@@ -1,5 +1,5 @@
 # jade
-![the plant logo](jade-logo.png)
+![the plant logo](extras/jade-logo.png)
 
 ## Features
 - Lightweight and fast
