@@ -1,2 +1,2 @@
 # jade
-(jade-logo.png)
+![the plant logo](jade-logo.png)
