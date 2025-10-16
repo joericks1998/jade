@@ -1,7 +1,5 @@
 #!/bin/bash
 # Usage: jadeinstall.sh
-#
-#
 # Check if pip is installed
 if ! command -v pip &> /dev/null; then
     echo "Error: pip is not installed. Please install pip before running this script."
