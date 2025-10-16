@@ -2,4 +2,4 @@
 # Usage: jade.sh <file-to-compile>
 
 # Change to the directory where compile.py lives, or use full path
-python3 main.py "$0"
+python3 -c "import jade_project_JOERICKS1998"
