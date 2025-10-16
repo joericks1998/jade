@@ -12,10 +12,10 @@ fi
 
 # Check if /usr/local/bin directory exists
 if [ -d "/usr/local/bin" ]; then
-    curl -sSL https://raw.githubusercontent.com/JoeRicks1998/jade/main/jade.sh -o /usr/local/bin/jade
+    curl -sSL https://raw.githubusercontent.com/joericks1998/jade/refs/heads/main/src/exec/jade.sh -o /usr/local/bin/jade
     chmod +x /usr/local/bin/jade
     echo "jade installed successfully"
 else
-    echo "Error: /usr/local/bin directory does not exist. Cannot set execute permisßsions on jade."
-    exit 1s
+    echo "Error: /usr/local/bin directory does not exist. Cannot set execute permissions on jade."
+    exit 1
 fi
