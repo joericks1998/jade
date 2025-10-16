@@ -2,4 +2,4 @@
 # Usage: jade.sh <file-to-compile>
 
 # Change to the directory where compile.py lives, or use full path
-echo "$1"
+echo "hello world"
