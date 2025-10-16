@@ -5,4 +5,4 @@
 cd "$(dirname "$0")"
 
 # Run Python script, passing all arguments through
-python3 ../compiler/compile.py "$@"
+python3 -m jade_project_JOERICKS1998.main "$@"
