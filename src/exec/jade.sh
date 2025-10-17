@@ -3,3 +3,5 @@
 
 # Change to the directory where compile.py lives, or use full path
 python3 -c "import jade_project_JOERICKS1998"
+
+which python3
