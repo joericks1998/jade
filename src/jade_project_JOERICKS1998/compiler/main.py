@@ -1,9 +1,8 @@
-from .compiler import compiler
+from . import compiler
 import sys
 
 
 def main() -> None:
-    """Main function to compile a Jade file."""
     if len(sys.argv) != 2:
         print("Usage: python readfile.py <filename>")
         sys.exit(1)
