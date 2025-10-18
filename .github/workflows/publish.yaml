@@ -32,7 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: testpypi
-      url: https://test.pypi.org/p/jade_JOERICKS1998
+      url: https://test.pypi.org/p/
     permissions:
       id-token: write
     steps:
@@ -45,4 +45,5 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
+          password: ${{ secrets.PYPI_TEST_PASSWORD }}
           # The action uses trusted publishing, so you do not need to provide username/password for trusted publisher setup
