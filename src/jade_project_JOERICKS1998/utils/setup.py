@@ -22,6 +22,7 @@ def general():
     """
     Display a comprehensive welcome message for the Jade programming language.
     """
+    # isort: skip
     msg = """
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║                            🎉 WELCOME TO JADE! 🎉                           ║
@@ -96,6 +97,7 @@ def help():
     """
     Display help information for Jade setup commands.
     """
+    # isort: skip
     help_msg = """
         Jade Setup Help
         ═══════════════
