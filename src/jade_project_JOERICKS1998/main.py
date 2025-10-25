@@ -1,6 +1,6 @@
 import sys
 
-from . import compiler
+from .utils.compiler import compile
 
 
 def main() -> None:
@@ -11,8 +11,7 @@ def main() -> None:
     filename = sys.argv[1]
 
     try:
-        tst = compiler.compile(filename)
-        print(tst)
+        compile(filename)
     except FileNotFoundError:
         print(f"File not found: {filename}")
     except Exception as e:
@@ -20,4 +19,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    pass
