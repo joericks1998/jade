@@ -1,5 +1,6 @@
-import keyring
 from typing import Optional
+
+import keyring
 
 
 def llm_setup():
