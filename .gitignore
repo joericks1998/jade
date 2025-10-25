@@ -3,3 +3,6 @@ venv/
 
 # ignore test text files
 *.txt
+
+# ignore test jade files
+*.jde
