@@ -1,4 +1,5 @@
 def compile(source_file: str) -> None:
+    # isort: off
     """
     Compile and execute a Jade source file.
 
@@ -20,6 +21,7 @@ def compile(source_file: str) -> None:
         Currently, Jade files (.jde) are executed as Python code directly.
         Files without the .jde extension are rejected with an error message.
     """
+    # isort: on
     # Check if the file has the correct Jade extension
     if ".jde" in source_file:
         try:
