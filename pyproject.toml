@@ -1,6 +1,6 @@
 [project]
 name = "jade_project_JOERICKS1998"
-version = "0.0.2.2"
+version = "0.0.3"
 authors = [
   { name="Joe Ricks", email="joericks1998@gmail.com" },
 ]
@@ -23,3 +23,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/jade_project_JOERICKS1998"]
+
+[project.scripts]
+jade = "jade_project_JOERICKS1998.main:main"
