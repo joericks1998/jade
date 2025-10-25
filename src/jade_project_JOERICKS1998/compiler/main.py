@@ -1,5 +1,6 @@
-from . import compiler
 import sys
+
+from . import compiler
 
 
 def main() -> None:
