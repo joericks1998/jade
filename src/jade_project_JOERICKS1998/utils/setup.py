@@ -96,25 +96,25 @@ def help():
     Display help information for Jade setup commands.
     """
     help_msg = """
-Jade Setup Help
-═══════════════
+        Jade Setup Help
+        ═══════════════
 
-Available Commands:
-• general() - Display welcome message and Jade overview
-• llm_setup() - Configure LLM provider for enhanced features
-• get_llm_api_key() - Retrieve stored API key for LLM integration
-• help() - Show this help message
+        Available Commands:
+        • general() - Display welcome message and Jade overview
+        • llm_setup() - Configure LLM provider for enhanced features
+        • get_llm_api_key() - Retrieve stored API key for LLM integration
+        • help() - Show this help message
 
-Usage Examples:
-  >>> from jade_project_JOERICKS1998.utils.setup import general
-  >>> general()  # Shows welcome message
+        Usage Examples:
+        >>> from jade_project_JOERICKS1998.utils.setup import general
+        >>> general()  # Shows welcome message
 
-  >>> from jade_project_JOERICKS1998.utils.setup import llm_setup
-  >>> llm_setup()  # Configure LLM integration
+        >>> from jade_project_JOERICKS1998.utils.setup import llm_setup
+        >>> llm_setup()  # Configure LLM integration
 
-  >>> from jade_project_JOERICKS1998.utils.setup import get_llm_api_key
-  >>> api_key = get_llm_api_key("your_username", "your_provider")
+        >>> from jade_project_JOERICKS1998.utils.setup import get_llm_api_key
+        >>> api_key = get_llm_api_key("your_username", "your_provider")
 
-For more information, visit: https://github.com/joericks1998/jade
+        For more information, visit: https://github.com/joericks1998/jade
     """
     print(help_msg)
