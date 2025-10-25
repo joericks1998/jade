@@ -4,6 +4,7 @@ from .utils import compiler, setup
 
 
 def main() -> None:
+    # isort: off
     """
     Main entry point for the Jade command-line interface.
 
@@ -34,6 +35,7 @@ def main() -> None:
         The setup commands allow users to configure LLM providers for enhanced
         features and integration within the Jade programming environment.
     """
+    # isort: on
     # Validate command-line arguments
     if len(sys.argv) != 2:
         print("Usage: jade <filename.jde>")
