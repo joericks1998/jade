@@ -1,3 +1,6 @@
+from . import processing
+
+
 def compile(source_file: str) -> None:
     # isort: off
     """
@@ -27,16 +30,20 @@ def compile(source_file: str) -> None:
         try:
             # Open and read the source file
             with open(source_file, "r") as f:
-                source_code = f.read()
-
+                source_code = processing.chunk_file(f)
+            print(source_code)
             # Execute the Jade/Python code directly
             # Note: This uses Python's exec() function which executes
             # the code in the current context
-            exec(source_code)
+            for chunk in source_code:
+                try:
+                    exec(chunk)
+                except Exception as e:
+                    print(f"Jade Error: {e}")
 
         except Exception as e:
             # Handle any exceptions that occur during code execution
-            print(f"Code execution failed with exception: {e}")
+            print(f"Compiler execution failed with exception: {e}")
 
         return
     else:

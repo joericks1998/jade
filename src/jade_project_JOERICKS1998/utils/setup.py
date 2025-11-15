@@ -1,4 +1,5 @@
 from typing import Optional
+from jade_project_JOERICKS1998.constants import constants
 
 import keyring
 
@@ -9,12 +10,29 @@ def llm_setup():
 
     Prompts user for LLM provider details and stores them securely using keyring.
     """
-    llm_provider = input("Please input your preferred LLM provider: ")
+    supported_models = list(constants.SUPPORTED_MODELS.keys())
+    print(
+        f"""
+        The current list of supported LLM providers for jade are: {"/n - ".join(supported_models)}
+        """
+    )
+    llm_provider = input(
+        "Please input your preferred LLM provider from the list above: "
+    )
+    while llm_provider not in supported_models:
+        print("Model provided is not supported...")
+        llm_provider = input(
+            "Please input your preferred LLM provider from the list above: "
+        )
     username = input("Please enter your username for your given provider: ")
     api_key = input("Please enter the API key for your provider: ")
 
     # Store credentials securely
-    keyring.set_password("jade_llm", f"{username}@{llm_provider}", api_key)
+    keyring.set_password(
+        "jade_llm",
+        f"{username}@{llm_provider}",
+        api_key,
+    )
     print(f"✅ LLM configuration saved for {username} at {llm_provider}")
 
 
