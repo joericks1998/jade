@@ -1,7 +1,6 @@
+import keyring
 from typing import Optional
 from jade_project_JOERICKS1998.constants import constants
-
-import keyring
 
 
 def llm_setup():
@@ -42,49 +41,49 @@ def general():
     """
     # isort: skip
     msg = """
-╔══════════════════════════════════════════════════════════════════════════════╗
-║                            🎉 WELCOME TO JADE! 🎉                           ║
-║                  Your Gateway to Elegant Programming                         ║
-╚══════════════════════════════════════════════════════════════════════════════╝
+    ╔══════════════════════════════════════════════════════════════════════════════╗
+    ║                            🎉 WELCOME TO JADE! 🎉                           ║
+    ║                  Your Gateway to Elegant Programming                         ║
+    ╚══════════════════════════════════════════════════════════════════════════════╝
 
-🌟 About Jade:
-Jade is a modern, expressive programming language designed for clarity and
-productivity. Built with Python at its core, Jade combines the power of
-traditional programming with the elegance of modern language design.
+    🌟 About Jade:
+    Jade is a modern, expressive programming language designed for clarity and
+    productivity. Built with Python at its core, Jade combines the power of
+    traditional programming with the elegance of modern language design.
 
-✨ Key Features:
-• 🚀 Lightning-fast compilation and execution
-• 🐍 Seamless Python interoperability
-• 📚 Clean, readable syntax
-• 🔧 Extensible architecture
-• 🤖 Built-in LLM integration for enhanced development
-• 🎯 File-based execution with .jde extension
+    ✨ Key Features:
+    • 🚀 Lightning-fast compilation and execution
+    • 🐍 Seamless Python interoperability
+    • 📚 Clean, readable syntax
+    • 🔧 Extensible architecture
+    • 🤖 Built-in LLM integration for enhanced development
+    • 🎯 File-based execution with .jde extension
 
-📖 Getting Started:
-1. Create a .jde file with your Jade code
-2. Run: jade your_file.jde
-3. Watch your code come to life!
+    📖 Getting Started:
+    1. Create a .jde file with your Jade code
+    2. Run: jade your_file.jde
+    3. Watch your code come to life!
 
-💡 Example Usage:
-  $ echo "print('Hello, Jade!')" > hello.jde
-  $ jade hello.jde
-  Hello, Jade!
+    💡 Example Usage:
+    $ echo "print('Hello, Jade!')" > hello.jde
+    $ jade hello.jde
+    Hello, Jade!
 
-🔧 Available Commands:
-• jade setup llm    - Configure LLM provider
-• jade setup help   - Show help information
-• jade <file.jde>   - Compile and execute Jade code
+    🔧 Available Commands:
+    • jade setup llm    - Configure LLM provider
+    • jade setup help   - Show help information
+    • jade <file.jde>   - Compile and execute Jade code
 
-📚 Documentation & Support:
-• GitHub: https://github.com/joericks1998/jade
-• Issues: Report bugs and feature requests
-• Community: Join our growing developer community
+    📚 Documentation & Support:
+    • GitHub: https://github.com/joericks1998/jade
+    • Issues: Report bugs and feature requests
+    • Community: Join our growing developer community
 
-🎯 Your Journey Starts Here!
-Whether you're building simple scripts or complex applications, Jade provides
-the tools and elegance you need to bring your ideas to reality.
+    🎯 Your Journey Starts Here!
+    Whether you're building simple scripts or complex applications, Jade provides
+    the tools and elegance you need to bring your ideas to reality.
 
-Happy coding with Jade! 🎊
+    Happy coding with Jade! 🎊
     """
     print(msg)
 

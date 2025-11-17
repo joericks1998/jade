@@ -1,11 +1,9 @@
-print("hello there!")
+#print("hello there!")
 
 def test_function():
     pass
     def another_function():
         print("hello")
 
-try:
-    print("this is a test")
-except:
-    print("failed")
+prompt test_prompt = "Hey there!"
+print(?test_prompt)

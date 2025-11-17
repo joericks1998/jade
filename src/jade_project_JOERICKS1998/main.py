@@ -51,7 +51,7 @@ def main() -> None:
         except Exception:
             setup.general()
     else:
-        filename = sys.argv[1]
+        filename: str = sys.argv[1]
 
     try:
         # Attempt to compile the specified file
