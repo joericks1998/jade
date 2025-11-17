@@ -1,4 +1,7 @@
-from . import processing
+from typing import List
+
+from jade_project_JOERICKS1998.llm.deepseek import DeepSeekClient
+from . import processing, heap
 
 
 def compile(source_file: str) -> None:
@@ -25,19 +28,24 @@ def compile(source_file: str) -> None:
         Files without the .jde extension are rejected with an error message.
     """
     # isort: on
+    # Initialize Deepseek client
+    client = DeepSeekClient()
+    # Define heap
+    hp = heap.Heap(client)
     # Check if the file has the correct Jade extension
     if ".jde" in source_file:
         try:
             # Open and read the source file
             with open(source_file, "r") as f:
-                source_code = processing.chunk_file(f)
-            print(source_code)
+                source_code: list[str] = processing.chunk_file(f)
             # Execute the Jade/Python code directly
             # Note: This uses Python's exec() function which executes
             # the code in the current context
             for chunk in source_code:
                 try:
                     exec(chunk)
+                except SyntaxError:
+                    processing.process_jade_block(chunk, hp)
                 except Exception as e:
                     print(f"Jade Error: {e}")
 
