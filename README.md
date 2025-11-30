@@ -10,7 +10,7 @@ A modern, expressive programming language designed for clarity and productivity.
 - **🐍 Seamless Python interoperability** - Leverage Python's extensive ecosystem
 - **📚 Clean, readable syntax** - Focus on developer experience
 - **🔧 Extensible architecture** - Easy to customize and extend
-- **🤖 Built-in LLM integration** - Enhanced development with AI assistance
+- **🤖 Built-in DeepSeek LLM integration** - Enhanced development with AI assistance
 - **🎯 File-based execution** - Simple `.jde` file format
 
 ## 🚀 Quick Start
@@ -49,10 +49,10 @@ jade your_file.jde
 
 ### Setup Commands
 
-Configure LLM integration for enhanced features:
+Configure DeepSeek LLM integration for enhanced features:
 
 ```bash
-# Configure LLM provider
+# Configure DeepSeek LLM provider
 jade setup llm
 
 # Show setup help
@@ -66,11 +66,10 @@ jade setup
 
 ### LLM Integration
 
-Jade supports LLM integration for enhanced development features. To set up:
+Jade supports DeepSeek LLM integration for enhanced development features. To set up:
 
 1. Run `jade setup llm`
-2. Enter your preferred LLM provider (OpenAI, Anthropic, etc.)
-3. Provide your username and API key
+2. Enter your DeepSeek API key from https://platform.deepseek.com/
 
 Your credentials are stored securely using your system's keychain.
 
@@ -81,7 +80,7 @@ In your Jade code, you can retrieve stored API keys:
 ```python
 from jade_project_JOERICKS1998.utils.setup import get_llm_api_key
 
-api_key = get_llm_api_key("your_username", "your_provider")
+api_key = get_llm_api_key()
 ```
 
 ## 🏗️ Project Structure

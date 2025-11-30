@@ -1,6 +1,6 @@
 import sys
 
-from .utils import compiler, setup
+from .utils import command_line, compiler
 
 
 def main() -> None:
@@ -36,32 +36,9 @@ def main() -> None:
         features and integration within the Jade programming environment.
     """
     # isort: on
-    # Validate command-line arguments
-    if len(sys.argv) != 2:
-        print("Usage: jade <filename.jde>")
-        sys.exit(1)
-
-    # Extract filename from command-line arguments
-    if sys.argv[1] == "setup":
-        try:
-            if sys.argv[2] == "llm":
-                setup.llm_setup()
-            elif sys.argv[2] == "--help":
-                setup.help()
-        except Exception:
-            setup.general()
-    else:
-        filename: str = sys.argv[1]
-
-    try:
-        # Attempt to compile the specified file
-        compiler.compile(filename)
-    except FileNotFoundError:
-        # Handle case where the specified file doesn't exist
-        print(f"File not found: {filename}")
-    except Exception as e:
-        # Handle any other unexpected errors during compilation
-        print(f"Error reading file: {e}")
+    # Get and clean user input args from the command line
+    command_line.input_handler(*sys.argv[1:])
+    return
 
 
 if __name__ == "__main__":
