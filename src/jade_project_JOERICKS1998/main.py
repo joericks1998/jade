@@ -37,6 +37,7 @@ def main() -> None:
     """
     # isort: on
     # Get and clean user input args from the command line
+    print("entered")
     command_line.input_handler(*sys.argv[1:])
     return
 

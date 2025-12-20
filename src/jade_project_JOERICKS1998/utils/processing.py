@@ -1,8 +1,7 @@
-from ..llm import deepseek
-from . import tokenizer
+from . import heap, tokenizer
 
 
-def process_jade_block(block: str, heap: Heap) -> None:
+def process_jade_block(block: str, heap: heap.Heap) -> None:
     tk = tokenizer.Block(block)
     for line in tk.block:
         try:
@@ -16,7 +15,7 @@ def process_jade_block(block: str, heap: Heap) -> None:
     #     print(f"Both line and jade line exectution failed with exception {e}")
 
 
-def chunk_file(file: _io.TextIOWrapper) -> list:
+def chunk_file(file) -> list[str]:
     try:
         chunks = []
         chunk = ""
@@ -66,3 +65,4 @@ def chunk_file(file: _io.TextIOWrapper) -> list:
         return chunks
     except Exception as e:
         print(f"Chunking failed with exception {e}")
+        return []

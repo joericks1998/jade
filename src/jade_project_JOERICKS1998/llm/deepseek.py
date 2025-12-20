@@ -5,11 +5,12 @@ This module provides functionality to interact with DeepSeek's API
 with built-in conversation management and message history tracking.
 """
 
+import getpass
 import json
 import os
 import sys
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Union, Any
+from typing import Any, Dict, List, Optional, Union
 
 import keyring
 import requests
@@ -139,12 +140,13 @@ class DeepSeekClient:
         api_key = os.getenv("DEEPSEEK_API_KEY")
         if api_key:
             self._store_api_key(api_key)
+            print("DeepSeek API key already configured!")
             return api_key
 
-        # If no key found, prompt user
-        print("DeepSeek API key not found.")
-        print("Please enter your DeepSeek API key:")
-        api_key = input().strip()
+        # If no key found, prompt user securely
+        api_key = getpass.getpass(
+            "DeepSeek API key not found.\nPlease enter your DeepSeek API key (input will be hidden): "
+        ).strip()
 
         if not api_key:
             raise ValueError("No DeepSeek API key provided")
@@ -156,6 +158,21 @@ class DeepSeekClient:
         """Store the API key securely in the system keyring."""
         keyring.set_password(self.service_name, "api_key", api_key)
         print("API key stored securely in system keyring.")
+
+    def is_configured(self) -> bool:
+        """
+        Check if DeepSeek API key is configured without prompting user.
+
+        Returns:
+            bool: True if API key exists in keyring or environment variable
+        """
+        # Check keyring first
+        if keyring.get_password(self.service_name, "api_key"):
+            return True
+        # Check environment variable
+        if os.getenv("DEEPSEEK_API_KEY"):
+            return True
+        return False
 
     def _make_request(self, endpoint: str, data: Dict) -> Dict:
         """
@@ -419,6 +436,7 @@ def setup_deepseek() -> None:
     print("=== DeepSeek LLM Setup ===")
     print("This will help you set up DeepSeek API integration.")
     print("You'll need a DeepSeek API key from https://platform.deepseek.com/")
+    print("Note: Your API key input will be hidden for security.")
     print()
 
     client = DeepSeekClient()
