@@ -2,14 +2,14 @@ from ..llm.deepseek import DeepSeekClient
 
 
 class Heap:
-    def __init__(self: Heap, client: DeepSeekClient) -> None:
+    def __init__(self, client: DeepSeekClient) -> None:
         self.prompts: dict[str, str] = {}
         self.client: DeepSeekClient = client
 
-    def add(self: Heap, var_name: str, prompt: str) -> None:
+    def add(self, var_name: str, prompt: str) -> None:
         self.prompts[var_name] = prompt
 
-    def release(self: Heap, var_name: str) -> str:
+    def release(self, var_name: str) -> str:
         try:
             response = self.client.send_message(self.prompts[var_name])
             del self.prompts[var_name]

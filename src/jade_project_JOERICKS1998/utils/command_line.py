@@ -4,6 +4,98 @@ from typing import Any, List, Optional
 from jade_project_JOERICKS1998.llm.deepseek import DeepSeekClient, setup_deepseek
 
 
+def help(args: List[str]) -> None:
+    """
+    Display comprehensive help information for all Jade commands.
+
+    This function provides detailed documentation for all available Jade commands,
+    including usage examples, descriptions, and subcommand information. It validates
+    that no suboperations are provided with the help command.
+
+    Args:
+        args: List of command-line arguments passed after 'help'
+              Should be empty for proper usage
+
+    Returns:
+        None: Prints help documentation or error message to stdout
+    """
+    if len(args) > 0:
+        # Handle invalid suboperations for help command
+        print("❌ Error: Invalid help command usage")
+        print(f"   Unexpected arguments: {' '.join(args)}")
+        print()
+        print("💡 Usage: jade help")
+        print("   This command doesn't accept additional arguments")
+        print()
+    else:
+        # Display comprehensive help documentation
+        msg = """
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                          Jade Command Reference                              │
+├──────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  OVERVIEW:                                                                   │
+│    Jade is a modern programming language with LLM-powered compilation.       │
+│    This reference covers all available commands and their usage.             │
+│                                                                              │
+│  📁 FILE COMPILATION COMMANDS:                                               │
+│    • jade <filename.jde>                                                     │
+│        Compile and execute a Jade source file                                │
+│        Example: jade hello.jde                                               │
+│        Note: Requires LLM setup (run 'jade setup' first)                     │
+│                                                                              │
+│  ⚙️  SETUP & CONFIGURATION COMMANDS:                                         │
+│    • jade setup                                                              │
+│        Interactive LLM provider configuration                                │
+│        Guides you through DeepSeek API setup                                 │
+│        Securely stores credentials in system keychain                        │
+│                                                                              │
+│    • jade setup --help                                                       │
+│        Detailed setup instructions and prerequisites                         │
+│        Shows security information and troubleshooting tips                   │
+│                                                                              │
+│  ℹ️  INFORMATION COMMANDS:                                                   │
+│    • jade info                                                               │
+│        Learn about Jade language features and capabilities                   │
+│        Shows technical details and getting started guide                     │
+│        Links to documentation and examples                                   │
+│                                                                              │
+│    • jade help                                                               │
+│        This command - shows all available commands                           │
+│        Provides usage examples and descriptions                              │
+│                                                                              │
+│  🆘 NO COMMAND HELP:                                                         │
+│    • jade (no arguments)                                                     │
+│        Shows brief command overview                                          │
+│        Directs to setup for full functionality                               │
+│                                                                              │
+│  🎯 COMMAND STRUCTURE:                                                       │
+│    All Jade commands follow this pattern:                                    │
+│        jade <command> [subcommand] [arguments]                               │
+│                                                                              │
+│    Examples:                                                                 │
+│        jade setup                  # Run interactive setup                   │
+│        jade setup --help           # Show setup instructions                 │
+│        jade info                   # Learn about Jade language               │
+│        jade help                   # Show this help documentation            │
+│        jade program.jde            # Compile and run Jade file               │
+│                                                                              │
+│  🔧 ADVANCED USAGE:                                                          │
+│    • Jade files must have .jde extension                                     │
+│    • LLM setup is required for file compilation                              │
+│    • Commands are case-sensitive                                             │
+│    • No spaces in file paths (use underscores or dashes)                     │
+│                                                                              │
+│  📚 ADDITIONAL RESOURCES:                                                    │
+│    • GitHub: https://github.com/joericks1998/jade                            │
+│    • Issues & Feedback: GitHub Issues page                                   │
+│    • Documentation: README.md and source code comments                       │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+"""
+        print(msg)
+
+
 def no_args() -> None:
     """
     Display help information for Jade setup commands when no arguments are provided.
@@ -16,33 +108,7 @@ def no_args() -> None:
         None: Prints help message to stdout
     """
     # isort: skip
-    msg = """
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                              Jade CLI Help                                   │
-├──────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│  USAGE:                                                                      │
-│    jade <command> [options]                                                  │
-│                                                                              │
-│  COMMANDS:                                                                   │
-│    • jade <file.jde>        Compile and execute a Jade file                  │
-│    • jade setup             Configure LLM provider (DeepSeek)                │
-│    • jade info              Display Jade language information                │
-│    • jade help              Show detailed help documentation                 │
-│                                                                              │
-│  EXAMPLES:                                                                   │
-│    jade hello.jde           Run a Jade program                               │
-│    jade setup               Configure your DeepSeek API key                  │
-│    jade info                Learn about Jade features                        │
-│                                                                              │
-│  NOTE:                                                                       │
-│    LLM setup is required for full Jade functionality.                        │
-│    Run 'jade setup' to configure your DeepSeek API credentials.              │
-│                                                                              │
-│  For more information: https://github.com/joericks1998/jade                  │
-│                                                                              │
-└──────────────────────────────────────────────────────────────────────────────┘
-"""
+    msg = """You must provide a command to setup Jade. Use 'jade help' for more information."""
     print(msg)
 
 
@@ -88,13 +154,14 @@ def setup_help(args: List[str]) -> None:
 │  SETUP STEPS:                                                                │
 │    1. Run: jade setup                                                        │
 │    2. Follow the interactive prompts                                         │
-│    3. Enter your DeepSeek API key when requested                             │
+│    3. Enter your DeepSeek API key when requested (input will be hidden)      │
 │    4. The system will verify and securely store your credentials             │
 │                                                                              │
 │  SECURITY:                                                                   │
 │    • Your API key is stored in your system's secure keychain                 │
 │    • No credentials are transmitted to third parties                         │
 │    • Local storage only - used exclusively for Jade operations               │
+│    • API key input is hidden (no visible characters) for privacy             │
 │                                                                              │
 │  TROUBLESHOOTING:                                                            │
 │    If you encounter issues:                                                  │
@@ -226,13 +293,14 @@ def input_handler(*args: str) -> None:
         4. jade setup - allows user to install credentials and setup LLM
     """
     # Define available top-level commands and their handler functions
-    options = {"setup": setup, "info": info, "help": no_args}
+    options = {"setup": setup, "info": info, "help": help}
 
     if not args:
         # No arguments provided - show default help
         no_args()
     elif options.get(args[0]):
         # Valid command found - execute with remaining arguments
+        print(args[0])
         options[args[0]](list(args[1:]))
     elif len(args) == 1 and args[0].endswith(".jde"):
         # Jade file detected - placeholder for compilation logic
