@@ -1,16 +1,23 @@
 from . import heap, tokenizer
+from .tokentypes import TokenType
 
 
 def process_jade_block(block: str, heap: heap.Heap) -> None:
     tk = tokenizer.Block(block)
+    # when processing a block, there are 2 tokens we are really looking for
+    # prompt, which can only occur in position 0 to be valid
+    # and ?, or the deref token
     for line in tk.block:
         try:
-            exec(line.line_str)
-        except SyntaxError:
-            for token in line.tokens:
-                print(token)
+            if line.tokens[0].type == TokenType.PROMPT:
+                heap.add(line.tokens[1].value, line.tokens[3].value)
+            else:
+                print(line.tokens)
+                for i in range(0, len(line.tokens) - 2):
+                    if line.tokens[i].type == TokenType.PROMPTDREF:
+                        heap.release(line.tokens[i + 1].value)
         except Exception as e:
-            print(f"Jade line failed with exception: {e}")
+            print(f"Line execution failed with exception {e}")
     # except Exception as e:
     #     print(f"Both line and jade line exectution failed with exception {e}")
 

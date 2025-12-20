@@ -1,6 +1,6 @@
 import re
-from typing import List, Union, Optional
 from dataclasses import dataclass
+
 from . import tokentypes
 
 """
@@ -47,6 +47,6 @@ class Block:
         self.block_str = block_str
         self.block = []
         i = 0
-        for line_str in self.block_str.split("/n"):
-            Line(line_str, i)
+        for line_str in self.block_str.split("\n"):
+            self.block.append(Line(line_str, i))
             i += 1

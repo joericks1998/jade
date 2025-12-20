@@ -1,7 +1,8 @@
 from typing import List
 
 from jade_project_JOERICKS1998.llm.deepseek import DeepSeekClient
-from . import processing, heap
+
+from . import heap, processing
 
 
 def compile(source_file: str) -> None:
@@ -28,32 +29,42 @@ def compile(source_file: str) -> None:
         Files without the .jde extension are rejected with an error message.
     """
     # isort: on
+    print(f"🔧 Starting compilation of: {source_file}")
+
     # Initialize Deepseek client
+    print("  Initializing DeepSeek client...")
     client = DeepSeekClient()
     # Define heap
+    print("  Creating heap...")
     hp = heap.Heap(client)
+
     # Check if the file has the correct Jade extension
-    if ".jde" in source_file:
-        try:
-            # Open and read the source file
-            with open(source_file, "r") as f:
-                source_code: list[str] = processing.chunk_file(f)
-            # Execute the Jade/Python code directly
-            # Note: This uses Python's exec() function which executes
-            # the code in the current context
-            for chunk in source_code:
-                try:
-                    exec(chunk)
-                except SyntaxError:
-                    processing.process_jade_block(chunk, hp)
-                except Exception as e:
-                    print(f"Jade Error: {e}")
+    try:
+        # Open and read the source file
+        print("Reading source file...")
+        with open(source_file, "r") as f:
+            source_code: list[str] = processing.chunk_file(f)
+        print(f"  File chunked into {len(source_code)} block(s)")
 
-        except Exception as e:
-            # Handle any exceptions that occur during code execution
-            print(f"Compiler execution failed with exception: {e}")
+        # Execute the Jade/Python code directly
+        # Note: This uses Python's exec() function which executes
+        # the code in the current context
+        for i, chunk in enumerate(source_code):
+            print(f"  Processing block {i + 1}/{len(source_code)}...")
+            try:
+                exec(chunk)
+                print(f"    ✓ Block {i + 1} executed successfully")
+            except SyntaxError:
+                print(f"    ⚠️  Block {i + 1} has Jade syntax, processing with LLM...")
+                processing.process_jade_block(chunk, hp)
+                print(f"    ✓ Block {i + 1} processed as Jade")
+            except Exception as e:
+                print(f"    ❌ Jade Error in block {i + 1}: {e}")
 
-        return
-    else:
-        # Reject files that don't have the Jade extension
-        print(f"Source file {source_file} is not a jade file, cannot be compiled...")
+        print(hp.prompts)
+    except Exception as e:
+        # Handle any exceptions that occur during code execution
+        print(f"❌ Compiler execution failed with exception: {e}")
+
+    print(f"✅ Compilation completed for: {source_file}")
+    return

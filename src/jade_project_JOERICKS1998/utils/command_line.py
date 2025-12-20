@@ -1,6 +1,6 @@
-from posix import setuid
-from typing import Any, List, Optional
+import os
 
+from typing import List
 from ..llm.deepseek import setup_deepseek
 from . import compiler
 
@@ -272,7 +272,7 @@ def info(args: List[str]) -> None:
         print(msg)
 
 
-def input_handler(*args: str) -> None:
+def input_handler(*args: str, cwd: str = "") -> None:
     """
     Main command-line input handler for Jade operations.
 
@@ -282,6 +282,8 @@ def input_handler(*args: str) -> None:
 
     Args:
         *args: Variable-length argument list of command-line inputs
+        cwd: Current working directory to resolve relative file paths.
+             If empty string (default), uses os.getcwd().
 
     Returns:
         None: Executes appropriate operations or prints help/error messages
@@ -293,6 +295,10 @@ def input_handler(*args: str) -> None:
         3. jade help - provides detailed help information
         4. jade setup - allows user to install credentials and setup LLM
     """
+    # Use current working directory if not provided
+    if not cwd:
+        cwd = os.getcwd()
+    
     # Define available top-level commands and their handler functions
     options = {"setup": setup, "info": info, "help": help}
 
@@ -304,9 +310,11 @@ def input_handler(*args: str) -> None:
         print(args[0])
         options[args[0]](list(args[1:]))
     elif len(args) == 1 and args[0].endswith(".jde"):
-        # Jade file detected - placeholder for compilation logic
-        print(f"🔧 Compiling {args[0]}...")
-        compiler.compile(args[0])
+        # Jade file detected - resolve path relative to cwd
+        file_path = os.path.join(cwd, args[0])
+        file_path = os.path.normpath(file_path)
+        print(f"🔧 Compiling {file_path}...")
+        compiler.compile(file_path)
         print("💡 Make sure to run 'jade setup' to enable LLM-powered compilation")
     else:
         # Invalid operation - show error message with help guidance
