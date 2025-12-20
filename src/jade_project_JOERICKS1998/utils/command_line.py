@@ -1,7 +1,8 @@
 from posix import setuid
 from typing import Any, List, Optional
 
-from jade_project_JOERICKS1998.llm.deepseek import DeepSeekClient, setup_deepseek
+from ..llm.deepseek import setup_deepseek
+from . import compiler
 
 
 def help(args: List[str]) -> None:
@@ -305,7 +306,7 @@ def input_handler(*args: str) -> None:
     elif len(args) == 1 and args[0].endswith(".jde"):
         # Jade file detected - placeholder for compilation logic
         print(f"🔧 Compiling {args[0]}...")
-        print("📝 Note: File compilation feature is under development")
+        compiler.compile(args[0])
         print("💡 Make sure to run 'jade setup' to enable LLM-powered compilation")
     else:
         # Invalid operation - show error message with help guidance
