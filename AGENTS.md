@@ -18,3 +18,7 @@ For more information see the README.md file.
 - Code should be well-organized and modular.
 - Error handling should be robust and consistent.
 - Generally we prefer optimized and efficient code, we do not overemphasize particular styles (ie. OOP, functional programming, etc.), but rather focus on clarity and maintainability.
+
+#Testing
+
+All testing should be performed by humans. At the end of each action you should ask the human to test the code and verify its correctness.

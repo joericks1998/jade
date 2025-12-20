@@ -1,6 +1,7 @@
+import os
 import sys
 
-from .utils import command_line, compiler
+from .utils import command_line
 
 
 def main() -> None:
@@ -38,7 +39,7 @@ def main() -> None:
     # isort: on
     # Get and clean user input args from the command line
     print("entered")
-    command_line.input_handler(*sys.argv[1:])
+    command_line.input_handler(*sys.argv[1:], cwd=os.getcwd())
     return
 
 
