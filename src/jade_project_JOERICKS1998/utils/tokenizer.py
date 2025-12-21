@@ -1,6 +1,7 @@
 import re
 from dataclasses import dataclass
 
+from ..constants.constants import MASTER_TOKEN_PATTERN
 from . import tokentypes
 
 """
@@ -25,21 +26,16 @@ class Line:
     def __init__(self, line_str: str, pos: int) -> None:
         self.line_str = line_str
         self.pos = pos
-        self.__re_pattern = r"""
-                \"[^\"]*\"        | # Double quoted strings: "hello world"
-                '[^']*'          | # Single quoted strings: 'hello world'
-                \b\d+\.?\d*\b    | # Numbers: 123, 45.67, .89
-                \b[a-zA-Z_]\w*\b | # Identifiers: variable_name, function_name
-                [=+\-*/%&|^<>!]+ | # Operators: =, +, -, *, /, %, &, |, ^, <, >, !
-                [(){}\[\],;]       # Punctuation: (, ), {, }, [, ], ,, ;
-            """
+        self.__re_pattern = MASTER_TOKEN_PATTERN
         self.tokens = []
         i = 0
         for w in re.findall(self.__re_pattern, line_str, re.VERBOSE):
-            if w.strip():
-                tk = Token(tokentypes.set(w.strip()), w.strip(), i)
-                self.tokens.append(tk)
+            tk = Token(tokentypes.set(w), w, i)
+            self.tokens.append(tk)
             i += 1
+
+    def __str__(self):
+        return f"[{', '.join(str(tk) for tk in self.tokens)}]"
 
 
 class Block:
