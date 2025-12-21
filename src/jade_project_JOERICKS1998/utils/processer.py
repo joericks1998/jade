@@ -1,23 +1,54 @@
+import re
+
 from . import heap, tokenizer
 from .tokentypes import TokenType
 
 
-def process_jade_block(block: str, heap: heap.Heap) -> None:
+class JadeBuffer:
+    def __init__(self):
+        self.out_py = ""
+
+    def write(self, string: str):
+        self.out_py += string
+
+    def flush(self):
+        exec(self.out_py)
+        self.out_py = ""
+
+
+def process_jade_block(block: str, heap: heap.Heap) -> str:
     tk = tokenizer.Block(block)
     # when processing a block, there are 2 tokens we are really looking for
     # prompt, which can only occur in position 0 to be valid
     # and ?, or the deref token
+    py_string = ""
+    parsed = False
     for line in tk.block:
+        print(line)
         try:
             if line.tokens[0].type == TokenType.PROMPT:
                 heap.add(line.tokens[1].value, line.tokens[3].value)
+                py_string += f"__p__{line.tokens[1].value} = {line.tokens[3].value}"
+                parsed = True
             else:
-                print(line.tokens)
-                for i in range(0, len(line.tokens) - 2):
+                i = 0
+                while i < len(line.tokens):
                     if line.tokens[i].type == TokenType.PROMPTDREF:
-                        heap.release(line.tokens[i + 1].value)
+                        response = heap.release(line.tokens[i + 1].value)
+                        # response = re.sub(r"[^a-zA-Z0-9\s]", "", response)
+                        py_string += f"'''{response}'''"
+                        i += 1
+                    else:
+                        py_string += line.tokens[i].value
+                    i += 1
+                parsed = True
         except Exception as e:
             print(f"Line execution failed with exception {e}")
+        py_string += "\n"
+    if parsed:
+        return py_string
+    else:
+        return block
     # except Exception as e:
     #     print(f"Both line and jade line exectution failed with exception {e}")
 

@@ -106,18 +106,20 @@ class TokenType(Enum):
     NEWLINE = auto()
     INDENT = auto()
     DEDENT = auto()
-    EOF = auto()
+    SPACE = auto()
 
     # Jade Tokens
     PROMPT = auto()
     PROMPTDREF = auto()
 
     # Fallback type (for no matches)
+    NULL = auto()
     FALLBACK = auto()
 
 
-# Keyword mapping
-KEYWORDS = {
+# Combined token mapping (keywords, operators, punctuation)
+TOKEN_MAP = {
+    # Keywords
     "if": TokenType.IF,
     "else": TokenType.ELSE,
     "elif": TokenType.ELIF,
@@ -156,11 +158,83 @@ KEYWORDS = {
     "case": TokenType.CASE,
     "prompt": TokenType.PROMPT,
     "?": TokenType.PROMPTDREF,
+    # Operators
+    "=": TokenType.ASSIGN,
+    "+": TokenType.PLUS,
+    "-": TokenType.MINUS,
+    "*": TokenType.MULTIPLY,
+    "/": TokenType.DIVIDE,
+    "%": TokenType.MODULO,
+    "**": TokenType.POWER,
+    "//": TokenType.FLOOR_DIV,
+    "==": TokenType.EQUALS,
+    "!=": TokenType.NOT_EQUALS,
+    "<": TokenType.LESS,
+    ">": TokenType.GREATER,
+    "<=": TokenType.LESS_EQUAL,
+    ">=": TokenType.GREATER_EQUAL,
+    "&": TokenType.BIT_AND,
+    "|": TokenType.BIT_OR,
+    "^": TokenType.BIT_XOR,
+    "~": TokenType.BIT_NOT,
+    "<<": TokenType.LEFT_SHIFT,
+    ">>": TokenType.RIGHT_SHIFT,
+    "+=": TokenType.PLUS_ASSIGN,
+    "-=": TokenType.MINUS_ASSIGN,
+    "*=": TokenType.MULT_ASSIGN,
+    "/=": TokenType.DIV_ASSIGN,
+    "%=": TokenType.MOD_ASSIGN,
+    "&=": TokenType.AND_ASSIGN,
+    "|=": TokenType.OR_ASSIGN,
+    "^=": TokenType.XOR_ASSIGN,
+    "<<=": TokenType.LEFT_SHIFT_ASSIGN,
+    ">>=": TokenType.RIGHT_SHIFT_ASSIGN,
+    # Punctuation
+    "(": TokenType.LPAREN,
+    ")": TokenType.RPAREN,
+    "{": TokenType.LBRACE,
+    "}": TokenType.RBRACE,
+    "[": TokenType.LBRACKET,
+    "]": TokenType.RBRACKET,
+    ",": TokenType.COMMA,
+    ";": TokenType.SEMICOLON,
+    ":": TokenType.COLON,
+    ".": TokenType.DOT,
+    "...": TokenType.ELLIPSIS,
+    "->": TokenType.ARROW,
 }
 
 
 def set(w: str):
-    token_type = KEYWORDS.get(w)
-    if not token_type:
-        return TokenType.FALLBACK
-    return token_type
+    # Check combined token map first (keywords, operators, punctuation)
+    # Need to handle multi-character tokens by checking longest matches first
+    for token_str in sorted(TOKEN_MAP.keys(), key=len, reverse=True):
+        if w == token_str:
+            return TOKEN_MAP[token_str]
+
+    # Check for literals
+    # Strings (quoted literals)
+    if (w.startswith('"') and w.endswith('"')) or (
+        w.startswith("'") and w.endswith("'")
+    ):
+        return TokenType.STRING
+
+    # Numbers (numeric patterns)
+    # Simple check - more robust number parsing would be better
+    if w.replace(".", "", 1).isdigit() and w.count(".") <= 1:
+        return TokenType.NUMBER
+
+    # Identifiers (must start with letter or underscore)
+    if w and (w[0].isalpha() or w[0] == "_"):
+        return TokenType.IDENTIFIER
+
+    if w == " ":
+        return TokenType.SPACE
+
+    if w == "\n":
+        return TokenType.NEWLINE
+
+    if w == "\t":
+        return TokenType.INDENT
+
+    return TokenType.FALLBACK

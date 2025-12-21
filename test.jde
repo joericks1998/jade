@@ -1,9 +1,0 @@
-#print("hello there!")
-
-def test_function():
-    pass
-    def another_function():
-        print("hello")
-
-prompt test_prompt = "Hey there!"
-print(?test_prompt)

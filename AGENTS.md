@@ -19,6 +19,8 @@ For more information see the README.md file.
 - Error handling should be robust and consistent.
 - Generally we prefer optimized and efficient code, we do not overemphasize particular styles (ie. OOP, functional programming, etc.), but rather focus on clarity and maintainability.
 
-#Testing
+## Testing
 
 All testing should be performed by humans. At the end of each action you should ask the human to test the code and verify its correctness.
+
+If simple unit tests are required, please write them in a separate file with a `.test` extension.
