@@ -61,16 +61,17 @@ PYTHON_BUILTINS = {
 }
 
 MASTER_TOKEN_PATTERN = r"""
+        \s+               |
         \"[^\"]*\"        | # Double quoted strings: "hello world"
         '[^']*'          | # Single quoted strings: 'hello world'
-        
+
         # Numbers (improved pattern)
         \b0[xX][0-9a-fA-F]+\b | # Hex: 0xFF, 0x1a
         \b0[oO][0-7]+\b       | # Octal: 0o777
         \b0[bB][01]+\b        | # Binary: 0b1010
         \b\d+[eE][+-]?\d+\b   | # Scientific: 1e10, 2.5e-3
         (?:\.\d+|\d+(?:\.\d*)?) | # Numbers: 123, 45.67, .89, 3.14
-        
+
         \b[a-zA-Z_]\w*\b | # Identifiers: variable_name, function_name
 
         # Multi-character operators (longest first)

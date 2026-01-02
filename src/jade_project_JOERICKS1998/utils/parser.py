@@ -1,8 +1,7 @@
 import re
-from dataclasses import dataclass
 
 from ..constants.constants import MASTER_TOKEN_PATTERN
-from . import tokentypes
+from . import tokenref
 
 """
 Enhanced tokenizer with line-based token organization.
@@ -12,16 +11,6 @@ allowing both flat token access and line-based token access.
 """
 
 
-@dataclass
-class Token:
-    type: tokentypes.TokenType
-    value: str
-    pos: int
-
-    def __str__(self):
-        return f"Token(value = {self.value}, type = {self.type}, position = {self.pos})"
-
-
 class Line:
     def __init__(self, line_str: str, pos: int) -> None:
         self.line_str = line_str
@@ -29,9 +18,8 @@ class Line:
         self.__re_pattern = MASTER_TOKEN_PATTERN
         self.tokens = []
         i = 0
-        for w in re.findall(self.__re_pattern, line_str, re.VERBOSE):
-            tk = Token(tokentypes.set(w), w, i)
-            self.tokens.append(tk)
+        for lex in re.findall(self.__re_pattern, line_str, re.VERBOSE):
+            self.tokens.append(tokenref.Token(lex, i))
             i += 1
 
     def __str__(self):
