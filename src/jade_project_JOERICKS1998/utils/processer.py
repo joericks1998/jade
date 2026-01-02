@@ -1,7 +1,7 @@
 import re
 
-from . import heap, tokenizer
-from .tokentypes import TokenType
+from . import heap, parser
+from .tokenref import Types
 
 
 class JadeBuffer:
@@ -17,7 +17,7 @@ class JadeBuffer:
 
 
 def process_jade_block(block: str, heap: heap.Heap) -> str:
-    tk = tokenizer.Block(block)
+    tk = parser.Block(block)
     # when processing a block, there are 2 tokens we are really looking for
     # prompt, which can only occur in position 0 to be valid
     # and ?, or the deref token
@@ -26,14 +26,14 @@ def process_jade_block(block: str, heap: heap.Heap) -> str:
     for line in tk.block:
         print(line)
         try:
-            if line.tokens[0].type == TokenType.PROMPT:
+            if line.tokens[0].type == Types.PROMPT:
                 heap.add(line.tokens[1].value, line.tokens[3].value)
                 py_string += f"__p__{line.tokens[1].value} = {line.tokens[3].value}"
                 parsed = True
             else:
                 i = 0
                 while i < len(line.tokens):
-                    if line.tokens[i].type == TokenType.PROMPTDREF:
+                    if line.tokens[i].type == Types.PROMPTDREF:
                         response = heap.release(line.tokens[i + 1].value)
                         # response = re.sub(r"[^a-zA-Z0-9\s]", "", response)
                         py_string += f"'''{response}'''"
