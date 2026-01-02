@@ -3,7 +3,6 @@ from typing import List
 from jade_project_JOERICKS1998.llm.deepseek import DeepSeekClient
 
 from . import heap, processer
-from .processer import JadeBuffer
 
 
 def compile(source_file: str) -> None:
@@ -30,43 +29,33 @@ def compile(source_file: str) -> None:
         Files without the .jde extension are rejected with an error message.
     """
     # isort: on
-    print(f"🔧 Starting compilation of: {source_file}")
+    print(f"Starting compilation of: {source_file}")
 
     # Initialize Deepseek client
     print("  Initializing DeepSeek client...")
     client = DeepSeekClient()
     # Define heap
     print("  Creating heap...")
-    hp = heap.Heap(client)
+    prompt_heap = heap.Heap(client)
 
     # Initialize Jade Buffer
     print("  Initializing Jade Buffer...")
-    jade_buffer = JadeBuffer()
+    buffer = processer.Buffer()
 
     # Check if the file has the correct Jade extension
     try:
         # Open and read the source file
-        print("Reading source file...")
-        with open(source_file, "r") as f:
-            source_code: list[str] = processer.chunk_file(f)
-        print(f"  File chunked into {len(source_code)} block(s)")
-
+        with open(source_file, "rb") as file:
+            code_bytes = file.read()
+            code_string = code_bytes.decode("utf-8")
+        processer.machine(code_string, buffer, prompt_heap)
         # Execute the Jade/Python code directly
         # Note: This uses Python's exec() function which executes
         # the code in the current context
-        for i, chunk in enumerate(source_code):
-            print(f"  Processing block {i + 1}/{len(source_code)}...")
-            try:
-                jade_buffer.write(processer.process_jade_block(chunk, hp))
-                print(f"    ✓ Block {i + 1} processed as Jade")
-            except Exception as e:
-                print(f"    ❌ Jade Error in block {i + 1}: {e}")
 
-        print(jade_buffer.out_py)
-        jade_buffer.flush()
     except Exception as e:
         # Handle any exceptions that occur during code execution
-        print(f"❌ Compiler execution failed with exception: {e}")
+        print(f"Compiler execution failed with exception: {e}")
 
     print(f"✅ Compilation completed for: {source_file}")
     return
