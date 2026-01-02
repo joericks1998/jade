@@ -120,8 +120,12 @@ class Types(Enum):
     # Comment
     COMMENT = auto()
 
+    # Empty token
+    EMPTY = auto()
+
 
 # Combined token mapping (keywords, operators, punctuation)
+# When adding to this list, ORDER MATTERS, see regex verbose documentation for more info...
 map = {
     # Keywords
     r"if": Types.IF,
@@ -161,7 +165,7 @@ map = {
     r"match": Types.MATCH,
     r"case": Types.CASE,
     r"prompt": Types.PROMPT,
-    r"?": Types.PROMPTDREF,
+    r"\?": Types.PROMPTDREF,
     # Operators
     r"\=": Types.ASSIGN,
     r"\+": Types.PLUS,
@@ -178,24 +182,24 @@ map = {
     r"<=": Types.LESS_EQUAL,
     r">=": Types.GREATER_EQUAL,
     r"&": Types.BIT_AND,
-    r"|": Types.BIT_OR,
-    r"^": Types.BIT_XOR,
+    r"\|": Types.BIT_OR,
+    r"\^": Types.BIT_XOR,
     r"~": Types.BIT_NOT,
     r"<<": Types.LEFT_SHIFT,
     r">>": Types.RIGHT_SHIFT,
-    r"+=": Types.PLUS_ASSIGN,
-    r"-=": Types.MINUS_ASSIGN,
-    r"*=": Types.MULT_ASSIGN,
+    r"\+=": Types.PLUS_ASSIGN,
+    r"\-=": Types.MINUS_ASSIGN,
+    r"\*=": Types.MULT_ASSIGN,
     r"/=": Types.DIV_ASSIGN,
     r"%=": Types.MOD_ASSIGN,
     r"&=": Types.AND_ASSIGN,
-    r"|=": Types.OR_ASSIGN,
-    r"^=": Types.XOR_ASSIGN,
+    r"\|=": Types.OR_ASSIGN,
+    r"\^=": Types.XOR_ASSIGN,
     r"<<=": Types.LEFT_SHIFT_ASSIGN,
     r">>=": Types.RIGHT_SHIFT_ASSIGN,
     # Punctuation
-    r"(": Types.LPAREN,
-    r")": Types.RPAREN,
+    r"\(": Types.LPAREN,
+    r"\)": Types.RPAREN,
     r"\{": Types.LBRACE,
     r"\}": Types.RBRACE,
     r"\[": Types.LBRACKET,
@@ -214,8 +218,9 @@ map = {
     r"\b\d+[eE][+-]?\d+\b": Types.NUMBER,  # Scientific: 1e10, 2.5e-3
     r"(?:\.\d+|\d+(?:\.\d*)?)": Types.NUMBER,  # Numbers: 123, 45.67, .89, 3.14
     r"\b[a-zA-Z_]\w*\b": Types.IDENTIFIER,  # Identifiers: variable_name, function_name
-    r"/s+": Types.SPACE,
-    r"#.*": Types.COMMENT,  # single line comment
+    r"\#.*": Types.COMMENT,  # single line comment
+    r"\u2420": Types.SPACE,
+    r"\u2424": Types.NEWLINE,
 }
 
 

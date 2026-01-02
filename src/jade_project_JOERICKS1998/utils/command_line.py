@@ -1,6 +1,6 @@
 import os
-
 from typing import List
+
 from ..llm.deepseek import setup_deepseek
 from . import compiler
 
@@ -298,7 +298,7 @@ def input_handler(*args: str, cwd: str = "") -> None:
     # Use current working directory if not provided
     if not cwd:
         cwd = os.getcwd()
-    
+
     # Define available top-level commands and their handler functions
     options = {"setup": setup, "info": info, "help": help}
 
@@ -315,7 +315,6 @@ def input_handler(*args: str, cwd: str = "") -> None:
         file_path = os.path.normpath(file_path)
         print(f"🔧 Compiling {file_path}...")
         compiler.compile(file_path)
-        print("💡 Make sure to run 'jade setup' to enable LLM-powered compilation")
     else:
         # Invalid operation - show error message with help guidance
         print("❌ Error: Unknown command or invalid operation")
