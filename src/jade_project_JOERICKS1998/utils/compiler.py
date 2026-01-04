@@ -1,5 +1,3 @@
-from typing import List
-
 from jade_project_JOERICKS1998.llm.deepseek import DeepSeekClient
 
 from . import heap, processer
@@ -52,6 +50,7 @@ def compile(source_file: str) -> None:
         # Execute the Jade/Python code directly
         # Note: This uses Python's exec() function which executes
         # the code in the current context
+        print(buffer.out_py)
 
     except Exception as e:
         # Handle any exceptions that occur during code execution

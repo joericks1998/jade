@@ -35,6 +35,11 @@ class Line:
     def Tokens(self):
         return [token.value for token in self.tokens]
 
+    def is_jade(self):
+        for token in self.tokens:
+            if tokenref.jade_switch.get(token.type):
+                return True
+
 
 class Block:
     def __init__(self, block_str: str) -> None:
@@ -50,7 +55,7 @@ class Block:
                 print(f"Error processing line {i}: {e}")
 
     def __str__(self):
-        return f"Block(lines = [{', '.join(str(line) for line in self.lines)}])"
+        return f"Block(Lines = [{', '.join(str(line) for line in self.lines)}])"
 
     def __iter__(self):
         return iter(self.lines)

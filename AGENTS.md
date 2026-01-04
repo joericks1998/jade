@@ -1,5 +1,8 @@
 ## Jade Programming Language Development Project
 
+## Agent Rules
+- Generally your outputs should be consise, your token limit on thinking and outputs is very high but you rarely need to use it (try to stick to 1000 tokens per response total)
+
 ### Overview
 
 Jade is a programming language designed for rapid development of AI applications. It is built on top of Python and leverages the power of large language models (LLMs) to provide a seamless development experience.

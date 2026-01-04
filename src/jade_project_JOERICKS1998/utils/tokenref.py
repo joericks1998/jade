@@ -223,6 +223,8 @@ map = {
     r"\u2424": Types.NEWLINE,
 }
 
+jade_switch = {Types.PROMPT: True, Types.PROMPTDREF: True}
+
 
 class Token:
     def __init__(self, lex: str, pos: int) -> None:
