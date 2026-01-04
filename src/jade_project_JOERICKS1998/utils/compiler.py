@@ -1,4 +1,6 @@
-from . import processing
+from jade_project_JOERICKS1998.llm.deepseek import DeepSeekClient
+
+from . import heap, processer
 
 
 def compile(source_file: str) -> None:
@@ -25,27 +27,35 @@ def compile(source_file: str) -> None:
         Files without the .jde extension are rejected with an error message.
     """
     # isort: on
+    print(f"Starting compilation of: {source_file}")
+
+    # Initialize Deepseek client
+    print("  Initializing DeepSeek client...")
+    client = DeepSeekClient()
+    # Define heap
+    print("  Creating heap...")
+    prompt_heap = heap.Heap(client)
+
+    # Initialize Jade Buffer
+    print("  Initializing Jade Buffer...")
+    buffer = processer.Buffer()
+
     # Check if the file has the correct Jade extension
-    if ".jde" in source_file:
-        try:
-            # Open and read the source file
-            with open(source_file, "r") as f:
-                source_code = processing.chunk_file(f)
-            print(source_code)
-            # Execute the Jade/Python code directly
-            # Note: This uses Python's exec() function which executes
-            # the code in the current context
-            for chunk in source_code:
-                try:
-                    exec(chunk)
-                except Exception as e:
-                    print(f"Jade Error: {e}")
+    try:
+        # Open and read the source file
+        with open(source_file, "rb") as file:
+            code_bytes = file.read()
+            code_string = code_bytes.decode("utf-8")
+        processer.machine(code_string, buffer, prompt_heap)
+        # Execute the Jade/Python code directly
+        # Note: This uses Python's exec() function which executes
+        # the code in the current context
+        print("Code Run Output: ")
+        buffer.flush()
 
-        except Exception as e:
-            # Handle any exceptions that occur during code execution
-            print(f"Compiler execution failed with exception: {e}")
+    except Exception as e:
+        # Handle any exceptions that occur during code execution
+        print(f"Compiler execution failed with exception: {e}")
 
-        return
-    else:
-        # Reject files that don't have the Jade extension
-        print(f"Source file {source_file} is not a jade file, cannot be compiled...")
+    print(f"✅ Compilation completed for: {source_file}")
+    return
