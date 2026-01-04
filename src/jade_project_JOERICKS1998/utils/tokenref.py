@@ -229,18 +229,18 @@ jade_switch = {Types.PROMPT: True, Types.PROMPTDREF: True}
 class Token:
     def __init__(self, lex: str, pos: int) -> None:
         # first set the position
-        self.pos = pos
+        self.Pos = pos
 
         # then set the value
-        self.value = lex
+        self.Value = lex
 
         # Set the type to none (default)
-        self.type = None
+        self.Type = None
         # set the type
         for pattern, type in map.items():
             if re.fullmatch(pattern, lex):
-                self.type = type
+                self.Type = type
                 break
 
     def __str__(self):
-        return f"Token(value = {self.value}, type = {self.type}, position = {self.pos})"
+        return f"Token(Value = {self.Value}, Type = {self.Type}, Position = {self.Pos})"

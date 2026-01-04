@@ -32,9 +32,13 @@ def process_1(line_of_tokens: parser.Line, heap: heap.Heap) -> str:
 
 
 # Interpreter for jade lines
-def interpreter(line_of_tokens: parser.Line, heap: heap.Heap) -> str:
-    
-    pass
+def line_interpreter(line_of_tokens: parser.Line, heap: heap.Heap) -> str:
+    try:
+        if tokenref.Types.PROMPT in [token.Type for token in line_of_tokens]:
+            return process_1(line_of_tokens, heap)
+    except Exception as e:
+        print(f"Error interpreting line {line_of_tokens.Pos}: {e}")
+    return "ERROR"
 
 
 # The main function that processes the code
@@ -43,7 +47,7 @@ def machine(jade_code_string: str, python_buffer: Buffer, heap: heap.Heap) -> No
     try:
         # preprocess code string
         preprocessed_space_code_str = jade_code_string
-        for k, v in constants.ENCODINGS.items():
+        for k, v in constants.SPACE_ENCODINGS.items():
             preprocessed_space_code_str = preprocessed_space_code_str.replace(k, v)
         token_block = parser.Block(preprocessed_space_code_str)
     except Exception as e:
@@ -53,11 +57,11 @@ def machine(jade_code_string: str, python_buffer: Buffer, heap: heap.Heap) -> No
     try:
         for line in token_block:
             if line.is_jade():
-                print(line)
+                python_buffer.write(line_interpreter(line, heap))
             else:
-                py_line = "".join(line.Tokens)
+                py_line = "".join(line.TokenValues)
                 postprocessed_py_line = py_line
-                for k, v in constants.ENCODINGS.items():
+                for k, v in constants.SPACE_ENCODINGS.items():
                     postprocessed_py_line = postprocessed_py_line.replace(v, k)
                 python_buffer.write(postprocessed_py_line)
     except Exception as e:
