@@ -1,10 +1,6 @@
 [project]
 name = "jade_project_JOERICKS1998"
-<<<<<<< HEAD
-version = "0.1.1"
-=======
-version = "0.0.6.1"
->>>>>>> b583411 (Bump version to 0.0.6.1 and fix deployment pipeline)
+version = "0.1.1.1"
 authors = [
   { name="Joe Ricks", email="joericks1998@gmail.com" },
 ]
