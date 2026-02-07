@@ -70,13 +70,19 @@ def process_1(line_of_tokens: parser.Line, heap: heap.Heap) -> str:
     """
     variable_name = ""
     prompt = ""
+    indent_space = ""
+    found_prompt = False
     for token in line_of_tokens:
-        if token.Type == tokenref.Types.IDENTIFIER:
+        if token.Type == tokenref.Types.PROMPT:
+            found_prompt = True
+        elif token.Type == tokenref.Types.IDENTIFIER:
             variable_name = token.Value
         elif token.Type == tokenref.Types.STRING:
             prompt = token.Value
+        elif token.Type == tokenref.Types.SPACE and not found_prompt:
+            indent_space += parser.decode_encodings(token.Value, constants.SPACE_ENCODINGS)
     heap.add(variable_name, prompt)
-    return f"__p__{variable_name} = {prompt}"
+    return f"{indent_space}__p__{variable_name} = {prompt}"
 
 def process_2(line_of_tokens: parser.Line, heap: heap.Heap) -> str:
     """
@@ -180,14 +186,11 @@ def machine(jade_code_string: str, python_buffer: Buffer, heap: heap.Heap) -> No
             if line.is_jade():
                 jade_output = line_interpreter(line, heap)
                 # Postprocess jade output to decode space encodings
-                for k, v in constants.SPACE_ENCODINGS.items():
-                    jade_output = jade_output.replace(v, k)
+                jade_output = parser.decode_encodings(jade_output, constants.SPACE_ENCODINGS)
                 python_buffer.write(jade_output)
             else:
                 py_line = "".join(line.TokenValues)
-                postprocessed_py_line = py_line
-                for k, v in constants.SPACE_ENCODINGS.items():
-                    postprocessed_py_line = postprocessed_py_line.replace(v, k)
+                postprocessed_py_line = parser.decode_encodings(py_line, constants.SPACE_ENCODINGS)
                 python_buffer.write(postprocessed_py_line)
     except Exception as e:
         print(f"Error processing Jade code: {e}")

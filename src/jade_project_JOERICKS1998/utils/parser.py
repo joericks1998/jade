@@ -11,6 +11,13 @@ allowing both flat token access and line-based token access.
 """
 
 
+def decode_encodings(s: str, encodings: dict[str, str]) -> str:
+    """Decode encoded symbols back to their original characters using the given encoding map."""
+    for original, encoded in encodings.items():
+        s = s.replace(encoded, original)
+    return s
+
+
 class Line:
     """
     Represents a single line of Jade source code with its tokenized content.
@@ -171,6 +178,9 @@ class LLMOutput:
             Sanitized string safe for code execution and display
         """
         cleaned_string = self.original_string
+
+        # Escape backslashes to prevent invalid escape sequences in generated Python
+        cleaned_string = cleaned_string.replace('\\', '\\\\')
 
         # Remove control characters (except newline, tab, carriage return)
         cleaned_string = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', cleaned_string)
