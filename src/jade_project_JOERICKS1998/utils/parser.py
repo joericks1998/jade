@@ -34,6 +34,9 @@ class Line:
     def __getitem__(self, index):
         return self.Tokens[index]
 
+    def __len__(self):
+        return len(self.Tokens)
+
     @property
     def TokenValues(self):
         return [token.Value for token in self.Tokens]
