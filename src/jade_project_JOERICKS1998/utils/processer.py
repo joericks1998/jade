@@ -1,25 +1,73 @@
+"""
+Jade code processing and compilation engine.
+
+This module contains the core logic for processing Jade source code, including:
+- Buffer management for intermediate Python code
+- Jade-specific token processing (prompts and dereferences)
+- Line-by-line interpretation and translation
+- Main compilation pipeline that converts Jade to executable Python
+"""
+
 from ..constants import constants
 from . import heap, parser, tokenref
 
 
-# A buffer class that stores the intermediate python string
 class Buffer:
-    def __init__(self):
+    """
+    Buffer for accumulating intermediate Python code during compilation.
+
+    The Buffer collects translated Python code strings during the Jade
+    compilation process and provides methods to write code incrementally
+    and execute it when ready.
+
+    Attributes:
+        out_py (str): Accumulated Python code string
+    """
+
+    def __init__(self) -> None:
+        """Initialize an empty Buffer."""
         self.out_py = ""
 
-    def write(self, string: str):
+    def write(self, string: str) -> None:
+        """
+        Append a code string to the buffer.
+
+        Args:
+            string: Python code string to append
+        """
         self.out_py += string
 
-    def flush(self):
+    def flush(self) -> None:
+        """
+        Execute the accumulated Python code and clear the buffer.
+
+        Uses Python's exec() to run the compiled code with access to builtins.
+        After execution, the buffer is cleared for potential reuse.
+        """
         exec(self.out_py, {"__builtins__": __builtins__})
         self.out_py = ""
 
 
-# Other jade processing functions (i.e processing tokens)
+# Jade-specific token processing functions
 
 
-# Process #1 declaring a prompt and adding to the heap
 def process_1(line_of_tokens: parser.Line, heap: heap.Heap) -> str:
+    """
+    Process a prompt declaration and store it in the heap.
+
+    This handles Jade's 'prompt' keyword syntax, which declares a variable
+    that will hold an LLM-generated response. The prompt is stored in the heap
+    for later retrieval and LLM invocation.
+
+    Example Jade syntax: `prompt my_var "Generate a greeting"`
+
+    Args:
+        line_of_tokens: Tokenized line containing a prompt declaration
+        heap: Heap instance for storing prompt information
+
+    Returns:
+        Python code string that creates a placeholder variable
+    """
     variable_name = ""
     prompt = ""
     for token in line_of_tokens:
@@ -30,12 +78,31 @@ def process_1(line_of_tokens: parser.Line, heap: heap.Heap) -> str:
     heap.add(variable_name, prompt)
     return f"__p__{variable_name} = {prompt}"
 
-def process_2(line_of_tokens: parser.Line, heap: heap) -> str:
+def process_2(line_of_tokens: parser.Line, heap: heap.Heap) -> str:
+    """
+    Process a prompt dereference and inject LLM-generated content.
+
+    This handles Jade's '?' operator, which retrieves a prompt from the heap,
+    sends it to the LLM, and injects the cleaned response into the code.
+
+    Example Jade syntax: `result = ?my_var`
+
+    Args:
+        line_of_tokens: Tokenized line containing a prompt dereference
+        heap: Heap instance containing stored prompts
+
+    Returns:
+        Python code string with LLM response injected as a triple-quoted string
+
+    Raises:
+        IndexError: If a PROMPTDREF token has no following identifier
+    """
     output_str = ""
     i = 0
     while i < len(line_of_tokens):
         if line_of_tokens[i].Type == tokenref.Types.PROMPTDREF:
             if i + 1 < len(line_of_tokens):
+                # Retrieve LLM response from heap and inject it
                 response = heap.release(line_of_tokens[i+1].Value)
                 output_str += f'\"\"\"{response.Clean}\"\"\"'
                 i += 2
@@ -47,8 +114,24 @@ def process_2(line_of_tokens: parser.Line, heap: heap) -> str:
     return output_str
 
 
-# Interpreter for jade lines
 def line_interpreter(line_of_tokens: parser.Line, heap: heap.Heap) -> str:
+    """
+    Interpret a line containing Jade-specific syntax.
+
+    Routes the line to the appropriate processor based on token types:
+    - Lines with PROMPT tokens -> process_1 (declare and store prompt)
+    - Lines with PROMPTDREF tokens -> process_2 (dereference and inject LLM response)
+
+    Args:
+        line_of_tokens: Tokenized line to interpret
+        heap: Heap instance for prompt storage and retrieval
+
+    Returns:
+        Python code string representing the translated line
+
+    Raises:
+        Exception: Re-raises any exceptions from processing functions with context
+    """
     try:
         if tokenref.Types.PROMPT in [token.Type for token in line_of_tokens]:
             return process_1(line_of_tokens, heap)
@@ -60,8 +143,27 @@ def line_interpreter(line_of_tokens: parser.Line, heap: heap.Heap) -> str:
     return ""
 
 
-# The main function that processes the code
 def machine(jade_code_string: str, python_buffer: Buffer, heap: heap.Heap) -> None:
+    """
+    Main compilation pipeline that converts Jade source code to executable Python.
+
+    This function orchestrates the entire compilation process:
+    1. Preprocesses the source by encoding special characters
+    2. Tokenizes the entire code into a block of lines
+    3. Processes each line, translating Jade syntax to Python
+    4. Writes the translated code to the output buffer
+
+    The function handles both pure Python lines (passed through) and Jade-specific
+    lines (processed through the interpreter).
+
+    Args:
+        jade_code_string: Raw Jade source code as a string
+        python_buffer: Buffer to accumulate translated Python code
+        heap: Heap for managing LLM prompts and responses
+
+    Returns:
+        None (results are written to python_buffer)
+    """
     # Step 1: Tokenize all of the code in the file
     try:
         # preprocess code string
