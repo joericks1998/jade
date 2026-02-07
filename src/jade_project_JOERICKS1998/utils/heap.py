@@ -1,4 +1,5 @@
 from ..llm.deepseek import DeepSeekClient
+from . import parser
 
 
 class Heap:
@@ -13,8 +14,10 @@ class Heap:
         try:
             response = self.client.send_message(self.prompts[var_name])
             del self.prompts[var_name]
+            return parser.LLMOutput(response)
+        except KeyError:
+            msg = f"var_name {var_name} does not exist in the heap"
+            raise KeyError(msg)
         except Exception as e:
-            msg = f"var_name {var_name} does not exist"
-            print(e)
-            raise ValueError(msg)
-        return response
+            print(f"Heap Error:{e}")
+            raise
