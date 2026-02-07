@@ -30,15 +30,34 @@ def process_1(line_of_tokens: parser.Line, heap: heap.Heap) -> str:
     heap.add(variable_name, prompt)
     return f"__p__{variable_name} = {prompt}"
 
+def process_2(line_of_tokens: parser.Line, heap: heap) -> str:
+    output_str = ""
+    i = 0
+    while i < len(line_of_tokens):
+        if line_of_tokens[i].Type == tokenref.Types.PROMPTDREF:
+            if i + 1 < len(line_of_tokens):
+                response = heap.release(line_of_tokens[i+1].Value)
+                output_str += response
+                i += 2
+            else:
+                raise IndexError(f"PROMPTDREF at position {i} has no following identifier")
+        else:
+            output_str += line_of_tokens[i].Value
+            i+=1
+    return output_str
+
 
 # Interpreter for jade lines
 def line_interpreter(line_of_tokens: parser.Line, heap: heap.Heap) -> str:
     try:
         if tokenref.Types.PROMPT in [token.Type for token in line_of_tokens]:
             return process_1(line_of_tokens, heap)
+        elif tokenref.Types.PROMPTDREF in [token.Type for token in line_of_tokens]:
+            return process_2(line_of_tokens, heap)
     except Exception as e:
         print(f"Error interpreting line {line_of_tokens.Pos}: {e}")
-    return "ERROR"
+        raise
+    return ""
 
 
 # The main function that processes the code
