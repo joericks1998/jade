@@ -34,6 +34,9 @@ class Line:
     def __getitem__(self, index):
         return self.Tokens[index]
 
+    def __len__(self):
+        return len(self.Tokens)
+
     @property
     def TokenValues(self):
         return [token.Value for token in self.Tokens]
@@ -62,3 +65,23 @@ class Block:
 
     def __iter__(self):
         return iter(self.lines)
+    
+class LLMOutput:
+    def __init__(self, llm_str: str) -> None:
+        self.original_string = llm_str
+
+    @property
+    def Clean(self) -> str:
+        """Clean LLM output by keeping only alphanumerics and standard keyboard symbols."""
+        cleaned_string = self.original_string
+
+        # Remove control characters (except newline, tab, carriage return)
+        cleaned_string = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', cleaned_string)
+
+        # Remove invisible Unicode characters
+        cleaned_string = re.sub(r'[\u200B-\u200F\uFEFF\u00A0]', '', cleaned_string)
+
+        # Keep only alphanumerics, whitespace, and common keyboard symbols
+        cleaned_string = re.sub(r'[^a-zA-Z0-9\s\.\,\!\?\'\"\-\_\(\)\[\]\{\}\<\>\/\\\|\@\#\$\%\^\&\*\+\=\~\`\;\:]', '', cleaned_string)
+
+        return cleaned_string.strip()

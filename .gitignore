@@ -1,6 +1,9 @@
 # ignore virtual environment setup
 venv/
 
+# ignore Python cache
+__pycache__/
+
 # ignore test text files
 *.txt
 

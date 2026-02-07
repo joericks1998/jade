@@ -11,7 +11,7 @@ class Buffer:
         self.out_py += string
 
     def flush(self):
-        exec(self.out_py)
+        exec(self.out_py, {"__builtins__": __builtins__})
         self.out_py = ""
 
 
@@ -30,15 +30,34 @@ def process_1(line_of_tokens: parser.Line, heap: heap.Heap) -> str:
     heap.add(variable_name, prompt)
     return f"__p__{variable_name} = {prompt}"
 
+def process_2(line_of_tokens: parser.Line, heap: heap) -> str:
+    output_str = ""
+    i = 0
+    while i < len(line_of_tokens):
+        if line_of_tokens[i].Type == tokenref.Types.PROMPTDREF:
+            if i + 1 < len(line_of_tokens):
+                response = heap.release(line_of_tokens[i+1].Value)
+                output_str += f'\"\"\"{response.Clean}\"\"\"'
+                i += 2
+            else:
+                raise IndexError(f"PROMPTDREF at position {i} has no following identifier")
+        else:
+            output_str += line_of_tokens[i].Value
+            i+=1
+    return output_str
+
 
 # Interpreter for jade lines
 def line_interpreter(line_of_tokens: parser.Line, heap: heap.Heap) -> str:
     try:
         if tokenref.Types.PROMPT in [token.Type for token in line_of_tokens]:
             return process_1(line_of_tokens, heap)
+        elif tokenref.Types.PROMPTDREF in [token.Type for token in line_of_tokens]:
+            return process_2(line_of_tokens, heap)
     except Exception as e:
         print(f"Error interpreting line {line_of_tokens.Pos}: {e}")
-    return "ERROR"
+        raise
+    return ""
 
 
 # The main function that processes the code
@@ -57,7 +76,11 @@ def machine(jade_code_string: str, python_buffer: Buffer, heap: heap.Heap) -> No
     try:
         for line in token_block:
             if line.is_jade():
-                python_buffer.write(line_interpreter(line, heap))
+                jade_output = line_interpreter(line, heap)
+                # Postprocess jade output to decode space encodings
+                for k, v in constants.SPACE_ENCODINGS.items():
+                    jade_output = jade_output.replace(v, k)
+                python_buffer.write(jade_output)
             else:
                 py_line = "".join(line.TokenValues)
                 postprocessed_py_line = py_line
