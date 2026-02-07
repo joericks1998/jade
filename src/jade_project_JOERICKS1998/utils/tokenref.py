@@ -113,6 +113,11 @@ class Types(Enum):
     IDENTIFIER = auto()
     NUMBER = auto()
     STRING = auto()
+    FSTRING = auto()  # Intermediate: captured whole, then expanded
+    FPREFIX = auto()  # f-string prefix: f
+    FSTRING_START = auto()  # f-string opening quote + text before first {
+    FSTRING_MID = auto()  # f-string text between } and {
+    FSTRING_END = auto()  # f-string text after last } + closing quote
 
     # Punctuation
     LPAREN = auto()  # (
