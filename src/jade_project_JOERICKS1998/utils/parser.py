@@ -97,19 +97,10 @@ class Line:
         """
         return [token.Value for token in self.Tokens]
 
-    def is_jade(self) -> bool:
-        """
-        Check if this line contains Jade-specific syntax.
+    @property
+    def AllTypes(self) -> list[tokenref.Types]:
+        return [token.Type for token in self.Tokens]
 
-        Jade-specific syntax includes the 'prompt' keyword and '?' prompt dereference operator.
-
-        Returns:
-            True if the line contains Jade tokens, False otherwise
-        """
-        for token in self.Tokens:
-            if tokenref.jade_switch.get(token.Type):
-                return True
-        return False
 
 
 class Block:
