@@ -11,6 +11,13 @@ allowing both flat token access and line-based token access.
 """
 
 
+def decode_encodings(s: str, encodings: dict[str, str]) -> str:
+    """Decode encoded symbols back to their original characters using the given encoding map."""
+    for original, encoded in encodings.items():
+        s = s.replace(encoded, original)
+    return s
+
+
 class Line:
     """
     Represents a single line of Jade source code with its tokenized content.
@@ -69,8 +76,19 @@ class Line:
         """Return the number of tokens in this line."""
         return len(self.Tokens)
 
+    def __setitem__(self, index: int, token: tokenref.Token) -> None:
+        """Set a token at the given index."""
+        self.Tokens[index] = token
+
+    def __delitem__(self, index: int) -> None:
+        del self.Tokens[index]
+
+    def append(self, token: tokenref.Token) -> None:
+        """Append a token to this line."""
+        self.Tokens.append(token)
+
     @property
-    def TokenValues(self) -> list[str]:
+    def AllValues(self) -> list[str]:
         """
         Get a list of token values (strings) without type information.
 
@@ -79,19 +97,10 @@ class Line:
         """
         return [token.Value for token in self.Tokens]
 
-    def is_jade(self) -> bool:
-        """
-        Check if this line contains Jade-specific syntax.
+    @property
+    def AllTypes(self) -> list[tokenref.Types]:
+        return [token.Type for token in self.Tokens]
 
-        Jade-specific syntax includes the 'prompt' keyword and '?' prompt dereference operator.
-
-        Returns:
-            True if the line contains Jade tokens, False otherwise
-        """
-        for token in self.Tokens:
-            if tokenref.jade_switch.get(token.Type):
-                return True
-        return False
 
 
 class Block:
@@ -171,6 +180,9 @@ class LLMOutput:
             Sanitized string safe for code execution and display
         """
         cleaned_string = self.original_string
+
+        # Escape backslashes to prevent invalid escape sequences in generated Python
+        cleaned_string = cleaned_string.replace('\\', '\\\\')
 
         # Remove control characters (except newline, tab, carriage return)
         cleaned_string = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', cleaned_string)

@@ -51,76 +51,113 @@ class Buffer:
 # Jade-specific token processing functions
 
 
-def process_1(line_of_tokens: parser.Line, heap: heap.Heap) -> str:
+def is_jade_line(line: parser.Line, heap: heap.Heap) -> bool:
+    """Determine if a line requires Jade processing rather than standard Python pass-through."""
+    return any(
+        token.Type == tokenref.Types.PROMPT
+        or token.Type == tokenref.Types.PROMPTDREF
+        or (token.Type == tokenref.Types.IDENTIFIER and token.Value in heap.prompts)
+        for token in line
+    )
+
+
+def process_1(line: parser.Line, heap: heap.Heap) -> str:
     """
     Process a prompt declaration and store it in the heap.
 
-    This handles Jade's 'prompt' keyword syntax, which declares a variable
-    that will hold an LLM-generated response. The prompt is stored in the heap
-    for later retrieval and LLM invocation.
+    Terminal operation — returns a Python code string.
 
-    Example Jade syntax: `prompt my_var "Generate a greeting"`
+    Example: `prompt my_var "Generate a greeting"` -> `__p__my_var = "Generate a greeting"`
 
     Args:
-        line_of_tokens: Tokenized line containing a prompt declaration
+        tokens: Token list containing a prompt declaration
         heap: Heap instance for storing prompt information
 
     Returns:
         Python code string that creates a placeholder variable
     """
-    variable_name = ""
     prompt = ""
-    for token in line_of_tokens:
-        if token.Type == tokenref.Types.IDENTIFIER:
-            variable_name = token.Value
-        elif token.Type == tokenref.Types.STRING:
-            prompt = token.Value
+    variable_name = ""
+    i = 0
+    while i < len(line):
+        if line[i].Type == tokenref.Types.IDENTIFIER:
+            variable_name = line[i].Value
+            line[i] = tokenref.Token(f"__p__{variable_name}", line[i].Pos)
+            i += 1
+        elif line[i].Type == tokenref.Types.STRING:
+            prompt = line[i].Value
+            i += 1
+        elif line[i].Type == tokenref.Types.PROMPT:
+            del line[i]
+            del line[i]
+        else:
+            i += 1
     heap.add(variable_name, prompt)
-    return f"__p__{variable_name} = {prompt}"
+    return line
 
-def process_2(line_of_tokens: parser.Line, heap: heap.Heap) -> str:
+
+def process_2(line: tokenref.Line, heap: heap.Heap) -> tokenref.Line:
     """
-    Process a prompt dereference and inject LLM-generated content.
+    Process prompt dereferences by releasing from the heap and replacing tokens.
 
-    This handles Jade's '?' operator, which retrieves a prompt from the heap,
-    sends it to the LLM, and injects the cleaned response into the code.
-
-    Example Jade syntax: `result = ?my_var`
+    Replaces each ?var pair with a single token containing the LLM response.
 
     Args:
-        line_of_tokens: Tokenized line containing a prompt dereference
+        tokens: Token list containing prompt dereferences
         heap: Heap instance containing stored prompts
 
     Returns:
-        Python code string with LLM response injected as a triple-quoted string
-
-    Raises:
-        IndexError: If a PROMPTDREF token has no following identifier
+        Modified token list with dereferences resolved
     """
-    output_str = ""
+    new_line = parser.Line("", line.Pos)
     i = 0
-    while i < len(line_of_tokens):
-        if line_of_tokens[i].Type == tokenref.Types.PROMPTDREF:
-            if i + 1 < len(line_of_tokens):
-                # Retrieve LLM response from heap and inject it
-                response = heap.release(line_of_tokens[i+1].Value)
-                output_str += f'\"\"\"{response.Clean}\"\"\"'
+    while i < len(line):
+        if line[i].Type == tokenref.Types.PROMPTDREF:
+            if i + 1 < len(line):
+                response = heap.release(line[i + 1].Value)
+                new_line.append(tokenref.Token(f'\"\"\"{response.Clean}\"\"\"', line[i].Pos))
                 i += 2
             else:
                 raise IndexError(f"PROMPTDREF at position {i} has no following identifier")
         else:
-            output_str += line_of_tokens[i].Value
-            i+=1
-    return output_str
+            new_line.append(line[i])
+            i += 1
+    return new_line
+
+
+def process_3(line: parser.Line, heap: heap.Heap) -> parser.Line:
+    """
+    Rewrite bare prompt identifiers to their __p__ prefixed variable names.
+
+    No LLM call — just a variable name substitution.
+
+    Example: `print(jade)` tokens -> `print(__p__jade)` tokens
+
+    Args:
+        tokens: Token list containing implicit prompt references
+        heap: Heap instance containing stored prompts
+
+    Returns:
+        Modified token list with identifiers rewritten
+    """
+    new_line = parser.Line("", pos=line.Pos)
+    for token in line:
+        if token.Type == tokenref.Types.IDENTIFIER and token.Value in heap.prompts:
+            new_line.append(tokenref.Token(f"__p__{token.Value}", token.Pos))
+        else:
+            new_line.append(token)
+    return new_line
 
 
 def line_interpreter(line_of_tokens: parser.Line, heap: heap.Heap) -> str:
     """
-    Interpret a line containing Jade-specific syntax.
+    Recursively interpret a line containing Jade-specific syntax.
 
-    Routes the line to the appropriate processor based on token types:
-    - Lines with PROMPT tokens -> process_1 (declare and store prompt)
-    - Lines with PROMPTDREF tokens -> process_2 (dereference and inject LLM response)
+    Extracts the token list and applies transformations in priority order,
+    recursing after each pass until no Jade operations remain:
+    1. Release: ?var dereferences -> invoke LLM, replace with response tokens
+    2. Variable lookup: bare identifier matching heap -> rewrite to __p__ prefix
+    3. Declaration: prompt keyword -> store in heap (terminal)
 
     Args:
         line_of_tokens: Tokenized line to interpret
@@ -128,19 +165,28 @@ def line_interpreter(line_of_tokens: parser.Line, heap: heap.Heap) -> str:
 
     Returns:
         Python code string representing the translated line
-
-    Raises:
-        Exception: Re-raises any exceptions from processing functions with context
     """
-    try:
-        if tokenref.Types.PROMPT in [token.Type for token in line_of_tokens]:
-            return process_1(line_of_tokens, heap)
-        elif tokenref.Types.PROMPTDREF in [token.Type for token in line_of_tokens]:
-            return process_2(line_of_tokens, heap)
-    except Exception as e:
-        print(f"Error interpreting line {line_of_tokens.Pos}: {e}")
-        raise
-    return ""
+    return _resolve_tokens(line_of_tokens, heap)
+
+
+def _resolve_tokens(line: parser.Line, heap: heap.Heap) -> str:
+    """Recursive resolution of Jade tokens by priority order."""
+    print(f"{line.Pos}: {any(t.Type == tokenref.Types.IDENTIFIER and t.Value in heap.prompts for t in line.Tokens)}: {line.AllValues}")
+    # Priority 1: Release — handle ?var dereferences
+    if tokenref.Types.PROMPTDREF in line.AllTypes:
+        return _resolve_tokens(process_2(line, heap), heap)
+
+    # Priority 2: Variable lookup — rewrite bare identifiers matching heap
+    if any(t.Type == tokenref.Types.IDENTIFIER and t.Value in heap.prompts for t in line.Tokens):
+
+        return _resolve_tokens(process_3(line, heap), heap)
+
+    # Priority 3: Declaration — store prompt in heap (terminal)
+    if tokenref.Types.PROMPT in line.AllTypes:
+        return _resolve_tokens(process_1(line, heap), heap)
+
+    # Base case: no jade operations remain
+    return "".join(line.AllValues)
 
 
 def machine(jade_code_string: str, python_buffer: Buffer, heap: heap.Heap) -> None:
@@ -177,18 +223,10 @@ def machine(jade_code_string: str, python_buffer: Buffer, heap: heap.Heap) -> No
     # Step 2: Go line by line and based on tokens and types, translate and add these tokens to the buffer
     try:
         for line in token_block:
-            if line.is_jade():
-                jade_output = line_interpreter(line, heap)
-                # Postprocess jade output to decode space encodings
-                for k, v in constants.SPACE_ENCODINGS.items():
-                    jade_output = jade_output.replace(v, k)
-                python_buffer.write(jade_output)
-            else:
-                py_line = "".join(line.TokenValues)
-                postprocessed_py_line = py_line
-                for k, v in constants.SPACE_ENCODINGS.items():
-                    postprocessed_py_line = postprocessed_py_line.replace(v, k)
-                python_buffer.write(postprocessed_py_line)
+            jade_output = line_interpreter(line, heap)
+            # Postprocess jade output to decode space encodings
+            jade_output = parser.decode_encodings(jade_output, constants.SPACE_ENCODINGS)
+            python_buffer.write(jade_output)
     except Exception as e:
         print(f"Error processing Jade code: {e}")
         return
