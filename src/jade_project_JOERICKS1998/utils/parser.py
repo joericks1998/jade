@@ -76,8 +76,19 @@ class Line:
         """Return the number of tokens in this line."""
         return len(self.Tokens)
 
+    def __setitem__(self, index: int, token: tokenref.Token) -> None:
+        """Set a token at the given index."""
+        self.Tokens[index] = token
+
+    def __delitem__(self, index: int) -> None:
+        del self.Tokens[index]
+
+    def append(self, token: tokenref.Token) -> None:
+        """Append a token to this line."""
+        self.Tokens.append(token)
+
     @property
-    def TokenValues(self) -> list[str]:
+    def AllValues(self) -> list[str]:
         """
         Get a list of token values (strings) without type information.
 
