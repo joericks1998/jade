@@ -1,16 +1,66 @@
+"""
+Heap management for Jade LLM prompt storage and retrieval.
+
+This module provides the Heap class which manages the lifecycle of LLM prompts
+during Jade code execution. Prompts are stored when declared and released
+(executed via LLM) when dereferenced in the code.
+"""
+
 from ..llm.deepseek import DeepSeekClient
 from . import parser
 
 
 class Heap:
+    """
+    Storage and execution manager for LLM prompts in Jade code.
+
+    The Heap stores prompt declarations and handles their execution through
+    an LLM client when they are dereferenced. Each prompt is identified by
+    a variable name and executed exactly once.
+
+    Attributes:
+        prompts (dict[str, str]): Mapping of variable names to prompt strings
+        client (DeepSeekClient): LLM client for executing prompts
+    """
+
     def __init__(self, client: DeepSeekClient) -> None:
+        """
+        Initialize a Heap with an LLM client.
+
+        Args:
+            client: Configured DeepSeekClient for LLM interactions
+        """
         self.prompts: dict[str, str] = {}
         self.client: DeepSeekClient = client
 
     def add(self, var_name: str, prompt: str) -> None:
+        """
+        Store a prompt in the heap for later execution.
+
+        Args:
+            var_name: Variable name identifier for this prompt
+            prompt: The prompt text to send to the LLM
+        """
         self.prompts[var_name] = prompt
 
-    def release(self, var_name: str) -> str:
+    def release(self, var_name: str) -> parser.LLMOutput:
+        """
+        Execute a stored prompt via LLM and remove it from the heap.
+
+        This method retrieves the prompt, sends it to the LLM client,
+        and returns the response wrapped in an LLMOutput object. The
+        prompt is deleted from the heap after execution (single-use).
+
+        Args:
+            var_name: Variable name of the prompt to execute
+
+        Returns:
+            LLMOutput object containing the cleaned LLM response
+
+        Raises:
+            KeyError: If the variable name doesn't exist in the heap
+            Exception: Re-raises any LLM client errors with context
+        """
         try:
             response = self.client.send_message(self.prompts[var_name])
             del self.prompts[var_name]
