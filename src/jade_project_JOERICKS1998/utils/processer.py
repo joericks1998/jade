@@ -11,7 +11,7 @@ class Buffer:
         self.out_py += string
 
     def flush(self):
-        exec(self.out_py)
+        exec(self.out_py, {"__builtins__": __builtins__})
         self.out_py = ""
 
 
@@ -37,7 +37,7 @@ def process_2(line_of_tokens: parser.Line, heap: heap) -> str:
         if line_of_tokens[i].Type == tokenref.Types.PROMPTDREF:
             if i + 1 < len(line_of_tokens):
                 response = heap.release(line_of_tokens[i+1].Value)
-                output_str += response
+                output_str += f'\"\"\"{response.Clean}\"\"\"'
                 i += 2
             else:
                 raise IndexError(f"PROMPTDREF at position {i} has no following identifier")
@@ -76,7 +76,11 @@ def machine(jade_code_string: str, python_buffer: Buffer, heap: heap.Heap) -> No
     try:
         for line in token_block:
             if line.is_jade():
-                python_buffer.write(line_interpreter(line, heap))
+                jade_output = line_interpreter(line, heap)
+                # Postprocess jade output to decode space encodings
+                for k, v in constants.SPACE_ENCODINGS.items():
+                    jade_output = jade_output.replace(v, k)
+                python_buffer.write(jade_output)
             else:
                 py_line = "".join(line.TokenValues)
                 postprocessed_py_line = py_line

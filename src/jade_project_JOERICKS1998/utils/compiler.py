@@ -50,6 +50,8 @@ def compile(source_file: str) -> None:
         # Execute the Jade/Python code directly
         # Note: This uses Python's exec() function which executes
         # the code in the current context
+        print("Generated Python code:")
+        print(buffer.out_py)
         print("Code Run Output: ")
         buffer.flush()
 
