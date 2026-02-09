@@ -30,6 +30,7 @@ class Message:
 @dataclass
 class Conversation:
     """Manages a conversation with message history and context."""
+    # test commit
 
     messages: List[Message] = field(default_factory=list)
     system_prompt: Optional[str] = None
