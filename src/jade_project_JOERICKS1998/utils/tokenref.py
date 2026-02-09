@@ -243,8 +243,8 @@ map = {
     r"\.\.\.": Types.ELLIPSIS,
     r"->": Types.ARROW,
     # Literals
-    r'f"[^"]*"': Types.FSTRING,  # f-string double quoted
-    r"f'[^']*'": Types.FSTRING,  # f-string single quoted
+    r'f"(?:[^"\\]|\\.)*"': Types.FSTRING,  # f-string double quoted
+    r"f'(?:[^'\\]|\\.)*'": Types.FSTRING,  # f-string single quoted
     r"\"[^\"]*\"": Types.STRING,  # Double quoted strings
     r"'[^']*'": Types.STRING,  # Single quoted strings
     r"\b0[xX][0-9a-fA-F]+\b ": Types.NUMBER,  # Hex: 0xFF, 0x1a
@@ -257,10 +257,6 @@ map = {
     r"\#.*": Types.COMMENT,  # Single line comment
     r"\u2420": Types.SPACE,  # Encoded space character
     r"\u2424": Types.NEWLINE,  # Encoded newline character
-    r"f(?=[\"'])": Types.FPREFIX,
-    r"(?<=f)[\"'][^\"'{}]*(?=\{)": Types.FSTRING_START,
-    r"(?<=\})[^\"'{}]+(?=\{)": Types.FSTRING_MID,
-    r"(?<=\})[^\"'{}]*[\"']": Types.FSTRING_END
 }
 
 
