@@ -1,6 +1,7 @@
 import os
 from typing import List
 
+from .. import config
 from ..llm.deepseek import setup_deepseek
 from . import compiler
 
@@ -40,10 +41,19 @@ def help(args: List[str]) -> None:
 │    This reference covers all available commands and their usage.             │
 │                                                                              │
 │  📁 FILE COMPILATION COMMANDS:                                               │
-│    • jade <filename.jde>                                                     │
+│    • jade <filename.jde> [flags]                                             │
 │        Compile and execute a Jade source file                                │
 │        Example: jade hello.jde                                               │
 │        Note: Requires LLM setup (run 'jade setup' first)                     │
+│                                                                              │
+│        Flags:                                                                │
+│          --verbose, -v       Show debug output (init steps, tokens)          │
+│          --show-python, -s   Show generated Python source code               │
+│                                                                              │
+│        Examples:                                                             │
+│          jade hello.jde -v                                                   │
+│          jade hello.jde --show-python                                        │
+│          jade hello.jde -v -s                                                │
 │                                                                              │
 │  ⚙️  SETUP & CONFIGURATION COMMANDS:                                         │
 │    • jade setup                                                              │
@@ -307,13 +317,28 @@ def input_handler(*args: str, cwd: str = "") -> None:
         no_args()
     elif options.get(args[0]):
         # Valid command found - execute with remaining arguments
-        print(args[0])
+        if config.verbose:
+            print(args[0])
         options[args[0]](list(args[1:]))
-    elif len(args) == 1 and args[0].endswith(".jde"):
-        # Jade file detected - resolve path relative to cwd
+    elif args[0].endswith(".jde"):
+        # Jade file detected - extract flags and resolve path
+        flags = {a for a in args[1:] if a.startswith("-")}
+        unknown_flags = flags - {"--verbose", "-v", "--show-python", "-s"}
+        if unknown_flags:
+            print(f"❌ Error: Unknown flag(s): {' '.join(unknown_flags)}")
+            print()
+            print("💡 Available flags:")
+            print("   --verbose, -v       - Show debug output")
+            print("   --show-python, -s   - Show generated Python source")
+            return
+
+        config.verbose = "--verbose" in flags or "-v" in flags
+        config.show_python = "--show-python" in flags or "-s" in flags
+
         file_path = os.path.join(cwd, args[0])
         file_path = os.path.normpath(file_path)
-        print(f"🔧 Compiling {file_path}...")
+        if config.verbose:
+            print(f"🔧 Compiling {file_path}...")
         compiler.compile(file_path)
     else:
         # Invalid operation - show error message with help guidance
