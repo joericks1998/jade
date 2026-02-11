@@ -1,5 +1,6 @@
 from jade_project_JOERICKS1998.llm.deepseek import DeepSeekClient
 
+from .. import config
 from . import heap, processer
 
 
@@ -27,17 +28,21 @@ def compile(source_file: str) -> None:
         Files without the .jde extension are rejected with an error message.
     """
     # isort: on
-    print(f"Starting compilation of: {source_file}")
+    if config.verbose:
+        print(f"Starting compilation of: {source_file}")
 
     # Initialize Deepseek client
-    print("  Initializing DeepSeek client...")
+    if config.verbose:
+        print("  Initializing DeepSeek client...")
     client = DeepSeekClient()
     # Define heap
-    print("  Creating heap...")
+    if config.verbose:
+        print("  Creating heap...")
     prompt_heap = heap.Heap(client)
 
     # Initialize Jade Buffer
-    print("  Initializing Jade Buffer...")
+    if config.verbose:
+        print("  Initializing Jade Buffer...")
     buffer = processer.Buffer()
 
     # Check if the file has the correct Jade extension
@@ -50,14 +55,15 @@ def compile(source_file: str) -> None:
         # Execute the Jade/Python code directly
         # Note: This uses Python's exec() function which executes
         # the code in the current context
-        print("Generated Python code:")
-        print(buffer.out_py)
-        print("Code Run Output: ")
+        if config.show_python:
+            print("Generated Python code:")
+            print(buffer.out_py)
         buffer.flush()
 
     except Exception as e:
         # Handle any exceptions that occur during code execution
         print(f"Compiler execution failed with exception: {e}")
 
-    print(f"✅ Compilation completed for: {source_file}")
+    if config.verbose:
+        print(f"✅ Compilation completed for: {source_file}")
     return

@@ -8,6 +8,7 @@ This module contains the core logic for processing Jade source code, including:
 - Main compilation pipeline that converts Jade to executable Python
 """
 
+from .. import config
 from ..constants import constants
 from . import heap, parser, tokenref
 
@@ -171,7 +172,8 @@ def line_interpreter(line_of_tokens: parser.Line, heap: heap.Heap) -> str:
 
 def _resolve_tokens(line: parser.Line, heap: heap.Heap) -> str:
     """Recursive resolution of Jade tokens by priority order."""
-    print(f"{line.Pos}: {any(t.Type == tokenref.Types.IDENTIFIER and t.Value in heap.prompts for t in line.Tokens)}: {line.AllValues}")
+    if config.verbose:
+        print(f"{line.Pos}: {any(t.Type == tokenref.Types.IDENTIFIER and t.Value in heap.prompts for t in line.Tokens)}: {line.AllValues}")
     # Priority 1: Release — handle ?var dereferences
     if tokenref.Types.PROMPTDREF in line.AllTypes:
         return _resolve_tokens(process_2(line, heap), heap)
