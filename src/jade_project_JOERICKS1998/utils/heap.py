@@ -43,6 +43,26 @@ class Heap:
         """
         self.prompts[var_name] = prompt
 
+    def ask(self, prompt_text: str) -> str:
+        """
+        Call the LLM with a runtime prompt string and return the cleaned response.
+
+        Used by dynamic prompts (``prompt p = expr``) where the prompt text is
+        only known at execution time, not at translation time.
+
+        Args:
+            prompt_text: The prompt string to send to the LLM
+
+        Returns:
+            Cleaned LLM response as a plain string
+        """
+        try:
+            response = self.client.send_message(prompt_text)
+            return parser.LLMOutput(response).Text
+        except Exception as e:
+            print(f"Heap Error: {e}")
+            raise
+
     def release(self, var_name: str) -> parser.LLMOutput:
         """
         Execute a stored prompt via LLM and remove it from the heap.

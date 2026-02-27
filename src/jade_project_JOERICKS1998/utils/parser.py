@@ -18,7 +18,163 @@ def decode_encodings(s: str, encodings: dict[str, str]) -> str:
     return s
 
 
-class Line:
+def _tokenize(encoded: str) -> list[tokenref.Token]:
+    """
+    Stateful character-level tokenizer for encoded Jade source lines.
+
+    Walks the encoded string character by character, producing one Token
+    per lexical unit. Every character is consumed into exactly one token,
+    so joining all token Values reconstructs the original string.
+
+    Args:
+        encoded: Source string with whitespace encoded (␠, ␉, ␤)
+
+    Returns:
+        List of Token objects covering the entire input
+    """
+    tokens = []
+    i = 0
+    n = len(encoded)
+
+    while i < n:
+        ch = encoded[i]
+
+        # Encoded whitespace
+        if ch == '\u2420':  # ␠ space
+            tokens.append(tokenref.Token(ch, i, tokenref.Types.SPACE))
+            i += 1
+        elif ch == '\u2409':  # ␉ tab
+            tokens.append(tokenref.Token(ch, i, tokenref.Types.INDENT))
+            i += 1
+        elif ch == '\u2424':  # ␤ newline
+            tokens.append(tokenref.Token(ch, i, tokenref.Types.NEWLINE))
+            i += 1
+
+        # f-string triple-double-quoted: f"""..."""
+        elif ch == 'f' and encoded[i+1:i+4] == '"""':
+            j = i + 4
+            while j < n and encoded[j:j+3] != '"""':
+                j += 1
+            j += 3
+            tokens.append(tokenref.Token(encoded[i:j], i, tokenref.Types.F))
+            i = j
+
+        # f-string triple-single-quoted: f'''...'''
+        elif ch == 'f' and encoded[i+1:i+4] == "'''":
+            j = i + 4
+            while j < n and encoded[j:j+3] != "'''":
+                j += 1
+            j += 3
+            tokens.append(tokenref.Token(encoded[i:j], i, tokenref.Types.F))
+            i = j
+
+        # Triple double-quoted string: """..."""
+        elif encoded[i:i+3] == '"""':
+            j = i + 3
+            while j < n and encoded[j:j+3] != '"""':
+                j += 1
+            j += 3
+            tokens.append(tokenref.Token(encoded[i:j], i, tokenref.Types.TRIPLEQ))
+            i = j
+
+        # Triple single-quoted string: '''...'''
+        elif encoded[i:i+3] == "'''":
+            j = i + 3
+            while j < n and encoded[j:j+3] != "'''":
+                j += 1
+            j += 3
+            tokens.append(tokenref.Token(encoded[i:j], i, tokenref.Types.TRIPLEQ))
+            i = j
+
+        # f-string double-quoted: f"..."
+        elif ch == 'f' and i + 1 < n and encoded[i+1] == '"':
+            j = i + 2
+            while j < n:
+                if encoded[j] == '\\':
+                    j += 2
+                elif encoded[j] == '"':
+                    j += 1
+                    break
+                else:
+                    j += 1
+            tokens.append(tokenref.Token(encoded[i:j], i, tokenref.Types.F))
+            i = j
+
+        # f-string single-quoted: f'...'
+        elif ch == 'f' and i + 1 < n and encoded[i+1] == "'":
+            j = i + 2
+            while j < n:
+                if encoded[j] == '\\':
+                    j += 2
+                elif encoded[j] == "'":
+                    j += 1
+                    break
+                else:
+                    j += 1
+            tokens.append(tokenref.Token(encoded[i:j], i, tokenref.Types.F))
+            i = j
+
+        # Regular double-quoted string: "..."
+        elif ch == '"':
+            j = i + 1
+            while j < n:
+                if encoded[j] == '\\':
+                    j += 2
+                elif encoded[j] == '"':
+                    j += 1
+                    break
+                else:
+                    j += 1
+            tokens.append(tokenref.Token(encoded[i:j], i, tokenref.Types.STRING))
+            i = j
+
+        # Regular single-quoted string: '...'
+        elif ch == "'":
+            j = i + 1
+            while j < n:
+                if encoded[j] == '\\':
+                    j += 2
+                elif encoded[j] == "'":
+                    j += 1
+                    break
+                else:
+                    j += 1
+            tokens.append(tokenref.Token(encoded[i:j], i, tokenref.Types.STRING))
+            i = j
+
+        # Comment: # until ␤
+        elif ch == '#':
+            j = i + 1
+            while j < n and encoded[j] != '\u2424':
+                j += 1
+            tokens.append(tokenref.Token(encoded[i:j], i, tokenref.Types.COMMENT))
+            i = j
+
+        # Prompt dereference: ?
+        elif ch == '?':
+            tokens.append(tokenref.Token(ch, i, tokenref.Types.PROMPTDREF))
+            i += 1
+
+        # Identifiers and keywords
+        elif ch.isalpha() or ch == '_':
+            j = i + 1
+            while j < n and (encoded[j].isalnum() or encoded[j] == '_'):
+                j += 1
+            word = encoded[i:j]
+            tok_type = tokenref.KEYWORD_TYPES.get(word, tokenref.Types.IDENTIFIER)
+            tokens.append(tokenref.Token(word, i, tok_type))
+            i = j
+
+        # Fallback: single character
+        else:
+            tokens.append(tokenref.Token(ch, i, tokenref.Types.FALLBACK))
+            i += 1
+
+    return tokens
+
+
+
+class Chunk:
     """
     Represents a single line of Jade source code with its tokenized content.
 
@@ -42,15 +198,8 @@ class Line:
         """
         self.line_str = line_str
         self.Pos = pos
-        self.__re_pattern = "|".join(tokenref.map.keys())
-        self.Tokens = []
-        i = 0
-        for lex in re.findall(self.__re_pattern, line_str, re.VERBOSE):
-            try:
-                self.Tokens.append(tokenref.Token(lex, i))
-                i += 1
-            except Exception as e:
-                print(f"Error tokenizing position {i}: {e}")
+        self.Tokens = _tokenize(line_str)
+
 
     def __str__(self) -> str:
         """Return a string representation of the Line with its tokens and position."""
@@ -118,32 +267,58 @@ class Block:
 
     def __init__(self, block_str: str) -> None:
         """
-        Initialize a Block by parsing source code into lines.
+        Initialize a Block by splitting encoded source into Chunks.
 
-        The block is split using encoded newline characters from SPACE_ENCODINGS
-        to handle special characters in the tokenization process.
+        Uses a stateful character-level walk to split on encoded newlines (␤)
+        while treating triple-quoted string contents as opaque (no splits inside).
 
         Args:
-            block_str: The complete source code string to parse
+            block_str: The complete encoded source code string to parse
         """
-        self.block_str = block_str
-        self.lines = []
+        self.chunks = []
+        state = "NORMAL"
+        buffer = ""
+        chunk_index = 0
         i = 0
-        split_char = constants.SPACE_ENCODINGS["\n"]
-        for line_str in re.split(re.compile(f"({split_char})"), self.block_str):
-            try:
-                self.lines.append(Line(line_str, i))
+        n = len(block_str)
+
+        while i < n:
+            if state == "NORMAL" and block_str[i:i+3] == '"""':
+                state = "TRIPLE_D"
+                buffer += '"""'
+                i += 3
+            elif state == "NORMAL" and block_str[i:i+3] == "'''":
+                state = "TRIPLE_S"
+                buffer += "'''"
+                i += 3
+            elif state == "TRIPLE_D" and block_str[i:i+3] == '"""':
+                state = "NORMAL"
+                buffer += '"""'
+                i += 3
+            elif state == "TRIPLE_S" and block_str[i:i+3] == "'''":
+                state = "NORMAL"
+                buffer += "'''"
+                i += 3
+            elif state == "NORMAL" and block_str[i] == '\u2424':  # ␤
+                buffer += '\u2424'
+                self.chunks.append(Chunk(buffer, chunk_index))
+                chunk_index += 1
+                buffer = ""
                 i += 1
-            except Exception as e:
-                print(f"Error processing line {i}: {e}")
+            else:
+                buffer += block_str[i]
+                i += 1
+
+        if buffer:
+            self.chunks.append(Chunk(buffer, chunk_index))
 
     def __str__(self) -> str:
-        """Return a string representation of the Block with all its lines."""
-        return f"Block(Lines = [{', '.join(str(line) for line in self.lines)}])"
+        """Return a string representation of the Block with all its chunks."""
+        return f"Block(Chunks = [{', '.join(str(chunk) for chunk in self.chunks)}])"
 
     def __iter__(self):
-        """Enable iteration over the lines in this block."""
-        return iter(self.lines)
+        """Enable iteration over the chunks in this block."""
+        return iter(self.chunks)
     
 class LLMOutput:
     """
@@ -194,3 +369,28 @@ class LLMOutput:
         cleaned_string = re.sub(r'[^a-zA-Z0-9\s\.\,\!\?\'\"\-\_\(\)\[\]\{\}\<\>\/\\\|\@\#\$\%\^\&\*\+\=\~\`\;\:]', '', cleaned_string)
 
         return cleaned_string.strip()
+
+    @property
+    def Text(self) -> str:
+        """
+        Lightly clean LLM output for use as a runtime string value.
+
+        Unlike Clean, this does NOT escape backslashes or restrict characters
+        to ASCII keyboard symbols — those transforms are only safe when the
+        response is being inlined into a Python string literal.  This property
+        is intended for dynamic prompts where the response is a plain Python
+        str at runtime.
+
+        Steps:
+        1. Remove control characters (including carriage return) except \\n and \\t
+        2. Remove invisible Unicode characters (zero-width spaces, etc.)
+
+        Returns:
+            Sanitized string suitable for direct use as a Python value
+        """
+        cleaned = self.original_string
+        # Remove control characters including \r (0x0D) — keeps \n (0x0A) and \t (0x09)
+        cleaned = re.sub(r'[\x00-\x08\x0B\x0C\x0D\x0E-\x1F\x7F]', '', cleaned)
+        # Remove invisible Unicode characters
+        cleaned = re.sub(r'[\u200B-\u200F\uFEFF\u00A0]', '', cleaned)
+        return cleaned.strip()

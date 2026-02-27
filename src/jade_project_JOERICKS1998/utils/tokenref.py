@@ -11,7 +11,6 @@ The tokenizer supports both standard Python syntax and Jade-specific
 extensions like the 'prompt' keyword and '?' dereference operator.
 """
 
-import re
 from enum import Enum, auto
 
 
@@ -112,12 +111,10 @@ class Types(Enum):
     # Literals
     IDENTIFIER = auto()
     NUMBER = auto()
+    
     STRING = auto()
-    FSTRING = auto()  # Intermediate: captured whole, then expanded
-    FPREFIX = auto()  # f-string prefix: f
-    FSTRING_START = auto()  # f-string opening quote + text before first {
-    FSTRING_MID = auto()  # f-string text between } and {
-    FSTRING_END = auto()  # f-string text after last } + closing quote
+    TRIPLEQ = auto()
+    F = auto()
 
     # Punctuation
     LPAREN = auto()  # (
@@ -154,109 +151,23 @@ class Types(Enum):
     EMPTY = auto()
 
 
-# Token pattern mapping for lexical analysis
-# Maps regular expression patterns to their corresponding token types
-# NOTE: Order matters! More specific patterns should come before general ones
-# to ensure correct tokenization (e.g., '**' before '*', '<=' before '<')
-map = {
-    # Keywords
-    r"if": Types.IF,
-    r"else": Types.ELSE,
-    r"elif": Types.ELIF,
-    r"for": Types.FOR,
-    r"while": Types.WHILE,
-    r"break": Types.BREAK,
-    r"continue": Types.CONTINUE,
-    r"pass": Types.PASS,
-    r"def": Types.DEF,
-    r"class": Types.CLASS,
-    r"return": Types.RETURN,
-    r"yield": Types.YIELD,
-    r"lambda": Types.LAMBDA,
-    r"import": Types.IMPORT,
-    r"from": Types.FROM,
-    r"as": Types.AS,
-    r"try": Types.TRY,
-    r"except": Types.EXCEPT,
-    r"finally": Types.FINALLY,
-    r"raise": Types.RAISE,
-    r"assert": Types.ASSERT,
-    r"with": Types.WITH,
-    r"global": Types.GLOBAL,
-    r"nonlocal": Types.NONLOCAL,
-    r"and": Types.AND,
-    r"or": Types.OR,
-    r"not": Types.NOT,
-    r"in": Types.IN,
-    r"is": Types.IS,
-    r"True": Types.TRUE,
-    r"False": Types.FALSE,
-    r"None": Types.NONE,
-    r"async": Types.ASYNC,
-    r"await": Types.AWAIT,
-    r"match": Types.MATCH,
-    r"case": Types.CASE,
-   r"\bprompt\b": Types.PROMPT,  # Jade-specific: prompt declaration
-    r"\?": Types.PROMPTDREF,  # Jade-specific: prompt dereference operator
-    # Operators (multi-character operators before single-character)
-    r"\=": Types.ASSIGN,
-    r"\+": Types.PLUS,
-    r"\-": Types.MINUS,
-    r"\*": Types.MULTIPLY,
-    r"/": Types.DIVIDE,
-    r"%": Types.MODULO,
-    r"\*\*": Types.POWER,
-    r"//": Types.FLOOR_DIV,
-    r"==": Types.EQUALS,
-    r"!=": Types.NOT_EQUALS,
-    r"<": Types.LESS,
-    r">": Types.GREATER,
-    r"<=": Types.LESS_EQUAL,
-    r">=": Types.GREATER_EQUAL,
-    r"&": Types.BIT_AND,
-    r"\|": Types.BIT_OR,
-    r"\^": Types.BIT_XOR,
-    r"~": Types.BIT_NOT,
-    r"<<": Types.LEFT_SHIFT,
-    r">>": Types.RIGHT_SHIFT,
-    r"\+=": Types.PLUS_ASSIGN,
-    r"\-=": Types.MINUS_ASSIGN,
-    r"\*=": Types.MULT_ASSIGN,
-    r"/=": Types.DIV_ASSIGN,
-    r"%=": Types.MOD_ASSIGN,
-    r"&=": Types.AND_ASSIGN,
-    r"\|=": Types.OR_ASSIGN,
-    r"\^=": Types.XOR_ASSIGN,
-    r"<<=": Types.LEFT_SHIFT_ASSIGN,
-    r">>=": Types.RIGHT_SHIFT_ASSIGN,
-    # Punctuation
-    r"\(": Types.LPAREN,
-    r"\)": Types.RPAREN,
-    r"\{": Types.LBRACE,
-    r"\}": Types.RBRACE,
-    r"\[": Types.LBRACKET,
-    r"\]": Types.RBRACKET,
-    r"\,": Types.COMMA,
-    r";": Types.SEMICOLON,
-    r"\:": Types.COLON,
-    r"\.": Types.DOT,
-    r"\.\.\.": Types.ELLIPSIS,
-    r"->": Types.ARROW,
-    # Literals
-    r'f"(?:[^"\\]|\\.)*"': Types.FSTRING,  # f-string double quoted
-    r"f'(?:[^'\\]|\\.)*'": Types.FSTRING,  # f-string single quoted
-    r"\"[^\"]*\"": Types.STRING,  # Double quoted strings
-    r"'[^']*'": Types.STRING,  # Single quoted strings
-    r"\b0[xX][0-9a-fA-F]+\b ": Types.NUMBER,  # Hex: 0xFF, 0x1a
-    r"\b0[oO][0-7]+\b": Types.NUMBER,  # Octal: 0o777
-    r"\b0[bB][01]+\b": Types.NUMBER,  # Binary: 0b1010
-    r"\b\d+[eE][+-]?\d+\b": Types.NUMBER,  # Scientific: 1e10, 2.5e-3
-    r"(?:\.\d+|\d+(?:\.\d*)?)": Types.NUMBER,  # Numbers: 123, 45.67, .89, 3.14
-    r"\b[a-zA-Z_]\w*\b": Types.IDENTIFIER,  # Identifiers: variable_name, function_name
-    # Special characters
-    r"\#.*": Types.COMMENT,  # Single line comment
-    r"\u2420": Types.SPACE,  # Encoded space character
-    r"\u2424": Types.NEWLINE,  # Encoded newline character
+KEYWORD_TYPES: dict[str, "Types"] = {
+    "prompt": Types.PROMPT,
+    "if": Types.IF, "else": Types.ELSE, "elif": Types.ELIF,
+    "for": Types.FOR, "while": Types.WHILE, "break": Types.BREAK,
+    "continue": Types.CONTINUE, "pass": Types.PASS,
+    "def": Types.DEF, "class": Types.CLASS,
+    "return": Types.RETURN, "yield": Types.YIELD,
+    "import": Types.IMPORT, "from": Types.FROM, "as": Types.AS,
+    "try": Types.TRY, "except": Types.EXCEPT, "finally": Types.FINALLY,
+    "raise": Types.RAISE, "assert": Types.ASSERT, "with": Types.WITH,
+    "global": Types.GLOBAL, "nonlocal": Types.NONLOCAL,
+    "and": Types.AND, "or": Types.OR, "not": Types.NOT,
+    "in": Types.IN, "is": Types.IS,
+    "True": Types.TRUE, "False": Types.FALSE, "None": Types.NONE,
+    "async": Types.ASYNC, "await": Types.AWAIT,
+    "match": Types.MATCH, "case": Types.CASE,
+    "lambda": Types.LAMBDA,
 }
 
 
@@ -274,30 +185,18 @@ class Token:
         Type (Types | None): The classified token type, or None if no match
     """
 
-    def __init__(self, lex: str, pos: int) -> None:
+    def __init__(self, lex: str, pos: int, type: "Types" = None) -> None:
         """
-        Create a Token by matching a lexeme against known patterns.
-
-        The lexeme is tested against all regex patterns in the 'map'
-        dictionary until a full match is found. The first matching
-        pattern determines the token type.
+        Create a Token with an explicit type classification.
 
         Args:
             lex: The raw text (lexeme) to tokenize
             pos: Position of this token in its line (0-indexed)
+            type: The token type; defaults to Types.FALLBACK if not provided
         """
-        # Set the position
         self.Pos = pos
-
-        # Set the value (lexeme)
         self.Value = lex
-
-        # Classify the token type by pattern matching
-        self.Type = None
-        for pattern, type in map.items():
-            if re.fullmatch(pattern, lex):
-                self.Type = type
-                break
+        self.Type = type if type is not None else Types.FALLBACK
 
     def __str__(self) -> str:
         """Return a string representation showing the token's value, type, and position."""

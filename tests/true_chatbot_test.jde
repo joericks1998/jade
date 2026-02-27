@@ -1,0 +1,20 @@
+# ===================================
+# Jade True Chatbot
+# ===================================
+# Uses a dynamic prompt (prompt p = input(...)) so each user message
+# is sent to the LLM at runtime — a genuine back-and-forth chatbot.
+
+print("=" * 50)
+print("  JADE CHATBOT")
+print("  Type your message, or Q to quit.")
+print("=" * 50)
+print()
+
+while True:
+    prompt p = input("Enter prompt here (Q to quit): ")
+    if p.upper() == "Q":
+        print("Goodbye!")
+        break
+    response = ?p
+    print(f"Jade: {response}")
+    print()
