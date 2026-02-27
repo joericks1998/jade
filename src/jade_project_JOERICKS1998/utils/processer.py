@@ -8,6 +8,8 @@ This module contains the core logic for processing Jade source code, including:
 - Main compilation pipeline that converts Jade to executable Python
 """
 
+import re
+
 from .. import config
 from ..constants import constants
 from . import heap, parser, tokenref
@@ -243,6 +245,17 @@ def machine(jade_code_string: str, heap: heap.Heap) -> None:
     for chunk in token_block:
         try:
             jade_output = line_interpreter(chunk, heap)
+            # Replace bare prompt names at the start of f-string expression
+            # slots: {pname...} -> {__p__pname...}.  The tokenizer treats
+            # the whole f"..." as one opaque token, so _resolve_tokens never
+            # sees the identifier inside {}.  We fix it here on the raw
+            # encoded output before decoding.
+            for pname in heap.prompts:
+                jade_output = re.sub(
+                    r'\{' + re.escape(pname) + r'(?=[^a-zA-Z0-9_])',
+                    '{__p__' + pname,
+                    jade_output,
+                )
             py_line = parser.decode_encodings(jade_output, constants.SPACE_ENCODINGS)
         except Exception as e:
             print(f"Error processing line {chunk.Pos}: {e}")
