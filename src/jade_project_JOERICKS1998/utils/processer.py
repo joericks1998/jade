@@ -64,38 +64,69 @@ def is_jade_line(line: parser.Chunk, heap: heap.Heap) -> bool:
     )
 
 
-def process_1(line: parser.Chunk, heap: heap.Heap) -> str:
+def process_1(line: parser.Chunk, heap: heap.Heap) -> parser.Chunk:
     """
     Process a prompt declaration and store it in the heap.
 
-    Terminal operation — returns a Python code string.
-
-    Example: `prompt my_var "Generate a greeting"` -> `__p__my_var = "Generate a greeting"`
+    Renames only the variable name identifier to ``__p__name`` and leaves all
+    other tokens (the value expression) untouched.  Stores the prompt text in
+    the heap:
+    - Static  ``prompt p = "literal"``  → heap["p"] = the string value
+    - Dynamic ``prompt p = expr``       → heap["p"] = None  (resolved at runtime)
 
     Args:
-        tokens: Token list containing a prompt declaration
+        line: Chunk containing a prompt declaration
         heap: Heap instance for storing prompt information
 
     Returns:
-        Python code string that creates a placeholder variable
+        Modified Chunk with the prompt keyword removed and name renamed
     """
-    prompt = ""
+    # Step 1: find and remove the PROMPT token and the space immediately after it
+    for i in range(len(line)):
+        if line[i].Type == tokenref.Types.PROMPT:
+            del line[i]   # removes 'prompt'
+            del line[i]   # removes the space after 'prompt'
+            break
+
+    # Step 2: rename only the first identifier (the variable name)
     variable_name = ""
-    i = 0
-    while i < len(line):
+    name_idx = -1
+    for i in range(len(line)):
         if line[i].Type == tokenref.Types.IDENTIFIER:
             variable_name = line[i].Value
-            line[i] = tokenref.Token(f"__p__{variable_name}", line[i].Pos, type=tokenref.Types.IDENTIFIER)
-            i += 1
-        elif line[i].Type == tokenref.Types.STRING:
-            prompt = line[i].Value
-            i += 1
-        elif line[i].Type == tokenref.Types.PROMPT:
-            del line[i]
-            del line[i]
+            line[i] = tokenref.Token(
+                f"__p__{variable_name}", line[i].Pos, type=tokenref.Types.IDENTIFIER
+            )
+            name_idx = i
+            break
+
+    if not variable_name:
+        return line
+
+    # Step 3: find the '=' token
+    eq_idx = -1
+    for i in range(name_idx + 1, len(line)):
+        if line[i].Type == tokenref.Types.FALLBACK and line[i].Value == '=':
+            eq_idx = i
+            break
+
+    # Step 4: determine static vs dynamic
+    # Static: exactly one STRING token after '=' (ignoring spaces/newlines)
+    # Dynamic: anything else (variable, function call, expression …)
+    if eq_idx != -1:
+        value_tokens = [
+            t for t in line.Tokens[eq_idx + 1:]
+            if t.Type not in (
+                tokenref.Types.SPACE, tokenref.Types.NEWLINE, tokenref.Types.INDENT
+            )
+        ]
+        if len(value_tokens) == 1 and value_tokens[0].Type == tokenref.Types.STRING:
+            heap.add(variable_name, value_tokens[0].Value)
         else:
-            i += 1
-    heap.add(variable_name, prompt)
+            heap.add(variable_name, None)   # dynamic — resolved at exec time
+    else:
+        heap.add(variable_name, None)
+
     return line
 
 
@@ -117,8 +148,22 @@ def process_2(line: parser.Chunk, heap: heap.Heap) -> parser.Chunk:
     while i < len(line):
         if line[i].Type == tokenref.Types.PROMPTDREF:
             if i + 1 < len(line):
-                response = heap.release(line[i + 1].Value)
-                new_line.append(tokenref.Token(f'\"\"\"{response.Clean}\"\"\"', line[i].Pos, type=tokenref.Types.TRIPLEQ))
+                var_name = line[i + 1].Value
+                if var_name in heap.prompts and heap.prompts[var_name] is None:
+                    # Dynamic prompt: emit a runtime call; LLM is invoked at exec time
+                    new_line.append(tokenref.Token(
+                        f"__jade_heap.ask(__p__{var_name})",
+                        line[i].Pos,
+                        type=tokenref.Types.FALLBACK,
+                    ))
+                else:
+                    # Static prompt: call LLM now and inline the response
+                    response = heap.release(var_name)
+                    new_line.append(tokenref.Token(
+                        f'\"\"\"{response.Clean}\"\"\"',
+                        line[i].Pos,
+                        type=tokenref.Types.TRIPLEQ,
+                    ))
                 i += 2
             else:
                 raise IndexError(f"PROMPTDREF at position {i} has no following identifier")
@@ -238,7 +283,9 @@ def machine(jade_code_string: str, heap: heap.Heap) -> None:
         print(f"Error tokenizing Jade code: {e}")
         return
 
-    namespace = {"__builtins__": __builtins__}
+    # __jade_heap is injected so that dynamic prompt dereferences (?p where
+    # prompt p = expr) can call heap.ask() at runtime.
+    namespace = {"__builtins__": __builtins__, "__jade_heap": heap}
     pending_py = ""
     all_py = ""
 
