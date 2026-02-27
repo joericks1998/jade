@@ -8,8 +8,6 @@ This module contains the core logic for processing Jade source code, including:
 - Main compilation pipeline that converts Jade to executable Python
 """
 
-import codeop
-
 from .. import config
 from ..constants import constants
 from . import heap, parser, tokenref
@@ -193,12 +191,36 @@ def _resolve_tokens(line: parser.Chunk, heap: heap.Heap) -> str:
     return "".join(line.AllValues)
 
 
+_CONTINUATION_KEYWORDS = (
+    'elif ', 'elif:', 'else:', 'else ', 'except:', 'except ',
+    'finally:', 'finally ',
+)
+
+_INCOMPLETE_MSGS = (
+    'expected an indented block',  # Python 3.10+ compound header without body
+    'unexpected eof',              # Python 3.9 fallback
+    'eof while',                   # Python 3.9 fallback
+    'was never closed',            # unclosed bracket/paren/string
+)
+
+
+def _is_incomplete(e: SyntaxError) -> bool:
+    """Return True if a SyntaxError represents incomplete (not yet wrong) input."""
+    msg = (e.msg if hasattr(e, 'msg') else str(e)).lower()
+    return any(pat in msg for pat in _INCOMPLETE_MSGS)
+
+
 def machine(jade_code_string: str, heap: heap.Heap) -> None:
     """
     Main compilation pipeline that converts Jade source code to executable Python.
 
     Preprocesses the source, tokenizes into chunks, translates each chunk from
-    Jade to Python, and executes using codeop for per-chunk incremental execution.
+    Jade to Python, and executes incrementally using exec-mode compilation.
+
+    Compilation is attempted only at unindented, non-blank, non-continuation
+    lines so that multi-branch compound statements (if/elif/else, try/except)
+    and function/class bodies containing blank lines accumulate fully before
+    being executed.
 
     Args:
         jade_code_string: Raw Jade source code as a string
@@ -229,18 +251,27 @@ def machine(jade_code_string: str, heap: heap.Heap) -> None:
         pending_py += py_line
         all_py += py_line
 
-        # Only attempt compilation at the top level (unindented lines).
-        # Indented lines are part of a block body — accumulate until we
-        # return to column 0, then let codeop decide if the block is done.
-        if not py_line.startswith((' ', '\t')):
+        stripped = py_line.strip()
+        is_indented = py_line.startswith((' ', '\t'))
+        is_blank = not stripped
+        is_continuation = stripped.startswith(_CONTINUATION_KEYWORDS)
+
+        # Only attempt compilation at top-level, non-blank, non-continuation lines.
+        # - Indented lines belong to a block body still being built.
+        # - Blank lines may appear inside compound statements (if/elif branches,
+        #   function bodies) — deferring avoids splitting them prematurely.
+        # - Continuation keywords (elif/else/except/finally) extend the current
+        #   compound statement and must not trigger early execution.
+        if not is_indented and not is_blank and not is_continuation:
             try:
-                code = codeop.compile_command(pending_py)
-                if code is not None:
-                    exec(code, namespace)
-                    pending_py = ""
-            except SyntaxError as e:
-                print(f"SyntaxError at line {chunk.Pos}: {e}")
+                code = compile(pending_py, "<jade>", "exec")
+                exec(code, namespace)
                 pending_py = ""
+            except SyntaxError as e:
+                if not _is_incomplete(e):
+                    print(f"SyntaxError at line {chunk.Pos}: {e}")
+                    pending_py = ""
+                # else: incomplete compound statement — keep accumulating
 
     if pending_py.strip():
         try:
