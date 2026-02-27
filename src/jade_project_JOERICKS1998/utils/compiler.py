@@ -1,5 +1,6 @@
 from jade_project_JOERICKS1998.llm.deepseek import DeepSeekClient
 
+from .. import config
 from . import heap, processer
 
 
@@ -27,37 +28,16 @@ def compile(source_file: str) -> None:
         Files without the .jde extension are rejected with an error message.
     """
     # isort: on
-    print(f"Starting compilation of: {source_file}")
-
-    # Initialize Deepseek client
-    print("  Initializing DeepSeek client...")
+    if config.verbose:
+        print(f"Starting compilation of: {source_file}")
     client = DeepSeekClient()
-    # Define heap
-    print("  Creating heap...")
     prompt_heap = heap.Heap(client)
-
-    # Initialize Jade Buffer
-    print("  Initializing Jade Buffer...")
-    buffer = processer.Buffer()
-
-    # Check if the file has the correct Jade extension
     try:
-        # Open and read the source file
         with open(source_file, "rb") as file:
-            code_bytes = file.read()
-            code_string = code_bytes.decode("utf-8")
-        processer.machine(code_string, buffer, prompt_heap)
-        # Execute the Jade/Python code directly
-        # Note: This uses Python's exec() function which executes
-        # the code in the current context
-        print("Generated Python code:")
-        print(buffer.out_py)
-        print("Code Run Output: ")
-        buffer.flush()
-
+            code_string = file.read().decode("utf-8")
+        processer.machine(code_string, prompt_heap)
     except Exception as e:
-        # Handle any exceptions that occur during code execution
-        print(f"Compiler execution failed with exception: {e}")
-
-    print(f"✅ Compilation completed for: {source_file}")
+        print(f"Compiler execution failed: {e}")
+    if config.verbose:
+        print(f"Compilation completed: {source_file}")
     return
