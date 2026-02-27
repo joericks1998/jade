@@ -8,6 +8,8 @@ This module contains the core logic for processing Jade source code, including:
 - Main compilation pipeline that converts Jade to executable Python
 """
 
+import codeop
+
 from .. import config
 from ..constants import constants
 from . import heap, parser, tokenref
@@ -52,7 +54,7 @@ class Buffer:
 # Jade-specific token processing functions
 
 
-def is_jade_line(line: parser.Line, heap: heap.Heap) -> bool:
+def is_jade_line(line: parser.Chunk, heap: heap.Heap) -> bool:
     """Determine if a line requires Jade processing rather than standard Python pass-through."""
     return any(
         token.Type == tokenref.Types.PROMPT
@@ -62,7 +64,7 @@ def is_jade_line(line: parser.Line, heap: heap.Heap) -> bool:
     )
 
 
-def process_1(line: parser.Line, heap: heap.Heap) -> str:
+def process_1(line: parser.Chunk, heap: heap.Heap) -> str:
     """
     Process a prompt declaration and store it in the heap.
 
@@ -83,7 +85,7 @@ def process_1(line: parser.Line, heap: heap.Heap) -> str:
     while i < len(line):
         if line[i].Type == tokenref.Types.IDENTIFIER:
             variable_name = line[i].Value
-            line[i] = tokenref.Token(f"__p__{variable_name}", line[i].Pos)
+            line[i] = tokenref.Token(f"__p__{variable_name}", line[i].Pos, type=tokenref.Types.IDENTIFIER)
             i += 1
         elif line[i].Type == tokenref.Types.STRING:
             prompt = line[i].Value
@@ -97,7 +99,7 @@ def process_1(line: parser.Line, heap: heap.Heap) -> str:
     return line
 
 
-def process_2(line: tokenref.Line, heap: heap.Heap) -> tokenref.Line:
+def process_2(line: parser.Chunk, heap: heap.Heap) -> parser.Chunk:
     """
     Process prompt dereferences by releasing from the heap and replacing tokens.
 
@@ -110,13 +112,13 @@ def process_2(line: tokenref.Line, heap: heap.Heap) -> tokenref.Line:
     Returns:
         Modified token list with dereferences resolved
     """
-    new_line = parser.Line("", line.Pos)
+    new_line = parser.Chunk("", line.Pos)
     i = 0
     while i < len(line):
         if line[i].Type == tokenref.Types.PROMPTDREF:
             if i + 1 < len(line):
                 response = heap.release(line[i + 1].Value)
-                new_line.append(tokenref.Token(f'\"\"\"{response.Clean}\"\"\"', line[i].Pos))
+                new_line.append(tokenref.Token(f'\"\"\"{response.Clean}\"\"\"', line[i].Pos, type=tokenref.Types.TRIPLEQ))
                 i += 2
             else:
                 raise IndexError(f"PROMPTDREF at position {i} has no following identifier")
@@ -126,7 +128,7 @@ def process_2(line: tokenref.Line, heap: heap.Heap) -> tokenref.Line:
     return new_line
 
 
-def process_3(line: parser.Line, heap: heap.Heap) -> parser.Line:
+def process_3(line: parser.Chunk, heap: heap.Heap) -> parser.Chunk:
     """
     Rewrite bare prompt identifiers to their __p__ prefixed variable names.
 
@@ -141,16 +143,16 @@ def process_3(line: parser.Line, heap: heap.Heap) -> parser.Line:
     Returns:
         Modified token list with identifiers rewritten
     """
-    new_line = parser.Line("", pos=line.Pos)
+    new_line = parser.Chunk("", pos=line.Pos)
     for token in line:
         if token.Type == tokenref.Types.IDENTIFIER and token.Value in heap.prompts:
-            new_line.append(tokenref.Token(f"__p__{token.Value}", token.Pos))
+            new_line.append(tokenref.Token(f"__p__{token.Value}", token.Pos, type=tokenref.Types.IDENTIFIER))
         else:
             new_line.append(token)
     return new_line
 
 
-def line_interpreter(line_of_tokens: parser.Line, heap: heap.Heap) -> str:
+def line_interpreter(line_of_tokens: parser.Chunk, heap: heap.Heap) -> str:
     """
     Recursively interpret a line containing Jade-specific syntax.
 
@@ -170,7 +172,7 @@ def line_interpreter(line_of_tokens: parser.Line, heap: heap.Heap) -> str:
     return _resolve_tokens(line_of_tokens, heap)
 
 
-def _resolve_tokens(line: parser.Line, heap: heap.Heap) -> str:
+def _resolve_tokens(line: parser.Chunk, heap: heap.Heap) -> str:
     """Recursive resolution of Jade tokens by priority order."""
     if config.verbose:
         print(f"{line.Pos}: {any(t.Type == tokenref.Types.IDENTIFIER and t.Value in heap.prompts for t in line.Tokens)}: {line.AllValues}")
@@ -191,46 +193,61 @@ def _resolve_tokens(line: parser.Line, heap: heap.Heap) -> str:
     return "".join(line.AllValues)
 
 
-def machine(jade_code_string: str, python_buffer: Buffer, heap: heap.Heap) -> None:
+def machine(jade_code_string: str, heap: heap.Heap) -> None:
     """
     Main compilation pipeline that converts Jade source code to executable Python.
 
-    This function orchestrates the entire compilation process:
-    1. Preprocesses the source by encoding special characters
-    2. Tokenizes the entire code into a block of lines
-    3. Processes each line, translating Jade syntax to Python
-    4. Writes the translated code to the output buffer
-
-    The function handles both pure Python lines (passed through) and Jade-specific
-    lines (processed through the interpreter).
+    Preprocesses the source, tokenizes into chunks, translates each chunk from
+    Jade to Python, and executes using codeop for per-chunk incremental execution.
 
     Args:
         jade_code_string: Raw Jade source code as a string
-        python_buffer: Buffer to accumulate translated Python code
         heap: Heap for managing LLM prompts and responses
-
-    Returns:
-        None (results are written to python_buffer)
     """
-    # Step 1: Tokenize all of the code in the file
+    preprocessed = jade_code_string
+    for k, v in constants.SPACE_ENCODINGS.items():
+        preprocessed = preprocessed.replace(k, v)
+
     try:
-        # preprocess code string
-        preprocessed_space_code_str = jade_code_string
-        for k, v in constants.SPACE_ENCODINGS.items():
-            preprocessed_space_code_str = preprocessed_space_code_str.replace(k, v)
-        token_block = parser.Block(preprocessed_space_code_str)
+        token_block = parser.Block(preprocessed)
     except Exception as e:
         print(f"Error tokenizing Jade code: {e}")
         return
-    # Step 2: Go line by line and based on tokens and types, translate and add these tokens to the buffer
-    try:
-        for line in token_block:
-            jade_output = line_interpreter(line, heap)
-            # Postprocess jade output to decode space encodings
-            jade_output = parser.decode_encodings(jade_output, constants.SPACE_ENCODINGS)
-            python_buffer.write(jade_output)
-    except Exception as e:
-        print(f"Error processing Jade code: {e}")
-        return
-    # If a prompt arises, handle via the heap first then write the output to the buffer
-    return
+
+    namespace = {"__builtins__": __builtins__}
+    pending_py = ""
+    all_py = ""
+
+    for chunk in token_block:
+        try:
+            jade_output = line_interpreter(chunk, heap)
+            py_line = parser.decode_encodings(jade_output, constants.SPACE_ENCODINGS)
+        except Exception as e:
+            print(f"Error processing line {chunk.Pos}: {e}")
+            continue
+
+        pending_py += py_line
+        all_py += py_line
+
+        # Only attempt compilation at the top level (unindented lines).
+        # Indented lines are part of a block body — accumulate until we
+        # return to column 0, then let codeop decide if the block is done.
+        if not py_line.startswith((' ', '\t')):
+            try:
+                code = codeop.compile_command(pending_py)
+                if code is not None:
+                    exec(code, namespace)
+                    pending_py = ""
+            except SyntaxError as e:
+                print(f"SyntaxError at line {chunk.Pos}: {e}")
+                pending_py = ""
+
+    if pending_py.strip():
+        try:
+            exec(compile(pending_py, "<jade>", "exec"), namespace)
+        except Exception as e:
+            print(f"Error executing remaining code: {e}")
+
+    if config.show_python:
+        print("Generated Python code:")
+        print(all_py)

@@ -30,40 +30,14 @@ def compile(source_file: str) -> None:
     # isort: on
     if config.verbose:
         print(f"Starting compilation of: {source_file}")
-
-    # Initialize Deepseek client
-    if config.verbose:
-        print("  Initializing DeepSeek client...")
     client = DeepSeekClient()
-    # Define heap
-    if config.verbose:
-        print("  Creating heap...")
     prompt_heap = heap.Heap(client)
-
-    # Initialize Jade Buffer
-    if config.verbose:
-        print("  Initializing Jade Buffer...")
-    buffer = processer.Buffer()
-
-    # Check if the file has the correct Jade extension
     try:
-        # Open and read the source file
         with open(source_file, "rb") as file:
-            code_bytes = file.read()
-            code_string = code_bytes.decode("utf-8")
-        processer.machine(code_string, buffer, prompt_heap)
-        # Execute the Jade/Python code directly
-        # Note: This uses Python's exec() function which executes
-        # the code in the current context
-        if config.show_python:
-            print("Generated Python code:")
-            print(buffer.out_py)
-        buffer.flush()
-
+            code_string = file.read().decode("utf-8")
+        processer.machine(code_string, prompt_heap)
     except Exception as e:
-        # Handle any exceptions that occur during code execution
-        print(f"Compiler execution failed with exception: {e}")
-
+        print(f"Compiler execution failed: {e}")
     if config.verbose:
-        print(f"✅ Compilation completed for: {source_file}")
+        print(f"Compilation completed: {source_file}")
     return
