@@ -58,7 +58,7 @@ class Heap:
         """
         try:
             response = self.client.send_message(prompt_text)
-            return parser.LLMOutput(response).Clean
+            return parser.LLMOutput(response).Text
         except Exception as e:
             print(f"Heap Error: {e}")
             raise

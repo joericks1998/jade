@@ -369,3 +369,28 @@ class LLMOutput:
         cleaned_string = re.sub(r'[^a-zA-Z0-9\s\.\,\!\?\'\"\-\_\(\)\[\]\{\}\<\>\/\\\|\@\#\$\%\^\&\*\+\=\~\`\;\:]', '', cleaned_string)
 
         return cleaned_string.strip()
+
+    @property
+    def Text(self) -> str:
+        """
+        Lightly clean LLM output for use as a runtime string value.
+
+        Unlike Clean, this does NOT escape backslashes or restrict characters
+        to ASCII keyboard symbols — those transforms are only safe when the
+        response is being inlined into a Python string literal.  This property
+        is intended for dynamic prompts where the response is a plain Python
+        str at runtime.
+
+        Steps:
+        1. Remove control characters (including carriage return) except \\n and \\t
+        2. Remove invisible Unicode characters (zero-width spaces, etc.)
+
+        Returns:
+            Sanitized string suitable for direct use as a Python value
+        """
+        cleaned = self.original_string
+        # Remove control characters including \r (0x0D) — keeps \n (0x0A) and \t (0x09)
+        cleaned = re.sub(r'[\x00-\x08\x0B\x0C\x0D\x0E-\x1F\x7F]', '', cleaned)
+        # Remove invisible Unicode characters
+        cleaned = re.sub(r'[\u200B-\u200F\uFEFF\u00A0]', '', cleaned)
+        return cleaned.strip()
