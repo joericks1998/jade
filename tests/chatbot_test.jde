@@ -1,0 +1,72 @@
+# ===================================
+# Jade Chatbot - "JadeBot"
+# Interactive AI chat demo
+# ===================================
+
+print("=" * 50)
+print("  JADEBOT - Your AI Chat Companion")
+print("  Powered by the Jade Language")
+print("=" * 50)
+
+# Bot introduces itself
+prompt intro = "You are JadeBot, a witty AI assistant built in a language called Jade. Introduce yourself in 2 sentences."
+welcome = ?intro
+print(f"\nJadeBot: {welcome}")
+
+# Let the user pick a conversation topic
+print()
+print("What would you like to chat about?")
+print("  1. Programming")
+print("  2. Science")
+print("  3. Philosophy")
+choice = input("\nYou (pick 1-3): ")
+
+if choice == "1":
+    prompt topic = "Explain why recursion is like a mirror facing another mirror, in 2 creative sentences"
+    response = ?topic
+    print(f"\nJadeBot: {response}")
+
+    prompt followup = "Now give one practical tip for debugging recursive functions, in one sentence"
+    tip = ?followup
+    print(f"JadeBot: Also - {tip}")
+
+elif choice == "2":
+    prompt topic = "Explain quantum entanglement like you are talking to a curious 10 year old, in 3 sentences"
+    response = ?topic
+    print(f"\nJadeBot: {response}")
+
+    prompt followup = "Now share one more wild physics fact that would blow a kids mind, in one sentence"
+    tip = ?followup
+    print(f"JadeBot: Oh and - {tip}")
+
+else:
+    prompt topic = "Pose a thought-provoking philosophical question about whether AI can be truly creative, in 2 sentences"
+    response = ?topic
+    print(f"\nJadeBot: {response}")
+
+    prompt followup = "Now share your own playful opinion on that question in one sentence"
+    tip = ?followup
+    print(f"JadeBot: Personally - {tip}")
+
+# Quick round: roast the user (friendly)
+print("\n" + "-" * 40)
+roast_choice = input("Want JadeBot to roast your coding skills? (yes/no): ")
+if roast_choice.lower() == "yes":
+    prompt roast = "Give a short, friendly, funny roast about a programmer who uses too many print statements for debugging, 2 sentences max"
+    burn = ?roast
+    print(f"\nJadeBot: {burn}")
+else:
+    prompt compliment = "Give a short, genuine compliment to a programmer who is exploring new languages, 1 sentence"
+    nice = ?compliment
+    print(f"\nJadeBot: {nice}")
+
+# Sign off
+print("\n" + "-" * 40)
+prompt signoff = "Say a memorable and witty goodbye as JadeBot, one sentence only"
+goodbye = ?signoff
+print(f"\nJadeBot: {goodbye}")
+
+print("\n" + "=" * 50)
+print("  Thanks for chatting with JadeBot!")
+print("  Built with Jade - where prompts are first-class")
+print("=" * 50)
