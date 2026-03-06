@@ -10,3 +10,5 @@ __pycache__/
 # ignore test jade files (but keep files in tests/)
 *.jde
 !tests/*.jde
+
+*/.DS_Store
