@@ -60,10 +60,13 @@ class Heap:
         return self.client.active_model
 
     def clear(self) -> None:
-        """Clear conversation history, keeping the system message if present."""
+        """Clear conversation history and reset token counters."""
         conv = self.client.active_conversation
         if conv is not None:
             conv.clear_history()
+        self.client.total_tokens = 0
+        self.client.total_prompt_tokens = 0
+        self.client.total_completion_tokens = 0
 
     def add(self, var_name: str, prompt: str) -> None:
         """
@@ -89,8 +92,11 @@ class Heap:
             Cleaned LLM response as a plain string
         """
         try:
-            response = self.client.send_message(prompt_text)
-            return parser.LLMOutput(response).Text
+            accumulated = ""
+            for chunk in self.client.stream_message(prompt_text):
+                print(chunk, end="", flush=True)
+                accumulated += chunk
+            return parser.LLMOutput(accumulated).Text
         except Exception as e:
             print(f"\n  [Jade] Request failed: {e}")
             return "[Request failed — please try again]"
