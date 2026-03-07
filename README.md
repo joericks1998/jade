@@ -8,9 +8,10 @@ A modern programming language that brings first-class LLM integration into your 
 
 - **First-class LLM prompts** — declare prompts as variables, invoke them with `?`
 - **Static and dynamic prompts** — resolve at compile time or runtime
+- **Typed output constraints** — `?p -> int` coerces LLM output to any type via its constructor
 - **Streaming output** — `print(?p)` streams tokens progressively
 - **Conversation memory** — stateful chat history across your entire program
-- **Built-in session builtins** — inspect tokens, messages, model, and clear history
+- **Built-in session builtins** — inspect tokens, messages, model, retry log, and more
 - **Python-compatible syntax** — full support for Python control flow, functions, imports, and more
 - **DeepSeek integration** — powered by `deepseek-chat` and `deepseek-reasoner`
 
@@ -123,6 +124,36 @@ while True:
     print(?p)
 ```
 
+### Typed output constraints (`-> Type`)
+
+Use `-> Type` on any dereference to constrain the LLM's output to a specific type. Jade injects a schema instruction into the prompt automatically, then coerces the response via the type's constructor: `Type(response)`.
+
+Works with primitives:
+
+```python
+prompt p = "How many legs does a spider have?"
+legs = ?p -> int
+print(legs + 1)   # 9
+```
+
+Works with any class that takes a single constructor argument:
+
+```python
+class Celsius:
+    def __init__(self, value):
+        self.value = float(value)
+    def __repr__(self):
+        return f"Celsius({self.value})"
+
+prompt p = "What is the boiling point of water in Celsius? Give only the number."
+temp = ?p -> Celsius
+print(temp.value)   # 100.0
+```
+
+If the response cannot be coerced, Jade retries the LLM with a correction message (up to `__max_retries__` times, default `3`). If all attempts fail, a `PromptOverflowError` is raised.
+
+Note: `print(?p -> Type)` is a compile-time error — typed dereferences cannot be streamed. Assign to a variable instead.
+
 ### Built-in session variables
 
 Jade provides special built-in names for inspecting the current LLM session:
@@ -135,6 +166,8 @@ Jade provides special built-in names for inspecting the current LLM session:
 | `__messages__` | `list` | Full conversation message history |
 | `__model__` | `str` | Active model name |
 | `__clear__()` | function | Clears conversation history and resets token counters |
+| `__max_retries__` | `int` | Max retry attempts for typed dereferences (default `3`) |
+| `__retry_log__` | `list` | Log of typed dereferences that required at least one retry |
 
 Example:
 
@@ -147,6 +180,22 @@ print(f"Tokens used: {__tokens__}")
 print(f"Messages in history: {len(__messages__)}")
 
 __clear__()   # reset for a fresh conversation
+```
+
+#### `__retry_log__`
+
+Each entry in `__retry_log__` represents a typed dereference that failed at least once. Clean first-try successes are not logged — their absence is the signal.
+
+```python
+prompt p = "How many continents are there?"
+count = ?p -> int
+
+for entry in __retry_log__:
+    print(entry["prompt"])    # original prompt text
+    print(entry["type"])      # type name as string
+    print(entry["attempts"])  # total attempts made
+    print(entry["success"])   # True if eventually coerced, False if exhausted
+    print(entry["failed"])    # list of raw responses that failed coercion
 ```
 
 ## CLI Reference
