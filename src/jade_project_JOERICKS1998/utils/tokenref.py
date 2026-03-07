@@ -159,6 +159,8 @@ BUILTIN_MAP: dict[str, str] = {
     "__messages__":          "__jade_heap.messages",
     "__model__":             "__jade_heap.model",
     "__clear__":             "__jade_heap.clear",
+    "__retry_log__":         "__jade_heap.retry_log",
+    "__max_retries__":       "__jade_heap.max_retries",
 }
 
 KEYWORD_TYPES: dict[str, "Types"] = {

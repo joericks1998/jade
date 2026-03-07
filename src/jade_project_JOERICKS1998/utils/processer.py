@@ -150,7 +150,34 @@ def process_2(line: parser.Chunk, heap: heap.Heap) -> parser.Chunk:
         if line[i].Type == tokenref.Types.PROMPTDREF:
             if i + 1 < len(line):
                 var_name = line[i + 1].Value
-                if var_name in heap.prompts and heap.prompts[var_name] is None:
+
+                # Look ahead past the identifier for an optional -> Type annotation.
+                # Token pattern: (SPACE*) FALLBACK('-') FALLBACK('>') (SPACE*) IDENTIFIER
+                j = i + 2
+                while j < len(line) and line[j].Type == tokenref.Types.SPACE:
+                    j += 1
+
+                output_type_name = None
+                consumed = i + 2  # default: consume only ?name
+
+                if (j + 1 < len(line)
+                        and line[j].Type == tokenref.Types.FALLBACK and line[j].Value == '-'
+                        and line[j + 1].Type == tokenref.Types.FALLBACK and line[j + 1].Value == '>'):
+                    k = j + 2
+                    while k < len(line) and line[k].Type == tokenref.Types.SPACE:
+                        k += 1
+                    if k < len(line) and line[k].Type == tokenref.Types.IDENTIFIER:
+                        output_type_name = line[k].Value
+                        consumed = k + 1
+
+                if output_type_name:
+                    # Typed dereference — always runtime regardless of static/dynamic
+                    new_line.append(tokenref.Token(
+                        f"__jade_heap.ask_typed(__p__{var_name}, {output_type_name})",
+                        line[i].Pos,
+                        type=tokenref.Types.FALLBACK,
+                    ))
+                elif var_name in heap.prompts and heap.prompts[var_name] is None:
                     # Dynamic prompt: emit a runtime call; LLM is invoked at exec time
                     new_line.append(tokenref.Token(
                         f"__jade_heap.ask(__p__{var_name})",
@@ -165,7 +192,7 @@ def process_2(line: parser.Chunk, heap: heap.Heap) -> parser.Chunk:
                         line[i].Pos,
                         type=tokenref.Types.TRIPLEQ,
                     ))
-                i += 2
+                i = consumed
             else:
                 raise IndexError(f"PROMPTDREF at position {i} has no following identifier")
         else:
@@ -323,6 +350,11 @@ def machine(jade_code_string: str, heap: heap.Heap) -> None:
                     '{' + btranslation,
                     jade_output,
                 )
+            # Typed dereferences cannot be streamed — catch print(?p -> Type) as a compile error.
+            if re.search(r'print\(__jade_heap\.ask_typed\(', jade_output):
+                print(f"CompileError at line {chunk.Pos}: typed dereferences cannot be streamed. Assign to a variable instead.")
+                continue
+
             # Transform print(?p) → __jade_heap.stream(...) for streaming display.
             # When the programmer writes print(?p), ?p has already been resolved
             # to __jade_heap.ask(...).  We detect the wrapping print() and replace
