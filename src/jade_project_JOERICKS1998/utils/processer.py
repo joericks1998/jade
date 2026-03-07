@@ -306,15 +306,21 @@ def machine(jade_code_string: str, heap: heap.Heap) -> None:
     for chunk in token_block:
         try:
             jade_output = line_interpreter(chunk, heap)
-            # Replace bare prompt names at the start of f-string expression
-            # slots: {pname...} -> {__p__pname...}.  The tokenizer treats
-            # the whole f"..." as one opaque token, so _resolve_tokens never
-            # sees the identifier inside {}.  We fix it here on the raw
-            # encoded output before decoding.
+            # Replace bare prompt names and builtin dunder names inside
+            # f-string expression slots: {name...} -> {translation...}.
+            # The tokenizer treats the whole f"..." as one opaque token, so
+            # _resolve_tokens never sees identifiers inside {}.  We fix them
+            # here on the raw encoded output before decoding.
             for pname in heap.prompts:
                 jade_output = re.sub(
                     r'\{' + re.escape(pname) + r'(?=[^a-zA-Z0-9_])',
                     '{__p__' + pname,
+                    jade_output,
+                )
+            for bname, btranslation in tokenref.BUILTIN_MAP.items():
+                jade_output = re.sub(
+                    r'\{' + re.escape(bname) + r'(?=[^a-zA-Z0-9_])',
+                    '{' + btranslation,
                     jade_output,
                 )
             py_line = parser.decode_encodings(jade_output, constants.SPACE_ENCODINGS)

@@ -92,8 +92,8 @@ class Heap:
             response = self.client.send_message(prompt_text)
             return parser.LLMOutput(response).Text
         except Exception as e:
-            print(f"Heap Error: {e}")
-            raise
+            print(f"\n  [Jade] Request failed: {e}")
+            return "[Request failed — please try again]"
 
     def release(self, var_name: str) -> parser.LLMOutput:
         """
