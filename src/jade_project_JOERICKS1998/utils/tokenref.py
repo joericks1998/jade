@@ -139,6 +139,7 @@ class Types(Enum):
     # Jade Tokens
     PROMPT = auto()
     PROMPTDREF = auto()
+    BUILTIN = auto()
 
     # Null type (for no matches)
     NULL = auto()
@@ -150,6 +151,15 @@ class Types(Enum):
     # Empty token
     EMPTY = auto()
 
+
+BUILTIN_MAP: dict[str, str] = {
+    "__tokens__":            "__jade_heap.tokens",
+    "__prompt_tokens__":     "__jade_heap.prompt_tokens",
+    "__completion_tokens__": "__jade_heap.completion_tokens",
+    "__messages__":          "__jade_heap.messages",
+    "__model__":             "__jade_heap.model",
+    "__clear__":             "__jade_heap.clear",
+}
 
 KEYWORD_TYPES: dict[str, "Types"] = {
     "prompt": Types.PROMPT,

@@ -1,6 +1,5 @@
 import re
 
-from ..constants import constants
 from . import tokenref
 
 """
@@ -155,14 +154,17 @@ def _tokenize(encoded: str) -> list[tokenref.Token]:
             tokens.append(tokenref.Token(ch, i, tokenref.Types.PROMPTDREF))
             i += 1
 
-        # Identifiers and keywords
+        # Identifiers, keywords, and builtins
         elif ch.isalpha() or ch == '_':
             j = i + 1
             while j < n and (encoded[j].isalnum() or encoded[j] == '_'):
                 j += 1
             word = encoded[i:j]
-            tok_type = tokenref.KEYWORD_TYPES.get(word, tokenref.Types.IDENTIFIER)
-            tokens.append(tokenref.Token(word, i, tok_type))
+            if word in tokenref.BUILTIN_MAP:
+                tokens.append(tokenref.Token(word, i, tokenref.Types.BUILTIN))
+            else:
+                tok_type = tokenref.KEYWORD_TYPES.get(word, tokenref.Types.IDENTIFIER)
+                tokens.append(tokenref.Token(word, i, tok_type))
             i = j
 
         # Fallback: single character
