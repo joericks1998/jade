@@ -1,6 +1,6 @@
 # Jade Programming Language
 
-![Jade Logo](extras/jade-logo.png){ width=200 }
+<img src="extras/jade-logo.png" alt="Jade Logo" width="200">
 
 A modern programming language that brings first-class LLM integration into your code. Jade lets you declare prompts as variables, dereference them with `?` to invoke an LLM, and mix the results seamlessly with standard Python-compatible logic — all in `.jde` files.
 
