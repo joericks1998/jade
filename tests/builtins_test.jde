@@ -1,0 +1,32 @@
+# ===================================
+# Jade Builtins Test
+# ===================================
+print("=== Jade Builtins Test ===")
+print()
+
+# Static prompt
+prompt greeting = "Say hello in exactly 5 words"
+print("Response:", ?greeting)
+print()
+
+# Token counters
+print("Total tokens used:", __tokens__)
+print("Prompt tokens:    ", __prompt_tokens__)
+print("Completion tokens:", __completion_tokens__)
+print()
+
+# Model info
+print("Current model:", __model__)
+print()
+
+# Message history length
+print("Messages in history:", len(__messages__))
+print()
+
+# Clear conversation and verify
+__clear__()
+print("After __clear__():")
+print("Messages in history:", len(__messages__))
+print()
+
+print("=== Builtins test complete ===")
