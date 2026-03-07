@@ -323,6 +323,15 @@ def machine(jade_code_string: str, heap: heap.Heap) -> None:
                     '{' + btranslation,
                     jade_output,
                 )
+            # Transform print(?p) → __jade_heap.stream(...) for streaming display.
+            # When the programmer writes print(?p), ?p has already been resolved
+            # to __jade_heap.ask(...).  We detect the wrapping print() and replace
+            # the whole call with stream() so tokens are printed progressively.
+            jade_output = re.sub(
+                r'print\(__jade_heap\.ask\(([^)]+)\)\)',
+                r'__jade_heap.stream(\1)',
+                jade_output,
+            )
             py_line = parser.decode_encodings(jade_output, constants.SPACE_ENCODINGS)
         except Exception as e:
             print(f"Error processing line {chunk.Pos}: {e}")
