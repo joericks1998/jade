@@ -1,0 +1,112 @@
+# ===================================
+# Jade Language - Comprehensive Tests
+# ===================================
+
+print("=" * 50)
+print("JADE LANGUAGE TEST SUITE")
+print("=" * 50)
+
+# Test 1: Basic I/O
+print("\n[Test 1] Basic Input/Output")
+print("-" * 40)
+user_name = input("Enter your name: ")
+print(f"Welcome to Jade, {user_name}!")
+
+# Test 2: Simple LLM Prompts
+print("\n[Test 2] Simple LLM Prompts")
+print("-" * 40)
+prompt greeting = "Say hello in 3 languages"
+greeting_response = ?greeting
+print(f"Answer: {greeting_response}")
+
+# Test 3: Multiple Sequential Prompts
+print("\n[Test 3] Multiple Prompts in Sequence")
+print("-" * 40)
+prompt python_q = "Explain Python in one sentence"
+prompt js_q = "Explain JavaScript in one sentence"
+prompt rust_q = "Explain Rust in one sentence"
+python_ans = ?python_q
+js_ans = ?js_q
+rust_ans = ?rust_q
+print(f"Python: {python_ans}")
+print(f"JavaScript: {js_ans}")
+print(f"Rust: {rust_ans}")
+
+# Test 4: Conditional Logic with LLM
+print("\n[Test 4] Conditional Logic with Prompts")
+print("-" * 40)
+difficulty = input("Choose difficulty (easy/hard): ")
+if difficulty.lower() == "easy":
+    prompt easy_q = "Give me an easy programming question"
+    question = ?easy_q
+    print(f"Question: {question}")
+else:
+    prompt hard_q = "Give me a hard programming question"
+    question = ?hard_q
+    print(f"Question: {question}")
+
+# Test 5: String Operations on LLM Output
+print("\n[Test 5] String Operations")
+print("-" * 40)
+prompt joke = "Tell me a short programming joke"
+joke_text = ?joke
+print(f"Original: {joke_text}")
+print(f"Length: {len(joke_text)} characters")
+print(f"First 50 chars: {joke_text[:50]}")
+
+# Test 6: List Operations
+print("\n[Test 6] Working with LLM Responses")
+print("-" * 40)
+prompt color_list = "List 3 colors separated by commas"
+colors_response = ?color_list
+print(f"LLM Response: {colors_response}")
+colors = colors_response.split(',')
+print(f"Split into list: {colors}")
+
+# Test 7: Dictionary with LLM Data
+print("\n[Test 7] Dictionary with LLM Data")
+print("-" * 40)
+prompt capital = "What is the capital of France?"
+capital_answer = ?capital
+france_info = {
+    "country": "France",
+    "capital": capital_answer,
+    "continent": "Europe"
+}
+print(f"Country Info: {france_info}")
+
+# Test 8: Multiple Prompts with Different Topics
+print("\n[Test 8] Knowledge Questions")
+print("-" * 40)
+prompt math_q = "What is the Pythagorean theorem?"
+prompt history_q = "Who was the first president of the USA?"
+prompt science_q = "What is photosynthesis?"
+math_ans = ?math_q
+history_ans = ?history_q
+science_ans = ?science_q
+print(f"Math: {math_ans}")
+print(f"History: {history_ans}")
+print(f"Science: {science_ans}")
+
+# Test 9: Error Handling
+print("\n[Test 9] Error Handling")
+print("-" * 40)
+try:
+    prompt safe = "Say 'Hello World'"
+    response = ?safe
+    print(f"Success: {response}")
+except Exception as e:
+    print(f"Error occurred: {e}")
+
+# Test 10: Practical Example - Quiz Generator
+print("\n[Test 10] Practical Example - Simple Quiz")
+print("-" * 40)
+prompt quiz_q = "Create a simple true/false programming question"
+question_text = ?quiz_q
+print(f"Quiz Question: {question_text}")
+user_answer = input("Your answer (true/false): ")
+print(f"You answered: {user_answer}")
+
+print("\n" + "=" * 50)
+print("ALL TESTS COMPLETED!")
+print("=" * 50)
