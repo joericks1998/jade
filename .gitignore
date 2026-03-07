@@ -1,6 +1,9 @@
 # ignore virtual environment setup
 venv/
 
+# ignore claude planning
+planning/
+
 # ignore Python cache
 __pycache__/
 
