@@ -1,0 +1,51 @@
+# ===================================
+# Jade Reasoning Workflow
+# Demonstrates chained LLM calls with
+# f-string prompt engineering in Jade.
+#
+# Two-step pipeline:
+#   1. Reasoning pass  — LLM thinks out loud
+#   2. Synthesis pass  — LLM answers from its own reasoning
+#
+# The reasoning output flows into the synthesis
+# prompt via a plain Python variable in an f-string,
+# showing how Jade blends LLM calls with normal code.
+# ===================================
+
+print("=" * 60)
+print("  JADE REASONING WORKFLOW")
+print("  Step 1: Reason   Step 2: Synthesize")
+print("=" * 60)
+print()
+
+# Get the problem from the user
+prompt question = input("What would you like me to reason about? ")
+print()
+
+# ── Step 1: Reasoning pass ──────────────────────────────────
+# LLM is instructed to think step by step WITHOUT giving
+# a final answer — its output becomes the context for step 2.
+print("--- Step 1: Reasoning ---")
+print()
+
+prompt reasoning_prompt = f"You are an expert analyst. Reason step by step about the following:\n\n{question}\n\nExplore multiple angles, consider tradeoffs and edge cases, and think carefully. Do not give a final answer yet — just reason through it."
+
+reasoning = ?reasoning_prompt
+print(reasoning)
+print()
+
+# ── Step 2: Synthesis pass ──────────────────────────────────
+# The reasoning string is injected directly into the next
+# prompt via an f-string — plain Python variable, no Jade magic.
+# The LLM now acts on its own prior reasoning to produce
+# a concise, structured final answer.
+print("--- Step 2: Answer ---")
+print()
+
+prompt answer_prompt = f"You have carefully reasoned about the following:\n\nQuestion: {question}\n\nYour reasoning:\n{reasoning}\n\nNow synthesize a clear, concise, well-structured final answer based on that reasoning. Be direct and actionable."
+
+print(?answer_prompt)
+print()
+
+# ── Session summary ─────────────────────────────────────────
+print(f"[ model: {__model__}  |  tokens used: {__tokens__} ]")

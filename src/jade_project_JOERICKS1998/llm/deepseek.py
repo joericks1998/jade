@@ -6,9 +6,10 @@ with built-in conversation management and message history tracking.
 """
 
 import getpass
+import json
 import os
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, Generator, List, Optional
 
 import keyring
 import requests
@@ -119,6 +120,11 @@ class DeepSeekClient:
         self.base_url = "https://api.deepseek.com/v1"
         self.api_key = self._get_api_key()
         self.active_conversation: Optional[Conversation] = None
+        self.active_model: str = "deepseek-chat"
+        self.total_tokens: int = 0
+        self.total_prompt_tokens: int = 0
+        self.total_completion_tokens: int = 0
+        self._pending_usage: Dict = {}
 
     def _get_api_key(self) -> str:
         """
@@ -202,6 +208,113 @@ class DeepSeekClient:
                 except:
                     error_msg = f"API Error: {e.response.text}"
             raise requests.RequestException(error_msg) from e
+
+    def _make_streaming_request(self, endpoint: str, data: Dict) -> Generator[str, None, None]:
+        """
+        Make a streaming request to the DeepSeek API, yielding text chunks.
+
+        Parses the SSE (Server-Sent Events) response line by line. If the
+        final chunk contains usage statistics (requires stream_options.include_usage
+        in the request), they are stashed in self._pending_usage for the caller.
+
+        Yields:
+            str: Text content from each delta chunk as it arrives
+        """
+        url = f"{self.base_url}/{endpoint}"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+
+        try:
+            response = requests.post(url, headers=headers, json=data, stream=True, timeout=60)
+            response.raise_for_status()
+
+            for raw_line in response.iter_lines():
+                if not raw_line:
+                    continue
+                line = raw_line.decode("utf-8")
+                if not line.startswith("data: "):
+                    continue
+                payload = line[6:]
+                if payload == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(payload)
+                    if "usage" in chunk and chunk["usage"]:
+                        self._pending_usage = chunk["usage"]
+                    content = chunk["choices"][0]["delta"].get("content", "")
+                    if content:
+                        yield content
+                except (json.JSONDecodeError, KeyError, IndexError):
+                    continue
+
+        except requests.RequestException as e:
+            error_msg = f"API request failed: {e}"
+            if hasattr(e, "response") and e.response is not None:
+                try:
+                    error_data = e.response.json()
+                    error_msg = f"API Error: {error_data.get('error', {}).get('message', str(e))}"
+                except Exception:
+                    error_msg = f"API Error: {e.response.text}"
+            raise requests.RequestException(error_msg) from e
+
+    def stream_message(
+        self,
+        message: str,
+        conversation: Optional[Conversation] = None,
+        model: str = "deepseek-chat",
+        temperature: float = 0.7,
+        max_tokens: Optional[int] = None,
+    ) -> Generator[str, None, None]:
+        """
+        Send a message and stream the assistant's response token by token.
+
+        Yields text chunks as they arrive. After the stream is exhausted the
+        full accumulated response is added to conversation history and token
+        usage counters are updated from the final SSE chunk.
+
+        Args:
+            message: User message to send
+            conversation: Conversation to use (uses active conversation if None)
+            model: Model to use for completion
+            temperature: Sampling temperature
+            max_tokens: Maximum tokens in response
+
+        Yields:
+            str: Text chunks of the assistant response
+        """
+        conv = conversation or self.active_conversation
+        if conv is None:
+            conv = self.start_conversation()
+
+        conv.add_user_message(message)
+        api_messages = conv.get_api_messages()
+
+        data = {
+            "model": model,
+            "messages": api_messages,
+            "temperature": temperature,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        if max_tokens is not None:
+            data["max_tokens"] = max_tokens
+
+        self._pending_usage = {}
+        accumulated = ""
+
+        for chunk in self._make_streaming_request("chat/completions", data):
+            accumulated += chunk
+            yield chunk
+
+        # Stream exhausted — update conversation history and token counts
+        conv.add_assistant_message(accumulated)
+        self.active_model = model
+        usage = self._pending_usage
+        self.total_prompt_tokens += usage.get("prompt_tokens", 0)
+        self.total_completion_tokens += usage.get("completion_tokens", 0)
+        self.total_tokens += usage.get("total_tokens", 0)
 
     def start_conversation(self, system_prompt: Optional[str] = None) -> Conversation:
         """
@@ -291,6 +404,13 @@ class DeepSeekClient:
 
         # Extract assistant response
         assistant_response = response["choices"][0]["message"]["content"]
+
+        # Accumulate token usage
+        usage = response.get("usage", {})
+        self.total_prompt_tokens += usage.get("prompt_tokens", 0)
+        self.total_completion_tokens += usage.get("completion_tokens", 0)
+        self.total_tokens += usage.get("total_tokens", 0)
+        self.active_model = model
 
         # Add assistant response to conversation
         conv.add_assistant_message(assistant_response)

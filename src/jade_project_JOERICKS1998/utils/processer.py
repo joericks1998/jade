@@ -59,6 +59,7 @@ def is_jade_line(line: parser.Chunk, heap: heap.Heap) -> bool:
     return any(
         token.Type == tokenref.Types.PROMPT
         or token.Type == tokenref.Types.PROMPTDREF
+        or token.Type == tokenref.Types.BUILTIN
         or (token.Type == tokenref.Types.IDENTIFIER and token.Value in heap.prompts)
         for token in line
     )
@@ -221,6 +222,19 @@ def _resolve_tokens(line: parser.Chunk, heap: heap.Heap) -> str:
     """Recursive resolution of Jade tokens by priority order."""
     if config.verbose:
         print(f"{line.Pos}: {any(t.Type == tokenref.Types.IDENTIFIER and t.Value in heap.prompts for t in line.Tokens)}: {line.AllValues}")
+
+    # Priority 0: Builtins — replace __dunder__ names with __jade_heap.* equivalents
+    if tokenref.Types.BUILTIN in line.AllTypes:
+        new_line = parser.Chunk("", line.Pos)
+        for token in line:
+            if token.Type == tokenref.Types.BUILTIN:
+                new_line.append(tokenref.Token(
+                    tokenref.BUILTIN_MAP[token.Value], token.Pos, type=tokenref.Types.FALLBACK,
+                ))
+            else:
+                new_line.append(token)
+        return _resolve_tokens(new_line, heap)
+
     # Priority 1: Release — handle ?var dereferences
     if tokenref.Types.PROMPTDREF in line.AllTypes:
         return _resolve_tokens(process_2(line, heap), heap)
@@ -292,17 +306,32 @@ def machine(jade_code_string: str, heap: heap.Heap) -> None:
     for chunk in token_block:
         try:
             jade_output = line_interpreter(chunk, heap)
-            # Replace bare prompt names at the start of f-string expression
-            # slots: {pname...} -> {__p__pname...}.  The tokenizer treats
-            # the whole f"..." as one opaque token, so _resolve_tokens never
-            # sees the identifier inside {}.  We fix it here on the raw
-            # encoded output before decoding.
+            # Replace bare prompt names and builtin dunder names inside
+            # f-string expression slots: {name...} -> {translation...}.
+            # The tokenizer treats the whole f"..." as one opaque token, so
+            # _resolve_tokens never sees identifiers inside {}.  We fix them
+            # here on the raw encoded output before decoding.
             for pname in heap.prompts:
                 jade_output = re.sub(
                     r'\{' + re.escape(pname) + r'(?=[^a-zA-Z0-9_])',
                     '{__p__' + pname,
                     jade_output,
                 )
+            for bname, btranslation in tokenref.BUILTIN_MAP.items():
+                jade_output = re.sub(
+                    r'\{' + re.escape(bname) + r'(?=[^a-zA-Z0-9_])',
+                    '{' + btranslation,
+                    jade_output,
+                )
+            # Transform print(?p) → __jade_heap.stream(...) for streaming display.
+            # When the programmer writes print(?p), ?p has already been resolved
+            # to __jade_heap.ask(...).  We detect the wrapping print() and replace
+            # the whole call with stream() so tokens are printed progressively.
+            jade_output = re.sub(
+                r'print\(__jade_heap\.ask\(([^)]+)\)\)',
+                r'__jade_heap.stream(\1)',
+                jade_output,
+            )
             py_line = parser.decode_encodings(jade_output, constants.SPACE_ENCODINGS)
         except Exception as e:
             print(f"Error processing line {chunk.Pos}: {e}")

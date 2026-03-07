@@ -33,6 +33,41 @@ class Heap:
         self.prompts: dict[str, str] = {}
         self.client: DeepSeekClient = client
 
+    @property
+    def tokens(self) -> int:
+        """Total tokens consumed this session."""
+        return self.client.total_tokens
+
+    @property
+    def prompt_tokens(self) -> int:
+        """Tokens sent in prompts this session."""
+        return self.client.total_prompt_tokens
+
+    @property
+    def completion_tokens(self) -> int:
+        """Tokens received in completions this session."""
+        return self.client.total_completion_tokens
+
+    @property
+    def messages(self) -> list:
+        """Current conversation message list."""
+        conv = self.client.active_conversation
+        return conv.messages if conv is not None else []
+
+    @property
+    def model(self) -> str:
+        """Active LLM model name."""
+        return self.client.active_model
+
+    def clear(self) -> None:
+        """Clear conversation history and reset token counters."""
+        conv = self.client.active_conversation
+        if conv is not None:
+            conv.clear_history()
+        self.client.total_tokens = 0
+        self.client.total_prompt_tokens = 0
+        self.client.total_completion_tokens = 0
+
     def add(self, var_name: str, prompt: str) -> None:
         """
         Store a prompt in the heap for later execution.
@@ -57,11 +92,31 @@ class Heap:
             Cleaned LLM response as a plain string
         """
         try:
-            response = self.client.send_message(prompt_text)
-            return parser.LLMOutput(response).Text
+            accumulated = ""
+            for chunk in self.client.stream_message(prompt_text):
+                accumulated += chunk
+            return parser.LLMOutput(accumulated).Text
         except Exception as e:
-            print(f"Heap Error: {e}")
-            raise
+            print(f"\n  [Jade] Request failed: {e}")
+            return "[Request failed — please try again]"
+
+    def stream(self, prompt_text: str) -> None:
+        """
+        Stream a dynamic prompt response directly to stdout, token by token.
+
+        Called when the Jade program uses ``print(?p)`` — the compiler replaces
+        the entire print call with this method so tokens are printed progressively
+        rather than buffered and displayed all at once.
+
+        Args:
+            prompt_text: The prompt string to send to the LLM
+        """
+        try:
+            for chunk in self.client.stream_message(prompt_text):
+                print(chunk, end="", flush=True)
+            print()
+        except Exception as e:
+            print(f"\n  [Jade] Request failed: {e}")
 
     def release(self, var_name: str) -> parser.LLMOutput:
         """
