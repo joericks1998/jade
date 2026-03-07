@@ -33,6 +33,38 @@ class Heap:
         self.prompts: dict[str, str] = {}
         self.client: DeepSeekClient = client
 
+    @property
+    def tokens(self) -> int:
+        """Total tokens consumed this session."""
+        return self.client.total_tokens
+
+    @property
+    def prompt_tokens(self) -> int:
+        """Tokens sent in prompts this session."""
+        return self.client.total_prompt_tokens
+
+    @property
+    def completion_tokens(self) -> int:
+        """Tokens received in completions this session."""
+        return self.client.total_completion_tokens
+
+    @property
+    def messages(self) -> list:
+        """Current conversation message list."""
+        conv = self.client.active_conversation
+        return conv.messages if conv is not None else []
+
+    @property
+    def model(self) -> str:
+        """Active LLM model name."""
+        return self.client.active_model
+
+    def clear(self) -> None:
+        """Clear conversation history, keeping the system message if present."""
+        conv = self.client.active_conversation
+        if conv is not None:
+            conv.clear_history()
+
     def add(self, var_name: str, prompt: str) -> None:
         """
         Store a prompt in the heap for later execution.

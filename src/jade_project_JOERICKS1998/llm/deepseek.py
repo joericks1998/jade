@@ -119,6 +119,10 @@ class DeepSeekClient:
         self.base_url = "https://api.deepseek.com/v1"
         self.api_key = self._get_api_key()
         self.active_conversation: Optional[Conversation] = None
+        self.active_model: str = "deepseek-chat"
+        self.total_tokens: int = 0
+        self.total_prompt_tokens: int = 0
+        self.total_completion_tokens: int = 0
 
     def _get_api_key(self) -> str:
         """
@@ -291,6 +295,13 @@ class DeepSeekClient:
 
         # Extract assistant response
         assistant_response = response["choices"][0]["message"]["content"]
+
+        # Accumulate token usage
+        usage = response.get("usage", {})
+        self.total_prompt_tokens += usage.get("prompt_tokens", 0)
+        self.total_completion_tokens += usage.get("completion_tokens", 0)
+        self.total_tokens += usage.get("total_tokens", 0)
+        self.active_model = model
 
         # Add assistant response to conversation
         conv.add_assistant_message(assistant_response)

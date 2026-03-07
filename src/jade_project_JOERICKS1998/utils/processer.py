@@ -59,6 +59,7 @@ def is_jade_line(line: parser.Chunk, heap: heap.Heap) -> bool:
     return any(
         token.Type == tokenref.Types.PROMPT
         or token.Type == tokenref.Types.PROMPTDREF
+        or token.Type == tokenref.Types.BUILTIN
         or (token.Type == tokenref.Types.IDENTIFIER and token.Value in heap.prompts)
         for token in line
     )
@@ -221,6 +222,19 @@ def _resolve_tokens(line: parser.Chunk, heap: heap.Heap) -> str:
     """Recursive resolution of Jade tokens by priority order."""
     if config.verbose:
         print(f"{line.Pos}: {any(t.Type == tokenref.Types.IDENTIFIER and t.Value in heap.prompts for t in line.Tokens)}: {line.AllValues}")
+
+    # Priority 0: Builtins — replace __dunder__ names with __jade_heap.* equivalents
+    if tokenref.Types.BUILTIN in line.AllTypes:
+        new_line = parser.Chunk("", line.Pos)
+        for token in line:
+            if token.Type == tokenref.Types.BUILTIN:
+                new_line.append(tokenref.Token(
+                    tokenref.BUILTIN_MAP[token.Value], token.Pos, type=tokenref.Types.FALLBACK,
+                ))
+            else:
+                new_line.append(token)
+        return _resolve_tokens(new_line, heap)
+
     # Priority 1: Release — handle ?var dereferences
     if tokenref.Types.PROMPTDREF in line.AllTypes:
         return _resolve_tokens(process_2(line, heap), heap)
