@@ -24,8 +24,9 @@ while True:
         print(f"  Goodbye! Session used {__tokens__} tokens total.")
         break
 
+    print("Jade: ", end="")
     response = ?p
-    print(f"Jade: {response}")
+    print()
     print()
 
     if __tokens__ > TOKEN_LIMIT:
