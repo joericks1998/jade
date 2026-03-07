@@ -94,12 +94,29 @@ class Heap:
         try:
             accumulated = ""
             for chunk in self.client.stream_message(prompt_text):
-                print(chunk, end="", flush=True)
                 accumulated += chunk
             return parser.LLMOutput(accumulated).Text
         except Exception as e:
             print(f"\n  [Jade] Request failed: {e}")
             return "[Request failed — please try again]"
+
+    def stream(self, prompt_text: str) -> None:
+        """
+        Stream a dynamic prompt response directly to stdout, token by token.
+
+        Called when the Jade program uses ``print(?p)`` — the compiler replaces
+        the entire print call with this method so tokens are printed progressively
+        rather than buffered and displayed all at once.
+
+        Args:
+            prompt_text: The prompt string to send to the LLM
+        """
+        try:
+            for chunk in self.client.stream_message(prompt_text):
+                print(chunk, end="", flush=True)
+            print()
+        except Exception as e:
+            print(f"\n  [Jade] Request failed: {e}")
 
     def release(self, var_name: str) -> parser.LLMOutput:
         """
