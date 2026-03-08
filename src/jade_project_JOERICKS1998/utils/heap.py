@@ -47,7 +47,14 @@ def _build_correction(output_type, error: Exception) -> str:
 
 
 def _coerce(raw: str, output_type):
-    return output_type(raw.strip())
+    cleaned = raw.strip()
+    if output_type is bool:
+        if cleaned.lower() == "true":
+            return True
+        if cleaned.lower() == "false":
+            return False
+        raise ValueError(f"Cannot convert {cleaned!r} to bool — expected 'True' or 'False'")
+    return output_type(cleaned)
 
 
 class Heap:
