@@ -6,48 +6,14 @@ during Jade code execution. Prompts are stored when declared and released
 (executed via LLM) when dereferenced in the code.
 """
 
-import inspect
-
 from ..llm.deepseek import DeepSeekClient
 from . import parser
 
 
-class PromptOverflowError(Exception):
+class RetryLimitExceeded(Exception):
     """Raised when a typed dereference exhausts all retry attempts without a valid coercion."""
 
 
-_PRIMITIVE_HINTS: dict = {
-    int:   "Respond with only a plain integer (e.g. 42), no other text.",
-    float: "Respond with only a plain decimal number (e.g. 3.14), no other text.",
-    bool:  "Respond with only True or False, no other text.",
-    str:   "Respond with only a plain string value, no other text.",
-}
-
-
-def _build_schema_hint(output_type) -> str:
-    if output_type in _PRIMITIVE_HINTS:
-        return _PRIMITIVE_HINTS[output_type]
-    try:
-        sig = inspect.signature(output_type.__init__)
-        params = [p for p in sig.parameters if p != "self"]
-        param_desc = params[0] if params else "value"
-    except (ValueError, TypeError):
-        param_desc = "value"
-    return (
-        f"Your entire response will be passed as a string to {output_type.__name__}({param_desc}=...). "
-        f"Respond with only the value, no explanation or extra text."
-    )
-
-
-def _build_correction(output_type, error: Exception) -> str:
-    return (
-        f"Your previous response could not be converted to {output_type.__name__}: {error}. "
-        f"Please try again. {_build_schema_hint(output_type)}"
-    )
-
-
-def _coerce(raw: str, output_type):
-    return output_type(raw.strip())
 
 
 class Heap:
@@ -72,8 +38,8 @@ class Heap:
         """
         self.prompts: dict[str, str] = {}
         self.client: DeepSeekClient = client
+        self.max_retries: int = 15
         self.retry_log: list[dict] = []
-        self.max_retries: int = 3
 
     @property
     def tokens(self) -> int:
@@ -160,74 +126,57 @@ class Heap:
         except Exception as e:
             print(f"\n  [Jade] Request failed: {e}")
 
-    def ask_typed(self, prompt_text: str, output_type) -> any:
-        """
-        Call the LLM and coerce the response into output_type via its constructor.
-
-        Injects a schema hint into the first prompt, then retries with a correction
-        message on each parse failure. Retry turns are stripped from conversation
-        history after resolution. Any call that required at least one retry is
-        appended to self.retry_log.
-
-        Args:
-            prompt_text: The prompt string to send to the LLM
-            output_type: A callable (class or primitive) used to coerce the raw response
-
-        Returns:
-            output_type(raw_response.strip())
-
-        Raises:
-            PromptOverflowError: If all retry attempts are exhausted without a valid coercion
-        """
-        max_retries = max(self.max_retries, 1)
-        augmented = prompt_text + "\n\n" + _build_schema_hint(output_type)
-        failed_responses: list[str] = []
-        last_error: Exception = None
-        conv = self.client.active_conversation
-        raw = ""
-
-        for attempt in range(max_retries):
+    def _coerce(self, raw: str, output_type, attempts: int = 0, _failed: list = None):
+        if _failed is None:
+            _failed = []
+        cleaned = raw.strip()
+        error = None
+        if output_type is bool:
+            if cleaned.lower() == "true":
+                return True
+            if cleaned.lower() == "false":
+                return False
+            error = ValueError(f"Cannot convert {cleaned!r} to bool — expected 'True' or 'False'")
+        else:
             try:
-                if attempt == 0:
-                    raw = self.client.send_message(augmented)
-                else:
-                    raw = self.client.send_message(_build_correction(output_type, last_error))
-
-                result = _coerce(raw, output_type)
-
-                if attempt > 0:
-                    # Strip the retry turns from conversation history:
-                    # keep the first user message and the final assistant message,
-                    # remove the 2*attempt messages in between.
-                    if conv is not None:
-                        del conv.messages[-(attempt * 2 + 1):-1]
-                    self.retry_log.append({
-                        "prompt":   prompt_text,
-                        "type":     output_type.__name__,
-                        "attempts": attempt + 1,
-                        "success":  True,
-                        "failed":   failed_responses,
-                    })
-
-                return result
-
+                return output_type(cleaned)
             except Exception as e:
-                failed_responses.append(raw)
-                last_error = e
-
-        # All attempts exhausted — strip every message added during this call
-        if conv is not None:
-            del conv.messages[-(max_retries * 2):]
-        self.retry_log.append({
-            "prompt":   prompt_text,
-            "type":     output_type.__name__,
-            "attempts": max_retries,
-            "success":  False,
-            "failed":   failed_responses,
-        })
-        raise PromptOverflowError(
-            f"Could not coerce LLM output to {output_type.__name__} after {max_retries} attempts"
+                error = e
+        _failed.append(raw)
+        if attempts >= self.max_retries:
+            raise RetryLimitExceeded(
+                f"Could not coerce LLM response to {output_type.__name__} after {self.max_retries} attempts"
+            ) from error
+        return self._coerce(
+            self.ask(f"{type(error).__name__}: failed to convert response to {output_type.__name__}. Respond with only the raw {output_type.__name__} value."),
+            output_type,
+            attempts + 1,
+            _failed,
         )
+
+    def ask_typed(self, prompt_text: str, output_type) -> any:
+        failed = []
+        try:
+            raw = self.client.send_message(prompt_text)
+            result = self._coerce(raw, output_type, _failed=failed)
+            if failed:
+                self.retry_log.append({
+                    "prompt": prompt_text,
+                    "type": output_type.__name__,
+                    "attempts": len(failed) + 1,
+                    "success": True,
+                    "failed": failed,
+                })
+            return result
+        except Exception:
+            self.retry_log.append({
+                "prompt": prompt_text,
+                "type": output_type.__name__,
+                "attempts": len(failed) + 1,
+                "success": False,
+                "failed": failed,
+            })
+            raise
 
     def release(self, var_name: str) -> parser.LLMOutput:
         """

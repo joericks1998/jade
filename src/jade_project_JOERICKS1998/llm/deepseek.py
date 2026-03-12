@@ -558,6 +558,18 @@ def setup_deepseek() -> None:
     print("Note: Your API key input will be hidden for security.")
     print()
 
+    api_key = getpass.getpass(
+        "Please enter your DeepSeek API key (input will be hidden): "
+    ).strip()
+
+    if not api_key:
+        print("❌ No API key provided. Setup cancelled.")
+        return
+
+    keyring.set_password("jade_deepseek", "api_key", api_key)
+    print("API key stored securely in system keyring.")
+    print()
+
     client = DeepSeekClient()
 
     if client.test_connection():
