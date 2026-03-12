@@ -177,20 +177,13 @@ def process_2(line: parser.Chunk, heap: heap.Heap) -> parser.Chunk:
                         line[i].Pos,
                         type=tokenref.Types.FALLBACK,
                     ))
-                elif var_name in heap.prompts and heap.prompts[var_name] is None:
-                    # Dynamic prompt: emit a runtime call; LLM is invoked at exec time
+                else:
+                    # All prompts (static and dynamic): emit a runtime call so
+                    # ?p can be used repeatedly without consuming the prompt.
                     new_line.append(tokenref.Token(
                         f"__jade_heap.ask(__p__{var_name})",
                         line[i].Pos,
                         type=tokenref.Types.FALLBACK,
-                    ))
-                else:
-                    # Static prompt: call LLM now and inline the response
-                    response = heap.release(var_name)
-                    new_line.append(tokenref.Token(
-                        f'\"\"\"{response.Clean}\"\"\"',
-                        line[i].Pos,
-                        type=tokenref.Types.TRIPLEQ,
                     ))
                 i = consumed
             else:
@@ -395,10 +388,7 @@ def machine(jade_code_string: str, heap: heap.Heap) -> None:
                 # else: incomplete compound statement — keep accumulating
 
     if pending_py.strip():
-        try:
-            exec(compile(pending_py, "<jade>", "exec"), namespace)
-        except Exception as e:
-            print(f"Error executing remaining code: {e}")
+        exec(compile(pending_py, "<jade>", "exec"), namespace)
 
     if config.show_python:
         print("Generated Python code:")

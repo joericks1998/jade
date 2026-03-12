@@ -56,7 +56,7 @@ jade hello.jde
 
 Jade introduces the `prompt` keyword for declaring LLM prompts as named variables.
 
-**Static prompt** — the string literal is sent to the LLM at translation time:
+**Static prompt** — a string literal assigned to a prompt variable. The LLM is called each time `?` is used to dereference it:
 
 ```python
 prompt greeting = "Say hello in exactly five words"
@@ -64,13 +64,15 @@ result = ?greeting
 print(result)
 ```
 
-**Dynamic prompt** — the expression is evaluated at runtime, so the LLM is called each time:
+**Dynamic prompt** — an expression evaluated at runtime. Useful when the prompt text depends on variables or user input:
 
 ```python
 prompt p = input("Enter your question: ")
 response = ?p
 print(response)
 ```
+
+Prompts persist in memory and can be dereferenced with `?` as many times as needed — each dereference makes a new LLM call.
 
 ### Dereference operator (`?`)
 
@@ -126,12 +128,12 @@ while True:
 
 ### Typed output constraints (`-> Type`)
 
-Use `-> Type` on any dereference to constrain the LLM's output to a specific type. Jade injects a schema instruction into the prompt automatically, then coerces the response via the type's constructor: `Type(response)`.
+Use `-> Type` on any dereference to constrain the LLM's output to a specific type. Jade coerces the response via the type's constructor: `Type(response)`. It is the prompt author's responsibility to instruct the LLM to respond in the correct format.
 
 Works with primitives:
 
 ```python
-prompt p = "How many legs does a spider have?"
+prompt p = "How many legs does a spider have? Respond with only an integer."
 legs = ?p -> int
 print(legs + 1)   # 9
 ```
@@ -150,7 +152,15 @@ temp = ?p -> Celsius
 print(temp.value)   # 100.0
 ```
 
-If the response cannot be coerced, Jade retries the LLM with a correction message (up to `__max_retries__` times, default `3`). If all attempts fail, a `PromptOverflowError` is raised.
+If the response cannot be coerced, Jade sends the Python error back to the LLM as a conversation message and retries automatically. The LLM sees its own mistake and attempts to self-correct. After `__max_retries__` failed attempts (default `15`), a `RetryLimitExceeded` is raised.
+
+```python
+prompt p = "How many legs does a spider have? Respond with only an integer."
+try:
+    legs = ?p -> int
+except RetryLimitExceeded:
+    print("LLM could not produce a valid integer")
+```
 
 Note: `print(?p -> Type)` is a compile-time error — typed dereferences cannot be streamed. Assign to a variable instead.
 
@@ -166,7 +176,7 @@ Jade provides special built-in names for inspecting the current LLM session:
 | `__messages__` | `list` | Full conversation message history |
 | `__model__` | `str` | Active model name |
 | `__clear__()` | function | Clears conversation history and resets token counters |
-| `__max_retries__` | `int` | Max retry attempts for typed dereferences (default `3`) |
+| `__max_retries__` | `int` | Max retry attempts for typed dereferences (default `15`) |
 | `__retry_log__` | `list` | Log of typed dereferences that required at least one retry |
 
 Example:
