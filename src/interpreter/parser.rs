@@ -1,5 +1,5 @@
 use super::{
-    ast::{BinOpKind, Expr, Program, Stmt},
+    ast::{BinOpKind, Expr, Program, Stmt, UnaryOpKind},
     error::{JadeError, Result},
     lexer::{Token, TokenKind},
 };
@@ -92,86 +92,154 @@ impl Parser {
         };
 
         self.expect(&TokenKind::Equals)?;
-        let value = self.parse_expr()?;
+        let value = self.parse_bitor()?;
         self.expect(&TokenKind::Semicolon)?;
 
         Ok(Stmt::Let { name, value, span })
     }
 
-    /// Parse an expression — handles `+` and `-` (lowest precedence).
-    fn parse_expr(&mut self) -> Result<Expr> {
-        let mut left = self.parse_term()?;
-        let span = match &left {
+    /// Extract the span from any expression node.
+    fn expr_span(e: &Expr) -> super::error::Span {
+        match e {
             Expr::Integer { span, .. } => *span,
             Expr::Identifier { span, .. } => *span,
             Expr::BinOp { span, .. } => *span,
-        };
+            Expr::UnaryOp { span, .. } => *span,
+        }
+    }
 
+    /// Lowest precedence: `|` (bitwise OR).
+    fn parse_bitor(&mut self) -> Result<Expr> {
+        let mut left = self.parse_bitxor()?;
         loop {
-            match self.peek().kind {
-                TokenKind::Plus => {
-                    self.advance();
-                    let right = self.parse_term()?;
-                    left = Expr::BinOp {
-                        op: BinOpKind::Add,
-                        left: Box::new(left),
-                        right: Box::new(right),
-                        span,
-                    };
-                }
-                TokenKind::Minus => {
-                    self.advance();
-                    let right = self.parse_term()?;
-                    left = Expr::BinOp {
-                        op: BinOpKind::Sub,
-                        left: Box::new(left),
-                        right: Box::new(right),
-                        span,
-                    };
-                }
-                _ => break,
+            if self.peek().kind == TokenKind::Pipe {
+                let span = Self::expr_span(&left);
+                self.advance();
+                let right = self.parse_bitxor()?;
+                left = Expr::BinOp { op: BinOpKind::BitOr, left: Box::new(left), right: Box::new(right), span };
+            } else {
+                break;
             }
         }
-
         Ok(left)
     }
 
-    /// Parse a term — handles `*` and `/` (higher precedence than + and -).
-    fn parse_term(&mut self) -> Result<Expr> {
-        let mut left = self.parse_primary()?;
-        let span = match &left {
-            Expr::Integer { span, .. } => *span,
-            Expr::Identifier { span, .. } => *span,
-            Expr::BinOp { span, .. } => *span,
-        };
+    /// `^` (bitwise XOR).
+    fn parse_bitxor(&mut self) -> Result<Expr> {
+        let mut left = self.parse_bitand()?;
+        loop {
+            if self.peek().kind == TokenKind::Caret {
+                let span = Self::expr_span(&left);
+                self.advance();
+                let right = self.parse_bitand()?;
+                left = Expr::BinOp { op: BinOpKind::BitXor, left: Box::new(left), right: Box::new(right), span };
+            } else {
+                break;
+            }
+        }
+        Ok(left)
+    }
 
+    /// `&` (bitwise AND).
+    fn parse_bitand(&mut self) -> Result<Expr> {
+        let mut left = self.parse_shift()?;
+        loop {
+            if self.peek().kind == TokenKind::Ampersand {
+                let span = Self::expr_span(&left);
+                self.advance();
+                let right = self.parse_shift()?;
+                left = Expr::BinOp { op: BinOpKind::BitAnd, left: Box::new(left), right: Box::new(right), span };
+            } else {
+                break;
+            }
+        }
+        Ok(left)
+    }
+
+    /// `<<` and `>>` (bit shifts).
+    fn parse_shift(&mut self) -> Result<Expr> {
+        let mut left = self.parse_expr()?;
         loop {
             match self.peek().kind {
-                TokenKind::Star => {
+                TokenKind::LtLt => {
+                    let span = Self::expr_span(&left);
                     self.advance();
-                    let right = self.parse_primary()?;
-                    left = Expr::BinOp {
-                        op: BinOpKind::Mul,
-                        left: Box::new(left),
-                        right: Box::new(right),
-                        span,
-                    };
+                    let right = self.parse_expr()?;
+                    left = Expr::BinOp { op: BinOpKind::Shl, left: Box::new(left), right: Box::new(right), span };
                 }
-                TokenKind::Slash => {
+                TokenKind::GtGt => {
+                    let span = Self::expr_span(&left);
                     self.advance();
-                    let right = self.parse_primary()?;
-                    left = Expr::BinOp {
-                        op: BinOpKind::Div,
-                        left: Box::new(left),
-                        right: Box::new(right),
-                        span,
-                    };
+                    let right = self.parse_expr()?;
+                    left = Expr::BinOp { op: BinOpKind::Shr, left: Box::new(left), right: Box::new(right), span };
                 }
                 _ => break,
             }
         }
-
         Ok(left)
+    }
+
+    /// `+` and `-` (additive).
+    fn parse_expr(&mut self) -> Result<Expr> {
+        let mut left = self.parse_term()?;
+        loop {
+            match self.peek().kind {
+                TokenKind::Plus => {
+                    let span = Self::expr_span(&left);
+                    self.advance();
+                    let right = self.parse_term()?;
+                    left = Expr::BinOp { op: BinOpKind::Add, left: Box::new(left), right: Box::new(right), span };
+                }
+                TokenKind::Minus => {
+                    let span = Self::expr_span(&left);
+                    self.advance();
+                    let right = self.parse_term()?;
+                    left = Expr::BinOp { op: BinOpKind::Sub, left: Box::new(left), right: Box::new(right), span };
+                }
+                _ => break,
+            }
+        }
+        Ok(left)
+    }
+
+    /// `*`, `/`, `%` (multiplicative).
+    fn parse_term(&mut self) -> Result<Expr> {
+        let mut left = self.parse_unary()?;
+        loop {
+            match self.peek().kind {
+                TokenKind::Star => {
+                    let span = Self::expr_span(&left);
+                    self.advance();
+                    let right = self.parse_unary()?;
+                    left = Expr::BinOp { op: BinOpKind::Mul, left: Box::new(left), right: Box::new(right), span };
+                }
+                TokenKind::Slash => {
+                    let span = Self::expr_span(&left);
+                    self.advance();
+                    let right = self.parse_unary()?;
+                    left = Expr::BinOp { op: BinOpKind::Div, left: Box::new(left), right: Box::new(right), span };
+                }
+                TokenKind::Percent => {
+                    let span = Self::expr_span(&left);
+                    self.advance();
+                    let right = self.parse_unary()?;
+                    left = Expr::BinOp { op: BinOpKind::Mod, left: Box::new(left), right: Box::new(right), span };
+                }
+                _ => break,
+            }
+        }
+        Ok(left)
+    }
+
+    /// Unary `~` (bitwise NOT).
+    fn parse_unary(&mut self) -> Result<Expr> {
+        if self.peek().kind == TokenKind::Tilde {
+            let span = self.peek().span;
+            self.advance();
+            let operand = self.parse_unary()?;
+            return Ok(Expr::UnaryOp { op: UnaryOpKind::BitNot, operand: Box::new(operand), span });
+        }
+        self.parse_primary()
     }
 
     /// Parse a primary: an integer literal or an identifier.

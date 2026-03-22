@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Jade 0.1.0 Documentation</title>
+  <title>Jade 1.0.2 Documentation</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -52,7 +52,9 @@
       width: 22px;
       height: 22px;
       object-fit: contain;
-      filter: brightness(0) invert(1);
+      border-radius: 4px;
+      background: #fff;
+      padding: 2px;
     }
 
     .topbar-sep { opacity: 0.5; }
@@ -280,9 +282,9 @@
       </a>
       <span class="topbar-sep">»</span>
       <select title="Version">
-        <option>0.1.0</option>
+        <option>1.0.2</option>
       </select>
-      <span class="topbar-title">0.1.0 Documentation</span>
+      <span class="topbar-title">1.0.2 Documentation</span>
     </div>
     <div class="topbar-right">
       <a href="https://github.com/joericks1998/jade">GitHub</a>
@@ -331,18 +333,19 @@
     <!-- ── Main content ── -->
     <main class="content">
 
-      <h1>Jade 0.1.0 Documentation</h1>
+      <h1>Jade 1.0.2 Documentation</h1>
       <p class="lead">
         Jade is a programming language written in Rust. This is the documentation
-        for version 0.1.0 — the initial interpreter release supporting integer
-        arithmetic and variable assignment.
+        for version 1.0.2 — the interpreter supports integer arithmetic, modulus,
+        bitwise operations (<code>&amp;</code>, <code>|</code>, <code>^</code>, <code>~</code>, <code>&lt;&lt;</code>, <code>&gt;&gt;</code>),
+        and variable assignment.
       </p>
 
       <!-- Installation -->
       <section id="installation">
         <h2>Installation</h2>
         <p>
-          Jade 0.1.0 is built from source. A prebuilt binary and install script
+          Jade 1.0.2 is built from source. A prebuilt binary and install script
           are planned for a future release.
         </p>
 
@@ -439,9 +442,16 @@ let doubled = base * 2</code></pre>
         <pre><code>let sum  = 3 + 4
 let diff = 10 - 3
 let prod = 6 * 7
-let quot = 20 / 4</code></pre>
+let quot = 20 / 4
+let rem  = 10 % 3
+let bits = 0xff & 0x0f
+let mask = 1 &lt;&lt; 4</code></pre>
         <p>Expressions associate left-to-right within the same precedence level:</p>
         <pre><code>let x = 10 - 3 - 2    // evaluates as (10 - 3) - 2 = 5</code></pre>
+
+        <h3>Unary Expressions</h3>
+        <p>The <code>~</code> operator applies bitwise NOT to its operand:</p>
+        <pre><code>let inv = ~0    // -1 (all bits set)</code></pre>
       </section>
 
       <!-- Operators -->
@@ -456,24 +466,42 @@ let quot = 20 / 4</code></pre>
             <tr><td><code>-</code></td><td>Subtraction</td><td><code>10 - 3</code></td><td><code>7</code></td></tr>
             <tr><td><code>*</code></td><td>Multiplication</td><td><code>3 * 4</code></td><td><code>12</code></td></tr>
             <tr><td><code>/</code></td><td>Integer division</td><td><code>10 / 3</code></td><td><code>3</code></td></tr>
+            <tr><td><code>%</code></td><td>Remainder (modulus)</td><td><code>10 % 3</code></td><td><code>1</code></td></tr>
+            <tr><td><code>&amp;</code></td><td>Bitwise AND</td><td><code>6 &amp; 3</code></td><td><code>2</code></td></tr>
+            <tr><td><code>|</code></td><td>Bitwise OR</td><td><code>5 | 2</code></td><td><code>7</code></td></tr>
+            <tr><td><code>^</code></td><td>Bitwise XOR</td><td><code>7 ^ 3</code></td><td><code>4</code></td></tr>
+            <tr><td><code>~</code></td><td>Bitwise NOT (unary)</td><td><code>~0</code></td><td><code>-1</code></td></tr>
+            <tr><td><code>&lt;&lt;</code></td><td>Left shift</td><td><code>1 &lt;&lt; 4</code></td><td><code>16</code></td></tr>
+            <tr><td><code>&gt;&gt;</code></td><td>Right shift</td><td><code>64 &gt;&gt; 2</code></td><td><code>16</code></td></tr>
           </tbody>
         </table>
         <h3>Precedence</h3>
-        <p>
-          <code>*</code> and <code>/</code> bind more tightly than <code>+</code> and <code>-</code>,
-          matching standard arithmetic precedence.
-        </p>
-        <pre><code>let x = 2 + 3 * 4    // 2 + (3 * 4) = 14</code></pre>
-        <h3>Division by Zero</h3>
-        <p>Dividing by zero is a runtime error:</p>
-        <pre><code>let x = 10 / 0    // runtime error: division by zero</code></pre>
+        <p>Operators bind from tightest to loosest in this order:</p>
+        <ol>
+          <li>Unary: <code>~</code></li>
+          <li>Multiplicative: <code>*</code>, <code>/</code>, <code>%</code></li>
+          <li>Additive: <code>+</code>, <code>-</code></li>
+          <li>Shifts: <code>&lt;&lt;</code>, <code>&gt;&gt;</code></li>
+          <li>Bitwise AND: <code>&amp;</code></li>
+          <li>Bitwise XOR: <code>^</code></li>
+          <li>Bitwise OR: <code>|</code></li>
+        </ol>
+        <pre><code>let x = 2 + 3 * 4        // 2 + (3 * 4) = 14
+let y = 1 &lt;&lt; 2 &amp; 0xf    // (1 &lt;&lt; 2) &amp; 0xf = 4</code></pre>
+        <h3>Runtime Errors</h3>
+        <p>The following operations produce runtime errors:</p>
+        <ul>
+          <li>Division by zero: <code>x / 0</code></li>
+          <li>Remainder by zero: <code>x % 0</code></li>
+          <li>Invalid shift amount (negative or ≥ 64): <code>1 &lt;&lt; 64</code></li>
+        </ul>
       </section>
 
       <!-- Types -->
       <section id="types">
         <h2>Types</h2>
         <p>
-          Jade 0.1.0 has a single value type: the 64-bit signed integer. A full
+          Jade 1.0.2 has a single value type: the 64-bit signed integer. A full
           static type system with inference is planned for a later phase of development.
         </p>
         <table>
@@ -519,7 +547,14 @@ jade -h</code></pre>
       <!-- Changelog -->
       <section id="changelog">
         <h2>Changelog</h2>
-        <h3>0.1.0</h3>
+        <h3>1.0.2</h3>
+        <ul>
+          <li>Modulus operator: <code>%</code></li>
+          <li>Bitwise operators: <code>&amp;</code>, <code>|</code>, <code>^</code>, <code>&lt;&lt;</code>, <code>&gt;&gt;</code></li>
+          <li>Unary bitwise NOT: <code>~</code></li>
+          <li>Runtime errors: remainder by zero, invalid shift amount (negative or ≥ 64)</li>
+        </ul>
+        <h3>1.0.1</h3>
         <ul>
           <li>Initial interpreter release written in Rust</li>
           <li><code>let</code> variable declarations with arithmetic expressions</li>
