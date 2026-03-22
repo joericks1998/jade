@@ -8,38 +8,44 @@
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     body {
-      background: #0d0d0d;
-      color: #e8e8e8;
+      background: #f7faf8;
+      color: #1c2e1c;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       min-height: 100vh;
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      gap: 2rem;
+      gap: 1.5rem;
       padding: 2rem;
     }
 
-    .logo {
-      font-size: 3.5rem;
+    .logo-img {
+      width: 90px;
+      height: 90px;
+      object-fit: contain;
+    }
+
+    .logo-name {
+      font-size: 3rem;
       font-weight: 700;
       letter-spacing: -1px;
-      color: #4ade80;
+      color: #1e7a2e;
     }
 
     .tagline {
-      font-size: 1.15rem;
-      color: #888;
+      font-size: 1.1rem;
+      color: #5a7a5a;
       text-align: center;
       max-width: 480px;
-      line-height: 1.6;
+      line-height: 1.7;
     }
 
     .badge {
       display: inline-block;
-      background: #1a1a1a;
-      border: 1px solid #2a2a2a;
-      color: #4ade80;
+      background: #e6f4eb;
+      border: 1px solid #b6dcc2;
+      color: #1e7a2e;
       font-size: 0.8rem;
       font-family: "SF Mono", "Fira Code", monospace;
       padding: 0.35rem 0.9rem;
@@ -50,21 +56,22 @@
     .links {
       display: flex;
       gap: 1.5rem;
-      margin-top: 0.5rem;
+      margin-top: 0.25rem;
     }
 
     .links a {
-      color: #555;
+      color: #8aaa8a;
       text-decoration: none;
       font-size: 0.9rem;
       transition: color 0.15s;
     }
 
-    .links a:hover { color: #e8e8e8; }
+    .links a:hover { color: #1e7a2e; }
   </style>
 </head>
 <body>
-  <div class="logo">jade</div>
+  <img class="logo-img" src="extras/logo.png" alt="Jade logo" />
+  <div class="logo-name">jade</div>
   <p class="tagline">
     A systems-capable programming language with first-class LLM integration.
   </p>
