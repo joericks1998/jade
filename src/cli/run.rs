@@ -36,10 +36,20 @@ pub fn run_file(path: &str, verbose: bool) {
     };
 
     if verbose {
-        let mut pairs: Vec<(&String, &i64)> = env.entries().collect();
+        let mut pairs: Vec<(&String, &eval::Value)> = env.entries().collect();
         pairs.sort_by_key(|(name, _)| name.as_str());
         for (name, val) in pairs {
-            println!("{} = {}", name, val);
+            match val {
+                eval::Value::Int(i) => println!("{} = {}", name, i),
+                eval::Value::Float(f) => {
+                    let s = format!("{}", f);
+                    if s.contains('.') || s.contains('e') {
+                        println!("{} = {}", name, s);
+                    } else {
+                        println!("{} = {}.0", name, s);
+                    }
+                }
+            }
         }
     }
 }

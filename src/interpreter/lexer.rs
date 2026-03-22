@@ -5,6 +5,7 @@ use super::error::{JadeError, Result, Span};
 pub enum TokenKind {
     // Literals
     Integer(i64),
+    Float(f64),
 
     // Identifiers and keywords
     Identifier(String),
@@ -49,7 +50,7 @@ pub struct Token {
 /// Returns true if this token kind triggers auto-semicolon insertion
 /// when it appears at the end of a line.
 fn is_line_terminator(kind: &TokenKind) -> bool {
-    matches!(kind, TokenKind::Integer(_) | TokenKind::Identifier(_) | TokenKind::RParen)
+    matches!(kind, TokenKind::Integer(_) | TokenKind::Float(_) | TokenKind::Identifier(_) | TokenKind::RParen)
 }
 
 /// Tokenize Jade source into a flat Vec of tokens.
@@ -86,7 +87,7 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
                 i += 1;
             }
 
-            // Integer literals
+            // Integer and float literals
             '0'..='9' => {
                 let start_col = col;
                 let mut num_str = String::new();
@@ -95,11 +96,28 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
                     i += 1;
                     col += 1;
                 }
-                let value: i64 = num_str.parse().unwrap();
-                tokens.push(Token {
-                    kind: TokenKind::Integer(value),
-                    span: Span { line, col: start_col },
-                });
+                // If followed by '.' and then a digit, parse as float
+                if i + 1 < chars.len() && chars[i] == '.' && chars[i + 1].is_ascii_digit() {
+                    num_str.push('.');
+                    i += 1;
+                    col += 1;
+                    while i < chars.len() && chars[i].is_ascii_digit() {
+                        num_str.push(chars[i]);
+                        i += 1;
+                        col += 1;
+                    }
+                    let value: f64 = num_str.parse().unwrap();
+                    tokens.push(Token {
+                        kind: TokenKind::Float(value),
+                        span: Span { line, col: start_col },
+                    });
+                } else {
+                    let value: i64 = num_str.parse().unwrap();
+                    tokens.push(Token {
+                        kind: TokenKind::Integer(value),
+                        span: Span { line, col: start_col },
+                    });
+                }
             }
 
             // Identifiers and keywords

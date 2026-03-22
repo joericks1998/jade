@@ -102,6 +102,7 @@ impl Parser {
     fn expr_span(e: &Expr) -> super::error::Span {
         match e {
             Expr::Integer { span, .. } => *span,
+            Expr::Float { span, .. } => *span,
             Expr::Identifier { span, .. } => *span,
             Expr::BinOp { span, .. } => *span,
             Expr::UnaryOp { span, .. } => *span,
@@ -242,13 +243,17 @@ impl Parser {
         self.parse_primary()
     }
 
-    /// Parse a primary: an integer literal or an identifier.
+    /// Parse a primary: a number literal or an identifier.
     fn parse_primary(&mut self) -> Result<Expr> {
         let token = self.peek().clone();
         match token.kind {
             TokenKind::Integer(value) => {
                 self.advance();
                 Ok(Expr::Integer { value, span: token.span })
+            }
+            TokenKind::Float(value) => {
+                self.advance();
+                Ok(Expr::Float { value, span: token.span })
             }
             TokenKind::Identifier(ref name) => {
                 let name = name.clone();
@@ -257,7 +262,7 @@ impl Parser {
             }
             TokenKind::Eof => Err(JadeError::UnexpectedEof { span: token.span }),
             _ => Err(JadeError::UnexpectedToken {
-                expected: "integer or identifier".to_string(),
+                expected: "number or identifier".to_string(),
                 got: format!("{:?}", token.kind),
                 span: token.span,
             }),
