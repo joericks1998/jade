@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Jade 1.0.2 — Installation</title>
+  <title>Jade 1.0.2 — Changelog</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -299,7 +299,7 @@
       <div class="sidebar-section">
         <h4>Getting Started</h4>
         <ul>
-          <li><a href="index.html" class="active">Installation</a></li>
+          <li><a href="index.html">Installation</a></li>
           <li><a href="quickstart.html">Quick Start</a></li>
         </ul>
       </div>
@@ -324,7 +324,7 @@
       <div class="sidebar-section">
         <h4>Project</h4>
         <ul>
-          <li><a href="changelog.html">Changelog</a></li>
+          <li><a href="changelog.html" class="active">Changelog</a></li>
           <li><a href="https://github.com/joericks1998/jade">GitHub →</a></li>
         </ul>
       </div>
@@ -333,46 +333,24 @@
     <!-- ── Main content ── -->
     <main class="content">
 
-      <h1>Jade 1.0.2 Documentation</h1>
-      <p class="lead">
-        Jade is a programming language written in Rust. This is the documentation
-        for version 1.0.2 — the interpreter supports integer arithmetic, modulus,
-        bitwise operations (<code>&amp;</code>, <code>|</code>, <code>^</code>, <code>~</code>, <code>&lt;&lt;</code>, <code>&gt;&gt;</code>),
-        and variable assignment.
-      </p>
-
-      <section id="installation">
-        <h2>Installation</h2>
-        <p>
-          Jade 1.0.2 is built from source. A prebuilt binary and install script
-          are planned for a future release.
-        </p>
-
-        <h3>Requirements</h3>
+      <section id="changelog">
+        <h2>Changelog</h2>
+        <h3>1.0.2</h3>
         <ul>
-          <li>Rust 1.70 or later — install via <a href="https://rustup.rs">rustup.rs</a></li>
-          <li>Git</li>
+          <li>Modulus operator: <code>%</code></li>
+          <li>Bitwise operators: <code>&amp;</code>, <code>|</code>, <code>^</code>, <code>&lt;&lt;</code>, <code>&gt;&gt;</code></li>
+          <li>Unary bitwise NOT: <code>~</code></li>
+          <li>Runtime errors: remainder by zero, invalid shift amount (negative or ≥ 64)</li>
         </ul>
-
-        <h3>Build from Source</h3>
-        <pre><code>git clone https://github.com/joericks1998/jade
-cd jade
-cargo build --release</code></pre>
-        <p>
-          The compiled binary is placed at <code>target/release/jade</code>.
-          Copy it somewhere on your <code>PATH</code>:
-        </p>
-        <pre><code>cp target/release/jade /usr/local/bin/jade</code></pre>
-
-        <h3>Verify</h3>
-        <pre><code>jade --help</code></pre>
-        <p>Expected output:</p>
-        <pre><code>jade — the Jade programming language
-
-USAGE:
-  jade &lt;file.jde&gt;               Run a Jade source file
-  jade &lt;file.jde&gt; -v, --verbose Run and print all variables after execution
-  jade -h, --help               Show this help message</code></pre>
+        <h3>1.0.1</h3>
+        <ul>
+          <li>Initial interpreter release written in Rust</li>
+          <li><code>let</code> variable declarations with arithmetic expressions</li>
+          <li>Operators: <code>+</code>, <code>-</code>, <code>*</code>, <code>/</code></li>
+          <li>Automatic semicolon insertion — no semicolons required</li>
+          <li>Runtime errors: undefined variable, division by zero</li>
+          <li>CLI: <code>jade &lt;file&gt;</code>, <code>--verbose</code>, <code>--help</code></li>
+        </ul>
       </section>
 
     </main>
