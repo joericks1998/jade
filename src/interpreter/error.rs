@@ -24,6 +24,12 @@ pub enum JadeError {
 
     /// Evaluator hit a divide-by-zero.
     DivisionByZero { span: Span },
+
+    /// Evaluator hit a remainder-by-zero.
+    RemainderByZero { span: Span },
+
+    /// Evaluator received a negative or out-of-range shift amount.
+    InvalidShift { amount: i64, span: Span },
 }
 
 /// Shorthand so every module can write `Result<T>` instead of `Result<T, JadeError>`.

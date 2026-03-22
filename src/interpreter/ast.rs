@@ -33,20 +33,41 @@ pub enum Expr {
         span: Span,
     },
 
-    /// A binary operation, e.g. `1 + 1` or `add * 2`
+    /// A binary operation, e.g. `1 + 1` or `add & 0xff`
     BinOp {
         op: BinOpKind,
         left: Box<Expr>,
         right: Box<Expr>,
         span: Span,
     },
+
+    /// A unary operation, e.g. `~x`
+    UnaryOp {
+        op: UnaryOpKind,
+        operand: Box<Expr>,
+        span: Span,
+    },
 }
 
-/// The four arithmetic operators Jade supports at this stage.
+/// All binary operators Jade supports.
 #[derive(Debug)]
 pub enum BinOpKind {
+    // Arithmetic
     Add,
     Sub,
     Mul,
     Div,
+    Mod,
+    // Bitwise
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
+}
+
+/// All unary operators Jade supports.
+#[derive(Debug)]
+pub enum UnaryOpKind {
+    BitNot,
 }

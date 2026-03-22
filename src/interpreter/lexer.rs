@@ -10,11 +10,22 @@ pub enum TokenKind {
     Identifier(String),
     Let,
 
-    // Operators
+    // Arithmetic operators
     Plus,
     Minus,
     Star,
     Slash,
+    Percent,
+
+    // Bitwise operators
+    Ampersand,
+    Pipe,
+    Caret,
+    Tilde,
+    LtLt,
+    GtGt,
+
+    // Assignment
     Equals,
 
     // Auto-inserted punctuation
@@ -111,13 +122,36 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
             }
 
             // Single-character tokens
-            '+' => { tokens.push(Token { kind: TokenKind::Plus,   span: Span { line, col } }); col += 1; i += 1; }
-            '-' => { tokens.push(Token { kind: TokenKind::Minus,  span: Span { line, col } }); col += 1; i += 1; }
-            '*' => { tokens.push(Token { kind: TokenKind::Star,   span: Span { line, col } }); col += 1; i += 1; }
-            '/' => { tokens.push(Token { kind: TokenKind::Slash,  span: Span { line, col } }); col += 1; i += 1; }
-            '=' => { tokens.push(Token { kind: TokenKind::Equals, span: Span { line, col } }); col += 1; i += 1; }
-            '(' => { tokens.push(Token { kind: TokenKind::LParen, span: Span { line, col } }); col += 1; i += 1; }
-            ')' => { tokens.push(Token { kind: TokenKind::RParen, span: Span { line, col } }); col += 1; i += 1; }
+            '+' => { tokens.push(Token { kind: TokenKind::Plus,      span: Span { line, col } }); col += 1; i += 1; }
+            '-' => { tokens.push(Token { kind: TokenKind::Minus,     span: Span { line, col } }); col += 1; i += 1; }
+            '*' => { tokens.push(Token { kind: TokenKind::Star,      span: Span { line, col } }); col += 1; i += 1; }
+            '/' => { tokens.push(Token { kind: TokenKind::Slash,     span: Span { line, col } }); col += 1; i += 1; }
+            '%' => { tokens.push(Token { kind: TokenKind::Percent,   span: Span { line, col } }); col += 1; i += 1; }
+            '&' => { tokens.push(Token { kind: TokenKind::Ampersand, span: Span { line, col } }); col += 1; i += 1; }
+            '|' => { tokens.push(Token { kind: TokenKind::Pipe,      span: Span { line, col } }); col += 1; i += 1; }
+            '^' => { tokens.push(Token { kind: TokenKind::Caret,     span: Span { line, col } }); col += 1; i += 1; }
+            '~' => { tokens.push(Token { kind: TokenKind::Tilde,     span: Span { line, col } }); col += 1; i += 1; }
+            '=' => { tokens.push(Token { kind: TokenKind::Equals,    span: Span { line, col } }); col += 1; i += 1; }
+            '(' => { tokens.push(Token { kind: TokenKind::LParen,    span: Span { line, col } }); col += 1; i += 1; }
+            ')' => { tokens.push(Token { kind: TokenKind::RParen,    span: Span { line, col } }); col += 1; i += 1; }
+
+            // Two-character tokens: << and >>
+            '<' => {
+                if i + 1 < chars.len() && chars[i + 1] == '<' {
+                    tokens.push(Token { kind: TokenKind::LtLt, span: Span { line, col } });
+                    col += 2; i += 2;
+                } else {
+                    return Err(JadeError::UnexpectedChar { ch, span: Span { line, col } });
+                }
+            }
+            '>' => {
+                if i + 1 < chars.len() && chars[i + 1] == '>' {
+                    tokens.push(Token { kind: TokenKind::GtGt, span: Span { line, col } });
+                    col += 2; i += 2;
+                } else {
+                    return Err(JadeError::UnexpectedChar { ch, span: Span { line, col } });
+                }
+            }
 
             // Anything else is an error
             _ => {
