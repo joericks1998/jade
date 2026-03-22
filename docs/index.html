@@ -444,14 +444,15 @@ let diff = 10 - 3
 let prod = 6 * 7
 let quot = 20 / 4
 let rem  = 10 % 3
-let bits = 0xff & 0x0f
+let bits = 255 & 15
 let mask = 1 &lt;&lt; 4</code></pre>
         <p>Expressions associate left-to-right within the same precedence level:</p>
-        <pre><code>let x = 10 - 3 - 2    // evaluates as (10 - 3) - 2 = 5</code></pre>
+        <pre><code>let x = 10 - 3 - 2</code></pre>
+        <p>This evaluates as <code>(10 - 3) - 2 = 5</code>.</p>
 
         <h3>Unary Expressions</h3>
         <p>The <code>~</code> operator applies bitwise NOT to its operand:</p>
-        <pre><code>let inv = ~0    // -1 (all bits set)</code></pre>
+        <pre><code>let inv = ~0</code></pre>
       </section>
 
       <!-- Operators -->
@@ -486,8 +487,8 @@ let mask = 1 &lt;&lt; 4</code></pre>
           <li>Bitwise XOR: <code>^</code></li>
           <li>Bitwise OR: <code>|</code></li>
         </ol>
-        <pre><code>let x = 2 + 3 * 4        // 2 + (3 * 4) = 14
-let y = 1 &lt;&lt; 2 &amp; 0xf    // (1 &lt;&lt; 2) &amp; 0xf = 4</code></pre>
+        <pre><code>let x = 2 + 3 * 4
+let y = 1 &lt;&lt; 2 &amp; 15</code></pre>
         <h3>Runtime Errors</h3>
         <p>The following operations produce runtime errors:</p>
         <ul>
