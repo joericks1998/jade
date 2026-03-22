@@ -1,8 +1,0 @@
-template Num = {
-    num: isinstance(prompt, int) or isinstance(prompt, float)
-}
-
-# Bot introduces itself
-prompt calculation = "What is 1 + 1?"
-welcome = ?Num(intro)
-print(f"\nJadeBot: {welcome}")

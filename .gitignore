@@ -11,3 +11,8 @@ __pycache__/
 *.txt
 
 */.DS_Store
+
+
+# Added by cargo
+
+/target
