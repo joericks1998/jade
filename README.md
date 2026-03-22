@@ -93,7 +93,8 @@ tests/
 planning/
   REQUIREMENTS.md           Full build plan across all phases
 docs/
-  index.html                Documentation website (GitHub Pages)
+  index.html                Documentation website (jadelang.org)
+  CNAME                     Custom domain configuration for GitHub Pages
   extras/logo.png           Project logo
 ```
 
@@ -103,7 +104,7 @@ The pipeline is: source text → `lexer::tokenize` → `parser::parse` → `eval
 
 ## Documentation
 
-Full documentation is available at the project's GitHub Pages site. The docs cover installation, language reference (variables, expressions, operators, types), CLI reference, and changelog.
+Full documentation is available at **[jadelang.org](https://jadelang.org)**. The docs cover installation, language reference (variables, expressions, operators, types), CLI reference, and changelog.
 
 ---
 
