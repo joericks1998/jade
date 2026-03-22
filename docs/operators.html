@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Jade 1.0.2 — Installation</title>
+  <title>Jade 1.0.2 — Operators</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -299,7 +299,7 @@
       <div class="sidebar-section">
         <h4>Getting Started</h4>
         <ul>
-          <li><a href="index.html" class="active">Installation</a></li>
+          <li><a href="index.html">Installation</a></li>
           <li><a href="quickstart.html">Quick Start</a></li>
         </ul>
       </div>
@@ -309,7 +309,7 @@
         <ul>
           <li><a href="variables.html">Variables</a></li>
           <li><a href="expressions.html">Expressions</a></li>
-          <li><a href="operators.html">Operators</a></li>
+          <li><a href="operators.html" class="active">Operators</a></li>
           <li><a href="types.html">Types</a></li>
         </ul>
       </div>
@@ -333,46 +333,46 @@
     <!-- ── Main content ── -->
     <main class="content">
 
-      <h1>Jade 1.0.2 Documentation</h1>
-      <p class="lead">
-        Jade is a programming language written in Rust. This is the documentation
-        for version 1.0.2 — the interpreter supports integer arithmetic, modulus,
-        bitwise operations (<code>&amp;</code>, <code>|</code>, <code>^</code>, <code>~</code>, <code>&lt;&lt;</code>, <code>&gt;&gt;</code>),
-        and variable assignment.
-      </p>
-
-      <section id="installation">
-        <h2>Installation</h2>
-        <p>
-          Jade 1.0.2 is built from source. A prebuilt binary and install script
-          are planned for a future release.
-        </p>
-
-        <h3>Requirements</h3>
+      <section id="operators">
+        <h2>Operators</h2>
+        <table>
+          <thead>
+            <tr><th>Operator</th><th>Name</th><th>Example</th><th>Result</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>+</code></td><td>Addition</td><td><code>3 + 4</code></td><td><code>7</code></td></tr>
+            <tr><td><code>-</code></td><td>Subtraction</td><td><code>10 - 3</code></td><td><code>7</code></td></tr>
+            <tr><td><code>*</code></td><td>Multiplication</td><td><code>3 * 4</code></td><td><code>12</code></td></tr>
+            <tr><td><code>/</code></td><td>Integer division</td><td><code>10 / 3</code></td><td><code>3</code></td></tr>
+            <tr><td><code>%</code></td><td>Remainder (modulus)</td><td><code>10 % 3</code></td><td><code>1</code></td></tr>
+            <tr><td><code>&amp;</code></td><td>Bitwise AND</td><td><code>6 &amp; 3</code></td><td><code>2</code></td></tr>
+            <tr><td><code>|</code></td><td>Bitwise OR</td><td><code>5 | 2</code></td><td><code>7</code></td></tr>
+            <tr><td><code>^</code></td><td>Bitwise XOR</td><td><code>7 ^ 3</code></td><td><code>4</code></td></tr>
+            <tr><td><code>~</code></td><td>Bitwise NOT (unary)</td><td><code>~0</code></td><td><code>-1</code></td></tr>
+            <tr><td><code>&lt;&lt;</code></td><td>Left shift</td><td><code>1 &lt;&lt; 4</code></td><td><code>16</code></td></tr>
+            <tr><td><code>&gt;&gt;</code></td><td>Right shift</td><td><code>64 &gt;&gt; 2</code></td><td><code>16</code></td></tr>
+          </tbody>
+        </table>
+        <h3>Precedence</h3>
+        <p>Operators bind from tightest to loosest in this order:</p>
+        <ol>
+          <li>Unary: <code>~</code></li>
+          <li>Multiplicative: <code>*</code>, <code>/</code>, <code>%</code></li>
+          <li>Additive: <code>+</code>, <code>-</code></li>
+          <li>Shifts: <code>&lt;&lt;</code>, <code>&gt;&gt;</code></li>
+          <li>Bitwise AND: <code>&amp;</code></li>
+          <li>Bitwise XOR: <code>^</code></li>
+          <li>Bitwise OR: <code>|</code></li>
+        </ol>
+        <pre><code>let x = 2 + 3 * 4
+let y = 1 &lt;&lt; 2 &amp; 15</code></pre>
+        <h3>Runtime Errors</h3>
+        <p>The following operations produce runtime errors:</p>
         <ul>
-          <li>Rust 1.70 or later — install via <a href="https://rustup.rs">rustup.rs</a></li>
-          <li>Git</li>
+          <li>Division by zero: <code>x / 0</code></li>
+          <li>Remainder by zero: <code>x % 0</code></li>
+          <li>Invalid shift amount (negative or ≥ 64): <code>1 &lt;&lt; 64</code></li>
         </ul>
-
-        <h3>Build from Source</h3>
-        <pre><code>git clone https://github.com/joericks1998/jade
-cd jade
-cargo build --release</code></pre>
-        <p>
-          The compiled binary is placed at <code>target/release/jade</code>.
-          Copy it somewhere on your <code>PATH</code>:
-        </p>
-        <pre><code>cp target/release/jade /usr/local/bin/jade</code></pre>
-
-        <h3>Verify</h3>
-        <pre><code>jade --help</code></pre>
-        <p>Expected output:</p>
-        <pre><code>jade — the Jade programming language
-
-USAGE:
-  jade &lt;file.jde&gt;               Run a Jade source file
-  jade &lt;file.jde&gt; -v, --verbose Run and print all variables after execution
-  jade -h, --help               Show this help message</code></pre>
       </section>
 
     </main>
