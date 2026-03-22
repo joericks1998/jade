@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use super::{
-    ast::{BinOpKind, Expr, Program, Stmt},
+    ast::{BinOpKind, Expr, Program, Stmt, UnaryOpKind},
     error::{JadeError, Result},
 };
 
@@ -69,12 +69,35 @@ fn eval_expr(expr: Expr, env: &Env) -> Result<i64> {
                 BinOpKind::Sub => Ok(l - r),
                 BinOpKind::Mul => Ok(l * r),
                 BinOpKind::Div => {
-                    if r == 0 {
-                        Err(JadeError::DivisionByZero { span })
+                    if r == 0 { Err(JadeError::DivisionByZero { span }) } else { Ok(l / r) }
+                }
+                BinOpKind::Mod => {
+                    if r == 0 { Err(JadeError::RemainderByZero { span }) } else { Ok(l % r) }
+                }
+                BinOpKind::BitAnd => Ok(l & r),
+                BinOpKind::BitOr  => Ok(l | r),
+                BinOpKind::BitXor => Ok(l ^ r),
+                BinOpKind::Shl => {
+                    if r < 0 || r >= 64 {
+                        Err(JadeError::InvalidShift { amount: r, span })
                     } else {
-                        Ok(l / r)
+                        Ok(l << r as u32)
                     }
                 }
+                BinOpKind::Shr => {
+                    if r < 0 || r >= 64 {
+                        Err(JadeError::InvalidShift { amount: r, span })
+                    } else {
+                        Ok(l >> r as u32)
+                    }
+                }
+            }
+        }
+
+        Expr::UnaryOp { op, operand, .. } => {
+            let val = eval_expr(*operand, env)?;
+            match op {
+                UnaryOpKind::BitNot => Ok(!val),
             }
         }
     }
