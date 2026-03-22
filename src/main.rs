@@ -16,7 +16,10 @@ fn main() {
             cli::help::print_help();
         }
         [_, filename] => {
-            cli::run::run_file(filename);
+            cli::run::run_file(filename, false);
+        }
+        [_, filename, flag] if flag == "-v" || flag == "--verbose" => {
+            cli::run::run_file(filename, true);
         }
         _ => {
             eprintln!("error: unexpected arguments");

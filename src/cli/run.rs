@@ -2,7 +2,7 @@ use std::{fs, process};
 
 use crate::interpreter::{eval, lexer, parser};
 
-pub fn run_file(path: &str) {
+pub fn run_file(path: &str, verbose: bool) {
     let source = match fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
@@ -35,10 +35,11 @@ pub fn run_file(path: &str) {
         }
     };
 
-    // Temporary: print all variables until we have print statements
-    let mut pairs: Vec<(&String, &i64)> = env.entries().collect();
-    pairs.sort_by_key(|(name, _)| name.as_str());
-    for (name, val) in pairs {
-        println!("{} = {}", name, val);
+    if verbose {
+        let mut pairs: Vec<(&String, &i64)> = env.entries().collect();
+        pairs.sort_by_key(|(name, _)| name.as_str());
+        for (name, val) in pairs {
+            println!("{} = {}", name, val);
+        }
     }
 }
