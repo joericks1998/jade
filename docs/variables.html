@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Jade 1.0.2 — Installation</title>
+  <title>Jade 1.0.2 — Variables</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -299,7 +299,7 @@
       <div class="sidebar-section">
         <h4>Getting Started</h4>
         <ul>
-          <li><a href="index.html" class="active">Installation</a></li>
+          <li><a href="index.html">Installation</a></li>
           <li><a href="quickstart.html">Quick Start</a></li>
         </ul>
       </div>
@@ -307,7 +307,7 @@
       <div class="sidebar-section">
         <h4>Language Reference</h4>
         <ul>
-          <li><a href="variables.html">Variables</a></li>
+          <li><a href="variables.html" class="active">Variables</a></li>
           <li><a href="expressions.html">Expressions</a></li>
           <li><a href="operators.html">Operators</a></li>
           <li><a href="types.html">Types</a></li>
@@ -333,46 +333,26 @@
     <!-- ── Main content ── -->
     <main class="content">
 
-      <h1>Jade 1.0.2 Documentation</h1>
-      <p class="lead">
-        Jade is a programming language written in Rust. This is the documentation
-        for version 1.0.2 — the interpreter supports integer arithmetic, modulus,
-        bitwise operations (<code>&amp;</code>, <code>|</code>, <code>^</code>, <code>~</code>, <code>&lt;&lt;</code>, <code>&gt;&gt;</code>),
-        and variable assignment.
-      </p>
-
-      <section id="installation">
-        <h2>Installation</h2>
+      <section id="variables">
+        <h2>Variables</h2>
         <p>
-          Jade 1.0.2 is built from source. A prebuilt binary and install script
-          are planned for a future release.
+          Variables are declared with the <code>let</code> keyword. Every variable
+          must be initialized at declaration.
         </p>
-
-        <h3>Requirements</h3>
+        <pre><code>let x = 42
+let y = x + 1
+let z = x * y - 10</code></pre>
+        <p>
+          Variable names must start with a letter or underscore and may contain
+          letters, digits, and underscores.
+        </p>
+        <h3>Rules</h3>
         <ul>
-          <li>Rust 1.70 or later — install via <a href="https://rustup.rs">rustup.rs</a></li>
-          <li>Git</li>
+          <li>All variables hold integers in the current release.</li>
+          <li>A variable may be referenced in any expression declared after it.</li>
+          <li>Referencing an undeclared variable is a runtime error.</li>
+          <li>Semicolons are optional — Jade inserts them automatically at line boundaries.</li>
         </ul>
-
-        <h3>Build from Source</h3>
-        <pre><code>git clone https://github.com/joericks1998/jade
-cd jade
-cargo build --release</code></pre>
-        <p>
-          The compiled binary is placed at <code>target/release/jade</code>.
-          Copy it somewhere on your <code>PATH</code>:
-        </p>
-        <pre><code>cp target/release/jade /usr/local/bin/jade</code></pre>
-
-        <h3>Verify</h3>
-        <pre><code>jade --help</code></pre>
-        <p>Expected output:</p>
-        <pre><code>jade — the Jade programming language
-
-USAGE:
-  jade &lt;file.jde&gt;               Run a Jade source file
-  jade &lt;file.jde&gt; -v, --verbose Run and print all variables after execution
-  jade -h, --help               Show this help message</code></pre>
       </section>
 
     </main>
