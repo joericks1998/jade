@@ -27,6 +27,12 @@ pub enum Expr {
         span: Span,
     },
 
+    /// A float literal, e.g. `3.14`
+    Float {
+        value: f64,
+        span: Span,
+    },
+
     /// A reference to a variable, e.g. `add`
     Identifier {
         name: String,
