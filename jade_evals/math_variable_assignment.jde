@@ -1,2 +1,4 @@
 let add = 1 + 1
 let result = add * 2
+
+let float_var = 0.22

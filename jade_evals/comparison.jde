@@ -1,0 +1,23 @@
+let eq_true = 3 == 3
+let eq_false = 3 == 4
+let ne_true = 3 != 4
+let ne_false = 3 != 3
+
+let lt_true = 1 < 2
+let lt_false = 2 < 1
+let gt_true = 2 > 1
+let gt_false = 1 > 2
+let le_equal = 2 <= 2
+let le_less = 1 <= 2
+let ge_equal = 2 >= 2
+let ge_greater = 3 >= 2
+
+let float_eq = 1.5 == 1.5
+let float_lt = 1.0 < 2.0
+let float_gt = 2.5 > 1.5
+
+let bool_lt = false < true
+let bool_gt = true > false
+let bool_eq = true == true
+
+let compare_chain = 1 < 2 && 3 > 0

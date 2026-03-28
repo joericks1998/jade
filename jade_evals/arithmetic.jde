@@ -1,0 +1,19 @@
+let add_int = 3 + 4
+let sub_int = 10 - 3
+let mul_int = 3 * 4
+let div_int = 10 / 2
+let mod_int = 10 % 3
+
+let add_float = 1.5 + 2.5
+let sub_float = 5.0 - 1.5
+let mul_float = 2.0 * 3.5
+let div_float = 5.0 / 2.0
+let mod_float = 5.0 % 2.0
+
+let promoted_add = 1 + 0.5
+let promoted_mul = 2 * 1.5
+let promoted_div = 5 / 2.0
+let promoted_sub = 3.0 - 1
+
+let chained = 2 + 3 * 4
+let grouped = (2 + 3) * 4

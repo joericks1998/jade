@@ -1,0 +1,10 @@
+let bitnot_zero = ~0
+let bitnot_val = ~6
+
+let neg_int = -5
+let neg_float = -2.5
+let neg_expr = -(3 + 4)
+
+let not_true = !true
+let not_false = !false
+let double_not = !!true
