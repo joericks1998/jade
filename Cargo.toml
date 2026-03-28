@@ -1,8 +1,8 @@
 [package]
 name = "jade"
-version = "1.0.4"
+version = "1.0.5"
 edition = "2024"
-description = "A languge for languages"
+description = "A languge for LLMs"
 license = "MIT"
 
 [dependencies]
