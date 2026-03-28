@@ -92,7 +92,7 @@ impl Env {
 /// Walk the program and return the populated top-level environment.
 pub fn evaluate(program: Program) -> Result<Env> {
     let env_rc = Rc::new(RefCell::new(Env::new()));
-    eval_block(program.stmts, Rc::clone(&env_rc))?;
+    eval_block(&program.stmts, Rc::clone(&env_rc))?;
     // FnValues hold Rc clones of env_rc, so try_unwrap would fail.
     // Snapshot the top-level frame into a plain Env for the caller.
     let mut result = Env::new();
@@ -106,29 +106,48 @@ pub fn evaluate(program: Program) -> Result<Env> {
 
 /// Evaluate a list of statements in `env`.
 /// Returns `Some(value)` if a `return` was executed, `None` otherwise.
-fn eval_block(stmts: Vec<Stmt>, env: Rc<RefCell<Env>>) -> Result<Option<Value>> {
+fn eval_block(stmts: &[Stmt], env: Rc<RefCell<Env>>) -> Result<Option<Value>> {
     for stmt in stmts {
         match stmt {
             Stmt::Let { name, value, .. } => {
                 let v = eval_expr(value, &env)?;
-                env.borrow_mut().set(name, v);
+                env.borrow_mut().set(name.clone(), v);
             }
 
             Stmt::FnDef { name, params, body, .. } => {
                 let fn_val = FnValue {
-                    params,
-                    body,
+                    params: params.clone(),
+                    body: body.clone(),
                     def_env: Rc::clone(&env),
                 };
-                env.borrow_mut().set(name, Value::Fn(Rc::new(fn_val)));
+                env.borrow_mut().set(name.clone(), Value::Fn(Rc::new(fn_val)));
             }
 
             Stmt::Return { value, .. } => {
                 let v = match value {
                     Some(expr) => eval_expr(expr, &env)?,
+                    // DESIGN: bare `return` yields Int(0) until a Unit type is added.
                     None => Value::Int(0),
                 };
                 return Ok(Some(v));
+            }
+
+            Stmt::While { condition, body, span } => {
+                loop {
+                    let cond = eval_expr(condition, &env)?;
+                    match cond {
+                        Value::Bool(true) => {
+                            if let Some(v) = eval_block(body, Rc::clone(&env))? {
+                                return Ok(Some(v));
+                            }
+                        }
+                        Value::Bool(false) => break,
+                        _ => return Err(JadeError::TypeError {
+                            op: "while".to_string(),
+                            span: *span,
+                        }),
+                    }
+                }
             }
 
             Stmt::If { condition, then_body, else_body, span } => {
@@ -148,7 +167,7 @@ fn eval_block(stmts: Vec<Stmt>, env: Rc<RefCell<Env>>) -> Result<Option<Value>> 
                     }
                     _ => return Err(JadeError::TypeError {
                         op: "if".to_string(),
-                        span,
+                        span: *span,
                     }),
                 }
             }
@@ -174,32 +193,29 @@ fn to_float(v: Value) -> f64 {
 }
 
 /// Evaluate one expression against the current environment, returning its value.
-fn eval_expr(expr: Expr, env: &Rc<RefCell<Env>>) -> Result<Value> {
+fn eval_expr(expr: &Expr, env: &Rc<RefCell<Env>>) -> Result<Value> {
     match expr {
-        Expr::Integer { value, .. } => Ok(Value::Int(value)),
-        Expr::Float   { value, .. } => Ok(Value::Float(value)),
-        Expr::Bool    { value, .. } => Ok(Value::Bool(value)),
+        Expr::Integer { value, .. } => Ok(Value::Int(*value)),
+        Expr::Float   { value, .. } => Ok(Value::Float(*value)),
+        Expr::Bool    { value, .. } => Ok(Value::Bool(*value)),
 
         Expr::Identifier { name, span } => {
-            env.borrow().get(&name).ok_or(JadeError::UndefinedVariable { name, span })
+            env.borrow().get(name).ok_or(JadeError::UndefinedVariable { name: name.clone(), span: *span })
         }
 
         Expr::Call { callee, args, span } => {
-            let callee_val = eval_expr(*callee, env)?;
+            let callee_val = eval_expr(callee, env)?;
             let Value::Fn(fn_rc) = callee_val else {
-                return Err(JadeError::NotCallable { span });
+                return Err(JadeError::NotCallable { span: *span });
             };
 
-            // Clone what we need before releasing the Rc borrow
-            let params  = fn_rc.params.clone();
-            let body    = fn_rc.body.clone();
             let def_env = Rc::clone(&fn_rc.def_env);
 
-            if args.len() != params.len() {
+            if args.len() != fn_rc.params.len() {
                 return Err(JadeError::ArityMismatch {
-                    expected: params.len(),
+                    expected: fn_rc.params.len(),
                     got: args.len(),
-                    span,
+                    span: *span,
                 });
             }
 
@@ -211,138 +227,140 @@ fn eval_expr(expr: Expr, env: &Rc<RefCell<Env>>) -> Result<Value> {
 
             // Build the call frame as a child of the function's defining scope
             let mut call_env = Env::new_child(def_env);
-            for (param, val) in params.into_iter().zip(arg_vals) {
-                call_env.set(param, val);
+            for (param, val) in fn_rc.params.iter().zip(arg_vals) {
+                call_env.set(param.clone(), val);
             }
             let call_env_rc = Rc::new(RefCell::new(call_env));
 
-            Ok(eval_block(body, call_env_rc)?.unwrap_or(Value::Int(0)))
+            // DESIGN: A function that falls off the end without `return` yields Int(0).
+            // This will be replaced by a Unit type in a future release.
+            Ok(eval_block(&fn_rc.body, call_env_rc)?.unwrap_or(Value::Int(0)))
         }
 
         Expr::BinOp { op, left, right, span } => {
             match op {
                 // Short-circuit logical ops
                 BinOpKind::And => {
-                    let l = eval_expr(*left, env)?;
+                    let l = eval_expr(left, env)?;
                     match l {
                         Value::Bool(false) => Ok(Value::Bool(false)),
-                        Value::Bool(true)  => match eval_expr(*right, env)? {
+                        Value::Bool(true)  => match eval_expr(right, env)? {
                             Value::Bool(b) => Ok(Value::Bool(b)),
-                            _              => Err(JadeError::TypeError { op: "&&".to_string(), span }),
+                            _              => Err(JadeError::TypeError { op: "&&".to_string(), span: *span }),
                         },
-                        _ => Err(JadeError::TypeError { op: "&&".to_string(), span }),
+                        _ => Err(JadeError::TypeError { op: "&&".to_string(), span: *span }),
                     }
                 }
                 BinOpKind::Or => {
-                    let l = eval_expr(*left, env)?;
+                    let l = eval_expr(left, env)?;
                     match l {
                         Value::Bool(true)  => Ok(Value::Bool(true)),
-                        Value::Bool(false) => match eval_expr(*right, env)? {
+                        Value::Bool(false) => match eval_expr(right, env)? {
                             Value::Bool(b) => Ok(Value::Bool(b)),
-                            _              => Err(JadeError::TypeError { op: "||".to_string(), span }),
+                            _              => Err(JadeError::TypeError { op: "||".to_string(), span: *span }),
                         },
-                        _ => Err(JadeError::TypeError { op: "||".to_string(), span }),
+                        _ => Err(JadeError::TypeError { op: "||".to_string(), span: *span }),
                     }
                 }
 
                 // All other binary ops evaluate both operands eagerly
                 other => {
-                    let l = eval_expr(*left, env)?;
-                    let r = eval_expr(*right, env)?;
+                    let l = eval_expr(left, env)?;
+                    let r = eval_expr(right, env)?;
                     match other {
                         BinOpKind::Add => match (l, r) {
                             (Value::Int(a), Value::Int(b)) => a.checked_add(b)
-                                .ok_or(JadeError::IntegerOverflow { span })
+                                .ok_or(JadeError::IntegerOverflow { span: *span })
                                 .map(Value::Int),
                             (Value::Bool(_), _) | (_, Value::Bool(_)) |
-                            (Value::Fn(_),   _) | (_, Value::Fn(_))   => Err(JadeError::TypeError { op: "+".to_string(), span }),
+                            (Value::Fn(_),   _) | (_, Value::Fn(_))   => Err(JadeError::TypeError { op: "+".to_string(), span: *span }),
                             (a, b) => Ok(Value::Float(to_float(a) + to_float(b))),
                         },
                         BinOpKind::Sub => match (l, r) {
                             (Value::Int(a), Value::Int(b)) => a.checked_sub(b)
-                                .ok_or(JadeError::IntegerOverflow { span })
+                                .ok_or(JadeError::IntegerOverflow { span: *span })
                                 .map(Value::Int),
                             (Value::Bool(_), _) | (_, Value::Bool(_)) |
-                            (Value::Fn(_),   _) | (_, Value::Fn(_))   => Err(JadeError::TypeError { op: "-".to_string(), span }),
+                            (Value::Fn(_),   _) | (_, Value::Fn(_))   => Err(JadeError::TypeError { op: "-".to_string(), span: *span }),
                             (a, b) => Ok(Value::Float(to_float(a) - to_float(b))),
                         },
                         BinOpKind::Mul => match (l, r) {
                             (Value::Int(a), Value::Int(b)) => a.checked_mul(b)
-                                .ok_or(JadeError::IntegerOverflow { span })
+                                .ok_or(JadeError::IntegerOverflow { span: *span })
                                 .map(Value::Int),
                             (Value::Bool(_), _) | (_, Value::Bool(_)) |
-                            (Value::Fn(_),   _) | (_, Value::Fn(_))   => Err(JadeError::TypeError { op: "*".to_string(), span }),
+                            (Value::Fn(_),   _) | (_, Value::Fn(_))   => Err(JadeError::TypeError { op: "*".to_string(), span: *span }),
                             (a, b) => Ok(Value::Float(to_float(a) * to_float(b))),
                         },
                         BinOpKind::Div => match (l, r) {
                             (Value::Int(a), Value::Int(b)) => {
-                                if b == 0 { Err(JadeError::DivisionByZero { span }) } else { Ok(Value::Int(a / b)) }
+                                if b == 0 { Err(JadeError::DivisionByZero { span: *span }) } else { Ok(Value::Int(a / b)) }
                             }
                             (Value::Bool(_), _) | (_, Value::Bool(_)) |
-                            (Value::Fn(_),   _) | (_, Value::Fn(_))   => Err(JadeError::TypeError { op: "/".to_string(), span }),
+                            (Value::Fn(_),   _) | (_, Value::Fn(_))   => Err(JadeError::TypeError { op: "/".to_string(), span: *span }),
                             (a, b) => {
                                 let bf = to_float(b);
-                                if bf == 0.0 { Err(JadeError::DivisionByZero { span }) } else { Ok(Value::Float(to_float(a) / bf)) }
+                                if bf == 0.0 { Err(JadeError::DivisionByZero { span: *span }) } else { Ok(Value::Float(to_float(a) / bf)) }
                             }
                         },
                         BinOpKind::Mod => match (l, r) {
                             (Value::Int(a), Value::Int(b)) => {
-                                if b == 0 { Err(JadeError::RemainderByZero { span }) } else { Ok(Value::Int(a % b)) }
+                                if b == 0 { Err(JadeError::RemainderByZero { span: *span }) } else { Ok(Value::Int(a % b)) }
                             }
                             (Value::Bool(_), _) | (_, Value::Bool(_)) |
-                            (Value::Fn(_),   _) | (_, Value::Fn(_))   => Err(JadeError::TypeError { op: "%".to_string(), span }),
+                            (Value::Fn(_),   _) | (_, Value::Fn(_))   => Err(JadeError::TypeError { op: "%".to_string(), span: *span }),
                             (a, b) => {
                                 let bf = to_float(b);
-                                if bf == 0.0 { Err(JadeError::RemainderByZero { span }) } else { Ok(Value::Float(to_float(a) % bf)) }
+                                if bf == 0.0 { Err(JadeError::RemainderByZero { span: *span }) } else { Ok(Value::Float(to_float(a) % bf)) }
                             }
                         },
 
                         BinOpKind::BitAnd => match (l, r) {
                             (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a & b)),
-                            _ => Err(JadeError::TypeError { op: "&".to_string(), span }),
+                            _ => Err(JadeError::TypeError { op: "&".to_string(), span: *span }),
                         },
                         BinOpKind::BitOr => match (l, r) {
                             (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a | b)),
-                            _ => Err(JadeError::TypeError { op: "|".to_string(), span }),
+                            _ => Err(JadeError::TypeError { op: "|".to_string(), span: *span }),
                         },
                         BinOpKind::BitXor => match (l, r) {
                             (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a ^ b)),
-                            _ => Err(JadeError::TypeError { op: "^".to_string(), span }),
+                            _ => Err(JadeError::TypeError { op: "^".to_string(), span: *span }),
                         },
                         BinOpKind::Shl => match (l, r) {
                             (Value::Int(a), Value::Int(b)) => {
                                 if b < 0 || b >= 64 {
-                                    Err(JadeError::InvalidShift { amount: b, span })
+                                    Err(JadeError::InvalidShift { amount: b, span: *span })
                                 } else {
                                     // SAFETY: guard above ensures 0 <= b < 64, fits safely in u32
                                     Ok(Value::Int(a << b as u32))
                                 }
                             }
-                            _ => Err(JadeError::TypeError { op: "<<".to_string(), span }),
+                            _ => Err(JadeError::TypeError { op: "<<".to_string(), span: *span }),
                         },
                         BinOpKind::Shr => match (l, r) {
                             (Value::Int(a), Value::Int(b)) => {
                                 if b < 0 || b >= 64 {
-                                    Err(JadeError::InvalidShift { amount: b, span })
+                                    Err(JadeError::InvalidShift { amount: b, span: *span })
                                 } else {
                                     // SAFETY: guard above ensures 0 <= b < 64, fits safely in u32
                                     Ok(Value::Int(a >> b as u32))
                                 }
                             }
-                            _ => Err(JadeError::TypeError { op: ">>".to_string(), span }),
+                            _ => Err(JadeError::TypeError { op: ">>".to_string(), span: *span }),
                         },
 
                         BinOpKind::Eq => match (l, r) {
                             (Value::Int(a),   Value::Int(b))   => Ok(Value::Bool(a == b)),
                             (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a == b)),
                             (Value::Bool(a),  Value::Bool(b))  => Ok(Value::Bool(a == b)),
-                            _ => Err(JadeError::TypeError { op: "==".to_string(), span }),
+                            _ => Err(JadeError::TypeError { op: "==".to_string(), span: *span }),
                         },
                         BinOpKind::Ne => match (l, r) {
                             (Value::Int(a),   Value::Int(b))   => Ok(Value::Bool(a != b)),
                             (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a != b)),
                             (Value::Bool(a),  Value::Bool(b))  => Ok(Value::Bool(a != b)),
-                            _ => Err(JadeError::TypeError { op: "!=".to_string(), span }),
+                            _ => Err(JadeError::TypeError { op: "!=".to_string(), span: *span }),
                         },
 
                         BinOpKind::Lt => match (l, r) {
@@ -351,8 +369,8 @@ fn eval_expr(expr: Expr, env: &Rc<RefCell<Env>>) -> Result<Value> {
                             (Value::Int(a),   Value::Float(b)) => Ok(Value::Bool((a as f64) < b)),
                             (Value::Float(a), Value::Int(b))   => Ok(Value::Bool(a < (b as f64))),
                             // bool ordering: false=0, true=1 → false < true
-                            (Value::Bool(a),  Value::Bool(b))  => Ok(Value::Bool((!a) & b)),
-                            _ => Err(JadeError::TypeError { op: "<".to_string(), span }),
+                            (Value::Bool(a),  Value::Bool(b))  => Ok(Value::Bool(!a && b)),
+                            _ => Err(JadeError::TypeError { op: "<".to_string(), span: *span }),
                         },
                         BinOpKind::Gt => match (l, r) {
                             (Value::Int(a),   Value::Int(b))   => Ok(Value::Bool(a > b)),
@@ -360,8 +378,8 @@ fn eval_expr(expr: Expr, env: &Rc<RefCell<Env>>) -> Result<Value> {
                             (Value::Int(a),   Value::Float(b)) => Ok(Value::Bool((a as f64) > b)),
                             (Value::Float(a), Value::Int(b))   => Ok(Value::Bool(a > (b as f64))),
                             // bool ordering: false=0, true=1 → true > false
-                            (Value::Bool(a),  Value::Bool(b))  => Ok(Value::Bool(a & (!b))),
-                            _ => Err(JadeError::TypeError { op: ">".to_string(), span }),
+                            (Value::Bool(a),  Value::Bool(b))  => Ok(Value::Bool(a && !b)),
+                            _ => Err(JadeError::TypeError { op: ">".to_string(), span: *span }),
                         },
                         BinOpKind::Le => match (l, r) {
                             (Value::Int(a),   Value::Int(b))   => Ok(Value::Bool(a <= b)),
@@ -369,8 +387,8 @@ fn eval_expr(expr: Expr, env: &Rc<RefCell<Env>>) -> Result<Value> {
                             (Value::Int(a),   Value::Float(b)) => Ok(Value::Bool((a as f64) <= b)),
                             (Value::Float(a), Value::Int(b))   => Ok(Value::Bool(a <= (b as f64))),
                             // bool ordering: false=0, true=1 → a <= b iff a==b or a<b
-                            (Value::Bool(a),  Value::Bool(b))  => Ok(Value::Bool(a == b || ((!a) & b))),
-                            _ => Err(JadeError::TypeError { op: "<=".to_string(), span }),
+                            (Value::Bool(a),  Value::Bool(b))  => Ok(Value::Bool(a == b || (!a && b))),
+                            _ => Err(JadeError::TypeError { op: "<=".to_string(), span: *span }),
                         },
                         BinOpKind::Ge => match (l, r) {
                             (Value::Int(a),   Value::Int(b))   => Ok(Value::Bool(a >= b)),
@@ -378,8 +396,8 @@ fn eval_expr(expr: Expr, env: &Rc<RefCell<Env>>) -> Result<Value> {
                             (Value::Int(a),   Value::Float(b)) => Ok(Value::Bool((a as f64) >= b)),
                             (Value::Float(a), Value::Int(b))   => Ok(Value::Bool(a >= (b as f64))),
                             // bool ordering: false=0, true=1 → a >= b iff a==b or a>b
-                            (Value::Bool(a),  Value::Bool(b))  => Ok(Value::Bool(a == b || (a & (!b)))),
-                            _ => Err(JadeError::TypeError { op: ">=".to_string(), span }),
+                            (Value::Bool(a),  Value::Bool(b))  => Ok(Value::Bool(a == b || (a && !b))),
+                            _ => Err(JadeError::TypeError { op: ">=".to_string(), span: *span }),
                         },
 
                         BinOpKind::And | BinOpKind::Or => unreachable!(),
@@ -389,20 +407,20 @@ fn eval_expr(expr: Expr, env: &Rc<RefCell<Env>>) -> Result<Value> {
         }
 
         Expr::UnaryOp { op, operand, span } => {
-            let val = eval_expr(*operand, env)?;
+            let val = eval_expr(operand, env)?;
             match op {
                 UnaryOpKind::BitNot => match val {
                     Value::Int(i)  => Ok(Value::Int(!i)),
-                    _ => Err(JadeError::TypeError { op: "~".to_string(), span }),
+                    _ => Err(JadeError::TypeError { op: "~".to_string(), span: *span }),
                 },
                 UnaryOpKind::Not => match val {
                     Value::Bool(b) => Ok(Value::Bool(!b)),
-                    _ => Err(JadeError::TypeError { op: "!".to_string(), span }),
+                    _ => Err(JadeError::TypeError { op: "!".to_string(), span: *span }),
                 },
                 UnaryOpKind::Neg => match val {
                     Value::Int(i)   => Ok(Value::Int(-i)),
                     Value::Float(f) => Ok(Value::Float(-f)),
-                    _ => Err(JadeError::TypeError { op: "-".to_string(), span }),
+                    _ => Err(JadeError::TypeError { op: "-".to_string(), span: *span }),
                 },
             }
         }
@@ -417,18 +435,20 @@ mod tests {
     use crate::interpreter::{error::JadeError, lexer, parser};
 
     fn eval_src(src: &str) -> Result<Env> {
-        let tokens = lexer::tokenize(src).unwrap();
-        let program = parser::parse(tokens).unwrap();
+        let tokens = lexer::tokenize(src).expect("lex failed");
+        let program = parser::parse(tokens).expect("parse failed");
         evaluate(program)
     }
 
     fn eval_src_parse_err(src: &str) -> JadeError {
-        let tokens = lexer::tokenize(src).unwrap();
+        let tokens = lexer::tokenize(src).expect("lex failed");
         parser::parse(tokens).unwrap_err()
     }
 
     fn get(env: &Env, name: &str) -> Value {
-        env.get(name).unwrap_or_else(|| panic!("variable '{}' not found", name))
+        let v = env.get(name);
+        assert!(v.is_some(), "variable '{}' not found in env", name);
+        v.unwrap()
     }
 
     // ── arithmetic ───────────────────────────────────────────────────────────
@@ -982,5 +1002,68 @@ mod tests {
     fn test_eval_nested_fn_parse_error() {
         let err = eval_src_parse_err("fn outer() {\n    fn inner() {\n        return 1\n    }\n    return 2\n}");
         assert!(matches!(err, JadeError::NestedFunction { .. }));
+    }
+
+    // ── while loops ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_eval_while_basic_count_up() {
+        let env = eval_src("let i = 0\nwhile i < 5 {\n    let i = i + 1\n}").unwrap();
+        assert!(matches!(get(&env, "i"), Value::Int(5)));
+    }
+
+    #[test]
+    fn test_eval_while_condition_false_from_start() {
+        let env = eval_src("let never = 99\nwhile never < 0 {\n    let never = never + 1\n}").unwrap();
+        assert!(matches!(get(&env, "never"), Value::Int(99)));
+    }
+
+    #[test]
+    fn test_eval_while_accumulate_sum() {
+        let env = eval_src(
+            "let sum = 0\nlet i = 1\nwhile i <= 10 {\n    let sum = sum + i\n    let i = i + 1\n}"
+        ).unwrap();
+        assert!(matches!(get(&env, "sum"), Value::Int(55)));
+    }
+
+    #[test]
+    fn test_eval_while_boolean_flag() {
+        let env = eval_src(
+            "let flag = true\nlet steps = 0\nwhile flag {\n    let steps = steps + 1\n    if steps == 3 {\n        let flag = false\n    }\n}"
+        ).unwrap();
+        assert!(matches!(get(&env, "steps"), Value::Int(3)));
+        assert!(matches!(get(&env, "flag"), Value::Bool(false)));
+    }
+
+    #[test]
+    fn test_eval_while_in_fn_factorial() {
+        let env = eval_src(
+            "fn factorial(n) {\n    let result = 1\n    let i = 1\n    while i <= n {\n        let result = result * i\n        let i = i + 1\n    }\n    return result\n}\nlet f5 = factorial(5)\nlet f0 = factorial(0)"
+        ).unwrap();
+        assert!(matches!(get(&env, "f5"), Value::Int(120)));
+        assert!(matches!(get(&env, "f0"), Value::Int(1)));
+    }
+
+    #[test]
+    fn test_eval_while_return_propagates() {
+        // return inside a while body must exit the function immediately
+        let env = eval_src(
+            "fn first_above(threshold) {\n    let n = 1\n    while n * n <= threshold {\n        let n = n + 1\n    }\n    return n\n}\nlet r = first_above(9)"
+        ).unwrap();
+        assert!(matches!(get(&env, "r"), Value::Int(4)));
+    }
+
+    #[test]
+    fn test_eval_while_nested() {
+        let env = eval_src(
+            "let total = 0\nlet i = 0\nwhile i < 3 {\n    let j = 0\n    while j < 3 {\n        let total = total + 1\n        let j = j + 1\n    }\n    let i = i + 1\n}"
+        ).unwrap();
+        assert!(matches!(get(&env, "total"), Value::Int(9)));
+    }
+
+    #[test]
+    fn test_eval_while_type_error_condition() {
+        let err = eval_src("while 1 {\n}").unwrap_err();
+        assert!(matches!(err, JadeError::TypeError { .. }));
     }
 }

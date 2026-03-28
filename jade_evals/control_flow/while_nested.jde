@@ -1,0 +1,55 @@
+// Nested while loops
+
+// 3x3 grid: count total iterations
+let total = 0
+let i = 0
+while i < 3 {
+    let j = 0
+    while j < 3 {
+        let total = total + 1
+        let j = j + 1
+    }
+    let i = i + 1
+}
+// total == 9
+
+// Dot product of two "vectors" via iteration
+// a = [1, 2, 3], b = [4, 5, 6] — encoded as steps
+fn dot3(a1, a2, a3, b1, b2, b3) {
+    return a1 * b1 + a2 * b2 + a3 * b3
+}
+
+let dp = dot3(1, 2, 3, 4, 5, 6)   // 4 + 10 + 18 = 32
+
+// Outer loop accumulates inner loop results
+let outer_sum = 0
+let a = 1
+while a <= 3 {
+    let inner_sum = 0
+    let b = 1
+    while b <= a {
+        let inner_sum = inner_sum + b
+        let b = b + 1
+    }
+    let outer_sum = outer_sum + inner_sum
+    let a = a + 1
+}
+// a=1: inner_sum=1
+// a=2: inner_sum=1+2=3
+// a=3: inner_sum=1+2+3=6
+// outer_sum == 10
+
+// Multiply two numbers via repeated addition
+fn mul_by_add(x, y) {
+    let result = 0
+    let i = 0
+    while i < y {
+        let result = result + x
+        let i = i + 1
+    }
+    return result
+}
+
+let m1 = mul_by_add(6, 7)    // 42
+let m2 = mul_by_add(0, 5)    // 0
+let m3 = mul_by_add(3, 0)    // 0

@@ -24,19 +24,19 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program> {
 
 impl Parser {
     /// Returns a reference to the current token without advancing.
-    /// Safety: the lexer always appends an `Eof` sentinel, so `self.pos` is
-    /// always a valid index as long as the parser stops looping on `Eof`.
+    // Safety: `parse()` rejects empty token streams. `advance()` is clamped at
+    // the Eof sentinel, so `self.pos` is always a valid index. The fallback to
+    // the last token is an extra safety net — it returns Eof rather than panicking.
     fn peek(&self) -> &Token {
         self.tokens.get(self.pos)
-            .expect("parser advanced past end of token stream — missing Eof sentinel")
+            .unwrap_or_else(|| &self.tokens[self.tokens.len() - 1])
     }
 
     /// Returns the current token and advances the cursor.
     /// Clamped at the `Eof` sentinel: once `pos` reaches the last token
     /// (`Eof`), further calls return `Eof` without advancing past it.
     fn advance(&mut self) -> &Token {
-        let token = self.tokens.get(self.pos)
-            .expect("parser advanced past end of token stream — missing Eof sentinel");
+        let token = &self.tokens[self.pos];
         // Clamped at Eof sentinel: pos never exceeds tokens.len()-1
         if self.pos + 1 < self.tokens.len() {
             self.pos += 1;
@@ -44,7 +44,10 @@ impl Parser {
         token
     }
 
-    /// If the current token matches `kind`, advance and return a clone.
+    /// If the current token's *variant* matches `kind`, advance and return a clone.
+    /// Note: only the discriminant is compared — the payload (e.g. the integer value
+    /// inside `Integer(n)`) is ignored. This is intentional: callers always pass a
+    /// representative value like `&TokenKind::Semicolon` where only the variant matters.
     /// Otherwise return an error.
     fn expect(&mut self, kind: &TokenKind) -> Result<Token> {
         let token = self.peek().clone();
@@ -76,6 +79,7 @@ impl Parser {
             TokenKind::Fn     => self.parse_fn(),
             TokenKind::Return => self.parse_return(),
             TokenKind::If     => self.parse_if(),
+            TokenKind::While  => self.parse_while(),
             _ => {
                 let token = self.peek().clone();
                 Err(JadeError::UnexpectedToken {
@@ -218,6 +222,17 @@ impl Parser {
         Ok(Stmt::If { condition, then_body, else_body, span })
     }
 
+    /// Parse `while <condition> { <body> }`
+    fn parse_while(&mut self) -> Result<Stmt> {
+        let span = self.peek().span;
+        self.advance(); // consume `while`
+
+        let condition = self.parse_or()?;
+        let body = self.parse_block()?;
+
+        Ok(Stmt::While { condition, body, span })
+    }
+
     /// Parse `{ <stmts> }` — a brace-delimited block of statements.
     fn parse_block(&mut self) -> Result<Vec<Stmt>> {
         self.expect(&TokenKind::LBrace)?;
@@ -345,19 +360,19 @@ impl Parser {
 
     /// `<<` and `>>` (bit shifts).
     fn parse_shift(&mut self) -> Result<Expr> {
-        let mut left = self.parse_expr()?;
+        let mut left = self.parse_additive()?;
         loop {
             match self.peek().kind {
                 TokenKind::LtLt => {
                     let span = Self::expr_span(&left);
                     self.advance();
-                    let right = self.parse_expr()?;
+                    let right = self.parse_additive()?;
                     left = Expr::BinOp { op: BinOpKind::Shl, left: Box::new(left), right: Box::new(right), span };
                 }
                 TokenKind::GtGt => {
                     let span = Self::expr_span(&left);
                     self.advance();
-                    let right = self.parse_expr()?;
+                    let right = self.parse_additive()?;
                     left = Expr::BinOp { op: BinOpKind::Shr, left: Box::new(left), right: Box::new(right), span };
                 }
                 _ => break,
@@ -367,7 +382,7 @@ impl Parser {
     }
 
     /// `+` and `-` (additive).
-    fn parse_expr(&mut self) -> Result<Expr> {
+    fn parse_additive(&mut self) -> Result<Expr> {
         let mut left = self.parse_term()?;
         loop {
             match self.peek().kind {
@@ -836,5 +851,31 @@ mod tests {
     fn test_parse_return_outside_fn_error() {
         let err = parse_src_err("return 1");
         assert!(matches!(err, JadeError::ReturnOutsideFunction { .. }));
+    }
+
+    // ── while ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_while_basic() {
+        let p = parse_src("let i = 0\nwhile i < 5 {\n    let i = i + 1\n}");
+        assert_eq!(p.stmts.len(), 2);
+        let Stmt::While { condition, body, .. } = &p.stmts[1] else { panic!() };
+        assert!(matches!(condition, Expr::BinOp { op: BinOpKind::Lt, .. }));
+        assert_eq!(body.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_while_empty_body() {
+        let p = parse_src("while false {\n}");
+        assert_eq!(p.stmts.len(), 1);
+        let Stmt::While { body, .. } = &p.stmts[0] else { panic!() };
+        assert!(body.is_empty());
+    }
+
+    #[test]
+    fn test_parse_while_inside_fn() {
+        let p = parse_src("fn f(n) {\n    while n > 0 {\n        let n = n - 1\n    }\n    return n\n}");
+        let Stmt::FnDef { body, .. } = &p.stmts[0] else { panic!() };
+        assert!(matches!(body[0], Stmt::While { .. }));
     }
 }
