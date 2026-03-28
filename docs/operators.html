@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Jade 1.0.2 — Operators</title>
+  <title>Jade 1.0.3 — Operators</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -282,9 +282,9 @@
       </a>
       <span class="topbar-sep">»</span>
       <select title="Version">
-        <option>1.0.2</option>
+        <option>1.0.3</option>
       </select>
-      <span class="topbar-title">1.0.2 Documentation</span>
+      <span class="topbar-title">1.0.3 Documentation</span>
     </div>
     <div class="topbar-right">
       <a href="https://github.com/joericks1998/jade">GitHub</a>
@@ -311,6 +311,8 @@
           <li><a href="expressions.html">Expressions</a></li>
           <li><a href="operators.html" class="active">Operators</a></li>
           <li><a href="types.html">Types</a></li>
+          <li><a href="functions.html">Functions</a></li>
+          <li><a href="control-flow.html">Control Flow</a></li>
         </ul>
       </div>
       <hr class="sidebar-divider" />
@@ -335,6 +337,8 @@
 
       <section id="operators">
         <h2>Operators</h2>
+
+        <h3>Arithmetic</h3>
         <table>
           <thead>
             <tr><th>Operator</th><th>Name</th><th>Example</th><th>Result</th></tr>
@@ -343,8 +347,18 @@
             <tr><td><code>+</code></td><td>Addition</td><td><code>3 + 4</code></td><td><code>7</code></td></tr>
             <tr><td><code>-</code></td><td>Subtraction</td><td><code>10 - 3</code></td><td><code>7</code></td></tr>
             <tr><td><code>*</code></td><td>Multiplication</td><td><code>3 * 4</code></td><td><code>12</code></td></tr>
-            <tr><td><code>/</code></td><td>Integer division</td><td><code>10 / 3</code></td><td><code>3</code></td></tr>
+            <tr><td><code>/</code></td><td>Division</td><td><code>10 / 4</code></td><td><code>2</code> (int÷int) / <code>2.5</code> (float)</td></tr>
             <tr><td><code>%</code></td><td>Remainder (modulus)</td><td><code>10 % 3</code></td><td><code>1</code></td></tr>
+            <tr><td><code>-</code></td><td>Unary negation</td><td><code>-5</code></td><td><code>-5</code></td></tr>
+          </tbody>
+        </table>
+
+        <h3>Bitwise</h3>
+        <table>
+          <thead>
+            <tr><th>Operator</th><th>Name</th><th>Example</th><th>Result</th></tr>
+          </thead>
+          <tbody>
             <tr><td><code>&amp;</code></td><td>Bitwise AND</td><td><code>6 &amp; 3</code></td><td><code>2</code></td></tr>
             <tr><td><code>|</code></td><td>Bitwise OR</td><td><code>5 | 2</code></td><td><code>7</code></td></tr>
             <tr><td><code>^</code></td><td>Bitwise XOR</td><td><code>7 ^ 3</code></td><td><code>4</code></td></tr>
@@ -353,25 +367,70 @@
             <tr><td><code>&gt;&gt;</code></td><td>Right shift</td><td><code>64 &gt;&gt; 2</code></td><td><code>16</code></td></tr>
           </tbody>
         </table>
+
+        <h3>Logical</h3>
+        <table>
+          <thead>
+            <tr><th>Operator</th><th>Name</th><th>Example</th><th>Result</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>&amp;&amp;</code></td><td>Logical AND (short-circuit)</td><td><code>true &amp;&amp; false</code></td><td><code>false</code></td></tr>
+            <tr><td><code>||</code></td><td>Logical OR (short-circuit)</td><td><code>false || true</code></td><td><code>true</code></td></tr>
+            <tr><td><code>!</code></td><td>Logical NOT (unary)</td><td><code>!true</code></td><td><code>false</code></td></tr>
+          </tbody>
+        </table>
+        <p>
+          <code>&amp;&amp;</code> and <code>||</code> are short-circuit: the right operand is not evaluated if
+          the left operand determines the result. Both operands must be <code>bool</code>;
+          mixing types produces a <code>TypeError</code>.
+        </p>
+
+        <h3>Comparison</h3>
+        <table>
+          <thead>
+            <tr><th>Operator</th><th>Name</th><th>Example</th><th>Result</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>==</code></td><td>Equal</td><td><code>3 == 3</code></td><td><code>true</code></td></tr>
+            <tr><td><code>!=</code></td><td>Not equal</td><td><code>3 != 4</code></td><td><code>true</code></td></tr>
+            <tr><td><code>&lt;</code></td><td>Less than</td><td><code>1 &lt; 2</code></td><td><code>true</code></td></tr>
+            <tr><td><code>&gt;</code></td><td>Greater than</td><td><code>2 &gt; 1</code></td><td><code>true</code></td></tr>
+            <tr><td><code>&lt;=</code></td><td>Less than or equal</td><td><code>2 &lt;= 2</code></td><td><code>true</code></td></tr>
+            <tr><td><code>&gt;=</code></td><td>Greater than or equal</td><td><code>3 &gt;= 2</code></td><td><code>true</code></td></tr>
+          </tbody>
+        </table>
+        <p>
+          Equality (<code>==</code>, <code>!=</code>) requires both operands to be the same type — mixing <code>int</code>
+          and <code>float</code> produces a <code>TypeError</code>. Ordering operators (<code>&lt;</code>, <code>&gt;</code>,
+          <code>&lt;=</code>, <code>&gt;=</code>) allow <code>int</code> vs <code>float</code> comparisons by promoting the
+          integer to float.
+        </p>
+
         <h3>Precedence</h3>
         <p>Operators bind from tightest to loosest in this order:</p>
         <ol>
-          <li>Unary: <code>~</code></li>
+          <li>Unary: <code>~</code>, <code>!</code>, <code>-</code></li>
           <li>Multiplicative: <code>*</code>, <code>/</code>, <code>%</code></li>
           <li>Additive: <code>+</code>, <code>-</code></li>
           <li>Shifts: <code>&lt;&lt;</code>, <code>&gt;&gt;</code></li>
           <li>Bitwise AND: <code>&amp;</code></li>
           <li>Bitwise XOR: <code>^</code></li>
           <li>Bitwise OR: <code>|</code></li>
+          <li>Comparison: <code>==</code>, <code>!=</code>, <code>&lt;</code>, <code>&gt;</code>, <code>&lt;=</code>, <code>&gt;=</code></li>
+          <li>Logical AND: <code>&amp;&amp;</code></li>
+          <li>Logical OR: <code>||</code></li>
         </ol>
         <pre><code>let x = 2 + 3 * 4
-let y = 1 &lt;&lt; 2 &amp; 15</code></pre>
+let y = 1 &lt;&lt; 2 &amp; 15
+let z = 1 &lt; 2 &amp;&amp; 3 &gt; 0</code></pre>
+
         <h3>Runtime Errors</h3>
         <p>The following operations produce runtime errors:</p>
         <ul>
           <li>Division by zero: <code>x / 0</code></li>
           <li>Remainder by zero: <code>x % 0</code></li>
           <li>Invalid shift amount (negative or ≥ 64): <code>1 &lt;&lt; 64</code></li>
+          <li>Type mismatch: <code>1 + true</code>, <code>1.0 &amp; 2</code>, <code>1 == 1.0</code></li>
         </ul>
       </section>
 

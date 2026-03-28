@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Jade 1.0.2 — Changelog</title>
+  <title>Jade 1.0.3 — Changelog</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -282,9 +282,9 @@
       </a>
       <span class="topbar-sep">»</span>
       <select title="Version">
-        <option>1.0.2</option>
+        <option>1.0.3</option>
       </select>
-      <span class="topbar-title">1.0.2 Documentation</span>
+      <span class="topbar-title">1.0.3 Documentation</span>
     </div>
     <div class="topbar-right">
       <a href="https://github.com/joericks1998/jade">GitHub</a>
@@ -311,6 +311,8 @@
           <li><a href="expressions.html">Expressions</a></li>
           <li><a href="operators.html">Operators</a></li>
           <li><a href="types.html">Types</a></li>
+          <li><a href="functions.html">Functions</a></li>
+          <li><a href="control-flow.html">Control Flow</a></li>
         </ul>
       </div>
       <hr class="sidebar-divider" />
@@ -335,11 +337,23 @@
 
       <section id="changelog">
         <h2>Changelog</h2>
-        <h3>1.0.2</h3>
+        <h3>v1.0.3</h3>
+        <ul>
+          <li>Added <code>fn</code> definitions with parameter lists and <code>return</code></li>
+          <li>Added function calls as first-class expressions</li>
+          <li>Added first-class function values — functions can be assigned to variables and passed as arguments</li>
+          <li>Added recursion — functions can call themselves</li>
+          <li>Added <code>if</code>/<code>else</code> control flow</li>
+        </ul>
+        <h3>v1.0.2</h3>
         <ul>
           <li>Modulus operator: <code>%</code></li>
           <li>Bitwise operators: <code>&amp;</code>, <code>|</code>, <code>^</code>, <code>&lt;&lt;</code>, <code>&gt;&gt;</code></li>
           <li>Unary bitwise NOT: <code>~</code></li>
+          <li>Float literals (<code>f64</code>) and unary negation for floats</li>
+          <li>Boolean literals: <code>true</code>, <code>false</code></li>
+          <li>Logical operators: <code>&amp;&amp;</code>, <code>||</code>, <code>!</code> with short-circuit evaluation</li>
+          <li>Comparison operators: <code>==</code>, <code>!=</code>, <code>&lt;</code>, <code>&gt;</code>, <code>&lt;=</code>, <code>&gt;=</code></li>
           <li>Runtime errors: remainder by zero, invalid shift amount (negative or ≥ 64)</li>
         </ul>
         <h3>1.0.1</h3>

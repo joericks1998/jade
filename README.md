@@ -1,11 +1,17 @@
 # Jade
 
-A programming language written in Rust. Jade is currently in Phase 1 — the core interpreter is working and supports integer arithmetic, bitwise operations, and variable assignment.
+A programming language written in Rust. Jade is currently in Phase 1 — the tree-walking interpreter supports three value types (`int`, `float`, `bool`), `let` bindings, `fn` function definitions with `return`, `if`/`else` control flow, first-class functions, recursion, arithmetic, bitwise, logical, and comparison operators.
 
 ```
-let x = 255 & 0x0f
-let y = x << 2
-let result = y + 1
+fn factorial(n) {
+    if n == 0 {
+        return 1
+    }
+    return n * factorial(n - 1)
+}
+
+let x = 10
+let result = factorial(x)
 ```
 
 ```
@@ -61,16 +67,24 @@ Errors are written to stderr with the format `<file>: <phase> error: <descriptio
 | Feature | Status |
 |---|---|
 | `let` variable declarations | ✓ |
-| Integer literals (i64) | ✓ |
+| Integer literals (`i64`) | ✓ |
+| Float literals (`f64`) | ✓ |
+| Boolean literals (`true`/`false`) | ✓ |
 | Arithmetic: `+` `-` `*` `/` `%` | ✓ |
 | Bitwise: `&` `\|` `^` `~` `<<` `>>` | ✓ |
+| Logical: `&&` `\|\|` `!` | ✓ |
+| Comparison: `==` `!=` `<` `>` `<=` `>=` | ✓ |
+| `fn` definitions and calls | ✓ |
+| `return` statement | ✓ |
+| `if`/`else` control flow | ✓ |
+| First-class functions | ✓ |
+| Recursion | ✓ |
 | Auto-semicolon insertion | ✓ |
-| Functions | Planned |
-| Control flow (`if`, `while`) | Planned |
-| Strings, bools, floats | Planned |
+| Strings | Planned |
+| `while` loops | Planned |
 | Type inference | Planned |
 
-Operator precedence (tightest to loosest): `~` → `*` `/` `%` → `+` `-` → `<<` `>>` → `&` → `^` → `|`
+Operator precedence (tightest to loosest): unary (`~` `!` `-`) → `*` `/` `%` → `+` `-` → `<<` `>>` → `&` → `^` → `|` → `==` `!=` `<` `>` `<=` `>=` → `&&` → `||`
 
 ---
 
@@ -88,8 +102,11 @@ src/
     ast.rs                  AST node definitions (Stmt, Expr, BinOpKind, UnaryOpKind)
     eval.rs                 Tree-walking evaluator — produces a variable environment
     error.rs                Error types (JadeError, Span)
-tests/
-  math_variable_assignment.jde    Working example of Jade syntax
+jade_evals/
+  arithmatic/               Fixture files for arithmetic and bitwise operations
+  assignment/               Fixture files for let bindings and boolean/comparison expressions
+  control_flow/             Fixture files for if/else and nested if
+  functions/                Fixture files for fn definitions, calls, recursion, first-class fns
 planning/
   REQUIREMENTS.md           Full build plan across all phases
 docs/
@@ -115,7 +132,7 @@ Full documentation is available at **[jadelang.org](https://jadelang.org)**. The
 ```sh
 cargo build
 cargo test
-jade tests/math_variable_assignment.jde --verbose
+jade jade_evals/arithmatic/arithmetic.jde --verbose
 ```
 
 **Guidelines**
