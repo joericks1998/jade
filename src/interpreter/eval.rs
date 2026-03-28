@@ -910,23 +910,65 @@ mod tests {
 
     #[test]
     fn test_eval_fn_factorial_0() {
-        let src = "fn factorial(n) {\n    let result = 1\n    let i = 1\n    while i <= n {\n        result = result * i\n        i = i + 1\n    }\n    return result\n}\nlet f0 = factorial(0)";
+        let src = "fn factorial(n) {\n    if n <= 1 {\n        return 1\n    }\n    return n * factorial(n - 1)\n}\nlet f0 = factorial(0)";
         let env = eval_src(src).unwrap();
         assert!(matches!(get(&env, "f0"), Value::Int(1)));
     }
 
     #[test]
+    fn test_eval_fn_factorial_1() {
+        let src = "fn factorial(n) {\n    if n <= 1 {\n        return 1\n    }\n    return n * factorial(n - 1)\n}\nlet f1 = factorial(1)";
+        let env = eval_src(src).unwrap();
+        assert!(matches!(get(&env, "f1"), Value::Int(1)));
+    }
+
+    #[test]
     fn test_eval_fn_factorial_5() {
-        let src = "fn factorial(n) {\n    let result = 1\n    let i = 1\n    while i <= n {\n        result = result * i\n        i = i + 1\n    }\n    return result\n}\nlet f5 = factorial(5)";
+        let src = "fn factorial(n) {\n    if n <= 1 {\n        return 1\n    }\n    return n * factorial(n - 1)\n}\nlet f5 = factorial(5)";
         let env = eval_src(src).unwrap();
         assert!(matches!(get(&env, "f5"), Value::Int(120)));
     }
 
     #[test]
+    fn test_eval_fn_factorial_7() {
+        let src = "fn factorial(n) {\n    if n <= 1 {\n        return 1\n    }\n    return n * factorial(n - 1)\n}\nlet f7 = factorial(7)";
+        let env = eval_src(src).unwrap();
+        assert!(matches!(get(&env, "f7"), Value::Int(5040)));
+    }
+
+    #[test]
+    fn test_eval_fn_fib_0() {
+        let src = "fn fib(n) {\n    if n <= 1 {\n        return n\n    }\n    return fib(n - 1) + fib(n - 2)\n}\nlet fib0 = fib(0)";
+        let env = eval_src(src).unwrap();
+        assert!(matches!(get(&env, "fib0"), Value::Int(0)));
+    }
+
+    #[test]
+    fn test_eval_fn_fib_1() {
+        let src = "fn fib(n) {\n    if n <= 1 {\n        return n\n    }\n    return fib(n - 1) + fib(n - 2)\n}\nlet fib1 = fib(1)";
+        let env = eval_src(src).unwrap();
+        assert!(matches!(get(&env, "fib1"), Value::Int(1)));
+    }
+
+    #[test]
     fn test_eval_fn_fib_10() {
-        let src = "fn fib(n) {\n    if n <= 1 {\n        return n\n    }\n    let a = 0\n    let b = 1\n    let i = 2\n    while i <= n {\n        let temp = a + b\n        a = b\n        b = temp\n        i = i + 1\n    }\n    return b\n}\nlet fib10 = fib(10)";
+        let src = "fn fib(n) {\n    if n <= 1 {\n        return n\n    }\n    return fib(n - 1) + fib(n - 2)\n}\nlet fib10 = fib(10)";
         let env = eval_src(src).unwrap();
         assert!(matches!(get(&env, "fib10"), Value::Int(55)));
+    }
+
+    #[test]
+    fn test_eval_fn_sum_to_0() {
+        let src = "fn sum_to(n) {\n    if n <= 0 {\n        return 0\n    }\n    return n + sum_to(n - 1)\n}\nlet s0 = sum_to(0)";
+        let env = eval_src(src).unwrap();
+        assert!(matches!(get(&env, "s0"), Value::Int(0)));
+    }
+
+    #[test]
+    fn test_eval_fn_sum_to_10() {
+        let src = "fn sum_to(n) {\n    if n <= 0 {\n        return 0\n    }\n    return n + sum_to(n - 1)\n}\nlet s10 = sum_to(10)";
+        let env = eval_src(src).unwrap();
+        assert!(matches!(get(&env, "s10"), Value::Int(55)));
     }
 
     // ── functions — if/else ───────────────────────────────────────────────────
