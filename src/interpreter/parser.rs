@@ -23,6 +23,11 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program> {
 }
 
 impl Parser {
+    /// Returns a reference to the token one position ahead without advancing.
+    fn peek_next(&self) -> Option<&Token> {
+        self.tokens.get(self.pos + 1)
+    }
+
     /// Returns a reference to the current token without advancing.
     // Safety: `parse()` rejects empty token streams. `advance()` is clamped at
     // the Eof sentinel, so `self.pos` is always a valid index. The fallback to
@@ -80,6 +85,9 @@ impl Parser {
             TokenKind::Return => self.parse_return(),
             TokenKind::If     => self.parse_if(),
             TokenKind::While  => self.parse_while(),
+            TokenKind::Identifier(_)
+                if self.peek_next().map(|t| t.kind == TokenKind::Equals).unwrap_or(false)
+            => self.parse_assign(),
             _ => {
                 let token = self.peek().clone();
                 Err(JadeError::UnexpectedToken {
@@ -89,6 +97,23 @@ impl Parser {
                 })
             }
         }
+    }
+
+    /// Parse `<ident> = <expr> ;`
+    fn parse_assign(&mut self) -> Result<Stmt> {
+        let span = self.peek().span;
+        let name = match &self.peek().kind {
+            TokenKind::Identifier(n) => {
+                let n = n.clone();
+                self.advance();
+                n
+            }
+            _ => unreachable!("parse_assign called without leading identifier"),
+        };
+        self.expect(&TokenKind::Equals)?;
+        let value = self.parse_or()?;
+        self.expect(&TokenKind::Semicolon)?;
+        Ok(Stmt::Assign { name, value, span })
     }
 
     /// Parse `let <ident> = <expr> ;`

@@ -47,6 +47,14 @@ pub enum Stmt {
         body: Vec<Stmt>,
         span: Span,
     },
+
+    /// `name = expr` — reassign an existing variable (or introduce one) in the global env
+    Assign {
+        name: String,
+        value: Expr,
+        #[allow(dead_code)]
+        span: Span,
+    },
 }
 
 /// An expression produces a value.
