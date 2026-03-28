@@ -17,5 +17,4 @@ __pycache__/
 
 /target
 
-.claude/*
-!.claude/commands/
+.claude/
