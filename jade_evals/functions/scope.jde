@@ -1,0 +1,17 @@
+fn get_local() {
+    let x = 42
+    return x
+}
+
+fn uses_param(x) {
+    return x + 1
+}
+
+fn local_shadow(x) {
+    let y = x * 2
+    return y
+}
+
+let a = get_local()
+let b = uses_param(9)
+let c = local_shadow(5)

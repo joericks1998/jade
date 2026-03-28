@@ -1,25 +1,49 @@
 use super::error::Span;
 
 /// A complete Jade program: a list of statements.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Program {
     pub stmts: Vec<Stmt>,
 }
 
 /// A statement is a top-level action.
-#[derive(Debug)]
-#[allow(dead_code)]
+#[derive(Debug, Clone)]
 pub enum Stmt {
     /// `let name = expr`
     Let {
         name: String,
         value: Expr,
+        #[allow(dead_code)] // reserved for future error reporting
+        span: Span,
+    },
+
+    /// `fn name(param, ...) { body }`
+    FnDef {
+        name: String,
+        params: Vec<String>,
+        body: Vec<Stmt>,
+        #[allow(dead_code)] // reserved for future error reporting
+        span: Span,
+    },
+
+    /// `return expr` or bare `return`
+    Return {
+        value: Option<Expr>,
+        #[allow(dead_code)] // reserved for future error reporting
+        span: Span,
+    },
+
+    /// `if condition { then_body } else { else_body }`
+    If {
+        condition: Expr,
+        then_body: Vec<Stmt>,
+        else_body: Option<Vec<Stmt>>,
         span: Span,
     },
 }
 
 /// An expression produces a value.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Expr {
     /// An integer literal, e.g. `42`
     Integer {
@@ -39,9 +63,16 @@ pub enum Expr {
         span: Span,
     },
 
-    /// A reference to a variable, e.g. `add`
+    /// A reference to a variable or function, e.g. `add`
     Identifier {
         name: String,
+        span: Span,
+    },
+
+    /// A function call, e.g. `add(1, 2)` or `f(x)`
+    Call {
+        callee: Box<Expr>,
+        args: Vec<Expr>,
         span: Span,
     },
 
@@ -62,7 +93,7 @@ pub enum Expr {
 }
 
 /// All binary operators Jade supports.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum BinOpKind {
     // Arithmetic
     Add,
@@ -89,7 +120,7 @@ pub enum BinOpKind {
 }
 
 /// All unary operators Jade supports.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum UnaryOpKind {
     BitNot,
     Not,

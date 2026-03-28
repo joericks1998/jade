@@ -1,6 +1,5 @@
 /// A position in source text. Line and column are 1-based (how editors report them).
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 pub struct Span {
     pub line: usize,
     pub col: usize,
@@ -8,7 +7,6 @@ pub struct Span {
 
 /// Every error Jade can produce.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub enum JadeError {
     /// Lexer found a character it doesn't recognize.
     UnexpectedChar { ch: char, span: Span },
@@ -31,11 +29,61 @@ pub enum JadeError {
     /// Evaluator received a negative or out-of-range shift amount.
     InvalidShift { amount: i64, span: Span },
 
-    /// Evaluator applied a bitwise operator to a float.
+    /// Evaluator applied an operator to an incompatible type.
     TypeError { op: String, span: Span },
 
     /// Lexer encountered a numeric literal that overflows its target type.
     LiteralOverflow { span: Span },
+
+    /// Called a function with the wrong number of arguments.
+    ArityMismatch { expected: usize, got: usize, span: Span },
+
+    /// Tried to call a non-function value.
+    NotCallable { span: Span },
+
+    /// `return` used outside of a function body.
+    ReturnOutsideFunction { span: Span },
+
+    /// `fn` definition found inside another function body.
+    NestedFunction { span: Span },
+
+    /// Integer arithmetic overflowed the i64 range.
+    IntegerOverflow { span: Span },
+}
+
+impl std::fmt::Display for JadeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            JadeError::UnexpectedChar { ch, span } =>
+                write!(f, "[{}:{}] unexpected character '{}'", span.line, span.col, ch),
+            JadeError::UnexpectedToken { expected, got, span } =>
+                write!(f, "[{}:{}] expected {}, found {}", span.line, span.col, expected, got),
+            JadeError::UnexpectedEof { span } =>
+                write!(f, "[{}:{}] unexpected end of file", span.line, span.col),
+            JadeError::UndefinedVariable { name, span } =>
+                write!(f, "[{}:{}] undefined variable '{}'", span.line, span.col, name),
+            JadeError::DivisionByZero { span } =>
+                write!(f, "[{}:{}] division by zero", span.line, span.col),
+            JadeError::RemainderByZero { span } =>
+                write!(f, "[{}:{}] remainder by zero", span.line, span.col),
+            JadeError::InvalidShift { amount, span } =>
+                write!(f, "[{}:{}] invalid shift amount {}", span.line, span.col, amount),
+            JadeError::TypeError { op, span } =>
+                write!(f, "[{}:{}] type error: operator '{}' applied to incompatible types", span.line, span.col, op),
+            JadeError::LiteralOverflow { span } =>
+                write!(f, "[{}:{}] numeric literal overflows its type", span.line, span.col),
+            JadeError::ArityMismatch { expected, got, span } =>
+                write!(f, "[{}:{}] wrong number of arguments: expected {}, got {}", span.line, span.col, expected, got),
+            JadeError::NotCallable { span } =>
+                write!(f, "[{}:{}] value is not callable", span.line, span.col),
+            JadeError::ReturnOutsideFunction { span } =>
+                write!(f, "[{}:{}] 'return' used outside of a function", span.line, span.col),
+            JadeError::NestedFunction { span } =>
+                write!(f, "[{}:{}] function definitions cannot be nested", span.line, span.col),
+            JadeError::IntegerOverflow { span } =>
+                write!(f, "[{}:{}] integer overflow", span.line, span.col),
+        }
+    }
 }
 
 /// Shorthand so every module can write `Result<T>` instead of `Result<T, JadeError>`.
