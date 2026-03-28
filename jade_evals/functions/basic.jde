@@ -1,0 +1,16 @@
+fn add(a, b) {
+    return a + b
+}
+
+fn square(x) {
+    return x * x
+}
+
+fn multiply(a, b, c) {
+    return a * b * c
+}
+
+let sum = add(3, 4)
+let sq = square(5)
+let triple = multiply(2, 3, 4)
+let chained = add(square(2), square(3))

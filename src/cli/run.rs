@@ -14,7 +14,7 @@ pub fn run_file(path: &str, verbose: bool) {
     let tokens = match lexer::tokenize(&source) {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("{}: lexer error: {:?}", path, e);
+            eprintln!("{}: lexer error: {}", path, e);
             process::exit(1);
         }
     };
@@ -22,7 +22,7 @@ pub fn run_file(path: &str, verbose: bool) {
     let program = match parser::parse(tokens) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("{}: parse error: {:?}", path, e);
+            eprintln!("{}: parse error: {}", path, e);
             process::exit(1);
         }
     };
@@ -30,7 +30,7 @@ pub fn run_file(path: &str, verbose: bool) {
     let env: eval::Env = match eval::evaluate(program) {
         Ok(e) => e,
         Err(e) => {
-            eprintln!("{}: runtime error: {:?}", path, e);
+            eprintln!("{}: runtime error: {}", path, e);
             process::exit(1);
         }
     };
@@ -50,6 +50,7 @@ pub fn run_file(path: &str, verbose: bool) {
                     }
                 }
                 eval::Value::Bool(b) => println!("{} = {}", name, b),
+                eval::Value::Fn(_)   => println!("{} = <fn>", name),
             }
         }
     }
