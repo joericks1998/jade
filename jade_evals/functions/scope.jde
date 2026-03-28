@@ -1,17 +1,21 @@
-fn get_local() {
+// Global scoping: all let bindings live in one flat env.
+// Function params and locals are visible at the top level after a call returns.
+
+fn set_value() {
     let x = 42
     return x
 }
 
-fn uses_param(x) {
-    return x + 1
+fn double_param(n) {
+    let result = n * 2
+    return result
 }
 
-fn local_shadow(x) {
-    let y = x * 2
-    return y
-}
+let a = set_value()
+// x == 42  (written globally by set_value)
+// a == 42
 
-let a = get_local()
-let b = uses_param(9)
-let c = local_shadow(5)
+let b = double_param(7)
+// n == 7   (parameter binding is global)
+// result == 14
+// b == 14
