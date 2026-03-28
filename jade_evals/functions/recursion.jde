@@ -1,20 +1,37 @@
+// Iterative implementations using while loops.
+// Recursion is not supported: all variables share one global scope,
+// so a recursive call overwrites the caller's parameters.
+
 fn factorial(n) {
-    if n == 0 {
-        return 1
+    let result = 1
+    let i = 1
+    while i <= n {
+        let result = result * i
+        let i = i + 1
     }
-    return n * factorial(n - 1)
+    return result
 }
 
 fn fib(n) {
     if n <= 1 {
         return n
     }
-    return fib(n - 1) + fib(n - 2)
+    let a = 0
+    let b = 1
+    let i = 2
+    while i <= n {
+        let temp = a + b
+        let a = b
+        let b = temp
+        let i = i + 1
+    }
+    return b
 }
 
-let f0 = factorial(0)
-let f1 = factorial(1)
-let f5 = factorial(5)
-let fib0 = fib(0)
-let fib1 = fib(1)
-let fib10 = fib(10)
+let f0 = factorial(0)    // 1
+let f1 = factorial(1)    // 1
+let f5 = factorial(5)    // 120
+
+let fib0  = fib(0)       // 0
+let fib1  = fib(1)       // 1
+let fib10 = fib(10)      // 55

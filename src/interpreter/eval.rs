@@ -1,4 +1,3 @@
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -18,13 +17,12 @@ pub enum Value {
     Fn(Rc<FnValue>),
 }
 
-/// The data behind a function value: its signature, body, and defining scope.
+/// Heap-allocated function body shared via `Rc` so that `Value::Fn` clones
+/// cheaply (pointer copy) and the body remains live even if the function
+/// name is rebound during execution.
 pub struct FnValue {
     pub params: Vec<String>,
     pub body: Vec<Stmt>,
-    /// The environment in which this function was defined. Used as the parent
-    /// scope for each call frame, enabling cross-function calls and recursion.
-    pub def_env: Rc<RefCell<Env>>,
 }
 
 impl std::fmt::Debug for Value {
@@ -46,44 +44,37 @@ impl std::fmt::Debug for FnValue {
 
 // ── Environment ──────────────────────────────────────────────────────────────
 
-/// Holds variable bindings for one scope frame.
-/// Reads walk the parent chain; writes always target the current frame.
+/// Single flat environment: all variables share one global scope.
 #[derive(Debug)]
 pub struct Env {
     vars: HashMap<String, Value>,
-    parent: Option<Rc<RefCell<Env>>>,
 }
 
 impl Env {
-    /// Create a new, empty top-level environment.
+    /// Create a new, empty environment.
     pub fn new() -> Self {
-        Env { vars: HashMap::new(), parent: None }
+        Env { vars: HashMap::new() }
     }
 
-    /// Create a child frame whose lookups fall through to `parent`.
-    fn new_child(parent: Rc<RefCell<Env>>) -> Self {
-        Env { vars: HashMap::new(), parent: Some(parent) }
-    }
-
-    /// Look up a variable by name, walking the parent chain.
+    /// Look up a variable by name.
     pub fn get(&self, name: &str) -> Option<Value> {
-        if let Some(v) = self.vars.get(name) {
-            return Some(v.clone());
-        }
-        if let Some(p) = &self.parent {
-            return p.borrow().get(name);
-        }
-        None
+        self.vars.get(name).cloned()
     }
 
-    /// Bind a name to a value in the current frame (never writes to parent).
+    /// Bind a name to a value.
     pub fn set(&mut self, name: String, value: Value) {
         self.vars.insert(name, value);
     }
 
-    /// Iterate over bindings in this frame only (used by `-v` output).
+    /// Iterate over all bindings (used by `-v` output).
     pub fn entries(&self) -> impl Iterator<Item = (&String, &Value)> {
         self.vars.iter()
+    }
+}
+
+impl Default for Env {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -91,41 +82,34 @@ impl Env {
 
 /// Walk the program and return the populated top-level environment.
 pub fn evaluate(program: Program) -> Result<Env> {
-    let env_rc = Rc::new(RefCell::new(Env::new()));
-    eval_block(&program.stmts, Rc::clone(&env_rc))?;
-    // FnValues hold Rc clones of env_rc, so try_unwrap would fail.
-    // Snapshot the top-level frame into a plain Env for the caller.
-    let mut result = Env::new();
-    for (k, v) in env_rc.borrow().entries() {
-        result.set(k.clone(), v.clone());
-    }
-    Ok(result)
+    let mut env = Env::new();
+    eval_block(&program.stmts, &mut env)?;
+    Ok(env)
 }
 
 // ── Statement evaluator ───────────────────────────────────────────────────────
 
 /// Evaluate a list of statements in `env`.
 /// Returns `Some(value)` if a `return` was executed, `None` otherwise.
-fn eval_block(stmts: &[Stmt], env: Rc<RefCell<Env>>) -> Result<Option<Value>> {
+fn eval_block(stmts: &[Stmt], env: &mut Env) -> Result<Option<Value>> {
     for stmt in stmts {
         match stmt {
             Stmt::Let { name, value, .. } => {
-                let v = eval_expr(value, &env)?;
-                env.borrow_mut().set(name.clone(), v);
+                let v = eval_expr(value, env)?;
+                env.set(name.clone(), v);
             }
 
             Stmt::FnDef { name, params, body, .. } => {
                 let fn_val = FnValue {
                     params: params.clone(),
                     body: body.clone(),
-                    def_env: Rc::clone(&env),
                 };
-                env.borrow_mut().set(name.clone(), Value::Fn(Rc::new(fn_val)));
+                env.set(name.clone(), Value::Fn(Rc::new(fn_val)));
             }
 
             Stmt::Return { value, .. } => {
                 let v = match value {
-                    Some(expr) => eval_expr(expr, &env)?,
+                    Some(expr) => eval_expr(expr, env)?,
                     // DESIGN: bare `return` yields Int(0) until a Unit type is added.
                     None => Value::Int(0),
                 };
@@ -134,10 +118,10 @@ fn eval_block(stmts: &[Stmt], env: Rc<RefCell<Env>>) -> Result<Option<Value>> {
 
             Stmt::While { condition, body, span } => {
                 loop {
-                    let cond = eval_expr(condition, &env)?;
+                    let cond = eval_expr(condition, env)?;
                     match cond {
                         Value::Bool(true) => {
-                            if let Some(v) = eval_block(body, Rc::clone(&env))? {
+                            if let Some(v) = eval_block(body, env)? {
                                 return Ok(Some(v));
                             }
                         }
@@ -151,16 +135,16 @@ fn eval_block(stmts: &[Stmt], env: Rc<RefCell<Env>>) -> Result<Option<Value>> {
             }
 
             Stmt::If { condition, then_body, else_body, span } => {
-                let cond = eval_expr(condition, &env)?;
+                let cond = eval_expr(condition, env)?;
                 match cond {
                     Value::Bool(true) => {
-                        if let Some(v) = eval_block(then_body, Rc::clone(&env))? {
+                        if let Some(v) = eval_block(then_body, env)? {
                             return Ok(Some(v));
                         }
                     }
                     Value::Bool(false) => {
                         if let Some(body) = else_body {
-                            if let Some(v) = eval_block(body, Rc::clone(&env))? {
+                            if let Some(v) = eval_block(body, env)? {
                                 return Ok(Some(v));
                             }
                         }
@@ -193,14 +177,14 @@ fn to_float(v: Value) -> f64 {
 }
 
 /// Evaluate one expression against the current environment, returning its value.
-fn eval_expr(expr: &Expr, env: &Rc<RefCell<Env>>) -> Result<Value> {
+fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
     match expr {
         Expr::Integer { value, .. } => Ok(Value::Int(*value)),
         Expr::Float   { value, .. } => Ok(Value::Float(*value)),
         Expr::Bool    { value, .. } => Ok(Value::Bool(*value)),
 
         Expr::Identifier { name, span } => {
-            env.borrow().get(name).ok_or(JadeError::UndefinedVariable { name: name.clone(), span: *span })
+            env.get(name).ok_or(JadeError::UndefinedVariable { name: name.clone(), span: *span })
         }
 
         Expr::Call { callee, args, span } => {
@@ -208,8 +192,6 @@ fn eval_expr(expr: &Expr, env: &Rc<RefCell<Env>>) -> Result<Value> {
             let Value::Fn(fn_rc) = callee_val else {
                 return Err(JadeError::NotCallable { span: *span });
             };
-
-            let def_env = Rc::clone(&fn_rc.def_env);
 
             if args.len() != fn_rc.params.len() {
                 return Err(JadeError::ArityMismatch {
@@ -219,22 +201,20 @@ fn eval_expr(expr: &Expr, env: &Rc<RefCell<Env>>) -> Result<Value> {
                 });
             }
 
-            // Evaluate arguments in the *caller's* scope
+            // Evaluate all arguments before binding (avoids partial-state reads)
             let mut arg_vals = Vec::with_capacity(args.len());
             for arg_expr in args {
                 arg_vals.push(eval_expr(arg_expr, env)?);
             }
 
-            // Build the call frame as a child of the function's defining scope
-            let mut call_env = Env::new_child(def_env);
+            // Bind parameters into the shared global env
             for (param, val) in fn_rc.params.iter().zip(arg_vals) {
-                call_env.set(param.clone(), val);
+                env.set(param.clone(), val);
             }
-            let call_env_rc = Rc::new(RefCell::new(call_env));
 
             // DESIGN: A function that falls off the end without `return` yields Int(0).
             // This will be replaced by a Unit type in a future release.
-            Ok(eval_block(&fn_rc.body, call_env_rc)?.unwrap_or(Value::Int(0)))
+            Ok(eval_block(&fn_rc.body, env)?.unwrap_or(Value::Int(0)))
         }
 
         Expr::BinOp { op, left, right, span } => {
@@ -446,9 +426,7 @@ mod tests {
     }
 
     fn get(env: &Env, name: &str) -> Value {
-        let v = env.get(name);
-        assert!(v.is_some(), "variable '{}' not found in env", name);
-        v.unwrap()
+        env.get(name).unwrap_or_else(|| panic!("variable '{}' not found in env", name))
     }
 
     // ── arithmetic ───────────────────────────────────────────────────────────
@@ -882,25 +860,25 @@ mod tests {
         assert!(matches!(get(&env, "d"), Value::Int(12)));
     }
 
-    // ── functions — recursion ─────────────────────────────────────────────────
+    // ── functions — iteration (global scope; recursion not supported) ────────────
 
     #[test]
     fn test_eval_fn_factorial_0() {
-        let src = "fn factorial(n) {\n    if n == 0 {\n        return 1\n    }\n    return n * factorial(n - 1)\n}\nlet f0 = factorial(0)";
+        let src = "fn factorial(n) {\n    let result = 1\n    let i = 1\n    while i <= n {\n        let result = result * i\n        let i = i + 1\n    }\n    return result\n}\nlet f0 = factorial(0)";
         let env = eval_src(src).unwrap();
         assert!(matches!(get(&env, "f0"), Value::Int(1)));
     }
 
     #[test]
     fn test_eval_fn_factorial_5() {
-        let src = "fn factorial(n) {\n    if n == 0 {\n        return 1\n    }\n    return n * factorial(n - 1)\n}\nlet f5 = factorial(5)";
+        let src = "fn factorial(n) {\n    let result = 1\n    let i = 1\n    while i <= n {\n        let result = result * i\n        let i = i + 1\n    }\n    return result\n}\nlet f5 = factorial(5)";
         let env = eval_src(src).unwrap();
         assert!(matches!(get(&env, "f5"), Value::Int(120)));
     }
 
     #[test]
     fn test_eval_fn_fib_10() {
-        let src = "fn fib(n) {\n    if n <= 1 {\n        return n\n    }\n    return fib(n - 1) + fib(n - 2)\n}\nlet fib10 = fib(10)";
+        let src = "fn fib(n) {\n    if n <= 1 {\n        return n\n    }\n    let a = 0\n    let b = 1\n    let i = 2\n    while i <= n {\n        let temp = a + b\n        let a = b\n        let b = temp\n        let i = i + 1\n    }\n    return b\n}\nlet fib10 = fib(10)";
         let env = eval_src(src).unwrap();
         assert!(matches!(get(&env, "fib10"), Value::Int(55)));
     }
