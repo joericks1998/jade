@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Jade 1.0.2 — Types</title>
+  <title>Jade 1.0.3 — Types</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -282,9 +282,9 @@
       </a>
       <span class="topbar-sep">»</span>
       <select title="Version">
-        <option>1.0.2</option>
+        <option>1.0.3</option>
       </select>
-      <span class="topbar-title">1.0.2 Documentation</span>
+      <span class="topbar-title">1.0.3 Documentation</span>
     </div>
     <div class="topbar-right">
       <a href="https://github.com/joericks1998/jade">GitHub</a>
@@ -311,6 +311,8 @@
           <li><a href="expressions.html">Expressions</a></li>
           <li><a href="operators.html">Operators</a></li>
           <li><a href="types.html" class="active">Types</a></li>
+          <li><a href="functions.html">Functions</a></li>
+          <li><a href="control-flow.html">Control Flow</a></li>
         </ul>
       </div>
       <hr class="sidebar-divider" />
@@ -336,21 +338,44 @@
       <section id="types">
         <h2>Types</h2>
         <p>
-          Jade 1.0.2 has a single value type: the 64-bit signed integer. A full
-          static type system with inference is planned for a later phase of development.
+          Jade 1.0.3 has three runtime value types. A full static type system with
+          inference is planned for a later phase of development.
         </p>
         <table>
           <thead>
             <tr><th>Type</th><th>Description</th><th>Status</th></tr>
           </thead>
           <tbody>
-            <tr><td><code>int</code></td><td>64-bit signed integer</td><td>Implemented</td></tr>
-            <tr><td><code>float</code></td><td>64-bit floating point</td><td>Planned</td></tr>
-            <tr><td><code>bool</code></td><td>Boolean true/false</td><td>Planned</td></tr>
+            <tr><td><code>int</code></td><td>64-bit signed integer (<code>i64</code>)</td><td>Implemented</td></tr>
+            <tr><td><code>float</code></td><td>64-bit floating point (<code>f64</code>)</td><td>Implemented</td></tr>
+            <tr><td><code>bool</code></td><td>Boolean <code>true</code> or <code>false</code></td><td>Implemented</td></tr>
+            <tr><td><code>fn</code></td><td>First-class function value</td><td>Implemented</td></tr>
             <tr><td><code>str</code></td><td>UTF-8 string</td><td>Planned</td></tr>
             <tr><td><code>nil</code></td><td>Absence of value</td><td>Planned</td></tr>
           </tbody>
         </table>
+
+        <h3>Type Coercion Rules</h3>
+        <p>Jade does not implicitly coerce types except in specific arithmetic and comparison contexts:</p>
+        <table>
+          <thead>
+            <tr><th>Rule</th><th>Example</th><th>Result</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Arithmetic: <code>int op float</code> → float</td><td><code>1 + 0.5</code></td><td><code>1.5</code> (float)</td></tr>
+            <tr><td>Ordering: <code>int &lt; float</code> allowed</td><td><code>1 &lt; 2.5</code></td><td><code>true</code></td></tr>
+            <tr><td>Strict equality: no cross-type coercion</td><td><code>1 == 1.0</code></td><td><code>TypeError</code></td></tr>
+            <tr><td>Bool ordering: <code>false</code> = 0, <code>true</code> = 1</td><td><code>false &lt; true</code></td><td><code>true</code></td></tr>
+            <tr><td>Bitwise: integer operands only</td><td><code>1.0 &amp; 2</code></td><td><code>TypeError</code></td></tr>
+            <tr><td>Logical: bool operands only</td><td><code>1 &amp;&amp; true</code></td><td><code>TypeError</code></td></tr>
+          </tbody>
+        </table>
+
+        <div class="note">
+          <strong>Note:</strong> Arithmetic promotion converts an <code>int</code> to <code>float</code>
+          when the other operand is a <code>float</code>. Equality never promotes — comparing
+          <code>1</code> to <code>1.0</code> is always a <code>TypeError</code>.
+        </div>
       </section>
 
     </main>
