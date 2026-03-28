@@ -10,6 +10,10 @@ pub enum TokenKind {
     // Identifiers and keywords
     Identifier(String),
     Let,
+    Fn,
+    Return,
+    If,
+    Else,
     True,
     False,
 
@@ -44,12 +48,15 @@ pub enum TokenKind {
     // Assignment
     Equals,
 
-    // Auto-inserted punctuation
+    // Punctuation
+    Comma,
     Semicolon,
 
     // Grouping
     LParen,
     RParen,
+    LBrace,
+    RBrace,
 
     // End of file sentinel
     Eof,
@@ -73,6 +80,8 @@ fn is_line_terminator(kind: &TokenKind) -> bool {
             | TokenKind::True
             | TokenKind::False
             | TokenKind::RParen
+            // RBrace is intentionally excluded: `} else {` must not get a
+            // semicolon between `}` and `else`.
     )
 }
 
@@ -157,10 +166,14 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
                     col += 1;
                 }
                 let kind = match name.as_str() {
-                    "let"   => TokenKind::Let,
-                    "true"  => TokenKind::True,
-                    "false" => TokenKind::False,
-                    _       => TokenKind::Identifier(name),
+                    "let"    => TokenKind::Let,
+                    "fn"     => TokenKind::Fn,
+                    "return" => TokenKind::Return,
+                    "if"     => TokenKind::If,
+                    "else"   => TokenKind::Else,
+                    "true"   => TokenKind::True,
+                    "false"  => TokenKind::False,
+                    _        => TokenKind::Identifier(name),
                 };
                 tokens.push(Token {
                     kind,
@@ -178,6 +191,9 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
             '^' => { tokens.push(Token { kind: TokenKind::Caret,   span: Span { line, col } }); col += 1; i += 1; }
             '(' => { tokens.push(Token { kind: TokenKind::LParen,  span: Span { line, col } }); col += 1; i += 1; }
             ')' => { tokens.push(Token { kind: TokenKind::RParen,  span: Span { line, col } }); col += 1; i += 1; }
+            '{' => { tokens.push(Token { kind: TokenKind::LBrace,  span: Span { line, col } }); col += 1; i += 1; }
+            '}' => { tokens.push(Token { kind: TokenKind::RBrace,  span: Span { line, col } }); col += 1; i += 1; }
+            ',' => { tokens.push(Token { kind: TokenKind::Comma,   span: Span { line, col } }); col += 1; i += 1; }
 
             // `&` or `&&`
             '&' => {
@@ -302,7 +318,6 @@ mod tests {
 
     #[test]
     fn test_keyword_let() {
-        // `let` is not a line terminator — no semicolon inserted
         assert_eq!(kinds("let"), vec![TokenKind::Let, TokenKind::Eof]);
     }
 
@@ -360,7 +375,6 @@ mod tests {
 
     #[test]
     fn test_no_semicolon_after_operator() {
-        // A `+` at end of line does not trigger semicolon insertion
         assert_eq!(
             kinds("1 +\n2"),
             vec![
@@ -462,5 +476,54 @@ mod tests {
     fn test_bang_eq_vs_bang() {
         assert_eq!(kinds("!="), vec![TokenKind::BangEq, TokenKind::Eof]);
         assert_eq!(kinds("!"),  vec![TokenKind::Bang,   TokenKind::Eof]);
+    }
+
+    // ── function / control flow tokens ───────────────────────────────────────
+
+    #[test]
+    fn test_tokenize_fn() {
+        assert_eq!(kinds("fn"), vec![TokenKind::Fn, TokenKind::Eof]);
+    }
+
+    #[test]
+    fn test_tokenize_return() {
+        assert_eq!(kinds("return"), vec![TokenKind::Return, TokenKind::Eof]);
+    }
+
+    #[test]
+    fn test_tokenize_if_else() {
+        assert_eq!(
+            kinds("if else"),
+            vec![TokenKind::If, TokenKind::Else, TokenKind::Eof]
+        );
+    }
+
+    #[test]
+    fn test_tokenize_braces() {
+        assert_eq!(
+            kinds("{}"),
+            vec![TokenKind::LBrace, TokenKind::RBrace, TokenKind::Eof]
+        );
+    }
+
+    #[test]
+    fn test_tokenize_comma() {
+        assert_eq!(
+            kinds("a, b"),
+            vec![
+                TokenKind::Identifier("a".into()), TokenKind::Comma,
+                TokenKind::Identifier("b".into()), TokenKind::Semicolon,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_no_semicolon_after_rbrace() {
+        // `}` followed by newline should NOT insert a semicolon
+        assert_eq!(
+            kinds("}\nelse"),
+            vec![TokenKind::RBrace, TokenKind::Else, TokenKind::Eof]
+        );
     }
 }
