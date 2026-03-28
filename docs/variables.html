@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Jade 1.0.2 — Variables</title>
+  <title>Jade 1.0.3 — Variables</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -282,9 +282,9 @@
       </a>
       <span class="topbar-sep">»</span>
       <select title="Version">
-        <option>1.0.2</option>
+        <option>1.0.3</option>
       </select>
-      <span class="topbar-title">1.0.2 Documentation</span>
+      <span class="topbar-title">1.0.3 Documentation</span>
     </div>
     <div class="topbar-right">
       <a href="https://github.com/joericks1998/jade">GitHub</a>
@@ -311,6 +311,8 @@
           <li><a href="expressions.html">Expressions</a></li>
           <li><a href="operators.html">Operators</a></li>
           <li><a href="types.html">Types</a></li>
+          <li><a href="functions.html">Functions</a></li>
+          <li><a href="control-flow.html">Control Flow</a></li>
         </ul>
       </div>
       <hr class="sidebar-divider" />
@@ -348,10 +350,11 @@ let z = x * y - 10</code></pre>
         </p>
         <h3>Rules</h3>
         <ul>
-          <li>All variables hold integers in the current release.</li>
+          <li>Variables can hold any of the three value types: <code>int</code>, <code>float</code>, or <code>bool</code>. Functions can also be bound to a name with <code>let</code>.</li>
           <li>A variable may be referenced in any expression declared after it.</li>
-          <li>Referencing an undeclared variable is a runtime error.</li>
+          <li>Referencing an undeclared variable is a runtime error (<code>UndefinedVariable</code>).</li>
           <li>Semicolons are optional — Jade inserts them automatically at line boundaries.</li>
+          <li>Variables declared inside a function body are local to that call frame and are not visible outside.</li>
         </ul>
       </section>
 
