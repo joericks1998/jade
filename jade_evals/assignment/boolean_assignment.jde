@@ -1,14 +1,17 @@
-let flag_true = true
-let flag_false = false
+let flag_true = true         // true
+let flag_false = false       // false
 
-let and_tt = true && true
-let and_tf = true && false
-let and_ff = false && false
+let and_tt = true && true    // true
+let and_tf = true && false   // false
+let and_ff = false && false  // false
 
-let or_tt = true || true
-let or_tf = true || false
-let or_ff = false || false
+let or_tt = true || true     // true
+let or_tf = true || false    // true
+let or_ff = false || false   // false
 
-let complex = true && false || true
-let short_circuit_and = false && true
-let short_circuit_or = true || false
+// && binds tighter than ||: (true && false) || true
+let complex = true && false || true   // true
+
+// short-circuit: right side not evaluated
+let short_circuit_and = false && true  // false
+let short_circuit_or = true || false   // true

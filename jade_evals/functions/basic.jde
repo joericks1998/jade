@@ -1,3 +1,6 @@
+// Basic function definitions and calls.
+// All parameters are bound in the global env and remain visible after the call.
+
 fn add(a, b) {
     return a + b
 }
@@ -11,6 +14,18 @@ fn multiply(a, b, c) {
 }
 
 let sum = add(3, 4)
+// a == 3, b == 4 (bound globally by add)
+// sum == 7
+
 let sq = square(5)
+// x == 5 (bound globally by square)
+// sq == 25
+
 let triple = multiply(2, 3, 4)
+// a == 2, b == 3, c == 4 (bound globally by multiply)
+// triple == 24
+
 let chained = add(square(2), square(3))
+// args evaluated left-to-right: square(2) → x == 2; square(3) → x == 3
+// then add(4, 9): a == 4, b == 9
+// chained == 13

@@ -24,10 +24,10 @@ fn clamp(x, lo, hi) {
     return x
 }
 
-let m1 = max(3, 7)
-let m2 = max(10, 2)
-let pos = is_positive(5)
-let neg = is_positive(-3)
-let clamped_lo = clamp(1, 5, 10)
-let clamped_mid = clamp(7, 5, 10)
-let clamped_hi = clamp(15, 5, 10)
+let m1 = max(3, 7)              // 7
+let m2 = max(10, 2)             // 10
+let pos = is_positive(5)        // true
+let neg = is_positive(-3)       // false
+let clamped_lo = clamp(1, 5, 10)    // 5
+let clamped_mid = clamp(7, 5, 10)   // 7
+let clamped_hi = clamp(15, 5, 10)   // 10
