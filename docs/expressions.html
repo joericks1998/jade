@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Jade 1.0.2 — Expressions</title>
+  <title>Jade 1.0.3 — Expressions</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -282,9 +282,9 @@
       </a>
       <span class="topbar-sep">»</span>
       <select title="Version">
-        <option>1.0.2</option>
+        <option>1.0.3</option>
       </select>
-      <span class="topbar-title">1.0.2 Documentation</span>
+      <span class="topbar-title">1.0.3 Documentation</span>
     </div>
     <div class="topbar-right">
       <a href="https://github.com/joericks1998/jade">GitHub</a>
@@ -311,6 +311,8 @@
           <li><a href="expressions.html" class="active">Expressions</a></li>
           <li><a href="operators.html">Operators</a></li>
           <li><a href="types.html">Types</a></li>
+          <li><a href="functions.html">Functions</a></li>
+          <li><a href="control-flow.html">Control Flow</a></li>
         </ul>
       </div>
       <hr class="sidebar-divider" />
@@ -336,19 +338,46 @@
       <section id="expressions">
         <h2>Expressions</h2>
         <p>
-          An expression produces an integer value. Expressions can be nested
-          arbitrarily using parentheses (planned — not yet supported) or evaluated
-          left-to-right following standard operator precedence.
+          An expression produces a value. Every expression has one of three runtime types:
+          <code>int</code> (64-bit signed integer), <code>float</code> (64-bit floating point),
+          or <code>bool</code>. Expressions can be nested arbitrarily using parentheses
+          or evaluated left-to-right following standard operator precedence.
         </p>
+
         <h3>Integer Literals</h3>
         <pre><code>let a = 0
 let b = 1000000</code></pre>
         <p>Integer literals are 64-bit signed integers (<code>i64</code>).</p>
 
+        <h3>Float Literals</h3>
+        <pre><code>let pi = 3.14
+let half = 0.5</code></pre>
+        <p>Float literals require at least one digit on each side of the decimal point.
+           <code>3.14</code> is valid; bare <code>.5</code> is not.</p>
+
+        <h3>Boolean Literals</h3>
+        <pre><code>let yes = true
+let no  = false</code></pre>
+        <p>The keywords <code>true</code> and <code>false</code> produce <code>bool</code> values.</p>
+
         <h3>Identifiers</h3>
         <p>A variable name used in an expression evaluates to the variable's current value.</p>
         <pre><code>let base = 8
 let doubled = base * 2</code></pre>
+
+        <h3>Parenthesized Expressions</h3>
+        <p>Any expression can be wrapped in parentheses to override default precedence:</p>
+        <pre><code>let a = (2 + 3) * 4
+let b = -(3 + 4)</code></pre>
+
+        <h3>Function Calls</h3>
+        <p>A function value followed by a parenthesized argument list calls that function:</p>
+        <pre><code>fn add(a, b) {
+    return a + b
+}
+let sum = add(3, 4)
+let nested = add(add(1, 2), 3)</code></pre>
+        <p>See <a href="functions.html">Functions</a> for the full reference.</p>
 
         <h3>Binary Expressions</h3>
         <p>Two values combined with an operator:</p>
@@ -358,14 +387,22 @@ let prod = 6 * 7
 let quot = 20 / 4
 let rem  = 10 % 3
 let bits = 255 &amp; 15
-let mask = 1 &lt;&lt; 4</code></pre>
+let mask = 1 &lt;&lt; 4
+let flag = 1 &lt; 2 &amp;&amp; 3 &gt; 0</code></pre>
         <p>Expressions associate left-to-right within the same precedence level:</p>
         <pre><code>let x = 10 - 3 - 2</code></pre>
         <p>This evaluates as <code>(10 - 3) - 2 = 5</code>.</p>
 
         <h3>Unary Expressions</h3>
-        <p>The <code>~</code> operator applies bitwise NOT to its operand:</p>
-        <pre><code>let inv = ~0</code></pre>
+        <p>Jade has three unary prefix operators:</p>
+        <ul>
+          <li><code>~</code> — bitwise NOT (integers only)</li>
+          <li><code>!</code> — logical NOT (booleans only)</li>
+          <li><code>-</code> — arithmetic negation (integers and floats)</li>
+        </ul>
+        <pre><code>let inv   = ~0
+let neg   = -5
+let nflag = !true</code></pre>
       </section>
 
     </main>
