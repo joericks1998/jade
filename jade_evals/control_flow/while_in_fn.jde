@@ -1,0 +1,59 @@
+// While loop inside a function
+
+fn factorial(n) {
+    let result = 1
+    let i = 1
+    while i <= n {
+        let result = result * i
+        let i = i + 1
+    }
+    return result
+}
+
+fn sum_to(n) {
+    let total = 0
+    let i = 1
+    while i <= n {
+        let total = total + i
+        let i = i + 1
+    }
+    return total
+}
+
+// Power function: base ^ exp
+fn power(base, exp) {
+    let result = 1
+    let i = 0
+    while i < exp {
+        let result = result * base
+        let i = i + 1
+    }
+    return result
+}
+
+// First n where n^2 > threshold
+fn first_square_above(threshold) {
+    let n = 1
+    while n * n <= threshold {
+        let n = n + 1
+    }
+    return n
+}
+
+let f0 = factorial(0)    // 1
+let f1 = factorial(1)    // 1
+let f5 = factorial(5)    // 120
+let f7 = factorial(7)    // 5040
+
+let s1  = sum_to(1)      // 1
+let s10 = sum_to(10)     // 55
+let s100 = sum_to(100)   // 5050
+
+let p0 = power(2, 0)     // 1
+let p3 = power(2, 3)     // 8
+let p10 = power(2, 10)   // 1024
+let p3_4 = power(3, 4)   // 81
+
+let fsa1 = first_square_above(0)    // 1  (1^2=1 > 0)
+let fsa9 = first_square_above(9)    // 4  (4^2=16 > 9)
+let fsa25 = first_square_above(25)  // 6  (6^2=36 > 25)

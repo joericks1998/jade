@@ -43,10 +43,13 @@ pub fn run_file(path: &str, verbose: bool) {
                 eval::Value::Int(i) => println!("{} = {}", name, i),
                 eval::Value::Float(f) => {
                     let s = format!("{}", f);
-                    if s.contains('.') || s.contains('e') {
-                        println!("{} = {}", name, s);
-                    } else {
+                    // Append `.0` only when the formatted value looks like a bare integer
+                    // (digits and optional leading minus only). This correctly leaves
+                    // `inf`, `-inf`, `NaN`, and scientific-notation strings unchanged.
+                    if s.chars().all(|c| c.is_ascii_digit() || c == '-') {
                         println!("{} = {}.0", name, s);
+                    } else {
+                        println!("{} = {}", name, s);
                     }
                 }
                 eval::Value::Bool(b) => println!("{} = {}", name, b),

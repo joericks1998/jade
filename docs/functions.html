@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Jade 1.0.3 — Functions</title>
+  <title>Jade 1.0.4 — Functions</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -282,9 +282,9 @@
       </a>
       <span class="topbar-sep">»</span>
       <select title="Version">
-        <option>1.0.3</option>
+        <option>1.0.4</option>
       </select>
-      <span class="topbar-title">1.0.3 Documentation</span>
+      <span class="topbar-title">1.0.4 Documentation</span>
     </div>
     <div class="topbar-right">
       <a href="https://github.com/joericks1998/jade">GitHub</a>
@@ -374,7 +374,7 @@
         <ul>
           <li><code>&lt;name&gt;</code> — an identifier naming the function; binds it in the enclosing scope.</li>
           <li><code>&lt;param&gt;</code> — zero or more parameter names separated by commas; each becomes a local variable inside the body.</li>
-          <li><code>&lt;body statements&gt;</code> — any sequence of <code>let</code>, <code>fn</code>, <code>if</code>/<code>else</code>, or <code>return</code> statements.</li>
+          <li><code>&lt;body statements&gt;</code> — any sequence of <code>let</code>, <code>if</code>/<code>else</code>, <code>while</code>, or <code>return</code> statements. Nested <code>fn</code> definitions are not allowed inside a function body.</li>
           <li><code>return &lt;expr&gt;</code> — exits the function and produces the given value. A bare <code>return</code> produces <code>0</code>.</li>
         </ul>
 
@@ -583,9 +583,9 @@ let fib10 = fib(10)</code></pre>
         <h2>Interaction with Other Features</h2>
         <ul>
           <li>
-            <strong>Control flow</strong>: <code>if</code>/<code>else</code> statements can appear
-            inside a function body. A <code>return</code> inside an <code>if</code> branch exits
-            the enclosing function immediately. See <a href="control-flow.html">Control Flow</a>.
+            <strong>Control flow</strong>: <code>if</code>/<code>else</code> and <code>while</code>
+            statements can appear inside a function body. A <code>return</code> inside a branch or
+            loop body exits the enclosing function immediately. See <a href="control-flow.html">Control Flow</a>.
           </li>
           <li>
             <strong>Arithmetic promotion</strong>: Return values participate in arithmetic just

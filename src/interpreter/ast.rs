@@ -40,6 +40,13 @@ pub enum Stmt {
         else_body: Option<Vec<Stmt>>,
         span: Span,
     },
+
+    /// `while condition { body }`
+    While {
+        condition: Expr,
+        body: Vec<Stmt>,
+        span: Span,
+    },
 }
 
 /// An expression produces a value.
