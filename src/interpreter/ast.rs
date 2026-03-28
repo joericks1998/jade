@@ -33,13 +33,19 @@ pub enum Expr {
         span: Span,
     },
 
+    /// A boolean literal, e.g. `true` or `false`
+    Bool {
+        value: bool,
+        span: Span,
+    },
+
     /// A reference to a variable, e.g. `add`
     Identifier {
         name: String,
         span: Span,
     },
 
-    /// A binary operation, e.g. `1 + 1` or `add & 0xff`
+    /// A binary operation, e.g. `1 + 1` or `a && b`
     BinOp {
         op: BinOpKind,
         left: Box<Expr>,
@@ -47,7 +53,7 @@ pub enum Expr {
         span: Span,
     },
 
-    /// A unary operation, e.g. `~x`
+    /// A unary operation, e.g. `~x`, `!flag`, `-n`
     UnaryOp {
         op: UnaryOpKind,
         operand: Box<Expr>,
@@ -70,10 +76,22 @@ pub enum BinOpKind {
     BitXor,
     Shl,
     Shr,
+    // Logical
+    And,
+    Or,
+    // Comparison
+    Eq,
+    Ne,
+    Lt,
+    Gt,
+    Le,
+    Ge,
 }
 
 /// All unary operators Jade supports.
 #[derive(Debug)]
 pub enum UnaryOpKind {
     BitNot,
+    Not,
+    Neg,
 }

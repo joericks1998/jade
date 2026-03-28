@@ -49,6 +49,7 @@ pub fn run_file(path: &str, verbose: bool) {
                         println!("{} = {}.0", name, s);
                     }
                 }
+                eval::Value::Bool(b) => println!("{} = {}", name, b),
             }
         }
     }
