@@ -33,6 +33,9 @@ pub enum JadeError {
 
     /// Evaluator applied a bitwise operator to a float.
     TypeError { op: String, span: Span },
+
+    /// Lexer encountered a numeric literal that overflows its target type.
+    LiteralOverflow { span: Span },
 }
 
 /// Shorthand so every module can write `Result<T>` instead of `Result<T, JadeError>`.
