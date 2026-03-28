@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Jade 1.0.3 — Control Flow</title>
+  <title>Jade 1.0.4 — Control Flow</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -282,9 +282,9 @@
       </a>
       <span class="topbar-sep">»</span>
       <select title="Version">
-        <option>1.0.3</option>
+        <option>1.0.4</option>
       </select>
-      <span class="topbar-title">1.0.3 Documentation</span>
+      <span class="topbar-title">1.0.4 Documentation</span>
     </div>
     <div class="topbar-right">
       <a href="https://github.com/joericks1998/jade">GitHub</a>
@@ -337,29 +337,34 @@
 
       <h1>Control Flow</h1>
       <p class="lead">
-        Jade's <code>if</code>/<code>else</code> statement conditionally executes one of two
-        blocks of code based on a <code>bool</code> condition.
+        Jade provides two control flow constructs: <code>if</code>/<code>else</code> for conditional
+        branching and <code>while</code> for repetition. Both require a <code>bool</code> condition.
       </p>
 
       <section id="overview">
         <h2>Overview</h2>
         <p>
-          The <code>if</code> statement is Jade's sole branching construct in version 1.0.3.
-          It tests a condition expression and executes the <em>then</em> block when the condition
-          is <code>true</code>. An optional <code>else</code> block executes when the condition
-          is <code>false</code>. If no <code>else</code> is provided and the condition is
-          <code>false</code>, the statement does nothing.
+          The <code>if</code> statement tests a condition expression and executes the <em>then</em>
+          block when the condition is <code>true</code>. An optional <code>else</code> block executes
+          when the condition is <code>false</code>. If no <code>else</code> is provided and the
+          condition is <code>false</code>, the statement does nothing.
         </p>
         <p>
-          The condition must evaluate to a <code>bool</code> value. Providing any other type —
-          an <code>int</code>, <code>float</code>, or <code>fn</code> value — raises a
-          <code>TypeError</code>. There is no implicit truthiness for non-boolean types.
+          The <code>while</code> statement repeatedly evaluates its condition and executes its body
+          as long as the condition remains <code>true</code>. When the condition becomes
+          <code>false</code>, execution continues with the statement after the closing <code>}</code>.
+          If the condition is <code>false</code> on the first check, the body never executes.
         </p>
         <p>
-          Control flow statements appear inside function bodies. An <code>if</code> statement
-          at the top level is also valid, but a <code>return</code> inside such an
-          <code>if</code> would trigger a <code>ReturnOutsideFunction</code> error because
-          <code>return</code> is only legal inside a function body.
+          Both constructs require the condition to evaluate to a <code>bool</code> value. Providing
+          any other type — an <code>int</code>, <code>float</code>, or <code>fn</code> value — raises
+          a <code>TypeError</code>. There is no implicit truthiness for non-boolean types.
+        </p>
+        <p>
+          Control flow statements can appear at the top level or inside function bodies. A
+          <code>return</code> inside a branch or loop body exits the enclosing function. Using
+          <code>return</code> outside of a function body raises a <code>ReturnOutsideFunction</code>
+          error.
         </p>
       </section>
 
@@ -630,6 +635,263 @@ let q4 = quadrant(1, -1)</code></pre>
           <code>Rc::clone(&amp;env)</code> into both branches rather than creating a new child
           frame. Variables declared with <code>let</code> inside a branch are visible after
           the branch completes, within the same function body (eval.rs: <code>eval_block(then_body, Rc::clone(&amp;env))</code>).
+        </div>
+      </section>
+
+      <section id="while-overview">
+        <h2>while Loops</h2>
+        <p>
+          The <code>while</code> statement is Jade's iteration construct. It evaluates a
+          <code>bool</code> condition before each iteration and executes the loop body as long as
+          the condition is <code>true</code>. Loop termination is controlled entirely by changing
+          the values that the condition expression tests — typically by rebinding a variable with
+          <code>let</code> inside the body.
+        </p>
+        <p>
+          Because Jade does not have mutable assignment (only <code>let</code> rebinding), updating
+          a loop variable means writing <code>let i = i + 1</code> inside the loop body. Each
+          iteration creates a new binding for <code>i</code> in the same scope, shadowing the
+          previous value. The loop condition then tests the newly bound value on the next iteration.
+        </p>
+        <p>
+          A <code>return</code> statement inside a <code>while</code> body exits the enclosing
+          function immediately, propagating the return value upward. A loop whose condition is
+          always <code>true</code> and contains no <code>return</code> will run forever.
+        </p>
+      </section>
+
+      <section id="while-syntax">
+        <h2>while Syntax</h2>
+        <pre><code>while &lt;condition&gt; {
+    &lt;body statements&gt;
+}</code></pre>
+        <ul>
+          <li><code>&lt;condition&gt;</code> — any expression that produces a <code>bool</code>. Evaluated before each iteration, including the first.</li>
+          <li><code>&lt;body statements&gt;</code> — any sequence of statements to execute while the condition is <code>true</code>. Typically includes a <code>let</code> rebinding to advance the loop variable.</li>
+        </ul>
+        <div class="note">
+          <strong>Note:</strong> The condition and the opening <code>{</code> must be on the same
+          line. Because the lexer inserts a semicolon after any line ending in an integer, float,
+          identifier, <code>true</code>, <code>false</code>, or <code>)</code> token, writing
+          the condition and brace on separate lines would insert an unexpected semicolon.
+          Write <code>while i &lt; 5 {</code> on one line.
+        </div>
+      </section>
+
+      <section id="while-examples">
+        <h2>while Examples</h2>
+
+        <h3>Counting up to a limit</h3>
+        <pre><code>let i = 0
+while i &lt; 5 {
+    let i = i + 1
+}</code></pre>
+        <p>
+          The loop rebinds <code>i</code> on each iteration. When <code>i</code> reaches
+          <code>5</code>, the condition <code>i &lt; 5</code> becomes <code>false</code>
+          and the loop exits. After the loop, <code>i</code> holds <code>5</code>.
+        </p>
+
+        <h3>Accumulating a sum</h3>
+        <pre><code>let n = 10
+let sum = 0
+let i = 1
+while i &lt;= n {
+    let sum = sum + i
+    let i = i + 1
+}</code></pre>
+        <p>
+          Each iteration adds the current <code>i</code> to <code>sum</code>, then advances
+          <code>i</code>. After the loop, <code>sum</code> holds <code>55</code> (the sum of
+          integers 1 through 10).
+        </p>
+
+        <h3>Condition false from the start</h3>
+        <pre><code>let never = 99
+while never &lt; 0 {
+    let never = never + 1
+}</code></pre>
+        <p>
+          The condition is <code>false</code> on the first check, so the body never executes.
+          <code>never</code> remains <code>99</code>.
+        </p>
+
+        <h3>While inside a function</h3>
+        <pre><code>fn sum_to(n) {
+    let total = 0
+    let i = 1
+    while i &lt;= n {
+        let total = total + i
+        let i = i + 1
+    }
+    return total
+}
+
+let s10 = sum_to(10)</code></pre>
+        <p>
+          A <code>while</code> loop can appear inside a function body. <code>sum_to(10)</code>
+          iterates from <code>1</code> to <code>10</code>, accumulating the sum, and returns
+          <code>55</code>.
+        </p>
+      </section>
+
+      <section id="while-advanced">
+        <h2>while Advanced Examples</h2>
+
+        <h3>Iterative factorial — while as an alternative to recursion</h3>
+        <pre><code>fn factorial(n) {
+    let result = 1
+    let i = 1
+    while i &lt;= n {
+        let result = result * i
+        let i = i + 1
+    }
+    return result
+}
+
+let f5 = factorial(5)</code></pre>
+        <p>
+          Iterative and recursive implementations produce the same result. <code>factorial(5)</code>
+          returns <code>120</code>. The <code>while</code> loop multiplies <code>result</code> by
+          each value of <code>i</code> from <code>1</code> to <code>n</code>, then the function
+          returns the accumulated product.
+        </p>
+
+        <h3>Nested while loops</h3>
+        <pre><code>let total = 0
+let i = 0
+while i &lt; 3 {
+    let j = 0
+    while j &lt; 3 {
+        let total = total + 1
+        let j = j + 1
+    }
+    let i = i + 1
+}</code></pre>
+        <p>
+          The inner loop runs to completion on each iteration of the outer loop. After both loops
+          finish, <code>total</code> holds <code>9</code> (three outer iterations, each running
+          three inner iterations). The inner variable <code>j</code> is rebound to <code>0</code>
+          at the start of each outer iteration.
+        </p>
+      </section>
+
+      <section id="while-type-rules">
+        <h2>while Type Rules</h2>
+        <table>
+          <thead>
+            <tr><th>Operation</th><th>Condition Type</th><th>Result</th><th>Notes</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>while &lt;cond&gt;</code> — condition is <code>true</code></td>
+              <td><code>bool</code></td>
+              <td>Body executes; condition re-evaluated</td>
+              <td>eval.rs:eval_block, <code>Value::Bool(true)</code> arm of <code>Stmt::While</code></td>
+            </tr>
+            <tr>
+              <td><code>while &lt;cond&gt;</code> — condition is <code>false</code></td>
+              <td><code>bool</code></td>
+              <td>Loop exits; execution continues after <code>}</code></td>
+              <td>eval.rs:eval_block, <code>Value::Bool(false) =&gt; break</code></td>
+            </tr>
+            <tr>
+              <td><code>while &lt;cond&gt;</code> — condition is not a <code>bool</code></td>
+              <td><code>int</code>, <code>float</code>, or <code>fn</code></td>
+              <td><code>TypeError</code></td>
+              <td>eval.rs: <code>_ =&gt; Err(JadeError::TypeError { op: "while".to_string(), … })</code></td>
+            </tr>
+            <tr>
+              <td><code>return</code> inside loop body</td>
+              <td>Any</td>
+              <td>Propagates return value up to enclosing function</td>
+              <td>eval.rs: <code>if let Some(v) = eval_block(body, …)?</code> inside <code>Stmt::While</code></td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="note">
+          <strong>Note:</strong> The condition must be exactly a <code>bool</code>. There is no
+          implicit truthiness: <code>while 1 { … }</code> is a <code>TypeError</code>, not
+          an infinite loop.
+        </div>
+      </section>
+
+      <section id="while-errors">
+        <h2>while Error Conditions</h2>
+        <table>
+          <thead>
+            <tr><th>Error</th><th>Trigger</th><th>Example</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>TypeError</code></td>
+              <td>Condition is not a <code>bool</code></td>
+              <td><code>while 1 { let i = 0 }</code></td>
+            </tr>
+            <tr>
+              <td><code>ReturnOutsideFunction</code></td>
+              <td><code>return</code> inside a top-level <code>while</code></td>
+              <td><code>while true { return 1 }</code> at the top level</td>
+            </tr>
+            <tr>
+              <td><code>UndefinedVariable</code></td>
+              <td>Referencing an undeclared name in the condition or body</td>
+              <td><code>while x &lt; 5 { let x = 1 }</code> where <code>x</code> is not declared before the loop</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section id="while-interactions">
+        <h2>while Interaction with Other Features</h2>
+        <ul>
+          <li>
+            <strong>Functions</strong>: <code>while</code> loops appear inside function bodies.
+            A <code>return</code> inside the loop body exits the enclosing function immediately,
+            propagating the return value. See <a href="functions.html">Functions</a>.
+          </li>
+          <li>
+            <strong>if/else inside while</strong>: An <code>if</code>/<code>else</code> statement
+            can appear inside a loop body to vary behavior across iterations. A <code>return</code>
+            inside such an <code>if</code> still exits the enclosing function.
+          </li>
+          <li>
+            <strong>Comparison operators</strong>: The most common source of <code>bool</code>
+            conditions for <code>while</code> loops is comparison expressions: <code>i &lt; n</code>,
+            <code>val &lt;= 100</code>, etc. See <a href="operators.html">Operators</a>.
+          </li>
+          <li>
+            <strong>let rebinding</strong>: Jade uses <code>let</code> to advance loop variables.
+            Writing <code>let i = i + 1</code> inside a loop body creates a new binding for
+            <code>i</code> in the same scope, shadowing the previous value. The condition then
+            tests the updated binding on the next iteration. See <a href="variables.html">Variables</a>.
+          </li>
+        </ul>
+      </section>
+
+      <section id="while-implementation">
+        <h2>while Implementation Notes</h2>
+        <div class="note">
+          <strong>Note:</strong> The <code>while</code> loop passes the same <code>Env</code>
+          frame to each iteration — it calls <code>eval_block(body, Rc::clone(&amp;env))</code>
+          without creating a child scope. Variables bound with <code>let</code> inside the loop
+          body are visible after each iteration completes, within the same surrounding scope
+          (eval.rs: <code>Stmt::While</code>).
+        </div>
+        <div class="note">
+          <strong>Note:</strong> The condition and the opening <code>{</code> must be on the same
+          source line. The lexer inserts a semicolon when a line ends in an integer, float,
+          identifier, boolean literal, or <code>)</code> token. A condition ending in any of
+          those token kinds, followed by a newline before <code>{</code>, would cause a parse
+          error. Write the condition and brace on one line: <code>while i &lt; 5 {</code>
+          (lexer.rs: <code>is_line_terminator</code>).
+        </div>
+        <div class="note">
+          <strong>Note:</strong> A <code>return</code> inside the loop body is detected when
+          <code>eval_block</code> returns <code>Some(value)</code>. The <code>while</code>
+          handler checks for this after each iteration and propagates it immediately, stopping
+          the loop and returning the value to the caller (eval.rs:
+          <code>if let Some(v) = eval_block(body, Rc::clone(&amp;env))? { return Ok(Some(v)); }</code>).
         </div>
       </section>
 

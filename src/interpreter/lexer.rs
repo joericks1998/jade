@@ -14,6 +14,7 @@ pub enum TokenKind {
     Return,
     If,
     Else,
+    While,
     True,
     False,
 
@@ -171,6 +172,7 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
                     "return" => TokenKind::Return,
                     "if"     => TokenKind::If,
                     "else"   => TokenKind::Else,
+                    "while"  => TokenKind::While,
                     "true"   => TokenKind::True,
                     "false"  => TokenKind::False,
                     _        => TokenKind::Identifier(name),
@@ -185,7 +187,18 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
             '+' => { tokens.push(Token { kind: TokenKind::Plus,    span: Span { line, col } }); col += 1; i += 1; }
             '-' => { tokens.push(Token { kind: TokenKind::Minus,   span: Span { line, col } }); col += 1; i += 1; }
             '*' => { tokens.push(Token { kind: TokenKind::Star,    span: Span { line, col } }); col += 1; i += 1; }
-            '/' => { tokens.push(Token { kind: TokenKind::Slash,   span: Span { line, col } }); col += 1; i += 1; }
+            // `/` or `//` (line comment)
+            '/' => {
+                if i + 1 < chars.len() && chars[i + 1] == '/' {
+                    // Skip everything until the end of the line
+                    while i < chars.len() && chars[i] != '\n' {
+                        i += 1;
+                    }
+                } else {
+                    tokens.push(Token { kind: TokenKind::Slash, span: Span { line, col } });
+                    col += 1; i += 1;
+                }
+            }
             '%' => { tokens.push(Token { kind: TokenKind::Percent, span: Span { line, col } }); col += 1; i += 1; }
             '~' => { tokens.push(Token { kind: TokenKind::Tilde,   span: Span { line, col } }); col += 1; i += 1; }
             '^' => { tokens.push(Token { kind: TokenKind::Caret,   span: Span { line, col } }); col += 1; i += 1; }
@@ -524,6 +537,37 @@ mod tests {
         assert_eq!(
             kinds("}\nelse"),
             vec![TokenKind::RBrace, TokenKind::Else, TokenKind::Eof]
+        );
+    }
+
+    #[test]
+    fn test_float_requires_digit_after_dot() {
+        // `1.` is tokenized as Integer(1), then `.` is an unexpected character.
+        // Float literals require at least one digit after the decimal point: `1.0`.
+        let err = tokenize("let x = 1.").unwrap_err();
+        assert!(matches!(err, JadeError::UnexpectedChar { ch: '.', .. }));
+    }
+
+    // ── while ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_tokenize_while() {
+        assert_eq!(kinds("while"), vec![TokenKind::While, TokenKind::Eof]);
+    }
+
+    #[test]
+    fn test_while_no_semicolon_before_brace() {
+        // `while i < 5 {` — no semicolon between condition and opening brace
+        assert_eq!(
+            kinds("while i < 5 {"),
+            vec![
+                TokenKind::While,
+                TokenKind::Identifier("i".into()),
+                TokenKind::Lt,
+                TokenKind::Integer(5),
+                TokenKind::LBrace,
+                TokenKind::Eof,
+            ]
         );
     }
 }
