@@ -1,6 +1,6 @@
 # Jade
 
-A programming language written in Rust. Jade is currently in Phase 1 — the tree-walking interpreter supports three value types (`int`, `float`, `bool`), `let` bindings, `fn` function definitions with `return`, `if`/`else` control flow, first-class functions, recursion, arithmetic, bitwise, logical, and comparison operators.
+A programming language written in Rust. Jade is currently in Phase 1 — the tree-walking interpreter supports three value types (`int`, `float`, `bool`), `let` bindings, `fn` function definitions with `return`, `if`/`else` control flow, `while` loops, first-class functions, recursion, arithmetic, bitwise, logical, and comparison operators.
 
 ```
 fn factorial(n) {
@@ -81,7 +81,7 @@ Errors are written to stderr with the format `<file>: <phase> error: <descriptio
 | Recursion | ✓ |
 | Auto-semicolon insertion | ✓ |
 | Strings | Planned |
-| `while` loops | Planned |
+| `while` loops | ✓ |
 | Type inference | Planned |
 
 Operator precedence (tightest to loosest): unary (`~` `!` `-`) → `*` `/` `%` → `+` `-` → `<<` `>>` → `&` → `^` → `|` → `==` `!=` `<` `>` `<=` `>=` → `&&` → `||`
@@ -105,7 +105,7 @@ src/
 jade_evals/
   arithmatic/               Fixture files for arithmetic and bitwise operations
   assignment/               Fixture files for let bindings and boolean/comparison expressions
-  control_flow/             Fixture files for if/else and nested if
+  control_flow/             Fixture files for if/else, nested if, and while loops
   functions/                Fixture files for fn definitions, calls, recursion, first-class fns
 planning/
   REQUIREMENTS.md           Full build plan across all phases
