@@ -1,0 +1,33 @@
+fn add(a, b) {
+    return a + b
+}
+
+fn double(x) {
+    return x * 2
+}
+
+fn square(x) {
+    return x * x
+}
+
+fn double_sum(a, b) {
+    return double(add(a, b))
+}
+
+fn sum_of_squares(a, b) {
+    return add(square(a), square(b))
+}
+
+fn apply_twice(f, x) {
+    return f(f(x))
+}
+
+fn pipeline(a, b) {
+    return double(square(add(a, b)))
+}
+
+let ds = double_sum(3, 4)
+let ss = sum_of_squares(3, 4)
+let at = apply_twice(double, 3)
+let ats = apply_twice(square, 2)
+let pipe = pipeline(1, 2)

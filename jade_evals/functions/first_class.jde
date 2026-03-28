@@ -1,0 +1,17 @@
+fn double(x) {
+    return x * 2
+}
+
+fn apply(f, x) {
+    return f(x)
+}
+
+fn compose(f, g, x) {
+    return f(g(x))
+}
+
+let f = double
+let a = f(5)
+let b = apply(double, 6)
+let c = apply(f, 7)
+let d = compose(double, double, 3)
