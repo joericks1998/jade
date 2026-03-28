@@ -30,6 +30,12 @@ pub enum JadeError {
 
     /// Evaluator received a negative or out-of-range shift amount.
     InvalidShift { amount: i64, span: Span },
+
+    /// Evaluator applied a bitwise operator to a float.
+    TypeError { op: String, span: Span },
+
+    /// Lexer encountered a numeric literal that overflows its target type.
+    LiteralOverflow { span: Span },
 }
 
 /// Shorthand so every module can write `Result<T>` instead of `Result<T, JadeError>`.

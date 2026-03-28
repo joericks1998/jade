@@ -335,10 +335,13 @@
 
       <h1>Jade 1.0.2 Documentation</h1>
       <p class="lead">
-        Jade is a programming language written in Rust. This is the documentation
-        for version 1.0.2 — the interpreter supports integer arithmetic, modulus,
-        bitwise operations (<code>&amp;</code>, <code>|</code>, <code>^</code>, <code>~</code>, <code>&lt;&lt;</code>, <code>&gt;&gt;</code>),
-        and variable assignment.
+        Jade is a programming language written in Rust. Version 1.0.2 implements
+        a tree-walking interpreter supporting three value types (<code>int</code>, <code>float</code>, <code>bool</code>),
+        <code>let</code> variable bindings, arithmetic (<code>+</code> <code>-</code> <code>*</code> <code>/</code> <code>%</code>),
+        bitwise (<code>&amp;</code> <code>|</code> <code>^</code> <code>~</code> <code>&lt;&lt;</code> <code>&gt;&gt;</code>),
+        logical (<code>&amp;&amp;</code> <code>||</code> <code>!</code>),
+        comparison (<code>==</code> <code>!=</code> <code>&lt;</code> <code>&gt;</code> <code>&lt;=</code> <code>&gt;=</code>),
+        unary negation (<code>-</code>), and parenthesized expressions.
       </p>
 
       <section id="installation">

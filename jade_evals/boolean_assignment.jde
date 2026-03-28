@@ -1,0 +1,14 @@
+let flag_true = true
+let flag_false = false
+
+let and_tt = true && true
+let and_tf = true && false
+let and_ff = false && false
+
+let or_tt = true || true
+let or_tf = true || false
+let or_ff = false || false
+
+let complex = true && false || true
+let short_circuit_and = false && true
+let short_circuit_or = true || false
