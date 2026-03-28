@@ -3,7 +3,7 @@ use std::rc::Rc;
 
 use super::{
     ast::{BinOpKind, Expr, Program, Stmt, UnaryOpKind},
-    error::{JadeError, Result},
+    error::{JadeError, Result, Span},
 };
 
 // ── Value ────────────────────────────────────────────────────────────────────
@@ -44,31 +44,60 @@ impl std::fmt::Debug for FnValue {
 
 // ── Environment ──────────────────────────────────────────────────────────────
 
-/// Single flat environment: all variables share one global scope.
+/// Scoped environment: a stack of hash maps. `scopes[0]` is the global scope;
+/// each function call and block body pushes/pops a new frame.
 #[derive(Debug)]
 pub struct Env {
-    vars: HashMap<String, Value>,
+    scopes: Vec<HashMap<String, Value>>,
 }
 
 impl Env {
-    /// Create a new, empty environment.
+    /// Create a new environment with one (global) scope.
     pub fn new() -> Self {
-        Env { vars: HashMap::new() }
+        Env { scopes: vec![HashMap::new()] }
     }
 
-    /// Look up a variable by name.
+    /// Push a new inner scope (on function call or block entry).
+    pub fn push_scope(&mut self) {
+        self.scopes.push(HashMap::new());
+    }
+
+    /// Pop the innermost scope (on function return or block exit).
+    pub fn pop_scope(&mut self) {
+        debug_assert!(self.scopes.len() > 1, "pop_scope called on global scope");
+        self.scopes.pop();
+    }
+
+    /// Bind `name` in the innermost scope — used for `let` and function params.
+    pub fn define(&mut self, name: String, value: Value) {
+        self.scopes.last_mut().unwrap().insert(name, value);
+    }
+
+    /// Update an existing binding anywhere in the scope chain — used for bare `x = expr`.
+    /// Returns `UndefinedVariable` if `name` was never declared in any enclosing scope.
+    pub fn assign(&mut self, name: &str, value: Value, span: Span) -> Result<()> {
+        for scope in self.scopes.iter_mut().rev() {
+            if scope.contains_key(name) {
+                scope.insert(name.to_string(), value);
+                return Ok(());
+            }
+        }
+        Err(JadeError::UndefinedVariable { name: name.to_string(), span })
+    }
+
+    /// Look up a variable, searching from innermost to outermost scope.
     pub fn get(&self, name: &str) -> Option<Value> {
-        self.vars.get(name).cloned()
+        for scope in self.scopes.iter().rev() {
+            if let Some(v) = scope.get(name) {
+                return Some(v.clone());
+            }
+        }
+        None
     }
 
-    /// Bind a name to a value.
-    pub fn set(&mut self, name: String, value: Value) {
-        self.vars.insert(name, value);
-    }
-
-    /// Iterate over all bindings (used by `-v` output).
+    /// Iterate over all top-level (global) bindings — used by `-v` output.
     pub fn entries(&self) -> impl Iterator<Item = (&String, &Value)> {
-        self.vars.iter()
+        self.scopes[0].iter()
     }
 }
 
@@ -96,7 +125,12 @@ fn eval_block(stmts: &[Stmt], env: &mut Env) -> Result<Option<Value>> {
         match stmt {
             Stmt::Let { name, value, .. } => {
                 let v = eval_expr(value, env)?;
-                env.set(name.clone(), v);
+                env.define(name.clone(), v);
+            }
+
+            Stmt::Assign { name, value, span } => {
+                let v = eval_expr(value, env)?;
+                env.assign(name, v, *span)?;
             }
 
             Stmt::FnDef { name, params, body, .. } => {
@@ -104,7 +138,7 @@ fn eval_block(stmts: &[Stmt], env: &mut Env) -> Result<Option<Value>> {
                     params: params.clone(),
                     body: body.clone(),
                 };
-                env.set(name.clone(), Value::Fn(Rc::new(fn_val)));
+                env.define(name.clone(), Value::Fn(Rc::new(fn_val)));
             }
 
             Stmt::Return { value, .. } => {
@@ -121,7 +155,10 @@ fn eval_block(stmts: &[Stmt], env: &mut Env) -> Result<Option<Value>> {
                     let cond = eval_expr(condition, env)?;
                     match cond {
                         Value::Bool(true) => {
-                            if let Some(v) = eval_block(body, env)? {
+                            env.push_scope();
+                            let result = eval_block(body, env);
+                            env.pop_scope();
+                            if let Some(v) = result? {
                                 return Ok(Some(v));
                             }
                         }
@@ -138,13 +175,19 @@ fn eval_block(stmts: &[Stmt], env: &mut Env) -> Result<Option<Value>> {
                 let cond = eval_expr(condition, env)?;
                 match cond {
                     Value::Bool(true) => {
-                        if let Some(v) = eval_block(then_body, env)? {
+                        env.push_scope();
+                        let result = eval_block(then_body, env);
+                        env.pop_scope();
+                        if let Some(v) = result? {
                             return Ok(Some(v));
                         }
                     }
                     Value::Bool(false) => {
                         if let Some(body) = else_body {
-                            if let Some(v) = eval_block(body, env)? {
+                            env.push_scope();
+                            let result = eval_block(body, env);
+                            env.pop_scope();
+                            if let Some(v) = result? {
                                 return Ok(Some(v));
                             }
                         }
@@ -207,14 +250,17 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                 arg_vals.push(eval_expr(arg_expr, env)?);
             }
 
-            // Bind parameters into the shared global env
+            // Push a new scope; bind params locally; pop scope even if the body errors.
+            env.push_scope();
             for (param, val) in fn_rc.params.iter().zip(arg_vals) {
-                env.set(param.clone(), val);
+                env.define(param.clone(), val);
             }
+            let result = eval_block(&fn_rc.body, env);
+            env.pop_scope();
 
             // DESIGN: A function that falls off the end without `return` yields Int(0).
             // This will be replaced by a Unit type in a future release.
-            Ok(eval_block(&fn_rc.body, env)?.unwrap_or(Value::Int(0)))
+            Ok(result?.unwrap_or(Value::Int(0)))
         }
 
         Expr::BinOp { op, left, right, span } => {
@@ -860,25 +906,25 @@ mod tests {
         assert!(matches!(get(&env, "d"), Value::Int(12)));
     }
 
-    // ── functions — iteration (global scope; recursion not supported) ────────────
+    // ── functions — iteration ─────────────────────────────────────────────────
 
     #[test]
     fn test_eval_fn_factorial_0() {
-        let src = "fn factorial(n) {\n    let result = 1\n    let i = 1\n    while i <= n {\n        let result = result * i\n        let i = i + 1\n    }\n    return result\n}\nlet f0 = factorial(0)";
+        let src = "fn factorial(n) {\n    let result = 1\n    let i = 1\n    while i <= n {\n        result = result * i\n        i = i + 1\n    }\n    return result\n}\nlet f0 = factorial(0)";
         let env = eval_src(src).unwrap();
         assert!(matches!(get(&env, "f0"), Value::Int(1)));
     }
 
     #[test]
     fn test_eval_fn_factorial_5() {
-        let src = "fn factorial(n) {\n    let result = 1\n    let i = 1\n    while i <= n {\n        let result = result * i\n        let i = i + 1\n    }\n    return result\n}\nlet f5 = factorial(5)";
+        let src = "fn factorial(n) {\n    let result = 1\n    let i = 1\n    while i <= n {\n        result = result * i\n        i = i + 1\n    }\n    return result\n}\nlet f5 = factorial(5)";
         let env = eval_src(src).unwrap();
         assert!(matches!(get(&env, "f5"), Value::Int(120)));
     }
 
     #[test]
     fn test_eval_fn_fib_10() {
-        let src = "fn fib(n) {\n    if n <= 1 {\n        return n\n    }\n    let a = 0\n    let b = 1\n    let i = 2\n    while i <= n {\n        let temp = a + b\n        let a = b\n        let b = temp\n        let i = i + 1\n    }\n    return b\n}\nlet fib10 = fib(10)";
+        let src = "fn fib(n) {\n    if n <= 1 {\n        return n\n    }\n    let a = 0\n    let b = 1\n    let i = 2\n    while i <= n {\n        let temp = a + b\n        a = b\n        b = temp\n        i = i + 1\n    }\n    return b\n}\nlet fib10 = fib(10)";
         let env = eval_src(src).unwrap();
         assert!(matches!(get(&env, "fib10"), Value::Int(55)));
     }
@@ -986,20 +1032,20 @@ mod tests {
 
     #[test]
     fn test_eval_while_basic_count_up() {
-        let env = eval_src("let i = 0\nwhile i < 5 {\n    let i = i + 1\n}").unwrap();
+        let env = eval_src("let i = 0\nwhile i < 5 {\n    i = i + 1\n}").unwrap();
         assert!(matches!(get(&env, "i"), Value::Int(5)));
     }
 
     #[test]
     fn test_eval_while_condition_false_from_start() {
-        let env = eval_src("let never = 99\nwhile never < 0 {\n    let never = never + 1\n}").unwrap();
+        let env = eval_src("let never = 99\nwhile never < 0 {\n    never = never + 1\n}").unwrap();
         assert!(matches!(get(&env, "never"), Value::Int(99)));
     }
 
     #[test]
     fn test_eval_while_accumulate_sum() {
         let env = eval_src(
-            "let sum = 0\nlet i = 1\nwhile i <= 10 {\n    let sum = sum + i\n    let i = i + 1\n}"
+            "let sum = 0\nlet i = 1\nwhile i <= 10 {\n    sum = sum + i\n    i = i + 1\n}"
         ).unwrap();
         assert!(matches!(get(&env, "sum"), Value::Int(55)));
     }
@@ -1007,7 +1053,7 @@ mod tests {
     #[test]
     fn test_eval_while_boolean_flag() {
         let env = eval_src(
-            "let flag = true\nlet steps = 0\nwhile flag {\n    let steps = steps + 1\n    if steps == 3 {\n        let flag = false\n    }\n}"
+            "let flag = true\nlet steps = 0\nwhile flag {\n    steps = steps + 1\n    if steps == 3 {\n        flag = false\n    }\n}"
         ).unwrap();
         assert!(matches!(get(&env, "steps"), Value::Int(3)));
         assert!(matches!(get(&env, "flag"), Value::Bool(false)));
@@ -1016,7 +1062,7 @@ mod tests {
     #[test]
     fn test_eval_while_in_fn_factorial() {
         let env = eval_src(
-            "fn factorial(n) {\n    let result = 1\n    let i = 1\n    while i <= n {\n        let result = result * i\n        let i = i + 1\n    }\n    return result\n}\nlet f5 = factorial(5)\nlet f0 = factorial(0)"
+            "fn factorial(n) {\n    let result = 1\n    let i = 1\n    while i <= n {\n        result = result * i\n        i = i + 1\n    }\n    return result\n}\nlet f5 = factorial(5)\nlet f0 = factorial(0)"
         ).unwrap();
         assert!(matches!(get(&env, "f5"), Value::Int(120)));
         assert!(matches!(get(&env, "f0"), Value::Int(1)));
@@ -1026,7 +1072,7 @@ mod tests {
     fn test_eval_while_return_propagates() {
         // return inside a while body must exit the function immediately
         let env = eval_src(
-            "fn first_above(threshold) {\n    let n = 1\n    while n * n <= threshold {\n        let n = n + 1\n    }\n    return n\n}\nlet r = first_above(9)"
+            "fn first_above(threshold) {\n    let n = 1\n    while n * n <= threshold {\n        n = n + 1\n    }\n    return n\n}\nlet r = first_above(9)"
         ).unwrap();
         assert!(matches!(get(&env, "r"), Value::Int(4)));
     }
@@ -1034,7 +1080,7 @@ mod tests {
     #[test]
     fn test_eval_while_nested() {
         let env = eval_src(
-            "let total = 0\nlet i = 0\nwhile i < 3 {\n    let j = 0\n    while j < 3 {\n        let total = total + 1\n        let j = j + 1\n    }\n    let i = i + 1\n}"
+            "let total = 0\nlet i = 0\nwhile i < 3 {\n    let j = 0\n    while j < 3 {\n        total = total + 1\n        j = j + 1\n    }\n    i = i + 1\n}"
         ).unwrap();
         assert!(matches!(get(&env, "total"), Value::Int(9)));
     }
