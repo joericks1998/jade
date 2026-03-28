@@ -1,0 +1,33 @@
+fn max(a, b) {
+    if a > b {
+        return a
+    } else {
+        return b
+    }
+}
+
+fn is_positive(x) {
+    if x > 0 {
+        return true
+    } else {
+        return false
+    }
+}
+
+fn clamp(x, lo, hi) {
+    if x < lo {
+        return lo
+    }
+    if x > hi {
+        return hi
+    }
+    return x
+}
+
+let m1 = max(3, 7)
+let m2 = max(10, 2)
+let pos = is_positive(5)
+let neg = is_positive(-3)
+let clamped_lo = clamp(1, 5, 10)
+let clamped_mid = clamp(7, 5, 10)
+let clamped_hi = clamp(15, 5, 10)
