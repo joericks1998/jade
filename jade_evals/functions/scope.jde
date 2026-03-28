@@ -1,5 +1,5 @@
-// Global scoping: all let bindings live in one flat env.
-// Function params and locals are visible at the top level after a call returns.
+// Scope isolation: function params and locals are private to each call.
+// They do not leak into the caller's environment.
 
 fn set_value() {
     let x = 42
@@ -12,10 +12,29 @@ fn double_param(n) {
 }
 
 let a = set_value()
-// x == 42  (written globally by set_value)
 // a == 42
+// x is NOT visible here — it was local to set_value
 
 let b = double_param(7)
-// n == 7   (parameter binding is global)
-// result == 14
 // b == 14
+// n and result are NOT visible here — they were local to double_param
+
+// Outer variables are visible inside functions (lexical scope chain)
+let outer = 100
+
+fn read_outer() {
+    return outer
+}
+
+let c = read_outer()
+// c == 100
+
+// Bare assignment inside a function mutates a binding in an enclosing scope
+fn bump(x) {
+    outer = outer + x
+    return outer
+}
+
+let d = bump(5)
+// outer == 105
+// d == 105
