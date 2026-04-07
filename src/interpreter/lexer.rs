@@ -15,6 +15,8 @@ pub enum TokenKind {
     If,
     Else,
     While,
+    Struct,
+    Extend,
     True,
     False,
 
@@ -52,6 +54,8 @@ pub enum TokenKind {
     // Punctuation
     Comma,
     Semicolon,
+    Dot,
+    Colon,
 
     // Grouping
     LParen,
@@ -81,8 +85,10 @@ fn is_line_terminator(kind: &TokenKind) -> bool {
             | TokenKind::True
             | TokenKind::False
             | TokenKind::RParen
-            // RBrace is intentionally excluded: `} else {` must not get a
-            // semicolon between `}` and `else`.
+            // RBrace triggers semicolons so struct literals (`let p = Point { … }`)
+            // on their own line terminate the statement correctly. The parser handles
+            // `} else {` by consuming the inserted semicolon before checking for `else`.
+            | TokenKind::RBrace
     )
 }
 
@@ -173,6 +179,8 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
                     "if"     => TokenKind::If,
                     "else"   => TokenKind::Else,
                     "while"  => TokenKind::While,
+                    "struct" => TokenKind::Struct,
+                    "extend" => TokenKind::Extend,
                     "true"   => TokenKind::True,
                     "false"  => TokenKind::False,
                     _        => TokenKind::Identifier(name),
@@ -207,6 +215,8 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
             '{' => { tokens.push(Token { kind: TokenKind::LBrace,  span: Span { line, col } }); col += 1; i += 1; }
             '}' => { tokens.push(Token { kind: TokenKind::RBrace,  span: Span { line, col } }); col += 1; i += 1; }
             ',' => { tokens.push(Token { kind: TokenKind::Comma,   span: Span { line, col } }); col += 1; i += 1; }
+            '.' => { tokens.push(Token { kind: TokenKind::Dot,     span: Span { line, col } }); col += 1; i += 1; }
+            ':' => { tokens.push(Token { kind: TokenKind::Colon,   span: Span { line, col } }); col += 1; i += 1; }
 
             // `&` or `&&`
             '&' => {
@@ -513,9 +523,10 @@ mod tests {
 
     #[test]
     fn test_tokenize_braces() {
+        // RBrace is a line terminator, so `{}` on one line inserts a semicolon after `}`
         assert_eq!(
             kinds("{}"),
-            vec![TokenKind::LBrace, TokenKind::RBrace, TokenKind::Eof]
+            vec![TokenKind::LBrace, TokenKind::RBrace, TokenKind::Semicolon, TokenKind::Eof]
         );
     }
 
@@ -532,20 +543,58 @@ mod tests {
     }
 
     #[test]
-    fn test_no_semicolon_after_rbrace() {
-        // `}` followed by newline should NOT insert a semicolon
+    fn test_semicolon_after_rbrace() {
+        // `}` at end of line now inserts a semicolon so struct literals and
+        // block-ending statements terminate correctly. The parser consumes the
+        // inserted semicolon before checking for `else`.
         assert_eq!(
             kinds("}\nelse"),
-            vec![TokenKind::RBrace, TokenKind::Else, TokenKind::Eof]
+            vec![
+                TokenKind::RBrace, TokenKind::Semicolon,
+                TokenKind::Else, TokenKind::Eof,
+            ]
         );
     }
 
     #[test]
     fn test_float_requires_digit_after_dot() {
-        // `1.` is tokenized as Integer(1), then `.` is an unexpected character.
+        // `1.` tokenizes as Integer(1) followed by a standalone Dot — not a float literal.
         // Float literals require at least one digit after the decimal point: `1.0`.
-        let err = tokenize("let x = 1.").unwrap_err();
-        assert!(matches!(err, JadeError::UnexpectedChar { ch: '.', .. }));
+        assert_eq!(
+            kinds("1."),
+            vec![TokenKind::Integer(1), TokenKind::Dot, TokenKind::Eof]
+        );
+    }
+
+    // ── struct / extend ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_tokenize_struct_keyword() {
+        assert_eq!(kinds("struct"), vec![TokenKind::Struct, TokenKind::Eof]);
+    }
+
+    #[test]
+    fn test_tokenize_extend_keyword() {
+        assert_eq!(kinds("extend"), vec![TokenKind::Extend, TokenKind::Eof]);
+    }
+
+    #[test]
+    fn test_tokenize_dot() {
+        assert_eq!(
+            kinds("a.b"),
+            vec![
+                TokenKind::Identifier("a".into()),
+                TokenKind::Dot,
+                TokenKind::Identifier("b".into()),
+                TokenKind::Semicolon,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_tokenize_colon() {
+        assert_eq!(kinds(":"), vec![TokenKind::Colon, TokenKind::Eof]);
     }
 
     // ── while ────────────────────────────────────────────────────────────────

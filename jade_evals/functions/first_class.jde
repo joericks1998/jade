@@ -1,3 +1,6 @@
+// Functions are first-class values: they can be stored and passed as arguments.
+// Parameters (including function-valued ones) are bound in the global env.
+
 fn double(x) {
     return x * 2
 }
@@ -11,7 +14,21 @@ fn compose(f, g, x) {
 }
 
 let f = double
+
 let a = f(5)
+// x == 5 (bound globally by double)
+// a == 10
+
 let b = apply(double, 6)
+// f == double, x == 6 (params of apply, bound globally)
+// b == 12
+
 let c = apply(f, 7)
+// f == double, x == 7 (params of apply overwrite previous f and x)
+// c == 14
+
 let d = compose(double, double, 3)
+// f == double, g == double, x == 3 (params of compose, bound globally)
+// g(x) = double(3) → x == 3, returns 6
+// f(6) = double(6) → x == 6, returns 12
+// d == 12

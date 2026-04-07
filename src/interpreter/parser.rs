@@ -9,6 +9,10 @@ struct Parser {
     pos: usize,
     /// Depth of nested `fn` definitions. Used to detect and reject nested fns.
     fn_depth: usize,
+    /// When false, a bare identifier followed by `{` is NOT parsed as a struct
+    /// literal. Set to false while parsing `if`/`while` conditions so that
+    /// `while running { … }` does not try to read `running {…}` as a struct.
+    struct_literal_allowed: bool,
 }
 
 /// Public entry point. Builds a Parser and drives it to produce a Program.
@@ -18,11 +22,34 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program> {
             span: Span { line: 1, col: 1 },
         });
     }
-    let mut parser = Parser { tokens, pos: 0, fn_depth: 0 };
+    let mut parser = Parser { tokens, pos: 0, fn_depth: 0, struct_literal_allowed: true };
     parser.parse_program()
 }
 
 impl Parser {
+    /// Returns a reference to the token `offset` positions ahead without advancing.
+    fn peek_at(&self, offset: usize) -> Option<&Token> {
+        self.tokens.get(self.pos + offset)
+    }
+
+    /// Consume the current token if it is an identifier and return its name;
+    /// otherwise return an `UnexpectedToken` error.
+    fn expect_ident(&mut self, context: &str) -> Result<String> {
+        let token = self.peek().clone();
+        match &token.kind {
+            TokenKind::Identifier(name) => {
+                let name = name.clone();
+                self.advance();
+                Ok(name)
+            }
+            _ => Err(JadeError::UnexpectedToken {
+                expected: context.to_string(),
+                got: format!("{:?}", token.kind),
+                span: token.span,
+            }),
+        }
+    }
+
     /// Returns a reference to the current token without advancing.
     // Safety: `parse()` rejects empty token streams. `advance()` is clamped at
     // the Eof sentinel, so `self.pos` is always a valid index. The fallback to
@@ -64,9 +91,17 @@ impl Parser {
     }
 
     /// Parse zero or more statements until Eof.
+    /// Semicolons between top-level statements are skipped; they can appear
+    /// after any closing `}` now that `RBrace` is a line-terminator.
     fn parse_program(&mut self) -> Result<Program> {
         let mut stmts = Vec::new();
         while self.peek().kind != TokenKind::Eof {
+            while self.peek().kind == TokenKind::Semicolon {
+                self.advance();
+            }
+            if self.peek().kind == TokenKind::Eof {
+                break;
+            }
             stmts.push(self.parse_stmt()?);
         }
         Ok(Program { stmts })
@@ -80,6 +115,29 @@ impl Parser {
             TokenKind::Return => self.parse_return(),
             TokenKind::If     => self.parse_if(),
             TokenKind::While  => self.parse_while(),
+            TokenKind::Struct => self.parse_struct_def(),
+            TokenKind::Extend => self.parse_extend_block(),
+            TokenKind::Identifier(_) => {
+                // Disambiguate the three identifier-led statement forms:
+                //   `ident =`            → bare variable assignment
+                //   `ident . ident =`    → struct field assignment
+                //   anything else        → expression statement (e.g. method call)
+                let next_is_eq = self.peek_at(1)
+                    .map(|t| t.kind == TokenKind::Equals).unwrap_or(false);
+                let next_is_dot = self.peek_at(1)
+                    .map(|t| t.kind == TokenKind::Dot).unwrap_or(false);
+                let dot_field_eq = next_is_dot
+                    && self.peek_at(2).map(|t| matches!(t.kind, TokenKind::Identifier(_))).unwrap_or(false)
+                    && self.peek_at(3).map(|t| t.kind == TokenKind::Equals).unwrap_or(false);
+
+                if next_is_eq {
+                    self.parse_assign()
+                } else if dot_field_eq {
+                    self.parse_field_assign()
+                } else {
+                    self.parse_expr_stmt()
+                }
+            }
             _ => {
                 let token = self.peek().clone();
                 Err(JadeError::UnexpectedToken {
@@ -89,6 +147,23 @@ impl Parser {
                 })
             }
         }
+    }
+
+    /// Parse `<ident> = <expr> ;`
+    fn parse_assign(&mut self) -> Result<Stmt> {
+        let span = self.peek().span;
+        let name = match &self.peek().kind {
+            TokenKind::Identifier(n) => {
+                let n = n.clone();
+                self.advance();
+                n
+            }
+            _ => unreachable!("parse_assign called without leading identifier"),
+        };
+        self.expect(&TokenKind::Equals)?;
+        let value = self.parse_or()?;
+        self.expect(&TokenKind::Semicolon)?;
+        Ok(Stmt::Assign { name, value, span })
     }
 
     /// Parse `let <ident> = <expr> ;`
@@ -204,13 +279,29 @@ impl Parser {
         Ok(Stmt::Return { value: Some(value), span })
     }
 
+    /// Parse an expression that will be used as a control-flow condition.
+    /// Struct literals are disallowed here so that `while running { … }` does
+    /// not try to interpret `running {…}` as a struct literal.
+    fn parse_condition(&mut self) -> Result<Expr> {
+        let saved = self.struct_literal_allowed;
+        self.struct_literal_allowed = false;
+        let cond = self.parse_or()?;
+        self.struct_literal_allowed = saved;
+        Ok(cond)
+    }
+
     /// Parse `if <condition> { <then> }` or `if <condition> { <then> } else { <else> }`
     fn parse_if(&mut self) -> Result<Stmt> {
         let span = self.peek().span;
         self.advance(); // consume `if`
 
-        let condition = self.parse_or()?;
+        let condition = self.parse_condition()?;
         let then_body = self.parse_block()?;
+
+        // RBrace now inserts an auto-semicolon; consume it before checking for `else`.
+        if self.peek().kind == TokenKind::Semicolon {
+            self.advance();
+        }
 
         let else_body = if self.peek().kind == TokenKind::Else {
             self.advance(); // consume `else`
@@ -227,33 +318,117 @@ impl Parser {
         let span = self.peek().span;
         self.advance(); // consume `while`
 
-        let condition = self.parse_or()?;
+        let condition = self.parse_condition()?;
         let body = self.parse_block()?;
 
         Ok(Stmt::While { condition, body, span })
     }
 
     /// Parse `{ <stmts> }` — a brace-delimited block of statements.
+    /// Leading semicolons between statements are skipped; they can appear after
+    /// any closing `}` now that `RBrace` is a line-terminator.
     fn parse_block(&mut self) -> Result<Vec<Stmt>> {
         self.expect(&TokenKind::LBrace)?;
         let mut stmts = Vec::new();
-        while self.peek().kind != TokenKind::RBrace && self.peek().kind != TokenKind::Eof {
+        loop {
+            while self.peek().kind == TokenKind::Semicolon {
+                self.advance();
+            }
+            if self.peek().kind == TokenKind::RBrace || self.peek().kind == TokenKind::Eof {
+                break;
+            }
             stmts.push(self.parse_stmt()?);
         }
         self.expect(&TokenKind::RBrace)?;
         Ok(stmts)
     }
 
+    /// Parse `struct Name { field, … }`
+    fn parse_struct_def(&mut self) -> Result<Stmt> {
+        let span = self.peek().span;
+        self.advance(); // consume `struct`
+        let name = self.expect_ident("struct name")?;
+        self.expect(&TokenKind::LBrace)?;
+        let mut fields = Vec::new();
+        loop {
+            // Skip auto-semicolons between field names (from trailing newlines)
+            while self.peek().kind == TokenKind::Semicolon {
+                self.advance();
+            }
+            if self.peek().kind == TokenKind::RBrace || self.peek().kind == TokenKind::Eof {
+                break;
+            }
+            fields.push(self.expect_ident("field name")?);
+            // Allow a trailing comma or semicolon after each field name
+            if self.peek().kind == TokenKind::Comma || self.peek().kind == TokenKind::Semicolon {
+                self.advance();
+            }
+        }
+        self.expect(&TokenKind::RBrace)?;
+        Ok(Stmt::StructDef { name, fields, span })
+    }
+
+    /// Parse `extend TypeName { fn method(self, …) { … } … }`
+    fn parse_extend_block(&mut self) -> Result<Stmt> {
+        let span = self.peek().span;
+        self.advance(); // consume `extend`
+        let type_name = self.expect_ident("type name")?;
+        self.expect(&TokenKind::LBrace)?;
+        let mut methods = Vec::new();
+        loop {
+            while self.peek().kind == TokenKind::Semicolon {
+                self.advance();
+            }
+            if self.peek().kind == TokenKind::RBrace || self.peek().kind == TokenKind::Eof {
+                break;
+            }
+            match self.peek().kind {
+                TokenKind::Fn => methods.push(self.parse_fn()?),
+                _ => {
+                    let t = self.peek().clone();
+                    return Err(JadeError::UnexpectedToken {
+                        expected: "fn".to_string(),
+                        got: format!("{:?}", t.kind),
+                        span: t.span,
+                    });
+                }
+            }
+        }
+        self.expect(&TokenKind::RBrace)?;
+        Ok(Stmt::ExtendBlock { type_name, methods, span })
+    }
+
+    /// Parse `object.field = expr ;`
+    fn parse_field_assign(&mut self) -> Result<Stmt> {
+        let span = self.peek().span;
+        let object = self.expect_ident("object name")?;
+        self.expect(&TokenKind::Dot)?;
+        let field = self.expect_ident("field name")?;
+        self.expect(&TokenKind::Equals)?;
+        let value = self.parse_or()?;
+        self.expect(&TokenKind::Semicolon)?;
+        Ok(Stmt::FieldAssign { object, field, value, span })
+    }
+
+    /// Parse an expression used as a statement (value discarded), e.g. `obj.method(args)`.
+    fn parse_expr_stmt(&mut self) -> Result<Stmt> {
+        let expr = self.parse_or()?;
+        self.expect(&TokenKind::Semicolon)?;
+        Ok(Stmt::Expr(expr))
+    }
+
     /// Extract the span from any expression node.
     fn expr_span(e: &Expr) -> Span {
         match e {
-            Expr::Integer    { span, .. } => *span,
-            Expr::Float      { span, .. } => *span,
-            Expr::Bool       { span, .. } => *span,
-            Expr::Identifier { span, .. } => *span,
-            Expr::Call       { span, .. } => *span,
-            Expr::BinOp      { span, .. } => *span,
-            Expr::UnaryOp    { span, .. } => *span,
+            Expr::Integer      { span, .. } => *span,
+            Expr::Float        { span, .. } => *span,
+            Expr::Bool         { span, .. } => *span,
+            Expr::Identifier   { span, .. } => *span,
+            Expr::Call         { span, .. } => *span,
+            Expr::BinOp        { span, .. } => *span,
+            Expr::UnaryOp      { span, .. } => *span,
+            Expr::StructLiteral{ span, .. } => *span,
+            Expr::FieldAccess  { span, .. } => *span,
         }
     }
 
@@ -458,23 +633,58 @@ impl Parser {
         }
     }
 
-    /// Parse a primary expression, then handle any trailing call `(args)`.
+    /// Parse the `{ field: expr, … }` body of a struct literal, given that the
+    /// type name has already been consumed.
+    fn parse_struct_literal_body(&mut self, type_name: String, span: Span) -> Result<Expr> {
+        self.advance(); // consume `{`
+        let mut fields = Vec::new();
+        loop {
+            // Skip any auto-inserted semicolons (e.g. after the last field's value)
+            while self.peek().kind == TokenKind::Semicolon {
+                self.advance();
+            }
+            if self.peek().kind == TokenKind::RBrace || self.peek().kind == TokenKind::Eof {
+                break;
+            }
+            let field_name = self.expect_ident("field name")?;
+            self.expect(&TokenKind::Colon)?;
+            let value = self.parse_or()?;
+            fields.push((field_name, value));
+            // Allow a trailing comma or semicolon after each field value
+            if self.peek().kind == TokenKind::Comma || self.peek().kind == TokenKind::Semicolon {
+                self.advance();
+            }
+        }
+        self.expect(&TokenKind::RBrace)?;
+        Ok(Expr::StructLiteral { type_name, fields, span })
+    }
+
+    /// Parse a primary expression, then handle any trailing `.field` or `(args)` postfix.
+    /// This naturally chains: `p.method(arg)` → FieldAccess then Call.
     fn parse_call(&mut self) -> Result<Expr> {
         let mut expr = self.parse_primary()?;
-        // Postfix call loop: `f(x)(y)` chains naturally
-        while self.peek().kind == TokenKind::LParen {
-            let span = Self::expr_span(&expr);
-            self.advance(); // consume `(`
-            let mut args = Vec::new();
-            if self.peek().kind != TokenKind::RParen {
-                args.push(self.parse_or()?);
-                while self.peek().kind == TokenKind::Comma {
-                    self.advance(); // consume `,`
+        loop {
+            if self.peek().kind == TokenKind::LParen {
+                let span = Self::expr_span(&expr);
+                self.advance(); // consume `(`
+                let mut args = Vec::new();
+                if self.peek().kind != TokenKind::RParen {
                     args.push(self.parse_or()?);
+                    while self.peek().kind == TokenKind::Comma {
+                        self.advance(); // consume `,`
+                        args.push(self.parse_or()?);
+                    }
                 }
+                self.expect(&TokenKind::RParen)?;
+                expr = Expr::Call { callee: Box::new(expr), args, span };
+            } else if self.peek().kind == TokenKind::Dot {
+                let span = Self::expr_span(&expr);
+                self.advance(); // consume `.`
+                let field = self.expect_ident("field name")?;
+                expr = Expr::FieldAccess { object: Box::new(expr), field, span };
+            } else {
+                break;
             }
-            self.expect(&TokenKind::RParen)?;
-            expr = Expr::Call { callee: Box::new(expr), args, span };
         }
         Ok(expr)
     }
@@ -502,7 +712,13 @@ impl Parser {
             TokenKind::Identifier(ref name) => {
                 let name = name.clone();
                 self.advance();
-                Ok(Expr::Identifier { name, span: token.span })
+                // `TypeName { field: expr, … }` is a struct literal, but only when
+                // struct literals are allowed in this position (not in if/while conditions).
+                if self.struct_literal_allowed && self.peek().kind == TokenKind::LBrace {
+                    self.parse_struct_literal_body(name, token.span)
+                } else {
+                    Ok(Expr::Identifier { name, span: token.span })
+                }
             }
             TokenKind::LParen => {
                 self.advance(); // consume `(`
@@ -877,5 +1093,61 @@ mod tests {
         let p = parse_src("fn f(n) {\n    while n > 0 {\n        let n = n - 1\n    }\n    return n\n}");
         let Stmt::FnDef { body, .. } = &p.stmts[0] else { panic!() };
         assert!(matches!(body[0], Stmt::While { .. }));
+    }
+
+    // ── struct / extend ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_struct_def() {
+        let p = parse_src("struct Point {\n    x,\n    y\n}");
+        let Stmt::StructDef { name, fields, .. } = &p.stmts[0] else { panic!() };
+        assert_eq!(name, "Point");
+        assert_eq!(fields, &["x", "y"]);
+    }
+
+    #[test]
+    fn test_parse_struct_def_empty() {
+        let p = parse_src("struct Empty {\n}");
+        let Stmt::StructDef { name, fields, .. } = &p.stmts[0] else { panic!() };
+        assert_eq!(name, "Empty");
+        assert!(fields.is_empty());
+    }
+
+    #[test]
+    fn test_parse_extend_block() {
+        let p = parse_src("extend Foo {\n    fn get(self) {\n        return 1\n    }\n}");
+        let Stmt::ExtendBlock { type_name, methods, .. } = &p.stmts[0] else { panic!() };
+        assert_eq!(type_name, "Foo");
+        assert_eq!(methods.len(), 1);
+        let Stmt::FnDef { name, params, .. } = &methods[0] else { panic!() };
+        assert_eq!(name, "get");
+        assert_eq!(params[0], "self");
+    }
+
+    #[test]
+    fn test_parse_struct_literal() {
+        let p = parse_src("let p = Point { x: 1, y: 2 }");
+        let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
+        let Expr::StructLiteral { type_name, fields, .. } = value else { panic!() };
+        assert_eq!(type_name, "Point");
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].0, "x");
+        assert_eq!(fields[1].0, "y");
+    }
+
+    #[test]
+    fn test_parse_field_access() {
+        let p = parse_src("let v = p.x");
+        let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
+        let Expr::FieldAccess { field, .. } = value else { panic!() };
+        assert_eq!(field, "x");
+    }
+
+    #[test]
+    fn test_parse_field_assign() {
+        let p = parse_src("let p = 0\np.x = 5");
+        let Stmt::FieldAssign { object, field, .. } = &p.stmts[1] else { panic!() };
+        assert_eq!(object, "p");
+        assert_eq!(field, "x");
     }
 }

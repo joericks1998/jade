@@ -1,17 +1,40 @@
-fn get_local() {
+// Scope isolation: function params and locals are private to each call.
+// They do not leak into the caller's environment.
+
+fn set_value() {
     let x = 42
     return x
 }
 
-fn uses_param(x) {
-    return x + 1
+fn double_param(n) {
+    let result = n * 2
+    return result
 }
 
-fn local_shadow(x) {
-    let y = x * 2
-    return y
+let a = set_value()
+// a == 42
+// x is NOT visible here — it was local to set_value
+
+let b = double_param(7)
+// b == 14
+// n and result are NOT visible here — they were local to double_param
+
+// Outer variables are visible inside functions (lexical scope chain)
+let outer = 100
+
+fn read_outer() {
+    return outer
 }
 
-let a = get_local()
-let b = uses_param(9)
-let c = local_shadow(5)
+let c = read_outer()
+// c == 100
+
+// Bare assignment inside a function mutates a binding in an enclosing scope
+fn bump(x) {
+    outer = outer + x
+    return outer
+}
+
+let d = bump(5)
+// outer == 105
+// d == 105

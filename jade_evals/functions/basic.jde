@@ -1,3 +1,7 @@
+// Basic function definitions and calls.
+// Parameters and local variables are scoped to the function call — they do
+// not leak into the caller's environment.
+
 fn add(a, b) {
     return a + b
 }
@@ -11,6 +15,17 @@ fn multiply(a, b, c) {
 }
 
 let sum = add(3, 4)
+// sum == 7
+// a, b are local to add — not visible here
+
 let sq = square(5)
+// sq == 25
+// x is local to square — not visible here
+
 let triple = multiply(2, 3, 4)
+// triple == 24
+// a, b, c are local to multiply — not visible here
+
 let chained = add(square(2), square(3))
+// square(2) → 4, square(3) → 9, add(4, 9) → 13
+// chained == 13
