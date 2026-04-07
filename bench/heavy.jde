@@ -1,0 +1,24 @@
+fn factorial(n) {
+    if n <= 1 {
+        return 1
+    }
+    return n * factorial(n - 1)
+}
+
+fn fib(n) {
+    if n <= 1 {
+        return n
+    }
+    return fib(n - 1) + fib(n - 2)
+}
+
+fn sum_to(n) {
+    if n <= 0 {
+        return 0
+    }
+    return n + sum_to(n - 1)
+}
+
+let f15   = factorial(15)   // 1307674368000
+let fib28 = fib(28)         // 317811
+let s500  = sum_to(500)     // 125250
