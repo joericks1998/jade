@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -15,14 +16,29 @@ pub enum Value {
     Float(f64),
     Bool(bool),
     Fn(Rc<FnValue>),
+    /// A struct instance. Wrapped in `Rc<RefCell<…>>` so that all references
+    /// to the same instance (including `self` inside methods) share mutable state.
+    Struct(Rc<RefCell<StructInstance>>),
+    /// A method bound to a specific receiver instance.
+    BoundMethod(Rc<BoundMethod>),
 }
 
-/// Heap-allocated function body shared via `Rc` so that `Value::Fn` clones
-/// cheaply (pointer copy) and the body remains live even if the function
-/// name is rebound during execution.
+/// Heap-allocated function body shared via `Rc`.
 pub struct FnValue {
     pub params: Vec<String>,
     pub body: Vec<Stmt>,
+}
+
+/// A struct instance at runtime.
+pub struct StructInstance {
+    pub type_name: String,
+    pub fields: HashMap<String, Value>,
+}
+
+/// A method together with the instance it was accessed through.
+pub struct BoundMethod {
+    pub receiver: Rc<RefCell<StructInstance>>,
+    pub method: Rc<FnValue>,
 }
 
 impl std::fmt::Debug for Value {
@@ -32,6 +48,18 @@ impl std::fmt::Debug for Value {
             Value::Float(v) => write!(f, "Float({})", v),
             Value::Bool(b)  => write!(f, "Bool({})", b),
             Value::Fn(fv)   => write!(f, "Fn({})", fv.params.join(", ")),
+            Value::Struct(rc) => {
+                let inst = rc.borrow();
+                write!(f, "{} {{", inst.type_name)?;
+                let mut first = true;
+                for (k, v) in &inst.fields {
+                    if !first { write!(f, ", ")?; }
+                    write!(f, "{}: {:?}", k, v)?;
+                    first = false;
+                }
+                write!(f, "}}")
+            }
+            Value::BoundMethod(_) => write!(f, "<bound method>"),
         }
     }
 }
@@ -46,15 +74,24 @@ impl std::fmt::Debug for FnValue {
 
 /// Scoped environment: a stack of hash maps. `scopes[0]` is the global scope;
 /// each function call and block body pushes/pops a new frame.
+/// Struct definitions and impl methods are global (not scoped).
 #[derive(Debug)]
 pub struct Env {
     scopes: Vec<HashMap<String, Value>>,
+    /// Maps struct type names to their ordered list of field names.
+    pub struct_defs: HashMap<String, Vec<String>>,
+    /// Maps struct type names to their method tables.
+    pub impl_methods: HashMap<String, HashMap<String, Rc<FnValue>>>,
 }
 
 impl Env {
     /// Create a new environment with one (global) scope.
     pub fn new() -> Self {
-        Env { scopes: vec![HashMap::new()] }
+        Env {
+            scopes: vec![HashMap::new()],
+            struct_defs: HashMap::new(),
+            impl_methods: HashMap::new(),
+        }
     }
 
     /// Push a new inner scope (on function call or block entry).
@@ -198,6 +235,47 @@ fn eval_block(stmts: &[Stmt], env: &mut Env) -> Result<Option<Value>> {
                     }),
                 }
             }
+
+            Stmt::StructDef { name, fields, .. } => {
+                env.struct_defs.insert(name.clone(), fields.clone());
+            }
+
+            Stmt::ImplBlock { type_name, methods, .. } => {
+                let method_map = env.impl_methods.entry(type_name.clone()).or_default();
+                for method in methods {
+                    if let Stmt::FnDef { name, params, body, .. } = method {
+                        method_map.insert(name.clone(), Rc::new(FnValue {
+                            params: params.clone(),
+                            body: body.clone(),
+                        }));
+                    }
+                }
+            }
+
+            Stmt::FieldAssign { object, field, value, span } => {
+                let v = eval_expr(value, env)?;
+                let obj_val = env.get(object).ok_or_else(|| JadeError::UndefinedVariable {
+                    name: object.clone(),
+                    span: *span,
+                })?;
+                match obj_val {
+                    Value::Struct(rc) => {
+                        if !rc.borrow().fields.contains_key(field) {
+                            return Err(JadeError::UndefinedField {
+                                type_name: rc.borrow().type_name.clone(),
+                                field: field.clone(),
+                                span: *span,
+                            });
+                        }
+                        rc.borrow_mut().fields.insert(field.clone(), v);
+                    }
+                    _ => return Err(JadeError::NotAStruct { span: *span }),
+                }
+            }
+
+            Stmt::Expr(expr) => {
+                eval_expr(expr, env)?;
+            }
         }
     }
     Ok(None)
@@ -213,9 +291,11 @@ fn to_float(v: Value) -> f64 {
     match v {
         Value::Int(i)   => i as f64,
         Value::Float(f) => f,
-        // Callers must guard against Bool and Fn before calling to_float.
-        Value::Bool(_)  => unreachable!("to_float called on Bool"),
-        Value::Fn(_)    => unreachable!("to_float called on Fn"),
+        // Callers must guard against non-numeric values before calling to_float.
+        Value::Bool(_)        => unreachable!("to_float called on Bool"),
+        Value::Fn(_)          => unreachable!("to_float called on Fn"),
+        Value::Struct(_)      => unreachable!("to_float called on Struct"),
+        Value::BoundMethod(_) => unreachable!("to_float called on BoundMethod"),
     }
 }
 
@@ -232,35 +312,114 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
 
         Expr::Call { callee, args, span } => {
             let callee_val = eval_expr(callee, env)?;
-            let Value::Fn(fn_rc) = callee_val else {
-                return Err(JadeError::NotCallable { span: *span });
-            };
 
-            if args.len() != fn_rc.params.len() {
-                return Err(JadeError::ArityMismatch {
-                    expected: fn_rc.params.len(),
-                    got: args.len(),
-                    span: *span,
-                });
+            match callee_val {
+                Value::Fn(fn_rc) => {
+                    if args.len() != fn_rc.params.len() {
+                        return Err(JadeError::ArityMismatch {
+                            expected: fn_rc.params.len(),
+                            got: args.len(),
+                            span: *span,
+                        });
+                    }
+                    let mut arg_vals = Vec::with_capacity(args.len());
+                    for arg_expr in args {
+                        arg_vals.push(eval_expr(arg_expr, env)?);
+                    }
+                    env.push_scope();
+                    for (param, val) in fn_rc.params.iter().zip(arg_vals) {
+                        env.define(param.clone(), val);
+                    }
+                    let result = eval_block(&fn_rc.body, env);
+                    env.pop_scope();
+                    Ok(result?.unwrap_or(Value::Int(0)))
+                }
+
+                Value::BoundMethod(bm) => {
+                    let fn_val = &bm.method;
+                    // params[0] is the `self` parameter — it is provided automatically
+                    // from the receiver; the caller supplies the remaining params.
+                    let self_param_count = if fn_val.params.is_empty() { 0 } else { 1 };
+                    let expected = fn_val.params.len() - self_param_count;
+                    if args.len() != expected {
+                        return Err(JadeError::ArityMismatch {
+                            expected,
+                            got: args.len(),
+                            span: *span,
+                        });
+                    }
+                    let mut arg_vals = Vec::with_capacity(args.len());
+                    for arg_expr in args {
+                        arg_vals.push(eval_expr(arg_expr, env)?);
+                    }
+                    env.push_scope();
+                    if !fn_val.params.is_empty() {
+                        // Bind `self` to the receiver (shared Rc — mutations inside
+                        // the method body are visible on the original instance).
+                        env.define(
+                            fn_val.params[0].clone(),
+                            Value::Struct(bm.receiver.clone()),
+                        );
+                        for (param, val) in fn_val.params[1..].iter().zip(arg_vals) {
+                            env.define(param.clone(), val);
+                        }
+                    }
+                    let result = eval_block(&fn_val.body, env);
+                    env.pop_scope();
+                    Ok(result?.unwrap_or(Value::Int(0)))
+                }
+
+                _ => Err(JadeError::NotCallable { span: *span }),
+            }
+        }
+
+        Expr::StructLiteral { type_name, fields, span } => {
+            let def_fields = env.struct_defs.get(type_name)
+                .ok_or_else(|| JadeError::UndefinedType { name: type_name.clone(), span: *span })?
+                .clone();
+
+            // Evaluate all field expressions
+            let mut field_map: HashMap<String, Value> = HashMap::new();
+            for (fname, fexpr) in fields {
+                let v = eval_expr(fexpr, env)?;
+                field_map.insert(fname.clone(), v);
             }
 
-            // Evaluate all arguments before binding (avoids partial-state reads)
-            let mut arg_vals = Vec::with_capacity(args.len());
-            for arg_expr in args {
-                arg_vals.push(eval_expr(arg_expr, env)?);
+            // Verify every declared field is present in the literal
+            for required in &def_fields {
+                if !field_map.contains_key(required) {
+                    return Err(JadeError::MissingField { field: required.clone(), span: *span });
+                }
             }
 
-            // Push a new scope; bind params locally; pop scope even if the body errors.
-            env.push_scope();
-            for (param, val) in fn_rc.params.iter().zip(arg_vals) {
-                env.define(param.clone(), val);
-            }
-            let result = eval_block(&fn_rc.body, env);
-            env.pop_scope();
+            Ok(Value::Struct(Rc::new(RefCell::new(StructInstance {
+                type_name: type_name.clone(),
+                fields: field_map,
+            }))))
+        }
 
-            // DESIGN: A function that falls off the end without `return` yields Int(0).
-            // This will be replaced by a Unit type in a future release.
-            Ok(result?.unwrap_or(Value::Int(0)))
+        Expr::FieldAccess { object, field, span } => {
+            let obj_val = eval_expr(object, env)?;
+            match obj_val {
+                Value::Struct(rc) => {
+                    let type_name = rc.borrow().type_name.clone();
+                    // Check instance fields first
+                    if let Some(v) = rc.borrow().fields.get(field).cloned() {
+                        return Ok(v);
+                    }
+                    // Fall back to impl methods, returning a bound method
+                    if let Some(methods) = env.impl_methods.get(&type_name) {
+                        if let Some(method) = methods.get(field) {
+                            return Ok(Value::BoundMethod(Rc::new(BoundMethod {
+                                receiver: rc,
+                                method: method.clone(),
+                            })));
+                        }
+                    }
+                    Err(JadeError::UndefinedField { type_name, field: field.clone(), span: *span })
+                }
+                _ => Err(JadeError::NotAStruct { span: *span }),
+            }
         }
 
         Expr::BinOp { op, left, right, span } => {
@@ -299,7 +458,10 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                                 .ok_or(JadeError::IntegerOverflow { span: *span })
                                 .map(Value::Int),
                             (Value::Bool(_), _) | (_, Value::Bool(_)) |
-                            (Value::Fn(_),   _) | (_, Value::Fn(_))   => Err(JadeError::TypeError { op: "+".to_string(), span: *span }),
+                            (Value::Fn(_),   _) | (_, Value::Fn(_))   |
+                            (Value::Struct(_), _) | (_, Value::Struct(_)) |
+                            (Value::BoundMethod(_), _) | (_, Value::BoundMethod(_)) =>
+                                Err(JadeError::TypeError { op: "+".to_string(), span: *span }),
                             (a, b) => Ok(Value::Float(to_float(a) + to_float(b))),
                         },
                         BinOpKind::Sub => match (l, r) {
@@ -307,7 +469,10 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                                 .ok_or(JadeError::IntegerOverflow { span: *span })
                                 .map(Value::Int),
                             (Value::Bool(_), _) | (_, Value::Bool(_)) |
-                            (Value::Fn(_),   _) | (_, Value::Fn(_))   => Err(JadeError::TypeError { op: "-".to_string(), span: *span }),
+                            (Value::Fn(_),   _) | (_, Value::Fn(_))   |
+                            (Value::Struct(_), _) | (_, Value::Struct(_)) |
+                            (Value::BoundMethod(_), _) | (_, Value::BoundMethod(_)) =>
+                                Err(JadeError::TypeError { op: "-".to_string(), span: *span }),
                             (a, b) => Ok(Value::Float(to_float(a) - to_float(b))),
                         },
                         BinOpKind::Mul => match (l, r) {
@@ -315,7 +480,10 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                                 .ok_or(JadeError::IntegerOverflow { span: *span })
                                 .map(Value::Int),
                             (Value::Bool(_), _) | (_, Value::Bool(_)) |
-                            (Value::Fn(_),   _) | (_, Value::Fn(_))   => Err(JadeError::TypeError { op: "*".to_string(), span: *span }),
+                            (Value::Fn(_),   _) | (_, Value::Fn(_))   |
+                            (Value::Struct(_), _) | (_, Value::Struct(_)) |
+                            (Value::BoundMethod(_), _) | (_, Value::BoundMethod(_)) =>
+                                Err(JadeError::TypeError { op: "*".to_string(), span: *span }),
                             (a, b) => Ok(Value::Float(to_float(a) * to_float(b))),
                         },
                         BinOpKind::Div => match (l, r) {
@@ -323,7 +491,10 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                                 if b == 0 { Err(JadeError::DivisionByZero { span: *span }) } else { Ok(Value::Int(a / b)) }
                             }
                             (Value::Bool(_), _) | (_, Value::Bool(_)) |
-                            (Value::Fn(_),   _) | (_, Value::Fn(_))   => Err(JadeError::TypeError { op: "/".to_string(), span: *span }),
+                            (Value::Fn(_),   _) | (_, Value::Fn(_))   |
+                            (Value::Struct(_), _) | (_, Value::Struct(_)) |
+                            (Value::BoundMethod(_), _) | (_, Value::BoundMethod(_)) =>
+                                Err(JadeError::TypeError { op: "/".to_string(), span: *span }),
                             (a, b) => {
                                 let bf = to_float(b);
                                 if bf == 0.0 { Err(JadeError::DivisionByZero { span: *span }) } else { Ok(Value::Float(to_float(a) / bf)) }
@@ -334,7 +505,10 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                                 if b == 0 { Err(JadeError::RemainderByZero { span: *span }) } else { Ok(Value::Int(a % b)) }
                             }
                             (Value::Bool(_), _) | (_, Value::Bool(_)) |
-                            (Value::Fn(_),   _) | (_, Value::Fn(_))   => Err(JadeError::TypeError { op: "%".to_string(), span: *span }),
+                            (Value::Fn(_),   _) | (_, Value::Fn(_))   |
+                            (Value::Struct(_), _) | (_, Value::Struct(_)) |
+                            (Value::BoundMethod(_), _) | (_, Value::BoundMethod(_)) =>
+                                Err(JadeError::TypeError { op: "%".to_string(), span: *span }),
                             (a, b) => {
                                 let bf = to_float(b);
                                 if bf == 0.0 { Err(JadeError::RemainderByZero { span: *span }) } else { Ok(Value::Float(to_float(a) % bf)) }
