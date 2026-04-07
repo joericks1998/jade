@@ -54,6 +54,25 @@ pub fn run_file(path: &str, verbose: bool) {
                 }
                 eval::Value::Bool(b) => println!("{} = {}", name, b),
                 eval::Value::Fn(_)   => println!("{} = <fn>", name),
+                eval::Value::Struct(rc) => {
+                    let inst = rc.borrow();
+                    print!("{} = {} {{", name, inst.type_name);
+                    let mut pairs: Vec<_> = inst.fields.iter().collect();
+                    pairs.sort_by_key(|(k, _)| k.as_str());
+                    let mut first = true;
+                    for (k, v) in pairs {
+                        if !first { print!(", "); }
+                        match v {
+                            eval::Value::Int(i)   => print!("{}: {}", k, i),
+                            eval::Value::Float(f) => print!("{}: {}", k, f),
+                            eval::Value::Bool(b)  => print!("{}: {}", k, b),
+                            _                     => print!("{}: ...", k),
+                        }
+                        first = false;
+                    }
+                    println!(" }}");
+                }
+                eval::Value::BoundMethod(_) => println!("{} = <bound method>", name),
             }
         }
     }

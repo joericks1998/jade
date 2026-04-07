@@ -1,0 +1,39 @@
+// Basic struct definitions, instantiation, field access, field mutation,
+// impl blocks, and method calls.
+
+struct Point {
+    x,
+    y
+}
+
+struct Counter {
+    count
+}
+
+// Instantiation and field access
+let p = Point { x: 10, y: 20 }
+let px = p.x
+// px == 10
+let py = p.y
+// py == 20
+
+// Field mutation
+p.x = 99
+let updated_x = p.x
+// updated_x == 99
+
+// impl block with methods; `self` refers to the receiver instance
+impl Counter {
+    fn increment(self) {
+        self.count = self.count + 1
+    }
+    fn value(self) {
+        return self.count
+    }
+}
+
+let c = Counter { count: 0 }
+c.increment()
+c.increment()
+let v = c.value()
+// v == 2
