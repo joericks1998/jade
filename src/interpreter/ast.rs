@@ -55,6 +55,35 @@ pub enum Stmt {
         #[allow(dead_code)]
         span: Span,
     },
+
+    /// `struct Name { field, … }`
+    StructDef {
+        name: String,
+        fields: Vec<String>,
+        #[allow(dead_code)]
+        span: Span,
+    },
+
+    /// `impl TypeName { fn method(self, …) { … } … }`
+    ImplBlock {
+        type_name: String,
+        methods: Vec<Stmt>,
+        #[allow(dead_code)]
+        span: Span,
+    },
+
+    /// `object.field = expr` — mutate a field on a struct instance
+    FieldAssign {
+        object: String,
+        field: String,
+        value: Expr,
+        #[allow(dead_code)]
+        span: Span,
+    },
+
+    /// A bare expression used as a statement, e.g. a method call whose return
+    /// value is discarded: `obj.method(args)`.
+    Expr(Expr),
 }
 
 /// An expression produces a value.
@@ -103,6 +132,20 @@ pub enum Expr {
     UnaryOp {
         op: UnaryOpKind,
         operand: Box<Expr>,
+        span: Span,
+    },
+
+    /// A struct literal, e.g. `Point { x: 10, y: 20 }`
+    StructLiteral {
+        type_name: String,
+        fields: Vec<(String, Expr)>,
+        span: Span,
+    },
+
+    /// Field access on a struct, e.g. `p.x` or `obj.method`
+    FieldAccess {
+        object: Box<Expr>,
+        field: String,
         span: Span,
     },
 }
