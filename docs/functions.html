@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Jade 1.0.4 — Functions</title>
+  <title>Jade 1.0.5 — Functions</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -282,9 +282,9 @@
       </a>
       <span class="topbar-sep">»</span>
       <select title="Version">
-        <option>1.0.4</option>
+        <option>1.0.5</option>
       </select>
-      <span class="topbar-title">1.0.4 Documentation</span>
+      <span class="topbar-title">1.0.5 Documentation</span>
     </div>
     <div class="topbar-right">
       <a href="https://github.com/joericks1998/jade">GitHub</a>
@@ -313,6 +313,7 @@
           <li><a href="types.html">Types</a></li>
           <li><a href="functions.html" class="active">Functions</a></li>
           <li><a href="control-flow.html">Control Flow</a></li>
+          <li><a href="structs.html">Structs</a></li>
         </ul>
       </div>
       <hr class="sidebar-divider" />
@@ -621,10 +622,11 @@ let fib10 = fib(10)</code></pre>
           body (parser.rs: <code>parse_fn</code>).
         </div>
         <div class="note">
-          <strong>Note:</strong> Auto-semicolon insertion does not insert a semicolon after a
-          closing <code>}</code>. This means a <code>}</code> followed by <code>else</code> on
-          the next line is parsed correctly without a semicolon between them (lexer.rs:
-          <code>is_line_terminator</code> — <code>RBrace</code> is intentionally excluded).
+          <strong>Note:</strong> Auto-semicolon insertion <em>does</em> insert a semicolon after
+          a closing <code>}</code> at the end of a line. The parser handles <code>} else {</code>
+          across lines by consuming any such semicolon before checking for <code>else</code>
+          (parser.rs: <code>parse_if</code>; lexer.rs: <code>is_line_terminator</code> includes
+          <code>RBrace</code>).
         </div>
         <div class="note">
           <strong>Note:</strong> Arguments are evaluated in the <em>caller's</em> scope before

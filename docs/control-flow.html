@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Jade 1.0.4 — Control Flow</title>
+  <title>Jade 1.0.5 — Control Flow</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -282,9 +282,9 @@
       </a>
       <span class="topbar-sep">»</span>
       <select title="Version">
-        <option>1.0.4</option>
+        <option>1.0.5</option>
       </select>
-      <span class="topbar-title">1.0.4 Documentation</span>
+      <span class="topbar-title">1.0.5 Documentation</span>
     </div>
     <div class="topbar-right">
       <a href="https://github.com/joericks1998/jade">GitHub</a>
@@ -313,6 +313,7 @@
           <li><a href="types.html">Types</a></li>
           <li><a href="functions.html">Functions</a></li>
           <li><a href="control-flow.html" class="active">Control Flow</a></li>
+          <li><a href="structs.html">Structs</a></li>
         </ul>
       </div>
       <hr class="sidebar-divider" />
@@ -600,9 +601,10 @@ let q4 = quadrant(1, -1)</code></pre>
           </li>
           <li>
             <strong>Variable bindings</strong>: A <code>let</code> statement inside a branch
-            creates a binding in the <em>enclosing function's</em> scope, not a new nested scope.
-            Both the <code>then</code> and <code>else</code> blocks share the same environment
-            frame as the surrounding function body.
+            creates a binding in the branch's own child scope. Variables declared inside a
+            <code>then</code> or <code>else</code> block are not visible outside that block.
+            Use bare assignment (<code>x = expr</code>) to update a variable declared in an
+            enclosing scope from inside a branch.
           </li>
           <li>
             <strong>Recursion</strong>: <code>if</code>/<code>else</code> is the standard way to
@@ -615,11 +617,12 @@ let q4 = quadrant(1, -1)</code></pre>
       <section id="implementation">
         <h2>Implementation Notes</h2>
         <div class="note">
-          <strong>Note:</strong> Auto-semicolon insertion does not insert a semicolon after
-          a closing <code>}</code>. This is what allows <code>} else {</code> to parse
-          correctly across lines — the lexer intentionally excludes <code>RBrace</code>
-          from the set of tokens that trigger semicolon insertion (lexer.rs:
-          <code>is_line_terminator</code>).
+          <strong>Note:</strong> The lexer <em>does</em> insert a semicolon after a closing
+          <code>}</code> at the end of a line (<code>RBrace</code> is a line-terminator token
+          in lexer.rs: <code>is_line_terminator</code>). The parser handles this by consuming
+          any auto-inserted semicolon before checking for <code>else</code> (parser.rs:
+          <code>parse_if</code>). This means <code>} else {</code> split across lines parses
+          correctly.
         </div>
         <div class="note">
           <strong>Note:</strong> A <code>return</code> statement inside either the <code>then</code>
@@ -630,11 +633,12 @@ let q4 = quadrant(1, -1)</code></pre>
           a branch exits the entire function (eval.rs: <code>if let Some(v) = eval_block(then_body, …)?</code>).
         </div>
         <div class="note">
-          <strong>Note:</strong> The <code>then</code> and <code>else</code> blocks share the
-          same <code>Env</code> frame as the surrounding block — the evaluator passes
-          <code>Rc::clone(&amp;env)</code> into both branches rather than creating a new child
-          frame. Variables declared with <code>let</code> inside a branch are visible after
-          the branch completes, within the same function body (eval.rs: <code>eval_block(then_body, Rc::clone(&amp;env))</code>).
+          <strong>Note:</strong> Both the <code>then</code> and <code>else</code> blocks execute
+          in a child scope. The evaluator calls <code>env.push_scope()</code> before entering
+          either branch and <code>env.pop_scope()</code> after it completes (eval.rs:
+          <code>Stmt::If</code>). Variables declared with <code>let</code> inside a branch are
+          not visible outside that branch. To update a variable from an enclosing scope inside
+          a branch, use bare assignment: <code>x = new_value</code>.
         </div>
       </section>
 
@@ -644,14 +648,14 @@ let q4 = quadrant(1, -1)</code></pre>
           The <code>while</code> statement is Jade's iteration construct. It evaluates a
           <code>bool</code> condition before each iteration and executes the loop body as long as
           the condition is <code>true</code>. Loop termination is controlled entirely by changing
-          the values that the condition expression tests — typically by rebinding a variable with
-          <code>let</code> inside the body.
+          the values that the condition expression tests — typically by using bare assignment
+          (<code>i = i + 1</code>) to update a variable that was declared before the loop.
         </p>
         <p>
-          Because Jade does not have mutable assignment (only <code>let</code> rebinding), updating
-          a loop variable means writing <code>let i = i + 1</code> inside the loop body. Each
-          iteration creates a new binding for <code>i</code> in the same scope, shadowing the
-          previous value. The loop condition then tests the newly bound value on the next iteration.
+          Bare assignment (<code>x = expr</code>) updates an existing variable in the nearest
+          enclosing scope that contains it. This is the standard way to advance a loop counter.
+          Each iteration writes the new value back into the variable, and the loop condition tests
+          that updated value on the next check.
         </p>
         <p>
           A <code>return</code> statement inside a <code>while</code> body exits the enclosing
@@ -667,7 +671,7 @@ let q4 = quadrant(1, -1)</code></pre>
 }</code></pre>
         <ul>
           <li><code>&lt;condition&gt;</code> — any expression that produces a <code>bool</code>. Evaluated before each iteration, including the first.</li>
-          <li><code>&lt;body statements&gt;</code> — any sequence of statements to execute while the condition is <code>true</code>. Typically includes a <code>let</code> rebinding to advance the loop variable.</li>
+          <li><code>&lt;body statements&gt;</code> — any sequence of statements to execute while the condition is <code>true</code>. Typically includes a bare assignment to advance the loop variable, such as <code>i = i + 1</code>.</li>
         </ul>
         <div class="note">
           <strong>Note:</strong> The condition and the opening <code>{</code> must be on the same
@@ -684,10 +688,10 @@ let q4 = quadrant(1, -1)</code></pre>
         <h3>Counting up to a limit</h3>
         <pre><code>let i = 0
 while i &lt; 5 {
-    let i = i + 1
+    i = i + 1
 }</code></pre>
         <p>
-          The loop rebinds <code>i</code> on each iteration. When <code>i</code> reaches
+          Bare assignment updates <code>i</code> on each iteration. When <code>i</code> reaches
           <code>5</code>, the condition <code>i &lt; 5</code> becomes <code>false</code>
           and the loop exits. After the loop, <code>i</code> holds <code>5</code>.
         </p>
@@ -697,8 +701,8 @@ while i &lt; 5 {
 let sum = 0
 let i = 1
 while i &lt;= n {
-    let sum = sum + i
-    let i = i + 1
+    sum = sum + i
+    i = i + 1
 }</code></pre>
         <p>
           Each iteration adds the current <code>i</code> to <code>sum</code>, then advances
@@ -709,7 +713,7 @@ while i &lt;= n {
         <h3>Condition false from the start</h3>
         <pre><code>let never = 99
 while never &lt; 0 {
-    let never = never + 1
+    never = never + 1
 }</code></pre>
         <p>
           The condition is <code>false</code> on the first check, so the body never executes.
@@ -721,8 +725,8 @@ while never &lt; 0 {
     let total = 0
     let i = 1
     while i &lt;= n {
-        let total = total + i
-        let i = i + 1
+        total = total + i
+        i = i + 1
     }
     return total
 }
@@ -743,8 +747,8 @@ let s10 = sum_to(10)</code></pre>
     let result = 1
     let i = 1
     while i &lt;= n {
-        let result = result * i
-        let i = i + 1
+        result = result * i
+        i = i + 1
     }
     return result
 }
@@ -763,16 +767,16 @@ let i = 0
 while i &lt; 3 {
     let j = 0
     while j &lt; 3 {
-        let total = total + 1
-        let j = j + 1
+        total = total + 1
+        j = j + 1
     }
-    let i = i + 1
+    i = i + 1
 }</code></pre>
         <p>
           The inner loop runs to completion on each iteration of the outer loop. After both loops
           finish, <code>total</code> holds <code>9</code> (three outer iterations, each running
-          three inner iterations). The inner variable <code>j</code> is rebound to <code>0</code>
-          at the start of each outer iteration.
+          three inner iterations). <code>j</code> is declared fresh with <code>let</code> at the
+          start of each outer iteration and updated with bare assignment inside the inner loop.
         </p>
       </section>
 
@@ -861,10 +865,10 @@ while i &lt; 3 {
             <code>val &lt;= 100</code>, etc. See <a href="operators.html">Operators</a>.
           </li>
           <li>
-            <strong>let rebinding</strong>: Jade uses <code>let</code> to advance loop variables.
-            Writing <code>let i = i + 1</code> inside a loop body creates a new binding for
-            <code>i</code> in the same scope, shadowing the previous value. The condition then
-            tests the updated binding on the next iteration. See <a href="variables.html">Variables</a>.
+            <strong>Variable assignment</strong>: Jade uses bare assignment (<code>i = i + 1</code>)
+            to advance loop variables. The variable must be declared with <code>let</code> before
+            the loop; bare assignment then updates it in place through the scope chain. The condition
+            tests the updated value on the next iteration. See <a href="variables.html">Variables</a>.
           </li>
         </ul>
       </section>
@@ -872,18 +876,21 @@ while i &lt; 3 {
       <section id="while-implementation">
         <h2>while Implementation Notes</h2>
         <div class="note">
-          <strong>Note:</strong> The <code>while</code> loop passes the same <code>Env</code>
-          frame to each iteration — it calls <code>eval_block(body, Rc::clone(&amp;env))</code>
-          without creating a child scope. Variables bound with <code>let</code> inside the loop
-          body are visible after each iteration completes, within the same surrounding scope
-          (eval.rs: <code>Stmt::While</code>).
+          <strong>Note:</strong> The <code>while</code> loop body executes in a child scope.
+          The evaluator calls <code>env.push_scope()</code> before each iteration and
+          <code>env.pop_scope()</code> after it (eval.rs: <code>Stmt::While</code>).
+          Variables declared with <code>let</code> inside the loop body are local to that
+          iteration and are not visible outside the loop or in subsequent iterations.
+          To update a variable across iterations, declare it with <code>let</code> before
+          the loop and use bare assignment (<code>i = i + 1</code>) inside the body, which
+          traverses the scope chain and updates the binding in the enclosing scope.
         </div>
         <div class="note">
           <strong>Note:</strong> The condition and the opening <code>{</code> must be on the same
           source line. The lexer inserts a semicolon when a line ends in an integer, float,
-          identifier, boolean literal, or <code>)</code> token. A condition ending in any of
-          those token kinds, followed by a newline before <code>{</code>, would cause a parse
-          error. Write the condition and brace on one line: <code>while i &lt; 5 {</code>
+          identifier, boolean literal, <code>)</code>, or <code>}</code> token. A condition
+          ending in any of those token kinds, followed by a newline before <code>{</code>, would
+          cause a parse error. Write the condition and brace on one line: <code>while i &lt; 5 {</code>
           (lexer.rs: <code>is_line_terminator</code>).
         </div>
         <div class="note">
