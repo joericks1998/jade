@@ -27,11 +27,6 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program> {
 }
 
 impl Parser {
-    /// Returns a reference to the token one position ahead without advancing.
-    fn peek_next(&self) -> Option<&Token> {
-        self.tokens.get(self.pos + 1)
-    }
-
     /// Returns a reference to the token `offset` positions ahead without advancing.
     fn peek_at(&self, offset: usize) -> Option<&Token> {
         self.tokens.get(self.pos + offset)
@@ -121,7 +116,7 @@ impl Parser {
             TokenKind::If     => self.parse_if(),
             TokenKind::While  => self.parse_while(),
             TokenKind::Struct => self.parse_struct_def(),
-            TokenKind::Impl   => self.parse_impl_block(),
+            TokenKind::Extend => self.parse_extend_block(),
             TokenKind::Identifier(_) => {
                 // Disambiguate the three identifier-led statement forms:
                 //   `ident =`            → bare variable assignment
@@ -373,10 +368,10 @@ impl Parser {
         Ok(Stmt::StructDef { name, fields, span })
     }
 
-    /// Parse `impl TypeName { fn method(self, …) { … } … }`
-    fn parse_impl_block(&mut self) -> Result<Stmt> {
+    /// Parse `extend TypeName { fn method(self, …) { … } … }`
+    fn parse_extend_block(&mut self) -> Result<Stmt> {
         let span = self.peek().span;
-        self.advance(); // consume `impl`
+        self.advance(); // consume `extend`
         let type_name = self.expect_ident("type name")?;
         self.expect(&TokenKind::LBrace)?;
         let mut methods = Vec::new();
@@ -400,7 +395,7 @@ impl Parser {
             }
         }
         self.expect(&TokenKind::RBrace)?;
-        Ok(Stmt::ImplBlock { type_name, methods, span })
+        Ok(Stmt::ExtendBlock { type_name, methods, span })
     }
 
     /// Parse `object.field = expr ;`
@@ -1098,5 +1093,61 @@ mod tests {
         let p = parse_src("fn f(n) {\n    while n > 0 {\n        let n = n - 1\n    }\n    return n\n}");
         let Stmt::FnDef { body, .. } = &p.stmts[0] else { panic!() };
         assert!(matches!(body[0], Stmt::While { .. }));
+    }
+
+    // ── struct / extend ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_struct_def() {
+        let p = parse_src("struct Point {\n    x,\n    y\n}");
+        let Stmt::StructDef { name, fields, .. } = &p.stmts[0] else { panic!() };
+        assert_eq!(name, "Point");
+        assert_eq!(fields, &["x", "y"]);
+    }
+
+    #[test]
+    fn test_parse_struct_def_empty() {
+        let p = parse_src("struct Empty {\n}");
+        let Stmt::StructDef { name, fields, .. } = &p.stmts[0] else { panic!() };
+        assert_eq!(name, "Empty");
+        assert!(fields.is_empty());
+    }
+
+    #[test]
+    fn test_parse_extend_block() {
+        let p = parse_src("extend Foo {\n    fn get(self) {\n        return 1\n    }\n}");
+        let Stmt::ExtendBlock { type_name, methods, .. } = &p.stmts[0] else { panic!() };
+        assert_eq!(type_name, "Foo");
+        assert_eq!(methods.len(), 1);
+        let Stmt::FnDef { name, params, .. } = &methods[0] else { panic!() };
+        assert_eq!(name, "get");
+        assert_eq!(params[0], "self");
+    }
+
+    #[test]
+    fn test_parse_struct_literal() {
+        let p = parse_src("let p = Point { x: 1, y: 2 }");
+        let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
+        let Expr::StructLiteral { type_name, fields, .. } = value else { panic!() };
+        assert_eq!(type_name, "Point");
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].0, "x");
+        assert_eq!(fields[1].0, "y");
+    }
+
+    #[test]
+    fn test_parse_field_access() {
+        let p = parse_src("let v = p.x");
+        let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
+        let Expr::FieldAccess { field, .. } = value else { panic!() };
+        assert_eq!(field, "x");
+    }
+
+    #[test]
+    fn test_parse_field_assign() {
+        let p = parse_src("let p = 0\np.x = 5");
+        let Stmt::FieldAssign { object, field, .. } = &p.stmts[1] else { panic!() };
+        assert_eq!(object, "p");
+        assert_eq!(field, "x");
     }
 }

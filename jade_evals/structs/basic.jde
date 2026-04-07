@@ -1,5 +1,5 @@
 // Basic struct definitions, instantiation, field access, field mutation,
-// impl blocks, and method calls.
+// extend blocks, and method calls.
 
 struct Point {
     x,
@@ -22,8 +22,8 @@ p.x = 99
 let updated_x = p.x
 // updated_x == 99
 
-// impl block with methods; `self` refers to the receiver instance
-impl Counter {
+// extend block with methods; `self` refers to the receiver instance
+extend Counter {
     fn increment(self) {
         self.count = self.count + 1
     }
