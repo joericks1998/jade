@@ -49,6 +49,18 @@ pub enum JadeError {
 
     /// Integer arithmetic overflowed the i64 range.
     IntegerOverflow { span: Span },
+
+    /// Tried to access or mutate a field on a non-struct value.
+    NotAStruct { span: Span },
+
+    /// Tried to access a field that does not exist on the struct type.
+    UndefinedField { type_name: String, field: String, span: Span },
+
+    /// Struct literal used an unknown type name.
+    UndefinedType { name: String, span: Span },
+
+    /// Struct literal is missing a required field.
+    MissingField { field: String, span: Span },
 }
 
 impl std::fmt::Display for JadeError {
@@ -82,6 +94,14 @@ impl std::fmt::Display for JadeError {
                 write!(f, "[{}:{}] function definitions cannot be nested", span.line, span.col),
             JadeError::IntegerOverflow { span } =>
                 write!(f, "[{}:{}] integer overflow", span.line, span.col),
+            JadeError::NotAStruct { span } =>
+                write!(f, "[{}:{}] value is not a struct", span.line, span.col),
+            JadeError::UndefinedField { type_name, field, span } =>
+                write!(f, "[{}:{}] struct '{}' has no field '{}'", span.line, span.col, type_name, field),
+            JadeError::UndefinedType { name, span } =>
+                write!(f, "[{}:{}] undefined struct type '{}'", span.line, span.col, name),
+            JadeError::MissingField { field, span } =>
+                write!(f, "[{}:{}] missing required field '{}' in struct literal", span.line, span.col, field),
         }
     }
 }

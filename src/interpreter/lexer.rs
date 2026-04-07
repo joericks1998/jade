@@ -15,6 +15,8 @@ pub enum TokenKind {
     If,
     Else,
     While,
+    Struct,
+    Impl,
     True,
     False,
 
@@ -52,6 +54,8 @@ pub enum TokenKind {
     // Punctuation
     Comma,
     Semicolon,
+    Dot,
+    Colon,
 
     // Grouping
     LParen,
@@ -81,8 +85,10 @@ fn is_line_terminator(kind: &TokenKind) -> bool {
             | TokenKind::True
             | TokenKind::False
             | TokenKind::RParen
-            // RBrace is intentionally excluded: `} else {` must not get a
-            // semicolon between `}` and `else`.
+            // RBrace triggers semicolons so struct literals (`let p = Point { … }`)
+            // on their own line terminate the statement correctly. The parser handles
+            // `} else {` by consuming the inserted semicolon before checking for `else`.
+            | TokenKind::RBrace
     )
 }
 
@@ -173,6 +179,8 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
                     "if"     => TokenKind::If,
                     "else"   => TokenKind::Else,
                     "while"  => TokenKind::While,
+                    "struct" => TokenKind::Struct,
+                    "impl"   => TokenKind::Impl,
                     "true"   => TokenKind::True,
                     "false"  => TokenKind::False,
                     _        => TokenKind::Identifier(name),
@@ -207,6 +215,8 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
             '{' => { tokens.push(Token { kind: TokenKind::LBrace,  span: Span { line, col } }); col += 1; i += 1; }
             '}' => { tokens.push(Token { kind: TokenKind::RBrace,  span: Span { line, col } }); col += 1; i += 1; }
             ',' => { tokens.push(Token { kind: TokenKind::Comma,   span: Span { line, col } }); col += 1; i += 1; }
+            '.' => { tokens.push(Token { kind: TokenKind::Dot,     span: Span { line, col } }); col += 1; i += 1; }
+            ':' => { tokens.push(Token { kind: TokenKind::Colon,   span: Span { line, col } }); col += 1; i += 1; }
 
             // `&` or `&&`
             '&' => {
@@ -532,11 +542,16 @@ mod tests {
     }
 
     #[test]
-    fn test_no_semicolon_after_rbrace() {
-        // `}` followed by newline should NOT insert a semicolon
+    fn test_semicolon_after_rbrace() {
+        // `}` at end of line now inserts a semicolon so struct literals and
+        // block-ending statements terminate correctly. The parser consumes the
+        // inserted semicolon before checking for `else`.
         assert_eq!(
             kinds("}\nelse"),
-            vec![TokenKind::RBrace, TokenKind::Else, TokenKind::Eof]
+            vec![
+                TokenKind::RBrace, TokenKind::Semicolon,
+                TokenKind::Else, TokenKind::Eof,
+            ]
         );
     }
 
