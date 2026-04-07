@@ -74,14 +74,14 @@ impl std::fmt::Debug for FnValue {
 
 /// Scoped environment: a stack of hash maps. `scopes[0]` is the global scope;
 /// each function call and block body pushes/pops a new frame.
-/// Struct definitions and impl methods are global (not scoped).
+/// Struct definitions and extend methods are global (not scoped).
 #[derive(Debug)]
 pub struct Env {
     scopes: Vec<HashMap<String, Value>>,
     /// Maps struct type names to their ordered list of field names.
     pub struct_defs: HashMap<String, Vec<String>>,
     /// Maps struct type names to their method tables.
-    pub impl_methods: HashMap<String, HashMap<String, Rc<FnValue>>>,
+    pub extend_methods: HashMap<String, HashMap<String, Rc<FnValue>>>,
 }
 
 impl Env {
@@ -90,7 +90,7 @@ impl Env {
         Env {
             scopes: vec![HashMap::new()],
             struct_defs: HashMap::new(),
-            impl_methods: HashMap::new(),
+            extend_methods: HashMap::new(),
         }
     }
 
@@ -240,8 +240,8 @@ fn eval_block(stmts: &[Stmt], env: &mut Env) -> Result<Option<Value>> {
                 env.struct_defs.insert(name.clone(), fields.clone());
             }
 
-            Stmt::ImplBlock { type_name, methods, .. } => {
-                let method_map = env.impl_methods.entry(type_name.clone()).or_default();
+            Stmt::ExtendBlock { type_name, methods, .. } => {
+                let method_map = env.extend_methods.entry(type_name.clone()).or_default();
                 for method in methods {
                     if let Stmt::FnDef { name, params, body, .. } = method {
                         method_map.insert(name.clone(), Rc::new(FnValue {
@@ -260,13 +260,16 @@ fn eval_block(stmts: &[Stmt], env: &mut Env) -> Result<Option<Value>> {
                 })?;
                 match obj_val {
                     Value::Struct(rc) => {
-                        if !rc.borrow().fields.contains_key(field) {
-                            return Err(JadeError::UndefinedField {
-                                type_name: rc.borrow().type_name.clone(),
-                                field: field.clone(),
-                                span: *span,
-                            });
-                        }
+                        {
+                            let b = rc.borrow();
+                            if !b.fields.contains_key(field) {
+                                return Err(JadeError::UndefinedField {
+                                    type_name: b.type_name.clone(),
+                                    field: field.clone(),
+                                    span: *span,
+                                });
+                            }
+                        } // `b` dropped here, freeing the immutable borrow before borrow_mut
                         rc.borrow_mut().fields.insert(field.clone(), v);
                     }
                     _ => return Err(JadeError::NotAStruct { span: *span }),
@@ -392,6 +395,17 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                 }
             }
 
+            // Verify no extra fields beyond what the struct defines
+            for provided in field_map.keys() {
+                if !def_fields.contains(provided) {
+                    return Err(JadeError::UndefinedField {
+                        type_name: type_name.clone(),
+                        field: provided.clone(),
+                        span: *span,
+                    });
+                }
+            }
+
             Ok(Value::Struct(Rc::new(RefCell::new(StructInstance {
                 type_name: type_name.clone(),
                 fields: field_map,
@@ -407,8 +421,8 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                     if let Some(v) = rc.borrow().fields.get(field).cloned() {
                         return Ok(v);
                     }
-                    // Fall back to impl methods, returning a bound method
-                    if let Some(methods) = env.impl_methods.get(&type_name) {
+                    // Fall back to extend methods, returning a bound method
+                    if let Some(methods) = env.extend_methods.get(&type_name) {
                         if let Some(method) = methods.get(field) {
                             return Ok(Value::BoundMethod(Rc::new(BoundMethod {
                                 receiver: rc,
@@ -1305,5 +1319,75 @@ mod tests {
     fn test_eval_while_type_error_condition() {
         let err = eval_src("while 1 {\n}").unwrap_err();
         assert!(matches!(err, JadeError::TypeError { .. }));
+    }
+
+    // ── structs ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_eval_struct_field_access() {
+        let env = eval_src(
+            "struct Point {\n    x,\n    y\n}\nlet p = Point { x: 10, y: 20 }\nlet px = p.x\nlet py = p.y"
+        ).unwrap();
+        assert!(matches!(get(&env, "px"), Value::Int(10)));
+        assert!(matches!(get(&env, "py"), Value::Int(20)));
+    }
+
+    #[test]
+    fn test_eval_struct_field_mutation() {
+        let env = eval_src(
+            "struct Point {\n    x,\n    y\n}\nlet p = Point { x: 10, y: 20 }\np.x = 99\nlet updated = p.x"
+        ).unwrap();
+        assert!(matches!(get(&env, "updated"), Value::Int(99)));
+    }
+
+    #[test]
+    fn test_eval_method_call_mutates_state() {
+        let src = concat!(
+            "struct Counter {\n    count\n}\n",
+            "extend Counter {\n",
+            "    fn increment(self) {\n        self.count = self.count + 1\n    }\n",
+            "    fn value(self) {\n        return self.count\n    }\n",
+            "}\n",
+            "let c = Counter { count: 0 }\n",
+            "c.increment()\nc.increment()\nlet v = c.value()"
+        );
+        let env = eval_src(src).unwrap();
+        assert!(matches!(get(&env, "v"), Value::Int(2)));
+    }
+
+    #[test]
+    fn test_eval_undefined_type_error() {
+        let err = eval_src("let p = Foo { x: 1 }").unwrap_err();
+        assert!(matches!(err, JadeError::UndefinedType { .. }));
+    }
+
+    #[test]
+    fn test_eval_missing_field_error() {
+        let err = eval_src(
+            "struct Point {\n    x,\n    y\n}\nlet p = Point { x: 1 }"
+        ).unwrap_err();
+        assert!(matches!(err, JadeError::MissingField { .. }));
+    }
+
+    #[test]
+    fn test_eval_extra_field_error() {
+        let err = eval_src(
+            "struct Point {\n    x,\n    y\n}\nlet p = Point { x: 1, y: 2, z: 3 }"
+        ).unwrap_err();
+        assert!(matches!(err, JadeError::UndefinedField { .. }));
+    }
+
+    #[test]
+    fn test_eval_field_access_on_non_struct_error() {
+        let err = eval_src("let x = 5\nlet v = x.y").unwrap_err();
+        assert!(matches!(err, JadeError::NotAStruct { .. }));
+    }
+
+    #[test]
+    fn test_eval_undefined_field_access_error() {
+        let err = eval_src(
+            "struct Point {\n    x,\n    y\n}\nlet p = Point { x: 1, y: 2 }\nlet v = p.z"
+        ).unwrap_err();
+        assert!(matches!(err, JadeError::UndefinedField { .. }));
     }
 }

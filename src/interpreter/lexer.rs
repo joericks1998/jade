@@ -16,7 +16,7 @@ pub enum TokenKind {
     Else,
     While,
     Struct,
-    Impl,
+    Extend,
     True,
     False,
 
@@ -180,7 +180,7 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
                     "else"   => TokenKind::Else,
                     "while"  => TokenKind::While,
                     "struct" => TokenKind::Struct,
-                    "impl"   => TokenKind::Impl,
+                    "extend" => TokenKind::Extend,
                     "true"   => TokenKind::True,
                     "false"  => TokenKind::False,
                     _        => TokenKind::Identifier(name),
@@ -523,9 +523,10 @@ mod tests {
 
     #[test]
     fn test_tokenize_braces() {
+        // RBrace is a line terminator, so `{}` on one line inserts a semicolon after `}`
         assert_eq!(
             kinds("{}"),
-            vec![TokenKind::LBrace, TokenKind::RBrace, TokenKind::Eof]
+            vec![TokenKind::LBrace, TokenKind::RBrace, TokenKind::Semicolon, TokenKind::Eof]
         );
     }
 
@@ -557,10 +558,43 @@ mod tests {
 
     #[test]
     fn test_float_requires_digit_after_dot() {
-        // `1.` is tokenized as Integer(1), then `.` is an unexpected character.
+        // `1.` tokenizes as Integer(1) followed by a standalone Dot — not a float literal.
         // Float literals require at least one digit after the decimal point: `1.0`.
-        let err = tokenize("let x = 1.").unwrap_err();
-        assert!(matches!(err, JadeError::UnexpectedChar { ch: '.', .. }));
+        assert_eq!(
+            kinds("1."),
+            vec![TokenKind::Integer(1), TokenKind::Dot, TokenKind::Eof]
+        );
+    }
+
+    // ── struct / extend ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_tokenize_struct_keyword() {
+        assert_eq!(kinds("struct"), vec![TokenKind::Struct, TokenKind::Eof]);
+    }
+
+    #[test]
+    fn test_tokenize_extend_keyword() {
+        assert_eq!(kinds("extend"), vec![TokenKind::Extend, TokenKind::Eof]);
+    }
+
+    #[test]
+    fn test_tokenize_dot() {
+        assert_eq!(
+            kinds("a.b"),
+            vec![
+                TokenKind::Identifier("a".into()),
+                TokenKind::Dot,
+                TokenKind::Identifier("b".into()),
+                TokenKind::Semicolon,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_tokenize_colon() {
+        assert_eq!(kinds(":"), vec![TokenKind::Colon, TokenKind::Eof]);
     }
 
     // ── while ────────────────────────────────────────────────────────────────

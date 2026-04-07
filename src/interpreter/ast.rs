@@ -64,8 +64,8 @@ pub enum Stmt {
         span: Span,
     },
 
-    /// `impl TypeName { fn method(self, …) { … } … }`
-    ImplBlock {
+    /// `extend TypeName { fn method(self, …) { … } … }`
+    ExtendBlock {
         type_name: String,
         methods: Vec<Stmt>,
         #[allow(dead_code)]
