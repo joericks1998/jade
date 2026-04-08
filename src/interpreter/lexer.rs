@@ -1,11 +1,23 @@
 use super::error::{JadeError, Result, Span};
 
+/// A raw part of an f-string as produced by the lexer.
+/// The `Expr` variant holds the raw source text inside `{…}` — it is
+/// parsed into an `Expr` node later by the parser.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RawFStrPart {
+    Literal(String),
+    Expr(String),
+}
+
 /// Every kind of token the lexer can produce.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
     // Literals
     Integer(i64),
     Float(f64),
+    Str(String),
+    /// An interpolated string: `f"…"` or `f"""…"""`.
+    FStr(Vec<RawFStrPart>),
 
     // Identifiers and keywords
     Identifier(String),
@@ -13,6 +25,7 @@ pub enum TokenKind {
     Fn,
     Return,
     If,
+    Elif,
     Else,
     While,
     Struct,
@@ -62,6 +75,8 @@ pub enum TokenKind {
     RParen,
     LBrace,
     RBrace,
+    LBracket,
+    RBracket,
 
     // End of file sentinel
     Eof,
@@ -81,6 +96,8 @@ fn is_line_terminator(kind: &TokenKind) -> bool {
         kind,
         TokenKind::Integer(_)
             | TokenKind::Float(_)
+            | TokenKind::Str(_)
+            | TokenKind::FStr(_)
             | TokenKind::Identifier(_)
             | TokenKind::True
             | TokenKind::False
@@ -89,7 +106,167 @@ fn is_line_terminator(kind: &TokenKind) -> bool {
             // on their own line terminate the statement correctly. The parser handles
             // `} else {` by consuming the inserted semicolon before checking for `else`.
             | TokenKind::RBrace
+            // RBracket triggers semicolons after index expressions: `s[0]` at end of line.
+            | TokenKind::RBracket
     )
+}
+
+/// Scan the content of a plain string (`"…"` or `"""…"""`) after the opening
+/// quote(s) have been consumed.  Advances `i`, `col`, and `line` in-place.
+fn scan_str_content(
+    chars: &[char],
+    i: &mut usize,
+    col: &mut usize,
+    line: &mut usize,
+    start_line: usize,
+    start_col: usize,
+    triple: bool,
+) -> Result<String> {
+    let mut content = String::new();
+    loop {
+        if *i >= chars.len() {
+            return Err(JadeError::UnterminatedString {
+                span: Span { line: start_line, col: start_col },
+            });
+        }
+        // Closing-quote detection
+        if triple {
+            if chars.get(*i) == Some(&'"')
+                && chars.get(*i + 1) == Some(&'"')
+                && chars.get(*i + 2) == Some(&'"')
+            {
+                *col += 3;
+                *i += 3;
+                break;
+            }
+        } else if chars[*i] == '"' {
+            *col += 1;
+            *i += 1;
+            break;
+        }
+        match chars[*i] {
+            '\\' => {
+                *i += 1;
+                *col += 1;
+                if *i >= chars.len() {
+                    return Err(JadeError::UnterminatedString {
+                        span: Span { line: start_line, col: start_col },
+                    });
+                }
+                match chars[*i] {
+                    '"'  => { content.push('"');  *i += 1; *col += 1; }
+                    '\\' => { content.push('\\'); *i += 1; *col += 1; }
+                    'n'  => { content.push('\n'); *i += 1; *col += 1; }
+                    't'  => { content.push('\t'); *i += 1; *col += 1; }
+                    'r'  => { content.push('\r'); *i += 1; *col += 1; }
+                    other => return Err(JadeError::UnexpectedChar {
+                        ch: other,
+                        span: Span { line: *line, col: *col },
+                    }),
+                }
+            }
+            '\n' => { content.push('\n'); *line += 1; *col = 1; *i += 1; }
+            ch   => { content.push(ch);  *col += 1; *i += 1; }
+        }
+    }
+    Ok(content)
+}
+
+/// Scan the content of an f-string (`f"…"` or `f"""…"""`) after the opening
+/// quote(s) have been consumed.  Returns the raw parts (literal segments and
+/// expression source texts).  Advances `i`, `col`, and `line` in-place.
+fn scan_fstr_content(
+    chars: &[char],
+    i: &mut usize,
+    col: &mut usize,
+    line: &mut usize,
+    start_line: usize,
+    start_col: usize,
+    triple: bool,
+) -> Result<Vec<RawFStrPart>> {
+    let mut parts: Vec<RawFStrPart> = Vec::new();
+    let mut literal = String::new();
+    loop {
+        if *i >= chars.len() {
+            return Err(JadeError::UnterminatedString {
+                span: Span { line: start_line, col: start_col },
+            });
+        }
+        // Closing-quote detection
+        if triple {
+            if chars.get(*i) == Some(&'"')
+                && chars.get(*i + 1) == Some(&'"')
+                && chars.get(*i + 2) == Some(&'"')
+            {
+                *col += 3;
+                *i += 3;
+                break;
+            }
+        } else if chars[*i] == '"' {
+            *col += 1;
+            *i += 1;
+            break;
+        }
+        match chars[*i] {
+            '{' => {
+                // Flush accumulated literal segment
+                if !literal.is_empty() {
+                    parts.push(RawFStrPart::Literal(std::mem::take(&mut literal)));
+                }
+                *col += 1;
+                *i += 1; // consume '{'
+                // Scan expression source until the matching '}'
+                let mut expr_src = String::new();
+                let mut depth = 1usize;
+                loop {
+                    if *i >= chars.len() {
+                        return Err(JadeError::UnterminatedString {
+                            span: Span { line: start_line, col: start_col },
+                        });
+                    }
+                    match chars[*i] {
+                        '{' => { depth += 1; expr_src.push('{'); *col += 1; *i += 1; }
+                        '}' => {
+                            depth -= 1;
+                            if depth == 0 { *col += 1; *i += 1; break; }
+                            expr_src.push('}'); *col += 1; *i += 1;
+                        }
+                        '\n' => { expr_src.push('\n'); *line += 1; *col = 1; *i += 1; }
+                        c    => { expr_src.push(c); *col += 1; *i += 1; }
+                    }
+                }
+                parts.push(RawFStrPart::Expr(expr_src));
+            }
+            '\\' => {
+                *i += 1;
+                *col += 1;
+                if *i >= chars.len() {
+                    return Err(JadeError::UnterminatedString {
+                        span: Span { line: start_line, col: start_col },
+                    });
+                }
+                match chars[*i] {
+                    '"'  => { literal.push('"');  *i += 1; *col += 1; }
+                    '\\' => { literal.push('\\'); *i += 1; *col += 1; }
+                    'n'  => { literal.push('\n'); *i += 1; *col += 1; }
+                    't'  => { literal.push('\t'); *i += 1; *col += 1; }
+                    'r'  => { literal.push('\r'); *i += 1; *col += 1; }
+                    '{'  => { literal.push('{');  *i += 1; *col += 1; }
+                    '}'  => { literal.push('}');  *i += 1; *col += 1; }
+                    other => return Err(JadeError::UnexpectedChar {
+                        ch: other,
+                        span: Span { line: *line, col: *col },
+                    }),
+                }
+            }
+            '\n' => { literal.push('\n'); *line += 1; *col = 1; *i += 1; }
+            ch   => { literal.push(ch);  *col += 1; *i += 1; }
+        }
+    }
+    if !literal.is_empty() {
+        parts.push(RawFStrPart::Literal(literal));
+    }
+    Ok(parts)
 }
 
 /// Tokenize Jade source into a flat Vec of tokens.
@@ -124,6 +301,22 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
             ' ' | '\t' | '\r' => {
                 col += 1;
                 i += 1;
+            }
+
+            // String literals: "..." or """..."""
+            '"' => {
+                let start_col = col;
+                let start_line = line;
+                let triple = chars.get(i + 1) == Some(&'"') && chars.get(i + 2) == Some(&'"');
+                if triple { col += 3; i += 3; } else { col += 1; i += 1; }
+                let content = scan_str_content(
+                    &chars, &mut i, &mut col, &mut line,
+                    start_line, start_col, triple,
+                )?;
+                tokens.push(Token {
+                    kind: TokenKind::Str(content),
+                    span: Span { line: start_line, col: start_col },
+                });
             }
 
             // Integer and float literals
@@ -177,12 +370,24 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
                     "fn"     => TokenKind::Fn,
                     "return" => TokenKind::Return,
                     "if"     => TokenKind::If,
+                    "elif"   => TokenKind::Elif,
                     "else"   => TokenKind::Else,
                     "while"  => TokenKind::While,
                     "struct" => TokenKind::Struct,
                     "extend" => TokenKind::Extend,
                     "true"   => TokenKind::True,
                     "false"  => TokenKind::False,
+                    // f-string: `f"…"` or `f"""…"""`
+                    "f" if chars.get(i) == Some(&'"') => {
+                        let start_line = line; // capture before mutable borrow
+                        let triple = chars.get(i + 1) == Some(&'"') && chars.get(i + 2) == Some(&'"');
+                        if triple { col += 3; i += 3; } else { col += 1; i += 1; }
+                        let parts = scan_fstr_content(
+                            &chars, &mut i, &mut col, &mut line,
+                            start_line, start_col, triple,
+                        )?;
+                        TokenKind::FStr(parts)
+                    }
                     _        => TokenKind::Identifier(name),
                 };
                 tokens.push(Token {
@@ -212,8 +417,10 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
             '^' => { tokens.push(Token { kind: TokenKind::Caret,   span: Span { line, col } }); col += 1; i += 1; }
             '(' => { tokens.push(Token { kind: TokenKind::LParen,  span: Span { line, col } }); col += 1; i += 1; }
             ')' => { tokens.push(Token { kind: TokenKind::RParen,  span: Span { line, col } }); col += 1; i += 1; }
-            '{' => { tokens.push(Token { kind: TokenKind::LBrace,  span: Span { line, col } }); col += 1; i += 1; }
-            '}' => { tokens.push(Token { kind: TokenKind::RBrace,  span: Span { line, col } }); col += 1; i += 1; }
+            '{' => { tokens.push(Token { kind: TokenKind::LBrace,    span: Span { line, col } }); col += 1; i += 1; }
+            '}' => { tokens.push(Token { kind: TokenKind::RBrace,    span: Span { line, col } }); col += 1; i += 1; }
+            '[' => { tokens.push(Token { kind: TokenKind::LBracket,  span: Span { line, col } }); col += 1; i += 1; }
+            ']' => { tokens.push(Token { kind: TokenKind::RBracket,  span: Span { line, col } }); col += 1; i += 1; }
             ',' => { tokens.push(Token { kind: TokenKind::Comma,   span: Span { line, col } }); col += 1; i += 1; }
             '.' => { tokens.push(Token { kind: TokenKind::Dot,     span: Span { line, col } }); col += 1; i += 1; }
             ':' => { tokens.push(Token { kind: TokenKind::Colon,   span: Span { line, col } }); col += 1; i += 1; }
@@ -522,6 +729,14 @@ mod tests {
     }
 
     #[test]
+    fn test_tokenize_elif() {
+        assert_eq!(
+            kinds("if elif else"),
+            vec![TokenKind::If, TokenKind::Elif, TokenKind::Else, TokenKind::Eof]
+        );
+    }
+
+    #[test]
     fn test_tokenize_braces() {
         // RBrace is a line terminator, so `{}` on one line inserts a semicolon after `}`
         assert_eq!(
@@ -595,6 +810,170 @@ mod tests {
     #[test]
     fn test_tokenize_colon() {
         assert_eq!(kinds(":"), vec![TokenKind::Colon, TokenKind::Eof]);
+    }
+
+    // ── triple-quoted and f-strings ──────────────────────────────────────────
+
+    #[test]
+    fn test_str_triple_quote_simple() {
+        assert_eq!(
+            kinds(r#""""hello""""#),
+            vec![TokenKind::Str("hello".into()), TokenKind::Semicolon, TokenKind::Eof]
+        );
+    }
+
+    #[test]
+    fn test_str_triple_quote_with_inner_quotes() {
+        assert_eq!(
+            kinds(r#""""he said "hi" to her""""#),
+            vec![TokenKind::Str(r#"he said "hi" to her"#.into()), TokenKind::Semicolon, TokenKind::Eof]
+        );
+    }
+
+    #[test]
+    fn test_fstr_no_interpolation() {
+        use super::RawFStrPart;
+        assert_eq!(
+            kinds(r#"f"hello""#),
+            vec![
+                TokenKind::FStr(vec![RawFStrPart::Literal("hello".into())]),
+                TokenKind::Semicolon,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_fstr_with_single_slot() {
+        use super::RawFStrPart;
+        assert_eq!(
+            kinds(r#"f"hi {name}""#),
+            vec![
+                TokenKind::FStr(vec![
+                    RawFStrPart::Literal("hi ".into()),
+                    RawFStrPart::Expr("name".into()),
+                ]),
+                TokenKind::Semicolon,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_fstr_triple_quote() {
+        use super::RawFStrPart;
+        assert_eq!(
+            kinds(r#"f"""hi {name}""""#),
+            vec![
+                TokenKind::FStr(vec![
+                    RawFStrPart::Literal("hi ".into()),
+                    RawFStrPart::Expr("name".into()),
+                ]),
+                TokenKind::Semicolon,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_fstr_identifier_f_without_quote_is_ident() {
+        // `f` not followed by `"` stays a plain identifier
+        assert_eq!(
+            kinds("f"),
+            vec![TokenKind::Identifier("f".into()), TokenKind::Semicolon, TokenKind::Eof]
+        );
+    }
+
+    #[test]
+    fn test_fstr_nested_braces_in_slot() {
+        use super::RawFStrPart;
+        // Struct literal inside `{}` — brace depth tracking keeps it together
+        assert_eq!(
+            kinds(r#"f"x={x}""#),
+            vec![
+                TokenKind::FStr(vec![
+                    RawFStrPart::Literal("x=".into()),
+                    RawFStrPart::Expr("x".into()),
+                ]),
+                TokenKind::Semicolon,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    // ── strings ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_str_simple() {
+        assert_eq!(
+            kinds(r#""hello""#),
+            vec![TokenKind::Str("hello".into()), TokenKind::Semicolon, TokenKind::Eof]
+        );
+    }
+
+    #[test]
+    fn test_str_empty() {
+        assert_eq!(
+            kinds(r#""""#),
+            vec![TokenKind::Str("".into()), TokenKind::Semicolon, TokenKind::Eof]
+        );
+    }
+
+    #[test]
+    fn test_str_escape_quote() {
+        assert_eq!(
+            kinds(r#""say \"hi\"""#),
+            vec![TokenKind::Str(r#"say "hi""#.into()), TokenKind::Semicolon, TokenKind::Eof]
+        );
+    }
+
+    #[test]
+    fn test_str_escape_newline() {
+        assert_eq!(
+            kinds(r#""\n""#),
+            vec![TokenKind::Str("\n".into()), TokenKind::Semicolon, TokenKind::Eof]
+        );
+    }
+
+    #[test]
+    fn test_str_escape_tab() {
+        assert_eq!(
+            kinds(r#""\t""#),
+            vec![TokenKind::Str("\t".into()), TokenKind::Semicolon, TokenKind::Eof]
+        );
+    }
+
+    #[test]
+    fn test_str_unterminated() {
+        let err = tokenize(r#""hello"#).unwrap_err();
+        assert!(matches!(err, JadeError::UnterminatedString { .. }));
+    }
+
+    #[test]
+    fn test_str_auto_semicolon() {
+        assert_eq!(
+            kinds("\"a\"\n\"b\""),
+            vec![
+                TokenKind::Str("a".into()), TokenKind::Semicolon,
+                TokenKind::Str("b".into()), TokenKind::Semicolon,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_bracket_tokens() {
+        assert_eq!(
+            kinds("s[0]"),
+            vec![
+                TokenKind::Identifier("s".into()),
+                TokenKind::LBracket,
+                TokenKind::Integer(0),
+                TokenKind::RBracket,
+                TokenKind::Semicolon,
+                TokenKind::Eof,
+            ]
+        );
     }
 
     // ── while ────────────────────────────────────────────────────────────────

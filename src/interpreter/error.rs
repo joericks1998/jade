@@ -61,6 +61,12 @@ pub enum JadeError {
 
     /// Struct literal is missing a required field.
     MissingField { field: String, span: Span },
+
+    /// Lexer hit the end of the file without finding a closing `"`.
+    UnterminatedString { span: Span },
+
+    /// String index is out of range.
+    IndexOutOfBounds { index: i64, len: usize, span: Span },
 }
 
 impl std::fmt::Display for JadeError {
@@ -102,6 +108,10 @@ impl std::fmt::Display for JadeError {
                 write!(f, "[{}:{}] undefined struct type '{}'", span.line, span.col, name),
             JadeError::MissingField { field, span } =>
                 write!(f, "[{}:{}] missing required field '{}' in struct literal", span.line, span.col, field),
+            JadeError::UnterminatedString { span } =>
+                write!(f, "[{}:{}] unterminated string literal", span.line, span.col),
+            JadeError::IndexOutOfBounds { index, len, span } =>
+                write!(f, "[{}:{}] index {} out of bounds for string of length {}", span.line, span.col, index, len),
         }
     }
 }

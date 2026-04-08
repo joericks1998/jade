@@ -53,6 +53,7 @@ pub fn run_file(path: &str, verbose: bool) {
                     }
                 }
                 eval::Value::Bool(b) => println!("{} = {}", name, b),
+                eval::Value::Str(s)  => println!("{} = \"{}\"", name, s),
                 eval::Value::Fn(_)   => println!("{} = <fn>", name),
                 eval::Value::Struct(rc) => {
                     let inst = rc.borrow();
@@ -66,6 +67,7 @@ pub fn run_file(path: &str, verbose: bool) {
                             eval::Value::Int(i)   => print!("{}: {}", k, i),
                             eval::Value::Float(f) => print!("{}: {}", k, f),
                             eval::Value::Bool(b)  => print!("{}: {}", k, b),
+                            eval::Value::Str(s)   => print!("{}: \"{}\"", k, s),
                             _                     => print!("{}: ...", k),
                         }
                         first = false;
@@ -73,6 +75,7 @@ pub fn run_file(path: &str, verbose: bool) {
                     println!(" }}");
                 }
                 eval::Value::BoundMethod(_) => println!("{} = <bound method>", name),
+                eval::Value::Builtin(_)     => {} // builtins are not shown in verbose output
             }
         }
     }

@@ -1,0 +1,36 @@
+// ── f-string interpolation (f"..." and f"""...""") ───────────────────────────
+
+let name = "Jade"
+let n    = 42
+let flag = true
+
+// Basic variable interpolation
+let greeting = f"hello, {name}!"           // "hello, Jade!"
+let msg      = f"answer: {n}"             // "answer: 42"
+let bool_msg = f"flag: {flag}"            // "flag: true"
+
+// Multiple interpolation slots in one string
+let x = 10
+let y = 20
+let point = f"({x}, {y})"                 // "(10, 20)"
+
+// Field access inside a slot
+struct Coord { x, y }
+let c = Coord { x: 3, y: 4 }
+let desc = f"coord: ({c.x}, {c.y})"      // "coord: (3, 4)"
+
+// f-string concatenated with another f-string
+let full = f"name={name}" + f", n={n}"    // "name=Jade, n=42"
+
+// Multiline triple-quoted f-string
+let summary = f"""
+name: {name}
+n: {n}
+"""
+
+print(greeting)
+print(msg)
+print(bool_msg)
+print(point)
+print(desc)
+print(full)

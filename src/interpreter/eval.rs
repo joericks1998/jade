@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use super::{
-    ast::{BinOpKind, Expr, Program, Stmt, UnaryOpKind},
+    ast::{BinOpKind, Expr, FStrPart, Program, Stmt, UnaryOpKind},
     error::{JadeError, Result, Span},
 };
 
@@ -15,12 +15,21 @@ pub enum Value {
     Int(i64),
     Float(f64),
     Bool(bool),
+    Str(String),
     Fn(Rc<FnValue>),
     /// A struct instance. Wrapped in `Rc<RefCell<…>>` so that all references
     /// to the same instance (including `self` inside methods) share mutable state.
     Struct(Rc<RefCell<StructInstance>>),
     /// A method bound to a specific receiver instance.
     BoundMethod(Rc<BoundMethod>),
+    /// A built-in function (e.g. `print`).
+    Builtin(BuiltinFn),
+}
+
+/// Identifies a built-in function by name.
+#[derive(Clone, Debug)]
+pub enum BuiltinFn {
+    Print,
 }
 
 /// Heap-allocated function body shared via `Rc`.
@@ -47,6 +56,7 @@ impl std::fmt::Debug for Value {
             Value::Int(i)   => write!(f, "Int({})", i),
             Value::Float(v) => write!(f, "Float({})", v),
             Value::Bool(b)  => write!(f, "Bool({})", b),
+            Value::Str(s)   => write!(f, "Str({:?})", s),
             Value::Fn(fv)   => write!(f, "Fn({})", fv.params.join(", ")),
             Value::Struct(rc) => {
                 let inst = rc.borrow();
@@ -60,6 +70,7 @@ impl std::fmt::Debug for Value {
                 write!(f, "}}")
             }
             Value::BoundMethod(_) => write!(f, "<bound method>"),
+            Value::Builtin(b)     => write!(f, "<builtin {:?}>", b),
         }
     }
 }
@@ -82,15 +93,21 @@ pub struct Env {
     pub struct_defs: HashMap<String, Vec<String>>,
     /// Maps struct type names to their method tables.
     pub extend_methods: HashMap<String, HashMap<String, Rc<FnValue>>>,
+    /// Built-in functions that are always in scope. Stored separately so they
+    /// don't appear in `-v` verbose output alongside user variables.
+    builtins: HashMap<String, BuiltinFn>,
 }
 
 impl Env {
-    /// Create a new environment with one (global) scope.
+    /// Create a new environment with one (global) scope and all built-ins pre-registered.
     pub fn new() -> Self {
+        let mut builtins = HashMap::new();
+        builtins.insert("print".to_string(), BuiltinFn::Print);
         Env {
             scopes: vec![HashMap::new()],
             struct_defs: HashMap::new(),
             extend_methods: HashMap::new(),
+            builtins,
         }
     }
 
@@ -122,14 +139,15 @@ impl Env {
         Err(JadeError::UndefinedVariable { name: name.to_string(), span })
     }
 
-    /// Look up a variable, searching from innermost to outermost scope.
+    /// Look up a variable, searching from innermost to outermost scope,
+    /// then falling back to built-in functions.
     pub fn get(&self, name: &str) -> Option<Value> {
         for scope in self.scopes.iter().rev() {
             if let Some(v) = scope.get(name) {
                 return Some(v.clone());
             }
         }
-        None
+        self.builtins.get(name).map(|b| Value::Builtin(b.clone()))
     }
 
     /// Iterate over all top-level (global) bindings — used by `-v` output.
@@ -296,9 +314,34 @@ fn to_float(v: Value) -> f64 {
         Value::Float(f) => f,
         // Callers must guard against non-numeric values before calling to_float.
         Value::Bool(_)        => unreachable!("to_float called on Bool"),
+        Value::Str(_)         => unreachable!("to_float called on Str"),
         Value::Fn(_)          => unreachable!("to_float called on Fn"),
         Value::Struct(_)      => unreachable!("to_float called on Struct"),
         Value::BoundMethod(_) => unreachable!("to_float called on BoundMethod"),
+        Value::Builtin(_)     => unreachable!("to_float called on Builtin"),
+    }
+}
+
+/// Convert a `Value` to its string representation (used by f-string interpolation
+/// and the `print` built-in).  Matches the same display rules as verbose output.
+fn value_to_str(v: &Value) -> String {
+    match v {
+        Value::Int(i) => i.to_string(),
+        Value::Float(f) => {
+            let s = format!("{}", f);
+            // Mirror the `.0` suffix logic from cli/run.rs
+            if s.chars().all(|c| c.is_ascii_digit() || c == '-') {
+                format!("{}.0", s)
+            } else {
+                s
+            }
+        }
+        Value::Bool(b)        => b.to_string(),
+        Value::Str(s)         => s.clone(),
+        Value::Fn(_)          => "<fn>".to_string(),
+        Value::Struct(_)      => "<struct>".to_string(),
+        Value::BoundMethod(_) => "<bound method>".to_string(),
+        Value::Builtin(_)     => "<builtin>".to_string(),
     }
 }
 
@@ -308,6 +351,21 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
         Expr::Integer { value, .. } => Ok(Value::Int(*value)),
         Expr::Float   { value, .. } => Ok(Value::Float(*value)),
         Expr::Bool    { value, .. } => Ok(Value::Bool(*value)),
+        Expr::Str     { value, .. } => Ok(Value::Str(value.clone())),
+
+        Expr::FStr { parts, .. } => {
+            let mut result = String::new();
+            for part in parts {
+                match part {
+                    FStrPart::Literal(s) => result.push_str(s),
+                    FStrPart::Expr(expr) => {
+                        let v = eval_expr(expr, env)?;
+                        result.push_str(&value_to_str(&v));
+                    }
+                }
+            }
+            Ok(Value::Str(result))
+        }
 
         Expr::Identifier { name, span } => {
             env.get(name).ok_or(JadeError::UndefinedVariable { name: name.clone(), span: *span })
@@ -370,6 +428,19 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                     let result = eval_block(&fn_val.body, env);
                     env.pop_scope();
                     Ok(result?.unwrap_or(Value::Int(0)))
+                }
+
+                Value::Builtin(BuiltinFn::Print) => {
+                    if args.len() != 1 {
+                        return Err(JadeError::ArityMismatch {
+                            expected: 1,
+                            got: args.len(),
+                            span: *span,
+                        });
+                    }
+                    let v = eval_expr(&args[0], env)?;
+                    println!("{}", value_to_str(&v));
+                    Ok(Value::Int(0))
                 }
 
                 _ => Err(JadeError::NotCallable { span: *span }),
@@ -436,6 +507,26 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
             }
         }
 
+        Expr::Index { object, index, span } => {
+            let obj = eval_expr(object, env)?;
+            let idx = eval_expr(index, env)?;
+            match (obj, idx) {
+                (Value::Str(s), Value::Int(i)) => {
+                    // Collect once: avoids the double O(n) traversal of chars().count()
+                    // followed by chars().nth(). Vec<char> indexing is then O(1).
+                    let chars: Vec<char> = s.chars().collect();
+                    let len = chars.len();
+                    if i < 0 || i as usize >= len {
+                        Err(JadeError::IndexOutOfBounds { index: i, len, span: *span })
+                    } else {
+                        Ok(Value::Str(chars[i as usize].to_string()))
+                    }
+                }
+                (Value::Str(_), _) => Err(JadeError::TypeError { op: "[]".to_string(), span: *span }),
+                _                  => Err(JadeError::TypeError { op: "[]".to_string(), span: *span }),
+            }
+        }
+
         Expr::BinOp { op, left, right, span } => {
             match op {
                 // Short-circuit logical ops
@@ -471,10 +562,13 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                             (Value::Int(a), Value::Int(b)) => a.checked_add(b)
                                 .ok_or(JadeError::IntegerOverflow { span: *span })
                                 .map(Value::Int),
+                            (Value::Str(a), Value::Str(b)) => Ok(Value::Str(a + &b)),
                             (Value::Bool(_), _) | (_, Value::Bool(_)) |
                             (Value::Fn(_),   _) | (_, Value::Fn(_))   |
                             (Value::Struct(_), _) | (_, Value::Struct(_)) |
-                            (Value::BoundMethod(_), _) | (_, Value::BoundMethod(_)) =>
+                            (Value::BoundMethod(_), _) | (_, Value::BoundMethod(_)) |
+                            (Value::Builtin(_), _) | (_, Value::Builtin(_)) |
+                            (Value::Str(_), _) | (_, Value::Str(_)) =>
                                 Err(JadeError::TypeError { op: "+".to_string(), span: *span }),
                             (a, b) => Ok(Value::Float(to_float(a) + to_float(b))),
                         },
@@ -483,9 +577,11 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                                 .ok_or(JadeError::IntegerOverflow { span: *span })
                                 .map(Value::Int),
                             (Value::Bool(_), _) | (_, Value::Bool(_)) |
+                            (Value::Str(_), _)  | (_, Value::Str(_))  |
                             (Value::Fn(_),   _) | (_, Value::Fn(_))   |
                             (Value::Struct(_), _) | (_, Value::Struct(_)) |
-                            (Value::BoundMethod(_), _) | (_, Value::BoundMethod(_)) =>
+                            (Value::BoundMethod(_), _) | (_, Value::BoundMethod(_)) |
+                            (Value::Builtin(_), _) | (_, Value::Builtin(_)) =>
                                 Err(JadeError::TypeError { op: "-".to_string(), span: *span }),
                             (a, b) => Ok(Value::Float(to_float(a) - to_float(b))),
                         },
@@ -494,9 +590,11 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                                 .ok_or(JadeError::IntegerOverflow { span: *span })
                                 .map(Value::Int),
                             (Value::Bool(_), _) | (_, Value::Bool(_)) |
+                            (Value::Str(_), _)  | (_, Value::Str(_))  |
                             (Value::Fn(_),   _) | (_, Value::Fn(_))   |
                             (Value::Struct(_), _) | (_, Value::Struct(_)) |
-                            (Value::BoundMethod(_), _) | (_, Value::BoundMethod(_)) =>
+                            (Value::BoundMethod(_), _) | (_, Value::BoundMethod(_)) |
+                            (Value::Builtin(_), _) | (_, Value::Builtin(_)) =>
                                 Err(JadeError::TypeError { op: "*".to_string(), span: *span }),
                             (a, b) => Ok(Value::Float(to_float(a) * to_float(b))),
                         },
@@ -505,9 +603,11 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                                 if b == 0 { Err(JadeError::DivisionByZero { span: *span }) } else { Ok(Value::Int(a / b)) }
                             }
                             (Value::Bool(_), _) | (_, Value::Bool(_)) |
+                            (Value::Str(_), _)  | (_, Value::Str(_))  |
                             (Value::Fn(_),   _) | (_, Value::Fn(_))   |
                             (Value::Struct(_), _) | (_, Value::Struct(_)) |
-                            (Value::BoundMethod(_), _) | (_, Value::BoundMethod(_)) =>
+                            (Value::BoundMethod(_), _) | (_, Value::BoundMethod(_)) |
+                            (Value::Builtin(_), _) | (_, Value::Builtin(_)) =>
                                 Err(JadeError::TypeError { op: "/".to_string(), span: *span }),
                             (a, b) => {
                                 let bf = to_float(b);
@@ -519,9 +619,11 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                                 if b == 0 { Err(JadeError::RemainderByZero { span: *span }) } else { Ok(Value::Int(a % b)) }
                             }
                             (Value::Bool(_), _) | (_, Value::Bool(_)) |
+                            (Value::Str(_), _)  | (_, Value::Str(_))  |
                             (Value::Fn(_),   _) | (_, Value::Fn(_))   |
                             (Value::Struct(_), _) | (_, Value::Struct(_)) |
-                            (Value::BoundMethod(_), _) | (_, Value::BoundMethod(_)) =>
+                            (Value::BoundMethod(_), _) | (_, Value::BoundMethod(_)) |
+                            (Value::Builtin(_), _) | (_, Value::Builtin(_)) =>
                                 Err(JadeError::TypeError { op: "%".to_string(), span: *span }),
                             (a, b) => {
                                 let bf = to_float(b);
@@ -568,12 +670,14 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                             (Value::Int(a),   Value::Int(b))   => Ok(Value::Bool(a == b)),
                             (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a == b)),
                             (Value::Bool(a),  Value::Bool(b))  => Ok(Value::Bool(a == b)),
+                            (Value::Str(a),   Value::Str(b))   => Ok(Value::Bool(a == b)),
                             _ => Err(JadeError::TypeError { op: "==".to_string(), span: *span }),
                         },
                         BinOpKind::Ne => match (l, r) {
                             (Value::Int(a),   Value::Int(b))   => Ok(Value::Bool(a != b)),
                             (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a != b)),
                             (Value::Bool(a),  Value::Bool(b))  => Ok(Value::Bool(a != b)),
+                            (Value::Str(a),   Value::Str(b))   => Ok(Value::Bool(a != b)),
                             _ => Err(JadeError::TypeError { op: "!=".to_string(), span: *span }),
                         },
 
@@ -584,6 +688,7 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                             (Value::Float(a), Value::Int(b))   => Ok(Value::Bool(a < (b as f64))),
                             // bool ordering: false=0, true=1 → false < true
                             (Value::Bool(a),  Value::Bool(b))  => Ok(Value::Bool(!a && b)),
+                            (Value::Str(a),   Value::Str(b))   => Ok(Value::Bool(a < b)),
                             _ => Err(JadeError::TypeError { op: "<".to_string(), span: *span }),
                         },
                         BinOpKind::Gt => match (l, r) {
@@ -593,6 +698,7 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                             (Value::Float(a), Value::Int(b))   => Ok(Value::Bool(a > (b as f64))),
                             // bool ordering: false=0, true=1 → true > false
                             (Value::Bool(a),  Value::Bool(b))  => Ok(Value::Bool(a && !b)),
+                            (Value::Str(a),   Value::Str(b))   => Ok(Value::Bool(a > b)),
                             _ => Err(JadeError::TypeError { op: ">".to_string(), span: *span }),
                         },
                         BinOpKind::Le => match (l, r) {
@@ -602,6 +708,7 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                             (Value::Float(a), Value::Int(b))   => Ok(Value::Bool(a <= (b as f64))),
                             // bool ordering: false=0, true=1 → a <= b iff a==b or a<b
                             (Value::Bool(a),  Value::Bool(b))  => Ok(Value::Bool(a == b || (!a && b))),
+                            (Value::Str(a),   Value::Str(b))   => Ok(Value::Bool(a <= b)),
                             _ => Err(JadeError::TypeError { op: "<=".to_string(), span: *span }),
                         },
                         BinOpKind::Ge => match (l, r) {
@@ -611,6 +718,7 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                             (Value::Float(a), Value::Int(b))   => Ok(Value::Bool(a >= (b as f64))),
                             // bool ordering: false=0, true=1 → a >= b iff a==b or a>b
                             (Value::Bool(a),  Value::Bool(b))  => Ok(Value::Bool(a == b || (a && !b))),
+                            (Value::Str(a),   Value::Str(b))   => Ok(Value::Bool(a >= b)),
                             _ => Err(JadeError::TypeError { op: ">=".to_string(), span: *span }),
                         },
 
@@ -1207,6 +1315,37 @@ mod tests {
         assert!(matches!(get(&env, "q4"), Value::Int(4)));
     }
 
+    // ── elif ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_eval_elif_classify() {
+        let src = "fn classify(x) {\n    if x > 0 {\n        return 1\n    } elif x < 0 {\n        return -1\n    } else {\n        return 0\n    }\n}\nlet pos = classify(5)\nlet neg = classify(-3)\nlet zero = classify(0)";
+        let env = eval_src(src).unwrap();
+        assert!(matches!(get(&env, "pos"),  Value::Int(1)));
+        assert!(matches!(get(&env, "neg"),  Value::Int(-1)));
+        assert!(matches!(get(&env, "zero"), Value::Int(0)));
+    }
+
+    #[test]
+    fn test_eval_elif_chain() {
+        let src = "fn grade(s) {\n    if s >= 90 {\n        return 4\n    } elif s >= 80 {\n        return 3\n    } elif s >= 70 {\n        return 2\n    } elif s >= 60 {\n        return 1\n    } else {\n        return 0\n    }\n}\nlet a = grade(95)\nlet b = grade(85)\nlet c = grade(75)\nlet d = grade(65)\nlet f = grade(50)";
+        let env = eval_src(src).unwrap();
+        assert!(matches!(get(&env, "a"), Value::Int(4)));
+        assert!(matches!(get(&env, "b"), Value::Int(3)));
+        assert!(matches!(get(&env, "c"), Value::Int(2)));
+        assert!(matches!(get(&env, "d"), Value::Int(1)));
+        assert!(matches!(get(&env, "f"), Value::Int(0)));
+    }
+
+    #[test]
+    fn test_eval_elif_no_else() {
+        let src = "fn check(x) {\n    if x == 1 {\n        return 10\n    } elif x == 2 {\n        return 20\n    }\n    return 0\n}\nlet r1 = check(1)\nlet r2 = check(2)\nlet r3 = check(3)";
+        let env = eval_src(src).unwrap();
+        assert!(matches!(get(&env, "r1"), Value::Int(10)));
+        assert!(matches!(get(&env, "r2"), Value::Int(20)));
+        assert!(matches!(get(&env, "r3"), Value::Int(0)));
+    }
+
     // ── functions — nested calls ──────────────────────────────────────────────
 
     #[test]
@@ -1389,5 +1528,210 @@ mod tests {
             "struct Point {\n    x,\n    y\n}\nlet p = Point { x: 1, y: 2 }\nlet v = p.z"
         ).unwrap_err();
         assert!(matches!(err, JadeError::UndefinedField { .. }));
+    }
+
+    // ── strings ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_eval_str_literal() {
+        let env = eval_src(r#"let s = "hello""#).unwrap();
+        assert!(matches!(get(&env, "s"), Value::Str(ref v) if v == "hello"));
+    }
+
+    #[test]
+    fn test_eval_str_concat() {
+        let env = eval_src(r#"let s = "foo" + "bar""#).unwrap();
+        assert!(matches!(get(&env, "s"), Value::Str(ref v) if v == "foobar"));
+    }
+
+    #[test]
+    fn test_eval_str_eq_true() {
+        let env = eval_src(r#"let b = "abc" == "abc""#).unwrap();
+        assert!(matches!(get(&env, "b"), Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_eval_str_eq_false() {
+        let env = eval_src(r#"let b = "abc" == "xyz""#).unwrap();
+        assert!(matches!(get(&env, "b"), Value::Bool(false)));
+    }
+
+    #[test]
+    fn test_eval_str_ne() {
+        let env = eval_src(r#"let b = "abc" != "xyz""#).unwrap();
+        assert!(matches!(get(&env, "b"), Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_eval_str_lt() {
+        let env = eval_src(r#"let b = "abc" < "abd""#).unwrap();
+        assert!(matches!(get(&env, "b"), Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_eval_str_gt() {
+        let env = eval_src(r#"let b = "b" > "a""#).unwrap();
+        assert!(matches!(get(&env, "b"), Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_eval_str_le_equal() {
+        let env = eval_src(r#"let b = "abc" <= "abc""#).unwrap();
+        assert!(matches!(get(&env, "b"), Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_eval_str_ge() {
+        let env = eval_src(r#"let b = "z" >= "a""#).unwrap();
+        assert!(matches!(get(&env, "b"), Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_eval_str_index() {
+        let env = eval_src("let s = \"hello\"\nlet h = s[0]").unwrap();
+        assert!(matches!(get(&env, "h"), Value::Str(ref v) if v == "h"));
+    }
+
+    #[test]
+    fn test_eval_str_index_last() {
+        let env = eval_src("let s = \"hello\"\nlet o = s[4]").unwrap();
+        assert!(matches!(get(&env, "o"), Value::Str(ref v) if v == "o"));
+    }
+
+    #[test]
+    fn test_eval_str_index_out_of_bounds() {
+        let err = eval_src("let s = \"hi\"\nlet x = s[10]").unwrap_err();
+        assert!(matches!(err, JadeError::IndexOutOfBounds { index: 10, len: 2, .. }));
+    }
+
+    #[test]
+    fn test_eval_str_index_negative() {
+        let err = eval_src("let s = \"hi\"\nlet x = s[-1]").unwrap_err();
+        assert!(matches!(err, JadeError::IndexOutOfBounds { index: -1, .. }));
+    }
+
+    #[test]
+    fn test_eval_str_add_int_type_error() {
+        let err = eval_src(r#"let x = "hello" + 1"#).unwrap_err();
+        assert!(matches!(err, JadeError::TypeError { .. }));
+    }
+
+    #[test]
+    fn test_eval_str_sub_type_error() {
+        let err = eval_src(r#"let x = "a" - "b""#).unwrap_err();
+        assert!(matches!(err, JadeError::TypeError { .. }));
+    }
+
+    #[test]
+    fn test_eval_str_escape_tab() {
+        let env = eval_src(r#"let s = "a\tb""#).unwrap();
+        assert!(matches!(get(&env, "s"), Value::Str(ref v) if v == "a\tb"));
+    }
+
+    #[test]
+    fn test_eval_str_escape_newline() {
+        let env = eval_src(r#"let s = "a\nb""#).unwrap();
+        assert!(matches!(get(&env, "s"), Value::Str(ref v) if v == "a\nb"));
+    }
+
+    #[test]
+    fn test_eval_str_escape_quote() {
+        let env = eval_src(r#"let s = "say \"hi\"""#).unwrap();
+        assert!(matches!(get(&env, "s"), Value::Str(ref v) if v == r#"say "hi""#));
+    }
+
+    #[test]
+    fn test_eval_print_builtin() {
+        // print is callable and returns Int(0) without error
+        let env = eval_src(r#"let r = 0
+print("hello")"#).unwrap();
+        // Just verify the program ran without error; print goes to stdout
+        assert!(matches!(get(&env, "r"), Value::Int(0)));
+    }
+
+    #[test]
+    fn test_eval_print_arity_error() {
+        let err = eval_src(r#"print("a", "b")"#).unwrap_err();
+        assert!(matches!(err, JadeError::ArityMismatch { expected: 1, got: 2, .. }));
+    }
+
+    // ── triple-quoted strings ────────────────────────────────────────────────
+
+    #[test]
+    fn test_eval_triple_quote_simple() {
+        let env = eval_src(r#"let s = """hello""""#).unwrap();
+        assert!(matches!(get(&env, "s"), Value::Str(ref v) if v == "hello"));
+    }
+
+    #[test]
+    fn test_eval_triple_quote_with_inner_quotes() {
+        let env = eval_src(r#"let s = """he said "hi" to her""""#).unwrap();
+        assert!(matches!(get(&env, "s"), Value::Str(ref v) if v == r#"he said "hi" to her"#));
+    }
+
+    #[test]
+    fn test_eval_triple_quote_concat() {
+        let env = eval_src(r#"let s = """foo""" + """bar""""#).unwrap();
+        assert!(matches!(get(&env, "s"), Value::Str(ref v) if v == "foobar"));
+    }
+
+    #[test]
+    fn test_eval_triple_quote_equals_regular() {
+        let env = eval_src(r#"let b = """abc""" == "abc""#).unwrap();
+        assert!(matches!(get(&env, "b"), Value::Bool(true)));
+    }
+
+    // ── f-strings ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_eval_fstr_literal_only() {
+        let env = eval_src(r#"let s = f"hello""#).unwrap();
+        assert!(matches!(get(&env, "s"), Value::Str(ref v) if v == "hello"));
+    }
+
+    #[test]
+    fn test_eval_fstr_str_var() {
+        let env = eval_src("let name = \"Joe\"\nlet g = f\"hi {name}\"").unwrap();
+        assert!(matches!(get(&env, "g"), Value::Str(ref v) if v == "hi Joe"));
+    }
+
+    #[test]
+    fn test_eval_fstr_int_var() {
+        let env = eval_src("let n = 42\nlet s = f\"n={n}\"").unwrap();
+        assert!(matches!(get(&env, "s"), Value::Str(ref v) if v == "n=42"));
+    }
+
+    #[test]
+    fn test_eval_fstr_bool_var() {
+        let env = eval_src("let b = true\nlet s = f\"b={b}\"").unwrap();
+        assert!(matches!(get(&env, "s"), Value::Str(ref v) if v == "b=true"));
+    }
+
+    #[test]
+    fn test_eval_fstr_multiple_slots() {
+        let env = eval_src("let x = 1\nlet y = 2\nlet s = f\"({x}, {y})\"").unwrap();
+        assert!(matches!(get(&env, "s"), Value::Str(ref v) if v == "(1, 2)"));
+    }
+
+    #[test]
+    fn test_eval_fstr_field_access() {
+        let env = eval_src(
+            "struct Point {\n    x,\n    y\n}\nlet p = Point { x: 3, y: 4 }\nlet s = f\"({p.x}, {p.y})\""
+        ).unwrap();
+        assert!(matches!(get(&env, "s"), Value::Str(ref v) if v == "(3, 4)"));
+    }
+
+    #[test]
+    fn test_eval_fstr_triple_quote() {
+        let env = eval_src("let name = \"Joe\"\nlet s = f\"\"\"hi {name}\"\"\"").unwrap();
+        assert!(matches!(get(&env, "s"), Value::Str(ref v) if v == "hi Joe"));
+    }
+
+    #[test]
+    fn test_eval_fstr_no_slots_equals_plain_str() {
+        let env = eval_src(r#"let a = f"hello"\nlet b = "hello""#.replace("\\n", "\n").as_str()).unwrap();
+        // both produce Value::Str("hello")
+        assert!(matches!(get(&env, "a"), Value::Str(ref v) if v == "hello"));
+        assert!(matches!(get(&env, "b"), Value::Str(ref v) if v == "hello"));
     }
 }

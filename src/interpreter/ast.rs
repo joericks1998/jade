@@ -1,5 +1,14 @@
 use super::error::Span;
 
+/// A part of an interpolated f-string expression.
+#[derive(Debug, Clone)]
+pub enum FStrPart {
+    /// A literal string segment between (or before/after) interpolation slots.
+    Literal(String),
+    /// An interpolated expression: the value is stringified at runtime.
+    Expr(Expr),
+}
+
 /// A complete Jade program: a list of statements.
 #[derive(Debug, Clone)]
 pub struct Program {
@@ -107,6 +116,12 @@ pub enum Expr {
         span: Span,
     },
 
+    /// A string literal, e.g. `"hello"`
+    Str {
+        value: String,
+        span: Span,
+    },
+
     /// A reference to a variable or function, e.g. `add`
     Identifier {
         name: String,
@@ -146,6 +161,19 @@ pub enum Expr {
     FieldAccess {
         object: Box<Expr>,
         field: String,
+        span: Span,
+    },
+
+    /// Index into a string, e.g. `s[0]`
+    Index {
+        object: Box<Expr>,
+        index: Box<Expr>,
+        span: Span,
+    },
+
+    /// An interpolated string, e.g. `f"hello, {name}!"`
+    FStr {
+        parts: Vec<FStrPart>,
         span: Span,
     },
 }
