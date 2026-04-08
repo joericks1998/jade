@@ -111,7 +111,7 @@ impl std::fmt::Display for JadeError {
             JadeError::UnterminatedString { span } =>
                 write!(f, "[{}:{}] unterminated string literal", span.line, span.col),
             JadeError::IndexOutOfBounds { index, len, span } =>
-                write!(f, "[{}:{}] index {} out of bounds for string of length {}", span.line, span.col, index, len),
+                write!(f, "[{}:{}] index {} out of bounds (length {})", span.line, span.col, index, len),
         }
     }
 }

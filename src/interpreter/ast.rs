@@ -90,6 +90,15 @@ pub enum Stmt {
         span: Span,
     },
 
+    /// `name[index] = expr` — mutate an element of an array
+    IndexAssign {
+        name: String,
+        index: Expr,
+        value: Expr,
+        #[allow(dead_code)]
+        span: Span,
+    },
+
     /// A bare expression used as a statement, e.g. a method call whose return
     /// value is discarded: `obj.method(args)`.
     Expr(Expr),
@@ -168,6 +177,12 @@ pub enum Expr {
     Index {
         object: Box<Expr>,
         index: Box<Expr>,
+        span: Span,
+    },
+
+    /// An array literal, e.g. `[1, 2, 3]` or `[]`
+    Array {
+        elements: Vec<Expr>,
         span: Span,
     },
 
