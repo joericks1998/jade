@@ -51,6 +51,9 @@ pub enum TokenKind {
     // Logical operators
     AmpAmp,
     PipePipe,
+
+    // Pipe operator
+    PipeGt,
     Bang,
 
     // Comparison operators
@@ -436,10 +439,13 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
                 }
             }
 
-            // `|` or `||`
+            // `|`, `||`, or `|>`
             '|' => {
                 if i + 1 < chars.len() && chars[i + 1] == '|' {
                     tokens.push(Token { kind: TokenKind::PipePipe, span: Span { line, col } });
+                    col += 2; i += 2;
+                } else if i + 1 < chars.len() && chars[i + 1] == '>' {
+                    tokens.push(Token { kind: TokenKind::PipeGt,   span: Span { line, col } });
                     col += 2; i += 2;
                 } else {
                     tokens.push(Token { kind: TokenKind::Pipe,     span: Span { line, col } });
@@ -651,6 +657,11 @@ mod tests {
     #[test]
     fn test_tokenize_single_pipe_unchanged() {
         assert_eq!(kinds("|"), vec![TokenKind::Pipe, TokenKind::Eof]);
+    }
+
+    #[test]
+    fn test_tokenize_pipe_gt() {
+        assert_eq!(kinds("|>"), vec![TokenKind::PipeGt, TokenKind::Eof]);
     }
 
     #[test]

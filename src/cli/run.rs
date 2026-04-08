@@ -74,6 +74,10 @@ pub fn run_file(path: &str, verbose: bool) {
                     }
                     println!(" }}");
                 }
+                eval::Value::Array(vec) => {
+                    let parts: Vec<String> = vec.iter().map(eval::value_to_str).collect();
+                    println!("{} = [{}]", name, parts.join(", "));
+                }
                 eval::Value::BoundMethod(_) => println!("{} = <bound method>", name),
                 eval::Value::Builtin(_)     => {} // builtins are not shown in verbose output
             }

@@ -118,10 +118,11 @@ impl Parser {
             TokenKind::Struct => self.parse_struct_def(),
             TokenKind::Extend => self.parse_extend_block(),
             TokenKind::Identifier(_) => {
-                // Disambiguate the three identifier-led statement forms:
-                //   `ident =`            → bare variable assignment
-                //   `ident . ident =`    → struct field assignment
-                //   anything else        → expression statement (e.g. method call)
+                // Disambiguate identifier-led statement forms:
+                //   `ident =`              → bare variable assignment
+                //   `ident . ident =`      → struct field assignment
+                //   `ident [ expr ] =`     → array index assignment
+                //   anything else          → expression statement (e.g. method call)
                 let next_is_eq = self.peek_at(1)
                     .map(|t| t.kind == TokenKind::Equals).unwrap_or(false);
                 let next_is_dot = self.peek_at(1)
@@ -134,18 +135,13 @@ impl Parser {
                     self.parse_assign()
                 } else if dot_field_eq {
                     self.parse_field_assign()
+                } else if self.is_index_assign() {
+                    self.parse_index_assign()
                 } else {
                     self.parse_expr_stmt()
                 }
             }
-            _ => {
-                let token = self.peek().clone();
-                Err(JadeError::UnexpectedToken {
-                    expected: "statement".to_string(),
-                    got: format!("{:?}", token.kind),
-                    span: token.span,
-                })
-            }
+            _ => self.parse_expr_stmt(),
         }
     }
 
@@ -161,7 +157,7 @@ impl Parser {
             _ => unreachable!("parse_assign called without leading identifier"),
         };
         self.expect(&TokenKind::Equals)?;
-        let value = self.parse_or()?;
+        let value = self.parse_pipe()?;
         self.expect(&TokenKind::Semicolon)?;
         Ok(Stmt::Assign { name, value, span })
     }
@@ -188,7 +184,7 @@ impl Parser {
         };
 
         self.expect(&TokenKind::Equals)?;
-        let value = self.parse_or()?;
+        let value = self.parse_pipe()?;
         self.expect(&TokenKind::Semicolon)?;
 
         Ok(Stmt::Let { name, value, span })
@@ -274,7 +270,7 @@ impl Parser {
             return Ok(Stmt::Return { value: None, span });
         }
 
-        let value = self.parse_or()?;
+        let value = self.parse_pipe()?;
         self.expect(&TokenKind::Semicolon)?;
         Ok(Stmt::Return { value: Some(value), span })
     }
@@ -285,7 +281,7 @@ impl Parser {
     fn parse_condition(&mut self) -> Result<Expr> {
         let saved = self.struct_literal_allowed;
         self.struct_literal_allowed = false;
-        let cond = self.parse_or()?;
+        let cond = self.parse_pipe()?;
         self.struct_literal_allowed = saved;
         Ok(cond)
     }
@@ -433,14 +429,85 @@ impl Parser {
         self.expect(&TokenKind::Dot)?;
         let field = self.expect_ident("field name")?;
         self.expect(&TokenKind::Equals)?;
-        let value = self.parse_or()?;
+        let value = self.parse_pipe()?;
         self.expect(&TokenKind::Semicolon)?;
         Ok(Stmt::FieldAssign { object, field, value, span })
     }
 
+    /// Returns true when the current position looks like `ident [ … ] =`.
+    /// Scans forward to find the matching `]`, then checks that the next token is `=`.
+    fn is_index_assign(&self) -> bool {
+        if !matches!(self.peek_at(1).map(|t| &t.kind), Some(TokenKind::LBracket)) {
+            return false;
+        }
+        let mut depth = 1usize;
+        let mut i = self.pos + 2;
+        while i < self.tokens.len() {
+            match &self.tokens[i].kind {
+                TokenKind::LBracket => depth += 1,
+                TokenKind::RBracket => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return matches!(
+                            self.tokens.get(i + 1).map(|t| &t.kind),
+                            Some(TokenKind::Equals)
+                        );
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        false
+    }
+
+    /// Parse `<ident> [ <expr> ] = <expr> ;`
+    fn parse_index_assign(&mut self) -> Result<Stmt> {
+        let span = self.peek().span;
+        let name = self.expect_ident("array name")?;
+        self.advance(); // consume `[`
+        let index = self.parse_pipe()?;
+        // Skip any auto-inserted semicolons before `]` (multiline index expr)
+        while self.peek().kind == TokenKind::Semicolon {
+            self.advance();
+        }
+        self.expect(&TokenKind::RBracket)?;
+        self.expect(&TokenKind::Equals)?;
+        let value = self.parse_pipe()?;
+        self.expect(&TokenKind::Semicolon)?;
+        Ok(Stmt::IndexAssign { name, index, value, span })
+    }
+
+    /// Parse an array literal starting after `[` has been consumed.
+    /// Handles trailing commas and auto-inserted semicolons (multiline arrays).
+    fn parse_array_literal(&mut self, span: Span) -> Result<Expr> {
+        let mut elements = Vec::new();
+        loop {
+            // Skip auto-inserted semicolons (e.g. after an element on its own line)
+            while self.peek().kind == TokenKind::Semicolon {
+                self.advance();
+            }
+            if self.peek().kind == TokenKind::RBracket || self.peek().kind == TokenKind::Eof {
+                break;
+            }
+            elements.push(self.parse_pipe()?);
+            // Skip auto-inserted semicolons between element and `,` or `]`
+            while self.peek().kind == TokenKind::Semicolon {
+                self.advance();
+            }
+            if self.peek().kind == TokenKind::Comma {
+                self.advance(); // consume `,`, then loop (handles trailing comma too)
+            } else {
+                break;
+            }
+        }
+        self.expect(&TokenKind::RBracket)?;
+        Ok(Expr::Array { elements, span })
+    }
+
     /// Parse an expression used as a statement (value discarded), e.g. `obj.method(args)`.
     fn parse_expr_stmt(&mut self) -> Result<Stmt> {
-        let expr = self.parse_or()?;
+        let expr = self.parse_pipe()?;
         self.expect(&TokenKind::Semicolon)?;
         Ok(Stmt::Expr(expr))
     }
@@ -459,6 +526,7 @@ impl Parser {
             Expr::StructLiteral{ span, .. } => *span,
             Expr::FieldAccess  { span, .. } => *span,
             Expr::Index        { span, .. } => *span,
+            Expr::Array        { span, .. } => *span,
             Expr::FStr         { span, .. } => *span,
         }
     }
@@ -477,10 +545,44 @@ impl Parser {
             fn_depth,
             struct_literal_allowed: true,
         };
-        sub.parse_or()
+        sub.parse_pipe()
     }
 
-    /// Lowest precedence: `||` (logical OR).
+    /// Lowest precedence: `|>` (pipe).
+    /// `val |> f`       → `f(val)`
+    /// `val |> f(a, b)` → `f(val, a, b)` (lhs inserted as first argument)
+    /// Left-associative: `a |> f |> g` = `g(f(a))`.
+    fn parse_pipe(&mut self) -> Result<Expr> {
+        let mut left = self.parse_or()?;
+        loop {
+            if self.peek().kind != TokenKind::PipeGt {
+                break;
+            }
+            let span = Self::expr_span(&left);
+            self.advance(); // consume `|>`
+            let right = self.parse_or()?;
+            let rhs_span = Self::expr_span(&right);
+            left = match right {
+                Expr::Identifier { name, span: id_span } => Expr::Call {
+                    callee: Box::new(Expr::Identifier { name, span: id_span }),
+                    args: vec![left],
+                    span,
+                },
+                Expr::Call { callee, mut args, span: call_span } => {
+                    args.insert(0, left);
+                    Expr::Call { callee, args, span: call_span }
+                }
+                _ => return Err(JadeError::UnexpectedToken {
+                    expected: "function or call on right side of |>".to_string(),
+                    got: "expression".to_string(),
+                    span: rhs_span,
+                }),
+            };
+        }
+        Ok(left)
+    }
+
+    /// `||` (logical OR).
     fn parse_or(&mut self) -> Result<Expr> {
         let mut left = self.parse_and()?;
         loop {
@@ -696,7 +798,7 @@ impl Parser {
             }
             let field_name = self.expect_ident("field name")?;
             self.expect(&TokenKind::Colon)?;
-            let value = self.parse_or()?;
+            let value = self.parse_pipe()?;
             fields.push((field_name, value));
             // Allow a trailing comma or semicolon after each field value
             if self.peek().kind == TokenKind::Comma || self.peek().kind == TokenKind::Semicolon {
@@ -717,10 +819,10 @@ impl Parser {
                 self.advance(); // consume `(`
                 let mut args = Vec::new();
                 if self.peek().kind != TokenKind::RParen {
-                    args.push(self.parse_or()?);
+                    args.push(self.parse_pipe()?);
                     while self.peek().kind == TokenKind::Comma {
                         self.advance(); // consume `,`
-                        args.push(self.parse_or()?);
+                        args.push(self.parse_pipe()?);
                     }
                 }
                 self.expect(&TokenKind::RParen)?;
@@ -733,7 +835,7 @@ impl Parser {
             } else if self.peek().kind == TokenKind::LBracket {
                 let span = Self::expr_span(&expr);
                 self.advance(); // consume `[`
-                let index = self.parse_or()?;
+                let index = self.parse_pipe()?;
                 self.expect(&TokenKind::RBracket)?;
                 expr = Expr::Index { object: Box::new(expr), index: Box::new(index), span };
             } else {
@@ -796,9 +898,14 @@ impl Parser {
             }
             TokenKind::LParen => {
                 self.advance(); // consume `(`
-                let expr = self.parse_or()?;
+                let expr = self.parse_pipe()?;
                 self.expect(&TokenKind::RParen)?;
                 Ok(expr)
+            }
+            TokenKind::LBracket => {
+                let span = token.span;
+                self.advance(); // consume `[`
+                self.parse_array_literal(span)
             }
             TokenKind::Eof => Err(JadeError::UnexpectedEof { span: token.span }),
             _ => Err(JadeError::UnexpectedToken {
@@ -1223,5 +1330,52 @@ mod tests {
         let Stmt::FieldAssign { object, field, .. } = &p.stmts[1] else { panic!() };
         assert_eq!(object, "p");
         assert_eq!(field, "x");
+    }
+
+    #[test]
+    fn test_parse_pipe_invalid_rhs_is_error() {
+        // `|>` requires a function name or call on the right, not a raw expression
+        let tokens = lexer::tokenize("5 |> (1 + 2)").unwrap();
+        assert!(parse(tokens).is_err());
+    }
+
+    // ── arrays ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_array_literal_empty() {
+        let p = parse_src("let a = []");
+        let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
+        assert!(matches!(value, Expr::Array { elements, .. } if elements.is_empty()));
+    }
+
+    #[test]
+    fn test_parse_array_literal_ints() {
+        let p = parse_src("let a = [1, 2, 3]");
+        let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
+        let Expr::Array { elements, .. } = value else { panic!() };
+        assert_eq!(elements.len(), 3);
+        assert!(matches!(elements[0], Expr::Integer { value: 1, .. }));
+    }
+
+    #[test]
+    fn test_parse_array_trailing_comma() {
+        let p = parse_src("let a = [1, 2,]");
+        let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
+        let Expr::Array { elements, .. } = value else { panic!() };
+        assert_eq!(elements.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_array_index() {
+        let p = parse_src("let x = a[0]");
+        let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
+        assert!(matches!(value, Expr::Index { .. }));
+    }
+
+    #[test]
+    fn test_parse_array_index_assign() {
+        let p = parse_src("let a = []\na[1] = 99");
+        let Stmt::IndexAssign { name, .. } = &p.stmts[1] else { panic!() };
+        assert_eq!(name, "a");
     }
 }

@@ -22,7 +22,10 @@ pub enum Value {
     Struct(Rc<RefCell<StructInstance>>),
     /// A method bound to a specific receiver instance.
     BoundMethod(Rc<BoundMethod>),
-    /// A built-in function (e.g. `print`).
+    /// An array value. Stored as a plain `Vec` — assignment clones the whole
+    /// vector (value semantics), so aliases are always independent copies.
+    Array(Vec<Value>),
+    /// A built-in function (e.g. `print`, `len`).
     Builtin(BuiltinFn),
 }
 
@@ -30,6 +33,7 @@ pub enum Value {
 #[derive(Clone, Debug)]
 pub enum BuiltinFn {
     Print,
+    Len,
 }
 
 /// Heap-allocated function body shared via `Rc`.
@@ -69,6 +73,14 @@ impl std::fmt::Debug for Value {
                 }
                 write!(f, "}}")
             }
+            Value::Array(vec) => {
+                write!(f, "Array[")?;
+                for (i, v) in vec.iter().enumerate() {
+                    if i > 0 { write!(f, ", ")?; }
+                    write!(f, "{:?}", v)?;
+                }
+                write!(f, "]")
+            }
             Value::BoundMethod(_) => write!(f, "<bound method>"),
             Value::Builtin(b)     => write!(f, "<builtin {:?}>", b),
         }
@@ -103,6 +115,7 @@ impl Env {
     pub fn new() -> Self {
         let mut builtins = HashMap::new();
         builtins.insert("print".to_string(), BuiltinFn::Print);
+        builtins.insert("len".to_string(), BuiltinFn::Len);
         Env {
             scopes: vec![HashMap::new()],
             struct_defs: HashMap::new(),
@@ -294,6 +307,31 @@ fn eval_block(stmts: &[Stmt], env: &mut Env) -> Result<Option<Value>> {
                 }
             }
 
+            Stmt::IndexAssign { name, index, value, span } => {
+                let idx_val = eval_expr(index, env)?;
+                let new_val = eval_expr(value, env)?;
+                let arr = env.get(name).ok_or_else(|| JadeError::UndefinedVariable {
+                    name: name.clone(),
+                    span: *span,
+                })?;
+                match (arr, idx_val) {
+                    (Value::Array(mut vec), Value::Int(i)) => {
+                        let len = vec.len();
+                        if i < 0 || i as usize >= len {
+                            return Err(JadeError::IndexOutOfBounds { index: i, len, span: *span });
+                        }
+                        vec[i as usize] = new_val;
+                        env.assign(name, Value::Array(vec), *span)?;
+                    }
+                    (Value::Array(_), _) => return Err(JadeError::TypeError {
+                        op: "array index".to_string(), span: *span,
+                    }),
+                    _ => return Err(JadeError::TypeError {
+                        op: "index assign".to_string(), span: *span,
+                    }),
+                }
+            }
+
             Stmt::Expr(expr) => {
                 eval_expr(expr, env)?;
             }
@@ -317,14 +355,16 @@ fn to_float(v: Value) -> f64 {
         Value::Str(_)         => unreachable!("to_float called on Str"),
         Value::Fn(_)          => unreachable!("to_float called on Fn"),
         Value::Struct(_)      => unreachable!("to_float called on Struct"),
+        Value::Array(_)       => unreachable!("to_float called on Array"),
         Value::BoundMethod(_) => unreachable!("to_float called on BoundMethod"),
         Value::Builtin(_)     => unreachable!("to_float called on Builtin"),
     }
 }
 
-/// Convert a `Value` to its string representation (used by f-string interpolation
-/// and the `print` built-in).  Matches the same display rules as verbose output.
-fn value_to_str(v: &Value) -> String {
+/// Convert a `Value` to its string representation (used by f-string interpolation,
+/// the `print` built-in, and `-v` verbose output).  Single source of truth for
+/// how values display to the user — update here and everywhere benefits.
+pub(crate) fn value_to_str(v: &Value) -> String {
     match v {
         Value::Int(i) => i.to_string(),
         Value::Float(f) => {
@@ -338,6 +378,10 @@ fn value_to_str(v: &Value) -> String {
         }
         Value::Bool(b)        => b.to_string(),
         Value::Str(s)         => s.clone(),
+        Value::Array(vec) => {
+            let parts: Vec<String> = vec.iter().map(value_to_str).collect();
+            format!("[{}]", parts.join(", "))
+        }
         Value::Fn(_)          => "<fn>".to_string(),
         Value::Struct(_)      => "<struct>".to_string(),
         Value::BoundMethod(_) => "<bound method>".to_string(),
@@ -443,6 +487,22 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                     Ok(Value::Int(0))
                 }
 
+                Value::Builtin(BuiltinFn::Len) => {
+                    if args.len() != 1 {
+                        return Err(JadeError::ArityMismatch {
+                            expected: 1,
+                            got: args.len(),
+                            span: *span,
+                        });
+                    }
+                    let v = eval_expr(&args[0], env)?;
+                    match v {
+                        Value::Str(s)     => Ok(Value::Int(s.chars().count() as i64)),
+                        Value::Array(vec) => Ok(Value::Int(vec.len() as i64)),
+                        _ => Err(JadeError::TypeError { op: "len".to_string(), span: *span }),
+                    }
+                }
+
                 _ => Err(JadeError::NotCallable { span: *span }),
             }
         }
@@ -507,6 +567,14 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
             }
         }
 
+        Expr::Array { elements, .. } => {
+            let mut vec = Vec::with_capacity(elements.len());
+            for elem in elements {
+                vec.push(eval_expr(elem, env)?);
+            }
+            Ok(Value::Array(vec))
+        }
+
         Expr::Index { object, index, span } => {
             let obj = eval_expr(object, env)?;
             let idx = eval_expr(index, env)?;
@@ -522,8 +590,15 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                         Ok(Value::Str(chars[i as usize].to_string()))
                     }
                 }
-                (Value::Str(_), _) => Err(JadeError::TypeError { op: "[]".to_string(), span: *span }),
-                _                  => Err(JadeError::TypeError { op: "[]".to_string(), span: *span }),
+                (Value::Array(vec), Value::Int(i)) => {
+                    let len = vec.len();
+                    if i < 0 || i as usize >= len {
+                        Err(JadeError::IndexOutOfBounds { index: i, len, span: *span })
+                    } else {
+                        Ok(vec[i as usize].clone())
+                    }
+                }
+                _ => Err(JadeError::TypeError { op: "[]".to_string(), span: *span }),
             }
         }
 
@@ -565,6 +640,7 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                             (Value::Str(a), Value::Str(b)) => Ok(Value::Str(a + &b)),
                             (Value::Bool(_), _) | (_, Value::Bool(_)) |
                             (Value::Fn(_),   _) | (_, Value::Fn(_))   |
+                            (Value::Array(_), _) | (_, Value::Array(_)) |
                             (Value::Struct(_), _) | (_, Value::Struct(_)) |
                             (Value::BoundMethod(_), _) | (_, Value::BoundMethod(_)) |
                             (Value::Builtin(_), _) | (_, Value::Builtin(_)) |
@@ -579,6 +655,7 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                             (Value::Bool(_), _) | (_, Value::Bool(_)) |
                             (Value::Str(_), _)  | (_, Value::Str(_))  |
                             (Value::Fn(_),   _) | (_, Value::Fn(_))   |
+                            (Value::Array(_), _) | (_, Value::Array(_)) |
                             (Value::Struct(_), _) | (_, Value::Struct(_)) |
                             (Value::BoundMethod(_), _) | (_, Value::BoundMethod(_)) |
                             (Value::Builtin(_), _) | (_, Value::Builtin(_)) =>
@@ -592,6 +669,7 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                             (Value::Bool(_), _) | (_, Value::Bool(_)) |
                             (Value::Str(_), _)  | (_, Value::Str(_))  |
                             (Value::Fn(_),   _) | (_, Value::Fn(_))   |
+                            (Value::Array(_), _) | (_, Value::Array(_)) |
                             (Value::Struct(_), _) | (_, Value::Struct(_)) |
                             (Value::BoundMethod(_), _) | (_, Value::BoundMethod(_)) |
                             (Value::Builtin(_), _) | (_, Value::Builtin(_)) =>
@@ -605,6 +683,7 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                             (Value::Bool(_), _) | (_, Value::Bool(_)) |
                             (Value::Str(_), _)  | (_, Value::Str(_))  |
                             (Value::Fn(_),   _) | (_, Value::Fn(_))   |
+                            (Value::Array(_), _) | (_, Value::Array(_)) |
                             (Value::Struct(_), _) | (_, Value::Struct(_)) |
                             (Value::BoundMethod(_), _) | (_, Value::BoundMethod(_)) |
                             (Value::Builtin(_), _) | (_, Value::Builtin(_)) =>
@@ -621,6 +700,7 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                             (Value::Bool(_), _) | (_, Value::Bool(_)) |
                             (Value::Str(_), _)  | (_, Value::Str(_))  |
                             (Value::Fn(_),   _) | (_, Value::Fn(_))   |
+                            (Value::Array(_), _) | (_, Value::Array(_)) |
                             (Value::Struct(_), _) | (_, Value::Struct(_)) |
                             (Value::BoundMethod(_), _) | (_, Value::BoundMethod(_)) |
                             (Value::Builtin(_), _) | (_, Value::Builtin(_)) =>
@@ -1733,5 +1813,144 @@ print("hello")"#).unwrap();
         // both produce Value::Str("hello")
         assert!(matches!(get(&env, "a"), Value::Str(ref v) if v == "hello"));
         assert!(matches!(get(&env, "b"), Value::Str(ref v) if v == "hello"));
+    }
+
+    // ── pipe operator |> ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_eval_pipe_simple() {
+        let src = "fn double(x) {\n    return x * 2\n}\nlet n = 5 |> double";
+        let env = eval_src(src).unwrap();
+        assert!(matches!(get(&env, "n"), Value::Int(10)));
+    }
+
+    #[test]
+    fn test_eval_pipe_chained() {
+        let src = "fn double(x) {\n    return x * 2\n}\nlet m = 3 |> double |> double";
+        let env = eval_src(src).unwrap();
+        assert!(matches!(get(&env, "m"), Value::Int(12)));
+    }
+
+    #[test]
+    fn test_eval_pipe_with_extra_arg() {
+        let src = "fn add(a, b) {\n    return a + b\n}\nlet r = 5 |> add(3)";
+        let env = eval_src(src).unwrap();
+        assert!(matches!(get(&env, "r"), Value::Int(8)));
+    }
+
+    #[test]
+    fn test_eval_pipe_with_string() {
+        let src = "fn greet(name) {\n    return f\"hello, {name}!\"\n}\nlet g = \"Jade\" |> greet";
+        let env = eval_src(src).unwrap();
+        assert!(matches!(get(&env, "g"), Value::Str(ref v) if v == "hello, Jade!"));
+    }
+
+    #[test]
+    fn test_eval_pipe_arithmetic_lhs() {
+        let src = "fn double(x) {\n    return x * 2\n}\nlet x = (2 + 3) |> double";
+        let env = eval_src(src).unwrap();
+        assert!(matches!(get(&env, "x"), Value::Int(10)));
+    }
+
+    // ── arrays ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_eval_array_empty() {
+        let env = eval_src("let a = []").unwrap();
+        assert!(matches!(get(&env, "a"), Value::Array(ref v) if v.is_empty()));
+    }
+
+    #[test]
+    fn test_eval_array_int_elements() {
+        let env = eval_src("let a = [10, 20, 30]").unwrap();
+        let Value::Array(ref vec) = get(&env, "a") else { panic!("not an array") };
+        assert!(matches!(vec[0], Value::Int(10)));
+        assert!(matches!(vec[1], Value::Int(20)));
+        assert!(matches!(vec[2], Value::Int(30)));
+    }
+
+    #[test]
+    fn test_eval_array_index_first() {
+        let env = eval_src("let a = [10, 20, 30]\nlet x = a[0]").unwrap();
+        assert!(matches!(get(&env, "x"), Value::Int(10)));
+    }
+
+    #[test]
+    fn test_eval_array_index_last() {
+        let env = eval_src("let a = [10, 20, 30]\nlet x = a[2]").unwrap();
+        assert!(matches!(get(&env, "x"), Value::Int(30)));
+    }
+
+    #[test]
+    fn test_eval_array_index_out_of_bounds() {
+        let err = eval_src("let a = [1]\nlet x = a[1]").unwrap_err();
+        assert!(matches!(err, JadeError::IndexOutOfBounds { index: 1, len: 1, .. }));
+    }
+
+    #[test]
+    fn test_eval_array_index_negative() {
+        let err = eval_src("let a = [1]\nlet x = a[-1]").unwrap_err();
+        assert!(matches!(err, JadeError::IndexOutOfBounds { index: -1, .. }));
+    }
+
+    #[test]
+    fn test_eval_array_index_assign() {
+        let env = eval_src("let a = [1, 2, 3]\na[1] = 99\nlet x = a[1]").unwrap();
+        assert!(matches!(get(&env, "x"), Value::Int(99)));
+    }
+
+    #[test]
+    fn test_eval_array_value_semantics() {
+        // b is an independent copy — mutating b does not affect a
+        let env = eval_src("let a = [1, 2]\nlet b = a\nb[0] = 42\nlet x = a[0]").unwrap();
+        assert!(matches!(get(&env, "x"), Value::Int(1)));
+    }
+
+    #[test]
+    fn test_eval_array_heterogeneous() {
+        let env = eval_src("let a = [1, 2.0, true, \"hello\"]").unwrap();
+        let Value::Array(ref vec) = get(&env, "a") else { panic!("not an array") };
+        assert_eq!(vec.len(), 4);
+        assert!(matches!(vec[0], Value::Int(1)));
+        assert!(matches!(vec[1], Value::Float(f) if f == 2.0));
+        assert!(matches!(vec[2], Value::Bool(true)));
+        assert!(matches!(vec[3], Value::Str(ref s) if s == "hello"));
+    }
+
+    #[test]
+    fn test_eval_array_nested() {
+        let env = eval_src("let m = [[1, 2], [3, 4]]\nlet x = m[0][1]").unwrap();
+        assert!(matches!(get(&env, "x"), Value::Int(2)));
+    }
+
+    #[test]
+    fn test_eval_array_trailing_comma() {
+        let env = eval_src("let a = [1, 2, 3,]").unwrap();
+        let Value::Array(ref vec) = get(&env, "a") else { panic!("not an array") };
+        assert_eq!(vec.len(), 3);
+    }
+
+    #[test]
+    fn test_eval_len_array() {
+        let env = eval_src("let a = [1, 2, 3]\nlet n = len(a)").unwrap();
+        assert!(matches!(get(&env, "n"), Value::Int(3)));
+    }
+
+    #[test]
+    fn test_eval_len_string() {
+        let env = eval_src("let n = len(\"hello\")").unwrap();
+        assert!(matches!(get(&env, "n"), Value::Int(5)));
+    }
+
+    #[test]
+    fn test_eval_len_empty_array() {
+        let env = eval_src("let n = len([])").unwrap();
+        assert!(matches!(get(&env, "n"), Value::Int(0)));
+    }
+
+    #[test]
+    fn test_eval_len_type_error() {
+        let err = eval_src("let n = len(42)").unwrap_err();
+        assert!(matches!(err, JadeError::TypeError { .. }));
     }
 }
