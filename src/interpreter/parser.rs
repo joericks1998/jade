@@ -1,7 +1,7 @@
 use super::{
-    ast::{BinOpKind, Expr, Program, Stmt, UnaryOpKind},
+    ast::{BinOpKind, Expr, FStrPart, Program, Stmt, UnaryOpKind},
     error::{JadeError, Result, Span},
-    lexer::{Token, TokenKind},
+    lexer::{RawFStrPart, Token, TokenKind},
 };
 
 struct Parser {
@@ -290,7 +290,7 @@ impl Parser {
         Ok(cond)
     }
 
-    /// Parse `if <condition> { <then> }` or `if <condition> { <then> } else { <else> }`
+    /// Parse `if <condition> { <then> }`, optional `elif` chain, optional `else`.
     fn parse_if(&mut self) -> Result<Stmt> {
         let span = self.peek().span;
         self.advance(); // consume `if`
@@ -298,12 +298,40 @@ impl Parser {
         let condition = self.parse_condition()?;
         let then_body = self.parse_block()?;
 
-        // RBrace now inserts an auto-semicolon; consume it before checking for `else`.
+        // RBrace inserts an auto-semicolon; consume it before checking for elif/else.
         if self.peek().kind == TokenKind::Semicolon {
             self.advance();
         }
 
-        let else_body = if self.peek().kind == TokenKind::Else {
+        let else_body = if self.peek().kind == TokenKind::Elif {
+            // Desugar `elif cond { … }` into `else { if cond { … } … }`
+            Some(vec![self.parse_elif()?])
+        } else if self.peek().kind == TokenKind::Else {
+            self.advance(); // consume `else`
+            Some(self.parse_block()?)
+        } else {
+            None
+        };
+
+        Ok(Stmt::If { condition, then_body, else_body, span })
+    }
+
+    /// Parse `elif <condition> { <then> }` (and any further elif/else chain).
+    /// Returns a `Stmt::If` that represents the desugared else-branch.
+    fn parse_elif(&mut self) -> Result<Stmt> {
+        let span = self.peek().span;
+        self.advance(); // consume `elif`
+
+        let condition = self.parse_condition()?;
+        let then_body = self.parse_block()?;
+
+        if self.peek().kind == TokenKind::Semicolon {
+            self.advance();
+        }
+
+        let else_body = if self.peek().kind == TokenKind::Elif {
+            Some(vec![self.parse_elif()?])
+        } else if self.peek().kind == TokenKind::Else {
             self.advance(); // consume `else`
             Some(self.parse_block()?)
         } else {
@@ -423,13 +451,33 @@ impl Parser {
             Expr::Integer      { span, .. } => *span,
             Expr::Float        { span, .. } => *span,
             Expr::Bool         { span, .. } => *span,
+            Expr::Str          { span, .. } => *span,
             Expr::Identifier   { span, .. } => *span,
             Expr::Call         { span, .. } => *span,
             Expr::BinOp        { span, .. } => *span,
             Expr::UnaryOp      { span, .. } => *span,
             Expr::StructLiteral{ span, .. } => *span,
             Expr::FieldAccess  { span, .. } => *span,
+            Expr::Index        { span, .. } => *span,
+            Expr::FStr         { span, .. } => *span,
         }
+    }
+
+    /// Re-lex and re-parse the raw expression source from inside an f-string slot.
+    /// Called once per `{…}` interpolation during `parse_primary` for `FStr` tokens.
+    fn parse_fstr_expr(src: &str, span: Span, fn_depth: usize) -> Result<Expr> {
+        let sub_tokens = super::lexer::tokenize(src).map_err(|_| JadeError::UnexpectedToken {
+            expected: "expression".to_string(),
+            got: format!("invalid f-string expression: {:?}", src),
+            span,
+        })?;
+        let mut sub = Parser {
+            tokens: sub_tokens,
+            pos: 0,
+            fn_depth,
+            struct_literal_allowed: true,
+        };
+        sub.parse_or()
     }
 
     /// Lowest precedence: `||` (logical OR).
@@ -682,6 +730,12 @@ impl Parser {
                 self.advance(); // consume `.`
                 let field = self.expect_ident("field name")?;
                 expr = Expr::FieldAccess { object: Box::new(expr), field, span };
+            } else if self.peek().kind == TokenKind::LBracket {
+                let span = Self::expr_span(&expr);
+                self.advance(); // consume `[`
+                let index = self.parse_or()?;
+                self.expect(&TokenKind::RBracket)?;
+                expr = Expr::Index { object: Box::new(expr), index: Box::new(index), span };
             } else {
                 break;
             }
@@ -708,6 +762,26 @@ impl Parser {
             TokenKind::False => {
                 self.advance();
                 Ok(Expr::Bool { value: false, span: token.span })
+            }
+            TokenKind::Str(ref value) => {
+                let value = value.clone();
+                self.advance();
+                Ok(Expr::Str { value, span: token.span })
+            }
+            TokenKind::FStr(raw_parts) => {
+                let span = token.span;
+                self.advance();
+                let mut parts = Vec::with_capacity(raw_parts.len());
+                for part in raw_parts {
+                    match part {
+                        RawFStrPart::Literal(s) => parts.push(FStrPart::Literal(s)),
+                        RawFStrPart::Expr(src) => {
+                            let expr = Self::parse_fstr_expr(&src, span, self.fn_depth)?;
+                            parts.push(FStrPart::Expr(expr));
+                        }
+                    }
+                }
+                Ok(Expr::FStr { parts, span })
             }
             TokenKind::Identifier(ref name) => {
                 let name = name.clone();
