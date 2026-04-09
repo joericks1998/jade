@@ -29,6 +29,12 @@ SUITES = [
         "py":    ROOT / "bench" / "heavy.py",
         "runs":  10,
     },
+    {
+        "name":  "sort   (bubble sort, 200-elem descending array)",
+        "jade":  ROOT / "bench" / "sort.jde",
+        "py":    ROOT / "bench" / "sort.py",
+        "runs":  10,
+    },
 ]
 
 

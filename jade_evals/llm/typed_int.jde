@@ -1,0 +1,5 @@
+// Typed dereference: LLM output coerced to int with retry on failure.
+
+prompt p = "What is 3 + 4? Respond with only the number."
+let n = ?p |> int
+print(n + 1)

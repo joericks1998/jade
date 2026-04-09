@@ -1,0 +1,33 @@
+// ── literals ──────────────────────────────────────────────────────────────────
+let hello = "hello"
+let world = "world"
+
+// ── concatenation ─────────────────────────────────────────────────────────────
+let hw = hello + " " + world       // "hello world"
+
+// ── equality ──────────────────────────────────────────────────────────────────
+let same = "abc" == "abc"          // true
+let diff = "abc" == "xyz"          // false
+let ne   = "abc" != "xyz"          // true
+
+// ── ordering (lexicographic) ──────────────────────────────────────────────────
+let lt = "abc" < "abd"             // true
+let gt = "b" > "a"                 // true
+let le = "abc" <= "abc"            // true
+let ge = "z" >= "a"                // true
+
+// ── indexing ──────────────────────────────────────────────────────────────────
+let s = "hello"
+let h = s[0]                       // "h"
+let o = s[4]                       // "o"
+
+// ── escape sequences ──────────────────────────────────────────────────────────
+let tab     = "a\tb"               // "a<TAB>b"
+let escaped = "say \"hi\""        // say "hi"
+let newline = "line1\nline2"       // line1<NL>line2
+
+// ── print builtin ─────────────────────────────────────────────────────────────
+print("hello from jade")           // prints: hello from jade
+print(42)                          // prints: 42
+print(true)                        // prints: true
+print(hw)                          // prints: hello world

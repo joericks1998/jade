@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Jade 1.0.5 — Types</title>
+  <title>Jade 1.0.6 — Types</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -282,9 +282,9 @@
       </a>
       <span class="topbar-sep">»</span>
       <select title="Version">
-        <option>1.0.5</option>
+        <option>1.0.6</option>
       </select>
-      <span class="topbar-title">1.0.5 Documentation</span>
+      <span class="topbar-title">1.0.6 Documentation</span>
     </div>
     <div class="topbar-right">
       <a href="https://github.com/joericks1998/jade">GitHub</a>
@@ -314,6 +314,7 @@
           <li><a href="functions.html">Functions</a></li>
           <li><a href="control-flow.html">Control Flow</a></li>
           <li><a href="structs.html">Structs</a></li>
+          <li><a href="llm.html">LLM Integration</a></li>
         </ul>
       </div>
       <hr class="sidebar-divider" />
@@ -339,7 +340,7 @@
       <section id="types">
         <h2>Types</h2>
         <p>
-          Jade 1.0.5 has five runtime value types. A full static type system with
+          Jade 1.0.6 has seven runtime value types. A full static type system with
           inference is planned for a later phase of development.
         </p>
         <table>
@@ -352,7 +353,8 @@
             <tr><td><code>bool</code></td><td>Boolean <code>true</code> or <code>false</code></td><td>Implemented</td></tr>
             <tr><td><code>fn</code></td><td>First-class function value</td><td>Implemented</td></tr>
             <tr><td><code>struct</code></td><td>User-defined record type with named fields</td><td>Implemented</td></tr>
-            <tr><td><code>str</code></td><td>UTF-8 string</td><td>Planned</td></tr>
+            <tr><td><code>str</code></td><td>UTF-8 string with indexing and concatenation</td><td>Implemented</td></tr>
+            <tr><td><code>array</code></td><td>Heterogeneous mutable array with index access</td><td>Implemented</td></tr>
             <tr><td><code>nil</code></td><td>Absence of value</td><td>Planned</td></tr>
           </tbody>
         </table>

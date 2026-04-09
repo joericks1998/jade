@@ -1,0 +1,6 @@
+// Basic untyped prompt dereference.
+// Requires JADE_API_KEY or jade.toml to be configured.
+
+prompt p = "Say exactly: Hello from Jade!"
+let response = ?p
+print(response)

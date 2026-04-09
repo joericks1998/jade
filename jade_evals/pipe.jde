@@ -1,0 +1,36 @@
+// ── pipe operator |> ──────────────────────────────────────────────────────────
+
+fn double(x) {
+    return x * 2
+}
+
+fn add(a, b) {
+    return a + b
+}
+
+fn greet(name) {
+    return f"hello, {name}!"
+}
+
+// Simple pipe: value |> function (function receives value as sole argument)
+let n = 5 |> double
+print(n)   // 10
+
+// Chained pipes — left-associative: 3 |> double |> double = double(double(3))
+let m = 3 |> double |> double
+print(m)   // 12
+
+// Pipe directly to print
+"piped string" |> print
+
+// Pipe with additional arguments: value is inserted as the *first* argument
+let r = 5 |> add(3)
+print(r)   // 8
+
+// Pipe works with string functions
+let greeting = "Jade" |> greet
+print(greeting)   // hello, Jade!
+
+// Pipe with arithmetic on the left
+let x = (2 + 3) |> double
+print(x)   // 10

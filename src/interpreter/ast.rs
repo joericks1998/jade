@@ -1,5 +1,29 @@
 use super::error::Span;
 
+/// A method signature within an `interface` definition.
+/// The tree-walk evaluator uses the name only (for missing-method checks);
+/// `params`/`return_type` are parsed for documentation and future type inference.
+#[derive(Debug, Clone)]
+pub struct InterfaceMethod {
+    pub name: String,
+    #[allow(dead_code)] // reserved for future type inference
+    pub params: Vec<String>,
+    /// Return type annotation, e.g. `str` in `fn to_str(self) -> str`.
+    #[allow(dead_code)] // reserved for future type inference
+    pub return_type: Option<String>,
+    #[allow(dead_code)] // reserved for future error reporting
+    pub span: Span,
+}
+
+/// A part of an interpolated f-string expression.
+#[derive(Debug, Clone)]
+pub enum FStrPart {
+    /// A literal string segment between (or before/after) interpolation slots.
+    Literal(String),
+    /// An interpolated expression: the value is stringified at runtime.
+    Expr(Expr),
+}
+
 /// A complete Jade program: a list of statements.
 #[derive(Debug, Clone)]
 pub struct Program {
@@ -64,9 +88,20 @@ pub enum Stmt {
         span: Span,
     },
 
+    /// `interface Name { fn method(self, …) -> type }`
+    InterfaceDef {
+        name: String,
+        methods: Vec<InterfaceMethod>,
+        #[allow(dead_code)]
+        span: Span,
+    },
+
     /// `extend TypeName { fn method(self, …) { … } … }`
+    /// `extend TypeName: InterfaceName { fn method(self, …) { … } … }`
     ExtendBlock {
         type_name: String,
+        /// The interface this extend block claims to implement, if any.
+        interface_name: Option<String>,
         methods: Vec<Stmt>,
         #[allow(dead_code)]
         span: Span,
@@ -78,6 +113,22 @@ pub enum Stmt {
         field: String,
         value: Expr,
         #[allow(dead_code)]
+        span: Span,
+    },
+
+    /// `name[index] = expr` — mutate an element of an array
+    IndexAssign {
+        name: String,
+        index: Expr,
+        value: Expr,
+        #[allow(dead_code)]
+        span: Span,
+    },
+
+    /// `prompt name = expr` — declare a prompt value from a string expression.
+    PromptDecl {
+        name: String,
+        body: Expr,
         span: Span,
     },
 
@@ -104,6 +155,12 @@ pub enum Expr {
     /// A boolean literal, e.g. `true` or `false`
     Bool {
         value: bool,
+        span: Span,
+    },
+
+    /// A string literal, e.g. `"hello"`
+    Str {
+        value: String,
         span: Span,
     },
 
@@ -146,6 +203,33 @@ pub enum Expr {
     FieldAccess {
         object: Box<Expr>,
         field: String,
+        span: Span,
+    },
+
+    /// Index into a string, e.g. `s[0]`
+    Index {
+        object: Box<Expr>,
+        index: Box<Expr>,
+        span: Span,
+    },
+
+    /// An array literal, e.g. `[1, 2, 3]` or `[]`
+    Array {
+        elements: Vec<Expr>,
+        span: Span,
+    },
+
+    /// An interpolated string, e.g. `f"hello, {name}!"`
+    FStr {
+        parts: Vec<FStrPart>,
+        span: Span,
+    },
+
+    /// `?name` — dereference a prompt variable, calling the LLM backend.
+    /// `?name |> type` — typed dereference: coerces the LLM output to `type` with retry.
+    PromptDeref {
+        name: String,
+        output_type: Option<String>,
         span: Span,
     },
 }

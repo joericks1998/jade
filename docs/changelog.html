@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Jade 1.0.5 — Changelog</title>
+  <title>Jade 1.0.6 — Changelog</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -282,9 +282,9 @@
       </a>
       <span class="topbar-sep">»</span>
       <select title="Version">
-        <option>1.0.5</option>
+        <option>1.0.6</option>
       </select>
-      <span class="topbar-title">1.0.5 Documentation</span>
+      <span class="topbar-title">1.0.6 Documentation</span>
     </div>
     <div class="topbar-right">
       <a href="https://github.com/joericks1998/jade">GitHub</a>
@@ -314,6 +314,7 @@
           <li><a href="functions.html">Functions</a></li>
           <li><a href="control-flow.html">Control Flow</a></li>
           <li><a href="structs.html">Structs</a></li>
+          <li><a href="llm.html">LLM Integration</a></li>
         </ul>
       </div>
       <hr class="sidebar-divider" />
@@ -338,6 +339,18 @@
 
       <section id="changelog">
         <h2>Changelog</h2>
+        <h3>v1.0.6</h3>
+        <ul>
+          <li>Added <code>str</code> type: string literals, triple-quoted strings, concatenation with <code>+</code>, character indexing, equality and lexicographic ordering</li>
+          <li>Added f-string interpolation: <code>f"…{expr}…"</code> and <code>f"""…{expr}…"""</code></li>
+          <li>Added array literals (<code>[1, 2, 3]</code>), index access (<code>arr[i]</code>), and index assignment (<code>arr[i] = expr</code>)</li>
+          <li>Added <code>print</code> and <code>len</code> built-in functions</li>
+          <li>Added pipe operator <code>|&gt;</code> for chaining function calls</li>
+          <li>Added <code>interface</code> definitions and <code>extend Type: Interface</code> conformance checking</li>
+          <li>Added <code>elif</code> clause for chained conditionals</li>
+          <li>Added <code>jade configure</code> command for LLM backend configuration</li>
+          <li>Added <code>prompt</code> declarations and <code>?</code> dereference for LLM inference</li>
+        </ul>
         <h3>v1.0.5</h3>
         <ul>
           <li>Added <code>struct</code> definitions with named fields</li>
