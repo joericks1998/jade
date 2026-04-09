@@ -96,6 +96,9 @@ pub fn run_file(path: &str, verbose: bool) {
                 eval::Value::BoundMethod(_) => println!("{} = <bound method>", name),
                 eval::Value::Builtin(_)     => {} // builtins are not shown in verbose output
                 eval::Value::Prompt(_)      => println!("{} = <prompt>", name),
+                eval::Value::Dict(_) => {
+                    println!("{} = {}", name, eval::value_to_str(val));
+                }
             }
         }
     }

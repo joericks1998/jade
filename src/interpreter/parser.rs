@@ -610,6 +610,7 @@ impl Parser {
             Expr::Array        { span, .. } => *span,
             Expr::FStr         { span, .. } => *span,
             Expr::PromptDeref  { span, .. } => *span,
+            Expr::Dict         { span, .. } => *span,
         }
     }
 
@@ -866,6 +867,35 @@ impl Parser {
         }
     }
 
+    /// Parse a dict literal starting after `{` has been consumed.
+    /// Keys are full expressions that must evaluate to strings at runtime.
+    /// Handles trailing commas and auto-inserted semicolons (multiline dicts).
+    fn parse_dict_literal(&mut self, span: Span) -> Result<Expr> {
+        let mut entries = Vec::new();
+        loop {
+            // Skip auto-inserted semicolons
+            while self.peek().kind == TokenKind::Semicolon {
+                self.advance();
+            }
+            if self.peek().kind == TokenKind::RBrace || self.peek().kind == TokenKind::Eof {
+                break;
+            }
+            // Disable struct literals when parsing the key to prevent `TypeName {` ambiguity
+            let was_allowed = self.struct_literal_allowed;
+            self.struct_literal_allowed = false;
+            let key = self.parse_pipe()?;
+            self.struct_literal_allowed = was_allowed;
+            self.expect(&TokenKind::Colon)?;
+            let value = self.parse_pipe()?;
+            entries.push((key, value));
+            if self.peek().kind == TokenKind::Comma || self.peek().kind == TokenKind::Semicolon {
+                self.advance();
+            }
+        }
+        self.expect(&TokenKind::RBrace)?;
+        Ok(Expr::Dict { entries, span })
+    }
+
     /// Parse the `{ field: expr, … }` body of a struct literal, given that the
     /// type name has already been consumed.
     fn parse_struct_literal_body(&mut self, type_name: String, span: Span) -> Result<Expr> {
@@ -1000,6 +1030,11 @@ impl Parser {
                 let span = token.span;
                 self.advance(); // consume `[`
                 self.parse_array_literal(span)
+            }
+            TokenKind::LBrace => {
+                let span = token.span;
+                self.advance(); // consume `{`
+                self.parse_dict_literal(span)
             }
             TokenKind::Question => {
                 let span = token.span;
@@ -1569,5 +1604,51 @@ mod tests {
         let tokens = super::super::lexer::tokenize("print(?p |> int)").expect("lex");
         let err = parse(tokens).unwrap_err();
         assert!(matches!(err, super::super::error::JadeError::StreamingWithType { .. }));
+    }
+
+    // ── dict literal tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_dict_empty() {
+        let p = parse_src("let d = {}");
+        let Stmt::Let { value: Expr::Dict { entries, .. }, .. } = &p.stmts[0]
+            else { panic!("expected Let with Dict") };
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_parse_dict_single_entry() {
+        let p = parse_src(r#"let d = {"key": 1}"#);
+        let Stmt::Let { value: Expr::Dict { entries, .. }, .. } = &p.stmts[0]
+            else { panic!("expected Let with Dict") };
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(&entries[0].0, Expr::Str { value, .. } if value == "key"));
+        assert!(matches!(&entries[0].1, Expr::Integer { value: 1, .. }));
+    }
+
+    #[test]
+    fn test_parse_dict_multiple_entries() {
+        let p = parse_src(r#"let d = {"a": 1, "b": 2}"#);
+        let Stmt::Let { value: Expr::Dict { entries, .. }, .. } = &p.stmts[0]
+            else { panic!("expected Let with Dict") };
+        assert_eq!(entries.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_dict_trailing_comma() {
+        let p = parse_src(r#"let d = {"a": 1,}"#);
+        let Stmt::Let { value: Expr::Dict { entries, .. }, .. } = &p.stmts[0]
+            else { panic!("expected Let with Dict") };
+        assert_eq!(entries.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_dict_identifier_key() {
+        // Variable key: the key expression is an identifier
+        let p = parse_src("let d = {k: 1}");
+        let Stmt::Let { value: Expr::Dict { entries, .. }, .. } = &p.stmts[0]
+            else { panic!("expected Let with Dict") };
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(&entries[0].0, Expr::Identifier { name, .. } if name == "k"));
     }
 }

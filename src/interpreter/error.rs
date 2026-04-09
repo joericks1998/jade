@@ -88,6 +88,9 @@ pub enum JadeError {
 
     /// `?p |> Type` was used inside `print(...)` where streaming output is expected.
     StreamingWithType { span: Span },
+
+    /// Dict lookup used a key that does not exist.
+    KeyNotFound { key: String, span: Span },
 }
 
 impl std::fmt::Display for JadeError {
@@ -147,6 +150,8 @@ impl std::fmt::Display for JadeError {
                 write!(f, "[{}:{}] prompt '{}' failed to produce a valid typed value after {} attempt(s)", span.line, span.col, name, attempts),
             JadeError::StreamingWithType { span } =>
                 write!(f, "[{}:{}] typed dereference '?p |> Type' cannot be used inside print() — assign to a variable first", span.line, span.col),
+            JadeError::KeyNotFound { key, span } =>
+                write!(f, "[{}:{}] key '{}' not found in dict", span.line, span.col, key),
         }
     }
 }
