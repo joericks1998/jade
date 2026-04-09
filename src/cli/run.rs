@@ -27,7 +27,22 @@ pub fn run_file(path: &str, verbose: bool) {
         }
     };
 
-    let env: eval::Env = match eval::evaluate(program) {
+    // Load config (jade.toml + env vars) and build LLM backend if an API key is available.
+    let cfg = crate::config::load_config();
+    let backend = cfg.api_key.as_ref()
+        .map(|key| crate::llm::build_backend(&cfg.provider, key, &cfg.model))
+        .transpose()
+        .unwrap_or_else(|e| {
+            eprintln!("error: invalid configuration: {}", e);
+            process::exit(1);
+        });
+    let opts = eval::LlmOpts {
+        backend,
+        default_model: cfg.model,
+        max_retries: cfg.max_retries,
+    };
+
+    let env: eval::Env = match eval::evaluate(program, opts) {
         Ok(e) => e,
         Err(e) => {
             eprintln!("{}: runtime error: {}", path, e);
@@ -80,6 +95,7 @@ pub fn run_file(path: &str, verbose: bool) {
                 }
                 eval::Value::BoundMethod(_) => println!("{} = <bound method>", name),
                 eval::Value::Builtin(_)     => {} // builtins are not shown in verbose output
+                eval::Value::Prompt(_)      => println!("{} = <prompt>", name),
             }
         }
     }

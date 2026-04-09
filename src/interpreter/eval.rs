@@ -6,6 +6,14 @@ use super::{
     ast::{BinOpKind, Expr, FStrPart, Program, Stmt, UnaryOpKind},
     error::{JadeError, Result, Span},
 };
+use crate::llm;
+
+// ── LLM inference constants ───────────────────────────────────────────────────
+
+/// Token budget for a normal (untyped) LLM response.
+const DEFAULT_MAX_TOKENS: u32 = 1024;
+/// Token budget for a retry correction reply — only a single typed value is needed.
+const RETRY_MAX_TOKENS: u32 = 64;
 
 // ── Value ────────────────────────────────────────────────────────────────────
 
@@ -27,6 +35,8 @@ pub enum Value {
     Array(Vec<Value>),
     /// A built-in function (e.g. `print`, `len`).
     Builtin(BuiltinFn),
+    /// A prompt declaration. Holds the prompt text; dereferenced with `?`.
+    Prompt(String),
 }
 
 /// Identifies a built-in function by name.
@@ -83,6 +93,7 @@ impl std::fmt::Debug for Value {
             }
             Value::BoundMethod(_) => write!(f, "<bound method>"),
             Value::Builtin(b)     => write!(f, "<builtin {:?}>", b),
+            Value::Prompt(text)   => write!(f, "Prompt({:?})", text),
         }
     }
 }
@@ -98,16 +109,29 @@ impl std::fmt::Debug for FnValue {
 /// Scoped environment: a stack of hash maps. `scopes[0]` is the global scope;
 /// each function call and block body pushes/pops a new frame.
 /// Struct definitions and extend methods are global (not scoped).
-#[derive(Debug)]
 pub struct Env {
     scopes: Vec<HashMap<String, Value>>,
     /// Maps struct type names to their ordered list of field names.
     pub struct_defs: HashMap<String, Vec<String>>,
     /// Maps struct type names to their method tables.
     pub extend_methods: HashMap<String, HashMap<String, Rc<FnValue>>>,
+    /// Maps interface names to their required method names.
+    pub interface_defs: HashMap<String, Vec<String>>,
+    /// Maps type names to the list of interface names they implement.
+    pub interface_impls: HashMap<String, Vec<String>>,
     /// Built-in functions that are always in scope. Stored separately so they
     /// don't appear in `-v` verbose output alongside user variables.
     builtins: HashMap<String, BuiltinFn>,
+    /// LLM inference backend, if one was configured for this run.
+    pub inference_backend: Option<Box<dyn llm::InferenceBackend>>,
+    /// Conversation history shared across all `?` dereferences in this program run.
+    pub conversation_history: Vec<llm::Message>,
+    /// Running total of tokens consumed by all inference calls.
+    pub token_count: i64,
+    /// Maximum number of retry attempts for typed dereferences (`?p |> Type`).
+    pub max_retries: usize,
+    /// Default model name passed to the inference backend.
+    pub default_model: String,
 }
 
 impl Env {
@@ -116,12 +140,32 @@ impl Env {
         let mut builtins = HashMap::new();
         builtins.insert("print".to_string(), BuiltinFn::Print);
         builtins.insert("len".to_string(), BuiltinFn::Len);
+
+        // Pre-populate session variables accessible from Jade code.
+        let mut global_scope: HashMap<String, Value> = HashMap::new();
+        global_scope.insert("__tokens__".to_string(), Value::Int(0));
+        global_scope.insert("__model__".to_string(), Value::Str(String::new()));
+        global_scope.insert("__max_retries__".to_string(), Value::Int(3));
+        global_scope.insert("__retry_log__".to_string(), Value::Array(vec![]));
+
         Env {
-            scopes: vec![HashMap::new()],
+            scopes: vec![global_scope],
             struct_defs: HashMap::new(),
             extend_methods: HashMap::new(),
+            interface_defs: HashMap::new(),
+            interface_impls: HashMap::new(),
             builtins,
+            inference_backend: None,
+            conversation_history: Vec::new(),
+            token_count: 0,
+            max_retries: 3,
+            default_model: String::new(),
         }
+    }
+
+    /// Update a session variable in the global scope (e.g. `__tokens__`).
+    fn set_session_var(&mut self, name: &str, value: Value) {
+        self.scopes[0].insert(name.to_string(), value);
     }
 
     /// Push a new inner scope (on function call or block entry).
@@ -169,6 +213,22 @@ impl Env {
     }
 }
 
+impl std::fmt::Debug for Env {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Env")
+            .field("scopes", &self.scopes)
+            .field("struct_defs", &self.struct_defs)
+            .field("extend_methods_keys", &self.extend_methods.keys().collect::<Vec<_>>())
+            .field("interface_defs", &self.interface_defs)
+            .field("interface_impls", &self.interface_impls)
+            .field("inference_backend", &self.inference_backend.as_ref().map(|_| "<backend>"))
+            .field("token_count", &self.token_count)
+            .field("max_retries", &self.max_retries)
+            .field("default_model", &self.default_model)
+            .finish()
+    }
+}
+
 impl Default for Env {
     fn default() -> Self {
         Self::new()
@@ -177,9 +237,27 @@ impl Default for Env {
 
 // ── Public entry point ───────────────────────────────────────────────────────
 
+/// Options controlling LLM integration for a single program run.
+pub struct LlmOpts {
+    pub backend: Option<Box<dyn llm::InferenceBackend>>,
+    pub default_model: String,
+    pub max_retries: usize,
+}
+
+impl Default for LlmOpts {
+    fn default() -> Self {
+        LlmOpts { backend: None, default_model: String::new(), max_retries: 3 }
+    }
+}
+
 /// Walk the program and return the populated top-level environment.
-pub fn evaluate(program: Program) -> Result<Env> {
+pub fn evaluate(program: Program, opts: LlmOpts) -> Result<Env> {
     let mut env = Env::new();
+    env.inference_backend = opts.backend;
+    env.max_retries = opts.max_retries;
+    env.default_model = opts.default_model.clone();
+    env.set_session_var("__model__", Value::Str(opts.default_model));
+    env.set_session_var("__max_retries__", Value::Int(opts.max_retries as i64));
     eval_block(&program.stmts, &mut env)?;
     Ok(env)
 }
@@ -271,7 +349,36 @@ fn eval_block(stmts: &[Stmt], env: &mut Env) -> Result<Option<Value>> {
                 env.struct_defs.insert(name.clone(), fields.clone());
             }
 
-            Stmt::ExtendBlock { type_name, methods, .. } => {
+            Stmt::InterfaceDef { name, methods, .. } => {
+                let method_names = methods.iter().map(|m| m.name.clone()).collect();
+                env.interface_defs.insert(name.clone(), method_names);
+            }
+
+            Stmt::ExtendBlock { type_name, interface_name, methods, span } => {
+                // Collect the names of all methods provided in this extend block.
+                let provided: std::collections::HashSet<String> = methods.iter()
+                    .filter_map(|m| if let Stmt::FnDef { name, .. } = m { Some(name.clone()) } else { None })
+                    .collect();
+
+                // If this extend claims to implement an interface, validate it.
+                if let Some(iface) = interface_name {
+                    let required = env.interface_defs.get(iface).ok_or_else(|| JadeError::UndefinedInterface {
+                        name: iface.clone(),
+                        span: *span,
+                    })?.clone();
+                    for req in &required {
+                        if !provided.contains(req) {
+                            return Err(JadeError::MissingInterfaceMethod {
+                                type_name: type_name.clone(),
+                                interface_name: iface.clone(),
+                                method: req.clone(),
+                                span: *span,
+                            });
+                        }
+                    }
+                    env.interface_impls.entry(type_name.clone()).or_default().push(iface.clone());
+                }
+
                 let method_map = env.extend_methods.entry(type_name.clone()).or_default();
                 for method in methods {
                     if let Stmt::FnDef { name, params, body, .. } = method {
@@ -332,6 +439,17 @@ fn eval_block(stmts: &[Stmt], env: &mut Env) -> Result<Option<Value>> {
                 }
             }
 
+            Stmt::PromptDecl { name, body, span } => {
+                let v = eval_expr(body, env)?;
+                match v {
+                    Value::Str(text) => env.define(name.clone(), Value::Prompt(text)),
+                    _ => return Err(JadeError::TypeError {
+                        op: "prompt declaration requires a string body".to_string(),
+                        span: *span,
+                    }),
+                }
+            }
+
             Stmt::Expr(expr) => {
                 eval_expr(expr, env)?;
             }
@@ -358,6 +476,7 @@ fn to_float(v: Value) -> f64 {
         Value::Array(_)       => unreachable!("to_float called on Array"),
         Value::BoundMethod(_) => unreachable!("to_float called on BoundMethod"),
         Value::Builtin(_)     => unreachable!("to_float called on Builtin"),
+        Value::Prompt(_)      => unreachable!("to_float called on Prompt"),
     }
 }
 
@@ -386,6 +505,7 @@ pub(crate) fn value_to_str(v: &Value) -> String {
         Value::Struct(_)      => "<struct>".to_string(),
         Value::BoundMethod(_) => "<bound method>".to_string(),
         Value::Builtin(_)     => "<builtin>".to_string(),
+        Value::Prompt(_)      => "<prompt>".to_string(),
     }
 }
 
@@ -644,6 +764,7 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                             (Value::Struct(_), _) | (_, Value::Struct(_)) |
                             (Value::BoundMethod(_), _) | (_, Value::BoundMethod(_)) |
                             (Value::Builtin(_), _) | (_, Value::Builtin(_)) |
+                            (Value::Prompt(_), _) | (_, Value::Prompt(_)) |
                             (Value::Str(_), _) | (_, Value::Str(_)) =>
                                 Err(JadeError::TypeError { op: "+".to_string(), span: *span }),
                             (a, b) => Ok(Value::Float(to_float(a) + to_float(b))),
@@ -658,7 +779,8 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                             (Value::Array(_), _) | (_, Value::Array(_)) |
                             (Value::Struct(_), _) | (_, Value::Struct(_)) |
                             (Value::BoundMethod(_), _) | (_, Value::BoundMethod(_)) |
-                            (Value::Builtin(_), _) | (_, Value::Builtin(_)) =>
+                            (Value::Builtin(_), _) | (_, Value::Builtin(_)) |
+                            (Value::Prompt(_), _) | (_, Value::Prompt(_)) =>
                                 Err(JadeError::TypeError { op: "-".to_string(), span: *span }),
                             (a, b) => Ok(Value::Float(to_float(a) - to_float(b))),
                         },
@@ -672,7 +794,8 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                             (Value::Array(_), _) | (_, Value::Array(_)) |
                             (Value::Struct(_), _) | (_, Value::Struct(_)) |
                             (Value::BoundMethod(_), _) | (_, Value::BoundMethod(_)) |
-                            (Value::Builtin(_), _) | (_, Value::Builtin(_)) =>
+                            (Value::Builtin(_), _) | (_, Value::Builtin(_)) |
+                            (Value::Prompt(_), _) | (_, Value::Prompt(_)) =>
                                 Err(JadeError::TypeError { op: "*".to_string(), span: *span }),
                             (a, b) => Ok(Value::Float(to_float(a) * to_float(b))),
                         },
@@ -686,7 +809,8 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                             (Value::Array(_), _) | (_, Value::Array(_)) |
                             (Value::Struct(_), _) | (_, Value::Struct(_)) |
                             (Value::BoundMethod(_), _) | (_, Value::BoundMethod(_)) |
-                            (Value::Builtin(_), _) | (_, Value::Builtin(_)) =>
+                            (Value::Builtin(_), _) | (_, Value::Builtin(_)) |
+                            (Value::Prompt(_), _) | (_, Value::Prompt(_)) =>
                                 Err(JadeError::TypeError { op: "/".to_string(), span: *span }),
                             (a, b) => {
                                 let bf = to_float(b);
@@ -703,7 +827,8 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                             (Value::Array(_), _) | (_, Value::Array(_)) |
                             (Value::Struct(_), _) | (_, Value::Struct(_)) |
                             (Value::BoundMethod(_), _) | (_, Value::BoundMethod(_)) |
-                            (Value::Builtin(_), _) | (_, Value::Builtin(_)) =>
+                            (Value::Builtin(_), _) | (_, Value::Builtin(_)) |
+                            (Value::Prompt(_), _) | (_, Value::Prompt(_)) =>
                                 Err(JadeError::TypeError { op: "%".to_string(), span: *span }),
                             (a, b) => {
                                 let bf = to_float(b);
@@ -826,6 +951,102 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                 },
             }
         }
+
+        Expr::PromptDeref { name, output_type, span } => {
+            // 1. Resolve the prompt text from the environment.
+            let prompt_text = match env.get(name) {
+                Some(Value::Prompt(text)) => text,
+                Some(_) => return Err(JadeError::NotAPrompt { name: name.clone(), span: *span }),
+                None    => return Err(JadeError::UndefinedVariable { name: name.clone(), span: *span }),
+            };
+
+            // 2. Call the backend with the current conversation history.
+            let initial_resp = {
+                let backend = env.inference_backend.as_ref()
+                    .ok_or(JadeError::MissingApiKey { span: *span })?;
+                let req = llm::InferenceRequest {
+                    prompt: prompt_text.clone(),
+                    model: env.default_model.clone(),
+                    history: env.conversation_history.clone(),
+                    max_tokens: DEFAULT_MAX_TOKENS,
+                };
+                backend.infer(req, *span)?
+            };
+
+            // 3. Record the exchange in conversation history and update token count.
+            env.conversation_history.push(llm::Message { role: "user".to_string(), content: prompt_text });
+            env.conversation_history.push(llm::Message { role: "assistant".to_string(), content: initial_resp.text.clone() });
+            env.token_count += initial_resp.tokens_used;
+            let new_token_count = env.token_count;
+            env.set_session_var("__tokens__", Value::Int(new_token_count));
+
+            // 4. Untyped dereference: return raw LLM response as a string.
+            let Some(type_name) = output_type else {
+                return Ok(Value::Str(initial_resp.text));
+            };
+
+            // 5. Typed dereference: retry loop with coercion.
+            let max_retries = env.max_retries;
+            let history_len_before_retries = env.conversation_history.len();
+            let mut current_response = initial_resp.text;
+
+            // Each loop iteration checks the current response, then sends a correction
+            // if coercion fails. After the loop, one final coercion check is done on
+            // the last correction reply before declaring overflow.
+            for _attempt in 0..max_retries {
+                if let Some(v) = coerce_to_type(&current_response, type_name) {
+                    env.conversation_history.truncate(history_len_before_retries);
+                    return Ok(v);
+                }
+
+                // Send a correction prompt and collect the next response.
+                let correction = format!(
+                    "Your response '{}' could not be parsed as {}. Please respond with only a single {} value, nothing else.",
+                    current_response.trim(), type_name, type_name
+                );
+                let retry_resp = {
+                    let backend = env.inference_backend.as_ref()
+                        .ok_or(JadeError::MissingApiKey { span: *span })?;
+                    let retry_req = llm::InferenceRequest {
+                        prompt: correction.clone(),
+                        model: env.default_model.clone(),
+                        history: env.conversation_history.clone(),
+                        max_tokens: RETRY_MAX_TOKENS,
+                    };
+                    backend.infer(retry_req, *span)?
+                };
+                env.conversation_history.push(llm::Message { role: "user".to_string(), content: correction });
+                env.conversation_history.push(llm::Message { role: "assistant".to_string(), content: retry_resp.text.clone() });
+                current_response = retry_resp.text;
+            }
+
+            // Final coercion attempt after all retry corrections have been sent.
+            if let Some(v) = coerce_to_type(&current_response, type_name) {
+                env.conversation_history.truncate(history_len_before_retries);
+                return Ok(v);
+            }
+            env.conversation_history.truncate(history_len_before_retries);
+            Err(JadeError::PromptOverflow {
+                name: name.clone(),
+                attempts: max_retries + 1,
+                span: *span,
+            })
+        }
+    }
+}
+
+/// Try to coerce a raw LLM response string to a Jade typed value.
+fn coerce_to_type(text: &str, type_name: &str) -> Option<Value> {
+    match type_name {
+        "int"   => text.trim().parse::<i64>().ok().map(Value::Int),
+        "float" => text.trim().parse::<f64>().ok().map(Value::Float),
+        "str"   => Some(Value::Str(text.trim().to_string())),
+        "bool"  => match text.trim().to_lowercase().as_str() {
+            "true"  => Some(Value::Bool(true)),
+            "false" => Some(Value::Bool(false)),
+            _       => None,
+        },
+        _ => None,
     }
 }
 
@@ -839,7 +1060,7 @@ mod tests {
     fn eval_src(src: &str) -> Result<Env> {
         let tokens = lexer::tokenize(src).expect("lex failed");
         let program = parser::parse(tokens).expect("parse failed");
-        evaluate(program)
+        evaluate(program, LlmOpts::default())
     }
 
     fn eval_src_parse_err(src: &str) -> JadeError {
@@ -1952,5 +2173,166 @@ print("hello")"#).unwrap();
     fn test_eval_len_type_error() {
         let err = eval_src("let n = len(42)").unwrap_err();
         assert!(matches!(err, JadeError::TypeError { .. }));
+    }
+
+    // ── interfaces ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_eval_interface_basic() {
+        let src = concat!(
+            "interface Displayable {\n",
+            "    fn to_str(self) -> str\n",
+            "}\n",
+            "struct Point {\n    x,\n    y\n}\n",
+            "extend Point: Displayable {\n",
+            "    fn to_str(self) -> str {\n",
+            "        return \"point\"\n",
+            "    }\n",
+            "}\n",
+            "let p = Point { x: 1, y: 2 }\n",
+            "let s = p.to_str()\n",
+        );
+        let env = eval_src(src).unwrap();
+        assert!(matches!(get(&env, "s"), Value::Str(ref v) if v == "point"));
+    }
+
+    #[test]
+    fn test_eval_interface_missing_method_error() {
+        let src = concat!(
+            "interface Displayable {\n",
+            "    fn to_str(self) -> str\n",
+            "}\n",
+            "struct Point {\n    x,\n    y\n}\n",
+            // Extend block does NOT implement `to_str` — should error
+            "extend Point: Displayable {\n",
+            "    fn area(self) {\n",
+            "        return 0\n",
+            "    }\n",
+            "}\n",
+        );
+        let err = eval_src(src).unwrap_err();
+        assert!(matches!(err, JadeError::MissingInterfaceMethod { .. }));
+    }
+
+    #[test]
+    fn test_eval_interface_undefined_error() {
+        let src = concat!(
+            "struct Point {\n    x,\n    y\n}\n",
+            // Interface `Displayable` is never defined
+            "extend Point: Displayable {\n",
+            "    fn to_str(self) -> str {\n",
+            "        return \"point\"\n",
+            "    }\n",
+            "}\n",
+        );
+        let err = eval_src(src).unwrap_err();
+        assert!(matches!(err, JadeError::UndefinedInterface { .. }));
+    }
+
+    #[test]
+    fn test_eval_interface_impl_registered() {
+        let src = concat!(
+            "interface Showable {\n",
+            "    fn show(self) -> str\n",
+            "}\n",
+            "struct Box {\n    val\n}\n",
+            "extend Box: Showable {\n",
+            "    fn show(self) -> str {\n",
+            "        return \"box\"\n",
+            "    }\n",
+            "}\n",
+        );
+        let env = eval_src(src).unwrap();
+        assert!(env.interface_impls.get("Box").map_or(false, |v| v.contains(&"Showable".to_string())));
+    }
+
+    // ── LLM / prompt ────────────────────────────────────────────────────────
+
+    fn eval_with_mock(src: &str, responses: Vec<&str>) -> Result<Env> {
+        let tokens = lexer::tokenize(src).expect("lex failed");
+        let program = parser::parse(tokens).expect("parse failed");
+        let backend = Box::new(crate::llm::MockBackend::new(responses));
+        evaluate(program, LlmOpts {
+            backend: Some(backend),
+            default_model: "mock-model".to_string(),
+            max_retries: 3,
+        })
+    }
+
+    #[test]
+    fn test_eval_prompt_decl_stores_prompt_value() {
+        let env = eval_src("prompt p = \"hello\"").unwrap();
+        assert!(matches!(get(&env, "p"), Value::Prompt(t) if t == "hello"));
+    }
+
+    #[test]
+    fn test_eval_prompt_deref_no_backend_returns_error() {
+        let tokens = lexer::tokenize("prompt p = \"hi\"\nlet x = ?p").expect("lex");
+        let program = parser::parse(tokens).expect("parse");
+        let err = evaluate(program, LlmOpts::default()).unwrap_err();
+        assert!(matches!(err, JadeError::MissingApiKey { .. }));
+    }
+
+    #[test]
+    fn test_eval_prompt_deref_not_a_prompt_returns_error() {
+        let err = eval_with_mock("let x = 5\nlet y = ?x", vec!["42"]).unwrap_err();
+        assert!(matches!(err, JadeError::NotAPrompt { .. }));
+    }
+
+    #[test]
+    fn test_eval_typed_deref_int_success() {
+        let env = eval_with_mock("prompt p = \"What is 2+2?\"\nlet n = ?p |> int", vec!["4"]).unwrap();
+        assert!(matches!(get(&env, "n"), Value::Int(4)));
+    }
+
+    #[test]
+    fn test_eval_typed_deref_float_success() {
+        let env = eval_with_mock("prompt p = \"pi\"\nlet n = ?p |> float", vec!["3.14"]).unwrap();
+        assert!(matches!(get(&env, "n"), Value::Float(f) if (f - 3.14).abs() < 0.001));
+    }
+
+    #[test]
+    fn test_eval_typed_deref_bool_success() {
+        let env = eval_with_mock("prompt p = \"true?\"\nlet n = ?p |> bool", vec!["true"]).unwrap();
+        assert!(matches!(get(&env, "n"), Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_eval_typed_deref_str_success() {
+        let env = eval_with_mock("prompt p = \"hello\"\nlet n = ?p |> str", vec!["world"]).unwrap();
+        assert!(matches!(get(&env, "n"), Value::Str(s) if s == "world"));
+    }
+
+    #[test]
+    fn test_eval_typed_deref_overflow() {
+        // 4 responses all non-int: initial + 3 retries = 4 calls, all fail
+        let err = eval_with_mock(
+            "prompt p = \"bad\"\nlet n = ?p |> int",
+            vec!["oops", "still wrong", "nope", "nah"],
+        ).unwrap_err();
+        assert!(matches!(err, JadeError::PromptOverflow { .. }));
+    }
+
+    #[test]
+    fn test_eval_tokens_incremented_after_deref() {
+        let env = eval_with_mock("prompt p = \"hi\"\nlet x = ?p", vec!["hello"]).unwrap();
+        // MockBackend returns tokens_used = 10 per call
+        assert!(matches!(get(&env, "__tokens__"), Value::Int(n) if n > 0));
+    }
+
+    #[test]
+    fn test_eval_untyped_deref_returns_str() {
+        let env = eval_with_mock("prompt p = \"test\"\nlet x = ?p", vec!["result"]).unwrap();
+        assert!(matches!(get(&env, "x"), Value::Str(s) if s == "result"));
+    }
+
+    #[test]
+    fn test_eval_typed_deref_retry_succeeds_on_second_attempt() {
+        // First response fails coercion, second succeeds
+        let env = eval_with_mock(
+            "prompt p = \"number?\"\nlet n = ?p |> int",
+            vec!["not a number", "42"],
+        ).unwrap();
+        assert!(matches!(get(&env, "n"), Value::Int(42)));
     }
 }
