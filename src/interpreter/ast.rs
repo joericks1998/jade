@@ -232,6 +232,12 @@ pub enum Expr {
         output_type: Option<String>,
         span: Span,
     },
+
+    /// A dictionary literal, e.g. `{"key": 1, "other": 2}` or `{}`
+    Dict {
+        entries: Vec<(Expr, Expr)>,
+        span: Span,
+    },
 }
 
 /// All binary operators Jade supports.

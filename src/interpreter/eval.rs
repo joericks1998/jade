@@ -37,6 +37,9 @@ pub enum Value {
     Builtin(BuiltinFn),
     /// A prompt declaration. Holds the prompt text; dereferenced with `?`.
     Prompt(String),
+    /// A dictionary value. Stored as a plain `HashMap` — assignment clones the whole
+    /// map (value semantics), so aliases are always independent copies.
+    Dict(HashMap<String, Value>),
 }
 
 /// Identifies a built-in function by name.
@@ -94,6 +97,18 @@ impl std::fmt::Debug for Value {
             Value::BoundMethod(_) => write!(f, "<bound method>"),
             Value::Builtin(b)     => write!(f, "<builtin {:?}>", b),
             Value::Prompt(text)   => write!(f, "Prompt({:?})", text),
+            Value::Dict(map) => {
+                let mut pairs: Vec<_> = map.iter().collect();
+                pairs.sort_by_key(|(k, _)| k.as_str());
+                write!(f, "Dict{{")?;
+                let mut first = true;
+                for (k, v) in pairs {
+                    if !first { write!(f, ", ")?; }
+                    write!(f, "{:?}: {:?}", k, v)?;
+                    first = false;
+                }
+                write!(f, "}}")
+            }
         }
     }
 }
@@ -433,6 +448,13 @@ fn eval_block(stmts: &[Stmt], env: &mut Env) -> Result<Option<Value>> {
                     (Value::Array(_), _) => return Err(JadeError::TypeError {
                         op: "array index".to_string(), span: *span,
                     }),
+                    (Value::Dict(mut map), Value::Str(key)) => {
+                        map.insert(key, new_val);
+                        env.assign(name, Value::Dict(map), *span)?;
+                    }
+                    (Value::Dict(_), _) => return Err(JadeError::TypeError {
+                        op: "dict index".to_string(), span: *span,
+                    }),
                     _ => return Err(JadeError::TypeError {
                         op: "index assign".to_string(), span: *span,
                     }),
@@ -460,6 +482,27 @@ fn eval_block(stmts: &[Stmt], env: &mut Env) -> Result<Option<Value>> {
 
 // ── Expression evaluator ─────────────────────────────────────────────────────
 
+/// Extract the source `Span` from any expression node.
+fn expr_span(e: &Expr) -> Span {
+    match e {
+        Expr::Integer      { span, .. } => *span,
+        Expr::Float        { span, .. } => *span,
+        Expr::Bool         { span, .. } => *span,
+        Expr::Str          { span, .. } => *span,
+        Expr::Identifier   { span, .. } => *span,
+        Expr::Call         { span, .. } => *span,
+        Expr::BinOp        { span, .. } => *span,
+        Expr::UnaryOp      { span, .. } => *span,
+        Expr::StructLiteral{ span, .. } => *span,
+        Expr::FieldAccess  { span, .. } => *span,
+        Expr::Index        { span, .. } => *span,
+        Expr::Array        { span, .. } => *span,
+        Expr::FStr         { span, .. } => *span,
+        Expr::PromptDeref  { span, .. } => *span,
+        Expr::Dict         { span, .. } => *span,
+    }
+}
+
 /// Widen an integer to float for mixed-type arithmetic.
 /// This match is exhaustive over all current `Value` variants. If a new
 /// variant is added, the compiler will require it to be handled here — it
@@ -477,6 +520,7 @@ fn to_float(v: Value) -> f64 {
         Value::BoundMethod(_) => unreachable!("to_float called on BoundMethod"),
         Value::Builtin(_)     => unreachable!("to_float called on Builtin"),
         Value::Prompt(_)      => unreachable!("to_float called on Prompt"),
+        Value::Dict(_)        => unreachable!("to_float called on Dict"),
     }
 }
 
@@ -500,6 +544,14 @@ pub(crate) fn value_to_str(v: &Value) -> String {
         Value::Array(vec) => {
             let parts: Vec<String> = vec.iter().map(value_to_str).collect();
             format!("[{}]", parts.join(", "))
+        }
+        Value::Dict(map) => {
+            let mut pairs: Vec<_> = map.iter().collect();
+            pairs.sort_by_key(|(k, _)| k.as_str());
+            let parts: Vec<String> = pairs.iter()
+                .map(|(k, v)| format!("{:?}: {}", k, value_to_str(v)))
+                .collect();
+            format!("{{{}}}", parts.join(", "))
         }
         Value::Fn(_)          => "<fn>".to_string(),
         Value::Struct(_)      => "<struct>".to_string(),
@@ -619,6 +671,7 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                     match v {
                         Value::Str(s)     => Ok(Value::Int(s.chars().count() as i64)),
                         Value::Array(vec) => Ok(Value::Int(vec.len() as i64)),
+                        Value::Dict(map)  => Ok(Value::Int(map.len() as i64)),
                         _ => Err(JadeError::TypeError { op: "len".to_string(), span: *span }),
                     }
                 }
@@ -695,6 +748,24 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
             Ok(Value::Array(vec))
         }
 
+        Expr::Dict { entries, .. } => {
+            let mut map = HashMap::with_capacity(entries.len());
+            for (key_expr, val_expr) in entries {
+                let key_span = expr_span(key_expr);
+                let key = match eval_expr(key_expr, env)? {
+                    Value::Str(s) => s,
+                    _ => return Err(JadeError::TypeError {
+                        op: "dict key".to_string(),
+                        span: key_span,
+                    }),
+                };
+                let val = eval_expr(val_expr, env)?;
+                // Duplicate keys are allowed; the last definition wins (Python semantics).
+                map.insert(key, val);
+            }
+            Ok(Value::Dict(map))
+        }
+
         Expr::Index { object, index, span } => {
             let obj = eval_expr(object, env)?;
             let idx = eval_expr(index, env)?;
@@ -718,6 +789,10 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                         Ok(vec[i as usize].clone())
                     }
                 }
+                (Value::Dict(map), Value::Str(key)) => {
+                    map.get(&key).cloned().ok_or_else(|| JadeError::KeyNotFound { key, span: *span })
+                }
+                (Value::Dict(_), _) => Err(JadeError::TypeError { op: "dict index".to_string(), span: *span }),
                 _ => Err(JadeError::TypeError { op: "[]".to_string(), span: *span }),
             }
         }
@@ -761,6 +836,7 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                             (Value::Bool(_), _) | (_, Value::Bool(_)) |
                             (Value::Fn(_),   _) | (_, Value::Fn(_))   |
                             (Value::Array(_), _) | (_, Value::Array(_)) |
+                            (Value::Dict(_), _) | (_, Value::Dict(_)) |
                             (Value::Struct(_), _) | (_, Value::Struct(_)) |
                             (Value::BoundMethod(_), _) | (_, Value::BoundMethod(_)) |
                             (Value::Builtin(_), _) | (_, Value::Builtin(_)) |
@@ -777,6 +853,7 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                             (Value::Str(_), _)  | (_, Value::Str(_))  |
                             (Value::Fn(_),   _) | (_, Value::Fn(_))   |
                             (Value::Array(_), _) | (_, Value::Array(_)) |
+                            (Value::Dict(_), _) | (_, Value::Dict(_)) |
                             (Value::Struct(_), _) | (_, Value::Struct(_)) |
                             (Value::BoundMethod(_), _) | (_, Value::BoundMethod(_)) |
                             (Value::Builtin(_), _) | (_, Value::Builtin(_)) |
@@ -792,6 +869,7 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                             (Value::Str(_), _)  | (_, Value::Str(_))  |
                             (Value::Fn(_),   _) | (_, Value::Fn(_))   |
                             (Value::Array(_), _) | (_, Value::Array(_)) |
+                            (Value::Dict(_), _) | (_, Value::Dict(_)) |
                             (Value::Struct(_), _) | (_, Value::Struct(_)) |
                             (Value::BoundMethod(_), _) | (_, Value::BoundMethod(_)) |
                             (Value::Builtin(_), _) | (_, Value::Builtin(_)) |
@@ -807,6 +885,7 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                             (Value::Str(_), _)  | (_, Value::Str(_))  |
                             (Value::Fn(_),   _) | (_, Value::Fn(_))   |
                             (Value::Array(_), _) | (_, Value::Array(_)) |
+                            (Value::Dict(_), _) | (_, Value::Dict(_)) |
                             (Value::Struct(_), _) | (_, Value::Struct(_)) |
                             (Value::BoundMethod(_), _) | (_, Value::BoundMethod(_)) |
                             (Value::Builtin(_), _) | (_, Value::Builtin(_)) |
@@ -825,6 +904,7 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                             (Value::Str(_), _)  | (_, Value::Str(_))  |
                             (Value::Fn(_),   _) | (_, Value::Fn(_))   |
                             (Value::Array(_), _) | (_, Value::Array(_)) |
+                            (Value::Dict(_), _) | (_, Value::Dict(_)) |
                             (Value::Struct(_), _) | (_, Value::Struct(_)) |
                             (Value::BoundMethod(_), _) | (_, Value::BoundMethod(_)) |
                             (Value::Builtin(_), _) | (_, Value::Builtin(_)) |
@@ -2334,5 +2414,125 @@ print("hello")"#).unwrap();
             vec!["not a number", "42"],
         ).unwrap();
         assert!(matches!(get(&env, "n"), Value::Int(42)));
+    }
+
+    // ── dict tests ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_eval_dict_empty() {
+        let env = eval_src("let d = {}").unwrap();
+        assert!(matches!(get(&env, "d"), Value::Dict(m) if m.is_empty()));
+    }
+
+    #[test]
+    fn test_eval_dict_string_values() {
+        let env = eval_src(r#"let d = {"name": "jade", "lang": "cool"}"#).unwrap();
+        match get(&env, "d") {
+            Value::Dict(m) => {
+                assert!(matches!(m.get("name"), Some(Value::Str(s)) if s == "jade"));
+                assert!(matches!(m.get("lang"), Some(Value::Str(s)) if s == "cool"));
+            }
+            _ => panic!("expected Dict"),
+        }
+    }
+
+    #[test]
+    fn test_eval_dict_int_value() {
+        let env = eval_src(r#"let d = {"x": 42}"#).unwrap();
+        match get(&env, "d") {
+            Value::Dict(m) => assert!(matches!(m.get("x"), Some(Value::Int(42)))),
+            _ => panic!("expected Dict"),
+        }
+    }
+
+    #[test]
+    fn test_eval_dict_index_read() {
+        let src = "let d = {\"k\": 7}\nlet v = d[\"k\"]";
+        let env = eval_src(src).unwrap();
+        assert!(matches!(get(&env, "v"), Value::Int(7)));
+    }
+
+    #[test]
+    fn test_eval_dict_index_read_string_value() {
+        let src = "let d = {\"a\": \"hello\"}\nlet v = d[\"a\"]";
+        let env = eval_src(src).unwrap();
+        assert!(matches!(get(&env, "v"), Value::Str(s) if s == "hello"));
+    }
+
+    #[test]
+    fn test_eval_dict_key_not_found() {
+        let src = "let d = {\"x\": 1}\nlet v = d[\"y\"]";
+        let err = eval_src(src).unwrap_err();
+        assert!(matches!(err, JadeError::KeyNotFound { key, .. } if key == "y"));
+    }
+
+    #[test]
+    fn test_eval_dict_index_assign_existing_key() {
+        let src = "let d = {\"v\": 1}\nd[\"v\"] = 99";
+        let env = eval_src(src).unwrap();
+        match get(&env, "d") {
+            Value::Dict(m) => assert!(matches!(m.get("v"), Some(Value::Int(99)))),
+            _ => panic!("expected Dict"),
+        }
+    }
+
+    #[test]
+    fn test_eval_dict_index_assign_new_key() {
+        let src = "let d = {}\nd[\"k\"] = 5";
+        let env = eval_src(src).unwrap();
+        match get(&env, "d") {
+            Value::Dict(m) => assert!(matches!(m.get("k"), Some(Value::Int(5)))),
+            _ => panic!("expected Dict"),
+        }
+    }
+
+    #[test]
+    fn test_eval_dict_len() {
+        let src = "let d = {\"a\": 1, \"b\": 2, \"c\": 3}\nlet n = len(d)";
+        let env = eval_src(src).unwrap();
+        assert!(matches!(get(&env, "n"), Value::Int(3)));
+    }
+
+    #[test]
+    fn test_eval_dict_len_empty() {
+        let env = eval_src("let d = {}\nlet n = len(d)").unwrap();
+        assert!(matches!(get(&env, "n"), Value::Int(0)));
+    }
+
+    #[test]
+    fn test_eval_dict_value_semantics() {
+        // Assigning a dict copies it; mutation of the copy does not affect original
+        let src = "let d = {\"x\": 1}\nlet d2 = d\nd2[\"x\"] = 99";
+        let env = eval_src(src).unwrap();
+        match get(&env, "d") {
+            Value::Dict(m) => assert!(matches!(m.get("x"), Some(Value::Int(1)))),
+            _ => panic!("expected Dict"),
+        }
+        match get(&env, "d2") {
+            Value::Dict(m) => assert!(matches!(m.get("x"), Some(Value::Int(99)))),
+            _ => panic!("expected Dict"),
+        }
+    }
+
+    #[test]
+    fn test_eval_dict_variable_key() {
+        // Key expression that evaluates to a string at runtime
+        let src = "let k = \"name\"\nlet d = {k: \"jade\"}\nlet v = d[\"name\"]";
+        let env = eval_src(src).unwrap();
+        assert!(matches!(get(&env, "v"), Value::Str(s) if s == "jade"));
+    }
+
+    #[test]
+    fn test_eval_dict_non_string_key_type_error() {
+        let src = "let d = {1: \"oops\"}";
+        let err = eval_src(src).unwrap_err();
+        assert!(matches!(err, JadeError::TypeError { .. }));
+    }
+
+    #[test]
+    fn test_eval_dict_non_string_index_type_error() {
+        let src = "let d = {\"x\": 1}\nlet v = d[0]";
+        let err = eval_src(src).unwrap_err();
+        assert!(matches!(err, JadeError::TypeError { .. }));
     }
 }
