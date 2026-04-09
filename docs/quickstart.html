@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Jade 1.0.5 — Quick Start</title>
+  <title>Jade 1.0.6 — Quick Start</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -282,9 +282,9 @@
       </a>
       <span class="topbar-sep">»</span>
       <select title="Version">
-        <option>1.0.5</option>
+        <option>1.0.6</option>
       </select>
-      <span class="topbar-title">1.0.5 Documentation</span>
+      <span class="topbar-title">1.0.6 Documentation</span>
     </div>
     <div class="topbar-right">
       <a href="https://github.com/joericks1998/jade">GitHub</a>
@@ -341,8 +341,13 @@
         <p>Create a file named <code>hello.jde</code>:</p>
         <pre><code>let x = 10
 let y = 32
-let answer = x + y</code></pre>
-        <p>Run it with <code>--verbose</code> to print the final variable state:</p>
+let answer = x + y
+print(answer)</code></pre>
+        <p>Run it:</p>
+        <pre><code>jade hello.jde</code></pre>
+        <p>Output:</p>
+        <pre><code>42</code></pre>
+        <p>You can also use <code>--verbose</code> to print every variable's final value after execution:</p>
         <pre><code>jade hello.jde --verbose</code></pre>
         <p>Output:</p>
         <pre><code>answer = 42
@@ -350,8 +355,8 @@ x = 10
 y = 32</code></pre>
         <div class="note">
           <strong>Note:</strong> Variables are printed in alphabetical order when using
-          <code>--verbose</code>. Jade does not yet have a <code>print</code> statement —
-          <code>--verbose</code> is the current way to inspect computed values.
+          <code>--verbose</code>. The <code>print</code> built-in function prints a single
+          value to stdout and can be called anywhere in the program.
         </div>
       </section>
 
