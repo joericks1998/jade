@@ -1,5 +1,5 @@
 use super::{
-    ast::{BinOpKind, Expr, FStrPart, Program, Stmt, UnaryOpKind},
+    ast::{BinOpKind, Expr, FStrPart, InterfaceMethod, Program, Stmt, UnaryOpKind},
     error::{JadeError, Result, Span},
     lexer::{RawFStrPart, Token, TokenKind},
 };
@@ -13,6 +13,9 @@ struct Parser {
     /// literal. Set to false while parsing `if`/`while` conditions so that
     /// `while running { … }` does not try to read `running {…}` as a struct.
     struct_literal_allowed: bool,
+    /// Set to true while parsing the argument list of a `print(…)` call.
+    /// Used to detect the forbidden `?p |> Type` inside print.
+    in_print_call: bool,
 }
 
 /// Public entry point. Builds a Parser and drives it to produce a Program.
@@ -22,7 +25,7 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program> {
             span: Span { line: 1, col: 1 },
         });
     }
-    let mut parser = Parser { tokens, pos: 0, fn_depth: 0, struct_literal_allowed: true };
+    let mut parser = Parser { tokens, pos: 0, fn_depth: 0, struct_literal_allowed: true, in_print_call: false };
     parser.parse_program()
 }
 
@@ -115,8 +118,10 @@ impl Parser {
             TokenKind::Return => self.parse_return(),
             TokenKind::If     => self.parse_if(),
             TokenKind::While  => self.parse_while(),
-            TokenKind::Struct => self.parse_struct_def(),
-            TokenKind::Extend => self.parse_extend_block(),
+            TokenKind::Struct     => self.parse_struct_def(),
+            TokenKind::Extend     => self.parse_extend_block(),
+            TokenKind::Interface  => self.parse_interface_def(),
+            TokenKind::Prompt     => self.parse_prompt_decl(),
             TokenKind::Identifier(_) => {
                 // Disambiguate identifier-led statement forms:
                 //   `ident =`              → bare variable assignment
@@ -246,6 +251,12 @@ impl Parser {
         }
         self.expect(&TokenKind::RParen)?;
 
+        // Optional `-> type` return annotation — parsed and discarded at tree-walk stage.
+        if self.peek().kind == TokenKind::Arrow {
+            self.advance(); // consume `->`
+            self.expect_ident("return type")?; // consume type name
+        }
+
         // Body block
         self.fn_depth += 1;
         let body = self.parse_block()?;
@@ -367,6 +378,17 @@ impl Parser {
         Ok(stmts)
     }
 
+    /// Parse `prompt name = expr ;`
+    fn parse_prompt_decl(&mut self) -> Result<Stmt> {
+        let span = self.peek().span;
+        self.advance(); // consume `prompt`
+        let name = self.expect_ident("prompt variable name")?;
+        self.expect(&TokenKind::Equals)?;
+        let body = self.parse_pipe()?;
+        self.expect(&TokenKind::Semicolon)?;
+        Ok(Stmt::PromptDecl { name, body, span })
+    }
+
     /// Parse `struct Name { field, … }`
     fn parse_struct_def(&mut self) -> Result<Stmt> {
         let span = self.peek().span;
@@ -393,10 +415,18 @@ impl Parser {
     }
 
     /// Parse `extend TypeName { fn method(self, …) { … } … }`
+    /// or    `extend TypeName: InterfaceName { fn method(self, …) { … } … }`
     fn parse_extend_block(&mut self) -> Result<Stmt> {
         let span = self.peek().span;
         self.advance(); // consume `extend`
         let type_name = self.expect_ident("type name")?;
+        // Optional `: InterfaceName`
+        let interface_name = if self.peek().kind == TokenKind::Colon {
+            self.advance(); // consume `:`
+            Some(self.expect_ident("interface name")?)
+        } else {
+            None
+        };
         self.expect(&TokenKind::LBrace)?;
         let mut methods = Vec::new();
         loop {
@@ -419,7 +449,58 @@ impl Parser {
             }
         }
         self.expect(&TokenKind::RBrace)?;
-        Ok(Stmt::ExtendBlock { type_name, methods, span })
+        Ok(Stmt::ExtendBlock { type_name, interface_name, methods, span })
+    }
+
+    /// Parse `interface Name { fn method(self, …) -> type }`
+    /// Method bodies are absent — these are signatures only.
+    fn parse_interface_def(&mut self) -> Result<Stmt> {
+        let span = self.peek().span;
+        self.advance(); // consume `interface`
+        let name = self.expect_ident("interface name")?;
+        self.expect(&TokenKind::LBrace)?;
+        let mut methods = Vec::new();
+        loop {
+            while self.peek().kind == TokenKind::Semicolon {
+                self.advance();
+            }
+            if self.peek().kind == TokenKind::RBrace || self.peek().kind == TokenKind::Eof {
+                break;
+            }
+            // Expect `fn`
+            let method_span = self.peek().span;
+            match self.peek().kind.clone() {
+                TokenKind::Fn => { self.advance(); } // consume `fn`
+                _ => {
+                    let t = self.peek().clone();
+                    return Err(JadeError::UnexpectedToken {
+                        expected: "fn".to_string(),
+                        got: format!("{:?}", t.kind),
+                        span: t.span,
+                    });
+                }
+            }
+            let method_name = self.expect_ident("method name")?;
+            self.expect(&TokenKind::LParen)?;
+            let mut params = Vec::new();
+            while self.peek().kind != TokenKind::RParen && self.peek().kind != TokenKind::Eof {
+                params.push(self.expect_ident("parameter name")?);
+                if self.peek().kind == TokenKind::Comma {
+                    self.advance();
+                }
+            }
+            self.expect(&TokenKind::RParen)?;
+            // Optional `-> type`
+            let return_type = if self.peek().kind == TokenKind::Arrow {
+                self.advance(); // consume `->`
+                Some(self.expect_ident("return type")?)
+            } else {
+                None
+            };
+            methods.push(InterfaceMethod { name: method_name, params, return_type, span: method_span });
+        }
+        self.expect(&TokenKind::RBrace)?;
+        Ok(Stmt::InterfaceDef { name, methods, span })
     }
 
     /// Parse `object.field = expr ;`
@@ -528,6 +609,7 @@ impl Parser {
             Expr::Index        { span, .. } => *span,
             Expr::Array        { span, .. } => *span,
             Expr::FStr         { span, .. } => *span,
+            Expr::PromptDeref  { span, .. } => *span,
         }
     }
 
@@ -544,6 +626,7 @@ impl Parser {
             pos: 0,
             fn_depth,
             struct_literal_allowed: true,
+            in_print_call: false,
         };
         sub.parse_pipe()
     }
@@ -816,6 +899,16 @@ impl Parser {
         loop {
             if self.peek().kind == TokenKind::LParen {
                 let span = Self::expr_span(&expr);
+
+                // Track whether we're inside `print(…)` to detect the forbidden
+                // `?p |> Type` streaming pattern.
+                let was_in_print_call = self.in_print_call;
+                if let Expr::Identifier { ref name, .. } = expr {
+                    if name == "print" {
+                        self.in_print_call = true;
+                    }
+                }
+
                 self.advance(); // consume `(`
                 let mut args = Vec::new();
                 if self.peek().kind != TokenKind::RParen {
@@ -826,6 +919,7 @@ impl Parser {
                     }
                 }
                 self.expect(&TokenKind::RParen)?;
+                self.in_print_call = was_in_print_call;
                 expr = Expr::Call { callee: Box::new(expr), args, span };
             } else if self.peek().kind == TokenKind::Dot {
                 let span = Self::expr_span(&expr);
@@ -906,6 +1000,23 @@ impl Parser {
                 let span = token.span;
                 self.advance(); // consume `[`
                 self.parse_array_literal(span)
+            }
+            TokenKind::Question => {
+                let span = token.span;
+                self.advance(); // consume `?`
+                let name = self.expect_ident("prompt variable name after ?")?;
+                // Check for optional `|> TypeName` typed dereference suffix.
+                let output_type = if self.peek().kind == TokenKind::PipeGt {
+                    if self.in_print_call {
+                        return Err(JadeError::StreamingWithType { span });
+                    }
+                    self.advance(); // consume `|>`
+                    let type_name = self.expect_ident("type name after |>")?;
+                    Some(type_name)
+                } else {
+                    None
+                };
+                Ok(Expr::PromptDeref { name, output_type, span })
             }
             TokenKind::Eof => Err(JadeError::UnexpectedEof { span: token.span }),
             _ => Err(JadeError::UnexpectedToken {
@@ -1377,5 +1488,86 @@ mod tests {
         let p = parse_src("let a = []\na[1] = 99");
         let Stmt::IndexAssign { name, .. } = &p.stmts[1] else { panic!() };
         assert_eq!(name, "a");
+    }
+
+    // ── interface ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_interface_def() {
+        let p = parse_src("interface Displayable {\n    fn to_str(self) -> str\n}");
+        let Stmt::InterfaceDef { name, methods, .. } = &p.stmts[0] else { panic!() };
+        assert_eq!(name, "Displayable");
+        assert_eq!(methods.len(), 1);
+        assert_eq!(methods[0].name, "to_str");
+        assert_eq!(methods[0].params, vec!["self"]);
+        assert_eq!(methods[0].return_type.as_deref(), Some("str"));
+    }
+
+    #[test]
+    fn test_parse_interface_def_no_return_type() {
+        let p = parse_src("interface Runnable {\n    fn run(self)\n}");
+        let Stmt::InterfaceDef { name, methods, .. } = &p.stmts[0] else { panic!() };
+        assert_eq!(name, "Runnable");
+        assert_eq!(methods[0].name, "run");
+        assert!(methods[0].return_type.is_none());
+    }
+
+    #[test]
+    fn test_parse_extend_with_interface() {
+        let p = parse_src("extend Foo: Bar {\n    fn go(self) {\n        return 1\n    }\n}");
+        let Stmt::ExtendBlock { type_name, interface_name, methods, .. } = &p.stmts[0] else { panic!() };
+        assert_eq!(type_name, "Foo");
+        assert_eq!(interface_name.as_deref(), Some("Bar"));
+        assert_eq!(methods.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_extend_without_interface() {
+        let p = parse_src("extend Foo {\n    fn go(self) {\n        return 1\n    }\n}");
+        let Stmt::ExtendBlock { type_name, interface_name, .. } = &p.stmts[0] else { panic!() };
+        assert_eq!(type_name, "Foo");
+        assert!(interface_name.is_none());
+    }
+
+    #[test]
+    fn test_parse_fn_with_return_type() {
+        let p = parse_src("fn greet(name) -> str {\n    return \"hi\"\n}");
+        let Stmt::FnDef { name, params, .. } = &p.stmts[0] else { panic!() };
+        assert_eq!(name, "greet");
+        assert_eq!(params, &["name"]);
+    }
+
+    // ── LLM / prompt ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_prompt_decl() {
+        let p = parse_src("prompt p = \"hello\"");
+        let Stmt::PromptDecl { name, .. } = &p.stmts[0] else { panic!("expected PromptDecl") };
+        assert_eq!(name, "p");
+    }
+
+    #[test]
+    fn test_parse_prompt_deref_untyped() {
+        let p = parse_src("let x = ?p");
+        let Stmt::Let { value: Expr::PromptDeref { name, output_type, .. }, .. } = &p.stmts[0]
+            else { panic!("expected Let with PromptDeref") };
+        assert_eq!(name, "p");
+        assert!(output_type.is_none());
+    }
+
+    #[test]
+    fn test_parse_prompt_deref_typed_int() {
+        let p = parse_src("let x = ?p |> int");
+        let Stmt::Let { value: Expr::PromptDeref { name, output_type, .. }, .. } = &p.stmts[0]
+            else { panic!("expected Let with PromptDeref") };
+        assert_eq!(name, "p");
+        assert_eq!(output_type.as_deref(), Some("int"));
+    }
+
+    #[test]
+    fn test_parse_streaming_prohibition() {
+        let tokens = super::super::lexer::tokenize("print(?p |> int)").expect("lex");
+        let err = parse(tokens).unwrap_err();
+        assert!(matches!(err, super::super::error::JadeError::StreamingWithType { .. }));
     }
 }

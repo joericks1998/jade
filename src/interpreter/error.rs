@@ -67,6 +67,27 @@ pub enum JadeError {
 
     /// String index is out of range.
     IndexOutOfBounds { index: i64, len: usize, span: Span },
+
+    /// `extend Type: Interface` names an interface that was never defined.
+    UndefinedInterface { name: String, span: Span },
+
+    /// `extend Type: Interface` is missing a method required by the interface.
+    MissingInterfaceMethod { type_name: String, interface_name: String, method: String, span: Span },
+
+    /// LLM inference call failed (network error, HTTP error, or unexpected API response).
+    InferenceError { message: String, span: Span },
+
+    /// No API key or backend is configured when a `?` dereference is attempted.
+    MissingApiKey { span: Span },
+
+    /// `?` applied to a variable that holds a non-prompt value.
+    NotAPrompt { name: String, span: Span },
+
+    /// Typed dereference `?p |> Type` exhausted its retry budget without producing a valid value.
+    PromptOverflow { name: String, attempts: usize, span: Span },
+
+    /// `?p |> Type` was used inside `print(...)` where streaming output is expected.
+    StreamingWithType { span: Span },
 }
 
 impl std::fmt::Display for JadeError {
@@ -112,6 +133,20 @@ impl std::fmt::Display for JadeError {
                 write!(f, "[{}:{}] unterminated string literal", span.line, span.col),
             JadeError::IndexOutOfBounds { index, len, span } =>
                 write!(f, "[{}:{}] index {} out of bounds (length {})", span.line, span.col, index, len),
+            JadeError::UndefinedInterface { name, span } =>
+                write!(f, "[{}:{}] interface '{}' is not defined", span.line, span.col, name),
+            JadeError::MissingInterfaceMethod { type_name, interface_name, method, span } =>
+                write!(f, "[{}:{}] type '{}' does not implement interface '{}': missing method '{}'", span.line, span.col, type_name, interface_name, method),
+            JadeError::InferenceError { message, span } =>
+                write!(f, "[{}:{}] inference error: {}", span.line, span.col, message),
+            JadeError::MissingApiKey { span } =>
+                write!(f, "[{}:{}] no API key configured — set JADE_API_KEY or run 'jade configure'", span.line, span.col),
+            JadeError::NotAPrompt { name, span } =>
+                write!(f, "[{}:{}] '{}' is not a prompt variable", span.line, span.col, name),
+            JadeError::PromptOverflow { name, attempts, span } =>
+                write!(f, "[{}:{}] prompt '{}' failed to produce a valid typed value after {} attempt(s)", span.line, span.col, name, attempts),
+            JadeError::StreamingWithType { span } =>
+                write!(f, "[{}:{}] typed dereference '?p |> Type' cannot be used inside print() — assign to a variable first", span.line, span.col),
         }
     }
 }

@@ -30,8 +30,13 @@ pub enum TokenKind {
     While,
     Struct,
     Extend,
+    Interface,
+    Prompt,
     True,
     False,
+
+    // Prompt dereference operator
+    Question,
 
     // Arithmetic operators
     Plus,
@@ -63,6 +68,9 @@ pub enum TokenKind {
     Gt,
     LtEq,
     GtEq,
+
+    /// `->` (return type annotation in interface method signatures)
+    Arrow,
 
     // Assignment
     Equals,
@@ -376,9 +384,11 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
                     "elif"   => TokenKind::Elif,
                     "else"   => TokenKind::Else,
                     "while"  => TokenKind::While,
-                    "struct" => TokenKind::Struct,
-                    "extend" => TokenKind::Extend,
-                    "true"   => TokenKind::True,
+                    "struct"    => TokenKind::Struct,
+                    "extend"    => TokenKind::Extend,
+                    "interface" => TokenKind::Interface,
+                    "prompt"    => TokenKind::Prompt,
+                    "true"      => TokenKind::True,
                     "false"  => TokenKind::False,
                     // f-string: `f"…"` or `f"""…"""`
                     "f" if chars.get(i) == Some(&'"') => {
@@ -401,7 +411,15 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
 
             // Unambiguous single-character tokens
             '+' => { tokens.push(Token { kind: TokenKind::Plus,    span: Span { line, col } }); col += 1; i += 1; }
-            '-' => { tokens.push(Token { kind: TokenKind::Minus,   span: Span { line, col } }); col += 1; i += 1; }
+            '-' => {
+                if chars.get(i + 1) == Some(&'>') {
+                    tokens.push(Token { kind: TokenKind::Arrow, span: Span { line, col } });
+                    col += 2; i += 2;
+                } else {
+                    tokens.push(Token { kind: TokenKind::Minus, span: Span { line, col } });
+                    col += 1; i += 1;
+                }
+            }
             '*' => { tokens.push(Token { kind: TokenKind::Star,    span: Span { line, col } }); col += 1; i += 1; }
             // `/` or `//` (line comment)
             '/' => {
@@ -502,6 +520,9 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
                     col += 1; i += 1;
                 }
             }
+
+            // `?` — prompt dereference operator
+            '?' => { tokens.push(Token { kind: TokenKind::Question, span: Span { line, col } }); col += 1; i += 1; }
 
             // Anything else is an error
             _ => {
@@ -805,6 +826,25 @@ mod tests {
     }
 
     #[test]
+    fn test_tokenize_interface_keyword() {
+        assert_eq!(kinds("interface"), vec![TokenKind::Interface, TokenKind::Eof]);
+    }
+
+    #[test]
+    fn test_tokenize_arrow() {
+        assert_eq!(kinds("->"), vec![TokenKind::Arrow, TokenKind::Eof]);
+    }
+
+    #[test]
+    fn test_tokenize_arrow_vs_minus() {
+        // `-` alone stays Minus; only `->` becomes Arrow
+        assert_eq!(
+            kinds("- ->"),
+            vec![TokenKind::Minus, TokenKind::Arrow, TokenKind::Eof]
+        );
+    }
+
+    #[test]
     fn test_tokenize_dot() {
         assert_eq!(
             kinds("a.b"),
@@ -1005,6 +1045,57 @@ mod tests {
                 TokenKind::Lt,
                 TokenKind::Integer(5),
                 TokenKind::LBrace,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    // ── LLM / prompt tokens ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_lex_prompt_keyword() {
+        assert_eq!(
+            kinds("prompt p = \"hi\""),
+            vec![
+                TokenKind::Prompt,
+                TokenKind::Identifier("p".into()),
+                TokenKind::Equals,
+                TokenKind::Str("hi".into()),
+                TokenKind::Semicolon,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_lex_question_mark() {
+        assert_eq!(
+            kinds("?p"),
+            vec![
+                TokenKind::Question,
+                TokenKind::Identifier("p".into()),
+                TokenKind::Semicolon,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_lex_pipe_forward_not_pipe_gt() {
+        // `|>` should be a single PipeGt token, not Pipe + Gt
+        assert_eq!(kinds("|>"), vec![TokenKind::PipeGt, TokenKind::Eof]);
+    }
+
+    #[test]
+    fn test_lex_typed_deref_tokens() {
+        assert_eq!(
+            kinds("?p |> int"),
+            vec![
+                TokenKind::Question,
+                TokenKind::Identifier("p".into()),
+                TokenKind::PipeGt,
+                TokenKind::Identifier("int".into()),
+                TokenKind::Semicolon,
                 TokenKind::Eof,
             ]
         );
