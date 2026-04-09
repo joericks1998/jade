@@ -1,0 +1,17 @@
+interface Displayable {
+    fn to_str(self) -> str
+}
+
+struct Point {
+    x,
+    y
+}
+
+extend Point: Displayable {
+    fn to_str(self) -> str {
+        return f"({self.x}, {self.y})"
+    }
+}
+
+let p = Point { x: 3, y: 4 }
+let s = p.to_str()

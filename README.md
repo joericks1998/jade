@@ -1,6 +1,6 @@
 # Jade
 
-A programming language written in Rust. Jade is currently in Phase 1 — the tree-walking interpreter supports three value types (`int`, `float`, `bool`), `let` bindings, bare variable assignment, `fn` function definitions with `return`, `if`/`else` control flow, `while` loops, first-class functions, recursion, `struct` definitions with field access and mutation, `extend` blocks for methods, and arithmetic, bitwise, logical, and comparison operators.
+A programming language written in Rust. Jade is currently in Phase 1 — the tree-walking interpreter supports value types (`int`, `float`, `bool`, `str`, arrays, and user-defined `struct`s), `let` bindings, bare variable assignment, `fn` function definitions with `return`, `if`/`else`/`elif` control flow, `while` loops, first-class functions, recursion, `struct` definitions with field access and mutation, `extend` blocks for methods, `interface` definitions, the `print` and `len` built-ins, f-string interpolation, the pipe operator `|>`, and arithmetic, bitwise, logical, and comparison operators.
 
 ```
 fn factorial(n) {
@@ -18,13 +18,19 @@ extend Counter {
     fn increment(self) {
         self.count = self.count + 1
     }
+    fn value(self) {
+        return self.count
+    }
 }
 
 let x = 10
 let result = factorial(x)
+print(f"factorial({x}) = {result}")
+
 let c = Counter { count: 0 }
 c.increment()
 c.increment()
+print(c.value())
 ```
 
 ```
@@ -98,10 +104,18 @@ Errors are written to stderr with the format `<file>: <phase> error: <descriptio
 | `struct` definitions and instantiation | ✓ |
 | Field access and field mutation | ✓ |
 | `extend` blocks and method calls | ✓ |
-| Strings | Planned |
+| String literals (`str`) with concatenation and indexing | ✓ |
+| F-string interpolation (`f"…{expr}…"`) | ✓ |
+| Array literals with index access and assignment | ✓ |
+| `print` and `len` built-in functions | ✓ |
+| Pipe operator `\|>` | ✓ |
+| `interface` definitions and conformance checking | ✓ |
+| `elif` chained conditionals | ✓ |
+| `jade configure` for LLM backend setup | ✓ |
+| `prompt` declarations and `?` LLM dereference | ✓ |
 | Type inference | Planned |
 
-Operator precedence (tightest to loosest): unary (`~` `!` `-`) → `*` `/` `%` → `+` `-` → `<<` `>>` → `&` → `^` → `|` → `==` `!=` `<` `>` `<=` `>=` → `&&` → `||`
+Operator precedence (tightest to loosest): unary (`~` `!` `-`) → `*` `/` `%` → `+` `-` → `<<` `>>` → `&` → `^` → `|` → `==` `!=` `<` `>` `<=` `>=` → `&&` → `||` → `|>`
 
 ---
 
@@ -113,6 +127,9 @@ src/
   cli/
     help.rs                 Prints usage text
     run.rs                  Reads a .jde file and drives the pipeline
+    configure.rs            Interactive wizard for LLM backend configuration
+  config/                   Loads jade.toml and environment variables
+  llm/                      LLM inference backends (Anthropic, OpenAI)
   interpreter/
     lexer.rs                Tokenizer — produces a token stream, inserts semicolons
     parser.rs               Recursive descent parser — produces an AST
@@ -121,10 +138,15 @@ src/
     error.rs                Error types (JadeError, Span)
 jade_evals/
   arithmatic/               Fixture files for arithmetic and bitwise operations
+  arrays/                   Fixture files for array literals, indexing, and assignment
   assignment/               Fixture files for let bindings, assignment, and comparison expressions
-  control_flow/             Fixture files for if/else, nested if, and while loops
+  control_flow/             Fixture files for if/else/elif, nested if, and while loops
   functions/                Fixture files for fn definitions, calls, recursion, first-class fns
+  interfaces/               Fixture files for interface definitions and conformance
+  llm/                      Fixture files for prompt declarations and LLM dereference
+  strings/                  Fixture files for string literals, f-strings, and indexing
   structs/                  Fixture files for struct definitions, field access, extend blocks
+  pipe.jde                  Fixture file for the |> pipe operator
 planning/
   REQUIREMENTS.md           Full build plan across all phases
 docs/
@@ -151,6 +173,7 @@ Full documentation is available at **[jadelang.org](https://jadelang.org)**. The
 cargo build
 cargo test
 jade jade_evals/arithmatic/arithmetic.jde --verbose
+jade jade_evals/strings/fstrings.jde
 ```
 
 **Guidelines**

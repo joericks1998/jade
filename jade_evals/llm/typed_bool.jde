@@ -1,0 +1,9 @@
+// Typed dereference: LLM output coerced to bool.
+
+prompt p = "Is 5 greater than 3? Respond with only: true or false"
+let result = ?p |> bool
+if result {
+    print("correct!")
+} else {
+    print("unexpected!")
+}

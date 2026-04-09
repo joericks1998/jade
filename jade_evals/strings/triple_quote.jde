@@ -1,0 +1,24 @@
+// ── triple-quoted strings ("""...""") ─────────────────────────────────────────
+
+// Basic triple-quoted string (same token type as regular strings)
+let simple = """hello"""
+
+// Can contain double quotes without escaping, as long as content
+// does not end with " (which would be ambiguous with the closing """)
+let with_quotes = """he said "hi" to her"""
+
+// Multi-line content — newlines are literal
+let poem = """
+roses are red
+violets are blue
+"""
+
+// Concatenation works identically to regular strings
+let joined = """foo""" + """bar"""
+
+// Equality comparison with a regular string
+let eq = """abc""" == "abc"
+
+print(simple)
+print(with_quotes)
+print(joined)
