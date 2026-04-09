@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Jade 1.0.5 — CLI Reference</title>
+  <title>Jade 1.0.6 — CLI Reference</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -282,9 +282,9 @@
       </a>
       <span class="topbar-sep">»</span>
       <select title="Version">
-        <option>1.0.5</option>
+        <option>1.0.6</option>
       </select>
-      <span class="topbar-title">1.0.5 Documentation</span>
+      <span class="topbar-title">1.0.6 Documentation</span>
     </div>
     <div class="topbar-right">
       <a href="https://github.com/joericks1998/jade">GitHub</a>
@@ -349,6 +349,14 @@
         </p>
         <pre><code>jade program.jde --verbose
 jade program.jde -v</code></pre>
+
+        <h3><code>jade configure</code></h3>
+        <p>
+          Run the interactive configuration wizard to set up an LLM backend.
+          Stores provider, model, and API key in <code>jade.toml</code> in the current directory.
+          The <code>JADE_API_KEY</code> environment variable can also be used to supply a key at runtime.
+        </p>
+        <pre><code>jade configure</code></pre>
 
         <h3><code>jade --help</code></h3>
         <p>Print usage information.</p>

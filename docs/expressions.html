@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Jade 1.0.5 — Expressions</title>
+  <title>Jade 1.0.6 — Expressions</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -282,9 +282,9 @@
       </a>
       <span class="topbar-sep">»</span>
       <select title="Version">
-        <option>1.0.5</option>
+        <option>1.0.6</option>
       </select>
-      <span class="topbar-title">1.0.5 Documentation</span>
+      <span class="topbar-title">1.0.6 Documentation</span>
     </div>
     <div class="topbar-right">
       <a href="https://github.com/joericks1998/jade">GitHub</a>
@@ -339,9 +339,10 @@
       <section id="expressions">
         <h2>Expressions</h2>
         <p>
-          An expression produces a value. Every expression has one of three runtime types:
+          An expression produces a value. Jade's runtime types are
           <code>int</code> (64-bit signed integer), <code>float</code> (64-bit floating point),
-          or <code>bool</code>. Expressions can be nested arbitrarily using parentheses
+          <code>bool</code>, <code>str</code> (UTF-8 string), arrays, user-defined <code>struct</code>s,
+          and <code>fn</code> (function values). Expressions can be nested arbitrarily using parentheses
           or evaluated left-to-right following standard operator precedence.
         </p>
 
@@ -404,6 +405,46 @@ let flag = 1 &lt; 2 &amp;&amp; 3 &gt; 0</code></pre>
         <pre><code>let inv   = ~0
 let neg   = -5
 let nflag = !true</code></pre>
+
+        <h3>String Literals</h3>
+        <p>String literals are delimited by double quotes. Triple-quoted strings (<code>"""…"""</code>) span multiple lines. The <code>+</code> operator concatenates two strings.</p>
+        <pre><code>let hello = "hello"
+let world = "world"
+let hw    = hello + " " + world
+
+let multi = """
+line one
+line two
+"""</code></pre>
+        <p>Strings support indexing with <code>[i]</code> to extract a single character as a one-character string. Indexes are zero-based. Out-of-range indexes raise <code>IndexOutOfBounds</code>.</p>
+        <pre><code>let s = "hello"
+let h = s[0]</code></pre>
+
+        <h3>F-String Interpolation</h3>
+        <p>An f-string is prefixed with <code>f</code> before the opening quote. Any expression inside <code>{ }</code> is evaluated and its value is converted to a string and embedded in place.</p>
+        <pre><code>let name = "Jade"
+let n    = 42
+let msg  = f"hello, {name}! answer is {n}"</code></pre>
+        <p>Triple-quoted f-strings are written as <code>f"""…"""</code> and behave the same way.</p>
+
+        <h3>Array Literals</h3>
+        <p>An array is written as a comma-separated list inside square brackets. Arrays may be empty and may hold values of any type.</p>
+        <pre><code>let a     = [1, 2, 3]
+let empty = []
+let mixed = [1, 2.0, true, "hello"]</code></pre>
+        <p>Elements are accessed with <code>arr[i]</code> (zero-based). Elements can be assigned with <code>arr[i] = expr</code>. Arrays have value semantics — assigning an array to a new variable copies it.</p>
+        <pre><code>let b = a
+b[0] = 99
+// a[0] is still 1 — b is an independent copy</code></pre>
+
+        <h3>Pipe Operator</h3>
+        <p>The <code>|&gt;</code> operator passes the left-hand value as the first argument to the right-hand function. Pipes chain left-to-right.</p>
+        <pre><code>fn double(x) { return x * 2 }
+let n = 5 |&gt; double            // double(5) → 10
+let m = 3 |&gt; double |&gt; double  // double(double(3)) → 12</code></pre>
+        <p>When the right-hand side is a call expression, the left value is inserted as the first argument before those already listed:</p>
+        <pre><code>fn add(a, b) { return a + b }
+let r = 5 |&gt; add(3)           // add(5, 3) → 8</code></pre>
       </section>
 
     </main>
