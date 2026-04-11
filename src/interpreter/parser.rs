@@ -959,6 +959,13 @@ impl Parser {
             TokenKind::Minus => {
                 let span = self.peek().span;
                 self.advance();
+                if self.peek().kind == TokenKind::LParen {
+                    return Err(JadeError::UnexpectedToken {
+                        expected: "literal or identifier after `-`".to_string(),
+                        got: "(".to_string(),
+                        span: self.peek().span,
+                    });
+                }
                 let operand = self.parse_unary()?;
                 Ok(Expr::UnaryOp { op: UnaryOpKind::Neg, operand: Box::new(operand), span })
             }
