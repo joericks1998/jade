@@ -588,6 +588,22 @@ pub(crate) fn value_to_str(v: &Value) -> String {
     }
 }
 
+fn value_type_name(v: &Value) -> &'static str {
+    match v {
+        Value::Int(_)         => "int",
+        Value::Float(_)       => "float",
+        Value::Bool(_)        => "bool",
+        Value::Str(_)         => "str",
+        Value::Array(_)       => "array",
+        Value::Dict(_)        => "dict",
+        Value::Struct(_)      => "struct",
+        Value::Fn(_)          => "fn",
+        Value::BoundMethod(_) => "fn",
+        Value::Builtin(_)     => "fn",
+        Value::Prompt(_)      => "prompt",
+    }
+}
+
 /// Evaluate one expression against the current environment, returning its value.
 fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
     match expr {
@@ -812,10 +828,23 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
             }
         }
 
-        Expr::Array { elements, .. } => {
+        Expr::Array { elements, span } => {
             let mut vec = Vec::with_capacity(elements.len());
             for elem in elements {
                 vec.push(eval_expr(elem, env)?);
+            }
+            if let Some(first) = vec.first() {
+                let first_ty = value_type_name(first);
+                for v in vec.iter().skip(1) {
+                    let ty = value_type_name(v);
+                    if ty != first_ty {
+                        return Err(JadeError::HeterogeneousArray {
+                            first: first_ty.to_string(),
+                            got: ty.to_string(),
+                            span: *span,
+                        });
+                    }
+                }
             }
             Ok(Value::Array(vec))
         }
@@ -1338,9 +1367,9 @@ mod tests {
     }
 
     #[test]
-    fn test_eval_neg_expr() {
-        let env = eval_src("let x = -(3 + 4)").unwrap();
-        assert!(matches!(get(&env, "x"), Value::Int(-7)));
+    fn test_eval_neg_paren_rejected() {
+        // -(expr) syntax is not allowed; use a let binding to negate instead
+        assert!(matches!(eval_src_parse_err("let x = -(3 + 4)"), JadeError::UnexpectedToken { .. }));
     }
 
     // ── error conditions ─────────────────────────────────────────────────────
@@ -2279,14 +2308,11 @@ print("hello")"#).unwrap();
     }
 
     #[test]
-    fn test_eval_array_heterogeneous() {
-        let env = eval_src("let a = [1, 2.0, true, \"hello\"]").unwrap();
-        let Value::Array(ref vec) = get(&env, "a") else { panic!("not an array") };
-        assert_eq!(vec.len(), 4);
-        assert!(matches!(vec[0], Value::Int(1)));
-        assert!(matches!(vec[1], Value::Float(f) if f == 2.0));
-        assert!(matches!(vec[2], Value::Bool(true)));
-        assert!(matches!(vec[3], Value::Str(ref s) if s == "hello"));
+    fn test_eval_array_heterogeneous_rejected() {
+        assert!(matches!(
+            eval_src("let a = [1, 2.0, true, \"hello\"]").unwrap_err(),
+            JadeError::HeterogeneousArray { .. }
+        ));
     }
 
     #[test]
