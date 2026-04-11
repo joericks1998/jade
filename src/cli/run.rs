@@ -77,10 +77,17 @@ pub fn run_file(path: &str, verbose: bool) {
             eprintln!("error: invalid configuration: {}", e);
             process::exit(1);
         });
+    let source_dir = Path::new(path)
+        .canonicalize()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+
     let opts = vm::VmOpts {
         backend,
         default_model: cfg.model,
         max_retries: cfg.max_retries,
+        source_dir,
     };
 
     // Execute.

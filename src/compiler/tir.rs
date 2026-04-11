@@ -175,6 +175,11 @@ pub enum TStmt {
         body: TExpr,
         span: Span,
     },
+    /// `use "path"` — passed through unchanged from the AST; resolved at VM runtime.
+    Use {
+        path: String,
+        span: Span,
+    },
     Expr(TExpr),
 }
 

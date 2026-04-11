@@ -1,4 +1,4 @@
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::{cell::RefCell, collections::{HashMap, HashSet}, path::PathBuf, rc::Rc};
 
 use crate::{
     compiler::{
@@ -122,6 +122,10 @@ pub struct VmState {
     pub token_count: i64,
     pub max_retries: usize,
     pub default_model: String,
+    /// Directory of the currently-executing file — used to resolve relative `use` paths.
+    pub source_dir: PathBuf,
+    /// Set of canonical paths currently being imported (cycle detection).
+    pub import_stack: HashSet<PathBuf>,
 }
 
 impl VmState {
@@ -140,6 +144,8 @@ impl VmState {
             token_count: 0,
             max_retries: 3,
             default_model: String::new(),
+            source_dir: PathBuf::new(),
+            import_stack: HashSet::new(),
         }
     }
 
@@ -158,11 +164,19 @@ pub struct VmOpts {
     pub backend: Option<Box<dyn llm::InferenceBackend>>,
     pub default_model: String,
     pub max_retries: usize,
+    /// Directory of the source file being run — used to resolve relative `use` paths.
+    /// Defaults to the current working directory when running in-memory (tests, REPL).
+    pub source_dir: PathBuf,
 }
 
 impl Default for VmOpts {
     fn default() -> Self {
-        VmOpts { backend: None, default_model: String::new(), max_retries: 3 }
+        VmOpts {
+            backend: None,
+            default_model: String::new(),
+            max_retries: 3,
+            source_dir: std::env::current_dir().unwrap_or_default(),
+        }
     }
 }
 
@@ -174,14 +188,27 @@ pub fn run(program: CompiledProgram, opts: VmOpts) -> Result<VmState> {
     state.inference_backend = opts.backend;
     state.max_retries = opts.max_retries;
     state.default_model = opts.default_model.clone();
+    state.source_dir = opts.source_dir;
     state.set_session("__model__", VmValue::Str(opts.default_model));
     state.set_session("__max_retries__", VmValue::Int(opts.max_retries as i64));
-    state.extend_methods = program.extend_methods;
-    state.struct_defs = program.struct_defs;
+    run_with_state(program, &mut state)?;
+    Ok(state)
+}
+
+/// Execute a compiled program against an existing `VmState`.
+/// Used internally for imports so they share globals/struct_defs/extend_methods.
+fn run_with_state(program: CompiledProgram, state: &mut VmState) -> Result<()> {
+    // Merge compile-time metadata into the shared state.
+    for (k, v) in program.struct_defs {
+        state.struct_defs.insert(k, v);
+    }
+    for (type_name, methods) in program.extend_methods {
+        state.extend_methods.entry(type_name).or_default().extend(methods);
+    }
 
     let mut slots: Vec<VmValue> = vec![VmValue::Nil; program.top_n_slots as usize];
-    execute_chunk(&program.top, &mut slots, &mut state)?;
-    Ok(state)
+    execute_chunk(&program.top, &mut slots, state)?;
+    Ok(())
 }
 
 // ── Execution engine ──────────────────────────────────────────────────────────
@@ -212,6 +239,74 @@ fn execute_chunk(
 
         match instr {
             Instr::Halt => break,
+
+            // ── Imports ───────────────────────────────────────────────────────
+            Instr::ImportFile(path) => {
+                let abs_path = state.source_dir.join(path);
+                let canon = abs_path.canonicalize().map_err(|_| JadeError::ImportNotFound {
+                    path: path.clone(),
+                    span,
+                })?;
+
+                if state.import_stack.contains(&canon) {
+                    return Err(JadeError::CircularImport {
+                        path: path.clone(),
+                        span,
+                    });
+                }
+
+                state.import_stack.insert(canon.clone());
+
+                // Save and update source_dir for the imported file's own imports.
+                let prev_dir = state.source_dir.clone();
+                state.source_dir = canon.parent()
+                    .unwrap_or_else(|| std::path::Path::new("."))
+                    .to_path_buf();
+
+                let result = (|| -> Result<()> {
+                    let source = std::fs::read_to_string(&canon).map_err(|_| {
+                        JadeError::ImportNotFound { path: path.clone(), span }
+                    })?;
+
+                    let canon_str = canon.to_string_lossy().into_owned();
+                    let hash = crate::cache::file_hash(&canon);
+
+                    let cached_ast = hash.as_ref().and_then(|h| crate::cache::read_ast_cache(h));
+                    let program = match cached_ast {
+                        Some(p) => p,
+                        None => {
+                            let tokens = crate::interpreter::lexer::tokenize(&source)?;
+                            let p = crate::interpreter::parser::parse(tokens)?;
+                            if let Some(ref h) = hash {
+                                crate::cache::write_ast_cache(h, &canon_str, &p);
+                            }
+                            p
+                        }
+                    };
+
+                    let tprogram = if let Some(ref h) = hash {
+                        match crate::cache::read_tir_cache(h) {
+                            Some(tp) => tp,
+                            None => {
+                                let tp = crate::compiler::type_infer::infer(program)?;
+                                crate::cache::write_tir_cache(h, &canon_str, &tp);
+                                tp
+                            }
+                        }
+                    } else {
+                        crate::compiler::type_infer::infer(program)?
+                    };
+
+                    let compiled = crate::compiler::emit::emit(tprogram)?;
+                    run_with_state(compiled, state)
+                })();
+
+                // Always restore source_dir and release the import_stack entry.
+                state.source_dir = prev_dir;
+                state.import_stack.remove(&canon);
+
+                result?;
+            }
 
             // ── Loads ─────────────────────────────────────────────────────────
             Instr::LoadInt(d, v)   => set(slots, *d, VmValue::Int(*v)),
@@ -1014,7 +1109,7 @@ fn instr_max_reg(instr: &Instr) -> u32 {
         Instr::SetIndex(o,i,v) => (*o).max(*i).max(*v),
         Instr::SetField(o,_,v) => (*o).max(*v),
         Instr::JumpIfFalse(c,_)|Instr::JumpIfTrue(c,_) => *c,
-        Instr::Jump(_)|Instr::Halt|Instr::Return(None) => 0,
+        Instr::Jump(_)|Instr::Halt|Instr::Return(None)|Instr::ImportFile(_) => 0,
         Instr::Return(Some(r)) => *r,
         Instr::Call(d,c,args) => {
             let mut m = (*d).max(*c);

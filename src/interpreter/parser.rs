@@ -74,6 +74,24 @@ impl Parser {
         token
     }
 
+    /// Consume a semicolon if the next token is one; otherwise accept an implicit
+    /// semicolon when the next token is `}` (end of block) or `Eof`.
+    /// This lets single-line function bodies work: `fn f(x) { return x * 2 }`.
+    fn consume_semicolon(&mut self) -> Result<()> {
+        match self.peek().kind {
+            TokenKind::Semicolon => { self.advance(); Ok(()) }
+            TokenKind::RBrace | TokenKind::Eof => Ok(()),
+            _ => {
+                let token = self.peek().clone();
+                Err(JadeError::UnexpectedToken {
+                    expected: "';'".to_string(),
+                    got: format!("{:?}", token.kind),
+                    span: token.span,
+                })
+            }
+        }
+    }
+
     /// If the current token's *variant* matches `kind`, advance and return a clone.
     /// Note: only the discriminant is compared — the payload (e.g. the integer value
     /// inside `Integer(n)`) is ignored. This is intentional: callers always pass a
@@ -122,6 +140,7 @@ impl Parser {
             TokenKind::Extend     => self.parse_extend_block(),
             TokenKind::Interface  => self.parse_interface_def(),
             TokenKind::Prompt     => self.parse_prompt_decl(),
+            TokenKind::Use        => self.parse_use(),
             TokenKind::Identifier(_) => {
                 // Disambiguate identifier-led statement forms:
                 //   `ident =`              → bare variable assignment
@@ -163,7 +182,7 @@ impl Parser {
         };
         self.expect(&TokenKind::Equals)?;
         let value = self.parse_pipe()?;
-        self.expect(&TokenKind::Semicolon)?;
+        self.consume_semicolon()?;
         Ok(Stmt::Assign { name, value, span })
     }
 
@@ -190,7 +209,7 @@ impl Parser {
 
         self.expect(&TokenKind::Equals)?;
         let value = self.parse_pipe()?;
-        self.expect(&TokenKind::Semicolon)?;
+        self.consume_semicolon()?;
 
         Ok(Stmt::Let { name, value, span })
     }
@@ -275,14 +294,15 @@ impl Parser {
 
         self.advance(); // consume `return`
 
-        // If the next token is a semicolon, it's a bare return
-        if self.peek().kind == TokenKind::Semicolon {
-            self.advance();
-            return Ok(Stmt::Return { value: None, span });
+        // If the next token ends the statement without a value, it's a bare return
+        match self.peek().kind {
+            TokenKind::Semicolon => { self.advance(); return Ok(Stmt::Return { value: None, span }); }
+            TokenKind::RBrace | TokenKind::Eof => return Ok(Stmt::Return { value: None, span }),
+            _ => {}
         }
 
         let value = self.parse_pipe()?;
-        self.expect(&TokenKind::Semicolon)?;
+        self.consume_semicolon()?;
         Ok(Stmt::Return { value: Some(value), span })
     }
 
@@ -379,13 +399,36 @@ impl Parser {
     }
 
     /// Parse `prompt name = expr ;`
+    /// Parse `use "path/to/file.jde" ;`
+    fn parse_use(&mut self) -> Result<Stmt> {
+        let span = self.peek().span;
+        self.advance(); // consume `use`
+        let path_token = self.peek().clone();
+        let path = match &path_token.kind {
+            TokenKind::Str(s) => {
+                let s = s.clone();
+                self.advance();
+                s
+            }
+            _ => {
+                return Err(JadeError::UnexpectedToken {
+                    expected: "string path after `use`".to_string(),
+                    got: format!("{:?}", path_token.kind),
+                    span: path_token.span,
+                });
+            }
+        };
+        self.consume_semicolon()?;
+        Ok(Stmt::Use { path, span })
+    }
+
     fn parse_prompt_decl(&mut self) -> Result<Stmt> {
         let span = self.peek().span;
         self.advance(); // consume `prompt`
         let name = self.expect_ident("prompt variable name")?;
         self.expect(&TokenKind::Equals)?;
         let body = self.parse_pipe()?;
-        self.expect(&TokenKind::Semicolon)?;
+        self.consume_semicolon()?;
         Ok(Stmt::PromptDecl { name, body, span })
     }
 
@@ -540,7 +583,7 @@ impl Parser {
         let field = self.expect_ident("field name")?;
         self.expect(&TokenKind::Equals)?;
         let value = self.parse_pipe()?;
-        self.expect(&TokenKind::Semicolon)?;
+        self.consume_semicolon()?;
         Ok(Stmt::FieldAssign { object, field, value, span })
     }
 
@@ -584,7 +627,7 @@ impl Parser {
         self.expect(&TokenKind::RBracket)?;
         self.expect(&TokenKind::Equals)?;
         let value = self.parse_pipe()?;
-        self.expect(&TokenKind::Semicolon)?;
+        self.consume_semicolon()?;
         Ok(Stmt::IndexAssign { name, index, value, span })
     }
 
@@ -618,7 +661,7 @@ impl Parser {
     /// Parse an expression used as a statement (value discarded), e.g. `obj.method(args)`.
     fn parse_expr_stmt(&mut self) -> Result<Stmt> {
         let expr = self.parse_pipe()?;
-        self.expect(&TokenKind::Semicolon)?;
+        self.consume_semicolon()?;
         Ok(Stmt::Expr(expr))
     }
 
