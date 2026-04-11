@@ -472,6 +472,17 @@ fn eval_block(stmts: &[Stmt], env: &mut Env) -> Result<Option<Value>> {
                 }
             }
 
+            Stmt::Use { span, .. } => {
+                // `use` is not supported by the tree-walk evaluator — it is
+                // resolved at the bytecode VM level. Reaching this arm means
+                // the evaluator was called directly on a program that contains
+                // `use`, which is not the normal execution path.
+                return Err(JadeError::TypeError {
+                    op: "`use` is not supported in the tree-walk evaluator".to_string(),
+                    span: *span,
+                });
+            }
+
             Stmt::Expr(expr) => {
                 eval_expr(expr, env)?;
             }

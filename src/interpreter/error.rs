@@ -103,6 +103,12 @@ pub enum JadeError {
 
     /// Type checker: an array literal contains elements of different concrete types.
     HeterogeneousArray { first: String, got: String, span: Span },
+
+    /// `use "path"` could not find the referenced file.
+    ImportNotFound { path: String, span: Span },
+
+    /// `use "path"` would create a cycle: `a` imports `b` which imports `a`.
+    CircularImport { path: String, span: Span },
 }
 
 impl std::fmt::Display for JadeError {
@@ -172,6 +178,10 @@ impl std::fmt::Display for JadeError {
                 write!(f, "[{}:{}] type mismatch: expected {}, got {}", span.line, span.col, expected, got),
             JadeError::HeterogeneousArray { first, got, span } =>
                 write!(f, "[{}:{}] heterogeneous array: first element is {}, found {}", span.line, span.col, first, got),
+            JadeError::ImportNotFound { path, span } =>
+                write!(f, "[{}:{}] cannot find import '{}': file not found", span.line, span.col, path),
+            JadeError::CircularImport { path, span } =>
+                write!(f, "[{}:{}] circular import detected: '{}' is already being imported", span.line, span.col, path),
         }
     }
 }

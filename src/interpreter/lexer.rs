@@ -32,6 +32,7 @@ pub enum TokenKind {
     Extend,
     Interface,
     Prompt,
+    Use,
     True,
     False,
 
@@ -388,6 +389,7 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
                     "extend"    => TokenKind::Extend,
                     "interface" => TokenKind::Interface,
                     "prompt"    => TokenKind::Prompt,
+                    "use"       => TokenKind::Use,
                     "true"      => TokenKind::True,
                     "false"  => TokenKind::False,
                     // f-string: `f"…"` or `f"""…"""`

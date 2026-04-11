@@ -154,6 +154,12 @@ pub enum Stmt {
         span: Span,
     },
 
+    /// `use "path/to/file.jde"` — import all top-level definitions from another file.
+    Use {
+        path: String,
+        span: Span,
+    },
+
     /// A bare expression used as a statement, e.g. a method call whose return
     /// value is discarded: `obj.method(args)`.
     Expr(Expr),

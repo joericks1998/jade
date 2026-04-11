@@ -273,6 +273,10 @@ fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
             }
         }
 
+        TStmt::Use { path, span } => {
+            em.chunk.emit(Instr::ImportFile(path), span);
+        }
+
         TStmt::Expr(expr) => {
             emit_expr(&expr, em, ctx)?;
         }

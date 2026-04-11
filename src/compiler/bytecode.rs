@@ -242,4 +242,9 @@ pub enum Instr {
     // ── Misc ───────────────────────────────────────────────────────────────
     Move(Reg, Reg),
     Halt,
+
+    // ── Imports ────────────────────────────────────────────────────────────
+    /// Run the full pipeline for the file at `path` (relative to the current
+    /// file's directory) and merge its top-level exports into the running state.
+    ImportFile(String),
 }

@@ -22,6 +22,10 @@ struct TypeContext {
     interface_defs: HashMap<String, Vec<String>>,
     /// Extend: type_name → method_name → inferred return type.
     extend_methods: HashMap<String, HashMap<String, JadeType>>,
+    /// True if this program contains any `use` statements. When true, unknown
+    /// identifiers are treated as `Unknown` (resolved at VM runtime) rather
+    /// than hard errors — symbols may be provided by the imports.
+    has_imports: bool,
 }
 
 impl TypeContext {
@@ -31,6 +35,7 @@ impl TypeContext {
             struct_defs: HashMap::new(),
             interface_defs: HashMap::new(),
             extend_methods: HashMap::new(),
+            has_imports: false,
         };
         // Built-in functions. `print` is variadic in practice, but we give it
         // one Unknown param so the return type (Nil) is always resolved.
@@ -140,6 +145,9 @@ fn pre_pass(stmts: &[Stmt], ctx: &mut TypeContext) {
                             .insert(mname.clone(), JadeType::Unknown);
                     }
                 }
+            }
+            Stmt::Use { .. } => {
+                ctx.has_imports = true;
             }
             _ => {}
         }
@@ -339,6 +347,13 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
             Ok(TStmt::PromptDecl { name: name.clone(), body: tbody, span: *span })
         }
 
+        // ── Imports ───────────────────────────────────────────────────────────
+
+        Stmt::Use { path, span } => {
+            // Pass through unchanged; the import is resolved at VM runtime.
+            Ok(TStmt::Use { path: path.clone(), span: *span })
+        }
+
         // ── Bare expression ───────────────────────────────────────────────────
 
         Stmt::Expr(expr) => {
@@ -369,8 +384,11 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
         // ── Variables ─────────────────────────────────────────────────────────
 
         Expr::Identifier { name, span } => {
-            let ty = ctx.get(name)
-                .ok_or_else(|| JadeError::UndefinedVariable { name: name.clone(), span: *span })?;
+            let ty = match ctx.get(name) {
+                Some(t) => t,
+                None if ctx.has_imports => JadeType::Unknown,
+                None => return Err(JadeError::UndefinedVariable { name: name.clone(), span: *span }),
+            };
             Ok(TExpr { kind: TExprKind::Identifier(name.clone()), ty, span: *span })
         }
 
