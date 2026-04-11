@@ -1,5 +1,5 @@
 use super::{
-    ast::{BinOpKind, Expr, FStrPart, InterfaceMethod, Program, Stmt, UnaryOpKind},
+    ast::{BinOpKind, Expr, FStrPart, InterfaceMethod, Program, StructFieldDef, Stmt, UnaryOpKind},
     error::{JadeError, Result, Span},
     lexer::{RawFStrPart, Token, TokenKind},
 };
@@ -390,6 +390,8 @@ impl Parser {
     }
 
     /// Parse `struct Name { field, … }`
+    /// Fields may be bare identifiers (required), `let name = expr` (optional with default),
+    /// or `prompt name = expr` (optional prompt field with default text).
     fn parse_struct_def(&mut self) -> Result<Stmt> {
         let span = self.peek().span;
         self.advance(); // consume `struct`
@@ -397,15 +399,42 @@ impl Parser {
         self.expect(&TokenKind::LBrace)?;
         let mut fields = Vec::new();
         loop {
-            // Skip auto-semicolons between field names (from trailing newlines)
+            // Skip auto-semicolons between field declarations (from trailing newlines)
             while self.peek().kind == TokenKind::Semicolon {
                 self.advance();
             }
             if self.peek().kind == TokenKind::RBrace || self.peek().kind == TokenKind::Eof {
                 break;
             }
-            fields.push(self.expect_ident("field name")?);
-            // Allow a trailing comma or semicolon after each field name
+            match self.peek().kind.clone() {
+                TokenKind::Identifier(_) => {
+                    let field_name = self.expect_ident("field name")?;
+                    fields.push(StructFieldDef::Required(field_name));
+                }
+                TokenKind::Let => {
+                    self.advance(); // consume `let`
+                    let field_name = self.expect_ident("field name after `let`")?;
+                    self.expect(&TokenKind::Equals)?;
+                    let default = self.parse_pipe()?;
+                    fields.push(StructFieldDef::Let { name: field_name, default });
+                }
+                TokenKind::Prompt => {
+                    self.advance(); // consume `prompt`
+                    let field_name = self.expect_ident("field name after `prompt`")?;
+                    self.expect(&TokenKind::Equals)?;
+                    let default = self.parse_pipe()?;
+                    fields.push(StructFieldDef::Prompt { name: field_name, default });
+                }
+                _ => {
+                    let t = self.peek().clone();
+                    return Err(JadeError::UnexpectedToken {
+                        expected: "field name, `let`, or `prompt`".to_string(),
+                        got: format!("{:?}", t.kind),
+                        span: t.span,
+                    });
+                }
+            }
+            // Allow a trailing comma or semicolon after each field declaration
             if self.peek().kind == TokenKind::Comma || self.peek().kind == TokenKind::Semicolon {
                 self.advance();
             }
@@ -1039,7 +1068,8 @@ impl Parser {
             TokenKind::Question => {
                 let span = token.span;
                 self.advance(); // consume `?`
-                let name = self.expect_ident("prompt variable name after ?")?;
+                // Parse the target expression: supports ?name, ?obj.field, ?arr[i], etc.
+                let expr = self.parse_call()?;
                 // Check for optional `|> TypeName` typed dereference suffix.
                 let output_type = if self.peek().kind == TokenKind::PipeGt {
                     if self.in_print_call {
@@ -1051,7 +1081,7 @@ impl Parser {
                 } else {
                     None
                 };
-                Ok(Expr::PromptDeref { name, output_type, span })
+                Ok(Expr::PromptDeref { expr: Box::new(expr), output_type, span })
             }
             TokenKind::Eof => Err(JadeError::UnexpectedEof { span: token.span }),
             _ => Err(JadeError::UnexpectedToken {
@@ -1429,7 +1459,9 @@ mod tests {
         let p = parse_src("struct Point {\n    x,\n    y\n}");
         let Stmt::StructDef { name, fields, .. } = &p.stmts[0] else { panic!() };
         assert_eq!(name, "Point");
-        assert_eq!(fields, &["x", "y"]);
+        assert_eq!(fields.len(), 2);
+        assert!(matches!(&fields[0], StructFieldDef::Required(n) if n == "x"));
+        assert!(matches!(&fields[1], StructFieldDef::Required(n) if n == "y"));
     }
 
     #[test]
@@ -1438,6 +1470,44 @@ mod tests {
         let Stmt::StructDef { name, fields, .. } = &p.stmts[0] else { panic!() };
         assert_eq!(name, "Empty");
         assert!(fields.is_empty());
+    }
+
+    #[test]
+    fn test_parse_struct_def_let_default() {
+        let p = parse_src("struct Agent {\n    let name = \"Assistant\"\n}");
+        let Stmt::StructDef { name, fields, .. } = &p.stmts[0] else { panic!() };
+        assert_eq!(name, "Agent");
+        assert_eq!(fields.len(), 1);
+        assert!(matches!(&fields[0], StructFieldDef::Let { name, .. } if name == "name"));
+    }
+
+    #[test]
+    fn test_parse_struct_def_prompt_field() {
+        let p = parse_src("struct Agent {\n    prompt system = \"You are helpful\"\n}");
+        let Stmt::StructDef { name, fields, .. } = &p.stmts[0] else { panic!() };
+        assert_eq!(name, "Agent");
+        assert_eq!(fields.len(), 1);
+        assert!(matches!(&fields[0], StructFieldDef::Prompt { name, .. } if name == "system"));
+    }
+
+    #[test]
+    fn test_parse_struct_def_mixed() {
+        let p = parse_src("struct Mixed {\n    x,\n    let label = \"origin\",\n    prompt sys = \"helpful\"\n}");
+        let Stmt::StructDef { fields, .. } = &p.stmts[0] else { panic!() };
+        assert_eq!(fields.len(), 3);
+        assert!(matches!(&fields[0], StructFieldDef::Required(n) if n == "x"));
+        assert!(matches!(&fields[1], StructFieldDef::Let { name, .. } if name == "label"));
+        assert!(matches!(&fields[2], StructFieldDef::Prompt { name, .. } if name == "sys"));
+    }
+
+    #[test]
+    fn test_parse_struct_def_struct_literal_default() {
+        // A struct-literal expression as a default value parses without ambiguity.
+        // The inner `}` belongs to the nested struct literal; the outer `}` closes the struct def.
+        let p = parse_src("struct Wrapper {\n    let inner = Point { x: 0, y: 0 }\n}");
+        let Stmt::StructDef { fields, .. } = &p.stmts[0] else { panic!() };
+        assert_eq!(fields.len(), 1);
+        assert!(matches!(&fields[0], StructFieldDef::Let { name, default: Expr::StructLiteral { .. }, .. } if name == "inner"));
     }
 
     #[test]
@@ -1584,18 +1654,36 @@ mod tests {
     #[test]
     fn test_parse_prompt_deref_untyped() {
         let p = parse_src("let x = ?p");
-        let Stmt::Let { value: Expr::PromptDeref { name, output_type, .. }, .. } = &p.stmts[0]
+        let Stmt::Let { value: Expr::PromptDeref { expr, output_type, .. }, .. } = &p.stmts[0]
             else { panic!("expected Let with PromptDeref") };
-        assert_eq!(name, "p");
+        assert!(matches!(expr.as_ref(), Expr::Identifier { name, .. } if name == "p"));
         assert!(output_type.is_none());
     }
 
     #[test]
     fn test_parse_prompt_deref_typed_int() {
         let p = parse_src("let x = ?p |> int");
-        let Stmt::Let { value: Expr::PromptDeref { name, output_type, .. }, .. } = &p.stmts[0]
+        let Stmt::Let { value: Expr::PromptDeref { expr, output_type, .. }, .. } = &p.stmts[0]
             else { panic!("expected Let with PromptDeref") };
-        assert_eq!(name, "p");
+        assert!(matches!(expr.as_ref(), Expr::Identifier { name, .. } if name == "p"));
+        assert_eq!(output_type.as_deref(), Some("int"));
+    }
+
+    #[test]
+    fn test_parse_prompt_deref_field_access() {
+        let p = parse_src("let x = ?obj.system");
+        let Stmt::Let { value: Expr::PromptDeref { expr, output_type, .. }, .. } = &p.stmts[0]
+            else { panic!("expected Let with PromptDeref") };
+        assert!(matches!(expr.as_ref(), Expr::FieldAccess { field, .. } if field == "system"));
+        assert!(output_type.is_none());
+    }
+
+    #[test]
+    fn test_parse_prompt_deref_field_access_typed() {
+        let p = parse_src("let x = ?obj.field |> int");
+        let Stmt::Let { value: Expr::PromptDeref { expr, output_type, .. }, .. } = &p.stmts[0]
+            else { panic!("expected Let with PromptDeref") };
+        assert!(matches!(expr.as_ref(), Expr::FieldAccess { field, .. } if field == "field"));
         assert_eq!(output_type.as_deref(), Some("int"));
     }
 

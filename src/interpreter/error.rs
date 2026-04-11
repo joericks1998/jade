@@ -1,5 +1,5 @@
 /// A position in source text. Line and column are 1-based (how editors report them).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct Span {
     pub line: usize,
     pub col: usize,
@@ -91,6 +91,18 @@ pub enum JadeError {
 
     /// Dict lookup used a key that does not exist.
     KeyNotFound { key: String, span: Span },
+
+    /// A `prompt` field's default or provided value is not a string.
+    PromptFieldNotStr { field: String, span: Span },
+
+    /// A struct literal supplies the same field name more than once.
+    DuplicateField { field: String, span: Span },
+
+    /// Type checker: an operator or construct received incompatible types.
+    TypeMismatch { expected: String, got: String, span: Span },
+
+    /// Type checker: an array literal contains elements of different concrete types.
+    HeterogeneousArray { first: String, got: String, span: Span },
 }
 
 impl std::fmt::Display for JadeError {
@@ -152,6 +164,14 @@ impl std::fmt::Display for JadeError {
                 write!(f, "[{}:{}] typed dereference '?p |> Type' cannot be used inside print() — assign to a variable first", span.line, span.col),
             JadeError::KeyNotFound { key, span } =>
                 write!(f, "[{}:{}] key '{}' not found in dict", span.line, span.col, key),
+            JadeError::PromptFieldNotStr { field, span } =>
+                write!(f, "[{}:{}] prompt field '{}' requires a string value", span.line, span.col, field),
+            JadeError::DuplicateField { field, span } =>
+                write!(f, "[{}:{}] field '{}' is specified more than once in struct literal", span.line, span.col, field),
+            JadeError::TypeMismatch { expected, got, span } =>
+                write!(f, "[{}:{}] type mismatch: expected {}, got {}", span.line, span.col, expected, got),
+            JadeError::HeterogeneousArray { first, got, span } =>
+                write!(f, "[{}:{}] heterogeneous array: first element is {}, found {}", span.line, span.col, first, got),
         }
     }
 }

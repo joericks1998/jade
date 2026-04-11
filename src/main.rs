@@ -1,4 +1,6 @@
+mod cache;
 mod cli;
+mod compiler;
 mod config;
 mod interpreter;
 mod llm;
@@ -20,6 +22,9 @@ fn main() {
         }
         [_, cmd] if cmd == "configure" => {
             cli::configure::run_configure();
+        }
+        [_, cmd, filename] if cmd == "check" => {
+            cli::check::run_check(filename);
         }
         [_, filename] => {
             cli::run::run_file(filename, false);
