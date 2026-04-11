@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use super::{
-    ast::{BinOpKind, Expr, FStrPart, Program, Stmt, UnaryOpKind},
+    ast::{BinOpKind, Expr, FStrPart, Program, StructFieldDef, Stmt, UnaryOpKind},
     error::{JadeError, Result, Span},
 };
 use crate::llm;
@@ -126,8 +126,8 @@ impl std::fmt::Debug for FnValue {
 /// Struct definitions and extend methods are global (not scoped).
 pub struct Env {
     scopes: Vec<HashMap<String, Value>>,
-    /// Maps struct type names to their ordered list of field names.
-    pub struct_defs: HashMap<String, Vec<String>>,
+    /// Maps struct type names to their field definitions (including defaults).
+    pub struct_defs: HashMap<String, Vec<StructFieldDef>>,
     /// Maps struct type names to their method tables.
     pub extend_methods: HashMap<String, HashMap<String, Rc<FnValue>>>,
     /// Maps interface names to their required method names.
@@ -503,6 +503,15 @@ fn expr_span(e: &Expr) -> Span {
     }
 }
 
+/// Build a human-readable description of an expression for use in error messages.
+fn expr_display(e: &Expr) -> String {
+    match e {
+        Expr::Identifier { name, .. } => name.clone(),
+        Expr::FieldAccess { object, field, .. } => format!("{}.{}", expr_display(object), field),
+        _ => "<expression>".to_string(),
+    }
+}
+
 /// Widen an integer to float for mixed-type arithmetic.
 /// This match is exhaustive over all current `Value` variants. If a new
 /// variant is added, the compiler will require it to be handled here — it
@@ -681,38 +690,83 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
         }
 
         Expr::StructLiteral { type_name, fields, span } => {
-            let def_fields = env.struct_defs.get(type_name)
+            // Clone is required: `eval_expr(default, env)` below needs `&mut env`, which
+            // would conflict with an immutable borrow of `env.struct_defs` kept alive
+            // across the call. The clone drops that borrow before mutation begins.
+            let def_fields: Vec<StructFieldDef> = env.struct_defs
+                .get(type_name)
                 .ok_or_else(|| JadeError::UndefinedType { name: type_name.clone(), span: *span })?
                 .clone();
 
-            // Evaluate all field expressions
-            let mut field_map: HashMap<String, Value> = HashMap::new();
+            // Evaluate all caller-provided field expressions. Store each value alongside
+            // the expression's span for precise error reporting, and reject duplicates.
+            let mut provided: HashMap<String, (Value, Span)> = HashMap::new();
             for (fname, fexpr) in fields {
-                let v = eval_expr(fexpr, env)?;
-                field_map.insert(fname.clone(), v);
-            }
-
-            // Verify every declared field is present in the literal
-            for required in &def_fields {
-                if !field_map.contains_key(required) {
-                    return Err(JadeError::MissingField { field: required.clone(), span: *span });
+                let field_span = expr_span(fexpr);
+                if provided.contains_key(fname.as_str()) {
+                    return Err(JadeError::DuplicateField { field: fname.clone(), span: field_span });
                 }
+                let v = eval_expr(fexpr, env)?;
+                provided.insert(fname.clone(), (v, field_span));
             }
 
             // Verify no extra fields beyond what the struct defines
-            for provided in field_map.keys() {
-                if !def_fields.contains(provided) {
+            for (key, (_, key_span)) in &provided {
+                if !def_fields.iter().any(|f| f.name() == key) {
                     return Err(JadeError::UndefinedField {
                         type_name: type_name.clone(),
-                        field: provided.clone(),
-                        span: *span,
+                        field: key.clone(),
+                        span: *key_span,
                     });
+                }
+            }
+
+            // Walk the definition in order, filling final fields from provided values or defaults
+            let mut final_fields: HashMap<String, Value> = HashMap::new();
+            for def_field in &def_fields {
+                match def_field {
+                    StructFieldDef::Required(name) => {
+                        match provided.remove(name) {
+                            Some((v, _)) => { final_fields.insert(name.clone(), v); }
+                            None         => return Err(JadeError::MissingField { field: name.clone(), span: *span }),
+                        }
+                    }
+                    StructFieldDef::Let { name, default } => {
+                        let v = if let Some((pv, _)) = provided.remove(name) {
+                            pv
+                        } else {
+                            eval_expr(default, env)?
+                        };
+                        final_fields.insert(name.clone(), v);
+                    }
+                    StructFieldDef::Prompt { name, default } => {
+                        let v = if let Some((pv, field_span)) = provided.remove(name) {
+                            // Caller-provided value must be a string; wrap as Prompt
+                            match pv {
+                                Value::Str(text) => Value::Prompt(text),
+                                _ => return Err(JadeError::PromptFieldNotStr {
+                                    field: name.clone(),
+                                    span: field_span,
+                                }),
+                            }
+                        } else {
+                            // Evaluate default; must yield a string
+                            match eval_expr(default, env)? {
+                                Value::Str(text) => Value::Prompt(text),
+                                _ => return Err(JadeError::PromptFieldNotStr {
+                                    field: name.clone(),
+                                    span: *span,
+                                }),
+                            }
+                        };
+                        final_fields.insert(name.clone(), v);
+                    }
                 }
             }
 
             Ok(Value::Struct(Rc::new(RefCell::new(StructInstance {
                 type_name: type_name.clone(),
-                fields: field_map,
+                fields: final_fields,
             }))))
         }
 
@@ -1032,12 +1086,11 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
             }
         }
 
-        Expr::PromptDeref { name, output_type, span } => {
-            // 1. Resolve the prompt text from the environment.
-            let prompt_text = match env.get(name) {
-                Some(Value::Prompt(text)) => text,
-                Some(_) => return Err(JadeError::NotAPrompt { name: name.clone(), span: *span }),
-                None    => return Err(JadeError::UndefinedVariable { name: name.clone(), span: *span }),
+        Expr::PromptDeref { expr, output_type, span } => {
+            // 1. Evaluate the target expression and extract the prompt text.
+            let prompt_text = match eval_expr(expr, env)? {
+                Value::Prompt(text) => text,
+                _ => return Err(JadeError::NotAPrompt { name: expr_display(expr), span: *span }),
             };
 
             // 2. Call the backend with the current conversation history.
@@ -1107,7 +1160,7 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
             }
             env.conversation_history.truncate(history_len_before_retries);
             Err(JadeError::PromptOverflow {
-                name: name.clone(),
+                name: expr_display(expr),
                 attempts: max_retries + 1,
                 span: *span,
             })
@@ -2360,6 +2413,37 @@ print("hello")"#).unwrap();
     }
 
     #[test]
+    fn test_eval_prompt_deref_field_access_no_backend() {
+        // ?obj.field resolves the prompt field and tries to call the backend
+        let tokens = lexer::tokenize(
+            "struct Agent {\n    prompt system = \"helpful\"\n}\nlet a = Agent {}\nlet r = ?a.system"
+        ).expect("lex");
+        let program = parser::parse(tokens).expect("parse");
+        let err = evaluate(program, LlmOpts::default()).unwrap_err();
+        assert!(matches!(err, JadeError::MissingApiKey { .. }));
+    }
+
+    #[test]
+    fn test_eval_prompt_deref_field_access_not_a_prompt() {
+        // ?obj.field where the field is not a prompt → NotAPrompt error
+        let err = eval_with_mock(
+            "struct S {\n    x,\n}\nlet s = S { x: 42 }\nlet r = ?s.x",
+            vec![]
+        ).unwrap_err();
+        assert!(matches!(err, JadeError::NotAPrompt { .. }));
+    }
+
+    #[test]
+    fn test_eval_prompt_deref_field_access_with_mock() {
+        // ?obj.field works end-to-end with a mock backend
+        let env = eval_with_mock(
+            "struct Agent {\n    prompt system = \"Say hello\"\n}\nlet a = Agent {}\nlet r = ?a.system",
+            vec!["hello!"]
+        ).unwrap();
+        assert!(matches!(get(&env, "r"), Value::Str(s) if s == "hello!"));
+    }
+
+    #[test]
     fn test_eval_typed_deref_int_success() {
         let env = eval_with_mock("prompt p = \"What is 2+2?\"\nlet n = ?p |> int", vec!["4"]).unwrap();
         assert!(matches!(get(&env, "n"), Value::Int(4)));
@@ -2534,5 +2618,114 @@ print("hello")"#).unwrap();
         let src = "let d = {\"x\": 1}\nlet v = d[0]";
         let err = eval_src(src).unwrap_err();
         assert!(matches!(err, JadeError::TypeError { .. }));
+    }
+
+    // ── struct field defaults ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_eval_struct_default_omitted() {
+        let env = eval_src(
+            "struct Config {\n    let host = \"localhost\"\n}\nlet c = Config {}\nlet h = c.host"
+        ).unwrap();
+        assert!(matches!(env.get("h"), Some(Value::Str(s)) if s == "localhost"));
+    }
+
+    #[test]
+    fn test_eval_struct_default_overridden() {
+        let env = eval_src(
+            "struct Config {\n    let host = \"localhost\"\n}\nlet c = Config { host: \"example.com\" }\nlet h = c.host"
+        ).unwrap();
+        assert!(matches!(env.get("h"), Some(Value::Str(s)) if s == "example.com"));
+    }
+
+    #[test]
+    fn test_eval_struct_all_defaults_empty_literal() {
+        let env = eval_src(
+            "struct Config {\n    let host = \"localhost\"\n    let port = 8080\n}\nlet c = Config {}\nlet h = c.host\nlet p = c.port"
+        ).unwrap();
+        assert!(matches!(env.get("h"), Some(Value::Str(s)) if s == "localhost"));
+        assert!(matches!(env.get("p"), Some(Value::Int(8080))));
+    }
+
+    #[test]
+    fn test_eval_struct_required_still_required() {
+        let err = eval_src(
+            "struct Mixed {\n    x,\n    let label = \"origin\"\n}\nlet m = Mixed {}"
+        ).unwrap_err();
+        assert!(matches!(err, JadeError::MissingField { .. }));
+    }
+
+    #[test]
+    fn test_eval_struct_mixed_fields() {
+        let env = eval_src(
+            "struct Mixed {\n    x,\n    y,\n    let label = \"origin\"\n}\nlet m = Mixed { x: 1, y: 2 }\nlet lbl = m.label"
+        ).unwrap();
+        assert!(matches!(env.get("lbl"), Some(Value::Str(s)) if s == "origin"));
+    }
+
+    #[test]
+    fn test_eval_struct_prompt_field_default() {
+        let env = eval_src(
+            "struct Agent {\n    prompt system = \"You are helpful\"\n}\nlet a = Agent {}\nlet s = a.system"
+        ).unwrap();
+        assert!(matches!(env.get("s"), Some(Value::Prompt(t)) if t == "You are helpful"));
+    }
+
+    #[test]
+    fn test_eval_struct_prompt_field_override() {
+        let env = eval_src(
+            "struct Agent {\n    prompt system = \"You are helpful\"\n}\nlet a = Agent { system: \"Custom\" }\nlet s = a.system"
+        ).unwrap();
+        assert!(matches!(env.get("s"), Some(Value::Prompt(t)) if t == "Custom"));
+    }
+
+    #[test]
+    fn test_eval_struct_prompt_field_non_string_error() {
+        let err = eval_src(
+            "struct Bad {\n    prompt sys = 42\n}\nlet b = Bad {}"
+        ).unwrap_err();
+        assert!(matches!(err, JadeError::PromptFieldNotStr { .. }));
+    }
+
+    #[test]
+    fn test_eval_struct_prompt_field_override_non_string_error() {
+        let err = eval_src(
+            "struct Agent {\n    prompt system = \"ok\"\n}\nlet a = Agent { system: 99 }"
+        ).unwrap_err();
+        assert!(matches!(err, JadeError::PromptFieldNotStr { .. }));
+    }
+
+    #[test]
+    fn test_eval_struct_extra_field_still_errors_with_defaults() {
+        let err = eval_src(
+            "struct Agent {\n    let name = \"Jade\"\n}\nlet a = Agent { name: \"x\", extra: 1 }"
+        ).unwrap_err();
+        assert!(matches!(err, JadeError::UndefinedField { .. }));
+    }
+
+    #[test]
+    fn test_eval_struct_duplicate_field_error() {
+        let err = eval_src(
+            "struct Point {\n    x,\n    y\n}\nlet p = Point { x: 1, y: 2, x: 3 }"
+        ).unwrap_err();
+        assert!(matches!(err, JadeError::DuplicateField { field, .. } if field == "x"));
+    }
+
+    #[test]
+    fn test_eval_struct_default_references_variable() {
+        // Default expressions are evaluated lazily in the current env
+        let env = eval_src(
+            "let base = 10\nstruct S {\n    let x = base\n}\nlet s = S {}\nlet v = s.x"
+        ).unwrap();
+        assert!(matches!(env.get("v"), Some(Value::Int(10))));
+    }
+
+    #[test]
+    fn test_eval_struct_required_after_let_field() {
+        // Required field after a Let field: omitting it still errors
+        let err = eval_src(
+            "struct S {\n    let x = 0,\n    y\n}\nlet s = S { x: 1 }"
+        ).unwrap_err();
+        assert!(matches!(err, JadeError::MissingField { field, .. } if field == "y"));
     }
 }
