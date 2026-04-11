@@ -142,6 +142,12 @@ pub enum TStmt {
         body: Vec<TStmt>,
         span: Span,
     },
+    For {
+        var: String,
+        iterable: TExpr,
+        body: Vec<TStmt>,
+        span: Span,
+    },
     StructDef {
         name: String,
         fields: Vec<StructFieldDef>,

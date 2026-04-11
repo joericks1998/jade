@@ -227,6 +227,57 @@ fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
             em.chunk.patch_jump(jump_exit, em.chunk.len());
         }
 
+        TStmt::For { var, iterable, body, span } => {
+            // Evaluate the iterable into a register.
+            let iter_reg = emit_expr(&iterable, em, ctx)?;
+
+            // idx = 0
+            let idx_reg = em.alloc_reg();
+            em.chunk.emit(Instr::LoadInt(idx_reg, 0), span);
+
+            // len = len(iter)
+            let len_reg = em.alloc_reg();
+            em.chunk.emit(Instr::CallLen(len_reg, iter_reg), span);
+
+            // Allocate the loop variable: a local slot inside fn, a scratch reg at top level.
+            let x_reg = if em.in_fn() {
+                em.define_local(&var)
+            } else {
+                em.alloc_reg()
+            };
+
+            // ── Loop header ────────────────────────────────────────────────────
+            let loop_start = em.chunk.len();
+
+            let cond_reg = em.alloc_reg();
+            em.chunk.emit(Instr::CmpLtInt(cond_reg, idx_reg, len_reg), span);
+            let jump_exit = em.chunk.emit(Instr::JumpIfFalse(cond_reg, 0), span);
+
+            // x = iter[idx]
+            em.chunk.emit(Instr::GetIndex(x_reg, iter_reg, idx_reg), span);
+            // At top level, also write to the global so body code can read it.
+            if !em.in_fn() {
+                em.chunk.emit(Instr::SetGlobal(var.clone(), x_reg), span);
+            }
+
+            // ── Loop body ──────────────────────────────────────────────────────
+            for s in body {
+                emit_stmt(s, em, ctx)?;
+            }
+
+            // ── Increment: idx = idx + 1 ───────────────────────────────────────
+            let one_reg = em.alloc_reg();
+            em.chunk.emit(Instr::LoadInt(one_reg, 1), span);
+            let next_idx = em.alloc_reg();
+            em.chunk.emit(Instr::AddInt(next_idx, idx_reg, one_reg), span);
+            em.chunk.emit(Instr::Move(idx_reg, next_idx), span);
+
+            // Back-jump and patch exit.
+            let back = loop_start as i32 - (em.chunk.len() as i32 + 1);
+            em.chunk.emit(Instr::Jump(back), span);
+            em.chunk.patch_jump(jump_exit, em.chunk.len());
+        }
+
         // Metadata only — already captured in the first pass.
         TStmt::StructDef { .. } | TStmt::InterfaceDef { .. } => {}
 

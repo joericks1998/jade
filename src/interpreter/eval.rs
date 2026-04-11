@@ -472,6 +472,13 @@ fn eval_block(stmts: &[Stmt], env: &mut Env) -> Result<Option<Value>> {
                 }
             }
 
+            Stmt::For { span, .. } => {
+                return Err(JadeError::TypeError {
+                    op: "`for` is not supported in the tree-walk evaluator".to_string(),
+                    span: *span,
+                });
+            }
+
             Stmt::Use { span, .. } => {
                 // `use` is not supported by the tree-walk evaluator — it is
                 // resolved at the bytecode VM level. Reaching this arm means

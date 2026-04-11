@@ -241,6 +241,23 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
             Ok(TStmt::While { condition: tcond, body: tbody, span: *span })
         }
 
+        Stmt::For { var, iterable, body, span } => {
+            let titerable = infer_expr(iterable, ctx)?;
+            let elem_ty = match &titerable.ty {
+                JadeType::Array(elem) => *elem.clone(),
+                JadeType::Unknown     => JadeType::Unknown,
+                other => return Err(JadeError::TypeError {
+                    op: format!("cannot iterate over {}", jade_type_name(other)),
+                    span: *span,
+                }),
+            };
+            ctx.push_scope();
+            ctx.define(var.clone(), elem_ty);
+            let tbody = check_stmts(body, ctx)?;
+            ctx.pop_scope();
+            Ok(TStmt::For { var: var.clone(), iterable: titerable, body: tbody, span: *span })
+        }
+
         // ── Type definitions ──────────────────────────────────────────────────
 
         Stmt::StructDef { name, fields, span } => {
@@ -784,7 +801,7 @@ fn infer_return_type(stmts: &[TStmt]) -> JadeType {
                     if t2 != JadeType::Unknown && t2 != JadeType::Nil { return t2; }
                 }
             }
-            TStmt::While { body, .. } => {
+            TStmt::While { body, .. } | TStmt::For { body, .. } => {
                 let t = infer_return_type(body);
                 if t != JadeType::Unknown && t != JadeType::Nil { return t; }
             }

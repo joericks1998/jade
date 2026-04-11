@@ -94,6 +94,14 @@ pub enum Stmt {
         span: Span,
     },
 
+    /// `for var in iterable { body }`
+    For {
+        var: String,
+        iterable: Expr,
+        body: Vec<Stmt>,
+        span: Span,
+    },
+
     /// `name = expr` — reassign an existing variable (or introduce one) in the global env
     Assign {
         name: String,

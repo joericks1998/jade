@@ -136,6 +136,7 @@ impl Parser {
             TokenKind::Return => self.parse_return(),
             TokenKind::If     => self.parse_if(),
             TokenKind::While  => self.parse_while(),
+            TokenKind::For    => self.parse_for(),
             TokenKind::Struct     => self.parse_struct_def(),
             TokenKind::Extend     => self.parse_extend_block(),
             TokenKind::Interface  => self.parse_interface_def(),
@@ -377,6 +378,32 @@ impl Parser {
         let body = self.parse_block()?;
 
         Ok(Stmt::While { condition, body, span })
+    }
+
+    /// Parse `for <var> in <iterable> { <body> }`
+    fn parse_for(&mut self) -> Result<Stmt> {
+        let span = self.peek().span;
+        self.advance(); // consume `for`
+
+        let var_token = self.peek().clone();
+        let var = match &var_token.kind {
+            TokenKind::Identifier(n) => {
+                let n = n.clone();
+                self.advance();
+                n
+            }
+            _ => return Err(JadeError::UnexpectedToken {
+                expected: "identifier after `for`".to_string(),
+                got: format!("{:?}", var_token.kind),
+                span: var_token.span,
+            }),
+        };
+
+        self.expect(&TokenKind::In)?;
+        let iterable = self.parse_condition()?;
+        let body = self.parse_block()?;
+
+        Ok(Stmt::For { var, iterable, body, span })
     }
 
     /// Parse `{ <stmts> }` — a brace-delimited block of statements.
