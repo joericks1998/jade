@@ -14,6 +14,8 @@ use crate::llm;
 const DEFAULT_MAX_TOKENS: u32 = 1024;
 /// Token budget for a retry correction reply — only a single typed value is needed.
 const RETRY_MAX_TOKENS: u32 = 64;
+/// Token budget for retries on complex types (Array, Dict, struct) that may produce larger outputs.
+const RETRY_MAX_TOKENS_COMPLEX: u32 = 512;
 
 // ── Value ────────────────────────────────────────────────────────────────────
 
@@ -1289,64 +1291,269 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
             let max_retries = env.max_retries;
             let history_len_before_retries = env.conversation_history.len();
             let mut current_response = initial_resp.text;
+            // Clone struct_defs so the retry loop can borrow other env fields freely.
+            let struct_defs = env.struct_defs.clone();
 
-            // Each loop iteration checks the current response, then sends a correction
-            // if coercion fails. After the loop, one final coercion check is done on
-            // the last correction reply before declaring overflow.
-            for _attempt in 0..max_retries {
-                if let Some(v) = coerce_to_type(&current_response, type_name) {
-                    env.conversation_history.truncate(history_len_before_retries);
-                    return Ok(v);
+            // Use a larger token budget for complex types that produce more output.
+            let retry_max_tokens = if matches!(type_name.as_str(), "int" | "float" | "bool" | "str") {
+                RETRY_MAX_TOKENS
+            } else {
+                RETRY_MAX_TOKENS_COMPLEX
+            };
+
+            // Each loop iteration checks the current response, then sends the coercion
+            // error back to the LLM as a correction prompt. The user never sees these
+            // intermediate failures — only a PromptOverflow if all retries are exhausted.
+            for attempt in 0..max_retries {
+                match coerce_to_type(&current_response, type_name, &struct_defs) {
+                    Ok(v) => {
+                        env.conversation_history.truncate(history_len_before_retries);
+                        return Ok(v);
+                    }
+                    Err(correction) => {
+                        // Record the failed attempt in __retry_log__
+                        let entry = Value::Str(format!(
+                            "attempt {}: response={:?} hint={:?}",
+                            attempt + 1, current_response.trim(), correction
+                        ));
+                        if let Some(log_val) = env.scopes.first_mut()
+                            .and_then(|s| s.get_mut("__retry_log__"))
+                        {
+                            if let Value::Array(log) = log_val {
+                                log.push(entry);
+                            }
+                        }
+
+                        // Send the coercion error back to the LLM and collect its correction.
+                        let retry_resp = {
+                            let backend = env.inference_backend.as_ref()
+                                .ok_or(JadeError::MissingApiKey { span: *span })?;
+                            backend.infer(llm::InferenceRequest {
+                                prompt: correction.clone(),
+                                model: env.default_model.clone(),
+                                history: env.conversation_history.clone(),
+                                max_tokens: retry_max_tokens,
+                            }, *span)?
+                        };
+                        env.conversation_history.push(llm::Message {
+                            role: "user".to_string(), content: correction,
+                        });
+                        env.conversation_history.push(llm::Message {
+                            role: "assistant".to_string(), content: retry_resp.text.clone(),
+                        });
+                        current_response = retry_resp.text;
+                    }
                 }
-
-                // Send a correction prompt and collect the next response.
-                let correction = format!(
-                    "Your response '{}' could not be parsed as {}. Please respond with only a single {} value, nothing else.",
-                    current_response.trim(), type_name, type_name
-                );
-                let retry_resp = {
-                    let backend = env.inference_backend.as_ref()
-                        .ok_or(JadeError::MissingApiKey { span: *span })?;
-                    let retry_req = llm::InferenceRequest {
-                        prompt: correction.clone(),
-                        model: env.default_model.clone(),
-                        history: env.conversation_history.clone(),
-                        max_tokens: RETRY_MAX_TOKENS,
-                    };
-                    backend.infer(retry_req, *span)?
-                };
-                env.conversation_history.push(llm::Message { role: "user".to_string(), content: correction });
-                env.conversation_history.push(llm::Message { role: "assistant".to_string(), content: retry_resp.text.clone() });
-                current_response = retry_resp.text;
             }
 
             // Final coercion attempt after all retry corrections have been sent.
-            if let Some(v) = coerce_to_type(&current_response, type_name) {
-                env.conversation_history.truncate(history_len_before_retries);
-                return Ok(v);
+            match coerce_to_type(&current_response, type_name, &struct_defs) {
+                Ok(v) => {
+                    env.conversation_history.truncate(history_len_before_retries);
+                    Ok(v)
+                }
+                Err(_) => {
+                    env.conversation_history.truncate(history_len_before_retries);
+                    Err(JadeError::PromptOverflow {
+                        name: expr_display(expr),
+                        attempts: max_retries + 1,
+                        span: *span,
+                    })
+                }
             }
-            env.conversation_history.truncate(history_len_before_retries);
-            Err(JadeError::PromptOverflow {
-                name: expr_display(expr),
-                attempts: max_retries + 1,
-                span: *span,
-            })
         }
     }
 }
 
+/// Strip markdown code fences that LLMs often wrap JSON in (``` or ```json).
+fn extract_json_text(text: &str) -> &str {
+    let t = text.trim();
+    let inner = t
+        .strip_prefix("```json").or_else(|| t.strip_prefix("```"))
+        .and_then(|s| s.strip_suffix("```"))
+        .map(str::trim);
+    inner.unwrap_or(t)
+}
+
+/// Recursively convert a `serde_json::Value` to a Jade `Value`.
+fn json_to_value(json: &serde_json::Value) -> std::result::Result<Value, String> {
+    match json {
+        serde_json::Value::Null => Err("null is not a valid Jade value".to_string()),
+        serde_json::Value::Bool(b) => Ok(Value::Bool(*b)),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() { Ok(Value::Int(i)) }
+            else if let Some(f) = n.as_f64() { Ok(Value::Float(f)) }
+            else { Err(format!("number {} cannot be represented as int or float", n)) }
+        }
+        serde_json::Value::String(s) => Ok(Value::Str(s.clone())),
+        serde_json::Value::Array(arr) => arr.iter().enumerate()
+            .map(|(i, v)| json_to_value(v).map_err(|e| format!("element {}: {}", i, e)))
+            .collect::<std::result::Result<Vec<Value>, String>>()
+            .map(Value::Array),
+        serde_json::Value::Object(obj) => obj.iter()
+            .map(|(k, v)| json_to_value(v)
+                .map(|val| (k.clone(), val))
+                .map_err(|e| format!("field '{}': {}", k, e)))
+            .collect::<std::result::Result<HashMap<String, Value>, String>>()
+            .map(Value::Dict),
+    }
+}
+
+/// Summarise struct field names and optionality for LLM error messages.
+fn field_summary(def: &[StructFieldDef]) -> String {
+    def.iter().map(|f| match f {
+        StructFieldDef::Required(n)      => format!("{} (required)", n),
+        StructFieldDef::Let { name, .. } => format!("{} (optional)", name),
+        StructFieldDef::Prompt { name, .. } => format!("{} (prompt, optional)", name),
+    }).collect::<Vec<_>>().join(", ")
+}
+
+/// Parse an LLM JSON response into a struct `Value`.
+fn coerce_struct(
+    text: &str,
+    type_name: &str,
+    def: &[StructFieldDef],
+) -> std::result::Result<Value, String> {
+    let raw = extract_json_text(text);
+    let json: serde_json::Value = serde_json::from_str(raw).map_err(|e| format!(
+        "Your response could not be parsed as a {} struct: {}. \
+         Respond with a JSON object with fields: {}.",
+        type_name, e, field_summary(def)
+    ))?;
+    let obj = json.as_object().ok_or_else(|| format!(
+        "Your response is not a JSON object. \
+         Respond with a JSON object for struct '{}' with fields: {}.",
+        type_name, field_summary(def)
+    ))?;
+
+    let mut fields: HashMap<String, Value> = HashMap::new();
+    for field_def in def {
+        match field_def {
+            StructFieldDef::Required(name) => {
+                let raw_val = obj.get(name.as_str()).ok_or_else(|| format!(
+                    "Missing required field '{}' for struct '{}'. \
+                     Respond with a JSON object containing all required fields: {}.",
+                    name, type_name, field_summary(def)
+                ))?;
+                let val = json_to_value(raw_val).map_err(|e| format!(
+                    "Field '{}' is invalid: {}. \
+                     Respond with a corrected JSON object for struct '{}'.",
+                    name, e, type_name
+                ))?;
+                fields.insert(name.clone(), val);
+            }
+            StructFieldDef::Let { name, .. } => {
+                if let Some(raw_val) = obj.get(name.as_str()) {
+                    let val = json_to_value(raw_val).map_err(|e| format!(
+                        "Field '{}' is invalid: {}. \
+                         Respond with a corrected JSON object for struct '{}'.",
+                        name, e, type_name
+                    ))?;
+                    fields.insert(name.clone(), val);
+                }
+            }
+            StructFieldDef::Prompt { name, .. } => {
+                if let Some(raw_val) = obj.get(name.as_str()) {
+                    let s = raw_val.as_str().ok_or_else(|| format!(
+                        "Prompt field '{}' must be a string value.", name
+                    ))?;
+                    fields.insert(name.clone(), Value::Prompt(s.to_string()));
+                }
+            }
+        }
+    }
+
+    Ok(Value::Struct(Rc::new(RefCell::new(StructInstance {
+        type_name: type_name.to_string(),
+        fields,
+    }))))
+}
+
 /// Try to coerce a raw LLM response string to a Jade typed value.
-fn coerce_to_type(text: &str, type_name: &str) -> Option<Value> {
+/// Returns `Ok(value)` on success or `Err(correction_prompt)` on failure —
+/// the correction is fed back to the LLM, never surfaced to the user directly.
+fn coerce_to_type(
+    text: &str,
+    type_name: &str,
+    struct_defs: &HashMap<String, Vec<StructFieldDef>>,
+) -> std::result::Result<Value, String> {
     match type_name {
-        "int"   => text.trim().parse::<i64>().ok().map(Value::Int),
-        "float" => text.trim().parse::<f64>().ok().map(Value::Float),
-        "str"   => Some(Value::Str(text.trim().to_string())),
-        "bool"  => match text.trim().to_lowercase().as_str() {
-            "true"  => Some(Value::Bool(true)),
-            "false" => Some(Value::Bool(false)),
-            _       => None,
+        "int" => text.trim().parse::<i64>().map(Value::Int).map_err(|_| format!(
+            "Your response {:?} could not be parsed as an integer. \
+             Respond with only a plain integer, e.g. 42.",
+            text.trim()
+        )),
+        "float" => text.trim().parse::<f64>().map(Value::Float).map_err(|_| format!(
+            "Your response {:?} could not be parsed as a float. \
+             Respond with only a plain float, e.g. 3.14.",
+            text.trim()
+        )),
+        "str" => Ok(Value::Str(text.trim().to_string())),
+        "bool" => match text.trim().to_lowercase().as_str() {
+            "true"  => Ok(Value::Bool(true)),
+            "false" => Ok(Value::Bool(false)),
+            _ => Err(format!(
+                "Your response {:?} could not be parsed as a boolean. \
+                 Respond with only 'true' or 'false'.",
+                text.trim()
+            )),
         },
-        _ => None,
+        "Array" | "array" => {
+            let raw = extract_json_text(text);
+            serde_json::from_str::<serde_json::Value>(raw)
+                .map_err(|e| format!(
+                    "Your response could not be parsed as a JSON array: {}. \
+                     Respond with only a JSON array, e.g. [1, \"two\", true].",
+                    e
+                ))
+                .and_then(|v| match v {
+                    serde_json::Value::Array(arr) => arr.iter().enumerate()
+                        .map(|(i, elem)| json_to_value(elem)
+                            .map_err(|e| format!("element {}: {}", i, e)))
+                        .collect::<std::result::Result<Vec<Value>, String>>()
+                        .map(Value::Array)
+                        .map_err(|e| format!(
+                            "Your response array could not be fully converted: {}. \
+                             Respond with only a JSON array of int, float, bool, or string values.",
+                            e
+                        )),
+                    _ => Err("Your response is not a JSON array. \
+                              Respond with only a JSON array, e.g. [1, \"two\", true].".to_string()),
+                })
+        }
+        "Dict" | "dict" => {
+            let raw = extract_json_text(text);
+            serde_json::from_str::<serde_json::Value>(raw)
+                .map_err(|e| format!(
+                    "Your response could not be parsed as a JSON object: {}. \
+                     Respond with only a JSON object, e.g. {{\"key\": \"value\"}}.",
+                    e
+                ))
+                .and_then(|v| match v {
+                    serde_json::Value::Object(obj) => obj.iter()
+                        .map(|(k, val)| json_to_value(val)
+                            .map(|v| (k.clone(), v))
+                            .map_err(|e| format!("field '{}': {}", k, e)))
+                        .collect::<std::result::Result<HashMap<String, Value>, String>>()
+                        .map(Value::Dict)
+                        .map_err(|e| format!(
+                            "Your response dict could not be fully converted: {}. \
+                             Respond with only a JSON object, e.g. {{\"key\": \"value\"}}.",
+                            e
+                        )),
+                    _ => Err("Your response is not a JSON object. \
+                              Respond with only a JSON object, e.g. {\"key\": \"value\"}.".to_string()),
+                })
+        }
+        name => {
+            if let Some(def) = struct_defs.get(name) {
+                coerce_struct(text, name, def)
+            } else {
+                Err(format!(
+                    "Unknown type '{}'. Cannot coerce LLM response to this type.", name
+                ))
+            }
+        }
     }
 }
 

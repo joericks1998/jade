@@ -12,7 +12,10 @@ impl OpenAiBackend {
         OpenAiBackend {
             api_key: api_key.to_string(),
             default_model: default_model.to_string(),
-            client: reqwest::blocking::Client::new(),
+            client: reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(60))
+                .build()
+                .expect("failed to build HTTP client"),
         }
     }
 }
