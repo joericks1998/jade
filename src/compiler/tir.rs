@@ -99,6 +99,10 @@ pub enum TExprKind {
     Dict {
         entries: Vec<(TExpr, TExpr)>,
     },
+    Closure {
+        params: Vec<String>,
+        body: Vec<TStmt>,
+    },
 }
 
 // ── TIR statements ────────────────────────────────────────────────────────────

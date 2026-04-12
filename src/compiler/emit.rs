@@ -35,6 +35,16 @@ struct EmitCtx {
     struct_defs: HashMap<String, Vec<StructFieldDef>>,
     interface_defs: HashMap<String, Vec<String>>,
     extend_methods: HashMap<String, HashMap<String, Rc<CompiledFn>>>,
+    /// Counter for generating unique closure names (`__closure_0__`, etc.).
+    next_closure_id: usize,
+}
+
+impl EmitCtx {
+    fn next_closure_name(&mut self) -> String {
+        let id = self.next_closure_id;
+        self.next_closure_id += 1;
+        format!("__closure_{}__", id)
+    }
 }
 
 /// Per-chunk compilation state.
@@ -112,6 +122,7 @@ pub fn emit(program: TProgram) -> Result<CompiledProgram> {
         struct_defs: HashMap::new(),
         interface_defs: HashMap::new(),
         extend_methods: HashMap::new(),
+        next_closure_id: 0,
     };
     for stmt in &program.stmts {
         match stmt {
@@ -465,6 +476,16 @@ fn emit_expr(expr: &TExpr, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<Reg> {
             let src = emit_expr(pexpr, em, ctx)?;
             let dest = em.alloc_reg();
             em.chunk.emit(Instr::PromptDeref(dest, src, output_type.clone()), span);
+            Ok(dest)
+        }
+
+        TExprKind::Closure { params, body } => {
+            let name = ctx.next_closure_name();
+            let compiled = emit_fn(&name, params.clone(), body.clone(), span, ctx)?;
+            let rc = Rc::new(compiled);
+            let idx = em.chunk.intern_fn(Rc::clone(&rc));
+            let dest = em.alloc_reg();
+            em.chunk.emit(Instr::MakeClosure(dest, idx), span);
             Ok(dest)
         }
     }

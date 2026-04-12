@@ -30,6 +30,8 @@ pub enum VmValue {
     Bool(bool),
     Str(String),
     Fn(Rc<CompiledFn>),
+    /// A closure: compiled function + snapshot of globals at creation time.
+    Closure(Rc<CompiledFn>, Rc<HashMap<String, VmValue>>),
     Struct(Rc<RefCell<VmStruct>>),
     BoundMethod(Rc<VmBoundMethod>),
     Array(Vec<VmValue>),
@@ -56,6 +58,7 @@ impl std::fmt::Debug for VmValue {
             VmValue::Bool(b)  => write!(f, "Bool({})", b),
             VmValue::Str(s)   => write!(f, "Str({:?})", s),
             VmValue::Fn(cf)   => write!(f, "Fn({})", cf.params.join(", ")),
+            VmValue::Closure(cf, _) => write!(f, "Closure({})", cf.params.join(", ")),
             VmValue::Struct(rc) => {
                 let inst = rc.borrow();
                 write!(f, "{} {{...}}", inst.type_name)
@@ -99,6 +102,7 @@ pub fn value_to_display(v: &VmValue) -> String {
             format!("{{{}}}", parts.join(", "))
         }
         VmValue::Fn(_)          => "<fn>".to_string(),
+        VmValue::Closure(_, _)  => "<fn>".to_string(),
         VmValue::Struct(_)      => "<struct>".to_string(),
         VmValue::BoundMethod(_) => "<bound method>".to_string(),
         VmValue::Prompt(_)      => "<prompt>".to_string(),
@@ -317,6 +321,14 @@ fn execute_chunk(
             Instr::LoadFn(d, idx)  => {
                 let cf = Rc::clone(&chunk.fn_defs[*idx]);
                 set(slots, *d, VmValue::Fn(cf));
+            }
+            Instr::MakeClosure(d, idx) => {
+                let cf = Rc::clone(&chunk.fn_defs[*idx]);
+                // Capture a snapshot of all current globals at closure-creation time.
+                let captured: HashMap<String, VmValue> = state.globals.iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                set(slots, *d, VmValue::Closure(cf, Rc::new(captured)));
             }
             Instr::Move(d, s) => {
                 let v = get(slots, *s).clone();
@@ -694,6 +706,23 @@ fn call_value(
 ) -> Result<VmValue> {
     match callee {
         VmValue::Fn(cf) => call_fn(&cf, args, state, span),
+        VmValue::Closure(cf, captured) => {
+            // Temporarily inject captured variables into globals so the closure body
+            // sees them via GetGlobal. Save any displaced values and restore after.
+            let mut saved: Vec<(String, Option<VmValue>)> = Vec::new();
+            for (k, v) in captured.iter() {
+                let old = state.globals.insert(k.clone(), v.clone());
+                saved.push((k.clone(), old));
+            }
+            let result = call_fn(&cf, args, state, span);
+            for (k, old) in saved {
+                match old {
+                    Some(v) => { state.globals.insert(k, v); }
+                    None    => { state.globals.remove(&k); }
+                }
+            }
+            result
+        }
         VmValue::BoundMethod(bm) => {
             let method = Rc::clone(&bm.method);
             let mut full_args = Vec::with_capacity(args.len() + 1);
@@ -1075,7 +1104,8 @@ fn str2(slots: &[VmValue], l: Reg, r: Reg, span: Span) -> Result<(String, String
 fn instr_max_reg(instr: &Instr) -> u32 {
     match instr {
         Instr::LoadInt(d,_)|Instr::LoadFloat(d,_)|Instr::LoadBool(d,_)
-        |Instr::LoadStr(d,_)|Instr::LoadNil(d)|Instr::LoadFn(d,_) => *d,
+        |Instr::LoadStr(d,_)|Instr::LoadNil(d)|Instr::LoadFn(d,_)
+        |Instr::MakeClosure(d,_) => *d,
         Instr::GetLocal(d,_)|Instr::GetGlobal(d,_) => *d,
         Instr::Move(d,s)|Instr::NegInt(d,s)|Instr::NegFloat(d,s)
         |Instr::IntToFloat(d,s)|Instr::BitNot(d,s)|Instr::Not(d,s)

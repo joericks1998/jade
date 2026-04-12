@@ -710,6 +710,7 @@ impl Parser {
             Expr::FStr         { span, .. } => *span,
             Expr::PromptDeref  { span, .. } => *span,
             Expr::Dict         { span, .. } => *span,
+            Expr::Closure      { span, .. } => *span,
         }
     }
 
@@ -1160,6 +1161,33 @@ impl Parser {
                 };
                 Ok(Expr::PromptDeref { expr: Box::new(expr), output_type, span })
             }
+            // ── Closures: `|x, y| expr` or `|x, y| { body }` ────────────────
+            TokenKind::Pipe => {
+                let span = token.span;
+                self.advance(); // consume first `|`
+                let mut params = Vec::new();
+                // Parse parameters until the closing `|`
+                while self.peek().kind != TokenKind::Pipe {
+                    if self.peek().kind == TokenKind::Eof {
+                        return Err(JadeError::UnexpectedEof { span: self.peek().span });
+                    }
+                    let p = self.expect_ident("closure parameter")?;
+                    params.push(p);
+                    if self.peek().kind == TokenKind::Comma {
+                        self.advance();
+                    }
+                }
+                self.expect(&TokenKind::Pipe)?; // consume closing `|`
+                let body = self.parse_closure_body(span)?;
+                Ok(Expr::Closure { params, body, span })
+            }
+            // ── Empty-param closure: `|| expr` or `|| { body }` ─────────────
+            TokenKind::PipePipe => {
+                let span = token.span;
+                self.advance(); // consume `||`
+                let body = self.parse_closure_body(span)?;
+                Ok(Expr::Closure { params: Vec::new(), body, span })
+            }
             TokenKind::Eof => Err(JadeError::UnexpectedEof { span: token.span }),
             _ => Err(JadeError::UnexpectedToken {
                 expected: "expression".to_string(),
@@ -1167,6 +1195,20 @@ impl Parser {
                 span: token.span,
             }),
         }
+    }
+
+    /// Parse the body of a closure: `{ stmts }` or a single expression (implicit return).
+    fn parse_closure_body(&mut self, span: Span) -> Result<Vec<Stmt>> {
+        self.fn_depth += 1;
+        let body = if self.peek().kind == TokenKind::LBrace {
+            self.parse_block()?
+        } else {
+            // Single expression: wrap as implicit return so eval_block returns it.
+            let expr = self.parse_pipe()?;
+            vec![Stmt::Return { value: Some(expr), span }]
+        };
+        self.fn_depth -= 1;
+        Ok(body)
     }
 }
 

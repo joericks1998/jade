@@ -103,6 +103,8 @@ pub enum Instr {
     LoadNil(Reg),
     /// Load a compiled function value from `chunk.fn_defs[idx]`.
     LoadFn(Reg, usize),
+    /// Create a closure from `chunk.fn_defs[idx]`, capturing the current globals.
+    MakeClosure(Reg, usize),
 
     // ── Variable access ────────────────────────────────────────────────────
     /// dest ← globals[name]
