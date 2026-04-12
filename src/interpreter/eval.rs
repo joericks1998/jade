@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use super::{
-    ast::{BinOpKind, Expr, FStrPart, Program, Stmt, UnaryOpKind},
+    ast::{BinOpKind, Expr, FStrPart, Program, StructFieldDef, Stmt, UnaryOpKind},
     error::{JadeError, Result, Span},
 };
 use crate::llm;
@@ -37,6 +37,9 @@ pub enum Value {
     Builtin(BuiltinFn),
     /// A prompt declaration. Holds the prompt text; dereferenced with `?`.
     Prompt(String),
+    /// A dictionary value. Stored as a plain `HashMap` — assignment clones the whole
+    /// map (value semantics), so aliases are always independent copies.
+    Dict(HashMap<String, Value>),
 }
 
 /// Identifies a built-in function by name.
@@ -50,6 +53,8 @@ pub enum BuiltinFn {
 pub struct FnValue {
     pub params: Vec<String>,
     pub body: Vec<Stmt>,
+    /// Variables captured at closure-creation time (empty for named functions).
+    pub captured: HashMap<String, Value>,
 }
 
 /// A struct instance at runtime.
@@ -94,6 +99,18 @@ impl std::fmt::Debug for Value {
             Value::BoundMethod(_) => write!(f, "<bound method>"),
             Value::Builtin(b)     => write!(f, "<builtin {:?}>", b),
             Value::Prompt(text)   => write!(f, "Prompt({:?})", text),
+            Value::Dict(map) => {
+                let mut pairs: Vec<_> = map.iter().collect();
+                pairs.sort_by_key(|(k, _)| k.as_str());
+                write!(f, "Dict{{")?;
+                let mut first = true;
+                for (k, v) in pairs {
+                    if !first { write!(f, ", ")?; }
+                    write!(f, "{:?}: {:?}", k, v)?;
+                    first = false;
+                }
+                write!(f, "}}")
+            }
         }
     }
 }
@@ -111,8 +128,8 @@ impl std::fmt::Debug for FnValue {
 /// Struct definitions and extend methods are global (not scoped).
 pub struct Env {
     scopes: Vec<HashMap<String, Value>>,
-    /// Maps struct type names to their ordered list of field names.
-    pub struct_defs: HashMap<String, Vec<String>>,
+    /// Maps struct type names to their field definitions (including defaults).
+    pub struct_defs: HashMap<String, Vec<StructFieldDef>>,
     /// Maps struct type names to their method tables.
     pub extend_methods: HashMap<String, HashMap<String, Rc<FnValue>>>,
     /// Maps interface names to their required method names.
@@ -207,6 +224,18 @@ impl Env {
         self.builtins.get(name).map(|b| Value::Builtin(b.clone()))
     }
 
+    /// Snapshot all currently visible variables (inner scopes win over outer).
+    /// Used to capture the environment when creating a closure.
+    fn snapshot(&self) -> HashMap<String, Value> {
+        let mut map = HashMap::new();
+        for scope in self.scopes.iter() {
+            for (k, v) in scope {
+                map.insert(k.clone(), v.clone());
+            }
+        }
+        map
+    }
+
     /// Iterate over all top-level (global) bindings — used by `-v` output.
     pub fn entries(&self) -> impl Iterator<Item = (&String, &Value)> {
         self.scopes[0].iter()
@@ -283,6 +312,7 @@ fn eval_block(stmts: &[Stmt], env: &mut Env) -> Result<Option<Value>> {
                 let fn_val = FnValue {
                     params: params.clone(),
                     body: body.clone(),
+                    captured: HashMap::new(),
                 };
                 env.define(name.clone(), Value::Fn(Rc::new(fn_val)));
             }
@@ -385,6 +415,7 @@ fn eval_block(stmts: &[Stmt], env: &mut Env) -> Result<Option<Value>> {
                         method_map.insert(name.clone(), Rc::new(FnValue {
                             params: params.clone(),
                             body: body.clone(),
+                            captured: HashMap::new(),
                         }));
                     }
                 }
@@ -433,6 +464,13 @@ fn eval_block(stmts: &[Stmt], env: &mut Env) -> Result<Option<Value>> {
                     (Value::Array(_), _) => return Err(JadeError::TypeError {
                         op: "array index".to_string(), span: *span,
                     }),
+                    (Value::Dict(mut map), Value::Str(key)) => {
+                        map.insert(key, new_val);
+                        env.assign(name, Value::Dict(map), *span)?;
+                    }
+                    (Value::Dict(_), _) => return Err(JadeError::TypeError {
+                        op: "dict index".to_string(), span: *span,
+                    }),
                     _ => return Err(JadeError::TypeError {
                         op: "index assign".to_string(), span: *span,
                     }),
@@ -450,6 +488,24 @@ fn eval_block(stmts: &[Stmt], env: &mut Env) -> Result<Option<Value>> {
                 }
             }
 
+            Stmt::For { span, .. } => {
+                return Err(JadeError::TypeError {
+                    op: "`for` is not supported in the tree-walk evaluator".to_string(),
+                    span: *span,
+                });
+            }
+
+            Stmt::Use { span, .. } => {
+                // `use` is not supported by the tree-walk evaluator — it is
+                // resolved at the bytecode VM level. Reaching this arm means
+                // the evaluator was called directly on a program that contains
+                // `use`, which is not the normal execution path.
+                return Err(JadeError::TypeError {
+                    op: "`use` is not supported in the tree-walk evaluator".to_string(),
+                    span: *span,
+                });
+            }
+
             Stmt::Expr(expr) => {
                 eval_expr(expr, env)?;
             }
@@ -459,6 +515,37 @@ fn eval_block(stmts: &[Stmt], env: &mut Env) -> Result<Option<Value>> {
 }
 
 // ── Expression evaluator ─────────────────────────────────────────────────────
+
+/// Extract the source `Span` from any expression node.
+fn expr_span(e: &Expr) -> Span {
+    match e {
+        Expr::Integer      { span, .. } => *span,
+        Expr::Float        { span, .. } => *span,
+        Expr::Bool         { span, .. } => *span,
+        Expr::Str          { span, .. } => *span,
+        Expr::Identifier   { span, .. } => *span,
+        Expr::Call         { span, .. } => *span,
+        Expr::BinOp        { span, .. } => *span,
+        Expr::UnaryOp      { span, .. } => *span,
+        Expr::StructLiteral{ span, .. } => *span,
+        Expr::FieldAccess  { span, .. } => *span,
+        Expr::Index        { span, .. } => *span,
+        Expr::Array        { span, .. } => *span,
+        Expr::FStr         { span, .. } => *span,
+        Expr::PromptDeref  { span, .. } => *span,
+        Expr::Dict         { span, .. } => *span,
+        Expr::Closure      { span, .. } => *span,
+    }
+}
+
+/// Build a human-readable description of an expression for use in error messages.
+fn expr_display(e: &Expr) -> String {
+    match e {
+        Expr::Identifier { name, .. } => name.clone(),
+        Expr::FieldAccess { object, field, .. } => format!("{}.{}", expr_display(object), field),
+        _ => "<expression>".to_string(),
+    }
+}
 
 /// Widen an integer to float for mixed-type arithmetic.
 /// This match is exhaustive over all current `Value` variants. If a new
@@ -477,6 +564,7 @@ fn to_float(v: Value) -> f64 {
         Value::BoundMethod(_) => unreachable!("to_float called on BoundMethod"),
         Value::Builtin(_)     => unreachable!("to_float called on Builtin"),
         Value::Prompt(_)      => unreachable!("to_float called on Prompt"),
+        Value::Dict(_)        => unreachable!("to_float called on Dict"),
     }
 }
 
@@ -501,11 +589,35 @@ pub(crate) fn value_to_str(v: &Value) -> String {
             let parts: Vec<String> = vec.iter().map(value_to_str).collect();
             format!("[{}]", parts.join(", "))
         }
+        Value::Dict(map) => {
+            let mut pairs: Vec<_> = map.iter().collect();
+            pairs.sort_by_key(|(k, _)| k.as_str());
+            let parts: Vec<String> = pairs.iter()
+                .map(|(k, v)| format!("{:?}: {}", k, value_to_str(v)))
+                .collect();
+            format!("{{{}}}", parts.join(", "))
+        }
         Value::Fn(_)          => "<fn>".to_string(),
         Value::Struct(_)      => "<struct>".to_string(),
         Value::BoundMethod(_) => "<bound method>".to_string(),
         Value::Builtin(_)     => "<builtin>".to_string(),
         Value::Prompt(_)      => "<prompt>".to_string(),
+    }
+}
+
+fn value_type_name(v: &Value) -> &'static str {
+    match v {
+        Value::Int(_)         => "int",
+        Value::Float(_)       => "float",
+        Value::Bool(_)        => "bool",
+        Value::Str(_)         => "str",
+        Value::Array(_)       => "array",
+        Value::Dict(_)        => "dict",
+        Value::Struct(_)      => "struct",
+        Value::Fn(_)          => "fn",
+        Value::BoundMethod(_) => "fn",
+        Value::Builtin(_)     => "fn",
+        Value::Prompt(_)      => "prompt",
     }
 }
 
@@ -552,6 +664,10 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                         arg_vals.push(eval_expr(arg_expr, env)?);
                     }
                     env.push_scope();
+                    // Inject captured variables first so params can shadow them.
+                    for (name, val) in &fn_rc.captured {
+                        env.define(name.clone(), val.clone());
+                    }
                     for (param, val) in fn_rc.params.iter().zip(arg_vals) {
                         env.define(param.clone(), val);
                     }
@@ -619,6 +735,7 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                     match v {
                         Value::Str(s)     => Ok(Value::Int(s.chars().count() as i64)),
                         Value::Array(vec) => Ok(Value::Int(vec.len() as i64)),
+                        Value::Dict(map)  => Ok(Value::Int(map.len() as i64)),
                         _ => Err(JadeError::TypeError { op: "len".to_string(), span: *span }),
                     }
                 }
@@ -628,38 +745,83 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
         }
 
         Expr::StructLiteral { type_name, fields, span } => {
-            let def_fields = env.struct_defs.get(type_name)
+            // Clone is required: `eval_expr(default, env)` below needs `&mut env`, which
+            // would conflict with an immutable borrow of `env.struct_defs` kept alive
+            // across the call. The clone drops that borrow before mutation begins.
+            let def_fields: Vec<StructFieldDef> = env.struct_defs
+                .get(type_name)
                 .ok_or_else(|| JadeError::UndefinedType { name: type_name.clone(), span: *span })?
                 .clone();
 
-            // Evaluate all field expressions
-            let mut field_map: HashMap<String, Value> = HashMap::new();
+            // Evaluate all caller-provided field expressions. Store each value alongside
+            // the expression's span for precise error reporting, and reject duplicates.
+            let mut provided: HashMap<String, (Value, Span)> = HashMap::new();
             for (fname, fexpr) in fields {
-                let v = eval_expr(fexpr, env)?;
-                field_map.insert(fname.clone(), v);
-            }
-
-            // Verify every declared field is present in the literal
-            for required in &def_fields {
-                if !field_map.contains_key(required) {
-                    return Err(JadeError::MissingField { field: required.clone(), span: *span });
+                let field_span = expr_span(fexpr);
+                if provided.contains_key(fname.as_str()) {
+                    return Err(JadeError::DuplicateField { field: fname.clone(), span: field_span });
                 }
+                let v = eval_expr(fexpr, env)?;
+                provided.insert(fname.clone(), (v, field_span));
             }
 
             // Verify no extra fields beyond what the struct defines
-            for provided in field_map.keys() {
-                if !def_fields.contains(provided) {
+            for (key, (_, key_span)) in &provided {
+                if !def_fields.iter().any(|f| f.name() == key) {
                     return Err(JadeError::UndefinedField {
                         type_name: type_name.clone(),
-                        field: provided.clone(),
-                        span: *span,
+                        field: key.clone(),
+                        span: *key_span,
                     });
+                }
+            }
+
+            // Walk the definition in order, filling final fields from provided values or defaults
+            let mut final_fields: HashMap<String, Value> = HashMap::new();
+            for def_field in &def_fields {
+                match def_field {
+                    StructFieldDef::Required(name) => {
+                        match provided.remove(name) {
+                            Some((v, _)) => { final_fields.insert(name.clone(), v); }
+                            None         => return Err(JadeError::MissingField { field: name.clone(), span: *span }),
+                        }
+                    }
+                    StructFieldDef::Let { name, default } => {
+                        let v = if let Some((pv, _)) = provided.remove(name) {
+                            pv
+                        } else {
+                            eval_expr(default, env)?
+                        };
+                        final_fields.insert(name.clone(), v);
+                    }
+                    StructFieldDef::Prompt { name, default } => {
+                        let v = if let Some((pv, field_span)) = provided.remove(name) {
+                            // Caller-provided value must be a string; wrap as Prompt
+                            match pv {
+                                Value::Str(text) => Value::Prompt(text),
+                                _ => return Err(JadeError::PromptFieldNotStr {
+                                    field: name.clone(),
+                                    span: field_span,
+                                }),
+                            }
+                        } else {
+                            // Evaluate default; must yield a string
+                            match eval_expr(default, env)? {
+                                Value::Str(text) => Value::Prompt(text),
+                                _ => return Err(JadeError::PromptFieldNotStr {
+                                    field: name.clone(),
+                                    span: *span,
+                                }),
+                            }
+                        };
+                        final_fields.insert(name.clone(), v);
+                    }
                 }
             }
 
             Ok(Value::Struct(Rc::new(RefCell::new(StructInstance {
                 type_name: type_name.clone(),
-                fields: field_map,
+                fields: final_fields,
             }))))
         }
 
@@ -687,12 +849,52 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
             }
         }
 
-        Expr::Array { elements, .. } => {
+        Expr::Array { elements, span } => {
             let mut vec = Vec::with_capacity(elements.len());
             for elem in elements {
                 vec.push(eval_expr(elem, env)?);
             }
+            if let Some(first) = vec.first() {
+                let first_ty = value_type_name(first);
+                for v in vec.iter().skip(1) {
+                    let ty = value_type_name(v);
+                    if ty != first_ty {
+                        return Err(JadeError::HeterogeneousArray {
+                            first: first_ty.to_string(),
+                            got: ty.to_string(),
+                            span: *span,
+                        });
+                    }
+                }
+            }
             Ok(Value::Array(vec))
+        }
+
+        Expr::Dict { entries, .. } => {
+            let mut map = HashMap::with_capacity(entries.len());
+            for (key_expr, val_expr) in entries {
+                let key_span = expr_span(key_expr);
+                let key = match eval_expr(key_expr, env)? {
+                    Value::Str(s) => s,
+                    _ => return Err(JadeError::TypeError {
+                        op: "dict key".to_string(),
+                        span: key_span,
+                    }),
+                };
+                let val = eval_expr(val_expr, env)?;
+                // Duplicate keys are allowed; the last definition wins (Python semantics).
+                map.insert(key, val);
+            }
+            Ok(Value::Dict(map))
+        }
+
+        Expr::Closure { params, body, .. } => {
+            let fn_val = FnValue {
+                params: params.clone(),
+                body: body.clone(),
+                captured: env.snapshot(),
+            };
+            Ok(Value::Fn(Rc::new(fn_val)))
         }
 
         Expr::Index { object, index, span } => {
@@ -718,6 +920,10 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                         Ok(vec[i as usize].clone())
                     }
                 }
+                (Value::Dict(map), Value::Str(key)) => {
+                    map.get(&key).cloned().ok_or_else(|| JadeError::KeyNotFound { key, span: *span })
+                }
+                (Value::Dict(_), _) => Err(JadeError::TypeError { op: "dict index".to_string(), span: *span }),
                 _ => Err(JadeError::TypeError { op: "[]".to_string(), span: *span }),
             }
         }
@@ -761,6 +967,7 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                             (Value::Bool(_), _) | (_, Value::Bool(_)) |
                             (Value::Fn(_),   _) | (_, Value::Fn(_))   |
                             (Value::Array(_), _) | (_, Value::Array(_)) |
+                            (Value::Dict(_), _) | (_, Value::Dict(_)) |
                             (Value::Struct(_), _) | (_, Value::Struct(_)) |
                             (Value::BoundMethod(_), _) | (_, Value::BoundMethod(_)) |
                             (Value::Builtin(_), _) | (_, Value::Builtin(_)) |
@@ -777,6 +984,7 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                             (Value::Str(_), _)  | (_, Value::Str(_))  |
                             (Value::Fn(_),   _) | (_, Value::Fn(_))   |
                             (Value::Array(_), _) | (_, Value::Array(_)) |
+                            (Value::Dict(_), _) | (_, Value::Dict(_)) |
                             (Value::Struct(_), _) | (_, Value::Struct(_)) |
                             (Value::BoundMethod(_), _) | (_, Value::BoundMethod(_)) |
                             (Value::Builtin(_), _) | (_, Value::Builtin(_)) |
@@ -792,6 +1000,7 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                             (Value::Str(_), _)  | (_, Value::Str(_))  |
                             (Value::Fn(_),   _) | (_, Value::Fn(_))   |
                             (Value::Array(_), _) | (_, Value::Array(_)) |
+                            (Value::Dict(_), _) | (_, Value::Dict(_)) |
                             (Value::Struct(_), _) | (_, Value::Struct(_)) |
                             (Value::BoundMethod(_), _) | (_, Value::BoundMethod(_)) |
                             (Value::Builtin(_), _) | (_, Value::Builtin(_)) |
@@ -807,6 +1016,7 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                             (Value::Str(_), _)  | (_, Value::Str(_))  |
                             (Value::Fn(_),   _) | (_, Value::Fn(_))   |
                             (Value::Array(_), _) | (_, Value::Array(_)) |
+                            (Value::Dict(_), _) | (_, Value::Dict(_)) |
                             (Value::Struct(_), _) | (_, Value::Struct(_)) |
                             (Value::BoundMethod(_), _) | (_, Value::BoundMethod(_)) |
                             (Value::Builtin(_), _) | (_, Value::Builtin(_)) |
@@ -825,6 +1035,7 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                             (Value::Str(_), _)  | (_, Value::Str(_))  |
                             (Value::Fn(_),   _) | (_, Value::Fn(_))   |
                             (Value::Array(_), _) | (_, Value::Array(_)) |
+                            (Value::Dict(_), _) | (_, Value::Dict(_)) |
                             (Value::Struct(_), _) | (_, Value::Struct(_)) |
                             (Value::BoundMethod(_), _) | (_, Value::BoundMethod(_)) |
                             (Value::Builtin(_), _) | (_, Value::Builtin(_)) |
@@ -952,12 +1163,11 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
             }
         }
 
-        Expr::PromptDeref { name, output_type, span } => {
-            // 1. Resolve the prompt text from the environment.
-            let prompt_text = match env.get(name) {
-                Some(Value::Prompt(text)) => text,
-                Some(_) => return Err(JadeError::NotAPrompt { name: name.clone(), span: *span }),
-                None    => return Err(JadeError::UndefinedVariable { name: name.clone(), span: *span }),
+        Expr::PromptDeref { expr, output_type, span } => {
+            // 1. Evaluate the target expression and extract the prompt text.
+            let prompt_text = match eval_expr(expr, env)? {
+                Value::Prompt(text) => text,
+                _ => return Err(JadeError::NotAPrompt { name: expr_display(expr), span: *span }),
             };
 
             // 2. Call the backend with the current conversation history.
@@ -1027,7 +1237,7 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
             }
             env.conversation_history.truncate(history_len_before_retries);
             Err(JadeError::PromptOverflow {
-                name: name.clone(),
+                name: expr_display(expr),
                 attempts: max_retries + 1,
                 span: *span,
             })
@@ -1187,9 +1397,9 @@ mod tests {
     }
 
     #[test]
-    fn test_eval_neg_expr() {
-        let env = eval_src("let x = -(3 + 4)").unwrap();
-        assert!(matches!(get(&env, "x"), Value::Int(-7)));
+    fn test_eval_neg_paren_rejected() {
+        // -(expr) syntax is not allowed; use a let binding to negate instead
+        assert!(matches!(eval_src_parse_err("let x = -(3 + 4)"), JadeError::UnexpectedToken { .. }));
     }
 
     // ── error conditions ─────────────────────────────────────────────────────
@@ -2128,14 +2338,11 @@ print("hello")"#).unwrap();
     }
 
     #[test]
-    fn test_eval_array_heterogeneous() {
-        let env = eval_src("let a = [1, 2.0, true, \"hello\"]").unwrap();
-        let Value::Array(ref vec) = get(&env, "a") else { panic!("not an array") };
-        assert_eq!(vec.len(), 4);
-        assert!(matches!(vec[0], Value::Int(1)));
-        assert!(matches!(vec[1], Value::Float(f) if f == 2.0));
-        assert!(matches!(vec[2], Value::Bool(true)));
-        assert!(matches!(vec[3], Value::Str(ref s) if s == "hello"));
+    fn test_eval_array_heterogeneous_rejected() {
+        assert!(matches!(
+            eval_src("let a = [1, 2.0, true, \"hello\"]").unwrap_err(),
+            JadeError::HeterogeneousArray { .. }
+        ));
     }
 
     #[test]
@@ -2280,6 +2487,37 @@ print("hello")"#).unwrap();
     }
 
     #[test]
+    fn test_eval_prompt_deref_field_access_no_backend() {
+        // ?obj.field resolves the prompt field and tries to call the backend
+        let tokens = lexer::tokenize(
+            "struct Agent {\n    prompt system = \"helpful\"\n}\nlet a = Agent {}\nlet r = ?a.system"
+        ).expect("lex");
+        let program = parser::parse(tokens).expect("parse");
+        let err = evaluate(program, LlmOpts::default()).unwrap_err();
+        assert!(matches!(err, JadeError::MissingApiKey { .. }));
+    }
+
+    #[test]
+    fn test_eval_prompt_deref_field_access_not_a_prompt() {
+        // ?obj.field where the field is not a prompt → NotAPrompt error
+        let err = eval_with_mock(
+            "struct S {\n    x,\n}\nlet s = S { x: 42 }\nlet r = ?s.x",
+            vec![]
+        ).unwrap_err();
+        assert!(matches!(err, JadeError::NotAPrompt { .. }));
+    }
+
+    #[test]
+    fn test_eval_prompt_deref_field_access_with_mock() {
+        // ?obj.field works end-to-end with a mock backend
+        let env = eval_with_mock(
+            "struct Agent {\n    prompt system = \"Say hello\"\n}\nlet a = Agent {}\nlet r = ?a.system",
+            vec!["hello!"]
+        ).unwrap();
+        assert!(matches!(get(&env, "r"), Value::Str(s) if s == "hello!"));
+    }
+
+    #[test]
     fn test_eval_typed_deref_int_success() {
         let env = eval_with_mock("prompt p = \"What is 2+2?\"\nlet n = ?p |> int", vec!["4"]).unwrap();
         assert!(matches!(get(&env, "n"), Value::Int(4)));
@@ -2334,5 +2572,234 @@ print("hello")"#).unwrap();
             vec!["not a number", "42"],
         ).unwrap();
         assert!(matches!(get(&env, "n"), Value::Int(42)));
+    }
+
+    // ── dict tests ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_eval_dict_empty() {
+        let env = eval_src("let d = {}").unwrap();
+        assert!(matches!(get(&env, "d"), Value::Dict(m) if m.is_empty()));
+    }
+
+    #[test]
+    fn test_eval_dict_string_values() {
+        let env = eval_src(r#"let d = {"name": "jade", "lang": "cool"}"#).unwrap();
+        match get(&env, "d") {
+            Value::Dict(m) => {
+                assert!(matches!(m.get("name"), Some(Value::Str(s)) if s == "jade"));
+                assert!(matches!(m.get("lang"), Some(Value::Str(s)) if s == "cool"));
+            }
+            _ => panic!("expected Dict"),
+        }
+    }
+
+    #[test]
+    fn test_eval_dict_int_value() {
+        let env = eval_src(r#"let d = {"x": 42}"#).unwrap();
+        match get(&env, "d") {
+            Value::Dict(m) => assert!(matches!(m.get("x"), Some(Value::Int(42)))),
+            _ => panic!("expected Dict"),
+        }
+    }
+
+    #[test]
+    fn test_eval_dict_index_read() {
+        let src = "let d = {\"k\": 7}\nlet v = d[\"k\"]";
+        let env = eval_src(src).unwrap();
+        assert!(matches!(get(&env, "v"), Value::Int(7)));
+    }
+
+    #[test]
+    fn test_eval_dict_index_read_string_value() {
+        let src = "let d = {\"a\": \"hello\"}\nlet v = d[\"a\"]";
+        let env = eval_src(src).unwrap();
+        assert!(matches!(get(&env, "v"), Value::Str(s) if s == "hello"));
+    }
+
+    #[test]
+    fn test_eval_dict_key_not_found() {
+        let src = "let d = {\"x\": 1}\nlet v = d[\"y\"]";
+        let err = eval_src(src).unwrap_err();
+        assert!(matches!(err, JadeError::KeyNotFound { key, .. } if key == "y"));
+    }
+
+    #[test]
+    fn test_eval_dict_index_assign_existing_key() {
+        let src = "let d = {\"v\": 1}\nd[\"v\"] = 99";
+        let env = eval_src(src).unwrap();
+        match get(&env, "d") {
+            Value::Dict(m) => assert!(matches!(m.get("v"), Some(Value::Int(99)))),
+            _ => panic!("expected Dict"),
+        }
+    }
+
+    #[test]
+    fn test_eval_dict_index_assign_new_key() {
+        let src = "let d = {}\nd[\"k\"] = 5";
+        let env = eval_src(src).unwrap();
+        match get(&env, "d") {
+            Value::Dict(m) => assert!(matches!(m.get("k"), Some(Value::Int(5)))),
+            _ => panic!("expected Dict"),
+        }
+    }
+
+    #[test]
+    fn test_eval_dict_len() {
+        let src = "let d = {\"a\": 1, \"b\": 2, \"c\": 3}\nlet n = len(d)";
+        let env = eval_src(src).unwrap();
+        assert!(matches!(get(&env, "n"), Value::Int(3)));
+    }
+
+    #[test]
+    fn test_eval_dict_len_empty() {
+        let env = eval_src("let d = {}\nlet n = len(d)").unwrap();
+        assert!(matches!(get(&env, "n"), Value::Int(0)));
+    }
+
+    #[test]
+    fn test_eval_dict_value_semantics() {
+        // Assigning a dict copies it; mutation of the copy does not affect original
+        let src = "let d = {\"x\": 1}\nlet d2 = d\nd2[\"x\"] = 99";
+        let env = eval_src(src).unwrap();
+        match get(&env, "d") {
+            Value::Dict(m) => assert!(matches!(m.get("x"), Some(Value::Int(1)))),
+            _ => panic!("expected Dict"),
+        }
+        match get(&env, "d2") {
+            Value::Dict(m) => assert!(matches!(m.get("x"), Some(Value::Int(99)))),
+            _ => panic!("expected Dict"),
+        }
+    }
+
+    #[test]
+    fn test_eval_dict_variable_key() {
+        // Key expression that evaluates to a string at runtime
+        let src = "let k = \"name\"\nlet d = {k: \"jade\"}\nlet v = d[\"name\"]";
+        let env = eval_src(src).unwrap();
+        assert!(matches!(get(&env, "v"), Value::Str(s) if s == "jade"));
+    }
+
+    #[test]
+    fn test_eval_dict_non_string_key_type_error() {
+        let src = "let d = {1: \"oops\"}";
+        let err = eval_src(src).unwrap_err();
+        assert!(matches!(err, JadeError::TypeError { .. }));
+    }
+
+    #[test]
+    fn test_eval_dict_non_string_index_type_error() {
+        let src = "let d = {\"x\": 1}\nlet v = d[0]";
+        let err = eval_src(src).unwrap_err();
+        assert!(matches!(err, JadeError::TypeError { .. }));
+    }
+
+    // ── struct field defaults ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_eval_struct_default_omitted() {
+        let env = eval_src(
+            "struct Config {\n    let host = \"localhost\"\n}\nlet c = Config {}\nlet h = c.host"
+        ).unwrap();
+        assert!(matches!(env.get("h"), Some(Value::Str(s)) if s == "localhost"));
+    }
+
+    #[test]
+    fn test_eval_struct_default_overridden() {
+        let env = eval_src(
+            "struct Config {\n    let host = \"localhost\"\n}\nlet c = Config { host: \"example.com\" }\nlet h = c.host"
+        ).unwrap();
+        assert!(matches!(env.get("h"), Some(Value::Str(s)) if s == "example.com"));
+    }
+
+    #[test]
+    fn test_eval_struct_all_defaults_empty_literal() {
+        let env = eval_src(
+            "struct Config {\n    let host = \"localhost\"\n    let port = 8080\n}\nlet c = Config {}\nlet h = c.host\nlet p = c.port"
+        ).unwrap();
+        assert!(matches!(env.get("h"), Some(Value::Str(s)) if s == "localhost"));
+        assert!(matches!(env.get("p"), Some(Value::Int(8080))));
+    }
+
+    #[test]
+    fn test_eval_struct_required_still_required() {
+        let err = eval_src(
+            "struct Mixed {\n    x,\n    let label = \"origin\"\n}\nlet m = Mixed {}"
+        ).unwrap_err();
+        assert!(matches!(err, JadeError::MissingField { .. }));
+    }
+
+    #[test]
+    fn test_eval_struct_mixed_fields() {
+        let env = eval_src(
+            "struct Mixed {\n    x,\n    y,\n    let label = \"origin\"\n}\nlet m = Mixed { x: 1, y: 2 }\nlet lbl = m.label"
+        ).unwrap();
+        assert!(matches!(env.get("lbl"), Some(Value::Str(s)) if s == "origin"));
+    }
+
+    #[test]
+    fn test_eval_struct_prompt_field_default() {
+        let env = eval_src(
+            "struct Agent {\n    prompt system = \"You are helpful\"\n}\nlet a = Agent {}\nlet s = a.system"
+        ).unwrap();
+        assert!(matches!(env.get("s"), Some(Value::Prompt(t)) if t == "You are helpful"));
+    }
+
+    #[test]
+    fn test_eval_struct_prompt_field_override() {
+        let env = eval_src(
+            "struct Agent {\n    prompt system = \"You are helpful\"\n}\nlet a = Agent { system: \"Custom\" }\nlet s = a.system"
+        ).unwrap();
+        assert!(matches!(env.get("s"), Some(Value::Prompt(t)) if t == "Custom"));
+    }
+
+    #[test]
+    fn test_eval_struct_prompt_field_non_string_error() {
+        let err = eval_src(
+            "struct Bad {\n    prompt sys = 42\n}\nlet b = Bad {}"
+        ).unwrap_err();
+        assert!(matches!(err, JadeError::PromptFieldNotStr { .. }));
+    }
+
+    #[test]
+    fn test_eval_struct_prompt_field_override_non_string_error() {
+        let err = eval_src(
+            "struct Agent {\n    prompt system = \"ok\"\n}\nlet a = Agent { system: 99 }"
+        ).unwrap_err();
+        assert!(matches!(err, JadeError::PromptFieldNotStr { .. }));
+    }
+
+    #[test]
+    fn test_eval_struct_extra_field_still_errors_with_defaults() {
+        let err = eval_src(
+            "struct Agent {\n    let name = \"Jade\"\n}\nlet a = Agent { name: \"x\", extra: 1 }"
+        ).unwrap_err();
+        assert!(matches!(err, JadeError::UndefinedField { .. }));
+    }
+
+    #[test]
+    fn test_eval_struct_duplicate_field_error() {
+        let err = eval_src(
+            "struct Point {\n    x,\n    y\n}\nlet p = Point { x: 1, y: 2, x: 3 }"
+        ).unwrap_err();
+        assert!(matches!(err, JadeError::DuplicateField { field, .. } if field == "x"));
+    }
+
+    #[test]
+    fn test_eval_struct_default_references_variable() {
+        // Default expressions are evaluated lazily in the current env
+        let env = eval_src(
+            "let base = 10\nstruct S {\n    let x = base\n}\nlet s = S {}\nlet v = s.x"
+        ).unwrap();
+        assert!(matches!(env.get("v"), Some(Value::Int(10))));
+    }
+
+    #[test]
+    fn test_eval_struct_required_after_let_field() {
+        // Required field after a Let field: omitting it still errors
+        let err = eval_src(
+            "struct S {\n    let x = 0,\n    y\n}\nlet s = S { x: 1 }"
+        ).unwrap_err();
+        assert!(matches!(err, JadeError::MissingField { field, .. } if field == "y"));
     }
 }

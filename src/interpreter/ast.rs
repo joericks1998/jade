@@ -1,9 +1,10 @@
 use super::error::Span;
+use serde::{Deserialize, Serialize};
 
 /// A method signature within an `interface` definition.
 /// The tree-walk evaluator uses the name only (for missing-method checks);
 /// `params`/`return_type` are parsed for documentation and future type inference.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InterfaceMethod {
     pub name: String,
     #[allow(dead_code)] // reserved for future type inference
@@ -15,8 +16,29 @@ pub struct InterfaceMethod {
     pub span: Span,
 }
 
+/// A field declaration inside a `struct` body.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum StructFieldDef {
+    /// Bare `name,` — required, no default.
+    Required(String),
+    /// `let name = expr` — optional, has a default value expression.
+    Let { name: String, default: Expr },
+    /// `prompt name = expr` — optional prompt field; default must eval to a string.
+    Prompt { name: String, default: Expr },
+}
+
+impl StructFieldDef {
+    pub fn name(&self) -> &str {
+        match self {
+            StructFieldDef::Required(name) => name,
+            StructFieldDef::Let { name, .. } => name,
+            StructFieldDef::Prompt { name, .. } => name,
+        }
+    }
+}
+
 /// A part of an interpolated f-string expression.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FStrPart {
     /// A literal string segment between (or before/after) interpolation slots.
     Literal(String),
@@ -25,13 +47,13 @@ pub enum FStrPart {
 }
 
 /// A complete Jade program: a list of statements.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Program {
     pub stmts: Vec<Stmt>,
 }
 
 /// A statement is a top-level action.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Stmt {
     /// `let name = expr`
     Let {
@@ -72,6 +94,14 @@ pub enum Stmt {
         span: Span,
     },
 
+    /// `for var in iterable { body }`
+    For {
+        var: String,
+        iterable: Expr,
+        body: Vec<Stmt>,
+        span: Span,
+    },
+
     /// `name = expr` — reassign an existing variable (or introduce one) in the global env
     Assign {
         name: String,
@@ -83,7 +113,7 @@ pub enum Stmt {
     /// `struct Name { field, … }`
     StructDef {
         name: String,
-        fields: Vec<String>,
+        fields: Vec<StructFieldDef>,
         #[allow(dead_code)]
         span: Span,
     },
@@ -132,13 +162,19 @@ pub enum Stmt {
         span: Span,
     },
 
+    /// `use "path/to/file.jde"` — import all top-level definitions from another file.
+    Use {
+        path: String,
+        span: Span,
+    },
+
     /// A bare expression used as a statement, e.g. a method call whose return
     /// value is discarded: `obj.method(args)`.
     Expr(Expr),
 }
 
 /// An expression produces a value.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Expr {
     /// An integer literal, e.g. `42`
     Integer {
@@ -225,17 +261,31 @@ pub enum Expr {
         span: Span,
     },
 
-    /// `?name` — dereference a prompt variable, calling the LLM backend.
-    /// `?name |> type` — typed dereference: coerces the LLM output to `type` with retry.
+    /// `?expr` — dereference a prompt, calling the LLM backend.
+    /// `?expr |> type` — typed dereference: coerces the LLM output to `type` with retry.
+    /// `expr` must evaluate to `Value::Prompt`; supports `?name`, `?obj.field`, etc.
     PromptDeref {
-        name: String,
+        expr: Box<Expr>,
         output_type: Option<String>,
+        span: Span,
+    },
+
+    /// A dictionary literal, e.g. `{"key": 1, "other": 2}` or `{}`
+    Dict {
+        entries: Vec<(Expr, Expr)>,
+        span: Span,
+    },
+
+    /// An anonymous function (closure), e.g. `|x| x * 2` or `|x, y| { x + y }`
+    Closure {
+        params: Vec<String>,
+        body: Vec<Stmt>,
         span: Span,
     },
 }
 
 /// All binary operators Jade supports.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum BinOpKind {
     // Arithmetic
     Add,
@@ -262,7 +312,7 @@ pub enum BinOpKind {
 }
 
 /// All unary operators Jade supports.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum UnaryOpKind {
     BitNot,
     Not,

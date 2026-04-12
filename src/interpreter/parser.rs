@@ -1,5 +1,5 @@
 use super::{
-    ast::{BinOpKind, Expr, FStrPart, InterfaceMethod, Program, Stmt, UnaryOpKind},
+    ast::{BinOpKind, Expr, FStrPart, InterfaceMethod, Program, StructFieldDef, Stmt, UnaryOpKind},
     error::{JadeError, Result, Span},
     lexer::{RawFStrPart, Token, TokenKind},
 };
@@ -74,6 +74,24 @@ impl Parser {
         token
     }
 
+    /// Consume a semicolon if the next token is one; otherwise accept an implicit
+    /// semicolon when the next token is `}` (end of block) or `Eof`.
+    /// This lets single-line function bodies work: `fn f(x) { return x * 2 }`.
+    fn consume_semicolon(&mut self) -> Result<()> {
+        match self.peek().kind {
+            TokenKind::Semicolon => { self.advance(); Ok(()) }
+            TokenKind::RBrace | TokenKind::Eof => Ok(()),
+            _ => {
+                let token = self.peek().clone();
+                Err(JadeError::UnexpectedToken {
+                    expected: "';'".to_string(),
+                    got: format!("{:?}", token.kind),
+                    span: token.span,
+                })
+            }
+        }
+    }
+
     /// If the current token's *variant* matches `kind`, advance and return a clone.
     /// Note: only the discriminant is compared — the payload (e.g. the integer value
     /// inside `Integer(n)`) is ignored. This is intentional: callers always pass a
@@ -118,10 +136,12 @@ impl Parser {
             TokenKind::Return => self.parse_return(),
             TokenKind::If     => self.parse_if(),
             TokenKind::While  => self.parse_while(),
+            TokenKind::For    => self.parse_for(),
             TokenKind::Struct     => self.parse_struct_def(),
             TokenKind::Extend     => self.parse_extend_block(),
             TokenKind::Interface  => self.parse_interface_def(),
             TokenKind::Prompt     => self.parse_prompt_decl(),
+            TokenKind::Use        => self.parse_use(),
             TokenKind::Identifier(_) => {
                 // Disambiguate identifier-led statement forms:
                 //   `ident =`              → bare variable assignment
@@ -163,7 +183,7 @@ impl Parser {
         };
         self.expect(&TokenKind::Equals)?;
         let value = self.parse_pipe()?;
-        self.expect(&TokenKind::Semicolon)?;
+        self.consume_semicolon()?;
         Ok(Stmt::Assign { name, value, span })
     }
 
@@ -190,7 +210,7 @@ impl Parser {
 
         self.expect(&TokenKind::Equals)?;
         let value = self.parse_pipe()?;
-        self.expect(&TokenKind::Semicolon)?;
+        self.consume_semicolon()?;
 
         Ok(Stmt::Let { name, value, span })
     }
@@ -275,14 +295,15 @@ impl Parser {
 
         self.advance(); // consume `return`
 
-        // If the next token is a semicolon, it's a bare return
-        if self.peek().kind == TokenKind::Semicolon {
-            self.advance();
-            return Ok(Stmt::Return { value: None, span });
+        // If the next token ends the statement without a value, it's a bare return
+        match self.peek().kind {
+            TokenKind::Semicolon => { self.advance(); return Ok(Stmt::Return { value: None, span }); }
+            TokenKind::RBrace | TokenKind::Eof => return Ok(Stmt::Return { value: None, span }),
+            _ => {}
         }
 
         let value = self.parse_pipe()?;
-        self.expect(&TokenKind::Semicolon)?;
+        self.consume_semicolon()?;
         Ok(Stmt::Return { value: Some(value), span })
     }
 
@@ -359,6 +380,32 @@ impl Parser {
         Ok(Stmt::While { condition, body, span })
     }
 
+    /// Parse `for <var> in <iterable> { <body> }`
+    fn parse_for(&mut self) -> Result<Stmt> {
+        let span = self.peek().span;
+        self.advance(); // consume `for`
+
+        let var_token = self.peek().clone();
+        let var = match &var_token.kind {
+            TokenKind::Identifier(n) => {
+                let n = n.clone();
+                self.advance();
+                n
+            }
+            _ => return Err(JadeError::UnexpectedToken {
+                expected: "identifier after `for`".to_string(),
+                got: format!("{:?}", var_token.kind),
+                span: var_token.span,
+            }),
+        };
+
+        self.expect(&TokenKind::In)?;
+        let iterable = self.parse_condition()?;
+        let body = self.parse_block()?;
+
+        Ok(Stmt::For { var, iterable, body, span })
+    }
+
     /// Parse `{ <stmts> }` — a brace-delimited block of statements.
     /// Leading semicolons between statements are skipped; they can appear after
     /// any closing `}` now that `RBrace` is a line-terminator.
@@ -379,17 +426,42 @@ impl Parser {
     }
 
     /// Parse `prompt name = expr ;`
+    /// Parse `use "path/to/file.jde" ;`
+    fn parse_use(&mut self) -> Result<Stmt> {
+        let span = self.peek().span;
+        self.advance(); // consume `use`
+        let path_token = self.peek().clone();
+        let path = match &path_token.kind {
+            TokenKind::Str(s) => {
+                let s = s.clone();
+                self.advance();
+                s
+            }
+            _ => {
+                return Err(JadeError::UnexpectedToken {
+                    expected: "string path after `use`".to_string(),
+                    got: format!("{:?}", path_token.kind),
+                    span: path_token.span,
+                });
+            }
+        };
+        self.consume_semicolon()?;
+        Ok(Stmt::Use { path, span })
+    }
+
     fn parse_prompt_decl(&mut self) -> Result<Stmt> {
         let span = self.peek().span;
         self.advance(); // consume `prompt`
         let name = self.expect_ident("prompt variable name")?;
         self.expect(&TokenKind::Equals)?;
         let body = self.parse_pipe()?;
-        self.expect(&TokenKind::Semicolon)?;
+        self.consume_semicolon()?;
         Ok(Stmt::PromptDecl { name, body, span })
     }
 
     /// Parse `struct Name { field, … }`
+    /// Fields may be bare identifiers (required), `let name = expr` (optional with default),
+    /// or `prompt name = expr` (optional prompt field with default text).
     fn parse_struct_def(&mut self) -> Result<Stmt> {
         let span = self.peek().span;
         self.advance(); // consume `struct`
@@ -397,15 +469,42 @@ impl Parser {
         self.expect(&TokenKind::LBrace)?;
         let mut fields = Vec::new();
         loop {
-            // Skip auto-semicolons between field names (from trailing newlines)
+            // Skip auto-semicolons between field declarations (from trailing newlines)
             while self.peek().kind == TokenKind::Semicolon {
                 self.advance();
             }
             if self.peek().kind == TokenKind::RBrace || self.peek().kind == TokenKind::Eof {
                 break;
             }
-            fields.push(self.expect_ident("field name")?);
-            // Allow a trailing comma or semicolon after each field name
+            match self.peek().kind.clone() {
+                TokenKind::Identifier(_) => {
+                    let field_name = self.expect_ident("field name")?;
+                    fields.push(StructFieldDef::Required(field_name));
+                }
+                TokenKind::Let => {
+                    self.advance(); // consume `let`
+                    let field_name = self.expect_ident("field name after `let`")?;
+                    self.expect(&TokenKind::Equals)?;
+                    let default = self.parse_pipe()?;
+                    fields.push(StructFieldDef::Let { name: field_name, default });
+                }
+                TokenKind::Prompt => {
+                    self.advance(); // consume `prompt`
+                    let field_name = self.expect_ident("field name after `prompt`")?;
+                    self.expect(&TokenKind::Equals)?;
+                    let default = self.parse_pipe()?;
+                    fields.push(StructFieldDef::Prompt { name: field_name, default });
+                }
+                _ => {
+                    let t = self.peek().clone();
+                    return Err(JadeError::UnexpectedToken {
+                        expected: "field name, `let`, or `prompt`".to_string(),
+                        got: format!("{:?}", t.kind),
+                        span: t.span,
+                    });
+                }
+            }
+            // Allow a trailing comma or semicolon after each field declaration
             if self.peek().kind == TokenKind::Comma || self.peek().kind == TokenKind::Semicolon {
                 self.advance();
             }
@@ -511,7 +610,7 @@ impl Parser {
         let field = self.expect_ident("field name")?;
         self.expect(&TokenKind::Equals)?;
         let value = self.parse_pipe()?;
-        self.expect(&TokenKind::Semicolon)?;
+        self.consume_semicolon()?;
         Ok(Stmt::FieldAssign { object, field, value, span })
     }
 
@@ -555,7 +654,7 @@ impl Parser {
         self.expect(&TokenKind::RBracket)?;
         self.expect(&TokenKind::Equals)?;
         let value = self.parse_pipe()?;
-        self.expect(&TokenKind::Semicolon)?;
+        self.consume_semicolon()?;
         Ok(Stmt::IndexAssign { name, index, value, span })
     }
 
@@ -589,7 +688,7 @@ impl Parser {
     /// Parse an expression used as a statement (value discarded), e.g. `obj.method(args)`.
     fn parse_expr_stmt(&mut self) -> Result<Stmt> {
         let expr = self.parse_pipe()?;
-        self.expect(&TokenKind::Semicolon)?;
+        self.consume_semicolon()?;
         Ok(Stmt::Expr(expr))
     }
 
@@ -610,6 +709,8 @@ impl Parser {
             Expr::Array        { span, .. } => *span,
             Expr::FStr         { span, .. } => *span,
             Expr::PromptDeref  { span, .. } => *span,
+            Expr::Dict         { span, .. } => *span,
+            Expr::Closure      { span, .. } => *span,
         }
     }
 
@@ -859,11 +960,47 @@ impl Parser {
             TokenKind::Minus => {
                 let span = self.peek().span;
                 self.advance();
+                if self.peek().kind == TokenKind::LParen {
+                    return Err(JadeError::UnexpectedToken {
+                        expected: "literal or identifier after `-`".to_string(),
+                        got: "(".to_string(),
+                        span: self.peek().span,
+                    });
+                }
                 let operand = self.parse_unary()?;
                 Ok(Expr::UnaryOp { op: UnaryOpKind::Neg, operand: Box::new(operand), span })
             }
             _ => self.parse_call(),
         }
+    }
+
+    /// Parse a dict literal starting after `{` has been consumed.
+    /// Keys are full expressions that must evaluate to strings at runtime.
+    /// Handles trailing commas and auto-inserted semicolons (multiline dicts).
+    fn parse_dict_literal(&mut self, span: Span) -> Result<Expr> {
+        let mut entries = Vec::new();
+        loop {
+            // Skip auto-inserted semicolons
+            while self.peek().kind == TokenKind::Semicolon {
+                self.advance();
+            }
+            if self.peek().kind == TokenKind::RBrace || self.peek().kind == TokenKind::Eof {
+                break;
+            }
+            // Disable struct literals when parsing the key to prevent `TypeName {` ambiguity
+            let was_allowed = self.struct_literal_allowed;
+            self.struct_literal_allowed = false;
+            let key = self.parse_pipe()?;
+            self.struct_literal_allowed = was_allowed;
+            self.expect(&TokenKind::Colon)?;
+            let value = self.parse_pipe()?;
+            entries.push((key, value));
+            if self.peek().kind == TokenKind::Comma || self.peek().kind == TokenKind::Semicolon {
+                self.advance();
+            }
+        }
+        self.expect(&TokenKind::RBrace)?;
+        Ok(Expr::Dict { entries, span })
     }
 
     /// Parse the `{ field: expr, … }` body of a struct literal, given that the
@@ -1001,10 +1138,16 @@ impl Parser {
                 self.advance(); // consume `[`
                 self.parse_array_literal(span)
             }
+            TokenKind::LBrace => {
+                let span = token.span;
+                self.advance(); // consume `{`
+                self.parse_dict_literal(span)
+            }
             TokenKind::Question => {
                 let span = token.span;
                 self.advance(); // consume `?`
-                let name = self.expect_ident("prompt variable name after ?")?;
+                // Parse the target expression: supports ?name, ?obj.field, ?arr[i], etc.
+                let expr = self.parse_call()?;
                 // Check for optional `|> TypeName` typed dereference suffix.
                 let output_type = if self.peek().kind == TokenKind::PipeGt {
                     if self.in_print_call {
@@ -1016,7 +1159,34 @@ impl Parser {
                 } else {
                     None
                 };
-                Ok(Expr::PromptDeref { name, output_type, span })
+                Ok(Expr::PromptDeref { expr: Box::new(expr), output_type, span })
+            }
+            // ── Closures: `|x, y| expr` or `|x, y| { body }` ────────────────
+            TokenKind::Pipe => {
+                let span = token.span;
+                self.advance(); // consume first `|`
+                let mut params = Vec::new();
+                // Parse parameters until the closing `|`
+                while self.peek().kind != TokenKind::Pipe {
+                    if self.peek().kind == TokenKind::Eof {
+                        return Err(JadeError::UnexpectedEof { span: self.peek().span });
+                    }
+                    let p = self.expect_ident("closure parameter")?;
+                    params.push(p);
+                    if self.peek().kind == TokenKind::Comma {
+                        self.advance();
+                    }
+                }
+                self.expect(&TokenKind::Pipe)?; // consume closing `|`
+                let body = self.parse_closure_body(span)?;
+                Ok(Expr::Closure { params, body, span })
+            }
+            // ── Empty-param closure: `|| expr` or `|| { body }` ─────────────
+            TokenKind::PipePipe => {
+                let span = token.span;
+                self.advance(); // consume `||`
+                let body = self.parse_closure_body(span)?;
+                Ok(Expr::Closure { params: Vec::new(), body, span })
             }
             TokenKind::Eof => Err(JadeError::UnexpectedEof { span: token.span }),
             _ => Err(JadeError::UnexpectedToken {
@@ -1025,6 +1195,20 @@ impl Parser {
                 span: token.span,
             }),
         }
+    }
+
+    /// Parse the body of a closure: `{ stmts }` or a single expression (implicit return).
+    fn parse_closure_body(&mut self, span: Span) -> Result<Vec<Stmt>> {
+        self.fn_depth += 1;
+        let body = if self.peek().kind == TokenKind::LBrace {
+            self.parse_block()?
+        } else {
+            // Single expression: wrap as implicit return so eval_block returns it.
+            let expr = self.parse_pipe()?;
+            vec![Stmt::Return { value: Some(expr), span }]
+        };
+        self.fn_depth -= 1;
+        Ok(body)
     }
 }
 
@@ -1394,7 +1578,9 @@ mod tests {
         let p = parse_src("struct Point {\n    x,\n    y\n}");
         let Stmt::StructDef { name, fields, .. } = &p.stmts[0] else { panic!() };
         assert_eq!(name, "Point");
-        assert_eq!(fields, &["x", "y"]);
+        assert_eq!(fields.len(), 2);
+        assert!(matches!(&fields[0], StructFieldDef::Required(n) if n == "x"));
+        assert!(matches!(&fields[1], StructFieldDef::Required(n) if n == "y"));
     }
 
     #[test]
@@ -1403,6 +1589,44 @@ mod tests {
         let Stmt::StructDef { name, fields, .. } = &p.stmts[0] else { panic!() };
         assert_eq!(name, "Empty");
         assert!(fields.is_empty());
+    }
+
+    #[test]
+    fn test_parse_struct_def_let_default() {
+        let p = parse_src("struct Agent {\n    let name = \"Assistant\"\n}");
+        let Stmt::StructDef { name, fields, .. } = &p.stmts[0] else { panic!() };
+        assert_eq!(name, "Agent");
+        assert_eq!(fields.len(), 1);
+        assert!(matches!(&fields[0], StructFieldDef::Let { name, .. } if name == "name"));
+    }
+
+    #[test]
+    fn test_parse_struct_def_prompt_field() {
+        let p = parse_src("struct Agent {\n    prompt system = \"You are helpful\"\n}");
+        let Stmt::StructDef { name, fields, .. } = &p.stmts[0] else { panic!() };
+        assert_eq!(name, "Agent");
+        assert_eq!(fields.len(), 1);
+        assert!(matches!(&fields[0], StructFieldDef::Prompt { name, .. } if name == "system"));
+    }
+
+    #[test]
+    fn test_parse_struct_def_mixed() {
+        let p = parse_src("struct Mixed {\n    x,\n    let label = \"origin\",\n    prompt sys = \"helpful\"\n}");
+        let Stmt::StructDef { fields, .. } = &p.stmts[0] else { panic!() };
+        assert_eq!(fields.len(), 3);
+        assert!(matches!(&fields[0], StructFieldDef::Required(n) if n == "x"));
+        assert!(matches!(&fields[1], StructFieldDef::Let { name, .. } if name == "label"));
+        assert!(matches!(&fields[2], StructFieldDef::Prompt { name, .. } if name == "sys"));
+    }
+
+    #[test]
+    fn test_parse_struct_def_struct_literal_default() {
+        // A struct-literal expression as a default value parses without ambiguity.
+        // The inner `}` belongs to the nested struct literal; the outer `}` closes the struct def.
+        let p = parse_src("struct Wrapper {\n    let inner = Point { x: 0, y: 0 }\n}");
+        let Stmt::StructDef { fields, .. } = &p.stmts[0] else { panic!() };
+        assert_eq!(fields.len(), 1);
+        assert!(matches!(&fields[0], StructFieldDef::Let { name, default: Expr::StructLiteral { .. }, .. } if name == "inner"));
     }
 
     #[test]
@@ -1549,18 +1773,36 @@ mod tests {
     #[test]
     fn test_parse_prompt_deref_untyped() {
         let p = parse_src("let x = ?p");
-        let Stmt::Let { value: Expr::PromptDeref { name, output_type, .. }, .. } = &p.stmts[0]
+        let Stmt::Let { value: Expr::PromptDeref { expr, output_type, .. }, .. } = &p.stmts[0]
             else { panic!("expected Let with PromptDeref") };
-        assert_eq!(name, "p");
+        assert!(matches!(expr.as_ref(), Expr::Identifier { name, .. } if name == "p"));
         assert!(output_type.is_none());
     }
 
     #[test]
     fn test_parse_prompt_deref_typed_int() {
         let p = parse_src("let x = ?p |> int");
-        let Stmt::Let { value: Expr::PromptDeref { name, output_type, .. }, .. } = &p.stmts[0]
+        let Stmt::Let { value: Expr::PromptDeref { expr, output_type, .. }, .. } = &p.stmts[0]
             else { panic!("expected Let with PromptDeref") };
-        assert_eq!(name, "p");
+        assert!(matches!(expr.as_ref(), Expr::Identifier { name, .. } if name == "p"));
+        assert_eq!(output_type.as_deref(), Some("int"));
+    }
+
+    #[test]
+    fn test_parse_prompt_deref_field_access() {
+        let p = parse_src("let x = ?obj.system");
+        let Stmt::Let { value: Expr::PromptDeref { expr, output_type, .. }, .. } = &p.stmts[0]
+            else { panic!("expected Let with PromptDeref") };
+        assert!(matches!(expr.as_ref(), Expr::FieldAccess { field, .. } if field == "system"));
+        assert!(output_type.is_none());
+    }
+
+    #[test]
+    fn test_parse_prompt_deref_field_access_typed() {
+        let p = parse_src("let x = ?obj.field |> int");
+        let Stmt::Let { value: Expr::PromptDeref { expr, output_type, .. }, .. } = &p.stmts[0]
+            else { panic!("expected Let with PromptDeref") };
+        assert!(matches!(expr.as_ref(), Expr::FieldAccess { field, .. } if field == "field"));
         assert_eq!(output_type.as_deref(), Some("int"));
     }
 
@@ -1569,5 +1811,51 @@ mod tests {
         let tokens = super::super::lexer::tokenize("print(?p |> int)").expect("lex");
         let err = parse(tokens).unwrap_err();
         assert!(matches!(err, super::super::error::JadeError::StreamingWithType { .. }));
+    }
+
+    // ── dict literal tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_dict_empty() {
+        let p = parse_src("let d = {}");
+        let Stmt::Let { value: Expr::Dict { entries, .. }, .. } = &p.stmts[0]
+            else { panic!("expected Let with Dict") };
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_parse_dict_single_entry() {
+        let p = parse_src(r#"let d = {"key": 1}"#);
+        let Stmt::Let { value: Expr::Dict { entries, .. }, .. } = &p.stmts[0]
+            else { panic!("expected Let with Dict") };
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(&entries[0].0, Expr::Str { value, .. } if value == "key"));
+        assert!(matches!(&entries[0].1, Expr::Integer { value: 1, .. }));
+    }
+
+    #[test]
+    fn test_parse_dict_multiple_entries() {
+        let p = parse_src(r#"let d = {"a": 1, "b": 2}"#);
+        let Stmt::Let { value: Expr::Dict { entries, .. }, .. } = &p.stmts[0]
+            else { panic!("expected Let with Dict") };
+        assert_eq!(entries.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_dict_trailing_comma() {
+        let p = parse_src(r#"let d = {"a": 1,}"#);
+        let Stmt::Let { value: Expr::Dict { entries, .. }, .. } = &p.stmts[0]
+            else { panic!("expected Let with Dict") };
+        assert_eq!(entries.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_dict_identifier_key() {
+        // Variable key: the key expression is an identifier
+        let p = parse_src("let d = {k: 1}");
+        let Stmt::Let { value: Expr::Dict { entries, .. }, .. } = &p.stmts[0]
+            else { panic!("expected Let with Dict") };
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(&entries[0].0, Expr::Identifier { name, .. } if name == "k"));
     }
 }

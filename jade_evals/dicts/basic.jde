@@ -1,0 +1,36 @@
+// basic dict operations
+
+let d = {"name": "jade", "version": 1}
+print(d["name"])      // jade
+print(d["version"])   // 1
+
+// empty dict
+let empty = {}
+print(len(empty))     // 0
+
+// mutation
+d["version"] = 2
+print(d["version"])   // 2
+
+// adding a new key
+d["stable"] = true
+print(d["stable"])    // true
+
+// len
+print(len(d))         // 3
+
+// value semantics: assigning copies the dict
+let d2 = d
+d2["name"] = "copy"
+print(d["name"])      // jade  (original unchanged)
+print(d2["name"])     // copy
+
+// nested dict
+let outer = {"inner": {"x": 42}}
+let inner = outer["inner"]
+print(inner["x"])     // 42
+
+// dict with expression keys
+let key = "hello"
+let greet = {key: "world"}
+print(greet["hello"])  // world
