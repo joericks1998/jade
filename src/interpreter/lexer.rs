@@ -37,6 +37,9 @@ pub enum TokenKind {
     Use,
     True,
     False,
+    Raise,
+    Try,
+    Catch,
 
     // Prompt dereference operator
     Question,
@@ -394,6 +397,9 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
                     "interface" => TokenKind::Interface,
                     "prompt"    => TokenKind::Prompt,
                     "use"       => TokenKind::Use,
+                    "raise"     => TokenKind::Raise,
+                    "try"       => TokenKind::Try,
+                    "catch"     => TokenKind::Catch,
                     "true"      => TokenKind::True,
                     "false"  => TokenKind::False,
                     // f-string: `f"…"` or `f"""…"""`

@@ -109,6 +109,10 @@ pub enum JadeError {
 
     /// `use "path"` would create a cycle: `a` imports `b` which imports `a`.
     CircularImport { path: String, span: Span },
+
+    /// An exception raised by `raise` that was not caught by any enclosing `try/catch`.
+    /// `message` is the string representation of the raised value, captured at raise-site.
+    Exception { message: String, span: Span },
 }
 
 impl std::fmt::Display for JadeError {
@@ -182,6 +186,8 @@ impl std::fmt::Display for JadeError {
                 write!(f, "[{}:{}] cannot find import '{}': file not found", span.line, span.col, path),
             JadeError::CircularImport { path, span } =>
                 write!(f, "[{}:{}] circular import detected: '{}' is already being imported", span.line, span.col, path),
+            JadeError::Exception { message, span } =>
+                write!(f, "[{}:{}] unhandled exception: {}", span.line, span.col, message),
         }
     }
 }

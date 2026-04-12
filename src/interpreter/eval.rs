@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use super::{
-    ast::{BinOpKind, Expr, FStrPart, Program, StructFieldDef, Stmt, UnaryOpKind},
+    ast::{BinOpKind, CatchArm, Expr, FStrPart, Program, StructFieldDef, Stmt, UnaryOpKind},
     error::{JadeError, Result, Span},
 };
 use crate::llm;
@@ -139,6 +139,10 @@ pub struct Env {
     /// Built-in functions that are always in scope. Stored separately so they
     /// don't appear in `-v` verbose output alongside user variables.
     builtins: HashMap<String, BuiltinFn>,
+    /// The value most recently raised by `raise`; consumed by the nearest `try/catch`.
+    /// Stored here (rather than inside `JadeError`) to avoid a circular dependency
+    /// between `error.rs` and `eval.rs`.
+    pub raised_exception: Option<Value>,
     /// LLM inference backend, if one was configured for this run.
     pub inference_backend: Option<Box<dyn llm::InferenceBackend>>,
     /// Conversation history shared across all `?` dereferences in this program run.
@@ -172,6 +176,7 @@ impl Env {
             interface_defs: HashMap::new(),
             interface_impls: HashMap::new(),
             builtins,
+            raised_exception: None,
             inference_backend: None,
             conversation_history: Vec::new(),
             token_count: 0,
@@ -506,6 +511,64 @@ fn eval_block(stmts: &[Stmt], env: &mut Env) -> Result<Option<Value>> {
                 });
             }
 
+            Stmt::Raise { value, span } => {
+                let v = eval_expr(value, env)?;
+                let message = value_to_str(&v);
+                env.raised_exception = Some(v);
+                return Err(JadeError::Exception { message, span: *span });
+            }
+
+            Stmt::TryCatch { body, arms, span } => {
+                env.push_scope();
+                let result = eval_block(body, env);
+                env.pop_scope();
+
+                let raised_val: Value = match result {
+                    // Block completed normally or hit a `return` — propagate unchanged.
+                    Ok(ret) => return Ok(ret),
+                    // A Jade `raise` — take the payload out of env.
+                    Err(JadeError::Exception { .. }) => {
+                        env.raised_exception.take()
+                            .unwrap_or_else(|| Value::Str("unknown exception".to_string()))
+                    }
+                    // Built-in runtime error (division by zero, type error, …) —
+                    // wrap as a `RuntimeError { message }` struct so catch arms can
+                    // match on it and access `.message`.
+                    Err(other) => {
+                        let mut fields = HashMap::new();
+                        fields.insert("message".to_string(), Value::Str(other.to_string()));
+                        Value::Struct(Rc::new(RefCell::new(StructInstance {
+                            type_name: "RuntimeError".to_string(),
+                            fields,
+                        })))
+                    }
+                };
+
+                // Try each catch arm in order; first match wins.
+                for arm in arms {
+                    let matches = match &arm.catch_type {
+                        None => true, // catch-all always matches
+                        Some(type_name) => match &raised_val {
+                            Value::Struct(rc) => rc.borrow().type_name == *type_name,
+                            _ => false,
+                        },
+                    };
+
+                    if matches {
+                        env.push_scope();
+                        env.define(arm.binding.clone(), raised_val);
+                        let arm_result = eval_block(&arm.body, env);
+                        env.pop_scope();
+                        return arm_result;
+                    }
+                }
+
+                // No arm matched — re-raise so an outer try/catch can handle it.
+                let message = value_to_str(&raised_val);
+                env.raised_exception = Some(raised_val);
+                return Err(JadeError::Exception { message, span: *span });
+            }
+
             Stmt::Expr(expr) => {
                 eval_expr(expr, env)?;
             }
@@ -598,7 +661,18 @@ pub(crate) fn value_to_str(v: &Value) -> String {
             format!("{{{}}}", parts.join(", "))
         }
         Value::Fn(_)          => "<fn>".to_string(),
-        Value::Struct(_)      => "<struct>".to_string(),
+        Value::Struct(rc) => {
+            let inst = rc.borrow();
+            let mut parts: Vec<String> = inst.fields.iter()
+                .map(|(k, v)| format!("{}: {}", k, value_to_str(v)))
+                .collect();
+            parts.sort(); // deterministic output regardless of HashMap iteration order
+            if parts.is_empty() {
+                inst.type_name.clone()
+            } else {
+                format!("{} {{ {} }}", inst.type_name, parts.join(", "))
+            }
+        }
         Value::BoundMethod(_) => "<bound method>".to_string(),
         Value::Builtin(_)     => "<builtin>".to_string(),
         Value::Prompt(_)      => "<prompt>".to_string(),

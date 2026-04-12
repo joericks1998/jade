@@ -1,5 +1,5 @@
 use super::{
-    ast::{BinOpKind, Expr, FStrPart, InterfaceMethod, Program, StructFieldDef, Stmt, UnaryOpKind},
+    ast::{BinOpKind, CatchArm, Expr, FStrPart, InterfaceMethod, Program, StructFieldDef, Stmt, UnaryOpKind},
     error::{JadeError, Result, Span},
     lexer::{RawFStrPart, Token, TokenKind},
 };
@@ -142,6 +142,8 @@ impl Parser {
             TokenKind::Interface  => self.parse_interface_def(),
             TokenKind::Prompt     => self.parse_prompt_decl(),
             TokenKind::Use        => self.parse_use(),
+            TokenKind::Raise      => self.parse_raise(),
+            TokenKind::Try        => self.parse_try_catch(),
             TokenKind::Identifier(_) => {
                 // Disambiguate identifier-led statement forms:
                 //   `ident =`              → bare variable assignment
@@ -457,6 +459,60 @@ impl Parser {
         let body = self.parse_pipe()?;
         self.consume_semicolon()?;
         Ok(Stmt::PromptDecl { name, body, span })
+    }
+
+    /// Parse `raise expr ;`
+    fn parse_raise(&mut self) -> Result<Stmt> {
+        let span = self.peek().span;
+        self.advance(); // consume `raise`
+        let value = self.parse_pipe()?;
+        self.consume_semicolon()?;
+        Ok(Stmt::Raise { value, span })
+    }
+
+    /// Parse `try { body } catch [TypeName] binding { arm } …`
+    fn parse_try_catch(&mut self) -> Result<Stmt> {
+        let span = self.peek().span;
+        self.advance(); // consume `try`
+        let body = self.parse_block()?;
+
+        // Consume the auto-inserted semicolon after the closing `}` — same
+        // pattern used by `if/else`.
+        if self.peek().kind == TokenKind::Semicolon {
+            self.advance();
+        }
+
+        let mut arms = Vec::new();
+        while self.peek().kind == TokenKind::Catch {
+            self.advance(); // consume `catch`
+
+            // Disambiguate between:
+            //   `catch TypeName binding { … }` — two identifiers before `{`
+            //   `catch binding { … }`           — one identifier before `{`
+            let second_is_ident = self.peek_at(1)
+                .map(|t| matches!(t.kind, TokenKind::Identifier(_)))
+                .unwrap_or(false);
+
+            let (catch_type, binding) = if second_is_ident {
+                let type_name = self.expect_ident("exception type name")?;
+                let bind_name = self.expect_ident("catch binding name")?;
+                (Some(type_name), bind_name)
+            } else {
+                let bind_name = self.expect_ident("catch binding name")?;
+                (None, bind_name)
+            };
+
+            let arm_body = self.parse_block()?;
+
+            // Consume the auto-inserted semicolon before the next `catch` or end.
+            if self.peek().kind == TokenKind::Semicolon {
+                self.advance();
+            }
+
+            arms.push(CatchArm { catch_type, binding, body: arm_body });
+        }
+
+        Ok(Stmt::TryCatch { body, arms, span })
     }
 
     /// Parse `struct Name { field, … }`
