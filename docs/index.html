@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Jade 1.0.7 — Installation</title>
+  <title>Jade 1.0.9 — Installation</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -282,9 +282,9 @@
       </a>
       <span class="topbar-sep">»</span>
       <select title="Version">
-        <option>1.0.7</option>
+        <option>1.0.9</option>
       </select>
-      <span class="topbar-title">1.0.7 Documentation</span>
+      <span class="topbar-title">1.0.9 Documentation</span>
     </div>
     <div class="topbar-right">
       <a href="https://github.com/joericks1998/jade">GitHub</a>
@@ -316,6 +316,7 @@
           <li><a href="structs.html">Structs</a></li>
           <li><a href="imports.html">Imports</a></li>
           <li><a href="llm.html">LLM Integration</a></li>
+          <li><a href="exceptions.html">Exceptions</a></li>
         </ul>
       </div>
       <hr class="sidebar-divider" />
@@ -338,13 +339,14 @@
     <!-- ── Main content ── -->
     <main class="content">
 
-      <h1>Jade 1.0.7 Documentation</h1>
+      <h1>Jade 1.0.9 Documentation</h1>
       <p class="lead">
-        Jade is a programming language written in Rust. Version 1.0.7 compiles programs through a type inference pass and a register-based bytecode VM.
+        Jade is a programming language written in Rust. Version 1.0.9 compiles programs through a type inference pass and a register-based bytecode VM.
         It supports value types (<code>int</code>, <code>float</code>, <code>bool</code>, <code>str</code>, arrays, dicts, and user-defined <code>struct</code>s),
         <code>let</code> variable bindings, bare variable assignment, <code>fn</code> function definitions with <code>return</code>,
         anonymous closures (<code>|x| x * 2</code>), first-class functions, recursion,
         <code>if</code>/<code>elif</code>/<code>else</code> control flow, <code>while</code> loops, <code>for</code> loops over arrays,
+        <code>try</code>/<code>catch</code>/<code>raise</code> exception handling,
         <code>struct</code> definitions with field access and mutation, <code>extend</code> blocks for methods,
         <code>interface</code> definitions, multi-file <code>use</code> imports,
         <code>print</code> and <code>len</code> built-in functions,
@@ -359,7 +361,7 @@
       <section id="installation">
         <h2>Installation</h2>
         <p>
-          Jade 1.0.7 is built from source. A prebuilt binary and install script
+          Jade 1.0.9 is built from source. A prebuilt binary and install script
           are planned for a future release.
         </p>
 
@@ -381,13 +383,7 @@ cargo build --release</code></pre>
 
         <h3>Verify</h3>
         <pre><code>jade --help</code></pre>
-        <p>Expected output:</p>
-        <pre><code>jade — the Jade programming language
-
-USAGE:
-  jade &lt;file.jde&gt;               Run a Jade source file
-  jade &lt;file.jde&gt; -v, --verbose Run and print all variables after execution
-  jade -h, --help               Show this help message</code></pre>
+        <p>This will print the list of available subcommands. See the <a href="cli.html">CLI Reference</a> for full details.</p>
       </section>
 
     </main>
