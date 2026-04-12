@@ -437,7 +437,7 @@ fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
 fn emit_fn(
     name: &str,
     params: Vec<String>,
-    body: Vec<TStmt>,
+    mut body: Vec<TStmt>,
     span: Span,
     ctx: &mut EmitCtx,
 ) -> Result<CompiledFn> {
@@ -446,11 +446,26 @@ fn emit_fn(
     for param in &params {
         fn_em.define_local(param);
     }
+
+    // If the last statement is a bare expression, treat it as an implicit return value.
+    let implicit_ret = if matches!(body.last(), Some(TStmt::Expr(_))) {
+        if let Some(TStmt::Expr(expr)) = body.pop() { Some(expr) } else { None }
+    } else {
+        None
+    };
+
     for stmt in body {
         emit_stmt(stmt, &mut fn_em, ctx)?;
     }
-    // Implicit return if execution falls off the end.
-    fn_em.chunk.emit(Instr::Return(None), span);
+
+    if let Some(expr) = implicit_ret {
+        let src = emit_expr(&expr, &mut fn_em, ctx)?;
+        fn_em.chunk.emit(Instr::Return(Some(src)), span);
+    } else {
+        // Implicit nil return if execution falls off the end.
+        fn_em.chunk.emit(Instr::Return(None), span);
+    }
+
     let n_slots = fn_em.next_reg;
     Ok(CompiledFn { params, chunk: fn_em.chunk, n_slots })
 }

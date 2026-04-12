@@ -345,6 +345,7 @@
         <ul>
           <li>Added <code>try</code>/<code>catch</code>/<code>raise</code> exception handling — raise any value as an exception, catch by struct type name or with a catch-all arm, nested <code>try</code>/<code>catch</code> blocks, built-in runtime errors (division by zero, type errors, etc.) are automatically catchable</li>
           <li>Upgraded CLI to full subcommand structure: <code>jade run</code>, <code>jade check</code>, <code>jade build</code>, <code>jade repl</code>, <code>jade test</code>, <code>jade fmt</code>, <code>jade env</code>, <code>jade cache</code>, <code>jade model</code>, <code>jade new</code>, <code>jade init</code></li>
+          <li>Fixed implicit function return: the last bare expression in a function body is now returned automatically without needing an explicit <code>return</code> keyword</li>
         </ul>
         <h3>v1.0.8</h3>
         <ul>
