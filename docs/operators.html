@@ -314,6 +314,7 @@
           <li><a href="functions.html">Functions</a></li>
           <li><a href="control-flow.html">Control Flow</a></li>
           <li><a href="structs.html">Structs</a></li>
+          <li><a href="imports.html">Imports</a></li>
           <li><a href="llm.html">LLM Integration</a></li>
         </ul>
       </div>
@@ -408,6 +409,44 @@
           integer to float.
         </p>
 
+        <h3>Pipe</h3>
+        <table>
+          <thead>
+            <tr><th>Operator</th><th>Name</th><th>Description</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>|&gt;</code></td><td>Pipe</td><td>Pass left-hand value as the first argument to the right-hand function</td></tr>
+          </tbody>
+        </table>
+        <p>
+          The pipe operator threads a value through a chain of function calls left-to-right.
+          <code>x |&gt; f</code> is equivalent to <code>f(x)</code>. When the right-hand side
+          is a call expression with arguments, the piped value is inserted as the <em>first</em>
+          argument: <code>5 |&gt; add(3)</code> is equivalent to <code>add(5, 3)</code>.
+        </p>
+        <pre><code>fn double(x) { return x * 2 }
+fn add(a, b) { return a + b }
+
+// Simple pipe
+let n = 5 |> double          // 10
+
+// Chained pipes — left-associative
+let m = 3 |> double |> double  // 12
+
+// Pipe with extra arguments (value inserted as first arg)
+let r = 5 |> add(3)          // add(5, 3) = 8
+
+// Pipe to print
+"hello" |> print
+
+// Pipe with arithmetic on the left
+let x = (2 + 3) |> double   // 10</code></pre>
+        <p>
+          Pipes are left-associative and have lower precedence than all other operators, so the
+          entire expression to the left of <code>|&gt;</code> is fully evaluated before being
+          passed to the function on the right.
+        </p>
+
         <h3>Precedence</h3>
         <p>Operators bind from tightest to loosest in this order:</p>
         <ol>
@@ -421,6 +460,7 @@
           <li>Comparison: <code>==</code>, <code>!=</code>, <code>&lt;</code>, <code>&gt;</code>, <code>&lt;=</code>, <code>&gt;=</code></li>
           <li>Logical AND: <code>&amp;&amp;</code></li>
           <li>Logical OR: <code>||</code></li>
+          <li>Pipe: <code>|&gt;</code> (lowest — entire left expression is the piped value)</li>
         </ol>
         <pre><code>let x = 2 + 3 * 4
 let y = 1 &lt;&lt; 2 &amp; 15
