@@ -1,0 +1,26 @@
+// Basic inline closure
+let double = |x| x * 2
+print(double(5))
+
+// Multi-param closure
+let add = |x, y| x + y
+print(add(3, 4))
+
+// Empty-param closure
+let greet = || "hello"
+print(greet())
+
+// Closure capturing outer variable
+let multiplier = 3
+let triple = |x| x * multiplier
+print(triple(5))
+
+// Block-body closure
+let abs_val = |x| {
+    if x < 0 {
+        return -x
+    }
+    return x
+}
+print(abs_val(-7))
+print(abs_val(4))

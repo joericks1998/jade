@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Jade 1.0.6 — Changelog</title>
+  <title>Jade 1.0.7 — Changelog</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -282,9 +282,9 @@
       </a>
       <span class="topbar-sep">»</span>
       <select title="Version">
-        <option>1.0.6</option>
+        <option>1.0.7</option>
       </select>
-      <span class="topbar-title">1.0.6 Documentation</span>
+      <span class="topbar-title">1.0.7 Documentation</span>
     </div>
     <div class="topbar-right">
       <a href="https://github.com/joericks1998/jade">GitHub</a>
@@ -314,6 +314,7 @@
           <li><a href="functions.html">Functions</a></li>
           <li><a href="control-flow.html">Control Flow</a></li>
           <li><a href="structs.html">Structs</a></li>
+          <li><a href="imports.html">Imports</a></li>
           <li><a href="llm.html">LLM Integration</a></li>
         </ul>
       </div>
@@ -339,6 +340,15 @@
 
       <section id="changelog">
         <h2>Changelog</h2>
+        <h3>v1.0.7</h3>
+        <ul>
+          <li>Added <code>dict</code> type: dictionary literals (<code>{"key": value}</code>), key access (<code>d["key"]</code>), key assignment, and <code>len</code> support</li>
+          <li>Added anonymous functions (closures): <code>|x| x * 2</code> and block-body <code>|x| { … }</code> with environment capture</li>
+          <li>Added <code>for</code> loops: <code>for x in array { … }</code> iteration over arrays</li>
+          <li>Added <code>use "path.jde"</code> for multi-file imports</li>
+          <li>Added bytecode compiler and VM — programs now run through type inference, bytecode emission, and a register-based VM</li>
+          <li>Added multi-level AST and TIR caching to skip redundant compilation passes</li>
+        </ul>
         <h3>v1.0.6</h3>
         <ul>
           <li>Added <code>str</code> type: string literals, triple-quoted strings, concatenation with <code>+</code>, character indexing, equality and lexicographic ordering</li>

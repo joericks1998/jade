@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Jade 1.0.6 — Functions</title>
+  <title>Jade 1.0.7 — Functions</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -282,9 +282,9 @@
       </a>
       <span class="topbar-sep">»</span>
       <select title="Version">
-        <option>1.0.6</option>
+        <option>1.0.7</option>
       </select>
-      <span class="topbar-title">1.0.6 Documentation</span>
+      <span class="topbar-title">1.0.7 Documentation</span>
     </div>
     <div class="topbar-right">
       <a href="https://github.com/joericks1998/jade">GitHub</a>
@@ -314,6 +314,7 @@
           <li><a href="functions.html" class="active">Functions</a></li>
           <li><a href="control-flow.html">Control Flow</a></li>
           <li><a href="structs.html">Structs</a></li>
+          <li><a href="imports.html">Imports</a></li>
           <li><a href="llm.html">LLM Integration</a></li>
         </ul>
       </div>
@@ -612,6 +613,71 @@ let fib10 = fib(10)</code></pre>
             functions, but variables declared inside a function are not visible outside.
           </li>
         </ul>
+      </section>
+
+      <section id="closures">
+        <h2>Closures</h2>
+        <p>
+          A closure is an anonymous function written inline using the <code>|params| body</code>
+          syntax. It captures a snapshot of the variables visible at the point it is created, so
+          it can reference those variables even when called later from a different scope.
+        </p>
+
+        <h3>Syntax</h3>
+        <pre><code>|&lt;param&gt;, &lt;param&gt;, ...| &lt;expr&gt;      // single-expression body
+|&lt;param&gt;, &lt;param&gt;, ...| { &lt;stmts&gt; } // block body
+|| &lt;expr&gt;                              // zero-parameter closure</code></pre>
+
+        <h3>Basic examples</h3>
+        <pre><code>// Single-expression body — implicitly returns the expression
+let double = |x| x * 2
+print(double(5))   // 10
+
+// Multiple parameters
+let add = |x, y| x + y
+print(add(3, 4))   // 7
+
+// Zero parameters
+let greet = || "hello"
+print(greet())   // hello</code></pre>
+
+        <h3>Capturing outer variables</h3>
+        <p>
+          All variables visible at closure creation are captured by copy. The closure
+          carries its own snapshot — mutations inside the closure do not affect the outer scope,
+          and reassigning the outer variable after closure creation has no effect on the closure.
+        </p>
+        <pre><code>let multiplier = 3
+let triple = |x| x * multiplier
+print(triple(5))   // 15</code></pre>
+
+        <h3>Block body</h3>
+        <pre><code>let abs_val = |x| {
+    if x < 0 {
+        return -x
+    }
+    return x
+}
+print(abs_val(-7))   // 7
+print(abs_val(4))    // 4</code></pre>
+
+        <h3>Closures as arguments</h3>
+        <p>
+          Closures are first-class values and can be passed to higher-order functions:
+        </p>
+        <pre><code>fn apply(f, x) {
+    return f(x)
+}
+
+let result = apply(|x| x * x, 6)   // 36</code></pre>
+
+        <div class="note">
+          <strong>Note:</strong> The <code>|</code> symbol that opens a closure is only treated as
+          a closure delimiter when it appears at the start of an expression (primary position). In
+          all other positions it remains the bitwise OR operator. The empty-param form uses
+          <code>||</code>, which is distinct from the logical OR operator because <code>||</code>
+          only appears as logical OR in an infix position, never at the start of an expression.
+        </div>
       </section>
 
       <section id="implementation">

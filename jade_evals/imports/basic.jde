@@ -1,0 +1,4 @@
+use "math_lib.jde"
+
+let x = add(2, 3)
+let y = mul(4, 5)

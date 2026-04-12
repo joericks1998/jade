@@ -1,0 +1,32 @@
+// Struct fields with let defaults — optional fields with type-inferrable default values
+
+struct Config {
+    let host = "localhost"
+    let port = 8080
+}
+
+let c = Config {}
+let h = c.host
+// h == "localhost"
+let p = c.port
+// p == 8080
+
+let c2 = Config { host: "example.com" }
+let h2 = c2.host
+// h2 == "example.com"
+let p2 = c2.port
+// p2 == 8080 (default used)
+
+struct Mixed {
+    x,
+    y,
+    let label = "origin"
+}
+
+let m = Mixed { x: 1, y: 2 }
+let lbl = m.label
+// lbl == "origin" (default)
+
+let m2 = Mixed { x: 3, y: 4, label: "custom" }
+let lbl2 = m2.label
+// lbl2 == "custom" (override)

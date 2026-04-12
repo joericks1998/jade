@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Jade 1.0.6 — Control Flow</title>
+  <title>Jade 1.0.7 — Control Flow</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -282,9 +282,9 @@
       </a>
       <span class="topbar-sep">»</span>
       <select title="Version">
-        <option>1.0.6</option>
+        <option>1.0.7</option>
       </select>
-      <span class="topbar-title">1.0.6 Documentation</span>
+      <span class="topbar-title">1.0.7 Documentation</span>
     </div>
     <div class="topbar-right">
       <a href="https://github.com/joericks1998/jade">GitHub</a>
@@ -314,6 +314,7 @@
           <li><a href="functions.html">Functions</a></li>
           <li><a href="control-flow.html" class="active">Control Flow</a></li>
           <li><a href="structs.html">Structs</a></li>
+          <li><a href="imports.html">Imports</a></li>
           <li><a href="llm.html">LLM Integration</a></li>
         </ul>
       </div>
@@ -339,8 +340,9 @@
 
       <h1>Control Flow</h1>
       <p class="lead">
-        Jade provides two control flow constructs: <code>if</code>/<code>else</code> for conditional
-        branching and <code>while</code> for repetition. Both require a <code>bool</code> condition.
+        Jade provides four control flow constructs: <code>if</code>/<code>elif</code>/<code>else</code>
+        for conditional branching, <code>while</code> for condition-driven loops, and <code>for</code>
+        for iterating over arrays. All conditions must be <code>bool</code>.
       </p>
 
       <section id="overview">
@@ -391,11 +393,49 @@
           <li><code>&lt;else statements&gt;</code> — any sequence of statements to execute when the condition is <code>false</code>. May itself contain <code>if</code>/<code>else</code> to create chains.</li>
         </ul>
 
+        <h3>if / elif / else</h3>
+        <pre><code>if &lt;condition&gt; {
+    &lt;then statements&gt;
+} elif &lt;condition&gt; {
+    &lt;elif statements&gt;
+} else {
+    &lt;else statements&gt;
+}</code></pre>
+        <p>
+          Any number of <code>elif</code> branches may follow the initial <code>if</code>. Each branch
+          is tested in order; the first one whose condition is <code>true</code> executes, and the rest
+          are skipped. The final <code>else</code> is optional and runs only when every preceding
+          condition is <code>false</code>.
+        </p>
+        <pre><code>fn classify(x) {
+    if x > 0 {
+        return 1
+    } elif x < 0 {
+        return -1
+    } else {
+        return 0
+    }
+}
+
+fn grade(score) {
+    if score >= 90 {
+        return 4
+    } elif score >= 80 {
+        return 3
+    } elif score >= 70 {
+        return 2
+    } elif score >= 60 {
+        return 1
+    } else {
+        return 0
+    }
+}</code></pre>
+
         <div class="note">
           <strong>Note:</strong> The <code>else</code> keyword must appear on the same line as the
           closing <code>}</code> of the <code>then</code> block, or on the next line. Because the
           lexer does not insert a semicolon after <code>}</code>, writing <code>} else {</code> on
-          one line or splitting across lines both work correctly.
+          one line or splitting across lines both work correctly. The same applies to <code>} elif {</code>.
         </div>
       </section>
 
@@ -872,6 +912,64 @@ while i &lt; 3 {
             tests the updated value on the next iteration. See <a href="variables.html">Variables</a>.
           </li>
         </ul>
+      </section>
+
+      <section id="for-overview">
+        <h2>for Loops</h2>
+        <p>
+          The <code>for</code> statement iterates over an array, binding each element to a loop
+          variable in turn. It is the idiomatic way to process every element of an array without
+          managing an index manually.
+        </p>
+        <pre><code>for &lt;var&gt; in &lt;array&gt; {
+    &lt;body statements&gt;
+}</code></pre>
+        <ul>
+          <li><code>&lt;var&gt;</code> — a name bound to each element on each iteration. It is visible throughout the loop body.</li>
+          <li><code>&lt;array&gt;</code> — any expression that evaluates to an <code>array</code>. The array is fully evaluated once before iteration begins.</li>
+          <li><code>&lt;body statements&gt;</code> — any sequence of statements. The loop variable can be read but mutations do not affect the original array.</li>
+        </ul>
+
+        <h3>Basic iteration</h3>
+        <pre><code>let nums = [1, 2, 3, 4, 5]
+for n in nums {
+    print(n)
+}
+// 1
+// 2
+// 3
+// 4
+// 5</code></pre>
+
+        <h3>Inline array literal</h3>
+        <pre><code>for x in [10, 20, 30] {
+    print(x)
+}</code></pre>
+
+        <h3>Accumulating a result</h3>
+        <pre><code>let total = 0
+let nums = [1, 2, 3, 4, 5]
+for n in nums {
+    total = total + n
+}
+// total is 15</code></pre>
+
+        <h3>for inside a function</h3>
+        <pre><code>fn sum_array(arr) {
+    let total = 0
+    for x in arr {
+        total = total + x
+    }
+    return total
+}
+
+let s = sum_array([10, 20, 30])  // 60</code></pre>
+
+        <div class="note">
+          <strong>Note:</strong> The iterable expression must evaluate to an <code>array</code>.
+          Attempting to iterate over any other type (such as a string or dict) produces a
+          <code>TypeError</code>.
+        </div>
       </section>
 
       <section id="while-implementation">
