@@ -1,0 +1,110 @@
+// ── exceptions.jde ────────────────────────────────────────────────────────────
+
+// 1. Basic raise with a string, caught by catch-all
+fn risky() {
+    raise "something went wrong"
+}
+
+try {
+    risky()
+} catch e {
+    print(e)
+}
+// → something went wrong
+
+// 2. Custom exception struct with typed catch
+struct ValueError { message }
+
+fn parse_age(n) {
+    if n < 0 {
+        raise ValueError { message: "age cannot be negative" }
+    }
+    return n
+}
+
+try {
+    parse_age(-1)
+} catch ValueError e {
+    print(e.message)
+}
+// → age cannot be negative
+
+// 3. Multiple typed catch arms — first match wins
+struct NetworkError { code, message }
+
+try {
+    raise NetworkError { code: 503, message: "service unavailable" }
+} catch ValueError e {
+    print("wrong: value error")
+} catch NetworkError e {
+    print(e.code)
+    print(e.message)
+} catch e {
+    print("wrong: catch-all")
+}
+// → 503
+// → service unavailable
+
+// 4. Unmatched typed catch falls through to catch-all
+try {
+    raise "plain string error"
+} catch ValueError e {
+    print("wrong: value error")
+} catch e {
+    print(e)
+}
+// → plain string error
+
+// 5. Exception propagates through the call stack
+fn inner() {
+    raise ValueError { message: "deep error" }
+}
+
+fn outer() {
+    inner()
+}
+
+try {
+    outer()
+} catch ValueError e {
+    print(e.message)
+}
+// → deep error
+
+// 6. Built-in runtime error is catchable
+try {
+    let x = 1 / 0
+} catch e {
+    print("caught runtime error")
+}
+// → caught runtime error
+
+// 7. No exception — try body completes normally, catch never runs
+try {
+    let x = 1 + 1
+    print(x)
+} catch e {
+    print("wrong: should not run")
+}
+// → 2
+
+// 8. raise exits the try body immediately — remaining statements skipped
+try {
+    raise "early exit"
+    print("wrong: should not run")
+} catch e {
+    print(e)
+}
+// → early exit
+
+// 9. Nested try/catch — inner catches if it matches, outer catches if it doesn't
+try {
+    try {
+        raise ValueError { message: "inner error" }
+    } catch NetworkError e {
+        print("wrong: inner caught network error")
+    }
+} catch ValueError e {
+    print(e.message)
+}
+// → inner error
