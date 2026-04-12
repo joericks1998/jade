@@ -2,10 +2,12 @@
 """
 Benchmark: Jade (bytecode VM) vs Jade (LLVM native) vs Python 3
 
-Three suites:
-  light  — fib(10), factorial(7), sum_to(10)
-  heavy  — fib(28), factorial(15), sum_to(500)
-  sort   — bubble sort, 200-element descending array
+Four suites:
+  light   — fib(10), factorial(7), sum_to(10)
+  heavy   — fib(28), factorial(15), sum_to(500)
+  sort    — bubble sort, 200-element descending array
+  extreme — fib(40), ~330M recursive calls (~7s Python, ~67s VM, <1s LLVM)
+             VM runs only once; Python and LLVM run 3 times each.
 """
 
 import subprocess
@@ -22,31 +24,41 @@ PYTHON_BIN = sys.executable
 
 SUITES = [
     {
-        "name":  "light  (fib(10), factorial(7), sum_to(10))",
-        "jade":  ROOT / "jade_evals" / "functions" / "recursion.jde",
-        "py":    ROOT / "bench" / "recursion.py",
-        "runs":  20,
+        "name":     "light  (fib(10), factorial(7), sum_to(10))",
+        "jade":     ROOT / "jade_evals" / "functions" / "recursion.jde",
+        "py":       ROOT / "bench" / "recursion.py",
+        "runs":     20,
+        "runs_vm":  20,
     },
     {
-        "name":  "heavy  (fib(28), factorial(15), sum_to(500))",
-        "jade":  ROOT / "bench" / "heavy.jde",
-        "py":    ROOT / "bench" / "heavy.py",
-        "runs":  10,
+        "name":     "heavy  (fib(28), factorial(15), sum_to(500))",
+        "jade":     ROOT / "bench" / "heavy.jde",
+        "py":       ROOT / "bench" / "heavy.py",
+        "runs":     10,
+        "runs_vm":  10,
     },
     {
-        "name":  "sort   (bubble sort, 200-elem descending array)",
-        "jade":  ROOT / "bench" / "sort.jde",
-        "py":    ROOT / "bench" / "sort.py",
-        "runs":  10,
+        "name":     "sort   (bubble sort, 200-elem descending array)",
+        "jade":     ROOT / "bench" / "sort.jde",
+        "py":       ROOT / "bench" / "sort.py",
+        "runs":     10,
+        "runs_vm":  10,
+    },
+    {
+        "name":     "extreme (fib(40), ~330M recursive calls)",
+        "jade":     ROOT / "bench" / "extreme.jde",
+        "py":       ROOT / "bench" / "extreme.py",
+        "runs":     3,
+        "runs_vm":  1,   # VM takes ~60-70s per run — single sample only
     },
 ]
 
 
-def measure(cmd: list[str], runs: int) -> list[float]:
+def measure(cmd: list[str], runs: int, timeout: float | None = None) -> list[float]:
     times = []
     for _ in range(runs):
         t0 = time.perf_counter()
-        result = subprocess.run(cmd, capture_output=True)
+        result = subprocess.run(cmd, capture_output=True, timeout=timeout)
         elapsed = time.perf_counter() - t0
         if result.returncode != 0:
             print(f"      ERROR: {result.stderr.decode().strip()[:120]}")
@@ -83,12 +95,17 @@ def compile_llvm(jade_src: Path, out_path: str) -> bool:
 
 with tempfile.TemporaryDirectory() as tmpdir:
     for suite in SUITES:
-        runs = suite["runs"]
+        runs    = suite["runs"]
+        runs_vm = suite["runs_vm"]
         jade_src = suite["jade"]
-        print(f"\n── {suite['name']}  ({runs} runs each) ──")
+        print(f"\n── {suite['name']} ──")
+        if runs_vm != runs:
+            print(f"   (VM: {runs_vm} run(s);  LLVM + Python: {runs} run(s) each)")
+        else:
+            print(f"   ({runs} runs each)")
 
         # ── Jade bytecode VM ──
-        vm_times = measure([str(JADE_BIN), "run", str(jade_src)], runs)
+        vm_times = measure([str(JADE_BIN), "run", str(jade_src)], runs_vm)
         report("Jade  (bytecode VM)", vm_times)
         print()
 
