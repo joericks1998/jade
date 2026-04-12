@@ -14,6 +14,7 @@ fn main() {
         [_] => {
             eprintln!("Usage: jade <file.jde>");
             eprintln!("       jade configure");
+            eprintln!("       jade build <file.jde>");
             eprintln!("       jade --help");
             process::exit(1);
         }
@@ -25,6 +26,18 @@ fn main() {
         }
         [_, cmd, filename] if cmd == "check" => {
             cli::check::run_check(filename);
+        }
+        // jade build <file.jde>
+        [_, cmd, filename] if cmd == "build" => {
+            cli::build::run_build(filename, None, false);
+        }
+        // jade build <file.jde> -o <output>
+        [_, cmd, filename, flag, output] if cmd == "build" && (flag == "-o" || flag == "--output") => {
+            cli::build::run_build(filename, Some(output), false);
+        }
+        // jade build <file.jde> --emit=ir
+        [_, cmd, filename, flag] if cmd == "build" && flag == "--emit=ir" => {
+            cli::build::run_build(filename, None, true);
         }
         [_, filename] => {
             cli::run::run_file(filename, false);
