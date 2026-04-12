@@ -342,8 +342,9 @@
       <h1>Functions</h1>
       <p class="lead">
         Jade functions are defined with <code>fn</code>, accept zero or more parameters,
-        and return a value with <code>return</code>. Functions are first-class values and
-        can be passed to other functions or assigned to variables.
+        and return a value either with an explicit <code>return</code> statement or via
+        implicit return (the last bare expression in the body). Functions are first-class
+        values and can be passed to other functions or assigned to variables.
       </p>
 
       <section id="overview">
@@ -352,12 +353,19 @@
           A function is a named, reusable block of statements. It is introduced with
           the <code>fn</code> keyword, followed by a name, a parenthesized parameter list,
           and a brace-delimited body. Calling a function evaluates its body in a new scope
-          and returns the value produced by a <code>return</code> statement.
+          and returns a value.
         </p>
         <p>
-          If execution reaches the end of the function body without hitting a
-          <code>return</code> statement, the function returns <code>0</code> (an integer).
-          This mirrors the behavior of <code>return</code> with no expression.
+          There are two ways to return a value from a function:
+        </p>
+        <ul>
+          <li><strong>Explicit return:</strong> <code>return &lt;expr&gt;</code> exits immediately and produces that value.</li>
+          <li><strong>Implicit return:</strong> if the last statement in the body is a bare expression (no <code>return</code> keyword), that expression's value is returned automatically.</li>
+        </ul>
+        <p>
+          If execution reaches the end of the body without hitting a <code>return</code>
+          statement and without a final bare expression, the function returns <code>nil</code>.
+          A bare <code>return</code> with no expression also produces <code>nil</code>.
         </p>
         <p>
           Functions are first-class values in Jade. A function definition binds the name
@@ -378,8 +386,8 @@
         <ul>
           <li><code>&lt;name&gt;</code> — an identifier naming the function; binds it in the enclosing scope.</li>
           <li><code>&lt;param&gt;</code> — zero or more parameter names separated by commas; each becomes a local variable inside the body.</li>
-          <li><code>&lt;body statements&gt;</code> — any sequence of <code>let</code>, <code>if</code>/<code>else</code>, <code>while</code>, or <code>return</code> statements. Nested <code>fn</code> definitions are not allowed inside a function body.</li>
-          <li><code>return &lt;expr&gt;</code> — exits the function and produces the given value. A bare <code>return</code> produces <code>0</code>.</li>
+          <li><code>&lt;body statements&gt;</code> — any sequence of statements. If the last statement is a bare expression, its value is returned implicitly.</li>
+          <li><code>return &lt;expr&gt;</code> — exits immediately and produces the given value. A bare <code>return</code> produces <code>nil</code>.</li>
         </ul>
 
         <h3>Function Call</h3>
@@ -402,6 +410,18 @@ let sum = add(3, 4)</code></pre>
         <p>
           <code>add</code> takes two parameters and returns their sum. Calling <code>add(3, 4)</code>
           evaluates the body with <code>a = 3</code> and <code>b = 4</code>, producing <code>7</code>.
+        </p>
+
+        <h3>Implicit return (last expression)</h3>
+        <pre><code>fn double(x) {
+    x * 2
+}
+
+print(double(5))  // 10</code></pre>
+        <p>
+          The last statement is the bare expression <code>x * 2</code>. Because it is not
+          a <code>let</code>, <code>if</code>, or other statement, its value is automatically
+          returned. This is equivalent to writing <code>return x * 2</code>.
         </p>
 
         <h3>A function with no parameters</h3>
@@ -533,10 +553,16 @@ let fib10 = fib(10)</code></pre>
               <td><code>let f = double</code> — <code>f</code> holds the same <code>fn</code> value as <code>double</code></td>
             </tr>
             <tr>
+              <td>Implicit return (last bare expression)</td>
+              <td>Any expression as the final statement</td>
+              <td>Value of that expression</td>
+              <td>emit.rs: last <code>TStmt::Expr</code> in function body emits <code>Return(Some(reg))</code></td>
+            </tr>
+            <tr>
               <td>Bare <code>return</code> or fall-through</td>
               <td>None</td>
-              <td><code>int</code> value <code>0</code></td>
-              <td>eval.rs: <code>eval_block(body, …)?.unwrap_or(Value::Int(0))</code></td>
+              <td><code>nil</code></td>
+              <td>emit.rs: <code>Instr::Return(None)</code> → VM returns <code>VmValue::Nil</code></td>
             </tr>
           </tbody>
         </table>

@@ -971,6 +971,12 @@ let s = sum_array([10, 20, 30])  // 60</code></pre>
           Attempting to iterate over any other type (such as a string or dict) produces a
           <code>TypeError</code>.
         </div>
+        <div class="note">
+          <strong>REPL limitation:</strong> <code>for</code> loops are not supported in
+          <code>jade repl</code>. The REPL uses the tree-walk evaluator, which does not
+          implement <code>for</code>. Use <code>jade run</code> or <code>jade build</code>
+          to run programs that contain <code>for</code> loops.
+        </div>
       </section>
 
       <section id="while-implementation">
