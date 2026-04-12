@@ -3,7 +3,7 @@ use std::{collections::HashMap, rc::Rc};
 use crate::{
     compiler::{
         bytecode::{Chunk, CompiledFn, FStrPart, Instr, Reg},
-        tir::{JadeType, TExpr, TExprKind, TFStrPart, TProgram, TStmt},
+        tir::{JadeType, TExpr, TExprKind, TFStrPart, TProgram, TStmt, TCatchArm},
     },
     interpreter::{
         ast::{BinOpKind, StructFieldDef, UnaryOpKind},
@@ -337,6 +337,91 @@ fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
 
         TStmt::Use { path, span } => {
             em.chunk.emit(Instr::ImportFile(path), span);
+        }
+
+        TStmt::Raise { value, span } => {
+            let src = emit_expr(&value, em, ctx)?;
+            em.chunk.emit(Instr::Raise(src), span);
+        }
+
+        TStmt::TryCatch { body, arms, span } => {
+            // Allocate a register to hold the caught exception value.
+            let caught_reg = em.alloc_reg();
+
+            // SetupHandler: on exception, store caught value in caught_reg and jump to handler.
+            // Offset is patched below once we know where the handler arms begin.
+            let setup_idx = em.chunk.emit(Instr::SetupHandler(caught_reg, 0), span);
+
+            // Emit try body.
+            for s in body {
+                emit_stmt(s, em, ctx)?;
+            }
+
+            // Normal exit from try: pop the handler frame.
+            em.chunk.emit(Instr::PopHandler, span);
+
+            // Jump past all handler arms (patched below).
+            let jump_end_idx = em.chunk.emit(Instr::Jump(0), span);
+
+            // Patch SetupHandler to point here (start of handler arms).
+            em.chunk.patch_jump(setup_idx, em.chunk.len());
+
+            // Collect jumps to end that need patching after all arms.
+            let mut end_jumps: Vec<usize> = Vec::new();
+
+            let n_arms = arms.len();
+            for (i, arm) in arms.into_iter().enumerate() {
+                let TCatchArm { catch_type, binding, body: arm_body } = arm;
+
+                // For typed arms, check the caught value's type name.
+                let skip_idx = if let Some(type_name) = catch_type {
+                    let type_reg = em.alloc_reg();
+                    em.chunk.emit(Instr::GetTypeName(type_reg, caught_reg), span);
+                    let expected_reg = em.alloc_reg();
+                    em.chunk.emit(Instr::LoadStr(expected_reg, type_name), span);
+                    let cmp_reg = em.alloc_reg();
+                    em.chunk.emit(Instr::CmpEqStr(cmp_reg, type_reg, expected_reg), span);
+                    // If type doesn't match, jump to next arm.
+                    let idx = em.chunk.emit(Instr::JumpIfFalse(cmp_reg, 0), span);
+                    Some(idx)
+                } else {
+                    None
+                };
+
+                // Bind the caught value to the arm's variable.
+                if em.in_fn() {
+                    let slot = em.define_local(&binding);
+                    em.chunk.emit(Instr::SetLocal(slot, caught_reg), span);
+                } else {
+                    em.chunk.emit(Instr::SetGlobal(binding.clone(), caught_reg), span);
+                }
+
+                // Emit arm body.
+                for s in arm_body {
+                    emit_stmt(s, em, ctx)?;
+                }
+
+                // Always jump to end after the arm body executes, so execution
+                // never falls through into the re-raise or the next arm.
+                let j = em.chunk.emit(Instr::Jump(0), span);
+                end_jumps.push(j);
+
+                // Patch the type-mismatch skip to point past this arm (to the next arm).
+                if let Some(skip) = skip_idx {
+                    em.chunk.patch_jump(skip, em.chunk.len());
+                }
+            }
+
+            // Re-raise fallthrough: if all typed arms failed to match, re-raise.
+            // Arms with a catch-all will always jump past this via end_jumps.
+            em.chunk.emit(Instr::Raise(caught_reg), span);
+
+            // Patch all end jumps to point here (past the re-raise).
+            let end_target = em.chunk.len();
+            em.chunk.patch_jump(jump_end_idx, end_target);
+            for j in end_jumps {
+                em.chunk.patch_jump(j, end_target);
+            }
         }
 
         TStmt::Expr(expr) => {

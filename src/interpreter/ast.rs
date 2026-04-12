@@ -46,6 +46,17 @@ pub enum FStrPart {
     Expr(Expr),
 }
 
+/// A single arm of a `try/catch` statement.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatchArm {
+    /// If `Some(name)`, only catches exceptions whose struct `type_name` matches.
+    /// If `None`, this is a catch-all arm that matches any raised value.
+    pub catch_type: Option<String>,
+    /// The variable name bound to the caught exception value inside the arm body.
+    pub binding: String,
+    pub body: Vec<Stmt>,
+}
+
 /// A complete Jade program: a list of statements.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Program {
@@ -165,6 +176,19 @@ pub enum Stmt {
     /// `use "path/to/file.jde"` — import all top-level definitions from another file.
     Use {
         path: String,
+        span: Span,
+    },
+
+    /// `raise expr` — raise any value as an exception.
+    Raise {
+        value: Expr,
+        span: Span,
+    },
+
+    /// `try { body } catch Type e { arm } ... catch e { arm }`
+    TryCatch {
+        body: Vec<Stmt>,
+        arms: Vec<CatchArm>,
         span: Span,
     },
 

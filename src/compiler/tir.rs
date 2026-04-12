@@ -190,7 +190,26 @@ pub enum TStmt {
         path: String,
         span: Span,
     },
+    /// `raise expr`
+    Raise {
+        value: TExpr,
+        span: Span,
+    },
+    /// `try { body } catch [Type] binding { arm } …`
+    TryCatch {
+        body: Vec<TStmt>,
+        arms: Vec<TCatchArm>,
+        span: Span,
+    },
     Expr(TExpr),
+}
+
+/// A single typed catch arm.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TCatchArm {
+    pub catch_type: Option<String>,
+    pub binding: String,
+    pub body: Vec<TStmt>,
 }
 
 // ── TIR program ───────────────────────────────────────────────────────────────

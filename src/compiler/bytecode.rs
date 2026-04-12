@@ -71,9 +71,10 @@ impl Chunk {
     pub fn patch_jump(&mut self, idx: usize, target_idx: usize) {
         let offset = target_idx as i32 - (idx as i32 + 1);
         match &mut self.code[idx] {
-            Instr::Jump(o)           => *o = offset,
-            Instr::JumpIfFalse(_, o) => *o = offset,
-            Instr::JumpIfTrue(_, o)  => *o = offset,
+            Instr::Jump(o)             => *o = offset,
+            Instr::JumpIfFalse(_, o)   => *o = offset,
+            Instr::JumpIfTrue(_, o)    => *o = offset,
+            Instr::SetupHandler(_, o)  => *o = offset,
             other => unreachable!("patch_jump on non-jump: {:?}", other),
         }
     }
@@ -240,6 +241,20 @@ pub enum Instr {
     // ── Built-ins ──────────────────────────────────────────────────────────
     CallPrint(Vec<Reg>),
     CallLen(Reg, Reg),
+
+    // ── Exception handling ─────────────────────────────────────────────────
+    /// Raise the value in `val` as an exception. If a handler frame is active,
+    /// stores the value in `caught_reg` and jumps to the handler; otherwise
+    /// stores it in `VmState::raised_exception` and propagates `JadeError::Exception`.
+    Raise(Reg),
+    /// Push an exception handler frame. On exception, stores the caught value in
+    /// `caught_reg` and jumps `offset` instructions past this instruction.
+    SetupHandler(Reg, i32),
+    /// Pop the current exception handler frame (try block completed normally).
+    PopHandler,
+    /// Store the struct `type_name` of `src` as a string in `dest`.
+    /// Yields an empty string if `src` is not a struct. Used for typed catch matching.
+    GetTypeName(Reg, Reg),
 
     // ── Misc ───────────────────────────────────────────────────────────────
     Move(Reg, Reg),
