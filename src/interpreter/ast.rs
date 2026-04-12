@@ -275,6 +275,13 @@ pub enum Expr {
         entries: Vec<(Expr, Expr)>,
         span: Span,
     },
+
+    /// An anonymous function (closure), e.g. `|x| x * 2` or `|x, y| { x + y }`
+    Closure {
+        params: Vec<String>,
+        body: Vec<Stmt>,
+        span: Span,
+    },
 }
 
 /// All binary operators Jade supports.

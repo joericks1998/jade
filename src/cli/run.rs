@@ -115,7 +115,7 @@ pub fn run_file(path: &str, verbose: bool) {
                 }
                 vm::VmValue::Bool(b)  => println!("{} = {}", name, b),
                 vm::VmValue::Str(s)   => println!("{} = \"{}\"", name, s),
-                vm::VmValue::Fn(_)    => println!("{} = <fn>", name),
+                vm::VmValue::Fn(_) | vm::VmValue::Closure(_, _) => println!("{} = <fn>", name),
                 vm::VmValue::Struct(rc) => {
                     let inst = rc.borrow();
                     print!("{} = {} {{", name, inst.type_name);

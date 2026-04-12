@@ -53,6 +53,8 @@ pub enum BuiltinFn {
 pub struct FnValue {
     pub params: Vec<String>,
     pub body: Vec<Stmt>,
+    /// Variables captured at closure-creation time (empty for named functions).
+    pub captured: HashMap<String, Value>,
 }
 
 /// A struct instance at runtime.
@@ -222,6 +224,18 @@ impl Env {
         self.builtins.get(name).map(|b| Value::Builtin(b.clone()))
     }
 
+    /// Snapshot all currently visible variables (inner scopes win over outer).
+    /// Used to capture the environment when creating a closure.
+    fn snapshot(&self) -> HashMap<String, Value> {
+        let mut map = HashMap::new();
+        for scope in self.scopes.iter() {
+            for (k, v) in scope {
+                map.insert(k.clone(), v.clone());
+            }
+        }
+        map
+    }
+
     /// Iterate over all top-level (global) bindings — used by `-v` output.
     pub fn entries(&self) -> impl Iterator<Item = (&String, &Value)> {
         self.scopes[0].iter()
@@ -298,6 +312,7 @@ fn eval_block(stmts: &[Stmt], env: &mut Env) -> Result<Option<Value>> {
                 let fn_val = FnValue {
                     params: params.clone(),
                     body: body.clone(),
+                    captured: HashMap::new(),
                 };
                 env.define(name.clone(), Value::Fn(Rc::new(fn_val)));
             }
@@ -400,6 +415,7 @@ fn eval_block(stmts: &[Stmt], env: &mut Env) -> Result<Option<Value>> {
                         method_map.insert(name.clone(), Rc::new(FnValue {
                             params: params.clone(),
                             body: body.clone(),
+                            captured: HashMap::new(),
                         }));
                     }
                 }
@@ -518,6 +534,7 @@ fn expr_span(e: &Expr) -> Span {
         Expr::FStr         { span, .. } => *span,
         Expr::PromptDeref  { span, .. } => *span,
         Expr::Dict         { span, .. } => *span,
+        Expr::Closure      { span, .. } => *span,
     }
 }
 
@@ -647,6 +664,10 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                         arg_vals.push(eval_expr(arg_expr, env)?);
                     }
                     env.push_scope();
+                    // Inject captured variables first so params can shadow them.
+                    for (name, val) in &fn_rc.captured {
+                        env.define(name.clone(), val.clone());
+                    }
                     for (param, val) in fn_rc.params.iter().zip(arg_vals) {
                         env.define(param.clone(), val);
                     }
@@ -865,6 +886,15 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                 map.insert(key, val);
             }
             Ok(Value::Dict(map))
+        }
+
+        Expr::Closure { params, body, .. } => {
+            let fn_val = FnValue {
+                params: params.clone(),
+                body: body.clone(),
+                captured: env.snapshot(),
+            };
+            Ok(Value::Fn(Rc::new(fn_val)))
         }
 
         Expr::Index { object, index, span } => {

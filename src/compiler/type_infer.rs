@@ -656,6 +656,25 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
             })
         }
 
+        // ── Closures ──────────────────────────────────────────────────────────
+
+        Expr::Closure { params, body, span } => {
+            ctx.push_scope();
+            for param in params {
+                ctx.define(param.clone(), JadeType::Unknown);
+            }
+            let tbody = check_stmts(body, ctx)?;
+            ctx.pop_scope();
+            Ok(TExpr {
+                kind: TExprKind::Closure { params: params.clone(), body: tbody },
+                ty: JadeType::Fn {
+                    params: params.iter().map(|_| JadeType::Unknown).collect(),
+                    ret: Box::new(JadeType::Unknown),
+                },
+                span: *span,
+            })
+        }
+
         // ── LLM prompt dereference ────────────────────────────────────────────
 
         Expr::PromptDeref { expr, output_type, span } => {
@@ -871,7 +890,8 @@ fn expr_span(e: &Expr) -> Span {
         | Expr::BinOp { span, .. } | Expr::UnaryOp { span, .. }
         | Expr::StructLiteral { span, .. } | Expr::FieldAccess { span, .. }
         | Expr::Index { span, .. } | Expr::Array { span, .. } | Expr::FStr { span, .. }
-        | Expr::PromptDeref { span, .. } | Expr::Dict { span, .. } => *span,
+        | Expr::PromptDeref { span, .. } | Expr::Dict { span, .. }
+        | Expr::Closure { span, .. } => *span,
     }
 }
 
