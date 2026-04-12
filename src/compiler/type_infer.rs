@@ -371,6 +371,34 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
             Ok(TStmt::Use { path: path.clone(), span: *span })
         }
 
+        // ── Exception handling ────────────────────────────────────────────────
+
+        Stmt::Raise { value, span } => {
+            let tval = infer_expr(value, ctx)?;
+            Ok(TStmt::Raise { value: tval, span: *span })
+        }
+
+        Stmt::TryCatch { body, arms, span } => {
+            ctx.push_scope();
+            let tbody = check_stmts(body, ctx)?;
+            ctx.pop_scope();
+
+            let tarms = arms.iter().map(|arm| {
+                ctx.push_scope();
+                // The binding variable holds the caught value; type is unknown statically.
+                ctx.define(arm.binding.clone(), JadeType::Unknown);
+                let tbody = check_stmts(&arm.body, ctx)?;
+                ctx.pop_scope();
+                Ok(crate::compiler::tir::TCatchArm {
+                    catch_type: arm.catch_type.clone(),
+                    binding: arm.binding.clone(),
+                    body: tbody,
+                })
+            }).collect::<Result<Vec<_>>>()?;
+
+            Ok(TStmt::TryCatch { body: tbody, arms: tarms, span: *span })
+        }
+
         // ── Bare expression ───────────────────────────────────────────────────
 
         Stmt::Expr(expr) => {

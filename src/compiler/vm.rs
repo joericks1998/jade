@@ -114,6 +114,9 @@ pub fn value_to_display(v: &VmValue) -> String {
 
 /// The global execution state, including LLM integration.
 pub struct VmState {
+    /// The value most recently raised by `Instr::Raise` that propagated past its
+    /// frame's handler stack. Consumed by the nearest enclosing `SetupHandler`.
+    pub raised_exception: Option<VmValue>,
     /// All top-level (global) bindings after execution.
     pub globals: HashMap<String, VmValue>,
     /// Extend-block method tables: `type_name → method_name → fn`.
@@ -140,6 +143,7 @@ impl VmState {
         globals.insert("__max_retries__".to_string(), VmValue::Int(3));
         globals.insert("__retry_log__".to_string(), VmValue::Array(vec![]));
         VmState {
+            raised_exception: None,
             globals,
             extend_methods: HashMap::new(),
             struct_defs: HashMap::new(),
@@ -217,6 +221,17 @@ fn run_with_state(program: CompiledProgram, state: &mut VmState) -> Result<()> {
 
 // ── Execution engine ──────────────────────────────────────────────────────────
 
+/// Build a `RuntimeError { message }` struct value for wrapping built-in errors
+/// when they are caught by a `try/catch` block.
+fn make_vm_runtime_error(message: String) -> VmValue {
+    let mut fields = HashMap::new();
+    fields.insert("message".to_string(), VmValue::Str(message));
+    VmValue::Struct(Rc::new(RefCell::new(VmStruct {
+        type_name: "RuntimeError".to_string(),
+        fields,
+    })))
+}
+
 /// Execute `chunk` with the provided register frame.  Returns `Some(value)` if
 /// a `Return` instruction was executed, `None` if execution ended normally.
 fn execute_chunk(
@@ -232,7 +247,44 @@ fn execute_chunk(
         slots.resize(needed as usize + 1, VmValue::Nil);
     }
 
+    // Instruction pointer — must be declared before the macros that assign to it.
     let mut ip: usize = 0;
+
+    // Active exception handler frames: (caught_reg, handler_ip).
+    // SetupHandler pushes; PopHandler pops; Raise/errors dispatch to the top frame.
+    let mut handlers: Vec<(Reg, usize)> = Vec::new();
+
+    // Dispatch `err` to the top handler frame, or propagate it up the call stack.
+    // Used inline — written as a named closure so every error site stays readable.
+    // Returns the error to propagate (None means handler was invoked; continue the loop).
+    macro_rules! vm_err {
+        ($err:expr) => {{
+            let __err: JadeError = $err;
+            if let Some((__caught, __handler_ip)) = handlers.pop() {
+                let __raised = match __err {
+                    JadeError::Exception { .. } => state.raised_exception.take()
+                        .unwrap_or_else(|| VmValue::Str("unknown exception".to_string())),
+                    ref __e => make_vm_runtime_error(__e.to_string()),
+                };
+                set(slots, __caught, __raised);
+                ip = __handler_ip;
+                continue;
+            } else {
+                return Err(__err);
+            }
+        }};
+    }
+
+    // Like `expr?` but dispatches to an exception handler when one is active.
+    macro_rules! vm_try {
+        ($expr:expr) => {
+            match $expr {
+                Ok(__v) => __v,
+                Err(__e) => { vm_err!(__e); }
+            }
+        };
+    }
+
     loop {
         if ip >= chunk.code.len() {
             break;
@@ -360,89 +412,89 @@ fn execute_chunk(
 
             // ── Integer arithmetic ────────────────────────────────────────────
             Instr::AddInt(d, l, r) => {
-                let (a, b) = int2(slots, *l, *r, span)?;
+                let (a, b) = vm_try!(int2(slots, *l, *r, span));
                 set(slots, *d, VmValue::Int(
-                    a.checked_add(b).ok_or(JadeError::IntegerOverflow { span })?
+                    vm_try!(a.checked_add(b).ok_or(JadeError::IntegerOverflow { span }))
                 ));
             }
             Instr::SubInt(d, l, r) => {
-                let (a, b) = int2(slots, *l, *r, span)?;
+                let (a, b) = vm_try!(int2(slots, *l, *r, span));
                 set(slots, *d, VmValue::Int(
-                    a.checked_sub(b).ok_or(JadeError::IntegerOverflow { span })?
+                    vm_try!(a.checked_sub(b).ok_or(JadeError::IntegerOverflow { span }))
                 ));
             }
             Instr::MulInt(d, l, r) => {
-                let (a, b) = int2(slots, *l, *r, span)?;
+                let (a, b) = vm_try!(int2(slots, *l, *r, span));
                 set(slots, *d, VmValue::Int(
-                    a.checked_mul(b).ok_or(JadeError::IntegerOverflow { span })?
+                    vm_try!(a.checked_mul(b).ok_or(JadeError::IntegerOverflow { span }))
                 ));
             }
             Instr::DivInt(d, l, r) => {
-                let (a, b) = int2(slots, *l, *r, span)?;
-                if b == 0 { return Err(JadeError::DivisionByZero { span }); }
+                let (a, b) = vm_try!(int2(slots, *l, *r, span));
+                if b == 0 { vm_err!(JadeError::DivisionByZero { span }); }
                 set(slots, *d, VmValue::Int(a / b));
             }
             Instr::ModInt(d, l, r) => {
-                let (a, b) = int2(slots, *l, *r, span)?;
-                if b == 0 { return Err(JadeError::RemainderByZero { span }); }
+                let (a, b) = vm_try!(int2(slots, *l, *r, span));
+                if b == 0 { vm_err!(JadeError::RemainderByZero { span }); }
                 set(slots, *d, VmValue::Int(a % b));
             }
             Instr::NegInt(d, s) => {
-                let a = get_int(slots, *s, span)?;
+                let a = vm_try!(get_int(slots, *s, span));
                 set(slots, *d, VmValue::Int(-a));
             }
 
             // ── Float arithmetic ──────────────────────────────────────────────
             Instr::AddFloat(d, l, r) => {
-                let (a, b) = flt2(slots, *l, *r, span)?;
+                let (a, b) = vm_try!(flt2(slots, *l, *r, span));
                 set(slots, *d, VmValue::Float(a + b));
             }
             Instr::SubFloat(d, l, r) => {
-                let (a, b) = flt2(slots, *l, *r, span)?;
+                let (a, b) = vm_try!(flt2(slots, *l, *r, span));
                 set(slots, *d, VmValue::Float(a - b));
             }
             Instr::MulFloat(d, l, r) => {
-                let (a, b) = flt2(slots, *l, *r, span)?;
+                let (a, b) = vm_try!(flt2(slots, *l, *r, span));
                 set(slots, *d, VmValue::Float(a * b));
             }
             Instr::DivFloat(d, l, r) => {
-                let (a, b) = flt2(slots, *l, *r, span)?;
-                if b == 0.0 { return Err(JadeError::DivisionByZero { span }); }
+                let (a, b) = vm_try!(flt2(slots, *l, *r, span));
+                if b == 0.0 { vm_err!(JadeError::DivisionByZero { span }); }
                 set(slots, *d, VmValue::Float(a / b));
             }
             Instr::NegFloat(d, s) => {
-                let a = get_flt(slots, *s, span)?;
+                let a = vm_try!(get_flt(slots, *s, span));
                 set(slots, *d, VmValue::Float(-a));
             }
             Instr::IntToFloat(d, s) => {
-                let a = get_int(slots, *s, span)?;
+                let a = vm_try!(get_int(slots, *s, span));
                 set(slots, *d, VmValue::Float(a as f64));
             }
             Instr::ConcatStr(d, l, r) => {
-                let a = get_str(slots, *l, span)?;
-                let b = get_str(slots, *r, span)?;
+                let a = vm_try!(get_str(slots, *l, span));
+                let b = vm_try!(get_str(slots, *r, span));
                 set(slots, *d, VmValue::Str(a + &b));
             }
 
             // ── Bitwise ───────────────────────────────────────────────────────
-            Instr::BitAnd(d, l, r) => { let (a,b)=int2(slots,*l,*r,span)?; set(slots,*d,VmValue::Int(a&b)); }
-            Instr::BitOr(d, l, r)  => { let (a,b)=int2(slots,*l,*r,span)?; set(slots,*d,VmValue::Int(a|b)); }
-            Instr::BitXor(d, l, r) => { let (a,b)=int2(slots,*l,*r,span)?; set(slots,*d,VmValue::Int(a^b)); }
-            Instr::BitNot(d, s)    => { let a=get_int(slots,*s,span)?; set(slots,*d,VmValue::Int(!a)); }
+            Instr::BitAnd(d, l, r) => { let (a,b)=vm_try!(int2(slots,*l,*r,span)); set(slots,*d,VmValue::Int(a&b)); }
+            Instr::BitOr(d, l, r)  => { let (a,b)=vm_try!(int2(slots,*l,*r,span)); set(slots,*d,VmValue::Int(a|b)); }
+            Instr::BitXor(d, l, r) => { let (a,b)=vm_try!(int2(slots,*l,*r,span)); set(slots,*d,VmValue::Int(a^b)); }
+            Instr::BitNot(d, s)    => { let a=vm_try!(get_int(slots,*s,span)); set(slots,*d,VmValue::Int(!a)); }
             Instr::Shl(d, l, r)    => {
-                let (a, b) = int2(slots, *l, *r, span)?;
-                if b < 0 || b >= 64 { return Err(JadeError::InvalidShift { amount: b, span }); }
+                let (a, b) = vm_try!(int2(slots, *l, *r, span));
+                if b < 0 || b >= 64 { vm_err!(JadeError::InvalidShift { amount: b, span }); }
                 set(slots, *d, VmValue::Int(a << b as u32));
             }
             Instr::Shr(d, l, r)    => {
-                let (a, b) = int2(slots, *l, *r, span)?;
-                if b < 0 || b >= 64 { return Err(JadeError::InvalidShift { amount: b, span }); }
+                let (a, b) = vm_try!(int2(slots, *l, *r, span));
+                if b < 0 || b >= 64 { vm_err!(JadeError::InvalidShift { amount: b, span }); }
                 set(slots, *d, VmValue::Int(a >> b as u32));
             }
 
             // ── Logical ───────────────────────────────────────────────────────
             Instr::Not(d, s) => {
-                let b = get_bool(slots, *s, span)?;
+                let b = vm_try!(get_bool(slots, *s, span));
                 set(slots, *d, VmValue::Bool(!b));
             }
 
@@ -450,64 +502,64 @@ fn execute_chunk(
             Instr::BinOp(d, op, l, r) => {
                 let lv = get(slots, *l).clone();
                 let rv = get(slots, *r).clone();
-                let result = eval_binop_dynamic(op, lv, rv, span)?;
+                let result = vm_try!(eval_binop_dynamic(op, lv, rv, span));
                 set(slots, *d, result);
             }
             Instr::UnaryOp(d, op, s) => {
                 let v = get(slots, *s).clone();
-                let result = eval_unaryop_dynamic(op, v, span)?;
+                let result = vm_try!(eval_unaryop_dynamic(op, v, span));
                 set(slots, *d, result);
             }
 
             // ── Typed comparisons — int ───────────────────────────────────────
-            Instr::CmpEqInt(d,l,r) => { let (a,b)=int2(slots,*l,*r,span)?; set(slots,*d,VmValue::Bool(a==b)); }
-            Instr::CmpNeInt(d,l,r) => { let (a,b)=int2(slots,*l,*r,span)?; set(slots,*d,VmValue::Bool(a!=b)); }
-            Instr::CmpLtInt(d,l,r) => { let (a,b)=int2(slots,*l,*r,span)?; set(slots,*d,VmValue::Bool(a<b));  }
-            Instr::CmpGtInt(d,l,r) => { let (a,b)=int2(slots,*l,*r,span)?; set(slots,*d,VmValue::Bool(a>b));  }
-            Instr::CmpLeInt(d,l,r) => { let (a,b)=int2(slots,*l,*r,span)?; set(slots,*d,VmValue::Bool(a<=b)); }
-            Instr::CmpGeInt(d,l,r) => { let (a,b)=int2(slots,*l,*r,span)?; set(slots,*d,VmValue::Bool(a>=b)); }
+            Instr::CmpEqInt(d,l,r) => { let (a,b)=vm_try!(int2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(a==b)); }
+            Instr::CmpNeInt(d,l,r) => { let (a,b)=vm_try!(int2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(a!=b)); }
+            Instr::CmpLtInt(d,l,r) => { let (a,b)=vm_try!(int2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(a<b));  }
+            Instr::CmpGtInt(d,l,r) => { let (a,b)=vm_try!(int2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(a>b));  }
+            Instr::CmpLeInt(d,l,r) => { let (a,b)=vm_try!(int2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(a<=b)); }
+            Instr::CmpGeInt(d,l,r) => { let (a,b)=vm_try!(int2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(a>=b)); }
 
             // ── Typed comparisons — float ─────────────────────────────────────
-            Instr::CmpEqFloat(d,l,r) => { let (a,b)=flt2(slots,*l,*r,span)?; set(slots,*d,VmValue::Bool(a==b)); }
-            Instr::CmpNeFloat(d,l,r) => { let (a,b)=flt2(slots,*l,*r,span)?; set(slots,*d,VmValue::Bool(a!=b)); }
-            Instr::CmpLtFloat(d,l,r) => { let (a,b)=flt2(slots,*l,*r,span)?; set(slots,*d,VmValue::Bool(a<b));  }
-            Instr::CmpGtFloat(d,l,r) => { let (a,b)=flt2(slots,*l,*r,span)?; set(slots,*d,VmValue::Bool(a>b));  }
-            Instr::CmpLeFloat(d,l,r) => { let (a,b)=flt2(slots,*l,*r,span)?; set(slots,*d,VmValue::Bool(a<=b)); }
-            Instr::CmpGeFloat(d,l,r) => { let (a,b)=flt2(slots,*l,*r,span)?; set(slots,*d,VmValue::Bool(a>=b)); }
+            Instr::CmpEqFloat(d,l,r) => { let (a,b)=vm_try!(flt2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(a==b)); }
+            Instr::CmpNeFloat(d,l,r) => { let (a,b)=vm_try!(flt2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(a!=b)); }
+            Instr::CmpLtFloat(d,l,r) => { let (a,b)=vm_try!(flt2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(a<b));  }
+            Instr::CmpGtFloat(d,l,r) => { let (a,b)=vm_try!(flt2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(a>b));  }
+            Instr::CmpLeFloat(d,l,r) => { let (a,b)=vm_try!(flt2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(a<=b)); }
+            Instr::CmpGeFloat(d,l,r) => { let (a,b)=vm_try!(flt2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(a>=b)); }
 
             // ── Typed comparisons — mixed ─────────────────────────────────────
-            Instr::CmpLtIntFloat(d,l,r) => { let a=get_int(slots,*l,span)? as f64; let b=get_flt(slots,*r,span)?; set(slots,*d,VmValue::Bool(a<b));  }
-            Instr::CmpGtIntFloat(d,l,r) => { let a=get_int(slots,*l,span)? as f64; let b=get_flt(slots,*r,span)?; set(slots,*d,VmValue::Bool(a>b));  }
-            Instr::CmpLeIntFloat(d,l,r) => { let a=get_int(slots,*l,span)? as f64; let b=get_flt(slots,*r,span)?; set(slots,*d,VmValue::Bool(a<=b)); }
-            Instr::CmpGeIntFloat(d,l,r) => { let a=get_int(slots,*l,span)? as f64; let b=get_flt(slots,*r,span)?; set(slots,*d,VmValue::Bool(a>=b)); }
-            Instr::CmpLtFloatInt(d,l,r) => { let a=get_flt(slots,*l,span)?; let b=get_int(slots,*r,span)? as f64; set(slots,*d,VmValue::Bool(a<b));  }
-            Instr::CmpGtFloatInt(d,l,r) => { let a=get_flt(slots,*l,span)?; let b=get_int(slots,*r,span)? as f64; set(slots,*d,VmValue::Bool(a>b));  }
-            Instr::CmpLeFloatInt(d,l,r) => { let a=get_flt(slots,*l,span)?; let b=get_int(slots,*r,span)? as f64; set(slots,*d,VmValue::Bool(a<=b)); }
-            Instr::CmpGeFloatInt(d,l,r) => { let a=get_flt(slots,*l,span)?; let b=get_int(slots,*r,span)? as f64; set(slots,*d,VmValue::Bool(a>=b)); }
+            Instr::CmpLtIntFloat(d,l,r) => { let a=vm_try!(get_int(slots,*l,span)) as f64; let b=vm_try!(get_flt(slots,*r,span)); set(slots,*d,VmValue::Bool(a<b));  }
+            Instr::CmpGtIntFloat(d,l,r) => { let a=vm_try!(get_int(slots,*l,span)) as f64; let b=vm_try!(get_flt(slots,*r,span)); set(slots,*d,VmValue::Bool(a>b));  }
+            Instr::CmpLeIntFloat(d,l,r) => { let a=vm_try!(get_int(slots,*l,span)) as f64; let b=vm_try!(get_flt(slots,*r,span)); set(slots,*d,VmValue::Bool(a<=b)); }
+            Instr::CmpGeIntFloat(d,l,r) => { let a=vm_try!(get_int(slots,*l,span)) as f64; let b=vm_try!(get_flt(slots,*r,span)); set(slots,*d,VmValue::Bool(a>=b)); }
+            Instr::CmpLtFloatInt(d,l,r) => { let a=vm_try!(get_flt(slots,*l,span)); let b=vm_try!(get_int(slots,*r,span)) as f64; set(slots,*d,VmValue::Bool(a<b));  }
+            Instr::CmpGtFloatInt(d,l,r) => { let a=vm_try!(get_flt(slots,*l,span)); let b=vm_try!(get_int(slots,*r,span)) as f64; set(slots,*d,VmValue::Bool(a>b));  }
+            Instr::CmpLeFloatInt(d,l,r) => { let a=vm_try!(get_flt(slots,*l,span)); let b=vm_try!(get_int(slots,*r,span)) as f64; set(slots,*d,VmValue::Bool(a<=b)); }
+            Instr::CmpGeFloatInt(d,l,r) => { let a=vm_try!(get_flt(slots,*l,span)); let b=vm_try!(get_int(slots,*r,span)) as f64; set(slots,*d,VmValue::Bool(a>=b)); }
 
             // ── Typed comparisons — bool ──────────────────────────────────────
-            Instr::CmpEqBool(d,l,r) => { let (a,b)=bool2(slots,*l,*r,span)?; set(slots,*d,VmValue::Bool(a==b)); }
-            Instr::CmpNeBool(d,l,r) => { let (a,b)=bool2(slots,*l,*r,span)?; set(slots,*d,VmValue::Bool(a!=b)); }
-            Instr::CmpLtBool(d,l,r) => { let (a,b)=bool2(slots,*l,*r,span)?; set(slots,*d,VmValue::Bool(!a&&b)); }
-            Instr::CmpGtBool(d,l,r) => { let (a,b)=bool2(slots,*l,*r,span)?; set(slots,*d,VmValue::Bool(a&&!b)); }
-            Instr::CmpLeBool(d,l,r) => { let (a,b)=bool2(slots,*l,*r,span)?; set(slots,*d,VmValue::Bool(a==b||(!a&&b))); }
-            Instr::CmpGeBool(d,l,r) => { let (a,b)=bool2(slots,*l,*r,span)?; set(slots,*d,VmValue::Bool(a==b||(a&&!b))); }
+            Instr::CmpEqBool(d,l,r) => { let (a,b)=vm_try!(bool2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(a==b)); }
+            Instr::CmpNeBool(d,l,r) => { let (a,b)=vm_try!(bool2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(a!=b)); }
+            Instr::CmpLtBool(d,l,r) => { let (a,b)=vm_try!(bool2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(!a&&b)); }
+            Instr::CmpGtBool(d,l,r) => { let (a,b)=vm_try!(bool2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(a&&!b)); }
+            Instr::CmpLeBool(d,l,r) => { let (a,b)=vm_try!(bool2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(a==b||(!a&&b))); }
+            Instr::CmpGeBool(d,l,r) => { let (a,b)=vm_try!(bool2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(a==b||(a&&!b))); }
 
             // ── Typed comparisons — str ───────────────────────────────────────
-            Instr::CmpEqStr(d,l,r) => { let (a,b)=str2(slots,*l,*r,span)?; set(slots,*d,VmValue::Bool(a==b)); }
-            Instr::CmpNeStr(d,l,r) => { let (a,b)=str2(slots,*l,*r,span)?; set(slots,*d,VmValue::Bool(a!=b)); }
-            Instr::CmpLtStr(d,l,r) => { let (a,b)=str2(slots,*l,*r,span)?; set(slots,*d,VmValue::Bool(a<b));  }
-            Instr::CmpGtStr(d,l,r) => { let (a,b)=str2(slots,*l,*r,span)?; set(slots,*d,VmValue::Bool(a>b));  }
-            Instr::CmpLeStr(d,l,r) => { let (a,b)=str2(slots,*l,*r,span)?; set(slots,*d,VmValue::Bool(a<=b)); }
-            Instr::CmpGeStr(d,l,r) => { let (a,b)=str2(slots,*l,*r,span)?; set(slots,*d,VmValue::Bool(a>=b)); }
+            Instr::CmpEqStr(d,l,r) => { let (a,b)=vm_try!(str2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(a==b)); }
+            Instr::CmpNeStr(d,l,r) => { let (a,b)=vm_try!(str2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(a!=b)); }
+            Instr::CmpLtStr(d,l,r) => { let (a,b)=vm_try!(str2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(a<b));  }
+            Instr::CmpGtStr(d,l,r) => { let (a,b)=vm_try!(str2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(a>b));  }
+            Instr::CmpLeStr(d,l,r) => { let (a,b)=vm_try!(str2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(a<=b)); }
+            Instr::CmpGeStr(d,l,r) => { let (a,b)=vm_try!(str2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(a>=b)); }
 
             // ── Dynamic comparisons ───────────────────────────────────────────
-            Instr::CmpEq(d,l,r) => { let v=cmp_dynamic(slots,*l,*r,"==",span)?; set(slots,*d,v); }
-            Instr::CmpNe(d,l,r) => { let v=cmp_dynamic(slots,*l,*r,"!=",span)?; set(slots,*d,v); }
-            Instr::CmpLt(d,l,r) => { let v=cmp_dynamic(slots,*l,*r,"<", span)?; set(slots,*d,v); }
-            Instr::CmpGt(d,l,r) => { let v=cmp_dynamic(slots,*l,*r,">", span)?; set(slots,*d,v); }
-            Instr::CmpLe(d,l,r) => { let v=cmp_dynamic(slots,*l,*r,"<=",span)?; set(slots,*d,v); }
-            Instr::CmpGe(d,l,r) => { let v=cmp_dynamic(slots,*l,*r,">=",span)?; set(slots,*d,v); }
+            Instr::CmpEq(d,l,r) => { let v=vm_try!(cmp_dynamic(slots,*l,*r,"==",span)); set(slots,*d,v); }
+            Instr::CmpNe(d,l,r) => { let v=vm_try!(cmp_dynamic(slots,*l,*r,"!=",span)); set(slots,*d,v); }
+            Instr::CmpLt(d,l,r) => { let v=vm_try!(cmp_dynamic(slots,*l,*r,"<", span)); set(slots,*d,v); }
+            Instr::CmpGt(d,l,r) => { let v=vm_try!(cmp_dynamic(slots,*l,*r,">", span)); set(slots,*d,v); }
+            Instr::CmpLe(d,l,r) => { let v=vm_try!(cmp_dynamic(slots,*l,*r,"<=",span)); set(slots,*d,v); }
+            Instr::CmpGe(d,l,r) => { let v=vm_try!(cmp_dynamic(slots,*l,*r,">=",span)); set(slots,*d,v); }
 
             // ── Control flow ──────────────────────────────────────────────────
             Instr::Jump(offset) => {
@@ -528,7 +580,7 @@ fn execute_chunk(
             Instr::Call(dest, callee_reg, arg_regs) => {
                 let callee = get(slots, *callee_reg).clone();
                 let args: Vec<VmValue> = arg_regs.iter().map(|&r| get(slots, r).clone()).collect();
-                let result = call_value(callee, args, state, span)?;
+                let result = vm_try!(call_value(callee, args, state, span));
                 set(slots, *dest, result);
             }
             Instr::Return(opt_reg) => {
@@ -549,7 +601,7 @@ fn execute_chunk(
                 for &(kr, vr) in pairs {
                     let key = match get(slots, kr).clone() {
                         VmValue::Str(s) => s,
-                        _ => return Err(JadeError::TypeError { op: "dict key".to_string(), span }),
+                        _ => { vm_err!(JadeError::TypeError { op: "dict key".to_string(), span }); }
                     };
                     let val = get(slots, vr).clone();
                     map.insert(key, val);
@@ -559,7 +611,7 @@ fn execute_chunk(
             Instr::GetIndex(dest, obj_reg, idx_reg) => {
                 let obj = get(slots, *obj_reg).clone();
                 let idx = get(slots, *idx_reg).clone();
-                let result = vm_index(obj, idx, span)?;
+                let result = vm_try!(vm_index(obj, idx, span));
                 set(slots, *dest, result);
             }
             Instr::SetIndex(obj_reg, idx_reg, val_reg) => {
@@ -567,16 +619,16 @@ fn execute_chunk(
                 let val = get(slots, *val_reg).clone();
                 match &mut slots[*obj_reg as usize] {
                     VmValue::Array(v) => {
-                        let i = match idx { VmValue::Int(n) => n, _ => return Err(JadeError::TypeError { op: "array index".to_string(), span }) };
+                        let i = match idx { VmValue::Int(n) => n, _ => { vm_err!(JadeError::TypeError { op: "array index".to_string(), span }); } };
                         let len = v.len();
-                        if i < 0 || i as usize >= len { return Err(JadeError::IndexOutOfBounds { index: i, len, span }); }
+                        if i < 0 || i as usize >= len { vm_err!(JadeError::IndexOutOfBounds { index: i, len, span }); }
                         v[i as usize] = val;
                     }
                     VmValue::Dict(m) => {
-                        let k = match idx { VmValue::Str(s) => s, _ => return Err(JadeError::TypeError { op: "dict index".to_string(), span }) };
+                        let k = match idx { VmValue::Str(s) => s, _ => { vm_err!(JadeError::TypeError { op: "dict index".to_string(), span }); } };
                         m.insert(k, val);
                     }
-                    _ => return Err(JadeError::TypeError { op: "index assign".to_string(), span }),
+                    _ => { vm_err!(JadeError::TypeError { op: "index assign".to_string(), span }); }
                 }
             }
 
@@ -612,13 +664,13 @@ fn execute_chunk(
                                     method: Rc::clone(mfn),
                                 })));
                             } else {
-                                return Err(JadeError::UndefinedField { type_name, field: field.clone(), span });
+                                vm_err!(JadeError::UndefinedField { type_name, field: field.clone(), span });
                             }
                         } else {
-                            return Err(JadeError::UndefinedField { type_name, field: field.clone(), span });
+                            vm_err!(JadeError::UndefinedField { type_name, field: field.clone(), span });
                         }
                     }
-                    _ => return Err(JadeError::NotAStruct { span }),
+                    _ => { vm_err!(JadeError::NotAStruct { span }); }
                 }
             }
             Instr::SetField(obj_reg, field, val_reg) => {
@@ -629,7 +681,7 @@ fn execute_chunk(
                         {
                             let b = rc.borrow();
                             if !b.fields.contains_key(field.as_str()) {
-                                return Err(JadeError::UndefinedField {
+                                vm_err!(JadeError::UndefinedField {
                                     type_name: b.type_name.clone(),
                                     field: field.clone(),
                                     span,
@@ -638,7 +690,7 @@ fn execute_chunk(
                         }
                         rc.borrow_mut().fields.insert(field.clone(), val);
                     }
-                    _ => return Err(JadeError::NotAStruct { span }),
+                    _ => { vm_err!(JadeError::NotAStruct { span }); }
                 }
             }
 
@@ -658,26 +710,26 @@ fn execute_chunk(
             Instr::MakePrompt(dest, text_reg) => {
                 let text = match get(slots, *text_reg).clone() {
                     VmValue::Str(s) => s,
-                    _ => return Err(JadeError::TypeError {
+                    _ => { vm_err!(JadeError::TypeError {
                         op: "prompt declaration requires a string body".to_string(),
                         span,
-                    }),
+                    }); }
                 };
                 set(slots, *dest, VmValue::Prompt(text));
             }
             Instr::PromptDeref(dest, prompt_reg, output_type) => {
                 let text = match get(slots, *prompt_reg).clone() {
                     VmValue::Prompt(t) => t,
-                    _ => return Err(JadeError::NotAPrompt { name: "<expr>".to_string(), span }),
+                    _ => { vm_err!(JadeError::NotAPrompt { name: "<expr>".to_string(), span }); }
                 };
-                let result = vm_prompt_deref(text, output_type.as_deref(), state, span)?;
+                let result = vm_try!(vm_prompt_deref(text, output_type.as_deref(), state, span));
                 set(slots, *dest, result);
             }
 
             // ── Built-ins ─────────────────────────────────────────────────────
             Instr::CallPrint(arg_regs) => {
                 if arg_regs.len() != 1 {
-                    return Err(JadeError::ArityMismatch { expected: 1, got: arg_regs.len(), span });
+                    vm_err!(JadeError::ArityMismatch { expected: 1, got: arg_regs.len(), span });
                 }
                 let v = get(slots, arg_regs[0]).clone();
                 println!("{}", value_to_display(&v));
@@ -687,9 +739,40 @@ fn execute_chunk(
                     VmValue::Str(s)    => VmValue::Int(s.chars().count() as i64),
                     VmValue::Array(v)  => VmValue::Int(v.len() as i64),
                     VmValue::Dict(m)   => VmValue::Int(m.len() as i64),
-                    _ => return Err(JadeError::TypeError { op: "len".to_string(), span }),
+                    _ => { vm_err!(JadeError::TypeError { op: "len".to_string(), span }); }
                 };
                 set(slots, *dest, result);
+            }
+
+            // ── Exception handling ────────────────────────────────────────────
+            Instr::Raise(val_reg) => {
+                let raised = get(slots, *val_reg).clone();
+                if let Some((caught_reg, handler_ip)) = handlers.pop() {
+                    set(slots, caught_reg, raised);
+                    ip = handler_ip;
+                } else {
+                    let message = value_to_display(&raised);
+                    state.raised_exception = Some(raised);
+                    return Err(JadeError::Exception { message, span });
+                }
+            }
+
+            Instr::SetupHandler(caught_reg, offset) => {
+                // ip has already been incremented past this instruction.
+                let handler_ip = (ip as i64 + *offset as i64) as usize;
+                handlers.push((*caught_reg, handler_ip));
+            }
+
+            Instr::PopHandler => {
+                handlers.pop();
+            }
+
+            Instr::GetTypeName(dest, src) => {
+                let name = match get(slots, *src) {
+                    VmValue::Struct(rc) => rc.borrow().type_name.clone(),
+                    _ => String::new(),
+                };
+                set(slots, *dest, VmValue::Str(name));
             }
         }
     }
@@ -1167,6 +1250,10 @@ fn instr_max_reg(instr: &Instr) -> u32 {
             for p in parts { if let FStrPart::Reg(r) = p { m = m.max(*r); } }
             m
         }
+        Instr::Raise(r)            => *r,
+        Instr::SetupHandler(r, _)  => *r,
+        Instr::PopHandler          => 0,
+        Instr::GetTypeName(d, s)   => (*d).max(*s),
     }
 }
 
