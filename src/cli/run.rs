@@ -11,7 +11,13 @@ pub fn run_entry(verbose: bool) {
         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
     });
 
-    let manifest = crate::project::load_project(&root).unwrap_or_default();
+    let manifest = match crate::project::load_project(&root) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("warning: could not read jade.toml: {}", e);
+            crate::project::ProjectManifest::default()
+        }
+    };
     let entry = root.join(manifest.entry_file());
 
     if !entry.exists() {

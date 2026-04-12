@@ -161,6 +161,19 @@ impl VmState {
         self.globals.insert(name.to_string(), value);
     }
 
+    /// Apply `VmOpts` fields onto this state and seed the session globals.
+    ///
+    /// Extracted to avoid duplicating the same 6-line block in `run` and
+    /// `new_for_repl`.
+    fn apply_opts(&mut self, opts: VmOpts) {
+        self.inference_backend = opts.backend;
+        self.max_retries = opts.max_retries;
+        self.default_model = opts.default_model.clone();
+        self.source_dir = opts.source_dir;
+        self.set_session("__model__", VmValue::Str(opts.default_model));
+        self.set_session("__max_retries__", VmValue::Int(opts.max_retries as i64));
+    }
+
     /// Iterate over all global bindings — used by `-v` verbose output.
     pub fn global_entries(&self) -> impl Iterator<Item = (&String, &VmValue)> {
         self.globals.iter()
@@ -172,12 +185,7 @@ impl VmState {
     /// empty state that the REPL can feed snippets into via `run_incremental`.
     pub fn new_for_repl(opts: VmOpts) -> Self {
         let mut state = VmState::new();
-        state.inference_backend = opts.backend;
-        state.max_retries = opts.max_retries;
-        state.default_model = opts.default_model.clone();
-        state.source_dir = opts.source_dir;
-        state.set_session("__model__", VmValue::Str(opts.default_model));
-        state.set_session("__max_retries__", VmValue::Int(opts.max_retries as i64));
+        state.apply_opts(opts);
         state
     }
 }
@@ -208,12 +216,7 @@ impl Default for VmOpts {
 /// Execute a compiled program and return the populated global state.
 pub fn run(program: CompiledProgram, opts: VmOpts) -> Result<VmState> {
     let mut state = VmState::new();
-    state.inference_backend = opts.backend;
-    state.max_retries = opts.max_retries;
-    state.default_model = opts.default_model.clone();
-    state.source_dir = opts.source_dir;
-    state.set_session("__model__", VmValue::Str(opts.default_model));
-    state.set_session("__max_retries__", VmValue::Int(opts.max_retries as i64));
+    state.apply_opts(opts);
     run_with_state(program, &mut state)?;
     Ok(state)
 }
@@ -1189,6 +1192,16 @@ fn get_str(slots: &[VmValue], r: Reg, span: Span) -> Result<String> {
     }
 }
 
+/// Borrow a string slot by reference.  Use this instead of `get_str` when the
+/// caller only needs to read the string (e.g. for comparisons) and does not
+/// need an owned `String`.  Avoids a heap allocation per comparison.
+fn get_str_ref<'a>(slots: &'a [VmValue], r: Reg, span: Span) -> Result<&'a str> {
+    match get(slots, r) {
+        VmValue::Str(s) => Ok(s.as_str()),
+        _ => Err(JadeError::TypeError { op: "expected str".to_string(), span }),
+    }
+}
+
 fn int2(slots: &[VmValue], l: Reg, r: Reg, span: Span) -> Result<(i64, i64)> {
     Ok((get_int(slots, l, span)?, get_int(slots, r, span)?))
 }
@@ -1201,8 +1214,10 @@ fn bool2(slots: &[VmValue], l: Reg, r: Reg, span: Span) -> Result<(bool, bool)> 
     Ok((get_bool(slots, l, span)?, get_bool(slots, r, span)?))
 }
 
-fn str2(slots: &[VmValue], l: Reg, r: Reg, span: Span) -> Result<(String, String)> {
-    Ok((get_str(slots, l, span)?, get_str(slots, r, span)?))
+/// Borrow both string slots for comparison.  Returns `(&str, &str)` to avoid
+/// cloning both `String`s when only an equality or ordering check is needed.
+fn str2<'a>(slots: &'a [VmValue], l: Reg, r: Reg, span: Span) -> Result<(&'a str, &'a str)> {
+    Ok((get_str_ref(slots, l, span)?, get_str_ref(slots, r, span)?))
 }
 
 /// Walk an instruction and return the highest register index it references.
@@ -1535,5 +1550,40 @@ mod tests {
     fn test_vm_div_by_zero() {
         let res = run_src("let x = 1 / 0");
         assert!(res.is_err());
+    }
+
+    // ── Implicit return tests ─────────────────────────────────────────────────
+
+    /// A function whose body is a single bare expression returns that value.
+    #[test]
+    fn test_vm_implicit_return_bare_expr() {
+        let s = run_src("fn answer() {\n  42\n}\nlet x = answer()").unwrap();
+        assert_eq!(get_int(&s, "x"), 42);
+    }
+
+    /// A function with let bindings followed by a bare expression returns the
+    /// expression value, not nil.
+    #[test]
+    fn test_vm_implicit_return_after_let() {
+        let s = run_src("fn double(n) {\n  let result = n * 2\n  result\n}\nlet x = double(5)").unwrap();
+        assert_eq!(get_int(&s, "x"), 10);
+    }
+
+    /// A function ending with an explicit `return` still works correctly; the
+    /// emitter must not append a second `Return(None)` instruction after it.
+    #[test]
+    fn test_vm_explicit_return_no_dead_instruction() {
+        let s = run_src("fn add(a, b) {\n  return a + b\n}\nlet x = add(3, 4)").unwrap();
+        assert_eq!(get_int(&s, "x"), 7);
+    }
+
+    /// A function with an empty body falls off the end and returns nil.
+    #[test]
+    fn test_vm_empty_body_returns_nil() {
+        let s = run_src("fn noop() {}\nlet x = noop()").unwrap();
+        match s.globals.get("x").unwrap() {
+            VmValue::Nil => {}
+            v => panic!("expected Nil, got {:?}", v),
+        }
     }
 }

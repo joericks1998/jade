@@ -17,6 +17,9 @@ pub fn run_test(pattern: Option<&str>, verbose: bool) {
         return;
     }
 
+    // Fix 4: load config once here rather than once per test file.
+    let cfg = crate::config::load_config();
+
     println!("running {} test{}", files.len(), if files.len() == 1 { "" } else { "s" });
 
     let mut passed = 0usize;
@@ -30,11 +33,10 @@ pub fn run_test(pattern: Option<&str>, verbose: bool) {
             .unwrap_or("?")
             .to_string();
 
-        let path_str = file.to_string_lossy().to_string();
-
         print!("  {} ... ", name);
 
-        match run_test_file(&path_str, verbose) {
+        // Fix 5: pass &Path directly instead of converting to an owned String.
+        match run_test_file(file, verbose, &cfg.provider, &cfg.model, cfg.max_retries, cfg.api_key.as_deref()) {
             Ok(()) => {
                 println!("ok");
                 passed += 1;
@@ -62,15 +64,24 @@ pub fn run_test(pattern: Option<&str>, verbose: bool) {
 }
 
 /// Run a single test file.  Returns `Ok(())` on clean exit, `Err(msg)` on any error.
-fn run_test_file(path: &str, _verbose: bool) -> Result<(), String> {
-    use std::path::Path;
+///
+/// Fix 4/5: accepts `&Path` directly (no intermediate `String` allocation) and
+/// receives pre-loaded config values so `load_config` is not called per file.
+fn run_test_file(
+    path: &std::path::Path,
+    _verbose: bool,
+    provider: &str,
+    model: &str,
+    max_retries: usize,
+    api_key: Option<&str>,
+) -> Result<(), String> {
     use crate::compiler::{emit, type_infer, vm};
 
     let source = std::fs::read_to_string(path)
         .map_err(|e| format!("could not read file: {}", e))?;
 
     // Lex + parse (with cache).
-    let hash = crate::cache::file_hash(Path::new(path));
+    let hash = crate::cache::file_hash(path);
     let cached_ast = hash.as_ref().and_then(|h| crate::cache::read_ast_cache(h));
     let program = match cached_ast {
         Some(p) => p,
@@ -80,7 +91,8 @@ fn run_test_file(path: &str, _verbose: bool) -> Result<(), String> {
             let p = crate::interpreter::parser::parse(tokens)
                 .map_err(|e| format!("parse error: {}", e))?;
             if let Some(ref h) = hash {
-                crate::cache::write_ast_cache(h, path, &p);
+                // to_string_lossy only where a &str is truly needed (cache key display).
+                crate::cache::write_ast_cache(h, &path.to_string_lossy(), &p);
             }
             p
         }
@@ -93,7 +105,7 @@ fn run_test_file(path: &str, _verbose: bool) -> Result<(), String> {
             None => {
                 let tp = type_infer::infer(program)
                     .map_err(|e| format!("type error: {}", e))?;
-                crate::cache::write_tir_cache(h, path, &tp);
+                crate::cache::write_tir_cache(h, &path.to_string_lossy(), &tp);
                 tp
             }
         }
@@ -105,13 +117,12 @@ fn run_test_file(path: &str, _verbose: bool) -> Result<(), String> {
     let compiled = emit::emit(tprogram)
         .map_err(|e| format!("compile error: {}", e))?;
 
-    let cfg = crate::config::load_config();
-    let backend = cfg.api_key.as_ref()
-        .map(|key| crate::llm::build_backend(&cfg.provider, key, &cfg.model))
+    let backend = api_key
+        .map(|key| crate::llm::build_backend(provider, key, model))
         .transpose()
         .map_err(|e| format!("config error: {}", e))?;
 
-    let source_dir = Path::new(path)
+    let source_dir = path
         .canonicalize()
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
@@ -119,8 +130,8 @@ fn run_test_file(path: &str, _verbose: bool) -> Result<(), String> {
 
     let opts = vm::VmOpts {
         backend,
-        default_model: cfg.model,
-        max_retries: cfg.max_retries,
+        default_model: model.to_string(),
+        max_retries,
         source_dir,
     };
 

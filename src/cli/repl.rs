@@ -25,7 +25,10 @@ pub fn run_repl(_verbose: bool) {
     let mut env = Env::new();
     env.inference_backend = opts.backend;
     env.max_retries = opts.max_retries;
-    env.default_model = opts.default_model;
+    env.default_model = opts.default_model.clone();
+    // Fix 3: populate session vars so Jade code can read __model__ and __max_retries__.
+    env.set_session_var("__model__", Value::Str(opts.default_model));
+    env.set_session_var("__max_retries__", Value::Int(opts.max_retries as i64));
 
     let version = env!("CARGO_PKG_VERSION");
     println!("jade {} repl — type 'exit' or press Ctrl+D to quit", version);
@@ -33,6 +36,9 @@ pub fn run_repl(_verbose: bool) {
 
     let stdin = io::stdin();
     let mut stdout = io::stdout();
+    // Fix 2: acquire the stdin lock once before the outer loop so it is held
+    // for the entire REPL session rather than re-acquired on every line read.
+    let mut stdin_lock = stdin.lock();
 
     loop {
         print!("jade> ");
@@ -43,7 +49,7 @@ pub fn run_repl(_verbose: bool) {
 
         loop {
             let mut line = String::new();
-            match stdin.lock().read_line(&mut line) {
+            match stdin_lock.read_line(&mut line) {
                 Ok(0) => {
                     // EOF (Ctrl+D).
                     println!();
@@ -57,7 +63,16 @@ pub fn run_repl(_verbose: bool) {
                 }
             }
 
+            // Fix 1: count braces with a state machine that skips over string
+            // literals so that `let s = "hello {"` does not enter continuation
+            // mode.
+            let mut in_str = false;
+            let mut escape = false;
             for ch in line.chars() {
+                if escape { escape = false; continue; }
+                if ch == '\\' && in_str { escape = true; continue; }
+                if ch == '"' { in_str = !in_str; continue; }
+                if in_str { continue; }
                 match ch {
                     '{' => open_braces += 1,
                     '}' => open_braces -= 1,

@@ -44,7 +44,7 @@ fn hex(hash: &[u8; 32]) -> String {
 // The two-level layout bounds per-directory entry counts on filesystems that
 // slow down with large directories (HFS+, older ext4 configs, etc.).
 
-fn cache_root() -> PathBuf {
+pub(crate) fn cache_root() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home).join(".jade").join("cache")
 }

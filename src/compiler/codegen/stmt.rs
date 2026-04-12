@@ -360,8 +360,13 @@ pub fn emit_stmt<'ctx>(ctx: &mut CodegenCtx<'ctx>, stmt: &TStmt) -> Result<(), S
                 .lookup(name)
                 .ok_or_else(|| format!("undefined variable: {name}"))?;
 
+            // Parameters with no type annotation are stored as Unknown.  Treat
+            // them as an array of Unknown elements so index assignment still
+            // works at runtime (the pointer bits are valid; only the TIR type
+            // is missing).
             let elem_ty = match &arr_ty {
                 JadeType::Array(inner) => *inner.clone(),
+                JadeType::Unknown => JadeType::Unknown,
                 _ => return Err(format!(
                     "index assignment on non-array type {:?}", arr_ty
                 )),
@@ -370,11 +375,21 @@ pub fn emit_stmt<'ctx>(ctx: &mut CodegenCtx<'ctx>, stmt: &TStmt) -> Result<(), S
             let i64_ty = ctx.context.i64_type();
             let ptr_ty = ctx.context.ptr_type(AddressSpace::default());
 
-            // Load the jade.array header pointer from the variable slot
-            let arr_ptr = ctx.builder
-                .build_load(ptr_ty, arr_slot, "ia_arr")
-                .map_err(|e| e.to_string())?
-                .into_pointer_value();
+            // Load the jade.array header pointer from the variable slot.
+            //
+            // When `arr` is a function parameter typed as Unknown, its alloca
+            // was created for an i64 value (the LLVM function signature uses i64
+            // for all Unknown params).  We must load as i64 and then cast to
+            // pointer.  When the type is Array (a local `let arr = [...]`), the
+            // alloca holds a pointer directly.
+            let load_ty = match &arr_ty {
+                JadeType::Unknown => types::jade_to_llvm(&JadeType::Int, ctx.context),
+                _ => types::jade_to_llvm(&JadeType::Array(Box::new(JadeType::Unknown)), ctx.context),
+            };
+            let raw_load = ctx.builder
+                .build_load(load_ty, arr_slot, "ia_arr_raw")
+                .map_err(|e| e.to_string())?;
+            let arr_ptr = expr::as_pointer(raw_load, ctx)?;
 
             let idx = expr::emit_expr(index, ctx)?.into_int_value();
 

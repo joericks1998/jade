@@ -233,7 +233,15 @@ fn main() {
 
         // ── backward-compat: jade <file.jde> [-v] ────────────────────────────
         Commands::External(args) => {
-            let file = &args[0];
+            let Some(file) = args.first() else {
+                eprintln!("error: no file specified");
+                std::process::exit(1);
+            };
+            // check it ends with .jde or the path exists, otherwise show unknown command error
+            if !file.ends_with(".jde") && !std::path::Path::new(file).exists() {
+                eprintln!("error: unknown command '{}'\n       Run 'jade --help' for usage.", file);
+                std::process::exit(1);
+            }
             let verbose = args.get(1).map(|f| f == "-v" || f == "--verbose").unwrap_or(false);
             cli::run::run_file(file, verbose);
         }

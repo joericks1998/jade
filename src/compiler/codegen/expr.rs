@@ -146,7 +146,7 @@ fn emit_index<'ctx>(
     let i64_ty = ctx.context.i64_type();
     let ptr_ty = ctx.context.ptr_type(AddressSpace::default());
 
-    let arr = emit_expr(object, ctx)?.into_pointer_value();
+    let arr = as_pointer(emit_expr(object, ctx)?, ctx)?;
     let idx = emit_expr(index, ctx)?.into_int_value();
 
     // Load data ptr from field 0
@@ -232,7 +232,7 @@ fn emit_field_access<'ctx>(
         .unwrap_or_else(|| result_ty.clone());
 
     let i64_ty = ctx.context.i64_type();
-    let struct_ptr = emit_expr(object, ctx)?.into_pointer_value();
+    let struct_ptr = as_pointer(emit_expr(object, ctx)?, ctx)?;
     let slot = ctx.gep(i64_ty, struct_ptr, &[i64_ty.const_int(idx as u64, false)], "fa_slot")?;
     let raw = ctx.builder
         .build_load(i64_ty, slot, "fa_raw")
@@ -930,6 +930,34 @@ pub fn i64_to_value<'ctx>(
 
 // ── Type helpers ──────────────────────────────────────────────────────────────
 
+/// Extract a `PointerValue` from `val`.
+///
+/// Function parameters typed as `Unknown` are allocated as `i64` in the entry
+/// block and then loaded back as `IntValue`.  When the actual runtime value is a
+/// heap pointer (array header, struct, …) we need to cast the integer back to a
+/// pointer before using it in GEP / struct_gep instructions.
+///
+/// If `val` is already a `PointerValue` this is a no-op.
+/// If `val` is an `IntValue` we emit `inttoptr` to recover the pointer.
+pub fn as_pointer<'ctx>(
+    val: BasicValueEnum<'ctx>,
+    ctx: &mut CodegenCtx<'ctx>,
+) -> Result<inkwell::values::PointerValue<'ctx>, String> {
+    match val {
+        BasicValueEnum::PointerValue(p) => Ok(p),
+        BasicValueEnum::IntValue(i) => {
+            let ptr_ty = ctx.context.ptr_type(inkwell::AddressSpace::default());
+            ctx.builder
+                .build_int_to_ptr(i, ptr_ty, "i2ptr_coerce")
+                .map_err(|e| e.to_string())
+        }
+        other => Err(format!(
+            "expected pointer or int-as-pointer, got {:?}",
+            other
+        )),
+    }
+}
+
 /// Collapse `Unknown` → `Int` for dispatch purposes.
 fn effective_ty(ty: &JadeType) -> JadeType {
     match ty {
@@ -964,6 +992,20 @@ fn coerce<'ctx>(
     target_ty: &JadeType,
     ctx: &mut CodegenCtx<'ctx>,
 ) -> Result<BasicValueEnum<'ctx>, String> {
+    // When the target parameter has no type annotation it is typed as `Unknown`
+    // in the LLVM signature, which maps to i64.  Heap values (arrays, structs,
+    // strings) are represented as pointers, so we must convert them to integers
+    // before passing them across the call boundary.  The callee will cast them
+    // back to pointers when it needs to dereference them.
+    if matches!(target_ty, JadeType::Unknown) {
+        if let BasicValueEnum::PointerValue(p) = val {
+            let i = ctx.builder
+                .build_ptr_to_int(p, ctx.context.i64_type(), "ptr2i_arg")
+                .map_err(|e| e.to_string())?;
+            return Ok(i.into());
+        }
+    }
+
     match (effective_ty(actual_ty), effective_ty(target_ty)) {
         (JadeType::Float, JadeType::Int) => {
             let v = ctx.builder
