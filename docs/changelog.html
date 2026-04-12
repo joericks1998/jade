@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Jade 1.0.7 — Changelog</title>
+  <title>Jade 1.0.9 — Changelog</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -282,9 +282,9 @@
       </a>
       <span class="topbar-sep">»</span>
       <select title="Version">
-        <option>1.0.7</option>
+        <option>1.0.9</option>
       </select>
-      <span class="topbar-title">1.0.7 Documentation</span>
+      <span class="topbar-title">1.0.9 Documentation</span>
     </div>
     <div class="topbar-right">
       <a href="https://github.com/joericks1998/jade">GitHub</a>
@@ -316,6 +316,7 @@
           <li><a href="structs.html">Structs</a></li>
           <li><a href="imports.html">Imports</a></li>
           <li><a href="llm.html">LLM Integration</a></li>
+          <li><a href="exceptions.html">Exceptions</a></li>
         </ul>
       </div>
       <hr class="sidebar-divider" />
@@ -340,16 +341,21 @@
 
       <section id="changelog">
         <h2>Changelog</h2>
-        <h3>v1.0.7</h3>
+        <h3>v1.0.9</h3>
         <ul>
+          <li>Added <code>try</code>/<code>catch</code>/<code>raise</code> exception handling — raise any value as an exception, catch by struct type name or with a catch-all arm, nested <code>try</code>/<code>catch</code> blocks, built-in runtime errors (division by zero, type errors, etc.) are automatically catchable</li>
+          <li>Upgraded CLI to full subcommand structure: <code>jade run</code>, <code>jade check</code>, <code>jade build</code>, <code>jade repl</code>, <code>jade test</code>, <code>jade fmt</code>, <code>jade env</code>, <code>jade cache</code>, <code>jade model</code>, <code>jade new</code>, <code>jade init</code></li>
+        </ul>
+        <h3>v1.0.8</h3>
+        <ul>
+          <li>Added anonymous closures: <code>|x| x * 2</code> (inline expression body) and <code>|x| { … }</code> (block body) with environment capture at creation time</li>
+          <li>Added <code>for</code> loops: <code>for x in array { … }</code> iteration over arrays (via bytecode VM)</li>
           <li>Added <code>dict</code> type: dictionary literals (<code>{"key": value}</code>), key access (<code>d["key"]</code>), key assignment, and <code>len</code> support</li>
-          <li>Added anonymous functions (closures): <code>|x| x * 2</code> and block-body <code>|x| { … }</code> with environment capture</li>
-          <li>Added <code>for</code> loops: <code>for x in array { … }</code> iteration over arrays</li>
           <li>Added <code>use "path.jde"</code> for multi-file imports</li>
           <li>Added bytecode compiler and VM — programs now run through type inference, bytecode emission, and a register-based VM</li>
           <li>Added multi-level AST and TIR caching to skip redundant compilation passes</li>
         </ul>
-        <h3>v1.0.6</h3>
+        <h3>v1.0.7</h3>
         <ul>
           <li>Added <code>str</code> type: string literals, triple-quoted strings, concatenation with <code>+</code>, character indexing, equality and lexicographic ordering</li>
           <li>Added f-string interpolation: <code>f"…{expr}…"</code> and <code>f"""…{expr}…"""</code></li>
@@ -360,6 +366,13 @@
           <li>Added <code>elif</code> clause for chained conditionals</li>
           <li>Added <code>jade configure</code> command for LLM backend configuration</li>
           <li>Added <code>prompt</code> declarations and <code>?</code> dereference for LLM inference</li>
+        </ul>
+        <h3>v1.0.6</h3>
+        <ul>
+          <li>Added <code>struct</code> definitions with named fields, field access, and field mutation</li>
+          <li>Added <code>extend</code> blocks for attaching methods, with <code>self</code> binding</li>
+          <li>Added bare variable assignment (<code>x = expr</code>)</li>
+          <li>Added <code>while</code> loops with boolean condition</li>
         </ul>
         <h3>v1.0.5</h3>
         <ul>

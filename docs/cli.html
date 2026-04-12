@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Jade 1.0.7 — CLI Reference</title>
+  <title>Jade 1.0.9 — CLI Reference</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -282,9 +282,9 @@
       </a>
       <span class="topbar-sep">»</span>
       <select title="Version">
-        <option>1.0.7</option>
+        <option>1.0.9</option>
       </select>
-      <span class="topbar-title">1.0.7 Documentation</span>
+      <span class="topbar-title">1.0.9 Documentation</span>
     </div>
     <div class="topbar-right">
       <a href="https://github.com/joericks1998/jade">GitHub</a>
@@ -316,6 +316,7 @@
           <li><a href="structs.html">Structs</a></li>
           <li><a href="imports.html">Imports</a></li>
           <li><a href="llm.html">LLM Integration</a></li>
+          <li><a href="exceptions.html">Exceptions</a></li>
         </ul>
       </div>
       <hr class="sidebar-divider" />
@@ -338,37 +339,204 @@
     <!-- ── Main content ── -->
     <main class="content">
 
-      <section id="cli">
-        <h2>CLI Reference</h2>
-        <h3><code>jade &lt;file.jde&gt;</code></h3>
-        <p>Run a Jade source file. Exits with code 1 on any error.</p>
-        <pre><code>jade program.jde</code></pre>
+      <h1>CLI Reference</h1>
+      <p class="lead">
+        The <code>jade</code> command uses a subcommand structure. Every operation is a named
+        subcommand — there is no bare <code>jade &lt;file&gt;</code> primary form (though the old
+        form is accepted as a backward-compatible shorthand via <code>jade run</code>).
+      </p>
 
-        <h3><code>jade &lt;file.jde&gt; --verbose</code></h3>
+      <section id="run">
+        <h2><code>jade run</code></h2>
         <p>
-          Run a Jade source file and print all variables and their final values to
-          stdout after execution. Variables are printed in alphabetical order.
+          Run a Jade source file, a named script from <code>jade.toml</code>, or the project
+          entry point (<code>main.jde</code> by default when no argument is given).
         </p>
-        <pre><code>jade program.jde --verbose
-jade program.jde -v</code></pre>
+        <pre><code>jade run program.jde          # run a specific file
+jade run                      # run the project entry point (main.jde)
+jade run build                # run the script named "build" in jade.toml</code></pre>
 
-        <h3><code>jade configure</code></h3>
+        <h3>Flags</h3>
+        <table>
+          <thead><tr><th>Flag</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr><td><code>-v</code>, <code>--verbose</code></td><td>Print all global variables and their final values after execution. Variables are printed in alphabetical order.</td></tr>
+          </tbody>
+        </table>
+        <pre><code>jade run program.jde --verbose
+jade run program.jde -v</code></pre>
+      </section>
+
+      <section id="check">
+        <h2><code>jade check</code></h2>
+        <p>Type-check a source file without executing it. Exits with code 0 if there are no errors.</p>
+        <pre><code>jade check program.jde</code></pre>
+      </section>
+
+      <section id="build">
+        <h2><code>jade build</code></h2>
+        <p>Compile a Jade file to a native binary via LLVM (requires the <code>llvm</code> feature).</p>
+        <pre><code>jade build program.jde
+jade build program.jde --output mybin
+jade build program.jde --emit ir</code></pre>
+        <h3>Flags</h3>
+        <table>
+          <thead><tr><th>Flag</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr><td><code>-o</code>, <code>--output &lt;PATH&gt;</code></td><td>Output binary path. Defaults to the input filename without extension.</td></tr>
+            <tr><td><code>--emit ir</code></td><td>Emit LLVM IR to stdout instead of producing a binary.</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section id="new-init">
+        <h2><code>jade new</code> / <code>jade init</code></h2>
+        <p>
+          <code>jade new &lt;name&gt;</code> creates a new Jade project in a new directory named
+          <code>&lt;name&gt;</code>. <code>jade init</code> initializes a project in the current
+          directory. Both accept a <code>--template</code> flag.
+        </p>
+        <pre><code>jade new myapp
+jade new myapp --template llm
+jade init
+jade init --template basic</code></pre>
+        <h3>Flags</h3>
+        <table>
+          <thead><tr><th>Flag</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr><td><code>--template &lt;basic|llm&gt;</code></td><td>Project template. Defaults to <code>basic</code>.</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section id="repl">
+        <h2><code>jade repl</code></h2>
+        <p>Start an interactive REPL session. Each line is evaluated against the running environment; definitions from previous lines persist.</p>
+        <pre><code>jade repl
+jade repl --verbose</code></pre>
+        <h3>Flags</h3>
+        <table>
+          <thead><tr><th>Flag</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr><td><code>-v</code>, <code>--verbose</code></td><td>Print extra debug info for each evaluated expression.</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section id="test">
+        <h2><code>jade test</code></h2>
+        <p>Discover and run test files matching <code>test_*.jde</code> or <code>*_test.jde</code> patterns.</p>
+        <pre><code>jade test
+jade test my_feature
+jade test --verbose</code></pre>
+        <h3>Flags</h3>
+        <table>
+          <thead><tr><th>Flag</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr><td><code>[pattern]</code></td><td>Only run tests whose name contains this string.</td></tr>
+            <tr><td><code>-v</code>, <code>--verbose</code></td><td>Show output from each test file.</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section id="fmt">
+        <h2><code>jade fmt</code></h2>
+        <p>Format Jade source files. Works on a single file or all <code>.jde</code> files in a directory recursively.</p>
+        <pre><code>jade fmt program.jde
+jade fmt src/
+jade fmt src/ --check</code></pre>
+        <h3>Flags</h3>
+        <table>
+          <thead><tr><th>Flag</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr><td><code>--check</code></td><td>Exit with code 1 if any file would be changed (useful for CI).</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section id="env">
+        <h2><code>jade env</code></h2>
+        <p>Show the Jade environment: version, config file location, cache directory, and project info.</p>
+        <pre><code>jade env
+jade env --json</code></pre>
+        <h3>Flags</h3>
+        <table>
+          <thead><tr><th>Flag</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr><td><code>--json</code></td><td>Output environment information as JSON.</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section id="cache">
+        <h2><code>jade cache</code></h2>
+        <p>Manage the build cache. The cache stores compiled AST and bytecode to skip redundant compilation passes.</p>
+        <pre><code>jade cache info
+jade cache clean
+jade cache clean --older-than 30
+jade cache clean --dry-run</code></pre>
+        <h3>Subcommands</h3>
+        <table>
+          <thead><tr><th>Subcommand</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr><td><code>info</code></td><td>Show cache statistics (entry count, total size).</td></tr>
+            <tr><td><code>clean</code></td><td>Remove stale or old cache entries.</td></tr>
+          </tbody>
+        </table>
+        <h3>clean Flags</h3>
+        <table>
+          <thead><tr><th>Flag</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr><td><code>--older-than &lt;DAYS&gt;</code></td><td>Also remove entries older than this many days.</td></tr>
+            <tr><td><code>--dry-run</code></td><td>Show what would be removed without deleting.</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section id="model">
+        <h2><code>jade model</code></h2>
+        <p>Manage LLM model configuration.</p>
+        <pre><code>jade model list
+jade model use anthropic/claude-3-5-sonnet</code></pre>
+        <h3>Subcommands</h3>
+        <table>
+          <thead><tr><th>Subcommand</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr><td><code>list</code></td><td>List known LLM models by provider.</td></tr>
+            <tr><td><code>use &lt;provider/model&gt;</code></td><td>Set the default model, writing to <code>~/.jade/config.toml</code>.</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section id="configure">
+        <h2><code>jade configure</code></h2>
         <p>
           Run the interactive configuration wizard to set up an LLM backend.
-          Stores provider, model, and API key in <code>jade.toml</code> in the current directory.
+          Stores provider, model, and API key in <code>~/.jade/config.toml</code>.
           The <code>JADE_API_KEY</code> environment variable can also be used to supply a key at runtime.
         </p>
         <pre><code>jade configure</code></pre>
+      </section>
 
-        <h3><code>jade --help</code></h3>
-        <p>Print usage information.</p>
-        <pre><code>jade --help
-jade -h</code></pre>
+      <section id="backward-compat">
+        <h2>Backward-Compatible File Execution</h2>
+        <p>
+          The old <code>jade &lt;file.jde&gt;</code> form (without the <code>run</code> subcommand)
+          is still accepted as a hidden shorthand. It dispatches to <code>jade run &lt;file&gt;</code>
+          internally. Prefer <code>jade run</code> in new scripts and documentation.
+        </p>
+        <pre><code>jade program.jde          # equivalent to: jade run program.jde
+jade program.jde -v       # equivalent to: jade run program.jde --verbose</code></pre>
+      </section>
 
-        <h3>Error Output</h3>
-        <p>Errors are written to stderr in the format:</p>
-        <pre><code>&lt;file&gt;: &lt;phase&gt; error: &lt;description&gt;</code></pre>
-        <p>Where <code>&lt;phase&gt;</code> is one of <code>lexer</code>, <code>parse</code>, or <code>runtime</code>.</p>
+      <section id="errors">
+        <h2>Error Output</h2>
+        <p>Errors are written to stderr with a source location prefix:</p>
+        <pre><code>[line:col] error description</code></pre>
+        <p>
+          For example: <code>[3:5] undefined variable 'x'</code>. The phase that produced the
+          error (lexer, parser, or evaluator) is implicit in the error message text.
+        </p>
       </section>
 
     </main>
