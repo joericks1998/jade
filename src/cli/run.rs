@@ -2,6 +2,72 @@ use std::{fs, path::Path, process};
 
 use crate::compiler::{emit, type_infer, vm};
 
+// ── Project-aware run ─────────────────────────────────────────────────────────
+
+/// `jade run` with no argument: find project root and run its entry file.
+pub fn run_entry(verbose: bool) {
+    let root = crate::project::find_project_root().unwrap_or_else(|| {
+        // Fall back to running main.jde in CWD.
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+    });
+
+    let manifest = crate::project::load_project(&root).unwrap_or_default();
+    let entry = root.join(manifest.entry_file());
+
+    if !entry.exists() {
+        eprintln!("error: entry file '{}' not found", entry.display());
+        eprintln!("       run 'jade new <name>' to create a project, or 'jade run <file.jde>'");
+        process::exit(1);
+    }
+
+    run_file(&entry.to_string_lossy(), verbose);
+}
+
+/// `jade run <script>`: run a named script from [scripts] in jade.toml.
+pub fn run_script(name: &str) {
+    let root = crate::project::find_project_root().unwrap_or_else(|| {
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+    });
+
+    let manifest = match crate::project::load_project(&root) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("error: {}", e);
+            process::exit(1);
+        }
+    };
+
+    let scripts = manifest.scripts.unwrap_or_default();
+    let cmd = scripts.get(name).cloned().unwrap_or_else(|| {
+        eprintln!("error: no script named '{}' in jade.toml", name);
+        eprintln!("       available scripts: {}", scripts.keys().cloned().collect::<Vec<_>>().join(", "));
+        process::exit(1);
+    });
+
+    // Execute via shell.
+    #[cfg(unix)]
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&cmd)
+        .status();
+    #[cfg(windows)]
+    let status = std::process::Command::new("cmd")
+        .args(["/C", &cmd])
+        .status();
+
+    match status {
+        Ok(s) => {
+            if !s.success() {
+                process::exit(s.code().unwrap_or(1));
+            }
+        }
+        Err(e) => {
+            eprintln!("error: could not run script: {}", e);
+            process::exit(1);
+        }
+    }
+}
+
 pub fn run_file(path: &str, verbose: bool) {
     let source = match fs::read_to_string(path) {
         Ok(s) => s,

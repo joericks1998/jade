@@ -1,5 +1,12 @@
 pub mod build;
+pub mod cache;
 pub mod check;
 pub mod configure;
+pub mod env;
+pub mod fmt;
 pub mod help;
+pub mod model;
+pub mod new;
+pub mod repl;
 pub mod run;
+pub mod test;

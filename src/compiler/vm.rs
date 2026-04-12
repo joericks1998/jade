@@ -165,6 +165,21 @@ impl VmState {
     pub fn global_entries(&self) -> impl Iterator<Item = (&String, &VmValue)> {
         self.globals.iter()
     }
+
+    /// Create a live `VmState` seeded from `VmOpts` for the REPL.
+    ///
+    /// Unlike `run()`, this does **not** execute any program — it returns an
+    /// empty state that the REPL can feed snippets into via `run_incremental`.
+    pub fn new_for_repl(opts: VmOpts) -> Self {
+        let mut state = VmState::new();
+        state.inference_backend = opts.backend;
+        state.max_retries = opts.max_retries;
+        state.default_model = opts.default_model.clone();
+        state.source_dir = opts.source_dir;
+        state.set_session("__model__", VmValue::Str(opts.default_model));
+        state.set_session("__max_retries__", VmValue::Int(opts.max_retries as i64));
+        state
+    }
 }
 
 /// Options for an `vm::run` invocation.
@@ -201,6 +216,14 @@ pub fn run(program: CompiledProgram, opts: VmOpts) -> Result<VmState> {
     state.set_session("__max_retries__", VmValue::Int(opts.max_retries as i64));
     run_with_state(program, &mut state)?;
     Ok(state)
+}
+
+/// Execute a compiled program against an existing `VmState`.
+///
+/// This is the public entry point for the REPL — it lets each snippet share
+/// globals, struct definitions, and extend-block methods with prior snippets.
+pub fn run_incremental(program: CompiledProgram, state: &mut VmState) -> Result<()> {
+    run_with_state(program, state)
 }
 
 /// Execute a compiled program against an existing `VmState`.

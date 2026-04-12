@@ -121,6 +121,102 @@ pub fn read_tir_cache(hash: &[u8; 32]) -> Option<TProgram> {
     bincode::deserialize(&tir_bytes).ok()
 }
 
+// ── Cache introspection ───────────────────────────────────────────────────────
+
+/// Summary of a single cache entry, used by `jade cache info/clean`.
+pub struct CacheEntry {
+    pub hash: String,
+    pub version: String,
+    pub source_path: String,
+    pub dir: PathBuf,
+    pub size_bytes: u64,
+    pub modified: Option<std::time::SystemTime>,
+}
+
+/// Walk `~/.jade/cache/` and return a summary of every entry found.
+pub fn list_entries() -> Vec<CacheEntry> {
+    let root = cache_root();
+    let mut entries = Vec::new();
+
+    let prefix_dirs = match fs::read_dir(&root) {
+        Ok(d) => d,
+        Err(_) => return entries,
+    };
+
+    for prefix_entry in prefix_dirs.flatten() {
+        if !prefix_entry.path().is_dir() { continue; }
+        let hash_dirs = match fs::read_dir(prefix_entry.path()) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+        for hash_entry in hash_dirs.flatten() {
+            let dir = hash_entry.path();
+            if !dir.is_dir() { continue; }
+
+            // Read meta.json to get version and source path.
+            let meta_path = dir.join("meta.json");
+            let (version, source_path) = if let Ok(bytes) = fs::read(&meta_path) {
+                if let Ok(m) = serde_json::from_slice::<CacheMeta>(&bytes) {
+                    (m.version, m.source_path)
+                } else {
+                    (String::new(), String::new())
+                }
+            } else {
+                (String::new(), String::new())
+            };
+
+            // Sum the size of all files in this entry's directory.
+            let size_bytes = fs::read_dir(&dir)
+                .map(|iter| {
+                    iter.flatten()
+                        .filter_map(|e| e.metadata().ok())
+                        .map(|m| m.len())
+                        .sum()
+                })
+                .unwrap_or(0);
+
+            let modified = fs::metadata(&meta_path)
+                .ok()
+                .and_then(|m| m.modified().ok());
+
+            let hash = dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
+
+            entries.push(CacheEntry { hash, version, source_path, dir, size_bytes, modified });
+        }
+    }
+
+    entries
+}
+
+/// Remove cache entries that match `predicate(entry)`.
+/// Returns `(count_removed, bytes_freed)`.
+pub fn purge_entries<F>(predicate: F, dry_run: bool) -> (usize, u64)
+where
+    F: Fn(&CacheEntry) -> bool,
+{
+    let entries = list_entries();
+    let mut count = 0;
+    let mut bytes = 0;
+    for entry in &entries {
+        if predicate(entry) {
+            count += 1;
+            bytes += entry.size_bytes;
+            if !dry_run {
+                let _ = fs::remove_dir_all(&entry.dir);
+                // Clean up empty prefix dir.
+                if let Some(parent) = entry.dir.parent() {
+                    let _ = fs::remove_dir(parent); // silently fails if non-empty
+                }
+            }
+        }
+    }
+    (count, bytes)
+}
+
 /// Persist a `TProgram` to `~/.jade/cache/<prefix>/<hash>/tir.bin`.
 ///
 /// All I/O errors are silently swallowed — a cache write failure must never

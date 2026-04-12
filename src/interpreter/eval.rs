@@ -206,6 +206,13 @@ impl Env {
         self.scopes.last_mut().unwrap().insert(name, value);
     }
 
+    /// Mutable reference to the outermost (global) scope.
+    ///
+    /// Used by the REPL to remove temporary bindings after displaying their value.
+    pub fn globals_mut(&mut self) -> &mut HashMap<String, Value> {
+        &mut self.scopes[0]
+    }
+
     /// Update an existing binding anywhere in the scope chain — used for bare `x = expr`.
     /// Returns `UndefinedVariable` if `name` was never declared in any enclosing scope.
     pub fn assign(&mut self, name: &str, value: Value, span: Span) -> Result<()> {
@@ -294,6 +301,15 @@ pub fn evaluate(program: Program, opts: LlmOpts) -> Result<Env> {
     env.set_session_var("__max_retries__", Value::Int(opts.max_retries as i64));
     eval_block(&program.stmts, &mut env)?;
     Ok(env)
+}
+
+/// Execute a program against an **existing** environment.
+///
+/// Used by the REPL so that definitions from previous lines persist into
+/// subsequent ones.  Does **not** reset globals or session variables.
+pub fn evaluate_incremental(program: Program, env: &mut Env) -> Result<()> {
+    eval_block(&program.stmts, env)?;
+    Ok(())
 }
 
 // ── Statement evaluator ───────────────────────────────────────────────────────
