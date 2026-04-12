@@ -1,0 +1,692 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Jade 1.0.9 — Exceptions</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #f7faf8;
+      color: #1c2e1c;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 15px;
+      line-height: 1.6;
+    }
+
+    /* ── Top bar ── */
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      background: #1e7a2e;
+      color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 1.5rem;
+      height: 42px;
+      font-size: 0.85rem;
+      gap: 1rem;
+    }
+
+    .topbar-left {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+    }
+
+    .topbar-logo {
+      display: flex;
+      align-items: center;
+      gap: 0.45rem;
+      text-decoration: none;
+      color: #fff;
+      font-weight: 700;
+      font-size: 1rem;
+      letter-spacing: -0.3px;
+    }
+
+    .topbar-logo img {
+      width: 22px;
+      height: 22px;
+      object-fit: contain;
+      border-radius: 4px;
+      background: #fff;
+      padding: 2px;
+    }
+
+    .topbar-sep { opacity: 0.5; }
+
+    .topbar select {
+      background: rgba(255,255,255,0.15);
+      border: 1px solid rgba(255,255,255,0.3);
+      color: #fff;
+      font-size: 0.8rem;
+      padding: 0.15rem 0.4rem;
+      border-radius: 4px;
+      cursor: pointer;
+      appearance: auto;
+    }
+
+    .topbar select option { background: #1e7a2e; color: #fff; }
+
+    .topbar-title { opacity: 0.85; }
+
+    .topbar-right {
+      display: flex;
+      align-items: center;
+      gap: 1.2rem;
+    }
+
+    .topbar-right a {
+      color: rgba(255,255,255,0.85);
+      text-decoration: none;
+      font-size: 0.82rem;
+    }
+
+    .topbar-right a:hover { color: #fff; }
+
+    /* ── Layout ── */
+    .layout {
+      display: flex;
+      min-height: calc(100vh - 42px);
+    }
+
+    /* ── Sidebar ── */
+    .sidebar {
+      width: 240px;
+      flex-shrink: 0;
+      background: #edf4f0;
+      border-right: 1px solid #cde0d4;
+      padding: 1.5rem 0;
+      position: sticky;
+      top: 42px;
+      height: calc(100vh - 42px);
+      overflow-y: auto;
+    }
+
+    .sidebar-section {
+      margin-bottom: 1.4rem;
+      padding: 0 1rem;
+    }
+
+    .sidebar-section h4 {
+      font-size: 0.7rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      color: #5a7a5a;
+      margin-bottom: 0.45rem;
+    }
+
+    .sidebar-section ul { list-style: none; }
+
+    .sidebar-section ul li a {
+      display: block;
+      padding: 0.2rem 0.5rem;
+      border-radius: 4px;
+      color: #2e5c2e;
+      text-decoration: none;
+      font-size: 0.875rem;
+    }
+
+    .sidebar-section ul li a:hover,
+    .sidebar-section ul li a.active {
+      background: #c8e6d0;
+      color: #1e7a2e;
+    }
+
+    .sidebar-divider {
+      border: none;
+      border-top: 1px solid #cde0d4;
+      margin: 0.5rem 1rem 1rem;
+    }
+
+    /* ── Main content ── */
+    .content {
+      flex: 1;
+      max-width: 860px;
+      padding: 2.5rem 3rem 4rem;
+    }
+
+    .content h1 {
+      font-size: 2rem;
+      font-weight: 700;
+      color: #1c2e1c;
+      margin-bottom: 0.5rem;
+      letter-spacing: -0.5px;
+    }
+
+    .content .lead {
+      font-size: 1rem;
+      color: #4a6a4a;
+      margin-bottom: 2rem;
+      border-bottom: 1px solid #cde0d4;
+      padding-bottom: 1.5rem;
+    }
+
+    .content section {
+      margin-bottom: 3rem;
+      scroll-margin-top: 62px;
+    }
+
+    .content h2 {
+      font-size: 1.35rem;
+      font-weight: 700;
+      color: #1c2e1c;
+      margin-bottom: 0.75rem;
+      padding-bottom: 0.35rem;
+      border-bottom: 1px solid #cde0d4;
+    }
+
+    .content h3 {
+      font-size: 1rem;
+      font-weight: 700;
+      color: #1c2e1c;
+      margin: 1.25rem 0 0.5rem;
+    }
+
+    .content p { margin-bottom: 0.75rem; color: #2a4a2a; }
+
+    .content ul, .content ol {
+      margin: 0.5rem 0 0.75rem 1.5rem;
+      color: #2a4a2a;
+    }
+
+    .content li { margin-bottom: 0.25rem; }
+
+    .content a { color: #1e7a2e; text-decoration: none; }
+    .content a:hover { text-decoration: underline; }
+
+    code {
+      font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
+      font-size: 0.85em;
+      background: #e0ede6;
+      color: #1c4a1c;
+      padding: 0.1em 0.35em;
+      border-radius: 3px;
+    }
+
+    pre {
+      background: #e6f4eb;
+      color: #1c2e1c;
+      font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
+      font-size: 0.875rem;
+      line-height: 1.65;
+      padding: 1rem 1.25rem;
+      border-radius: 6px;
+      border: 1px solid #b6dcc2;
+      overflow-x: auto;
+      margin: 0.75rem 0 1rem;
+    }
+
+    pre code {
+      background: none;
+      color: inherit;
+      padding: 0;
+      font-size: inherit;
+      border-radius: 0;
+    }
+
+    .note {
+      background: #e6f4eb;
+      border-left: 3px solid #1e7a2e;
+      padding: 0.75rem 1rem;
+      border-radius: 0 6px 6px 0;
+      margin: 1rem 0;
+      font-size: 0.9rem;
+      color: #2a4a2a;
+    }
+
+    .note strong { color: #1e7a2e; }
+
+    /* operator table */
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 0.75rem 0 1rem;
+      font-size: 0.9rem;
+    }
+
+    th {
+      text-align: left;
+      padding: 0.4rem 0.75rem;
+      background: #ddeee4;
+      border: 1px solid #b6dcc2;
+      font-weight: 700;
+      font-size: 0.8rem;
+      color: #2e5c2e;
+    }
+
+    td {
+      padding: 0.4rem 0.75rem;
+      border: 1px solid #cde0d4;
+      color: #2a4a2a;
+    }
+
+    td code { font-size: 0.85rem; }
+
+    tr:nth-child(even) td { background: #f0f8f3; }
+  </style>
+</head>
+<body>
+
+  <!-- ── Top bar ── -->
+  <div class="topbar">
+    <div class="topbar-left">
+      <a class="topbar-logo" href="index.html">
+        <img src="extras/logo.png" alt="Jade" />
+        jade
+      </a>
+      <span class="topbar-sep">»</span>
+      <select title="Version">
+        <option>1.0.9</option>
+      </select>
+      <span class="topbar-title">1.0.9 Documentation</span>
+    </div>
+    <div class="topbar-right">
+      <a href="https://github.com/joericks1998/jade">GitHub</a>
+    </div>
+  </div>
+
+  <!-- ── Page layout ── -->
+  <div class="layout">
+
+    <!-- ── Sidebar ── -->
+    <nav class="sidebar">
+      <div class="sidebar-section">
+        <h4>Getting Started</h4>
+        <ul>
+          <li><a href="index.html">Installation</a></li>
+          <li><a href="quickstart.html">Quick Start</a></li>
+        </ul>
+      </div>
+      <hr class="sidebar-divider" />
+      <div class="sidebar-section">
+        <h4>Language Reference</h4>
+        <ul>
+          <li><a href="variables.html">Variables</a></li>
+          <li><a href="expressions.html">Expressions</a></li>
+          <li><a href="operators.html">Operators</a></li>
+          <li><a href="types.html">Types</a></li>
+          <li><a href="functions.html">Functions</a></li>
+          <li><a href="control-flow.html">Control Flow</a></li>
+          <li><a href="structs.html">Structs</a></li>
+          <li><a href="imports.html">Imports</a></li>
+          <li><a href="llm.html">LLM Integration</a></li>
+          <li><a href="exceptions.html" class="active">Exceptions</a></li>
+        </ul>
+      </div>
+      <hr class="sidebar-divider" />
+      <div class="sidebar-section">
+        <h4>CLI Reference</h4>
+        <ul>
+          <li><a href="cli.html">jade command</a></li>
+        </ul>
+      </div>
+      <hr class="sidebar-divider" />
+      <div class="sidebar-section">
+        <h4>Project</h4>
+        <ul>
+          <li><a href="changelog.html">Changelog</a></li>
+          <li><a href="https://github.com/joericks1998/jade">GitHub →</a></li>
+        </ul>
+      </div>
+    </nav>
+
+    <!-- ── Main content ── -->
+    <main class="content">
+
+      <h1>Exceptions</h1>
+      <p class="lead">
+        Jade provides structured exception handling through three keywords: <code>raise</code>
+        raises any value as an exception, <code>try</code> wraps a block that might raise, and
+        <code>catch</code> handles the raised value by type or unconditionally.
+      </p>
+
+      <section id="overview">
+        <h2>Overview</h2>
+        <p>
+          An exception is any Jade value raised with the <code>raise</code> statement. The raised
+          value can be a string, a struct instance, an integer, or any other runtime value. The most
+          common pattern is to define a dedicated <code>struct</code> type to carry the exception
+          payload, then raise an instance of that type. This lets <code>catch</code> arms match by
+          type name and access the fields of the caught value.
+        </p>
+        <p>
+          A <code>try</code>/<code>catch</code> block wraps the statements that might raise. If
+          the <code>try</code> body completes without raising, execution continues normally after
+          the last <code>catch</code> arm and no catch arm runs. If a <code>raise</code> occurs,
+          execution of the <code>try</code> body stops immediately and the runtime searches the
+          catch arms in order, executing the first one that matches the raised value.
+        </p>
+        <p>
+          Built-in runtime errors — division by zero, type errors, undefined variable references,
+          index out of bounds, and all other <code>JadeError</code> variants — are automatically
+          wrapped in a synthetic <code>RuntimeError</code> struct with a single <code>message</code>
+          field. A catch-all arm (<code>catch e { … }</code>) will catch these just as it catches
+          user-raised exceptions, allowing programs to recover from runtime errors cleanly.
+        </p>
+        <p>
+          If no <code>catch</code> arm matches the raised value, the exception propagates outward
+          to the nearest enclosing <code>try</code>/<code>catch</code>. If it reaches the top level
+          without being caught, the program exits with an error message.
+        </p>
+      </section>
+
+      <section id="syntax">
+        <h2>Syntax</h2>
+
+        <h3>raise</h3>
+        <pre><code>raise &lt;expr&gt;</code></pre>
+        <ul>
+          <li><code>&lt;expr&gt;</code> — any expression. The evaluated value becomes the raised exception. Execution of the enclosing block stops immediately after <code>raise</code>.</li>
+        </ul>
+
+        <h3>try / catch</h3>
+        <pre><code>try {
+    &lt;body statements&gt;
+} catch &lt;TypeName&gt; &lt;binding&gt; {
+    &lt;arm statements&gt;
+} catch &lt;binding&gt; {
+    &lt;arm statements&gt;
+}</code></pre>
+        <ul>
+          <li><code>&lt;body statements&gt;</code> — any sequence of statements that might raise.</li>
+          <li><code>&lt;TypeName&gt;</code> — an optional struct type name. When present, this arm only matches exceptions that are instances of that struct type. When absent, the arm is a catch-all and matches any raised value.</li>
+          <li><code>&lt;binding&gt;</code> — a name bound to the caught value inside the arm body. For typed arms, the bound value is the struct instance; for catch-all arms, it is whatever was raised.</li>
+        </ul>
+        <p>
+          Any number of typed <code>catch</code> arms may appear before the optional catch-all.
+          Arms are tested in the order they are written; the first match wins and the rest are
+          skipped. A catch-all arm should appear last because it matches everything.
+        </p>
+      </section>
+
+      <section id="basic-examples">
+        <h2>Basic Examples</h2>
+
+        <h3>Raising and catching a string</h3>
+        <pre><code>fn risky() {
+    raise "something went wrong"
+}
+
+try {
+    risky()
+} catch e {
+    print(e)
+}</code></pre>
+        <p>
+          <code>risky</code> raises a string. The catch-all arm binds the string to <code>e</code>
+          and prints it. Output: <code>something went wrong</code>. Any Jade value can be raised,
+          not just strings.
+        </p>
+
+        <h3>Typed catch with a struct exception</h3>
+        <pre><code>struct ValueError { message }
+
+fn parse_age(n) {
+    if n &lt; 0 {
+        raise ValueError { message: "age cannot be negative" }
+    }
+    return n
+}
+
+try {
+    parse_age(-1)
+} catch ValueError e {
+    print(e.message)
+}</code></pre>
+        <p>
+          Defining a dedicated exception struct lets catch arms match by type. Here
+          <code>catch ValueError e</code> only runs when the raised value is a
+          <code>ValueError</code> instance. The field <code>e.message</code> holds the error
+          description. Output: <code>age cannot be negative</code>.
+        </p>
+
+        <h3>Catching a built-in runtime error</h3>
+        <pre><code>try {
+    let x = 1 / 0
+} catch e {
+    print("caught runtime error")
+}</code></pre>
+        <p>
+          Division by zero normally terminates the program. Inside a <code>try</code> block,
+          built-in runtime errors are automatically wrapped in a <code>RuntimeError</code> struct
+          with a <code>message</code> field. The catch-all arm binds this struct to <code>e</code>
+          and the program continues. Output: <code>caught runtime error</code>.
+        </p>
+      </section>
+
+      <section id="advanced-examples">
+        <h2>Advanced Examples</h2>
+
+        <h3>Multiple typed catch arms — first match wins</h3>
+        <pre><code>struct NetworkError { code, message }
+struct ValueError { message }
+
+try {
+    raise NetworkError { code: 503, message: "service unavailable" }
+} catch ValueError e {
+    print("wrong: value error")
+} catch NetworkError e {
+    print(e.code)
+    print(e.message)
+} catch e {
+    print("wrong: catch-all")
+}</code></pre>
+        <p>
+          Three arms are checked in order. The raised value is a <code>NetworkError</code>, so the
+          first arm (<code>catch ValueError</code>) does not match. The second arm matches and runs,
+          printing <code>503</code> then <code>service unavailable</code>. The catch-all is never
+          reached.
+        </p>
+
+        <h3>Exception propagation through the call stack</h3>
+        <pre><code>struct ValueError { message }
+
+fn inner() {
+    raise ValueError { message: "deep error" }
+}
+
+fn outer() {
+    inner()
+}
+
+try {
+    outer()
+} catch ValueError e {
+    print(e.message)
+}</code></pre>
+        <p>
+          When <code>inner</code> raises, execution unwinds through <code>outer</code> without
+          any catch arm in either function. The exception propagates to the <code>try</code>/<code>catch</code>
+          block at the call site, which catches it and prints <code>deep error</code>. Exceptions
+          cross function boundaries automatically.
+        </p>
+
+        <h3>Nested try/catch — inner handles if it matches, outer handles if it does not</h3>
+        <pre><code>struct ValueError { message }
+struct NetworkError { code, message }
+
+try {
+    try {
+        raise ValueError { message: "inner error" }
+    } catch NetworkError e {
+        print("wrong: inner caught network error")
+    }
+} catch ValueError e {
+    print(e.message)
+}</code></pre>
+        <p>
+          The inner <code>try</code>/<code>catch</code> only handles <code>NetworkError</code>.
+          Because a <code>ValueError</code> was raised and the inner arm does not match, the exception
+          propagates to the outer <code>try</code>/<code>catch</code>, which catches it and prints
+          <code>inner error</code>.
+        </p>
+
+        <h3>try body completes normally — catch never runs</h3>
+        <pre><code>try {
+    let x = 1 + 1
+    print(x)
+} catch e {
+    print("wrong: should not run")
+}</code></pre>
+        <p>
+          When no exception is raised, the <code>try</code> body executes fully and no catch arm
+          runs. Output: <code>2</code>.
+        </p>
+      </section>
+
+      <section id="type-rules">
+        <h2>Type Rules</h2>
+        <table>
+          <thead>
+            <tr><th>Operation</th><th>Operand / Condition</th><th>Result</th><th>Notes</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>raise &lt;expr&gt;</code></td>
+              <td>Any <code>Value</code></td>
+              <td>Exception propagation; execution of current block stops</td>
+              <td>eval.rs: <code>Stmt::Raise</code> — stores value in <code>env.raised_exception</code>, returns <code>Err(JadeError::Exception)</code></td>
+            </tr>
+            <tr>
+              <td><code>catch TypeName e</code> — typed arm</td>
+              <td>Raised value must be <code>Value::Struct</code> with <code>type_name == TypeName</code></td>
+              <td>Arm body executes; <code>e</code> bound to the struct instance</td>
+              <td>eval.rs: <code>Stmt::TryCatch</code> — checks <code>rc.borrow().type_name == type_name</code></td>
+            </tr>
+            <tr>
+              <td><code>catch e</code> — catch-all arm</td>
+              <td>Any raised value, including built-in runtime errors</td>
+              <td>Arm body executes; <code>e</code> bound to the raised value</td>
+              <td>eval.rs: <code>None</code> catch type always matches</td>
+            </tr>
+            <tr>
+              <td>Built-in runtime error inside <code>try</code></td>
+              <td>Any <code>JadeError</code> that is not <code>Exception</code></td>
+              <td>Wrapped as <code>RuntimeError { message }</code> struct; catchable by catch-all or <code>catch RuntimeError e</code></td>
+              <td>eval.rs: <code>Err(other)</code> arm in <code>TryCatch</code> handler</td>
+            </tr>
+            <tr>
+              <td>No catch arm matches</td>
+              <td>Raised value does not match any typed arm</td>
+              <td>Exception re-raised; propagates to nearest enclosing <code>try</code></td>
+              <td>eval.rs: re-raises <code>JadeError::Exception</code> after all arms are checked</td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="note">
+          <strong>Note:</strong> Typed <code>catch</code> arms only match struct values — they
+          check the <code>type_name</code> field of the struct instance at runtime. Raising a plain
+          string or integer and then catching with a typed arm will not match; use a catch-all arm
+          to handle non-struct raises.
+        </div>
+      </section>
+
+      <section id="errors">
+        <h2>Error Conditions</h2>
+        <table>
+          <thead>
+            <tr><th>Error</th><th>Trigger</th><th>Example</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>Exception</code> (unhandled)</td>
+              <td><code>raise</code> with no enclosing <code>try</code>/<code>catch</code> that matches, or exception propagates past the top level</td>
+              <td><code>raise "oops"</code> at the top level with no <code>try</code> block</td>
+            </tr>
+            <tr>
+              <td><code>UndefinedVariable</code> inside catch body</td>
+              <td>Referencing a name that was never declared, inside a catch arm body</td>
+              <td><code>catch e { print(z) }</code> where <code>z</code> is not defined</td>
+            </tr>
+            <tr>
+              <td>Any other <code>JadeError</code> inside <code>try</code></td>
+              <td>Built-in runtime error (division by zero, index out of bounds, etc.) occurs inside the <code>try</code> body</td>
+              <td><code>try { let x = 1 / 0 } catch e { print(e.message) }</code> — catches as <code>RuntimeError</code></td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section id="interactions">
+        <h2>Interaction with Other Features</h2>
+        <ul>
+          <li>
+            <strong>Structs</strong>: The most common pattern is to raise struct instances as typed
+            exceptions. Define a dedicated <code>struct</code> for each exception category, include a
+            <code>message</code> field (or any fields that carry diagnostic context), and raise an
+            instance. Typed <code>catch</code> arms match by struct type name. See
+            <a href="structs.html">Structs</a>.
+          </li>
+          <li>
+            <strong>Functions</strong>: Exceptions propagate through function call boundaries
+            automatically. A <code>raise</code> inside a function unwinds the call stack until it
+            reaches the nearest enclosing <code>try</code>/<code>catch</code>, regardless of how many
+            function calls deep the <code>raise</code> occurs. See <a href="functions.html">Functions</a>.
+          </li>
+          <li>
+            <strong>Control flow</strong>: <code>try</code>/<code>catch</code> blocks can appear
+            anywhere a statement is valid — inside <code>if</code> branches, inside <code>while</code>
+            loop bodies, or at the top level. A <code>return</code> inside a <code>try</code> body
+            exits the enclosing function normally without triggering any <code>catch</code> arm.
+            See <a href="control-flow.html">Control Flow</a>.
+          </li>
+          <li>
+            <strong>Variables</strong>: The binding introduced by a <code>catch</code> arm
+            (<code>catch e { … }</code>) is scoped to that arm's body. Variables declared with
+            <code>let</code> inside a catch arm are not visible outside it. Use bare assignment
+            to write back to a variable declared in an enclosing scope from inside a catch arm.
+          </li>
+          <li>
+            <strong>Raise anything</strong>: The <code>raise</code> keyword accepts any expression —
+            strings, integers, booleans, struct instances. Typed <code>catch</code> arms only match
+            struct instances; everything else can only be caught by a catch-all arm.
+          </li>
+        </ul>
+      </section>
+
+      <section id="implementation">
+        <h2>Implementation Notes</h2>
+        <div class="note">
+          <strong>Note:</strong> When a <code>raise</code> statement executes, the evaluator stores
+          the raised value in <code>env.raised_exception</code> and returns a Rust
+          <code>Err(JadeError::Exception)</code>. The <code>TryCatch</code> handler in
+          <code>eval.rs</code> checks whether the error is a <code>JadeError::Exception</code>
+          and retrieves the value from <code>env.raised_exception</code>. Other <code>JadeError</code>
+          variants (division by zero, type error, etc.) are caught by the <code>Err(other)</code>
+          arm and wrapped in a synthetic <code>RuntimeError { message }</code> struct so that
+          catch arms can match and inspect them.
+        </div>
+        <div class="note">
+          <strong>Note:</strong> Each <code>catch</code> arm body executes in its own child scope.
+          The evaluator calls <code>env.push_scope()</code> before entering the arm, binds the
+          exception value to the arm's binding name via <code>env.define</code>, and calls
+          <code>env.pop_scope()</code> after the arm body completes. Variables declared with
+          <code>let</code> inside a catch arm are not visible outside that arm.
+        </div>
+        <div class="note">
+          <strong>Note:</strong> When no catch arm matches a raised exception, the evaluator
+          re-raises it: it stores the value back in <code>env.raised_exception</code> and returns
+          a new <code>Err(JadeError::Exception)</code>. This propagates the exception upward through
+          the Rust call stack to the next enclosing <code>TryCatch</code> handler, or to the top
+          level where it produces an error message (eval.rs: end of <code>Stmt::TryCatch</code> arm).
+        </div>
+        <div class="note">
+          <strong>Note:</strong> If a <code>try</code> body completes normally (returns
+          <code>Ok(ret)</code>), the <code>TryCatch</code> handler immediately returns that result
+          and no catch arm is consulted. A <code>return</code> statement inside a <code>try</code>
+          body propagates normally and is not treated as an exception (eval.rs:
+          <code>Ok(ret) =&gt; return Ok(ret)</code>).
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+</body>
+</html>
