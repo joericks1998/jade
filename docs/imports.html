@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Jade 1.0.7 — Types</title>
+  <title>Jade 1.0.7 — Imports</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -242,7 +242,6 @@
 
     .note strong { color: #1e7a2e; }
 
-    /* operator table */
     table {
       border-collapse: collapse;
       width: 100%;
@@ -310,11 +309,11 @@
           <li><a href="variables.html">Variables</a></li>
           <li><a href="expressions.html">Expressions</a></li>
           <li><a href="operators.html">Operators</a></li>
-          <li><a href="types.html" class="active">Types</a></li>
+          <li><a href="types.html">Types</a></li>
           <li><a href="functions.html">Functions</a></li>
           <li><a href="control-flow.html">Control Flow</a></li>
           <li><a href="structs.html">Structs</a></li>
-          <li><a href="imports.html">Imports</a></li>
+          <li><a href="imports.html" class="active">Imports</a></li>
           <li><a href="llm.html">LLM Integration</a></li>
         </ul>
       </div>
@@ -338,99 +337,100 @@
     <!-- ── Main content ── -->
     <main class="content">
 
-      <section id="types">
-        <h2>Types</h2>
+      <h1>Imports</h1>
+      <p class="lead">
+        Jade's <code>use</code> statement loads another <code>.jde</code> file and makes its
+        top-level function and variable definitions available in the importing file.
+      </p>
+
+      <section id="syntax">
+        <h2>Syntax</h2>
+        <pre><code>use "&lt;path&gt;"</code></pre>
+        <ul>
+          <li><code>&lt;path&gt;</code> — a relative path to another <code>.jde</code> file, resolved relative to the directory of the importing file.</li>
+          <li>The <code>use</code> statement must appear at the top level (not inside a function body).</li>
+          <li>The imported file is executed once; all top-level bindings it produces become available in the importing scope.</li>
+        </ul>
+      </section>
+
+      <section id="basic-example">
+        <h2>Basic Example</h2>
+
+        <h3>math_lib.jde — the library</h3>
+        <pre><code>fn add(a, b) { return a + b }
+fn mul(a, b) { return a * b }</code></pre>
+
+        <h3>main.jde — the importer</h3>
+        <pre><code>use "math_lib.jde"
+
+let x = add(2, 3)   // 5
+let y = mul(4, 5)   // 20</code></pre>
         <p>
-          Jade 1.0.7 has eight runtime value types. A full static type system with
-          inference is planned for a later phase of development.
+          After the <code>use</code> statement executes, <code>add</code> and <code>mul</code> are
+          defined in the importing scope exactly as if they had been written inline. They can be
+          called, passed as values, or stored in variables.
         </p>
-        <table>
-          <thead>
-            <tr><th>Type</th><th>Description</th><th>Status</th></tr>
-          </thead>
-          <tbody>
-            <tr><td><code>int</code></td><td>64-bit signed integer (<code>i64</code>)</td><td>Implemented</td></tr>
-            <tr><td><code>float</code></td><td>64-bit floating point (<code>f64</code>)</td><td>Implemented</td></tr>
-            <tr><td><code>bool</code></td><td>Boolean <code>true</code> or <code>false</code></td><td>Implemented</td></tr>
-            <tr><td><code>fn</code></td><td>First-class function value</td><td>Implemented</td></tr>
-            <tr><td><code>struct</code></td><td>User-defined record type with named fields</td><td>Implemented</td></tr>
-            <tr><td><code>str</code></td><td>UTF-8 string with indexing and concatenation</td><td>Implemented</td></tr>
-            <tr><td><code>array</code></td><td>Heterogeneous mutable array with index access</td><td>Implemented</td></tr>
-            <tr><td><code>dict</code></td><td>String-keyed mutable hash map</td><td>Implemented</td></tr>
-            <tr><td><code>nil</code></td><td>Absence of value</td><td>Planned</td></tr>
-          </tbody>
-        </table>
+      </section>
 
-        <h3>Type Coercion Rules</h3>
-        <p>Jade does not implicitly coerce types except in specific arithmetic and comparison contexts:</p>
-        <table>
-          <thead>
-            <tr><th>Rule</th><th>Example</th><th>Result</th></tr>
-          </thead>
-          <tbody>
-            <tr><td>Arithmetic: <code>int op float</code> → float</td><td><code>1 + 0.5</code></td><td><code>1.5</code> (float)</td></tr>
-            <tr><td>Ordering: <code>int &lt; float</code> allowed</td><td><code>1 &lt; 2.5</code></td><td><code>true</code></td></tr>
-            <tr><td>Strict equality: no cross-type coercion</td><td><code>1 == 1.0</code></td><td><code>TypeError</code></td></tr>
-            <tr><td>Bool ordering: <code>false</code> = 0, <code>true</code> = 1</td><td><code>false &lt; true</code></td><td><code>true</code></td></tr>
-            <tr><td>Bitwise: integer operands only</td><td><code>1.0 &amp; 2</code></td><td><code>TypeError</code></td></tr>
-            <tr><td>Logical: bool operands only</td><td><code>1 &amp;&amp; true</code></td><td><code>TypeError</code></td></tr>
-          </tbody>
-        </table>
+      <section id="path-resolution">
+        <h2>Path Resolution</h2>
+        <p>
+          Paths in <code>use</code> are resolved relative to the directory containing the
+          <em>importing</em> file, not the directory from which <code>jade</code> was invoked.
+        </p>
+        <pre><code>// If your project layout is:
+//   project/
+//     main.jde
+//     lib/
+//       utils.jde
 
+// Inside main.jde:
+use "lib/utils.jde"</code></pre>
         <div class="note">
-          <strong>Note:</strong> Arithmetic promotion converts an <code>int</code> to <code>float</code>
-          when the other operand is a <code>float</code>. Equality never promotes — comparing
-          <code>1</code> to <code>1.0</code> is always a <code>TypeError</code>.
+          <strong>Note:</strong> Absolute paths are not supported. Always use paths relative to
+          the importing file's location.
         </div>
       </section>
 
-      <section id="dict">
-        <h2>Dict</h2>
+      <section id="what-gets-imported">
+        <h2>What Gets Imported</h2>
         <p>
-          A <code>dict</code> is a mutable, string-keyed hash map. Keys are strings; values can be any
-          Jade type. Dicts are created with curly-brace literal syntax and accessed with square-bracket
-          indexing.
+          All top-level bindings in the imported file are brought into scope — including functions,
+          variables, and struct definitions. The imported file runs to completion before execution
+          of the importing file continues past the <code>use</code> statement.
         </p>
+        <table>
+          <thead>
+            <tr><th>Exported from lib</th><th>Available after <code>use</code></th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>fn add(a, b) { … }</code></td><td><code>add(2, 3)</code> works</td></tr>
+            <tr><td><code>let PI = 3.14159</code></td><td><code>PI</code> is in scope</td></tr>
+            <tr><td><code>struct Point { x, y }</code></td><td><code>Point { x: 1, y: 2 }</code> works</td></tr>
+          </tbody>
+        </table>
+      </section>
 
-        <h3>Creating a dict</h3>
-        <pre><code>let d = {"name": "jade", "version": 1}
-let empty = {}</code></pre>
-
+      <section id="multiple-imports">
+        <h2>Multiple Imports</h2>
         <p>
-          Bare identifiers are also accepted as keys — the identifier's string value becomes the key:
+          A file may contain multiple <code>use</code> statements. Each is processed in order.
+          If two imported files define the same name, the later import wins.
         </p>
-        <pre><code>let key = "hello"
-let greet = {key: "world"}
-print(greet["hello"])  // world</code></pre>
+        <pre><code>use "math_lib.jde"
+use "string_lib.jde"
 
-        <h3>Reading and writing values</h3>
-        <pre><code>print(d["name"])       // jade
+let n = add(1, 2)
+let s = concat("hello", " world")</code></pre>
+      </section>
 
-d["version"] = 2       // update existing key
-d["stable"] = true     // add new key</code></pre>
-
-        <h3>Length</h3>
-        <pre><code>print(len(d))   // number of key-value pairs</code></pre>
-
-        <h3>Value semantics</h3>
+      <section id="no-re-export">
+        <h2>No Re-export</h2>
         <p>
-          Assigning a dict to a new variable copies it. Mutations to the copy do not affect the
-          original:
+          Imports are not re-exported. If <code>a.jde</code> uses <code>b.jde</code>, a third file
+          that uses <code>a.jde</code> does <em>not</em> automatically get access to what
+          <code>b.jde</code> defined. Each file must import the libraries it needs directly.
         </p>
-        <pre><code>let d2 = d
-d2["name"] = "copy"
-print(d["name"])   // jade   (unchanged)
-print(d2["name"])  // copy</code></pre>
-
-        <h3>Nested dicts</h3>
-        <pre><code>let outer = {"inner": {"x": 42}}
-let inner = outer["inner"]
-print(inner["x"])  // 42</code></pre>
-
-        <div class="note">
-          <strong>Note:</strong> Dict keys are always strings. Accessing a key that does not exist
-          produces a runtime error.
-        </div>
       </section>
 
     </main>
