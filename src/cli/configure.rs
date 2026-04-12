@@ -40,6 +40,11 @@ pub fn run_configure() {
         if trimmed.is_empty() { cfg.provider.clone() } else { trimmed.to_string() }
     };
 
+    if !["anthropic", "openai", "local"].contains(&provider.trim()) {
+        eprintln!("warning: '{}' is not a known provider. Known providers: anthropic, openai, local.", provider.trim());
+        eprintln!("         Continuing anyway...");
+    }
+
     // ── Default model ─────────────────────────────────────────────────────────
     let default_model_hint = match provider.as_str() {
         "openai" => "gpt-4o-mini",
@@ -108,16 +113,13 @@ pub fn run_configure() {
             }
         }
     } else {
-        // Legacy: write [model] to jade.toml in CWD.
-        let api_key_line = match &api_key {
-            Some(k) => format!("api_key = \"{}\"\n", k),
-            None => String::new(),
-        };
-        let toml_content = format!(
-            "[model]\nprovider = \"{provider}\"\nmodel = \"{model}\"\nmax_retries = {max_retries}\n{api_key_line}"
-        );
-        std::fs::write("jade.toml", &toml_content).unwrap_or_else(|e| {
-            eprintln!("error: could not write jade.toml: {}", e);
+        // Write [model] to jade.toml in CWD via proper TOML serialization so that
+        // values containing quotes or backslashes cannot produce invalid TOML.
+        let toml_config = crate::config::TomlConfig { model: Some(section.clone()) };
+        let content = toml::to_string_pretty(&toml_config)
+            .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+        std::fs::write("jade.toml", &content).unwrap_or_else(|e| {
+            eprintln!("error writing jade.toml: {}", e);
             std::process::exit(1);
         });
         println!();

@@ -47,7 +47,13 @@ fn apply_model_section(cfg: &mut JadeConfig, m: &ModelSection) {
 
 /// Returns `~/.jade/config.toml` — the global user configuration file.
 pub fn global_config_path() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))  // Windows fallback
+        .unwrap_or_else(|_| {
+            // Neither HOME nor USERPROFILE set — fall back to CWD.
+            // Config will be placed in .jade/ relative to the current directory.
+            ".".to_string()
+        });
     std::path::PathBuf::from(home).join(".jade").join("config.toml")
 }
 
@@ -98,11 +104,15 @@ pub fn load_config() -> JadeConfig {
         }
     }
 
-    // Layer 3: project jade.toml [model] section in CWD
-    if let Ok(content) = std::fs::read_to_string("jade.toml") {
-        if let Ok(parsed) = toml::from_str::<TomlConfig>(&content) {
-            if let Some(m) = &parsed.model {
-                apply_model_section(&mut cfg, m);
+    // Layer 3: project jade.toml [model] section — walk up to project root so
+    // running jade from a subdirectory still picks up the project config.
+    if let Some(root) = crate::project::find_project_root() {
+        let path = root.join("jade.toml");
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            if let Ok(parsed) = toml::from_str::<TomlConfig>(&content) {
+                if let Some(m) = &parsed.model {
+                    apply_model_section(&mut cfg, m);
+                }
             }
         }
     }

@@ -42,61 +42,57 @@ pub fn run_env(json: bool) {
         .filter(|e| e.version != crate::cache::JADE_VERSION)
         .count();
     let total_bytes: u64 = cache_entries.iter().map(|e| e.size_bytes).sum();
-    let cache_size = format_bytes(total_bytes);
+    let cache_size = super::format_bytes(total_bytes);
 
-    let cache_root = {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        format!("{}/.jade/cache/", home)
-    };
+    let cache_root = crate::cache::cache_root().display().to_string();
 
     // Project info
     let project_info = crate::project::find_project_root().and_then(|root| {
-        crate::project::load_project(&root).ok().map(|m| {
+        crate::project::load_project(&root).ok().and_then(|m| {
             let entry = m.entry_file().to_string();
-            let p = m.project.unwrap();
-            (
+            let p = m.project?;
+            Some((
                 root.join("jade.toml").display().to_string(),
                 p.name,
                 p.version.unwrap_or_else(|| "?".to_string()),
                 entry,
-            )
+            ))
         })
     });
 
     if json {
-        // JSON output
-        let project_json = match &project_info {
-            Some((path, name, ver, entry)) => format!(
-                r#"  "project": {{"path": "{path}", "name": "{name}", "version": "{ver}", "entry": "{entry}"}}"#
-            ),
-            None => r#"  "project": null"#.to_string(),
+        let project_value = match &project_info {
+            Some((path, name, ver, entry)) => serde_json::json!({
+                "path":    path,
+                "name":    name,
+                "version": ver,
+                "entry":   entry,
+            }),
+            None => serde_json::Value::Null,
         };
 
-        println!(
-            r#"{{
-  "jade_version": "{version}",
-  "binary": "{binary}",
-  "llvm": "{llvm_status}",
-  "platform": "{platform}",
-  "config": {{
-    "source": "{config_source}",
-    "provider": "{provider}",
-    "model": "{model}",
-    "api_key": "{api_key_status}",
-    "max_retries": {max_retries}
-  }},
-  "cache": {{
-    "path": "{cache_root}",
-    "entries": {entry_count},
-    "stale": {stale_count},
-    "size": "{cache_size}"
-  }},
-{project_json}
-}}"#,
-            provider = cfg.provider,
-            model = cfg.model,
-            max_retries = cfg.max_retries,
-        );
+        let output = serde_json::json!({
+            "jade_version": version,
+            "binary":       binary,
+            "llvm":         llvm_status,
+            "platform":     platform,
+            "config": {
+                "source":      config_source,
+                "provider":    cfg.provider,
+                "model":       cfg.model,
+                "api_key":     api_key_status,
+                "max_retries": cfg.max_retries,
+            },
+            "cache": {
+                "path":    cache_root,
+                "entries": entry_count,
+                "stale":   stale_count,
+                "size":    cache_size,
+            },
+            "project": project_value,
+        });
+
+        println!("{}", serde_json::to_string_pretty(&output).unwrap_or_default());
     } else {
         // Human-readable output
         println!("jade {}", version);
@@ -123,15 +119,5 @@ pub fn run_env(json: bool) {
             println!("  version  {}", ver);
             println!("  entry    {}", entry);
         }
-    }
-}
-
-fn format_bytes(bytes: u64) -> String {
-    if bytes < 1024 {
-        format!("{} B", bytes)
-    } else if bytes < 1024 * 1024 {
-        format!("{:.1} KB", bytes as f64 / 1024.0)
-    } else {
-        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
     }
 }

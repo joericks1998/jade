@@ -46,20 +46,25 @@ pub fn scaffold(dir: &Path, name: &str, template: &str) {
 
 /// `jade new <name> [--template basic|llm]`
 pub fn run_new(name: &str, template: &str) {
+    if name.contains('/') || name.contains('\\') || name.starts_with('.') {
+        eprintln!("error: project name '{}' must not contain path separators or start with '.'", name);
+        process::exit(1);
+    }
+
     let dir = Path::new(name);
     if dir.exists() {
         eprintln!("error: directory '{}' already exists", name);
         process::exit(1);
     }
     scaffold(dir, name, template);
-    eprintln!("created: {}/", name);
-    eprintln!("  jade.toml");
-    eprintln!("  main.jde");
-    eprintln!("  .gitignore");
-    eprintln!();
-    eprintln!("Get started:");
-    eprintln!("  cd {}", name);
-    eprintln!("  jade run");
+    println!("created: {}/", name);
+    println!("  jade.toml");
+    println!("  main.jde");
+    println!("  .gitignore");
+    println!();
+    println!("Get started:");
+    println!("  cd {}", name);
+    println!("  jade run");
 }
 
 /// `jade init [--template basic|llm]`
@@ -108,10 +113,10 @@ pub fn run_init(template: &str) {
             eprintln!("error: could not write main.jde: {}", e);
             process::exit(1);
         });
-        eprintln!("created: main.jde");
+        println!("created: main.jde");
     }
 
-    eprintln!("initialized jade project: {}", name);
-    eprintln!("  jade run    — run main.jde");
-    eprintln!("  jade test   — run test files");
+    println!("initialized jade project: {}", name);
+    println!("  jade run    — run main.jde");
+    println!("  jade test   — run test files");
 }

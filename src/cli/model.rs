@@ -25,24 +25,25 @@ const KNOWN_MODELS: &[KnownModel] = &[
 /// `jade model list`
 pub fn run_model_list() {
     let cfg = crate::config::load_config();
-    let current = format!("{}/{}", cfg.provider, cfg.model);
 
     let anthropic: Vec<_> = KNOWN_MODELS.iter().filter(|m| m.provider == "anthropic").collect();
     let openai: Vec<_>    = KNOWN_MODELS.iter().filter(|m| m.provider == "openai").collect();
 
     println!("anthropic:");
     for m in anthropic {
-        let marker = if format!("{}/{}", m.provider, m.name) == current { " ◀ current" } else { "" };
+        let is_current = m.provider == cfg.provider && m.name == cfg.model;
+        let marker = if is_current { " ◀ current" } else { "" };
         println!("  {:42} ({}){}", m.name, m.note, marker);
     }
     println!();
     println!("openai:");
     for m in openai {
-        let marker = if format!("{}/{}", m.provider, m.name) == current { " ◀ current" } else { "" };
+        let is_current = m.provider == cfg.provider && m.name == cfg.model;
+        let marker = if is_current { " ◀ current" } else { "" };
         println!("  {:42} ({}){}", m.name, m.note, marker);
     }
     println!();
-    println!("currently configured: {}", current);
+    println!("currently configured: {}/{}", cfg.provider, cfg.model);
     println!();
     println!("To change: jade model use <provider>/<model-name>");
     println!("           jade model use anthropic/claude-opus-4-6");

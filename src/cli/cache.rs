@@ -8,14 +8,13 @@ pub fn run_cache_info() {
         .count();
     let total_bytes: u64 = entries.iter().map(|e| e.size_bytes).sum();
 
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    let cache_path = format!("{}/.jade/cache/", home);
+    let cache_path = crate::cache::cache_root().display().to_string();
 
     println!("cache location:  {}", cache_path);
     println!("jade version:    {}", crate::cache::JADE_VERSION);
     println!("total entries:   {}", total);
     println!("stale entries:   {} (from older jade versions)", stale);
-    println!("total size:      {}", format_bytes(total_bytes));
+    println!("total size:      {}", super::format_bytes(total_bytes));
 }
 
 /// `jade cache clean [--older-than N] [--dry-run]`
@@ -47,19 +46,9 @@ pub fn run_cache_clean(older_than_days: Option<u64>, dry_run: bool) {
         println!(
             "would remove {} entries ({})",
             count,
-            format_bytes(bytes)
+            super::format_bytes(bytes)
         );
     } else {
-        println!("removed {} entries ({} freed)", count, format_bytes(bytes));
-    }
-}
-
-fn format_bytes(bytes: u64) -> String {
-    if bytes < 1024 {
-        format!("{} B", bytes)
-    } else if bytes < 1024 * 1024 {
-        format!("{:.1} KB", bytes as f64 / 1024.0)
-    } else {
-        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+        println!("removed {} entries ({} freed)", count, super::format_bytes(bytes));
     }
 }

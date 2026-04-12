@@ -186,7 +186,7 @@ impl Env {
     }
 
     /// Update a session variable in the global scope (e.g. `__tokens__`).
-    fn set_session_var(&mut self, name: &str, value: Value) {
+    pub fn set_session_var(&mut self, name: &str, value: Value) {
         self.scopes[0].insert(name.to_string(), value);
     }
 

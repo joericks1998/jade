@@ -33,6 +33,9 @@ pub fn run_fmt(path: &str, check: bool) {
     }
 
     let mut any_changed = false;
+    // Fix 6: collect write errors and continue processing remaining files
+    // rather than aborting immediately on the first failure.
+    let mut any_error = false;
     for file in &files {
         let source = match fs::read_to_string(file) {
             Ok(s) => s,
@@ -48,16 +51,17 @@ pub fn run_fmt(path: &str, check: bool) {
             if check {
                 eprintln!("would reformat: {}", file.display());
             } else {
-                fs::write(file, &formatted).unwrap_or_else(|e| {
+                if let Err(e) = fs::write(file, &formatted) {
                     eprintln!("error writing '{}': {}", file.display(), e);
-                    process::exit(1);
-                });
-                eprintln!("reformatted: {}", file.display());
+                    any_error = true;
+                } else {
+                    eprintln!("reformatted: {}", file.display());
+                }
             }
         }
     }
 
-    if check && any_changed {
+    if any_error || (check && any_changed) {
         process::exit(1);
     }
 }
