@@ -1,0 +1,14 @@
+// Extreme benchmark: naive recursive Fibonacci
+//
+// fib(40) requires ~330 million recursive calls — stress-tests
+// function call overhead, stack discipline, and arithmetic throughput.
+// fib(40) = 102334155
+
+fn fib(n) {
+    if n <= 1 {
+        return n
+    }
+    return fib(n - 1) + fib(n - 2)
+}
+
+let result = fib(40)   // 102334155

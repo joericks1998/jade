@@ -1,6 +1,6 @@
 # Jade
 
-A programming language written in Rust. Jade 1.0.7 compiles programs through a type inference pass and a register-based bytecode VM. It supports value types (`int`, `float`, `bool`, `str`, arrays, dicts, and user-defined `struct`s), `let` bindings, bare variable assignment, `fn` function definitions with `return`, anonymous closures, first-class functions, recursion, `if`/`elif`/`else` control flow, `while` loops, `for` loops over arrays, `struct` definitions with field access and mutation, `extend` blocks for methods, `interface` definitions, multi-file `use` imports, the `print` and `len` built-ins, f-string interpolation, the pipe operator `|>`, `prompt` declarations with LLM inference via `?`, and arithmetic, bitwise, logical, and comparison operators.
+A programming language written in Rust. Jade 1.0.9 compiles programs through a type inference pass and a register-based bytecode VM. It supports value types (`int`, `float`, `bool`, `str`, arrays, dicts, and user-defined `struct`s), `let` bindings, bare variable assignment, `fn` function definitions with `return`, anonymous closures, first-class functions, recursion, `if`/`elif`/`else` control flow, `while` loops, `for` loops over arrays, `try`/`catch`/`raise` exception handling, `struct` definitions with field access and mutation, `extend` blocks for methods, `interface` definitions, multi-file `use` imports, the `print` and `len` built-ins, f-string interpolation, the pipe operator `|>`, `prompt` declarations with LLM inference via `?`, and arithmetic, bitwise, logical, and comparison operators.
 
 ```
 fn factorial(n) {
@@ -72,8 +72,15 @@ jade --help
 ## Usage
 
 ```sh
-jade <file.jde>               # Run a Jade source file
-jade <file.jde> --verbose     # Run and print all variables after execution
+jade run <file.jde>           # Run a Jade source file
+jade run <file.jde> --verbose # Run and print all variables after execution
+jade run                      # Run the project entry point (main.jde)
+jade check <file.jde>         # Type-check without executing
+jade repl                     # Start an interactive REPL
+jade test                     # Discover and run test files
+jade fmt <file.jde>           # Format source files
+jade new myapp                # Create a new project
+jade env                      # Show version, config, and cache info
 jade --help                   # Show help
 ```
 
@@ -119,6 +126,7 @@ Errors are written to stderr with the format `<file>: <phase> error: <descriptio
 | Multi-file `use` imports | ✓ |
 | Bytecode compiler and register-based VM | ✓ |
 | Type inference | ✓ |
+| `try`/`catch`/`raise` exception handling | ✓ |
 
 Operator precedence (tightest to loosest): unary (`~` `!` `-`) → `*` `/` `%` → `+` `-` → `<<` `>>` → `&` → `^` → `|` → `==` `!=` `<` `>` `<=` `>=` → `&&` → `||` → `|>`
 

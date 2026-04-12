@@ -113,6 +113,12 @@ impl Emitter {
     }
 }
 
+// ── Module-level constants ────────────────────────────────────────────────────
+
+/// A zero-span used where no meaningful source location exists (e.g. synthetic
+/// `Halt` and fallback `Return(None)` instructions injected by the emitter).
+const NO_SPAN: Span = Span { line: 0, col: 0 };
+
 // ── Public entry point ────────────────────────────────────────────────────────
 
 /// Compile a `TProgram` into bytecode ready for the VM.
@@ -141,11 +147,10 @@ pub fn emit(program: TProgram) -> Result<CompiledProgram> {
 
     // Second pass: emit all statements into the top-level chunk.
     let mut em = Emitter::new_top();
-    let dummy = Span { line: 0, col: 0 };
     for stmt in program.stmts {
         emit_stmt(stmt, &mut em, &mut ctx)?;
     }
-    em.chunk.emit(Instr::Halt, dummy);
+    em.chunk.emit(Instr::Halt, NO_SPAN);
 
     let n_slots = em.next_reg;
     Ok(CompiledProgram {
@@ -160,7 +165,6 @@ pub fn emit(program: TProgram) -> Result<CompiledProgram> {
 // ── Statement emission ────────────────────────────────────────────────────────
 
 fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
-    let dummy = Span { line: 0, col: 0 };
     match stmt {
         TStmt::Let { name, value, span } => {
             let src = emit_expr(&value, em, ctx)?;
@@ -428,7 +432,6 @@ fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
             emit_expr(&expr, em, ctx)?;
         }
     }
-    let _ = dummy;
     Ok(())
 }
 
@@ -437,7 +440,7 @@ fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
 fn emit_fn(
     name: &str,
     params: Vec<String>,
-    body: Vec<TStmt>,
+    mut body: Vec<TStmt>,
     span: Span,
     ctx: &mut EmitCtx,
 ) -> Result<CompiledFn> {
@@ -446,11 +449,34 @@ fn emit_fn(
     for param in &params {
         fn_em.define_local(param);
     }
+
+    // If the body already ends with an explicit terminator (return or raise),
+    // we must not append a second Return(None) after it — that would be dead
+    // code.  Check *before* the pop below so we see the original last stmt.
+    let already_terminated = matches!(
+        body.last(),
+        Some(TStmt::Return { .. } | TStmt::Raise { .. })
+    );
+
+    // If the last statement is a bare expression, treat it as an implicit return value.
+    let implicit_ret = if matches!(body.last(), Some(TStmt::Expr(_))) {
+        if let Some(TStmt::Expr(expr)) = body.pop() { Some(expr) } else { None }
+    } else {
+        None
+    };
+
     for stmt in body {
         emit_stmt(stmt, &mut fn_em, ctx)?;
     }
-    // Implicit return if execution falls off the end.
-    fn_em.chunk.emit(Instr::Return(None), span);
+
+    if let Some(expr) = implicit_ret {
+        let src = emit_expr(&expr, &mut fn_em, ctx)?;
+        fn_em.chunk.emit(Instr::Return(Some(src)), span);
+    } else if !already_terminated {
+        // Implicit nil return if execution falls off the end of the function.
+        fn_em.chunk.emit(Instr::Return(None), NO_SPAN);
+    }
+
     let n_slots = fn_em.next_reg;
     Ok(CompiledFn { params, chunk: fn_em.chunk, n_slots })
 }

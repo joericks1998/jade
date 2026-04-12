@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Jade 1.0.7 — Control Flow</title>
+  <title>Jade 1.0.9 — Control Flow</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -282,9 +282,9 @@
       </a>
       <span class="topbar-sep">»</span>
       <select title="Version">
-        <option>1.0.7</option>
+        <option>1.0.9</option>
       </select>
-      <span class="topbar-title">1.0.7 Documentation</span>
+      <span class="topbar-title">1.0.9 Documentation</span>
     </div>
     <div class="topbar-right">
       <a href="https://github.com/joericks1998/jade">GitHub</a>
@@ -316,6 +316,7 @@
           <li><a href="structs.html">Structs</a></li>
           <li><a href="imports.html">Imports</a></li>
           <li><a href="llm.html">LLM Integration</a></li>
+          <li><a href="exceptions.html">Exceptions</a></li>
         </ul>
       </div>
       <hr class="sidebar-divider" />
@@ -969,6 +970,12 @@ let s = sum_array([10, 20, 30])  // 60</code></pre>
           <strong>Note:</strong> The iterable expression must evaluate to an <code>array</code>.
           Attempting to iterate over any other type (such as a string or dict) produces a
           <code>TypeError</code>.
+        </div>
+        <div class="note">
+          <strong>REPL limitation:</strong> <code>for</code> loops are not supported in
+          <code>jade repl</code>. The REPL uses the tree-walk evaluator, which does not
+          implement <code>for</code>. Use <code>jade run</code> or <code>jade build</code>
+          to run programs that contain <code>for</code> loops.
         </div>
       </section>
 

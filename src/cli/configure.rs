@@ -40,6 +40,11 @@ pub fn run_configure() {
         if trimmed.is_empty() { cfg.provider.clone() } else { trimmed.to_string() }
     };
 
+    if !["anthropic", "openai", "local"].contains(&provider.trim()) {
+        eprintln!("warning: '{}' is not a known provider. Known providers: anthropic, openai, local.", provider.trim());
+        eprintln!("         Continuing anyway...");
+    }
+
     // ── Default model ─────────────────────────────────────────────────────────
     let default_model_hint = match provider.as_str() {
         "openai" => "gpt-4o-mini",
@@ -81,31 +86,53 @@ pub fn run_configure() {
         }
     };
 
-    // ── Write jade.toml ───────────────────────────────────────────────────────
-    let api_key_line = match &api_key {
-        Some(k) => format!("api_key = \"{}\"\n", k),
-        None => String::new(),
+    // ── Determine write target ────────────────────────────────────────────────
+    // If we're inside a Jade project (jade.toml has [project]), write the LLM
+    // config to ~/.jade/config.toml to avoid clobbering the project manifest.
+    let in_project = crate::project::find_project_root().is_some();
+
+    let section = crate::config::ModelSection {
+        provider: Some(provider.clone()),
+        model: Some(model.clone()),
+        api_key: api_key.clone(),
+        max_retries: Some(max_retries),
     };
 
-    let toml_content = format!(
-        "[model]\nprovider = \"{provider}\"\nmodel = \"{model}\"\nmax_retries = {max_retries}\n{api_key_line}"
-    );
-
-    std::fs::write("jade.toml", &toml_content).unwrap_or_else(|e| {
-        eprintln!("error: could not write jade.toml: {}", e);
-        std::process::exit(1);
-    });
-
-    println!();
-    println!("jade.toml written successfully.");
+    if in_project {
+        // Write to global config.
+        match crate::config::write_global_config(&section) {
+            Ok(()) => {
+                let path = crate::config::global_config_path();
+                println!();
+                println!("config written to: {}", path.display());
+                println!("(inside a project — wrote to global config instead of jade.toml)");
+            }
+            Err(e) => {
+                eprintln!("error: could not write global config: {}", e);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        // Write [model] to jade.toml in CWD via proper TOML serialization so that
+        // values containing quotes or backslashes cannot produce invalid TOML.
+        let toml_config = crate::config::TomlConfig { model: Some(section.clone()) };
+        let content = toml::to_string_pretty(&toml_config)
+            .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+        std::fs::write("jade.toml", &content).unwrap_or_else(|e| {
+            eprintln!("error writing jade.toml: {}", e);
+            std::process::exit(1);
+        });
+        println!();
+        println!("jade.toml written successfully.");
+    }
 
     if api_key.is_some() {
-        println!("Warning: your API key is stored in jade.toml in plaintext.");
+        println!("Warning: your API key is stored in config in plaintext.");
         println!("         Consider using the JADE_API_KEY environment variable instead.");
     } else {
         println!("Set the JADE_API_KEY environment variable before running jade programs.");
     }
 
     println!();
-    println!("Run 'jade <file.jde>' to use your configured model.");
+    println!("Run 'jade run' to execute a Jade program.");
 }
