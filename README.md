@@ -1,6 +1,6 @@
 # Jade
 
-A programming language written in Rust. Jade 1.0.9 compiles programs through a type inference pass and a register-based bytecode VM. It supports value types (`int`, `float`, `bool`, `str`, arrays, dicts, and user-defined `struct`s), `let` bindings, bare variable assignment, `fn` function definitions with `return`, anonymous closures, first-class functions, recursion, `if`/`elif`/`else` control flow, `while` loops, `for` loops over arrays, `try`/`catch`/`raise` exception handling, `struct` definitions with field access and mutation, `extend` blocks for methods, `interface` definitions, multi-file `use` imports, the `print` and `len` built-ins, f-string interpolation, the pipe operator `|>`, `prompt` declarations with LLM inference via `?`, and arithmetic, bitwise, logical, and comparison operators.
+A programming language written in Rust. Jade 1.1.1 compiles programs through a type inference pass and a register-based bytecode VM. It supports value types (`int`, `float`, `bool`, `str`, arrays, dicts, and user-defined `struct`s), `let` bindings, bare variable assignment, `fn` function definitions with `return`, anonymous closures, first-class functions, recursion, `if`/`elif`/`else` control flow, `while` loops, `for` loops over arrays, `try`/`catch`/`raise` exception handling, `struct` definitions with field access and mutation, `extend` blocks for methods, `interface` definitions, multi-file `use` imports, the `print` and `len` built-ins, f-string interpolation, the pipe operator `|>`, `prompt` declarations with LLM inference via `?`, and arithmetic, bitwise, logical, and comparison operators.
 
 ```
 fn factorial(n) {
@@ -41,23 +41,26 @@ jade program.jde --verbose
 
 ## Installation
 
-Jade is built from source. Prebuilt binaries are planned for a future release.
+### macOS and Linux (recommended)
 
-**Requirements**
-- Rust 1.70 or later — install via [rustup.rs](https://rustup.rs)
-- Git
+```sh
+curl -fsSL https://jadelang.org/install.sh | sh
+```
 
-**Build**
+The script detects your OS and architecture, downloads the correct prebuilt binary from the [latest release](https://github.com/joericks1998/jade/releases/latest), and installs it to `/usr/local/bin/jade`. Set `JADE_INSTALL_DIR` to override the destination.
+
+### Windows
+
+Download `jade-windows-x86_64.exe` from the [latest release](https://github.com/joericks1998/jade/releases/latest), rename it to `jade.exe`, and place it on your `PATH`.
+
+### Build from source
+
+Requires Rust 1.70+ — install via [rustup.rs](https://rustup.rs).
 
 ```sh
 git clone https://github.com/joericks1998/jade
 cd jade
 cargo build --release
-```
-
-Copy the binary to your PATH:
-
-```sh
 cp target/release/jade /usr/local/bin/jade
 ```
 
