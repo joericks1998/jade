@@ -6,6 +6,11 @@ on:
       - 'v*'
   repository_dispatch:
     types: [release]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v1.1.3)'
+        required: true
 
 permissions:
   contents: write
@@ -103,7 +108,22 @@ jobs:
     name: Publish release
     needs: [build, universal-macos]
     runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event.client_payload.tag || github.event.inputs.tag || github.ref_name }}
     steps:
+      - name: Debug trigger info
+        run: |
+          echo "Triggered by:       ${{ github.event_name }}"
+          echo "Ref:                ${{ github.ref }}"
+          echo "Ref name:           ${{ github.ref_name }}"
+          echo "Dispatch tag:       ${{ github.event.client_payload.tag }}"
+          echo "Manual input tag:   ${{ github.event.inputs.tag }}"
+          echo "Resolved TAG:       $TAG"
+          if [ -z "$TAG" ]; then
+            echo "ERROR: TAG is empty — cannot create release"
+            exit 1
+          fi
+
       - uses: actions/download-artifact@v4
         with:
           pattern: jade-*
@@ -121,9 +141,10 @@ jobs:
 
       - name: Create release and upload assets
         uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: ${{ github.event.client_payload.tag || github.ref_name }}
-          token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: ${{ env.TAG }}
           generate_release_notes: true
           files: |
             jade-linux-x86_64.tar.gz
