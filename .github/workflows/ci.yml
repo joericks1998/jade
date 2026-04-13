@@ -32,23 +32,30 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Create version tag if new
-        env:
-          RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
         run: |
-          if [ -z "$RELEASE_PAT" ]; then
-            echo "ERROR: RELEASE_PAT secret is not set. Add it in Settings → Secrets → Actions."
-            echo "Without it, the tag push uses GITHUB_TOKEN, which cannot trigger release.yml."
-            exit 1
-          fi
           VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
           TAG="v$VERSION"
           if git ls-remote --tags origin "refs/tags/$TAG" | grep -q "$TAG"; then
             echo "Tag $TAG already exists — skipping."
+            echo "NEW_TAG=false" >> $GITHUB_ENV
           else
             git tag "$TAG"
-            git push https://x-access-token:${RELEASE_PAT}@github.com/${{ github.repository }}.git "$TAG"
-            echo "Pushed $TAG — release workflow will now build binaries."
+            git push origin "$TAG"
+            echo "NEW_TAG=true" >> $GITHUB_ENV
+            echo "TAG=$TAG" >> $GITHUB_ENV
+            echo "Pushed $TAG"
           fi
+
+      - name: Dispatch release workflow
+        if: env.NEW_TAG == 'true'
+        run: |
+          gh api repos/${{ github.repository }}/dispatches \
+            --method POST \
+            --input - <<EOF
+          {"event_type":"release","client_payload":{"tag":"$TAG"}}
+          EOF
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   deploy:
     needs: build
