@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Jade 1.0.9 — Changelog</title>
+  <title>Jade 1.1.1 — Changelog</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -282,9 +282,9 @@
       </a>
       <span class="topbar-sep">»</span>
       <select title="Version">
-        <option>1.0.9</option>
+        <option>1.1.1</option>
       </select>
-      <span class="topbar-title">1.0.9 Documentation</span>
+      <span class="topbar-title">1.1.1 Documentation</span>
     </div>
     <div class="topbar-right">
       <a href="https://github.com/joericks1998/jade">GitHub</a>
@@ -341,6 +341,12 @@
 
       <section id="changelog">
         <h2>Changelog</h2>
+        <h3>v1.1.1</h3>
+        <ul>
+          <li>Added official install script at <code>https://jadelang.org/install.sh</code> — detects OS and architecture, downloads the correct prebuilt binary, and installs to <code>/usr/local/bin/jade</code></li>
+          <li>Added Windows prebuilt binary: <code>jade-windows-x86_64.exe</code> available from the GitHub Releases page</li>
+          <li>Updated documentation installation page to document the install script and Windows download path</li>
+        </ul>
         <h3>v1.0.9</h3>
         <ul>
           <li>Added <code>try</code>/<code>catch</code>/<code>raise</code> exception handling — raise any value as an exception, catch by struct type name or with a catch-all arm, nested <code>try</code>/<code>catch</code> blocks, built-in runtime errors (division by zero, type errors, etc.) are automatically catchable</li>
