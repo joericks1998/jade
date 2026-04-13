@@ -21,6 +21,28 @@ jobs:
       - name: Test
         run: cargo test --verbose
 
+  tag-release:
+    name: Tag release
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create version tag if new
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          TAG="v$VERSION"
+          if git ls-remote --tags origin "refs/tags/$TAG" | grep -q "$TAG"; then
+            echo "Tag $TAG already exists — skipping."
+          else
+            git tag "$TAG"
+            git push origin "$TAG"
+            echo "Pushed $TAG — release workflow will now build binaries."
+          fi
+
   deploy:
     needs: build
     runs-on: ubuntu-latest
