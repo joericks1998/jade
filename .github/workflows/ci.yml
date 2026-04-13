@@ -35,6 +35,11 @@ jobs:
         env:
           RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
         run: |
+          if [ -z "$RELEASE_PAT" ]; then
+            echo "ERROR: RELEASE_PAT secret is not set. Add it in Settings → Secrets → Actions."
+            echo "Without it, the tag push uses GITHUB_TOKEN, which cannot trigger release.yml."
+            exit 1
+          fi
           VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
           TAG="v$VERSION"
           if git ls-remote --tags origin "refs/tags/$TAG" | grep -q "$TAG"; then
