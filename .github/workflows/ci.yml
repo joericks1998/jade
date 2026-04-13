@@ -32,6 +32,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Create version tag if new
+        env:
+          RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
         run: |
           VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
           TAG="v$VERSION"
@@ -39,7 +41,7 @@ jobs:
             echo "Tag $TAG already exists — skipping."
           else
             git tag "$TAG"
-            git push origin "$TAG"
+            git push https://x-access-token:${RELEASE_PAT}@github.com/${{ github.repository }}.git "$TAG"
             echo "Pushed $TAG — release workflow will now build binaries."
           fi
 
