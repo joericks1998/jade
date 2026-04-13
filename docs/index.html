@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Jade 1.0.9 — Installation</title>
+  <title>Jade 1.1.1 — Installation</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -282,9 +282,9 @@
       </a>
       <span class="topbar-sep">»</span>
       <select title="Version">
-        <option>1.0.9</option>
+        <option>1.1.1</option>
       </select>
-      <span class="topbar-title">1.0.9 Documentation</span>
+      <span class="topbar-title">1.1.1 Documentation</span>
     </div>
     <div class="topbar-right">
       <a href="https://github.com/joericks1998/jade">GitHub</a>
@@ -339,9 +339,9 @@
     <!-- ── Main content ── -->
     <main class="content">
 
-      <h1>Jade 1.0.9 Documentation</h1>
+      <h1>Jade 1.1.1 Documentation</h1>
       <p class="lead">
-        Jade is a programming language written in Rust. Version 1.0.9 compiles programs through a type inference pass and a register-based bytecode VM.
+        Jade is a programming language written in Rust. Version 1.1.1 compiles programs through a type inference pass and a register-based bytecode VM.
         It supports value types (<code>int</code>, <code>float</code>, <code>bool</code>, <code>str</code>, arrays, dicts, and user-defined <code>struct</code>s),
         <code>let</code> variable bindings, bare variable assignment, <code>fn</code> function definitions with <code>return</code>,
         anonymous closures (<code>|x| x * 2</code>), first-class functions, recursion,
@@ -360,30 +360,41 @@
 
       <section id="installation">
         <h2>Installation</h2>
-        <p>
-          Jade 1.0.9 is built from source. A prebuilt binary and install script
-          are planned for a future release.
-        </p>
 
-        <h3>Requirements</h3>
-        <ul>
-          <li>Rust 1.70 or later — install via <a href="https://rustup.rs">rustup.rs</a></li>
-          <li>Git</li>
-        </ul>
+        <h3>macOS and Linux (recommended)</h3>
+        <p>
+          The fastest way to install Jade is with the official install script. Open a
+          terminal and run:
+        </p>
+        <pre><code>curl -fsSL https://jadelang.org/install.sh | sh</code></pre>
+        <p>
+          The script detects your OS and architecture, downloads the correct prebuilt
+          binary from the
+          <a href="https://github.com/joericks1998/jade/releases/latest">latest release</a>,
+          and installs it to <code>/usr/local/bin/jade</code>. To install to a different
+          location, set the <code>JADE_INSTALL_DIR</code> environment variable before
+          running the script:
+        </p>
+        <pre><code>JADE_INSTALL_DIR=~/.local/bin curl -fsSL https://jadelang.org/install.sh | sh</code></pre>
+
+        <h3>Windows</h3>
+        <p>
+          Download <code>jade-windows-x86_64.exe</code> from the
+          <a href="https://github.com/joericks1998/jade/releases/latest">latest release</a>,
+          rename it to <code>jade.exe</code>, and place it somewhere on your
+          <code>PATH</code>.
+        </p>
 
         <h3>Build from Source</h3>
+        <p>Requires Rust 1.70 or later — install via <a href="https://rustup.rs">rustup.rs</a>.</p>
         <pre><code>git clone https://github.com/joericks1998/jade
 cd jade
-cargo build --release</code></pre>
-        <p>
-          The compiled binary is placed at <code>target/release/jade</code>.
-          Copy it somewhere on your <code>PATH</code>:
-        </p>
-        <pre><code>cp target/release/jade /usr/local/bin/jade</code></pre>
+cargo build --release
+cp target/release/jade /usr/local/bin/jade</code></pre>
 
         <h3>Verify</h3>
         <pre><code>jade --help</code></pre>
-        <p>This will print the list of available subcommands. See the <a href="cli.html">CLI Reference</a> for full details.</p>
+        <p>This prints the list of available subcommands. See the <a href="cli.html">CLI Reference</a> for full details.</p>
       </section>
 
     </main>
