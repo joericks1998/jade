@@ -1,6 +1,7 @@
 use crate::interpreter::error::{JadeError, Result, Span};
 
 pub mod anthropic;
+pub mod jade_os;
 pub mod openai;
 
 /// A single message in a conversation history.
@@ -35,8 +36,9 @@ pub fn build_backend(provider: &str, api_key: &str, model: &str) -> Result<Box<d
     match provider {
         "openai"    => Ok(Box::new(openai::OpenAiBackend::new(api_key, model))),
         "anthropic" => Ok(Box::new(anthropic::AnthropicBackend::new(api_key, model))),
+        "jade"      => Ok(Box::new(jade_os::JadeOsBackend::new())),
         other => Err(JadeError::InferenceError {
-            message: format!("unknown provider '{}' — expected 'anthropic' or 'openai'", other),
+            message: format!("unknown provider '{}' — expected 'anthropic', 'openai', or 'jade'", other),
             span: Span { line: 0, col: 0 },
         }),
     }
