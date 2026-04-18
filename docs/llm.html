@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Jade 1.1.3 — LLM Integration</title>
+  <title>Jade 1.1.4 — LLM Integration</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -279,7 +279,7 @@
         jade
       </a>
       <span class="topbar-sep">»</span>
-      <span class="topbar-title">1.1.3 Documentation</span>
+      <span class="topbar-title">1.1.4 Documentation</span>
     </div>
     <div class="topbar-right">
       <a href="https://github.com/joericks1998/jade">GitHub</a>
@@ -498,6 +498,11 @@ api_key     = "sk-..."             # optional — prefer the env var</code></pre
               <td>OpenAI Chat Completions</td>
               <td><code>gpt-4o-mini</code></td>
             </tr>
+            <tr>
+              <td><code>jade-os</code></td>
+              <td>Jade OS on-device kernel backend</td>
+              <td>set by device configuration</td>
+            </tr>
           </tbody>
         </table>
       </section>
@@ -528,6 +533,60 @@ print(__max_retries__)  // 3
 print(__tokens__)       // tokens used so far</code></pre>
       </section>
 
+      <!-- ── Async inference ── -->
+      <section id="async">
+        <h2>Async Inference</h2>
+        <p>
+          Jade supports concurrent LLM inference through <code>async fn</code> definitions and
+          <code>await</code> expressions. Defining a function with <code>async fn</code> allows
+          it to run prompt dereferences concurrently with other async functions.
+        </p>
+        <p>
+          Within an <code>async fn</code>, prefix any expression with <code>await</code> to
+          wait for its result. When running under <code>jade run</code>, async functions execute
+          concurrently via the Tokio runtime — multiple LLM calls can be in-flight at the same time.
+        </p>
+        <pre><code>async fn ask_question(q) {
+    prompt p = q
+    return await ?p
+}
+
+let a = ask_question("What is the capital of France?")
+let b = ask_question("What is the capital of Germany?")
+print(await a)
+print(await b)</code></pre>
+        <p>
+          The two calls above run concurrently — both prompts are sent to the model at the same
+          time and the program waits for each result only when <code>await</code> is reached.
+        </p>
+        <div class="note">
+          <strong>Note:</strong> The REPL executes <code>async fn</code> definitions
+          synchronously (one at a time). Use <code>jade run</code> for true concurrent execution.
+          A warning is printed to stderr when an <code>async fn</code> is evaluated in the
+          tree-walk path.
+        </div>
+        <h3>Async errors</h3>
+        <table>
+          <thead>
+            <tr><th>Error</th><th>Cause</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>NotAFuture</code></td>
+              <td><code>await</code> applied to a value that is not a pending async result</td>
+            </tr>
+            <tr>
+              <td><code>DoubleAwait</code></td>
+              <td>The same async result was awaited more than once</td>
+            </tr>
+            <tr>
+              <td><code>AsyncPanic</code></td>
+              <td>A spawned async task panicked internally — includes the panic message and source location</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
       <!-- ── Error reference ── -->
       <section id="errors">
         <h2>Error Reference</h2>
@@ -555,6 +614,18 @@ print(__tokens__)       // tokens used so far</code></pre>
             <tr>
               <td><code>StreamingWithType</code></td>
               <td><code>?p |&gt; Type</code> used directly inside <code>print()</code> — assign to a variable first</td>
+            </tr>
+            <tr>
+              <td><code>NotAFuture</code></td>
+              <td><code>await</code> applied to a non-Future value</td>
+            </tr>
+            <tr>
+              <td><code>DoubleAwait</code></td>
+              <td>The same Future was awaited more than once</td>
+            </tr>
+            <tr>
+              <td><code>AsyncPanic</code></td>
+              <td>A spawned async task panicked; the message and span are captured from the task</td>
             </tr>
           </tbody>
         </table>
