@@ -1,6 +1,6 @@
 # Jade
 
-A programming language written in Rust. Jade 1.1.1 compiles programs through a type inference pass and a register-based bytecode VM. It supports value types (`int`, `float`, `bool`, `str`, arrays, dicts, and user-defined `struct`s), `let` bindings, bare variable assignment, `fn` function definitions with `return`, anonymous closures, first-class functions, recursion, `if`/`elif`/`else` control flow, `while` loops, `for` loops over arrays, `try`/`catch`/`raise` exception handling, `struct` definitions with field access and mutation, `extend` blocks for methods, `interface` definitions, multi-file `use` imports, the `print` and `len` built-ins, f-string interpolation, the pipe operator `|>`, `prompt` declarations with LLM inference via `?`, and arithmetic, bitwise, logical, and comparison operators.
+A programming language written in Rust. Jade 1.1.4 compiles programs through a type inference pass and a register-based bytecode VM. It supports value types (`int`, `float`, `bool`, `str`, arrays, dicts, and user-defined `struct`s), `let` bindings, bare variable assignment, `fn` function definitions with `return`, anonymous closures, first-class functions, recursion, `if`/`elif`/`else` control flow, `while` loops, `for` loops over arrays, `try`/`catch`/`raise` exception handling, `struct` definitions with field access and mutation, `extend` blocks for methods, `interface` definitions, multi-file `use` imports, the `print` and `len` built-ins, f-string interpolation, the pipe operator `|>`, `prompt` declarations with LLM inference via `?`, and arithmetic, bitwise, logical, and comparison operators.
 
 ```
 fn factorial(n) {
@@ -130,6 +130,7 @@ Errors are written to stderr with the format `<file>: <phase> error: <descriptio
 | Bytecode compiler and register-based VM | ✓ |
 | Type inference | ✓ |
 | `try`/`catch`/`raise` exception handling | ✓ |
+| `async fn` definitions and `await` expressions | ✓ |
 
 Operator precedence (tightest to loosest): unary (`~` `!` `-`) → `*` `/` `%` → `+` `-` → `<<` `>>` → `&` → `^` → `|` → `==` `!=` `<` `>` `<=` `>=` → `&&` → `||` → `|>`
 
@@ -200,8 +201,8 @@ Full documentation is available at **[jadelang.org](https://jadelang.org)**. The
 ```sh
 cargo build
 cargo test
-jade jade_evals/arithmatic/arithmetic.jde --verbose
-jade jade_evals/strings/fstrings.jde
+jade run jade_evals/arithmatic/arithmetic.jde --verbose
+jade run jade_evals/strings/fstrings.jde
 ```
 
 **Guidelines**
