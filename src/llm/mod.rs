@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::interpreter::error::{JadeError, Result, Span};
 
 pub mod anthropic;
@@ -26,17 +28,23 @@ pub struct InferenceResponse {
 }
 
 /// Shared interface for any LLM inference provider.
-pub trait InferenceBackend {
-    fn infer(&self, req: InferenceRequest, span: Span) -> Result<InferenceResponse>;
+#[async_trait::async_trait]
+pub trait InferenceBackend: Send + Sync {
+    async fn infer(&self, req: InferenceRequest, span: Span) -> Result<InferenceResponse>;
 }
 
 /// Build the appropriate backend for the given provider string.
 /// Returns an error for unrecognized provider names.
-pub fn build_backend(provider: &str, api_key: &str, model: &str) -> Result<Box<dyn InferenceBackend>> {
+pub fn build_backend(
+    provider: &str,
+    api_key: &str,
+    model: &str,
+    max_parallel: Option<usize>,
+) -> Result<Arc<dyn InferenceBackend>> {
     match provider {
-        "openai"    => Ok(Box::new(openai::OpenAiBackend::new(api_key, model))),
-        "anthropic" => Ok(Box::new(anthropic::AnthropicBackend::new(api_key, model))),
-        "jade"      => Ok(Box::new(jade_os::JadeOsBackend::new())),
+        "openai"    => Ok(Arc::new(openai::OpenAiBackend::new(api_key, model, max_parallel))),
+        "anthropic" => Ok(Arc::new(anthropic::AnthropicBackend::new(api_key, model, max_parallel))),
+        "jade"      => Ok(Arc::new(jade_os::JadeOsBackend::new())),
         other => Err(JadeError::InferenceError {
             message: format!("unknown provider '{}' — expected 'anthropic', 'openai', or 'jade'", other),
             span: Span { line: 0, col: 0 },
@@ -44,18 +52,39 @@ pub fn build_backend(provider: &str, api_key: &str, model: &str) -> Result<Box<d
     }
 }
 
+/// Synchronous bridge: run an async `infer` call from a sync context.
+///
+/// Uses the current tokio runtime if one exists (production, post–Phase 6),
+/// otherwise spins up a temporary single-threaded runtime (tests, early phases).
+/// This helper is removed in Phase 4 when the VM is fully async.
+pub fn infer_sync(
+    backend: &dyn InferenceBackend,
+    req: InferenceRequest,
+    span: crate::interpreter::error::Span,
+) -> crate::interpreter::error::Result<InferenceResponse> {
+    let fut = backend.infer(req, span);
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => handle.block_on(fut),
+        Err(_) => tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime")
+            .block_on(fut),
+    }
+}
+
 // ── Mock backend for tests ───────────────────────────────────────────────────
 
 #[cfg(test)]
 pub struct MockBackend {
-    pub responses: std::cell::RefCell<std::collections::VecDeque<String>>,
+    pub responses: std::sync::Mutex<std::collections::VecDeque<String>>,
 }
 
 #[cfg(test)]
 impl MockBackend {
     pub fn new(responses: Vec<&str>) -> Self {
         MockBackend {
-            responses: std::cell::RefCell::new(
+            responses: std::sync::Mutex::new(
                 responses.into_iter().map(|s| s.to_string()).collect()
             ),
         }
@@ -63,9 +92,10 @@ impl MockBackend {
 }
 
 #[cfg(test)]
+#[async_trait::async_trait]
 impl InferenceBackend for MockBackend {
-    fn infer(&self, _req: InferenceRequest, span: Span) -> Result<InferenceResponse> {
-        if let Some(text) = self.responses.borrow_mut().pop_front() {
+    async fn infer(&self, _req: InferenceRequest, span: Span) -> Result<InferenceResponse> {
+        if let Some(text) = self.responses.lock().unwrap().pop_front() {
             Ok(InferenceResponse { text, tokens_used: 10_i64 })
         } else {
             Err(crate::interpreter::error::JadeError::InferenceError {

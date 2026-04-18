@@ -35,33 +35,45 @@ impl JadeOsBackend {
     }
 }
 
+#[async_trait::async_trait]
 impl InferenceBackend for JadeOsBackend {
-    fn infer(&self, req: InferenceRequest, span: Span) -> Result<InferenceResponse> {
-        // ── Open device ───────────────────────────────────────────────────────
+    async fn infer(&self, req: InferenceRequest, span: Span) -> Result<InferenceResponse> {
+        let device_path = self.device_path.clone();
+        tokio::task::spawn_blocking(move || {
+            Self::infer_blocking(&device_path, req, span)
+        })
+        .await
+        .map_err(|e| JadeError::InferenceError {
+            message: format!("spawn_blocking panic: {e}"),
+            span,
+        })?
+    }
+}
+
+impl JadeOsBackend {
+    fn infer_blocking(device_path: &str, req: InferenceRequest, span: Span) -> Result<InferenceResponse> {
         let mut dev = OpenOptions::new()
             .read(true)
             .write(true)
-            .open(&self.device_path)
+            .open(device_path)
             .map_err(|e| JadeError::InferenceError {
                 message: format!(
                     "could not open {} — is jade_core loaded and jade-tree running? ({e})",
-                    self.device_path
+                    device_path
                 ),
                 span,
             })?;
 
-        // ── Encode and write request ──────────────────────────────────────────
         let payload = encode_request(&req).map_err(|e| JadeError::InferenceError {
             message: format!("failed to encode inference request: {e}"),
             span,
         })?;
 
         dev.write_all(&payload).map_err(|e| JadeError::InferenceError {
-            message: format!("write to {} failed: {e}", self.device_path),
+            message: format!("write to {} failed: {e}", device_path),
             span,
         })?;
 
-        // ── Read streaming response frames ────────────────────────────────────
         let mut buf: Vec<u8> = Vec::new();
         let mut read_tmp = [0u8; 4096];
         let mut text = String::new();
@@ -85,7 +97,7 @@ impl InferenceBackend for JadeOsBackend {
                 }
                 FrameResult::Incomplete => {
                     let n = dev.read(&mut read_tmp).map_err(|e| JadeError::InferenceError {
-                        message: format!("read from {} failed: {e}", self.device_path),
+                        message: format!("read from {} failed: {e}", device_path),
                         span,
                     })?;
                     if n == 0 {

@@ -1,7 +1,7 @@
 use std::{path::PathBuf, process};
 
 /// `jade test [pattern] [-v]`
-pub fn run_test(pattern: Option<&str>, verbose: bool) {
+pub async fn run_test(pattern: Option<&str>, verbose: bool) {
     // Find test files relative to project root (or CWD).
     let root = crate::project::find_project_root()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
@@ -36,7 +36,7 @@ pub fn run_test(pattern: Option<&str>, verbose: bool) {
         print!("  {} ... ", name);
 
         // Fix 5: pass &Path directly instead of converting to an owned String.
-        match run_test_file(file, verbose, &cfg.provider, &cfg.model, cfg.max_retries, cfg.api_key.as_deref()) {
+        match run_test_file(file, verbose, &cfg.provider, &cfg.model, cfg.max_retries, cfg.api_key.as_deref()).await {
             Ok(()) => {
                 println!("ok");
                 passed += 1;
@@ -67,7 +67,7 @@ pub fn run_test(pattern: Option<&str>, verbose: bool) {
 ///
 /// Fix 4/5: accepts `&Path` directly (no intermediate `String` allocation) and
 /// receives pre-loaded config values so `load_config` is not called per file.
-fn run_test_file(
+async fn run_test_file(
     path: &std::path::Path,
     _verbose: bool,
     provider: &str,
@@ -118,7 +118,7 @@ fn run_test_file(
         .map_err(|e| format!("compile error: {}", e))?;
 
     let backend = api_key
-        .map(|key| crate::llm::build_backend(provider, key, model))
+        .map(|key| crate::llm::build_backend(provider, key, model, None))
         .transpose()
         .map_err(|e| format!("config error: {}", e))?;
 
@@ -135,6 +135,6 @@ fn run_test_file(
         source_dir,
     };
 
-    vm::run(compiled, opts).map_err(|e| e.to_string())?;
+    vm::run(compiled, opts).await.map_err(|e| e.to_string())?;
     Ok(())
 }

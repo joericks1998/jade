@@ -8,6 +8,7 @@ pub mod help;
 pub mod model;
 pub mod new;
 pub mod repl;
+pub mod rt;
 pub mod run;
 pub mod test;
 

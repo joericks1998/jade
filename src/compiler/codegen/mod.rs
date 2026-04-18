@@ -47,6 +47,22 @@ pub struct CodegenCtx<'ctx> {
     /// sprintf(ptr buf, ptr fmt, ...) -> i32  — variadic
     pub sprintf_fn: FunctionValue<'ctx>,
 
+    // ── jade_rt async runtime (jade_rt_pthread.c / jade_rt_jadeos.c) ──────
+    /// jade_spawn(fn_ptr: ptr, args: ptr, n: i32) -> ptr
+    pub jade_spawn_fn: FunctionValue<'ctx>,
+    /// jade_await(future: ptr) -> i64
+    pub jade_await_fn: FunctionValue<'ctx>,
+    /// jade_join(futures: ptr, n: i32, results_out: ptr) -> void
+    pub jade_join_fn: FunctionValue<'ctx>,
+
+    // ── Async codegen state ────────────────────────────────────────────────
+    /// When `Some(ty)`, `TStmt::Return` in an async body function converts its
+    /// value via `value_to_i64(val, ty)` before emitting `ret i64`.
+    pub async_body_ret_ty: Option<JadeType>,
+    /// Set to `true` when any async construct (spawn/await/join) is emitted.
+    /// Used to decide whether to link `-lJadeRuntime`.
+    pub uses_async: bool,
+
     // ── Heap type layouts ──────────────────────────────────────────────────
     /// `%jade.array = type { ptr data, i64 len, i64 cap }`
     pub array_ty: StructType<'ctx>,
@@ -90,6 +106,18 @@ impl<'ctx> CodegenCtx<'ctx> {
         let array_ty = context.opaque_struct_type("jade.array");
         array_ty.set_body(&[ptr_ty.into(), i64_ty.into(), i64_ty.into()], false);
 
+        // jade_spawn(fn_ptr: ptr, args: ptr, n: i32) -> ptr
+        let jade_spawn_ty = ptr_ty.fn_type(&[ptr_ty.into(), ptr_ty.into(), i32_ty.into()], false);
+        let jade_spawn_fn = module.add_function("jade_spawn", jade_spawn_ty, None);
+
+        // jade_await(future: ptr) -> i64
+        let jade_await_ty = i64_ty.fn_type(&[ptr_ty.into()], false);
+        let jade_await_fn = module.add_function("jade_await", jade_await_ty, None);
+
+        // jade_join(futures: ptr, n: i32, results_out: ptr) -> void
+        let jade_join_ty = context.void_type().fn_type(&[ptr_ty.into(), i32_ty.into(), ptr_ty.into()], false);
+        let jade_join_fn = module.add_function("jade_join", jade_join_ty, None);
+
         CodegenCtx {
             context,
             module,
@@ -102,6 +130,11 @@ impl<'ctx> CodegenCtx<'ctx> {
             malloc_fn,
             strlen_fn,
             sprintf_fn,
+            jade_spawn_fn,
+            jade_await_fn,
+            jade_join_fn,
+            async_body_ret_ty: None,
+            uses_async: false,
             array_ty,
             struct_field_order: HashMap::new(),
             struct_field_types: HashMap::new(),
@@ -329,6 +362,17 @@ pub fn compile(program: TProgram, source_path: Option<&Path>, output_path: &Path
                 cc.arg(format!("-mmacosx-version-min={short}"));
             }
         }
+    }
+    // Link jade_rt if any async constructs were emitted.
+    if ctx.uses_async {
+        if let Ok(lib_dir) = std::env::var("JADE_RT_LIB") {
+            cc.arg(format!("-L{}", lib_dir));
+        } else {
+            cc.arg("-L/usr/local/lib/jade");
+        }
+        cc.arg("-lJadeRuntime");
+        #[cfg(target_os = "linux")]
+        cc.arg("-lpthread");
     }
     let status = cc.status().map_err(|e| format!("linker not found: {e}"))?;
 

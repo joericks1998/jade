@@ -96,6 +96,7 @@ pub fn run_configure() {
         model: Some(model.clone()),
         api_key: api_key.clone(),
         max_retries: Some(max_retries),
+        max_parallel: None,
     };
 
     if in_project {
