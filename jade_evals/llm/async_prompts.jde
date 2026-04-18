@@ -1,0 +1,115 @@
+// Async prompt fixtures.
+// Requires JADE_API_KEY or a [model] section in jade.toml.
+//
+// Core rules:
+//   - prompt "text" is lazy — evaluates the string immediately, makes no LLM call.
+//   - ?p auto-awaits in any context: blocks the thread in a sync fn, suspends
+//     the task in an async fn. No explicit await needed on prompts.
+//   - The prompt string is a snapshot — it captures variable values at the point
+//     of the prompt expression, not at deref time.
+
+
+// 1. Prompt inside a sync function — ?p blocks until the LLM responds.
+
+fn get_greeting(name) {
+    let p = prompt "Say exactly: Hello, " + name + "!"
+    return ?p
+}
+
+print(get_greeting("Jade"))
+// → Hello, Jade!
+
+
+// 2. Prompt string is a snapshot — reassigning the source variable does not
+//    change the prompt because string concatenation already happened.
+
+let tone = "formal"
+let p = prompt "Respond in a " + tone + " tone: introduce yourself in one sentence."
+tone = "casual"
+// p holds "Respond in a formal tone: ..." — tone reassignment has no effect
+print(?p)
+// → (formal-style introduction)
+
+
+// 3. Prompt returned as a value — deref happens at the call site, not inside
+//    the function. The function has no knowledge of when the LLM will be called.
+
+fn analysis_prompt(subject) {
+    return prompt "Describe " + subject + " in exactly five words."
+}
+
+let p1 = analysis_prompt("the sun")
+let p2 = analysis_prompt("the moon")
+// No LLM calls yet — p1 and p2 are plain Prompt values
+
+print(?p1)
+print(?p2)
+// → (five-word description of the sun)
+// → (five-word description of the moon)
+
+
+// 4. Chained prompts — output of the first feeds directly into the second.
+//    Each ?p blocks until the LLM responds before the next prompt is built.
+
+fn chain_analysis(data) {
+    let topics = ?prompt "List the three main topics in this text: " + data
+    let insights = ?prompt "Give one key insight for each of these topics: " + topics
+    return insights
+}
+
+let doc = "Jade is a language for LLM-native computing on custom operating systems."
+print(chain_analysis(doc))
+// → (multi-step analysis)
+
+
+// 5. Parallel prompt execution — wrap each deref in an async fn so that the
+//    LLM calls run concurrently via join.
+
+async fn summarize(text) {
+    return ?prompt "Summarize in one sentence: " + text
+}
+
+let results = join(
+    summarize("The sky is blue and full of clouds."),
+    summarize("The ocean is deep and covers most of the Earth."),
+    summarize("Mountains rise above the treeline into cold air.")
+)
+print(results[0])
+print(results[1])
+print(results[2])
+// → (summary of sky sentence)
+// → (summary of ocean sentence)
+// → (summary of mountains sentence)
+
+
+// 6. Typed prompt deref inside an async fn — output coercion works the same
+//    as in sync context, with retries handled transparently.
+
+async fn classify_sentiment(text) {
+    return ?prompt "Is this positive? " + text + " Respond with only true or false." |> bool
+}
+
+let f1 = classify_sentiment("I love this language.")
+let f2 = classify_sentiment("This is frustrating.")
+
+let sentiments = join(f1, f2)
+print(sentiments[0])
+print(sentiments[1])
+// → true
+// → false
+
+
+// 7. Prompt inside an async fn that also awaits another async fn — mixed usage.
+
+async fn extract_keywords(text) {
+    return ?prompt "List three keywords from: " + text
+}
+
+async fn build_summary(text) {
+    let keywords = await extract_keywords(text)
+    let summary = ?prompt "Write one sentence using these keywords: " + keywords
+    return summary
+}
+
+print(await build_summary("Neural networks learn patterns from large datasets."))
+// → (one sentence summary using extracted keywords)

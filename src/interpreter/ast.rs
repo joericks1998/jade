@@ -192,6 +192,14 @@ pub enum Stmt {
         span: Span,
     },
 
+    /// `async fn name(param, ...) { body }`
+    AsyncFnDef {
+        name: String,
+        params: Vec<String>,
+        body: Vec<Stmt>,
+        span: Span,
+    },
+
     /// A bare expression used as a statement, e.g. a method call whose return
     /// value is discarded: `obj.method(args)`.
     Expr(Expr),
@@ -304,6 +312,12 @@ pub enum Expr {
     Closure {
         params: Vec<String>,
         body: Vec<Stmt>,
+        span: Span,
+    },
+
+    /// `await expr`
+    Await {
+        expr: Box<Expr>,
         span: Span,
     },
 }

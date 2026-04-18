@@ -129,6 +129,12 @@ fn pre_pass(stmts: &[Stmt], ctx: &mut TypeContext) {
                     ret: Box::new(JadeType::Unknown),
                 });
             }
+            Stmt::AsyncFnDef { name, params, .. } => {
+                ctx.define(name.clone(), JadeType::AsyncFn {
+                    params: vec![JadeType::Unknown; params.len()],
+                    ret: Box::new(JadeType::Unknown),
+                });
+            }
             Stmt::StructDef { name, fields, .. } => {
                 ctx.struct_defs.insert(name.clone(), fields.clone());
             }
@@ -194,6 +200,29 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
             });
 
             Ok(TStmt::FnDef {
+                name: name.clone(),
+                params: params.clone(),
+                body: tbody,
+                ret_ty,
+                span: *span,
+            })
+        }
+
+        Stmt::AsyncFnDef { name, params, body, span } => {
+            ctx.push_scope();
+            for param in params {
+                ctx.define(param.clone(), JadeType::Unknown);
+            }
+            let tbody = check_stmts(body, ctx)?;
+            ctx.pop_scope();
+
+            let ret_ty = infer_return_type(&tbody);
+            ctx.define(name.clone(), JadeType::AsyncFn {
+                params: vec![JadeType::Unknown; params.len()],
+                ret: Box::new(ret_ty.clone()),
+            });
+
+            Ok(TStmt::AsyncFnDef {
                 name: name.clone(),
                 params: params.clone(),
                 body: tbody,
@@ -481,9 +510,10 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
             let tcallee = infer_expr(callee, ctx)?;
             let targs: Vec<TExpr> = args.iter().map(|a| infer_expr(a, ctx)).collect::<Result<_>>()?;
             let ret_ty = match &tcallee.ty {
-                JadeType::Fn { ret, .. } => *ret.clone(),
-                JadeType::Unknown        => JadeType::Unknown,
-                _                        => return Err(JadeError::NotCallable { span: *span }),
+                JadeType::Fn { ret, .. }      => *ret.clone(),
+                JadeType::AsyncFn { ret, .. } => JadeType::Future(ret.clone()),
+                JadeType::Unknown             => JadeType::Unknown,
+                _                             => return Err(JadeError::NotCallable { span: *span }),
             };
             Ok(TExpr {
                 kind: TExprKind::Call { callee: Box::new(tcallee), args: targs },
@@ -703,6 +733,26 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
             })
         }
 
+        // ── Async await ───────────────────────────────────────────────────────
+
+        Expr::Await { expr, span } => {
+            let texpr = infer_expr(expr, ctx)?;
+            let ty = match &texpr.ty {
+                JadeType::Future(inner) => *inner.clone(),
+                JadeType::Unknown       => JadeType::Unknown,
+                other => return Err(JadeError::TypeMismatch {
+                    expected: "future".to_string(),
+                    got: jade_type_name(other),
+                    span: *span,
+                }),
+            };
+            Ok(TExpr {
+                kind: TExprKind::Await { expr: Box::new(texpr) },
+                ty,
+                span: *span,
+            })
+        }
+
         // ── LLM prompt dereference ────────────────────────────────────────────
 
         Expr::PromptDeref { expr, output_type, span } => {
@@ -852,7 +902,7 @@ fn infer_return_type(stmts: &[TStmt]) -> JadeType {
                 let t = infer_return_type(body);
                 if t != JadeType::Unknown && t != JadeType::Nil { return t; }
             }
-            TStmt::FnDef { .. } => {} // nested fn def — do not recurse
+            TStmt::FnDef { .. } | TStmt::AsyncFnDef { .. } => {} // nested fn def — do not recurse
             _ => {}
         }
     }
@@ -884,8 +934,10 @@ pub fn jade_type_name(ty: &JadeType) -> String {
         JadeType::Array(elem)  => format!("[{}]", jade_type_name(elem)),
         JadeType::Dict         => "dict".to_string(),
         JadeType::Struct(name) => name.clone(),
-        JadeType::Fn { .. }    => "fn".to_string(),
-        JadeType::Unknown      => "unknown".to_string(),
+        JadeType::Fn { .. }       => "fn".to_string(),
+        JadeType::AsyncFn { .. }  => "async fn".to_string(),
+        JadeType::Future(inner)   => format!("future<{}>", jade_type_name(inner)),
+        JadeType::Unknown         => "unknown".to_string(),
     }
 }
 
@@ -919,7 +971,7 @@ fn expr_span(e: &Expr) -> Span {
         | Expr::StructLiteral { span, .. } | Expr::FieldAccess { span, .. }
         | Expr::Index { span, .. } | Expr::Array { span, .. } | Expr::FStr { span, .. }
         | Expr::PromptDeref { span, .. } | Expr::Dict { span, .. }
-        | Expr::Closure { span, .. } => *span,
+        | Expr::Closure { span, .. } | Expr::Await { span, .. } => *span,
     }
 }
 

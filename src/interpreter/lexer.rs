@@ -40,6 +40,8 @@ pub enum TokenKind {
     Raise,
     Try,
     Catch,
+    Async,
+    Await,
 
     // Prompt dereference operator
     Question,
@@ -400,6 +402,8 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
                     "raise"     => TokenKind::Raise,
                     "try"       => TokenKind::Try,
                     "catch"     => TokenKind::Catch,
+                    "async"     => TokenKind::Async,
+                    "await"     => TokenKind::Await,
                     "true"      => TokenKind::True,
                     "false"  => TokenKind::False,
                     // f-string: `f"…"` or `f"""…"""`

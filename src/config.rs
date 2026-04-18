@@ -7,6 +7,7 @@ pub struct JadeConfig {
     pub model: String,
     pub api_key: Option<String>,
     pub max_retries: usize,
+    pub max_parallel: Option<usize>,
 }
 
 impl Default for JadeConfig {
@@ -16,6 +17,7 @@ impl Default for JadeConfig {
             model: "claude-haiku-4-5-20251001".to_string(),
             api_key: None,
             max_retries: 3,
+            max_parallel: None,
         }
     }
 }
@@ -34,13 +36,15 @@ pub struct ModelSection {
     pub model: Option<String>,
     pub api_key: Option<String>,
     pub max_retries: Option<usize>,
+    pub max_parallel: Option<usize>,
 }
 
 fn apply_model_section(cfg: &mut JadeConfig, m: &ModelSection) {
-    if let Some(p) = &m.provider   { cfg.provider    = p.clone(); }
-    if let Some(m) = &m.model      { cfg.model       = m.clone(); }
-    if let Some(k) = &m.api_key    { cfg.api_key     = Some(k.clone()); }
-    if let Some(r) = m.max_retries { cfg.max_retries = r; }
+    if let Some(p) = &m.provider    { cfg.provider     = p.clone(); }
+    if let Some(m) = &m.model       { cfg.model        = m.clone(); }
+    if let Some(k) = &m.api_key     { cfg.api_key      = Some(k.clone()); }
+    if let Some(r) = m.max_retries  { cfg.max_retries  = r; }
+    if let Some(n) = m.max_parallel { cfg.max_parallel = Some(n); }
 }
 
 // ── Global config path ───────────────────────────────────────────────────────
@@ -123,6 +127,9 @@ pub fn load_config() -> JadeConfig {
     if let Ok(k) = std::env::var("JADE_API_KEY")     { cfg.api_key = Some(k); }
     if let Ok(r) = std::env::var("JADE_MAX_RETRIES") {
         if let Ok(n) = r.parse::<usize>() { cfg.max_retries = n; }
+    }
+    if let Ok(p) = std::env::var("JADE_MAX_PARALLEL") {
+        if let Ok(n) = p.parse::<usize>() { cfg.max_parallel = Some(n); }
     }
 
     cfg

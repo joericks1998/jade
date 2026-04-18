@@ -1,4 +1,4 @@
-use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::interpreter::{
     ast::{BinOpKind, UnaryOpKind},
@@ -36,7 +36,7 @@ pub struct Chunk {
     /// Parallel source spans — one per instruction, used for error messages.
     pub spans: Vec<Span>,
     /// Function literals embedded in this chunk (referred to by `LoadFn`).
-    pub fn_defs: Vec<Rc<CompiledFn>>,
+    pub fn_defs: Vec<Arc<CompiledFn>>,
 }
 
 impl Chunk {
@@ -58,7 +58,7 @@ impl Chunk {
     }
 
     /// Intern a `CompiledFn` and return its index in `fn_defs`.
-    pub fn intern_fn(&mut self, f: Rc<CompiledFn>) -> usize {
+    pub fn intern_fn(&mut self, f: Arc<CompiledFn>) -> usize {
         let idx = self.fn_defs.len();
         self.fn_defs.push(f);
         idx
@@ -259,6 +259,14 @@ pub enum Instr {
     // ── Misc ───────────────────────────────────────────────────────────────
     Move(Reg, Reg),
     Halt,
+
+    // ── Async ──────────────────────────────────────────────────────────────────
+    /// dest ← start async fn immediately, return Future handle.
+    Spawn(Reg, Reg, Vec<Reg>),
+    /// dest ← block until Future resolves and unwrap result.
+    Await(Reg, Reg),
+    /// dest ← wait for all Futures in argument order, return Array.
+    Join(Reg, Vec<Reg>),
 
     // ── Imports ────────────────────────────────────────────────────────────
     /// Run the full pipeline for the file at `path` (relative to the current

@@ -118,7 +118,12 @@ enum Commands {
     Model {
         #[command(subcommand)]
         subcommand: ModelCommands,
+    },
 
+    /// Manage the jade async runtime library (jade_rt)
+    Rt {
+        #[command(subcommand)]
+        subcommand: RtCommands,
     },
 
     /// Run a file directly (backward-compatible shorthand)
@@ -154,18 +159,49 @@ enum ModelCommands {
     },
 }
 
+#[derive(Subcommand)]
+enum RtCommands {
+    /// Build libJadeRuntime.a from the bundled C source
+    ///
+    /// The jade binary embeds jade_rt_pthread.c (Linux/macOS) and
+    /// jade_rt_jadeos.c (Jade OS kernel).  This command compiles the
+    /// appropriate file and produces libJadeRuntime.a without requiring
+    /// the Jade source tree.
+    ///
+    /// Examples:
+    ///   jade rt build                          # pthread, outputs ./libJadeRuntime.a
+    ///   jade rt build --target jade-os         # Jade OS kernel backend
+    ///   jade rt build --output /opt/jade/lib   # custom output directory
+    ///   JADE_RT_LIB=. jade build myapp.jde     # then compile a Jade program
+    Build {
+        /// Target OS backend: "host" (pthread, default) or "jade-os"
+        #[arg(long, default_value = "host", value_name = "TARGET")]
+        target: String,
+        /// Output directory or file path (default: current directory)
+        #[arg(short, long, value_name = "PATH")]
+        output: Option<String>,
+        /// C compiler to use (default: cc)
+        #[arg(long, default_value = "cc", value_name = "CC")]
+        cc: String,
+        /// Archiver to use (default: ar)
+        #[arg(long, default_value = "ar", value_name = "AR")]
+        ar: String,
+    },
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let cli = Cli::parse();
 
     match cli.command {
         // ── run ───────────────────────────────────────────────────────────────
         Commands::Run { target: None, verbose } => {
-            cli::run::run_entry(verbose);
+            cli::run::run_entry(verbose).await;
         }
         Commands::Run { target: Some(ref t), verbose } if t.ends_with(".jde") || std::path::Path::new(t).exists() => {
-            cli::run::run_file(t, verbose);
+            cli::run::run_file(t, verbose).await;
         }
         Commands::Run { target: Some(ref t), .. } => {
             cli::run::run_script(t);
@@ -199,12 +235,12 @@ fn main() {
 
         // ── repl ─────────────────────────────────────────────────────────────
         Commands::Repl { verbose } => {
-            cli::repl::run_repl(verbose);
+            cli::repl::run_repl(verbose).await;
         }
 
         // ── test ─────────────────────────────────────────────────────────────
         Commands::Test { pattern, verbose } => {
-            cli::test::run_test(pattern.as_deref(), verbose);
+            cli::test::run_test(pattern.as_deref(), verbose).await;
         }
 
         // ── fmt ──────────────────────────────────────────────────────────────
@@ -231,6 +267,13 @@ fn main() {
             ModelCommands::Use { spec } => cli::model::run_model_use(&spec),
         },
 
+        // ── rt ────────────────────────────────────────────────────────────────
+        Commands::Rt { subcommand } => match subcommand {
+            RtCommands::Build { target, output, cc, ar } => {
+                cli::rt::run_rt_build(&target, output.as_deref(), &cc, &ar);
+            }
+        },
+
         // ── backward-compat: jade <file.jde> [-v] ────────────────────────────
         Commands::External(args) => {
             let Some(file) = args.first() else {
@@ -243,7 +286,7 @@ fn main() {
                 std::process::exit(1);
             }
             let verbose = args.get(1).map(|f| f == "-v" || f == "--verbose").unwrap_or(false);
-            cli::run::run_file(file, verbose);
+            cli::run::run_file(file, verbose).await;
         }
     }
 }
