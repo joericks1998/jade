@@ -15,6 +15,13 @@
 #include <jade/alloc.h>
 #include <jade/task.h>
 
+#include <stdint.h>
+
+/* Fatal abort for Jade OS: kills the current task with exit code -1.
+ * Used when a runtime invariant is violated (OOM, failed task spawn).
+ * __builtin_unreachable() suppresses false "function may not return" warnings. */
+#define JADE_ABORT() do { jade_task_exit(-1); __builtin_unreachable(); } while (0)
+
 struct jade_future {
     jade_task_id_t task_id;
     jade_value_t   result;
@@ -32,27 +39,42 @@ static void task_entry(void* vp) {
     jade_value_t result = tc->fn(tc->args, tc->n_args);
     jade_free(tc->args);
     struct jade_future* fut = tc->future;
-    free(tc);
+    jade_free(tc);          /* matched allocation: jade_alloc(sizeof(TaskCtx)) */
     fut->result = result;
+    /* Full memory barrier: ensure the result store is visible to jade_task_wait
+     * callers before the task's completion is signalled by jade_task_exit. */
+    __sync_synchronize();
     jade_task_exit(0);
 }
 
 jade_future_t jade_spawn(jade_task_fn fn, jade_value_t* args, int n_args) {
     struct jade_future* fut = jade_alloc(sizeof(struct jade_future));
+    if (!fut) JADE_ABORT();
 
     jade_value_t* args_copy = NULL;
     if (n_args > 0) {
+        /* Guard against overflow on 32-bit targets where size_t is 32 bits. */
+        if ((size_t)n_args > SIZE_MAX / sizeof(jade_value_t)) JADE_ABORT();
         args_copy = jade_alloc(sizeof(jade_value_t) * (size_t)n_args);
+        if (!args_copy) { jade_free(fut); JADE_ABORT(); }
         jade_memcpy(args_copy, args, sizeof(jade_value_t) * (size_t)n_args);
     }
 
     TaskCtx* tc = jade_alloc(sizeof(TaskCtx));
+    if (!tc) { jade_free(args_copy); jade_free(fut); JADE_ABORT(); }
     tc->fn     = fn;
     tc->args   = args_copy;
     tc->n_args = n_args;
     tc->future = fut;
 
-    fut->task_id = jade_task_spawn(task_entry, tc, JADE_TASK_NORMAL);
+    jade_task_id_t tid = jade_task_spawn(task_entry, tc, JADE_TASK_NORMAL);
+    if (tid == JADE_INVALID_TASK) {
+        jade_free(tc);
+        jade_free(args_copy);
+        jade_free(fut);
+        JADE_ABORT();
+    }
+    fut->task_id = tid;
     return fut;
 }
 

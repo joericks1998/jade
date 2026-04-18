@@ -589,7 +589,8 @@ fn eval_block(stmts: &[Stmt], env: &mut Env) -> Result<Option<Value>> {
 
             // In the tree-walk evaluator, async fn behaves like a regular fn.
             // True async execution only happens through the bytecode VM / LLVM path.
-            Stmt::AsyncFnDef { name, params, body, .. } => {
+            Stmt::AsyncFnDef { name, params, body, span } => {
+                eprintln!("[{}:{}] warning: '{}' is defined as async fn but the REPL runs it synchronously — use `jade run` for true async execution", span.line, span.col, name);
                 let fn_val = FnValue {
                     params: params.clone(),
                     body: body.clone(),

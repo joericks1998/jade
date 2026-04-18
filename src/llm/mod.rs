@@ -42,8 +42,8 @@ pub fn build_backend(
     max_parallel: Option<usize>,
 ) -> Result<Arc<dyn InferenceBackend>> {
     match provider {
-        "openai"    => Ok(Arc::new(openai::OpenAiBackend::new(api_key, model, max_parallel))),
-        "anthropic" => Ok(Arc::new(anthropic::AnthropicBackend::new(api_key, model, max_parallel))),
+        "openai"    => Ok(Arc::new(openai::OpenAiBackend::new(api_key, model, max_parallel)?)),
+        "anthropic" => Ok(Arc::new(anthropic::AnthropicBackend::new(api_key, model, max_parallel)?)),
         "jade"      => Ok(Arc::new(jade_os::JadeOsBackend::new())),
         other => Err(JadeError::InferenceError {
             message: format!("unknown provider '{}' — expected 'anthropic', 'openai', or 'jade'", other),
@@ -52,11 +52,11 @@ pub fn build_backend(
     }
 }
 
-/// Synchronous bridge: run an async `infer` call from a sync context.
+/// Synchronous bridge: run an async `infer` call from the tree-walk REPL path.
 ///
-/// Uses the current tokio runtime if one exists (production, post–Phase 6),
-/// otherwise spins up a temporary single-threaded runtime (tests, early phases).
-/// This helper is removed in Phase 4 when the VM is fully async.
+/// Uses `block_in_place` when a multi-threaded tokio runtime is active (REPL under
+/// `#[tokio::main]`), which yields the thread to the scheduler without panicking.
+/// Falls back to a fresh single-threaded runtime in tests or bare sync contexts.
 pub fn infer_sync(
     backend: &dyn InferenceBackend,
     req: InferenceRequest,
@@ -64,11 +64,14 @@ pub fn infer_sync(
 ) -> crate::interpreter::error::Result<InferenceResponse> {
     let fut = backend.infer(req, span);
     match tokio::runtime::Handle::try_current() {
-        Ok(handle) => handle.block_on(fut),
+        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(fut)),
         Err(_) => tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .expect("tokio runtime")
+            .map_err(|e| crate::interpreter::error::JadeError::InferenceError {
+                message: format!("failed to create tokio runtime for sync inference: {e}"),
+                span: crate::interpreter::error::Span { line: 0, col: 0 },
+            })?
             .block_on(fut),
     }
 }
