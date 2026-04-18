@@ -113,6 +113,15 @@ pub enum JadeError {
     /// An exception raised by `raise` that was not caught by any enclosing `try/catch`.
     /// `message` is the string representation of the raised value, captured at raise-site.
     Exception { message: String, span: Span },
+
+    /// `await` applied to a value that is not a Future.
+    NotAFuture { span: Span },
+
+    /// The same Future was awaited more than once.
+    DoubleAwait { span: Span },
+
+    /// A spawned async task panicked (tokio JoinError).
+    AsyncPanic { message: String, span: Span },
 }
 
 impl std::fmt::Display for JadeError {
@@ -188,6 +197,12 @@ impl std::fmt::Display for JadeError {
                 write!(f, "[{}:{}] circular import detected: '{}' is already being imported", span.line, span.col, path),
             JadeError::Exception { message, span } =>
                 write!(f, "[{}:{}] unhandled exception: {}", span.line, span.col, message),
+            JadeError::NotAFuture { span } =>
+                write!(f, "[{}:{}] 'await' applied to a non-Future value", span.line, span.col),
+            JadeError::DoubleAwait { span } =>
+                write!(f, "[{}:{}] cannot await the same Future more than once", span.line, span.col),
+            JadeError::AsyncPanic { message, span } =>
+                write!(f, "[{}:{}] async task panicked: {}", span.line, span.col, message),
         }
     }
 }

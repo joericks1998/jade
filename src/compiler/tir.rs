@@ -28,6 +28,11 @@ pub enum JadeType {
         params: Vec<JadeType>,  // all Unknown for user fns (params are unannotated)
         ret: Box<JadeType>,
     },
+    AsyncFn {
+        params: Vec<JadeType>,
+        ret: Box<JadeType>,
+    },
+    Future(Box<JadeType>),      // result of calling an AsyncFn
     Unknown,                    // type could not be statically determined
 }
 
@@ -102,6 +107,9 @@ pub enum TExprKind {
     Closure {
         params: Vec<String>,
         body: Vec<TStmt>,
+    },
+    Await {
+        expr: Box<TExpr>,
     },
 }
 
@@ -199,6 +207,14 @@ pub enum TStmt {
     TryCatch {
         body: Vec<TStmt>,
         arms: Vec<TCatchArm>,
+        span: Span,
+    },
+    /// `async fn name(params) { body }`
+    AsyncFnDef {
+        name: String,
+        params: Vec<String>,
+        body: Vec<TStmt>,
+        ret_ty: JadeType,
         span: Span,
     },
     Expr(TExpr),

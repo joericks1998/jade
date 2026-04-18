@@ -5,7 +5,7 @@ use crate::compiler::{emit, type_infer, vm};
 // ── Project-aware run ─────────────────────────────────────────────────────────
 
 /// `jade run` with no argument: find project root and run its entry file.
-pub fn run_entry(verbose: bool) {
+pub async fn run_entry(verbose: bool) {
     let root = crate::project::find_project_root().unwrap_or_else(|| {
         // Fall back to running main.jde in CWD.
         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
@@ -26,7 +26,7 @@ pub fn run_entry(verbose: bool) {
         process::exit(1);
     }
 
-    run_file(&entry.to_string_lossy(), verbose);
+    run_file(&entry.to_string_lossy(), verbose).await;
 }
 
 /// `jade run <script>`: run a named script from [scripts] in jade.toml.
@@ -74,7 +74,7 @@ pub fn run_script(name: &str) {
     }
 }
 
-pub fn run_file(path: &str, verbose: bool) {
+pub async fn run_file(path: &str, verbose: bool) {
     let source = match fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
@@ -143,7 +143,7 @@ pub fn run_file(path: &str, verbose: bool) {
     // Build LLM config and backend.
     let cfg = crate::config::load_config();
     let backend = cfg.api_key.as_ref()
-        .map(|key| crate::llm::build_backend(&cfg.provider, key, &cfg.model))
+        .map(|key| crate::llm::build_backend(&cfg.provider, key, &cfg.model, cfg.max_parallel))
         .transpose()
         .unwrap_or_else(|e| {
             eprintln!("error: invalid configuration: {}", e);
@@ -163,7 +163,7 @@ pub fn run_file(path: &str, verbose: bool) {
     };
 
     // Execute.
-    let state = match vm::run(compiled, opts) {
+    let state = match vm::run(compiled, opts).await {
         Ok(s) => s,
         Err(e) => {
             eprintln!("{}: runtime error: {}", path, e);
@@ -189,10 +189,10 @@ pub fn run_file(path: &str, verbose: bool) {
                 vm::VmValue::Str(s)   => println!("{} = \"{}\"", name, s),
                 vm::VmValue::Fn(_) | vm::VmValue::Closure(_, _) => println!("{} = <fn>", name),
                 vm::VmValue::Struct(rc) => {
-                    let inst = rc.borrow();
+                    let inst = rc.lock().unwrap();
                     print!("{} = {} {{", name, inst.type_name);
                     let mut fields: Vec<_> = inst.fields.iter().collect();
-                    fields.sort_by_key(|(k, _)| k.as_str());
+                    fields.sort_by_key(|(k, _): &(&String, _)| k.as_str());
                     let mut first = true;
                     for (k, v) in fields {
                         if !first { print!(", "); }
@@ -214,6 +214,7 @@ pub fn run_file(path: &str, verbose: bool) {
                 vm::VmValue::BoundMethod(_) => println!("{} = <bound method>", name),
                 vm::VmValue::Prompt(_)      => println!("{} = <prompt>", name),
                 vm::VmValue::Dict(_) => println!("{} = {}", name, vm::value_to_display(val)),
+                vm::VmValue::Future(_) => println!("{} = <future>", name),
                 vm::VmValue::Nil    => {} // not shown
             }
         }

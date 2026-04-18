@@ -10,10 +10,10 @@ use crate::interpreter::{
 ///
 /// Uses the tree-walk evaluator so that definitions from one line persist into
 /// subsequent ones without needing type-inference state to be threaded through.
-pub fn run_repl(_verbose: bool) {
+pub async fn run_repl(_verbose: bool) {
     let cfg = crate::config::load_config();
     let backend = cfg.api_key.as_ref()
-        .and_then(|key| crate::llm::build_backend(&cfg.provider, key, &cfg.model).ok());
+        .and_then(|key| crate::llm::build_backend(&cfg.provider, key, &cfg.model, cfg.max_parallel).ok());
 
     let opts = LlmOpts {
         backend,
