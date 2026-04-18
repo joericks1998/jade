@@ -83,6 +83,14 @@ pub fn emit_expr<'ctx>(
 
         FStr { parts } => emit_fstr(parts, ctx),
 
+        // ── Async: await expr ────────────────────────────────────────────────
+        Await { expr } => {
+            let fut_val = emit_expr(expr, ctx)?;
+            let fut_ptr = as_pointer(fut_val, ctx)?;
+            ctx.uses_async = true;
+            ctx.call_rv(ctx.jade_await_fn, &[fut_ptr.into()], "await_res")
+        }
+
         // ── Unsupported in this backend ───────────────────────────────────────
         Dict { .. } => Err("dicts are not yet supported in the LLVM backend (use `jade run`)".into()),
         PromptDeref { .. } => Err("prompt dereference is not supported in the LLVM backend".into()),
@@ -422,6 +430,99 @@ fn emit_len<'ctx>(
     }
 }
 
+// ── join() built-in ───────────────────────────────────────────────────────────
+
+fn emit_join<'ctx>(
+    args: &[crate::compiler::tir::TExpr],
+    ctx: &mut CodegenCtx<'ctx>,
+) -> Result<BasicValueEnum<'ctx>, String> {
+    let n = args.len();
+    let i64_ty = ctx.context.i64_type();
+    let ptr_ty = ctx.context.ptr_type(inkwell::AddressSpace::default());
+    let i32_ty = ctx.context.i32_type();
+
+    // Evaluate each future argument to a pointer.
+    let mut future_ptrs: Vec<PointerValue<'ctx>> = Vec::with_capacity(n);
+    for arg in args {
+        let val = emit_expr(arg, ctx)?;
+        future_ptrs.push(as_pointer(val, ctx)?);
+    }
+
+    let alloc_n = i64_ty.const_int(n.max(1) as u64, false);
+
+    // Stack-alloc array of future pointers: [n x ptr]
+    let fut_arr = ctx.builder
+        .build_array_alloca(ptr_ty, alloc_n, "join_futs")
+        .map_err(|e| e.to_string())?;
+
+    for (i, fut_ptr) in future_ptrs.iter().enumerate() {
+        let slot = ctx.gep(
+            ptr_ty,
+            fut_arr,
+            &[i64_ty.const_int(i as u64, false)],
+            &format!("jf{i}_slot"),
+        )?;
+        ctx.builder.build_store(slot, *fut_ptr).map_err(|e| e.to_string())?;
+    }
+
+    // Stack-alloc results array: [n x i64]
+    let res_arr = ctx.builder
+        .build_array_alloca(i64_ty, alloc_n, "join_res")
+        .map_err(|e| e.to_string())?;
+
+    // jade_join(fut_arr, n, res_arr)
+    let n_i32 = i32_ty.const_int(n as u64, false);
+    ctx.call_void(ctx.jade_join_fn, &[fut_arr.into(), n_i32.into(), res_arr.into()])?;
+    ctx.uses_async = true;
+
+    // Build a jade array from the results.
+    let header_ptr = ctx.malloc_ptr(i64_ty.const_int(24, false), "join_hdr")?;
+    let data_bytes = (n.max(1) * 8) as u64;
+    let data_ptr   = ctx.malloc_ptr(i64_ty.const_int(data_bytes, false), "join_data")?;
+
+    let f0 = ctx.builder
+        .build_struct_gep(ctx.array_ty, header_ptr, 0, "join_f0")
+        .map_err(|e| e.to_string())?;
+    ctx.builder.build_store(f0, data_ptr).map_err(|e| e.to_string())?;
+
+    let f1 = ctx.builder
+        .build_struct_gep(ctx.array_ty, header_ptr, 1, "join_f1")
+        .map_err(|e| e.to_string())?;
+    ctx.builder
+        .build_store(f1, i64_ty.const_int(n as u64, false))
+        .map_err(|e| e.to_string())?;
+
+    let f2 = ctx.builder
+        .build_struct_gep(ctx.array_ty, header_ptr, 2, "join_f2")
+        .map_err(|e| e.to_string())?;
+    ctx.builder
+        .build_store(f2, i64_ty.const_int(n as u64, false))
+        .map_err(|e| e.to_string())?;
+
+    // Copy each result from res_arr into the jade array data.
+    for i in 0..n {
+        let src = ctx.gep(
+            i64_ty,
+            res_arr,
+            &[i64_ty.const_int(i as u64, false)],
+            &format!("jr{i}_src"),
+        )?;
+        let raw = ctx.builder
+            .build_load(i64_ty, src, &format!("jr{i}_raw"))
+            .map_err(|e| e.to_string())?
+            .into_int_value();
+        let dst = ctx.gep(
+            i64_ty,
+            data_ptr,
+            &[i64_ty.const_int(i as u64, false)],
+            &format!("jr{i}_dst"),
+        )?;
+        ctx.builder.build_store(dst, raw).map_err(|e| e.to_string())?;
+    }
+
+    Ok(header_ptr.into())
+}
+
 // ── Short-circuit logical operators ──────────────────────────────────────────
 
 fn emit_and<'ctx>(
@@ -442,12 +543,14 @@ fn emit_and<'ctx>(
     ctx.builder
         .build_conditional_branch(lhs, rhs_bb, merge_bb)
         .map_err(|e| e.to_string())?;
-    let lhs_end = ctx.builder.get_insert_block().unwrap();
+    let lhs_end = ctx.builder.get_insert_block()
+        .ok_or_else(|| "&&: builder lost insert block after lhs branch".to_string())?;
 
     ctx.builder.position_at_end(rhs_bb);
     let rhs = emit_expr(right, ctx)?.into_int_value();
     ctx.builder.build_unconditional_branch(merge_bb).map_err(|e| e.to_string())?;
-    let rhs_end = ctx.builder.get_insert_block().unwrap();
+    let rhs_end = ctx.builder.get_insert_block()
+        .ok_or_else(|| "&&: builder lost insert block after rhs branch".to_string())?;
 
     ctx.builder.position_at_end(merge_bb);
     let phi = ctx
@@ -479,12 +582,14 @@ fn emit_or<'ctx>(
     ctx.builder
         .build_conditional_branch(lhs, merge_bb, rhs_bb)
         .map_err(|e| e.to_string())?;
-    let lhs_end = ctx.builder.get_insert_block().unwrap();
+    let lhs_end = ctx.builder.get_insert_block()
+        .ok_or_else(|| "||: builder lost insert block after lhs branch".to_string())?;
 
     ctx.builder.position_at_end(rhs_bb);
     let rhs = emit_expr(right, ctx)?.into_int_value();
     ctx.builder.build_unconditional_branch(merge_bb).map_err(|e| e.to_string())?;
-    let rhs_end = ctx.builder.get_insert_block().unwrap();
+    let rhs_end = ctx.builder.get_insert_block()
+        .ok_or_else(|| "||: builder lost insert block after rhs branch".to_string())?;
 
     ctx.builder.position_at_end(merge_bb);
     let phi = ctx
@@ -664,6 +769,7 @@ fn emit_call<'ctx>(
         match name.as_str() {
             "print" => return emit_print(args, ctx),
             "len"   => return emit_len(args, ctx),
+            "join"  => return emit_join(args, ctx),
             _ => {}
         }
     }

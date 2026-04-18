@@ -1,0 +1,109 @@
+// Basic async fn — calling an async fn starts it immediately and returns a
+// Future handle. await blocks until the task completes and unwraps the result.
+
+async fn double(x) {
+    return x * 2
+}
+
+let f = double(21)
+// f is a Future — double() is already running
+let result = await f
+print(result)
+// → 42
+
+
+// await is valid at the top level (blocks the script until resolved)
+
+async fn add(a, b) {
+    return a + b
+}
+
+print(await add(10, 32))
+// → 42
+
+
+// join — fires all futures concurrently, returns an array in argument order.
+// All tasks are already running by the time join is called.
+
+async fn square(n) {
+    return n * n
+}
+
+let squares = join(square(2), square(3), square(4))
+print(squares[0])
+print(squares[1])
+print(squares[2])
+// → 4
+// → 9
+// → 16
+
+
+// async fn can await other async fns
+
+async fn increment(n) {
+    return n + 1
+}
+
+async fn double_then_increment(x) {
+    let d = await double(x)
+    return await increment(d)
+}
+
+print(await double_then_increment(5))
+// double(5) → 10, increment(10) → 11
+// → 11
+
+
+// Two futures running in parallel — each is started at its let binding,
+// not at the await. By the time the first await resolves, the second task
+// has been running the whole time.
+
+async fn slow_add(a, b) {
+    return a + b
+}
+
+let fa = slow_add(3, 4)
+let fb = slow_add(100, 200)
+// Both tasks are in flight here
+print(await fa)
+print(await fb)
+// → 7
+// → 300
+
+
+// Exceptions raised inside an async fn propagate through await and are
+// catchable with the normal try/catch mechanism.
+
+struct TaskError { message }
+
+async fn risky(n) {
+    if n < 0 {
+        raise TaskError { message: "negative input" }
+    }
+    return n * 10
+}
+
+try {
+    let r = await risky(-1)
+} catch TaskError e {
+    print(e.message)
+}
+// → negative input
+
+// Successful path is unaffected
+print(await risky(5))
+// → 50
+
+
+// join propagates the first error if any task fails.
+// Remaining tasks are not cancelled — they run to completion.
+
+async fn safe(n) { return n }
+async fn fail() { raise TaskError { message: "task failed" } }
+
+try {
+    let results = join(safe(1), fail(), safe(3))
+} catch TaskError e {
+    print(e.message)
+}
+// → task failed

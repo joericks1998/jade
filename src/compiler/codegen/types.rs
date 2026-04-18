@@ -21,6 +21,8 @@ pub fn jade_to_llvm<'ctx>(ty: &JadeType, ctx: &'ctx Context) -> BasicTypeEnum<'c
         | JadeType::Dict
         | JadeType::Struct(_)
         | JadeType::Fn { .. }
+        | JadeType::AsyncFn { .. }
+        | JadeType::Future(_)
         | JadeType::Prompt => ctx.ptr_type(AddressSpace::default()).into(),
     }
 }

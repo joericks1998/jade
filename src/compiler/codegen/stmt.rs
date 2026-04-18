@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use inkwell::{AddressSpace, IntPredicate};
 
-use crate::compiler::tir::{JadeType, TStmt};
+use crate::compiler::tir::{JadeType, TExprKind, TStmt};
 
 use super::{expr, types, CodegenCtx};
 
@@ -22,6 +22,9 @@ pub fn collect_struct_defs(
             TStmt::ExtendBlock { methods, .. } => {
                 collect_struct_defs(methods, field_order);
             }
+            TStmt::AsyncFnDef { body, .. } => {
+                collect_struct_defs(body, field_order);
+            }
             _ => {}
         }
     }
@@ -38,6 +41,7 @@ pub fn collect_struct_literal_types(
 
     fn walk_expr(e: &TExpr, ft: &mut HashMap<String, HashMap<String, crate::compiler::tir::JadeType>>) {
         match &e.kind {
+            TExprKind::Await { expr } => walk_expr(expr, ft),
             TExprKind::StructLiteral { type_name, fields } => {
                 // Record field types first, then recurse into field expressions.
                 let entries: Vec<(String, crate::compiler::tir::JadeType)> = fields
@@ -86,7 +90,7 @@ pub fn collect_struct_literal_types(
             | TStmt::Expr(value)
             | TStmt::PromptDecl { body: value, .. }
             | TStmt::Raise { value, .. } => walk_expr(value, ft),
-            TStmt::FnDef { body, .. } => walk_stmts(body, ft),
+            TStmt::FnDef { body, .. } | TStmt::AsyncFnDef { body, .. } => walk_stmts(body, ft),
             TStmt::If { condition, then_body, else_body, .. } => {
                 walk_expr(condition, ft);
                 walk_stmts(then_body, ft);
@@ -119,15 +123,39 @@ pub fn collect_struct_literal_types(
 /// resolve correctly in the second pass.
 pub fn declare_fns<'ctx>(ctx: &mut CodegenCtx<'ctx>, stmts: &[TStmt]) -> Result<(), String> {
     for stmt in stmts {
-        if let TStmt::FnDef { name, params, ret_ty, .. } = stmt {
-            let param_meta: Vec<_> = params
-                .iter()
-                .map(|_| types::jade_to_meta(&JadeType::Unknown, ctx.context))
-                .collect();
-            let fn_ty = types::jade_fn_type(ret_ty, &param_meta, ctx.context);
-            let fn_val = ctx.module.add_function(name, fn_ty, None);
-            let param_jt: Vec<JadeType> = params.iter().map(|_| JadeType::Unknown).collect();
-            ctx.fn_info.insert(name.clone(), (fn_val, param_jt, ret_ty.clone()));
+        match stmt {
+            TStmt::FnDef { name, params, ret_ty, .. } => {
+                let param_meta: Vec<_> = params
+                    .iter()
+                    .map(|_| types::jade_to_meta(&JadeType::Unknown, ctx.context))
+                    .collect();
+                let fn_ty = types::jade_fn_type(ret_ty, &param_meta, ctx.context);
+                let fn_val = ctx.module.add_function(name, fn_ty, None);
+                let param_jt: Vec<JadeType> = params.iter().map(|_| JadeType::Unknown).collect();
+                ctx.fn_info.insert(name.clone(), (fn_val, param_jt, ret_ty.clone()));
+            }
+            TStmt::AsyncFnDef { name, params, ret_ty, .. } => {
+                let i64_ty = ctx.context.i64_type();
+                let i32_ty = ctx.context.i32_type();
+                let ptr_ty = ctx.context.ptr_type(AddressSpace::default());
+
+                // Body helper: i64 (ptr %args, i32 %n)
+                let body_name = format!("{name}__async_body");
+                let body_fn_ty = i64_ty.fn_type(&[ptr_ty.into(), i32_ty.into()], false);
+                ctx.module.add_function(&body_name, body_fn_ty, None);
+
+                // Public wrapper: ptr (i64, i64, ...) — returns a jade_future_t
+                let param_meta: Vec<_> = params
+                    .iter()
+                    .map(|_| types::jade_to_meta(&JadeType::Unknown, ctx.context))
+                    .collect();
+                let wrapper_ret_ty = JadeType::Future(Box::new(ret_ty.clone()));
+                let fn_ty = types::jade_fn_type(&wrapper_ret_ty, &param_meta, ctx.context);
+                let fn_val = ctx.module.add_function(name, fn_ty, None);
+                let param_jt: Vec<JadeType> = params.iter().map(|_| JadeType::Unknown).collect();
+                ctx.fn_info.insert(name.clone(), (fn_val, param_jt, wrapper_ret_ty));
+            }
+            _ => {}
         }
     }
     Ok(())
@@ -174,17 +202,36 @@ pub fn emit_stmt<'ctx>(ctx: &mut CodegenCtx<'ctx>, stmt: &TStmt) -> Result<(), S
             emit_fn_body(ctx, name, params, body, ret_ty)?;
         }
 
+        // ── async fn definitions ──────────────────────────────────────────────
+        TStmt::AsyncFnDef { name, params, body, ret_ty, .. } => {
+            emit_async_fn_def(ctx, name, params, body, ret_ty)?;
+        }
+
         // ── return [expr] ─────────────────────────────────────────────────────
         TStmt::Return { value, .. } => {
+            // Inside an async body function all values must be returned as i64
+            // (jade_value_t).  async_body_ret_ty carries the original Jade type
+            // needed to convert non-integer values correctly.
+            let conv_ty = ctx.async_body_ret_ty.clone();
             match value {
                 Some(e) => {
                     let val = expr::emit_expr(e, ctx)?;
+                    let ret_val: inkwell::values::BasicValueEnum = if let Some(ref ty) = conv_ty {
+                        expr::value_to_i64(val, ty, ctx)?.into()
+                    } else {
+                        val
+                    };
                     ctx.builder
-                        .build_return(Some(&val))
+                        .build_return(Some(&ret_val))
                         .map_err(|e| e.to_string())?;
                 }
                 None => {
-                    ctx.builder.build_return(None).map_err(|e| e.to_string())?;
+                    if conv_ty.is_some() {
+                        let zero = ctx.context.i64_type().const_int(0, false);
+                        ctx.builder.build_return(Some(&zero)).map_err(|e| e.to_string())?;
+                    } else {
+                        ctx.builder.build_return(None).map_err(|e| e.to_string())?;
+                    }
                 }
             }
         }
@@ -481,6 +528,154 @@ pub fn emit_stmt<'ctx>(ctx: &mut CodegenCtx<'ctx>, stmt: &TStmt) -> Result<(), S
             ctx.builder.build_unreachable().map_err(|e| e.to_string())?;
         }
     }
+    Ok(())
+}
+
+// ── Async function emission ───────────────────────────────────────────────────
+
+/// Emit both halves of an `async fn`:
+///
+/// 1. `<name>__async_body(ptr %args, i32 %n) -> i64`
+///    The actual computation.  Parameters are loaded from the args array.
+///    All return values are bit-cast to i64 (jade_value_t).
+///
+/// 2. `<name>(i64 arg0, ...) -> ptr`
+///    The public wrapper.  Allocates an args array on the stack, fills it,
+///    calls `jade_spawn(&<name>__async_body, args, n)`, and returns the
+///    resulting `jade_future_t` pointer.
+fn emit_async_fn_def<'ctx>(
+    ctx: &mut CodegenCtx<'ctx>,
+    name: &str,
+    params: &[String],
+    body: &[TStmt],
+    ret_ty: &JadeType,
+) -> Result<(), String> {
+    use inkwell::values::BasicValueEnum;
+
+    let i64_ty = ctx.context.i64_type();
+    let i32_ty = ctx.context.i32_type();
+    let ptr_ty = ctx.context.ptr_type(AddressSpace::default());
+
+    let restore_bb = ctx.builder.get_insert_block();
+
+    // ── 1. Body function ─────────────────────────────────────────────────────
+    let body_name = format!("{name}__async_body");
+    let body_fn = ctx.module.get_function(&body_name)
+        .ok_or_else(|| format!("async body '{body_name}' not declared in pass 1"))?;
+
+    let body_entry = ctx.context.append_basic_block(body_fn, "entry");
+    ctx.builder.position_at_end(body_entry);
+
+    ctx.push_scope();
+    let saved_ret   = ctx.current_ret_ty.take();
+    let saved_async = ctx.async_body_ret_ty.take();
+    ctx.current_ret_ty   = Some(ret_ty.clone());
+    ctx.async_body_ret_ty = Some(ret_ty.clone());
+
+    // Load each parameter from args[i] (uniform i64 slots).
+    let args_ptr = body_fn.get_nth_param(0)
+        .ok_or("async body: missing args param")?
+        .into_pointer_value();
+
+    for (i, param_name) in params.iter().enumerate() {
+        let slot = ctx.gep(
+            i64_ty,
+            args_ptr,
+            &[i64_ty.const_int(i as u64, false)],
+            &format!("abp{i}_slot"),
+        )?;
+        let raw = ctx.builder
+            .build_load(i64_ty, slot, &format!("abp{i}_raw"))
+            .map_err(|e| e.to_string())?;
+        let alloca = ctx.builder
+            .build_alloca(i64_ty, param_name)
+            .map_err(|e| e.to_string())?;
+        ctx.builder.build_store(alloca, raw).map_err(|e| e.to_string())?;
+        ctx.define(param_name.clone(), alloca, JadeType::Unknown);
+    }
+
+    emit_stmts(ctx, body)?;
+
+    // Fall-through return → always i64 0 (nil) for async bodies.
+    if !ctx.is_terminated() {
+        ctx.builder
+            .build_return(Some(&i64_ty.const_int(0, false)))
+            .map_err(|e| e.to_string())?;
+    }
+
+    ctx.pop_scope();
+    ctx.current_ret_ty   = saved_ret;
+    ctx.async_body_ret_ty = saved_async;
+
+    // ── 2. Wrapper function ──────────────────────────────────────────────────
+    let wrapper_fn = ctx.module.get_function(name)
+        .ok_or_else(|| format!("async wrapper '{name}' not declared in pass 1"))?;
+
+    let wrapper_entry = ctx.context.append_basic_block(wrapper_fn, "entry");
+    ctx.builder.position_at_end(wrapper_entry);
+
+    let n = params.len();
+    let alloc_size = i64_ty.const_int(n.max(1) as u64, false);
+
+    // Stack-allocate `jade_value_t args[n]`.
+    let args_arr = ctx.builder
+        .build_array_alloca(i64_ty, alloc_size, "spawn_args")
+        .map_err(|e| e.to_string())?;
+
+    // Store each argument (always i64 in the wrapper signature) into args[i].
+    for i in 0..n {
+        let arg = wrapper_fn
+            .get_nth_param(i as u32)
+            .ok_or_else(|| format!("param {i} out of range for async wrapper '{name}'"))?;
+        // Wrapper params are Unknown → i64; coerce wider types to i64.
+        let as_i64: inkwell::values::IntValue<'ctx> = match arg {
+            BasicValueEnum::IntValue(v) => {
+                if v.get_type().get_bit_width() < 64 {
+                    ctx.builder
+                        .build_int_z_extend(v, i64_ty, &format!("sw{i}_ext"))
+                        .map_err(|e| e.to_string())?
+                } else {
+                    v
+                }
+            }
+            BasicValueEnum::FloatValue(f) => ctx.float_to_i64_bits(f)?,
+            BasicValueEnum::PointerValue(p) => ctx.builder
+                .build_ptr_to_int(p, i64_ty, &format!("sw{i}_p2i"))
+                .map_err(|e| e.to_string())?,
+            other => {
+                return Err(format!("unsupported arg type in async wrapper: {other:?}"));
+            }
+        };
+        let slot = ctx.gep(
+            i64_ty,
+            args_arr,
+            &[i64_ty.const_int(i as u64, false)],
+            &format!("sw{i}_slot"),
+        )?;
+        ctx.builder.build_store(slot, as_i64).map_err(|e| e.to_string())?;
+    }
+
+    // jade_spawn(&body_fn, args_arr, n)
+    let body_fn_ptr = body_fn.as_global_value().as_pointer_value();
+    let n_val = i32_ty.const_int(n as u64, false);
+    let future_ptr = ctx
+        .call_rv(
+            ctx.jade_spawn_fn,
+            &[body_fn_ptr.into(), args_arr.into(), n_val.into()],
+            "future",
+        )?
+        .into_pointer_value();
+
+    ctx.builder
+        .build_return(Some(&future_ptr))
+        .map_err(|e| e.to_string())?;
+
+    ctx.uses_async = true;
+
+    if let Some(bb) = restore_bb {
+        ctx.builder.position_at_end(bb);
+    }
+
     Ok(())
 }
 

@@ -1,4 +1,4 @@
-use std::{collections::HashMap, rc::Rc};
+use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     compiler::{
@@ -23,7 +23,7 @@ pub struct CompiledProgram {
     /// field-access method fallback).
     pub struct_defs: HashMap<String, Vec<StructFieldDef>>,
     /// Compiled extend-block methods: `type_name → method_name → CompiledFn`.
-    pub extend_methods: HashMap<String, HashMap<String, Rc<CompiledFn>>>,
+    pub extend_methods: HashMap<String, HashMap<String, Arc<CompiledFn>>>,
     /// Interface definitions (method names required per interface).
     pub interface_defs: HashMap<String, Vec<String>>,
 }
@@ -34,7 +34,7 @@ pub struct CompiledProgram {
 struct EmitCtx {
     struct_defs: HashMap<String, Vec<StructFieldDef>>,
     interface_defs: HashMap<String, Vec<String>>,
-    extend_methods: HashMap<String, HashMap<String, Rc<CompiledFn>>>,
+    extend_methods: HashMap<String, HashMap<String, Arc<CompiledFn>>>,
     /// Counter for generating unique closure names (`__closure_0__`, etc.).
     next_closure_id: usize,
 }
@@ -183,8 +183,8 @@ fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
 
         TStmt::FnDef { name, params, body, span, .. } => {
             let compiled = emit_fn(&name, params, body, span, ctx)?;
-            let rc = Rc::new(compiled);
-            let idx = em.chunk.intern_fn(Rc::clone(&rc));
+            let rc = Arc::new(compiled);
+            let idx = em.chunk.intern_fn(Arc::clone(&rc));
             let dest = em.alloc_reg();
             em.chunk.emit(Instr::LoadFn(dest, idx), span);
             if em.in_fn() {
@@ -308,7 +308,7 @@ fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
             }
             let method_map = ctx.extend_methods.entry(type_name.clone()).or_default();
             for (name, compiled) in compiled_methods {
-                method_map.insert(name, Rc::new(compiled));
+                method_map.insert(name, Arc::new(compiled));
             }
         }
 
@@ -425,6 +425,23 @@ fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
             em.chunk.patch_jump(jump_end_idx, end_target);
             for j in end_jumps {
                 em.chunk.patch_jump(j, end_target);
+            }
+        }
+
+        TStmt::AsyncFnDef { name, params, body, span, .. } => {
+            // Compile async fn body as a regular CompiledFn.
+            // Call sites emit Instr::Spawn (instead of Instr::Call) based on
+            // the callee's JadeType::AsyncFn — handled in emit_call below.
+            let compiled = emit_fn(&name, params, body, span, ctx)?;
+            let rc = Arc::new(compiled);
+            let idx = em.chunk.intern_fn(Arc::clone(&rc));
+            let dest = em.alloc_reg();
+            em.chunk.emit(Instr::LoadFn(dest, idx), span);
+            if em.in_fn() {
+                let slot = em.define_local(&name);
+                em.chunk.emit(Instr::SetLocal(slot, dest), span);
+            } else {
+                em.chunk.emit(Instr::SetGlobal(name, dest), span);
             }
         }
 
@@ -593,10 +610,17 @@ fn emit_expr(expr: &TExpr, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<Reg> {
         TExprKind::Closure { params, body } => {
             let name = ctx.next_closure_name();
             let compiled = emit_fn(&name, params.clone(), body.clone(), span, ctx)?;
-            let rc = Rc::new(compiled);
-            let idx = em.chunk.intern_fn(Rc::clone(&rc));
+            let rc = Arc::new(compiled);
+            let idx = em.chunk.intern_fn(Arc::clone(&rc));
             let dest = em.alloc_reg();
             em.chunk.emit(Instr::MakeClosure(dest, idx), span);
+            Ok(dest)
+        }
+
+        TExprKind::Await { expr } => {
+            let src = emit_expr(expr, em, ctx)?;
+            let dest = em.alloc_reg();
+            em.chunk.emit(Instr::Await(dest, src), span);
             Ok(dest)
         }
     }
@@ -639,8 +663,29 @@ fn emit_call(
                 em.chunk.emit(Instr::CallLen(dest, src), span);
                 return Ok(dest);
             }
+            "join" => {
+                let mut arg_regs = Vec::with_capacity(args.len());
+                for a in args {
+                    arg_regs.push(emit_expr(a, em, ctx)?);
+                }
+                let dest = em.alloc_reg();
+                em.chunk.emit(Instr::Join(dest, arg_regs), span);
+                return Ok(dest);
+            }
             _ => {}
         }
+    }
+
+    // Async fn call → emit Spawn instead of Call.
+    if matches!(callee.ty, JadeType::AsyncFn { .. }) {
+        let callee_reg = emit_expr(callee, em, ctx)?;
+        let mut arg_regs = Vec::with_capacity(args.len());
+        for a in args {
+            arg_regs.push(emit_expr(a, em, ctx)?);
+        }
+        let dest = em.alloc_reg();
+        em.chunk.emit(Instr::Spawn(dest, callee_reg, arg_regs), span);
+        return Ok(dest);
     }
 
     // General call.

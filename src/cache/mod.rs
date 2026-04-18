@@ -10,6 +10,14 @@ use crate::compiler::tir::TProgram;
 /// when the AST format changes between releases.
 pub const JADE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Independent format version for cached AST/TIR/bytecode schemas.
+/// Increment this whenever the shape of any serialized type changes so that
+/// caches from prior builds are unconditionally rejected without needing a
+/// version bump in Cargo.toml.
+/// v3: async migration added JadeType::AsyncFn/Future, TStmt::AsyncFnDef,
+///     TExprKind::Await, and Instr::Spawn/Await/Join — all serde-serialized.
+pub const CACHE_FORMAT_VERSION: u32 = 3;
+
 // ── Internal types ────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize)]
@@ -17,6 +25,10 @@ struct CacheMeta {
     version: String,
     source_path: String,
     hash: String,
+    /// Missing in caches written before format versioning was added; defaults
+    /// to 0, which always fails the CACHE_FORMAT_VERSION check.
+    #[serde(default)]
+    format_version: u32,
 }
 
 // ── Hashing ───────────────────────────────────────────────────────────────────
@@ -67,9 +79,7 @@ pub fn read_ast_cache(hash: &[u8; 32]) -> Option<Program> {
     let meta_bytes = fs::read(dir.join("meta.json")).ok()?;
     let meta: CacheMeta = serde_json::from_slice(&meta_bytes).ok()?;
 
-    // Reject artifacts from a different Jade version; the AST shape may have
-    // changed and bincode would silently produce garbage.
-    if meta.version != JADE_VERSION {
+    if meta.version != JADE_VERSION || meta.format_version != CACHE_FORMAT_VERSION {
         return None;
     }
 
@@ -92,14 +102,29 @@ pub fn write_ast_cache(hash: &[u8; 32], source_path: &str, program: &Program) {
         version: JADE_VERSION.to_string(),
         source_path: source_path.to_string(),
         hash: hex(hash),
+        format_version: CACHE_FORMAT_VERSION,
     };
 
     if let Ok(meta_json) = serde_json::to_vec(&meta) {
-        let _ = fs::write(dir.join("meta.json"), meta_json);
+        if let Err(e) = fs::write(dir.join("meta.json"), meta_json) {
+            #[cfg(debug_assertions)]
+            eprintln!("jade cache: failed to write meta.json: {e}");
+            let _ = e;
+        }
     }
 
-    if let Ok(ast_bytes) = bincode::serialize(program) {
-        let _ = fs::write(dir.join("ast.bin"), ast_bytes);
+    match bincode::serialize(program) {
+        Ok(ast_bytes) => {
+            if let Err(e) = fs::write(dir.join("ast.bin"), ast_bytes) {
+                #[cfg(debug_assertions)]
+                eprintln!("jade cache: failed to write ast.bin: {e}");
+                let _ = e;
+            }
+        }
+        #[cfg(debug_assertions)]
+        Err(e) => eprintln!("jade cache: failed to serialize AST: {e}"),
+        #[cfg(not(debug_assertions))]
+        Err(_) => {}
     }
 }
 
@@ -113,7 +138,7 @@ pub fn read_tir_cache(hash: &[u8; 32]) -> Option<TProgram> {
 
     let meta_bytes = fs::read(dir.join("meta.json")).ok()?;
     let meta: CacheMeta = serde_json::from_slice(&meta_bytes).ok()?;
-    if meta.version != JADE_VERSION {
+    if meta.version != JADE_VERSION || meta.format_version != CACHE_FORMAT_VERSION {
         return None;
     }
 
@@ -228,17 +253,31 @@ pub fn write_tir_cache(hash: &[u8; 32], source_path: &str, tprogram: &TProgram) 
         return;
     }
 
-    // Write (or refresh) meta.json alongside the TIR.
     let meta = CacheMeta {
         version: JADE_VERSION.to_string(),
         source_path: source_path.to_string(),
         hash: hex(hash),
+        format_version: CACHE_FORMAT_VERSION,
     };
     if let Ok(meta_json) = serde_json::to_vec(&meta) {
-        let _ = fs::write(dir.join("meta.json"), meta_json);
+        if let Err(e) = fs::write(dir.join("meta.json"), meta_json) {
+            #[cfg(debug_assertions)]
+            eprintln!("jade cache: failed to write meta.json: {e}");
+            let _ = e;
+        }
     }
 
-    if let Ok(tir_bytes) = bincode::serialize(tprogram) {
-        let _ = fs::write(dir.join("tir.bin"), tir_bytes);
+    match bincode::serialize(tprogram) {
+        Ok(tir_bytes) => {
+            if let Err(e) = fs::write(dir.join("tir.bin"), tir_bytes) {
+                #[cfg(debug_assertions)]
+                eprintln!("jade cache: failed to write tir.bin: {e}");
+                let _ = e;
+            }
+        }
+        #[cfg(debug_assertions)]
+        Err(e) => eprintln!("jade cache: failed to serialize TIR: {e}"),
+        #[cfg(not(debug_assertions))]
+        Err(_) => {}
     }
 }

@@ -146,7 +146,7 @@ pub struct Env {
     /// between `error.rs` and `eval.rs`.
     pub raised_exception: Option<Value>,
     /// LLM inference backend, if one was configured for this run.
-    pub inference_backend: Option<Box<dyn llm::InferenceBackend>>,
+    pub inference_backend: Option<std::sync::Arc<dyn llm::InferenceBackend>>,
     /// Conversation history shared across all `?` dereferences in this program run.
     pub conversation_history: Vec<llm::Message>,
     /// Running total of tokens consumed by all inference calls.
@@ -282,7 +282,7 @@ impl Default for Env {
 
 /// Options controlling LLM integration for a single program run.
 pub struct LlmOpts {
-    pub backend: Option<Box<dyn llm::InferenceBackend>>,
+    pub backend: Option<std::sync::Arc<dyn llm::InferenceBackend>>,
     pub default_model: String,
     pub max_retries: usize,
 }
@@ -587,6 +587,18 @@ fn eval_block(stmts: &[Stmt], env: &mut Env) -> Result<Option<Value>> {
                 return Err(JadeError::Exception { message, span: *span });
             }
 
+            // In the tree-walk evaluator, async fn behaves like a regular fn.
+            // True async execution only happens through the bytecode VM / LLVM path.
+            Stmt::AsyncFnDef { name, params, body, span } => {
+                eprintln!("[{}:{}] warning: '{}' is defined as async fn but the REPL runs it synchronously — use `jade run` for true async execution", span.line, span.col, name);
+                let fn_val = FnValue {
+                    params: params.clone(),
+                    body: body.clone(),
+                    captured: HashMap::new(),
+                };
+                env.define(name.clone(), Value::Fn(Rc::new(fn_val)));
+            }
+
             Stmt::Expr(expr) => {
                 eval_expr(expr, env)?;
             }
@@ -616,6 +628,7 @@ fn expr_span(e: &Expr) -> Span {
         Expr::PromptDeref  { span, .. } => *span,
         Expr::Dict         { span, .. } => *span,
         Expr::Closure      { span, .. } => *span,
+        Expr::Await        { span, .. } => *span,
     }
 }
 
@@ -1255,6 +1268,9 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
             }
         }
 
+        // In the tree-walk evaluator, await just evaluates the expression immediately.
+        Expr::Await { expr, .. } => eval_expr(expr, env),
+
         Expr::PromptDeref { expr, output_type, span } => {
             // 1. Evaluate the target expression and extract the prompt text.
             let prompt_text = match eval_expr(expr, env)? {
@@ -1272,7 +1288,7 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                     history: env.conversation_history.clone(),
                     max_tokens: DEFAULT_MAX_TOKENS,
                 };
-                backend.infer(req, *span)?
+                crate::llm::infer_sync(backend.as_ref(), req, *span)?
             };
 
             // 3. Record the exchange in conversation history and update token count.
@@ -1328,7 +1344,7 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                         let retry_resp = {
                             let backend = env.inference_backend.as_ref()
                                 .ok_or(JadeError::MissingApiKey { span: *span })?;
-                            backend.infer(llm::InferenceRequest {
+                            crate::llm::infer_sync(backend.as_ref(), llm::InferenceRequest {
                                 prompt: correction.clone(),
                                 model: env.default_model.clone(),
                                 history: env.conversation_history.clone(),
@@ -2755,7 +2771,7 @@ print("hello")"#).unwrap();
     fn eval_with_mock(src: &str, responses: Vec<&str>) -> Result<Env> {
         let tokens = lexer::tokenize(src).expect("lex failed");
         let program = parser::parse(tokens).expect("parse failed");
-        let backend = Box::new(crate::llm::MockBackend::new(responses));
+        let backend = std::sync::Arc::new(crate::llm::MockBackend::new(responses));
         evaluate(program, LlmOpts {
             backend: Some(backend),
             default_model: "mock-model".to_string(),

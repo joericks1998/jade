@@ -29,6 +29,7 @@ pub struct ManifestModelSection {
     pub model: Option<String>,
     pub api_key: Option<String>,
     pub max_retries: Option<usize>,
+    pub max_parallel: Option<usize>,
 }
 
 impl ProjectManifest {

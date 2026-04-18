@@ -1,4 +1,5 @@
-use std::{cell::RefCell, collections::{HashMap, HashSet}, path::PathBuf, rc::Rc};
+use std::{sync::{Arc, Mutex}, collections::{HashMap, HashSet}, path::PathBuf};
+use tokio::task::JoinHandle;
 
 use crate::{
     compiler::{
@@ -30,15 +31,33 @@ pub enum VmValue {
     Float(f64),
     Bool(bool),
     Str(String),
-    Fn(Rc<CompiledFn>),
+    Fn(Arc<CompiledFn>),
     /// A closure: compiled function + snapshot of globals at creation time.
-    Closure(Rc<CompiledFn>, Rc<HashMap<String, VmValue>>),
-    Struct(Rc<RefCell<VmStruct>>),
-    BoundMethod(Rc<VmBoundMethod>),
+    Closure(Arc<CompiledFn>, Arc<HashMap<String, VmValue>>),
+    Struct(Arc<Mutex<VmStruct>>),
+    BoundMethod(Arc<VmBoundMethod>),
     Array(Vec<VmValue>),
     Prompt(String),
     Dict(HashMap<String, VmValue>),
+    /// A handle to an in-flight async task.
+    Future(Arc<JadeFuture>),
     Nil,
+}
+
+/// A handle to a spawned async task.  `Arc<JadeFuture>` is `Send + Sync` because
+/// `Mutex` makes the inner `Option<JoinHandle>` safe to share across threads.
+pub struct JadeFuture {
+    pub handle: Mutex<Option<JoinHandle<Result<(VmValue, i64)>>>>,
+}
+
+impl Drop for JadeFuture {
+    fn drop(&mut self) {
+        // Abort any un-awaited task so it does not run forever as a detached thread.
+        let guard = self.handle.get_mut().unwrap_or_else(|e| e.into_inner());
+        if let Some(handle) = guard.take() {
+            handle.abort();
+        }
+    }
 }
 
 pub struct VmStruct {
@@ -47,8 +66,8 @@ pub struct VmStruct {
 }
 
 pub struct VmBoundMethod {
-    pub receiver: Rc<RefCell<VmStruct>>,
-    pub method: Rc<CompiledFn>,
+    pub receiver: Arc<Mutex<VmStruct>>,
+    pub method: Arc<CompiledFn>,
 }
 
 impl std::fmt::Debug for VmValue {
@@ -61,14 +80,15 @@ impl std::fmt::Debug for VmValue {
             VmValue::Fn(cf)   => write!(f, "Fn({})", cf.params.join(", ")),
             VmValue::Closure(cf, _) => write!(f, "Closure({})", cf.params.join(", ")),
             VmValue::Struct(rc) => {
-                let inst = rc.borrow();
+                let inst = rc.lock().unwrap_or_else(|e| e.into_inner());
                 write!(f, "{} {{...}}", inst.type_name)
             }
             VmValue::BoundMethod(_) => write!(f, "<bound method>"),
             VmValue::Array(v) => write!(f, "Array[{} elem(s)]", v.len()),
-            VmValue::Prompt(s) => write!(f, "Prompt({:?})", s),
-            VmValue::Dict(m)  => write!(f, "Dict({} key(s))", m.len()),
-            VmValue::Nil      => write!(f, "Nil"),
+            VmValue::Prompt(s)  => write!(f, "Prompt({:?})", s),
+            VmValue::Dict(m)    => write!(f, "Dict({} key(s))", m.len()),
+            VmValue::Future(_)  => write!(f, "Future"),
+            VmValue::Nil        => write!(f, "Nil"),
         }
     }
 }
@@ -107,6 +127,7 @@ pub fn value_to_display(v: &VmValue) -> String {
         VmValue::Struct(_)      => "<struct>".to_string(),
         VmValue::BoundMethod(_) => "<bound method>".to_string(),
         VmValue::Prompt(_)      => "<prompt>".to_string(),
+        VmValue::Future(_)      => "<future>".to_string(),
         VmValue::Nil            => "nil".to_string(),
     }
 }
@@ -121,11 +142,11 @@ pub struct VmState {
     /// All top-level (global) bindings after execution.
     pub globals: HashMap<String, VmValue>,
     /// Extend-block method tables: `type_name → method_name → fn`.
-    pub extend_methods: HashMap<String, HashMap<String, Rc<CompiledFn>>>,
+    pub extend_methods: HashMap<String, HashMap<String, Arc<CompiledFn>>>,
     /// Struct field definitions (needed for struct instantiation validation).
     pub struct_defs: HashMap<String, Vec<StructFieldDef>>,
     /// Optional LLM inference backend.
-    pub inference_backend: Option<Box<dyn llm::InferenceBackend>>,
+    pub inference_backend: Option<std::sync::Arc<dyn llm::InferenceBackend>>,
     pub conversation_history: Vec<llm::Message>,
     pub token_count: i64,
     pub max_retries: usize,
@@ -189,11 +210,33 @@ impl VmState {
         state.apply_opts(opts);
         state
     }
+
+    /// Create a snapshot of this state suitable for passing to a spawned async task.
+    ///
+    /// Globals, struct_defs, and extend_methods are cloned (value snapshot).
+    /// The inference backend is Arc-cloned so both tasks share the same connection pool.
+    /// Mutations inside the spawned task do NOT propagate back, except token counts:
+    /// the child starts at 0 and returns its delta, which the parent accumulates on Await/Join.
+    pub fn new_for_spawn(&self) -> Self {
+        VmState {
+            raised_exception: None,
+            globals: self.globals.clone(),
+            extend_methods: self.extend_methods.clone(),
+            struct_defs: self.struct_defs.clone(),
+            inference_backend: self.inference_backend.clone(),
+            conversation_history: self.conversation_history.clone(),
+            token_count: 0,
+            max_retries: self.max_retries,
+            default_model: self.default_model.clone(),
+            source_dir: self.source_dir.clone(),
+            import_stack: HashSet::new(),
+        }
+    }
 }
 
 /// Options for an `vm::run` invocation.
 pub struct VmOpts {
-    pub backend: Option<Box<dyn llm::InferenceBackend>>,
+    pub backend: Option<std::sync::Arc<dyn llm::InferenceBackend>>,
     pub default_model: String,
     pub max_retries: usize,
     /// Directory of the source file being run — used to resolve relative `use` paths.
@@ -215,10 +258,10 @@ impl Default for VmOpts {
 // ── Public entry point ────────────────────────────────────────────────────────
 
 /// Execute a compiled program and return the populated global state.
-pub fn run(program: CompiledProgram, opts: VmOpts) -> Result<VmState> {
+pub async fn run(program: CompiledProgram, opts: VmOpts) -> Result<VmState> {
     let mut state = VmState::new();
     state.apply_opts(opts);
-    run_with_state(program, &mut state)?;
+    run_with_state(program, &mut state).await?;
     Ok(state)
 }
 
@@ -226,13 +269,14 @@ pub fn run(program: CompiledProgram, opts: VmOpts) -> Result<VmState> {
 ///
 /// This is the public entry point for the REPL — it lets each snippet share
 /// globals, struct definitions, and extend-block methods with prior snippets.
-pub fn run_incremental(program: CompiledProgram, state: &mut VmState) -> Result<()> {
-    run_with_state(program, state)
+pub async fn run_incremental(program: CompiledProgram, state: &mut VmState) -> Result<()> {
+    run_with_state(program, state).await
 }
+
 
 /// Execute a compiled program against an existing `VmState`.
 /// Used internally for imports so they share globals/struct_defs/extend_methods.
-fn run_with_state(program: CompiledProgram, state: &mut VmState) -> Result<()> {
+async fn run_with_state(program: CompiledProgram, state: &mut VmState) -> Result<()> {
     // Merge compile-time metadata into the shared state.
     for (k, v) in program.struct_defs {
         state.struct_defs.insert(k, v);
@@ -242,7 +286,7 @@ fn run_with_state(program: CompiledProgram, state: &mut VmState) -> Result<()> {
     }
 
     let mut slots: Vec<VmValue> = vec![VmValue::Nil; program.top_n_slots as usize];
-    execute_chunk(&program.top, &mut slots, state)?;
+    execute_chunk(&program.top, &mut slots, state).await?;
     Ok(())
 }
 
@@ -253,7 +297,7 @@ fn run_with_state(program: CompiledProgram, state: &mut VmState) -> Result<()> {
 fn make_vm_runtime_error(message: String) -> VmValue {
     let mut fields = HashMap::new();
     fields.insert("message".to_string(), VmValue::Str(message));
-    VmValue::Struct(Rc::new(RefCell::new(VmStruct {
+    VmValue::Struct(Arc::new(Mutex::new(VmStruct {
         type_name: "RuntimeError".to_string(),
         fields,
     })))
@@ -261,7 +305,8 @@ fn make_vm_runtime_error(message: String) -> VmValue {
 
 /// Execute `chunk` with the provided register frame.  Returns `Some(value)` if
 /// a `Return` instruction was executed, `None` if execution ended normally.
-fn execute_chunk(
+#[async_recursion::async_recursion]
+async fn execute_chunk(
     chunk: &Chunk,
     slots: &mut Vec<VmValue>,
     state: &mut VmState,
@@ -346,7 +391,8 @@ fn execute_chunk(
                     .unwrap_or_else(|| std::path::Path::new("."))
                     .to_path_buf();
 
-                let result = (|| -> Result<()> {
+                // Compile in a sync closure (lex/parse/emit are all sync).
+                let compile_result: Result<crate::compiler::emit::CompiledProgram> = (|| {
                     let source = std::fs::read_to_string(&canon).map_err(|_| {
                         JadeError::ImportNotFound { path: path.clone(), span }
                     })?;
@@ -380,9 +426,13 @@ fn execute_chunk(
                         crate::compiler::type_infer::infer(program)?
                     };
 
-                    let compiled = crate::compiler::emit::emit(tprogram)?;
-                    run_with_state(compiled, state)
+                    crate::compiler::emit::emit(tprogram)
                 })();
+
+                let result = match compile_result {
+                    Ok(compiled) => run_with_state(compiled, state).await,
+                    Err(e) => Err(e),
+                };
 
                 // Always restore source_dir and release the import_stack entry.
                 state.source_dir = prev_dir;
@@ -398,16 +448,15 @@ fn execute_chunk(
             Instr::LoadStr(d, s)   => set(slots, *d, VmValue::Str(s.clone())),
             Instr::LoadNil(d)      => set(slots, *d, VmValue::Nil),
             Instr::LoadFn(d, idx)  => {
-                let cf = Rc::clone(&chunk.fn_defs[*idx]);
+                let cf = Arc::clone(&chunk.fn_defs[*idx]);
                 set(slots, *d, VmValue::Fn(cf));
             }
             Instr::MakeClosure(d, idx) => {
-                let cf = Rc::clone(&chunk.fn_defs[*idx]);
-                // Capture a snapshot of all current globals at closure-creation time.
+                let cf = Arc::clone(&chunk.fn_defs[*idx]);
                 let captured: HashMap<String, VmValue> = state.globals.iter()
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect();
-                set(slots, *d, VmValue::Closure(cf, Rc::new(captured)));
+                set(slots, *d, VmValue::Closure(cf, Arc::new(captured)));
             }
             Instr::Move(d, s) => {
                 let v = get(slots, *s).clone();
@@ -607,7 +656,7 @@ fn execute_chunk(
             Instr::Call(dest, callee_reg, arg_regs) => {
                 let callee = get(slots, *callee_reg).clone();
                 let args: Vec<VmValue> = arg_regs.iter().map(|&r| get(slots, r).clone()).collect();
-                let result = vm_try!(call_value(callee, args, state, span));
+                let result = vm_try!(call_value(callee, args, state, span).await);
                 set(slots, *dest, result);
             }
             Instr::Return(opt_reg) => {
@@ -672,7 +721,7 @@ fn execute_chunk(
                     }
                     fields.insert(fname.clone(), val);
                 }
-                set(slots, *dest, VmValue::Struct(Rc::new(RefCell::new(VmStruct {
+                set(slots, *dest, VmValue::Struct(Arc::new(Mutex::new(VmStruct {
                     type_name: type_name.clone(),
                     fields,
                 }))));
@@ -681,14 +730,17 @@ fn execute_chunk(
                 let obj = get(slots, *obj_reg).clone();
                 match obj {
                     VmValue::Struct(rc) => {
-                        let type_name = rc.borrow().type_name.clone();
-                        if let Some(v) = rc.borrow().fields.get(field.as_str()).cloned() {
+                        let (type_name, field_val) = {
+                            let guard = rc.lock().unwrap_or_else(|e| e.into_inner());
+                            (guard.type_name.clone(), guard.fields.get(field.as_str()).cloned())
+                        };
+                        if let Some(v) = field_val {
                             set(slots, *dest, v);
                         } else if let Some(methods) = state.extend_methods.get(&type_name) {
                             if let Some(mfn) = methods.get(field.as_str()) {
-                                set(slots, *dest, VmValue::BoundMethod(Rc::new(VmBoundMethod {
+                                set(slots, *dest, VmValue::BoundMethod(Arc::new(VmBoundMethod {
                                     receiver: rc,
-                                    method: Rc::clone(mfn),
+                                    method: Arc::clone(mfn),
                                 })));
                             } else {
                                 vm_err!(JadeError::UndefinedField { type_name, field: field.clone(), span });
@@ -705,17 +757,22 @@ fn execute_chunk(
                 let obj = get(slots, *obj_reg).clone();
                 match obj {
                     VmValue::Struct(rc) => {
-                        {
-                            let b = rc.borrow();
-                            if !b.fields.contains_key(field.as_str()) {
-                                vm_err!(JadeError::UndefinedField {
-                                    type_name: b.type_name.clone(),
-                                    field: field.clone(),
-                                    span,
-                                });
+                        let error_type_name = {
+                            let guard = rc.lock().unwrap_or_else(|e| e.into_inner());
+                            if guard.fields.contains_key(field.as_str()) {
+                                None
+                            } else {
+                                Some(guard.type_name.clone())
                             }
+                        };
+                        if let Some(type_name) = error_type_name {
+                            vm_err!(JadeError::UndefinedField {
+                                type_name,
+                                field: field.clone(),
+                                span,
+                            });
                         }
-                        rc.borrow_mut().fields.insert(field.clone(), val);
+                        rc.lock().unwrap_or_else(|e| e.into_inner()).fields.insert(field.clone(), val);
                     }
                     _ => { vm_err!(JadeError::NotAStruct { span }); }
                 }
@@ -749,7 +806,7 @@ fn execute_chunk(
                     VmValue::Prompt(t) => t,
                     _ => { vm_err!(JadeError::NotAPrompt { name: "<expr>".to_string(), span }); }
                 };
-                let result = vm_try!(vm_prompt_deref(text, output_type.as_deref(), state, span));
+                let result = vm_try!(vm_prompt_deref(text, output_type.as_deref(), state, span).await);
                 set(slots, *dest, result);
             }
 
@@ -796,10 +853,70 @@ fn execute_chunk(
 
             Instr::GetTypeName(dest, src) => {
                 let name = match get(slots, *src) {
-                    VmValue::Struct(rc) => rc.borrow().type_name.clone(),
+                    VmValue::Struct(rc) => rc.lock().unwrap_or_else(|e| e.into_inner()).type_name.clone(),
                     _ => String::new(),
                 };
                 set(slots, *dest, VmValue::Str(name));
+            }
+
+            // ── Async ─────────────────────────────────────────────────────────
+            Instr::Spawn(dest, callee_reg, arg_regs) => {
+                let callee = get(slots, *callee_reg).clone();
+                let args: Vec<VmValue> = arg_regs.iter().map(|&r| get(slots, r).clone()).collect();
+                let child_state = state.new_for_spawn();
+                let handle = tokio::spawn(call_value_standalone(callee, args, child_state, span));
+                set(slots, *dest, VmValue::Future(Arc::new(JadeFuture {
+                    handle: Mutex::new(Some(handle)),
+                })));
+            }
+            Instr::Await(dest, future_reg) => {
+                let fut_val = get(slots, *future_reg).clone();
+                match fut_val {
+                    VmValue::Future(jade_fut) => {
+                        // SAFETY: .take() consumes the JoinHandle as an owned value before
+                        // reaching .await, so the MutexGuard is dropped synchronously here —
+                        // std::sync::MutexGuard is never held across an await point.
+                        let handle = vm_try!(jade_fut.handle.lock().unwrap_or_else(|e| e.into_inner()).take()
+                            .ok_or(JadeError::DoubleAwait { span }));
+                        let join_result = handle.await;
+                        let task_result = vm_try!(join_result.map_err(|e| JadeError::AsyncPanic {
+                            message: e.to_string(),
+                            span,
+                        }));
+                        let (value, child_tokens) = vm_try!(task_result);
+                        state.token_count += child_tokens;
+                        state.globals.insert("__tokens__".to_string(), VmValue::Int(state.token_count));
+                        set(slots, *dest, value);
+                    }
+                    _ => { vm_err!(JadeError::NotAFuture { span }); }
+                }
+            }
+            Instr::Join(dest, future_regs) => {
+                let mut handles = Vec::with_capacity(future_regs.len());
+                for &r in future_regs {
+                    match get(slots, r).clone() {
+                        VmValue::Future(jade_fut) => {
+                            // SAFETY: same as Instr::Await — .take() is synchronous.
+                            let handle = vm_try!(jade_fut.handle.lock().unwrap_or_else(|e| e.into_inner()).take()
+                                .ok_or(JadeError::DoubleAwait { span }));
+                            handles.push(handle);
+                        }
+                        _ => { vm_err!(JadeError::NotAFuture { span }); }
+                    }
+                }
+                let mut results = Vec::with_capacity(handles.len());
+                for handle in handles {
+                    let join_result = handle.await;
+                    let task_result = vm_try!(join_result.map_err(|e| JadeError::AsyncPanic {
+                        message: e.to_string(),
+                        span,
+                    }));
+                    let (value, child_tokens) = vm_try!(task_result);
+                    state.token_count += child_tokens;
+                    results.push(value);
+                }
+                state.globals.insert("__tokens__".to_string(), VmValue::Int(state.token_count));
+                set(slots, *dest, VmValue::Array(results));
             }
         }
     }
@@ -808,14 +925,15 @@ fn execute_chunk(
 
 // ── Call dispatch ─────────────────────────────────────────────────────────────
 
-fn call_value(
+#[async_recursion::async_recursion]
+async fn call_value(
     callee: VmValue,
     args: Vec<VmValue>,
     state: &mut VmState,
     span: Span,
 ) -> Result<VmValue> {
     match callee {
-        VmValue::Fn(cf) => call_fn(&cf, args, state, span),
+        VmValue::Fn(cf) => call_fn(&cf, args, state, span).await,
         VmValue::Closure(cf, captured) => {
             // Temporarily inject captured variables into globals so the closure body
             // sees them via GetGlobal. Save any displaced values and restore after.
@@ -824,7 +942,7 @@ fn call_value(
                 let old = state.globals.insert(k.clone(), v.clone());
                 saved.push((k.clone(), old));
             }
-            let result = call_fn(&cf, args, state, span);
+            let result = call_fn(&cf, args, state, span).await;
             for (k, old) in saved {
                 match old {
                     Some(v) => { state.globals.insert(k, v); }
@@ -834,17 +952,32 @@ fn call_value(
             result
         }
         VmValue::BoundMethod(bm) => {
-            let method = Rc::clone(&bm.method);
+            let method = Arc::clone(&bm.method);
             let mut full_args = Vec::with_capacity(args.len() + 1);
-            full_args.push(VmValue::Struct(Rc::clone(&bm.receiver)));
+            full_args.push(VmValue::Struct(Arc::clone(&bm.receiver)));
             full_args.extend(args);
-            call_fn(&method, full_args, state, span)
+            call_fn(&method, full_args, state, span).await
         }
         _ => Err(JadeError::NotCallable { span }),
     }
 }
 
-fn call_fn(
+/// Standalone version of `call_value` that owns its `VmState`, suitable for
+/// passing to `tokio::spawn` where borrowed state cannot cross thread boundaries.
+/// Returns `(value, token_delta)` so the parent can accumulate LLM token counts.
+#[async_recursion::async_recursion]
+async fn call_value_standalone(
+    callee: VmValue,
+    args: Vec<VmValue>,
+    mut state: VmState,
+    span: Span,
+) -> Result<(VmValue, i64)> {
+    let value = call_value(callee, args, &mut state, span).await?;
+    Ok((value, state.token_count))
+}
+
+#[async_recursion::async_recursion]
+async fn call_fn(
     cf: &CompiledFn,
     args: Vec<VmValue>,
     state: &mut VmState,
@@ -864,28 +997,28 @@ fn call_fn(
     for (i, v) in args.into_iter().enumerate() {
         frame[i] = v;
     }
-    let result = execute_chunk(&cf.chunk, &mut frame, state)?;
+    let result = execute_chunk(&cf.chunk, &mut frame, state).await?;
     Ok(result.unwrap_or(VmValue::Nil))
 }
 
 // ── Prompt deref ──────────────────────────────────────────────────────────────
 
-fn vm_prompt_deref(
+async fn vm_prompt_deref(
     prompt_text: String,
     output_type: Option<&str>,
     state: &mut VmState,
     span: Span,
 ) -> Result<VmValue> {
-    let initial_resp = {
-        let backend = state.inference_backend.as_ref()
-            .ok_or(JadeError::MissingApiKey { span })?;
-        backend.infer(llm::InferenceRequest {
-            prompt: prompt_text.clone(),
-            model: state.default_model.clone(),
-            history: state.conversation_history.clone(),
-            max_tokens: DEFAULT_MAX_TOKENS,
-        }, span)?
-    };
+    // Clone the Arc so we don't hold a borrow of state across .await points.
+    let backend = state.inference_backend.as_ref()
+        .ok_or(JadeError::MissingApiKey { span })?
+        .clone();
+    let initial_resp = backend.infer(llm::InferenceRequest {
+        prompt: prompt_text.clone(),
+        model: state.default_model.clone(),
+        history: state.conversation_history.clone(),
+        max_tokens: DEFAULT_MAX_TOKENS,
+    }, span).await?;
 
     state.conversation_history.push(llm::Message { role: "user".to_string(),      content: prompt_text });
     state.conversation_history.push(llm::Message { role: "assistant".to_string(), content: initial_resp.text.clone() });
@@ -927,16 +1060,12 @@ fn vm_prompt_deref(
                 }
 
                 // Send the coercion error back to the LLM and collect its correction.
-                let retry = {
-                    let backend = state.inference_backend.as_ref()
-                        .ok_or(JadeError::MissingApiKey { span })?;
-                    backend.infer(llm::InferenceRequest {
-                        prompt: correction.clone(),
-                        model: state.default_model.clone(),
-                        history: state.conversation_history.clone(),
-                        max_tokens: retry_max_tokens,
-                    }, span)?
-                };
+                let retry = backend.infer(llm::InferenceRequest {
+                    prompt: correction.clone(),
+                    model: state.default_model.clone(),
+                    history: state.conversation_history.clone(),
+                    max_tokens: retry_max_tokens,
+                }, span).await?;
                 state.conversation_history.push(llm::Message {
                     role: "user".to_string(), content: correction,
                 });
@@ -1058,7 +1187,7 @@ fn vm_coerce_struct(
         }
     }
 
-    Ok(VmValue::Struct(Rc::new(RefCell::new(VmStruct {
+    Ok(VmValue::Struct(Arc::new(Mutex::new(VmStruct {
         type_name: type_name.to_string(),
         fields,
     }))))
@@ -1497,6 +1626,17 @@ fn instr_max_reg(instr: &Instr) -> u32 {
         Instr::SetupHandler(r, _)  => *r,
         Instr::PopHandler          => 0,
         Instr::GetTypeName(d, s)   => (*d).max(*s),
+        Instr::Spawn(d, c, args) => {
+            let mut m = (*d).max(*c);
+            for &a in args { m = m.max(a); }
+            m
+        }
+        Instr::Await(d, s) => (*d).max(*s),
+        Instr::Join(d, regs) => {
+            let mut m = *d;
+            for &r in regs { m = m.max(r); }
+            m
+        }
     }
 }
 
@@ -1515,7 +1655,11 @@ mod tests {
         let program = parser::parse(tokens).expect("parse failed");
         let tprogram = type_infer::infer(program).expect("type inference failed");
         let compiled = emit::emit(tprogram).expect("emit failed");
-        run(compiled, VmOpts::default())
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime")
+            .block_on(run(compiled, VmOpts::default()))
     }
 
     fn get_int(state: &VmState, name: &str) -> i64 {

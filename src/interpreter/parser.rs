@@ -9,6 +9,8 @@ struct Parser {
     pos: usize,
     /// Depth of nested `fn` definitions. Used to detect and reject nested fns.
     fn_depth: usize,
+    /// Depth of nested `async fn` definitions. Allows `await` to know it is inside an async context.
+    async_fn_depth: usize,
     /// When false, a bare identifier followed by `{` is NOT parsed as a struct
     /// literal. Set to false while parsing `if`/`while` conditions so that
     /// `while running { … }` does not try to read `running {…}` as a struct.
@@ -25,7 +27,7 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program> {
             span: Span { line: 1, col: 1 },
         });
     }
-    let mut parser = Parser { tokens, pos: 0, fn_depth: 0, struct_literal_allowed: true, in_print_call: false };
+    let mut parser = Parser { tokens, pos: 0, fn_depth: 0, async_fn_depth: 0, struct_literal_allowed: true, in_print_call: false };
     parser.parse_program()
 }
 
@@ -133,6 +135,7 @@ impl Parser {
         match self.peek().kind {
             TokenKind::Let    => self.parse_let(),
             TokenKind::Fn     => self.parse_fn(),
+            TokenKind::Async  => self.parse_async_fn(),
             TokenKind::Return => self.parse_return(),
             TokenKind::If     => self.parse_if(),
             TokenKind::While  => self.parse_while(),
@@ -285,6 +288,82 @@ impl Parser {
         self.fn_depth -= 1;
 
         Ok(Stmt::FnDef { name, params, body, span })
+    }
+
+    /// Parse `async fn <ident> ( <params> ) { <body> }`
+    fn parse_async_fn(&mut self) -> Result<Stmt> {
+        let span = self.peek().span;
+        self.advance(); // consume `async`
+
+        // Must be followed by `fn`
+        if self.peek().kind != TokenKind::Fn {
+            let t = self.peek().clone();
+            return Err(JadeError::UnexpectedToken {
+                expected: "fn after async".to_string(),
+                got: format!("{:?}", t.kind),
+                span: t.span,
+            });
+        }
+
+        // Nested async fn definitions are not allowed
+        if self.fn_depth > 0 {
+            return Err(JadeError::NestedFunction { span });
+        }
+
+        self.advance(); // consume `fn`
+
+        let name_token = self.peek().clone();
+        let name = match &name_token.kind {
+            TokenKind::Identifier(n) => {
+                let n = n.clone();
+                self.advance();
+                n
+            }
+            _ => return Err(JadeError::UnexpectedToken {
+                expected: "function name".to_string(),
+                got: format!("{:?}", name_token.kind),
+                span: name_token.span,
+            }),
+        };
+
+        self.expect(&TokenKind::LParen)?;
+        let mut params = Vec::new();
+        if self.peek().kind != TokenKind::RParen {
+            loop {
+                let param_token = self.peek().clone();
+                match &param_token.kind {
+                    TokenKind::Identifier(p) => {
+                        params.push(p.clone());
+                        self.advance();
+                    }
+                    _ => return Err(JadeError::UnexpectedToken {
+                        expected: "parameter name".to_string(),
+                        got: format!("{:?}", param_token.kind),
+                        span: param_token.span,
+                    }),
+                }
+                if self.peek().kind == TokenKind::Comma {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+        }
+        self.expect(&TokenKind::RParen)?;
+
+        // Optional `-> type` return annotation
+        if self.peek().kind == TokenKind::Arrow {
+            self.advance();
+            self.expect_ident("return type")?;
+        }
+
+        self.fn_depth += 1;
+        self.async_fn_depth += 1;
+        let body = self.parse_block()?;
+        self.async_fn_depth -= 1;
+        self.fn_depth -= 1;
+
+        Ok(Stmt::AsyncFnDef { name, params, body, span })
     }
 
     /// Parse `return <expr> ;` or `return ;`
@@ -767,6 +846,7 @@ impl Parser {
             Expr::PromptDeref  { span, .. } => *span,
             Expr::Dict         { span, .. } => *span,
             Expr::Closure      { span, .. } => *span,
+            Expr::Await        { span, .. } => *span,
         }
     }
 
@@ -782,6 +862,7 @@ impl Parser {
             tokens: sub_tokens,
             pos: 0,
             fn_depth,
+            async_fn_depth: 0,
             struct_literal_allowed: true,
             in_print_call: false,
         };
@@ -998,7 +1079,7 @@ impl Parser {
         Ok(left)
     }
 
-    /// Unary `~` (bitwise NOT), `!` (logical NOT), `-` (negation).
+    /// Unary `~` (bitwise NOT), `!` (logical NOT), `-` (negation), `await`.
     fn parse_unary(&mut self) -> Result<Expr> {
         match self.peek().kind {
             TokenKind::Tilde => {
@@ -1025,6 +1106,12 @@ impl Parser {
                 }
                 let operand = self.parse_unary()?;
                 Ok(Expr::UnaryOp { op: UnaryOpKind::Neg, operand: Box::new(operand), span })
+            }
+            TokenKind::Await => {
+                let span = self.peek().span;
+                self.advance();
+                let expr = self.parse_unary()?;
+                Ok(Expr::Await { expr: Box::new(expr), span })
             }
             _ => self.parse_call(),
         }

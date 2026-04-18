@@ -70,6 +70,7 @@ pub fn run_model_use(spec: &str) {
         model:    Some(model.to_string()),
         api_key:  None,
         max_retries: None,
+        max_parallel: None,
     };
 
     match crate::config::write_global_config(&section) {

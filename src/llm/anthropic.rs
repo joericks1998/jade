@@ -1,30 +1,48 @@
+use std::sync::Arc;
+
+use tokio::sync::Semaphore;
+
 use super::{InferenceBackend, InferenceRequest, InferenceResponse};
 use crate::interpreter::error::{JadeError, Result, Span};
 
 pub struct AnthropicBackend {
     api_key: String,
     default_model: String,
-    client: reqwest::blocking::Client,
+    client: reqwest::Client,
+    semaphore: Option<Arc<Semaphore>>,
 }
 
 impl AnthropicBackend {
-    pub fn new(api_key: &str, default_model: &str) -> Self {
-        AnthropicBackend {
+    pub fn new(api_key: &str, default_model: &str, max_parallel: Option<usize>) -> Result<Self> {
+        Ok(AnthropicBackend {
             api_key: api_key.to_string(),
             default_model: default_model.to_string(),
-            client: reqwest::blocking::Client::builder()
+            client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(60))
                 .build()
-                .expect("failed to build HTTP client"),
-        }
+                .map_err(|e| JadeError::InferenceError {
+                    message: format!("failed to build HTTP client: {e}"),
+                    span: Span { line: 0, col: 0 },
+                })?,
+            semaphore: max_parallel.map(|n| Arc::new(Semaphore::new(n))),
+        })
     }
 }
 
+#[async_trait::async_trait]
 impl InferenceBackend for AnthropicBackend {
-    fn infer(&self, req: InferenceRequest, span: Span) -> Result<InferenceResponse> {
+    async fn infer(&self, req: InferenceRequest, span: Span) -> Result<InferenceResponse> {
+        let _permit = if let Some(sem) = &self.semaphore {
+            Some(sem.acquire().await.map_err(|e| JadeError::InferenceError {
+                message: format!("semaphore error: {e}"),
+                span,
+            })?)
+        } else {
+            None
+        };
+
         let model = if req.model.is_empty() { &self.default_model } else { &req.model };
 
-        // Build messages array from history + new user prompt
         let mut messages: Vec<serde_json::Value> = req.history.iter().map(|m| {
             serde_json::json!({ "role": m.role, "content": m.content })
         }).collect();
@@ -43,11 +61,12 @@ impl InferenceBackend for AnthropicBackend {
             .header("content-type", "application/json")
             .json(&body)
             .send()
-            .map_err(|e| JadeError::InferenceError { message: e.to_string(), span })?;
+            .await
+            .map_err(|e: reqwest::Error| JadeError::InferenceError { message: e.to_string(), span })?;
 
         if !response.status().is_success() {
             let status = response.status();
-            let body_text = response.text().unwrap_or_default();
+            let body_text = response.text().await.unwrap_or_default();
             return Err(JadeError::InferenceError {
                 message: format!("Anthropic API returned HTTP {}: {}", status, body_text),
                 span,
@@ -55,7 +74,8 @@ impl InferenceBackend for AnthropicBackend {
         }
 
         let json: serde_json::Value = response.json()
-            .map_err(|e| JadeError::InferenceError { message: e.to_string(), span })?;
+            .await
+            .map_err(|e: reqwest::Error| JadeError::InferenceError { message: e.to_string(), span })?;
 
         let text = json["content"][0]["text"]
             .as_str()
