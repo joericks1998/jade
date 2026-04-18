@@ -174,7 +174,9 @@ fn decode_frame(buf: &[u8]) -> FrameResult {
             if payload_len != 8 {
                 return FrameResult::Error("malformed DONE frame".to_owned(), consumed);
             }
-            let tokens_used = u64::from_le_bytes(payload.try_into().unwrap());
+            let tokens_used = u64::from_le_bytes(
+                payload.try_into().expect("invariant: payload_len was checked to be 8 above"),
+            );
             FrameResult::Done(tokens_used, consumed)
         }
         0x03 => match std::str::from_utf8(payload) {

@@ -47,7 +47,17 @@ pub enum VmValue {
 /// A handle to a spawned async task.  `Arc<JadeFuture>` is `Send + Sync` because
 /// `Mutex` makes the inner `Option<JoinHandle>` safe to share across threads.
 pub struct JadeFuture {
-    pub handle: Mutex<Option<JoinHandle<Result<VmValue>>>>,
+    pub handle: Mutex<Option<JoinHandle<Result<(VmValue, i64)>>>>,
+}
+
+impl Drop for JadeFuture {
+    fn drop(&mut self) {
+        // Abort any un-awaited task so it does not run forever as a detached thread.
+        let guard = self.handle.get_mut().unwrap_or_else(|e| e.into_inner());
+        if let Some(handle) = guard.take() {
+            handle.abort();
+        }
+    }
 }
 
 pub struct VmStruct {
@@ -70,7 +80,7 @@ impl std::fmt::Debug for VmValue {
             VmValue::Fn(cf)   => write!(f, "Fn({})", cf.params.join(", ")),
             VmValue::Closure(cf, _) => write!(f, "Closure({})", cf.params.join(", ")),
             VmValue::Struct(rc) => {
-                let inst = rc.lock().unwrap();
+                let inst = rc.lock().unwrap_or_else(|e| e.into_inner());
                 write!(f, "{} {{...}}", inst.type_name)
             }
             VmValue::BoundMethod(_) => write!(f, "<bound method>"),
@@ -205,7 +215,8 @@ impl VmState {
     ///
     /// Globals, struct_defs, and extend_methods are cloned (value snapshot).
     /// The inference backend is Arc-cloned so both tasks share the same connection pool.
-    /// Mutations inside the spawned task do NOT propagate back.
+    /// Mutations inside the spawned task do NOT propagate back, except token counts:
+    /// the child starts at 0 and returns its delta, which the parent accumulates on Await/Join.
     pub fn new_for_spawn(&self) -> Self {
         VmState {
             raised_exception: None,
@@ -214,7 +225,7 @@ impl VmState {
             struct_defs: self.struct_defs.clone(),
             inference_backend: self.inference_backend.clone(),
             conversation_history: self.conversation_history.clone(),
-            token_count: self.token_count,
+            token_count: 0,
             max_retries: self.max_retries,
             default_model: self.default_model.clone(),
             source_dir: self.source_dir.clone(),
@@ -720,7 +731,7 @@ async fn execute_chunk(
                 match obj {
                     VmValue::Struct(rc) => {
                         let (type_name, field_val) = {
-                            let guard = rc.lock().unwrap();
+                            let guard = rc.lock().unwrap_or_else(|e| e.into_inner());
                             (guard.type_name.clone(), guard.fields.get(field.as_str()).cloned())
                         };
                         if let Some(v) = field_val {
@@ -747,7 +758,7 @@ async fn execute_chunk(
                 match obj {
                     VmValue::Struct(rc) => {
                         let error_type_name = {
-                            let guard = rc.lock().unwrap();
+                            let guard = rc.lock().unwrap_or_else(|e| e.into_inner());
                             if guard.fields.contains_key(field.as_str()) {
                                 None
                             } else {
@@ -761,7 +772,7 @@ async fn execute_chunk(
                                 span,
                             });
                         }
-                        rc.lock().unwrap().fields.insert(field.clone(), val);
+                        rc.lock().unwrap_or_else(|e| e.into_inner()).fields.insert(field.clone(), val);
                     }
                     _ => { vm_err!(JadeError::NotAStruct { span }); }
                 }
@@ -842,7 +853,7 @@ async fn execute_chunk(
 
             Instr::GetTypeName(dest, src) => {
                 let name = match get(slots, *src) {
-                    VmValue::Struct(rc) => rc.lock().unwrap().type_name.clone(),
+                    VmValue::Struct(rc) => rc.lock().unwrap_or_else(|e| e.into_inner()).type_name.clone(),
                     _ => String::new(),
                 };
                 set(slots, *dest, VmValue::Str(name));
@@ -862,14 +873,19 @@ async fn execute_chunk(
                 let fut_val = get(slots, *future_reg).clone();
                 match fut_val {
                     VmValue::Future(jade_fut) => {
-                        let handle = vm_try!(jade_fut.handle.lock().unwrap().take()
+                        // SAFETY: .take() consumes the JoinHandle as an owned value before
+                        // reaching .await, so the MutexGuard is dropped synchronously here —
+                        // std::sync::MutexGuard is never held across an await point.
+                        let handle = vm_try!(jade_fut.handle.lock().unwrap_or_else(|e| e.into_inner()).take()
                             .ok_or(JadeError::DoubleAwait { span }));
                         let join_result = handle.await;
                         let task_result = vm_try!(join_result.map_err(|e| JadeError::AsyncPanic {
                             message: e.to_string(),
                             span,
                         }));
-                        let value = vm_try!(task_result);
+                        let (value, child_tokens) = vm_try!(task_result);
+                        state.token_count += child_tokens;
+                        state.globals.insert("__tokens__".to_string(), VmValue::Int(state.token_count));
                         set(slots, *dest, value);
                     }
                     _ => { vm_err!(JadeError::NotAFuture { span }); }
@@ -880,7 +896,8 @@ async fn execute_chunk(
                 for &r in future_regs {
                     match get(slots, r).clone() {
                         VmValue::Future(jade_fut) => {
-                            let handle = vm_try!(jade_fut.handle.lock().unwrap().take()
+                            // SAFETY: same as Instr::Await — .take() is synchronous.
+                            let handle = vm_try!(jade_fut.handle.lock().unwrap_or_else(|e| e.into_inner()).take()
                                 .ok_or(JadeError::DoubleAwait { span }));
                             handles.push(handle);
                         }
@@ -894,8 +911,11 @@ async fn execute_chunk(
                         message: e.to_string(),
                         span,
                     }));
-                    results.push(vm_try!(task_result));
+                    let (value, child_tokens) = vm_try!(task_result);
+                    state.token_count += child_tokens;
+                    results.push(value);
                 }
+                state.globals.insert("__tokens__".to_string(), VmValue::Int(state.token_count));
                 set(slots, *dest, VmValue::Array(results));
             }
         }
@@ -944,14 +964,16 @@ async fn call_value(
 
 /// Standalone version of `call_value` that owns its `VmState`, suitable for
 /// passing to `tokio::spawn` where borrowed state cannot cross thread boundaries.
+/// Returns `(value, token_delta)` so the parent can accumulate LLM token counts.
 #[async_recursion::async_recursion]
 async fn call_value_standalone(
     callee: VmValue,
     args: Vec<VmValue>,
     mut state: VmState,
     span: Span,
-) -> Result<VmValue> {
-    call_value(callee, args, &mut state, span).await
+) -> Result<(VmValue, i64)> {
+    let value = call_value(callee, args, &mut state, span).await?;
+    Ok((value, state.token_count))
 }
 
 #[async_recursion::async_recursion]

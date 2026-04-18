@@ -14,7 +14,9 @@ pub const JADE_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Increment this whenever the shape of any serialized type changes so that
 /// caches from prior builds are unconditionally rejected without needing a
 /// version bump in Cargo.toml.
-pub const CACHE_FORMAT_VERSION: u32 = 2;
+/// v3: async migration added JadeType::AsyncFn/Future, TStmt::AsyncFnDef,
+///     TExprKind::Await, and Instr::Spawn/Await/Join — all serde-serialized.
+pub const CACHE_FORMAT_VERSION: u32 = 3;
 
 // ── Internal types ────────────────────────────────────────────────────────────
 
@@ -104,11 +106,25 @@ pub fn write_ast_cache(hash: &[u8; 32], source_path: &str, program: &Program) {
     };
 
     if let Ok(meta_json) = serde_json::to_vec(&meta) {
-        let _ = fs::write(dir.join("meta.json"), meta_json);
+        if let Err(e) = fs::write(dir.join("meta.json"), meta_json) {
+            #[cfg(debug_assertions)]
+            eprintln!("jade cache: failed to write meta.json: {e}");
+            let _ = e;
+        }
     }
 
-    if let Ok(ast_bytes) = bincode::serialize(program) {
-        let _ = fs::write(dir.join("ast.bin"), ast_bytes);
+    match bincode::serialize(program) {
+        Ok(ast_bytes) => {
+            if let Err(e) = fs::write(dir.join("ast.bin"), ast_bytes) {
+                #[cfg(debug_assertions)]
+                eprintln!("jade cache: failed to write ast.bin: {e}");
+                let _ = e;
+            }
+        }
+        #[cfg(debug_assertions)]
+        Err(e) => eprintln!("jade cache: failed to serialize AST: {e}"),
+        #[cfg(not(debug_assertions))]
+        Err(_) => {}
     }
 }
 
@@ -244,10 +260,24 @@ pub fn write_tir_cache(hash: &[u8; 32], source_path: &str, tprogram: &TProgram) 
         format_version: CACHE_FORMAT_VERSION,
     };
     if let Ok(meta_json) = serde_json::to_vec(&meta) {
-        let _ = fs::write(dir.join("meta.json"), meta_json);
+        if let Err(e) = fs::write(dir.join("meta.json"), meta_json) {
+            #[cfg(debug_assertions)]
+            eprintln!("jade cache: failed to write meta.json: {e}");
+            let _ = e;
+        }
     }
 
-    if let Ok(tir_bytes) = bincode::serialize(tprogram) {
-        let _ = fs::write(dir.join("tir.bin"), tir_bytes);
+    match bincode::serialize(tprogram) {
+        Ok(tir_bytes) => {
+            if let Err(e) = fs::write(dir.join("tir.bin"), tir_bytes) {
+                #[cfg(debug_assertions)]
+                eprintln!("jade cache: failed to write tir.bin: {e}");
+                let _ = e;
+            }
+        }
+        #[cfg(debug_assertions)]
+        Err(e) => eprintln!("jade cache: failed to serialize TIR: {e}"),
+        #[cfg(not(debug_assertions))]
+        Err(_) => {}
     }
 }

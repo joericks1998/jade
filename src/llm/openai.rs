@@ -13,16 +13,19 @@ pub struct OpenAiBackend {
 }
 
 impl OpenAiBackend {
-    pub fn new(api_key: &str, default_model: &str, max_parallel: Option<usize>) -> Self {
-        OpenAiBackend {
+    pub fn new(api_key: &str, default_model: &str, max_parallel: Option<usize>) -> Result<Self> {
+        Ok(OpenAiBackend {
             api_key: api_key.to_string(),
             default_model: default_model.to_string(),
             client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(60))
                 .build()
-                .expect("failed to build HTTP client"),
+                .map_err(|e| JadeError::InferenceError {
+                    message: format!("failed to build HTTP client: {e}"),
+                    span: Span { line: 0, col: 0 },
+                })?,
             semaphore: max_parallel.map(|n| Arc::new(Semaphore::new(n))),
-        }
+        })
     }
 }
 

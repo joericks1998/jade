@@ -543,12 +543,14 @@ fn emit_and<'ctx>(
     ctx.builder
         .build_conditional_branch(lhs, rhs_bb, merge_bb)
         .map_err(|e| e.to_string())?;
-    let lhs_end = ctx.builder.get_insert_block().unwrap();
+    let lhs_end = ctx.builder.get_insert_block()
+        .ok_or_else(|| "&&: builder lost insert block after lhs branch".to_string())?;
 
     ctx.builder.position_at_end(rhs_bb);
     let rhs = emit_expr(right, ctx)?.into_int_value();
     ctx.builder.build_unconditional_branch(merge_bb).map_err(|e| e.to_string())?;
-    let rhs_end = ctx.builder.get_insert_block().unwrap();
+    let rhs_end = ctx.builder.get_insert_block()
+        .ok_or_else(|| "&&: builder lost insert block after rhs branch".to_string())?;
 
     ctx.builder.position_at_end(merge_bb);
     let phi = ctx
@@ -580,12 +582,14 @@ fn emit_or<'ctx>(
     ctx.builder
         .build_conditional_branch(lhs, merge_bb, rhs_bb)
         .map_err(|e| e.to_string())?;
-    let lhs_end = ctx.builder.get_insert_block().unwrap();
+    let lhs_end = ctx.builder.get_insert_block()
+        .ok_or_else(|| "||: builder lost insert block after lhs branch".to_string())?;
 
     ctx.builder.position_at_end(rhs_bb);
     let rhs = emit_expr(right, ctx)?.into_int_value();
     ctx.builder.build_unconditional_branch(merge_bb).map_err(|e| e.to_string())?;
-    let rhs_end = ctx.builder.get_insert_block().unwrap();
+    let rhs_end = ctx.builder.get_insert_block()
+        .ok_or_else(|| "||: builder lost insert block after rhs branch".to_string())?;
 
     ctx.builder.position_at_end(merge_bb);
     let phi = ctx
