@@ -1,0 +1,601 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Jade 1.1.4 — Async / Await</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #f7faf8;
+      color: #1c2e1c;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 15px;
+      line-height: 1.6;
+    }
+
+    /* ── Top bar ── */
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      background: #1e7a2e;
+      color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 1.5rem;
+      height: 42px;
+      font-size: 0.85rem;
+      gap: 1rem;
+    }
+
+    .topbar-left {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+    }
+
+    .topbar-logo {
+      display: flex;
+      align-items: center;
+      gap: 0.45rem;
+      text-decoration: none;
+      color: #fff;
+      font-weight: 700;
+      font-size: 1rem;
+      letter-spacing: -0.3px;
+    }
+
+    .topbar-logo img {
+      width: 22px;
+      height: 22px;
+      object-fit: contain;
+      border-radius: 4px;
+      background: #fff;
+      padding: 2px;
+    }
+
+    .topbar-sep { opacity: 0.5; }
+
+    .topbar-title { opacity: 0.85; }
+
+    .topbar-right {
+      display: flex;
+      align-items: center;
+      gap: 1.2rem;
+    }
+
+    .topbar-right a {
+      color: rgba(255,255,255,0.85);
+      text-decoration: none;
+      font-size: 0.82rem;
+    }
+
+    .topbar-right a:hover { color: #fff; }
+
+    /* ── Layout ── */
+    .layout {
+      display: flex;
+      min-height: calc(100vh - 42px);
+    }
+
+    /* ── Sidebar ── */
+    .sidebar {
+      width: 240px;
+      flex-shrink: 0;
+      background: #edf4f0;
+      border-right: 1px solid #cde0d4;
+      padding: 1.5rem 0;
+      position: sticky;
+      top: 42px;
+      height: calc(100vh - 42px);
+      overflow-y: auto;
+    }
+
+    .sidebar-section {
+      margin-bottom: 1.4rem;
+      padding: 0 1rem;
+    }
+
+    .sidebar-section h4 {
+      font-size: 0.7rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      color: #5a7a5a;
+      margin-bottom: 0.45rem;
+    }
+
+    .sidebar-section ul { list-style: none; }
+
+    .sidebar-section ul li a {
+      display: block;
+      padding: 0.2rem 0.5rem;
+      border-radius: 4px;
+      color: #2e5c2e;
+      text-decoration: none;
+      font-size: 0.875rem;
+    }
+
+    .sidebar-section ul li a:hover,
+    .sidebar-section ul li a.active {
+      background: #c8e6d0;
+      color: #1e7a2e;
+    }
+
+    .sidebar-divider {
+      border: none;
+      border-top: 1px solid #cde0d4;
+      margin: 0.5rem 1rem 1rem;
+    }
+
+    /* ── Main content ── */
+    .content {
+      flex: 1;
+      max-width: 860px;
+      padding: 2.5rem 3rem 4rem;
+    }
+
+    .content h1 {
+      font-size: 2rem;
+      font-weight: 700;
+      color: #1c2e1c;
+      margin-bottom: 0.5rem;
+      letter-spacing: -0.5px;
+    }
+
+    .content .lead {
+      font-size: 1rem;
+      color: #4a6a4a;
+      margin-bottom: 2rem;
+      border-bottom: 1px solid #cde0d4;
+      padding-bottom: 1.5rem;
+    }
+
+    .content section {
+      margin-bottom: 3rem;
+      scroll-margin-top: 62px;
+    }
+
+    .content h2 {
+      font-size: 1.35rem;
+      font-weight: 700;
+      color: #1c2e1c;
+      margin-bottom: 0.75rem;
+      padding-bottom: 0.35rem;
+      border-bottom: 1px solid #cde0d4;
+    }
+
+    .content h3 {
+      font-size: 1rem;
+      font-weight: 700;
+      color: #1c2e1c;
+      margin: 1.25rem 0 0.5rem;
+    }
+
+    .content p { margin-bottom: 0.75rem; color: #2a4a2a; }
+
+    .content ul, .content ol {
+      margin: 0.5rem 0 0.75rem 1.5rem;
+      color: #2a4a2a;
+    }
+
+    .content li { margin-bottom: 0.25rem; }
+
+    .content a { color: #1e7a2e; text-decoration: none; }
+    .content a:hover { text-decoration: underline; }
+
+    code {
+      font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
+      font-size: 0.85em;
+      background: #e0ede6;
+      color: #1c4a1c;
+      padding: 0.1em 0.35em;
+      border-radius: 3px;
+    }
+
+    pre {
+      background: #e6f4eb;
+      color: #1c2e1c;
+      font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
+      font-size: 0.875rem;
+      line-height: 1.65;
+      padding: 1rem 1.25rem;
+      border-radius: 6px;
+      border: 1px solid #b6dcc2;
+      overflow-x: auto;
+      margin: 0.75rem 0 1rem;
+    }
+
+    pre code {
+      background: none;
+      color: inherit;
+      padding: 0;
+      font-size: inherit;
+      border-radius: 0;
+    }
+
+    .note {
+      background: #e6f4eb;
+      border-left: 3px solid #1e7a2e;
+      padding: 0.75rem 1rem;
+      border-radius: 0 6px 6px 0;
+      margin: 1rem 0;
+      font-size: 0.9rem;
+      color: #2a4a2a;
+    }
+
+    .note strong { color: #1e7a2e; }
+
+    .warn {
+      background: #fff8e6;
+      border-left: 3px solid #b07000;
+      padding: 0.75rem 1rem;
+      border-radius: 0 6px 6px 0;
+      margin: 1rem 0;
+      font-size: 0.9rem;
+      color: #4a3a00;
+    }
+
+    .warn strong { color: #b07000; }
+
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 0.75rem 0 1rem;
+      font-size: 0.9rem;
+    }
+
+    th {
+      text-align: left;
+      padding: 0.4rem 0.75rem;
+      background: #ddeee4;
+      border: 1px solid #b6dcc2;
+      font-weight: 700;
+      font-size: 0.8rem;
+      color: #2e5c2e;
+    }
+
+    td {
+      padding: 0.4rem 0.75rem;
+      border: 1px solid #cde0d4;
+      color: #2a4a2a;
+    }
+
+    td code { font-size: 0.85rem; }
+
+    tr:nth-child(even) td { background: #f0f8f3; }
+  </style>
+</head>
+<body>
+
+  <!-- ── Top bar ── -->
+  <div class="topbar">
+    <div class="topbar-left">
+      <a class="topbar-logo" href="index.html">
+        <img src="extras/logo.png" alt="Jade" />
+        jade
+      </a>
+      <span class="topbar-sep">»</span>
+      <span class="topbar-title">1.1.4 Documentation</span>
+    </div>
+    <div class="topbar-right">
+      <a href="https://github.com/joericks1998/jade">GitHub</a>
+    </div>
+  </div>
+
+  <!-- ── Page layout ── -->
+  <div class="layout">
+
+    <!-- ── Sidebar ── -->
+    <nav class="sidebar">
+      <div class="sidebar-section">
+        <h4>Getting Started</h4>
+        <ul>
+          <li><a href="index.html">Installation</a></li>
+          <li><a href="quickstart.html">Quick Start</a></li>
+        </ul>
+      </div>
+      <hr class="sidebar-divider" />
+      <div class="sidebar-section">
+        <h4>Language Reference</h4>
+        <ul>
+          <li><a href="variables.html">Variables</a></li>
+          <li><a href="expressions.html">Expressions</a></li>
+          <li><a href="operators.html">Operators</a></li>
+          <li><a href="types.html">Types</a></li>
+          <li><a href="functions.html">Functions</a></li>
+          <li><a href="control-flow.html">Control Flow</a></li>
+          <li><a href="structs.html">Structs</a></li>
+          <li><a href="imports.html">Imports</a></li>
+          <li><a href="llm.html">LLM Integration</a></li>
+          <li><a href="async.html" class="active">Async / Await</a></li>
+          <li><a href="exceptions.html">Exceptions</a></li>
+        </ul>
+      </div>
+      <hr class="sidebar-divider" />
+      <div class="sidebar-section">
+        <h4>CLI Reference</h4>
+        <ul>
+          <li><a href="cli.html">jade command</a></li>
+        </ul>
+      </div>
+      <hr class="sidebar-divider" />
+      <div class="sidebar-section">
+        <h4>Project</h4>
+        <ul>
+          <li><a href="changelog.html">Changelog</a></li>
+          <li><a href="https://github.com/joericks1998/jade">GitHub →</a></li>
+        </ul>
+      </div>
+    </nav>
+
+    <!-- ── Main content ── -->
+    <main class="content">
+
+      <h1>Async / Await</h1>
+      <p class="lead">
+        Jade supports concurrent LLM inference through <code>async fn</code> definitions and
+        <code>await</code> expressions. Multiple prompt dereferences can be in-flight at the same
+        time, reducing total wall-clock time when a program sends several independent prompts.
+      </p>
+
+      <!-- ── Overview ── -->
+      <section id="overview">
+        <h2>Overview</h2>
+        <p>
+          By default, a <code>?p</code> dereference blocks until the model responds. When many
+          independent prompts need answers, blocking on each one in sequence is wasteful.
+          <code>async fn</code> lets you express that a function's body may be deferred — the
+          call returns a <em>future</em> immediately, and execution of the body proceeds
+          concurrently with the rest of the program. The result is only demanded when you
+          <code>await</code> it.
+        </p>
+        <p>
+          Under <code>jade run</code>, async functions are dispatched onto the Tokio runtime.
+          Multiple async calls run concurrently: network round-trips to the LLM overlap instead
+          of stacking. Under the tree-walk evaluator (REPL / <code>jade eval</code>), async
+          functions execute synchronously one at a time, and a warning is printed to stderr.
+        </p>
+      </section>
+
+      <!-- ── Defining async functions ── -->
+      <section id="definition">
+        <h2>Defining an <code>async fn</code></h2>
+        <p>
+          Prefix <code>fn</code> with <code>async</code> to mark a function as asynchronous.
+          The rest of the syntax is identical to a regular function.
+        </p>
+        <pre><code>async fn &lt;name&gt;(&lt;params&gt;) {
+    &lt;body&gt;
+    return &lt;expr&gt;
+}</code></pre>
+        <p>
+          Calling an <code>async fn</code> does <em>not</em> run its body immediately. Instead
+          it returns a <strong>future</strong> — a pending computation. The body begins running
+          concurrently in the background (under <code>jade run</code>).
+        </p>
+        <pre><code>async fn fetch(q) {
+    prompt p = q
+    return await ?p
+}
+
+// Both calls start immediately — bodies run concurrently.
+let a = fetch("What is the capital of France?")
+let b = fetch("What is the capital of Germany?")
+
+// await blocks here, but only until each result is ready.
+print(await a)   // Paris
+print(await b)   // Berlin</code></pre>
+        <div class="note">
+          <strong>Note:</strong> Nested <code>async fn</code> definitions (an <code>async fn</code>
+          inside another function body) follow the same restriction as regular functions — they
+          are rejected at parse time with a <code>NestedFunction</code> error.
+        </div>
+      </section>
+
+      <!-- ── await expression ── -->
+      <section id="await">
+        <h2>The <code>await</code> Expression</h2>
+        <p>
+          <code>await</code> is a prefix expression that blocks the current context until the
+          future resolves, then produces the future's value.
+        </p>
+        <pre><code>let result = await &lt;expr&gt;</code></pre>
+        <p>
+          <code>&lt;expr&gt;</code> must evaluate to a future (the return value of an
+          <code>async fn</code> call). Applying <code>await</code> to any other value raises
+          <code>NotAFuture</code>. Awaiting the same future twice raises <code>DoubleAwait</code>.
+        </p>
+
+        <h3>Awaiting inside an async function</h3>
+        <p>
+          You can <code>await</code> a prompt dereference directly inside an <code>async fn</code>
+          body to suspend that task until the model responds, while other tasks continue running.
+        </p>
+        <pre><code>async fn summarize(text) {
+    prompt p = "Summarize in one sentence: " + text
+    return await ?p
+}</code></pre>
+
+        <h3>Awaiting at the top level</h3>
+        <p>
+          <code>await</code> can also appear at the top level of a program to collect results
+          from previously launched async calls.
+        </p>
+        <pre><code>let t1 = summarize("The quick brown fox...")
+let t2 = summarize("Four score and seven years...")
+
+let s1 = await t1
+let s2 = await t2
+print(s1)
+print(s2)</code></pre>
+      </section>
+
+      <!-- ── Concurrency model ── -->
+      <section id="concurrency">
+        <h2>Concurrency Model</h2>
+        <p>
+          Jade's async model follows a simple rule: calling an <code>async fn</code> starts the
+          work; <code>await</code> collects the result. The two operations are separate, which
+          is what enables overlap.
+        </p>
+        <ul>
+          <li>
+            <strong>Call phase</strong> — the <code>async fn</code> body is dispatched to the
+            Tokio runtime. The call expression returns a future handle immediately.
+          </li>
+          <li>
+            <strong>Concurrent phase</strong> — the caller continues executing (starting more
+            async calls, computing other values) while the async bodies run in the background.
+          </li>
+          <li>
+            <strong>Await phase</strong> — <code>await future</code> suspends the caller until
+            that specific task finishes and returns its value.
+          </li>
+        </ul>
+        <p>
+          Token accounting is performed per-task: each async task tracks the tokens it consumes
+          and adds them to <code>__tokens__</code> when the task completes.
+        </p>
+        <div class="warn">
+          <strong>REPL limitation:</strong> The tree-walk evaluator used by the interactive REPL
+          and <code>jade eval</code> does not run a Tokio runtime. Async functions execute
+          synchronously in that context, and a warning is printed to stderr. Use
+          <code>jade run</code> for true concurrent execution.
+        </div>
+      </section>
+
+      <!-- ── Patterns ── -->
+      <section id="patterns">
+        <h2>Common Patterns</h2>
+
+        <h3>Fan-out: send N prompts, collect all results</h3>
+        <pre><code>async fn ask(q) {
+    prompt p = q
+    return await ?p
+}
+
+let r1 = ask("Name a red fruit.")
+let r2 = ask("Name a blue fruit.")
+let r3 = ask("Name a green fruit.")
+
+print(await r1)
+print(await r2)
+print(await r3)</code></pre>
+        <p>
+          All three prompts are dispatched before any <code>await</code> is reached. The program
+          waits for each in order of collection, but the LLM calls run in parallel.
+        </p>
+
+        <h3>Async with typed dereference</h3>
+        <pre><code>async fn count_words(sentence) {
+    prompt p = "How many words in: " + sentence + "? Reply with only the number."
+    return await ?p |> int
+}
+
+let n = count_words("The quick brown fox")
+print(await n)   // integer word count</code></pre>
+        <p>
+          Typed dereference (<code>|&gt; int</code>, <code>|&gt; bool</code>, etc.) works inside
+          async functions. Retry logic applies per-task — each task independently retries up to
+          <code>max_retries</code> times before raising <code>PromptOverflow</code>.
+        </p>
+
+        <h3>Passing futures to functions</h3>
+        <p>
+          A future is a first-class value and can be passed to another function, stored in a
+          variable, or returned from a function. <code>await</code> can be applied wherever the
+          future value appears.
+        </p>
+        <pre><code>async fn get(q) {
+    prompt p = q
+    return await ?p
+}
+
+fn print_result(future) {
+    print(await future)
+}
+
+let f = get("What year did WWII end?")
+print_result(f)</code></pre>
+      </section>
+
+      <!-- ── Token accounting ── -->
+      <section id="tokens">
+        <h2>Token Accounting</h2>
+        <p>
+          Each async task accumulates the tokens it uses during inference and adds them to the
+          global <code>__tokens__</code> counter when the task finishes (i.e., when the future
+          resolves). This means <code>__tokens__</code> reflects the running total across all
+          completed tasks, both synchronous and async.
+        </p>
+        <pre><code>async fn ask(q) {
+    prompt p = q
+    return await ?p
+}
+
+let a = ask("hi")
+let b = ask("hello")
+
+let _ = await a
+let _ = await b
+
+print(__tokens__)   // total tokens from both tasks</code></pre>
+        <div class="note">
+          <strong>Note:</strong> If you read <code>__tokens__</code> before awaiting a task,
+          that task's tokens are not yet included. Always await all tasks before reading the
+          final token count.
+        </div>
+      </section>
+
+      <!-- ── Error reference ── -->
+      <section id="errors">
+        <h2>Error Reference</h2>
+        <table>
+          <thead>
+            <tr><th>Error</th><th>Cause</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>NotAFuture</code></td>
+              <td><code>await</code> applied to a value that is not a pending async result (e.g., an <code>int</code> or <code>str</code>)</td>
+            </tr>
+            <tr>
+              <td><code>DoubleAwait</code></td>
+              <td>The same future was awaited more than once — a future is consumed on first await</td>
+            </tr>
+            <tr>
+              <td><code>AsyncPanic</code></td>
+              <td>A spawned async task panicked internally; the panic message and source span are captured and reported</td>
+            </tr>
+            <tr>
+              <td><code>PromptOverflow</code></td>
+              <td>Inside an async task, a typed dereference exhausted all retries — same as in synchronous code</td>
+            </tr>
+            <tr>
+              <td><code>InferenceError</code></td>
+              <td>HTTP or API error from the provider inside an async task — propagated to the awaiting call site</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <!-- ── Relation to functions ── -->
+      <section id="related">
+        <h2>Related Pages</h2>
+        <ul>
+          <li><a href="functions.html">Functions</a> — regular <code>fn</code> syntax, closures, first-class functions</li>
+          <li><a href="llm.html">LLM Integration</a> — <code>prompt</code> declarations, <code>?</code> dereference, typed coercion, configuration</li>
+          <li><a href="exceptions.html">Exceptions</a> — how runtime errors surface and how to handle them</li>
+        </ul>
+      </section>
+
+    </main>
+  </div>
+
+<script src="copy.js"></script>
+</body>
+</html>
