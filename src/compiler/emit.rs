@@ -607,7 +607,7 @@ fn emit_expr(expr: &TExpr, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<Reg> {
             Ok(dest)
         }
 
-        TExprKind::Closure { params, body } => {
+        TExprKind::Closure { params, body, .. } => {
             let name = ctx.next_closure_name();
             let compiled = emit_fn(&name, params.clone(), body.clone(), span, ctx)?;
             let rc = Arc::new(compiled);

@@ -55,17 +55,33 @@ pub struct CodegenCtx<'ctx> {
     /// jade_join(futures: ptr, n: i32, results_out: ptr) -> void
     pub jade_join_fn: FunctionValue<'ctx>,
 
-    // ── Async codegen state ────────────────────────────────────────────────
-    /// When `Some(ty)`, `TStmt::Return` in an async body function converts its
-    /// value via `value_to_i64(val, ty)` before emitting `ret i64`.
+    // ── jade_rt dict runtime ───────────────────────────────────────────────
+    /// jade_dict_create() -> ptr
+    pub jade_dict_create_fn: FunctionValue<'ctx>,
+    /// jade_dict_set(ptr dict, ptr key, i64 value) -> void
+    pub jade_dict_set_fn: FunctionValue<'ctx>,
+    /// jade_dict_get(ptr dict, ptr key) -> i64
+    pub jade_dict_get_fn: FunctionValue<'ctx>,
+    /// jade_dict_len(ptr dict) -> i64
+    pub jade_dict_len_fn: FunctionValue<'ctx>,
+
+    // ── Async / dict codegen state ─────────────────────────────────────────
+    /// When `Some(ty)`, `TStmt::Return` in an async body or closure function
+    /// converts its value via `value_to_i64(val, ty)` before emitting `ret i64`.
     pub async_body_ret_ty: Option<JadeType>,
     /// Set to `true` when any async construct (spawn/await/join) is emitted.
-    /// Used to decide whether to link `-lJadeRuntime`.
     pub uses_async: bool,
+    /// Set to `true` when any dict runtime call is emitted.
+    pub uses_dicts: bool,
 
     // ── Heap type layouts ──────────────────────────────────────────────────
     /// `%jade.array = type { ptr data, i64 len, i64 cap }`
     pub array_ty: StructType<'ctx>,
+    /// `%jade.fn = type { ptr fn_ptr, ptr env_ptr }` — fat pointer for first-class functions.
+    pub jade_fn_ty: StructType<'ctx>,
+
+    /// Counter for unique closure body function names (`closure_0`, `closure_1`, …).
+    pub closure_counter: usize,
 
     /// Struct name → field names in definition order.
     /// Populated by the struct pre-pass before codegen begins.
@@ -118,6 +134,26 @@ impl<'ctx> CodegenCtx<'ctx> {
         let jade_join_ty = context.void_type().fn_type(&[ptr_ty.into(), i32_ty.into(), ptr_ty.into()], false);
         let jade_join_fn = module.add_function("jade_join", jade_join_ty, None);
 
+        // jade_dict_create() -> ptr
+        let jade_dict_create_ty = ptr_ty.fn_type(&[], false);
+        let jade_dict_create_fn = module.add_function("jade_dict_create", jade_dict_create_ty, None);
+
+        // jade_dict_set(ptr, ptr, i64) -> void
+        let jade_dict_set_ty = context.void_type().fn_type(&[ptr_ty.into(), ptr_ty.into(), i64_ty.into()], false);
+        let jade_dict_set_fn = module.add_function("jade_dict_set", jade_dict_set_ty, None);
+
+        // jade_dict_get(ptr, ptr) -> i64
+        let jade_dict_get_ty = i64_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], false);
+        let jade_dict_get_fn = module.add_function("jade_dict_get", jade_dict_get_ty, None);
+
+        // jade_dict_len(ptr) -> i64
+        let jade_dict_len_ty = i64_ty.fn_type(&[ptr_ty.into()], false);
+        let jade_dict_len_fn = module.add_function("jade_dict_len", jade_dict_len_ty, None);
+
+        // %jade.fn = type { ptr, ptr }  — fat pointer for first-class functions / closures
+        let jade_fn_ty = context.opaque_struct_type("jade.fn");
+        jade_fn_ty.set_body(&[ptr_ty.into(), ptr_ty.into()], false);
+
         CodegenCtx {
             context,
             module,
@@ -133,9 +169,16 @@ impl<'ctx> CodegenCtx<'ctx> {
             jade_spawn_fn,
             jade_await_fn,
             jade_join_fn,
+            jade_dict_create_fn,
+            jade_dict_set_fn,
+            jade_dict_get_fn,
+            jade_dict_len_fn,
             async_body_ret_ty: None,
             uses_async: false,
+            uses_dicts: false,
             array_ty,
+            jade_fn_ty,
+            closure_counter: 0,
             struct_field_order: HashMap::new(),
             struct_field_types: HashMap::new(),
         }
@@ -363,8 +406,8 @@ pub fn compile(program: TProgram, source_path: Option<&Path>, output_path: &Path
             }
         }
     }
-    // Link jade_rt if any async constructs were emitted.
-    if ctx.uses_async {
+    // Link jade_rt if any async or dict runtime calls were emitted.
+    if ctx.uses_async || ctx.uses_dicts {
         if let Ok(lib_dir) = std::env::var("JADE_RT_LIB") {
             cc.arg(format!("-L{}", lib_dir));
         } else {

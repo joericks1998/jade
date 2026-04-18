@@ -107,6 +107,9 @@ pub enum TExprKind {
     Closure {
         params: Vec<String>,
         body: Vec<TStmt>,
+        /// Variables captured from enclosing scopes, in order.
+        /// Each entry is (name, type_at_capture_site).
+        captures: Vec<(String, JadeType)>,
     },
     Await {
         expr: Box<TExpr>,
