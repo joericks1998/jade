@@ -1,4 +1,5 @@
-use std::{sync::{Arc, Mutex}, collections::{HashMap, HashSet}, path::PathBuf};
+use std::{sync::Arc, collections::{HashMap, HashSet}, path::PathBuf};
+use parking_lot::Mutex;
 use tokio::task::JoinHandle;
 
 use crate::{
@@ -53,7 +54,7 @@ pub struct JadeFuture {
 impl Drop for JadeFuture {
     fn drop(&mut self) {
         // Abort any un-awaited task so it does not run forever as a detached thread.
-        let guard = self.handle.get_mut().unwrap_or_else(|e| e.into_inner());
+        let guard = self.handle.get_mut();
         if let Some(handle) = guard.take() {
             handle.abort();
         }
@@ -80,7 +81,7 @@ impl std::fmt::Debug for VmValue {
             VmValue::Fn(cf)   => write!(f, "Fn({})", cf.params.join(", ")),
             VmValue::Closure(cf, _) => write!(f, "Closure({})", cf.params.join(", ")),
             VmValue::Struct(rc) => {
-                let inst = rc.lock().unwrap_or_else(|e| e.into_inner());
+                let inst = rc.lock();
                 write!(f, "{} {{...}}", inst.type_name)
             }
             VmValue::BoundMethod(_) => write!(f, "<bound method>"),
@@ -305,7 +306,6 @@ fn make_vm_runtime_error(message: String) -> VmValue {
 
 /// Execute `chunk` with the provided register frame.  Returns `Some(value)` if
 /// a `Return` instruction was executed, `None` if execution ended normally.
-#[async_recursion::async_recursion]
 async fn execute_chunk(
     chunk: &Chunk,
     slots: &mut Vec<VmValue>,
@@ -430,7 +430,7 @@ async fn execute_chunk(
                 })();
 
                 let result = match compile_result {
-                    Ok(compiled) => run_with_state(compiled, state).await,
+                    Ok(compiled) => Box::pin(run_with_state(compiled, state)).await,
                     Err(e) => Err(e),
                 };
 
@@ -731,7 +731,7 @@ async fn execute_chunk(
                 match obj {
                     VmValue::Struct(rc) => {
                         let (type_name, field_val) = {
-                            let guard = rc.lock().unwrap_or_else(|e| e.into_inner());
+                            let guard = rc.lock();
                             (guard.type_name.clone(), guard.fields.get(field.as_str()).cloned())
                         };
                         if let Some(v) = field_val {
@@ -758,7 +758,7 @@ async fn execute_chunk(
                 match obj {
                     VmValue::Struct(rc) => {
                         let error_type_name = {
-                            let guard = rc.lock().unwrap_or_else(|e| e.into_inner());
+                            let guard = rc.lock();
                             if guard.fields.contains_key(field.as_str()) {
                                 None
                             } else {
@@ -772,7 +772,7 @@ async fn execute_chunk(
                                 span,
                             });
                         }
-                        rc.lock().unwrap_or_else(|e| e.into_inner()).fields.insert(field.clone(), val);
+                        rc.lock().fields.insert(field.clone(), val);
                     }
                     _ => { vm_err!(JadeError::NotAStruct { span }); }
                 }
@@ -853,7 +853,7 @@ async fn execute_chunk(
 
             Instr::GetTypeName(dest, src) => {
                 let name = match get(slots, *src) {
-                    VmValue::Struct(rc) => rc.lock().unwrap_or_else(|e| e.into_inner()).type_name.clone(),
+                    VmValue::Struct(rc) => rc.lock().type_name.clone(),
                     _ => String::new(),
                 };
                 set(slots, *dest, VmValue::Str(name));
@@ -876,7 +876,7 @@ async fn execute_chunk(
                         // SAFETY: .take() consumes the JoinHandle as an owned value before
                         // reaching .await, so the MutexGuard is dropped synchronously here —
                         // std::sync::MutexGuard is never held across an await point.
-                        let handle = vm_try!(jade_fut.handle.lock().unwrap_or_else(|e| e.into_inner()).take()
+                        let handle = vm_try!(jade_fut.handle.lock().take()
                             .ok_or(JadeError::DoubleAwait { span }));
                         let join_result = handle.await;
                         let task_result = vm_try!(join_result.map_err(|e| JadeError::AsyncPanic {
@@ -897,7 +897,7 @@ async fn execute_chunk(
                     match get(slots, r).clone() {
                         VmValue::Future(jade_fut) => {
                             // SAFETY: same as Instr::Await — .take() is synchronous.
-                            let handle = vm_try!(jade_fut.handle.lock().unwrap_or_else(|e| e.into_inner()).take()
+                            let handle = vm_try!(jade_fut.handle.lock().take()
                                 .ok_or(JadeError::DoubleAwait { span }));
                             handles.push(handle);
                         }
@@ -925,7 +925,6 @@ async fn execute_chunk(
 
 // ── Call dispatch ─────────────────────────────────────────────────────────────
 
-#[async_recursion::async_recursion]
 async fn call_value(
     callee: VmValue,
     args: Vec<VmValue>,
