@@ -191,8 +191,15 @@ enum RtCommands {
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime")
+        .block_on(run_cli());
+}
+
+async fn run_cli() {
     let cli = Cli::parse();
 
     match cli.command {
