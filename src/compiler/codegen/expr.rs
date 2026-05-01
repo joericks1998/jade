@@ -102,8 +102,8 @@ pub fn emit_expr<'ctx>(
             ctx.call_rv(ctx.jade_await_fn, &[fut_ptr.into()], "await_res")
         }
 
-        // ── Unsupported in this backend ───────────────────────────────────────
-        PromptDeref { .. } => Err("prompt dereference is not supported in the LLVM backend".into()),
+        // ── Prompt dereference (?prompt) ──────────────────────────────────────
+        PromptDeref { expr: prompt_expr, .. } => emit_prompt_deref(prompt_expr, ctx),
     }
 }
 
@@ -547,6 +547,59 @@ fn emit_join<'ctx>(
     }
 
     Ok(header_ptr.into())
+}
+
+// ── Prompt dereference (?prompt) ─────────────────────────────────────────────
+
+/// Emit a `?prompt` expression by calling the extern `jade_infer` C function.
+///
+/// Signature: `char* jade_infer(ptr prompt, i64 prompt_len, ptr model, i64 model_len, i32 max_tokens)`
+///
+/// The model and max_tokens are baked in at compile time from the JADE_MODEL and
+/// JADE_MAX_TOKENS environment variables (defaulting to "default" / 2048).
+fn emit_prompt_deref<'ctx>(
+    prompt_expr: &TExpr,
+    ctx: &mut CodegenCtx<'ctx>,
+) -> Result<BasicValueEnum<'ctx>, String> {
+    ctx.uses_prompt = true;
+    let i64_ty = ctx.context.i64_type();
+    let i32_ty = ctx.context.i32_type();
+
+    // Evaluate the prompt expression to get a char* pointer.
+    let prompt_val = emit_expr(prompt_expr, ctx)?;
+    let prompt_ptr = as_pointer(prompt_val, ctx)?;
+
+    // Compute prompt length via strlen.
+    let prompt_len = ctx.call_rv(ctx.strlen_fn, &[prompt_ptr.into()], "prompt_len")?
+        .into_int_value();
+
+    // Bake model name at compile time.
+    let model_str = std::env::var("JADE_MODEL").unwrap_or_else(|_| "default".to_string());
+    let model_global = ctx.builder
+        .build_global_string_ptr(&model_str, "jade_model")
+        .map_err(|e| e.to_string())?
+        .as_pointer_value();
+    let model_len = i64_ty.const_int(model_str.len() as u64, false);
+
+    // Bake max_tokens at compile time.
+    let max_tokens_val: u32 = std::env::var("JADE_MAX_TOKENS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(2048);
+    let max_tokens = i32_ty.const_int(max_tokens_val as u64, false);
+
+    // Call jade_infer and return the heap-allocated result string.
+    ctx.call_rv(
+        ctx.jade_infer_fn,
+        &[
+            prompt_ptr.into(),
+            prompt_len.into(),
+            model_global.into(),
+            model_len.into(),
+            max_tokens.into(),
+        ],
+        "infer_result",
+    )
 }
 
 // ── Dict creation ─────────────────────────────────────────────────────────────

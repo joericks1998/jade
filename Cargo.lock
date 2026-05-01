@@ -628,6 +628,7 @@ dependencies = [
  "bincode",
  "clap",
  "inkwell",
+ "jade-protocol",
  "parking_lot",
  "reqwest",
  "serde",
@@ -635,6 +636,14 @@ dependencies = [
  "sha2",
  "tokio",
  "toml",
+]
+
+[[package]]
+name = "jade-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

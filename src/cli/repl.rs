@@ -12,8 +12,7 @@ use crate::interpreter::{
 /// subsequent ones without needing type-inference state to be threaded through.
 pub async fn run_repl(_verbose: bool) {
     let cfg = crate::config::load_config();
-    let backend = cfg.api_key.as_ref()
-        .and_then(|key| crate::llm::build_backend(&cfg.provider, key, &cfg.model, cfg.max_parallel).ok());
+    let backend = crate::llm::select_backend(&cfg);
 
     let opts = LlmOpts {
         backend,

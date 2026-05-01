@@ -52,6 +52,21 @@ pub fn build_backend(
     }
 }
 
+/// Select the inference backend automatically.
+///
+/// When `/dev/jade` is present (running on JADE OS), `JadeOsBackend` is returned
+/// unconditionally — no API key or `jade configure` is needed.
+///
+/// Otherwise falls back to whatever provider is configured in `~/.jade/config.toml`.
+/// Returns `None` if no `/dev/jade` exists and no API key has been configured.
+pub fn select_backend(config: &crate::config::JadeConfig) -> Option<Arc<dyn InferenceBackend>> {
+    if std::path::Path::new("/dev/jade").exists() {
+        return Some(Arc::new(jade_os::JadeOsBackend::new()));
+    }
+    config.api_key.as_ref()
+        .and_then(|key| build_backend(&config.provider, key, &config.model, config.max_parallel).ok())
+}
+
 /// Synchronous bridge: run an async `infer` call from the tree-walk REPL path.
 ///
 /// Uses `block_in_place` when a multi-threaded tokio runtime is active (REPL under
