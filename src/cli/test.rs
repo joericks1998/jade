@@ -117,10 +117,14 @@ async fn run_test_file(
     let compiled = emit::emit(tprogram)
         .map_err(|e| format!("compile error: {}", e))?;
 
-    let backend = api_key
-        .map(|key| crate::llm::build_backend(provider, key, model, None))
-        .transpose()
-        .map_err(|e| format!("config error: {}", e))?;
+    let backend = if std::path::Path::new("/dev/jade").exists() {
+        Some(std::sync::Arc::new(crate::llm::jade_os::JadeOsBackend::new()) as std::sync::Arc<dyn crate::llm::InferenceBackend>)
+    } else {
+        api_key
+            .map(|key| crate::llm::build_backend(provider, key, model, None))
+            .transpose()
+            .map_err(|e| format!("config error: {}", e))?
+    };
 
     let source_dir = path
         .canonicalize()

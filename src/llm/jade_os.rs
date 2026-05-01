@@ -15,6 +15,8 @@
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
 
+use jade_protocol::{Frame, FrameError};
+
 use crate::interpreter::error::{JadeError, Result, Span};
 use super::{InferenceBackend, InferenceRequest, InferenceResponse};
 
@@ -64,7 +66,17 @@ impl JadeOsBackend {
                 span,
             })?;
 
-        let payload = encode_request(&req).map_err(|e| JadeError::InferenceError {
+        // Build a jade_protocol InferenceRequest and encode it.
+        let proto_req = jade_protocol::InferenceRequest {
+            prompt: req.prompt,
+            model: req.model,
+            history: req.history.into_iter().map(|m| jade_protocol::Message {
+                role: m.role,
+                content: m.content,
+            }).collect(),
+            max_tokens: req.max_tokens,
+        };
+        let payload = proto_req.encode().map_err(|e| JadeError::InferenceError {
             message: format!("failed to encode inference request: {e}"),
             span,
         })?;
@@ -79,23 +91,23 @@ impl JadeOsBackend {
         let mut text = String::new();
 
         loop {
-            match decode_frame(&buf) {
-                FrameResult::Token(token, consumed) => {
+            match Frame::decode(&buf) {
+                Ok((Frame::Token(token), consumed)) => {
                     text.push_str(&token);
                     buf.drain(..consumed);
                 }
-                FrameResult::Done(tokens_used, consumed) => {
+                Ok((Frame::Done { tokens_used }, consumed)) => {
                     buf.drain(..consumed);
                     return Ok(InferenceResponse {
                         text,
                         tokens_used: tokens_used as i64,
                     });
                 }
-                FrameResult::Error(msg, consumed) => {
+                Ok((Frame::Error(msg), consumed)) => {
                     buf.drain(..consumed);
                     return Err(JadeError::InferenceError { message: msg, span });
                 }
-                FrameResult::Incomplete => {
+                Err(FrameError::Incomplete) => {
                     let n = dev.read(&mut read_tmp).map_err(|e| JadeError::InferenceError {
                         message: format!("read from {} failed: {e}", device_path),
                         span,
@@ -108,81 +120,13 @@ impl JadeOsBackend {
                     }
                     buf.extend_from_slice(&read_tmp[..n]);
                 }
-                FrameResult::UnknownType(t) => {
+                Err(e) => {
                     return Err(JadeError::InferenceError {
-                        message: format!("unknown frame type from daemon: {t:#04x}"),
+                        message: format!("frame decode error: {e}"),
                         span,
                     });
                 }
             }
         }
-    }
-}
-
-// ── Wire protocol ────────────────────────────────────────────────────────────
-
-
-
-
-fn encode_request(req: &InferenceRequest) -> std::result::Result<Vec<u8>, serde_json::Error> {
-    #[derive(serde::Serialize)]
-    struct Wire<'a> {
-        prompt: &'a str,
-        model: &'a str,
-        history: &'a [super::Message],
-        max_tokens: u32,
-    }
-    let json = serde_json::to_vec(&Wire {
-        prompt: &req.prompt,
-        model: &req.model,
-        history: &req.history,
-        max_tokens: req.max_tokens,
-    })?;
-    let len = json.len() as u32;
-    let mut buf = Vec::with_capacity(4 + json.len());
-    buf.extend_from_slice(&len.to_le_bytes());
-    buf.extend_from_slice(&json);
-    Ok(buf)
-}
-
-enum FrameResult {
-    Token(String, usize),
-    Done(u64, usize),
-    Error(String, usize),
-    Incomplete,
-    UnknownType(u8),
-}
-
-fn decode_frame(buf: &[u8]) -> FrameResult {
-    if buf.len() < 3 {
-        return FrameResult::Incomplete;
-    }
-    let frame_type = buf[0];
-    let payload_len = u16::from_le_bytes([buf[1], buf[2]]) as usize;
-    if buf.len() < 3 + payload_len {
-        return FrameResult::Incomplete;
-    }
-    let payload = &buf[3..3 + payload_len];
-    let consumed = 3 + payload_len;
-
-    match frame_type {
-        0x01 => match std::str::from_utf8(payload) {
-            Ok(s) => FrameResult::Token(s.to_owned(), consumed),
-            Err(_) => FrameResult::Error("daemon sent invalid UTF-8 in TOKEN frame".to_owned(), consumed),
-        },
-        0x02 => {
-            if payload_len != 8 {
-                return FrameResult::Error("malformed DONE frame".to_owned(), consumed);
-            }
-            let tokens_used = u64::from_le_bytes(
-                payload.try_into().expect("invariant: payload_len was checked to be 8 above"),
-            );
-            FrameResult::Done(tokens_used, consumed)
-        }
-        0x03 => match std::str::from_utf8(payload) {
-            Ok(s) => FrameResult::Error(s.to_owned(), consumed),
-            Err(_) => FrameResult::Error("daemon sent invalid UTF-8 in ERROR frame".to_owned(), consumed),
-        },
-        other => FrameResult::UnknownType(other),
     }
 }

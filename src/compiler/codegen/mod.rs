@@ -65,7 +65,11 @@ pub struct CodegenCtx<'ctx> {
     /// jade_dict_len(ptr dict) -> i64
     pub jade_dict_len_fn: FunctionValue<'ctx>,
 
-    // ── Async / dict codegen state ─────────────────────────────────────────
+    // ── jade_rt inference runtime ─────────────────────────────────────────
+    /// jade_infer(prompt: ptr, prompt_len: i64, model: ptr, model_len: i64, max_tokens: i32) -> ptr
+    pub jade_infer_fn: FunctionValue<'ctx>,
+
+    // ── Async / dict / prompt codegen state ───────────────────────────────
     /// When `Some(ty)`, `TStmt::Return` in an async body or closure function
     /// converts its value via `value_to_i64(val, ty)` before emitting `ret i64`.
     pub async_body_ret_ty: Option<JadeType>,
@@ -73,6 +77,8 @@ pub struct CodegenCtx<'ctx> {
     pub uses_async: bool,
     /// Set to `true` when any dict runtime call is emitted.
     pub uses_dicts: bool,
+    /// Set to `true` when a `?prompt` dereference is emitted (requires jade_infer symbol).
+    pub uses_prompt: bool,
 
     // ── Heap type layouts ──────────────────────────────────────────────────
     /// `%jade.array = type { ptr data, i64 len, i64 cap }`
@@ -150,6 +156,13 @@ impl<'ctx> CodegenCtx<'ctx> {
         let jade_dict_len_ty = i64_ty.fn_type(&[ptr_ty.into()], false);
         let jade_dict_len_fn = module.add_function("jade_dict_len", jade_dict_len_ty, None);
 
+        // jade_infer(prompt: ptr, prompt_len: i64, model: ptr, model_len: i64, max_tokens: i32) -> ptr
+        let jade_infer_ty = ptr_ty.fn_type(
+            &[ptr_ty.into(), i64_ty.into(), ptr_ty.into(), i64_ty.into(), i32_ty.into()],
+            false,
+        );
+        let jade_infer_fn = module.add_function("jade_infer", jade_infer_ty, None);
+
         // %jade.fn = type { ptr, ptr }  — fat pointer for first-class functions / closures
         let jade_fn_ty = context.opaque_struct_type("jade.fn");
         jade_fn_ty.set_body(&[ptr_ty.into(), ptr_ty.into()], false);
@@ -173,9 +186,11 @@ impl<'ctx> CodegenCtx<'ctx> {
             jade_dict_set_fn,
             jade_dict_get_fn,
             jade_dict_len_fn,
+            jade_infer_fn,
             async_body_ret_ty: None,
             uses_async: false,
             uses_dicts: false,
+            uses_prompt: false,
             array_ty,
             jade_fn_ty,
             closure_counter: 0,
@@ -406,8 +421,8 @@ pub fn compile(program: TProgram, source_path: Option<&Path>, output_path: &Path
             }
         }
     }
-    // Link jade_rt if any async or dict runtime calls were emitted.
-    if ctx.uses_async || ctx.uses_dicts {
+    // Link jade_rt if any async, dict, or prompt runtime calls were emitted.
+    if ctx.uses_async || ctx.uses_dicts || ctx.uses_prompt {
         if let Ok(lib_dir) = std::env::var("JADE_RT_LIB") {
             cc.arg(format!("-L{}", lib_dir));
         } else {
