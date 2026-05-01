@@ -22,4 +22,4 @@ toml = "0.8"
 bincode = "1"
 sha2 = "0.10"
 inkwell = { version = "0.8", features = ["llvm18-1"], optional = true }
-jade-protocol = { path = "../../jadeOS/jade-os/jade-protocol" }
+jade-protocol = { path = "../jade-protocol" }
