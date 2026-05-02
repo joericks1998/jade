@@ -45,10 +45,16 @@ pub enum VmValue {
     Nil,
 }
 
+/// Task result type: (value, token_delta, raised_exception).
+/// The third element carries the raised exception value so that parent tasks can
+/// re-raise it with the correct type (struct/string) rather than losing it.
+type TaskOutput = std::result::Result<(VmValue, i64), JadeError>;
+type TaskBundle = (TaskOutput, Option<VmValue>);
+
 /// A handle to a spawned async task.  `Arc<JadeFuture>` is `Send + Sync` because
 /// `Mutex` makes the inner `Option<JoinHandle>` safe to share across threads.
 pub struct JadeFuture {
-    pub handle: Mutex<Option<JoinHandle<Result<(VmValue, i64)>>>>,
+    pub handle: Mutex<Option<JoinHandle<TaskBundle>>>,
 }
 
 impl Drop for JadeFuture {
@@ -879,10 +885,13 @@ async fn execute_chunk(
                         let handle = vm_try!(jade_fut.handle.lock().take()
                             .ok_or(JadeError::DoubleAwait { span }));
                         let join_result = handle.await;
-                        let task_result = vm_try!(join_result.map_err(|e| JadeError::AsyncPanic {
+                        let (task_result, child_raised) = vm_try!(join_result.map_err(|e| JadeError::AsyncPanic {
                             message: e.to_string(),
                             span,
                         }));
+                        if let Some(v) = child_raised {
+                            state.raised_exception = Some(v);
+                        }
                         let (value, child_tokens) = vm_try!(task_result);
                         state.token_count += child_tokens;
                         state.globals.insert("__tokens__".to_string(), VmValue::Int(state.token_count));
@@ -907,10 +916,13 @@ async fn execute_chunk(
                 let mut results = Vec::with_capacity(handles.len());
                 for handle in handles {
                     let join_result = handle.await;
-                    let task_result = vm_try!(join_result.map_err(|e| JadeError::AsyncPanic {
+                    let (task_result, child_raised) = vm_try!(join_result.map_err(|e| JadeError::AsyncPanic {
                         message: e.to_string(),
                         span,
                     }));
+                    if let Some(v) = child_raised {
+                        state.raised_exception = Some(v);
+                    }
                     let (value, child_tokens) = vm_try!(task_result);
                     state.token_count += child_tokens;
                     results.push(value);
@@ -963,16 +975,18 @@ async fn call_value(
 
 /// Standalone version of `call_value` that owns its `VmState`, suitable for
 /// passing to `tokio::spawn` where borrowed state cannot cross thread boundaries.
-/// Returns `(value, token_delta)` so the parent can accumulate LLM token counts.
+/// Always returns `(result, raised_exception)` so the parent can propagate the
+/// exception value (struct/string) through try/catch rather than losing it.
 #[async_recursion::async_recursion]
 async fn call_value_standalone(
     callee: VmValue,
     args: Vec<VmValue>,
     mut state: VmState,
     span: Span,
-) -> Result<(VmValue, i64)> {
-    let value = call_value(callee, args, &mut state, span).await?;
-    Ok((value, state.token_count))
+) -> TaskBundle {
+    let result = call_value(callee, args, &mut state, span).await;
+    let raised = state.raised_exception.take();
+    (result.map(|v| (v, state.token_count)), raised)
 }
 
 #[async_recursion::async_recursion]

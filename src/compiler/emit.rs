@@ -600,6 +600,13 @@ fn emit_expr(expr: &TExpr, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<Reg> {
             Ok(dest)
         }
 
+        TExprKind::PromptLiteral { body } => {
+            let text = emit_expr(body, em, ctx)?;
+            let dest = em.alloc_reg();
+            em.chunk.emit(Instr::MakePrompt(dest, text), span);
+            Ok(dest)
+        }
+
         TExprKind::PromptDeref { expr: pexpr, output_type } => {
             let src = emit_expr(pexpr, em, ctx)?;
             let dest = em.alloc_reg();

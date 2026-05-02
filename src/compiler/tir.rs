@@ -114,6 +114,10 @@ pub enum TExprKind {
     Await {
         expr: Box<TExpr>,
     },
+    /// `prompt <expr>` as an expression — evaluates body and wraps as a Prompt value.
+    PromptLiteral {
+        body: Box<TExpr>,
+    },
 }
 
 // ── TIR statements ────────────────────────────────────────────────────────────
