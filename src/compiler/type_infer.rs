@@ -47,6 +47,10 @@ impl TypeContext {
             params: vec![JadeType::Unknown],
             ret: Box::new(JadeType::Int),
         });
+        ctx.define("join".to_string(), JadeType::Fn {
+            params: vec![JadeType::Unknown],
+            ret: Box::new(JadeType::Array(Box::new(JadeType::Unknown))),
+        });
         // LLM session builtins that the evaluator always populates.
         ctx.define("__tokens__".to_string(), JadeType::Int);
         ctx.define("__model__".to_string(), JadeType::Str);
@@ -680,28 +684,25 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
 
             let telems: Vec<TExpr> = elements.iter().map(|e| infer_expr(e, ctx)).collect::<Result<_>>()?;
 
-            // Find the first concrete (non-Unknown) element type.
+            // Use the first concrete element type; fall back to Unknown for
+            // heterogeneous arrays (arrays are untyped at runtime).
             let elem_ty = telems.iter()
                 .find(|t| t.ty != JadeType::Unknown)
                 .map(|t| t.ty.clone())
                 .unwrap_or(JadeType::Unknown);
 
-            // All other concrete elements must match the first.
-            if elem_ty != JadeType::Unknown {
-                for telem in &telems {
-                    if telem.ty != JadeType::Unknown && telem.ty != elem_ty {
-                        return Err(JadeError::HeterogeneousArray {
-                            first: jade_type_name(&elem_ty),
-                            got: jade_type_name(&telem.ty),
-                            span: telem.span,
-                        });
-                    }
-                }
-            }
+            // If elements have mixed types, widen to Unknown.
+            let array_elem_ty = if elem_ty != JadeType::Unknown
+                && telems.iter().any(|t| t.ty != JadeType::Unknown && t.ty != elem_ty)
+            {
+                JadeType::Unknown
+            } else {
+                elem_ty
+            };
 
             Ok(TExpr {
                 kind: TExprKind::Array { elements: telems },
-                ty: JadeType::Array(Box::new(elem_ty)),
+                ty: JadeType::Array(Box::new(array_elem_ty)),
                 span: *span,
             })
         }
@@ -757,6 +758,17 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
             Ok(TExpr {
                 kind: TExprKind::Await { expr: Box::new(texpr) },
                 ty,
+                span: *span,
+            })
+        }
+
+        // ── Prompt literal expression: `prompt <expr>` ───────────────────────
+
+        Expr::PromptLiteral { body, span } => {
+            let tbody = infer_expr(body, ctx)?;
+            Ok(TExpr {
+                kind: TExprKind::PromptLiteral { body: Box::new(tbody) },
+                ty: JadeType::Prompt,
                 span: *span,
             })
         }
@@ -1050,6 +1062,7 @@ fn collect_captures_in_expr(
         }
         TExprKind::Await { expr } => collect_captures_in_expr(expr, locals, captures, seen, ctx),
         TExprKind::PromptDeref { expr, .. } => collect_captures_in_expr(expr, locals, captures, seen, ctx),
+        TExprKind::PromptLiteral { body } => collect_captures_in_expr(body, locals, captures, seen, ctx),
         TExprKind::Closure { params: inner_params, captures: inner_caps, .. } => {
             // The inner closure already resolved its own captures.
             // Propagate any that come from OUR enclosing scope.
@@ -1158,8 +1171,8 @@ fn expr_span(e: &Expr) -> Span {
         | Expr::BinOp { span, .. } | Expr::UnaryOp { span, .. }
         | Expr::StructLiteral { span, .. } | Expr::FieldAccess { span, .. }
         | Expr::Index { span, .. } | Expr::Array { span, .. } | Expr::FStr { span, .. }
-        | Expr::PromptDeref { span, .. } | Expr::Dict { span, .. }
-        | Expr::Closure { span, .. } | Expr::Await { span, .. } => *span,
+        | Expr::PromptLiteral { span, .. } | Expr::PromptDeref { span, .. }
+        | Expr::Dict { span, .. } | Expr::Closure { span, .. } | Expr::Await { span, .. } => *span,
     }
 }
 
@@ -1317,9 +1330,15 @@ mod tests {
     }
 
     #[test]
-    fn test_infer_heterogeneous_array_is_error() {
-        let err = infer_err(r#"let a = [1, "hello"]"#);
-        assert!(matches!(err, JadeError::HeterogeneousArray { .. }));
+    fn test_infer_heterogeneous_array_widens_to_unknown() {
+        // Heterogeneous arrays are allowed; the type widens to Array(Unknown).
+        let prog = infer_ok(r#"let a = [1, "hello"]"#);
+        match &prog.stmts[0] {
+            crate::compiler::tir::TStmt::Let { value, .. } => {
+                assert!(matches!(value.ty, crate::compiler::tir::JadeType::Array(_)));
+            }
+            _ => panic!("expected Let"),
+        }
     }
 
     // ── Control flow ──────────────────────────────────────────────────────────

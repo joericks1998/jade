@@ -223,12 +223,6 @@ impl Parser {
     /// Parse `fn <ident> ( <params> ) { <body> }`
     fn parse_fn(&mut self) -> Result<Stmt> {
         let span = self.peek().span;
-
-        // Nested fn definitions are not allowed
-        if self.fn_depth > 0 {
-            return Err(JadeError::NestedFunction { span });
-        }
-
         self.advance(); // consume `fn`
 
         // Function name
@@ -303,11 +297,6 @@ impl Parser {
                 got: format!("{:?}", t.kind),
                 span: t.span,
             });
-        }
-
-        // Nested async fn definitions are not allowed
-        if self.fn_depth > 0 {
-            return Err(JadeError::NestedFunction { span });
         }
 
         self.advance(); // consume `fn`
@@ -843,6 +832,7 @@ impl Parser {
             Expr::Index        { span, .. } => *span,
             Expr::Array        { span, .. } => *span,
             Expr::FStr         { span, .. } => *span,
+            Expr::PromptLiteral{ span, .. } => *span,
             Expr::PromptDeref  { span, .. } => *span,
             Expr::Dict         { span, .. } => *span,
             Expr::Closure      { span, .. } => *span,
@@ -1097,13 +1087,6 @@ impl Parser {
             TokenKind::Minus => {
                 let span = self.peek().span;
                 self.advance();
-                if self.peek().kind == TokenKind::LParen {
-                    return Err(JadeError::UnexpectedToken {
-                        expected: "literal or identifier after `-`".to_string(),
-                        got: "(".to_string(),
-                        span: self.peek().span,
-                    });
-                }
                 let operand = self.parse_unary()?;
                 Ok(Expr::UnaryOp { op: UnaryOpKind::Neg, operand: Box::new(operand), span })
             }
@@ -1330,6 +1313,17 @@ impl Parser {
                 self.advance(); // consume `||`
                 let body = self.parse_closure_body(span)?;
                 Ok(Expr::Closure { params: Vec::new(), body, span })
+            }
+            // ── Prompt literal as expression: `prompt <expr>` ────────────────
+            // Allows `let p = prompt "text"` inside function bodies, in addition
+            // to the top-level `prompt p = "text"` declaration form.
+            // Body uses parse_or (not parse_pipe) so that `?prompt "..." |> Type`
+            // leaves the `|>` for the enclosing `?` typed-deref handler to consume.
+            TokenKind::Prompt => {
+                let span = token.span;
+                self.advance(); // consume `prompt`
+                let body = self.parse_or()?;
+                Ok(Expr::PromptLiteral { body: Box::new(body), span })
             }
             TokenKind::Eof => Err(JadeError::UnexpectedEof { span: token.span }),
             _ => Err(JadeError::UnexpectedToken {
@@ -1677,9 +1671,10 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_nested_fn_error() {
-        let err = parse_src_err("fn outer() {\n    fn inner() {\n        return 1\n    }\n    return 2\n}");
-        assert!(matches!(err, JadeError::NestedFunction { .. }));
+    fn test_parse_nested_fn_ok() {
+        // Nested function definitions are now allowed.
+        let prog = parse_src("fn outer() {\n    fn inner() {\n        return 1\n    }\n    return 2\n}");
+        assert_eq!(prog.stmts.len(), 1);
     }
 
     #[test]

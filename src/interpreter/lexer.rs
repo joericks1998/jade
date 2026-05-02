@@ -296,6 +296,9 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
     let mut i = 0;
     let mut line = 1usize;
     let mut col = 1usize;
+    // Track open ( and [ depth: semicolons are never inserted inside them so that
+    // multi-line argument lists (e.g. join(\n  f(),\n  g()\n)) parse correctly.
+    let mut bracket_depth: i32 = 0;
 
     while i < chars.len() {
         let ch = chars[i];
@@ -303,12 +306,14 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
         match ch {
             // Newline: possibly insert a semicolon, then advance to next line
             '\n' => {
-                if let Some(last) = tokens.last() {
-                    if is_line_terminator(&last.kind) {
-                        tokens.push(Token {
-                            kind: TokenKind::Semicolon,
-                            span: Span { line, col },
-                        });
+                if bracket_depth == 0 {
+                    if let Some(last) = tokens.last() {
+                        if is_line_terminator(&last.kind) {
+                            tokens.push(Token {
+                                kind: TokenKind::Semicolon,
+                                span: Span { line, col },
+                            });
+                        }
                     }
                 }
                 line += 1;
@@ -452,12 +457,12 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
             '%' => { tokens.push(Token { kind: TokenKind::Percent, span: Span { line, col } }); col += 1; i += 1; }
             '~' => { tokens.push(Token { kind: TokenKind::Tilde,   span: Span { line, col } }); col += 1; i += 1; }
             '^' => { tokens.push(Token { kind: TokenKind::Caret,   span: Span { line, col } }); col += 1; i += 1; }
-            '(' => { tokens.push(Token { kind: TokenKind::LParen,  span: Span { line, col } }); col += 1; i += 1; }
-            ')' => { tokens.push(Token { kind: TokenKind::RParen,  span: Span { line, col } }); col += 1; i += 1; }
+            '(' => { tokens.push(Token { kind: TokenKind::LParen,  span: Span { line, col } }); bracket_depth += 1; col += 1; i += 1; }
+            ')' => { tokens.push(Token { kind: TokenKind::RParen,  span: Span { line, col } }); bracket_depth -= 1; col += 1; i += 1; }
             '{' => { tokens.push(Token { kind: TokenKind::LBrace,    span: Span { line, col } }); col += 1; i += 1; }
             '}' => { tokens.push(Token { kind: TokenKind::RBrace,    span: Span { line, col } }); col += 1; i += 1; }
-            '[' => { tokens.push(Token { kind: TokenKind::LBracket,  span: Span { line, col } }); col += 1; i += 1; }
-            ']' => { tokens.push(Token { kind: TokenKind::RBracket,  span: Span { line, col } }); col += 1; i += 1; }
+            '[' => { tokens.push(Token { kind: TokenKind::LBracket,  span: Span { line, col } }); bracket_depth += 1; col += 1; i += 1; }
+            ']' => { tokens.push(Token { kind: TokenKind::RBracket,  span: Span { line, col } }); bracket_depth -= 1; col += 1; i += 1; }
             ',' => { tokens.push(Token { kind: TokenKind::Comma,   span: Span { line, col } }); col += 1; i += 1; }
             '.' => { tokens.push(Token { kind: TokenKind::Dot,     span: Span { line, col } }); col += 1; i += 1; }
             ':' => { tokens.push(Token { kind: TokenKind::Colon,   span: Span { line, col } }); col += 1; i += 1; }
@@ -551,12 +556,14 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
     }
 
     // Apply semicolon insertion for the final line (no trailing newline case)
-    if let Some(last) = tokens.last() {
-        if is_line_terminator(&last.kind) {
-            tokens.push(Token {
-                kind: TokenKind::Semicolon,
-                span: Span { line, col },
-            });
+    if bracket_depth == 0 {
+        if let Some(last) = tokens.last() {
+            if is_line_terminator(&last.kind) {
+                tokens.push(Token {
+                    kind: TokenKind::Semicolon,
+                    span: Span { line, col },
+                });
+            }
         }
     }
 

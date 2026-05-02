@@ -293,6 +293,14 @@ pub enum Expr {
         span: Span,
     },
 
+    /// `prompt <expr>` — produce a prompt value from a string expression.
+    /// Expression form of the `prompt p = "text"` declaration; valid anywhere an
+    /// expression is allowed, e.g. `let p = prompt "text"` inside a function.
+    PromptLiteral {
+        body: Box<Expr>,
+        span: Span,
+    },
+
     /// `?expr` — dereference a prompt, calling the LLM backend.
     /// `?expr |> type` — typed dereference: coerces the LLM output to `type` with retry.
     /// `expr` must evaluate to `Value::Prompt`; supports `?name`, `?obj.field`, etc.
