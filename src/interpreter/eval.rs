@@ -51,6 +51,8 @@ pub enum BuiltinFn {
     Len,
     Join,
     Exec,
+    ReadFile,
+    WriteFile,
 }
 
 /// Heap-allocated function body shared via `Rc`.
@@ -167,6 +169,8 @@ impl Env {
         builtins.insert("len".to_string(), BuiltinFn::Len);
         builtins.insert("join".to_string(), BuiltinFn::Join);
         builtins.insert("exec".to_string(), BuiltinFn::Exec);
+        builtins.insert("read_file".to_string(), BuiltinFn::ReadFile);
+        builtins.insert("write_file".to_string(), BuiltinFn::WriteFile);
 
         // Pre-populate session variables accessible from Jade code.
         let mut global_scope: HashMap<String, Value> = HashMap::new();
@@ -917,6 +921,54 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                         }
                         Err(e) => Ok(Value::Str(format!("exec: {e}"))),
                     }
+                }
+
+                // read_file(path) → Str
+                // Returns the file contents as a string.
+                // On error returns "read_file: <reason>" so the REPL never crashes.
+                Value::Builtin(BuiltinFn::ReadFile) => {
+                    if args.len() != 1 {
+                        return Err(JadeError::ArityMismatch {
+                            expected: 1,
+                            got: args.len(),
+                            span: *span,
+                        });
+                    }
+                    let path_val = eval_expr(&args[0], env)?;
+                    let path = match path_val {
+                        Value::Str(s) => s,
+                        _ => return Err(JadeError::TypeError { op: "read_file".to_string(), span: *span }),
+                    };
+                    let result = std::fs::read_to_string(&path)
+                        .unwrap_or_else(|e| format!("read_file: {e}"));
+                    Ok(Value::Str(result))
+                }
+
+                // write_file(path, content) → Str
+                // Writes content to path, creating or truncating the file.
+                // Returns "" on success, "write_file: <reason>" on error.
+                Value::Builtin(BuiltinFn::WriteFile) => {
+                    if args.len() != 2 {
+                        return Err(JadeError::ArityMismatch {
+                            expected: 2,
+                            got: args.len(),
+                            span: *span,
+                        });
+                    }
+                    let path_val = eval_expr(&args[0], env)?;
+                    let content_val = eval_expr(&args[1], env)?;
+                    let path = match path_val {
+                        Value::Str(s) => s,
+                        _ => return Err(JadeError::TypeError { op: "write_file path".to_string(), span: *span }),
+                    };
+                    let content = match content_val {
+                        Value::Str(s) => s,
+                        _ => return Err(JadeError::TypeError { op: "write_file content".to_string(), span: *span }),
+                    };
+                    let result = std::fs::write(&path, content.as_bytes())
+                        .map(|_| String::new())
+                        .unwrap_or_else(|e| format!("write_file: {e}"));
+                    Ok(Value::Str(result))
                 }
 
                 _ => Err(JadeError::NotCallable { span: *span }),
