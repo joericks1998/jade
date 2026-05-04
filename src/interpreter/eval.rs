@@ -50,6 +50,7 @@ pub enum BuiltinFn {
     Print,
     Len,
     Join,
+    Exec,
 }
 
 /// Heap-allocated function body shared via `Rc`.
@@ -165,6 +166,7 @@ impl Env {
         builtins.insert("print".to_string(), BuiltinFn::Print);
         builtins.insert("len".to_string(), BuiltinFn::Len);
         builtins.insert("join".to_string(), BuiltinFn::Join);
+        builtins.insert("exec".to_string(), BuiltinFn::Exec);
 
         // Pre-populate session variables accessible from Jade code.
         let mut global_scope: HashMap<String, Value> = HashMap::new();
@@ -857,6 +859,64 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                         results.push(eval_expr(a, env)?);
                     }
                     Ok(Value::Array(results))
+                }
+
+                // exec(cmd) or exec(cmd, [arg1, arg2, ...])
+                //
+                // Spawns a subprocess and returns its stdout as a Str.
+                // The first argument is split on whitespace for inline args
+                // (e.g. exec("ls -la /")). An optional second array argument
+                // appends additional args without whitespace splitting — useful
+                // when args may contain spaces.
+                // On non-zero exit, stderr is returned instead of stdout.
+                // Never panics: process errors surface as an error string.
+                Value::Builtin(BuiltinFn::Exec) => {
+                    if args.is_empty() || args.len() > 2 {
+                        return Err(JadeError::ArityMismatch {
+                            expected: 1,
+                            got: args.len(),
+                            span: *span,
+                        });
+                    }
+                    let cmd_val = eval_expr(&args[0], env)?;
+                    let cmd_str = match cmd_val {
+                        Value::Str(s) => s,
+                        _ => return Err(JadeError::TypeError { op: "exec".to_string(), span: *span }),
+                    };
+
+                    let mut parts = cmd_str.split_whitespace();
+                    let program = match parts.next() {
+                        Some(p) => p.to_string(),
+                        None => return Ok(Value::Str(String::new())),
+                    };
+                    let mut cmd_args: Vec<String> = parts.map(|s| s.to_string()).collect();
+
+                    if args.len() == 2 {
+                        let extra = eval_expr(&args[1], env)?;
+                        match extra {
+                            Value::Array(arr) => {
+                                for v in arr { cmd_args.push(value_to_str(&v)); }
+                            }
+                            _ => return Err(JadeError::TypeError { op: "exec args".to_string(), span: *span }),
+                        }
+                    }
+
+                    let output = std::process::Command::new(&program)
+                        .args(&cmd_args)
+                        .output();
+
+                    match output {
+                        Ok(out) => {
+                            let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+                            let result = if out.status.success() || !stdout.is_empty() {
+                                stdout
+                            } else {
+                                String::from_utf8_lossy(&out.stderr).into_owned()
+                            };
+                            Ok(Value::Str(result.trim_end_matches('\n').to_string()))
+                        }
+                        Err(e) => Ok(Value::Str(format!("exec: {e}"))),
+                    }
                 }
 
                 _ => Err(JadeError::NotCallable { span: *span }),
