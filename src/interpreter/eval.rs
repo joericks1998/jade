@@ -49,6 +49,10 @@ pub enum Value {
 pub enum BuiltinFn {
     Print,
     Len,
+    Join,
+    Exec,
+    ReadFile,
+    WriteFile,
 }
 
 /// Heap-allocated function body shared via `Rc`.
@@ -163,6 +167,10 @@ impl Env {
         let mut builtins = HashMap::new();
         builtins.insert("print".to_string(), BuiltinFn::Print);
         builtins.insert("len".to_string(), BuiltinFn::Len);
+        builtins.insert("join".to_string(), BuiltinFn::Join);
+        builtins.insert("exec".to_string(), BuiltinFn::Exec);
+        builtins.insert("read_file".to_string(), BuiltinFn::ReadFile);
+        builtins.insert("write_file".to_string(), BuiltinFn::WriteFile);
 
         // Pre-populate session variables accessible from Jade code.
         let mut global_scope: HashMap<String, Value> = HashMap::new();
@@ -625,6 +633,7 @@ fn expr_span(e: &Expr) -> Span {
         Expr::Index        { span, .. } => *span,
         Expr::Array        { span, .. } => *span,
         Expr::FStr         { span, .. } => *span,
+        Expr::PromptLiteral{ span, .. } => *span,
         Expr::PromptDeref  { span, .. } => *span,
         Expr::Dict         { span, .. } => *span,
         Expr::Closure      { span, .. } => *span,
@@ -845,6 +854,123 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                     }
                 }
 
+                // join(f1, f2, ...) — in the tree-walk evaluator async fns run
+                // synchronously, so each argument is already a resolved value;
+                // join just collects them into an array.
+                Value::Builtin(BuiltinFn::Join) => {
+                    let mut results = Vec::with_capacity(args.len());
+                    for a in args {
+                        results.push(eval_expr(a, env)?);
+                    }
+                    Ok(Value::Array(results))
+                }
+
+                // exec(cmd) or exec(cmd, [arg1, arg2, ...])
+                //
+                // Spawns a subprocess and returns its stdout as a Str.
+                // The first argument is split on whitespace for inline args
+                // (e.g. exec("ls -la /")). An optional second array argument
+                // appends additional args without whitespace splitting — useful
+                // when args may contain spaces.
+                // On non-zero exit, stderr is returned instead of stdout.
+                // Never panics: process errors surface as an error string.
+                Value::Builtin(BuiltinFn::Exec) => {
+                    if args.is_empty() || args.len() > 2 {
+                        return Err(JadeError::ArityMismatch {
+                            expected: 1,
+                            got: args.len(),
+                            span: *span,
+                        });
+                    }
+                    let cmd_val = eval_expr(&args[0], env)?;
+                    let cmd_str = match cmd_val {
+                        Value::Str(s) => s,
+                        _ => return Err(JadeError::TypeError { op: "exec".to_string(), span: *span }),
+                    };
+
+                    let mut parts = cmd_str.split_whitespace();
+                    let program = match parts.next() {
+                        Some(p) => p.to_string(),
+                        None => return Ok(Value::Str(String::new())),
+                    };
+                    let mut cmd_args: Vec<String> = parts.map(|s| s.to_string()).collect();
+
+                    if args.len() == 2 {
+                        let extra = eval_expr(&args[1], env)?;
+                        match extra {
+                            Value::Array(arr) => {
+                                for v in arr { cmd_args.push(value_to_str(&v)); }
+                            }
+                            _ => return Err(JadeError::TypeError { op: "exec args".to_string(), span: *span }),
+                        }
+                    }
+
+                    let output = std::process::Command::new(&program)
+                        .args(&cmd_args)
+                        .output();
+
+                    match output {
+                        Ok(out) => {
+                            let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+                            let result = if out.status.success() || !stdout.is_empty() {
+                                stdout
+                            } else {
+                                String::from_utf8_lossy(&out.stderr).into_owned()
+                            };
+                            Ok(Value::Str(result.trim_end_matches('\n').to_string()))
+                        }
+                        Err(e) => Ok(Value::Str(format!("exec: {e}"))),
+                    }
+                }
+
+                // read_file(path) → Str
+                // Returns the file contents as a string.
+                // On error returns "read_file: <reason>" so the REPL never crashes.
+                Value::Builtin(BuiltinFn::ReadFile) => {
+                    if args.len() != 1 {
+                        return Err(JadeError::ArityMismatch {
+                            expected: 1,
+                            got: args.len(),
+                            span: *span,
+                        });
+                    }
+                    let path_val = eval_expr(&args[0], env)?;
+                    let path = match path_val {
+                        Value::Str(s) => s,
+                        _ => return Err(JadeError::TypeError { op: "read_file".to_string(), span: *span }),
+                    };
+                    let result = std::fs::read_to_string(&path)
+                        .unwrap_or_else(|e| format!("read_file: {e}"));
+                    Ok(Value::Str(result))
+                }
+
+                // write_file(path, content) → Str
+                // Writes content to path, creating or truncating the file.
+                // Returns "" on success, "write_file: <reason>" on error.
+                Value::Builtin(BuiltinFn::WriteFile) => {
+                    if args.len() != 2 {
+                        return Err(JadeError::ArityMismatch {
+                            expected: 2,
+                            got: args.len(),
+                            span: *span,
+                        });
+                    }
+                    let path_val = eval_expr(&args[0], env)?;
+                    let content_val = eval_expr(&args[1], env)?;
+                    let path = match path_val {
+                        Value::Str(s) => s,
+                        _ => return Err(JadeError::TypeError { op: "write_file path".to_string(), span: *span }),
+                    };
+                    let content = match content_val {
+                        Value::Str(s) => s,
+                        _ => return Err(JadeError::TypeError { op: "write_file content".to_string(), span: *span }),
+                    };
+                    let result = std::fs::write(&path, content.as_bytes())
+                        .map(|_| String::new())
+                        .unwrap_or_else(|e| format!("write_file: {e}"));
+                    Ok(Value::Str(result))
+                }
+
                 _ => Err(JadeError::NotCallable { span: *span }),
             }
         }
@@ -954,23 +1080,10 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
             }
         }
 
-        Expr::Array { elements, span } => {
+        Expr::Array { elements, .. } => {
             let mut vec = Vec::with_capacity(elements.len());
             for elem in elements {
                 vec.push(eval_expr(elem, env)?);
-            }
-            if let Some(first) = vec.first() {
-                let first_ty = value_type_name(first);
-                for v in vec.iter().skip(1) {
-                    let ty = value_type_name(v);
-                    if ty != first_ty {
-                        return Err(JadeError::HeterogeneousArray {
-                            first: first_ty.to_string(),
-                            got: ty.to_string(),
-                            span: *span,
-                        });
-                    }
-                }
             }
             Ok(Value::Array(vec))
         }
@@ -1270,6 +1383,17 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
 
         // In the tree-walk evaluator, await just evaluates the expression immediately.
         Expr::Await { expr, .. } => eval_expr(expr, env),
+
+        // `prompt <expr>` as an expression: evaluate body to string, wrap as Prompt value.
+        Expr::PromptLiteral { body, span } => {
+            match eval_expr(body, env)? {
+                Value::Str(text) => Ok(Value::Prompt(text)),
+                other => Err(JadeError::TypeError {
+                    op: format!("prompt body must be a string, got {}", value_type_name(&other)),
+                    span: *span,
+                }),
+            }
+        }
 
         Expr::PromptDeref { expr, output_type, span } => {
             // 1. Evaluate the target expression and extract the prompt text.
@@ -1710,9 +1834,10 @@ mod tests {
     }
 
     #[test]
-    fn test_eval_neg_paren_rejected() {
-        // -(expr) syntax is not allowed; use a let binding to negate instead
-        assert!(matches!(eval_src_parse_err("let x = -(3 + 4)"), JadeError::UnexpectedToken { .. }));
+    fn test_eval_neg_paren_ok() {
+        // -(expr) is now valid syntax.
+        let env = eval_src("let x = -(3 + 4)").unwrap();
+        assert!(matches!(get(&env, "x"), Value::Int(-7)));
     }
 
     // ── error conditions ─────────────────────────────────────────────────────
@@ -2216,9 +2341,10 @@ mod tests {
     }
 
     #[test]
-    fn test_eval_nested_fn_parse_error() {
-        let err = eval_src_parse_err("fn outer() {\n    fn inner() {\n        return 1\n    }\n    return 2\n}");
-        assert!(matches!(err, JadeError::NestedFunction { .. }));
+    fn test_eval_nested_fn_ok() {
+        // Nested function definitions are now allowed.
+        let env = eval_src("fn outer() {\n    fn inner() {\n        return 1\n    }\n    return 2\n}").unwrap();
+        let _ = get(&env, "outer");
     }
 
     // ── while loops ──────────────────────────────────────────────────────────
@@ -2651,11 +2777,10 @@ print("hello")"#).unwrap();
     }
 
     #[test]
-    fn test_eval_array_heterogeneous_rejected() {
-        assert!(matches!(
-            eval_src("let a = [1, 2.0, true, \"hello\"]").unwrap_err(),
-            JadeError::HeterogeneousArray { .. }
-        ));
+    fn test_eval_array_heterogeneous_ok() {
+        // Heterogeneous arrays are now allowed.
+        let env = eval_src("let a = [1, 2.0, true, \"hello\"]").unwrap();
+        let _ = get(&env, "a");
     }
 
     #[test]

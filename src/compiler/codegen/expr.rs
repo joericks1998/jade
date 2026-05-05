@@ -1,4 +1,5 @@
 use inkwell::{
+    types::BasicMetadataTypeEnum,
     values::{
         AnyValue, AnyValueEnum, BasicMetadataValueEnum, BasicValueEnum,
         CallSiteValue, IntValue, PointerValue,
@@ -9,7 +10,7 @@ use inkwell::{
 use crate::interpreter::ast::{BinOpKind, UnaryOpKind};
 use crate::compiler::tir::{JadeType, TExpr, TExprKind, TFStrPart};
 
-use super::{types, CodegenCtx};
+use super::{stmt, types, CodegenCtx};
 
 /// Emit LLVM IR for `expr`, returning the resulting LLVM value.
 pub fn emit_expr<'ctx>(
@@ -39,13 +40,18 @@ pub fn emit_expr<'ctx>(
             if name == "nil" {
                 return Ok(ctx.context.i64_type().const_int(0, false).into());
             }
-            let (ptr, ty) = ctx
-                .lookup(name)
-                .ok_or_else(|| format!("undefined variable: {name}"))?;
-            let llvm_ty = types::jade_to_llvm(&ty, ctx.context);
-            ctx.builder
-                .build_load(llvm_ty, ptr, name)
-                .map_err(|e| e.to_string())
+            // Local variable in scope (covers closures, params, let-bindings).
+            if let Some((ptr, ty)) = ctx.lookup(name) {
+                let llvm_ty = types::jade_to_llvm(&ty, ctx.context);
+                return ctx.builder
+                    .build_load(llvm_ty, ptr, name)
+                    .map_err(|e| e.to_string());
+            }
+            // Named function referenced as a first-class value (not a direct call).
+            if ctx.fn_info.contains_key(name.as_str()) {
+                return emit_fn_as_value(name, ctx);
+            }
+            Err(format!("undefined variable: {name}"))
         }
 
         // ── Binary operations ─────────────────────────────────────────────────
@@ -77,11 +83,16 @@ pub fn emit_expr<'ctx>(
 
         Index { object, index } => emit_index(object, index, &expr.ty, ctx),
 
+        Dict { entries } => emit_dict(entries, ctx),
+
         StructLiteral { type_name, fields } => emit_struct_literal(type_name, fields, ctx),
 
         FieldAccess { object, field } => emit_field_access(object, field, &expr.ty, ctx),
 
         FStr { parts } => emit_fstr(parts, ctx),
+
+        // ── First-class functions and closures ────────────────────────────────
+        Closure { params, body, captures } => emit_closure(params, body, captures, ctx),
 
         // ── Async: await expr ────────────────────────────────────────────────
         Await { expr } => {
@@ -92,9 +103,7 @@ pub fn emit_expr<'ctx>(
         }
 
         // ── Unsupported in this backend ───────────────────────────────────────
-        Dict { .. } => Err("dicts are not yet supported in the LLVM backend (use `jade run`)".into()),
         PromptDeref { .. } => Err("prompt dereference is not supported in the LLVM backend".into()),
-        Closure { .. } => Err("closures are not yet supported in the LLVM backend (use `jade run`)".into()),
     }
 }
 
@@ -151,6 +160,19 @@ fn emit_index<'ctx>(
     result_ty: &JadeType,
     ctx: &mut CodegenCtx<'ctx>,
 ) -> Result<BasicValueEnum<'ctx>, String> {
+    // Dict indexing — key is always a string (char*)
+    if matches!(&object.ty, JadeType::Dict) {
+        ctx.uses_dicts = true;
+        let dict_ptr = as_pointer(emit_expr(object, ctx)?, ctx)?;
+        let key_ptr  = as_pointer(emit_expr(index, ctx)?, ctx)?;
+        let raw = ctx.call_rv(
+            ctx.jade_dict_get_fn,
+            &[dict_ptr.into(), key_ptr.into()],
+            "dict_get",
+        )?.into_int_value();
+        return i64_to_value(raw, result_ty, ctx);
+    }
+
     let i64_ty = ctx.context.i64_type();
     let ptr_ty = ctx.context.ptr_type(AddressSpace::default());
 
@@ -426,6 +448,10 @@ fn emit_len<'ctx>(
                 .build_load(i64_ty, f1, "arr_len")
                 .map_err(|e| e.to_string())
         }
+        JadeType::Dict => {
+            ctx.uses_dicts = true;
+            ctx.call_rv(ctx.jade_dict_len_fn, &[val.into_pointer_value().into()], "dict_len")
+        }
         _ => Err(format!("len() not supported for type {:?}", arg.ty)),
     }
 }
@@ -521,6 +547,244 @@ fn emit_join<'ctx>(
     }
 
     Ok(header_ptr.into())
+}
+
+// ── Dict creation ─────────────────────────────────────────────────────────────
+
+fn emit_dict<'ctx>(
+    entries: &[(TExpr, TExpr)],
+    ctx: &mut CodegenCtx<'ctx>,
+) -> Result<BasicValueEnum<'ctx>, String> {
+    ctx.uses_dicts = true;
+    let dict_ptr = ctx
+        .call_rv(ctx.jade_dict_create_fn, &[], "dict_ptr")?
+        .into_pointer_value();
+
+    for (key_expr, val_expr) in entries {
+        let key = emit_expr(key_expr, ctx)?;
+        let val = emit_expr(val_expr, ctx)?;
+        let key_ptr = as_pointer(key, ctx)?;
+        let val_i64 = value_to_i64(val, &val_expr.ty, ctx)?;
+        ctx.call_void(
+            ctx.jade_dict_set_fn,
+            &[dict_ptr.into(), key_ptr.into(), val_i64.into()],
+        )?;
+    }
+    Ok(dict_ptr.into())
+}
+
+// ── Named function as first-class value ───────────────────────────────────────
+
+/// Wrap the named function `name` in a `jade_fn_t` fat pointer so it can be
+/// stored in a variable or passed as an argument.
+///
+/// Generates a thin wrapper `name__callable(i64..., ptr env) -> i64` that
+/// unpacks i64 arguments, calls the real function, and packs the result as i64.
+/// The wrapper is deduplicated — emitted at most once per named function.
+fn emit_fn_as_value<'ctx>(
+    name: &str,
+    ctx: &mut CodegenCtx<'ctx>,
+) -> Result<BasicValueEnum<'ctx>, String> {
+    let i64_ty = ctx.context.i64_type();
+    let ptr_ty = ctx.context.ptr_type(AddressSpace::default());
+
+    let (fn_val, param_tys, fn_ret_ty) = ctx
+        .fn_info
+        .get(name)
+        .ok_or_else(|| format!("no function named '{name}'"))?
+        .clone();
+
+    // Emit the wrapper function if it doesn't exist yet.
+    let wrapper_name = format!("{name}__callable");
+    let wrapper_fn = if let Some(existing) = ctx.module.get_function(&wrapper_name) {
+        existing
+    } else {
+        // Signature: i64(i64..., ptr env)
+        let mut wrapper_param_tys: Vec<inkwell::types::BasicMetadataTypeEnum<'ctx>> =
+            param_tys.iter().map(|_| i64_ty.into()).collect();
+        wrapper_param_tys.push(ptr_ty.into());
+        let wrapper_fn_ty = i64_ty.fn_type(&wrapper_param_tys, false);
+        let wrapper_fn = ctx.module.add_function(&wrapper_name, wrapper_fn_ty, None);
+
+        let restore_bb = ctx.builder.get_insert_block();
+        let entry = ctx.context.append_basic_block(wrapper_fn, "entry");
+        ctx.builder.position_at_end(entry);
+
+        // Unpack i64 args → real types, call the real function.
+        let mut real_args: Vec<BasicMetadataValueEnum<'ctx>> = Vec::new();
+        for (i, param_ty) in param_tys.iter().enumerate() {
+            let raw = wrapper_fn.get_nth_param(i as u32).unwrap().into_int_value();
+            let val = i64_to_value(raw, param_ty, ctx)?;
+            real_args.push(val.into());
+        }
+        let call_site = ctx.builder
+            .build_call(fn_val, &real_args, "wcall")
+            .map_err(|e| e.to_string())?;
+
+        let result_i64 = match &fn_ret_ty {
+            JadeType::Nil => i64_ty.const_int(0, false),
+            _ => {
+                let result_val: BasicValueEnum = match call_site.as_any_value_enum() {
+                    AnyValueEnum::IntValue(v)     => v.into(),
+                    AnyValueEnum::FloatValue(v)   => v.into(),
+                    AnyValueEnum::PointerValue(v) => v.into(),
+                    _ => i64_ty.const_int(0, false).into(),
+                };
+                value_to_i64(result_val, &fn_ret_ty, ctx)?
+            }
+        };
+        ctx.builder.build_return(Some(&result_i64)).map_err(|e| e.to_string())?;
+
+        if let Some(bb) = restore_bb {
+            ctx.builder.position_at_end(bb);
+        }
+        wrapper_fn
+    };
+
+    // Allocate a jade_fn_t: { &wrapper_fn, null }
+    let jade_fn_ptr = ctx.malloc_ptr(i64_ty.const_int(16, false), "named_fn_val")?;
+    let f0 = ctx.builder
+        .build_struct_gep(ctx.jade_fn_ty, jade_fn_ptr, 0, "nfv_f0")
+        .map_err(|e| e.to_string())?;
+    ctx.builder
+        .build_store(f0, wrapper_fn.as_global_value().as_pointer_value())
+        .map_err(|e| e.to_string())?;
+    let f1 = ctx.builder
+        .build_struct_gep(ctx.jade_fn_ty, jade_fn_ptr, 1, "nfv_f1")
+        .map_err(|e| e.to_string())?;
+    ctx.builder
+        .build_store(f1, ptr_ty.const_null())
+        .map_err(|e| e.to_string())?;
+
+    Ok(jade_fn_ptr.into())
+}
+
+// ── Closure emission ──────────────────────────────────────────────────────────
+
+/// Emit a closure expression, returning a `jade_fn_t*` fat pointer.
+///
+/// Three steps:
+///   1. Allocate an env struct on the heap and store each captured variable.
+///   2. Emit `closure_N(i64 a0, …, ptr env) -> i64` as a new LLVM function.
+///   3. Allocate a `jade_fn_t` and fill it with `{ &closure_N, env_ptr }`.
+fn emit_closure<'ctx>(
+    params: &[String],
+    body: &[crate::compiler::tir::TStmt],
+    captures: &[(String, JadeType)],
+    ctx: &mut CodegenCtx<'ctx>,
+) -> Result<BasicValueEnum<'ctx>, String> {
+    let i64_ty = ctx.context.i64_type();
+    let ptr_ty = ctx.context.ptr_type(AddressSpace::default());
+
+    // ── 1. Allocate env struct and store captured values ───────────────────
+    // (done NOW, in the outer function, while captured locals are still in scope)
+    let env_ptr: PointerValue<'ctx> = if captures.is_empty() {
+        ptr_ty.const_null()
+    } else {
+        let n = captures.len() as u64;
+        let ep = ctx.malloc_ptr(i64_ty.const_int(n * 8, false), "cl_env")?;
+        for (i, (cap_name, cap_ty)) in captures.iter().enumerate() {
+            let (slot, slot_ty) = ctx
+                .lookup(cap_name)
+                .ok_or_else(|| format!("captured variable '{cap_name}' not found in scope"))?;
+            let llvm_ty = types::jade_to_llvm(&slot_ty, ctx.context);
+            let val = ctx.builder
+                .build_load(llvm_ty, slot, cap_name)
+                .map_err(|e| e.to_string())?;
+            let as_i64 = value_to_i64(val, cap_ty, ctx)?;
+            let env_slot = ctx.gep(
+                i64_ty, ep,
+                &[i64_ty.const_int(i as u64, false)],
+                &format!("cap{i}_slot"),
+            )?;
+            ctx.builder.build_store(env_slot, as_i64).map_err(|e| e.to_string())?;
+        }
+        ep
+    };
+
+    // ── 2. Emit the closure body as a new LLVM function ────────────────────
+    let closure_id = ctx.closure_counter;
+    ctx.closure_counter += 1;
+    let body_name = format!("closure_{closure_id}");
+
+    // Signature: i64(i64 a0, …, ptr env)
+    let mut cl_param_tys: Vec<inkwell::types::BasicMetadataTypeEnum<'ctx>> =
+        params.iter().map(|_| i64_ty.into()).collect();
+    cl_param_tys.push(ptr_ty.into());
+    let cl_fn_ty = i64_ty.fn_type(&cl_param_tys, false);
+    let cl_fn = ctx.module.add_function(&body_name, cl_fn_ty, None);
+
+    let restore_bb = ctx.builder.get_insert_block();
+    let entry_bb = ctx.context.append_basic_block(cl_fn, "entry");
+    ctx.builder.position_at_end(entry_bb);
+
+    ctx.push_scope();
+    let saved_ret   = ctx.current_ret_ty.take();
+    let saved_async = ctx.async_body_ret_ty.take();
+    // Signal TStmt::Return to pack return values as i64 (same as async bodies).
+    ctx.async_body_ret_ty = Some(JadeType::Unknown);
+
+    // Bind parameters from i64 LLVM args.
+    for (i, param_name) in params.iter().enumerate() {
+        let alloca = ctx.builder
+            .build_alloca(i64_ty, param_name)
+            .map_err(|e| e.to_string())?;
+        let arg = cl_fn.get_nth_param(i as u32).unwrap();
+        ctx.builder.build_store(alloca, arg).map_err(|e| e.to_string())?;
+        ctx.define(param_name.clone(), alloca, JadeType::Unknown);
+    }
+
+    // Restore captured variables from the env struct.
+    let env_param = cl_fn.get_nth_param(params.len() as u32).unwrap().into_pointer_value();
+    for (i, (cap_name, cap_ty)) in captures.iter().enumerate() {
+        let env_slot = ctx.gep(
+            i64_ty, env_param,
+            &[i64_ty.const_int(i as u64, false)],
+            &format!("env{i}"),
+        )?;
+        let raw = ctx.builder
+            .build_load(i64_ty, env_slot, &format!("env_{cap_name}_raw"))
+            .map_err(|e| e.to_string())?
+            .into_int_value();
+        let val = i64_to_value(raw, cap_ty, ctx)?;
+        let llvm_ty = types::jade_to_llvm(cap_ty, ctx.context);
+        let alloca = ctx.builder
+            .build_alloca(llvm_ty, cap_name)
+            .map_err(|e| e.to_string())?;
+        ctx.builder.build_store(alloca, val).map_err(|e| e.to_string())?;
+        ctx.define(cap_name.clone(), alloca, cap_ty.clone());
+    }
+
+    stmt::emit_stmts(ctx, body)?;
+
+    if !ctx.is_terminated() {
+        ctx.builder
+            .build_return(Some(&i64_ty.const_int(0, false)))
+            .map_err(|e| e.to_string())?;
+    }
+
+    ctx.pop_scope();
+    ctx.current_ret_ty   = saved_ret;
+    ctx.async_body_ret_ty = saved_async;
+
+    if let Some(bb) = restore_bb {
+        ctx.builder.position_at_end(bb);
+    }
+
+    // ── 3. Allocate jade_fn_t { &closure_N, env_ptr } ─────────────────────
+    let jade_fn_ptr = ctx.malloc_ptr(i64_ty.const_int(16, false), "jade_fn")?;
+    let f0 = ctx.builder
+        .build_struct_gep(ctx.jade_fn_ty, jade_fn_ptr, 0, "cl_f0")
+        .map_err(|e| e.to_string())?;
+    ctx.builder
+        .build_store(f0, cl_fn.as_global_value().as_pointer_value())
+        .map_err(|e| e.to_string())?;
+    let f1 = ctx.builder
+        .build_struct_gep(ctx.jade_fn_ty, jade_fn_ptr, 1, "cl_f1")
+        .map_err(|e| e.to_string())?;
+    ctx.builder.build_store(f1, env_ptr).map_err(|e| e.to_string())?;
+
+    Ok(jade_fn_ptr.into())
 }
 
 // ── Short-circuit logical operators ──────────────────────────────────────────
@@ -762,9 +1026,10 @@ fn emit_unaryop<'ctx>(
 fn emit_call<'ctx>(
     callee: &TExpr,
     args: &[TExpr],
-    _ret_ty: &JadeType,
+    ret_ty: &JadeType,
     ctx: &mut CodegenCtx<'ctx>,
 ) -> Result<BasicValueEnum<'ctx>, String> {
+    // ── Built-in functions ────────────────────────────────────────────────────
     if let TExprKind::Identifier(name) = &callee.kind {
         match name.as_str() {
             "print" => return emit_print(args, ctx),
@@ -774,46 +1039,92 @@ fn emit_call<'ctx>(
         }
     }
 
-    let fn_name = match &callee.kind {
-        TExprKind::Identifier(n) => n.clone(),
-        _ => return Err("indirect function calls are not yet supported in the LLVM backend".into()),
-    };
-
-    let (fn_val, param_tys, fn_ret_ty) = ctx
-        .fn_info
-        .get(&fn_name)
-        .ok_or_else(|| format!("undefined function: {fn_name}"))?
-        .clone();
-
-    let mut llvm_args: Vec<BasicMetadataValueEnum<'ctx>> = Vec::with_capacity(args.len());
-    for (i, arg_expr) in args.iter().enumerate() {
-        let arg_val = emit_expr(arg_expr, ctx)?;
-        let param_ty = param_tys.get(i).unwrap_or(&JadeType::Unknown);
-        let coerced = coerce(arg_val, &arg_expr.ty, param_ty, ctx)?;
-        llvm_args.push(coerced.into());
+    // ── Direct named function call ─────────────────────────────────────────
+    if let TExprKind::Identifier(fn_name) = &callee.kind {
+        if let Some((fn_val, param_tys, fn_ret_ty)) = ctx.fn_info.get(fn_name.as_str()).cloned() {
+            let mut llvm_args: Vec<BasicMetadataValueEnum<'ctx>> = Vec::with_capacity(args.len());
+            for (i, arg_expr) in args.iter().enumerate() {
+                let arg_val = emit_expr(arg_expr, ctx)?;
+                let param_ty = param_tys.get(i).unwrap_or(&JadeType::Unknown);
+                let coerced = coerce(arg_val, &arg_expr.ty, param_ty, ctx)?;
+                llvm_args.push(coerced.into());
+            }
+            let call_site = ctx.builder
+                .build_call(fn_val, &llvm_args, "call")
+                .map_err(|e| e.to_string())?;
+            return match fn_ret_ty {
+                JadeType::Nil => Ok(ctx.context.i64_type().const_int(0, false).into()),
+                _ => match call_site.as_any_value_enum() {
+                    AnyValueEnum::IntValue(v)     => Ok(v.into()),
+                    AnyValueEnum::FloatValue(v)   => Ok(v.into()),
+                    AnyValueEnum::PointerValue(v) => Ok(v.into()),
+                    AnyValueEnum::StructValue(v)  => Ok(v.into()),
+                    AnyValueEnum::ArrayValue(v)   => Ok(v.into()),
+                    AnyValueEnum::VectorValue(v)  => Ok(v.into()),
+                    _ => Ok(ctx.context.i64_type().const_int(0, false).into()),
+                },
+            };
+        }
     }
 
-    let call_site = ctx
-        .builder
-        .build_call(fn_val, &llvm_args, "call")
+    // ── Indirect call through jade_fn_t fat pointer ───────────────────────────
+    emit_indirect_call(callee, args, ret_ty, ctx)
+}
+
+/// Call a first-class function value (closure or named-fn-as-value) stored as a
+/// `jade_fn_t*`.  All arguments are packed as `i64`; the env pointer is the last
+/// argument.  The result is returned as an `i64` and then reinterpreted as `ret_ty`.
+fn emit_indirect_call<'ctx>(
+    callee: &TExpr,
+    args: &[TExpr],
+    ret_ty: &JadeType,
+    ctx: &mut CodegenCtx<'ctx>,
+) -> Result<BasicValueEnum<'ctx>, String> {
+    let i64_ty = ctx.context.i64_type();
+    let ptr_ty = ctx.context.ptr_type(AddressSpace::default());
+
+    let jade_fn_ptr = as_pointer(emit_expr(callee, ctx)?, ctx)?;
+
+    // Load fn_ptr (field 0) and env_ptr (field 1) from the fat pointer.
+    let fp_slot = ctx.builder
+        .build_struct_gep(ctx.jade_fn_ty, jade_fn_ptr, 0, "fp_slot")
+        .map_err(|e| e.to_string())?;
+    let fn_ptr = ctx.builder
+        .build_load(ptr_ty, fp_slot, "fn_ptr")
+        .map_err(|e| e.to_string())?
+        .into_pointer_value();
+
+    let ep_slot = ctx.builder
+        .build_struct_gep(ctx.jade_fn_ty, jade_fn_ptr, 1, "ep_slot")
+        .map_err(|e| e.to_string())?;
+    let env_ptr = ctx.builder
+        .build_load(ptr_ty, ep_slot, "env_ptr")
+        .map_err(|e| e.to_string())?
+        .into_pointer_value();
+
+    // Coerce all arguments to i64, append env_ptr.
+    let mut llvm_args: Vec<BasicMetadataValueEnum<'ctx>> = Vec::with_capacity(args.len() + 1);
+    for arg_expr in args {
+        let val = emit_expr(arg_expr, ctx)?;
+        llvm_args.push(value_to_i64(val, &arg_expr.ty, ctx)?.into());
+    }
+    llvm_args.push(env_ptr.into());
+
+    // Build the uniform function type: i64(i64..., ptr).
+    let mut param_tys: Vec<BasicMetadataTypeEnum<'ctx>> =
+        args.iter().map(|_| BasicMetadataTypeEnum::IntType(i64_ty)).collect();
+    param_tys.push(BasicMetadataTypeEnum::PointerType(ptr_ty));
+    let indirect_fn_ty = i64_ty.fn_type(&param_tys, false);
+
+    let call_site = ctx.builder
+        .build_indirect_call(indirect_fn_ty, fn_ptr, &llvm_args, "icall")
         .map_err(|e| e.to_string())?;
 
-    match fn_ret_ty {
-        JadeType::Nil => {
-            Ok(ctx.context.i64_type().const_int(0, false).into())
-        }
-        _ => {
-            match call_site.as_any_value_enum() {
-                AnyValueEnum::IntValue(v)     => Ok(v.into()),
-                AnyValueEnum::FloatValue(v)   => Ok(v.into()),
-                AnyValueEnum::PointerValue(v) => Ok(v.into()),
-                AnyValueEnum::StructValue(v)  => Ok(v.into()),
-                AnyValueEnum::ArrayValue(v)   => Ok(v.into()),
-                AnyValueEnum::VectorValue(v)  => Ok(v.into()),
-                _ => Ok(ctx.context.i64_type().const_int(0, false).into()),
-            }
-        }
-    }
+    let raw = match call_site.as_any_value_enum() {
+        AnyValueEnum::IntValue(v) => v,
+        _ => i64_ty.const_int(0, false),
+    };
+    i64_to_value(raw, ret_ty, ctx)
 }
 
 // ── print() built-in ─────────────────────────────────────────────────────────
@@ -878,6 +1189,20 @@ fn emit_printf_value<'ctx>(
                 .build_ptr_to_int(val.into_pointer_value(), ctx.context.i64_type(), "spi")
                 .map_err(|e| e.to_string())?;
             let fmt = sp(&format!("<struct:0x%llx>{suffix}"), ctx)?;
+            ctx.builder.build_call(ctx.printf_fn, &[fmt.into(), pi.into()], "").map_err(|e| e.to_string())?;
+        }
+        JadeType::Dict => {
+            let pi = ctx.builder
+                .build_ptr_to_int(val.into_pointer_value(), ctx.context.i64_type(), "dpi")
+                .map_err(|e| e.to_string())?;
+            let fmt = sp(&format!("<dict:0x%llx>{suffix}"), ctx)?;
+            ctx.builder.build_call(ctx.printf_fn, &[fmt.into(), pi.into()], "").map_err(|e| e.to_string())?;
+        }
+        JadeType::Fn { .. } | JadeType::AsyncFn { .. } => {
+            let pi = ctx.builder
+                .build_ptr_to_int(val.into_pointer_value(), ctx.context.i64_type(), "fpi")
+                .map_err(|e| e.to_string())?;
+            let fmt = sp(&format!("<fn:0x%llx>{suffix}"), ctx)?;
             ctx.builder.build_call(ctx.printf_fn, &[fmt.into(), pi.into()], "").map_err(|e| e.to_string())?;
         }
         _ => {
@@ -1002,10 +1327,26 @@ pub fn value_to_i64<'ctx>(
         JadeType::Bool => ctx.builder
             .build_int_z_extend(val.into_int_value(), i64_ty, "b2i64")
             .map_err(|e| e.to_string()),
-        JadeType::Str | JadeType::Array(_) | JadeType::Struct(_) => ctx.builder
+        JadeType::Str | JadeType::Array(_) | JadeType::Struct(_)
+        | JadeType::Dict | JadeType::Fn { .. } | JadeType::AsyncFn { .. }
+        | JadeType::Future(_) | JadeType::Prompt => ctx.builder
             .build_ptr_to_int(val.into_pointer_value(), i64_ty, "p2i64")
             .map_err(|e| e.to_string()),
-        _ => Ok(val.into_int_value()),
+        // For Int / Unknown / Nil: inspect the actual LLVM value type so that
+        // returning a pointer or float from an Unknown-typed function still works.
+        _ => match val {
+            BasicValueEnum::PointerValue(p) =>
+                ctx.builder.build_ptr_to_int(p, i64_ty, "p2i64_unk").map_err(|e| e.to_string()),
+            BasicValueEnum::FloatValue(f) => ctx.float_to_i64_bits(f),
+            BasicValueEnum::IntValue(v) => {
+                if v.get_type().get_bit_width() < 64 {
+                    ctx.builder.build_int_z_extend(v, i64_ty, "zext_i64").map_err(|e| e.to_string())
+                } else {
+                    Ok(v)
+                }
+            }
+            _ => Err(format!("value_to_i64: unhandled LLVM value type {:?}", val)),
+        },
     }
 }
 
@@ -1024,7 +1365,9 @@ pub fn i64_to_value<'ctx>(
                 .map_err(|e| e.to_string())?;
             Ok(b.into())
         }
-        JadeType::Str | JadeType::Array(_) | JadeType::Struct(_) => {
+        JadeType::Str | JadeType::Array(_) | JadeType::Struct(_)
+        | JadeType::Dict | JadeType::Fn { .. } | JadeType::AsyncFn { .. }
+        | JadeType::Future(_) | JadeType::Prompt => {
             let p = ctx.builder
                 .build_int_to_ptr(raw, ptr_ty, "i2ptr")
                 .map_err(|e| e.to_string())?;
@@ -1079,7 +1422,9 @@ fn actual_ty<'ctx>(declared: &JadeType, val: &BasicValueEnum<'ctx>) -> JadeType 
     match val {
         BasicValueEnum::FloatValue(_) => JadeType::Float,
         BasicValueEnum::PointerValue(_) => match declared {
-            JadeType::Str | JadeType::Array(_) | JadeType::Struct(_) => declared.clone(),
+            JadeType::Str | JadeType::Array(_) | JadeType::Struct(_)
+            | JadeType::Dict | JadeType::Fn { .. } | JadeType::AsyncFn { .. }
+            | JadeType::Future(_) | JadeType::Prompt => declared.clone(),
             _ => JadeType::Str,
         },
         BasicValueEnum::IntValue(_) => match declared {

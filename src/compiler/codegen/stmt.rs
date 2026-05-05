@@ -401,11 +401,33 @@ pub fn emit_stmt<'ctx>(ctx: &mut CodegenCtx<'ctx>, stmt: &TStmt) -> Result<(), S
             ctx.builder.position_at_end(exit_bb);
         }
 
-        // ── arr[idx] = value ──────────────────────────────────────────────────
+        // ── arr[idx] = value  /  dict[key] = value ───────────────────────────
         TStmt::IndexAssign { name, index, value, .. } => {
             let (arr_slot, arr_ty) = ctx
                 .lookup(name)
                 .ok_or_else(|| format!("undefined variable: {name}"))?;
+
+            // Dict: d[key] = value  →  jade_dict_set(dict_ptr, key_ptr, value_i64)
+            if matches!(arr_ty, JadeType::Dict) {
+                let ptr_ty = ctx.context.ptr_type(AddressSpace::default());
+                let dict_ptr = ctx.builder
+                    .build_load(ptr_ty, arr_slot, "ia_dict")
+                    .map_err(|e| e.to_string())?
+                    .into_pointer_value();
+                let key_val = expr::emit_expr(index, ctx)?;
+                let key_ptr = expr::as_pointer(key_val, ctx)?;
+                let val = expr::emit_expr(value, ctx)?;
+                let as_i64 = expr::value_to_i64(val, &value.ty, ctx)?;
+                ctx.builder
+                    .build_call(
+                        ctx.jade_dict_set_fn,
+                        &[dict_ptr.into(), key_ptr.into(), as_i64.into()],
+                        "",
+                    )
+                    .map_err(|e| e.to_string())?;
+                ctx.uses_dicts = true;
+                return Ok(());
+            }
 
             // Parameters with no type annotation are stored as Unknown.  Treat
             // them as an array of Unknown elements so index assignment still
