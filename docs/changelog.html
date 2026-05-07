@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Jade 1.1.4 — Changelog</title>
+  <title>Jade 1.1.5 — Changelog</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -268,7 +268,7 @@
         jade
       </a>
       <span class="topbar-sep">»</span>
-      <span class="topbar-title">1.1.4 Documentation</span>
+      <span class="topbar-title">1.1.5 Documentation</span>
     </div>
     <div class="topbar-right">
       <a href="https://github.com/joericks1998/jade">GitHub</a>
@@ -326,6 +326,12 @@
 
       <section id="changelog">
         <h2>Changelog</h2>
+        <h3>v1.1.5</h3>
+        <ul>
+          <li>Added single-quote string literals — <code>'hello'</code> and <code>'''triple'''</code> are now equivalent to their double-quote forms; <code>f'…{expr}…'</code> f-strings work too</li>
+          <li>Fixed <code>jade.toml</code> config loading — a config-only file with only a <code>[model]</code> section (no <code>[project]</code>) is now correctly picked up</li>
+          <li>Added <code>jade upgrade</code> command — downloads and atomically replaces the binary from the latest GitHub release</li>
+        </ul>
         <h3>v1.1.4</h3>
         <ul>
           <li>Added <code>async fn</code> definitions and <code>await</code> expressions — concurrent LLM inference via <code>await</code> on prompt dereferences</li>

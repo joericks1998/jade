@@ -11,6 +11,7 @@ pub mod repl;
 pub mod rt;
 pub mod run;
 pub mod test;
+pub mod upgrade;
 
 /// Format a byte count as a human-readable string (B / KB / MB).
 pub(crate) fn format_bytes(bytes: u64) -> String {
