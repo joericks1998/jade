@@ -108,15 +108,22 @@ pub fn load_config() -> JadeConfig {
         }
     }
 
-    // Layer 3: project jade.toml [model] section — walk up to project root so
-    // running jade from a subdirectory still picks up the project config.
-    if let Some(root) = crate::project::find_project_root() {
-        let path = root.join("jade.toml");
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            if let Ok(parsed) = toml::from_str::<TomlConfig>(&content) {
-                if let Some(m) = &parsed.model {
-                    apply_model_section(&mut cfg, m);
+    // Layer 3: nearest jade.toml [model] section — walk up from CWD so that
+    // running jade from a subdirectory still picks up the config.  A jade.toml
+    // without a [project] section is valid here (config-only files work too).
+    if let Ok(mut dir) = std::env::current_dir() {
+        loop {
+            let path = dir.join("jade.toml");
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                if let Ok(parsed) = toml::from_str::<TomlConfig>(&content) {
+                    if let Some(m) = &parsed.model {
+                        apply_model_section(&mut cfg, m);
+                    }
                 }
+                break; // stop at the first jade.toml found, whether it had [model] or not
+            }
+            if !dir.pop() {
+                break;
             }
         }
     }
