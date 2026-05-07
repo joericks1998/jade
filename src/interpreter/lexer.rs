@@ -130,8 +130,8 @@ fn is_line_terminator(kind: &TokenKind) -> bool {
     )
 }
 
-/// Scan the content of a plain string (`"…"` or `"""…"""`) after the opening
-/// quote(s) have been consumed.  Advances `i`, `col`, and `line` in-place.
+/// Scan the content of a plain string after the opening quote(s) have been consumed.
+/// `quote` is either `'"'` or `'\''`.  Advances `i`, `col`, and `line` in-place.
 fn scan_str_content(
     chars: &[char],
     i: &mut usize,
@@ -140,6 +140,7 @@ fn scan_str_content(
     start_line: usize,
     start_col: usize,
     triple: bool,
+    quote: char,
 ) -> Result<String> {
     let mut content = String::new();
     loop {
@@ -150,15 +151,15 @@ fn scan_str_content(
         }
         // Closing-quote detection
         if triple {
-            if chars.get(*i) == Some(&'"')
-                && chars.get(*i + 1) == Some(&'"')
-                && chars.get(*i + 2) == Some(&'"')
+            if chars.get(*i) == Some(&quote)
+                && chars.get(*i + 1) == Some(&quote)
+                && chars.get(*i + 2) == Some(&quote)
             {
                 *col += 3;
                 *i += 3;
                 break;
             }
-        } else if chars[*i] == '"' {
+        } else if chars[*i] == quote {
             *col += 1;
             *i += 1;
             break;
@@ -172,16 +173,20 @@ fn scan_str_content(
                         span: Span { line: start_line, col: start_col },
                     });
                 }
-                match chars[*i] {
-                    '"'  => { content.push('"');  *i += 1; *col += 1; }
-                    '\\' => { content.push('\\'); *i += 1; *col += 1; }
-                    'n'  => { content.push('\n'); *i += 1; *col += 1; }
-                    't'  => { content.push('\t'); *i += 1; *col += 1; }
-                    'r'  => { content.push('\r'); *i += 1; *col += 1; }
-                    other => return Err(JadeError::UnexpectedChar {
-                        ch: other,
-                        span: Span { line: *line, col: *col },
-                    }),
+                let esc = chars[*i];
+                if esc == quote {
+                    content.push(quote); *i += 1; *col += 1;
+                } else {
+                    match esc {
+                        '\\' => { content.push('\\'); *i += 1; *col += 1; }
+                        'n'  => { content.push('\n'); *i += 1; *col += 1; }
+                        't'  => { content.push('\t'); *i += 1; *col += 1; }
+                        'r'  => { content.push('\r'); *i += 1; *col += 1; }
+                        other => return Err(JadeError::UnexpectedChar {
+                            ch: other,
+                            span: Span { line: *line, col: *col },
+                        }),
+                    }
                 }
             }
             '\n' => { content.push('\n'); *line += 1; *col = 1; *i += 1; }
@@ -191,8 +196,8 @@ fn scan_str_content(
     Ok(content)
 }
 
-/// Scan the content of an f-string (`f"…"` or `f"""…"""`) after the opening
-/// quote(s) have been consumed.  Returns the raw parts (literal segments and
+/// Scan the content of an f-string after the opening quote(s) have been consumed.
+/// `quote` is either `'"'` or `'\''`.  Returns the raw parts (literal segments and
 /// expression source texts).  Advances `i`, `col`, and `line` in-place.
 fn scan_fstr_content(
     chars: &[char],
@@ -202,6 +207,7 @@ fn scan_fstr_content(
     start_line: usize,
     start_col: usize,
     triple: bool,
+    quote: char,
 ) -> Result<Vec<RawFStrPart>> {
     let mut parts: Vec<RawFStrPart> = Vec::new();
     let mut literal = String::new();
@@ -213,15 +219,15 @@ fn scan_fstr_content(
         }
         // Closing-quote detection
         if triple {
-            if chars.get(*i) == Some(&'"')
-                && chars.get(*i + 1) == Some(&'"')
-                && chars.get(*i + 2) == Some(&'"')
+            if chars.get(*i) == Some(&quote)
+                && chars.get(*i + 1) == Some(&quote)
+                && chars.get(*i + 2) == Some(&quote)
             {
                 *col += 3;
                 *i += 3;
                 break;
             }
-        } else if chars[*i] == '"' {
+        } else if chars[*i] == quote {
             *col += 1;
             *i += 1;
             break;
@@ -264,18 +270,22 @@ fn scan_fstr_content(
                         span: Span { line: start_line, col: start_col },
                     });
                 }
-                match chars[*i] {
-                    '"'  => { literal.push('"');  *i += 1; *col += 1; }
-                    '\\' => { literal.push('\\'); *i += 1; *col += 1; }
-                    'n'  => { literal.push('\n'); *i += 1; *col += 1; }
-                    't'  => { literal.push('\t'); *i += 1; *col += 1; }
-                    'r'  => { literal.push('\r'); *i += 1; *col += 1; }
-                    '{'  => { literal.push('{');  *i += 1; *col += 1; }
-                    '}'  => { literal.push('}');  *i += 1; *col += 1; }
-                    other => return Err(JadeError::UnexpectedChar {
-                        ch: other,
-                        span: Span { line: *line, col: *col },
-                    }),
+                let esc = chars[*i];
+                if esc == quote {
+                    literal.push(quote); *i += 1; *col += 1;
+                } else {
+                    match esc {
+                        '\\' => { literal.push('\\'); *i += 1; *col += 1; }
+                        'n'  => { literal.push('\n'); *i += 1; *col += 1; }
+                        't'  => { literal.push('\t'); *i += 1; *col += 1; }
+                        'r'  => { literal.push('\r'); *i += 1; *col += 1; }
+                        '{'  => { literal.push('{');  *i += 1; *col += 1; }
+                        '}'  => { literal.push('}');  *i += 1; *col += 1; }
+                        other => return Err(JadeError::UnexpectedChar {
+                            ch: other,
+                            span: Span { line: *line, col: *col },
+                        }),
+                    }
                 }
             }
             '\n' => { literal.push('\n'); *line += 1; *col = 1; *i += 1; }
@@ -327,15 +337,16 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
                 i += 1;
             }
 
-            // String literals: "..." or """..."""
-            '"' => {
+            // String literals: "..." / """...""" or '...' / '''...'''
+            '"' | '\'' => {
+                let quote = ch;
                 let start_col = col;
                 let start_line = line;
-                let triple = chars.get(i + 1) == Some(&'"') && chars.get(i + 2) == Some(&'"');
+                let triple = chars.get(i + 1) == Some(&quote) && chars.get(i + 2) == Some(&quote);
                 if triple { col += 3; i += 3; } else { col += 1; i += 1; }
                 let content = scan_str_content(
                     &chars, &mut i, &mut col, &mut line,
-                    start_line, start_col, triple,
+                    start_line, start_col, triple, quote,
                 )?;
                 tokens.push(Token {
                     kind: TokenKind::Str(content),
@@ -411,14 +422,15 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
                     "await"     => TokenKind::Await,
                     "true"      => TokenKind::True,
                     "false"  => TokenKind::False,
-                    // f-string: `f"…"` or `f"""…"""`
-                    "f" if chars.get(i) == Some(&'"') => {
-                        let start_line = line; // capture before mutable borrow
-                        let triple = chars.get(i + 1) == Some(&'"') && chars.get(i + 2) == Some(&'"');
+                    // f-string: `f"…"` / `f"""…"""` or `f'…'` / `f'''…'''`
+                    "f" if matches!(chars.get(i), Some(&'"') | Some(&'\'')) => {
+                        let quote = chars[i];
+                        let start_line = line;
+                        let triple = chars.get(i + 1) == Some(&quote) && chars.get(i + 2) == Some(&quote);
                         if triple { col += 3; i += 3; } else { col += 1; i += 1; }
                         let parts = scan_fstr_content(
                             &chars, &mut i, &mut col, &mut line,
-                            start_line, start_col, triple,
+                            start_line, start_col, triple, quote,
                         )?;
                         TokenKind::FStr(parts)
                     }
