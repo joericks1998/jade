@@ -126,6 +126,9 @@ enum Commands {
         subcommand: RtCommands,
     },
 
+    /// Upgrade jade to the latest release
+    Upgrade,
+
     /// Run a file directly (backward-compatible shorthand)
     ///
     /// This command is hidden — prefer `jade run <file.jde>`.
@@ -280,6 +283,11 @@ async fn run_cli() {
                 cli::rt::run_rt_build(&target, output.as_deref(), &cc, &ar);
             }
         },
+
+        // ── upgrade ───────────────────────────────────────────────────────────
+        Commands::Upgrade => {
+            cli::upgrade::run_upgrade().await;
+        }
 
         // ── backward-compat: jade <file.jde> [-v] ────────────────────────────
         Commands::External(args) => {
