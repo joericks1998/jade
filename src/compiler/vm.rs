@@ -1031,6 +1031,7 @@ async fn vm_prompt_deref(
         model: state.default_model.clone(),
         history: state.conversation_history.clone(),
         max_tokens: DEFAULT_MAX_TOKENS,
+        system_prompt: None,
     }, span).await?;
 
     state.conversation_history.push(llm::Message { role: "user".to_string(),      content: prompt_text });
@@ -1078,6 +1079,7 @@ async fn vm_prompt_deref(
                     model: state.default_model.clone(),
                     history: state.conversation_history.clone(),
                     max_tokens: retry_max_tokens,
+                    system_prompt: None,
                 }, span).await?;
                 state.conversation_history.push(llm::Message {
                     role: "user".to_string(), content: correction,

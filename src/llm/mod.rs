@@ -19,6 +19,7 @@ pub struct InferenceRequest {
     pub model: String,
     pub history: Vec<Message>,
     pub max_tokens: u32,
+    pub system_prompt: Option<String>,
 }
 
 /// A successful response from an inference backend.

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Jade 1.1.4 — Expressions</title>
+  <title>Jade 1.1.5 — Expressions</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -268,7 +268,7 @@
         jade
       </a>
       <span class="topbar-sep">»</span>
-      <span class="topbar-title">1.1.4 Documentation</span>
+      <span class="topbar-title">1.1.5 Documentation</span>
     </div>
     <div class="topbar-right">
       <a href="https://github.com/joericks1998/jade">GitHub</a>
@@ -395,25 +395,31 @@ let neg   = -5
 let nflag = !true</code></pre>
 
         <h3>String Literals</h3>
-        <p>String literals are delimited by double quotes. Triple-quoted strings (<code>"""…"""</code>) span multiple lines. The <code>+</code> operator concatenates two strings.</p>
+        <p>String literals may be delimited by double quotes (<code>"…"</code>) or single quotes (<code>'…'</code>) — both forms are identical. Triple-quoted strings (<code>"""…"""</code> or <code>'''…'''</code>) span multiple lines. The <code>+</code> operator concatenates two strings.</p>
         <pre><code>let hello = "hello"
-let world = "world"
+let world = 'world'
 let hw    = hello + " " + world
 
 let multi = """
 line one
 line two
-"""</code></pre>
+"""
+
+let also_multi = '''
+line one
+line two
+'''</code></pre>
         <p>Strings support indexing with <code>[i]</code> to extract a single character as a one-character string. Indexes are zero-based. Out-of-range indexes raise <code>IndexOutOfBounds</code>.</p>
         <pre><code>let s = "hello"
 let h = s[0]</code></pre>
 
         <h3>F-String Interpolation</h3>
-        <p>An f-string is prefixed with <code>f</code> before the opening quote. Any expression inside <code>{ }</code> is evaluated and its value is converted to a string and embedded in place.</p>
+        <p>An f-string is prefixed with <code>f</code> before the opening quote. Any expression inside <code>{ }</code> is evaluated and its value is converted to a string and embedded in place. Both quote styles are supported.</p>
         <pre><code>let name = "Jade"
 let n    = 42
-let msg  = f"hello, {name}! answer is {n}"</code></pre>
-        <p>Triple-quoted f-strings are written as <code>f"""…"""</code> and behave the same way.</p>
+let msg  = f"hello, {name}! answer is {n}"
+let msg2 = f'hello, {name}! answer is {n}'</code></pre>
+        <p>Triple-quoted f-strings are written as <code>f"""…"""</code> or <code>f'''…'''</code> and behave the same way.</p>
 
         <h3>Array Literals</h3>
         <p>An array is written as a comma-separated list inside square brackets. Arrays may be empty and may hold values of any type.</p>

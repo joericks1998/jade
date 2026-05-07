@@ -142,13 +142,7 @@ pub async fn run_file(path: &str, verbose: bool) {
 
     // Build LLM config and backend.
     let cfg = crate::config::load_config();
-    let backend = cfg.api_key.as_ref()
-        .map(|key| crate::llm::build_backend(&cfg.provider, key, &cfg.model, cfg.max_parallel))
-        .transpose()
-        .unwrap_or_else(|e| {
-            eprintln!("error: invalid configuration: {}", e);
-            process::exit(1);
-        });
+    let backend = crate::llm::select_backend(&cfg);
     let source_dir = Path::new(path)
         .canonicalize()
         .ok()

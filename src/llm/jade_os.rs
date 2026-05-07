@@ -81,11 +81,14 @@ impl JadeOsBackend {
         loop {
             match decode_frame(&buf) {
                 FrameResult::Token(token, consumed) => {
+                    print!("{}", token);
+                    let _ = std::io::Write::flush(&mut std::io::stdout());
                     text.push_str(&token);
                     buf.drain(..consumed);
                 }
                 FrameResult::Done(tokens_used, consumed) => {
                     buf.drain(..consumed);
+                    println!();
                     return Ok(InferenceResponse {
                         text,
                         tokens_used: tokens_used as i64,
@@ -131,12 +134,14 @@ fn encode_request(req: &InferenceRequest) -> std::result::Result<Vec<u8>, serde_
         model: &'a str,
         history: &'a [super::Message],
         max_tokens: u32,
+        system_prompt: Option<&'a str>,
     }
     let json = serde_json::to_vec(&Wire {
         prompt: &req.prompt,
         model: &req.model,
         history: &req.history,
         max_tokens: req.max_tokens,
+        system_prompt: req.system_prompt.as_deref(),
     })?;
     let len = json.len() as u32;
     let mut buf = Vec::with_capacity(4 + json.len());

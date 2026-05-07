@@ -1,6 +1,6 @@
 # Jade
 
-A programming language written in Rust. Jade 1.1.4 compiles programs through a type inference pass and a register-based bytecode VM. It supports value types (`int`, `float`, `bool`, `str`, arrays, dicts, and user-defined `struct`s), `let` bindings, bare variable assignment, `fn` function definitions with `return`, anonymous closures, first-class functions, recursion, `if`/`elif`/`else` control flow, `while` loops, `for` loops over arrays, `try`/`catch`/`raise` exception handling, `struct` definitions with field access and mutation, `extend` blocks for methods, `interface` definitions, multi-file `use` imports, the `print` and `len` built-ins, f-string interpolation, the pipe operator `|>`, `prompt` declarations with LLM inference via `?`, and arithmetic, bitwise, logical, and comparison operators.
+A programming language written in Rust. Jade 1.1.5 compiles programs through a type inference pass and a register-based bytecode VM. It supports value types (`int`, `float`, `bool`, `str`, arrays, dicts, and user-defined `struct`s), `let` bindings, bare variable assignment, `fn` function definitions with `return`, anonymous closures, first-class functions, recursion, `if`/`elif`/`else` control flow, `while` loops, `for` loops over arrays, `try`/`catch`/`raise` exception handling, `struct` definitions with field access and mutation, `extend` blocks for methods, `interface` definitions, multi-file `use` imports, the `print` and `len` built-ins, f-string interpolation, the pipe operator `|>`, `prompt` declarations with LLM inference via `?`, and arithmetic, bitwise, logical, and comparison operators. String literals accept both double quotes (`"…"`) and single quotes (`'…'`), including triple-quoted variants.
 
 ```
 fn factorial(n) {
@@ -84,6 +84,7 @@ jade test                     # Discover and run test files
 jade fmt <file.jde>           # Format source files
 jade new myapp                # Create a new project
 jade env                      # Show version, config, and cache info
+jade upgrade                  # Upgrade jade to the latest release
 jade --help                   # Show help
 ```
 
@@ -114,8 +115,8 @@ Errors are written to stderr with the format `<file>: <phase> error: <descriptio
 | `struct` definitions and instantiation | ✓ |
 | Field access and field mutation | ✓ |
 | `extend` blocks and method calls | ✓ |
-| String literals (`str`) with concatenation and indexing | ✓ |
-| F-string interpolation (`f"…{expr}…"`) | ✓ |
+| String literals (`str`) — double or single quotes, triple-quoted variants | ✓ |
+| F-string interpolation (`f"…{expr}…"` or `f'…{expr}…'`) | ✓ |
 | Array literals with index access and assignment | ✓ |
 | `print` and `len` built-in functions | ✓ |
 | Pipe operator `\|>` | ✓ |

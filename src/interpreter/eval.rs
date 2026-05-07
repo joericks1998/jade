@@ -1411,6 +1411,7 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                     model: env.default_model.clone(),
                     history: env.conversation_history.clone(),
                     max_tokens: DEFAULT_MAX_TOKENS,
+                    system_prompt: None,
                 };
                 crate::llm::infer_sync(backend.as_ref(), req, *span)?
             };
@@ -1473,6 +1474,7 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                                 model: env.default_model.clone(),
                                 history: env.conversation_history.clone(),
                                 max_tokens: retry_max_tokens,
+                                system_prompt: None,
                             }, *span)?
                         };
                         env.conversation_history.push(llm::Message {
