@@ -1402,57 +1402,49 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                 _ => return Err(JadeError::NotAPrompt { name: expr_display(expr), span: *span }),
             };
 
-            // 2. Call the backend with the current conversation history.
+            // 2. Stateless call — no conversation history is sent or recorded.
+            //    Conversational memory is the JadeLang program's responsibility.
             let initial_resp = {
                 let backend = env.inference_backend.as_ref()
                     .ok_or(JadeError::MissingApiKey { span: *span })?;
-                let req = llm::InferenceRequest {
+                crate::llm::infer_sync(backend.as_ref(), llm::InferenceRequest {
                     prompt: prompt_text.clone(),
                     model: env.default_model.clone(),
-                    history: env.conversation_history.clone(),
+                    history: Vec::new(),
                     max_tokens: DEFAULT_MAX_TOKENS,
                     system_prompt: None,
-                };
-                crate::llm::infer_sync(backend.as_ref(), req, *span)?
+                }, *span)?
             };
 
-            // 3. Record the exchange in conversation history and update token count.
-            env.conversation_history.push(llm::Message { role: "user".to_string(), content: prompt_text });
-            env.conversation_history.push(llm::Message { role: "assistant".to_string(), content: initial_resp.text.clone() });
             env.token_count += initial_resp.tokens_used;
-            let new_token_count = env.token_count;
-            env.set_session_var("__tokens__", Value::Int(new_token_count));
+            env.set_session_var("__tokens__", Value::Int(env.token_count));
 
-            // 4. Untyped dereference: return raw LLM response as a string.
+            // 3. Untyped dereference: return raw LLM response as a string.
             let Some(type_name) = output_type else {
                 return Ok(Value::Str(initial_resp.text));
             };
 
-            // 5. Typed dereference: retry loop with coercion.
+            // 4. Typed dereference: retry loop with coercion.
+            //    A local history is built for this exchange only so correction
+            //    prompts have context — it is never merged into env.
             let max_retries = env.max_retries;
-            let history_len_before_retries = env.conversation_history.len();
+            let mut retry_history: Vec<llm::Message> = vec![
+                llm::Message { role: "user".to_string(), content: prompt_text },
+                llm::Message { role: "assistant".to_string(), content: initial_resp.text.clone() },
+            ];
             let mut current_response = initial_resp.text;
-            // Clone struct_defs so the retry loop can borrow other env fields freely.
             let struct_defs = env.struct_defs.clone();
 
-            // Use a larger token budget for complex types that produce more output.
             let retry_max_tokens = if matches!(type_name.as_str(), "int" | "float" | "bool" | "str") {
                 RETRY_MAX_TOKENS
             } else {
                 RETRY_MAX_TOKENS_COMPLEX
             };
 
-            // Each loop iteration checks the current response, then sends the coercion
-            // error back to the LLM as a correction prompt. The user never sees these
-            // intermediate failures — only a PromptOverflow if all retries are exhausted.
             for attempt in 0..max_retries {
                 match coerce_to_type(&current_response, type_name, &struct_defs) {
-                    Ok(v) => {
-                        env.conversation_history.truncate(history_len_before_retries);
-                        return Ok(v);
-                    }
+                    Ok(v) => return Ok(v),
                     Err(correction) => {
-                        // Record the failed attempt in __retry_log__
                         let entry = Value::Str(format!(
                             "attempt {}: response={:?} hint={:?}",
                             attempt + 1, current_response.trim(), correction
@@ -1465,43 +1457,31 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                             }
                         }
 
-                        // Send the coercion error back to the LLM and collect its correction.
                         let retry_resp = {
                             let backend = env.inference_backend.as_ref()
                                 .ok_or(JadeError::MissingApiKey { span: *span })?;
                             crate::llm::infer_sync(backend.as_ref(), llm::InferenceRequest {
                                 prompt: correction.clone(),
                                 model: env.default_model.clone(),
-                                history: env.conversation_history.clone(),
+                                history: retry_history.clone(),
                                 max_tokens: retry_max_tokens,
                                 system_prompt: None,
                             }, *span)?
                         };
-                        env.conversation_history.push(llm::Message {
-                            role: "user".to_string(), content: correction,
-                        });
-                        env.conversation_history.push(llm::Message {
-                            role: "assistant".to_string(), content: retry_resp.text.clone(),
-                        });
+                        retry_history.push(llm::Message { role: "user".to_string(), content: correction });
+                        retry_history.push(llm::Message { role: "assistant".to_string(), content: retry_resp.text.clone() });
                         current_response = retry_resp.text;
                     }
                 }
             }
 
-            // Final coercion attempt after all retry corrections have been sent.
             match coerce_to_type(&current_response, type_name, &struct_defs) {
-                Ok(v) => {
-                    env.conversation_history.truncate(history_len_before_retries);
-                    Ok(v)
-                }
-                Err(_) => {
-                    env.conversation_history.truncate(history_len_before_retries);
-                    Err(JadeError::PromptOverflow {
-                        name: expr_display(expr),
-                        attempts: max_retries + 1,
-                        span: *span,
-                    })
-                }
+                Ok(v) => Ok(v),
+                Err(_) => Err(JadeError::PromptOverflow {
+                    name: expr_display(expr),
+                    attempts: max_retries + 1,
+                    span: *span,
+                }),
             }
         }
     }
