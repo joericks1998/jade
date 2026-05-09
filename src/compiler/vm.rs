@@ -158,6 +158,9 @@ pub struct VmState {
     pub token_count: i64,
     pub max_retries: usize,
     pub default_model: String,
+    /// Memoisation cache: maps `(prompt_text, output_type)` → the raw response
+    /// text that produced a successful result. Mirrors the same cache in `Env`.
+    pub prompt_cache: HashMap<(String, Option<String>), String>,
     /// Directory of the currently-executing file — used to resolve relative `use` paths.
     pub source_dir: PathBuf,
     /// Set of canonical paths currently being imported (cycle detection).
@@ -181,6 +184,7 @@ impl VmState {
             token_count: 0,
             max_retries: 3,
             default_model: String::new(),
+            prompt_cache: HashMap::new(),
             source_dir: PathBuf::new(),
             import_stack: HashSet::new(),
         }
@@ -235,6 +239,7 @@ impl VmState {
             token_count: 0,
             max_retries: self.max_retries,
             default_model: self.default_model.clone(),
+            prompt_cache: self.prompt_cache.clone(),
             source_dir: self.source_dir.clone(),
             import_stack: HashSet::new(),
         }
@@ -1022,6 +1027,20 @@ async fn vm_prompt_deref(
     state: &mut VmState,
     span: Span,
 ) -> Result<VmValue> {
+    // Cache check — skip inference entirely on a repeated (prompt, type) pair.
+    let cache_key = (prompt_text.clone(), output_type.map(str::to_owned));
+    if let Some(cached) = state.prompt_cache.get(&cache_key).cloned() {
+        return match output_type {
+            None => Ok(VmValue::Str(cached)),
+            Some(type_name) => {
+                let struct_defs = state.struct_defs.clone();
+                coerce(cached.trim(), type_name, &struct_defs).map_err(|_| {
+                    JadeError::PromptOverflow { name: "<prompt>".to_string(), attempts: 1, span }
+                })
+            }
+        };
+    }
+
     // Clone the Arc so we don't hold a borrow of state across .await points.
     let backend = state.inference_backend.as_ref()
         .ok_or(JadeError::MissingApiKey { span })?
@@ -1041,6 +1060,7 @@ async fn vm_prompt_deref(
     state.globals.insert("__tokens__".to_string(), VmValue::Int(tc));
 
     let Some(type_name) = output_type else {
+        state.prompt_cache.insert(cache_key, initial_resp.text.clone());
         return Ok(VmValue::Str(initial_resp.text));
     };
 
@@ -1061,7 +1081,10 @@ async fn vm_prompt_deref(
 
     for attempt in 0..max_retries {
         match coerce(current.trim(), type_name, &struct_defs) {
-            Ok(v) => return Ok(v),
+            Ok(v) => {
+                state.prompt_cache.insert(cache_key, current);
+                return Ok(v);
+            }
             Err(correction) => {
                 let entry = VmValue::Str(format!(
                     "attempt {}: response={:?} hint={:?}",
@@ -1086,7 +1109,10 @@ async fn vm_prompt_deref(
     }
 
     match coerce(current.trim(), type_name, &struct_defs) {
-        Ok(v) => Ok(v),
+        Ok(v) => {
+            state.prompt_cache.insert(cache_key, current);
+            Ok(v)
+        }
         Err(_) => Err(JadeError::PromptOverflow { name: "<prompt>".to_string(), attempts: max_retries + 1, span }),
     }
 }
