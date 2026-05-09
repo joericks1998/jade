@@ -159,6 +159,10 @@ pub struct Env {
     pub max_retries: usize,
     /// Default model name passed to the inference backend.
     pub default_model: String,
+    /// Memoisation cache: maps `(prompt_text, output_type)` → the raw response
+    /// text that produced a successful result. On a hit the inference call is
+    /// skipped entirely; for typed derefs `coerce_to_type` is re-run (cheap).
+    pub prompt_cache: HashMap<(String, Option<String>), String>,
 }
 
 impl Env {
@@ -192,6 +196,7 @@ impl Env {
             token_count: 0,
             max_retries: 3,
             default_model: String::new(),
+            prompt_cache: HashMap::new(),
         }
     }
 
@@ -1402,7 +1407,25 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                 _ => return Err(JadeError::NotAPrompt { name: expr_display(expr), span: *span }),
             };
 
-            // 2. Stateless call — no conversation history is sent or recorded.
+            // 2. Cache check — skip inference entirely on a repeated (prompt, type) pair.
+            let cache_key = (prompt_text.clone(), output_type.clone());
+            if let Some(cached) = env.prompt_cache.get(&cache_key).cloned() {
+                return match output_type {
+                    None => Ok(Value::Str(cached)),
+                    Some(type_name) => {
+                        let struct_defs = env.struct_defs.clone();
+                        coerce_to_type(&cached, type_name, &struct_defs).map_err(|_| {
+                            JadeError::PromptOverflow {
+                                name: expr_display(expr),
+                                attempts: 1,
+                                span: *span,
+                            }
+                        })
+                    }
+                };
+            }
+
+            // 3. Stateless call — no conversation history is sent or recorded.
             //    Conversational memory is the JadeLang program's responsibility.
             let initial_resp = {
                 let backend = env.inference_backend.as_ref()
@@ -1419,12 +1442,13 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
             env.token_count += initial_resp.tokens_used;
             env.set_session_var("__tokens__", Value::Int(env.token_count));
 
-            // 3. Untyped dereference: return raw LLM response as a string.
+            // 4. Untyped dereference: cache and return raw LLM response.
             let Some(type_name) = output_type else {
+                env.prompt_cache.insert(cache_key, initial_resp.text.clone());
                 return Ok(Value::Str(initial_resp.text));
             };
 
-            // 4. Typed dereference: retry loop with coercion.
+            // 5. Typed dereference: retry loop with coercion.
             //    A local history is built for this exchange only so correction
             //    prompts have context — it is never merged into env.
             let max_retries = env.max_retries;
@@ -1443,7 +1467,10 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
 
             for attempt in 0..max_retries {
                 match coerce_to_type(&current_response, type_name, &struct_defs) {
-                    Ok(v) => return Ok(v),
+                    Ok(v) => {
+                        env.prompt_cache.insert(cache_key, current_response);
+                        return Ok(v);
+                    }
                     Err(correction) => {
                         let entry = Value::Str(format!(
                             "attempt {}: response={:?} hint={:?}",
@@ -1476,7 +1503,10 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
             }
 
             match coerce_to_type(&current_response, type_name, &struct_defs) {
-                Ok(v) => Ok(v),
+                Ok(v) => {
+                    env.prompt_cache.insert(cache_key, current_response);
+                    Ok(v)
+                }
                 Err(_) => Err(JadeError::PromptOverflow {
                     name: expr_display(expr),
                     attempts: max_retries + 1,
