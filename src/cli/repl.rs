@@ -121,6 +121,17 @@ fn eval_snippet(src: &str, env: &mut Env) -> Result<Option<String>, String> {
         false
     };
 
+    // PromptDeref (`?p`) streams tokens directly to stdout during evaluation;
+    // don't echo the final Value::Str — the output already appeared live.
+    let is_prompt_deref = if capture {
+        matches!(
+            program.stmts.last(),
+            Some(Stmt::Expr(crate::interpreter::ast::Expr::PromptDeref { .. }))
+        )
+    } else {
+        false
+    };
+
     if capture {
         if let Some(Stmt::Expr(expr)) = program.stmts.pop() {
             program.stmts.push(Stmt::Let {
@@ -133,7 +144,7 @@ fn eval_snippet(src: &str, env: &mut Env) -> Result<Option<String>, String> {
 
     eval::evaluate_incremental(program, env).map_err(|e| e.to_string())?;
 
-    if capture {
+    if capture && !is_prompt_deref {
         // Retrieve and immediately remove the temporary binding.
         if let Some(val) = env.globals_mut().remove("__repl_result__") {
             let display = match &val {
@@ -142,6 +153,9 @@ fn eval_snippet(src: &str, env: &mut Env) -> Result<Option<String>, String> {
             };
             return Ok(Some(display));
         }
+    } else if capture {
+        // Still clean up the binding even when we don't display it.
+        env.globals_mut().remove("__repl_result__");
     }
 
     Ok(None)
