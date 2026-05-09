@@ -1,0 +1,6 @@
+// f-string variable interpolation inside a prompt.
+
+let lang = "Jade"
+prompt p = f"Name exactly one benefit of the {lang} programming language in five words or fewer."
+let result = ?p
+print(result)

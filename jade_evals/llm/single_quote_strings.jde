@@ -1,0 +1,6 @@
+// Single-quote strings passed to prompts (regression for quote-parsing fix).
+
+let greeting = 'hello'
+prompt p = 'Reply with exactly the word: world'
+let result = ?p
+print(f'{greeting} {result}')
