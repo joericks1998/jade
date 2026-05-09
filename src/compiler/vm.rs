@@ -1026,16 +1026,16 @@ async fn vm_prompt_deref(
     let backend = state.inference_backend.as_ref()
         .ok_or(JadeError::MissingApiKey { span })?
         .clone();
+    // Stateless call — no conversation history is sent or recorded.
+    // Conversational memory is the JadeLang program's responsibility.
     let initial_resp = backend.infer(llm::InferenceRequest {
         prompt: prompt_text.clone(),
         model: state.default_model.clone(),
-        history: state.conversation_history.clone(),
+        history: Vec::new(),
         max_tokens: DEFAULT_MAX_TOKENS,
         system_prompt: None,
     }, span).await?;
 
-    state.conversation_history.push(llm::Message { role: "user".to_string(),      content: prompt_text });
-    state.conversation_history.push(llm::Message { role: "assistant".to_string(), content: initial_resp.text.clone() });
     state.token_count += initial_resp.tokens_used;
     let tc = state.token_count;
     state.globals.insert("__tokens__".to_string(), VmValue::Int(tc));
@@ -1044,11 +1044,13 @@ async fn vm_prompt_deref(
         return Ok(VmValue::Str(initial_resp.text));
     };
 
-    // Typed deref: retry loop.
+    // Typed deref: retry loop with a local history for this exchange only.
     let max_retries = state.max_retries;
-    let hist_len_before = state.conversation_history.len();
+    let mut retry_history: Vec<llm::Message> = vec![
+        llm::Message { role: "user".to_string(), content: prompt_text },
+        llm::Message { role: "assistant".to_string(), content: initial_resp.text.clone() },
+    ];
     let mut current = initial_resp.text;
-    // Clone struct_defs so the retry loop can borrow other state fields freely.
     let struct_defs = state.struct_defs.clone();
 
     let retry_max_tokens = if matches!(type_name, "int" | "float" | "bool" | "str") {
@@ -1059,12 +1061,8 @@ async fn vm_prompt_deref(
 
     for attempt in 0..max_retries {
         match coerce(current.trim(), type_name, &struct_defs) {
-            Ok(v) => {
-                state.conversation_history.truncate(hist_len_before);
-                return Ok(v);
-            }
+            Ok(v) => return Ok(v),
             Err(correction) => {
-                // Record the failed attempt in __retry_log__
                 let entry = VmValue::Str(format!(
                     "attempt {}: response={:?} hint={:?}",
                     attempt + 1, current.trim(), correction
@@ -1073,34 +1071,23 @@ async fn vm_prompt_deref(
                     log.push(entry);
                 }
 
-                // Send the coercion error back to the LLM and collect its correction.
                 let retry = backend.infer(llm::InferenceRequest {
                     prompt: correction.clone(),
                     model: state.default_model.clone(),
-                    history: state.conversation_history.clone(),
+                    history: retry_history.clone(),
                     max_tokens: retry_max_tokens,
                     system_prompt: None,
                 }, span).await?;
-                state.conversation_history.push(llm::Message {
-                    role: "user".to_string(), content: correction,
-                });
-                state.conversation_history.push(llm::Message {
-                    role: "assistant".to_string(), content: retry.text.clone(),
-                });
+                retry_history.push(llm::Message { role: "user".to_string(), content: correction });
+                retry_history.push(llm::Message { role: "assistant".to_string(), content: retry.text.clone() });
                 current = retry.text;
             }
         }
     }
 
     match coerce(current.trim(), type_name, &struct_defs) {
-        Ok(v) => {
-            state.conversation_history.truncate(hist_len_before);
-            Ok(v)
-        }
-        Err(_) => {
-            state.conversation_history.truncate(hist_len_before);
-            Err(JadeError::PromptOverflow { name: "<prompt>".to_string(), attempts: max_retries + 1, span })
-        }
+        Ok(v) => Ok(v),
+        Err(_) => Err(JadeError::PromptOverflow { name: "<prompt>".to_string(), attempts: max_retries + 1, span }),
     }
 }
 
