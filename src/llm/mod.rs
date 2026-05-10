@@ -55,16 +55,9 @@ pub fn build_backend(
 
 /// Select the inference backend automatically.
 ///
-/// When `$HOME/.jade/llm.sock` is present (jade-tree running), `JadeOsBackend`
-/// is returned unconditionally — no API key needed.
-///
-/// Otherwise falls back to whatever provider is configured in `~/.jade/config.toml`.
-/// Returns `None` if no socket exists and no API key has been configured.
+/// Priority: `$HOME/.jade/llm.sock` (jade-tree) → API key from `~/.jade/config.toml`.
+/// Returns `None` if neither is available.
 pub fn select_backend(config: &crate::config::JadeConfig) -> Option<Arc<dyn InferenceBackend>> {
-    // JADE_MOCK_LLM=1: return deterministic mock responses for CI / eval testing.
-    if std::env::var("JADE_MOCK_LLM").as_deref() == Ok("1") {
-        return Some(Arc::new(MockBackend::default()));
-    }
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_owned());
     if std::path::Path::new(&format!("{home}/.jade/llm.sock")).exists() {
         return Some(Arc::new(jade_os::JadeOsBackend::new()));
@@ -98,26 +91,29 @@ pub fn infer_sync(
     }
 }
 
-// ── Mock backend (JADE_MOCK_LLM=1 and tests) ─────────────────────────────────
+// ── Mock backend (test builds only) ──────────────────────────────────────────
 
-/// Deterministic mock backend used for eval testing and CI.
+/// Deterministic mock backend for unit tests. Not available at runtime.
 ///
 /// Heuristics for response selection (sufficient to pass all fixture evals):
 ///   - Prompt asking for "true or false" / "yes or no" → "true"
 ///   - Prompt asking for "only the number" / arithmetic → "7"
 ///   - Otherwise → "mock response"
+#[cfg(test)]
 pub struct MockBackend {
     /// When non-empty, responses are consumed in FIFO order regardless of heuristics.
     /// Used by unit tests that need precise control.
     pub responses: std::sync::Mutex<std::collections::VecDeque<String>>,
 }
 
+#[cfg(test)]
 impl Default for MockBackend {
     fn default() -> Self {
         MockBackend { responses: std::sync::Mutex::new(std::collections::VecDeque::new()) }
     }
 }
 
+#[cfg(test)]
 impl MockBackend {
     pub fn new(responses: Vec<&str>) -> Self {
         MockBackend {
@@ -139,6 +135,7 @@ impl MockBackend {
     }
 }
 
+#[cfg(test)]
 #[async_trait::async_trait]
 impl InferenceBackend for MockBackend {
     async fn infer(&self, req: InferenceRequest, _span: Span) -> Result<InferenceResponse> {
