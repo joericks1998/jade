@@ -217,13 +217,17 @@ void jade_exc_throw(int64_t value) {
 int64_t jade_exc_value(void) { return exc_thrown_value; }
 
 /* ── LLM Inference ────────────────────────────────────────────────────── */
+/* Connects to jade-tree at JADE_SOCK_PATH (Unix domain socket).
+ * Each jade_infer call opens a fresh connection, sends one JSON request,
+ * and accumulates streaming TOKEN frames until DONE or ERROR. */
 
-#ifdef __linux__
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 
-#define JADE_DEV_PATH        "/dev/jade"
+#define JADE_SOCK_PATH        "/run/jade/llm.sock"
 #define JADE_INFER_MAX_TOKENS 1024
 #define JADE_RESP_INIT_CAP    4096
 
@@ -278,7 +282,20 @@ char* jade_infer(const char* prompt, const char* model) {
     free(ep); free(em);
     if (jlen < 0 || (size_t)jlen >= jcap) { free(json); return NULL; }
 
-    int fd = open(JADE_DEV_PATH, O_RDWR);
+    /* Connect to jade-tree's Unix socket; retry up to 3 times (100 ms apart)
+     * to tolerate a brief window when jade-tree is still starting up. */
+    int fd = -1;
+    for (int retry = 0; retry < 3; retry++) {
+        struct sockaddr_un addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sun_family = AF_UNIX;
+        strncpy(addr.sun_path, JADE_SOCK_PATH, sizeof(addr.sun_path) - 1);
+        int s = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (s < 0) break;
+        if (connect(s, (struct sockaddr*)&addr, sizeof(addr)) == 0) { fd = s; break; }
+        close(s);
+        if (retry < 2) usleep(100000);
+    }
     if (fd < 0) { free(json); return NULL; }
 
     uint32_t blen = (uint32_t)jlen;
@@ -322,7 +339,6 @@ char* jade_infer(const char* prompt, const char* model) {
     return rbuf;
 }
 
-/* Trim leading/trailing whitespace in-place; returns pointer to first non-space. */
 static const char* infer_trim(const char* s, char* buf, size_t bufsz) {
     while (*s && isspace((unsigned char)*s)) s++;
     size_t n = strlen(s);
@@ -390,20 +406,3 @@ char* jade_infer_typed(const char* prompt, const char* model,
     free(current_prompt);
     return NULL;
 }
-
-#else /* !__linux__ */
-
-char* jade_infer(const char* prompt, const char* model) {
-    (void)prompt; (void)model;
-    fprintf(stderr, "jade_infer: /dev/jade not available on this platform\n");
-    return NULL;
-}
-
-char* jade_infer_typed(const char* prompt, const char* model,
-                       const char* type_name, int max_retries) {
-    (void)prompt; (void)model; (void)type_name; (void)max_retries;
-    fprintf(stderr, "jade_infer_typed: /dev/jade not available on this platform\n");
-    return NULL;
-}
-
-#endif /* __linux__ */

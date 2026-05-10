@@ -205,9 +205,12 @@ void jade_exc_throw(int64_t value) {
 int64_t jade_exc_value(void) { return exc_thrown_value; }
 
 /* ── LLM Inference ────────────────────────────────────────────────────── */
-/* JadeOS: /dev/jade is always present — no #ifdef guard needed. */
+/* JadeOS: jade-tree listens on a Unix domain socket; no kernel module needed. */
 
-#define JADE_DEV_PATH        "/dev/jade"
+#include <sys/socket.h>
+#include <sys/un.h>
+
+#define JADE_SOCK_PATH        "/run/jade/llm.sock"
 #define JADE_INFER_MAX_TOKENS 1024
 #define JADE_RESP_INIT_CAP    4096
 
@@ -262,7 +265,19 @@ char* jade_infer(const char* prompt, const char* model) {
     free(ep); free(em);
     if (jlen < 0 || (size_t)jlen >= jcap) { free(json); return NULL; }
 
-    int fd = open(JADE_DEV_PATH, O_RDWR);
+    /* Connect to jade-tree's Unix socket; retry up to 3 times (100 ms apart). */
+    int fd = -1;
+    for (int retry = 0; retry < 3; retry++) {
+        struct sockaddr_un addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sun_family = AF_UNIX;
+        strncpy(addr.sun_path, JADE_SOCK_PATH, sizeof(addr.sun_path) - 1);
+        int s = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (s < 0) break;
+        if (connect(s, (struct sockaddr*)&addr, sizeof(addr)) == 0) { fd = s; break; }
+        close(s);
+        if (retry < 2) usleep(100000);
+    }
     if (fd < 0) { free(json); return NULL; }
 
     uint32_t blen = (uint32_t)jlen;
