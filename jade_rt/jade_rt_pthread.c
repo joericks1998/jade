@@ -227,7 +227,7 @@ int64_t jade_exc_value(void) { return exc_thrown_value; }
 #include <sys/socket.h>
 #include <sys/un.h>
 
-#define JADE_SOCK_PATH        "/run/jade/llm.sock"
+#define JADE_SOCK_PATH        "/tmp/jade/llm.sock"
 #define JADE_INFER_MAX_TOKENS 1024
 #define JADE_RESP_INIT_CAP    4096
 
