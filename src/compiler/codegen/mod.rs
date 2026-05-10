@@ -44,8 +44,10 @@ pub struct CodegenCtx<'ctx> {
     pub malloc_fn: FunctionValue<'ctx>,
     /// strlen(ptr) -> i64
     pub strlen_fn: FunctionValue<'ctx>,
-    /// sprintf(ptr buf, ptr fmt, ...) -> i32  — variadic
+    /// sprintf(ptr buf, ptr fmt, ...) -> i32  — variadic (used for non-fstring contexts)
     pub sprintf_fn: FunctionValue<'ctx>,
+    /// snprintf(ptr buf, i64 max, ptr fmt, ...) -> i32  — variadic (fstring safe writes)
+    pub snprintf_fn: FunctionValue<'ctx>,
 
     // ── jade_rt async runtime (jade_rt_pthread.c / jade_rt_jadeos.c) ──────
     /// jade_spawn(fn_ptr: ptr, args: ptr, n: i32) -> ptr
@@ -149,6 +151,10 @@ impl<'ctx> CodegenCtx<'ctx> {
         // sprintf(ptr, ptr, ...) -> i32
         let sprintf_ty = i32_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], true);
         let sprintf_fn = module.add_function("sprintf", sprintf_ty, None);
+
+        // snprintf(ptr buf, i64 max, ptr fmt, ...) -> i32
+        let snprintf_ty = i32_ty.fn_type(&[ptr_ty.into(), i64_ty.into(), ptr_ty.into()], true);
+        let snprintf_fn = module.add_function("snprintf", snprintf_ty, None);
 
         // %jade.array = type { ptr, i64, i64 }
         let array_ty = context.opaque_struct_type("jade.array");
@@ -255,6 +261,7 @@ impl<'ctx> CodegenCtx<'ctx> {
             malloc_fn,
             strlen_fn,
             sprintf_fn,
+            snprintf_fn,
             jade_spawn_fn,
             jade_await_fn,
             jade_join_fn,

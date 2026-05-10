@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use inkwell::{AddressSpace, IntPredicate};
 
-use crate::compiler::tir::{JadeType, TExprKind, TStmt};
+use crate::compiler::tir::{JadeType, TStmt};
 
 use super::{expr, types, CodegenCtx};
 
@@ -22,7 +22,7 @@ pub fn collect_struct_defs(
             TStmt::ExtendBlock { methods, .. } => {
                 collect_struct_defs(methods, field_order);
             }
-            TStmt::AsyncFnDef { body, .. } => {
+            TStmt::FnDef { body, .. } | TStmt::AsyncFnDef { body, .. } => {
                 collect_struct_defs(body, field_order);
             }
             _ => {}
@@ -154,6 +154,26 @@ pub fn declare_fns<'ctx>(ctx: &mut CodegenCtx<'ctx>, stmts: &[TStmt]) -> Result<
                 let fn_val = ctx.module.add_function(name, fn_ty, None);
                 let param_jt: Vec<JadeType> = params.iter().map(|_| JadeType::Unknown).collect();
                 ctx.fn_info.insert(name.clone(), (fn_val, param_jt, wrapper_ret_ty));
+            }
+            // Forward-declare extend methods as TypeName__method_name(ptr self, i64...) -> ret
+            TStmt::ExtendBlock { type_name, methods, .. } => {
+                for method_stmt in methods {
+                    if let TStmt::FnDef { name, params, ret_ty, .. } = method_stmt {
+                        let mangled = format!("{type_name}__{name}");
+                        // First param is self (Struct → ptr); rest are Unknown (→ i64).
+                        let mut param_meta: Vec<_> = vec![
+                            types::jade_to_meta(&JadeType::Struct(type_name.clone()), ctx.context),
+                        ];
+                        param_meta.extend(
+                            params.iter().skip(1).map(|_| types::jade_to_meta(&JadeType::Unknown, ctx.context))
+                        );
+                        let fn_ty = types::jade_fn_type(ret_ty, &param_meta, ctx.context);
+                        let fn_val = ctx.module.add_function(&mangled, fn_ty, None);
+                        let mut param_jt = vec![JadeType::Struct(type_name.clone())];
+                        param_jt.extend(params.iter().skip(1).map(|_| JadeType::Unknown));
+                        ctx.fn_info.insert(mangled, (fn_val, param_jt, ret_ty.clone()));
+                    }
+                }
             }
             _ => {}
         }
@@ -523,10 +543,18 @@ pub fn emit_stmt<'ctx>(ctx: &mut CodegenCtx<'ctx>, stmt: &TStmt) -> Result<(), S
             expr::emit_expr(e, ctx)?;
         }
 
-        // ── Silently skip non-code definitions ────────────────────────────────
-        TStmt::StructDef { .. }
-        | TStmt::InterfaceDef { .. }
-        | TStmt::ExtendBlock { .. } => {}
+        // ── Metadata-only definitions ─────────────────────────────────────────
+        TStmt::StructDef { .. } | TStmt::InterfaceDef { .. } => {}
+
+        // ── Struct method definitions ─────────────────────────────────────────
+        TStmt::ExtendBlock { type_name, methods, .. } => {
+            for method_stmt in methods {
+                if let TStmt::FnDef { name, params, body, ret_ty, .. } = method_stmt {
+                    let mangled = format!("{type_name}__{name}");
+                    emit_fn_body(ctx, &mangled, params, body, ret_ty)?;
+                }
+            }
+        }
 
         // ── prompt p = expr ───────────────────────────────────────────────────
         // A prompt declaration is a string value with Prompt type.  Represented
@@ -685,8 +713,7 @@ pub fn emit_stmt<'ctx>(ctx: &mut CodegenCtx<'ctx>, stmt: &TStmt) -> Result<(), S
             let i64_val = match val {
                 inkwell::values::BasicValueEnum::IntValue(v)   => v,
                 inkwell::values::BasicValueEnum::FloatValue(v) =>
-                    ctx.builder.build_bit_cast(v, ctx.context.i64_type(), "raise_bc")
-                        .map_err(|e: inkwell::builder::BuilderError| e.to_string())?.into_int_value(),
+                    ctx.float_to_i64_bits(v)?,
                 inkwell::values::BasicValueEnum::PointerValue(v) =>
                     ctx.builder.build_ptr_to_int(v, ctx.context.i64_type(), "raise_pi")
                         .map_err(|e| e.to_string())?,
