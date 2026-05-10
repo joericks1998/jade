@@ -1352,7 +1352,7 @@ impl Parser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::interpreter::{
+    use crate::frontend::{
         ast::{BinOpKind, Expr, Stmt, UnaryOpKind},
         error::JadeError,
         lexer,

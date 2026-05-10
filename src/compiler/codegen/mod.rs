@@ -547,9 +547,9 @@ fn resolve_imports(
 
                 let src = std::fs::read_to_string(&canon)
                     .map_err(|e| format!("import '{}': {e}", path))?;
-                let tokens = crate::interpreter::lexer::tokenize(&src)
+                let tokens = crate::frontend::lexer::tokenize(&src)
                     .map_err(|e| e.to_string())?;
-                let ast = crate::interpreter::parser::parse(tokens)
+                let ast = crate::frontend::parser::parse(tokens)
                     .map_err(|e| e.to_string())?;
                 let tp = crate::compiler::type_infer::infer(ast)
                     .map_err(|e| e.to_string())?;

@@ -15,7 +15,7 @@
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 
-use crate::interpreter::error::{JadeError, Result, Span};
+use crate::frontend::error::{JadeError, Result, Span};
 use super::{InferenceBackend, InferenceRequest, InferenceResponse};
 
 fn jade_sock_path() -> String {

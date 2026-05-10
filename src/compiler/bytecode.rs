@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::interpreter::{
+use crate::frontend::{
     ast::{BinOpKind, UnaryOpKind},
     error::Span,
 };

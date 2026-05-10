@@ -2,7 +2,7 @@ use super::error::Span;
 use serde::{Deserialize, Serialize};
 
 /// A method signature within an `interface` definition.
-/// The tree-walk evaluator uses the name only (for missing-method checks);
+/// The type checker uses `name` for missing-method checks;
 /// `params`/`return_type` are parsed for documentation and future type inference.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InterfaceMethod {

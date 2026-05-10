@@ -90,14 +90,14 @@ pub async fn run_file(path: &str, verbose: bool) {
     let program = match cached_ast {
         Some(p) => p,
         None => {
-            let tokens = match crate::interpreter::lexer::tokenize(&source) {
+            let tokens = match crate::frontend::lexer::tokenize(&source) {
                 Ok(t) => t,
                 Err(e) => {
                     eprintln!("{}: lexer error: {}", path, e);
                     process::exit(1);
                 }
             };
-            let p = match crate::interpreter::parser::parse(tokens) {
+            let p = match crate::frontend::parser::parse(tokens) {
                 Ok(p) => p,
                 Err(e) => {
                     eprintln!("{}: parse error: {}", path, e);

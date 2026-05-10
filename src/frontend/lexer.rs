@@ -590,7 +590,7 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::interpreter::error::JadeError;
+    use crate::frontend::error::JadeError;
 
     fn kinds(src: &str) -> Vec<TokenKind> {
         tokenize(src).unwrap().into_iter().map(|t| t.kind).collect()

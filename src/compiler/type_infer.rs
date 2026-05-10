@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::interpreter::{
+use crate::frontend::{
     ast::{BinOpKind, Expr, FStrPart, Program, StructFieldDef, Stmt, UnaryOpKind},
     error::{JadeError, Result, Span},
 };
@@ -129,6 +129,20 @@ impl TypeContext {
 /// conservatively whenever a type cannot be determined — no false positives.
 pub fn infer(program: Program) -> Result<TProgram> {
     let mut ctx = TypeContext::new();
+    pre_pass(&program.stmts, &mut ctx);
+    let stmts = check_stmts(&program.stmts, &mut ctx)?;
+    Ok(TProgram { stmts })
+}
+
+/// Like `infer` but pre-seeds the type context with a set of known global names
+/// as `JadeType::Unknown`. Used by the REPL so that variables defined in earlier
+/// snippets are visible to the type checker in subsequent snippets — without
+/// requiring the type checker to be fully stateful.
+pub fn infer_with_globals(program: Program, known_globals: &[String]) -> Result<TProgram> {
+    let mut ctx = TypeContext::new();
+    for name in known_globals {
+        ctx.define(name.clone(), JadeType::Unknown);
+    }
     pre_pass(&program.stmts, &mut ctx);
     let stmts = check_stmts(&program.stmts, &mut ctx)?;
     Ok(TProgram { stmts })
@@ -1189,7 +1203,7 @@ fn expr_span(e: &Expr) -> Span {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::interpreter::{lexer, parser};
+    use crate::frontend::{lexer, parser};
 
     fn infer_src(src: &str) -> Result<TProgram> {
         let tokens = lexer::tokenize(src).expect("lex");

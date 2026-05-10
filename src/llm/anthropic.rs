@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 
 use super::{InferenceBackend, InferenceRequest, InferenceResponse};
-use crate::interpreter::error::{JadeError, Result, Span};
+use crate::frontend::error::{JadeError, Result, Span};
 
 pub struct AnthropicBackend {
     api_key: String,
