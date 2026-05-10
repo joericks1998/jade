@@ -174,7 +174,10 @@ impl std::fmt::Display for JadeError {
             JadeError::InferenceError { message, span } =>
                 write!(f, "[{}:{}] inference error: {}", span.line, span.col, message),
             JadeError::MissingApiKey { span } =>
-                write!(f, "[{}:{}] no API key configured — set JADE_API_KEY or run 'jade configure'", span.line, span.col),
+                write!(f, "[{}:{}] no inference backend available — options:\n  \
+                    1. start jade-tree (Unix socket at /run/jade/llm.sock)\n  \
+                    2. set JADE_API_KEY and optionally run 'jade configure'\n  \
+                    3. set JADE_MOCK_LLM=1 for deterministic mock responses", span.line, span.col),
             JadeError::NotAPrompt { name, span } =>
                 write!(f, "[{}:{}] '{}' is not a prompt variable", span.line, span.col, name),
             JadeError::PromptOverflow { name, attempts, span } =>
