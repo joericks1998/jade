@@ -238,14 +238,6 @@ pub enum Instr {
     MakePrompt(Reg, Reg),
     PromptDeref(Reg, Reg, Option<String>),
 
-    // ── Built-ins ──────────────────────────────────────────────────────────
-    CallPrint(Vec<Reg>),
-    /// write(str) — print without trailing newline
-    CallWrite(Vec<Reg>),
-    CallLen(Reg, Reg),
-    /// dest ← input(prompt?)  — reads one line from stdin, optional prompt string in arg_regs[0]
-    CallInput(Reg, Vec<Reg>),
-
     // ── Exception handling ─────────────────────────────────────────────────
     /// Raise the value in `val` as an exception. If a handler frame is active,
     /// stores the value in `caught_reg` and jumps to the handler; otherwise

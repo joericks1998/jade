@@ -250,9 +250,11 @@ fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
             let idx_reg = em.alloc_reg();
             em.chunk.emit(Instr::LoadInt(idx_reg, 0), span);
 
-            // len = len(iter)
+            // len = len(iter) — call the global `len` BuiltinFn
+            let len_fn_reg = em.alloc_reg();
+            em.chunk.emit(Instr::GetGlobal(len_fn_reg, "len".to_string()), span);
             let len_reg = em.alloc_reg();
-            em.chunk.emit(Instr::CallLen(len_reg, iter_reg), span);
+            em.chunk.emit(Instr::Call(len_reg, len_fn_reg, vec![iter_reg]), span);
 
             // Allocate the loop variable: a local slot inside fn, a scratch reg at top level.
             let x_reg = if em.in_fn() {
@@ -644,61 +646,16 @@ fn emit_call(
 ) -> Result<Reg> {
     let span = full_expr.span;
 
-    // Fast path: built-in functions that map to dedicated opcodes.
+    // `join` is async-specific and stays as a dedicated opcode.
     if let TExprKind::Identifier(name) = &callee.kind {
-        match name.as_str() {
-            "print" => {
-                let mut arg_regs = Vec::with_capacity(args.len());
-                for a in args {
-                    arg_regs.push(emit_expr(a, em, ctx)?);
-                }
-                em.chunk.emit(Instr::CallPrint(arg_regs), span);
-                let dest = em.alloc_reg();
-                em.chunk.emit(Instr::LoadNil(dest), span);
-                return Ok(dest);
+        if name == "join" {
+            let mut arg_regs = Vec::with_capacity(args.len());
+            for a in args {
+                arg_regs.push(emit_expr(a, em, ctx)?);
             }
-            "write" => {
-                let mut arg_regs = Vec::with_capacity(args.len());
-                for a in args {
-                    arg_regs.push(emit_expr(a, em, ctx)?);
-                }
-                em.chunk.emit(Instr::CallWrite(arg_regs), span);
-                let dest = em.alloc_reg();
-                em.chunk.emit(Instr::LoadNil(dest), span);
-                return Ok(dest);
-            }
-            "len" => {
-                if args.len() != 1 {
-                    return Err(crate::frontend::error::JadeError::ArityMismatch {
-                        expected: 1,
-                        got: args.len(),
-                        span,
-                    });
-                }
-                let src = emit_expr(&args[0], em, ctx)?;
-                let dest = em.alloc_reg();
-                em.chunk.emit(Instr::CallLen(dest, src), span);
-                return Ok(dest);
-            }
-            "join" => {
-                let mut arg_regs = Vec::with_capacity(args.len());
-                for a in args {
-                    arg_regs.push(emit_expr(a, em, ctx)?);
-                }
-                let dest = em.alloc_reg();
-                em.chunk.emit(Instr::Join(dest, arg_regs), span);
-                return Ok(dest);
-            }
-            "input" => {
-                let mut arg_regs = Vec::with_capacity(args.len());
-                for a in args {
-                    arg_regs.push(emit_expr(a, em, ctx)?);
-                }
-                let dest = em.alloc_reg();
-                em.chunk.emit(Instr::CallInput(dest, arg_regs), span);
-                return Ok(dest);
-            }
-            _ => {}
+            let dest = em.alloc_reg();
+            em.chunk.emit(Instr::Join(dest, arg_regs), span);
+            return Ok(dest);
         }
     }
 

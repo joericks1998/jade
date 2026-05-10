@@ -6,6 +6,7 @@ use crate::{
     compiler::{
         bytecode::{Chunk, CompiledFn, FStrPart, Instr, Reg},
         emit::CompiledProgram,
+        stdlib::{self, BuiltinFn, NativeBoundMethod, PrimType},
     },
     frontend::{
         ast::{BinOpKind, StructFieldDef, UnaryOpKind},
@@ -44,9 +45,15 @@ pub enum VmValue {
     Closure(Arc<CompiledFn>, Arc<HashMap<String, VmValue>>),
     Struct(Arc<Mutex<VmStruct>>),
     BoundMethod(Arc<VmBoundMethod>),
-    Array(Vec<VmValue>),
+    /// Reference-counted array — mutations are visible to all aliases.
+    Array(Arc<Mutex<Vec<VmValue>>>),
     Prompt(String),
     Dict(HashMap<String, VmValue>),
+    /// A pure Rust-backed callable (no VM state mutation). Used for stdlib
+    /// core built-ins (print, len, write, input) and package functions.
+    BuiltinFn(BuiltinFn),
+    /// A BuiltinFn pre-loaded with its receiver for primitive method dispatch.
+    NativeBoundMethod(Arc<NativeBoundMethod>),
     /// A Rust-backed callable returned by a built-in module (e.g. `llm.set_max_tokens`).
     NativeFn(NativeFnId),
     /// A handle to an in-flight async task.
@@ -100,9 +107,11 @@ impl std::fmt::Debug for VmValue {
                 write!(f, "{} {{...}}", inst.type_name)
             }
             VmValue::BoundMethod(_) => write!(f, "<bound method>"),
-            VmValue::Array(v) => write!(f, "Array[{} elem(s)]", v.len()),
+            VmValue::Array(arc) => write!(f, "Array[{} elem(s)]", arc.lock().len()),
             VmValue::Prompt(s)  => write!(f, "Prompt({:?})", s),
             VmValue::Dict(m)    => write!(f, "Dict({} key(s))", m.len()),
+            VmValue::BuiltinFn(bf) => write!(f, "BuiltinFn({})", bf.name),
+            VmValue::NativeBoundMethod(nbm) => write!(f, "NativeBoundMethod({})", nbm.method.name),
             VmValue::NativeFn(nf) => write!(f, "NativeFn({:?})", nf),
             VmValue::Future(_)  => write!(f, "Future"),
             VmValue::Nil        => write!(f, "Nil"),
@@ -126,8 +135,9 @@ pub fn value_to_display(v: &VmValue) -> String {
         }
         VmValue::Bool(b)   => b.to_string(),
         VmValue::Str(s)    => s.clone(),
-        VmValue::Array(v) => {
-            let parts: Vec<String> = v.iter().map(value_to_display).collect();
+        VmValue::Array(arc) => {
+            let guard = arc.lock();
+            let parts: Vec<String> = guard.iter().map(value_to_display).collect();
             format!("[{}]", parts.join(", "))
         }
         VmValue::Dict(m) => {
@@ -138,14 +148,16 @@ pub fn value_to_display(v: &VmValue) -> String {
                 .collect();
             format!("{{{}}}", parts.join(", "))
         }
-        VmValue::Fn(_)          => "<fn>".to_string(),
-        VmValue::Closure(_, _)  => "<fn>".to_string(),
-        VmValue::Struct(_)      => "<struct>".to_string(),
-        VmValue::BoundMethod(_) => "<bound method>".to_string(),
-        VmValue::Prompt(_)      => "<prompt>".to_string(),
-        VmValue::NativeFn(_)    => "<native fn>".to_string(),
-        VmValue::Future(_)      => "<future>".to_string(),
-        VmValue::Nil            => "nil".to_string(),
+        VmValue::Fn(_)                 => "<fn>".to_string(),
+        VmValue::Closure(_, _)         => "<fn>".to_string(),
+        VmValue::Struct(_)             => "<struct>".to_string(),
+        VmValue::BoundMethod(_)        => "<bound method>".to_string(),
+        VmValue::BuiltinFn(bf)         => format!("<builtin {}>", bf.name),
+        VmValue::NativeBoundMethod(nm) => format!("<builtin {}>", nm.method.name),
+        VmValue::Prompt(_)             => "<prompt>".to_string(),
+        VmValue::NativeFn(_)           => "<native fn>".to_string(),
+        VmValue::Future(_)             => "<future>".to_string(),
+        VmValue::Nil                   => "nil".to_string(),
     }
 }
 
@@ -184,7 +196,8 @@ impl VmState {
         globals.insert("__tokens__".to_string(), VmValue::Int(0));
         globals.insert("__model__".to_string(), VmValue::Str(String::new()));
         globals.insert("__max_retries__".to_string(), VmValue::Int(3));
-        globals.insert("__retry_log__".to_string(), VmValue::Array(vec![]));
+        globals.insert("__retry_log__".to_string(), VmValue::Array(Arc::new(Mutex::new(vec![]))));
+        stdlib::seed_globals(&mut globals);
         VmState {
             raised_exception: None,
             globals,
@@ -395,11 +408,15 @@ async fn execute_chunk(
             // ── Imports ───────────────────────────────────────────────────────
             Instr::ImportFile(path) => {
                 // ── Built-in packages ───────────────────────────────────────
-                // Intercept well-known package names before touching the filesystem.
-                if path == "llm" {
-                    let mut m = HashMap::new();
-                    m.insert("set_max_tokens".to_string(), VmValue::NativeFn(NativeFnId::LlmSetMaxTokens));
-                    state.globals.insert("llm".to_string(), VmValue::Dict(m));
+                // Intercept stdlib package names before touching the filesystem.
+                if let Some(pkg) = stdlib::find_package(path) {
+                    let val = if pkg.import_name == "llm" {
+                        // llm has a state-mutating function — use the special dict builder
+                        stdlib::llm_pkg::llm_vm_dict_value()
+                    } else {
+                        pkg.vm_dict_value()
+                    };
+                    state.globals.insert(pkg.global_name.to_string(), val);
                     continue;
                 }
 
@@ -703,7 +720,7 @@ async fn execute_chunk(
             // ── Collections ───────────────────────────────────────────────────
             Instr::MakeArray(dest, elem_regs) => {
                 let elems: Vec<VmValue> = elem_regs.iter().map(|&r| get(slots, r).clone()).collect();
-                set(slots, *dest, VmValue::Array(elems));
+                set(slots, *dest, VmValue::Array(Arc::new(Mutex::new(elems))));
             }
             Instr::MakeDict(dest, pairs) => {
                 let mut map = HashMap::with_capacity(pairs.len());
@@ -726,16 +743,20 @@ async fn execute_chunk(
             Instr::SetIndex(obj_reg, idx_reg, val_reg) => {
                 let idx = get(slots, *idx_reg).clone();
                 let val = get(slots, *val_reg).clone();
-                match &mut slots[*obj_reg as usize] {
-                    VmValue::Array(v) => {
+                // Clone the object first to avoid holding a mutable borrow on slots
+                // (needed because vm_err! may re-borrow slots via `set`).
+                let obj = get(slots, *obj_reg).clone();
+                match obj {
+                    VmValue::Array(arc) => {
                         let i = match idx { VmValue::Int(n) => n, _ => { vm_err!(JadeError::TypeError { op: "array index".to_string(), span }); } };
-                        let len = v.len();
+                        let len = arc.lock().len();
                         if i < 0 || i as usize >= len { vm_err!(JadeError::IndexOutOfBounds { index: i, len, span }); }
-                        v[i as usize] = val;
+                        arc.lock()[i as usize] = val;
                     }
-                    VmValue::Dict(m) => {
+                    VmValue::Dict(mut m) => {
                         let k = match idx { VmValue::Str(s) => s, _ => { vm_err!(JadeError::TypeError { op: "dict index".to_string(), span }); } };
                         m.insert(k, val);
+                        slots[*obj_reg as usize] = VmValue::Dict(m);
                     }
                     _ => { vm_err!(JadeError::TypeError { op: "index assign".to_string(), span }); }
                 }
@@ -782,10 +803,41 @@ async fn execute_chunk(
                             vm_err!(JadeError::UndefinedField { type_name, field: field.clone(), span });
                         }
                     }
-                    VmValue::Dict(map) => {
-                        match map.get(field.as_str()) {
-                            Some(v) => set(slots, *dest, v.clone()),
-                            None => { vm_err!(JadeError::UndefinedField { type_name: "Dict".to_string(), field: field.clone(), span }); }
+                    // Dict: check HashMap entries first (package namespaces), then primitive methods.
+                    VmValue::Dict(ref map) => {
+                        if let Some(v) = map.get(field.as_str()) {
+                            set(slots, *dest, v.clone());
+                        } else if let Some(method) = stdlib::find_primitive_method(PrimType::Dict, field) {
+                            set(slots, *dest, VmValue::NativeBoundMethod(Arc::new(NativeBoundMethod {
+                                receiver: obj.clone(),
+                                method,
+                            })));
+                        } else {
+                            vm_err!(JadeError::UndefinedField {
+                                type_name: "dict".to_string(),
+                                field: field.clone(),
+                                span,
+                            });
+                        }
+                    }
+                    // Primitive method dispatch for str/array/int/float.
+                    ref prim @ (VmValue::Str(_) | VmValue::Array(_)
+                               | VmValue::Int(_) | VmValue::Float(_)) => {
+                        if let Some(ty) = PrimType::from_value(prim) {
+                            if let Some(method) = stdlib::find_primitive_method(ty, field) {
+                                set(slots, *dest, VmValue::NativeBoundMethod(Arc::new(NativeBoundMethod {
+                                    receiver: prim.clone(),
+                                    method,
+                                })));
+                            } else {
+                                vm_err!(JadeError::UndefinedField {
+                                    type_name: ty.type_name().to_string(),
+                                    field: field.clone(),
+                                    span,
+                                });
+                            }
+                        } else {
+                            vm_err!(JadeError::NotAStruct { span });
                         }
                     }
                     _ => { vm_err!(JadeError::NotAStruct { span }); }
@@ -847,52 +899,6 @@ async fn execute_chunk(
                 };
                 let result = vm_try!(vm_prompt_deref(text, output_type.as_deref(), state, span).await);
                 set(slots, *dest, result);
-            }
-
-            // ── Built-ins ─────────────────────────────────────────────────────
-            Instr::CallPrint(arg_regs) => {
-                if arg_regs.len() != 1 {
-                    vm_err!(JadeError::ArityMismatch { expected: 1, got: arg_regs.len(), span });
-                }
-                let v = get(slots, arg_regs[0]).clone();
-                println!("{}", value_to_display(&v));
-            }
-            Instr::CallWrite(arg_regs) => {
-                if arg_regs.len() != 1 {
-                    vm_err!(JadeError::ArityMismatch { expected: 1, got: arg_regs.len(), span });
-                }
-                let v = get(slots, arg_regs[0]).clone();
-                use std::io::Write as IoWrite;
-                print!("{}", value_to_display(&v));
-                std::io::stdout().flush().ok();
-            }
-            Instr::CallLen(dest, src) => {
-                let result = match get(slots, *src) {
-                    VmValue::Str(s)    => VmValue::Int(s.chars().count() as i64),
-                    VmValue::Array(v)  => VmValue::Int(v.len() as i64),
-                    VmValue::Dict(m)   => VmValue::Int(m.len() as i64),
-                    _ => { vm_err!(JadeError::TypeError { op: "len".to_string(), span }); }
-                };
-                set(slots, *dest, result);
-            }
-            Instr::CallInput(dest, arg_regs) => {
-                if arg_regs.len() > 1 {
-                    vm_err!(JadeError::ArityMismatch { expected: 1, got: arg_regs.len(), span });
-                }
-                if let Some(&prompt_reg) = arg_regs.first() {
-                    match get(slots, prompt_reg) {
-                        VmValue::Str(s) => {
-                            use std::io::Write;
-                            print!("{}", s);
-                            std::io::stdout().flush().ok();
-                        }
-                        _ => { vm_err!(JadeError::TypeError { op: "input".to_string(), span }); }
-                    }
-                }
-                let mut line = String::new();
-                std::io::stdin().read_line(&mut line).ok();
-                let line = line.trim_end_matches('\n').trim_end_matches('\r').to_string();
-                set(slots, *dest, VmValue::Str(line));
             }
 
             // ── Exception handling ────────────────────────────────────────────
@@ -989,7 +995,7 @@ async fn execute_chunk(
                     results.push(value);
                 }
                 state.globals.insert("__tokens__".to_string(), VmValue::Int(state.token_count));
-                set(slots, *dest, VmValue::Array(results));
+                set(slots, *dest, VmValue::Array(Arc::new(Mutex::new(results))));
             }
         }
     }
@@ -997,6 +1003,17 @@ async fn execute_chunk(
 }
 
 // ── Call dispatch ─────────────────────────────────────────────────────────────
+
+/// Replace zero-span placeholders from built-in error paths with the actual call-site span.
+fn patch_builtin_span(mut e: JadeError, call_span: Span) -> JadeError {
+    match &mut e {
+        JadeError::ArityMismatch { span, .. } | JadeError::TypeError { span, .. } => {
+            if span.line == 0 { *span = call_span; }
+        }
+        _ => {}
+    }
+    e
+}
 
 async fn call_value(
     callee: VmValue,
@@ -1029,6 +1046,13 @@ async fn call_value(
             full_args.push(VmValue::Struct(Arc::clone(&bm.receiver)));
             full_args.extend(args);
             call_fn(&method, full_args, state, span).await
+        }
+        VmValue::BuiltinFn(bf) => (bf.vm_impl)(&args).map_err(|e| patch_builtin_span(e, span)),
+        VmValue::NativeBoundMethod(nbm) => {
+            let mut full_args = Vec::with_capacity(args.len() + 1);
+            full_args.push(nbm.receiver.clone());
+            full_args.extend(args);
+            (nbm.method.vm_impl)(&full_args).map_err(|e| patch_builtin_span(e, span))
         }
         VmValue::NativeFn(nf) => match nf {
             NativeFnId::LlmSetMaxTokens => {
@@ -1160,8 +1184,8 @@ async fn vm_prompt_deref(
                     "attempt {}: response={:?} hint={:?}",
                     attempt + 1, current.trim(), correction
                 ));
-                if let Some(VmValue::Array(log)) = state.globals.get_mut("__retry_log__") {
-                    log.push(entry);
+                if let Some(VmValue::Array(arc)) = state.globals.get("__retry_log__") {
+                    arc.lock().push(entry);
                 }
 
                 let retry = backend.infer(llm::InferenceRequest {
@@ -1211,7 +1235,7 @@ fn json_to_vm_value(json: &serde_json::Value) -> std::result::Result<VmValue, St
         serde_json::Value::Array(arr) => arr.iter().enumerate()
             .map(|(i, v)| json_to_vm_value(v).map_err(|e| format!("element {}: {}", i, e)))
             .collect::<std::result::Result<Vec<VmValue>, String>>()
-            .map(VmValue::Array),
+            .map(|v| VmValue::Array(Arc::new(Mutex::new(v)))),
         serde_json::Value::Object(obj) => obj.iter()
             .map(|(k, v)| json_to_vm_value(v)
                 .map(|val| (k.clone(), val))
@@ -1333,7 +1357,7 @@ fn coerce(
                         .map(|(i, elem)| json_to_vm_value(elem)
                             .map_err(|e| format!("element {}: {}", i, e)))
                         .collect::<std::result::Result<Vec<VmValue>, String>>()
-                        .map(VmValue::Array)
+                        .map(|v| VmValue::Array(Arc::new(Mutex::new(v))))
                         .map_err(|e| format!(
                             "Your response array could not be fully converted: {}. \
                              Respond with only a JSON array of int, float, bool, or string values.",
@@ -1558,12 +1582,13 @@ fn vm_index(obj: VmValue, idx: VmValue, span: Span) -> Result<VmValue> {
                 Ok(VmValue::Str(chars[i as usize].to_string()))
             }
         }
-        (VmValue::Array(v), VmValue::Int(i)) => {
-            let len = v.len();
+        (VmValue::Array(arc), VmValue::Int(i)) => {
+            let guard = arc.lock();
+            let len = guard.len();
             if i < 0 || i as usize >= len {
                 Err(JadeError::IndexOutOfBounds { index: i, len, span })
             } else {
-                Ok(v[i as usize].clone())
+                Ok(guard[i as usize].clone())
             }
         }
         (VmValue::Dict(m), VmValue::Str(k)) => {
@@ -1662,7 +1687,7 @@ fn instr_max_reg(instr: &Instr) -> u32 {
         Instr::GetLocal(d,_)|Instr::GetGlobal(d,_) => *d,
         Instr::Move(d,s)|Instr::NegInt(d,s)|Instr::NegFloat(d,s)
         |Instr::IntToFloat(d,s)|Instr::BitNot(d,s)|Instr::Not(d,s)
-        |Instr::MakePrompt(d,s)|Instr::CallLen(d,s)
+        |Instr::MakePrompt(d,s)
         |Instr::UnaryOp(d,_,s)|Instr::PromptDeref(d,s,_) => (*d).max(*s),
         Instr::SetGlobal(_,s)|Instr::SetLocal(_,s) => *s,
         Instr::AddInt(d,l,r)|Instr::SubInt(d,l,r)|Instr::MulInt(d,l,r)
@@ -1696,12 +1721,6 @@ fn instr_max_reg(instr: &Instr) -> u32 {
         Instr::Return(Some(r)) => *r,
         Instr::Call(d,c,args) => {
             let mut m = (*d).max(*c);
-            for &a in args { m = m.max(a); }
-            m
-        }
-        Instr::CallPrint(args) | Instr::CallWrite(args) => args.iter().copied().max().unwrap_or(0),
-        Instr::CallInput(d, args) => {
-            let mut m = *d;
             for &a in args { m = m.max(a); }
             m
         }
@@ -2630,7 +2649,7 @@ mod tests {
     #[test]
     fn test_vm_field_access_on_non_struct_error() {
         let err = try_run_src("let x = 5\nlet v = x.y").err().expect("expected error");
-        assert!(matches!(err, JadeError::NotAStruct { .. } | JadeError::TypeMismatch { .. }));
+        assert!(matches!(err, JadeError::NotAStruct { .. } | JadeError::TypeMismatch { .. } | JadeError::UndefinedField { .. }));
     }
 
     #[test]
@@ -2857,7 +2876,7 @@ mod tests {
     fn test_vm_array_empty() {
         let s = run_src("let a = []").unwrap();
         match s.globals.get("a").unwrap() {
-            VmValue::Array(v) => assert!(v.is_empty()),
+            VmValue::Array(v) => assert!(v.lock().is_empty()),
             v => panic!("expected Array, got {:?}", v),
         }
     }
@@ -2867,9 +2886,10 @@ mod tests {
         let s = run_src("let a = [10, 20, 30]").unwrap();
         match s.globals.get("a").unwrap() {
             VmValue::Array(v) => {
-                assert!(matches!(v[0], VmValue::Int(10)));
-                assert!(matches!(v[1], VmValue::Int(20)));
-                assert!(matches!(v[2], VmValue::Int(30)));
+                let guard = v.lock();
+                assert!(matches!(guard[0], VmValue::Int(10)));
+                assert!(matches!(guard[1], VmValue::Int(20)));
+                assert!(matches!(guard[2], VmValue::Int(30)));
             }
             v => panic!("expected Array, got {:?}", v),
         }
@@ -2894,9 +2914,10 @@ mod tests {
     }
 
     #[test]
-    fn test_vm_array_value_semantics() {
+    fn test_vm_array_reference_semantics() {
+        // Arrays are Arc-wrapped: assigning creates an alias, not a copy.
         let s = run_src("let a = [1, 2]\nlet b = a\nb[0] = 42\nlet x = a[0]").unwrap();
-        assert_eq!(get_int(&s, "x"), 1);
+        assert_eq!(get_int(&s, "x"), 42);
     }
 
     #[test]
@@ -2909,7 +2930,7 @@ mod tests {
     fn test_vm_array_trailing_comma() {
         let s = run_src("let a = [1, 2, 3,]").unwrap();
         match s.globals.get("a").unwrap() {
-            VmValue::Array(v) => assert_eq!(v.len(), 3),
+            VmValue::Array(v) => assert_eq!(v.lock().len(), 3),
             v => panic!("expected Array, got {:?}", v),
         }
     }

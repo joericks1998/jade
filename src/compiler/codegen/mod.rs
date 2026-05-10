@@ -539,6 +539,8 @@ fn resolve_imports(
     for stmt in stmts {
         match stmt {
             TStmt::Use { path, .. } => {
+                // Skip stdlib packages — they are VM-runtime values, not source files.
+                if crate::compiler::stdlib::find_package(&path).is_some() { continue; }
                 let full = dir.join(&path);
                 let canon = full.canonicalize()
                     .map_err(|e| format!("import '{}': {e}", path))?;
