@@ -19,11 +19,6 @@ static LLM_FNS: [BuiltinFn; 1] = [
 ];
 
 fn register_llm_types(ctx: &mut TypeContext) {
-    let mut methods = std::collections::HashMap::new();
-    methods.insert("set_max_tokens".to_string(), JadeType::Fn {
-        params: vec![JadeType::Int],
-        ret: Box::new(JadeType::Nil),
-    });
     ctx.define("llm".to_string(), JadeType::Unknown);
 }
 

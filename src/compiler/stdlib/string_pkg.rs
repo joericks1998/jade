@@ -181,7 +181,6 @@ pub static STRING_PKG: Package = Package {
 // ── Type checker primitive method registration ────────────────────────────────
 
 pub fn register_str_method_types(ctx: &mut TypeContext) {
-    let ret_nil  = || Box::new(JadeType::Nil);
     let ret_str  = || Box::new(JadeType::Str);
     let ret_int  = || Box::new(JadeType::Int);
     let ret_bool = || Box::new(JadeType::Bool);

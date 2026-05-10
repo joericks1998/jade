@@ -1,7 +1,3 @@
-use std::sync::Arc;
-
-use parking_lot::Mutex;
-
 use crate::{
     compiler::{tir::JadeType, type_infer::TypeContext, vm::VmValue},
     frontend::error::{JadeError, Result, Span},

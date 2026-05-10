@@ -342,6 +342,17 @@ fn emit_field_access<'ctx>(
 ) -> Result<BasicValueEnum<'ctx>, String> {
     let type_name = match &object.ty {
         JadeType::Struct(n) => n.clone(),
+        // Inside method bodies `self` is Unknown-typed in TIR; resolve via scope.
+        JadeType::Unknown => {
+            if let TExprKind::Identifier(var) = &object.kind {
+                match ctx.lookup(var).map(|(_, ty)| ty) {
+                    Some(JadeType::Struct(n)) => n,
+                    _ => return Err(format!("field access on '{var}' with unresolved struct type")),
+                }
+            } else {
+                return Err(format!("field access on Unknown-typed non-identifier expression"));
+            }
+        }
         _ => return Err(format!("field access on non-struct: {:?}", object.ty)),
     };
 
@@ -377,6 +388,8 @@ fn emit_field_access<'ctx>(
 
 // ── F-string ──────────────────────────────────────────────────────────────────
 
+const FSTR_BUF_SIZE: u64 = 4096;
+
 fn emit_fstr<'ctx>(
     parts: &[TFStrPart],
     ctx: &mut CodegenCtx<'ctx>,
@@ -384,9 +397,9 @@ fn emit_fstr<'ctx>(
     let i8_ty  = ctx.context.i8_type();
     let i64_ty = ctx.context.i64_type();
 
-    // 4096-byte stack buffer
+    // Stack buffer — writes are bounded by remaining capacity via snprintf.
     let buf_ptr = ctx.builder
-        .build_array_alloca(i8_ty, i64_ty.const_int(4096, false), "fstr_buf")
+        .build_array_alloca(i8_ty, i64_ty.const_int(FSTR_BUF_SIZE, false), "fstr_buf")
         .map_err(|e| e.to_string())?;
 
     // Current write offset
@@ -402,6 +415,10 @@ fn emit_fstr<'ctx>(
             .build_load(i64_ty, pos_slot, "fstr_pos_v")
             .map_err(|e| e.to_string())?
             .into_int_value();
+        // Remaining capacity for snprintf (including the null terminator).
+        let remaining = ctx.builder
+            .build_int_sub(i64_ty.const_int(FSTR_BUF_SIZE, false), pos, "fstr_rem")
+            .map_err(|e| e.to_string())?;
         let write_ptr = ctx.gep(i8_ty, buf_ptr, &[pos], "fstr_wptr")?;
 
         let written = match part {
@@ -415,13 +432,13 @@ fn emit_fstr<'ctx>(
                     .map_err(|e| e.to_string())?
                     .as_pointer_value();
                 let call = ctx.builder
-                    .build_call(ctx.sprintf_fn, &[write_ptr.into(), fmt.into(), lit.into()], "sp_lit")
+                    .build_call(ctx.snprintf_fn, &[write_ptr.into(), remaining.into(), fmt.into(), lit.into()], "snp_lit")
                     .map_err(|e| e.to_string())?;
                 extract_i32_from_call(call, ctx)?
             }
             TFStrPart::Expr(e) => {
                 let val = emit_expr(e, ctx)?;
-                emit_sprintf_value(val, &e.ty, write_ptr, ctx)?
+                emit_snprintf_value(val, &e.ty, write_ptr, remaining, ctx)?
             }
         };
 
@@ -437,10 +454,11 @@ fn emit_fstr<'ctx>(
     Ok(buf_ptr.into())
 }
 
-fn emit_sprintf_value<'ctx>(
+fn emit_snprintf_value<'ctx>(
     val: BasicValueEnum<'ctx>,
     ty: &JadeType,
     write_ptr: PointerValue<'ctx>,
+    remaining: IntValue<'ctx>,
     ctx: &mut CodegenCtx<'ctx>,
 ) -> Result<IntValue<'ctx>, String> {
     let mk = |s: &str, ctx: &mut CodegenCtx<'ctx>| -> Result<PointerValue<'ctx>, String> {
@@ -453,32 +471,32 @@ fn emit_sprintf_value<'ctx>(
     let call = match effective_ty(ty) {
         JadeType::Int => {
             let fmt = mk("%lld", ctx)?;
-            ctx.builder.build_call(ctx.sprintf_fn, &[write_ptr.into(), fmt.into(), val.into()], "sp_int")
+            ctx.builder.build_call(ctx.snprintf_fn, &[write_ptr.into(), remaining.into(), fmt.into(), val.into()], "snp_int")
                 .map_err(|e| e.to_string())?
         }
         JadeType::Float => {
             let fmt = mk("%g", ctx)?;
-            ctx.builder.build_call(ctx.sprintf_fn, &[write_ptr.into(), fmt.into(), val.into()], "sp_flt")
+            ctx.builder.build_call(ctx.snprintf_fn, &[write_ptr.into(), remaining.into(), fmt.into(), val.into()], "snp_flt")
                 .map_err(|e| e.to_string())?
         }
         JadeType::Bool => {
             let t = mk("true", ctx)?;
             let f = mk("false", ctx)?;
             let sel = ctx.builder
-                .build_select(val.into_int_value(), t, f, "sp_bsel")
+                .build_select(val.into_int_value(), t, f, "snp_bsel")
                 .map_err(|e| e.to_string())?;
             let fmt = mk("%s", ctx)?;
-            ctx.builder.build_call(ctx.sprintf_fn, &[write_ptr.into(), fmt.into(), sel.into()], "sp_bool")
+            ctx.builder.build_call(ctx.snprintf_fn, &[write_ptr.into(), remaining.into(), fmt.into(), sel.into()], "snp_bool")
                 .map_err(|e| e.to_string())?
         }
         JadeType::Str => {
             let fmt = mk("%s", ctx)?;
-            ctx.builder.build_call(ctx.sprintf_fn, &[write_ptr.into(), fmt.into(), val.into()], "sp_str")
+            ctx.builder.build_call(ctx.snprintf_fn, &[write_ptr.into(), remaining.into(), fmt.into(), val.into()], "snp_str")
                 .map_err(|e| e.to_string())?
         }
         _ => {
             let fmt = mk("%lld", ctx)?;
-            ctx.builder.build_call(ctx.sprintf_fn, &[write_ptr.into(), fmt.into(), val.into()], "sp_unk")
+            ctx.builder.build_call(ctx.snprintf_fn, &[write_ptr.into(), remaining.into(), fmt.into(), val.into()], "snp_unk")
                 .map_err(|e| e.to_string())?
         }
     };
@@ -716,7 +734,10 @@ fn emit_fn_as_value<'ctx>(
         // Unpack i64 args → real types, call the real function.
         let mut real_args: Vec<BasicMetadataValueEnum<'ctx>> = Vec::new();
         for (i, param_ty) in param_tys.iter().enumerate() {
-            let raw = wrapper_fn.get_nth_param(i as u32).unwrap().into_int_value();
+            let raw = wrapper_fn
+                .get_nth_param(i as u32)
+                .ok_or_else(|| format!("wrapper fn '{name}' has no param {i}"))?
+                .into_int_value();
             let val = i64_to_value(raw, param_ty, ctx)?;
             real_args.push(val.into());
         }
@@ -832,7 +853,9 @@ fn emit_closure<'ctx>(
         let alloca = ctx.builder
             .build_alloca(i64_ty, param_name)
             .map_err(|e| e.to_string())?;
-        let arg = cl_fn.get_nth_param(i as u32).unwrap();
+        let arg = cl_fn
+            .get_nth_param(i as u32)
+            .ok_or_else(|| format!("closure body has no param {i}"))?;
         ctx.builder.build_store(alloca, arg).map_err(|e| e.to_string())?;
         ctx.define(param_name.clone(), alloca, JadeType::Unknown);
     }
@@ -1185,6 +1208,49 @@ fn emit_call<'ctx>(
                     _ => Ok(ctx.context.i64_type().const_int(0, false).into()),
                 },
             };
+        }
+    }
+
+    // ── Struct method call: obj.method(args…) ────────────────────────────────
+    if let TExprKind::FieldAccess { object, field } = &callee.kind {
+        let type_name_opt = match &object.ty {
+            JadeType::Struct(n) => Some(n.clone()),
+            JadeType::Unknown => {
+                // Inside method bodies `self` is Unknown-typed in TIR; resolve via scope.
+                if let TExprKind::Identifier(var) = &object.kind {
+                    ctx.lookup(var).and_then(|(_, ty)| {
+                        if let JadeType::Struct(n) = ty { Some(n) } else { None }
+                    })
+                } else { None }
+            }
+            _ => None,
+        };
+        if let Some(type_name) = type_name_opt {
+            let mangled = format!("{type_name}__{field}");
+            if let Some((fn_val, param_tys, fn_ret_ty)) = ctx.fn_info.get(mangled.as_str()).cloned() {
+                // Emit the receiver (self) as the first argument.
+                let self_val = emit_expr(object, ctx)?;
+                let mut llvm_args: Vec<BasicMetadataValueEnum<'ctx>> = Vec::with_capacity(args.len() + 1);
+                llvm_args.push(self_val.into());
+                for (i, arg_expr) in args.iter().enumerate() {
+                    let arg_val = emit_expr(arg_expr, ctx)?;
+                    let param_ty = param_tys.get(i + 1).unwrap_or(&JadeType::Unknown);
+                    let coerced = coerce(arg_val, &arg_expr.ty, param_ty, ctx)?;
+                    llvm_args.push(coerced.into());
+                }
+                let call_site = ctx.builder
+                    .build_call(fn_val, &llvm_args, "mcall")
+                    .map_err(|e| e.to_string())?;
+                return match fn_ret_ty {
+                    JadeType::Nil => Ok(ctx.context.i64_type().const_int(0, false).into()),
+                    _ => match call_site.as_any_value_enum() {
+                        AnyValueEnum::IntValue(v)     => Ok(v.into()),
+                        AnyValueEnum::FloatValue(v)   => Ok(v.into()),
+                        AnyValueEnum::PointerValue(v) => Ok(v.into()),
+                        _ => Ok(ctx.context.i64_type().const_int(0, false).into()),
+                    },
+                };
+            }
         }
     }
 
