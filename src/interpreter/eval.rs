@@ -11,7 +11,7 @@ use crate::llm;
 // ── LLM inference constants ───────────────────────────────────────────────────
 
 /// Token budget for a normal (untyped) LLM response.
-const DEFAULT_MAX_TOKENS: u32 = 1024;
+const DEFAULT_MAX_TOKENS: u32 = 4096;
 /// Token budget for a retry correction reply — only a single typed value is needed.
 const RETRY_MAX_TOKENS: u32 = 64;
 /// Token budget for retries on complex types (Array, Dict, struct) that may produce larger outputs.
