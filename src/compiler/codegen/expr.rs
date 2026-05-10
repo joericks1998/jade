@@ -102,6 +102,11 @@ pub fn emit_expr<'ctx>(
             ctx.call_rv(ctx.jade_await_fn, &[fut_ptr.into()], "await_res")
         }
 
+        // ── prompt <expr> ─────────────────────────────────────────────────────
+        // A Prompt value is represented identically to a Str pointer at the
+        // LLVM level — the type distinction is only semantic.
+        PromptLiteral { body } => emit_expr(body, ctx),
+
         // ── ?prompt  /  ?prompt |> Type ──────────────────────────────────────
         PromptDeref { expr: pexpr, output_type } => {
             ctx.uses_prompts = true;
@@ -291,8 +296,20 @@ fn emit_struct_literal<'ctx>(
     let i64_ty = ctx.context.i64_type();
     let n = fields.len() as u64;
 
-    // malloc n * 8 bytes for uniform i64 slots
-    let struct_ptr = ctx.malloc_ptr(i64_ty.const_int(n * 8 + 8, false), "struct_ptr")?;
+    // Layout: slot 0 = type_name ptr (as i64), slots 1..=n = field values.
+    // Allocates (n+1) * 8 bytes — same as the old n*8+8 but now slot 0 is used.
+    let struct_ptr = ctx.malloc_ptr(i64_ty.const_int((n + 1) * 8, false), "struct_ptr")?;
+
+    // Store the type name pointer at slot 0 for typed catch dispatch.
+    let type_name_lit = ctx.builder
+        .build_global_string_ptr(type_name, "sty_name")
+        .map_err(|e| e.to_string())?
+        .as_pointer_value();
+    let type_name_i64 = ctx.builder
+        .build_ptr_to_int(type_name_lit, i64_ty, "sty_p2i")
+        .map_err(|e| e.to_string())?;
+    let slot0 = ctx.gep(i64_ty, struct_ptr, &[i64_ty.const_int(0, false)], "sty_slot")?;
+    ctx.builder.build_store(slot0, type_name_i64).map_err(|e| e.to_string())?;
 
     let field_names = ctx.struct_field_order
         .get(type_name)
@@ -307,7 +324,8 @@ fn emit_struct_literal<'ctx>(
 
         let val = emit_expr(field_expr, ctx)?;
         let as_i64 = value_to_i64(val, &field_expr.ty, ctx)?;
-        let slot = ctx.gep(i64_ty, struct_ptr, &[i64_ty.const_int(idx as u64, false)], "sf_slot")?;
+        // +1 to skip the type_name slot at slot 0
+        let slot = ctx.gep(i64_ty, struct_ptr, &[i64_ty.const_int((idx as u64) + 1, false)], "sf_slot")?;
         ctx.builder.build_store(slot, as_i64).map_err(|e| e.to_string())?;
     }
 
@@ -347,7 +365,8 @@ fn emit_field_access<'ctx>(
 
     let i64_ty = ctx.context.i64_type();
     let struct_ptr = as_pointer(emit_expr(object, ctx)?, ctx)?;
-    let slot = ctx.gep(i64_ty, struct_ptr, &[i64_ty.const_int(idx as u64, false)], "fa_slot")?;
+    // +1 to skip the type_name slot at slot 0
+    let slot = ctx.gep(i64_ty, struct_ptr, &[i64_ty.const_int((idx as u64) + 1, false)], "fa_slot")?;
     let raw = ctx.builder
         .build_load(i64_ty, slot, "fa_raw")
         .map_err(|e| e.to_string())?
@@ -1048,6 +1067,24 @@ fn emit_binop<'ctx>(
         (JadeType::Bool, Gt, JadeType::Bool) => icmp(IntPredicate::UGT, lhs, rhs, ctx),
         (JadeType::Bool, Le, JadeType::Bool) => icmp(IntPredicate::ULE, lhs, rhs, ctx),
         (JadeType::Bool, Ge, JadeType::Bool) => icmp(IntPredicate::UGE, lhs, rhs, ctx),
+
+        // ── String comparisons (via strcmp) ───────────────────────────────────
+        (JadeType::Str, Eq | Ne | Lt | Gt | Le | Ge, JadeType::Str) => {
+            let lp = as_pointer(lhs, ctx)?;
+            let rp = as_pointer(rhs, ctx)?;
+            let cmp = ctx.call_rv(ctx.strcmp_fn, &[lp.into(), rp.into()], "scmp")?.into_int_value();
+            let zero = ctx.context.i32_type().const_zero();
+            let pred = match op {
+                Eq => IntPredicate::EQ,
+                Ne => IntPredicate::NE,
+                Lt => IntPredicate::SLT,
+                Gt => IntPredicate::SGT,
+                Le => IntPredicate::SLE,
+                Ge => IntPredicate::SGE,
+                _ => unreachable!(),
+            };
+            Ok(ctx.builder.build_int_compare(pred, cmp, zero, "scmp_r").map_err(|e| e.to_string())?.into())
+        }
 
         _ => Err(format!(
             "unsupported binary op {:?} for types {:?} × {:?} in LLVM backend",
