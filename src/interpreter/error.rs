@@ -175,7 +175,7 @@ impl std::fmt::Display for JadeError {
                 write!(f, "[{}:{}] inference error: {}", span.line, span.col, message),
             JadeError::MissingApiKey { span } =>
                 write!(f, "[{}:{}] no inference backend available — options:\n  \
-                    1. start jade-tree (Unix socket at /tmp/jade/llm.sock)\n  \
+                    1. start jade-tree (socket at $HOME/.jade/llm.sock)\n  \
                     2. set JADE_API_KEY and optionally run 'jade configure'\n  \
                     3. set JADE_MOCK_LLM=1 for deterministic mock responses", span.line, span.col),
             JadeError::NotAPrompt { name, span } =>

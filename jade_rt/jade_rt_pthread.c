@@ -227,9 +227,15 @@ int64_t jade_exc_value(void) { return exc_thrown_value; }
 #include <sys/socket.h>
 #include <sys/un.h>
 
-#define JADE_SOCK_PATH        "/tmp/jade/llm.sock"
 #define JADE_INFER_MAX_TOKENS 1024
 #define JADE_RESP_INIT_CAP    4096
+
+static int jade_get_sock_path(char* buf, size_t bufsz) {
+    const char* home = getenv("HOME");
+    if (!home || !*home) home = "/root";
+    int n = snprintf(buf, bufsz, "%s/.jade/llm.sock", home);
+    return (n > 0 && (size_t)n < bufsz) ? 0 : -1;
+}
 
 static char* infer_json_escape(const char* s) {
     size_t n = strlen(s);
@@ -284,12 +290,14 @@ char* jade_infer(const char* prompt, const char* model) {
 
     /* Connect to jade-tree's Unix socket; retry up to 3 times (100 ms apart)
      * to tolerate a brief window when jade-tree is still starting up. */
+    char sock_path[256];
+    if (jade_get_sock_path(sock_path, sizeof(sock_path)) < 0) { free(json); return NULL; }
     int fd = -1;
     for (int retry = 0; retry < 3; retry++) {
         struct sockaddr_un addr;
         memset(&addr, 0, sizeof(addr));
         addr.sun_family = AF_UNIX;
-        strncpy(addr.sun_path, JADE_SOCK_PATH, sizeof(addr.sun_path) - 1);
+        strncpy(addr.sun_path, sock_path, sizeof(addr.sun_path) - 1);
         int s = socket(AF_UNIX, SOCK_STREAM, 0);
         if (s < 0) break;
         if (connect(s, (struct sockaddr*)&addr, sizeof(addr)) == 0) { fd = s; break; }
