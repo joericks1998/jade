@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::interpreter::{
+use crate::frontend::{
     ast::{BinOpKind, InterfaceMethod, StructFieldDef, UnaryOpKind},
     error::Span,
 };

@@ -5,7 +5,7 @@ use crate::{
         bytecode::{Chunk, CompiledFn, FStrPart, Instr, Reg},
         tir::{JadeType, TExpr, TExprKind, TFStrPart, TProgram, TStmt, TCatchArm},
     },
-    interpreter::{
+    frontend::{
         ast::{BinOpKind, StructFieldDef, UnaryOpKind},
         error::{Result, Span},
     },
@@ -669,7 +669,7 @@ fn emit_call(
             }
             "len" => {
                 if args.len() != 1 {
-                    return Err(crate::interpreter::error::JadeError::ArityMismatch {
+                    return Err(crate::frontend::error::JadeError::ArityMismatch {
                         expected: 1,
                         got: args.len(),
                         span,

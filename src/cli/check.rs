@@ -2,7 +2,7 @@ use std::{fs, path::Path, process};
 
 use crate::{
     compiler::type_infer,
-    interpreter::{lexer, parser},
+    frontend::{lexer, parser},
 };
 
 /// Run `jade check <path>`: type-check a source file without executing it.

@@ -7,7 +7,7 @@ use inkwell::{
     AddressSpace, FloatPredicate, IntPredicate,
 };
 
-use crate::interpreter::ast::{BinOpKind, UnaryOpKind};
+use crate::frontend::ast::{BinOpKind, UnaryOpKind};
 use crate::compiler::tir::{JadeType, TExpr, TExprKind, TFStrPart};
 
 use super::{stmt, types, CodegenCtx};

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::interpreter::error::{JadeError, Result, Span};
+use crate::frontend::error::{JadeError, Result, Span};
 
 pub mod anthropic;
 pub mod jade_os;
@@ -75,17 +75,17 @@ pub fn select_backend(config: &crate::config::JadeConfig) -> Option<Arc<dyn Infe
 pub fn infer_sync(
     backend: &dyn InferenceBackend,
     req: InferenceRequest,
-    span: crate::interpreter::error::Span,
-) -> crate::interpreter::error::Result<InferenceResponse> {
+    span: crate::frontend::error::Span,
+) -> crate::frontend::error::Result<InferenceResponse> {
     let fut = backend.infer(req, span);
     match tokio::runtime::Handle::try_current() {
         Ok(handle) => tokio::task::block_in_place(|| handle.block_on(fut)),
         Err(_) => tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .map_err(|e| crate::interpreter::error::JadeError::InferenceError {
+            .map_err(|e| crate::frontend::error::JadeError::InferenceError {
                 message: format!("failed to create tokio runtime for sync inference: {e}"),
-                span: crate::interpreter::error::Span { line: 0, col: 0 },
+                span: crate::frontend::error::Span { line: 0, col: 0 },
             })?
             .block_on(fut),
     }

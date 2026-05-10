@@ -2,7 +2,7 @@ mod cache;
 mod cli;
 mod compiler;
 mod config;
-mod interpreter;
+mod frontend;
 mod llm;
 mod project;
 
