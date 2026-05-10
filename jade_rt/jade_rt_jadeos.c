@@ -15,7 +15,16 @@
 #include <jade/alloc.h>
 #include <jade/task.h>
 
+/* JadeOS userspace runs against musl libc — full C standard library is
+ * available for dict runtime, exception handling, and /dev/jade I/O. */
 #include <stdint.h>
+#include <stddef.h>
+#include <stdlib.h>
+#include <string.h>
+#include <setjmp.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
 
 /* Fatal abort for Jade OS: kills the current task with exit code -1.
  * Used when a runtime invariant is violated (OOM, failed task spawn).
