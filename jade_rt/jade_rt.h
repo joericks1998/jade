@@ -37,3 +37,33 @@ void jade_join(jade_future_t* futures, int n, jade_value_t* results_out);
  * called after jade_await (or jade_join) has returned for this future.
  */
 void jade_future_free(jade_future_t future);
+
+/* ── Dict ─────────────────────────────────────────────────────────────── */
+void*   jade_dict_create(void);
+void    jade_dict_set(void* dict, const char* key, int64_t val);
+int64_t jade_dict_get(void* dict, const char* key);
+int64_t jade_dict_len(void* dict);
+void    jade_dict_free(void* dict);
+
+/* ── Exceptions ───────────────────────────────────────────────────────── */
+/* Registers jmpbuf (alloca'd by the LLVM-compiled caller) as the current
+ * exception frame. The caller calls setjmp on the same buffer immediately
+ * after and branches: 0 → try body, nonzero → catch body.      */
+void    jade_exc_push_frame(void* jmpbuf);
+void    jade_exc_pop(void);
+void    jade_exc_throw(int64_t value);   /* longjmps to top frame or exits */
+int64_t jade_exc_value(void);
+
+/* ── LLM Inference ────────────────────────────────────────────────────── */
+/* Opens /dev/jade, sends a stateless inference request, reads TOKEN frames
+ * until DONE, returns heap-allocated NUL-terminated response string.
+ * Caller must free. Returns NULL on error.                      */
+char*   jade_infer(const char* prompt, const char* model);
+
+/* Like jade_infer but retries (up to max_retries times) using a folded
+ * correction prompt until the response parses as type_name.
+ * type_name: "int" | "float" | "bool" | "str"
+ * Returns heap-allocated string parseable as type_name, or NULL on
+ * exhaustion. Caller must free.                                 */
+char*   jade_infer_typed(const char* prompt, const char* model,
+                         const char* type_name, int max_retries);

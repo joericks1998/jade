@@ -527,26 +527,93 @@ pub fn emit_stmt<'ctx>(ctx: &mut CodegenCtx<'ctx>, stmt: &TStmt) -> Result<(), S
         | TStmt::InterfaceDef { .. }
         | TStmt::ExtendBlock { .. } => {}
 
-        // ── Unsupported with clear error ──────────────────────────────────────
-        TStmt::PromptDecl { .. } =>
-            return Err("prompt declarations are not supported in the LLVM backend".into()),
-        TStmt::Use { .. } =>
-            return Err("use imports are not yet supported in the LLVM backend (use `jade run`)".into()),
-        TStmt::TryCatch { .. } =>
-            return Err("try/catch is not yet supported in the LLVM backend (use `jade run`)".into()),
+        // ── prompt p = expr ───────────────────────────────────────────────────
+        // A prompt declaration is a string value with Prompt type.  Represented
+        // identically to a Str pointer — the type distinction is only semantic.
+        TStmt::PromptDecl { name, body, .. } => {
+            let ptr_ty = ctx.context.ptr_type(AddressSpace::default());
+            let val = expr::emit_expr(body, ctx)?;
+            let slot = ctx.build_entry_alloca(ptr_ty.into(), name)?;
+            ctx.builder.build_store(slot, val).map_err(|e| e.to_string())?;
+            ctx.define(name.clone(), slot, JadeType::Prompt);
+        }
 
-        TStmt::Raise { value, .. } => {
-            let i32_ty = ctx.context.i32_type();
-            let msg = ctx
-                .builder
-                .build_global_string_ptr("raise: unhandled exception\n", "raise_msg")
-                .map_err(|e| e.to_string())?
-                .as_pointer_value();
-            ctx.builder.build_call(ctx.printf_fn, &[msg.into()], "").map_err(|e| e.to_string())?;
-            let _ = expr::emit_expr(value, ctx);
-            ctx.builder
-                .build_call(ctx.exit_fn, &[i32_ty.const_int(1, false).into()], "")
+        // ── use "path" — expanded by resolve_imports before codegen ──────────
+        TStmt::Use { .. } => {}
+
+        // ── try { body } catch binding { arm } ────────────────────────────────
+        TStmt::TryCatch { body, arms, .. } => {
+            ctx.uses_exceptions = true;
+
+            let fn_val = ctx.builder.get_insert_block()
+                .and_then(|b| b.get_parent())
+                .ok_or("try/catch outside function")?;
+
+            // Stack-allocate a 256-byte jmpbuf (conservative for all x86_64 targets).
+            let i8_ty  = ctx.context.i8_type();
+            let buf_ty = i8_ty.array_type(256);
+            let buf    = ctx.build_entry_alloca(buf_ty.into(), "exc_buf")?;
+
+            // Register the frame, then setjmp.
+            ctx.call_void(ctx.jade_exc_push_frame_fn, &[buf.into()])?;
+            let r = ctx.call_rv(ctx.setjmp_fn, &[buf.into()], "exc_r")?
+                .into_int_value();
+
+            let try_bb   = ctx.context.append_basic_block(fn_val, "try_body");
+            let catch_bb = ctx.context.append_basic_block(fn_val, "catch_body");
+            let merge_bb = ctx.context.append_basic_block(fn_val, "exc_merge");
+
+            let is_throw = ctx.builder
+                .build_int_compare(IntPredicate::NE, r, ctx.context.i32_type().const_zero(), "is_throw")
                 .map_err(|e| e.to_string())?;
+            ctx.builder.build_conditional_branch(is_throw, catch_bb, try_bb)
+                .map_err(|e| e.to_string())?;
+
+            // Try body — pop the frame on clean exit.
+            ctx.builder.position_at_end(try_bb);
+            ctx.push_scope();
+            emit_stmts(ctx, body)?;
+            ctx.pop_scope();
+            if !ctx.is_terminated() {
+                ctx.call_void(ctx.jade_exc_pop_fn, &[])?;
+                ctx.builder.build_unconditional_branch(merge_bb).map_err(|e| e.to_string())?;
+            }
+
+            // Catch body — retrieve thrown value, bind it, emit arm.
+            ctx.builder.position_at_end(catch_bb);
+            let exc_i64 = ctx.call_rv(ctx.jade_exc_value_fn, &[], "exc_val")?;
+            // Initial implementation: treat all arms as catch-all; use first arm only.
+            if let Some(arm) = arms.first() {
+                let slot = ctx.build_entry_alloca(ctx.context.i64_type().into(), &arm.binding)?;
+                ctx.builder.build_store(slot, exc_i64).map_err(|e| e.to_string())?;
+                ctx.push_scope();
+                ctx.define(arm.binding.clone(), slot, JadeType::Int);
+                emit_stmts(ctx, &arm.body)?;
+                ctx.pop_scope();
+            }
+            if !ctx.is_terminated() {
+                ctx.builder.build_unconditional_branch(merge_bb).map_err(|e| e.to_string())?;
+            }
+
+            ctx.builder.position_at_end(merge_bb);
+        }
+
+        // ── raise expr ────────────────────────────────────────────────────────
+        TStmt::Raise { value, .. } => {
+            ctx.uses_exceptions = true;
+            let val = expr::emit_expr(value, ctx)?;
+            // Coerce any value to i64 for the exception slot.
+            let i64_val = match val {
+                inkwell::values::BasicValueEnum::IntValue(v)   => v,
+                inkwell::values::BasicValueEnum::FloatValue(v) =>
+                    ctx.builder.build_bitcast(v, ctx.context.i64_type(), "raise_bc")
+                        .map_err(|e| e.to_string())?.into_int_value(),
+                inkwell::values::BasicValueEnum::PointerValue(v) =>
+                    ctx.builder.build_ptr_to_int(v, ctx.context.i64_type(), "raise_pi")
+                        .map_err(|e| e.to_string())?,
+                _ => ctx.context.i64_type().const_int(0, false),
+            };
+            ctx.call_void(ctx.jade_exc_throw_fn, &[i64_val.into()])?;
             ctx.builder.build_unreachable().map_err(|e| e.to_string())?;
         }
     }
