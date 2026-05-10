@@ -53,6 +53,8 @@ pub enum BuiltinFn {
     Exec,
     ReadFile,
     WriteFile,
+    Input,
+    Write,
 }
 
 /// Heap-allocated function body shared via `Rc`.
@@ -175,6 +177,8 @@ impl Env {
         builtins.insert("exec".to_string(), BuiltinFn::Exec);
         builtins.insert("read_file".to_string(), BuiltinFn::ReadFile);
         builtins.insert("write_file".to_string(), BuiltinFn::WriteFile);
+        builtins.insert("input".to_string(), BuiltinFn::Input);
+        builtins.insert("write".to_string(), BuiltinFn::Write);
 
         // Pre-populate session variables accessible from Jade code.
         let mut global_scope: HashMap<String, Value> = HashMap::new();
@@ -974,6 +978,51 @@ fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                         .map(|_| String::new())
                         .unwrap_or_else(|e| format!("write_file: {e}"));
                     Ok(Value::Str(result))
+                }
+
+                // input() or input("prompt string") → Str
+                // Prints the optional prompt to stdout without a newline, then reads
+                // one line from stdin. Returns the line with the trailing newline stripped.
+                // Returns "" on EOF (Ctrl-D) so callers can treat "" as a quit signal.
+                Value::Builtin(BuiltinFn::Input) => {
+                    if args.len() > 1 {
+                        return Err(JadeError::ArityMismatch {
+                            expected: 1,
+                            got: args.len(),
+                            span: *span,
+                        });
+                    }
+                    if let Some(prompt_arg) = args.first() {
+                        let v = eval_expr(prompt_arg, env)?;
+                        match v {
+                            Value::Str(s) => {
+                                use std::io::Write;
+                                print!("{}", s);
+                                std::io::stdout().flush().ok();
+                            }
+                            _ => return Err(JadeError::TypeError { op: "input".to_string(), span: *span }),
+                        }
+                    }
+                    let mut line = String::new();
+                    std::io::stdin().read_line(&mut line).ok();
+                    let line = line.trim_end_matches('\n').trim_end_matches('\r').to_string();
+                    Ok(Value::Str(line))
+                }
+
+                // write(str) — print without trailing newline, then flush.
+                Value::Builtin(BuiltinFn::Write) => {
+                    if args.len() != 1 {
+                        return Err(JadeError::ArityMismatch {
+                            expected: 1,
+                            got: args.len(),
+                            span: *span,
+                        });
+                    }
+                    let v = eval_expr(&args[0], env)?;
+                    use std::io::Write as IoWrite;
+                    print!("{}", value_to_str(&v));
+                    std::io::stdout().flush().ok();
+                    Ok(Value::Int(0))
                 }
 
                 _ => Err(JadeError::NotCallable { span: *span }),

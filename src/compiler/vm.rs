@@ -829,6 +829,15 @@ async fn execute_chunk(
                 let v = get(slots, arg_regs[0]).clone();
                 println!("{}", value_to_display(&v));
             }
+            Instr::CallWrite(arg_regs) => {
+                if arg_regs.len() != 1 {
+                    vm_err!(JadeError::ArityMismatch { expected: 1, got: arg_regs.len(), span });
+                }
+                let v = get(slots, arg_regs[0]).clone();
+                use std::io::Write as IoWrite;
+                print!("{}", value_to_display(&v));
+                std::io::stdout().flush().ok();
+            }
             Instr::CallLen(dest, src) => {
                 let result = match get(slots, *src) {
                     VmValue::Str(s)    => VmValue::Int(s.chars().count() as i64),
@@ -837,6 +846,25 @@ async fn execute_chunk(
                     _ => { vm_err!(JadeError::TypeError { op: "len".to_string(), span }); }
                 };
                 set(slots, *dest, result);
+            }
+            Instr::CallInput(dest, arg_regs) => {
+                if arg_regs.len() > 1 {
+                    vm_err!(JadeError::ArityMismatch { expected: 1, got: arg_regs.len(), span });
+                }
+                if let Some(&prompt_reg) = arg_regs.first() {
+                    match get(slots, prompt_reg) {
+                        VmValue::Str(s) => {
+                            use std::io::Write;
+                            print!("{}", s);
+                            std::io::stdout().flush().ok();
+                        }
+                        _ => { vm_err!(JadeError::TypeError { op: "input".to_string(), span }); }
+                    }
+                }
+                let mut line = String::new();
+                std::io::stdin().read_line(&mut line).ok();
+                let line = line.trim_end_matches('\n').trim_end_matches('\r').to_string();
+                set(slots, *dest, VmValue::Str(line));
             }
 
             // ── Exception handling ────────────────────────────────────────────
@@ -1629,7 +1657,12 @@ fn instr_max_reg(instr: &Instr) -> u32 {
             for &a in args { m = m.max(a); }
             m
         }
-        Instr::CallPrint(args) => args.iter().copied().max().unwrap_or(0),
+        Instr::CallPrint(args) | Instr::CallWrite(args) => args.iter().copied().max().unwrap_or(0),
+        Instr::CallInput(d, args) => {
+            let mut m = *d;
+            for &a in args { m = m.max(a); }
+            m
+        }
         Instr::MakeArray(d, regs) => {
             let mut m = *d;
             for &r in regs { m = m.max(r); }
