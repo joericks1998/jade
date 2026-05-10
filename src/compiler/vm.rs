@@ -24,6 +24,13 @@ const RETRY_MAX_TOKENS_COMPLEX: u32 = 512;
 
 /// A value at VM runtime.
 ///
+/// Identifies a native (Rust-backed) callable stored inside a module dict.
+/// Adding a new package method = adding a variant here + a match arm in `call_value`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum NativeFnId {
+    LlmSetMaxTokens,
+}
+
 /// Mirrors `eval::Value` but carries `Rc<CompiledFn>` for functions so the VM
 /// can execute them without re-running the emitter.
 #[derive(Clone)]
@@ -40,6 +47,8 @@ pub enum VmValue {
     Array(Vec<VmValue>),
     Prompt(String),
     Dict(HashMap<String, VmValue>),
+    /// A Rust-backed callable returned by a built-in module (e.g. `llm.set_max_tokens`).
+    NativeFn(NativeFnId),
     /// A handle to an in-flight async task.
     Future(Arc<JadeFuture>),
     Nil,
@@ -94,6 +103,7 @@ impl std::fmt::Debug for VmValue {
             VmValue::Array(v) => write!(f, "Array[{} elem(s)]", v.len()),
             VmValue::Prompt(s)  => write!(f, "Prompt({:?})", s),
             VmValue::Dict(m)    => write!(f, "Dict({} key(s))", m.len()),
+            VmValue::NativeFn(nf) => write!(f, "NativeFn({:?})", nf),
             VmValue::Future(_)  => write!(f, "Future"),
             VmValue::Nil        => write!(f, "Nil"),
         }
@@ -134,6 +144,7 @@ pub fn value_to_display(v: &VmValue) -> String {
         VmValue::Struct(_)      => "<struct>".to_string(),
         VmValue::BoundMethod(_) => "<bound method>".to_string(),
         VmValue::Prompt(_)      => "<prompt>".to_string(),
+        VmValue::NativeFn(_)    => "<native fn>".to_string(),
         VmValue::Future(_)      => "<future>".to_string(),
         VmValue::Nil            => "nil".to_string(),
     }
@@ -157,6 +168,7 @@ pub struct VmState {
     pub conversation_history: Vec<llm::Message>,
     pub token_count: i64,
     pub max_retries: usize,
+    pub max_tokens: u32,
     pub default_model: String,
     /// Memoisation cache: maps `(prompt_text, output_type)` → the raw response
     /// text that produced a successful result. Mirrors the same cache in `Env`.
@@ -183,6 +195,7 @@ impl VmState {
             conversation_history: Vec::new(),
             token_count: 0,
             max_retries: 3,
+            max_tokens: DEFAULT_MAX_TOKENS,
             default_model: String::new(),
             prompt_cache: HashMap::new(),
             source_dir: PathBuf::new(),
@@ -238,6 +251,7 @@ impl VmState {
             conversation_history: self.conversation_history.clone(),
             token_count: 0,
             max_retries: self.max_retries,
+            max_tokens: self.max_tokens,
             default_model: self.default_model.clone(),
             prompt_cache: self.prompt_cache.clone(),
             source_dir: self.source_dir.clone(),
@@ -381,6 +395,15 @@ async fn execute_chunk(
 
             // ── Imports ───────────────────────────────────────────────────────
             Instr::ImportFile(path) => {
+                // ── Built-in packages ───────────────────────────────────────
+                // Intercept well-known package names before touching the filesystem.
+                if path == "llm" {
+                    let mut m = HashMap::new();
+                    m.insert("set_max_tokens".to_string(), VmValue::NativeFn(NativeFnId::LlmSetMaxTokens));
+                    state.globals.insert("llm".to_string(), VmValue::Dict(m));
+                    continue;
+                }
+
                 let abs_path = state.source_dir.join(path);
                 let canon = abs_path.canonicalize().map_err(|_| JadeError::ImportNotFound {
                     path: path.clone(),
@@ -760,6 +783,12 @@ async fn execute_chunk(
                             vm_err!(JadeError::UndefinedField { type_name, field: field.clone(), span });
                         }
                     }
+                    VmValue::Dict(map) => {
+                        match map.get(field.as_str()) {
+                            Some(v) => set(slots, *dest, v.clone()),
+                            None => { vm_err!(JadeError::UndefinedField { type_name: "Dict".to_string(), field: field.clone(), span }); }
+                        }
+                    }
                     _ => { vm_err!(JadeError::NotAStruct { span }); }
                 }
             }
@@ -1002,6 +1031,20 @@ async fn call_value(
             full_args.extend(args);
             call_fn(&method, full_args, state, span).await
         }
+        VmValue::NativeFn(nf) => match nf {
+            NativeFnId::LlmSetMaxTokens => {
+                if args.len() != 1 {
+                    return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span });
+                }
+                match &args[0] {
+                    VmValue::Int(n) if *n > 0 => {
+                        state.max_tokens = *n as u32;
+                        Ok(VmValue::Nil)
+                    }
+                    _ => Err(JadeError::TypeError { op: "llm.set_max_tokens".to_string(), span }),
+                }
+            }
+        },
         _ => Err(JadeError::NotCallable { span }),
     }
 }
@@ -1079,7 +1122,7 @@ async fn vm_prompt_deref(
         prompt: prompt_text.clone(),
         model: state.default_model.clone(),
         history: Vec::new(),
-        max_tokens: DEFAULT_MAX_TOKENS,
+        max_tokens: state.max_tokens,
         system_prompt: None,
     }, span).await?;
 
