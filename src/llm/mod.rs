@@ -55,8 +55,8 @@ pub fn build_backend(
 
 /// Select the inference backend automatically.
 ///
-/// When `/tmp/jade/llm.sock` is present (jade-tree running on JADE OS),
-/// `JadeOsBackend` is returned unconditionally — no API key needed.
+/// When `$HOME/.jade/llm.sock` is present (jade-tree running), `JadeOsBackend`
+/// is returned unconditionally — no API key needed.
 ///
 /// Otherwise falls back to whatever provider is configured in `~/.jade/config.toml`.
 /// Returns `None` if no socket exists and no API key has been configured.
@@ -65,7 +65,8 @@ pub fn select_backend(config: &crate::config::JadeConfig) -> Option<Arc<dyn Infe
     if std::env::var("JADE_MOCK_LLM").as_deref() == Ok("1") {
         return Some(Arc::new(MockBackend::default()));
     }
-    if std::path::Path::new("/tmp/jade/llm.sock").exists() {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_owned());
+    if std::path::Path::new(&format!("{home}/.jade/llm.sock")).exists() {
         return Some(Arc::new(jade_os::JadeOsBackend::new()));
     }
     config.api_key.as_ref()

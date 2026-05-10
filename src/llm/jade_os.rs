@@ -1,6 +1,6 @@
 //! JadeOsBackend — native inference via Unix domain socket.
 //!
-//! Connects to jade-tree at `/tmp/jade/llm.sock`. Each call opens a fresh
+
 
 
 //!
@@ -18,7 +18,10 @@ use std::os::unix::net::UnixStream;
 use crate::interpreter::error::{JadeError, Result, Span};
 use super::{InferenceBackend, InferenceRequest, InferenceResponse};
 
-const SOCK_PATH: &str = "/tmp/jade/llm.sock";
+fn jade_sock_path() -> String {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_owned());
+    format!("{home}/.jade/llm.sock")
+}
 
 pub struct JadeOsBackend {
     sock_path: String,
@@ -26,7 +29,7 @@ pub struct JadeOsBackend {
 
 impl JadeOsBackend {
     pub fn new() -> Self {
-        Self { sock_path: SOCK_PATH.to_owned() }
+        Self { sock_path: jade_sock_path() }
     }
 
     pub fn with_device(path: impl Into<String>) -> Self {
