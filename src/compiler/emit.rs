@@ -657,6 +657,16 @@ fn emit_call(
                 em.chunk.emit(Instr::LoadNil(dest), span);
                 return Ok(dest);
             }
+            "write" => {
+                let mut arg_regs = Vec::with_capacity(args.len());
+                for a in args {
+                    arg_regs.push(emit_expr(a, em, ctx)?);
+                }
+                em.chunk.emit(Instr::CallWrite(arg_regs), span);
+                let dest = em.alloc_reg();
+                em.chunk.emit(Instr::LoadNil(dest), span);
+                return Ok(dest);
+            }
             "len" => {
                 if args.len() != 1 {
                     return Err(crate::interpreter::error::JadeError::ArityMismatch {
@@ -677,6 +687,15 @@ fn emit_call(
                 }
                 let dest = em.alloc_reg();
                 em.chunk.emit(Instr::Join(dest, arg_regs), span);
+                return Ok(dest);
+            }
+            "input" => {
+                let mut arg_regs = Vec::with_capacity(args.len());
+                for a in args {
+                    arg_regs.push(emit_expr(a, em, ctx)?);
+                }
+                let dest = em.alloc_reg();
+                em.chunk.emit(Instr::CallInput(dest, arg_regs), span);
                 return Ok(dest);
             }
             _ => {}

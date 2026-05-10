@@ -51,6 +51,14 @@ impl TypeContext {
             params: vec![JadeType::Unknown],
             ret: Box::new(JadeType::Array(Box::new(JadeType::Unknown))),
         });
+        ctx.define("input".to_string(), JadeType::Fn {
+            params: vec![JadeType::Unknown],
+            ret: Box::new(JadeType::Str),
+        });
+        ctx.define("write".to_string(), JadeType::Fn {
+            params: vec![JadeType::Unknown],
+            ret: Box::new(JadeType::Nil),
+        });
         // LLM session builtins that the evaluator always populates.
         ctx.define("__tokens__".to_string(), JadeType::Int);
         ctx.define("__model__".to_string(), JadeType::Str);

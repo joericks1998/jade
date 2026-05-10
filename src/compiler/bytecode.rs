@@ -240,7 +240,11 @@ pub enum Instr {
 
     // ── Built-ins ──────────────────────────────────────────────────────────
     CallPrint(Vec<Reg>),
+    /// write(str) — print without trailing newline
+    CallWrite(Vec<Reg>),
     CallLen(Reg, Reg),
+    /// dest ← input(prompt?)  — reads one line from stdin, optional prompt string in arg_regs[0]
+    CallInput(Reg, Vec<Reg>),
 
     // ── Exception handling ─────────────────────────────────────────────────
     /// Raise the value in `val` as an exception. If a handler frame is active,
