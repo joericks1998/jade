@@ -1,8 +1,11 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::frontend::{
-    ast::{BinOpKind, Expr, FStrPart, Program, StructFieldDef, Stmt, UnaryOpKind},
-    error::{JadeError, Result, Span},
+use crate::{
+    compiler::stdlib,
+    frontend::{
+        ast::{BinOpKind, Expr, FStrPart, Program, StructFieldDef, Stmt, UnaryOpKind},
+        error::{JadeError, Result, Span},
+    },
 };
 use super::tir::{JadeType, TExpr, TExprKind, TFStrPart, TProgram, TStmt};
 
@@ -13,7 +16,7 @@ use super::tir::{JadeType, TExpr, TExprKind, TFStrPart, TProgram, TStmt};
 /// Uses a scope stack matching the evaluator's scoping: `scopes[0]` is global,
 /// `scopes.last()` is the innermost. Struct and interface definitions are stored
 /// in flat maps (they are always global in the current language).
-struct TypeContext {
+pub struct TypeContext {
     /// Variable name → resolved type, innermost scope last.
     scopes: Vec<HashMap<String, JadeType>>,
     /// Struct type name → field definitions (copied from AST).
@@ -22,6 +25,9 @@ struct TypeContext {
     interface_defs: HashMap<String, Vec<String>>,
     /// Extend: type_name → method_name → inferred return type.
     extend_methods: HashMap<String, HashMap<String, JadeType>>,
+    /// Primitive type methods: type_name → method_name → JadeType.
+    /// E.g. "str" → {"upper" → Fn { .. }}, "array" → {"push" → Fn { .. }}.
+    pub primitive_methods: HashMap<String, HashMap<String, JadeType>>,
     /// True if this program contains any `use` statements. When true, unknown
     /// identifiers are treated as `Unknown` (resolved at VM runtime) rather
     /// than hard errors — symbols may be provided by the imports.
@@ -29,42 +35,26 @@ struct TypeContext {
 }
 
 impl TypeContext {
-    fn new() -> Self {
+    pub fn new() -> Self {
         let mut ctx = TypeContext {
             scopes: vec![HashMap::new()],
             struct_defs: HashMap::new(),
             interface_defs: HashMap::new(),
             extend_methods: HashMap::new(),
+            primitive_methods: HashMap::new(),
             has_imports: false,
         };
-        // Built-in functions. `print` is variadic in practice, but we give it
-        // one Unknown param so the return type (Nil) is always resolved.
-        ctx.define("print".to_string(), JadeType::Fn {
-            params: vec![JadeType::Unknown],
-            ret: Box::new(JadeType::Nil),
-        });
-        ctx.define("len".to_string(), JadeType::Fn {
-            params: vec![JadeType::Unknown],
-            ret: Box::new(JadeType::Int),
-        });
-        ctx.define("join".to_string(), JadeType::Fn {
-            params: vec![JadeType::Unknown],
-            ret: Box::new(JadeType::Array(Box::new(JadeType::Unknown))),
-        });
-        ctx.define("input".to_string(), JadeType::Fn {
-            params: vec![JadeType::Unknown],
-            ret: Box::new(JadeType::Str),
-        });
-        ctx.define("write".to_string(), JadeType::Fn {
-            params: vec![JadeType::Unknown],
-            ret: Box::new(JadeType::Nil),
-        });
-        // LLM session builtins that the evaluator always populates.
-        ctx.define("__tokens__".to_string(), JadeType::Int);
-        ctx.define("__model__".to_string(), JadeType::Str);
-        ctx.define("__max_retries__".to_string(), JadeType::Int);
-        ctx.define("__retry_log__".to_string(), JadeType::Array(Box::new(JadeType::Unknown)));
+        stdlib::register_core_types(&mut ctx);
+        stdlib::register_primitive_method_types(&mut ctx);
         ctx
+    }
+
+    /// Register a primitive method type for type inference of `receiver.method(...)`.
+    pub fn define_primitive_method(&mut self, type_name: &str, method_name: &str, ty: JadeType) {
+        self.primitive_methods
+            .entry(type_name.to_string())
+            .or_default()
+            .insert(method_name.to_string(), ty);
     }
 
     fn push_scope(&mut self) {
@@ -78,7 +68,7 @@ impl TypeContext {
     }
 
     /// Bind `name` in the innermost (current) scope — used for `let` and fn params.
-    fn define(&mut self, name: String, ty: JadeType) {
+    pub fn define(&mut self, name: String, ty: JadeType) {
         if let Some(scope) = self.scopes.last_mut() {
             scope.insert(name, ty);
         }
@@ -428,7 +418,12 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
         // ── Imports ───────────────────────────────────────────────────────────
 
         Stmt::Use { path, span } => {
-            // Pass through unchanged; the import is resolved at VM runtime.
+            ctx.has_imports = true;
+            // If it's a stdlib package, register its types so downstream code
+            // can refer to the package global without type errors.
+            if let Some(pkg) = stdlib::find_package(path) {
+                (pkg.register_types)(ctx);
+            }
             Ok(TStmt::Use { path: path.clone(), span: *span })
         }
 
@@ -656,12 +651,27 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
                     // Field/method value types are not tracked at Stage B — return Unknown.
                     JadeType::Unknown
                 }
+                // Primitive types: check registered primitive methods
+                JadeType::Str => {
+                    ctx.primitive_methods.get("str")
+                        .and_then(|m| m.get(field.as_str()))
+                        .cloned()
+                        .unwrap_or(JadeType::Unknown)
+                }
+                JadeType::Array(_) => {
+                    ctx.primitive_methods.get("array")
+                        .and_then(|m| m.get(field.as_str()))
+                        .cloned()
+                        .unwrap_or(JadeType::Unknown)
+                }
+                JadeType::Dict => {
+                    ctx.primitive_methods.get("dict")
+                        .and_then(|m| m.get(field.as_str()))
+                        .cloned()
+                        .unwrap_or(JadeType::Unknown)
+                }
                 JadeType::Unknown => JadeType::Unknown,
-                _ => return Err(JadeError::TypeMismatch {
-                    expected: "struct".to_string(),
-                    got: jade_type_name(&tobj.ty),
-                    span: *span,
-                }),
+                _ => JadeType::Unknown,
             };
             Ok(TExpr {
                 kind: TExprKind::FieldAccess { object: Box::new(tobj), field: field.clone() },
