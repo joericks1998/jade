@@ -510,7 +510,8 @@ pub fn emit_stmt<'ctx>(ctx: &mut CodegenCtx<'ctx>, stmt: &TStmt) -> Result<(), S
                 .map_err(|e| e.to_string())?
                 .into_pointer_value();
 
-            let slot = ctx.gep(i64_ty, struct_ptr, &[i64_ty.const_int(field_idx as u64, false)], "fa_slot")?;
+            // +1 to skip the type_name slot at slot 0
+            let slot = ctx.gep(i64_ty, struct_ptr, &[i64_ty.const_int((field_idx as u64) + 1, false)], "fa_slot")?;
 
             let val = expr::emit_expr(value, ctx)?;
             let as_i64 = expr::value_to_i64(val, &value.ty, ctx)?;
@@ -579,18 +580,96 @@ pub fn emit_stmt<'ctx>(ctx: &mut CodegenCtx<'ctx>, stmt: &TStmt) -> Result<(), S
                 ctx.builder.build_unconditional_branch(merge_bb).map_err(|e| e.to_string())?;
             }
 
-            // Catch body — retrieve thrown value, bind it, emit arm.
+            // Catch body — retrieve thrown value, dispatch to typed arms.
             ctx.builder.position_at_end(catch_bb);
-            let exc_i64 = ctx.call_rv(ctx.jade_exc_value_fn, &[], "exc_val")?;
-            // Initial implementation: treat all arms as catch-all; use first arm only.
-            if let Some(arm) = arms.first() {
-                let slot = ctx.build_entry_alloca(ctx.context.i64_type().into(), &arm.binding)?;
-                ctx.builder.build_store(slot, exc_i64).map_err(|e| e.to_string())?;
-                ctx.push_scope();
-                ctx.define(arm.binding.clone(), slot, JadeType::Int);
-                emit_stmts(ctx, &arm.body)?;
-                ctx.pop_scope();
+            let exc_i64 = ctx.call_rv(ctx.jade_exc_value_fn, &[], "exc_val")?.into_int_value();
+
+            let i64_ty  = ctx.context.i64_type();
+            let i32_ty  = ctx.context.i32_type();
+            let ptr_ty  = ctx.context.ptr_type(AddressSpace::default());
+
+            // Block to jump to when no arm matches (swallow the exception).
+            let no_match_bb = ctx.context.append_basic_block(fn_val, "catch_nomatch");
+
+            if arms.is_empty() {
+                // Nothing to bind — swallow.
+                ctx.builder.build_unconditional_branch(merge_bb).map_err(|e| e.to_string())?;
             }
+
+            for (arm_idx, arm) in arms.iter().enumerate() {
+                if ctx.is_terminated() { break; }
+                let arm_body_bb = ctx.context.append_basic_block(fn_val, &format!("catch_arm{arm_idx}"));
+
+                if let Some(ref expected_type) = arm.catch_type {
+                    // Load the type_name stored at slot 0 of the raised struct.
+                    let struct_ptr = ctx.builder
+                        .build_int_to_ptr(exc_i64, ptr_ty, "exc_sptr")
+                        .map_err(|e| e.to_string())?;
+                    let ty_slot = ctx.gep(i64_ty, struct_ptr, &[i64_ty.const_int(0, false)], "exc_ty_slot")?;
+                    let ty_i64  = ctx.builder
+                        .build_load(i64_ty, ty_slot, "exc_ty_i64")
+                        .map_err(|e| e.to_string())?
+                        .into_int_value();
+                    let ty_ptr  = ctx.builder
+                        .build_int_to_ptr(ty_i64, ptr_ty, "exc_ty_ptr")
+                        .map_err(|e| e.to_string())?;
+                    let exp_ptr = ctx.builder
+                        .build_global_string_ptr(expected_type, "exp_ty")
+                        .map_err(|e| e.to_string())?
+                        .as_pointer_value();
+                    let cmp = ctx.call_rv(ctx.strcmp_fn, &[ty_ptr.into(), exp_ptr.into()], "ty_cmp")?
+                        .into_int_value();
+                    let is_match = ctx.builder
+                        .build_int_compare(IntPredicate::EQ, cmp, i32_ty.const_zero(), "ty_match")
+                        .map_err(|e| e.to_string())?;
+
+                    let is_last = arm_idx + 1 >= arms.len();
+                    let else_bb = if is_last {
+                        no_match_bb
+                    } else {
+                        ctx.context.append_basic_block(fn_val, &format!("catch_check{}", arm_idx + 1))
+                    };
+
+                    ctx.builder.build_conditional_branch(is_match, arm_body_bb, else_bb)
+                        .map_err(|e| e.to_string())?;
+
+                    // Arm body: bind as struct pointer.
+                    ctx.builder.position_at_end(arm_body_bb);
+                    let slot = ctx.build_entry_alloca(ptr_ty.into(), &arm.binding)?;
+                    let exc_ptr = ctx.builder
+                        .build_int_to_ptr(exc_i64, ptr_ty, "exc_bind_ptr")
+                        .map_err(|e| e.to_string())?;
+                    ctx.builder.build_store(slot, exc_ptr).map_err(|e| e.to_string())?;
+                    ctx.push_scope();
+                    ctx.define(arm.binding.clone(), slot, JadeType::Struct(expected_type.clone()));
+                    emit_stmts(ctx, &arm.body)?;
+                    ctx.pop_scope();
+                    if !ctx.is_terminated() {
+                        ctx.builder.build_unconditional_branch(merge_bb).map_err(|e| e.to_string())?;
+                    }
+
+                    if !is_last {
+                        ctx.builder.position_at_end(else_bb);
+                    }
+                } else {
+                    // Catch-all arm: bind as raw i64, run body.
+                    ctx.builder.build_unconditional_branch(arm_body_bb).map_err(|e| e.to_string())?;
+                    ctx.builder.position_at_end(arm_body_bb);
+                    let slot = ctx.build_entry_alloca(i64_ty.into(), &arm.binding)?;
+                    ctx.builder.build_store(slot, exc_i64).map_err(|e| e.to_string())?;
+                    ctx.push_scope();
+                    ctx.define(arm.binding.clone(), slot, JadeType::Int);
+                    emit_stmts(ctx, &arm.body)?;
+                    ctx.pop_scope();
+                    if !ctx.is_terminated() {
+                        ctx.builder.build_unconditional_branch(merge_bb).map_err(|e| e.to_string())?;
+                    }
+                    break; // catch-all terminates the chain
+                }
+            }
+
+            // no_match_bb: no typed arm matched — swallow and continue.
+            ctx.builder.position_at_end(no_match_bb);
             if !ctx.is_terminated() {
                 ctx.builder.build_unconditional_branch(merge_bb).map_err(|e| e.to_string())?;
             }
@@ -606,8 +685,8 @@ pub fn emit_stmt<'ctx>(ctx: &mut CodegenCtx<'ctx>, stmt: &TStmt) -> Result<(), S
             let i64_val = match val {
                 inkwell::values::BasicValueEnum::IntValue(v)   => v,
                 inkwell::values::BasicValueEnum::FloatValue(v) =>
-                    ctx.builder.build_bitcast(v, ctx.context.i64_type(), "raise_bc")
-                        .map_err(|e| e.to_string())?.into_int_value(),
+                    ctx.builder.build_bit_cast(v, ctx.context.i64_type(), "raise_bc")
+                        .map_err(|e: inkwell::builder::BuilderError| e.to_string())?.into_int_value(),
                 inkwell::values::BasicValueEnum::PointerValue(v) =>
                     ctx.builder.build_ptr_to_int(v, ctx.context.i64_type(), "raise_pi")
                         .map_err(|e| e.to_string())?,
