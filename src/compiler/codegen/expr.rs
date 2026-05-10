@@ -102,8 +102,92 @@ pub fn emit_expr<'ctx>(
             ctx.call_rv(ctx.jade_await_fn, &[fut_ptr.into()], "await_res")
         }
 
-        // ── Unsupported in this backend ───────────────────────────────────────
-        PromptDeref { .. } => Err("prompt dereference is not supported in the LLVM backend".into()),
+        // ── ?prompt  /  ?prompt |> Type ──────────────────────────────────────
+        PromptDeref { expr: pexpr, output_type } => {
+            ctx.uses_prompts = true;
+
+            // Load the prompt string pointer.
+            let prompt_ptr = emit_expr(pexpr, ctx)?.into_pointer_value();
+
+            // Model name: read from JADE_MODEL env var at runtime, or empty string.
+            let model_ptr = ctx.builder
+                .build_global_string_ptr("", "jade_model_empty")
+                .map_err(|e| e.to_string())?
+                .as_pointer_value();
+
+            match output_type {
+                // ── Untyped: jade_infer(prompt, model) -> char* ───────────────
+                None => {
+                    ctx.call_rv(ctx.jade_infer_fn, &[prompt_ptr.into(), model_ptr.into()], "infer_r")
+                }
+
+                // ── Typed: jade_infer_typed → parse to target type ────────────
+                Some(type_name) => {
+                    let type_ptr = ctx.builder
+                        .build_global_string_ptr(type_name, "infer_type")
+                        .map_err(|e| e.to_string())?
+                        .as_pointer_value();
+                    let max_retries = ctx.context.i32_type().const_int(3, false);
+
+                    let result_ptr = ctx.call_rv(
+                        ctx.jade_infer_typed_fn,
+                        &[prompt_ptr.into(), model_ptr.into(), type_ptr.into(), max_retries.into()],
+                        "infer_typed_r",
+                    )?.into_pointer_value();
+
+                    // Null → exhausted retries → exit(1).
+                    let fn_val = ctx.builder.get_insert_block()
+                        .and_then(|b| b.get_parent())
+                        .ok_or("prompt deref outside function")?;
+                    let ok_bb   = ctx.context.append_basic_block(fn_val, "infer_ok");
+                    let fail_bb = ctx.context.append_basic_block(fn_val, "infer_fail");
+
+                    let is_null = ctx.builder
+                        .build_is_null(result_ptr, "infer_null")
+                        .map_err(|e| e.to_string())?;
+                    ctx.builder.build_conditional_branch(is_null, fail_bb, ok_bb)
+                        .map_err(|e| e.to_string())?;
+
+                    ctx.builder.position_at_end(fail_bb);
+                    let err = ctx.builder
+                        .build_global_string_ptr("jade: prompt type coercion exhausted retries\n", "infer_err")
+                        .map_err(|e| e.to_string())?
+                        .as_pointer_value();
+                    ctx.builder.build_call(ctx.printf_fn, &[err.into()], "")
+                        .map_err(|e| e.to_string())?;
+                    ctx.builder.build_call(ctx.exit_fn,
+                        &[ctx.context.i32_type().const_int(1, false).into()], "")
+                        .map_err(|e| e.to_string())?;
+                    ctx.builder.build_unreachable().map_err(|e| e.to_string())?;
+
+                    ctx.builder.position_at_end(ok_bb);
+
+                    // Parse the guaranteed-valid string to the target LLVM type.
+                    match type_name.as_str() {
+                        "int" => ctx.call_rv(ctx.atoll_fn, &[result_ptr.into()], "parsed_int"),
+                        "float" => ctx.call_rv(ctx.strtod_fn,
+                            &[result_ptr.into(),
+                              ctx.context.ptr_type(AddressSpace::default()).const_null().into()],
+                            "parsed_float"),
+                        "bool" => {
+                            let true_lit = ctx.builder
+                                .build_global_string_ptr("true", "true_lit")
+                                .map_err(|e| e.to_string())?
+                                .as_pointer_value();
+                            let cmp = ctx.call_rv(ctx.strcmp_fn,
+                                &[result_ptr.into(), true_lit.into()], "strcmp_r")?
+                                .into_int_value();
+                            let is_true = ctx.builder
+                                .build_int_compare(IntPredicate::EQ, cmp,
+                                    ctx.context.i32_type().const_zero(), "is_true")
+                                .map_err(|e| e.to_string())?;
+                            Ok(is_true.into())
+                        }
+                        _ => Ok(result_ptr.into()), // "str" or unknown → return char*
+                    }
+                }
+            }
+        }
     }
 }
 
