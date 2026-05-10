@@ -16,7 +16,7 @@ use crate::{
 
 // ── Token budgets (mirror eval.rs) ────────────────────────────────────────────
 
-const DEFAULT_MAX_TOKENS: u32 = 1024;
+const DEFAULT_MAX_TOKENS: u32 = 4096;
 const RETRY_MAX_TOKENS: u32 = 64;
 const RETRY_MAX_TOKENS_COMPLEX: u32 = 512;
 
