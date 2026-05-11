@@ -7,7 +7,7 @@ use inkwell::{
     AddressSpace, FloatPredicate, IntPredicate,
 };
 
-use crate::interpreter::ast::{BinOpKind, UnaryOpKind};
+use crate::frontend::ast::{BinOpKind, UnaryOpKind};
 use crate::compiler::tir::{JadeType, TExpr, TExprKind, TFStrPart};
 
 use super::{stmt, types, CodegenCtx};
@@ -102,8 +102,97 @@ pub fn emit_expr<'ctx>(
             ctx.call_rv(ctx.jade_await_fn, &[fut_ptr.into()], "await_res")
         }
 
-        // ── Unsupported in this backend ───────────────────────────────────────
-        PromptDeref { .. } => Err("prompt dereference is not supported in the LLVM backend".into()),
+        // ── prompt <expr> ─────────────────────────────────────────────────────
+        // A Prompt value is represented identically to a Str pointer at the
+        // LLVM level — the type distinction is only semantic.
+        PromptLiteral { body } => emit_expr(body, ctx),
+
+        // ── ?prompt  /  ?prompt |> Type ──────────────────────────────────────
+        PromptDeref { expr: pexpr, output_type } => {
+            ctx.uses_prompts = true;
+
+            // Load the prompt string pointer.
+            let prompt_ptr = emit_expr(pexpr, ctx)?.into_pointer_value();
+
+            // Model name: read from JADE_MODEL env var at runtime, or empty string.
+            let model_ptr = ctx.builder
+                .build_global_string_ptr("", "jade_model_empty")
+                .map_err(|e| e.to_string())?
+                .as_pointer_value();
+
+            match output_type {
+                // ── Untyped: jade_infer(prompt, model) -> char* ───────────────
+                None => {
+                    ctx.call_rv(ctx.jade_infer_fn, &[prompt_ptr.into(), model_ptr.into()], "infer_r")
+                }
+
+                // ── Typed: jade_infer_typed → parse to target type ────────────
+                Some(type_name) => {
+                    let type_ptr = ctx.builder
+                        .build_global_string_ptr(type_name, "infer_type")
+                        .map_err(|e| e.to_string())?
+                        .as_pointer_value();
+                    let max_retries = ctx.context.i32_type().const_int(3, false);
+
+                    let result_ptr = ctx.call_rv(
+                        ctx.jade_infer_typed_fn,
+                        &[prompt_ptr.into(), model_ptr.into(), type_ptr.into(), max_retries.into()],
+                        "infer_typed_r",
+                    )?.into_pointer_value();
+
+                    // Null → exhausted retries → exit(1).
+                    let fn_val = ctx.builder.get_insert_block()
+                        .and_then(|b| b.get_parent())
+                        .ok_or("prompt deref outside function")?;
+                    let ok_bb   = ctx.context.append_basic_block(fn_val, "infer_ok");
+                    let fail_bb = ctx.context.append_basic_block(fn_val, "infer_fail");
+
+                    let is_null = ctx.builder
+                        .build_is_null(result_ptr, "infer_null")
+                        .map_err(|e| e.to_string())?;
+                    ctx.builder.build_conditional_branch(is_null, fail_bb, ok_bb)
+                        .map_err(|e| e.to_string())?;
+
+                    ctx.builder.position_at_end(fail_bb);
+                    let err = ctx.builder
+                        .build_global_string_ptr("jade: prompt type coercion exhausted retries\n", "infer_err")
+                        .map_err(|e| e.to_string())?
+                        .as_pointer_value();
+                    ctx.builder.build_call(ctx.printf_fn, &[err.into()], "")
+                        .map_err(|e| e.to_string())?;
+                    ctx.builder.build_call(ctx.exit_fn,
+                        &[ctx.context.i32_type().const_int(1, false).into()], "")
+                        .map_err(|e| e.to_string())?;
+                    ctx.builder.build_unreachable().map_err(|e| e.to_string())?;
+
+                    ctx.builder.position_at_end(ok_bb);
+
+                    // Parse the guaranteed-valid string to the target LLVM type.
+                    match type_name.as_str() {
+                        "int" => ctx.call_rv(ctx.atoll_fn, &[result_ptr.into()], "parsed_int"),
+                        "float" => ctx.call_rv(ctx.strtod_fn,
+                            &[result_ptr.into(),
+                              ctx.context.ptr_type(AddressSpace::default()).const_null().into()],
+                            "parsed_float"),
+                        "bool" => {
+                            let true_lit = ctx.builder
+                                .build_global_string_ptr("true", "true_lit")
+                                .map_err(|e| e.to_string())?
+                                .as_pointer_value();
+                            let cmp = ctx.call_rv(ctx.strcmp_fn,
+                                &[result_ptr.into(), true_lit.into()], "strcmp_r")?
+                                .into_int_value();
+                            let is_true = ctx.builder
+                                .build_int_compare(IntPredicate::EQ, cmp,
+                                    ctx.context.i32_type().const_zero(), "is_true")
+                                .map_err(|e| e.to_string())?;
+                            Ok(is_true.into())
+                        }
+                        _ => Ok(result_ptr.into()), // "str" or unknown → return char*
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -207,8 +296,20 @@ fn emit_struct_literal<'ctx>(
     let i64_ty = ctx.context.i64_type();
     let n = fields.len() as u64;
 
-    // malloc n * 8 bytes for uniform i64 slots
-    let struct_ptr = ctx.malloc_ptr(i64_ty.const_int(n * 8 + 8, false), "struct_ptr")?;
+    // Layout: slot 0 = type_name ptr (as i64), slots 1..=n = field values.
+    // Allocates (n+1) * 8 bytes — same as the old n*8+8 but now slot 0 is used.
+    let struct_ptr = ctx.malloc_ptr(i64_ty.const_int((n + 1) * 8, false), "struct_ptr")?;
+
+    // Store the type name pointer at slot 0 for typed catch dispatch.
+    let type_name_lit = ctx.builder
+        .build_global_string_ptr(type_name, "sty_name")
+        .map_err(|e| e.to_string())?
+        .as_pointer_value();
+    let type_name_i64 = ctx.builder
+        .build_ptr_to_int(type_name_lit, i64_ty, "sty_p2i")
+        .map_err(|e| e.to_string())?;
+    let slot0 = ctx.gep(i64_ty, struct_ptr, &[i64_ty.const_int(0, false)], "sty_slot")?;
+    ctx.builder.build_store(slot0, type_name_i64).map_err(|e| e.to_string())?;
 
     let field_names = ctx.struct_field_order
         .get(type_name)
@@ -223,7 +324,8 @@ fn emit_struct_literal<'ctx>(
 
         let val = emit_expr(field_expr, ctx)?;
         let as_i64 = value_to_i64(val, &field_expr.ty, ctx)?;
-        let slot = ctx.gep(i64_ty, struct_ptr, &[i64_ty.const_int(idx as u64, false)], "sf_slot")?;
+        // +1 to skip the type_name slot at slot 0
+        let slot = ctx.gep(i64_ty, struct_ptr, &[i64_ty.const_int((idx as u64) + 1, false)], "sf_slot")?;
         ctx.builder.build_store(slot, as_i64).map_err(|e| e.to_string())?;
     }
 
@@ -240,6 +342,17 @@ fn emit_field_access<'ctx>(
 ) -> Result<BasicValueEnum<'ctx>, String> {
     let type_name = match &object.ty {
         JadeType::Struct(n) => n.clone(),
+        // Inside method bodies `self` is Unknown-typed in TIR; resolve via scope.
+        JadeType::Unknown => {
+            if let TExprKind::Identifier(var) = &object.kind {
+                match ctx.lookup(var).map(|(_, ty)| ty) {
+                    Some(JadeType::Struct(n)) => n,
+                    _ => return Err(format!("field access on '{var}' with unresolved struct type")),
+                }
+            } else {
+                return Err(format!("field access on Unknown-typed non-identifier expression"));
+            }
+        }
         _ => return Err(format!("field access on non-struct: {:?}", object.ty)),
     };
 
@@ -263,7 +376,8 @@ fn emit_field_access<'ctx>(
 
     let i64_ty = ctx.context.i64_type();
     let struct_ptr = as_pointer(emit_expr(object, ctx)?, ctx)?;
-    let slot = ctx.gep(i64_ty, struct_ptr, &[i64_ty.const_int(idx as u64, false)], "fa_slot")?;
+    // +1 to skip the type_name slot at slot 0
+    let slot = ctx.gep(i64_ty, struct_ptr, &[i64_ty.const_int((idx as u64) + 1, false)], "fa_slot")?;
     let raw = ctx.builder
         .build_load(i64_ty, slot, "fa_raw")
         .map_err(|e| e.to_string())?
@@ -274,6 +388,8 @@ fn emit_field_access<'ctx>(
 
 // ── F-string ──────────────────────────────────────────────────────────────────
 
+const FSTR_BUF_SIZE: u64 = 4096;
+
 fn emit_fstr<'ctx>(
     parts: &[TFStrPart],
     ctx: &mut CodegenCtx<'ctx>,
@@ -281,9 +397,9 @@ fn emit_fstr<'ctx>(
     let i8_ty  = ctx.context.i8_type();
     let i64_ty = ctx.context.i64_type();
 
-    // 4096-byte stack buffer
+    // Stack buffer — writes are bounded by remaining capacity via snprintf.
     let buf_ptr = ctx.builder
-        .build_array_alloca(i8_ty, i64_ty.const_int(4096, false), "fstr_buf")
+        .build_array_alloca(i8_ty, i64_ty.const_int(FSTR_BUF_SIZE, false), "fstr_buf")
         .map_err(|e| e.to_string())?;
 
     // Current write offset
@@ -299,6 +415,10 @@ fn emit_fstr<'ctx>(
             .build_load(i64_ty, pos_slot, "fstr_pos_v")
             .map_err(|e| e.to_string())?
             .into_int_value();
+        // Remaining capacity for snprintf (including the null terminator).
+        let remaining = ctx.builder
+            .build_int_sub(i64_ty.const_int(FSTR_BUF_SIZE, false), pos, "fstr_rem")
+            .map_err(|e| e.to_string())?;
         let write_ptr = ctx.gep(i8_ty, buf_ptr, &[pos], "fstr_wptr")?;
 
         let written = match part {
@@ -312,13 +432,13 @@ fn emit_fstr<'ctx>(
                     .map_err(|e| e.to_string())?
                     .as_pointer_value();
                 let call = ctx.builder
-                    .build_call(ctx.sprintf_fn, &[write_ptr.into(), fmt.into(), lit.into()], "sp_lit")
+                    .build_call(ctx.snprintf_fn, &[write_ptr.into(), remaining.into(), fmt.into(), lit.into()], "snp_lit")
                     .map_err(|e| e.to_string())?;
                 extract_i32_from_call(call, ctx)?
             }
             TFStrPart::Expr(e) => {
                 let val = emit_expr(e, ctx)?;
-                emit_sprintf_value(val, &e.ty, write_ptr, ctx)?
+                emit_snprintf_value(val, &e.ty, write_ptr, remaining, ctx)?
             }
         };
 
@@ -334,10 +454,11 @@ fn emit_fstr<'ctx>(
     Ok(buf_ptr.into())
 }
 
-fn emit_sprintf_value<'ctx>(
+fn emit_snprintf_value<'ctx>(
     val: BasicValueEnum<'ctx>,
     ty: &JadeType,
     write_ptr: PointerValue<'ctx>,
+    remaining: IntValue<'ctx>,
     ctx: &mut CodegenCtx<'ctx>,
 ) -> Result<IntValue<'ctx>, String> {
     let mk = |s: &str, ctx: &mut CodegenCtx<'ctx>| -> Result<PointerValue<'ctx>, String> {
@@ -350,32 +471,32 @@ fn emit_sprintf_value<'ctx>(
     let call = match effective_ty(ty) {
         JadeType::Int => {
             let fmt = mk("%lld", ctx)?;
-            ctx.builder.build_call(ctx.sprintf_fn, &[write_ptr.into(), fmt.into(), val.into()], "sp_int")
+            ctx.builder.build_call(ctx.snprintf_fn, &[write_ptr.into(), remaining.into(), fmt.into(), val.into()], "snp_int")
                 .map_err(|e| e.to_string())?
         }
         JadeType::Float => {
             let fmt = mk("%g", ctx)?;
-            ctx.builder.build_call(ctx.sprintf_fn, &[write_ptr.into(), fmt.into(), val.into()], "sp_flt")
+            ctx.builder.build_call(ctx.snprintf_fn, &[write_ptr.into(), remaining.into(), fmt.into(), val.into()], "snp_flt")
                 .map_err(|e| e.to_string())?
         }
         JadeType::Bool => {
             let t = mk("true", ctx)?;
             let f = mk("false", ctx)?;
             let sel = ctx.builder
-                .build_select(val.into_int_value(), t, f, "sp_bsel")
+                .build_select(val.into_int_value(), t, f, "snp_bsel")
                 .map_err(|e| e.to_string())?;
             let fmt = mk("%s", ctx)?;
-            ctx.builder.build_call(ctx.sprintf_fn, &[write_ptr.into(), fmt.into(), sel.into()], "sp_bool")
+            ctx.builder.build_call(ctx.snprintf_fn, &[write_ptr.into(), remaining.into(), fmt.into(), sel.into()], "snp_bool")
                 .map_err(|e| e.to_string())?
         }
         JadeType::Str => {
             let fmt = mk("%s", ctx)?;
-            ctx.builder.build_call(ctx.sprintf_fn, &[write_ptr.into(), fmt.into(), val.into()], "sp_str")
+            ctx.builder.build_call(ctx.snprintf_fn, &[write_ptr.into(), remaining.into(), fmt.into(), val.into()], "snp_str")
                 .map_err(|e| e.to_string())?
         }
         _ => {
             let fmt = mk("%lld", ctx)?;
-            ctx.builder.build_call(ctx.sprintf_fn, &[write_ptr.into(), fmt.into(), val.into()], "sp_unk")
+            ctx.builder.build_call(ctx.snprintf_fn, &[write_ptr.into(), remaining.into(), fmt.into(), val.into()], "snp_unk")
                 .map_err(|e| e.to_string())?
         }
     };
@@ -613,7 +734,10 @@ fn emit_fn_as_value<'ctx>(
         // Unpack i64 args → real types, call the real function.
         let mut real_args: Vec<BasicMetadataValueEnum<'ctx>> = Vec::new();
         for (i, param_ty) in param_tys.iter().enumerate() {
-            let raw = wrapper_fn.get_nth_param(i as u32).unwrap().into_int_value();
+            let raw = wrapper_fn
+                .get_nth_param(i as u32)
+                .ok_or_else(|| format!("wrapper fn '{name}' has no param {i}"))?
+                .into_int_value();
             let val = i64_to_value(raw, param_ty, ctx)?;
             real_args.push(val.into());
         }
@@ -729,7 +853,9 @@ fn emit_closure<'ctx>(
         let alloca = ctx.builder
             .build_alloca(i64_ty, param_name)
             .map_err(|e| e.to_string())?;
-        let arg = cl_fn.get_nth_param(i as u32).unwrap();
+        let arg = cl_fn
+            .get_nth_param(i as u32)
+            .ok_or_else(|| format!("closure body has no param {i}"))?;
         ctx.builder.build_store(alloca, arg).map_err(|e| e.to_string())?;
         ctx.define(param_name.clone(), alloca, JadeType::Unknown);
     }
@@ -965,6 +1091,24 @@ fn emit_binop<'ctx>(
         (JadeType::Bool, Le, JadeType::Bool) => icmp(IntPredicate::ULE, lhs, rhs, ctx),
         (JadeType::Bool, Ge, JadeType::Bool) => icmp(IntPredicate::UGE, lhs, rhs, ctx),
 
+        // ── String comparisons (via strcmp) ───────────────────────────────────
+        (JadeType::Str, Eq | Ne | Lt | Gt | Le | Ge, JadeType::Str) => {
+            let lp = as_pointer(lhs, ctx)?;
+            let rp = as_pointer(rhs, ctx)?;
+            let cmp = ctx.call_rv(ctx.strcmp_fn, &[lp.into(), rp.into()], "scmp")?.into_int_value();
+            let zero = ctx.context.i32_type().const_zero();
+            let pred = match op {
+                Eq => IntPredicate::EQ,
+                Ne => IntPredicate::NE,
+                Lt => IntPredicate::SLT,
+                Gt => IntPredicate::SGT,
+                Le => IntPredicate::SLE,
+                Ge => IntPredicate::SGE,
+                _ => unreachable!(),
+            };
+            Ok(ctx.builder.build_int_compare(pred, cmp, zero, "scmp_r").map_err(|e| e.to_string())?.into())
+        }
+
         _ => Err(format!(
             "unsupported binary op {:?} for types {:?} × {:?} in LLVM backend",
             op, lty, rty
@@ -1064,6 +1208,49 @@ fn emit_call<'ctx>(
                     _ => Ok(ctx.context.i64_type().const_int(0, false).into()),
                 },
             };
+        }
+    }
+
+    // ── Struct method call: obj.method(args…) ────────────────────────────────
+    if let TExprKind::FieldAccess { object, field } = &callee.kind {
+        let type_name_opt = match &object.ty {
+            JadeType::Struct(n) => Some(n.clone()),
+            JadeType::Unknown => {
+                // Inside method bodies `self` is Unknown-typed in TIR; resolve via scope.
+                if let TExprKind::Identifier(var) = &object.kind {
+                    ctx.lookup(var).and_then(|(_, ty)| {
+                        if let JadeType::Struct(n) = ty { Some(n) } else { None }
+                    })
+                } else { None }
+            }
+            _ => None,
+        };
+        if let Some(type_name) = type_name_opt {
+            let mangled = format!("{type_name}__{field}");
+            if let Some((fn_val, param_tys, fn_ret_ty)) = ctx.fn_info.get(mangled.as_str()).cloned() {
+                // Emit the receiver (self) as the first argument.
+                let self_val = emit_expr(object, ctx)?;
+                let mut llvm_args: Vec<BasicMetadataValueEnum<'ctx>> = Vec::with_capacity(args.len() + 1);
+                llvm_args.push(self_val.into());
+                for (i, arg_expr) in args.iter().enumerate() {
+                    let arg_val = emit_expr(arg_expr, ctx)?;
+                    let param_ty = param_tys.get(i + 1).unwrap_or(&JadeType::Unknown);
+                    let coerced = coerce(arg_val, &arg_expr.ty, param_ty, ctx)?;
+                    llvm_args.push(coerced.into());
+                }
+                let call_site = ctx.builder
+                    .build_call(fn_val, &llvm_args, "mcall")
+                    .map_err(|e| e.to_string())?;
+                return match fn_ret_ty {
+                    JadeType::Nil => Ok(ctx.context.i64_type().const_int(0, false).into()),
+                    _ => match call_site.as_any_value_enum() {
+                        AnyValueEnum::IntValue(v)     => Ok(v.into()),
+                        AnyValueEnum::FloatValue(v)   => Ok(v.into()),
+                        AnyValueEnum::PointerValue(v) => Ok(v.into()),
+                        _ => Ok(ctx.context.i64_type().const_int(0, false).into()),
+                    },
+                };
+            }
         }
     }
 

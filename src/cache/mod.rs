@@ -3,7 +3,7 @@ use std::{fs, path::{Path, PathBuf}};
 use sha2::{Digest, Sha256};
 use serde::{Deserialize, Serialize};
 
-use crate::interpreter::ast::Program;
+use crate::frontend::ast::Program;
 use crate::compiler::tir::TProgram;
 
 /// Jade version baked in at compile time — used to invalidate cached artifacts

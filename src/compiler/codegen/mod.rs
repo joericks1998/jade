@@ -44,8 +44,10 @@ pub struct CodegenCtx<'ctx> {
     pub malloc_fn: FunctionValue<'ctx>,
     /// strlen(ptr) -> i64
     pub strlen_fn: FunctionValue<'ctx>,
-    /// sprintf(ptr buf, ptr fmt, ...) -> i32  — variadic
+    /// sprintf(ptr buf, ptr fmt, ...) -> i32  — variadic (used for non-fstring contexts)
     pub sprintf_fn: FunctionValue<'ctx>,
+    /// snprintf(ptr buf, i64 max, ptr fmt, ...) -> i32  — variadic (fstring safe writes)
+    pub snprintf_fn: FunctionValue<'ctx>,
 
     // ── jade_rt async runtime (jade_rt_pthread.c / jade_rt_jadeos.c) ──────
     /// jade_spawn(fn_ptr: ptr, args: ptr, n: i32) -> ptr
@@ -65,7 +67,35 @@ pub struct CodegenCtx<'ctx> {
     /// jade_dict_len(ptr dict) -> i64
     pub jade_dict_len_fn: FunctionValue<'ctx>,
 
-    // ── Async / dict codegen state ─────────────────────────────────────────
+    // ── jade_rt exception runtime ──────────────────────────────────────────
+    /// setjmp(ptr jmpbuf) -> i32  [returns_twice]
+    pub setjmp_fn: FunctionValue<'ctx>,
+    /// jade_exc_push_frame(ptr jmpbuf) -> void
+    pub jade_exc_push_frame_fn: FunctionValue<'ctx>,
+    /// jade_exc_pop() -> void
+    pub jade_exc_pop_fn: FunctionValue<'ctx>,
+    /// jade_exc_throw(i64 value) -> void  [noreturn]
+    pub jade_exc_throw_fn: FunctionValue<'ctx>,
+    /// jade_exc_value() -> i64
+    pub jade_exc_value_fn: FunctionValue<'ctx>,
+
+    // ── jade_rt inference runtime ──────────────────────────────────────────
+    /// jade_infer(ptr prompt, ptr model) -> ptr
+    pub jade_infer_fn: FunctionValue<'ctx>,
+    /// jade_infer_typed(ptr prompt, ptr model, ptr type_name, i32 max_retries) -> ptr
+    pub jade_infer_typed_fn: FunctionValue<'ctx>,
+
+    // ── libc helpers for typed prompt parsing ──────────────────────────────
+    /// atoll(ptr) -> i64
+    pub atoll_fn: FunctionValue<'ctx>,
+    /// strtod(ptr, ptr) -> double
+    pub strtod_fn: FunctionValue<'ctx>,
+    /// strcmp(ptr, ptr) -> i32
+    pub strcmp_fn: FunctionValue<'ctx>,
+    /// free(ptr) -> void
+    pub free_fn: FunctionValue<'ctx>,
+
+    // ── Async / dict / exception / prompt codegen state ────────────────────
     /// When `Some(ty)`, `TStmt::Return` in an async body or closure function
     /// converts its value via `value_to_i64(val, ty)` before emitting `ret i64`.
     pub async_body_ret_ty: Option<JadeType>,
@@ -73,6 +103,10 @@ pub struct CodegenCtx<'ctx> {
     pub uses_async: bool,
     /// Set to `true` when any dict runtime call is emitted.
     pub uses_dicts: bool,
+    /// Set to `true` when any try/catch or raise is emitted.
+    pub uses_exceptions: bool,
+    /// Set to `true` when any prompt deref is emitted.
+    pub uses_prompts: bool,
 
     // ── Heap type layouts ──────────────────────────────────────────────────
     /// `%jade.array = type { ptr data, i64 len, i64 cap }`
@@ -118,6 +152,10 @@ impl<'ctx> CodegenCtx<'ctx> {
         let sprintf_ty = i32_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], true);
         let sprintf_fn = module.add_function("sprintf", sprintf_ty, None);
 
+        // snprintf(ptr buf, i64 max, ptr fmt, ...) -> i32
+        let snprintf_ty = i32_ty.fn_type(&[ptr_ty.into(), i64_ty.into(), ptr_ty.into()], true);
+        let snprintf_fn = module.add_function("snprintf", snprintf_ty, None);
+
         // %jade.array = type { ptr, i64, i64 }
         let array_ty = context.opaque_struct_type("jade.array");
         array_ty.set_body(&[ptr_ty.into(), i64_ty.into(), i64_ty.into()], false);
@@ -150,6 +188,63 @@ impl<'ctx> CodegenCtx<'ctx> {
         let jade_dict_len_ty = i64_ty.fn_type(&[ptr_ty.into()], false);
         let jade_dict_len_fn = module.add_function("jade_dict_len", jade_dict_len_ty, None);
 
+        // setjmp(ptr) -> i32  [returns_twice — must not be optimised away]
+        let setjmp_ty = i32_ty.fn_type(&[ptr_ty.into()], false);
+        let setjmp_fn = module.add_function("setjmp", setjmp_ty, None);
+        {
+            use inkwell::attributes::AttributeLoc;
+            let id = inkwell::attributes::Attribute::get_named_enum_kind_id("returns_twice");
+            let attr = context.create_enum_attribute(id, 0);
+            setjmp_fn.add_attribute(AttributeLoc::Function, attr);
+        }
+
+        // jade_exc_push_frame(ptr) -> void
+        let jade_exc_push_frame_ty = context.void_type().fn_type(&[ptr_ty.into()], false);
+        let jade_exc_push_frame_fn = module.add_function("jade_exc_push_frame", jade_exc_push_frame_ty, None);
+
+        // jade_exc_pop() -> void
+        let jade_exc_pop_ty = context.void_type().fn_type(&[], false);
+        let jade_exc_pop_fn = module.add_function("jade_exc_pop", jade_exc_pop_ty, None);
+
+        // jade_exc_throw(i64) -> void  [noreturn]
+        let jade_exc_throw_ty = context.void_type().fn_type(&[i64_ty.into()], false);
+        let jade_exc_throw_fn = module.add_function("jade_exc_throw", jade_exc_throw_ty, None);
+        {
+            use inkwell::attributes::AttributeLoc;
+            let id = inkwell::attributes::Attribute::get_named_enum_kind_id("noreturn");
+            let attr = context.create_enum_attribute(id, 0);
+            jade_exc_throw_fn.add_attribute(AttributeLoc::Function, attr);
+        }
+
+        // jade_exc_value() -> i64
+        let jade_exc_value_ty = i64_ty.fn_type(&[], false);
+        let jade_exc_value_fn = module.add_function("jade_exc_value", jade_exc_value_ty, None);
+
+        // jade_infer(ptr prompt, ptr model) -> ptr
+        let jade_infer_ty = ptr_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], false);
+        let jade_infer_fn = module.add_function("jade_infer", jade_infer_ty, None);
+
+        // jade_infer_typed(ptr prompt, ptr model, ptr type_name, i32 max_retries) -> ptr
+        let jade_infer_typed_ty = ptr_ty.fn_type(&[ptr_ty.into(), ptr_ty.into(), ptr_ty.into(), i32_ty.into()], false);
+        let jade_infer_typed_fn = module.add_function("jade_infer_typed", jade_infer_typed_ty, None);
+
+        // atoll(ptr) -> i64
+        let atoll_ty = i64_ty.fn_type(&[ptr_ty.into()], false);
+        let atoll_fn = module.add_function("atoll", atoll_ty, None);
+
+        // strtod(ptr endptr_or_null) -> double
+        let f64_ty = context.f64_type();
+        let strtod_ty = f64_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], false);
+        let strtod_fn = module.add_function("strtod", strtod_ty, None);
+
+        // strcmp(ptr, ptr) -> i32
+        let strcmp_ty = i32_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], false);
+        let strcmp_fn = module.add_function("strcmp", strcmp_ty, None);
+
+        // free(ptr) -> void
+        let free_ty = context.void_type().fn_type(&[ptr_ty.into()], false);
+        let free_fn = module.add_function("free", free_ty, None);
+
         // %jade.fn = type { ptr, ptr }  — fat pointer for first-class functions / closures
         let jade_fn_ty = context.opaque_struct_type("jade.fn");
         jade_fn_ty.set_body(&[ptr_ty.into(), ptr_ty.into()], false);
@@ -166,6 +261,7 @@ impl<'ctx> CodegenCtx<'ctx> {
             malloc_fn,
             strlen_fn,
             sprintf_fn,
+            snprintf_fn,
             jade_spawn_fn,
             jade_await_fn,
             jade_join_fn,
@@ -173,9 +269,22 @@ impl<'ctx> CodegenCtx<'ctx> {
             jade_dict_set_fn,
             jade_dict_get_fn,
             jade_dict_len_fn,
+            setjmp_fn,
+            jade_exc_push_frame_fn,
+            jade_exc_pop_fn,
+            jade_exc_throw_fn,
+            jade_exc_value_fn,
+            jade_infer_fn,
+            jade_infer_typed_fn,
+            atoll_fn,
+            strtod_fn,
+            strcmp_fn,
+            free_fn,
             async_body_ret_ty: None,
             uses_async: false,
             uses_dicts: false,
+            uses_exceptions: false,
+            uses_prompts: false,
             array_ty,
             jade_fn_ty,
             closure_counter: 0,
@@ -406,8 +515,8 @@ pub fn compile(program: TProgram, source_path: Option<&Path>, output_path: &Path
             }
         }
     }
-    // Link jade_rt if any async or dict runtime calls were emitted.
-    if ctx.uses_async || ctx.uses_dicts {
+    // Link jade_rt if any runtime calls were emitted.
+    if ctx.uses_async || ctx.uses_dicts || ctx.uses_exceptions || ctx.uses_prompts {
         if let Ok(lib_dir) = std::env::var("JADE_RT_LIB") {
             cc.arg(format!("-L{}", lib_dir));
         } else {
@@ -437,6 +546,8 @@ fn resolve_imports(
     for stmt in stmts {
         match stmt {
             TStmt::Use { path, .. } => {
+                // Skip stdlib packages — they are VM-runtime values, not source files.
+                if crate::compiler::stdlib::find_package(&path).is_some() { continue; }
                 let full = dir.join(&path);
                 let canon = full.canonicalize()
                     .map_err(|e| format!("import '{}': {e}", path))?;
@@ -445,9 +556,9 @@ fn resolve_imports(
 
                 let src = std::fs::read_to_string(&canon)
                     .map_err(|e| format!("import '{}': {e}", path))?;
-                let tokens = crate::interpreter::lexer::tokenize(&src)
+                let tokens = crate::frontend::lexer::tokenize(&src)
                     .map_err(|e| e.to_string())?;
-                let ast = crate::interpreter::parser::parse(tokens)
+                let ast = crate::frontend::parser::parse(tokens)
                     .map_err(|e| e.to_string())?;
                 let tp = crate::compiler::type_infer::infer(ast)
                     .map_err(|e| e.to_string())?;

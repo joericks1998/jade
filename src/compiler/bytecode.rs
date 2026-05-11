@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::interpreter::{
+use crate::frontend::{
     ast::{BinOpKind, UnaryOpKind},
     error::Span,
 };
@@ -237,10 +237,6 @@ pub enum Instr {
     // ── Prompt ─────────────────────────────────────────────────────────────
     MakePrompt(Reg, Reg),
     PromptDeref(Reg, Reg, Option<String>),
-
-    // ── Built-ins ──────────────────────────────────────────────────────────
-    CallPrint(Vec<Reg>),
-    CallLen(Reg, Reg),
 
     // ── Exception handling ─────────────────────────────────────────────────
     /// Raise the value in `val` as an exception. If a handler frame is active,

@@ -1,33 +1,31 @@
 use std::io::{self, BufRead, Write};
 
-use crate::interpreter::{
-    ast::Stmt,
-    error::Span,
-    eval::{self, Env, LlmOpts, Value},
+use crate::{
+    compiler::{
+        emit, type_infer,
+        vm::{self, VmOpts, VmState, value_to_display},
+    },
+    frontend::{
+        ast::{Expr, Stmt},
+        error::Span,
+        lexer, parser,
+    },
 };
 
 /// `jade repl [-v]`
 ///
-/// Uses the tree-walk evaluator so that definitions from one line persist into
-/// subsequent ones without needing type-inference state to be threaded through.
+/// Uses the VM backend so that `jade repl` and `jade run` share the same
+/// execution semantics. Globals persist across snippets via `VmState`.
 pub async fn run_repl(_verbose: bool) {
     let cfg = crate::config::load_config();
     let backend = crate::llm::select_backend(&cfg);
 
-    let opts = LlmOpts {
+    let opts = VmOpts {
         backend,
-        default_model: cfg.model.clone(),
-        max_retries: cfg.max_retries,
+        ..VmOpts::default()
     };
 
-    // Seed the live Env that persists across all REPL inputs.
-    let mut env = Env::new();
-    env.inference_backend = opts.backend;
-    env.max_retries = opts.max_retries;
-    env.default_model = opts.default_model.clone();
-    // Fix 3: populate session vars so Jade code can read __model__ and __max_retries__.
-    env.set_session_var("__model__", Value::Str(opts.default_model));
-    env.set_session_var("__max_retries__", Value::Int(opts.max_retries as i64));
+    let mut state = VmState::new_for_repl(opts);
 
     let version = env!("CARGO_PKG_VERSION");
     println!("jade {} repl — type 'exit' or press Ctrl+D to quit", version);
@@ -35,8 +33,6 @@ pub async fn run_repl(_verbose: bool) {
 
     let stdin = io::stdin();
     let mut stdout = io::stdout();
-    // Fix 2: acquire the stdin lock once before the outer loop so it is held
-    // for the entire REPL session rather than re-acquired on every line read.
     let mut stdin_lock = stdin.lock();
 
     loop {
@@ -50,7 +46,6 @@ pub async fn run_repl(_verbose: bool) {
             let mut line = String::new();
             match stdin_lock.read_line(&mut line) {
                 Ok(0) => {
-                    // EOF (Ctrl+D).
                     println!();
                     println!("bye");
                     return;
@@ -62,9 +57,8 @@ pub async fn run_repl(_verbose: bool) {
                 }
             }
 
-            // Fix 1: count braces with a state machine that skips over string
-            // literals so that `let s = "hello {"` does not enter continuation
-            // mode.
+            // Count braces, skipping string literals so `"hello {"` doesn't
+            // trigger continuation mode.
             let mut in_str = false;
             let mut escape = false;
             for ch in line.chars() {
@@ -83,7 +77,6 @@ pub async fn run_repl(_verbose: bool) {
             if open_braces <= 0 {
                 break;
             }
-            // Continuation prompt.
             print!("  ... ");
             stdout.flush().unwrap_or(());
         }
@@ -97,7 +90,7 @@ pub async fn run_repl(_verbose: bool) {
             return;
         }
 
-        match eval_snippet(trimmed, &mut env) {
+        match eval_snippet_vm(trimmed, &mut state).await {
             Ok(Some(display)) => println!("{}", display),
             Ok(None) => {}
             Err(msg) => eprintln!("error: {}", msg),
@@ -105,21 +98,24 @@ pub async fn run_repl(_verbose: bool) {
     }
 }
 
-/// Evaluate one REPL snippet and return the last expression value for display.
-fn eval_snippet(src: &str, env: &mut Env) -> Result<Option<String>, String> {
-    // Lex + parse.
-    let tokens = crate::interpreter::lexer::tokenize(src)
-        .map_err(|e| e.to_string())?;
-    let mut program = crate::interpreter::parser::parse(tokens)
-        .map_err(|e| e.to_string())?;
+/// Compile and execute one REPL snippet against the shared `VmState`.
+///
+/// Returns the display string for the last bare expression, if any.
+/// Type inference errors are non-fatal — the user is shown the error and can
+/// continue the session.
+async fn eval_snippet_vm(src: &str, state: &mut VmState) -> Result<Option<String>, String> {
+    let tokens = lexer::tokenize(src).map_err(|e| e.to_string())?;
+    let mut program = parser::parse(tokens).map_err(|e| e.to_string())?;
 
-    // If the last statement is a bare expression, capture it into a binding so
-    // we can retrieve and display the result after execution.
-    let capture = if let Some(last) = program.stmts.last() {
-        matches!(last, Stmt::Expr(_))
-    } else {
-        false
-    };
+    // Detect a bare expression as the last statement.
+    let capture = matches!(program.stmts.last(), Some(Stmt::Expr(_)));
+
+    // PromptDeref (`?p`) streams tokens live to stdout; suppress echoing the
+    // result string since the output already appeared during inference.
+    let is_prompt_deref = capture && matches!(
+        program.stmts.last(),
+        Some(Stmt::Expr(Expr::PromptDeref { .. }))
+    );
 
     if capture {
         if let Some(Stmt::Expr(expr)) = program.stmts.pop() {
@@ -131,17 +127,26 @@ fn eval_snippet(src: &str, env: &mut Env) -> Result<Option<String>, String> {
         }
     }
 
-    eval::evaluate_incremental(program, env).map_err(|e| e.to_string())?;
+    // Pre-seed the type context with globals from previous REPL runs so that
+    // cross-snippet references resolve. Unknown types are fine — the VM will
+    // catch real type mismatches at runtime.
+    let known: Vec<String> = state.globals.keys().cloned().collect();
+    let tprogram = type_infer::infer_with_globals(program, &known)
+        .map_err(|e| e.to_string())?;
+    let compiled = emit::emit(tprogram).map_err(|e| e.to_string())?;
 
-    if capture {
-        // Retrieve and immediately remove the temporary binding.
-        if let Some(val) = env.globals_mut().remove("__repl_result__") {
+    vm::run_incremental(compiled, state).await.map_err(|e| e.to_string())?;
+
+    if capture && !is_prompt_deref {
+        if let Some(val) = state.globals.remove("__repl_result__") {
             let display = match &val {
-                Value::Str(s) => format!("{:?}", s),
-                other => eval::value_to_str(other),
+                vm::VmValue::Str(s) => format!("{:?}", s),
+                other => value_to_display(other),
             };
             return Ok(Some(display));
         }
+    } else if capture {
+        state.globals.remove("__repl_result__");
     }
 
     Ok(None)

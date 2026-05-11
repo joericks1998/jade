@@ -90,14 +90,14 @@ pub async fn run_file(path: &str, verbose: bool) {
     let program = match cached_ast {
         Some(p) => p,
         None => {
-            let tokens = match crate::interpreter::lexer::tokenize(&source) {
+            let tokens = match crate::frontend::lexer::tokenize(&source) {
                 Ok(t) => t,
                 Err(e) => {
                     eprintln!("{}: lexer error: {}", path, e);
                     process::exit(1);
                 }
             };
-            let p = match crate::interpreter::parser::parse(tokens) {
+            let p = match crate::frontend::parser::parse(tokens) {
                 Ok(p) => p,
                 Err(e) => {
                     eprintln!("{}: parse error: {}", path, e);
@@ -201,13 +201,15 @@ pub async fn run_file(path: &str, verbose: bool) {
                     }
                     println!(" }}");
                 }
-                vm::VmValue::Array(vec) => {
-                    let parts: Vec<String> = vec.iter().map(vm::value_to_display).collect();
+                vm::VmValue::Array(arc) => {
+                    let guard = arc.lock();
+                    let parts: Vec<String> = guard.iter().map(vm::value_to_display).collect();
                     println!("{} = [{}]", name, parts.join(", "));
                 }
                 vm::VmValue::BoundMethod(_) => println!("{} = <bound method>", name),
                 vm::VmValue::Prompt(_)      => println!("{} = <prompt>", name),
                 vm::VmValue::Dict(_) => println!("{} = {}", name, vm::value_to_display(val)),
+                vm::VmValue::NativeFn(_) | vm::VmValue::BuiltinFn(_) | vm::VmValue::NativeBoundMethod(_) => {} // not shown
                 vm::VmValue::Future(_) => println!("{} = <future>", name),
                 vm::VmValue::Nil    => {} // not shown
             }

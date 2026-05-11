@@ -23,14 +23,14 @@ pub fn run_build(path: &str, output: Option<&str>, emit_ir: bool) {
         };
 
         // Lex + parse.
-        let tokens = match crate::interpreter::lexer::tokenize(&source) {
+        let tokens = match crate::frontend::lexer::tokenize(&source) {
             Ok(t) => t,
             Err(e) => {
                 eprintln!("{path}: lexer error: {e}");
                 process::exit(1);
             }
         };
-        let program = match crate::interpreter::parser::parse(tokens) {
+        let program = match crate::frontend::parser::parse(tokens) {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("{path}: parse error: {e}");

@@ -1,0 +1,8 @@
+// Multiple sequential prompt derefs in one program.
+
+prompt p1 = "Say exactly: alpha"
+prompt p2 = "Say exactly: beta"
+let a = ?p1
+let b = ?p2
+print(a)
+print(b)

@@ -1,8 +1,8 @@
-//! JadeOsBackend — native inference via /dev/jade
+//! JadeOsBackend — native inference via Unix domain socket.
 //!
-//! Connects to the jade-tree inference daemon through the jade_core kernel
-//! module. Writes an InferenceRequest and reads streaming Frame responses
-//! until a DONE or ERROR frame is received.
+//! Connects to jade-tree at `$HOME/.jade/llm.sock`. Each call opens a fresh
+//! connection, sends one InferenceRequest, and reads streaming Frame responses
+//! until a DONE or ERROR frame arrives.
 //!
 //! ## Protocol (see jade-protocol crate in jade-os repo)
 //!
@@ -12,35 +12,37 @@
 //!   0x02 DONE   — 8-byte LE u64 tokens_used; inference complete
 //!   0x03 ERROR  — UTF-8 error message
 
-use std::fs::OpenOptions;
 use std::io::{Read, Write};
+use std::os::unix::net::UnixStream;
 
-use crate::interpreter::error::{JadeError, Result, Span};
+use crate::frontend::error::{JadeError, Result, Span};
 use super::{InferenceBackend, InferenceRequest, InferenceResponse};
 
-const DEV_JADE: &str = "/dev/jade";
+fn jade_sock_path() -> String {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_owned());
+    format!("{home}/.jade/llm.sock")
+}
 
 pub struct JadeOsBackend {
-    device_path: String,
+    sock_path: String,
 }
 
 impl JadeOsBackend {
     pub fn new() -> Self {
-        Self { device_path: DEV_JADE.to_owned() }
+        Self { sock_path: jade_sock_path() }
     }
 
-    /// Override the device path (useful for testing with a named pipe or socket).
     pub fn with_device(path: impl Into<String>) -> Self {
-        Self { device_path: path.into() }
+        Self { sock_path: path.into() }
     }
 }
 
 #[async_trait::async_trait]
 impl InferenceBackend for JadeOsBackend {
     async fn infer(&self, req: InferenceRequest, span: Span) -> Result<InferenceResponse> {
-        let device_path = self.device_path.clone();
+        let sock_path = self.sock_path.clone();
         tokio::task::spawn_blocking(move || {
-            Self::infer_blocking(&device_path, req, span)
+            Self::infer_blocking(&sock_path, req, span)
         })
         .await
         .map_err(|e| JadeError::InferenceError {
@@ -51,15 +53,12 @@ impl InferenceBackend for JadeOsBackend {
 }
 
 impl JadeOsBackend {
-    fn infer_blocking(device_path: &str, req: InferenceRequest, span: Span) -> Result<InferenceResponse> {
-        let mut dev = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(device_path)
+    fn infer_blocking(sock_path: &str, req: InferenceRequest, span: Span) -> Result<InferenceResponse> {
+        let mut stream = UnixStream::connect(sock_path)
             .map_err(|e| JadeError::InferenceError {
                 message: format!(
-                    "could not open {} — is jade_core loaded and jade-tree running? ({e})",
-                    device_path
+                    "could not connect to {} — is jade-tree running? ({e})",
+                    sock_path
                 ),
                 span,
             })?;
@@ -69,8 +68,8 @@ impl JadeOsBackend {
             span,
         })?;
 
-        dev.write_all(&payload).map_err(|e| JadeError::InferenceError {
-            message: format!("write to {} failed: {e}", device_path),
+        stream.write_all(&payload).map_err(|e| JadeError::InferenceError {
+            message: format!("write to {} failed: {e}", sock_path),
             span,
         })?;
 
@@ -99,13 +98,13 @@ impl JadeOsBackend {
                     return Err(JadeError::InferenceError { message: msg, span });
                 }
                 FrameResult::Incomplete => {
-                    let n = dev.read(&mut read_tmp).map_err(|e| JadeError::InferenceError {
-                        message: format!("read from {} failed: {e}", device_path),
+                    let n = stream.read(&mut read_tmp).map_err(|e| JadeError::InferenceError {
+                        message: format!("read from {} failed: {e}", sock_path),
                         span,
                     })?;
                     if n == 0 {
                         return Err(JadeError::InferenceError {
-                            message: "device closed before DONE frame".to_owned(),
+                            message: "socket closed before DONE frame".to_owned(),
                             span,
                         });
                     }

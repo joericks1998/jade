@@ -1,0 +1,37 @@
+/* Jade green brand colors */
+:root {
+  --ifm-color-primary: #1e7a2e;
+  --ifm-color-primary-dark: #1a6a27;
+  --ifm-color-primary-darker: #175f22;
+  --ifm-color-primary-darkest: #11491a;
+  --ifm-color-primary-light: #228a35;
+  --ifm-color-primary-lighter: #26973a;
+  --ifm-color-primary-lightest: #2baa40;
+  --ifm-code-font-size: 87.5%;
+  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.1);
+}
+
+.navbar__logo {
+  display: flex;
+  align-items: center;
+}
+
+.navbar__logo img {
+  height: 44px;
+  width: 44px;
+}
+
+.navbar__brand {
+  align-items: center;
+}
+
+[data-theme='dark'] {
+  --ifm-color-primary: #4db860;
+  --ifm-color-primary-dark: #3daa50;
+  --ifm-color-primary-darker: #36a049;
+  --ifm-color-primary-darkest: #2a8039;
+  --ifm-color-primary-light: #5dc470;
+  --ifm-color-primary-lighter: #6ece7e;
+  --ifm-color-primary-lightest: #8fdb9a;
+  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.3);
+}

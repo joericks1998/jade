@@ -86,9 +86,9 @@ async fn run_test_file(
     let program = match cached_ast {
         Some(p) => p,
         None => {
-            let tokens = crate::interpreter::lexer::tokenize(&source)
+            let tokens = crate::frontend::lexer::tokenize(&source)
                 .map_err(|e| format!("lexer error: {}", e))?;
-            let p = crate::interpreter::parser::parse(tokens)
+            let p = crate::frontend::parser::parse(tokens)
                 .map_err(|e| format!("parse error: {}", e))?;
             if let Some(ref h) = hash {
                 // to_string_lossy only where a &str is truly needed (cache key display).

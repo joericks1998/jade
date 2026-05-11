@@ -2,7 +2,7 @@ mod cache;
 mod cli;
 mod compiler;
 mod config;
-mod interpreter;
+mod frontend;
 mod llm;
 mod project;
 
@@ -195,7 +195,7 @@ enum RtCommands {
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 fn main() {
-    tokio::runtime::Builder::new_current_thread()
+    tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("tokio runtime")
