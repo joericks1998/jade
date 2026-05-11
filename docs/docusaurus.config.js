@@ -32,7 +32,7 @@ const config = {
           customCss: './src/css/custom.css',
         },
         gtag: {
-          trackingID: 'G-XXXXXXXXXX',
+          trackingID: 'G-TQ3H38BVHE',
           anonymizeIP: true,
         },
       }),
