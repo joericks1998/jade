@@ -5,11 +5,17 @@ on:
     branches: [main]
     paths: ['docs/**']
 
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -21,8 +27,8 @@ jobs:
         working-directory: docs
       - run: npm run build
         working-directory: docs
-      - uses: peaceiris/actions-gh-pages@v4
+      - uses: actions/upload-pages-artifact@v3
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: docs/build
-          cname: www.jadelang.org
+          path: docs/build
+      - id: deploy
+        uses: actions/deploy-pages@v4
