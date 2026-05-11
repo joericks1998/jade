@@ -11,6 +11,20 @@
   --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.1);
 }
 
+.navbar__logo {
+  display: flex;
+  align-items: center;
+}
+
+.navbar__logo img {
+  height: 44px;
+  width: 44px;
+}
+
+.navbar__brand {
+  align-items: center;
+}
+
 [data-theme='dark'] {
   --ifm-color-primary: #4db860;
   --ifm-color-primary-dark: #3daa50;
