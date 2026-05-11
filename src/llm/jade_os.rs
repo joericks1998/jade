@@ -132,16 +132,12 @@ fn encode_request(req: &InferenceRequest) -> std::result::Result<Vec<u8>, serde_
     struct Wire<'a> {
         prompt: &'a str,
         model: &'a str,
-        history: &'a [super::Message],
         max_tokens: u32,
-        system_prompt: Option<&'a str>,
     }
     let json = serde_json::to_vec(&Wire {
         prompt: &req.prompt,
         model: &req.model,
-        history: &req.history,
         max_tokens: req.max_tokens,
-        system_prompt: req.system_prompt.as_deref(),
     })?;
     let len = json.len() as u32;
     let mut buf = Vec::with_capacity(4 + json.len());

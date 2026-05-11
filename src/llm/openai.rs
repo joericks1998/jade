@@ -43,14 +43,9 @@ impl InferenceBackend for OpenAiBackend {
 
         let model = if req.model.is_empty() { &self.default_model } else { &req.model };
 
-        let mut messages: Vec<serde_json::Value> = req.history.iter().map(|m| {
-            serde_json::json!({ "role": m.role, "content": m.content })
-        }).collect();
-        messages.push(serde_json::json!({ "role": "user", "content": req.prompt }));
-
         let body = serde_json::json!({
             "model": model,
-            "messages": messages,
+            "messages": [{ "role": "user", "content": req.prompt }],
         });
 
         let response = self.client

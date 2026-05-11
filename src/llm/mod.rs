@@ -7,20 +7,11 @@ pub mod anthropic;
 pub mod jade_os;
 pub mod openai;
 
-/// A single message in a conversation history.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct Message {
-    pub role: String,
-    pub content: String,
-}
-
 /// A request sent to an inference backend.
 pub struct InferenceRequest {
     pub prompt: String,
     pub model: String,
-    pub history: Vec<Message>,
     pub max_tokens: u32,
-    pub system_prompt: Option<String>,
 }
 
 /// A successful response from an inference backend.

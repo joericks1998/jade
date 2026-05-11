@@ -176,7 +176,6 @@ pub struct VmState {
     pub struct_defs: HashMap<String, Vec<StructFieldDef>>,
     /// Optional LLM inference backend.
     pub inference_backend: Option<std::sync::Arc<dyn llm::InferenceBackend>>,
-    pub conversation_history: Vec<llm::Message>,
     pub token_count: i64,
     pub max_retries: usize,
     pub max_tokens: u32,
@@ -204,7 +203,6 @@ impl VmState {
             extend_methods: HashMap::new(),
             struct_defs: HashMap::new(),
             inference_backend: None,
-            conversation_history: Vec::new(),
             token_count: 0,
             max_retries: 3,
             max_tokens: DEFAULT_MAX_TOKENS,
@@ -260,7 +258,6 @@ impl VmState {
             extend_methods: self.extend_methods.clone(),
             struct_defs: self.struct_defs.clone(),
             inference_backend: self.inference_backend.clone(),
-            conversation_history: self.conversation_history.clone(),
             token_count: 0,
             max_retries: self.max_retries,
             max_tokens: self.max_tokens,
@@ -1144,9 +1141,7 @@ async fn vm_prompt_deref(
     let initial_resp = backend.infer(llm::InferenceRequest {
         prompt: prompt_text.clone(),
         model: state.default_model.clone(),
-        history: Vec::new(),
         max_tokens: state.max_tokens,
-        system_prompt: None,
     }, span).await?;
 
     state.token_count += initial_resp.tokens_used;
@@ -1158,12 +1153,8 @@ async fn vm_prompt_deref(
         return Ok(VmValue::Str(initial_resp.text));
     };
 
-    // Typed deref: retry loop with a local history for this exchange only.
+    // Typed deref: retry loop — send the raw error string directly to the model.
     let max_retries = state.max_retries;
-    let mut retry_history: Vec<llm::Message> = vec![
-        llm::Message { role: "user".to_string(), content: prompt_text },
-        llm::Message { role: "assistant".to_string(), content: initial_resp.text.clone() },
-    ];
     let mut current = initial_resp.text;
     let struct_defs = state.struct_defs.clone();
 
@@ -1191,12 +1182,8 @@ async fn vm_prompt_deref(
                 let retry = backend.infer(llm::InferenceRequest {
                     prompt: correction.clone(),
                     model: state.default_model.clone(),
-                    history: retry_history.clone(),
                     max_tokens: retry_max_tokens,
-                    system_prompt: None,
                 }, span).await?;
-                retry_history.push(llm::Message { role: "user".to_string(), content: correction });
-                retry_history.push(llm::Message { role: "assistant".to_string(), content: retry.text.clone() });
                 current = retry.text;
             }
         }
