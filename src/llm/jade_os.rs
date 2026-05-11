@@ -1,3 +1,4 @@
+#![cfg(unix)]
 //! JadeOsBackend — native inference via Unix domain socket.
 //!
 //! Connects to jade-tree at `$HOME/.jade/llm.sock`. Each call opens a fresh

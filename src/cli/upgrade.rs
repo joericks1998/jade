@@ -1,5 +1,3 @@
-use std::os::unix::fs::PermissionsExt;
-
 const GITHUB_REPO: &str = "joericks1998/jade-os";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -132,11 +130,15 @@ pub async fn run_upgrade() {
         std::process::exit(1);
     }
 
-    // Make executable.
-    if let Err(e) = std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o755)) {
-        let _ = std::fs::remove_file(&tmp_path);
-        eprintln!("upgrade: could not set permissions: {}", e);
-        std::process::exit(1);
+    // Make executable (Unix only — Windows uses ACLs, not POSIX mode bits).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o755)) {
+            let _ = std::fs::remove_file(&tmp_path);
+            eprintln!("upgrade: could not set permissions: {}", e);
+            std::process::exit(1);
+        }
     }
 
     // Atomic rename — replaces the running binary.
