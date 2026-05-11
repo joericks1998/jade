@@ -157,6 +157,37 @@ let fib10 = fib(10)
 | `ReturnOutsideFunction` | Using `return` at the top level | `return 1` |
 | `UndefinedVariable` | Referencing a name not in scope | `fn f() { return z }` where `z` is not defined |
 
+## Built-in Functions
+
+Jade provides a small set of global built-in functions that are always in scope.
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `print` | `print(value)` | Writes `value` to stdout followed by a newline. Accepts any type. |
+| `write` | `write(str)` | Writes a string to stdout **without** a trailing newline and flushes immediately. |
+| `len` | `len(value)` | Returns the number of elements in a `str`, `array`, or `dict`. |
+| `input` | `input()` / `input(prompt)` | Reads one line from stdin and returns it as a `str`. If `prompt` is given, prints it to stdout (no newline) before reading. Returns `""` on EOF. |
+
+```jade
+// print vs write
+print("hello")       // hello\n
+write("hello")       // hello  (no newline, flushed immediately)
+
+// len on different types
+let s = "jade"
+print(len(s))        // 4
+
+let arr = [1, 2, 3]
+print(len(arr))      // 3
+
+// input — read from stdin
+let name = input("Enter your name: ")
+print("Hello, " + name)
+
+// input with no prompt
+let line = input()
+```
+
 ## Closures
 
 A closure is an anonymous function written inline using the `|params| body` syntax. It captures a snapshot of the variables visible at the point it is created, so it can reference those variables even when called later from a different scope.

@@ -149,6 +149,34 @@ print(__max_retries__)  // 3
 print(__tokens__)       // tokens used so far
 ```
 
+## Runtime Configuration — `use "llm"`
+
+Import the built-in `llm` package to adjust LLM settings at runtime:
+
+```jade
+use "llm"
+
+llm.set_max_tokens(256)    // cap responses at 256 tokens
+```
+
+### `llm.set_max_tokens(n)`
+
+Sets the maximum number of tokens the model may generate per inference call. `n` must be a positive integer. The setting takes effect for all subsequent `?` dereferences in the same run.
+
+```jade
+use "llm"
+
+llm.set_max_tokens(64)
+
+prompt p = "Write a haiku about rain."
+let haiku = ?p
+print(haiku)
+```
+
+:::note
+`set_max_tokens` overrides any `max_tokens` value set in `jade.toml` or environment variables for the remainder of the program run. There is no way to reset it to the config file value once changed.
+:::
+
 ## Async Inference
 
 Jade supports concurrent LLM inference through `async fn` definitions and `await` expressions. Defining a function with `async fn` allows it to run prompt dereferences concurrently with other async functions.
