@@ -1,3 +1,4 @@
+#![cfg(unix)]
 //! JadeOsBackend — native inference via Unix domain socket.
 //!
 

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::frontend::error::{JadeError, Result, Span};
 
 pub mod anthropic;
+#[cfg(unix)]
 pub mod jade_os;
 pub mod openai;
 
@@ -45,7 +46,15 @@ pub fn build_backend(
     match provider {
         "openai"    => Ok(Arc::new(openai::OpenAiBackend::new(api_key, model, max_parallel)?)),
         "anthropic" => Ok(Arc::new(anthropic::AnthropicBackend::new(api_key, model, max_parallel)?)),
-        "jade"      => Ok(Arc::new(jade_os::JadeOsBackend::new())),
+        "jade"      => {
+            #[cfg(unix)]
+            { return Ok(Arc::new(jade_os::JadeOsBackend::new())); }
+            #[cfg(not(unix))]
+            return Err(JadeError::InferenceError {
+                message: "jade-os backend is not supported on Windows".to_owned(),
+                span: Span { line: 0, col: 0 },
+            });
+        }
         other => Err(JadeError::InferenceError {
             message: format!("unknown provider '{}' — expected 'anthropic', 'openai', or 'jade'", other),
             span: Span { line: 0, col: 0 },
@@ -58,9 +67,12 @@ pub fn build_backend(
 /// Priority: `$HOME/.jade/llm.sock` (jade-tree) → API key from `~/.jade/config.toml`.
 /// Returns `None` if neither is available.
 pub fn select_backend(config: &crate::config::JadeConfig) -> Option<Arc<dyn InferenceBackend>> {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_owned());
-    if std::path::Path::new(&format!("{home}/.jade/llm.sock")).exists() {
-        return Some(Arc::new(jade_os::JadeOsBackend::new()));
+    #[cfg(unix)]
+    {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_owned());
+        if std::path::Path::new(&format!("{home}/.jade/llm.sock")).exists() {
+            return Some(Arc::new(jade_os::JadeOsBackend::new()));
+        }
     }
     config.api_key.as_ref()
         .and_then(|key| build_backend(&config.provider, key, &config.model, config.max_parallel).ok())
