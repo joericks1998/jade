@@ -1004,7 +1004,9 @@ async fn execute_chunk(
 /// Replace zero-span placeholders from built-in error paths with the actual call-site span.
 fn patch_builtin_span(mut e: JadeError, call_span: Span) -> JadeError {
     match &mut e {
-        JadeError::ArityMismatch { span, .. } | JadeError::TypeError { span, .. } => {
+        JadeError::ArityMismatch { span, .. }
+        | JadeError::TypeError { span, .. }
+        | JadeError::IoError { span, .. } => {
             if span.line == 0 { *span = call_span; }
         }
         _ => {}
@@ -3259,5 +3261,111 @@ mod tests {
     fn test_vm_struct_required_after_let_field() {
         let err = try_run_src("struct S {\n  let x = 0,\n  y\n}\nlet s = S { x: 1 }").err().expect("expected error");
         assert!(matches!(err, JadeError::MissingField { field, .. } if field == "y"));
+    }
+
+    // ── std/fs tests ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_fs_write_and_read() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("jade_test_fs_write_read.txt");
+        let path_str = path.to_str().unwrap();
+        let src = format!(
+            "use \"std/fs\"\nfs.write(\"{path_str}\", \"hello jade\")\nlet v = fs.read(\"{path_str}\")"
+        );
+        let s = run_src(&src).unwrap();
+        assert_eq!(get_str(&s, "v"), "hello jade");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_fs_exists_true() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("jade_test_fs_exists_true.txt");
+        std::fs::write(&path, "x").unwrap();
+        let path_str = path.to_str().unwrap();
+        let src = format!("use \"std/fs\"\nlet v = fs.exists(\"{path_str}\")");
+        let s = run_src(&src).unwrap();
+        assert!(get_bool(&s, "v"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_fs_exists_false() {
+        let src = "use \"std/fs\"\nlet v = fs.exists(\"/tmp/jade_test_no_such_file_xyz.txt\")";
+        let s = run_src(src).unwrap();
+        assert!(!get_bool(&s, "v"));
+    }
+
+    #[test]
+    fn test_fs_delete() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("jade_test_fs_delete.txt");
+        std::fs::write(&path, "bye").unwrap();
+        let path_str = path.to_str().unwrap();
+        let src = format!("use \"std/fs\"\nfs.delete(\"{path_str}\")\nlet v = fs.exists(\"{path_str}\")");
+        let s = run_src(&src).unwrap();
+        assert!(!get_bool(&s, "v"));
+    }
+
+    #[test]
+    fn test_fs_append() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("jade_test_fs_append.txt");
+        let path_str = path.to_str().unwrap();
+        let src = format!(
+            "use \"std/fs\"\nfs.write(\"{path_str}\", \"hello\")\nfs.append(\"{path_str}\", \" world\")\nlet v = fs.read(\"{path_str}\")"
+        );
+        let s = run_src(&src).unwrap();
+        assert_eq!(get_str(&s, "v"), "hello world");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_fs_list_dir() {
+        let dir = std::env::temp_dir();
+        let subdir = dir.join("jade_test_fs_list_dir");
+        std::fs::create_dir_all(&subdir).unwrap();
+        std::fs::write(subdir.join("a.txt"), "").unwrap();
+        std::fs::write(subdir.join("b.txt"), "").unwrap();
+        let path_str = subdir.to_str().unwrap();
+        let src = format!("use \"std/fs\"\nlet v = fs.list_dir(\"{path_str}\")");
+        let s = run_src(&src).unwrap();
+        match s.globals.get("v").unwrap() {
+            VmValue::Array(a) => {
+                let names: Vec<String> = a.lock().iter().map(|v| match v {
+                    VmValue::Str(s) => s.clone(),
+                    _ => panic!("non-str entry"),
+                }).collect();
+                assert!(names.contains(&"a.txt".to_string()));
+                assert!(names.contains(&"b.txt".to_string()));
+            }
+            _ => panic!("expected array"),
+        }
+        let _ = std::fs::remove_dir_all(&subdir);
+    }
+
+    #[test]
+    fn test_fs_mkdir() {
+        let dir = std::env::temp_dir();
+        let newdir = dir.join("jade_test_fs_mkdir_new/nested");
+        let path_str = newdir.to_str().unwrap();
+        let _ = std::fs::remove_dir_all(dir.join("jade_test_fs_mkdir_new"));
+        let src = format!("use \"std/fs\"\nfs.mkdir(\"{path_str}\")\nlet v = fs.exists(\"{path_str}\")");
+        let s = run_src(&src).unwrap();
+        assert!(get_bool(&s, "v"));
+        let _ = std::fs::remove_dir_all(dir.join("jade_test_fs_mkdir_new"));
+    }
+
+    #[test]
+    fn test_fs_read_nonexistent_errors() {
+        let err = try_run_src("use \"std/fs\"\nlet v = fs.read(\"/tmp/jade_no_such_file_xyz.txt\")").err().expect("expected error");
+        assert!(matches!(err, JadeError::IoError { .. }));
+    }
+
+    #[test]
+    fn test_fs_write_arity_error() {
+        let err = try_run_src("use \"std/fs\"\nfs.write(\"path\")").err().expect("expected error");
+        assert!(matches!(err, JadeError::ArityMismatch { expected: 2, .. }));
     }
 }

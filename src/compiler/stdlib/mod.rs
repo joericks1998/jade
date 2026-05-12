@@ -4,6 +4,7 @@ pub mod string_pkg;
 pub mod array_pkg;
 pub mod dict_pkg;
 pub mod math_pkg;
+pub mod fs_pkg;
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -121,6 +122,7 @@ static PACKAGES: &[&Package] = &[
     &math_pkg::MATH_PKG,
     &array_pkg::ARRAY_PKG,
     &dict_pkg::DICT_PKG,
+    &fs_pkg::FS_PKG,
 ];
 
 // ── Primitive method tables ───────────────────────────────────────────────────

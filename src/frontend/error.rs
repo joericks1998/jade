@@ -122,6 +122,9 @@ pub enum JadeError {
 
     /// A spawned async task panicked (tokio JoinError).
     AsyncPanic { message: String, span: Span },
+
+    /// A filesystem I/O operation failed.
+    IoError { message: String, span: Span },
 }
 
 impl std::fmt::Display for JadeError {
@@ -205,6 +208,8 @@ impl std::fmt::Display for JadeError {
                 write!(f, "[{}:{}] cannot await the same Future more than once", span.line, span.col),
             JadeError::AsyncPanic { message, span } =>
                 write!(f, "[{}:{}] async task panicked: {}", span.line, span.col, message),
+            JadeError::IoError { message, span } =>
+                write!(f, "[{}:{}] I/O error: {}", span.line, span.col, message),
         }
     }
 }
