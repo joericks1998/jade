@@ -46,10 +46,9 @@ pub fn grammar_for(
                 ));
             }
             let fields: Vec<String> = def.iter().map(|f| {
-                let json_key = serde_json::to_string(f.name()).unwrap_or_else(|_| {
-                    format!("\"{}\"", f.name())
-                });
-                format!("{json_key} ws \":\" ws value")
+                // GBNF "\"key\"" matches the literal text "key" (with surrounding quote chars).
+                // Plain "key" would match bare key without quotes, which is not valid JSON.
+                format!("\"\\\"{}\\\"\" ws \":\" ws value", f.name())
             }).collect();
             let root = format!(
                 "root   ::= \"{{\" ws {} ws \"}}\" [ \\t\\n\\r]*",
@@ -100,8 +99,9 @@ mod tests {
         let mut defs = HashMap::new();
         defs.insert("Person".to_string(), fields);
         let g = grammar_for("Person", &defs).unwrap();
-        assert!(g.contains("\"name\""), "grammar should contain field name");
-        assert!(g.contains("\"age\""), "grammar should contain field age");
+        // Keys must appear in GBNF-escaped form so the grammar enforces quoted JSON keys.
+        assert!(g.contains("\\\"name\\\""), "grammar should contain escaped field name");
+        assert!(g.contains("\\\"age\\\""), "grammar should contain escaped field age");
         assert!(g.contains("value"), "grammar should have value rule");
     }
 
