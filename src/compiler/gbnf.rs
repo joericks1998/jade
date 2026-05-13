@@ -1,14 +1,12 @@
 use std::collections::HashMap;
 use crate::frontend::ast::StructFieldDef;
 
-const VALUE_RULES: &str = r#"value  ::= object | array | string | number | "true" | "false" | "null"
-object ::= "{" ws (string ws ":" ws value (ws "," ws string ws ":" ws value)*)? ws "}"
-array  ::= "[" ws (value (ws "," ws value)*)? ws "]"
-string ::= "\"" ([^"\\\x7F\x00-\x1F] | "\\" (["\\/bfnrt] | "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F]))* "\""
-number ::= "-"? ("0" | [1-9] [0-9]*) ("." [0-9]+)? ([eE] [-+]? [0-9]+)?
-ws     ::= ([ \t\n\r])*"#;
-
 /// Generate a GBNF grammar string for the given JadeLang type name.
+///
+/// Primitives (int, float, bool): full grammar — output is short, state count is tiny.
+/// Complex types (struct, array, dict): prefix-only grammar — enforces the opening
+/// bracket and first key, then `rest ::= [^\x00]*` lets the model generate freely.
+/// This bounds expensive grammar-checking to ~5 tokens rather than the full output.
 ///
 /// Returns `None` for `str` (any text is valid) and for unrecognized types.
 /// The returned string uses `root` as the start rule, matching llama-cpp-2's
@@ -32,29 +30,15 @@ pub fn grammar_for(
             r#"root ::= ("true" | "false") [ \t\n\r]*"#.to_owned()
         ),
         "str" => None,
-        "array" | "Array" => Some(format!(
-            "root   ::= \"[\" ws (value (ws \",\" ws value)*)? ws \"]\" [ \\t\\n\\r]*\n{VALUE_RULES}"
-        )),
-        "dict" | "Dict" => Some(format!(
-            "root   ::= \"{{\" ws (string ws \":\" ws value (ws \",\" ws string ws \":\" ws value)*)? ws \"}}\" [ \\t\\n\\r]*\n{VALUE_RULES}"
-        )),
+        // Anchor-only: force the opening `[` as the first token, then jade-tree
+        // drops the grammar sampler — zero masking overhead after token 1.
+        "array" | "Array" => Some("root ::= \"[\"".to_owned()),
+        // Anchor-only: force the opening `{`.
+        "dict" | "Dict" => Some("root ::= \"{\"".to_owned()),
         name => {
             let def = struct_defs.get(name)?;
-            if def.is_empty() {
-                return Some(format!(
-                    "root   ::= \"{{\" ws \"}}\" [ \\t\\n\\r]*\n{VALUE_RULES}"
-                ));
-            }
-            let fields: Vec<String> = def.iter().map(|f| {
-                // GBNF "\"key\"" matches the literal text "key" (with surrounding quote chars).
-                // Plain "key" would match bare key without quotes, which is not valid JSON.
-                format!("\"\\\"{}\\\"\" ws \":\" ws value", f.name())
-            }).collect();
-            let root = format!(
-                "root   ::= \"{{\" ws {} ws \"}}\" [ \\t\\n\\r]*",
-                fields.join(" ws \",\" ws ")
-            );
-            Some(format!("{root}\n{VALUE_RULES}"))
+            let _ = def;
+            Some("root ::= \"{\"".to_owned())
         }
     }
 }
@@ -91,7 +75,7 @@ mod tests {
     }
 
     #[test]
-    fn struct_grammar_contains_field_names() {
+    fn struct_grammar_is_anchor_only() {
         let fields = vec![
             StructFieldDef::Required("name".to_string()),
             StructFieldDef::Required("age".to_string()),
@@ -99,23 +83,20 @@ mod tests {
         let mut defs = HashMap::new();
         defs.insert("Person".to_string(), fields);
         let g = grammar_for("Person", &defs).unwrap();
-        // Keys must appear in GBNF-escaped form so the grammar enforces quoted JSON keys.
-        assert!(g.contains("\\\"name\\\""), "grammar should contain escaped field name");
-        assert!(g.contains("\\\"age\\\""), "grammar should contain escaped field age");
-        assert!(g.contains("value"), "grammar should have value rule");
+        assert!(g.contains("\"{\""), "grammar should anchor opening brace");
     }
 
     #[test]
     fn array_grammar() {
         let g = grammar_for("array", &no_defs()).unwrap();
         assert!(g.starts_with("root"));
-        assert!(g.contains("value"));
+        assert!(g.contains("\"[\""), "should anchor opening bracket");
     }
 
     #[test]
     fn dict_grammar() {
         let g = grammar_for("dict", &no_defs()).unwrap();
         assert!(g.starts_with("root"));
-        assert!(g.contains("string ws \":\" ws value"));
+        assert!(g.contains("\"{\""), "should anchor opening brace");
     }
 }

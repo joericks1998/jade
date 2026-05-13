@@ -1259,13 +1259,143 @@ async fn vm_prompt_deref(
 }
 
 /// Strip markdown code fences that LLMs often wrap JSON in (``` or ```json).
-fn vm_extract_json(text: &str) -> &str {
+fn vm_extract_json(text: &str) -> String {
     let t = text.trim();
     let inner = t
         .strip_prefix("```json").or_else(|| t.strip_prefix("```"))
         .and_then(|s| s.strip_suffix("```"))
         .map(str::trim);
-    inner.unwrap_or(t)
+    let t = inner.unwrap_or(t);
+    // Scan forward through every `{` or `[` start position and return the first
+    // candidate that is parseable JSON (after optional normalization).
+    let bytes = t.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'{' || bytes[i] == b'[' {
+            if let Some(end) = json_find_end(&t[i..]) {
+                let candidate = &t[i..i + end];
+                if serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
+                    return candidate.to_owned();
+                }
+                // Try normalizing: quote unquoted keys, remove commas inside numbers.
+                let normalized = json_normalize(candidate);
+                if serde_json::from_str::<serde_json::Value>(&normalized).is_ok() {
+                    return normalized;
+                }
+            }
+        }
+        i += 1;
+    }
+    t.to_owned()
+}
+
+/// Quote unquoted object keys and strip thousands-separator commas from numbers.
+/// Handles the two most common model formatting mistakes: `{key: val}` and `1,000`.
+fn json_normalize(s: &str) -> String {
+    let s = json_quote_keys(s);
+    json_strip_number_commas(&s)
+}
+
+fn json_quote_keys(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 32);
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    let mut in_string = false;
+    let mut escape_next = false;
+    while i < bytes.len() {
+        if escape_next {
+            escape_next = false;
+            out.push(bytes[i] as char);
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b'\\' && in_string {
+            escape_next = true;
+            out.push('\\');
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b'"' {
+            in_string = !in_string;
+            out.push('"');
+            i += 1;
+            continue;
+        }
+        // Outside strings: detect unquoted key (word chars followed by ':').
+        if !in_string && (bytes[i].is_ascii_alphabetic() || bytes[i] == b'_') {
+            let start = i;
+            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                i += 1;
+            }
+            let word = &s[start..i];
+            // Peek past whitespace to see if ':' follows (and it's not '::').
+            let mut j = i;
+            while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') { j += 1; }
+            let is_key = j < bytes.len() && bytes[j] == b':'
+                && (j + 1 >= bytes.len() || bytes[j + 1] != b':');
+            if is_key {
+                out.push('"');
+                out.push_str(word);
+                out.push('"');
+            } else {
+                out.push_str(word);
+            }
+            continue;
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
+}
+
+fn json_strip_number_commas(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut in_string = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'"' && (i == 0 || bytes[i - 1] != b'\\') {
+            in_string = !in_string;
+        }
+        // Skip comma that sits between two digits outside a string.
+        if !in_string
+            && bytes[i] == b','
+            && i > 0 && bytes[i - 1].is_ascii_digit()
+            && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit()
+        {
+            i += 1;
+            continue;
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
+}
+
+/// Scan `s` for the end of the first top-level JSON object or array, respecting
+/// string escapes and nesting. Returns the exclusive byte index after the closing
+/// bracket/brace, or `None` if `s` contains no top-level `{` or `[`.
+fn json_find_end(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let start = bytes.iter().position(|&b| b == b'{' || b == b'[')?;
+    let (open, close) = if bytes[start] == b'{' { (b'{', b'}') } else { (b'[', b']') };
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut i = start;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' if in_string => { i += 2; }
+            b'"' => { in_string = !in_string; i += 1; }
+            b if !in_string && b == open  => { depth += 1; i += 1; }
+            b if !in_string && b == close => {
+                depth -= 1;
+                i += 1;
+                if depth == 0 { return Some(i); }
+            }
+            _ => { i += 1; }
+        }
+    }
+    None
 }
 
 /// Recursively convert a `serde_json::Value` to a `VmValue`.
@@ -1308,7 +1438,7 @@ fn vm_coerce_struct(
     def: &[StructFieldDef],
 ) -> std::result::Result<VmValue, String> {
     let raw = vm_extract_json(text);
-    let json: serde_json::Value = serde_json::from_str(raw).map_err(|e| format!(
+    let json: serde_json::Value = serde_json::from_str(&raw).map_err(|e| format!(
         "Your response could not be parsed as a {} struct: {}. \
          Respond with a JSON object with fields: {}.",
         type_name, e, vm_field_summary(def)
@@ -1496,7 +1626,7 @@ fn coerce(
         },
         "Array" | "array" => {
             let raw = vm_extract_json(text);
-            serde_json::from_str::<serde_json::Value>(raw)
+            serde_json::from_str::<serde_json::Value>(&raw)
                 .map_err(|e| format!(
                     "Your response could not be parsed as a JSON array: {}. \
                      Respond with only a JSON array, e.g. [1, \"two\", true].",
@@ -1519,7 +1649,7 @@ fn coerce(
         }
         "Dict" | "dict" => {
             let raw = vm_extract_json(text);
-            serde_json::from_str::<serde_json::Value>(raw)
+            serde_json::from_str::<serde_json::Value>(&raw)
                 .map_err(|e| format!(
                     "Your response could not be parsed as a JSON object: {}. \
                      Respond with only a JSON object, e.g. {{\"key\": \"value\"}}.",
