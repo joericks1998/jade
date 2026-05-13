@@ -12,6 +12,9 @@ pub struct InferenceRequest {
     pub prompt: String,
     pub model: String,
     pub max_tokens: u32,
+    /// GBNF grammar string for constrained decoding; `None` = unconstrained.
+    /// Passed through to jade-tree; ignored by API-based backends.
+    pub grammar: Option<String>,
 }
 
 /// A successful response from an inference backend.

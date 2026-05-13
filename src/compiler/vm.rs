@@ -1188,12 +1188,19 @@ async fn vm_prompt_deref(
     let backend = state.inference_backend.as_ref()
         .ok_or(JadeError::MissingApiKey { span })?
         .clone();
+
+    // Generate a GBNF grammar from the output type to constrain token sampling.
+    let grammar = output_type.and_then(|tn| {
+        crate::compiler::gbnf::grammar_for(tn, &state.struct_defs)
+    });
+
     // Stateless call — no conversation history is sent or recorded.
     // Conversational memory is the JadeLang program's responsibility.
     let initial_resp = backend.infer(llm::InferenceRequest {
         prompt: prompt_text.clone(),
         model: state.default_model.clone(),
         max_tokens: state.max_tokens,
+        grammar: grammar.clone(),
     }, span).await?;
 
     state.token_count += initial_resp.tokens_used;
@@ -1235,6 +1242,7 @@ async fn vm_prompt_deref(
                     prompt: correction.clone(),
                     model: state.default_model.clone(),
                     max_tokens: retry_max_tokens,
+                    grammar: grammar.clone(),
                 }, span).await?;
                 current = retry.text;
             }
@@ -1372,6 +1380,7 @@ async fn vm_prompt_deref_stream(
         prompt: prompt_text.clone(),
         model: state.default_model.clone(),
         max_tokens: state.max_tokens,
+        grammar: None,
     }, span).await?;
     Ok(VmValue::TokenStream(Arc::new(JadeTokenStream {
         rx: Mutex::new(Some(rx)),

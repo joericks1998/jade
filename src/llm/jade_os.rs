@@ -208,11 +208,14 @@ fn encode_request(req: &InferenceRequest) -> std::result::Result<Vec<u8>, serde_
         prompt: &'a str,
         model: &'a str,
         max_tokens: u32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        grammar: Option<&'a str>,
     }
     let json = serde_json::to_vec(&Wire {
         prompt: &req.prompt,
         model: &req.model,
         max_tokens: req.max_tokens,
+        grammar: req.grammar.as_deref(),
     })?;
     let len = json.len() as u32;
     let mut buf = Vec::with_capacity(4 + json.len());
