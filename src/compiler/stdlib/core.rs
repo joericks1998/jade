@@ -32,6 +32,19 @@ fn native_write(args: &[VmValue]) -> Result<VmValue> {
 
 pub const WRITE: BuiltinFn = BuiltinFn { name: "write", vm_impl: native_write };
 
+// ── stream ────────────────────────────────────────────────────────────────────
+
+fn native_stream(args: &[VmValue]) -> Result<VmValue> {
+    if args.len() != 1 {
+        return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: Span { line: 0, col: 0 } });
+    }
+    let s = value_to_display(&args[0]);
+    println!("{}", s);
+    Ok(VmValue::Str(s))
+}
+
+pub const STREAM: BuiltinFn = BuiltinFn { name: "stream", vm_impl: native_stream };
+
 // ── len ───────────────────────────────────────────────────────────────────────
 
 fn native_len(args: &[VmValue]) -> Result<VmValue> {
@@ -93,6 +106,10 @@ pub fn register_types(ctx: &mut TypeContext) {
     ctx.define("write".to_string(), JadeType::Fn {
         params: vec![JadeType::Unknown],
         ret: Box::new(JadeType::Nil),
+    });
+    ctx.define("stream".to_string(), JadeType::Fn {
+        params: vec![JadeType::Unknown],
+        ret: Box::new(JadeType::Str),
     });
     // LLM session globals
     ctx.define("__tokens__".to_string(), JadeType::Int);

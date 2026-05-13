@@ -818,7 +818,7 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
             }
             let result_ty = match output_type.as_deref() {
                 Some(s) => parse_type_name(s),
-                None    => JadeType::Str,
+                None    => JadeType::Unknown,  // lazy TokenStream; drains to Str at assignment
             };
             Ok(TExpr {
                 kind: TExprKind::PromptDeref { expr: Box::new(texpr), output_type: output_type.clone() },
@@ -1463,10 +1463,10 @@ mod tests {
     }
 
     #[test]
-    fn test_infer_prompt_deref_untyped_is_str() {
+    fn test_infer_prompt_deref_untyped_is_unknown() {
         let tp = infer_ok("prompt p = \"hi\"\nlet r = ?p");
         let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!() };
-        assert_eq!(value.ty, JadeType::Str);
+        assert_eq!(value.ty, JadeType::Unknown);
     }
 
     #[test]

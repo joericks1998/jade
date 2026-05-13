@@ -120,6 +120,9 @@ pub enum JadeError {
     /// The same Future was awaited more than once.
     DoubleAwait { span: Span },
 
+    /// A TokenStream was drained more than once.
+    DoubleStreamDrain { span: Span },
+
     /// A spawned async task panicked (tokio JoinError).
     AsyncPanic { message: String, span: Span },
 
@@ -206,6 +209,8 @@ impl std::fmt::Display for JadeError {
                 write!(f, "[{}:{}] 'await' applied to a non-Future value", span.line, span.col),
             JadeError::DoubleAwait { span } =>
                 write!(f, "[{}:{}] cannot await the same Future more than once", span.line, span.col),
+            JadeError::DoubleStreamDrain { span } =>
+                write!(f, "[{}:{}] cannot drain the same token stream more than once", span.line, span.col),
             JadeError::AsyncPanic { message, span } =>
                 write!(f, "[{}:{}] async task panicked: {}", span.line, span.col, message),
             JadeError::IoError { message, span } =>

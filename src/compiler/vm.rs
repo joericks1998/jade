@@ -30,6 +30,8 @@ const RETRY_MAX_TOKENS_COMPLEX: u32 = 512;
 #[derive(Clone, Debug, PartialEq)]
 pub enum NativeFnId {
     LlmSetMaxTokens,
+    Print,
+    Stream,
 }
 
 /// A value at VM runtime, carrying `Arc<CompiledFn>` for functions so the VM
@@ -58,6 +60,8 @@ pub enum VmValue {
     NativeFn(NativeFnId),
     /// A handle to an in-flight async task.
     Future(Arc<JadeFuture>),
+    /// A lazy token stream from an untyped prompt dereference.
+    TokenStream(Arc<JadeTokenStream>),
     Nil,
 }
 
@@ -71,6 +75,15 @@ type TaskBundle = (TaskOutput, Option<VmValue>);
 /// `Mutex` makes the inner `Option<JoinHandle>` safe to share across threads.
 pub struct JadeFuture {
     pub handle: Mutex<Option<JoinHandle<TaskBundle>>>,
+}
+
+/// A lazy, in-flight token stream from an inference call.
+/// Wrapping in `Arc` makes it cloneable as a `VmValue`; the interior `Option`
+/// enforces single-drain semantics — taking `None` on a second drain is an error.
+pub struct JadeTokenStream {
+    pub rx: Mutex<Option<tokio::sync::mpsc::Receiver<String>>>,
+    pub tokens_handle: Mutex<Option<JoinHandle<Result<i64>>>>,
+    pub prompt_key: (String, Option<String>),
 }
 
 impl Drop for JadeFuture {
@@ -113,8 +126,9 @@ impl std::fmt::Debug for VmValue {
             VmValue::BuiltinFn(bf) => write!(f, "BuiltinFn({})", bf.name),
             VmValue::NativeBoundMethod(nbm) => write!(f, "NativeBoundMethod({})", nbm.method.name),
             VmValue::NativeFn(nf) => write!(f, "NativeFn({:?})", nf),
-            VmValue::Future(_)  => write!(f, "Future"),
-            VmValue::Nil        => write!(f, "Nil"),
+            VmValue::Future(_)      => write!(f, "Future"),
+            VmValue::TokenStream(_) => write!(f, "TokenStream"),
+            VmValue::Nil            => write!(f, "Nil"),
         }
     }
 }
@@ -157,6 +171,7 @@ pub fn value_to_display(v: &VmValue) -> String {
         VmValue::Prompt(_)             => "<prompt>".to_string(),
         VmValue::NativeFn(_)           => "<native fn>".to_string(),
         VmValue::Future(_)             => "<future>".to_string(),
+        VmValue::TokenStream(_)        => "<token stream>".to_string(),
         VmValue::Nil                   => "nil".to_string(),
     }
 }
@@ -518,7 +533,7 @@ async fn execute_chunk(
                 set(slots, *d, v);
             }
             Instr::SetGlobal(name, s) => {
-                let v = get(slots, *s).clone();
+                let v = vm_try!(vm_maybe_drain(get(slots, *s).clone(), state, span).await);
                 state.globals.insert(name.clone(), v);
             }
             Instr::GetLocal(d, slot) => {
@@ -528,7 +543,7 @@ async fn execute_chunk(
                 set(slots, *d, v);
             }
             Instr::SetLocal(slot, s) => {
-                let v = get(slots, *s).clone();
+                let v = vm_try!(vm_maybe_drain(get(slots, *s).clone(), state, span).await);
                 ensure_slot(slots, *slot);
                 slots[*slot as usize] = v;
             }
@@ -894,7 +909,11 @@ async fn execute_chunk(
                     VmValue::Prompt(t) => t,
                     _ => { vm_err!(JadeError::NotAPrompt { name: "<expr>".to_string(), span }); }
                 };
-                let result = vm_try!(vm_prompt_deref(text, output_type.as_deref(), state, span).await);
+                let result = if output_type.is_none() {
+                    vm_try!(vm_prompt_deref_stream(text, state, span).await)
+                } else {
+                    vm_try!(vm_prompt_deref(text, output_type.as_deref(), state, span).await)
+                };
                 set(slots, *dest, result);
             }
 
@@ -1066,6 +1085,37 @@ async fn call_value(
                     _ => Err(JadeError::TypeError { op: "llm.set_max_tokens".to_string(), span }),
                 }
             }
+            NativeFnId::Print => {
+                if args.len() != 1 {
+                    return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span });
+                }
+                match args.into_iter().next().unwrap() {
+                    VmValue::TokenStream(ts) => {
+                        vm_drain_token_stream_printing(ts, state, span, true).await?;
+                        Ok(VmValue::Nil)
+                    }
+                    other => {
+                        println!("{}", value_to_display(&other));
+                        Ok(VmValue::Nil)
+                    }
+                }
+            }
+            NativeFnId::Stream => {
+                if args.len() != 1 {
+                    return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span });
+                }
+                match args.into_iter().next().unwrap() {
+                    VmValue::TokenStream(ts) => {
+                        let text = vm_drain_token_stream_printing(ts, state, span, true).await?;
+                        Ok(VmValue::Str(text))
+                    }
+                    other => {
+                        let s = value_to_display(&other);
+                        println!("{}", s);
+                        Ok(VmValue::Str(s))
+                    }
+                }
+            }
         },
         _ => Err(JadeError::NotCallable { span }),
     }
@@ -1106,7 +1156,7 @@ async fn call_fn(
     let n = (cf.n_slots as usize).max(cf.params.len());
     let mut frame = vec![VmValue::Nil; n];
     for (i, v) in args.into_iter().enumerate() {
-        frame[i] = v;
+        frame[i] = vm_maybe_drain(v, state, span).await?;
     }
     let result = execute_chunk(&cf.chunk, &mut frame, state).await?;
     Ok(result.unwrap_or(VmValue::Nil))
@@ -1302,6 +1352,108 @@ fn vm_coerce_struct(
         type_name: type_name.to_string(),
         fields,
     }))))
+}
+
+/// Start a streaming inference call and return a lazy `VmValue::TokenStream`.
+/// Cache hits short-circuit to `VmValue::Str` — drain logic handles both transparently.
+async fn vm_prompt_deref_stream(
+    prompt_text: String,
+    state: &mut VmState,
+    span: Span,
+) -> Result<VmValue> {
+    let cache_key = (prompt_text.clone(), None::<String>);
+    if let Some(cached) = state.prompt_cache.get(&cache_key).cloned() {
+        return Ok(VmValue::Str(cached));
+    }
+    let backend = state.inference_backend.as_ref()
+        .ok_or(JadeError::MissingApiKey { span })?
+        .clone();
+    let (rx, handle) = backend.infer_stream(llm::InferenceRequest {
+        prompt: prompt_text.clone(),
+        model: state.default_model.clone(),
+        max_tokens: state.max_tokens,
+    }, span).await?;
+    Ok(VmValue::TokenStream(Arc::new(JadeTokenStream {
+        rx: Mutex::new(Some(rx)),
+        tokens_handle: Mutex::new(Some(handle)),
+        prompt_key: (prompt_text, None),
+    })))
+}
+
+/// Drain a `TokenStream` silently into a `VmValue::Str`, updating token count and cache.
+async fn vm_drain_token_stream(
+    ts: Arc<JadeTokenStream>,
+    state: &mut VmState,
+    span: Span,
+) -> Result<VmValue> {
+    let rx_opt = ts.rx.lock().take();
+    let mut rx = rx_opt.ok_or(JadeError::DoubleStreamDrain { span })?;
+    let mut text = String::new();
+    while let Some(token) = rx.recv().await {
+        text.push_str(&token);
+    }
+    let h_opt = ts.tokens_handle.lock().take();
+    if let Some(h) = h_opt {
+        match h.await {
+            Ok(Ok(tokens)) => {
+                state.token_count += tokens;
+                let tc = state.token_count;
+                state.globals.insert("__tokens__".to_string(), VmValue::Int(tc));
+            }
+            Ok(Err(e)) => return Err(e),
+            Err(e) => return Err(JadeError::AsyncPanic {
+                message: format!("token stream task panicked: {e}"),
+                span,
+            }),
+        }
+    }
+    state.prompt_cache.insert(ts.prompt_key.clone(), text.clone());
+    Ok(VmValue::Str(text))
+}
+
+/// Drain a `TokenStream`, printing each token to stdout as it arrives.
+/// Returns the accumulated text so `stream()` can return it as a `Str`.
+async fn vm_drain_token_stream_printing(
+    ts: Arc<JadeTokenStream>,
+    state: &mut VmState,
+    span: Span,
+    newline: bool,
+) -> Result<String> {
+    let rx_opt = ts.rx.lock().take();
+    let mut rx = rx_opt.ok_or(JadeError::DoubleStreamDrain { span })?;
+    let mut text = String::new();
+    while let Some(token) = rx.recv().await {
+        use std::io::Write as _;
+        print!("{}", token);
+        let _ = std::io::stdout().flush();
+        text.push_str(&token);
+    }
+    if newline { println!(); }
+    let h_opt = ts.tokens_handle.lock().take();
+    if let Some(h) = h_opt {
+        match h.await {
+            Ok(Ok(tokens)) => {
+                state.token_count += tokens;
+                let tc = state.token_count;
+                state.globals.insert("__tokens__".to_string(), VmValue::Int(tc));
+            }
+            Ok(Err(e)) => return Err(e),
+            Err(e) => return Err(JadeError::AsyncPanic {
+                message: format!("token stream task panicked: {e}"),
+                span,
+            }),
+        }
+    }
+    state.prompt_cache.insert(ts.prompt_key.clone(), text.clone());
+    Ok(text)
+}
+
+/// Drain a `TokenStream` to `Str` if the value is one; pass everything else through.
+async fn vm_maybe_drain(v: VmValue, state: &mut VmState, span: Span) -> Result<VmValue> {
+    match v {
+        VmValue::TokenStream(ts) => vm_drain_token_stream(ts, state, span).await,
+        other => Ok(other),
+    }
 }
 
 /// Try to coerce a raw LLM response to a `VmValue`.

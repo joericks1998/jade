@@ -51,6 +51,19 @@ impl InferenceBackend for JadeOsBackend {
             span,
         })?
     }
+
+    async fn infer_stream(
+        &self,
+        req: InferenceRequest,
+        span: Span,
+    ) -> Result<(tokio::sync::mpsc::Receiver<String>, tokio::task::JoinHandle<Result<i64>>)> {
+        let sock_path = self.sock_path.clone();
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        let handle = tokio::task::spawn_blocking(move || {
+            Self::infer_blocking_stream(&sock_path, req, span, tx)
+        });
+        Ok((rx, handle))
+    }
 }
 
 impl JadeOsBackend {
@@ -81,18 +94,80 @@ impl JadeOsBackend {
         loop {
             match decode_frame(&buf) {
                 FrameResult::Token(token, consumed) => {
-                    print!("{}", token);
-                    let _ = std::io::Write::flush(&mut std::io::stdout());
                     text.push_str(&token);
                     buf.drain(..consumed);
                 }
                 FrameResult::Done(tokens_used, consumed) => {
                     buf.drain(..consumed);
-                    println!();
                     return Ok(InferenceResponse {
                         text,
                         tokens_used: tokens_used as i64,
                     });
+                }
+                FrameResult::Error(msg, consumed) => {
+                    buf.drain(..consumed);
+                    return Err(JadeError::InferenceError { message: msg, span });
+                }
+                FrameResult::Incomplete => {
+                    let n = stream.read(&mut read_tmp).map_err(|e| JadeError::InferenceError {
+                        message: format!("read from {} failed: {e}", sock_path),
+                        span,
+                    })?;
+                    if n == 0 {
+                        return Err(JadeError::InferenceError {
+                            message: "socket closed before DONE frame".to_owned(),
+                            span,
+                        });
+                    }
+                    buf.extend_from_slice(&read_tmp[..n]);
+                }
+                FrameResult::UnknownType(t) => {
+                    return Err(JadeError::InferenceError {
+                        message: format!("unknown frame type from daemon: {t:#04x}"),
+                        span,
+                    });
+                }
+            }
+        }
+    }
+
+    fn infer_blocking_stream(
+        sock_path: &str,
+        req: InferenceRequest,
+        span: Span,
+        tx: tokio::sync::mpsc::Sender<String>,
+    ) -> Result<i64> {
+        let mut stream = UnixStream::connect(sock_path)
+            .map_err(|e| JadeError::InferenceError {
+                message: format!(
+                    "could not connect to {} — is jade-tree running? ({e})",
+                    sock_path
+                ),
+                span,
+            })?;
+
+        let payload = encode_request(&req).map_err(|e| JadeError::InferenceError {
+            message: format!("failed to encode inference request: {e}"),
+            span,
+        })?;
+
+        stream.write_all(&payload).map_err(|e| JadeError::InferenceError {
+            message: format!("write to {} failed: {e}", sock_path),
+            span,
+        })?;
+
+        let mut buf: Vec<u8> = Vec::new();
+        let mut read_tmp = [0u8; 4096];
+
+        loop {
+            match decode_frame(&buf) {
+                FrameResult::Token(token, consumed) => {
+                    let _ = tx.blocking_send(token);
+                    buf.drain(..consumed);
+                }
+                FrameResult::Done(tokens_used, consumed) => {
+                    buf.drain(..consumed);
+                    return Ok(tokens_used as i64);
                 }
                 FrameResult::Error(msg, consumed) => {
                     buf.drain(..consumed);

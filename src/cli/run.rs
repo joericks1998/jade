@@ -210,8 +210,9 @@ pub async fn run_file(path: &str, verbose: bool) {
                 vm::VmValue::Prompt(_)      => println!("{} = <prompt>", name),
                 vm::VmValue::Dict(_) => println!("{} = {}", name, vm::value_to_display(val)),
                 vm::VmValue::NativeFn(_) | vm::VmValue::BuiltinFn(_) | vm::VmValue::NativeBoundMethod(_) => {} // not shown
-                vm::VmValue::Future(_) => println!("{} = <future>", name),
-                vm::VmValue::Nil    => {} // not shown
+                vm::VmValue::Future(_)      => println!("{} = <future>", name),
+                vm::VmValue::TokenStream(_) => println!("{} = <token stream>", name),
+                vm::VmValue::Nil            => {} // not shown
             }
         }
     }

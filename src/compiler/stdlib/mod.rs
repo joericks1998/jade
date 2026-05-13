@@ -11,7 +11,7 @@ use std::{collections::HashMap, sync::Arc};
 use parking_lot::Mutex;
 
 use crate::{
-    compiler::{tir::JadeType, type_infer::TypeContext, vm::VmValue},
+    compiler::{tir::JadeType, type_infer::TypeContext, vm::{NativeFnId, VmValue}},
     frontend::error::Result,
 };
 
@@ -108,8 +108,9 @@ impl Package {
 // ── Registries ────────────────────────────────────────────────────────────────
 
 /// All core globals (always available without import).
+/// `print` and `stream` are excluded — they are state-mutating and dispatched
+/// through `NativeFnId` variants injected directly in `seed_globals`.
 static CORE_BUILTINS: &[BuiltinFn] = &[
-    core::PRINT,
     core::WRITE,
     core::LEN,
     core::INPUT,
@@ -152,6 +153,10 @@ pub fn seed_globals(globals: &mut HashMap<String, VmValue>) {
     for f in CORE_BUILTINS {
         globals.insert(f.name.to_string(), VmValue::BuiltinFn(*f));
     }
+    // `print` and `stream` need async VmState access to drain TokenStreams,
+    // so they dispatch through NativeFnId rather than the pure BuiltinFn path.
+    globals.insert("print".to_string(),  VmValue::NativeFn(NativeFnId::Print));
+    globals.insert("stream".to_string(), VmValue::NativeFn(NativeFnId::Stream));
 }
 
 /// Register type signatures for all core built-ins into the type checker.

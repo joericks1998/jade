@@ -24,6 +24,24 @@ pub struct InferenceResponse {
 #[async_trait::async_trait]
 pub trait InferenceBackend: Send + Sync {
     async fn infer(&self, req: InferenceRequest, span: Span) -> Result<InferenceResponse>;
+
+    /// Stream tokens as they arrive. Returns a channel receiver and a join handle
+    /// that resolves to `tokens_used` when the stream is exhausted.
+    /// Default: calls `infer` and sends the full response as one token.
+    async fn infer_stream(
+        &self,
+        req: InferenceRequest,
+        span: Span,
+    ) -> Result<(tokio::sync::mpsc::Receiver<String>, tokio::task::JoinHandle<Result<i64>>)> {
+        let resp = self.infer(req, span).await?;
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let tokens = resp.tokens_used;
+        let handle = tokio::spawn(async move {
+            let _ = tx.send(resp.text).await;
+            Ok(tokens)
+        });
+        Ok((rx, handle))
+    }
 }
 
 /// Build the appropriate backend for the given provider string.
