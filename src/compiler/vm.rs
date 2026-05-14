@@ -1192,9 +1192,10 @@ async fn vm_prompt_deref(
             None => Ok(VmValue::Str(cached)),
             Some(type_name) => {
                 let struct_defs = state.struct_defs.clone();
-                coerce(cached.trim(), type_name, &struct_defs).map_err(|_| {
+                let v = coerce(cached.trim(), type_name, &struct_defs).map_err(|_| {
                     JadeError::PromptOverflow { name: "<prompt>".to_string(), attempts: 1, span }
-                })
+                })?;
+                apply_struct_decorators(v, type_name, state, span).await
             }
         };
     }
@@ -1242,7 +1243,7 @@ async fn vm_prompt_deref(
         match coerce(current.trim(), type_name, &struct_defs) {
             Ok(v) => {
                 state.prompt_cache.insert(cache_key, current);
-                return Ok(v);
+                return apply_struct_decorators(v, type_name, state, span).await;
             }
             Err(correction) => {
                 let entry = VmValue::Str(format!(
@@ -1267,10 +1268,28 @@ async fn vm_prompt_deref(
     match coerce(current.trim(), type_name, &struct_defs) {
         Ok(v) => {
             state.prompt_cache.insert(cache_key, current);
-            Ok(v)
+            apply_struct_decorators(v, type_name, state, span).await
         }
         Err(_) => Err(JadeError::PromptOverflow { name: "<prompt>".to_string(), attempts: max_retries + 1, span }),
     }
+}
+
+/// Apply any struct decorators registered for `type_name` to a coerced value.
+/// Called after every successful `coerce()` so decorator behaviour is identical
+/// whether the struct came from a literal or from `?p |> Type`.
+async fn apply_struct_decorators(
+    mut v: VmValue,
+    type_name: &str,
+    state: &mut VmState,
+    span: Span,
+) -> Result<VmValue> {
+    let decs = state.struct_decorators.get(type_name).cloned().unwrap_or_default();
+    for dec_name in decs {
+        if let Some(dec_fn) = state.globals.get(&dec_name).cloned() {
+            v = call_value(dec_fn, vec![v], state, span).await?;
+        }
+    }
+    Ok(v)
 }
 
 /// Strip markdown code fences that LLMs often wrap JSON in (``` or ```json).
