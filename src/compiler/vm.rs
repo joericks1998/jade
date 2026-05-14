@@ -209,7 +209,7 @@ impl VmState {
         let mut globals = HashMap::new();
         globals.insert("__tokens__".to_string(), VmValue::Int(0));
         globals.insert("__model__".to_string(), VmValue::Str(String::new()));
-        globals.insert("__max_retries__".to_string(), VmValue::Int(3));
+        globals.insert("__max_retries__".to_string(), VmValue::Int(15));
         globals.insert("__retry_log__".to_string(), VmValue::Array(Arc::new(Mutex::new(vec![]))));
         stdlib::seed_globals(&mut globals);
         VmState {
@@ -219,7 +219,7 @@ impl VmState {
             struct_defs: HashMap::new(),
             inference_backend: None,
             token_count: 0,
-            max_retries: 3,
+            max_retries: 15,
             max_tokens: DEFAULT_MAX_TOKENS,
             default_model: String::new(),
             prompt_cache: HashMap::new(),
@@ -299,7 +299,7 @@ impl Default for VmOpts {
         VmOpts {
             backend: None,
             default_model: String::new(),
-            max_retries: 3,
+            max_retries: 15,
             source_dir: std::env::current_dir().unwrap_or_default(),
         }
     }
