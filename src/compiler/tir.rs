@@ -144,6 +144,7 @@ pub enum TStmt {
         params: Vec<String>,
         body: Vec<TStmt>,
         ret_ty: JadeType,
+        decorators: Vec<String>,
         span: Span,
     },
     Return {
@@ -170,6 +171,7 @@ pub enum TStmt {
     StructDef {
         name: String,
         fields: Vec<StructFieldDef>,
+        decorators: Vec<String>,
         span: Span,
     },
     InterfaceDef {
@@ -222,6 +224,7 @@ pub enum TStmt {
         params: Vec<String>,
         body: Vec<TStmt>,
         ret_ty: JadeType,
+        decorators: Vec<String>,
         span: Span,
     },
     Expr(TExpr),

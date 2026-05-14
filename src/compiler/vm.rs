@@ -189,6 +189,8 @@ pub struct VmState {
     pub extend_methods: HashMap<String, HashMap<String, Arc<CompiledFn>>>,
     /// Struct field definitions (needed for struct instantiation validation).
     pub struct_defs: HashMap<String, Vec<StructFieldDef>>,
+    /// Decorator function names registered on each struct type.
+    pub struct_decorators: HashMap<String, Vec<String>>,
     /// Optional LLM inference backend.
     pub inference_backend: Option<std::sync::Arc<dyn llm::InferenceBackend>>,
     pub token_count: i64,
@@ -217,6 +219,7 @@ impl VmState {
             globals,
             extend_methods: HashMap::new(),
             struct_defs: HashMap::new(),
+            struct_decorators: HashMap::new(),
             inference_backend: None,
             token_count: 0,
             max_retries: 15,
@@ -272,6 +275,7 @@ impl VmState {
             globals: self.globals.clone(),
             extend_methods: self.extend_methods.clone(),
             struct_defs: self.struct_defs.clone(),
+            struct_decorators: self.struct_decorators.clone(),
             inference_backend: self.inference_backend.clone(),
             token_count: 0,
             max_retries: self.max_retries,
@@ -330,6 +334,9 @@ async fn run_with_state(program: CompiledProgram, state: &mut VmState) -> Result
     // Merge compile-time metadata into the shared state.
     for (k, v) in program.struct_defs {
         state.struct_defs.insert(k, v);
+    }
+    for (k, v) in program.struct_decorators {
+        state.struct_decorators.insert(k, v);
     }
     for (type_name, methods) in program.extend_methods {
         state.extend_methods.entry(type_name).or_default().extend(methods);
@@ -787,10 +794,18 @@ async fn execute_chunk(
                     }
                     fields.insert(fname.clone(), val);
                 }
-                set(slots, *dest, VmValue::Struct(Arc::new(Mutex::new(VmStruct {
+                let mut result = VmValue::Struct(Arc::new(Mutex::new(VmStruct {
                     type_name: type_name.clone(),
                     fields,
-                }))));
+                })));
+                // Call struct decorators: each receives the instance and returns the (possibly wrapped) value.
+                let decs = state.struct_decorators.get(type_name).cloned().unwrap_or_default();
+                for dec_name in decs {
+                    if let Some(dec_fn) = state.globals.get(&dec_name).cloned() {
+                        result = call_value(dec_fn, vec![result], state, span).await?;
+                    }
+                }
+                set(slots, *dest, result);
             }
             Instr::GetField(dest, obj_reg, field) => {
                 let obj = get(slots, *obj_reg).clone();

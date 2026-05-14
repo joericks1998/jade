@@ -206,7 +206,7 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
 
         // ── Functions ─────────────────────────────────────────────────────────
 
-        Stmt::FnDef { name, params, body, span } => {
+        Stmt::FnDef { name, params, body, decorators, span } => {
             ctx.push_scope();
             for param in params {
                 ctx.define(param.clone(), JadeType::Unknown);
@@ -226,11 +226,12 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
                 params: params.clone(),
                 body: tbody,
                 ret_ty,
+                decorators: decorators.clone(),
                 span: *span,
             })
         }
 
-        Stmt::AsyncFnDef { name, params, body, span } => {
+        Stmt::AsyncFnDef { name, params, body, decorators, span } => {
             ctx.push_scope();
             for param in params {
                 ctx.define(param.clone(), JadeType::Unknown);
@@ -249,6 +250,7 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
                 params: params.clone(),
                 body: tbody,
                 ret_ty,
+                decorators: decorators.clone(),
                 span: *span,
             })
         }
@@ -311,9 +313,9 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
 
         // ── Type definitions ──────────────────────────────────────────────────
 
-        Stmt::StructDef { name, fields, span } => {
+        Stmt::StructDef { name, fields, decorators, span } => {
             // Already registered in pre_pass; re-emit verbatim.
-            Ok(TStmt::StructDef { name: name.clone(), fields: fields.clone(), span: *span })
+            Ok(TStmt::StructDef { name: name.clone(), fields: fields.clone(), decorators: decorators.clone(), span: *span })
         }
 
         Stmt::InterfaceDef { name, methods, span } => {

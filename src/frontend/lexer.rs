@@ -46,6 +46,9 @@ pub enum TokenKind {
     // Prompt dereference operator
     Question,
 
+    // Decorator prefix
+    At,
+
     // Arithmetic operators
     Plus,
     Minus,
@@ -557,6 +560,9 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
             // `?` — prompt dereference operator
             '?' => { tokens.push(Token { kind: TokenKind::Question, span: Span { line, col } }); col += 1; i += 1; }
 
+            // `@` — decorator prefix
+            '@' => { tokens.push(Token { kind: TokenKind::At, span: Span { line, col } }); col += 1; i += 1; }
+
             // Anything else is an error
             _ => {
                 return Err(JadeError::UnexpectedChar {
@@ -678,9 +684,8 @@ mod tests {
     }
 
     #[test]
-    fn test_unexpected_char_error() {
-        let err = tokenize("@").unwrap_err();
-        assert!(matches!(err, JadeError::UnexpectedChar { ch: '@', .. }));
+    fn test_at_token() {
+        assert_eq!(kinds("@"), vec![TokenKind::At, TokenKind::Eof]);
     }
 
     // ── boolean / logical / comparison tokens ────────────────────────────────

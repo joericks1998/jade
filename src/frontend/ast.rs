@@ -79,6 +79,7 @@ pub enum Stmt {
         name: String,
         params: Vec<String>,
         body: Vec<Stmt>,
+        decorators: Vec<String>,
         #[allow(dead_code)] // reserved for future error reporting
         span: Span,
     },
@@ -125,6 +126,7 @@ pub enum Stmt {
     StructDef {
         name: String,
         fields: Vec<StructFieldDef>,
+        decorators: Vec<String>,
         #[allow(dead_code)]
         span: Span,
     },
@@ -197,6 +199,7 @@ pub enum Stmt {
         name: String,
         params: Vec<String>,
         body: Vec<Stmt>,
+        decorators: Vec<String>,
         span: Span,
     },
 

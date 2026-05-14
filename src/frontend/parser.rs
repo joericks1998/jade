@@ -130,17 +130,49 @@ impl Parser {
         Ok(Program { stmts })
     }
 
+    /// Parse zero or more `@ident` decorator lines preceding a fn/struct definition.
+    fn parse_decorators(&mut self) -> Result<Vec<String>> {
+        let mut decorators = Vec::new();
+        while self.peek().kind == TokenKind::At {
+            self.advance(); // consume `@`
+            let name = self.expect_ident("decorator name")?;
+            decorators.push(name);
+            // Consume the auto-semicolon inserted after the decorator line.
+            if self.peek().kind == TokenKind::Semicolon {
+                self.advance();
+            }
+        }
+        Ok(decorators)
+    }
+
     /// Parse a single statement.
     fn parse_stmt(&mut self) -> Result<Stmt> {
+        let decorators = self.parse_decorators()?;
+        if !decorators.is_empty() {
+            // Decorators are only valid on fn, async fn, and struct.
+            return match self.peek().kind {
+                TokenKind::Fn    => self.parse_fn_with_decorators(decorators),
+                TokenKind::Async => self.parse_async_fn_with_decorators(decorators),
+                TokenKind::Struct => self.parse_struct_def_with_decorators(decorators),
+                _ => {
+                    let t = self.peek().clone();
+                    Err(JadeError::UnexpectedToken {
+                        expected: "fn, async fn, or struct after decorator".to_string(),
+                        got: format!("{:?}", t.kind),
+                        span: t.span,
+                    })
+                }
+            };
+        }
         match self.peek().kind {
             TokenKind::Let    => self.parse_let(),
-            TokenKind::Fn     => self.parse_fn(),
-            TokenKind::Async  => self.parse_async_fn(),
+            TokenKind::Fn     => self.parse_fn_with_decorators(vec![]),
+            TokenKind::Async  => self.parse_async_fn_with_decorators(vec![]),
             TokenKind::Return => self.parse_return(),
             TokenKind::If     => self.parse_if(),
             TokenKind::While  => self.parse_while(),
             TokenKind::For    => self.parse_for(),
-            TokenKind::Struct     => self.parse_struct_def(),
+            TokenKind::Struct     => self.parse_struct_def_with_decorators(vec![]),
             TokenKind::Extend     => self.parse_extend_block(),
             TokenKind::Interface  => self.parse_interface_def(),
             TokenKind::Prompt     => self.parse_prompt_decl(),
@@ -220,8 +252,8 @@ impl Parser {
         Ok(Stmt::Let { name, value, span })
     }
 
-    /// Parse `fn <ident> ( <params> ) { <body> }`
-    fn parse_fn(&mut self) -> Result<Stmt> {
+    /// Parse `fn <ident> ( <params> ) { <body> }` with pre-collected decorators.
+    fn parse_fn_with_decorators(&mut self, decorators: Vec<String>) -> Result<Stmt> {
         let span = self.peek().span;
         self.advance(); // consume `fn`
 
@@ -281,11 +313,11 @@ impl Parser {
         let body = self.parse_block()?;
         self.fn_depth -= 1;
 
-        Ok(Stmt::FnDef { name, params, body, span })
+        Ok(Stmt::FnDef { name, params, body, decorators, span })
     }
 
-    /// Parse `async fn <ident> ( <params> ) { <body> }`
-    fn parse_async_fn(&mut self) -> Result<Stmt> {
+    /// Parse `async fn <ident> ( <params> ) { <body> }` with pre-collected decorators.
+    fn parse_async_fn_with_decorators(&mut self, decorators: Vec<String>) -> Result<Stmt> {
         let span = self.peek().span;
         self.advance(); // consume `async`
 
@@ -352,7 +384,7 @@ impl Parser {
         self.async_fn_depth -= 1;
         self.fn_depth -= 1;
 
-        Ok(Stmt::AsyncFnDef { name, params, body, span })
+        Ok(Stmt::AsyncFnDef { name, params, body, decorators, span })
     }
 
     /// Parse `return <expr> ;` or `return ;`
@@ -586,7 +618,7 @@ impl Parser {
     /// Parse `struct Name { field, … }`
     /// Fields may be bare identifiers (required), `let name = expr` (optional with default),
     /// or `prompt name = expr` (optional prompt field with default text).
-    fn parse_struct_def(&mut self) -> Result<Stmt> {
+    fn parse_struct_def_with_decorators(&mut self, decorators: Vec<String>) -> Result<Stmt> {
         let span = self.peek().span;
         self.advance(); // consume `struct`
         let name = self.expect_ident("struct name")?;
@@ -634,7 +666,7 @@ impl Parser {
             }
         }
         self.expect(&TokenKind::RBrace)?;
-        Ok(Stmt::StructDef { name, fields, span })
+        Ok(Stmt::StructDef { name, fields, decorators, span })
     }
 
     /// Parse `extend TypeName { fn method(self, …) { … } … }`
@@ -660,7 +692,7 @@ impl Parser {
                 break;
             }
             match self.peek().kind {
-                TokenKind::Fn => methods.push(self.parse_fn()?),
+                TokenKind::Fn => methods.push(self.parse_fn_with_decorators(vec![])?),
                 _ => {
                     let t = self.peek().clone();
                     return Err(JadeError::UnexpectedToken {

@@ -22,6 +22,8 @@ pub struct CompiledProgram {
     /// Struct field definitions (needed by the VM for struct instantiation and
     /// field-access method fallback).
     pub struct_defs: HashMap<String, Vec<StructFieldDef>>,
+    /// Decorator function names registered on each struct type.
+    pub struct_decorators: HashMap<String, Vec<String>>,
     /// Compiled extend-block methods: `type_name → method_name → CompiledFn`.
     pub extend_methods: HashMap<String, HashMap<String, Arc<CompiledFn>>>,
     /// Interface definitions (method names required per interface).
@@ -33,6 +35,7 @@ pub struct CompiledProgram {
 /// Shared context threaded through the whole compilation.
 struct EmitCtx {
     struct_defs: HashMap<String, Vec<StructFieldDef>>,
+    struct_decorators: HashMap<String, Vec<String>>,
     interface_defs: HashMap<String, Vec<String>>,
     extend_methods: HashMap<String, HashMap<String, Arc<CompiledFn>>>,
     /// Counter for generating unique closure names (`__closure_0__`, etc.).
@@ -126,14 +129,18 @@ pub fn emit(program: TProgram) -> Result<CompiledProgram> {
     // First pass: collect static metadata (struct/interface definitions).
     let mut ctx = EmitCtx {
         struct_defs: HashMap::new(),
+        struct_decorators: HashMap::new(),
         interface_defs: HashMap::new(),
         extend_methods: HashMap::new(),
         next_closure_id: 0,
     };
     for stmt in &program.stmts {
         match stmt {
-            TStmt::StructDef { name, fields, .. } => {
+            TStmt::StructDef { name, fields, decorators, .. } => {
                 ctx.struct_defs.insert(name.clone(), fields.clone());
+                if !decorators.is_empty() {
+                    ctx.struct_decorators.insert(name.clone(), decorators.clone());
+                }
             }
             TStmt::InterfaceDef { name, methods, .. } => {
                 ctx.interface_defs.insert(
@@ -157,6 +164,7 @@ pub fn emit(program: TProgram) -> Result<CompiledProgram> {
         top_n_slots: n_slots,
         top: em.chunk,
         struct_defs: ctx.struct_defs,
+        struct_decorators: ctx.struct_decorators,
         extend_methods: ctx.extend_methods,
         interface_defs: ctx.interface_defs,
     })
@@ -181,7 +189,7 @@ fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
             em.emit_store_var(&name, src, span);
         }
 
-        TStmt::FnDef { name, params, body, span, .. } => {
+        TStmt::FnDef { name, params, body, span, decorators, .. } => {
             let compiled = emit_fn(&name, params, body, span, ctx)?;
             let rc = Arc::new(compiled);
             let idx = em.chunk.intern_fn(Arc::clone(&rc));
@@ -191,7 +199,17 @@ fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
                 let slot = em.define_local(&name);
                 em.chunk.emit(Instr::SetLocal(slot, dest), span);
             } else {
-                em.chunk.emit(Instr::SetGlobal(name, dest), span);
+                em.chunk.emit(Instr::SetGlobal(name.clone(), dest), span);
+                // Apply decorators at runtime: foo = dec(foo) for each @dec.
+                for dec_name in &decorators {
+                    let dec_reg = em.alloc_reg();
+                    em.chunk.emit(Instr::GetGlobal(dec_reg, dec_name.clone()), span);
+                    let fn_reg = em.alloc_reg();
+                    em.chunk.emit(Instr::GetGlobal(fn_reg, name.clone()), span);
+                    let result_reg = em.alloc_reg();
+                    em.chunk.emit(Instr::Call(result_reg, dec_reg, vec![fn_reg]), span);
+                    em.chunk.emit(Instr::SetGlobal(name.clone(), result_reg), span);
+                }
             }
         }
 
@@ -430,7 +448,7 @@ fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
             }
         }
 
-        TStmt::AsyncFnDef { name, params, body, span, .. } => {
+        TStmt::AsyncFnDef { name, params, body, span, decorators, .. } => {
             // Compile async fn body as a regular CompiledFn.
             // Call sites emit Instr::Spawn (instead of Instr::Call) based on
             // the callee's JadeType::AsyncFn — handled in emit_call below.
@@ -443,7 +461,16 @@ fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
                 let slot = em.define_local(&name);
                 em.chunk.emit(Instr::SetLocal(slot, dest), span);
             } else {
-                em.chunk.emit(Instr::SetGlobal(name, dest), span);
+                em.chunk.emit(Instr::SetGlobal(name.clone(), dest), span);
+                for dec_name in &decorators {
+                    let dec_reg = em.alloc_reg();
+                    em.chunk.emit(Instr::GetGlobal(dec_reg, dec_name.clone()), span);
+                    let fn_reg = em.alloc_reg();
+                    em.chunk.emit(Instr::GetGlobal(fn_reg, name.clone()), span);
+                    let result_reg = em.alloc_reg();
+                    em.chunk.emit(Instr::Call(result_reg, dec_reg, vec![fn_reg]), span);
+                    em.chunk.emit(Instr::SetGlobal(name.clone(), result_reg), span);
+                }
             }
         }
 
