@@ -271,4 +271,6 @@ pub enum Instr {
     /// Run the full pipeline for the file at `path` (relative to the current
     /// file's directory) and merge its top-level exports into the running state.
     ImportFile(String),
+    /// `from X use Y, Z` — load package/file at path, then bind only the listed names directly.
+    ImportFrom(String, Vec<String>),
 }

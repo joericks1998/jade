@@ -524,6 +524,56 @@ async fn execute_chunk(
                 result?;
             }
 
+            Instr::ImportFrom(path, names) => {
+                if let Some(pkg) = stdlib::find_package(path) {
+                    // Build the package dict, then extract only the requested names.
+                    let dict = if pkg.import_name == "llm" {
+                        stdlib::llm_pkg::llm_vm_dict_value()
+                    } else {
+                        pkg.vm_dict_value()
+                    };
+                    if let VmValue::Dict(map) = dict {
+                        for name in names {
+                            if let Some(val) = map.get(name) {
+                                state.globals.insert(name.clone(), val.clone());
+                            }
+                        }
+                    }
+                    continue;
+                }
+                // File import: run the file (all its globals merge in), then names
+                // are already available in scope — no additional filtering needed.
+                let abs_path = state.source_dir.join(path);
+                let canon = abs_path.canonicalize().map_err(|_| JadeError::ImportNotFound {
+                    path: path.clone(),
+                    span,
+                })?;
+                if state.import_stack.contains(&canon) {
+                    return Err(JadeError::CircularImport { path: path.clone(), span });
+                }
+                state.import_stack.insert(canon.clone());
+                let prev_dir = state.source_dir.clone();
+                state.source_dir = canon.parent()
+                    .unwrap_or_else(|| std::path::Path::new("."))
+                    .to_path_buf();
+                let compile_result: Result<crate::compiler::emit::CompiledProgram> = (|| {
+                    let source = std::fs::read_to_string(&canon).map_err(|_| {
+                        JadeError::ImportNotFound { path: path.clone(), span }
+                    })?;
+                    let tokens = crate::frontend::lexer::tokenize(&source)?;
+                    let p = crate::frontend::parser::parse(tokens)?;
+                    let tp = crate::compiler::type_infer::infer(p)?;
+                    crate::compiler::emit::emit(tp)
+                })();
+                let result = match compile_result {
+                    Ok(compiled) => Box::pin(run_with_state(compiled, state)).await,
+                    Err(e) => Err(e),
+                };
+                state.source_dir = prev_dir;
+                state.import_stack.remove(&canon);
+                result?;
+            }
+
             // ── Loads ─────────────────────────────────────────────────────────
             Instr::LoadInt(d, v)   => set(slots, *d, VmValue::Int(*v)),
             Instr::LoadFloat(d, v) => set(slots, *d, VmValue::Float(*v)),
@@ -2207,7 +2257,8 @@ fn instr_max_reg(instr: &Instr) -> u32 {
         Instr::SetIndex(o,i,v) => (*o).max(*i).max(*v),
         Instr::SetField(o,_,v) => (*o).max(*v),
         Instr::JumpIfFalse(c,_)|Instr::JumpIfTrue(c,_) => *c,
-        Instr::Jump(_)|Instr::Halt|Instr::Return(None)|Instr::ImportFile(_) => 0,
+        Instr::Jump(_)|Instr::Halt|Instr::Return(None)
+        |Instr::ImportFile(_)|Instr::ImportFrom(_,_) => 0,
         Instr::Return(Some(r)) => *r,
         Instr::Call(d,c,args) => {
             let mut m = (*d).max(*c);

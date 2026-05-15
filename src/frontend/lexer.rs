@@ -42,6 +42,8 @@ pub enum TokenKind {
     Catch,
     Async,
     Await,
+    From,
+    As,
 
     // Prompt dereference operator
     Question,
@@ -134,6 +136,8 @@ pub fn token_kind_desc(kind: &TokenKind) -> String {
         TokenKind::Catch         => "`catch`".to_string(),
         TokenKind::Async         => "`async`".to_string(),
         TokenKind::Await         => "`await`".to_string(),
+        TokenKind::From          => "`from`".to_string(),
+        TokenKind::As            => "`as`".to_string(),
         TokenKind::Question      => "`?`".to_string(),
         TokenKind::At            => "`@`".to_string(),
         TokenKind::Plus          => "`+`".to_string(),
@@ -492,6 +496,8 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
                     "catch"     => TokenKind::Catch,
                     "async"     => TokenKind::Async,
                     "await"     => TokenKind::Await,
+                    "from"      => TokenKind::From,
+                    "as"        => TokenKind::As,
                     "true"      => TokenKind::True,
                     "false"  => TokenKind::False,
                     // f-string: `f"…"` / `f"""…"""` or `f'…'` / `f'''…'''`

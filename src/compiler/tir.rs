@@ -209,6 +209,12 @@ pub enum TStmt {
         path: String,
         span: Span,
     },
+    /// `from std.time use now, sleep` — named selective imports.
+    FromUse {
+        path: String,
+        names: Vec<String>,
+        span: Span,
+    },
     /// `raise expr`
     Raise {
         value: TExpr,

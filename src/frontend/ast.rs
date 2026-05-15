@@ -180,8 +180,17 @@ pub enum Stmt {
     },
 
     /// `use "path/to/file.jde"` — import all top-level definitions from another file.
+    /// Also accepts dot notation: `use std.time` → path `"std/time"`.
     Use {
         path: String,
+        span: Span,
+    },
+
+    /// `from std.time use now, sleep` — import specific names directly into scope.
+    /// Path follows the same rules as `Use` (string literal or dot notation).
+    FromUse {
+        path: String,
+        names: Vec<String>,
         span: Span,
     },
 

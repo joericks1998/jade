@@ -180,7 +180,7 @@ fn pre_pass(stmts: &[Stmt], ctx: &mut TypeContext) {
                     }
                 }
             }
-            Stmt::Use { .. } => {
+            Stmt::Use { .. } | Stmt::FromUse { .. } => {
                 ctx.has_imports = true;
             }
             _ => {}
@@ -444,12 +444,18 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
 
         Stmt::Use { path, span } => {
             ctx.has_imports = true;
-            // If it's a stdlib package, register its types so downstream code
-            // can refer to the package global without type errors.
             if let Some(pkg) = stdlib::find_package(path) {
                 (pkg.register_types)(ctx);
             }
             Ok(TStmt::Use { path: path.clone(), span: *span })
+        }
+
+        Stmt::FromUse { path, names, span } => {
+            ctx.has_imports = true;
+            if let Some(pkg) = stdlib::find_package(path) {
+                (pkg.register_types)(ctx);
+            }
+            Ok(TStmt::FromUse { path: path.clone(), names: names.clone(), span: *span })
         }
 
         // ── Exception handling ────────────────────────────────────────────────
@@ -1091,7 +1097,7 @@ fn collect_captures_in_stmts(
                 locals.insert(name.clone());
             }
             TStmt::StructDef { .. } | TStmt::InterfaceDef { .. }
-            | TStmt::ExtendBlock { .. } | TStmt::Use { .. } => {}
+            | TStmt::ExtendBlock { .. } | TStmt::Use { .. } | TStmt::FromUse { .. } => {}
         }
     }
 }

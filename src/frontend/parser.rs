@@ -215,6 +215,7 @@ impl Parser {
             TokenKind::Interface  => self.parse_interface_def(),
             TokenKind::Prompt     => self.parse_prompt_decl(),
             TokenKind::Use        => self.parse_use(),
+            TokenKind::From       => self.parse_from_use(),
             TokenKind::Raise      => self.parse_raise(),
             TokenKind::Try        => self.parse_try_catch(),
             TokenKind::Identifier(_) => {
@@ -573,23 +574,74 @@ impl Parser {
     fn parse_use(&mut self) -> Result<Stmt> {
         let span = self.peek().span;
         self.advance(); // consume `use`
-        let path_token = self.peek().clone();
-        let path = match &path_token.kind {
+        let path = self.parse_import_path()?;
+        self.consume_semicolon()?;
+        Ok(Stmt::Use { path, span })
+    }
+
+    fn parse_from_use(&mut self) -> Result<Stmt> {
+        let span = self.peek().span;
+        self.advance(); // consume `from`
+        let path = self.parse_import_path()?;
+        // expect `use`
+        let use_tok = self.peek().clone();
+        if use_tok.kind != TokenKind::Use {
+            return Err(JadeError::UnexpectedToken {
+                expected: "`use` after import path in `from … use …`".to_string(),
+                got: token_kind_desc(&use_tok.kind),
+                span: use_tok.span,
+            });
+        }
+        self.advance(); // consume `use`
+        // parse comma-separated name list
+        let mut names = Vec::new();
+        loop {
+            let name = self.expect_ident("imported name")?;
+            names.push(name);
+            if self.peek().kind == TokenKind::Comma {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        self.consume_semicolon()?;
+        Ok(Stmt::FromUse { path, names, span })
+    }
+
+    /// Parse an import path: either a string literal `"std/time"` or dot notation
+    /// `std.time` / `llm`. Dot notation converts dots to `/` so `std.time` → `"std/time"`.
+    fn parse_import_path(&mut self) -> Result<String> {
+        let tok = self.peek().clone();
+        match &tok.kind {
             TokenKind::Str(s) => {
                 let s = s.clone();
                 self.advance();
-                s
+                Ok(s)
             }
-            _ => {
-                return Err(JadeError::UnexpectedToken {
-                    expected: "file path string after `use`".to_string(),
-                    got: token_kind_desc(&path_token.kind),
-                    span: path_token.span,
-                });
+            TokenKind::Identifier(first) => {
+                let mut parts = vec![first.clone()];
+                self.advance();
+                while self.peek().kind == TokenKind::Dot {
+                    // peek ahead: only consume the dot if the next token is an identifier
+                    let next = self.peek_at(1).map(|t| matches!(t.kind, TokenKind::Identifier(_))).unwrap_or(false);
+                    if !next { break; }
+                    self.advance(); // consume `.`
+                    let ident_tok = self.peek().clone();
+                    if let TokenKind::Identifier(part) = &ident_tok.kind {
+                        parts.push(part.clone());
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                Ok(parts.join("/"))
             }
-        };
-        self.consume_semicolon()?;
-        Ok(Stmt::Use { path, span })
+            _ => Err(JadeError::UnexpectedToken {
+                expected: "module path (string or dot notation) after `use`".to_string(),
+                got: token_kind_desc(&tok.kind),
+                span: tok.span,
+            }),
+        }
     }
 
     fn parse_prompt_decl(&mut self) -> Result<Stmt> {
