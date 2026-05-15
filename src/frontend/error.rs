@@ -134,11 +134,11 @@ impl std::fmt::Display for JadeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             JadeError::UnexpectedChar { ch, span } =>
-                write!(f, "[{}:{}] unexpected character '{}'", span.line, span.col, ch),
+                write!(f, "[{}:{}] syntax error: unexpected character {:?}", span.line, span.col, ch),
             JadeError::UnexpectedToken { expected, got, span } =>
-                write!(f, "[{}:{}] expected {}, found {}", span.line, span.col, expected, got),
+                write!(f, "[{}:{}] syntax error: expected {}, found {}", span.line, span.col, expected, got),
             JadeError::UnexpectedEof { span } =>
-                write!(f, "[{}:{}] unexpected end of file", span.line, span.col),
+                write!(f, "[{}:{}] syntax error: unexpected end of file — did you forget a closing `}}`?", span.line, span.col),
             JadeError::UndefinedVariable { name, span } =>
                 write!(f, "[{}:{}] undefined variable '{}'", span.line, span.col, name),
             JadeError::DivisionByZero { span } =>

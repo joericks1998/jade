@@ -1,7 +1,7 @@
 use super::{
     ast::{BinOpKind, CatchArm, Expr, FStrPart, InterfaceMethod, Program, StructFieldDef, Stmt, UnaryOpKind},
     error::{JadeError, Result, Span},
-    lexer::{RawFStrPart, Token, TokenKind},
+    lexer::{token_kind_desc, RawFStrPart, Token, TokenKind},
 };
 
 struct Parser {
@@ -49,7 +49,7 @@ impl Parser {
             }
             _ => Err(JadeError::UnexpectedToken {
                 expected: context.to_string(),
-                got: format!("{:?}", token.kind),
+                got: token_kind_desc(&token.kind),
                 span: token.span,
             }),
         }
@@ -92,8 +92,8 @@ impl Parser {
             _ => {
                 let token = self.peek().clone();
                 Err(JadeError::UnexpectedToken {
-                    expected: "';'".to_string(),
-                    got: format!("{:?}", token.kind),
+                    expected: "end of statement".to_string(),
+                    got: token_kind_desc(&token.kind),
                     span: token.span,
                 })
             }
@@ -112,8 +112,8 @@ impl Parser {
             Ok(token)
         } else {
             Err(JadeError::UnexpectedToken {
-                expected: format!("{:?}", kind),
-                got: format!("{:?}", token.kind),
+                expected: token_kind_desc(kind),
+                got: token_kind_desc(&token.kind),
                 span: token.span,
             })
         }
@@ -195,8 +195,8 @@ impl Parser {
                 _ => {
                     let t = self.peek().clone();
                     Err(JadeError::UnexpectedToken {
-                        expected: "fn, async fn, struct, or extend after decorator".to_string(),
-                        got: format!("{:?}", t.kind),
+                        expected: "`fn`, `async fn`, `struct`, or `extend` after decorator".to_string(),
+                        got: token_kind_desc(&t.kind),
                         span: t.span,
                     })
                 }
@@ -293,8 +293,8 @@ impl Parser {
             }
             _ => {
                 return Err(JadeError::UnexpectedToken {
-                    expected: "identifier".to_string(),
-                    got: format!("{:?}", name_token.kind),
+                    expected: "variable name".to_string(),
+                    got: token_kind_desc(&name_token.kind),
                     span: name_token.span,
                 });
             }
@@ -319,7 +319,7 @@ impl Parser {
                     TokenKind::Identifier(p) => { let n = p.clone(); self.advance(); n }
                     _ => return Err(JadeError::UnexpectedToken {
                         expected: "parameter name".to_string(),
-                        got: format!("{:?}", param_token.kind),
+                        got: token_kind_desc(&param_token.kind),
                         span: param_token.span,
                     }),
                 };
@@ -357,7 +357,7 @@ impl Parser {
             _ => {
                 return Err(JadeError::UnexpectedToken {
                     expected: "function name".to_string(),
-                    got: format!("{:?}", name_token.kind),
+                    got: token_kind_desc(&name_token.kind),
                     span: name_token.span,
                 });
             }
@@ -389,8 +389,8 @@ impl Parser {
         if self.peek().kind != TokenKind::Fn {
             let t = self.peek().clone();
             return Err(JadeError::UnexpectedToken {
-                expected: "fn after async".to_string(),
-                got: format!("{:?}", t.kind),
+                expected: "`fn` after `async`".to_string(),
+                got: token_kind_desc(&t.kind),
                 span: t.span,
             });
         }
@@ -406,7 +406,7 @@ impl Parser {
             }
             _ => return Err(JadeError::UnexpectedToken {
                 expected: "function name".to_string(),
-                got: format!("{:?}", name_token.kind),
+                got: token_kind_desc(&name_token.kind),
                 span: name_token.span,
             }),
         };
@@ -536,8 +536,8 @@ impl Parser {
                 n
             }
             _ => return Err(JadeError::UnexpectedToken {
-                expected: "identifier after `for`".to_string(),
-                got: format!("{:?}", var_token.kind),
+                expected: "loop variable name after `for`".to_string(),
+                got: token_kind_desc(&var_token.kind),
                 span: var_token.span,
             }),
         };
@@ -582,8 +582,8 @@ impl Parser {
             }
             _ => {
                 return Err(JadeError::UnexpectedToken {
-                    expected: "string path after `use`".to_string(),
-                    got: format!("{:?}", path_token.kind),
+                    expected: "file path string after `use`".to_string(),
+                    got: token_kind_desc(&path_token.kind),
                     span: path_token.span,
                 });
             }
@@ -696,7 +696,7 @@ impl Parser {
                     let t = self.peek().clone();
                     return Err(JadeError::UnexpectedToken {
                         expected: "field name, `let`, or `prompt`".to_string(),
-                        got: format!("{:?}", t.kind),
+                        got: token_kind_desc(&t.kind),
                         span: t.span,
                     });
                 }
@@ -737,8 +737,8 @@ impl Parser {
                 _ => {
                     let t = self.peek().clone();
                     return Err(JadeError::UnexpectedToken {
-                        expected: "fn".to_string(),
-                        got: format!("{:?}", t.kind),
+                        expected: "`fn` method definition".to_string(),
+                        got: token_kind_desc(&t.kind),
                         span: t.span,
                     });
                 }
@@ -770,8 +770,8 @@ impl Parser {
                 _ => {
                     let t = self.peek().clone();
                     return Err(JadeError::UnexpectedToken {
-                        expected: "fn".to_string(),
-                        got: format!("{:?}", t.kind),
+                        expected: "`fn` method signature".to_string(),
+                        got: token_kind_desc(&t.kind),
                         span: t.span,
                     });
                 }
@@ -918,7 +918,7 @@ impl Parser {
     fn parse_fstr_expr(src: &str, span: Span, fn_depth: usize) -> Result<Expr> {
         let sub_tokens = super::lexer::tokenize(src).map_err(|_| JadeError::UnexpectedToken {
             expected: "expression".to_string(),
-            got: format!("invalid f-string expression: {:?}", src),
+            got: format!("invalid expression `{}`", src),
             span,
         })?;
         let mut sub = Parser {
@@ -1409,7 +1409,7 @@ impl Parser {
             TokenKind::Eof => Err(JadeError::UnexpectedEof { span: token.span }),
             _ => Err(JadeError::UnexpectedToken {
                 expected: "expression".to_string(),
-                got: format!("{:?}", token.kind),
+                got: token_kind_desc(&token.kind),
                 span: token.span,
             }),
         }
