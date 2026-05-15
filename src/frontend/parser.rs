@@ -64,6 +64,12 @@ impl Parser {
             .unwrap_or_else(|| &self.tokens[self.tokens.len() - 1])
     }
 
+    /// Look `offset` tokens ahead without advancing. Clamped to the last token.
+    fn peek_ahead(&self, offset: usize) -> &Token {
+        let idx = (self.pos + offset).min(self.tokens.len() - 1);
+        &self.tokens[idx]
+    }
+
     /// Returns the current token and advances the cursor.
     /// Clamped at the `Eof` sentinel: once `pos` reaches the last token
     /// (`Eof`), further calls return `Eof` without advancing past it.
@@ -131,12 +137,43 @@ impl Parser {
     }
 
     /// Parse zero or more `@ident` decorator lines preceding a fn/struct definition.
-    fn parse_decorators(&mut self) -> Result<Vec<String>> {
+    fn parse_decorators(&mut self) -> Result<Vec<(String, Vec<(Option<String>, Expr)>)>> {
         let mut decorators = Vec::new();
         while self.peek().kind == TokenKind::At {
             self.advance(); // consume `@`
             let name = self.expect_ident("decorator name")?;
-            decorators.push(name);
+            // Optional argument list: @dec(pos, key = val, ...)
+            let args = if self.peek().kind == TokenKind::LParen {
+                self.advance(); // consume `(`
+                let mut args = Vec::new();
+                if self.peek().kind != TokenKind::RParen {
+                    loop {
+                        // Look-ahead: `ident =` means keyword arg.
+                        let kw = if let TokenKind::Identifier(kname) = self.peek().kind.clone() {
+                            if self.peek_ahead(1).kind == TokenKind::Equals {
+                                self.advance(); // consume ident
+                                self.advance(); // consume `=`
+                                Some(kname)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+                        args.push((kw, self.parse_pipe()?));
+                        if self.peek().kind == TokenKind::Comma {
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                self.expect(&TokenKind::RParen)?;
+                args
+            } else {
+                Vec::new()
+            };
+            decorators.push((name, args));
             // Consume the auto-semicolon inserted after the decorator line.
             if self.peek().kind == TokenKind::Semicolon {
                 self.advance();
@@ -149,15 +186,16 @@ impl Parser {
     fn parse_stmt(&mut self) -> Result<Stmt> {
         let decorators = self.parse_decorators()?;
         if !decorators.is_empty() {
-            // Decorators are only valid on fn, async fn, and struct.
+            // Decorators are valid on fn, async fn, struct, and extend.
             return match self.peek().kind {
-                TokenKind::Fn    => self.parse_fn_with_decorators(decorators),
-                TokenKind::Async => self.parse_async_fn_with_decorators(decorators),
+                TokenKind::Fn     => self.parse_fn_with_decorators(decorators),
+                TokenKind::Async  => self.parse_async_fn_with_decorators(decorators),
                 TokenKind::Struct => self.parse_struct_def_with_decorators(decorators),
+                TokenKind::Extend => self.parse_extend_block_with_decorators(decorators),
                 _ => {
                     let t = self.peek().clone();
                     Err(JadeError::UnexpectedToken {
-                        expected: "fn, async fn, or struct after decorator".to_string(),
+                        expected: "fn, async fn, struct, or extend after decorator".to_string(),
                         got: format!("{:?}", t.kind),
                         span: t.span,
                     })
@@ -173,7 +211,7 @@ impl Parser {
             TokenKind::While  => self.parse_while(),
             TokenKind::For    => self.parse_for(),
             TokenKind::Struct     => self.parse_struct_def_with_decorators(vec![]),
-            TokenKind::Extend     => self.parse_extend_block(),
+            TokenKind::Extend     => self.parse_extend_block_with_decorators(vec![]),
             TokenKind::Interface  => self.parse_interface_def(),
             TokenKind::Prompt     => self.parse_prompt_decl(),
             TokenKind::Use        => self.parse_use(),
@@ -252,8 +290,42 @@ impl Parser {
         Ok(Stmt::Let { name, value, span })
     }
 
+    /// Parse a parenthesised parameter list `( name, name = expr, ... )`.
+    /// Returns `(name, default_expr)` pairs; required params have `None`.
+    fn parse_param_list(&mut self) -> Result<Vec<(String, Option<Expr>)>> {
+        self.expect(&TokenKind::LParen)?;
+        let mut params = Vec::new();
+        if self.peek().kind != TokenKind::RParen {
+            loop {
+                let param_token = self.peek().clone();
+                let name = match &param_token.kind {
+                    TokenKind::Identifier(p) => { let n = p.clone(); self.advance(); n }
+                    _ => return Err(JadeError::UnexpectedToken {
+                        expected: "parameter name".to_string(),
+                        got: format!("{:?}", param_token.kind),
+                        span: param_token.span,
+                    }),
+                };
+                let default = if self.peek().kind == TokenKind::Equals {
+                    self.advance(); // consume `=`
+                    Some(self.parse_pipe()?)
+                } else {
+                    None
+                };
+                params.push((name, default));
+                if self.peek().kind == TokenKind::Comma {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+        }
+        self.expect(&TokenKind::RParen)?;
+        Ok(params)
+    }
+
     /// Parse `fn <ident> ( <params> ) { <body> }` with pre-collected decorators.
-    fn parse_fn_with_decorators(&mut self, decorators: Vec<String>) -> Result<Stmt> {
+    fn parse_fn_with_decorators(&mut self, decorators: Vec<(String, Vec<(Option<String>, Expr)>)>) -> Result<Stmt> {
         let span = self.peek().span;
         self.advance(); // consume `fn`
 
@@ -275,32 +347,7 @@ impl Parser {
         };
 
         // Parameter list
-        self.expect(&TokenKind::LParen)?;
-        let mut params = Vec::new();
-        if self.peek().kind != TokenKind::RParen {
-            loop {
-                let param_token = self.peek().clone();
-                match &param_token.kind {
-                    TokenKind::Identifier(p) => {
-                        params.push(p.clone());
-                        self.advance();
-                    }
-                    _ => {
-                        return Err(JadeError::UnexpectedToken {
-                            expected: "parameter name".to_string(),
-                            got: format!("{:?}", param_token.kind),
-                            span: param_token.span,
-                        });
-                    }
-                }
-                if self.peek().kind == TokenKind::Comma {
-                    self.advance(); // consume `,`
-                } else {
-                    break;
-                }
-            }
-        }
-        self.expect(&TokenKind::RParen)?;
+        let params = self.parse_param_list()?;
 
         // Optional `-> type` return annotation — parsed and discarded at tree-walk stage.
         if self.peek().kind == TokenKind::Arrow {
@@ -317,7 +364,7 @@ impl Parser {
     }
 
     /// Parse `async fn <ident> ( <params> ) { <body> }` with pre-collected decorators.
-    fn parse_async_fn_with_decorators(&mut self, decorators: Vec<String>) -> Result<Stmt> {
+    fn parse_async_fn_with_decorators(&mut self, decorators: Vec<(String, Vec<(Option<String>, Expr)>)>) -> Result<Stmt> {
         let span = self.peek().span;
         self.advance(); // consume `async`
 
@@ -347,30 +394,7 @@ impl Parser {
             }),
         };
 
-        self.expect(&TokenKind::LParen)?;
-        let mut params = Vec::new();
-        if self.peek().kind != TokenKind::RParen {
-            loop {
-                let param_token = self.peek().clone();
-                match &param_token.kind {
-                    TokenKind::Identifier(p) => {
-                        params.push(p.clone());
-                        self.advance();
-                    }
-                    _ => return Err(JadeError::UnexpectedToken {
-                        expected: "parameter name".to_string(),
-                        got: format!("{:?}", param_token.kind),
-                        span: param_token.span,
-                    }),
-                }
-                if self.peek().kind == TokenKind::Comma {
-                    self.advance();
-                } else {
-                    break;
-                }
-            }
-        }
-        self.expect(&TokenKind::RParen)?;
+        let params = self.parse_param_list()?;
 
         // Optional `-> type` return annotation
         if self.peek().kind == TokenKind::Arrow {
@@ -618,7 +642,7 @@ impl Parser {
     /// Parse `struct Name { field, … }`
     /// Fields may be bare identifiers (required), `let name = expr` (optional with default),
     /// or `prompt name = expr` (optional prompt field with default text).
-    fn parse_struct_def_with_decorators(&mut self, decorators: Vec<String>) -> Result<Stmt> {
+    fn parse_struct_def_with_decorators(&mut self, decorators: Vec<(String, Vec<(Option<String>, Expr)>)>) -> Result<Stmt> {
         let span = self.peek().span;
         self.advance(); // consume `struct`
         let name = self.expect_ident("struct name")?;
@@ -671,7 +695,7 @@ impl Parser {
 
     /// Parse `extend TypeName { fn method(self, …) { … } … }`
     /// or    `extend TypeName: InterfaceName { fn method(self, …) { … } … }`
-    fn parse_extend_block(&mut self) -> Result<Stmt> {
+    fn parse_extend_block_with_decorators(&mut self, decorators: Vec<(String, Vec<(Option<String>, Expr)>)>) -> Result<Stmt> {
         let span = self.peek().span;
         self.advance(); // consume `extend`
         let type_name = self.expect_ident("type name")?;
@@ -704,7 +728,7 @@ impl Parser {
             }
         }
         self.expect(&TokenKind::RBrace)?;
-        Ok(Stmt::ExtendBlock { type_name, interface_name, methods, span })
+        Ok(Stmt::ExtendBlock { type_name, interface_name, methods, decorators, span })
     }
 
     /// Parse `interface Name { fn method(self, …) -> type }`
@@ -1642,7 +1666,8 @@ mod tests {
         let p = parse_src("fn add(a, b) {\n    return a\n}");
         let Stmt::FnDef { name, params, .. } = &p.stmts[0] else { panic!() };
         assert_eq!(name, "add");
-        assert_eq!(params, &["a", "b"]);
+        let names: Vec<&str> = params.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, &["a", "b"]);
     }
 
     #[test]
@@ -1807,7 +1832,7 @@ mod tests {
         assert_eq!(methods.len(), 1);
         let Stmt::FnDef { name, params, .. } = &methods[0] else { panic!() };
         assert_eq!(name, "get");
-        assert_eq!(params[0], "self");
+        assert_eq!(params[0].0, "self");
     }
 
     #[test]
@@ -1928,7 +1953,7 @@ mod tests {
         let p = parse_src("fn greet(name) -> str {\n    return \"hi\"\n}");
         let Stmt::FnDef { name, params, .. } = &p.stmts[0] else { panic!() };
         assert_eq!(name, "greet");
-        assert_eq!(params, &["name"]);
+        assert_eq!(params[0].0, "name");
     }
 
     // ── LLM / prompt ────────────────────────────────────────────────────────
@@ -2027,5 +2052,142 @@ mod tests {
             else { panic!("expected Let with Dict") };
         assert_eq!(entries.len(), 1);
         assert!(matches!(&entries[0].0, Expr::Identifier { name, .. } if name == "k"));
+    }
+
+    // ── default parameter values ──────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_fn_default_param_int() {
+        let p = parse_src("fn f(a, b = 42) {}");
+        let Stmt::FnDef { params, .. } = &p.stmts[0] else { panic!() };
+        assert_eq!(params.len(), 2);
+        assert!(params[0].1.is_none());
+        assert!(matches!(params[1].1, Some(Expr::Integer { value: 42, .. })));
+    }
+
+    #[test]
+    fn test_parse_fn_default_param_str() {
+        let p = parse_src("fn f(x, label = \"hello\") {}");
+        let Stmt::FnDef { params, .. } = &p.stmts[0] else { panic!() };
+        assert!(matches!(&params[1].1, Some(Expr::Str { value, .. }) if value == "hello"));
+    }
+
+    #[test]
+    fn test_parse_fn_default_param_nil() {
+        let p = parse_src("fn f(x, on = nil) {}");
+        let Stmt::FnDef { params, .. } = &p.stmts[0] else { panic!() };
+        assert!(matches!(&params[1].1, Some(Expr::Identifier { name, .. }) if name == "nil"));
+    }
+
+    #[test]
+    fn test_parse_fn_default_param_bool() {
+        let p = parse_src("fn f(a, flag = false) {}");
+        let Stmt::FnDef { params, .. } = &p.stmts[0] else { panic!() };
+        assert!(matches!(params[1].1, Some(Expr::Bool { value: false, .. })));
+    }
+
+    #[test]
+    fn test_parse_fn_all_defaults() {
+        let p = parse_src("fn f(a = 1, b = 2, c = 3) {}");
+        let Stmt::FnDef { params, .. } = &p.stmts[0] else { panic!() };
+        assert_eq!(params.len(), 3);
+        assert!(params.iter().all(|(_, d)| d.is_some()));
+    }
+
+    #[test]
+    fn test_parse_async_fn_default_param() {
+        let p = parse_src("async fn f(x, y = 0) {}");
+        let Stmt::AsyncFnDef { params, .. } = &p.stmts[0] else { panic!() };
+        assert_eq!(params.len(), 2);
+        assert!(params[0].1.is_none());
+        assert!(matches!(params[1].1, Some(Expr::Integer { value: 0, .. })));
+    }
+
+    // ── decorator argument parsing ────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_decorator_no_args() {
+        let p = parse_src("@tag\nfn f() {}");
+        let Stmt::FnDef { decorators, .. } = &p.stmts[0] else { panic!() };
+        assert_eq!(decorators.len(), 1);
+        assert_eq!(decorators[0].0, "tag");
+        assert!(decorators[0].1.is_empty());
+    }
+
+    #[test]
+    fn test_parse_decorator_positional_str_arg() {
+        let p = parse_src("@tag(\"hello\")\nfn f() {}");
+        let Stmt::FnDef { decorators, .. } = &p.stmts[0] else { panic!() };
+        let (kw, expr) = &decorators[0].1[0];
+        assert!(kw.is_none());
+        assert!(matches!(expr, Expr::Str { value, .. } if value == "hello"));
+    }
+
+    #[test]
+    fn test_parse_decorator_positional_int_arg() {
+        let p = parse_src("@retry(3)\nfn f() {}");
+        let Stmt::FnDef { decorators, .. } = &p.stmts[0] else { panic!() };
+        let (kw, expr) = &decorators[0].1[0];
+        assert!(kw.is_none());
+        assert!(matches!(expr, Expr::Integer { value: 3, .. }));
+    }
+
+    #[test]
+    fn test_parse_decorator_kwarg() {
+        let p = parse_src("@route(on = \"action\")\nfn f() {}");
+        let Stmt::FnDef { decorators, .. } = &p.stmts[0] else { panic!() };
+        let (kw, expr) = &decorators[0].1[0];
+        assert_eq!(kw.as_deref(), Some("on"));
+        assert!(matches!(expr, Expr::Str { value, .. } if value == "action"));
+    }
+
+    #[test]
+    fn test_parse_decorator_multiple_args_mixed() {
+        let p = parse_src("@dec(\"pos\", key = \"val\")\nfn f() {}");
+        let Stmt::FnDef { decorators, .. } = &p.stmts[0] else { panic!() };
+        let args = &decorators[0].1;
+        assert_eq!(args.len(), 2);
+        assert!(args[0].0.is_none());
+        assert_eq!(args[1].0.as_deref(), Some("key"));
+    }
+
+    #[test]
+    fn test_parse_decorator_multiple_decorators() {
+        let p = parse_src("@a\n@b(\"x\")\nfn f() {}");
+        let Stmt::FnDef { decorators, .. } = &p.stmts[0] else { panic!() };
+        assert_eq!(decorators.len(), 2);
+        assert_eq!(decorators[0].0, "a");
+        assert_eq!(decorators[1].0, "b");
+    }
+
+    #[test]
+    fn test_parse_struct_decorator_with_arg() {
+        let p = parse_src("@log(\"City\")\nstruct City {\n  name,\n}");
+        let Stmt::StructDef { decorators, .. } = &p.stmts[0] else { panic!() };
+        assert_eq!(decorators.len(), 1);
+        assert_eq!(decorators[0].0, "log");
+        let (kw, expr) = &decorators[0].1[0];
+        assert!(kw.is_none());
+        assert!(matches!(expr, Expr::Str { value, .. } if value == "City"));
+    }
+
+    #[test]
+    fn test_parse_extend_decorator_route_positional() {
+        let p = parse_src("@route(\"action\")\nextend Cmd {}");
+        let Stmt::ExtendBlock { decorators, type_name, .. } = &p.stmts[0] else { panic!() };
+        assert_eq!(type_name, "Cmd");
+        assert_eq!(decorators[0].0, "route");
+        let (kw, expr) = &decorators[0].1[0];
+        assert!(kw.is_none());
+        assert!(matches!(expr, Expr::Str { value, .. } if value == "action"));
+    }
+
+    #[test]
+    fn test_parse_extend_decorator_route_kwarg() {
+        let p = parse_src("@route(on = \"field\")\nextend T {}");
+        let Stmt::ExtendBlock { decorators, .. } = &p.stmts[0] else { panic!() };
+        let (kw, expr) = &decorators[0].1[0];
+        assert_eq!(kw.as_deref(), Some("on"));
+        assert!(matches!(expr, Expr::Str { value, .. } if value == "field"));
     }
 }

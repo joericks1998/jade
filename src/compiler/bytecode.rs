@@ -20,6 +20,9 @@ pub enum FStrPart {
 pub struct CompiledFn {
     /// Parameter names, in declaration order. Slot 0 .. params.len()-1.
     pub params: Vec<String>,
+    /// Default values for optional parameters, parallel to `params`.
+    /// `None` means the parameter is required.
+    pub defaults: Vec<Option<crate::compiler::vm::VmValue>>,
     /// Bytecode body.
     pub chunk: Chunk,
     /// Total number of register slots needed by this function frame.

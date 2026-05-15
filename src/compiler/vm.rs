@@ -32,6 +32,7 @@ pub enum NativeFnId {
     LlmSetMaxTokens,
     Print,
     Stream,
+    Route,
 }
 
 /// A value at VM runtime, carrying `Arc<CompiledFn>` for functions so the VM
@@ -62,6 +63,9 @@ pub enum VmValue {
     Future(Arc<JadeFuture>),
     /// A lazy token stream from an untyped prompt dereference.
     TokenStream(Arc<JadeTokenStream>),
+    /// A first-class type value. Callable with one argument for coercion/construction:
+    /// `int("3")` → 3, `City(dict)` → City struct, etc.
+    TypeRef(String),
     Nil,
 }
 
@@ -126,9 +130,10 @@ impl std::fmt::Debug for VmValue {
             VmValue::BuiltinFn(bf) => write!(f, "BuiltinFn({})", bf.name),
             VmValue::NativeBoundMethod(nbm) => write!(f, "NativeBoundMethod({})", nbm.method.name),
             VmValue::NativeFn(nf) => write!(f, "NativeFn({:?})", nf),
-            VmValue::Future(_)      => write!(f, "Future"),
-            VmValue::TokenStream(_) => write!(f, "TokenStream"),
-            VmValue::Nil            => write!(f, "Nil"),
+            VmValue::Future(_)       => write!(f, "Future"),
+            VmValue::TokenStream(_)  => write!(f, "TokenStream"),
+            VmValue::TypeRef(t)      => write!(f, "TypeRef({})", t),
+            VmValue::Nil             => write!(f, "Nil"),
         }
     }
 }
@@ -172,6 +177,7 @@ pub fn value_to_display(v: &VmValue) -> String {
         VmValue::NativeFn(_)           => "<native fn>".to_string(),
         VmValue::Future(_)             => "<future>".to_string(),
         VmValue::TokenStream(_)        => "<token stream>".to_string(),
+        VmValue::TypeRef(t)            => format!("<type {}>", t),
         VmValue::Nil                   => "nil".to_string(),
     }
 }
@@ -190,7 +196,9 @@ pub struct VmState {
     /// Struct field definitions (needed for struct instantiation validation).
     pub struct_defs: HashMap<String, Vec<StructFieldDef>>,
     /// Decorator function names registered on each struct type.
-    pub struct_decorators: HashMap<String, Vec<String>>,
+    pub struct_decorators: HashMap<String, Vec<(String, Vec<VmValue>)>>,
+    /// `@route("field")` configs: type_name → field_name to read for routing.
+    pub route_configs: HashMap<String, String>,
     /// Optional LLM inference backend.
     pub inference_backend: Option<std::sync::Arc<dyn llm::InferenceBackend>>,
     pub token_count: i64,
@@ -220,6 +228,7 @@ impl VmState {
             extend_methods: HashMap::new(),
             struct_defs: HashMap::new(),
             struct_decorators: HashMap::new(),
+            route_configs: HashMap::new(),
             inference_backend: None,
             token_count: 0,
             max_retries: 15,
@@ -276,6 +285,7 @@ impl VmState {
             extend_methods: self.extend_methods.clone(),
             struct_defs: self.struct_defs.clone(),
             struct_decorators: self.struct_decorators.clone(),
+            route_configs: self.route_configs.clone(),
             inference_backend: self.inference_backend.clone(),
             token_count: 0,
             max_retries: self.max_retries,
@@ -333,6 +343,7 @@ pub async fn run_incremental(program: CompiledProgram, state: &mut VmState) -> R
 async fn run_with_state(program: CompiledProgram, state: &mut VmState) -> Result<()> {
     // Merge compile-time metadata into the shared state.
     for (k, v) in program.struct_defs {
+        state.globals.entry(k.clone()).or_insert_with(|| VmValue::TypeRef(k.clone()));
         state.struct_defs.insert(k, v);
     }
     for (k, v) in program.struct_decorators {
@@ -340,6 +351,9 @@ async fn run_with_state(program: CompiledProgram, state: &mut VmState) -> Result
     }
     for (type_name, methods) in program.extend_methods {
         state.extend_methods.entry(type_name).or_default().extend(methods);
+    }
+    for (k, v) in program.route_configs {
+        state.route_configs.insert(k, v);
     }
 
     let mut slots: Vec<VmValue> = vec![VmValue::Nil; program.top_n_slots as usize];
@@ -798,11 +812,13 @@ async fn execute_chunk(
                     type_name: type_name.clone(),
                     fields,
                 })));
-                // Call struct decorators: each receives the instance and returns the (possibly wrapped) value.
+                // Call struct decorators: dec(instance, arg1, ...) for each @dec.
                 let decs = state.struct_decorators.get(type_name).cloned().unwrap_or_default();
-                for dec_name in decs {
+                for (dec_name, dec_args) in decs {
                     if let Some(dec_fn) = state.globals.get(&dec_name).cloned() {
-                        result = call_value(dec_fn, vec![result], state, span).await?;
+                        let mut call_args = vec![result];
+                        call_args.extend(dec_args);
+                        result = call_value(dec_fn, call_args, state, span).await?;
                     }
                 }
                 set(slots, *dest, result);
@@ -1048,6 +1064,7 @@ fn patch_builtin_span(mut e: JadeError, call_span: Span) -> JadeError {
     e
 }
 
+#[async_recursion::async_recursion]
 async fn call_value(
     callee: VmValue,
     args: Vec<VmValue>,
@@ -1131,7 +1148,60 @@ async fn call_value(
                     }
                 }
             }
+            NativeFnId::Route => {
+                if args.is_empty() || args.len() > 2 {
+                    return Err(JadeError::ArityMismatch { expected: 2, got: args.len(), span });
+                }
+                let mut iter = args.into_iter();
+                let obj = iter.next().unwrap();
+                // If `on` is omitted, try route_configs for this struct's type.
+                let on = iter.next().unwrap_or_else(|| {
+                    if let VmValue::Struct(ref s) = obj {
+                        let type_name = s.lock().type_name.clone();
+                        if let Some(field_name) = state.route_configs.get(&type_name) {
+                            let fields = s.lock();
+                            return fields.fields.get(field_name)
+                                .cloned()
+                                .unwrap_or(VmValue::Nil);
+                        }
+                    }
+                    VmValue::Nil
+                });
+                match on {
+                    VmValue::Nil => Ok(obj),
+                    VmValue::Str(method_name) => {
+                        // Prefer the struct's own extend methods; fall back to globals.
+                        let fn_val = if let VmValue::Struct(ref s) = obj {
+                            let type_name = s.lock().type_name.clone();
+                            state.extend_methods
+                                .get(&type_name)
+                                .and_then(|m| m.get(&method_name))
+                                .map(|cf| VmValue::Fn(Arc::clone(cf)))
+                                .or_else(|| state.globals.get(&method_name).cloned())
+                        } else {
+                            state.globals.get(&method_name).cloned()
+                        };
+                        match fn_val {
+                            Some(f) => call_value(f, vec![obj], state, span).await,
+                            None => Err(JadeError::Exception {
+                                message: format!("route(): no method or function named {:?}", method_name),
+                                span,
+                            }),
+                        }
+                    }
+                    other => Err(JadeError::TypeError {
+                        op: format!("route(): expected string method name, got {}", value_to_display(&other)),
+                        span,
+                    }),
+                }
+            }
         },
+        VmValue::TypeRef(type_name) => {
+            if args.len() != 1 {
+                return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span });
+            }
+            vm_type_call(type_name, args.into_iter().next().unwrap(), state, span)
+        }
         _ => Err(JadeError::NotCallable { span }),
     }
 }
@@ -1160,7 +1230,21 @@ async fn call_fn(
     span: Span,
 ) -> Result<VmValue> {
     // For bound methods `self` has already been prepended to `args`.
-    if args.len() != cf.params.len() {
+    // Fill trailing defaults for any omitted optional parameters.
+    let mut args = args;
+    if args.len() < cf.params.len() {
+        let missing_start = args.len();
+        for i in missing_start..cf.params.len() {
+            match cf.defaults.get(i).and_then(|d| d.as_ref()) {
+                Some(default) => args.push(default.clone()),
+                None => return Err(JadeError::ArityMismatch {
+                    expected: cf.params.len(),
+                    got: missing_start,
+                    span,
+                }),
+            }
+        }
+    } else if args.len() > cf.params.len() {
         return Err(JadeError::ArityMismatch {
             expected: cf.params.len(),
             got: args.len(),
@@ -1284,9 +1368,11 @@ async fn apply_struct_decorators(
     span: Span,
 ) -> Result<VmValue> {
     let decs = state.struct_decorators.get(type_name).cloned().unwrap_or_default();
-    for dec_name in decs {
+    for (dec_name, dec_args) in decs {
         if let Some(dec_fn) = state.globals.get(&dec_name).cloned() {
-            v = call_value(dec_fn, vec![v], state, span).await?;
+            let mut call_args = vec![v];
+            call_args.extend(dec_args);
+            v = call_value(dec_fn, call_args, state, span).await?;
         }
     }
     Ok(v)
@@ -1626,6 +1712,96 @@ async fn vm_maybe_drain(v: VmValue, state: &mut VmState, span: Span) -> Result<V
     match v {
         VmValue::TokenStream(ts) => vm_drain_token_stream(ts, state, span).await,
         other => Ok(other),
+    }
+}
+
+/// Runtime implementation of callable type constructors: `int(x)`, `str(x)`, `City(dict)`, etc.
+fn vm_type_call(
+    type_name: String,
+    arg: VmValue,
+    state: &VmState,
+    span: Span,
+) -> Result<VmValue> {
+    let err = |msg: String| Err(JadeError::Exception { message: msg, span });
+    match type_name.as_str() {
+        "int" => match arg {
+            VmValue::Int(i)   => Ok(VmValue::Int(i)),
+            VmValue::Float(f) => Ok(VmValue::Int(f as i64)),
+            VmValue::Bool(b)  => Ok(VmValue::Int(if b { 1 } else { 0 })),
+            VmValue::Str(s)   => s.trim().parse::<i64>()
+                .map(VmValue::Int)
+                .map_err(|_| JadeError::Exception {
+                    message: format!("int(): cannot convert {:?} to int", s),
+                    span,
+                }),
+            other => err(format!("int(): cannot convert {} to int", value_to_display(&other))),
+        },
+        "float" => match arg {
+            VmValue::Float(f) => Ok(VmValue::Float(f)),
+            VmValue::Int(i)   => Ok(VmValue::Float(i as f64)),
+            VmValue::Bool(b)  => Ok(VmValue::Float(if b { 1.0 } else { 0.0 })),
+            VmValue::Str(s)   => s.trim().parse::<f64>()
+                .map(VmValue::Float)
+                .map_err(|_| JadeError::Exception {
+                    message: format!("float(): cannot convert {:?} to float", s),
+                    span,
+                }),
+            other => err(format!("float(): cannot convert {} to float", value_to_display(&other))),
+        },
+        "bool" => match arg {
+            VmValue::Bool(b)  => Ok(VmValue::Bool(b)),
+            VmValue::Int(i)   => Ok(VmValue::Bool(i != 0)),
+            VmValue::Float(f) => Ok(VmValue::Bool(f != 0.0)),
+            VmValue::Nil      => Ok(VmValue::Bool(false)),
+            VmValue::Str(s)   => match s.to_lowercase().as_str() {
+                "true"  => Ok(VmValue::Bool(true)),
+                "false" => Ok(VmValue::Bool(false)),
+                ""      => Ok(VmValue::Bool(false)),
+                _       => Ok(VmValue::Bool(true)),
+            },
+            other => Ok(VmValue::Bool(!matches!(other, VmValue::Nil))),
+        },
+        "str" => Ok(VmValue::Str(value_to_display(&arg))),
+        "func" => match arg {
+            VmValue::Str(name) => state.globals.get(&name).cloned().ok_or_else(|| {
+                JadeError::Exception {
+                    message: format!("func(): no function named {:?}", name),
+                    span,
+                }
+            }),
+            other if matches!(
+                other,
+                VmValue::Fn(_) | VmValue::Closure(_, _) | VmValue::BoundMethod(_) | VmValue::BuiltinFn(_)
+            ) => Ok(other),
+            other => err(format!("func(): expected a string or function, got {}", value_to_display(&other))),
+        },
+        name => {
+            if let Some(def) = state.struct_defs.get(name) {
+                match arg {
+                    VmValue::Dict(map) => {
+                        let mut fields = HashMap::new();
+                        for field_def in def {
+                            let fname = field_def.name();
+                            if let Some(v) = map.get(fname) {
+                                fields.insert(fname.to_string(), v.clone());
+                            } else {
+                                fields.insert(fname.to_string(), VmValue::Nil);
+                            }
+                        }
+                        Ok(VmValue::Struct(Arc::new(Mutex::new(VmStruct {
+                            type_name: name.to_string(),
+                            fields,
+                        }))))
+                    }
+                    VmValue::Struct(s) if s.lock().type_name == name => Ok(VmValue::Struct(s)),
+                    other => err(format!(
+                        "{}(): cannot construct from {}", name, value_to_display(&other)
+                    )),
+                }
+            } else {
+                err(format!("{}(): unknown type", name))
+            }
+        }
     }
 }
 
@@ -3692,5 +3868,345 @@ mod tests {
     fn test_fs_write_arity_error() {
         let err = try_run_src("use \"std/fs\"\nfs.write(\"path\")").err().expect("expected error");
         assert!(matches!(err, JadeError::ArityMismatch { expected: 2, .. }));
+    }
+
+    // ── type constructors ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_type_int_from_str() {
+        let s = run_src("let v = int(\"42\")").unwrap();
+        assert_eq!(get_int(&s, "v"), 42);
+    }
+
+    #[test]
+    fn test_type_int_from_str_whitespace() {
+        let s = run_src("let v = int(\"  7  \")").unwrap();
+        assert_eq!(get_int(&s, "v"), 7);
+    }
+
+    #[test]
+    fn test_type_int_from_float_truncates() {
+        let s = run_src("let v = int(3.9)").unwrap();
+        assert_eq!(get_int(&s, "v"), 3);
+    }
+
+    #[test]
+    fn test_type_int_from_bool_true() {
+        let s = run_src("let v = int(true)").unwrap();
+        assert_eq!(get_int(&s, "v"), 1);
+    }
+
+    #[test]
+    fn test_type_int_from_bool_false() {
+        let s = run_src("let v = int(false)").unwrap();
+        assert_eq!(get_int(&s, "v"), 0);
+    }
+
+    #[test]
+    fn test_type_int_from_int_identity() {
+        let s = run_src("let v = int(99)").unwrap();
+        assert_eq!(get_int(&s, "v"), 99);
+    }
+
+    #[test]
+    fn test_type_int_invalid_str_errors() {
+        assert!(try_run_src("let v = int(\"abc\")").is_err());
+    }
+
+    #[test]
+    fn test_type_float_from_str() {
+        let s = run_src("let v = float(\"3.14\")").unwrap();
+        assert!((get_float(&s, "v") - 3.14).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_type_float_from_int() {
+        let s = run_src("let v = float(5)").unwrap();
+        assert!((get_float(&s, "v") - 5.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_type_float_from_bool() {
+        let s = run_src("let v = float(true)").unwrap();
+        assert!((get_float(&s, "v") - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_type_float_identity() {
+        let s = run_src("let v = float(2.5)").unwrap();
+        assert!((get_float(&s, "v") - 2.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_type_bool_from_zero_is_false() {
+        let s = run_src("let v = bool(0)").unwrap();
+        assert!(!get_bool(&s, "v"));
+    }
+
+    #[test]
+    fn test_type_bool_from_nonzero_is_true() {
+        let s = run_src("let v = bool(42)").unwrap();
+        assert!(get_bool(&s, "v"));
+    }
+
+    #[test]
+    fn test_type_bool_from_nil_is_false() {
+        let s = run_src("let v = bool(nil)").unwrap();
+        assert!(!get_bool(&s, "v"));
+    }
+
+    #[test]
+    fn test_type_bool_from_str_true() {
+        let s = run_src("let v = bool(\"true\")").unwrap();
+        assert!(get_bool(&s, "v"));
+    }
+
+    #[test]
+    fn test_type_bool_from_str_false() {
+        let s = run_src("let v = bool(\"false\")").unwrap();
+        assert!(!get_bool(&s, "v"));
+    }
+
+    #[test]
+    fn test_type_bool_from_empty_str_is_false() {
+        let s = run_src("let v = bool(\"\")").unwrap();
+        assert!(!get_bool(&s, "v"));
+    }
+
+    #[test]
+    fn test_type_bool_from_nonempty_str_is_true() {
+        let s = run_src("let v = bool(\"anything\")").unwrap();
+        assert!(get_bool(&s, "v"));
+    }
+
+    #[test]
+    fn test_type_str_from_int() {
+        let s = run_src("let v = str(42)").unwrap();
+        assert_eq!(get_str(&s, "v"), "42");
+    }
+
+    #[test]
+    fn test_type_str_from_bool() {
+        let s = run_src("let v = str(true)").unwrap();
+        assert_eq!(get_str(&s, "v"), "true");
+    }
+
+    #[test]
+    fn test_type_str_from_float() {
+        let s = run_src("let v = str(3.14)").unwrap();
+        assert_eq!(get_str(&s, "v"), "3.14");
+    }
+
+    #[test]
+    fn test_type_int_wrong_arity_errors() {
+        assert!(try_run_src("let v = int(1, 2)").is_err());
+    }
+
+    #[test]
+    fn test_type_struct_from_dict() {
+        let src = "struct City {\n  name,\n  country,\n}\nlet d = {\"name\": \"Paris\", \"country\": \"France\"}\nlet c = City(d)\nlet n = c.name";
+        let s = run_src(src).unwrap();
+        assert_eq!(get_str(&s, "n"), "Paris");
+    }
+
+    #[test]
+    fn test_type_struct_from_same_type_is_identity() {
+        let src = "struct Point {\n  x,\n  y,\n}\nlet p = Point { x: 3, y: 4 }\nlet q = Point(p)\nlet v = q.x";
+        let s = run_src(src).unwrap();
+        assert_eq!(get_int(&s, "v"), 3);
+    }
+
+    #[test]
+    fn test_type_struct_from_incompatible_errors() {
+        assert!(try_run_src("struct S {\n  x,\n}\nlet v = S(42)").is_err());
+    }
+
+    // ── func() ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_func_lookup_and_call() {
+        let src = "fn double(x) {\n  return x * 2\n}\nlet f = func(\"double\")\nlet v = f(5)";
+        let s = run_src(src).unwrap();
+        assert_eq!(get_int(&s, "v"), 10);
+    }
+
+    #[test]
+    fn test_func_lookup_nonexistent_errors() {
+        assert!(try_run_src("let f = func(\"no_such_fn\")").is_err());
+    }
+
+    #[test]
+    fn test_func_passthrough_existing_fn_value() {
+        let src = "fn greet() {\n  return 1\n}\nlet f = func(greet)\nlet v = f()";
+        let s = run_src(src).unwrap();
+        assert_eq!(get_int(&s, "v"), 1);
+    }
+
+    #[test]
+    fn test_func_non_string_non_fn_errors() {
+        assert!(try_run_src("let f = func(42)").is_err());
+    }
+
+    // ── default parameter values ──────────────────────────────────────────────
+
+    #[test]
+    fn test_default_param_used_when_omitted() {
+        let src = "fn add(a, b = 10) {\n  return a + b\n}\nlet v = add(5)";
+        let s = run_src(src).unwrap();
+        assert_eq!(get_int(&s, "v"), 15);
+    }
+
+    #[test]
+    fn test_default_param_overridden_by_caller() {
+        let src = "fn add(a, b = 10) {\n  return a + b\n}\nlet v = add(5, 3)";
+        let s = run_src(src).unwrap();
+        assert_eq!(get_int(&s, "v"), 8);
+    }
+
+    #[test]
+    fn test_default_param_multiple_defaults() {
+        let src = "fn f(a = 1, b = 2, c = 3) {\n  return a + b + c\n}\nlet v = f()";
+        let s = run_src(src).unwrap();
+        assert_eq!(get_int(&s, "v"), 6);
+    }
+
+    #[test]
+    fn test_default_param_partial_override() {
+        let src = "fn f(a = 1, b = 2, c = 3) {\n  return a + b + c\n}\nlet v = f(10, 20)";
+        let s = run_src(src).unwrap();
+        assert_eq!(get_int(&s, "v"), 33);
+    }
+
+    #[test]
+    fn test_default_param_nil() {
+        let src = "fn f(x, on = nil) {\n  return on\n}\nlet v = f(1)";
+        let s = run_src(src).unwrap();
+        assert!(matches!(s.globals.get("v").unwrap(), VmValue::Nil));
+    }
+
+    #[test]
+    fn test_default_param_str() {
+        let src = "fn f(x, label = \"default\") {\n  return label\n}\nlet v = f(0)";
+        let s = run_src(src).unwrap();
+        assert_eq!(get_str(&s, "v"), "default");
+    }
+
+    #[test]
+    fn test_default_param_bool() {
+        let src = "fn f(x, flag = false) {\n  return flag\n}\nlet v = f(1)";
+        let s = run_src(src).unwrap();
+        assert!(!get_bool(&s, "v"));
+    }
+
+    // ── decorator with args ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_decorator_no_args_passthrough() {
+        let src = "fn identity(f) {\n  return f\n}\n@identity\nfn greet() {\n  return 42\n}\nlet v = greet()";
+        let s = run_src(src).unwrap();
+        assert_eq!(get_int(&s, "v"), 42);
+    }
+
+    #[test]
+    fn test_decorator_positional_arg() {
+        // Decorator receives (fn, label) and returns the fn unchanged.
+        let src = "fn tag(f, label) {\n  return f\n}\n@tag(\"hello\")\nfn greet() {\n  return 99\n}\nlet v = greet()";
+        let s = run_src(src).unwrap();
+        assert_eq!(get_int(&s, "v"), 99);
+    }
+
+    #[test]
+    fn test_decorator_wraps_function() {
+        // Decorator stores a tag on the function's return value by recording a global.
+        // (Closure capture of fn-local params is not yet supported in the emitter.)
+        let src = "let calls = 0\nfn count(f) {\n  calls = calls + 1\n  return f\n}\n@count\nfn work() {\n  return 7\n}\nlet v = work()";
+        let s = run_src(src).unwrap();
+        assert_eq!(get_int(&s, "v"), 7);
+        assert_eq!(get_int(&s, "calls"), 1);
+    }
+
+    #[test]
+    fn test_decorator_with_kwarg() {
+        // @tag(label = "x") — keyword arg is passed positionally to tag(f, label).
+        let src = "fn tag(f, label) {\n  return f\n}\n@tag(label = \"x\")\nfn greet() {\n  return 7\n}\nlet v = greet()";
+        let s = run_src(src).unwrap();
+        assert_eq!(get_int(&s, "v"), 7);
+    }
+
+    #[test]
+    fn test_multiple_decorators_applied_in_order() {
+        // Two passthrough decorators — fn survives both.
+        let src = "fn p(f) {\n  return f\n}\n@p\n@p\nfn val() {\n  return 3\n}\nlet v = val()";
+        let s = run_src(src).unwrap();
+        assert_eq!(get_int(&s, "v"), 3);
+    }
+
+    // ── route() builtin ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_route_explicit_method_name_extend_method() {
+        let src = "struct Animal {\n  sound,\n}\nextend Animal {\n  fn bark(self) {\n    return \"woof\"\n  }\n  fn meow(self) {\n    return \"purr\"\n  }\n}\nlet a = Animal { sound: \"bark\" }\nlet v = route(a, \"bark\")";
+        let s = run_src(src).unwrap();
+        assert_eq!(get_str(&s, "v"), "woof");
+    }
+
+    #[test]
+    fn test_route_explicit_method_falls_back_to_global() {
+        let src = "struct Thing {}\nfn handle(t) {\n  return 100\n}\nlet t = Thing {}\nlet v = route(t, \"handle\")";
+        let s = run_src(src).unwrap();
+        assert_eq!(get_int(&s, "v"), 100);
+    }
+
+    #[test]
+    fn test_route_unknown_method_errors() {
+        let src = "struct S {}\nlet s = S {}\nlet v = route(s, \"nope\")";
+        assert!(try_run_src(src).is_err());
+    }
+
+    #[test]
+    fn test_route_nil_on_returns_obj() {
+        // route(obj, nil) returns obj unchanged.
+        let src = "struct S {\n  x,\n}\nlet s = S { x: 5 }\nlet r = route(s, nil)\nlet v = r.x";
+        let s = run_src(src).unwrap();
+        assert_eq!(get_int(&s, "v"), 5);
+    }
+
+    #[test]
+    fn test_route_non_string_on_errors() {
+        let src = "struct S {}\nlet s = S {}\nlet v = route(s, 42)";
+        assert!(try_run_src(src).is_err());
+    }
+
+    // ── @route decorator on extend ────────────────────────────────────────────
+
+    #[test]
+    fn test_route_decorator_positional_field() {
+        let src = "struct Cmd {\n  action,\n}\n@route(\"action\")\nextend Cmd {\n  fn run(self) {\n    return \"running\"\n  }\n  fn stop(self) {\n    return \"stopped\"\n  }\n}\nlet c = Cmd { action: \"run\" }\nlet v = route(c)";
+        let s = run_src(src).unwrap();
+        assert_eq!(get_str(&s, "v"), "running");
+    }
+
+    #[test]
+    fn test_route_decorator_kwarg_on() {
+        // @route(on = "action") is equivalent to @route("action").
+        let src = "struct Cmd {\n  action,\n}\n@route(on = \"action\")\nextend Cmd {\n  fn run(self) {\n    return \"running\"\n  }\n}\nlet c = Cmd { action: \"run\" }\nlet v = route(c)";
+        let s = run_src(src).unwrap();
+        assert_eq!(get_str(&s, "v"), "running");
+    }
+
+    #[test]
+    fn test_route_decorator_dispatches_different_methods() {
+        let src = "struct Op {\n  kind,\n}\n@route(\"kind\")\nextend Op {\n  fn add(self) {\n    return 1\n  }\n  fn sub(self) {\n    return 2\n  }\n}\nlet a = Op { kind: \"add\" }\nlet b = Op { kind: \"sub\" }\nlet va = route(a)\nlet vb = route(b)";
+        let s = run_src(src).unwrap();
+        assert_eq!(get_int(&s, "va"), 1);
+        assert_eq!(get_int(&s, "vb"), 2);
+    }
+
+    #[test]
+    fn test_route_no_config_and_no_on_returns_obj() {
+        // route(obj) with no registered config returns obj unchanged (on = nil path).
+        let src = "struct S {\n  x,\n}\nlet s = S { x: 7 }\nlet r = route(s)\nlet v = r.x";
+        let s = run_src(src).unwrap();
+        assert_eq!(get_int(&s, "v"), 7);
     }
 }

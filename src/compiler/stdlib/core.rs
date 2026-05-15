@@ -111,6 +111,20 @@ pub fn register_types(ctx: &mut TypeContext) {
         params: vec![JadeType::Unknown],
         ret: Box::new(JadeType::Str),
     });
+    ctx.define("route".to_string(), JadeType::Fn {
+        params: vec![JadeType::Unknown, JadeType::Unknown],
+        ret: Box::new(JadeType::Unknown),
+    });
+    // Primitive type constructors
+    for name in &["int", "float", "bool", "str", "func"] {
+        ctx.define(name.to_string(), JadeType::Fn {
+            params: vec![JadeType::Unknown],
+            ret: Box::new(JadeType::Unknown),
+        });
+    }
+    // nil / None literals — both spellings are valid
+    ctx.define("nil".to_string(),  JadeType::Nil);
+    ctx.define("None".to_string(), JadeType::Nil);
     // LLM session globals
     ctx.define("__tokens__".to_string(), JadeType::Int);
     ctx.define("__model__".to_string(), JadeType::Str);

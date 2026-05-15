@@ -157,8 +157,14 @@ fn pre_pass(stmts: &[Stmt], ctx: &mut TypeContext) {
                     ret: Box::new(JadeType::Unknown),
                 });
             }
+
             Stmt::StructDef { name, fields, .. } => {
                 ctx.struct_defs.insert(name.clone(), fields.clone());
+                // Struct names are callable constructors: `City(dict)`.
+                ctx.define(name.clone(), JadeType::Fn {
+                    params: vec![JadeType::Unknown],
+                    ret: Box::new(JadeType::Struct(name.clone())),
+                });
             }
             Stmt::InterfaceDef { name, methods, .. } => {
                 let method_names = methods.iter().map(|m| m.name.clone()).collect();
@@ -208,33 +214,40 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
 
         Stmt::FnDef { name, params, body, decorators, span } => {
             ctx.push_scope();
-            for param in params {
-                ctx.define(param.clone(), JadeType::Unknown);
+            for (pname, _) in params {
+                ctx.define(pname.clone(), JadeType::Unknown);
             }
             let tbody = check_stmts(body, ctx)?;
             ctx.pop_scope();
 
             let ret_ty = infer_return_type(&tbody);
-            // Update fn entry with the now-resolved return type.
             ctx.define(name.clone(), JadeType::Fn {
                 params: vec![JadeType::Unknown; params.len()],
                 ret: Box::new(ret_ty.clone()),
             });
 
+            let tparams = params.iter()
+                .map(|(pname, default)| {
+                    let tdefault = default.as_ref().map(|e| infer_expr(e, ctx)).transpose()?;
+                    Ok((pname.clone(), tdefault))
+                })
+                .collect::<Result<Vec<_>>>()?;
+
+            let tdecorators = infer_decorators(decorators, ctx)?;
             Ok(TStmt::FnDef {
                 name: name.clone(),
-                params: params.clone(),
+                params: tparams,
                 body: tbody,
                 ret_ty,
-                decorators: decorators.clone(),
+                decorators: tdecorators,
                 span: *span,
             })
         }
 
         Stmt::AsyncFnDef { name, params, body, decorators, span } => {
             ctx.push_scope();
-            for param in params {
-                ctx.define(param.clone(), JadeType::Unknown);
+            for (pname, _) in params {
+                ctx.define(pname.clone(), JadeType::Unknown);
             }
             let tbody = check_stmts(body, ctx)?;
             ctx.pop_scope();
@@ -245,12 +258,20 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
                 ret: Box::new(ret_ty.clone()),
             });
 
+            let tparams = params.iter()
+                .map(|(pname, default)| {
+                    let tdefault = default.as_ref().map(|e| infer_expr(e, ctx)).transpose()?;
+                    Ok((pname.clone(), tdefault))
+                })
+                .collect::<Result<Vec<_>>>()?;
+
+            let tdecorators = infer_decorators(decorators, ctx)?;
             Ok(TStmt::AsyncFnDef {
                 name: name.clone(),
-                params: params.clone(),
+                params: tparams,
                 body: tbody,
                 ret_ty,
-                decorators: decorators.clone(),
+                decorators: tdecorators,
                 span: *span,
             })
         }
@@ -314,15 +335,15 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
         // ── Type definitions ──────────────────────────────────────────────────
 
         Stmt::StructDef { name, fields, decorators, span } => {
-            // Already registered in pre_pass; re-emit verbatim.
-            Ok(TStmt::StructDef { name: name.clone(), fields: fields.clone(), decorators: decorators.clone(), span: *span })
+            let tdecorators = infer_decorators(decorators, ctx)?;
+            Ok(TStmt::StructDef { name: name.clone(), fields: fields.clone(), decorators: tdecorators, span: *span })
         }
 
         Stmt::InterfaceDef { name, methods, span } => {
             Ok(TStmt::InterfaceDef { name: name.clone(), methods: methods.clone(), span: *span })
         }
 
-        Stmt::ExtendBlock { type_name, interface_name, methods, span } => {
+        Stmt::ExtendBlock { type_name, interface_name, methods, decorators, span } => {
             // Verify interface compliance if an interface is named.
             if let Some(iface_name) = interface_name {
                 let required = ctx.interface_defs.get(iface_name).cloned();
@@ -354,10 +375,12 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
             // field accesses on self return Unknown (conservative for Stage B).
             let tmethods = check_stmts(methods, ctx)?;
 
+            let tdecorators = infer_decorators(decorators, ctx)?;
             Ok(TStmt::ExtendBlock {
                 type_name: type_name.clone(),
                 interface_name: interface_name.clone(),
                 methods: tmethods,
+                decorators: tdecorators,
                 span: *span,
             })
         }
@@ -487,6 +510,10 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
         // ── Variables ─────────────────────────────────────────────────────────
 
         Expr::Identifier { name, span } => {
+            // `nil` and `None` are built-in literal values; don't require a prior definition.
+            if name == "nil" || name == "None" {
+                return Ok(TExpr { kind: TExprKind::Identifier(name.clone()), ty: JadeType::Nil, span: *span });
+            }
             let ty = match ctx.get(name) {
                 Some(t) => t,
                 None if ctx.has_imports => JadeType::Unknown,
@@ -937,6 +964,21 @@ fn infer_unaryop(op: &UnaryOpKind, ty: &JadeType, span: Span) -> Result<JadeType
 
 // ── Return type inference ─────────────────────────────────────────────────────
 
+/// Infer types for decorator argument lists, preserving `(name, args)` pairs.
+fn infer_decorators(
+    decorators: &[(String, Vec<(Option<String>, crate::frontend::ast::Expr)>)],
+    ctx: &mut TypeContext,
+) -> Result<Vec<(String, Vec<(Option<String>, TExpr)>)>> {
+    decorators.iter()
+        .map(|(name, args)| {
+            let targs = args.iter()
+                .map(|(kw, a)| Ok((kw.clone(), infer_expr(a, ctx)?)))
+                .collect::<Result<Vec<_>>>()?;
+            Ok((name.clone(), targs))
+        })
+        .collect()
+}
+
 /// Scan `stmts` for `Return` nodes to infer the function's return type.
 /// Does not recurse into nested `FnDef` bodies (those are separate functions).
 fn infer_return_type(stmts: &[TStmt]) -> JadeType {
@@ -1259,6 +1301,21 @@ mod tests {
         let tp = infer_ok(r#"let x = "hello""#);
         let TStmt::Let { value, .. } = &tp.stmts[0] else { panic!() };
         assert_eq!(value.ty, JadeType::Str);
+    }
+
+    #[test]
+    fn test_infer_nil_literal() {
+        let tp = infer_ok("let x = nil");
+        let TStmt::Let { value, .. } = &tp.stmts[0] else { panic!() };
+        assert_eq!(value.ty, JadeType::Nil);
+    }
+
+    #[test]
+    fn test_infer_bool_nil() {
+        // bool(nil) must pass type inference with nil recognized as JadeType::Nil
+        let tp = infer_ok("let x = bool(nil)");
+        let TStmt::Let { value, .. } = &tp.stmts[0] else { panic!() };
+        assert_eq!(value.ty, JadeType::Unknown); // bool() returns Unknown
     }
 
     // ── Arithmetic ────────────────────────────────────────────────────────────

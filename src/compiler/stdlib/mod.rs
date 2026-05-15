@@ -157,6 +157,11 @@ pub fn seed_globals(globals: &mut HashMap<String, VmValue>) {
     // so they dispatch through NativeFnId rather than the pure BuiltinFn path.
     globals.insert("print".to_string(),  VmValue::NativeFn(NativeFnId::Print));
     globals.insert("stream".to_string(), VmValue::NativeFn(NativeFnId::Stream));
+    globals.insert("route".to_string(),  VmValue::NativeFn(NativeFnId::Route));
+    // Primitive type constructors: callable with one arg like Python's int(), str(), etc.
+    for name in &["int", "float", "bool", "str", "func"] {
+        globals.insert(name.to_string(), VmValue::TypeRef(name.to_string()));
+    }
 }
 
 /// Register type signatures for all core built-ins into the type checker.

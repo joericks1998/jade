@@ -141,10 +141,11 @@ pub enum TStmt {
     },
     FnDef {
         name: String,
-        params: Vec<String>,
+        /// `(param_name, default_expr)` — required params have `None`.
+        params: Vec<(String, Option<TExpr>)>,
         body: Vec<TStmt>,
         ret_ty: JadeType,
-        decorators: Vec<String>,
+        decorators: Vec<(String, Vec<(Option<String>, TExpr)>)>,
         span: Span,
     },
     Return {
@@ -171,7 +172,7 @@ pub enum TStmt {
     StructDef {
         name: String,
         fields: Vec<StructFieldDef>,
-        decorators: Vec<String>,
+        decorators: Vec<(String, Vec<(Option<String>, TExpr)>)>,
         span: Span,
     },
     InterfaceDef {
@@ -183,6 +184,7 @@ pub enum TStmt {
         type_name: String,
         interface_name: Option<String>,
         methods: Vec<TStmt>,
+        decorators: Vec<(String, Vec<(Option<String>, TExpr)>)>,
         span: Span,
     },
     FieldAssign {
@@ -221,10 +223,11 @@ pub enum TStmt {
     /// `async fn name(params) { body }`
     AsyncFnDef {
         name: String,
-        params: Vec<String>,
+        /// `(param_name, default_expr)` — required params have `None`.
+        params: Vec<(String, Option<TExpr>)>,
         body: Vec<TStmt>,
         ret_ty: JadeType,
-        decorators: Vec<String>,
+        decorators: Vec<(String, Vec<(Option<String>, TExpr)>)>,
         span: Span,
     },
     Expr(TExpr),

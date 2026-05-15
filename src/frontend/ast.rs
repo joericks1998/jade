@@ -74,12 +74,14 @@ pub enum Stmt {
         span: Span,
     },
 
-    /// `fn name(param, ...) { body }`
+    /// `fn name(param, param = default, ...) { body }`
     FnDef {
         name: String,
-        params: Vec<String>,
+        /// Each entry is `(param_name, default_expr)`. Required params have `None`.
+        params: Vec<(String, Option<Expr>)>,
         body: Vec<Stmt>,
-        decorators: Vec<String>,
+        /// Each entry is `(decorator_name, positional_args)`.
+        decorators: Vec<(String, Vec<(Option<String>, Expr)>)>,
         #[allow(dead_code)] // reserved for future error reporting
         span: Span,
     },
@@ -126,7 +128,8 @@ pub enum Stmt {
     StructDef {
         name: String,
         fields: Vec<StructFieldDef>,
-        decorators: Vec<String>,
+        /// Each entry is `(decorator_name, positional_args)`.
+        decorators: Vec<(String, Vec<(Option<String>, Expr)>)>,
         #[allow(dead_code)]
         span: Span,
     },
@@ -146,6 +149,7 @@ pub enum Stmt {
         /// The interface this extend block claims to implement, if any.
         interface_name: Option<String>,
         methods: Vec<Stmt>,
+        decorators: Vec<(String, Vec<(Option<String>, Expr)>)>,
         #[allow(dead_code)]
         span: Span,
     },
@@ -194,12 +198,14 @@ pub enum Stmt {
         span: Span,
     },
 
-    /// `async fn name(param, ...) { body }`
+    /// `async fn name(param, param = default, ...) { body }`
     AsyncFnDef {
         name: String,
-        params: Vec<String>,
+        /// Each entry is `(param_name, default_expr)`. Required params have `None`.
+        params: Vec<(String, Option<Expr>)>,
         body: Vec<Stmt>,
-        decorators: Vec<String>,
+        /// Each entry is `(decorator_name, positional_args)`.
+        decorators: Vec<(String, Vec<(Option<String>, Expr)>)>,
         span: Span,
     },
 

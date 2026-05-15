@@ -23,11 +23,13 @@ pub struct CompiledProgram {
     /// field-access method fallback).
     pub struct_defs: HashMap<String, Vec<StructFieldDef>>,
     /// Decorator function names registered on each struct type.
-    pub struct_decorators: HashMap<String, Vec<String>>,
+    pub struct_decorators: HashMap<String, Vec<(String, Vec<crate::compiler::vm::VmValue>)>>,
     /// Compiled extend-block methods: `type_name → method_name → CompiledFn`.
     pub extend_methods: HashMap<String, HashMap<String, Arc<CompiledFn>>>,
     /// Interface definitions (method names required per interface).
     pub interface_defs: HashMap<String, Vec<String>>,
+    /// `@route("field")` on extend blocks: type_name → field_name to read for routing.
+    pub route_configs: HashMap<String, String>,
 }
 
 // ── Internal state ────────────────────────────────────────────────────────────
@@ -35,9 +37,10 @@ pub struct CompiledProgram {
 /// Shared context threaded through the whole compilation.
 struct EmitCtx {
     struct_defs: HashMap<String, Vec<StructFieldDef>>,
-    struct_decorators: HashMap<String, Vec<String>>,
+    struct_decorators: HashMap<String, Vec<(String, Vec<crate::compiler::vm::VmValue>)>>,
     interface_defs: HashMap<String, Vec<String>>,
     extend_methods: HashMap<String, HashMap<String, Arc<CompiledFn>>>,
+    route_configs: HashMap<String, String>,
     /// Counter for generating unique closure names (`__closure_0__`, etc.).
     next_closure_id: usize,
 }
@@ -122,6 +125,28 @@ impl Emitter {
 /// `Halt` and fallback `Return(None)` instructions injected by the emitter).
 const NO_SPAN: Span = Span { line: 0, col: 0 };
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Evaluate a TExpr that must be a literal — used for struct decorator args.
+fn eval_literal_expr(
+    expr: &TExpr,
+    span: crate::frontend::error::Span,
+) -> Result<crate::compiler::vm::VmValue> {
+    use crate::compiler::tir::TExprKind;
+    use crate::compiler::vm::VmValue;
+    match &expr.kind {
+        TExprKind::Integer(n)  => Ok(VmValue::Int(*n)),
+        TExprKind::Float(f)    => Ok(VmValue::Float(*f)),
+        TExprKind::Bool(b)     => Ok(VmValue::Bool(*b)),
+        TExprKind::Str(s)      => Ok(VmValue::Str(s.clone())),
+        TExprKind::Identifier(s) if s == "None" || s == "nil" => Ok(VmValue::Nil),
+        _ => Err(crate::frontend::error::JadeError::Exception {
+            message: "struct decorator arguments must be literals (None, nil, numbers, booleans, strings)".to_string(),
+            span,
+        }),
+    }
+}
+
 // ── Public entry point ────────────────────────────────────────────────────────
 
 /// Compile a `TProgram` into bytecode ready for the VM.
@@ -132,14 +157,44 @@ pub fn emit(program: TProgram) -> Result<CompiledProgram> {
         struct_decorators: HashMap::new(),
         interface_defs: HashMap::new(),
         extend_methods: HashMap::new(),
+        route_configs: HashMap::new(),
         next_closure_id: 0,
     };
     for stmt in &program.stmts {
         match stmt {
-            TStmt::StructDef { name, fields, decorators, .. } => {
+            TStmt::ExtendBlock { type_name, decorators, .. } => {
+                for (dec_name, args) in decorators {
+                    if dec_name == "route" {
+                        // Accept `on = "field"` kwarg or the first positional arg.
+                        let field_name = args.iter()
+                            .find(|(kw, _)| kw.as_deref() == Some("on"))
+                            .or_else(|| args.first())
+                            .and_then(|(_, e)| {
+                                if let crate::compiler::tir::TExprKind::Str(s) = &e.kind {
+                                    Some(s.clone())
+                                } else {
+                                    None
+                                }
+                            });
+                        if let Some(field_name) = field_name {
+                            ctx.route_configs.insert(type_name.clone(), field_name);
+                        }
+                    }
+                }
+            }
+            TStmt::StructDef { name, fields, decorators, span } => {
                 ctx.struct_defs.insert(name.clone(), fields.clone());
                 if !decorators.is_empty() {
-                    ctx.struct_decorators.insert(name.clone(), decorators.clone());
+                    let compiled: crate::frontend::error::Result<Vec<_>> = decorators.iter()
+                        .map(|(dec_name, args)| {
+                            // Keyword names are stripped — values are passed positionally.
+                            let vals: crate::frontend::error::Result<Vec<_>> = args.iter()
+                                .map(|(_, e)| eval_literal_expr(e, *span))
+                                .collect();
+                            Ok((dec_name.clone(), vals?))
+                        })
+                        .collect();
+                    ctx.struct_decorators.insert(name.clone(), compiled?);
                 }
             }
             TStmt::InterfaceDef { name, methods, .. } => {
@@ -167,6 +222,7 @@ pub fn emit(program: TProgram) -> Result<CompiledProgram> {
         struct_decorators: ctx.struct_decorators,
         extend_methods: ctx.extend_methods,
         interface_defs: ctx.interface_defs,
+        route_configs: ctx.route_configs,
     })
 }
 
@@ -200,14 +256,20 @@ fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
                 em.chunk.emit(Instr::SetLocal(slot, dest), span);
             } else {
                 em.chunk.emit(Instr::SetGlobal(name.clone(), dest), span);
-                // Apply decorators at runtime: foo = dec(foo) for each @dec.
-                for dec_name in &decorators {
+                // Apply decorators at runtime: foo = dec(foo, arg1, ...) for each @dec.
+                for (dec_name, dec_args) in &decorators {
                     let dec_reg = em.alloc_reg();
                     em.chunk.emit(Instr::GetGlobal(dec_reg, dec_name.clone()), span);
                     let fn_reg = em.alloc_reg();
                     em.chunk.emit(Instr::GetGlobal(fn_reg, name.clone()), span);
+                    // fn is first arg; extra decorator args follow
+                    let mut call_args = vec![fn_reg];
+                    for (_, arg_expr) in dec_args {
+                        let arg_reg = emit_expr(arg_expr, em, ctx)?;
+                        call_args.push(arg_reg);
+                    }
                     let result_reg = em.alloc_reg();
-                    em.chunk.emit(Instr::Call(result_reg, dec_reg, vec![fn_reg]), span);
+                    em.chunk.emit(Instr::Call(result_reg, dec_reg, call_args), span);
                     em.chunk.emit(Instr::SetGlobal(name.clone(), result_reg), span);
                 }
             }
@@ -462,13 +524,18 @@ fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
                 em.chunk.emit(Instr::SetLocal(slot, dest), span);
             } else {
                 em.chunk.emit(Instr::SetGlobal(name.clone(), dest), span);
-                for dec_name in &decorators {
+                for (dec_name, dec_args) in &decorators {
                     let dec_reg = em.alloc_reg();
                     em.chunk.emit(Instr::GetGlobal(dec_reg, dec_name.clone()), span);
                     let fn_reg = em.alloc_reg();
                     em.chunk.emit(Instr::GetGlobal(fn_reg, name.clone()), span);
+                    let mut call_args = vec![fn_reg];
+                    for (_, arg_expr) in dec_args {
+                        let arg_reg = emit_expr(arg_expr, em, ctx)?;
+                        call_args.push(arg_reg);
+                    }
                     let result_reg = em.alloc_reg();
-                    em.chunk.emit(Instr::Call(result_reg, dec_reg, vec![fn_reg]), span);
+                    em.chunk.emit(Instr::Call(result_reg, dec_reg, call_args), span);
                     em.chunk.emit(Instr::SetGlobal(name.clone(), result_reg), span);
                 }
             }
@@ -485,16 +552,38 @@ fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
 
 fn emit_fn(
     name: &str,
-    params: Vec<String>,
+    params: Vec<(String, Option<TExpr>)>,
     mut body: Vec<TStmt>,
     span: Span,
     ctx: &mut EmitCtx,
 ) -> Result<CompiledFn> {
     let mut fn_em = Emitter::new_fn(name);
     // Allocate slots for parameters first (slots 0..params.len()).
-    for param in &params {
-        fn_em.define_local(param);
+    let param_names: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
+    for name in &param_names {
+        fn_em.define_local(name);
     }
+    // Compile literal defaults — non-literal defaults are unsupported for now.
+    let defaults: Vec<Option<crate::compiler::vm::VmValue>> = params.iter()
+        .map(|(_, default)| {
+            match default {
+                None => Ok(None),
+                Some(expr) => match &expr.kind {
+                    crate::compiler::tir::TExprKind::Integer(n) => Ok(Some(crate::compiler::vm::VmValue::Int(*n))),
+                    crate::compiler::tir::TExprKind::Float(f)   => Ok(Some(crate::compiler::vm::VmValue::Float(*f))),
+                    crate::compiler::tir::TExprKind::Bool(b)    => Ok(Some(crate::compiler::vm::VmValue::Bool(*b))),
+                    crate::compiler::tir::TExprKind::Str(s)     => Ok(Some(crate::compiler::vm::VmValue::Str(s.clone()))),
+                    crate::compiler::tir::TExprKind::Identifier(s) if s == "None" || s == "nil" => {
+                        Ok(Some(crate::compiler::vm::VmValue::Nil))
+                    }
+                    _ => Err(crate::frontend::error::JadeError::Exception {
+                        message: "default parameter values must be literals (None, nil, numbers, booleans, strings)".to_string(),
+                        span,
+                    }),
+                }
+            }
+        })
+        .collect::<Result<_>>()?;
 
     // If the body already ends with an explicit terminator (return or raise),
     // we must not append a second Return(None) after it — that would be dead
@@ -524,7 +613,7 @@ fn emit_fn(
     }
 
     let n_slots = fn_em.next_reg;
-    Ok(CompiledFn { params, chunk: fn_em.chunk, n_slots })
+    Ok(CompiledFn { params: param_names, defaults, chunk: fn_em.chunk, n_slots })
 }
 
 // ── Expression emission ───────────────────────────────────────────────────────
@@ -558,6 +647,12 @@ fn emit_expr(expr: &TExpr, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<Reg> {
         }
 
         TExprKind::Identifier(name) => {
+            // nil/None are built-in literals, not globals — emit directly.
+            if name == "nil" || name == "None" {
+                let dest = em.alloc_reg();
+                em.chunk.emit(Instr::LoadNil(dest), span);
+                return Ok(dest);
+            }
             // Builtin functions are handled at call sites; identifiers just load.
             Ok(em.emit_load_var(name, span))
         }
@@ -645,7 +740,8 @@ fn emit_expr(expr: &TExpr, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<Reg> {
 
         TExprKind::Closure { params, body, .. } => {
             let name = ctx.next_closure_name();
-            let compiled = emit_fn(&name, params.clone(), body.clone(), span, ctx)?;
+            let owned: Vec<(String, Option<TExpr>)> = params.iter().map(|p| (p.clone(), None)).collect();
+            let compiled = emit_fn(&name, owned, body.clone(), span, ctx)?;
             let rc = Arc::new(compiled);
             let idx = em.chunk.intern_fn(Arc::clone(&rc));
             let dest = em.alloc_reg();
