@@ -241,6 +241,23 @@ impl Parser {
                     self.parse_expr_stmt()
                 }
             }
+            // Implicit self field assignment: `.field = expr` → `self.field = expr`
+            TokenKind::Dot => {
+                let is_implicit_field_assign =
+                    self.peek_at(1).map(|t| matches!(t.kind, TokenKind::Identifier(_))).unwrap_or(false)
+                    && self.peek_at(2).map(|t| t.kind == TokenKind::Equals).unwrap_or(false);
+                if is_implicit_field_assign {
+                    let span = self.peek().span;
+                    self.advance(); // consume `.`
+                    let field = self.expect_ident("field name")?;
+                    self.expect(&TokenKind::Equals)?;
+                    let value = self.parse_pipe()?;
+                    self.consume_semicolon()?;
+                    Ok(Stmt::FieldAssign { object: "self".to_string(), field, value, span })
+                } else {
+                    self.parse_expr_stmt()
+                }
+            }
             _ => self.parse_expr_stmt(),
         }
     }
@@ -1381,6 +1398,14 @@ impl Parser {
                 let body = self.parse_or()?;
                 Ok(Expr::PromptLiteral { body: Box::new(body), span })
             }
+            // Implicit self: `.field` desugars to `self.field` inside method bodies.
+            TokenKind::Dot => {
+                let span = token.span;
+                self.advance(); // consume `.`
+                let field = self.expect_ident("field name")?;
+                let self_expr = Expr::Identifier { name: "self".to_string(), span };
+                Ok(Expr::FieldAccess { object: Box::new(self_expr), field, span })
+            }
             TokenKind::Eof => Err(JadeError::UnexpectedEof { span: token.span }),
             _ => Err(JadeError::UnexpectedToken {
                 expected: "expression".to_string(),
@@ -2189,5 +2214,29 @@ mod tests {
         let (kw, expr) = &decorators[0].1[0];
         assert_eq!(kw.as_deref(), Some("on"));
         assert!(matches!(expr, Expr::Str { value, .. } if value == "field"));
+    }
+
+    #[test]
+    fn test_parse_implicit_self_field_access() {
+        // `.name` should desugar to `self.name`
+        let p = parse_src("extend T { fn greet(self) { return .name } }");
+        let Stmt::ExtendBlock { methods, .. } = &p.stmts[0] else { panic!() };
+        let Stmt::FnDef { body, .. } = &methods[0] else { panic!() };
+        let Stmt::Return { value: Some(ret), .. } = &body[0] else { panic!() };
+        assert!(matches!(ret,
+            Expr::FieldAccess { object, field, .. }
+            if field == "name" && matches!(object.as_ref(), Expr::Identifier { name, .. } if name == "self")
+        ));
+    }
+
+    #[test]
+    fn test_parse_implicit_self_assignment() {
+        // `.count = .count + 1` desugars to FieldAssign { object: "self", field: "count", ... }
+        let p = parse_src("extend T { fn inc(self) { .count = .count + 1 } }");
+        let Stmt::ExtendBlock { methods, .. } = &p.stmts[0] else { panic!() };
+        let Stmt::FnDef { body, .. } = &methods[0] else { panic!() };
+        let Stmt::FieldAssign { object, field, .. } = &body[0] else { panic!() };
+        assert_eq!(object, "self");
+        assert_eq!(field, "count");
     }
 }

@@ -4209,4 +4209,58 @@ mod tests {
         let s = run_src(src).unwrap();
         assert_eq!(get_int(&s, "v"), 7);
     }
+
+    // ── Implicit self shorthand (.field) ──────────────────────────────────────
+
+    #[test]
+    fn test_implicit_self_read() {
+        let src = "
+struct Counter { count }
+extend Counter {
+    fn value(self) {
+        return .count
+    }
+}
+let c = Counter { count: 42 }
+let v = c.value()
+";
+        let s = run_src(src).unwrap();
+        assert_eq!(get_int(&s, "v"), 42);
+    }
+
+    #[test]
+    fn test_implicit_self_write() {
+        let src = "
+struct Counter { count }
+extend Counter {
+    fn inc(self) {
+        .count = .count + 1
+    }
+}
+let c = Counter { count: 0 }
+c.inc()
+c.inc()
+c.inc()
+let v = c.count
+";
+        let s = run_src(src).unwrap();
+        assert_eq!(get_int(&s, "v"), 3);
+    }
+
+    #[test]
+    fn test_implicit_self_mixed_with_explicit() {
+        // Can mix .field and self.field in the same method.
+        let src = "
+struct Point { x, y }
+extend Point {
+    fn sum(self) {
+        return .x + self.y
+    }
+}
+let p = Point { x: 3, y: 4 }
+let v = p.sum()
+";
+        let s = run_src(src).unwrap();
+        assert_eq!(get_int(&s, "v"), 7);
+    }
 }
