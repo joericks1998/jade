@@ -670,7 +670,7 @@ fn emit_expr(expr: &TExpr, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<Reg> {
             Ok(em.emit_load_var(name, span))
         }
 
-        TExprKind::Call { callee, args } => emit_call(callee, args, expr, em, ctx),
+        TExprKind::Call { callee, args, kwargs } => emit_call(callee, args, kwargs, expr, em, ctx),
 
         TExprKind::BinOp { op, left, right } => emit_binop(op, left, right, em, ctx, span),
 
@@ -776,6 +776,7 @@ fn emit_expr(expr: &TExpr, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<Reg> {
 fn emit_call(
     callee: &TExpr,
     args: &[TExpr],
+    kwargs: &[(String, TExpr)],
     full_expr: &TExpr,
     em: &mut Emitter,
     ctx: &mut EmitCtx,
@@ -807,8 +808,23 @@ fn emit_call(
         return Ok(dest);
     }
 
-    // General call.
     let callee_reg = emit_expr(callee, em, ctx)?;
+
+    // If there are keyword arguments, emit CallNamed with mixed positional/named pairs.
+    if !kwargs.is_empty() {
+        let mut mixed: Vec<(Option<String>, Reg)> = Vec::with_capacity(args.len() + kwargs.len());
+        for a in args {
+            mixed.push((None, emit_expr(a, em, ctx)?));
+        }
+        for (name, val) in kwargs {
+            mixed.push((Some(name.clone()), emit_expr(val, em, ctx)?));
+        }
+        let dest = em.alloc_reg();
+        em.chunk.emit(Instr::CallNamed(dest, callee_reg, mixed), span);
+        return Ok(dest);
+    }
+
+    // General positional-only call.
     let mut arg_regs = Vec::with_capacity(args.len());
     for a in args {
         arg_regs.push(emit_expr(a, em, ctx)?);

@@ -65,6 +65,9 @@ pub enum TExprKind {
     Call {
         callee: Box<TExpr>,
         args: Vec<TExpr>,
+        /// Keyword arguments resolved to typed expressions.
+        #[serde(default)]
+        kwargs: Vec<(String, TExpr)>,
     },
     BinOp {
         op: BinOpKind,

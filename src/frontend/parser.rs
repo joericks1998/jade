@@ -1008,11 +1008,12 @@ impl Parser {
                 Expr::Identifier { name, span: id_span } => Expr::Call {
                     callee: Box::new(Expr::Identifier { name, span: id_span }),
                     args: vec![left],
+                    kwargs: vec![],
                     span,
                 },
-                Expr::Call { callee, mut args, span: call_span } => {
+                Expr::Call { callee, mut args, kwargs, span: call_span } => {
                     args.insert(0, left);
-                    Expr::Call { callee, args, span: call_span }
+                    Expr::Call { callee, args, kwargs, span: call_span }
                 }
                 _ => return Err(JadeError::UnexpectedToken {
                     expected: "function or call on right side of |>".to_string(),
@@ -1056,18 +1057,27 @@ impl Parser {
         Ok(left)
     }
 
-    /// `==`, `!=`, `<`, `>`, `<=`, `>=` (comparison, non-associative).
+    /// `==`, `!=`, `<`, `>`, `<=`, `>=`, `in`, `not in` (comparison, non-associative).
     fn parse_comparison(&mut self) -> Result<Expr> {
         let mut left = self.parse_bitor()?;
         loop {
-            let op = match self.peek().kind {
-                TokenKind::EqEq   => BinOpKind::Eq,
-                TokenKind::BangEq => BinOpKind::Ne,
-                TokenKind::Lt     => BinOpKind::Lt,
-                TokenKind::Gt     => BinOpKind::Gt,
-                TokenKind::LtEq   => BinOpKind::Le,
-                TokenKind::GtEq   => BinOpKind::Ge,
-                _ => break,
+            // `not in` — two-token membership test
+            let is_not_in = self.peek().kind == TokenKind::Bang
+                && self.peek_at(1).map(|t| t.kind == TokenKind::In).unwrap_or(false);
+            let op = if is_not_in {
+                self.advance(); // consume `not`
+                BinOpKind::NotIn
+            } else {
+                match self.peek().kind {
+                    TokenKind::EqEq   => BinOpKind::Eq,
+                    TokenKind::BangEq => BinOpKind::Ne,
+                    TokenKind::Lt     => BinOpKind::Lt,
+                    TokenKind::Gt     => BinOpKind::Gt,
+                    TokenKind::LtEq   => BinOpKind::Le,
+                    TokenKind::GtEq   => BinOpKind::Ge,
+                    TokenKind::In     => BinOpKind::In,
+                    _ => break,
+                }
             };
             let span = Self::expr_span(&left);
             self.advance();
@@ -1305,16 +1315,36 @@ impl Parser {
 
                 self.advance(); // consume `(`
                 let mut args = Vec::new();
+                let mut kwargs = Vec::new();
                 if self.peek().kind != TokenKind::RParen {
-                    args.push(self.parse_pipe()?);
-                    while self.peek().kind == TokenKind::Comma {
-                        self.advance(); // consume `,`
-                        args.push(self.parse_pipe()?);
+                    loop {
+                        // Look-ahead: `Ident =` (single `=`, not `==`) means keyword arg.
+                        let kw = if let TokenKind::Identifier(kname) = self.peek().kind.clone() {
+                            if self.peek_ahead(1).kind == TokenKind::Equals {
+                                self.advance(); // consume ident
+                                self.advance(); // consume `=`
+                                Some(kname)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+                        let val = self.parse_pipe()?;
+                        match kw {
+                            None    => args.push(val),
+                            Some(k) => kwargs.push((k, val)),
+                        }
+                        if self.peek().kind == TokenKind::Comma {
+                            self.advance();
+                        } else {
+                            break;
+                        }
                     }
                 }
                 self.expect(&TokenKind::RParen)?;
                 self.in_print_call = was_in_print_call;
-                expr = Expr::Call { callee: Box::new(expr), args, span };
+                expr = Expr::Call { callee: Box::new(expr), args, kwargs, span };
             } else if self.peek().kind == TokenKind::Dot {
                 let span = Self::expr_span(&expr);
                 self.advance(); // consume `.`

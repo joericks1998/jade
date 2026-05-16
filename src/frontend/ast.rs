@@ -260,6 +260,9 @@ pub enum Expr {
     Call {
         callee: Box<Expr>,
         args: Vec<Expr>,
+        /// Keyword arguments: `name = expr` pairs, e.g. `foo(a = 1, b = 2)`.
+        #[serde(default)]
+        kwargs: Vec<(String, Expr)>,
         span: Span,
     },
 
@@ -373,6 +376,9 @@ pub enum BinOpKind {
     Gt,
     Le,
     Ge,
+    // Membership
+    In,
+    NotIn,
 }
 
 /// All unary operators Jade supports.

@@ -568,9 +568,12 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
 
         // ── Function calls ────────────────────────────────────────────────────
 
-        Expr::Call { callee, args, span } => {
+        Expr::Call { callee, args, kwargs, span } => {
             let tcallee = infer_expr(callee, ctx)?;
             let targs: Vec<TExpr> = args.iter().map(|a| infer_expr(a, ctx)).collect::<Result<_>>()?;
+            let tkwargs: Vec<(String, TExpr)> = kwargs.iter()
+                .map(|(k, v)| infer_expr(v, ctx).map(|tv| (k.clone(), tv)))
+                .collect::<Result<_>>()?;
             let ret_ty = match &tcallee.ty {
                 JadeType::Fn { ret, .. }      => *ret.clone(),
                 JadeType::AsyncFn { ret, .. } => JadeType::Future(ret.clone()),
@@ -578,7 +581,7 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
                 _                             => return Err(JadeError::NotCallable { span: *span }),
             };
             Ok(TExpr {
-                kind: TExprKind::Call { callee: Box::new(tcallee), args: targs },
+                kind: TExprKind::Call { callee: Box::new(tcallee), args: targs, kwargs: tkwargs },
                 ty: ret_ty,
                 span: *span,
             })
@@ -588,9 +591,21 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
 
         Expr::StructLiteral { type_name, fields, span } => {
             // Clone field defs to release the borrow on ctx before calling infer_expr.
-            let def_fields = ctx.struct_defs.get(type_name)
-                .ok_or_else(|| JadeError::UndefinedType { name: type_name.clone(), span: *span })?
-                .clone();
+            // If the type is unknown but imports are present, fall back gracefully.
+            let def_fields_opt = ctx.struct_defs.get(type_name).cloned();
+            if def_fields_opt.is_none() && ctx.has_imports {
+                // Type may be defined in an imported file; skip static checks.
+                let tfields = fields.iter()
+                    .map(|(n, e)| infer_expr(e, ctx).map(|te| (n.clone(), te, false)))
+                    .collect::<Result<Vec<_>>>()?;
+                return Ok(TExpr {
+                    kind: TExprKind::StructLiteral { type_name: type_name.clone(), fields: tfields },
+                    ty: JadeType::Unknown,
+                    span: *span,
+                });
+            }
+            let def_fields = def_fields_opt
+                .ok_or_else(|| JadeError::UndefinedType { name: type_name.clone(), span: *span })?;
 
             // Extra fields check.
             for (fname, fexpr) in fields {
@@ -940,6 +955,9 @@ fn infer_binop(op: &BinOpKind, lty: &JadeType, rty: &JadeType, span: Span) -> Re
                 span,
             }),
         },
+
+        // Membership: always returns bool; right-hand side type not statically checked.
+        In | NotIn => Ok(Bool),
     }
 }
 
@@ -1116,9 +1134,10 @@ fn collect_captures_in_expr(
             collect_captures_in_expr(right, locals, captures, seen, ctx);
         }
         TExprKind::UnaryOp { operand, .. } => collect_captures_in_expr(operand, locals, captures, seen, ctx),
-        TExprKind::Call { callee, args } => {
+        TExprKind::Call { callee, args, kwargs } => {
             collect_captures_in_expr(callee, locals, captures, seen, ctx);
             for a in args { collect_captures_in_expr(a, locals, captures, seen, ctx); }
+            for (_, v) in kwargs { collect_captures_in_expr(v, locals, captures, seen, ctx); }
         }
         TExprKind::Array { elements } => {
             for e in elements { collect_captures_in_expr(e, locals, captures, seen, ctx); }
@@ -1243,6 +1262,7 @@ fn op_symbol(op: &BinOpKind) -> &'static str {
         And => "&&", Or => "||",
         Eq => "==", Ne => "!=",
         Lt => "<", Gt => ">", Le => "<=", Ge => ">=",
+        In => "in", NotIn => "not in",
     }
 }
 

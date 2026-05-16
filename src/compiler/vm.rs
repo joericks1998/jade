@@ -792,6 +792,21 @@ async fn execute_chunk(
                 let result = vm_try!(call_value(callee, args, state, span).await);
                 set(slots, *dest, result);
             }
+            Instr::CallNamed(dest, callee_reg, arg_pairs) => {
+                let callee = get(slots, *callee_reg).clone();
+                let mut positional: Vec<VmValue> = Vec::new();
+                let mut named: Vec<(String, VmValue)> = Vec::new();
+                for (name_opt, reg) in arg_pairs {
+                    let val = get(slots, *reg).clone();
+                    match name_opt {
+                        None    => positional.push(val),
+                        Some(n) => named.push((n.clone(), val)),
+                    }
+                }
+                let args = vm_try!(resolve_named_args(&callee, positional, named, span));
+                let result = vm_try!(call_value(callee, args, state, span).await);
+                set(slots, *dest, result);
+            }
             Instr::Return(opt_reg) => {
                 let v = match opt_reg {
                     Some(r) => get(slots, *r).clone(),
@@ -865,7 +880,7 @@ async fn execute_chunk(
                 // Call struct decorators: dec(instance, arg1, ...) for each @dec.
                 let decs = state.struct_decorators.get(type_name).cloned().unwrap_or_default();
                 for (dec_name, dec_args) in decs {
-                    if let Some(dec_fn) = state.globals.get(&dec_name).cloned() {
+                    if let Some(dec_fn) = resolve_decorator_fn(&dec_name, state) {
                         let mut call_args = vec![result];
                         call_args.extend(dec_args);
                         result = call_value(dec_fn, call_args, state, span).await?;
@@ -1132,6 +1147,43 @@ fn patch_builtin_span(mut e: JadeError, call_span: Span) -> JadeError {
     e
 }
 
+/// Resolve a mix of positional and named arguments into a positional Vec by
+/// matching named args against the callee's parameter list.
+fn resolve_named_args(
+    callee: &VmValue,
+    positional: Vec<VmValue>,
+    named: Vec<(String, VmValue)>,
+    span: Span,
+) -> Result<Vec<VmValue>> {
+    if named.is_empty() {
+        return Ok(positional);
+    }
+    match callee {
+        VmValue::Fn(cf) => {
+            let params = &cf.params;
+            let mut result = vec![VmValue::Nil; params.len()];
+            for (i, v) in positional.into_iter().enumerate() {
+                if i < result.len() { result[i] = v; }
+            }
+            for (name, v) in named {
+                let pos = params.iter().position(|p| p == &name)
+                    .ok_or_else(|| JadeError::TypeError {
+                        op: format!("unknown parameter '{}'", name),
+                        span,
+                    })?;
+                result[pos] = v;
+            }
+            Ok(result)
+        }
+        _ => {
+            // For native/builtin/closure callees, append named values positionally.
+            let mut args = positional;
+            for (_, v) in named { args.push(v); }
+            Ok(args)
+        }
+    }
+}
+
 #[async_recursion::async_recursion]
 async fn call_value(
     callee: VmValue,
@@ -1329,116 +1381,6 @@ async fn call_fn(
     Ok(result.unwrap_or(VmValue::Nil))
 }
 
-// ── Tool dispatch ─────────────────────────────────────────────────────────────
-
-/// Called when `?p |> obj.field` resolves to a `__tool_dispatch__` sentinel.
-/// Reads the `_registry` array from the ToolRegistry struct, generates GBNF
-/// constraining `tool_name` to known names, calls the LLM, dispatches the
-/// matching handler with positional args, and wraps the result in a ToolResult.
-async fn vm_tool_dispatch(
-    prompt_text: String,
-    registry_arc: Arc<Mutex<VmStruct>>,
-    state: &mut VmState,
-    span: Span,
-) -> Result<VmValue> {
-    // Collect (name, params, handler) from _registry.
-    struct Entry { name: String, params: Vec<String>, handler: VmValue }
-    let entries: Vec<Entry> = {
-        let guard = registry_arc.lock();
-        let reg = match guard.fields.get("_registry") {
-            Some(VmValue::Array(a)) => a.lock().clone(),
-            _ => return Err(JadeError::TypeError { op: "tool dispatch: _registry is not an array".to_string(), span }),
-        };
-        let mut out = Vec::new();
-        for item in &reg {
-            if let VmValue::Dict(map) = item {
-                let name = match map.get("name") {
-                    Some(VmValue::Str(s)) => s.clone(),
-                    _ => continue,
-                };
-                let params: Vec<String> = match map.get("params") {
-                    Some(VmValue::Array(a)) => a.lock().iter().filter_map(|v| {
-                        if let VmValue::Str(s) = v { Some(s.clone()) } else { None }
-                    }).collect(),
-                    _ => vec![],
-                };
-                let handler = match map.get("handler") {
-                    Some(h) => h.clone(),
-                    _ => continue,
-                };
-                out.push(Entry { name, params, handler });
-            }
-        }
-        out
-    };
-
-    if entries.is_empty() {
-        return Err(JadeError::TypeError { op: "tool dispatch: no tools registered".to_string(), span });
-    }
-
-    // Build dynamic GBNF: tool_name constrained to known names; remaining fields unconstrained.
-    let tool_name_rule = entries.iter()
-        .map(|e| format!("\"\\\"{}\\\"\"", e.name))
-        .collect::<Vec<_>>()
-        .join(" | ");
-    let gbnf = format!(
-        "root      ::= \"{{\" ws \"\\\"tool_name\\\"\" ws \":\" ws tool-name (ws \",\" ws kv-pair)* ws \"}}\"\n\
-         tool-name ::= {tool_name_rule}\n\
-         kv-pair   ::= string ws \":\" ws value\n\
-         value     ::= object | array | string | number | \"true\" | \"false\" | \"null\"\n\
-         object    ::= \"{{\" ws (kv-pair (ws \",\" ws kv-pair)*)? ws \"}}\"\n\
-         array     ::= \"[\" ws (value (ws \",\" ws value)*)? ws \"]\"\n\
-         string    ::= \"\\\"\" ([^\"\\\\\\x7F\\x00-\\x1F] | \"\\\\\" ([\"\\\\/bfnrt] | \"u\" [0-9a-fA-F]{{4}}))* \"\\\"\"\n\
-         number    ::= \"-\"? (\"0\" | [1-9] [0-9]*) (\".\" [0-9]+)? ([eE] [-+]? [0-9]+)?\n\
-         ws        ::= ([ \\t\\n\\r])*",
-    );
-
-    let backend = state.inference_backend.as_ref()
-        .ok_or(JadeError::MissingApiKey { span })?
-        .clone();
-
-    let resp = backend.infer(crate::llm::InferenceRequest {
-        prompt: prompt_text,
-        model: state.default_model.clone(),
-        max_tokens: state.max_tokens,
-        grammar: Some(gbnf),
-    }, span).await?;
-    state.token_count += resp.tokens_used;
-
-    // Parse JSON response and extract tool_name.
-    let json: serde_json::Value = serde_json::from_str(resp.text.trim())
-        .map_err(|e| JadeError::TypeError { op: format!("tool dispatch: invalid JSON: {e}"), span })?;
-    let tool_name = json.get("tool_name")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| JadeError::TypeError { op: "tool dispatch: missing tool_name".to_string(), span })?;
-
-    // Find matching entry and call handler with positional args.
-    let result = 'dispatch: {
-        for entry in &entries {
-            if entry.name == tool_name {
-                let pos_args: Vec<VmValue> = entry.params.iter()
-                    .map(|p| {
-                        json.get(p.as_str())
-                            .and_then(|v| json_to_vm_value(v).ok())
-                            .unwrap_or(VmValue::Nil)
-                    })
-                    .collect();
-                break 'dispatch call_value(entry.handler.clone(), pos_args, state, span).await?;
-            }
-        }
-        return Err(JadeError::TypeError {
-            op: format!("tool dispatch: unregistered tool '{tool_name}'"),
-            span,
-        });
-    };
-
-    // Wrap result in ToolResult { _value: result }.
-    let result_str = value_to_display(&result);
-    Ok(VmValue::Struct(Arc::new(Mutex::new(VmStruct {
-        type_name: "ToolResult".to_string(),
-        fields: [("_value".to_string(), VmValue::Str(result_str))].into(),
-    }))))
-}
 
 // ── Prompt deref ──────────────────────────────────────────────────────────────
 
@@ -1448,22 +1390,6 @@ async fn vm_prompt_deref(
     state: &mut VmState,
     span: Span,
 ) -> Result<VmValue> {
-    // Dotted output type: ?p |> tools.schema — resolve sentinel at runtime and dispatch.
-    if let Some(tn) = output_type {
-        if let Some(dot) = tn.find('.') {
-            let base = &tn[..dot];
-            let field = &tn[dot + 1..];
-            if let Some(VmValue::Struct(arc)) = state.globals.get(base).cloned() {
-                let sentinel = arc.lock().fields.get(field).cloned();
-                if let Some(VmValue::Str(s)) = sentinel {
-                    if s == "__tool_dispatch__" {
-                        return vm_tool_dispatch(prompt_text, arc, state, span).await;
-                    }
-                }
-            }
-        }
-    }
-
     // Cache check — skip inference entirely on a repeated (prompt, type) pair.
     let cache_key = (prompt_text.clone(), output_type.map(str::to_owned));
     if let Some(cached) = state.prompt_cache.get(&cache_key).cloned() {
@@ -1553,6 +1479,36 @@ async fn vm_prompt_deref(
     }
 }
 
+/// Resolve a possibly-dotted decorator name to a callable VmValue.
+/// "tools.on_fail" → GetGlobal("tools") → GetMethod("on_fail") as BoundMethod.
+/// Mirrors what the function-decorator emitter does with bytecode at compile time.
+fn resolve_decorator_fn(dec_name: &str, state: &VmState) -> Option<VmValue> {
+    if let Some(dot) = dec_name.find('.') {
+        let base_name = &dec_name[..dot];
+        let field_name = &dec_name[dot + 1..];
+        match state.globals.get(base_name)?.clone() {
+            VmValue::Struct(arc) => {
+                let (type_name, field_val) = {
+                    let guard = arc.lock();
+                    (guard.type_name.clone(), guard.fields.get(field_name).cloned())
+                };
+                if let Some(v) = field_val {
+                    return Some(v);
+                }
+                let mfn = state.extend_methods.get(&type_name)?.get(field_name)?.clone();
+                Some(VmValue::BoundMethod(Arc::new(VmBoundMethod {
+                    receiver: arc,
+                    method: mfn,
+                })))
+            }
+            VmValue::Dict(map) => map.get(field_name).cloned(),
+            _ => None,
+        }
+    } else {
+        state.globals.get(dec_name).cloned()
+    }
+}
+
 /// Apply any struct decorators registered for `type_name` to a coerced value.
 /// Called after every successful `coerce()` so decorator behaviour is identical
 /// whether the struct came from a literal or from `?p |> Type`.
@@ -1564,7 +1520,7 @@ async fn apply_struct_decorators(
 ) -> Result<VmValue> {
     let decs = state.struct_decorators.get(type_name).cloned().unwrap_or_default();
     for (dec_name, dec_args) in decs {
-        if let Some(dec_fn) = state.globals.get(&dec_name).cloned() {
+        if let Some(dec_fn) = resolve_decorator_fn(&dec_name, state) {
             let mut call_args = vec![v];
             call_args.extend(dec_args);
             v = call_value(dec_fn, call_args, state, span).await?;
@@ -2140,24 +2096,65 @@ fn eval_binop_dynamic(op: &BinOpKind, l: VmValue, r: VmValue, span: Span) -> Res
             _ => Err(JadeError::TypeError{op:">>".to_string(),span})
         },
         Eq => match (l,r) {
-            (VmValue::Int(a),VmValue::Int(b))     => Ok(VmValue::Bool(a==b)),
-            (VmValue::Float(a),VmValue::Float(b)) => Ok(VmValue::Bool(a==b)),
-            (VmValue::Bool(a),VmValue::Bool(b))   => Ok(VmValue::Bool(a==b)),
-            (VmValue::Str(a),VmValue::Str(b))     => Ok(VmValue::Bool(a==b)),
+            (VmValue::Int(a),VmValue::Int(b))       => Ok(VmValue::Bool(a==b)),
+            (VmValue::Float(a),VmValue::Float(b))   => Ok(VmValue::Bool(a==b)),
+            (VmValue::Bool(a),VmValue::Bool(b))     => Ok(VmValue::Bool(a==b)),
+            (VmValue::Str(a),VmValue::Str(b))       => Ok(VmValue::Bool(a==b)),
+            (VmValue::Nil, VmValue::Nil)            => Ok(VmValue::Bool(true)),
+            (VmValue::Nil, _) | (_, VmValue::Nil)  => Ok(VmValue::Bool(false)),
             _ => Err(JadeError::TypeError{op:"==".to_string(),span})
         },
         Ne => match (l,r) {
-            (VmValue::Int(a),VmValue::Int(b))     => Ok(VmValue::Bool(a!=b)),
-            (VmValue::Float(a),VmValue::Float(b)) => Ok(VmValue::Bool(a!=b)),
-            (VmValue::Bool(a),VmValue::Bool(b))   => Ok(VmValue::Bool(a!=b)),
-            (VmValue::Str(a),VmValue::Str(b))     => Ok(VmValue::Bool(a!=b)),
+            (VmValue::Int(a),VmValue::Int(b))       => Ok(VmValue::Bool(a!=b)),
+            (VmValue::Float(a),VmValue::Float(b))   => Ok(VmValue::Bool(a!=b)),
+            (VmValue::Bool(a),VmValue::Bool(b))     => Ok(VmValue::Bool(a!=b)),
+            (VmValue::Str(a),VmValue::Str(b))       => Ok(VmValue::Bool(a!=b)),
+            (VmValue::Nil, VmValue::Nil)            => Ok(VmValue::Bool(false)),
+            (VmValue::Nil, _) | (_, VmValue::Nil)  => Ok(VmValue::Bool(true)),
             _ => Err(JadeError::TypeError{op:"!=".to_string(),span})
         },
         Lt => cmp_order(l,r,"<",span,|a:f64,b:f64| a<b, |a:i64,b:i64| a<b, |a:&str,b:&str| a<b, |a:bool,b:bool| !a&&b),
         Gt => cmp_order(l,r,">",span,|a:f64,b:f64| a>b, |a:i64,b:i64| a>b, |a:&str,b:&str| a>b, |a:bool,b:bool| a&&!b),
         Le => cmp_order(l,r,"<=",span,|a:f64,b:f64| a<=b,|a:i64,b:i64| a<=b,|a:&str,b:&str| a<=b,|a:bool,b:bool| a==b||(!a&&b)),
         Ge => cmp_order(l,r,">=",span,|a:f64,b:f64| a>=b,|a:i64,b:i64| a>=b,|a:&str,b:&str| a>=b,|a:bool,b:bool| a==b||(a&&!b)),
+        In => vm_contains(l, r, span).map(VmValue::Bool),
+        NotIn => vm_contains(l, r, span).map(|b| VmValue::Bool(!b)),
         And | Or => unreachable!("short-circuit ops must not reach BinOp dynamic dispatch"),
+    }
+}
+
+fn vm_scalar_eq(a: &VmValue, b: &VmValue) -> bool {
+    match (a, b) {
+        (VmValue::Int(x),   VmValue::Int(y))   => x == y,
+        (VmValue::Float(x), VmValue::Float(y)) => x == y,
+        (VmValue::Bool(x),  VmValue::Bool(y))  => x == y,
+        (VmValue::Str(x),   VmValue::Str(y))   => x == y,
+        (VmValue::Nil,      VmValue::Nil)      => true,
+        _ => false,
+    }
+}
+
+fn vm_contains(needle: VmValue, haystack: VmValue, span: Span) -> Result<bool> {
+    match haystack {
+        VmValue::Array(arc) => {
+            let arr = arc.lock();
+            Ok(arr.iter().any(|v| vm_scalar_eq(v, &needle)))
+        }
+        VmValue::Dict(map) => {
+            let key = match needle {
+                VmValue::Str(s) => s,
+                _ => return Err(JadeError::TypeError { op: "in (dict key must be str)".to_string(), span }),
+            };
+            Ok(map.contains_key(&key))
+        }
+        VmValue::Str(s) => {
+            let sub = match needle {
+                VmValue::Str(sub) => sub,
+                _ => return Err(JadeError::TypeError { op: "in (substring must be str)".to_string(), span }),
+            };
+            Ok(s.contains(sub.as_str()))
+        }
+        _ => Err(JadeError::TypeError { op: "in".to_string(), span }),
     }
 }
 
@@ -2443,6 +2440,11 @@ fn instr_max_reg(instr: &Instr) -> u32 {
         Instr::Join(d, regs) => {
             let mut m = *d;
             for &r in regs { m = m.max(r); }
+            m
+        }
+        Instr::CallNamed(d, c, pairs) => {
+            let mut m = (*d).max(*c);
+            for (_, r) in pairs { m = m.max(*r); }
             m
         }
     }

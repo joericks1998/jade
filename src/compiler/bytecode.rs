@@ -215,6 +215,8 @@ pub enum Instr {
     // ── Function calls ─────────────────────────────────────────────────────
     /// dest ← callee_reg(arg_regs…)
     Call(Reg, Reg, Vec<Reg>),
+    /// dest ← callee_reg(mixed_args) where args may be positional (None) or named (Some(name)).
+    CallNamed(Reg, Reg, Vec<(Option<String>, Reg)>),
     Return(Option<Reg>),
 
     // ── Collections ────────────────────────────────────────────────────────

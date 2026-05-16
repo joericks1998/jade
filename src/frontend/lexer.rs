@@ -499,7 +499,10 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
                     "from"      => TokenKind::From,
                     "as"        => TokenKind::As,
                     "true"      => TokenKind::True,
-                    "false"  => TokenKind::False,
+                    "false"     => TokenKind::False,
+                    "and"       => TokenKind::AmpAmp,
+                    "or"        => TokenKind::PipePipe,
+                    "not"       => TokenKind::Bang,
                     // f-string: `f"…"` / `f"""…"""` or `f'…'` / `f'''…'''`
                     "f" if matches!(chars.get(i), Some(&'"') | Some(&'\'')) => {
                         let quote = chars[i];
@@ -778,6 +781,21 @@ mod tests {
     #[test]
     fn test_tokenize_and() {
         assert_eq!(kinds("&&"), vec![TokenKind::AmpAmp, TokenKind::Eof]);
+    }
+
+    #[test]
+    fn test_keyword_and() {
+        assert_eq!(kinds("and"), vec![TokenKind::AmpAmp, TokenKind::Eof]);
+    }
+
+    #[test]
+    fn test_keyword_or() {
+        assert_eq!(kinds("or"), vec![TokenKind::PipePipe, TokenKind::Eof]);
+    }
+
+    #[test]
+    fn test_keyword_not() {
+        assert_eq!(kinds("not"), vec![TokenKind::Bang, TokenKind::Eof]);
     }
 
     #[test]
