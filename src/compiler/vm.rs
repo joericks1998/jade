@@ -933,6 +933,24 @@ async fn execute_chunk(
                             vm_err!(JadeError::NotAStruct { span });
                         }
                     }
+                    // Dunder attributes on function values: fn.__name__, fn.__params__
+                    VmValue::Fn(ref cf) => {
+                        let v = match field.as_str() {
+                            "__name__" => VmValue::Str(cf.chunk.name.clone()),
+                            "__params__" => {
+                                let arr: Vec<VmValue> = cf.params.iter()
+                                    .map(|p| VmValue::Str(p.clone()))
+                                    .collect();
+                                VmValue::Array(Arc::new(Mutex::new(arr)))
+                            }
+                            _ => vm_err!(JadeError::UndefinedField {
+                                type_name: "fn".to_string(),
+                                field: field.clone(),
+                                span,
+                            }),
+                        };
+                        set(slots, *dest, v);
+                    }
                     _ => { vm_err!(JadeError::NotAStruct { span }); }
                 }
             }
@@ -1311,6 +1329,117 @@ async fn call_fn(
     Ok(result.unwrap_or(VmValue::Nil))
 }
 
+// ── Tool dispatch ─────────────────────────────────────────────────────────────
+
+/// Called when `?p |> obj.field` resolves to a `__tool_dispatch__` sentinel.
+/// Reads the `_registry` array from the ToolRegistry struct, generates GBNF
+/// constraining `tool_name` to known names, calls the LLM, dispatches the
+/// matching handler with positional args, and wraps the result in a ToolResult.
+async fn vm_tool_dispatch(
+    prompt_text: String,
+    registry_arc: Arc<Mutex<VmStruct>>,
+    state: &mut VmState,
+    span: Span,
+) -> Result<VmValue> {
+    // Collect (name, params, handler) from _registry.
+    struct Entry { name: String, params: Vec<String>, handler: VmValue }
+    let entries: Vec<Entry> = {
+        let guard = registry_arc.lock();
+        let reg = match guard.fields.get("_registry") {
+            Some(VmValue::Array(a)) => a.lock().clone(),
+            _ => return Err(JadeError::TypeError { op: "tool dispatch: _registry is not an array".to_string(), span }),
+        };
+        let mut out = Vec::new();
+        for item in &reg {
+            if let VmValue::Dict(map) = item {
+                let name = match map.get("name") {
+                    Some(VmValue::Str(s)) => s.clone(),
+                    _ => continue,
+                };
+                let params: Vec<String> = match map.get("params") {
+                    Some(VmValue::Array(a)) => a.lock().iter().filter_map(|v| {
+                        if let VmValue::Str(s) = v { Some(s.clone()) } else { None }
+                    }).collect(),
+                    _ => vec![],
+                };
+                let handler = match map.get("handler") {
+                    Some(h) => h.clone(),
+                    _ => continue,
+                };
+                out.push(Entry { name, params, handler });
+            }
+        }
+        out
+    };
+
+    if entries.is_empty() {
+        return Err(JadeError::TypeError { op: "tool dispatch: no tools registered".to_string(), span });
+    }
+
+    // Build dynamic GBNF: tool_name constrained to known names; remaining fields unconstrained.
+    let tool_name_rule = entries.iter()
+        .map(|e| format!("\"\\\"{}\\\"\"", e.name))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    let gbnf = format!(
+        "root      ::= \"{{\" ws \"\\\"tool_name\\\"\" ws \":\" ws tool-name (ws \",\" ws kv-pair)* ws \"}}\"\n\
+         tool-name ::= {tool_name_rule}\n\
+         kv-pair   ::= string ws \":\" ws value\n\
+         value     ::= object | array | string | number | \"true\" | \"false\" | \"null\"\n\
+         object    ::= \"{{\" ws (kv-pair (ws \",\" ws kv-pair)*)? ws \"}}\"\n\
+         array     ::= \"[\" ws (value (ws \",\" ws value)*)? ws \"]\"\n\
+         string    ::= \"\\\"\" ([^\"\\\\\\x7F\\x00-\\x1F] | \"\\\\\" ([\"\\\\/bfnrt] | \"u\" [0-9a-fA-F]{{4}}))* \"\\\"\"\n\
+         number    ::= \"-\"? (\"0\" | [1-9] [0-9]*) (\".\" [0-9]+)? ([eE] [-+]? [0-9]+)?\n\
+         ws        ::= ([ \\t\\n\\r])*",
+    );
+
+    let backend = state.inference_backend.as_ref()
+        .ok_or(JadeError::MissingApiKey { span })?
+        .clone();
+
+    let resp = backend.infer(crate::llm::InferenceRequest {
+        prompt: prompt_text,
+        model: state.default_model.clone(),
+        max_tokens: state.max_tokens,
+        grammar: Some(gbnf),
+    }, span).await?;
+    state.token_count += resp.tokens_used;
+
+    // Parse JSON response and extract tool_name.
+    let json: serde_json::Value = serde_json::from_str(resp.text.trim())
+        .map_err(|e| JadeError::TypeError { op: format!("tool dispatch: invalid JSON: {e}"), span })?;
+    let tool_name = json.get("tool_name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JadeError::TypeError { op: "tool dispatch: missing tool_name".to_string(), span })?;
+
+    // Find matching entry and call handler with positional args.
+    let result = 'dispatch: {
+        for entry in &entries {
+            if entry.name == tool_name {
+                let pos_args: Vec<VmValue> = entry.params.iter()
+                    .map(|p| {
+                        json.get(p.as_str())
+                            .and_then(|v| json_to_vm_value(v).ok())
+                            .unwrap_or(VmValue::Nil)
+                    })
+                    .collect();
+                break 'dispatch call_value(entry.handler.clone(), pos_args, state, span).await?;
+            }
+        }
+        return Err(JadeError::TypeError {
+            op: format!("tool dispatch: unregistered tool '{tool_name}'"),
+            span,
+        });
+    };
+
+    // Wrap result in ToolResult { _value: result }.
+    let result_str = value_to_display(&result);
+    Ok(VmValue::Struct(Arc::new(Mutex::new(VmStruct {
+        type_name: "ToolResult".to_string(),
+        fields: [("_value".to_string(), VmValue::Str(result_str))].into(),
+    }))))
+}
+
 // ── Prompt deref ──────────────────────────────────────────────────────────────
 
 async fn vm_prompt_deref(
@@ -1319,6 +1448,22 @@ async fn vm_prompt_deref(
     state: &mut VmState,
     span: Span,
 ) -> Result<VmValue> {
+    // Dotted output type: ?p |> tools.schema — resolve sentinel at runtime and dispatch.
+    if let Some(tn) = output_type {
+        if let Some(dot) = tn.find('.') {
+            let base = &tn[..dot];
+            let field = &tn[dot + 1..];
+            if let Some(VmValue::Struct(arc)) = state.globals.get(base).cloned() {
+                let sentinel = arc.lock().fields.get(field).cloned();
+                if let Some(VmValue::Str(s)) = sentinel {
+                    if s == "__tool_dispatch__" {
+                        return vm_tool_dispatch(prompt_text, arc, state, span).await;
+                    }
+                }
+            }
+        }
+    }
+
     // Cache check — skip inference entirely on a repeated (prompt, type) pair.
     let cache_key = (prompt_text.clone(), output_type.map(str::to_owned));
     if let Some(cached) = state.prompt_cache.get(&cache_key).cloned() {

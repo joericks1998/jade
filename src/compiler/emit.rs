@@ -258,8 +258,17 @@ fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
                 em.chunk.emit(Instr::SetGlobal(name.clone(), dest), span);
                 // Apply decorators at runtime: foo = dec(foo, arg1, ...) for each @dec.
                 for (dec_name, dec_args) in &decorators {
-                    let dec_reg = em.alloc_reg();
-                    em.chunk.emit(Instr::GetGlobal(dec_reg, dec_name.clone()), span);
+                    // Resolve possibly-dotted decorator: "tools.register" → GetGlobal("tools") → GetField("register")
+                    let parts: Vec<&str> = dec_name.splitn(2, '.').collect();
+                    let base_reg = em.alloc_reg();
+                    em.chunk.emit(Instr::GetGlobal(base_reg, parts[0].to_string()), span);
+                    let dec_reg = if parts.len() == 2 {
+                        let field_reg = em.alloc_reg();
+                        em.chunk.emit(Instr::GetField(field_reg, base_reg, parts[1].to_string()), span);
+                        field_reg
+                    } else {
+                        base_reg
+                    };
                     let fn_reg = em.alloc_reg();
                     em.chunk.emit(Instr::GetGlobal(fn_reg, name.clone()), span);
                     // fn is first arg; extra decorator args follow

@@ -141,7 +141,13 @@ impl Parser {
         let mut decorators = Vec::new();
         while self.peek().kind == TokenKind::At {
             self.advance(); // consume `@`
-            let name = self.expect_ident("decorator name")?;
+            let mut name = self.expect_ident("decorator name")?;
+            // Support dotted decorator names: @tools.register → "tools.register"
+            while self.peek().kind == TokenKind::Dot {
+                self.advance();
+                let part = self.expect_ident("decorator field")?;
+                name = format!("{}.{}", name, part);
+            }
             // Optional argument list: @dec(pos, key = val, ...)
             let args = if self.peek().kind == TokenKind::LParen {
                 self.advance(); // consume `(`
@@ -1405,7 +1411,13 @@ impl Parser {
                         return Err(JadeError::StreamingWithType { span });
                     }
                     self.advance(); // consume `|>`
-                    let type_name = self.expect_ident("type name after |>")?;
+                    let mut type_name = self.expect_ident("type name after |>")?;
+                    // Support dotted type paths: ?p |> tools.schema → "tools.schema"
+                    while self.peek().kind == TokenKind::Dot {
+                        self.advance();
+                        let part = self.expect_ident("type field")?;
+                        type_name = format!("{}.{}", type_name, part);
+                    }
                     Some(type_name)
                 } else {
                     None
