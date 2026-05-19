@@ -241,7 +241,9 @@ pub enum Instr {
 
     // ── Prompt ─────────────────────────────────────────────────────────────
     MakePrompt(Reg, Reg),
-    PromptDeref(Reg, Reg, Option<String>),
+    /// (dest, prompt_reg, output_type, grammar_reg)
+    /// grammar_reg holds a VmValue::Grammar for user-supplied GBNF pattern.
+    PromptDeref(Reg, Reg, Option<String>, Option<Reg>),
 
     // ── Exception handling ─────────────────────────────────────────────────
     /// Raise the value in `val` as an exception. If a handler frame is active,

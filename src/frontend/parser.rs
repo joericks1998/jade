@@ -1435,24 +1435,19 @@ impl Parser {
                 self.advance(); // consume `?`
                 // Parse the target expression: supports ?name, ?obj.field, ?arr[i], etc.
                 let expr = self.parse_call()?;
-                // Check for optional `|> TypeName` typed dereference suffix.
-                let output_type = if self.peek().kind == TokenKind::PipeGt {
+                // Optional `|> constraint` — either a type name or a Grammar expression.
+                // Type inference resolves which it is at compile time.
+                let constraint = if self.peek().kind == TokenKind::PipeGt {
                     if self.in_print_call {
                         return Err(JadeError::StreamingWithType { span });
                     }
                     self.advance(); // consume `|>`
-                    let mut type_name = self.expect_ident("type name after |>")?;
-                    // Support dotted type paths: ?p |> tools.schema → "tools.schema"
-                    while self.peek().kind == TokenKind::Dot {
-                        self.advance();
-                        let part = self.expect_ident("type field")?;
-                        type_name = format!("{}.{}", type_name, part);
-                    }
-                    Some(type_name)
+                    // Use parse_or (not parse_pipe) so nested |> chains don't nest here.
+                    Some(Box::new(self.parse_or()?))
                 } else {
                     None
                 };
-                Ok(Expr::PromptDeref { expr: Box::new(expr), output_type, span })
+                Ok(Expr::PromptDeref { expr: Box::new(expr), constraint, span })
             }
             // ── Closures: `|x, y| expr` or `|x, y| { body }` ────────────────
             TokenKind::Pipe => {
@@ -2087,37 +2082,37 @@ mod tests {
     #[test]
     fn test_parse_prompt_deref_untyped() {
         let p = parse_src("let x = ?p");
-        let Stmt::Let { value: Expr::PromptDeref { expr, output_type, .. }, .. } = &p.stmts[0]
+        let Stmt::Let { value: Expr::PromptDeref { expr, constraint, .. }, .. } = &p.stmts[0]
             else { panic!("expected Let with PromptDeref") };
         assert!(matches!(expr.as_ref(), Expr::Identifier { name, .. } if name == "p"));
-        assert!(output_type.is_none());
+        assert!(constraint.is_none());
     }
 
     #[test]
     fn test_parse_prompt_deref_typed_int() {
         let p = parse_src("let x = ?p |> int");
-        let Stmt::Let { value: Expr::PromptDeref { expr, output_type, .. }, .. } = &p.stmts[0]
+        let Stmt::Let { value: Expr::PromptDeref { expr, constraint, .. }, .. } = &p.stmts[0]
             else { panic!("expected Let with PromptDeref") };
         assert!(matches!(expr.as_ref(), Expr::Identifier { name, .. } if name == "p"));
-        assert_eq!(output_type.as_deref(), Some("int"));
+        assert!(matches!(constraint.as_deref(), Some(Expr::Identifier { name, .. }) if name == "int"));
     }
 
     #[test]
     fn test_parse_prompt_deref_field_access() {
         let p = parse_src("let x = ?obj.system");
-        let Stmt::Let { value: Expr::PromptDeref { expr, output_type, .. }, .. } = &p.stmts[0]
+        let Stmt::Let { value: Expr::PromptDeref { expr, constraint, .. }, .. } = &p.stmts[0]
             else { panic!("expected Let with PromptDeref") };
         assert!(matches!(expr.as_ref(), Expr::FieldAccess { field, .. } if field == "system"));
-        assert!(output_type.is_none());
+        assert!(constraint.is_none());
     }
 
     #[test]
     fn test_parse_prompt_deref_field_access_typed() {
         let p = parse_src("let x = ?obj.field |> int");
-        let Stmt::Let { value: Expr::PromptDeref { expr, output_type, .. }, .. } = &p.stmts[0]
+        let Stmt::Let { value: Expr::PromptDeref { expr, constraint, .. }, .. } = &p.stmts[0]
             else { panic!("expected Let with PromptDeref") };
         assert!(matches!(expr.as_ref(), Expr::FieldAccess { field, .. } if field == "field"));
-        assert_eq!(output_type.as_deref(), Some("int"));
+        assert!(matches!(constraint.as_deref(), Some(Expr::Identifier { name, .. }) if name == "int"));
     }
 
     #[test]

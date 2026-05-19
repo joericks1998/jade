@@ -744,10 +744,11 @@ fn emit_expr(expr: &TExpr, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<Reg> {
             Ok(dest)
         }
 
-        TExprKind::PromptDeref { expr: pexpr, output_type } => {
+        TExprKind::PromptDeref { expr: pexpr, output_type, grammar_expr } => {
             let src = emit_expr(pexpr, em, ctx)?;
+            let grammar_reg = grammar_expr.as_ref().map(|g| emit_expr(g, em, ctx)).transpose()?;
             let dest = em.alloc_reg();
-            em.chunk.emit(Instr::PromptDeref(dest, src, output_type.clone()), span);
+            em.chunk.emit(Instr::PromptDeref(dest, src, output_type.clone(), grammar_reg), span);
             Ok(dest)
         }
 

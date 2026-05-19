@@ -107,8 +107,8 @@ pub fn emit_expr<'ctx>(
         // LLVM level — the type distinction is only semantic.
         PromptLiteral { body } => emit_expr(body, ctx),
 
-        // ── ?prompt  /  ?prompt |> Type ──────────────────────────────────────
-        PromptDeref { expr: pexpr, output_type } => {
+        // ── ?prompt  /  ?prompt |> Type  /  ?prompt |> grammar_expr ─────────
+        PromptDeref { expr: pexpr, output_type, grammar_expr: _ } => {
             ctx.uses_prompts = true;
 
             // Load the prompt string pointer.

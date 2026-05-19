@@ -323,11 +323,14 @@ pub enum Expr {
     },
 
     /// `?expr` — dereference a prompt, calling the LLM backend.
-    /// `?expr |> type` — typed dereference: coerces the LLM output to `type` with retry.
+    /// `?expr |> TypeName`   — typed deref: coerces output to the named type with retry.
+    /// `?expr |> grammar_expr` — grammar-constrained deref: expr must hold a Grammar value.
     /// `expr` must evaluate to `Value::Prompt`; supports `?name`, `?obj.field`, etc.
     PromptDeref {
         expr: Box<Expr>,
-        output_type: Option<String>,
+        /// The expression after `|>`, if any.  Resolved at type-inference time into either
+        /// an output-type name (Str literal path) or a Grammar constraint expression.
+        constraint: Option<Box<Expr>>,
         span: Span,
     },
 

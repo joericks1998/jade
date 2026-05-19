@@ -130,4 +130,6 @@ pub fn register_types(ctx: &mut TypeContext) {
     ctx.define("__model__".to_string(), JadeType::Str);
     ctx.define("__max_retries__".to_string(), JadeType::Int);
     ctx.define("__retry_log__".to_string(), JadeType::Array(Box::new(JadeType::Unknown)));
+    // Grammar global: Grammar.new(pattern) -> Grammar
+    ctx.define("Grammar".to_string(), JadeType::Unknown);
 }

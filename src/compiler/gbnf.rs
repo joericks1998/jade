@@ -1,6 +1,15 @@
 use std::collections::HashMap;
 use crate::frontend::ast::StructFieldDef;
 
+/// Wrap a user-supplied GBNF pattern (RHS only) into a complete grammar.
+///
+/// `pattern` is the right-hand side of the root rule, e.g. `"yes" | "no"`.
+/// Trailing whitespace allowance is appended so llama.cpp can find a valid
+/// continuation token after the pattern is fully consumed.
+pub fn grammar_from_pattern(pattern: &str) -> String {
+    format!("root ::= {} [ \\t\\n\\r]*", pattern)
+}
+
 /// Generate a GBNF grammar string for the given JadeLang type name.
 ///
 /// Primitives (int, float, bool): full grammar — output is short, state count is tiny.

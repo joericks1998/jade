@@ -212,6 +212,7 @@ pub async fn run_file(path: &str, verbose: bool) {
                 vm::VmValue::NativeFn(_) | vm::VmValue::BuiltinFn(_) | vm::VmValue::NativeBoundMethod(_) => {} // not shown
                 vm::VmValue::Future(_)      => println!("{} = <future>", name),
                 vm::VmValue::TokenStream(_) => println!("{} = <token stream>", name),
+                vm::VmValue::Grammar(_)     => {} // not shown
                 vm::VmValue::TypeRef(_)     => {} // not shown
                 vm::VmValue::Nil            => {} // not shown
             }

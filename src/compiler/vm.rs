@@ -51,6 +51,9 @@ pub enum VmValue {
     /// Reference-counted array — mutations are visible to all aliases.
     Array(Arc<Mutex<Vec<VmValue>>>),
     Prompt(String),
+    /// A user-defined GBNF pattern (RHS only, e.g. `"yes" | "no"`).
+    /// Used with `?p |> grammar_var` to constrain LLM token sampling.
+    Grammar(String),
     Dict(HashMap<String, VmValue>),
     /// A pure Rust-backed callable (no VM state mutation). Used for stdlib
     /// core built-ins (print, len, write, input) and package functions.
@@ -125,8 +128,9 @@ impl std::fmt::Debug for VmValue {
             }
             VmValue::BoundMethod(_) => write!(f, "<bound method>"),
             VmValue::Array(arc) => write!(f, "Array[{} elem(s)]", arc.lock().len()),
-            VmValue::Prompt(s)  => write!(f, "Prompt({:?})", s),
-            VmValue::Dict(m)    => write!(f, "Dict({} key(s))", m.len()),
+            VmValue::Prompt(s)   => write!(f, "Prompt({:?})", s),
+            VmValue::Grammar(s)  => write!(f, "Grammar({:?})", s),
+            VmValue::Dict(m)     => write!(f, "Dict({} key(s))", m.len()),
             VmValue::BuiltinFn(bf) => write!(f, "BuiltinFn({})", bf.name),
             VmValue::NativeBoundMethod(nbm) => write!(f, "NativeBoundMethod({})", nbm.method.name),
             VmValue::NativeFn(nf) => write!(f, "NativeFn({:?})", nf),
@@ -174,6 +178,7 @@ pub fn value_to_display(v: &VmValue) -> String {
         VmValue::BuiltinFn(bf)         => format!("<builtin {}>", bf.name),
         VmValue::NativeBoundMethod(nm) => format!("<builtin {}>", nm.method.name),
         VmValue::Prompt(_)             => "<prompt>".to_string(),
+        VmValue::Grammar(_)            => "<grammar>".to_string(),
         VmValue::NativeFn(_)           => "<native fn>".to_string(),
         VmValue::Future(_)             => "<future>".to_string(),
         VmValue::TokenStream(_)        => "<token stream>".to_string(),
@@ -1018,15 +1023,21 @@ async fn execute_chunk(
                 };
                 set(slots, *dest, VmValue::Prompt(text));
             }
-            Instr::PromptDeref(dest, prompt_reg, output_type) => {
+            Instr::PromptDeref(dest, prompt_reg, output_type, grammar_reg) => {
                 let text = match get(slots, *prompt_reg).clone() {
                     VmValue::Prompt(t) => t,
                     _ => { vm_err!(JadeError::NotAPrompt { name: "<expr>".to_string(), span }); }
                 };
-                let result = if output_type.is_none() {
+                let grammar_override = grammar_reg.map(|r| match get(slots, r).clone() {
+                    VmValue::Grammar(pat) => {
+                        crate::compiler::gbnf::grammar_from_pattern(&pat)
+                    }
+                    _ => { panic!("grammar register did not hold a Grammar value"); }
+                });
+                let result = if output_type.is_none() && grammar_override.is_none() {
                     vm_try!(vm_prompt_deref_stream(text, state, span).await)
                 } else {
-                    vm_try!(vm_prompt_deref(text, output_type.as_deref(), state, span).await)
+                    vm_try!(vm_prompt_deref(text, output_type.as_deref(), grammar_override, state, span).await)
                 };
                 set(slots, *dest, result);
             }
@@ -1387,6 +1398,7 @@ async fn call_fn(
 async fn vm_prompt_deref(
     prompt_text: String,
     output_type: Option<&str>,
+    grammar_override: Option<String>,
     state: &mut VmState,
     span: Span,
 ) -> Result<VmValue> {
@@ -1410,9 +1422,9 @@ async fn vm_prompt_deref(
         .ok_or(JadeError::MissingApiKey { span })?
         .clone();
 
-    // Generate a GBNF grammar from the output type to constrain token sampling.
-    let grammar = output_type.and_then(|tn| {
-        crate::compiler::gbnf::grammar_for(tn, &state.struct_defs)
+    // Grammar priority: user-supplied override > auto-generated from output type.
+    let grammar = grammar_override.or_else(|| {
+        output_type.and_then(|tn| crate::compiler::gbnf::grammar_for(tn, &state.struct_defs))
     });
 
     // Stateless call — no conversation history is sent or recorded.
@@ -2370,7 +2382,9 @@ fn instr_max_reg(instr: &Instr) -> u32 {
         Instr::Move(d,s)|Instr::NegInt(d,s)|Instr::NegFloat(d,s)
         |Instr::IntToFloat(d,s)|Instr::BitNot(d,s)|Instr::Not(d,s)
         |Instr::MakePrompt(d,s)
-        |Instr::UnaryOp(d,_,s)|Instr::PromptDeref(d,s,_) => (*d).max(*s),
+        |Instr::UnaryOp(d,_,s)
+        |Instr::PromptDeref(d,s,_,None) => (*d).max(*s),
+        Instr::PromptDeref(d,s,_,Some(g)) => (*d).max(*s).max(*g),
         Instr::SetGlobal(_,s)|Instr::SetLocal(_,s) => *s,
         Instr::AddInt(d,l,r)|Instr::SubInt(d,l,r)|Instr::MulInt(d,l,r)
         |Instr::DivInt(d,l,r)|Instr::ModInt(d,l,r)
@@ -3782,6 +3796,30 @@ mod tests {
             vec!["not a number", "42"],
         ).unwrap();
         assert_eq!(get_int(&s, "n"), 42);
+    }
+
+    // ── Grammar ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_grammar_new_returns_grammar_value() {
+        let s = run_src(r#"let g = Grammar.new('"yes" | "no"')"#).unwrap();
+        match s.globals.get("g").unwrap() {
+            VmValue::Grammar(pat) => assert_eq!(pat, r#""yes" | "no""#),
+            v => panic!("expected Grammar, got {:?}", v),
+        }
+    }
+
+    #[test]
+    fn test_grammar_constrained_deref() {
+        let s = run_src_with_mock(
+            r#"
+prompt p = "yes or no?"
+let g = Grammar.new('"yes" | "no"')
+let answer = ?p |> g
+"#,
+            vec!["yes"],
+        ).unwrap();
+        assert_eq!(get_str(&s, "answer"), "yes");
     }
 
     // ── dicts (ported from eval.rs) ───────────────────────────────────────────

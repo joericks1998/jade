@@ -21,6 +21,8 @@ pub enum JadeType {
     Str,
     Nil,
     Prompt,
+    /// A user-defined GBNF sampling constraint. Produced by `Grammar.new(pattern)`.
+    Grammar,
     Array(Box<JadeType>),       // homogeneous; empty arrays are Array(Unknown)
     Dict,                       // keys and values are untyped at this stage
     Struct(String),             // named struct, e.g. Struct("Point")
@@ -102,7 +104,10 @@ pub enum TExprKind {
     },
     PromptDeref {
         expr: Box<TExpr>,
+        /// Type-name constraint (`?p |> int`) — drives retry coercion.
         output_type: Option<String>,
+        /// Grammar-value constraint (`?p |> grammar_var`) — drives GBNF sampling.
+        grammar_expr: Option<Box<TExpr>>,
     },
     Dict {
         entries: Vec<(TExpr, TExpr)>,

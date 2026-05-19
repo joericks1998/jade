@@ -569,16 +569,26 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
         // ── Function calls ────────────────────────────────────────────────────
 
         Expr::Call { callee, args, kwargs, span } => {
+            // Grammar.new(pattern) → JadeType::Grammar (special-cased for static typing).
+            let is_grammar_new = matches!(callee.as_ref(),
+                Expr::FieldAccess { object, field, .. }
+                if field == "new" && matches!(object.as_ref(), Expr::Identifier { name, .. } if name == "Grammar")
+            );
+
             let tcallee = infer_expr(callee, ctx)?;
             let targs: Vec<TExpr> = args.iter().map(|a| infer_expr(a, ctx)).collect::<Result<_>>()?;
             let tkwargs: Vec<(String, TExpr)> = kwargs.iter()
                 .map(|(k, v)| infer_expr(v, ctx).map(|tv| (k.clone(), tv)))
                 .collect::<Result<_>>()?;
-            let ret_ty = match &tcallee.ty {
-                JadeType::Fn { ret, .. }      => *ret.clone(),
-                JadeType::AsyncFn { ret, .. } => JadeType::Future(ret.clone()),
-                JadeType::Unknown             => JadeType::Unknown,
-                _                             => return Err(JadeError::NotCallable { span: *span }),
+            let ret_ty = if is_grammar_new {
+                JadeType::Grammar
+            } else {
+                match &tcallee.ty {
+                    JadeType::Fn { ret, .. }      => *ret.clone(),
+                    JadeType::AsyncFn { ret, .. } => JadeType::Future(ret.clone()),
+                    JadeType::Unknown             => JadeType::Unknown,
+                    _                             => return Err(JadeError::NotCallable { span: *span }),
+                }
             };
             Ok(TExpr {
                 kind: TExprKind::Call { callee: Box::new(tcallee), args: targs, kwargs: tkwargs },
@@ -857,7 +867,7 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
 
         // ── LLM prompt dereference ────────────────────────────────────────────
 
-        Expr::PromptDeref { expr, output_type, span } => {
+        Expr::PromptDeref { expr, constraint, span } => {
             let texpr = infer_expr(expr, ctx)?;
             if texpr.ty != JadeType::Prompt && texpr.ty != JadeType::Unknown {
                 return Err(JadeError::TypeMismatch {
@@ -866,12 +876,32 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
                     span: *span,
                 });
             }
-            let result_ty = match output_type.as_deref() {
-                Some(s) => parse_type_name(s),
-                None    => JadeType::Unknown,  // lazy TokenStream; drains to Str at assignment
+
+            // Resolve the |> constraint: Grammar value → grammar_expr; otherwise → output_type string.
+            let (output_type, grammar_texpr, result_ty) = match constraint {
+                None => (None, None, JadeType::Unknown),
+                Some(c) => {
+                    let tc = infer_expr(c, ctx)?;
+                    if tc.ty == JadeType::Grammar {
+                        (None, Some(Box::new(tc)), JadeType::Str)
+                    } else {
+                        let name = extract_type_name(c).ok_or_else(|| JadeError::TypeMismatch {
+                            expected: "type name or Grammar value after |>".to_string(),
+                            got: jade_type_name(&tc.ty),
+                            span: *span,
+                        })?;
+                        let ty = parse_type_name(&name);
+                        (Some(name), None, ty)
+                    }
+                }
             };
+
             Ok(TExpr {
-                kind: TExprKind::PromptDeref { expr: Box::new(texpr), output_type: output_type.clone() },
+                kind: TExprKind::PromptDeref {
+                    expr: Box::new(texpr),
+                    output_type,
+                    grammar_expr: grammar_texpr,
+                },
                 ty: result_ty,
                 span: *span,
             })
@@ -1162,7 +1192,10 @@ fn collect_captures_in_expr(
             }
         }
         TExprKind::Await { expr } => collect_captures_in_expr(expr, locals, captures, seen, ctx),
-        TExprKind::PromptDeref { expr, .. } => collect_captures_in_expr(expr, locals, captures, seen, ctx),
+        TExprKind::PromptDeref { expr, grammar_expr, .. } => {
+            collect_captures_in_expr(expr, locals, captures, seen, ctx);
+            if let Some(g) = grammar_expr { collect_captures_in_expr(g, locals, captures, seen, ctx); }
+        }
         TExprKind::PromptLiteral { body } => collect_captures_in_expr(body, locals, captures, seen, ctx),
         TExprKind::Closure { params: inner_params, captures: inner_caps, .. } => {
             // The inner closure already resolved its own captures.
@@ -1233,6 +1266,7 @@ pub fn jade_type_name(ty: &JadeType) -> String {
         JadeType::Str          => "str".to_string(),
         JadeType::Nil          => "nil".to_string(),
         JadeType::Prompt       => "prompt".to_string(),
+        JadeType::Grammar      => "grammar".to_string(),
         JadeType::Array(elem)  => format!("[{}]", jade_type_name(elem)),
         JadeType::Dict         => "dict".to_string(),
         JadeType::Struct(name) => name.clone(),
@@ -1251,6 +1285,20 @@ fn parse_type_name(s: &str) -> JadeType {
         "str"   => JadeType::Str,
         "nil"   => JadeType::Nil,
         _       => JadeType::Unknown,
+    }
+}
+
+/// Extract a dotted type-name string from an AST expression used as a `|>` constraint.
+/// Returns `None` if the expression is not a plain identifier or dotted field path.
+fn extract_type_name(expr: &crate::frontend::ast::Expr) -> Option<String> {
+    use crate::frontend::ast::Expr;
+    match expr {
+        Expr::Identifier { name, .. } => Some(name.clone()),
+        Expr::FieldAccess { object, field, .. } => {
+            let base = extract_type_name(object)?;
+            Some(format!("{}.{}", base, field))
+        }
+        _ => None,
     }
 }
 

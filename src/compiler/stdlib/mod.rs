@@ -6,6 +6,7 @@ pub mod dict_pkg;
 pub mod math_pkg;
 pub mod fs_pkg;
 pub mod time_pkg;
+pub mod grammar_pkg;
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -164,6 +165,10 @@ pub fn seed_globals(globals: &mut HashMap<String, VmValue>) {
     for name in &["int", "float", "bool", "str", "func"] {
         globals.insert(name.to_string(), VmValue::TypeRef(name.to_string()));
     }
+    // Grammar global: Grammar.new(pattern) → VmValue::Grammar(pattern)
+    let mut grammar_fields = std::collections::HashMap::new();
+    grammar_fields.insert("new".to_string(), VmValue::BuiltinFn(grammar_pkg::GRAMMAR_NEW));
+    globals.insert("Grammar".to_string(), VmValue::Dict(grammar_fields));
 }
 
 /// Register type signatures for all core built-ins into the type checker.
