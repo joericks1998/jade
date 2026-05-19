@@ -1,17 +1,5 @@
 #![cfg(unix)]
 //! JadeOsBackend — native inference via Unix domain socket.
-//!
-
-
-
-//!
-
-//!
-
-
-
-
-
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -198,9 +186,6 @@ impl JadeOsBackend {
 }
 
 // ── Wire protocol ────────────────────────────────────────────────────────────
-
-
-
 
 fn encode_request(req: &InferenceRequest) -> std::result::Result<Vec<u8>, serde_json::Error> {
     #[derive(serde::Serialize)]
