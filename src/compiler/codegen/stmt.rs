@@ -56,7 +56,7 @@ pub fn collect_struct_literal_types(
                     walk_expr(field_expr, ft);
                 }
             }
-            TExprKind::Call { callee, args } => {
+            TExprKind::Call { callee, args, .. } => {
                 walk_expr(callee, ft);
                 for a in args { walk_expr(a, ft); }
             }
@@ -133,6 +133,8 @@ pub fn declare_fns<'ctx>(ctx: &mut CodegenCtx<'ctx>, stmts: &[TStmt]) -> Result<
                 let fn_val = ctx.module.add_function(name, fn_ty, None);
                 let param_jt: Vec<JadeType> = params.iter().map(|_| JadeType::Unknown).collect();
                 ctx.fn_info.insert(name.clone(), (fn_val, param_jt, ret_ty.clone()));
+                let names: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
+                ctx.fn_param_names.insert(name.clone(), names);
             }
             TStmt::AsyncFnDef { name, params, ret_ty, .. } => {
                 let i64_ty = ctx.context.i64_type();
@@ -154,6 +156,8 @@ pub fn declare_fns<'ctx>(ctx: &mut CodegenCtx<'ctx>, stmts: &[TStmt]) -> Result<
                 let fn_val = ctx.module.add_function(name, fn_ty, None);
                 let param_jt: Vec<JadeType> = params.iter().map(|_| JadeType::Unknown).collect();
                 ctx.fn_info.insert(name.clone(), (fn_val, param_jt, wrapper_ret_ty));
+                let names: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
+                ctx.fn_param_names.insert(name.clone(), names);
             }
             // Forward-declare extend methods as TypeName__method_name(ptr self, i64...) -> ret
             TStmt::ExtendBlock { type_name, methods, .. } => {
@@ -171,7 +175,9 @@ pub fn declare_fns<'ctx>(ctx: &mut CodegenCtx<'ctx>, stmts: &[TStmt]) -> Result<
                         let fn_val = ctx.module.add_function(&mangled, fn_ty, None);
                         let mut param_jt = vec![JadeType::Struct(type_name.clone())];
                         param_jt.extend(params.iter().skip(1).map(|_| JadeType::Unknown));
-                        ctx.fn_info.insert(mangled, (fn_val, param_jt, ret_ty.clone()));
+                        ctx.fn_info.insert(mangled.clone(), (fn_val, param_jt, ret_ty.clone()));
+                        let names: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
+                        ctx.fn_param_names.insert(mangled, names);
                     }
                 }
             }
@@ -219,12 +225,14 @@ pub fn emit_stmt<'ctx>(ctx: &mut CodegenCtx<'ctx>, stmt: &TStmt) -> Result<(), S
 
         // ── fn definitions ────────────────────────────────────────────────────
         TStmt::FnDef { name, params, body, ret_ty, .. } => {
-            emit_fn_body(ctx, name, params, body, ret_ty)?;
+            let param_names: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
+            emit_fn_body(ctx, name, &param_names, body, ret_ty)?;
         }
 
         // ── async fn definitions ──────────────────────────────────────────────
         TStmt::AsyncFnDef { name, params, body, ret_ty, .. } => {
-            emit_async_fn_def(ctx, name, params, body, ret_ty)?;
+            let param_names: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
+            emit_async_fn_def(ctx, name, &param_names, body, ret_ty)?;
         }
 
         // ── return [expr] ─────────────────────────────────────────────────────
@@ -551,7 +559,8 @@ pub fn emit_stmt<'ctx>(ctx: &mut CodegenCtx<'ctx>, stmt: &TStmt) -> Result<(), S
             for method_stmt in methods {
                 if let TStmt::FnDef { name, params, body, ret_ty, .. } = method_stmt {
                     let mangled = format!("{type_name}__{name}");
-                    emit_fn_body(ctx, &mangled, params, body, ret_ty)?;
+                    let param_names: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
+                    emit_fn_body(ctx, &mangled, &param_names, body, ret_ty)?;
                 }
             }
         }
@@ -569,6 +578,9 @@ pub fn emit_stmt<'ctx>(ctx: &mut CodegenCtx<'ctx>, stmt: &TStmt) -> Result<(), S
 
         // ── use "path" — expanded by resolve_imports before codegen ──────────
         TStmt::Use { .. } => {}
+
+        // ── from pkg use name, … — stdlib packages resolved at VM runtime ─────
+        TStmt::FromUse { .. } => {}
 
         // ── try { body } catch binding { arm } ────────────────────────────────
         TStmt::TryCatch { body, arms, .. } => {

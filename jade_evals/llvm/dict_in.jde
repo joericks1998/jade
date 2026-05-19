@@ -1,0 +1,5 @@
+let d = {"x": 1, "y": 2}
+let r = "x" in d
+print(r)
+let s = "z" in d
+print(s)

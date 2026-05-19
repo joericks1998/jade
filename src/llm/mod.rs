@@ -13,7 +13,7 @@ pub struct InferenceRequest {
     pub model: String,
     pub max_tokens: u32,
     /// GBNF grammar string for constrained decoding; `None` = unconstrained.
-    /// Passed through to jade-tree; ignored by API-based backends.
+    /// Passed through to the inference daemon; ignored by API-based backends.
     pub grammar: Option<String>,
 }
 
@@ -76,7 +76,7 @@ pub fn build_backend(
 
 /// Select the inference backend automatically.
 ///
-/// Priority: `$HOME/.jade/llm.sock` (jade-tree) → API key from `~/.jade/config.toml`.
+/// Priority: `$HOME/.jade/llm.sock` (inference daemon) → API key from `~/.jade/config.toml`.
 /// Returns `None` if neither is available.
 pub fn select_backend(config: &crate::config::JadeConfig) -> Option<Arc<dyn InferenceBackend>> {
     #[cfg(unix)]

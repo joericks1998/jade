@@ -59,7 +59,7 @@ impl JadeOsBackend {
         let mut stream = UnixStream::connect(sock_path)
             .map_err(|e| JadeError::InferenceError {
                 message: format!(
-                    "could not connect to {} — is jade-tree running? ({e})",
+                    "could not connect to {} — is the inference daemon running? ({e})",
                     sock_path
                 ),
                 span,
@@ -128,7 +128,7 @@ impl JadeOsBackend {
         let mut stream = UnixStream::connect(sock_path)
             .map_err(|e| JadeError::InferenceError {
                 message: format!(
-                    "could not connect to {} — is jade-tree running? ({e})",
+                    "could not connect to {} — is the inference daemon running? ({e})",
                     sock_path
                 ),
                 span,

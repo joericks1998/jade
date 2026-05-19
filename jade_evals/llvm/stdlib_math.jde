@@ -1,0 +1,8 @@
+use "std/math"
+print(math.floor(3.7))
+print(math.ceil(2.1))
+print(math.sqrt(16.0))
+print(math.abs(-5.0))
+print(math.min(3.0, 7.0))
+print(math.max(3.0, 7.0))
+print(math.pow(2.0, 10.0))

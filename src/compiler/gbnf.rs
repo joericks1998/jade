@@ -39,8 +39,8 @@ pub fn grammar_for(
             r#"root ::= ("true" | "false") [ \t\n\r]*"#.to_owned()
         ),
         "str" => None,
-        // Anchor-only: force the opening `[` as the first token, then jade-tree
-        // drops the grammar sampler — zero masking overhead after token 1.
+        // Anchor-only: force the opening `[` as the first token; the inference
+        // daemon drops the grammar sampler after token 1 — zero masking overhead.
         "array" | "Array" => Some("root ::= \"[\"".to_owned()),
         // Anchor-only: force the opening `{`.
         "dict" | "Dict" => Some("root ::= \"{\"".to_owned()),
