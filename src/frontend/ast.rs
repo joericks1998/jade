@@ -74,11 +74,14 @@ pub enum Stmt {
         span: Span,
     },
 
-    /// `fn name(param, ...) { body }`
+    /// `fn name(param, param = default, ...) { body }`
     FnDef {
         name: String,
-        params: Vec<String>,
+        /// Each entry is `(param_name, default_expr)`. Required params have `None`.
+        params: Vec<(String, Option<Expr>)>,
         body: Vec<Stmt>,
+        /// Each entry is `(decorator_name, positional_args)`.
+        decorators: Vec<(String, Vec<(Option<String>, Expr)>)>,
         #[allow(dead_code)] // reserved for future error reporting
         span: Span,
     },
@@ -125,6 +128,8 @@ pub enum Stmt {
     StructDef {
         name: String,
         fields: Vec<StructFieldDef>,
+        /// Each entry is `(decorator_name, positional_args)`.
+        decorators: Vec<(String, Vec<(Option<String>, Expr)>)>,
         #[allow(dead_code)]
         span: Span,
     },
@@ -144,6 +149,7 @@ pub enum Stmt {
         /// The interface this extend block claims to implement, if any.
         interface_name: Option<String>,
         methods: Vec<Stmt>,
+        decorators: Vec<(String, Vec<(Option<String>, Expr)>)>,
         #[allow(dead_code)]
         span: Span,
     },
@@ -174,8 +180,17 @@ pub enum Stmt {
     },
 
     /// `use "path/to/file.jde"` — import all top-level definitions from another file.
+    /// Also accepts dot notation: `use std.time` → path `"std/time"`.
     Use {
         path: String,
+        span: Span,
+    },
+
+    /// `from std.time use now, sleep` — import specific names directly into scope.
+    /// Path follows the same rules as `Use` (string literal or dot notation).
+    FromUse {
+        path: String,
+        names: Vec<String>,
         span: Span,
     },
 
@@ -192,11 +207,14 @@ pub enum Stmt {
         span: Span,
     },
 
-    /// `async fn name(param, ...) { body }`
+    /// `async fn name(param, param = default, ...) { body }`
     AsyncFnDef {
         name: String,
-        params: Vec<String>,
+        /// Each entry is `(param_name, default_expr)`. Required params have `None`.
+        params: Vec<(String, Option<Expr>)>,
         body: Vec<Stmt>,
+        /// Each entry is `(decorator_name, positional_args)`.
+        decorators: Vec<(String, Vec<(Option<String>, Expr)>)>,
         span: Span,
     },
 
@@ -242,6 +260,9 @@ pub enum Expr {
     Call {
         callee: Box<Expr>,
         args: Vec<Expr>,
+        /// Keyword arguments: `name = expr` pairs, e.g. `foo(a = 1, b = 2)`.
+        #[serde(default)]
+        kwargs: Vec<(String, Expr)>,
         span: Span,
     },
 
@@ -302,11 +323,14 @@ pub enum Expr {
     },
 
     /// `?expr` — dereference a prompt, calling the LLM backend.
-    /// `?expr |> type` — typed dereference: coerces the LLM output to `type` with retry.
+    /// `?expr |> TypeName`   — typed deref: coerces output to the named type with retry.
+    /// `?expr |> grammar_expr` — grammar-constrained deref: expr must hold a Grammar value.
     /// `expr` must evaluate to `Value::Prompt`; supports `?name`, `?obj.field`, etc.
     PromptDeref {
         expr: Box<Expr>,
-        output_type: Option<String>,
+        /// The expression after `|>`, if any.  Resolved at type-inference time into either
+        /// an output-type name (Str literal path) or a Grammar constraint expression.
+        constraint: Option<Box<Expr>>,
         span: Span,
     },
 
@@ -355,6 +379,9 @@ pub enum BinOpKind {
     Gt,
     Le,
     Ge,
+    // Membership
+    In,
+    NotIn,
 }
 
 /// All unary operators Jade supports.

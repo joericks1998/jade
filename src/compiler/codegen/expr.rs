@@ -2,7 +2,7 @@ use inkwell::{
     types::BasicMetadataTypeEnum,
     values::{
         AnyValue, AnyValueEnum, BasicMetadataValueEnum, BasicValueEnum,
-        CallSiteValue, IntValue, PointerValue,
+        CallSiteValue, FunctionValue, IntValue, PointerValue,
     },
     AddressSpace, FloatPredicate, IntPredicate,
 };
@@ -76,7 +76,7 @@ pub fn emit_expr<'ctx>(
         }
 
         // ── Function / built-in calls ─────────────────────────────────────────
-        Call { callee, args } => emit_call(callee, args, &expr.ty, ctx),
+        Call { callee, args, kwargs } => emit_call_with_kwargs(callee, args, kwargs, &expr.ty, ctx),
 
         // ── Heap collections ──────────────────────────────────────────────────
         Array { elements } => emit_array(elements, ctx),
@@ -107,26 +107,36 @@ pub fn emit_expr<'ctx>(
         // LLVM level — the type distinction is only semantic.
         PromptLiteral { body } => emit_expr(body, ctx),
 
-        // ── ?prompt  /  ?prompt |> Type ──────────────────────────────────────
-        PromptDeref { expr: pexpr, output_type } => {
+        // ── ?prompt  /  ?prompt |> Type  /  ?prompt |> grammar_expr ─────────
+        PromptDeref { expr: pexpr, output_type, grammar_expr } => {
             ctx.uses_prompts = true;
 
             // Load the prompt string pointer.
             let prompt_ptr = emit_expr(pexpr, ctx)?.into_pointer_value();
 
-            // Model name: read from JADE_MODEL env var at runtime, or empty string.
+            // Model name: empty string — the runtime reads JADE_MODEL from env.
             let model_ptr = ctx.builder
                 .build_global_string_ptr("", "jade_model_empty")
                 .map_err(|e| e.to_string())?
                 .as_pointer_value();
 
+            // Grammar-constrained deref: jrt_prompt_grammar(prompt, model, grammar)
+            if let Some(gexpr) = grammar_expr {
+                let grammar_ptr = emit_expr(gexpr, ctx)?.into_pointer_value();
+                return ctx.call_rv(
+                    ctx.jrt_prompt_grammar_fn,
+                    &[prompt_ptr.into(), model_ptr.into(), grammar_ptr.into()],
+                    "infer_grammar_r",
+                );
+            }
+
             match output_type {
-                // ── Untyped: jade_infer(prompt, model) -> char* ───────────────
+                // ── Untyped: jrt_prompt(prompt, model) -> char* ──────────────
                 None => {
-                    ctx.call_rv(ctx.jade_infer_fn, &[prompt_ptr.into(), model_ptr.into()], "infer_r")
+                    ctx.call_rv(ctx.jrt_prompt_fn, &[prompt_ptr.into(), model_ptr.into()], "infer_r")
                 }
 
-                // ── Typed: jade_infer_typed → parse to target type ────────────
+                // ── Typed: jrt_prompt_typed → parse to target type ────────────
                 Some(type_name) => {
                     let type_ptr = ctx.builder
                         .build_global_string_ptr(type_name, "infer_type")
@@ -135,7 +145,7 @@ pub fn emit_expr<'ctx>(
                     let max_retries = ctx.context.i32_type().const_int(3, false);
 
                     let result_ptr = ctx.call_rv(
-                        ctx.jade_infer_typed_fn,
+                        ctx.jrt_prompt_typed_fn,
                         &[prompt_ptr.into(), model_ptr.into(), type_ptr.into(), max_retries.into()],
                         "infer_typed_r",
                     )?.into_pointer_value();
@@ -489,7 +499,7 @@ fn emit_snprintf_value<'ctx>(
             ctx.builder.build_call(ctx.snprintf_fn, &[write_ptr.into(), remaining.into(), fmt.into(), sel.into()], "snp_bool")
                 .map_err(|e| e.to_string())?
         }
-        JadeType::Str => {
+        JadeType::Str | JadeType::Grammar => {
             let fmt = mk("%s", ctx)?;
             ctx.builder.build_call(ctx.snprintf_fn, &[write_ptr.into(), remaining.into(), fmt.into(), val.into()], "snp_str")
                 .map_err(|e| e.to_string())?
@@ -1109,9 +1119,157 @@ fn emit_binop<'ctx>(
             Ok(ctx.builder.build_int_compare(pred, cmp, zero, "scmp_r").map_err(|e| e.to_string())?.into())
         }
 
+        // ── Membership (in / not in) ──────────────────────────────────────────
+        (_, In, _) => emit_contains(lhs, lty.clone(), rhs, rty.clone(), ctx),
+        (_, NotIn, _) => {
+            let b = emit_contains(lhs, lty.clone(), rhs, rty.clone(), ctx)?.into_int_value();
+            Ok(ctx.builder.build_not(b, "not_in").map_err(|e| e.to_string())?.into())
+        }
+
         _ => Err(format!(
             "unsupported binary op {:?} for types {:?} × {:?} in LLVM backend",
             op, lty, rty
+        )),
+    }
+}
+
+// ── Membership: needle `in` haystack ─────────────────────────────────────────
+
+fn emit_contains<'ctx>(
+    needle: BasicValueEnum<'ctx>,
+    needle_ty: JadeType,
+    haystack: BasicValueEnum<'ctx>,
+    haystack_ty: JadeType,
+    ctx: &mut CodegenCtx<'ctx>,
+) -> Result<BasicValueEnum<'ctx>, String> {
+    match effective_ty(&haystack_ty) {
+        // ── key in dict: jade_dict_has(dict, key) != 0 ───────────────────────
+        JadeType::Dict => {
+            ctx.uses_dicts = true;
+            let dict_ptr = as_pointer(haystack, ctx)?;
+            let key_ptr  = as_pointer(needle, ctx)?;
+            let res = ctx.call_rv(
+                ctx.jade_dict_has_fn,
+                &[dict_ptr.into(), key_ptr.into()],
+                "dict_has",
+            )?.into_int_value();
+            let zero = ctx.context.i32_type().const_zero();
+            let found = ctx.builder
+                .build_int_compare(IntPredicate::NE, res, zero, "dict_has_b")
+                .map_err(|e| e.to_string())?;
+            Ok(found.into())
+        }
+
+        // ── str in str: strstr(haystack, needle) != NULL ──────────────────────
+        JadeType::Str => {
+            let hs = as_pointer(haystack, ctx)?;
+            let nd = as_pointer(needle, ctx)?;
+            let res = ctx.call_rv(ctx.strstr_fn, &[hs.into(), nd.into()], "strstr_r")?
+                .into_pointer_value();
+            let found = ctx.builder
+                .build_is_not_null(res, "in_str")
+                .map_err(|e| e.to_string())?;
+            Ok(found.into())
+        }
+
+        // ── x in array: linear scan ───────────────────────────────────────────
+        // All array elements are stored as i64; for str elements use strcmp,
+        // for Int/Float/Bool use i64 equality.
+        JadeType::Array(ref elem_ty) => {
+            let i64_ty = ctx.context.i64_type();
+            let ptr_ty = ctx.context.ptr_type(inkwell::AddressSpace::default());
+            let bool_ty = ctx.context.bool_type();
+            let fn_val = ctx.builder.get_insert_block()
+                .and_then(|bb| bb.get_parent())
+                .ok_or("'in' outside function")?;
+
+            let arr_ptr = as_pointer(haystack, ctx)?;
+            let f1 = ctx.builder.build_struct_gep(ctx.array_ty, arr_ptr, 1, "in_f1")
+                .map_err(|e| e.to_string())?;
+            let arr_len = ctx.builder.build_load(i64_ty, f1, "in_len")
+                .map_err(|e| e.to_string())?.into_int_value();
+            let f0 = ctx.builder.build_struct_gep(ctx.array_ty, arr_ptr, 0, "in_f0")
+                .map_err(|e| e.to_string())?;
+            let data_ptr = ctx.builder.build_load(ptr_ty, f0, "in_data")
+                .map_err(|e| e.to_string())?.into_pointer_value();
+
+            let needle_i64 = value_to_i64(needle, &needle_ty, ctx)?;
+
+            let result_slot = ctx.build_entry_alloca(bool_ty.into(), "in_result")?;
+            let i_slot      = ctx.build_entry_alloca(i64_ty.into(), "in_i")?;
+            ctx.builder.build_store(result_slot, bool_ty.const_int(0, false))
+                .map_err(|e| e.to_string())?;
+            ctx.builder.build_store(i_slot, i64_ty.const_int(0, false))
+                .map_err(|e| e.to_string())?;
+
+            // Blocks: cond → body → next → cond (exit on found or exhausted)
+            let cond_bb  = ctx.context.append_basic_block(fn_val, "in_cond");
+            let body_bb  = ctx.context.append_basic_block(fn_val, "in_body");
+            let found_bb = ctx.context.append_basic_block(fn_val, "in_found");
+            let next_bb  = ctx.context.append_basic_block(fn_val, "in_next");
+            let exit_bb  = ctx.context.append_basic_block(fn_val, "in_exit");
+
+            ctx.builder.build_unconditional_branch(cond_bb).map_err(|e| e.to_string())?;
+
+            // cond: i < len
+            ctx.builder.position_at_end(cond_bb);
+            let i_v = ctx.builder.build_load(i64_ty, i_slot, "in_i_v")
+                .map_err(|e| e.to_string())?.into_int_value();
+            let lt = ctx.builder.build_int_compare(inkwell::IntPredicate::SLT, i_v, arr_len, "in_lt")
+                .map_err(|e| e.to_string())?;
+            ctx.builder.build_conditional_branch(lt, body_bb, exit_bb)
+                .map_err(|e| e.to_string())?;
+
+            // body: load element, compare
+            ctx.builder.position_at_end(body_bb);
+            let i_v2 = ctx.builder.build_load(i64_ty, i_slot, "in_i2")
+                .map_err(|e| e.to_string())?.into_int_value();
+            let elem_slot = ctx.gep(i64_ty, data_ptr, &[i_v2], "in_eslot")?;
+            let raw = ctx.builder.build_load(i64_ty, elem_slot, "in_raw")
+                .map_err(|e| e.to_string())?.into_int_value();
+
+            let eq = match effective_ty(elem_ty) {
+                JadeType::Str => {
+                    let ep = ctx.builder.build_int_to_ptr(raw, ptr_ty, "in_ep")
+                        .map_err(|e| e.to_string())?;
+                    let np = ctx.builder.build_int_to_ptr(needle_i64, ptr_ty, "in_np")
+                        .map_err(|e| e.to_string())?;
+                    let cmp = ctx.call_rv(ctx.strcmp_fn, &[ep.into(), np.into()], "in_sc")?
+                        .into_int_value();
+                    ctx.builder.build_int_compare(inkwell::IntPredicate::EQ, cmp,
+                        ctx.context.i32_type().const_zero(), "in_seq")
+                        .map_err(|e| e.to_string())?
+                }
+                _ => ctx.builder.build_int_compare(inkwell::IntPredicate::EQ, raw, needle_i64, "in_eq")
+                    .map_err(|e| e.to_string())?,
+            };
+            ctx.builder.build_conditional_branch(eq, found_bb, next_bb)
+                .map_err(|e| e.to_string())?;
+
+            // found: set result = true, exit
+            ctx.builder.position_at_end(found_bb);
+            ctx.builder.build_store(result_slot, bool_ty.const_int(1, false))
+                .map_err(|e| e.to_string())?;
+            ctx.builder.build_unconditional_branch(exit_bb).map_err(|e| e.to_string())?;
+
+            // next: increment i, loop
+            ctx.builder.position_at_end(next_bb);
+            let i_v3 = ctx.builder.build_load(i64_ty, i_slot, "in_i3")
+                .map_err(|e| e.to_string())?.into_int_value();
+            let inc = ctx.builder.build_int_add(i_v3, i64_ty.const_int(1, false), "in_inc")
+                .map_err(|e| e.to_string())?;
+            ctx.builder.build_store(i_slot, inc).map_err(|e| e.to_string())?;
+            ctx.builder.build_unconditional_branch(cond_bb).map_err(|e| e.to_string())?;
+
+            ctx.builder.position_at_end(exit_bb);
+            let result = ctx.builder.build_load(bool_ty, result_slot, "in_res_v")
+                .map_err(|e| e.to_string())?;
+            Ok(result)
+        }
+
+        _ => Err(format!(
+            "'in' operator not supported for haystack type {:?} in LLVM backend",
+            haystack_ty
         )),
     }
 }
@@ -1165,7 +1323,120 @@ fn emit_unaryop<'ctx>(
     }
 }
 
+// ── Math stdlib inline emission ───────────────────────────────────────────────
+
+fn math_libc_fn<'ctx>(name: &str, arity: usize, ctx: &mut CodegenCtx<'ctx>) -> FunctionValue<'ctx> {
+    if let Some(f) = ctx.module.get_function(name) { return f; }
+    let f64_ty = ctx.context.f64_type();
+    let params: Vec<BasicMetadataTypeEnum<'ctx>> = (0..arity)
+        .map(|_| BasicMetadataTypeEnum::FloatType(f64_ty))
+        .collect();
+    ctx.module.add_function(name, f64_ty.fn_type(&params, false), None)
+}
+
+fn math_promote<'ctx>(arg: &TExpr, ctx: &mut CodegenCtx<'ctx>) -> Result<BasicValueEnum<'ctx>, String> {
+    let f64_ty = ctx.context.f64_type();
+    let val = emit_expr(arg, ctx)?;
+    match val {
+        BasicValueEnum::FloatValue(_) => Ok(val),
+        BasicValueEnum::IntValue(i) => Ok(ctx.builder
+            .build_signed_int_to_float(i, f64_ty, "math_itof")
+            .map_err(|e| e.to_string())?.into()),
+        BasicValueEnum::PointerValue(p) => {
+            let bits = ctx.builder.build_ptr_to_int(p, ctx.context.i64_type(), "mp2i")
+                .map_err(|e| e.to_string())?;
+            Ok(ctx.i64_bits_to_float(bits)?.into())
+        }
+        _ => Err("math: unexpected argument type".to_string()),
+    }
+}
+
+fn emit_math_call<'ctx>(
+    method: &str,
+    args: &[TExpr],
+    ctx: &mut CodegenCtx<'ctx>,
+) -> Result<BasicValueEnum<'ctx>, String> {
+    match method {
+        "floor" | "ceil" | "sqrt" => {
+            let libc = match method { "floor" => "floor", "ceil" => "ceil", _ => "sqrt" };
+            let f = math_libc_fn(libc, 1, ctx);
+            let a = math_promote(args.first().ok_or_else(|| format!("math.{method}: missing arg"))?, ctx)?;
+            ctx.call_rv(f, &[a.into()], "math_r")
+        }
+        "abs" => {
+            let f = math_libc_fn("fabs", 1, ctx);
+            let a = math_promote(args.first().ok_or_else(|| "math.abs: missing arg".to_string())?, ctx)?;
+            ctx.call_rv(f, &[a.into()], "math_r")
+        }
+        "min" => {
+            let f = math_libc_fn("fmin", 2, ctx);
+            let a = math_promote(args.first().ok_or_else(|| "math.min: missing arg 0".to_string())?, ctx)?;
+            let b = math_promote(args.get(1).ok_or_else(|| "math.min: missing arg 1".to_string())?, ctx)?;
+            ctx.call_rv(f, &[a.into(), b.into()], "math_r")
+        }
+        "max" => {
+            let f = math_libc_fn("fmax", 2, ctx);
+            let a = math_promote(args.first().ok_or_else(|| "math.max: missing arg 0".to_string())?, ctx)?;
+            let b = math_promote(args.get(1).ok_or_else(|| "math.max: missing arg 1".to_string())?, ctx)?;
+            ctx.call_rv(f, &[a.into(), b.into()], "math_r")
+        }
+        "pow" => {
+            let f = math_libc_fn("pow", 2, ctx);
+            let a = math_promote(args.first().ok_or_else(|| "math.pow: missing arg 0".to_string())?, ctx)?;
+            let b = math_promote(args.get(1).ok_or_else(|| "math.pow: missing arg 1".to_string())?, ctx)?;
+            ctx.call_rv(f, &[a.into(), b.into()], "math_r")
+        }
+        _ => Err(format!("math.{method}: unknown method")),
+    }
+}
+
 // ── Function calls ────────────────────────────────────────────────────────────
+
+/// Resolve keyword arguments into positional order, then delegate to emit_call.
+fn emit_call_with_kwargs<'ctx>(
+    callee: &TExpr,
+    args: &[TExpr],
+    kwargs: &[(String, TExpr)],
+    ret_ty: &JadeType,
+    ctx: &mut CodegenCtx<'ctx>,
+) -> Result<BasicValueEnum<'ctx>, String> {
+    if kwargs.is_empty() {
+        return emit_call(callee, args, ret_ty, ctx);
+    }
+
+    // Only positional-resolution for direct named calls that we know about.
+    if let TExprKind::Identifier(fn_name) = &callee.kind {
+        if let Some(param_names) = ctx.fn_param_names.get(fn_name.as_str()).cloned() {
+            let n = param_names.len();
+            let mut slots: Vec<Option<TExpr>> = (0..n).map(|_| None).collect();
+
+            // Fill positional slots first.
+            for (i, arg) in args.iter().enumerate() {
+                if i < n { slots[i] = Some(arg.clone()); }
+            }
+            // Fill keyword slots.
+            for (kw_name, kw_expr) in kwargs {
+                if let Some(idx) = param_names.iter().position(|p| p == kw_name) {
+                    slots[idx] = Some(kw_expr.clone());
+                }
+            }
+            // Build a flat ordered arg list (missing slots get a zero literal).
+            let ordered: Vec<TExpr> = slots.into_iter().map(|s| s.unwrap_or_else(|| {
+                crate::compiler::tir::TExpr {
+                    kind: TExprKind::Integer(0),
+                    ty: JadeType::Int,
+                    span: callee.span.clone(),
+                }
+            })).collect();
+            return emit_call(callee, &ordered, ret_ty, ctx);
+        }
+    }
+
+    // Fallback: append kwargs positionally after positional args.
+    let mut all_args: Vec<TExpr> = args.to_vec();
+    for (_, kw_expr) in kwargs { all_args.push(kw_expr.clone()); }
+    emit_call(callee, &all_args, ret_ty, ctx)
+}
 
 fn emit_call<'ctx>(
     callee: &TExpr,
@@ -1173,6 +1444,26 @@ fn emit_call<'ctx>(
     ret_ty: &JadeType,
     ctx: &mut CodegenCtx<'ctx>,
 ) -> Result<BasicValueEnum<'ctx>, String> {
+    // ── Grammar.new(pattern) — wire-identical to its string argument ──────────
+    if let TExprKind::FieldAccess { object, field } = &callee.kind {
+        if let TExprKind::Identifier(obj_name) = &object.kind {
+            if obj_name == "Grammar" && field == "new" {
+                if let Some(arg) = args.first() {
+                    return emit_expr(arg, ctx);
+                }
+            }
+        }
+    }
+
+    // ── Math stdlib dispatch: math.floor(...) etc. ────────────────────────────
+    if let TExprKind::FieldAccess { object, field } = &callee.kind {
+        if let TExprKind::Identifier(obj_name) = &object.kind {
+            if obj_name == "math" {
+                return emit_math_call(field, args, ctx);
+            }
+        }
+    }
+
     // ── Built-in functions ────────────────────────────────────────────────────
     if let TExprKind::Identifier(name) = &callee.kind {
         match name.as_str() {
@@ -1360,7 +1651,7 @@ fn emit_printf_value<'ctx>(
             let fmt = sp("%s", ctx)?;
             ctx.builder.build_call(ctx.printf_fn, &[fmt.into(), sel.into()], "").map_err(|e| e.to_string())?;
         }
-        JadeType::Str => {
+        JadeType::Str | JadeType::Grammar => {
             let fmt = sp(&format!("%s{suffix}"), ctx)?;
             ctx.builder.build_call(ctx.printf_fn, &[fmt.into(), val.into()], "").map_err(|e| e.to_string())?;
         }
@@ -1516,7 +1807,7 @@ pub fn value_to_i64<'ctx>(
             .map_err(|e| e.to_string()),
         JadeType::Str | JadeType::Array(_) | JadeType::Struct(_)
         | JadeType::Dict | JadeType::Fn { .. } | JadeType::AsyncFn { .. }
-        | JadeType::Future(_) | JadeType::Prompt => ctx.builder
+        | JadeType::Future(_) | JadeType::Prompt | JadeType::Grammar => ctx.builder
             .build_ptr_to_int(val.into_pointer_value(), i64_ty, "p2i64")
             .map_err(|e| e.to_string()),
         // For Int / Unknown / Nil: inspect the actual LLVM value type so that
@@ -1554,7 +1845,7 @@ pub fn i64_to_value<'ctx>(
         }
         JadeType::Str | JadeType::Array(_) | JadeType::Struct(_)
         | JadeType::Dict | JadeType::Fn { .. } | JadeType::AsyncFn { .. }
-        | JadeType::Future(_) | JadeType::Prompt => {
+        | JadeType::Future(_) | JadeType::Prompt | JadeType::Grammar => {
             let p = ctx.builder
                 .build_int_to_ptr(raw, ptr_ty, "i2ptr")
                 .map_err(|e| e.to_string())?;
@@ -1611,7 +1902,7 @@ fn actual_ty<'ctx>(declared: &JadeType, val: &BasicValueEnum<'ctx>) -> JadeType 
         BasicValueEnum::PointerValue(_) => match declared {
             JadeType::Str | JadeType::Array(_) | JadeType::Struct(_)
             | JadeType::Dict | JadeType::Fn { .. } | JadeType::AsyncFn { .. }
-            | JadeType::Future(_) | JadeType::Prompt => declared.clone(),
+            | JadeType::Future(_) | JadeType::Prompt | JadeType::Grammar => declared.clone(),
             _ => JadeType::Str,
         },
         BasicValueEnum::IntValue(_) => match declared {

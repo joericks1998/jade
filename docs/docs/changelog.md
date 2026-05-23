@@ -4,6 +4,14 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.1.7
+
+- Added `std/sh` package — execute shell commands from Jade via `sh.exec`, `sh.run`, and `sh.output`
+- Added `std/json` package — parse JSON strings into Jade values and serialize Jade values back to JSON with `json.parse`, `json.stringify`, and `json.stringify_pretty`
+- Added `std/env` package — read and write environment variables (`env.get`, `env.set`), inspect command-line arguments (`env.args`), and get the working directory (`env.cwd`)
+- Added `std/path` package — cross-platform path manipulation: `path.join`, `path.basename`, `path.dirname`, `path.ext`, `path.stem`, `path.abs`, `path.is_abs`
+- Added `std/random` package — random number generation with `random.int`, `random.float`, `random.choice`, `random.shuffle`, and a seedable global RNG via `random.seed`
+
 ## v1.1.6
 
 - Added `input(prompt?)` built-in — reads a line from stdin; the optional `prompt` argument prints to stdout without a trailing newline before reading. Returns an empty string on EOF.

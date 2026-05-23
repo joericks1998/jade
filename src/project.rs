@@ -13,6 +13,9 @@ pub struct ProjectManifest {
     pub scripts: Option<HashMap<String, String>>,
     pub model: Option<ManifestModelSection>,
     pub dependencies: Option<HashMap<String, String>>,
+    /// `[native]` section: maps package name → path to compiled shared library.
+    /// Used via `use "native/<name>"` in Jade source.
+    pub native: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -120,19 +120,25 @@ pub enum JadeError {
     /// The same Future was awaited more than once.
     DoubleAwait { span: Span },
 
+    /// A TokenStream was drained more than once.
+    DoubleStreamDrain { span: Span },
+
     /// A spawned async task panicked (tokio JoinError).
     AsyncPanic { message: String, span: Span },
+
+    /// A filesystem I/O operation failed.
+    IoError { message: String, span: Span },
 }
 
 impl std::fmt::Display for JadeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             JadeError::UnexpectedChar { ch, span } =>
-                write!(f, "[{}:{}] unexpected character '{}'", span.line, span.col, ch),
+                write!(f, "[{}:{}] syntax error: unexpected character {:?}", span.line, span.col, ch),
             JadeError::UnexpectedToken { expected, got, span } =>
-                write!(f, "[{}:{}] expected {}, found {}", span.line, span.col, expected, got),
+                write!(f, "[{}:{}] syntax error: expected {}, found {}", span.line, span.col, expected, got),
             JadeError::UnexpectedEof { span } =>
-                write!(f, "[{}:{}] unexpected end of file", span.line, span.col),
+                write!(f, "[{}:{}] syntax error: unexpected end of file — did you forget a closing `}}`?", span.line, span.col),
             JadeError::UndefinedVariable { name, span } =>
                 write!(f, "[{}:{}] undefined variable '{}'", span.line, span.col, name),
             JadeError::DivisionByZero { span } =>
@@ -175,7 +181,7 @@ impl std::fmt::Display for JadeError {
                 write!(f, "[{}:{}] inference error: {}", span.line, span.col, message),
             JadeError::MissingApiKey { span } =>
                 write!(f, "[{}:{}] no inference backend available — options:\n  \
-                    1. start jade-tree (socket at $HOME/.jade/llm.sock)\n  \
+                    1. start the inference daemon (socket at $HOME/.jade/llm.sock)\n  \
                     2. set JADE_API_KEY and optionally run 'jade configure'", span.line, span.col),
             JadeError::NotAPrompt { name, span } =>
                 write!(f, "[{}:{}] '{}' is not a prompt variable", span.line, span.col, name),
@@ -203,8 +209,12 @@ impl std::fmt::Display for JadeError {
                 write!(f, "[{}:{}] 'await' applied to a non-Future value", span.line, span.col),
             JadeError::DoubleAwait { span } =>
                 write!(f, "[{}:{}] cannot await the same Future more than once", span.line, span.col),
+            JadeError::DoubleStreamDrain { span } =>
+                write!(f, "[{}:{}] cannot drain the same token stream more than once", span.line, span.col),
             JadeError::AsyncPanic { message, span } =>
                 write!(f, "[{}:{}] async task panicked: {}", span.line, span.col, message),
+            JadeError::IoError { message, span } =>
+                write!(f, "[{}:{}] I/O error: {}", span.line, span.col, message),
         }
     }
 }

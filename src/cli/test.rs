@@ -133,6 +133,7 @@ async fn run_test_file(
         default_model: model.to_string(),
         max_retries,
         source_dir,
+        native_packages: std::collections::HashMap::new(),
     };
 
     vm::run(compiled, opts).await.map_err(|e| e.to_string())?;

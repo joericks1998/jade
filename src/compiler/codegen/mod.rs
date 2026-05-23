@@ -32,6 +32,10 @@ pub struct CodegenCtx<'ctx> {
     /// Declared Jade functions: name → (llvm fn, param jade-types, ret jade-type).
     pub fn_info: HashMap<String, (FunctionValue<'ctx>, Vec<JadeType>, JadeType)>,
 
+    /// Parameter names for each declared function: mangled-name → ordered param names.
+    /// Populated by declare_fns; used to resolve keyword arguments at call sites.
+    pub fn_param_names: HashMap<String, Vec<String>>,
+
     /// Return type of the function currently being emitted.
     pub current_ret_ty: Option<JadeType>,
 
@@ -64,6 +68,8 @@ pub struct CodegenCtx<'ctx> {
     pub jade_dict_set_fn: FunctionValue<'ctx>,
     /// jade_dict_get(ptr dict, ptr key) -> i64
     pub jade_dict_get_fn: FunctionValue<'ctx>,
+    /// jade_dict_has(ptr dict, ptr key) -> i32
+    pub jade_dict_has_fn: FunctionValue<'ctx>,
     /// jade_dict_len(ptr dict) -> i64
     pub jade_dict_len_fn: FunctionValue<'ctx>,
 
@@ -80,10 +86,12 @@ pub struct CodegenCtx<'ctx> {
     pub jade_exc_value_fn: FunctionValue<'ctx>,
 
     // ── jade_rt inference runtime ──────────────────────────────────────────
-    /// jade_infer(ptr prompt, ptr model) -> ptr
-    pub jade_infer_fn: FunctionValue<'ctx>,
-    /// jade_infer_typed(ptr prompt, ptr model, ptr type_name, i32 max_retries) -> ptr
-    pub jade_infer_typed_fn: FunctionValue<'ctx>,
+    /// jrt_prompt(ptr prompt, ptr model) -> ptr
+    pub jrt_prompt_fn: FunctionValue<'ctx>,
+    /// jrt_prompt_typed(ptr prompt, ptr model, ptr type_name, i32 max_retries) -> ptr
+    pub jrt_prompt_typed_fn: FunctionValue<'ctx>,
+    /// jrt_prompt_grammar(ptr prompt, ptr model, ptr grammar) -> ptr
+    pub jrt_prompt_grammar_fn: FunctionValue<'ctx>,
 
     // ── libc helpers for typed prompt parsing ──────────────────────────────
     /// atoll(ptr) -> i64
@@ -94,6 +102,8 @@ pub struct CodegenCtx<'ctx> {
     pub strcmp_fn: FunctionValue<'ctx>,
     /// free(ptr) -> void
     pub free_fn: FunctionValue<'ctx>,
+    /// strstr(haystack: ptr, needle: ptr) -> ptr  — for `x in str`
+    pub strstr_fn: FunctionValue<'ctx>,
 
     // ── Async / dict / exception / prompt codegen state ────────────────────
     /// When `Some(ty)`, `TStmt::Return` in an async body or closure function
@@ -184,6 +194,10 @@ impl<'ctx> CodegenCtx<'ctx> {
         let jade_dict_get_ty = i64_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], false);
         let jade_dict_get_fn = module.add_function("jade_dict_get", jade_dict_get_ty, None);
 
+        // jade_dict_has(ptr, ptr) -> i32
+        let jade_dict_has_ty = i32_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], false);
+        let jade_dict_has_fn = module.add_function("jade_dict_has", jade_dict_has_ty, None);
+
         // jade_dict_len(ptr) -> i64
         let jade_dict_len_ty = i64_ty.fn_type(&[ptr_ty.into()], false);
         let jade_dict_len_fn = module.add_function("jade_dict_len", jade_dict_len_ty, None);
@@ -220,13 +234,17 @@ impl<'ctx> CodegenCtx<'ctx> {
         let jade_exc_value_ty = i64_ty.fn_type(&[], false);
         let jade_exc_value_fn = module.add_function("jade_exc_value", jade_exc_value_ty, None);
 
-        // jade_infer(ptr prompt, ptr model) -> ptr
-        let jade_infer_ty = ptr_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], false);
-        let jade_infer_fn = module.add_function("jade_infer", jade_infer_ty, None);
+        // jrt_prompt(ptr prompt, ptr model) -> ptr
+        let jrt_prompt_ty = ptr_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], false);
+        let jrt_prompt_fn = module.add_function("jrt_prompt", jrt_prompt_ty, None);
 
-        // jade_infer_typed(ptr prompt, ptr model, ptr type_name, i32 max_retries) -> ptr
-        let jade_infer_typed_ty = ptr_ty.fn_type(&[ptr_ty.into(), ptr_ty.into(), ptr_ty.into(), i32_ty.into()], false);
-        let jade_infer_typed_fn = module.add_function("jade_infer_typed", jade_infer_typed_ty, None);
+        // jrt_prompt_typed(ptr prompt, ptr model, ptr type_name, i32 max_retries) -> ptr
+        let jrt_prompt_typed_ty = ptr_ty.fn_type(&[ptr_ty.into(), ptr_ty.into(), ptr_ty.into(), i32_ty.into()], false);
+        let jrt_prompt_typed_fn = module.add_function("jrt_prompt_typed", jrt_prompt_typed_ty, None);
+
+        // jrt_prompt_grammar(ptr prompt, ptr model, ptr grammar) -> ptr
+        let jrt_prompt_grammar_ty = ptr_ty.fn_type(&[ptr_ty.into(), ptr_ty.into(), ptr_ty.into()], false);
+        let jrt_prompt_grammar_fn = module.add_function("jrt_prompt_grammar", jrt_prompt_grammar_ty, None);
 
         // atoll(ptr) -> i64
         let atoll_ty = i64_ty.fn_type(&[ptr_ty.into()], false);
@@ -245,6 +263,10 @@ impl<'ctx> CodegenCtx<'ctx> {
         let free_ty = context.void_type().fn_type(&[ptr_ty.into()], false);
         let free_fn = module.add_function("free", free_ty, None);
 
+        // strstr(const char *haystack, const char *needle) -> char*
+        let strstr_ty = ptr_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], false);
+        let strstr_fn = module.add_function("strstr", strstr_ty, None);
+
         // %jade.fn = type { ptr, ptr }  — fat pointer for first-class functions / closures
         let jade_fn_ty = context.opaque_struct_type("jade.fn");
         jade_fn_ty.set_body(&[ptr_ty.into(), ptr_ty.into()], false);
@@ -255,6 +277,7 @@ impl<'ctx> CodegenCtx<'ctx> {
             builder,
             scopes: vec![HashMap::new()],
             fn_info: HashMap::new(),
+            fn_param_names: HashMap::new(),
             current_ret_ty: None,
             printf_fn,
             exit_fn,
@@ -268,18 +291,21 @@ impl<'ctx> CodegenCtx<'ctx> {
             jade_dict_create_fn,
             jade_dict_set_fn,
             jade_dict_get_fn,
+            jade_dict_has_fn,
             jade_dict_len_fn,
             setjmp_fn,
             jade_exc_push_frame_fn,
             jade_exc_pop_fn,
             jade_exc_throw_fn,
             jade_exc_value_fn,
-            jade_infer_fn,
-            jade_infer_typed_fn,
+            jrt_prompt_fn,
+            jrt_prompt_typed_fn,
+            jrt_prompt_grammar_fn,
             atoll_fn,
             strtod_fn,
             strcmp_fn,
             free_fn,
+            strstr_fn,
             async_body_ret_ty: None,
             uses_async: false,
             uses_dicts: false,

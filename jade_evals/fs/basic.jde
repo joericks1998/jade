@@ -1,0 +1,32 @@
+use "std/fs"
+
+let path = "/tmp/jade_eval_fs_basic.txt"
+
+// write and read back
+fs.write(path, "jade fs eval")
+let content = fs.read(path)
+print(content)                          // jade fs eval
+
+// exists
+let yes = fs.exists(path)
+let no  = fs.exists("/tmp/jade_no_such_file_xyz.txt")
+print(yes)                              // true
+print(no)                               // false
+
+// append
+fs.append(path, " appended")
+let content2 = fs.read(path)
+print(content2)                         // jade fs eval appended
+
+// list_dir
+let entries = fs.list_dir("/tmp")
+print(len(entries) > 0)                 // true
+
+// mkdir
+let dir = "/tmp/jade_eval_fs_dir"
+fs.mkdir(dir)
+print(fs.exists(dir))                   // true
+
+// delete
+fs.delete(path)
+print(fs.exists(path))                  // false

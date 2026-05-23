@@ -23,7 +23,8 @@ pub fn jade_to_llvm<'ctx>(ty: &JadeType, ctx: &'ctx Context) -> BasicTypeEnum<'c
         | JadeType::Fn { .. }
         | JadeType::AsyncFn { .. }
         | JadeType::Future(_)
-        | JadeType::Prompt => ctx.ptr_type(AddressSpace::default()).into(),
+        | JadeType::Prompt
+        | JadeType::Grammar => ctx.ptr_type(AddressSpace::default()).into(),
     }
 }
 

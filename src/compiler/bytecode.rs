@@ -20,6 +20,9 @@ pub enum FStrPart {
 pub struct CompiledFn {
     /// Parameter names, in declaration order. Slot 0 .. params.len()-1.
     pub params: Vec<String>,
+    /// Default values for optional parameters, parallel to `params`.
+    /// `None` means the parameter is required.
+    pub defaults: Vec<Option<crate::compiler::vm::VmValue>>,
     /// Bytecode body.
     pub chunk: Chunk,
     /// Total number of register slots needed by this function frame.
@@ -212,6 +215,8 @@ pub enum Instr {
     // ── Function calls ─────────────────────────────────────────────────────
     /// dest ← callee_reg(arg_regs…)
     Call(Reg, Reg, Vec<Reg>),
+    /// dest ← callee_reg(mixed_args) where args may be positional (None) or named (Some(name)).
+    CallNamed(Reg, Reg, Vec<(Option<String>, Reg)>),
     Return(Option<Reg>),
 
     // ── Collections ────────────────────────────────────────────────────────
@@ -236,7 +241,9 @@ pub enum Instr {
 
     // ── Prompt ─────────────────────────────────────────────────────────────
     MakePrompt(Reg, Reg),
-    PromptDeref(Reg, Reg, Option<String>),
+    /// (dest, prompt_reg, output_type, grammar_reg)
+    /// grammar_reg holds a VmValue::Grammar for user-supplied GBNF pattern.
+    PromptDeref(Reg, Reg, Option<String>, Option<Reg>),
 
     // ── Exception handling ─────────────────────────────────────────────────
     /// Raise the value in `val` as an exception. If a handler frame is active,
@@ -268,4 +275,6 @@ pub enum Instr {
     /// Run the full pipeline for the file at `path` (relative to the current
     /// file's directory) and merge its top-level exports into the running state.
     ImportFile(String),
+    /// `from X use Y, Z` — load package/file at path, then bind only the listed names directly.
+    ImportFrom(String, Vec<String>),
 }

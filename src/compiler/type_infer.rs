@@ -157,8 +157,14 @@ fn pre_pass(stmts: &[Stmt], ctx: &mut TypeContext) {
                     ret: Box::new(JadeType::Unknown),
                 });
             }
+
             Stmt::StructDef { name, fields, .. } => {
                 ctx.struct_defs.insert(name.clone(), fields.clone());
+                // Struct names are callable constructors: `City(dict)`.
+                ctx.define(name.clone(), JadeType::Fn {
+                    params: vec![JadeType::Unknown],
+                    ret: Box::new(JadeType::Struct(name.clone())),
+                });
             }
             Stmt::InterfaceDef { name, methods, .. } => {
                 let method_names = methods.iter().map(|m| m.name.clone()).collect();
@@ -174,7 +180,7 @@ fn pre_pass(stmts: &[Stmt], ctx: &mut TypeContext) {
                     }
                 }
             }
-            Stmt::Use { .. } => {
+            Stmt::Use { .. } | Stmt::FromUse { .. } => {
                 ctx.has_imports = true;
             }
             _ => {}
@@ -206,34 +212,42 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
 
         // ── Functions ─────────────────────────────────────────────────────────
 
-        Stmt::FnDef { name, params, body, span } => {
+        Stmt::FnDef { name, params, body, decorators, span } => {
             ctx.push_scope();
-            for param in params {
-                ctx.define(param.clone(), JadeType::Unknown);
+            for (pname, _) in params {
+                ctx.define(pname.clone(), JadeType::Unknown);
             }
             let tbody = check_stmts(body, ctx)?;
             ctx.pop_scope();
 
             let ret_ty = infer_return_type(&tbody);
-            // Update fn entry with the now-resolved return type.
             ctx.define(name.clone(), JadeType::Fn {
                 params: vec![JadeType::Unknown; params.len()],
                 ret: Box::new(ret_ty.clone()),
             });
 
+            let tparams = params.iter()
+                .map(|(pname, default)| {
+                    let tdefault = default.as_ref().map(|e| infer_expr(e, ctx)).transpose()?;
+                    Ok((pname.clone(), tdefault))
+                })
+                .collect::<Result<Vec<_>>>()?;
+
+            let tdecorators = infer_decorators(decorators, ctx)?;
             Ok(TStmt::FnDef {
                 name: name.clone(),
-                params: params.clone(),
+                params: tparams,
                 body: tbody,
                 ret_ty,
+                decorators: tdecorators,
                 span: *span,
             })
         }
 
-        Stmt::AsyncFnDef { name, params, body, span } => {
+        Stmt::AsyncFnDef { name, params, body, decorators, span } => {
             ctx.push_scope();
-            for param in params {
-                ctx.define(param.clone(), JadeType::Unknown);
+            for (pname, _) in params {
+                ctx.define(pname.clone(), JadeType::Unknown);
             }
             let tbody = check_stmts(body, ctx)?;
             ctx.pop_scope();
@@ -244,11 +258,20 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
                 ret: Box::new(ret_ty.clone()),
             });
 
+            let tparams = params.iter()
+                .map(|(pname, default)| {
+                    let tdefault = default.as_ref().map(|e| infer_expr(e, ctx)).transpose()?;
+                    Ok((pname.clone(), tdefault))
+                })
+                .collect::<Result<Vec<_>>>()?;
+
+            let tdecorators = infer_decorators(decorators, ctx)?;
             Ok(TStmt::AsyncFnDef {
                 name: name.clone(),
-                params: params.clone(),
+                params: tparams,
                 body: tbody,
                 ret_ty,
+                decorators: tdecorators,
                 span: *span,
             })
         }
@@ -311,16 +334,16 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
 
         // ── Type definitions ──────────────────────────────────────────────────
 
-        Stmt::StructDef { name, fields, span } => {
-            // Already registered in pre_pass; re-emit verbatim.
-            Ok(TStmt::StructDef { name: name.clone(), fields: fields.clone(), span: *span })
+        Stmt::StructDef { name, fields, decorators, span } => {
+            let tdecorators = infer_decorators(decorators, ctx)?;
+            Ok(TStmt::StructDef { name: name.clone(), fields: fields.clone(), decorators: tdecorators, span: *span })
         }
 
         Stmt::InterfaceDef { name, methods, span } => {
             Ok(TStmt::InterfaceDef { name: name.clone(), methods: methods.clone(), span: *span })
         }
 
-        Stmt::ExtendBlock { type_name, interface_name, methods, span } => {
+        Stmt::ExtendBlock { type_name, interface_name, methods, decorators, span } => {
             // Verify interface compliance if an interface is named.
             if let Some(iface_name) = interface_name {
                 let required = ctx.interface_defs.get(iface_name).cloned();
@@ -352,10 +375,12 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
             // field accesses on self return Unknown (conservative for Stage B).
             let tmethods = check_stmts(methods, ctx)?;
 
+            let tdecorators = infer_decorators(decorators, ctx)?;
             Ok(TStmt::ExtendBlock {
                 type_name: type_name.clone(),
                 interface_name: interface_name.clone(),
                 methods: tmethods,
+                decorators: tdecorators,
                 span: *span,
             })
         }
@@ -419,12 +444,18 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
 
         Stmt::Use { path, span } => {
             ctx.has_imports = true;
-            // If it's a stdlib package, register its types so downstream code
-            // can refer to the package global without type errors.
             if let Some(pkg) = stdlib::find_package(path) {
                 (pkg.register_types)(ctx);
             }
             Ok(TStmt::Use { path: path.clone(), span: *span })
+        }
+
+        Stmt::FromUse { path, names, span } => {
+            ctx.has_imports = true;
+            if let Some(pkg) = stdlib::find_package(path) {
+                (pkg.register_types)(ctx);
+            }
+            Ok(TStmt::FromUse { path: path.clone(), names: names.clone(), span: *span })
         }
 
         // ── Exception handling ────────────────────────────────────────────────
@@ -485,6 +516,10 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
         // ── Variables ─────────────────────────────────────────────────────────
 
         Expr::Identifier { name, span } => {
+            // `nil` and `None` are built-in literal values; don't require a prior definition.
+            if name == "nil" || name == "None" {
+                return Ok(TExpr { kind: TExprKind::Identifier(name.clone()), ty: JadeType::Nil, span: *span });
+            }
             let ty = match ctx.get(name) {
                 Some(t) => t,
                 None if ctx.has_imports => JadeType::Unknown,
@@ -533,17 +568,30 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
 
         // ── Function calls ────────────────────────────────────────────────────
 
-        Expr::Call { callee, args, span } => {
+        Expr::Call { callee, args, kwargs, span } => {
+            // Grammar.new(pattern) → JadeType::Grammar (special-cased for static typing).
+            let is_grammar_new = matches!(callee.as_ref(),
+                Expr::FieldAccess { object, field, .. }
+                if field == "new" && matches!(object.as_ref(), Expr::Identifier { name, .. } if name == "Grammar")
+            );
+
             let tcallee = infer_expr(callee, ctx)?;
             let targs: Vec<TExpr> = args.iter().map(|a| infer_expr(a, ctx)).collect::<Result<_>>()?;
-            let ret_ty = match &tcallee.ty {
-                JadeType::Fn { ret, .. }      => *ret.clone(),
-                JadeType::AsyncFn { ret, .. } => JadeType::Future(ret.clone()),
-                JadeType::Unknown             => JadeType::Unknown,
-                _                             => return Err(JadeError::NotCallable { span: *span }),
+            let tkwargs: Vec<(String, TExpr)> = kwargs.iter()
+                .map(|(k, v)| infer_expr(v, ctx).map(|tv| (k.clone(), tv)))
+                .collect::<Result<_>>()?;
+            let ret_ty = if is_grammar_new {
+                JadeType::Grammar
+            } else {
+                match &tcallee.ty {
+                    JadeType::Fn { ret, .. }      => *ret.clone(),
+                    JadeType::AsyncFn { ret, .. } => JadeType::Future(ret.clone()),
+                    JadeType::Unknown             => JadeType::Unknown,
+                    _                             => return Err(JadeError::NotCallable { span: *span }),
+                }
             };
             Ok(TExpr {
-                kind: TExprKind::Call { callee: Box::new(tcallee), args: targs },
+                kind: TExprKind::Call { callee: Box::new(tcallee), args: targs, kwargs: tkwargs },
                 ty: ret_ty,
                 span: *span,
             })
@@ -553,9 +601,21 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
 
         Expr::StructLiteral { type_name, fields, span } => {
             // Clone field defs to release the borrow on ctx before calling infer_expr.
-            let def_fields = ctx.struct_defs.get(type_name)
-                .ok_or_else(|| JadeError::UndefinedType { name: type_name.clone(), span: *span })?
-                .clone();
+            // If the type is unknown but imports are present, fall back gracefully.
+            let def_fields_opt = ctx.struct_defs.get(type_name).cloned();
+            if def_fields_opt.is_none() && ctx.has_imports {
+                // Type may be defined in an imported file; skip static checks.
+                let tfields = fields.iter()
+                    .map(|(n, e)| infer_expr(e, ctx).map(|te| (n.clone(), te, false)))
+                    .collect::<Result<Vec<_>>>()?;
+                return Ok(TExpr {
+                    kind: TExprKind::StructLiteral { type_name: type_name.clone(), fields: tfields },
+                    ty: JadeType::Unknown,
+                    span: *span,
+                });
+            }
+            let def_fields = def_fields_opt
+                .ok_or_else(|| JadeError::UndefinedType { name: type_name.clone(), span: *span })?;
 
             // Extra fields check.
             for (fname, fexpr) in fields {
@@ -807,7 +867,7 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
 
         // ── LLM prompt dereference ────────────────────────────────────────────
 
-        Expr::PromptDeref { expr, output_type, span } => {
+        Expr::PromptDeref { expr, constraint, span } => {
             let texpr = infer_expr(expr, ctx)?;
             if texpr.ty != JadeType::Prompt && texpr.ty != JadeType::Unknown {
                 return Err(JadeError::TypeMismatch {
@@ -816,12 +876,32 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
                     span: *span,
                 });
             }
-            let result_ty = match output_type.as_deref() {
-                Some(s) => parse_type_name(s),
-                None    => JadeType::Str,
+
+            // Resolve the |> constraint: Grammar value → grammar_expr; otherwise → output_type string.
+            let (output_type, grammar_texpr, result_ty) = match constraint {
+                None => (None, None, JadeType::Unknown),
+                Some(c) => {
+                    let tc = infer_expr(c, ctx)?;
+                    if tc.ty == JadeType::Grammar {
+                        (None, Some(Box::new(tc)), JadeType::Str)
+                    } else {
+                        let name = extract_type_name(c).ok_or_else(|| JadeError::TypeMismatch {
+                            expected: "type name or Grammar value after |>".to_string(),
+                            got: jade_type_name(&tc.ty),
+                            span: *span,
+                        })?;
+                        let ty = parse_type_name(&name);
+                        (Some(name), None, ty)
+                    }
+                }
             };
+
             Ok(TExpr {
-                kind: TExprKind::PromptDeref { expr: Box::new(texpr), output_type: output_type.clone() },
+                kind: TExprKind::PromptDeref {
+                    expr: Box::new(texpr),
+                    output_type,
+                    grammar_expr: grammar_texpr,
+                },
                 ty: result_ty,
                 span: *span,
             })
@@ -905,6 +985,9 @@ fn infer_binop(op: &BinOpKind, lty: &JadeType, rty: &JadeType, span: Span) -> Re
                 span,
             }),
         },
+
+        // Membership: always returns bool; right-hand side type not statically checked.
+        In | NotIn => Ok(Bool),
     }
 }
 
@@ -934,6 +1017,21 @@ fn infer_unaryop(op: &UnaryOpKind, ty: &JadeType, span: Span) -> Result<JadeType
 }
 
 // ── Return type inference ─────────────────────────────────────────────────────
+
+/// Infer types for decorator argument lists, preserving `(name, args)` pairs.
+fn infer_decorators(
+    decorators: &[(String, Vec<(Option<String>, crate::frontend::ast::Expr)>)],
+    ctx: &mut TypeContext,
+) -> Result<Vec<(String, Vec<(Option<String>, TExpr)>)>> {
+    decorators.iter()
+        .map(|(name, args)| {
+            let targs = args.iter()
+                .map(|(kw, a)| Ok((kw.clone(), infer_expr(a, ctx)?)))
+                .collect::<Result<Vec<_>>>()?;
+            Ok((name.clone(), targs))
+        })
+        .collect()
+}
 
 /// Scan `stmts` for `Return` nodes to infer the function's return type.
 /// Does not recurse into nested `FnDef` bodies (those are separate functions).
@@ -1047,7 +1145,7 @@ fn collect_captures_in_stmts(
                 locals.insert(name.clone());
             }
             TStmt::StructDef { .. } | TStmt::InterfaceDef { .. }
-            | TStmt::ExtendBlock { .. } | TStmt::Use { .. } => {}
+            | TStmt::ExtendBlock { .. } | TStmt::Use { .. } | TStmt::FromUse { .. } => {}
         }
     }
 }
@@ -1066,9 +1164,10 @@ fn collect_captures_in_expr(
             collect_captures_in_expr(right, locals, captures, seen, ctx);
         }
         TExprKind::UnaryOp { operand, .. } => collect_captures_in_expr(operand, locals, captures, seen, ctx),
-        TExprKind::Call { callee, args } => {
+        TExprKind::Call { callee, args, kwargs } => {
             collect_captures_in_expr(callee, locals, captures, seen, ctx);
             for a in args { collect_captures_in_expr(a, locals, captures, seen, ctx); }
+            for (_, v) in kwargs { collect_captures_in_expr(v, locals, captures, seen, ctx); }
         }
         TExprKind::Array { elements } => {
             for e in elements { collect_captures_in_expr(e, locals, captures, seen, ctx); }
@@ -1093,7 +1192,10 @@ fn collect_captures_in_expr(
             }
         }
         TExprKind::Await { expr } => collect_captures_in_expr(expr, locals, captures, seen, ctx),
-        TExprKind::PromptDeref { expr, .. } => collect_captures_in_expr(expr, locals, captures, seen, ctx),
+        TExprKind::PromptDeref { expr, grammar_expr, .. } => {
+            collect_captures_in_expr(expr, locals, captures, seen, ctx);
+            if let Some(g) = grammar_expr { collect_captures_in_expr(g, locals, captures, seen, ctx); }
+        }
         TExprKind::PromptLiteral { body } => collect_captures_in_expr(body, locals, captures, seen, ctx),
         TExprKind::Closure { params: inner_params, captures: inner_caps, .. } => {
             // The inner closure already resolved its own captures.
@@ -1164,6 +1266,7 @@ pub fn jade_type_name(ty: &JadeType) -> String {
         JadeType::Str          => "str".to_string(),
         JadeType::Nil          => "nil".to_string(),
         JadeType::Prompt       => "prompt".to_string(),
+        JadeType::Grammar      => "grammar".to_string(),
         JadeType::Array(elem)  => format!("[{}]", jade_type_name(elem)),
         JadeType::Dict         => "dict".to_string(),
         JadeType::Struct(name) => name.clone(),
@@ -1185,6 +1288,20 @@ fn parse_type_name(s: &str) -> JadeType {
     }
 }
 
+/// Extract a dotted type-name string from an AST expression used as a `|>` constraint.
+/// Returns `None` if the expression is not a plain identifier or dotted field path.
+fn extract_type_name(expr: &crate::frontend::ast::Expr) -> Option<String> {
+    use crate::frontend::ast::Expr;
+    match expr {
+        Expr::Identifier { name, .. } => Some(name.clone()),
+        Expr::FieldAccess { object, field, .. } => {
+            let base = extract_type_name(object)?;
+            Some(format!("{}.{}", base, field))
+        }
+        _ => None,
+    }
+}
+
 fn op_symbol(op: &BinOpKind) -> &'static str {
     use BinOpKind::*;
     match op {
@@ -1193,6 +1310,7 @@ fn op_symbol(op: &BinOpKind) -> &'static str {
         And => "&&", Or => "||",
         Eq => "==", Ne => "!=",
         Lt => "<", Gt => ">", Le => "<=", Ge => ">=",
+        In => "in", NotIn => "not in",
     }
 }
 
@@ -1211,286 +1329,5 @@ fn expr_span(e: &Expr) -> Span {
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::frontend::{lexer, parser};
-
-    fn infer_src(src: &str) -> Result<TProgram> {
-        let tokens = lexer::tokenize(src).expect("lex");
-        let program = parser::parse(tokens).expect("parse");
-        infer(program)
-    }
-
-    fn infer_ok(src: &str) -> TProgram {
-        infer_src(src).expect("type check failed")
-    }
-
-    fn infer_err(src: &str) -> JadeError {
-        infer_src(src).expect_err("expected type error")
-    }
-
-    // ── Literals ──────────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_infer_int_literal() {
-        let tp = infer_ok("let x = 42");
-        let TStmt::Let { value, .. } = &tp.stmts[0] else { panic!() };
-        assert_eq!(value.ty, JadeType::Int);
-    }
-
-    #[test]
-    fn test_infer_float_literal() {
-        let tp = infer_ok("let x = 3.14");
-        let TStmt::Let { value, .. } = &tp.stmts[0] else { panic!() };
-        assert_eq!(value.ty, JadeType::Float);
-    }
-
-    #[test]
-    fn test_infer_bool_literal() {
-        let tp = infer_ok("let x = true");
-        let TStmt::Let { value, .. } = &tp.stmts[0] else { panic!() };
-        assert_eq!(value.ty, JadeType::Bool);
-    }
-
-    #[test]
-    fn test_infer_str_literal() {
-        let tp = infer_ok(r#"let x = "hello""#);
-        let TStmt::Let { value, .. } = &tp.stmts[0] else { panic!() };
-        assert_eq!(value.ty, JadeType::Str);
-    }
-
-    // ── Arithmetic ────────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_infer_int_add() {
-        let tp = infer_ok("let x = 1 + 2");
-        let TStmt::Let { value, .. } = &tp.stmts[0] else { panic!() };
-        assert_eq!(value.ty, JadeType::Int);
-    }
-
-    #[test]
-    fn test_infer_float_add() {
-        let tp = infer_ok("let x = 1.0 + 2.0");
-        let TStmt::Let { value, .. } = &tp.stmts[0] else { panic!() };
-        assert_eq!(value.ty, JadeType::Float);
-    }
-
-    #[test]
-    fn test_infer_mixed_add_promotes_to_float() {
-        let tp = infer_ok("let x = 1 + 2.0");
-        let TStmt::Let { value, .. } = &tp.stmts[0] else { panic!() };
-        assert_eq!(value.ty, JadeType::Float);
-    }
-
-    #[test]
-    fn test_infer_str_concat() {
-        let tp = infer_ok(r#"let x = "a" + "b""#);
-        let TStmt::Let { value, .. } = &tp.stmts[0] else { panic!() };
-        assert_eq!(value.ty, JadeType::Str);
-    }
-
-    #[test]
-    fn test_infer_int_plus_str_is_error() {
-        let err = infer_err(r#"let x = 1 + "a""#);
-        assert!(matches!(err, JadeError::TypeMismatch { .. }));
-    }
-
-    // ── Logical and comparison ─────────────────────────────────────────────────
-
-    #[test]
-    fn test_infer_logical_and() {
-        let tp = infer_ok("let x = true && false");
-        let TStmt::Let { value, .. } = &tp.stmts[0] else { panic!() };
-        assert_eq!(value.ty, JadeType::Bool);
-    }
-
-    #[test]
-    fn test_infer_and_non_bool_is_error() {
-        let err = infer_err("let x = 1 && 0");
-        assert!(matches!(err, JadeError::TypeMismatch { .. }));
-    }
-
-    #[test]
-    fn test_infer_comparison_int() {
-        let tp = infer_ok("let x = 1 < 2");
-        let TStmt::Let { value, .. } = &tp.stmts[0] else { panic!() };
-        assert_eq!(value.ty, JadeType::Bool);
-    }
-
-    #[test]
-    fn test_infer_strict_equality_cross_type_is_error() {
-        let err = infer_err("let x = 1 == 1.0");
-        assert!(matches!(err, JadeError::TypeMismatch { .. }));
-    }
-
-    // ── Unary operators ───────────────────────────────────────────────────────
-
-    #[test]
-    fn test_infer_unary_neg_int() {
-        let tp = infer_ok("let x = -5");
-        let TStmt::Let { value, .. } = &tp.stmts[0] else { panic!() };
-        assert_eq!(value.ty, JadeType::Int);
-    }
-
-    #[test]
-    fn test_infer_unary_not_bool() {
-        let tp = infer_ok("let x = !true");
-        let TStmt::Let { value, .. } = &tp.stmts[0] else { panic!() };
-        assert_eq!(value.ty, JadeType::Bool);
-    }
-
-    #[test]
-    fn test_infer_unary_not_int_is_error() {
-        let err = infer_err("let x = !1");
-        assert!(matches!(err, JadeError::TypeMismatch { .. }));
-    }
-
-    // ── Arrays ────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_infer_array_int() {
-        let tp = infer_ok("let a = [1, 2, 3]");
-        let TStmt::Let { value, .. } = &tp.stmts[0] else { panic!() };
-        assert_eq!(value.ty, JadeType::Array(Box::new(JadeType::Int)));
-    }
-
-    #[test]
-    fn test_infer_array_empty() {
-        let tp = infer_ok("let a = []");
-        let TStmt::Let { value, .. } = &tp.stmts[0] else { panic!() };
-        assert_eq!(value.ty, JadeType::Array(Box::new(JadeType::Unknown)));
-    }
-
-    #[test]
-    fn test_infer_heterogeneous_array_widens_to_unknown() {
-        // Heterogeneous arrays are allowed; the type widens to Array(Unknown).
-        let prog = infer_ok(r#"let a = [1, "hello"]"#);
-        match &prog.stmts[0] {
-            crate::compiler::tir::TStmt::Let { value, .. } => {
-                assert!(matches!(value.ty, crate::compiler::tir::JadeType::Array(_)));
-            }
-            _ => panic!("expected Let"),
-        }
-    }
-
-    // ── Control flow ──────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_infer_if_bool_condition() {
-        infer_ok("if true {\n let x = 1\n}");
-    }
-
-    #[test]
-    fn test_infer_if_int_condition_is_error() {
-        let err = infer_err("if 1 {\n let x = 2\n}");
-        assert!(matches!(err, JadeError::TypeMismatch { .. }));
-    }
-
-    #[test]
-    fn test_infer_while_bool_condition() {
-        infer_ok("while false {\n let x = 1\n}");
-    }
-
-    // ── Functions ─────────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_infer_fn_return_type_int() {
-        let tp = infer_ok("fn add(x, y) {\n return 42\n}");
-        let TStmt::FnDef { ret_ty, .. } = &tp.stmts[0] else { panic!() };
-        assert_eq!(*ret_ty, JadeType::Int);
-    }
-
-    #[test]
-    fn test_infer_fn_no_return_is_nil() {
-        let tp = infer_ok("fn noop(x) {\n let y = 1\n}");
-        let TStmt::FnDef { ret_ty, .. } = &tp.stmts[0] else { panic!() };
-        assert_eq!(*ret_ty, JadeType::Nil);
-    }
-
-    #[test]
-    fn test_infer_call_return_type() {
-        let tp = infer_ok("fn id(x) {\n return 1\n}\nlet r = id(99)");
-        let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!() };
-        assert_eq!(value.ty, JadeType::Int);
-    }
-
-    #[test]
-    fn test_infer_call_builtin_len() {
-        let tp = infer_ok("let n = len([1, 2])");
-        let TStmt::Let { value, .. } = &tp.stmts[0] else { panic!() };
-        assert_eq!(value.ty, JadeType::Int);
-    }
-
-    // ── Structs ───────────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_infer_struct_literal_type() {
-        let tp = infer_ok("struct Point {\n x,\n y\n}\nlet p = Point { x: 1, y: 2 }");
-        let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!() };
-        assert_eq!(value.ty, JadeType::Struct("Point".to_string()));
-    }
-
-    #[test]
-    fn test_infer_struct_undefined_type_is_error() {
-        let err = infer_err("let p = Foo { x: 1 }");
-        assert!(matches!(err, JadeError::UndefinedType { .. }));
-    }
-
-    #[test]
-    fn test_infer_struct_missing_field_is_error() {
-        let err = infer_err("struct P {\n x,\n y\n}\nlet p = P { x: 1 }");
-        assert!(matches!(err, JadeError::MissingField { .. }));
-    }
-
-    #[test]
-    fn test_infer_struct_extra_field_is_error() {
-        let err = infer_err("struct P {\n x\n}\nlet p = P { x: 1, z: 2 }");
-        assert!(matches!(err, JadeError::UndefinedField { .. }));
-    }
-
-    // ── Prompts ───────────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_infer_prompt_decl_type() {
-        let tp = infer_ok(r#"prompt p = "hello""#);
-        let TStmt::PromptDecl { .. } = &tp.stmts[0] else { panic!() };
-    }
-
-    #[test]
-    fn test_infer_prompt_decl_non_str_is_error() {
-        let err = infer_err("prompt p = 42");
-        assert!(matches!(err, JadeError::TypeMismatch { .. }));
-    }
-
-    #[test]
-    fn test_infer_prompt_deref_untyped_is_str() {
-        let tp = infer_ok("prompt p = \"hi\"\nlet r = ?p");
-        let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!() };
-        assert_eq!(value.ty, JadeType::Str);
-    }
-
-    #[test]
-    fn test_infer_prompt_deref_typed_int() {
-        let tp = infer_ok("prompt p = \"hi\"\nlet r = ?p |> int");
-        let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!() };
-        assert_eq!(value.ty, JadeType::Int);
-    }
-
-    // ── Undefined variable ────────────────────────────────────────────────────
-
-    #[test]
-    fn test_infer_undefined_variable_is_error() {
-        let err = infer_err("let x = y + 1");
-        assert!(matches!(err, JadeError::UndefinedVariable { .. }));
-    }
-
-    // ── Unknown propagation ───────────────────────────────────────────────────
-
-    #[test]
-    fn test_infer_unknown_param_propagates() {
-        // Function body with unannotated params: operator with Unknown propagates to Unknown.
-        let tp = infer_ok("fn add(x, y) {\n return x + y\n}");
-        let TStmt::FnDef { ret_ty, .. } = &tp.stmts[0] else { panic!() };
-        assert_eq!(*ret_ty, JadeType::Unknown);
-    }
-}
+#[path = "type_infer_tests.rs"]
+mod tests;

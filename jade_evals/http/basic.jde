@@ -1,0 +1,26 @@
+use "std/http"
+
+// GET — returns Dict { "status": int, "body": str }
+let r = http.get("https://httpbin.org/get")
+print(r["status"])                          // 200
+
+// POST with body
+let p = http.post("https://httpbin.org/post", "{\"key\":\"value\"}")
+print(p["status"])                          // 200
+
+// PUT with body
+let u = http.put("https://httpbin.org/put", "update")
+print(u["status"])                          // 200
+
+// DELETE
+let d = http.delete("https://httpbin.org/delete")
+print(d["status"])                          // 200
+
+// HEAD — body is empty, status reflects the resource
+let h = http.head("https://httpbin.org/get")
+print(h["status"])                          // 200
+print(h["body"])                            // (empty string)
+
+// GET with custom headers
+let auth = http.get("https://httpbin.org/headers", {"X-Jade-Test": "hello"})
+print(auth["status"])                       // 200

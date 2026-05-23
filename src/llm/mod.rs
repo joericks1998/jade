@@ -7,20 +7,17 @@ pub mod anthropic;
 pub mod jade_os;
 pub mod openai;
 
-/// A single message in a conversation history.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct Message {
-    pub role: String,
-    pub content: String,
-}
-
 /// A request sent to an inference backend.
 pub struct InferenceRequest {
     pub prompt: String,
     pub model: String,
-    pub history: Vec<Message>,
     pub max_tokens: u32,
-    pub system_prompt: Option<String>,
+    /// GBNF grammar string for constrained decoding; `None` = unconstrained.
+    /// Passed through to the inference daemon; ignored by API-based backends.
+    pub grammar: Option<String>,
+    /// Anchor string; if set, grammar enforcement begins only after the model emits this string.
+    /// Passed through to the inference daemon; ignored by API-based backends.
+    pub anchor: Option<String>,
 }
 
 /// A successful response from an inference backend.
@@ -33,6 +30,24 @@ pub struct InferenceResponse {
 #[async_trait::async_trait]
 pub trait InferenceBackend: Send + Sync {
     async fn infer(&self, req: InferenceRequest, span: Span) -> Result<InferenceResponse>;
+
+    /// Stream tokens as they arrive. Returns a channel receiver and a join handle
+    /// that resolves to `tokens_used` when the stream is exhausted.
+    /// Default: calls `infer` and sends the full response as one token.
+    async fn infer_stream(
+        &self,
+        req: InferenceRequest,
+        span: Span,
+    ) -> Result<(tokio::sync::mpsc::Receiver<String>, tokio::task::JoinHandle<Result<i64>>)> {
+        let resp = self.infer(req, span).await?;
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let tokens = resp.tokens_used;
+        let handle = tokio::spawn(async move {
+            let _ = tx.send(resp.text).await;
+            Ok(tokens)
+        });
+        Ok((rx, handle))
+    }
 }
 
 /// Build the appropriate backend for the given provider string.
@@ -64,7 +79,7 @@ pub fn build_backend(
 
 /// Select the inference backend automatically.
 ///
-/// Priority: `$HOME/.jade/llm.sock` (jade-tree) → API key from `~/.jade/config.toml`.
+/// Priority: `$HOME/.jade/llm.sock` (inference daemon) → API key from `~/.jade/config.toml`.
 /// Returns `None` if neither is available.
 pub fn select_backend(config: &crate::config::JadeConfig) -> Option<Arc<dyn InferenceBackend>> {
     #[cfg(unix)]

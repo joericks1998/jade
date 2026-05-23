@@ -4,13 +4,22 @@ pub mod string_pkg;
 pub mod array_pkg;
 pub mod dict_pkg;
 pub mod math_pkg;
+pub mod fs_pkg;
+pub mod time_pkg;
+pub mod grammar_pkg;
+pub mod http_pkg;
+pub mod sh_pkg;
+pub mod json_pkg;
+pub mod env_pkg;
+pub mod path_pkg;
+pub mod random_pkg;
 
 use std::{collections::HashMap, sync::Arc};
 
 use parking_lot::Mutex;
 
 use crate::{
-    compiler::{tir::JadeType, type_infer::TypeContext, vm::VmValue},
+    compiler::{tir::JadeType, type_infer::TypeContext, vm::{NativeFnId, VmValue}},
     frontend::error::Result,
 };
 
@@ -107,8 +116,9 @@ impl Package {
 // ── Registries ────────────────────────────────────────────────────────────────
 
 /// All core globals (always available without import).
+/// `print` and `stream` are excluded — they are state-mutating and dispatched
+/// through `NativeFnId` variants injected directly in `seed_globals`.
 static CORE_BUILTINS: &[BuiltinFn] = &[
-    core::PRINT,
     core::WRITE,
     core::LEN,
     core::INPUT,
@@ -121,6 +131,14 @@ static PACKAGES: &[&Package] = &[
     &math_pkg::MATH_PKG,
     &array_pkg::ARRAY_PKG,
     &dict_pkg::DICT_PKG,
+    &fs_pkg::FS_PKG,
+    &time_pkg::TIME_PKG,
+    &http_pkg::HTTP_PKG,
+    &sh_pkg::SH_PKG,
+    &json_pkg::JSON_PKG,
+    &env_pkg::ENV_PKG,
+    &path_pkg::PATH_PKG,
+    &random_pkg::RANDOM_PKG,
 ];
 
 // ── Primitive method tables ───────────────────────────────────────────────────
@@ -150,6 +168,19 @@ pub fn seed_globals(globals: &mut HashMap<String, VmValue>) {
     for f in CORE_BUILTINS {
         globals.insert(f.name.to_string(), VmValue::BuiltinFn(*f));
     }
+    // `print` and `stream` need async VmState access to drain TokenStreams,
+    // so they dispatch through NativeFnId rather than the pure BuiltinFn path.
+    globals.insert("print".to_string(),  VmValue::NativeFn(NativeFnId::Print));
+    globals.insert("stream".to_string(), VmValue::NativeFn(NativeFnId::Stream));
+    globals.insert("route".to_string(),  VmValue::NativeFn(NativeFnId::Route));
+    // Primitive type constructors: callable with one arg like Python's int(), str(), etc.
+    for name in &["int", "float", "bool", "str", "func"] {
+        globals.insert(name.to_string(), VmValue::TypeRef(name.to_string()));
+    }
+    // Grammar global: Grammar.new(pattern) → VmValue::Grammar(pattern)
+    let mut grammar_fields = std::collections::HashMap::new();
+    grammar_fields.insert("new".to_string(), VmValue::BuiltinFn(grammar_pkg::GRAMMAR_NEW));
+    globals.insert("Grammar".to_string(), VmValue::Dict(grammar_fields));
 }
 
 /// Register type signatures for all core built-ins into the type checker.

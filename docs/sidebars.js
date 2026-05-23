@@ -26,7 +26,7 @@ const sidebars = {
       type: 'category',
       label: 'Guides',
       collapsed: false,
-      items: ['llm', 'cli'],
+      items: ['llm', 'stdlib', 'cli'],
     },
     { type: 'doc', id: 'changelog', label: 'Changelog' },
   ],
