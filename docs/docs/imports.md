@@ -80,3 +80,41 @@ let s = concat("hello", " world")
 ## No Re-export
 
 Imports are not re-exported. If `a.jde` uses `b.jde`, a third file that uses `a.jde` does *not* automatically get access to what `b.jde` defined. Each file must import the libraries it needs directly.
+
+---
+
+## Standard Library Packages
+
+Jade's standard library is also imported with `use`, but with a built-in string like `"std/json"` instead of a file path. These packages are always available — no installation required.
+
+```jade
+use "std/math"
+use "std/json"
+use "std/path"
+use "std/random"
+
+let n = math.sqrt(144.0)          // 12.0
+let data = json.parse('{"x": 1}')
+let p = path.join("src", "main.jde")
+let roll = random.int(1, 6)
+```
+
+Importing a stdlib package binds it as a global variable named after the package (`math`, `json`, `path`, etc.). The table below lists all available packages.
+
+| Import string | Global | Summary |
+|---------------|--------|---------|
+| `use "std/math"` | `math` | `floor`, `ceil`, `abs`, `sqrt`, `min`, `max`, `pow` |
+| `use "std/string"` | `string` | `split`, `upper`, `lower`, `trim`, `contains`, `replace`, `starts_with`, `ends_with` |
+| `use "std/array"` | `array` | `map`, `filter`, `sort`, `reverse` (higher-order; non-mutating) |
+| `use "std/dict"` | `dict` | `keys`, `values`, `has`, `get`, `merge` |
+| `use "std/fs"` | `fs` | `read`, `write`, `append`, `exists`, `delete`, `list_dir`, `mkdir` |
+| `use "std/time"` | `time` | `now`, `now_ms`, `sleep` |
+| `use "std/http"` | `http` | `get`, `post`, `put`, `delete`, `head` |
+| `use "std/sh"` | `sh` | `exec`, `run`, `output` |
+| `use "std/json"` | `json` | `parse`, `stringify`, `stringify_pretty` |
+| `use "std/env"` | `env` | `get`, `set`, `args`, `cwd` |
+| `use "std/path"` | `path` | `join`, `basename`, `dirname`, `ext`, `stem`, `abs`, `is_abs` |
+| `use "std/random"` | `random` | `int`, `float`, `choice`, `shuffle`, `seed` |
+| `use "llm"` | `llm` | `set_max_tokens` |
+
+See the [Standard Library](stdlib) reference for full API documentation.

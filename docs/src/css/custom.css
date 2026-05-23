@@ -25,6 +25,11 @@
   align-items: center;
 }
 
+/* Smaller prev/next pagination buttons */
+.pagination-nav__link {
+  padding: 0.5rem 0.75rem;
+}
+
 [data-theme='dark'] {
   --ifm-color-primary: #4db860;
   --ifm-color-primary-dark: #3daa50;

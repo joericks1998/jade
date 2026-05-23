@@ -1,6 +1,6 @@
 # Jade
 
-A programming language written in Rust. Jade 1.1.5 compiles programs through a type inference pass and a register-based bytecode VM. It supports value types (`int`, `float`, `bool`, `str`, arrays, dicts, and user-defined `struct`s), `let` bindings, bare variable assignment, `fn` function definitions with `return`, anonymous closures, first-class functions, recursion, `if`/`elif`/`else` control flow, `while` loops, `for` loops over arrays, `try`/`catch`/`raise` exception handling, `struct` definitions with field access and mutation, `extend` blocks for methods, `interface` definitions, multi-file `use` imports, the `print` and `len` built-ins, f-string interpolation, the pipe operator `|>`, `prompt` declarations with LLM inference via `?`, and arithmetic, bitwise, logical, and comparison operators. String literals accept both double quotes (`"…"`) and single quotes (`'…'`), including triple-quoted variants.
+A programming language written in Rust. Jade 1.1.7 compiles programs through a type inference pass and a register-based bytecode VM. It supports value types (`int`, `float`, `bool`, `str`, arrays, dicts, and user-defined `struct`s), `let` bindings, bare variable assignment, `fn` function definitions with `return`, anonymous closures, first-class functions, recursion, `if`/`elif`/`else` control flow, `while` loops, `for` loops over arrays, `try`/`catch`/`raise` exception handling, `struct` definitions with field access and mutation, `extend` blocks for methods, `interface` definitions, multi-file `use` imports, the `print` and `len` built-ins, f-string interpolation, the pipe operator `|>`, `prompt` declarations with LLM inference via `?`, and arithmetic, bitwise, logical, and comparison operators. String literals accept both double quotes (`"…"`) and single quotes (`'…'`), including triple-quoted variants.
 
 ```
 fn factorial(n) {
@@ -132,6 +132,18 @@ Errors are written to stderr with the format `<file>: <phase> error: <descriptio
 | Type inference | ✓ |
 | `try`/`catch`/`raise` exception handling | ✓ |
 | `async fn` definitions and `await` expressions | ✓ |
+| `use "std/math"` — floor, ceil, abs, sqrt, min, max, pow | ✓ |
+| `use "std/string"` — split, upper, lower, trim, contains, replace, starts_with, ends_with | ✓ |
+| `use "std/array"` — map, filter, sort, reverse (higher-order) | ✓ |
+| `use "std/dict"` — keys, values, has, get, merge | ✓ |
+| `use "std/fs"` — read, write, append, exists, delete, list_dir, mkdir | ✓ |
+| `use "std/time"` — now, now_ms, sleep | ✓ |
+| `use "std/http"` — get, post, put, delete, head | ✓ |
+| `use "std/sh"` — exec, run, output (shell command execution) | ✓ |
+| `use "std/json"` — parse, stringify, stringify_pretty | ✓ |
+| `use "std/env"` — get, set, args, cwd | ✓ |
+| `use "std/path"` — join, basename, dirname, ext, stem, abs, is_abs | ✓ |
+| `use "std/random"` — int, float, choice, shuffle, seed | ✓ |
 
 Operator precedence (tightest to loosest): unary (`~` `!` `-`) → `*` `/` `%` → `+` `-` → `<<` `>>` → `&` → `^` → `|` → `==` `!=` `<` `>` `<=` `>=` → `&&` → `||` → `|>`
 
@@ -156,11 +168,10 @@ src/
     tir.rs                  Typed IR node definitions
   config/                   Loads jade.toml and environment variables
   llm/                      LLM inference backends (Anthropic, OpenAI)
-  interpreter/
+  frontend/
     lexer.rs                Tokenizer — produces a token stream, inserts semicolons
     parser.rs               Recursive descent parser — produces an AST
     ast.rs                  AST node definitions (Stmt, Expr, BinOpKind, UnaryOpKind)
-    eval.rs                 Tree-walking evaluator (used by tests and check command)
     error.rs                Error types (JadeError, Span)
 jade_evals/
   arithmatic/               Fixture files for arithmetic and bitwise operations
@@ -185,7 +196,7 @@ docs/
   extras/logo.png           Project logo
 ```
 
-The pipeline is: source text → `lexer::tokenize` → `parser::parse` → `type_infer::infer` → `emit::emit` → `vm::run`.
+The pipeline is: source text → `frontend/lexer.rs` → `frontend/parser.rs` → `compiler/type_infer.rs` → `compiler/emit.rs` → `compiler/vm.rs` (for `jade run`) or `compiler/codegen/` (for `jade build`).
 
 ---
 
@@ -208,8 +219,8 @@ jade run jade_evals/strings/fstrings.jde
 
 **Guidelines**
 
-- Keep one concern per file — the lexer lexes, the parser parses, the evaluator evaluates. Cross-cutting changes should touch each layer independently.
-- New language features follow this path: add token(s) to `lexer.rs` → add AST node(s) to `ast.rs` → add parse rule(s) to `parser.rs` → add evaluation to `eval.rs` → add error variant(s) to `error.rs` if needed.
+- Keep one concern per file — the lexer lexes, the parser parses, each compiler pass transforms one IR to the next. Cross-cutting changes should touch each layer independently.
+- New language features follow this path: add token(s) to `frontend/lexer.rs` → add AST node(s) to `frontend/ast.rs` → add parse rule(s) to `frontend/parser.rs` → lower in `compiler/type_infer.rs` → emit in `compiler/emit.rs` → execute in `compiler/vm.rs` → add error variant(s) to `frontend/error.rs` if needed.
 - Operator precedence is encoded in the parser's function call chain (`parse_bitor` → `parse_bitxor` → ... → `parse_primary`). Add a new level by inserting a new function at the right position in the chain.
 - All error cases must return a `JadeError` — no panics in the interpreter path.
 - Use `print(expr)` to produce output from Jade code. The `--verbose` flag prints all top-level variable bindings after execution. Both paths go through `cli/run.rs`.
