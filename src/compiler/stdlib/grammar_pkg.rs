@@ -8,15 +8,25 @@ use super::BuiltinFn;
 const ZERO: Span = Span { line: 0, col: 0 };
 
 fn grammar_new(args: &[VmValue]) -> Result<VmValue> {
-    match args.get(0) {
-        Some(VmValue::Str(pattern)) => Ok(VmValue::Grammar(pattern.clone())),
-        Some(other) => Err(JadeError::TypeMismatch {
+    let pattern = match args.get(0) {
+        Some(VmValue::Str(s)) => s.clone(),
+        Some(other) => return Err(JadeError::TypeMismatch {
             expected: "str".to_string(),
             got: format!("{:?}", other),
             span: ZERO,
         }),
-        None => Err(JadeError::ArityMismatch { expected: 1, got: 0, span: ZERO }),
-    }
+        None => return Err(JadeError::ArityMismatch { expected: 1, got: 0, span: ZERO }),
+    };
+    let anchor = match args.get(1) {
+        None | Some(VmValue::Nil) => None,
+        Some(VmValue::Str(s)) => Some(s.clone()),
+        Some(other) => return Err(JadeError::TypeMismatch {
+            expected: "str".to_string(),
+            got: format!("{:?}", other),
+            span: ZERO,
+        }),
+    };
+    Ok(VmValue::Grammar { pattern, anchor })
 }
 
 pub static GRAMMAR_NEW: BuiltinFn = BuiltinFn { name: "new", vm_impl: grammar_new };

@@ -7,6 +7,7 @@ pub mod math_pkg;
 pub mod fs_pkg;
 pub mod time_pkg;
 pub mod grammar_pkg;
+pub mod http_pkg;
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -127,6 +128,7 @@ static PACKAGES: &[&Package] = &[
     &dict_pkg::DICT_PKG,
     &fs_pkg::FS_PKG,
     &time_pkg::TIME_PKG,
+    &http_pkg::HTTP_PKG,
 ];
 
 // ── Primitive method tables ───────────────────────────────────────────────────

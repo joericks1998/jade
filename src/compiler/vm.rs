@@ -53,7 +53,8 @@ pub enum VmValue {
     Prompt(String),
     /// A user-defined GBNF pattern (RHS only, e.g. `"yes" | "no"`).
     /// Used with `?p |> grammar_var` to constrain LLM token sampling.
-    Grammar(String),
+    /// `anchor`: if set, grammar enforcement begins only after the model emits this string.
+    Grammar { pattern: String, anchor: Option<String> },
     Dict(HashMap<String, VmValue>),
     /// A pure Rust-backed callable (no VM state mutation). Used for stdlib
     /// core built-ins (print, len, write, input) and package functions.
@@ -129,7 +130,8 @@ impl std::fmt::Debug for VmValue {
             VmValue::BoundMethod(_) => write!(f, "<bound method>"),
             VmValue::Array(arc) => write!(f, "Array[{} elem(s)]", arc.lock().len()),
             VmValue::Prompt(s)   => write!(f, "Prompt({:?})", s),
-            VmValue::Grammar(s)  => write!(f, "Grammar({:?})", s),
+            VmValue::Grammar { pattern, anchor: None }    => write!(f, "Grammar({:?})", pattern),
+            VmValue::Grammar { pattern, anchor: Some(a) } => write!(f, "Grammar({:?}, anchor={:?})", pattern, a),
             VmValue::Dict(m)     => write!(f, "Dict({} key(s))", m.len()),
             VmValue::BuiltinFn(bf) => write!(f, "BuiltinFn({})", bf.name),
             VmValue::NativeBoundMethod(nbm) => write!(f, "NativeBoundMethod({})", nbm.method.name),
@@ -178,7 +180,7 @@ pub fn value_to_display(v: &VmValue) -> String {
         VmValue::BuiltinFn(bf)         => format!("<builtin {}>", bf.name),
         VmValue::NativeBoundMethod(nm) => format!("<builtin {}>", nm.method.name),
         VmValue::Prompt(_)             => "<prompt>".to_string(),
-        VmValue::Grammar(_)            => "<grammar>".to_string(),
+        VmValue::Grammar { .. }        => "<grammar>".to_string(),
         VmValue::NativeFn(_)           => "<native fn>".to_string(),
         VmValue::Future(_)             => "<future>".to_string(),
         VmValue::TokenStream(_)        => "<token stream>".to_string(),
@@ -1028,16 +1030,19 @@ async fn execute_chunk(
                     VmValue::Prompt(t) => t,
                     _ => { vm_err!(JadeError::NotAPrompt { name: "<expr>".to_string(), span }); }
                 };
-                let grammar_override = grammar_reg.map(|r| match get(slots, r).clone() {
-                    VmValue::Grammar(pat) => {
-                        crate::compiler::gbnf::grammar_from_pattern(&pat)
-                    }
-                    _ => { panic!("grammar register did not hold a Grammar value"); }
-                });
+                let (grammar_override, grammar_anchor) = match grammar_reg {
+                    None => (None, None),
+                    Some(r) => match get(slots, *r).clone() {
+                        VmValue::Grammar { pattern, anchor } => {
+                            (Some(crate::compiler::gbnf::grammar_from_pattern(&pattern)), anchor)
+                        }
+                        _ => panic!("grammar register did not hold a Grammar value"),
+                    },
+                };
                 let result = if output_type.is_none() && grammar_override.is_none() {
                     vm_try!(vm_prompt_deref_stream(text, state, span).await)
                 } else {
-                    vm_try!(vm_prompt_deref(text, output_type.as_deref(), grammar_override, state, span).await)
+                    vm_try!(vm_prompt_deref(text, output_type.as_deref(), grammar_override, grammar_anchor, state, span).await)
                 };
                 set(slots, *dest, result);
             }
@@ -1399,6 +1404,7 @@ async fn vm_prompt_deref(
     prompt_text: String,
     output_type: Option<&str>,
     grammar_override: Option<String>,
+    grammar_anchor: Option<String>,
     state: &mut VmState,
     span: Span,
 ) -> Result<VmValue> {
@@ -1434,6 +1440,7 @@ async fn vm_prompt_deref(
         model: state.default_model.clone(),
         max_tokens: state.max_tokens,
         grammar: grammar.clone(),
+        anchor: grammar_anchor.clone(),
     }, span).await?;
 
     state.token_count += initial_resp.tokens_used;
@@ -1476,6 +1483,7 @@ async fn vm_prompt_deref(
                     model: state.default_model.clone(),
                     max_tokens: retry_max_tokens,
                     grammar: grammar.clone(),
+                    anchor: grammar_anchor.clone(),
                 }, span).await?;
                 current = retry.text;
             }
@@ -1794,6 +1802,7 @@ async fn vm_prompt_deref_stream(
         model: state.default_model.clone(),
         max_tokens: state.max_tokens,
         grammar: None,
+        anchor: None,
     }, span).await?;
     Ok(VmValue::TokenStream(Arc::new(JadeTokenStream {
         rx: Mutex::new(Some(rx)),

@@ -15,6 +15,9 @@ pub struct InferenceRequest {
     /// GBNF grammar string for constrained decoding; `None` = unconstrained.
     /// Passed through to the inference daemon; ignored by API-based backends.
     pub grammar: Option<String>,
+    /// Anchor string; if set, grammar enforcement begins only after the model emits this string.
+    /// Passed through to the inference daemon; ignored by API-based backends.
+    pub anchor: Option<String>,
 }
 
 /// A successful response from an inference backend.

@@ -1334,7 +1334,10 @@ fn test_vm_typed_deref_retry_succeeds_on_second_attempt() {
 fn test_grammar_new_returns_grammar_value() {
     let s = run_src(r#"let g = Grammar.new('"yes" | "no"')"#).unwrap();
     match s.globals.get("g").unwrap() {
-        VmValue::Grammar(pat) => assert_eq!(pat, r#""yes" | "no""#),
+        VmValue::Grammar { pattern, anchor } => {
+            assert_eq!(pattern, r#""yes" | "no""#);
+            assert_eq!(*anchor, None);
+        }
         v => panic!("expected Grammar, got {:?}", v),
     }
 }
@@ -1350,6 +1353,18 @@ let answer = ?p |> g
         vec!["yes"],
     ).unwrap();
     assert_eq!(get_str(&s, "answer"), "yes");
+}
+
+#[test]
+fn test_grammar_new_with_anchor() {
+    let s = run_src(r#"let g = Grammar.new('"yes" | "no"', anchor = "Answer:")"#).unwrap();
+    match s.globals.get("g").unwrap() {
+        VmValue::Grammar { pattern, anchor } => {
+            assert_eq!(pattern, r#""yes" | "no""#);
+            assert_eq!(anchor.as_deref(), Some("Answer:"));
+        }
+        v => panic!("expected Grammar, got {:?}", v),
+    }
 }
 
 // ── dicts (ported from eval.rs) ───────────────────────────────────────────
@@ -2028,4 +2043,111 @@ let v = p.sum()
 ";
     let s = run_src(src).unwrap();
     assert_eq!(get_int(&s, "v"), 7);
+}
+
+// ── std/http ──────────────────────────────────────────────────────────────
+
+fn start_http_test_server(status: u16, body: &'static str) -> u16 {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let response = format!(
+        "HTTP/1.1 {} OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        status,
+        body.len(),
+        body
+    );
+    std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut buf = vec![0u8; 8192];
+            let _ = stream.read(&mut buf);
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    port
+}
+
+#[test]
+fn test_http_get_status_and_body() {
+    let port = start_http_test_server(200, "hello jade");
+    let src = format!(
+        "use \"std/http\"\nlet r = http.get(\"http://127.0.0.1:{port}/\")"
+    );
+    let s = run_src(&src).unwrap();
+    match s.globals.get("r").unwrap() {
+        VmValue::Dict(map) => {
+            match map.get("status").unwrap() {
+                VmValue::Int(n) => assert_eq!(*n, 200),
+                v => panic!("expected Int, got {:?}", v),
+            }
+            match map.get("body").unwrap() {
+                VmValue::Str(b) => assert_eq!(b, "hello jade"),
+                v => panic!("expected Str, got {:?}", v),
+            }
+        }
+        v => panic!("expected Dict, got {:?}", v),
+    }
+}
+
+#[test]
+fn test_http_post_returns_response() {
+    let port = start_http_test_server(201, "created");
+    let src = format!(
+        "use \"std/http\"\nlet r = http.post(\"http://127.0.0.1:{port}/\", \"payload\")"
+    );
+    let s = run_src(&src).unwrap();
+    match s.globals.get("r").unwrap() {
+        VmValue::Dict(map) => {
+            match map.get("status").unwrap() {
+                VmValue::Int(n) => assert_eq!(*n, 201),
+                v => panic!("expected Int, got {:?}", v),
+            }
+            match map.get("body").unwrap() {
+                VmValue::Str(b) => assert_eq!(b, "created"),
+                v => panic!("expected Str, got {:?}", v),
+            }
+        }
+        v => panic!("expected Dict, got {:?}", v),
+    }
+}
+
+#[test]
+fn test_http_get_with_headers() {
+    let port = start_http_test_server(200, "ok");
+    let src = format!(
+        "use \"std/http\"\nlet r = http.get(\"http://127.0.0.1:{port}/\", {{\"X-Test\": \"jade\"}})"
+    );
+    let s = run_src(&src).unwrap();
+    match s.globals.get("r").unwrap() {
+        VmValue::Dict(map) => match map.get("status").unwrap() {
+            VmValue::Int(n) => assert_eq!(*n, 200),
+            v => panic!("expected Int, got {:?}", v),
+        },
+        v => panic!("expected Dict, got {:?}", v),
+    }
+}
+
+#[test]
+fn test_http_get_arity_error() {
+    let err = try_run_src("use \"std/http\"\nhttp.get()").err().expect("expected error");
+    assert!(matches!(err, JadeError::ArityMismatch { .. }));
+}
+
+#[test]
+fn test_http_get_type_error() {
+    let err = try_run_src("use \"std/http\"\nhttp.get(42)").err().expect("expected error");
+    assert!(matches!(err, JadeError::TypeError { .. }));
+}
+
+#[test]
+fn test_http_post_arity_error() {
+    let err = try_run_src("use \"std/http\"\nhttp.post(\"http://example.com\")").err().expect("expected error");
+    assert!(matches!(err, JadeError::ArityMismatch { .. }));
+}
+
+#[test]
+fn test_http_get_connection_refused_errors() {
+    let err = try_run_src("use \"std/http\"\nhttp.get(\"http://127.0.0.1:1/\")").err().expect("expected error");
+    assert!(matches!(err, JadeError::IoError { .. }));
 }
