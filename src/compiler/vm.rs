@@ -13,6 +13,7 @@ use crate::{
         error::{JadeError, Result, Span},
     },
     llm,
+    native::NativeLibFn,
 };
 
 // ── Token budgets (mirror eval.rs) ────────────────────────────────────────────
@@ -63,6 +64,8 @@ pub enum VmValue {
     NativeBoundMethod(Arc<NativeBoundMethod>),
     /// A Rust-backed callable returned by a built-in module (e.g. `llm.set_max_tokens`).
     NativeFn(NativeFnId),
+    /// A function loaded from a native shared library via `use "native/<pkg>"`.
+    NativeLibFn(Arc<NativeLibFn>),
     /// A handle to an in-flight async task.
     Future(Arc<JadeFuture>),
     /// A lazy token stream from an untyped prompt dereference.
@@ -136,6 +139,7 @@ impl std::fmt::Debug for VmValue {
             VmValue::BuiltinFn(bf) => write!(f, "BuiltinFn({})", bf.name),
             VmValue::NativeBoundMethod(nbm) => write!(f, "NativeBoundMethod({})", nbm.method.name),
             VmValue::NativeFn(nf) => write!(f, "NativeFn({:?})", nf),
+            VmValue::NativeLibFn(nfn) => write!(f, "NativeLibFn({})", nfn.name),
             VmValue::Future(_)       => write!(f, "Future"),
             VmValue::TokenStream(_)  => write!(f, "TokenStream"),
             VmValue::TypeRef(t)      => write!(f, "TypeRef({})", t),
@@ -182,6 +186,7 @@ pub fn value_to_display(v: &VmValue) -> String {
         VmValue::Prompt(_)             => "<prompt>".to_string(),
         VmValue::Grammar { .. }        => "<grammar>".to_string(),
         VmValue::NativeFn(_)           => "<native fn>".to_string(),
+        VmValue::NativeLibFn(nfn)      => format!("<native lib fn {}>", nfn.name),
         VmValue::Future(_)             => "<future>".to_string(),
         VmValue::TokenStream(_)        => "<token stream>".to_string(),
         VmValue::TypeRef(t)            => format!("<type {}>", t),
@@ -219,6 +224,8 @@ pub struct VmState {
     pub source_dir: PathBuf,
     /// Set of canonical paths currently being imported (cycle detection).
     pub import_stack: HashSet<PathBuf>,
+    /// Native package map from `[native]` in jade.toml: name → absolute path to .dylib/.so.
+    pub native_packages: HashMap<String, PathBuf>,
 }
 
 impl VmState {
@@ -244,6 +251,7 @@ impl VmState {
             prompt_cache: HashMap::new(),
             source_dir: PathBuf::new(),
             import_stack: HashSet::new(),
+            native_packages: HashMap::new(),
         }
     }
 
@@ -260,6 +268,7 @@ impl VmState {
         self.max_retries = opts.max_retries;
         self.default_model = opts.default_model.clone();
         self.source_dir = opts.source_dir;
+        self.native_packages = opts.native_packages;
         self.set_session("__model__", VmValue::Str(opts.default_model));
         self.set_session("__max_retries__", VmValue::Int(opts.max_retries as i64));
     }
@@ -301,6 +310,7 @@ impl VmState {
             prompt_cache: self.prompt_cache.clone(),
             source_dir: self.source_dir.clone(),
             import_stack: HashSet::new(),
+            native_packages: self.native_packages.clone(),
         }
     }
 }
@@ -313,6 +323,8 @@ pub struct VmOpts {
     /// Directory of the source file being run — used to resolve relative `use` paths.
     /// Defaults to the current working directory when running in-memory (tests, REPL).
     pub source_dir: PathBuf,
+    /// Native package map from `[native]` in jade.toml: name → absolute path to .dylib/.so.
+    pub native_packages: HashMap<String, PathBuf>,
 }
 
 impl Default for VmOpts {
@@ -322,6 +334,7 @@ impl Default for VmOpts {
             default_model: String::new(),
             max_retries: 15,
             source_dir: std::env::current_dir().unwrap_or_default(),
+            native_packages: HashMap::new(),
         }
     }
 }
@@ -447,6 +460,26 @@ async fn execute_chunk(
 
             // ── Imports ───────────────────────────────────────────────────────
             Instr::ImportFile(path) => {
+                // ── Native packages ─────────────────────────────────────────
+                // `use "native/<name>"` loads a .dylib/.so registered in jade.toml [native].
+                if let Some(pkg_name) = path.strip_prefix("native/") {
+                    let lib_path = state.native_packages.get(pkg_name)
+                        .cloned()
+                        .ok_or_else(|| JadeError::IoError {
+                            message: format!(
+                                "native package '{}' not declared in jade.toml [native]",
+                                pkg_name
+                            ),
+                            span,
+                        })?;
+                    let fns = crate::native::load_native_package(&lib_path, span)?;
+                    state.globals.insert(
+                        pkg_name.to_string(),
+                        VmValue::Dict(fns),
+                    );
+                    continue;
+                }
+
                 // ── Built-in packages ───────────────────────────────────────
                 // Intercept stdlib package names before touching the filesystem.
                 if let Some(pkg) = stdlib::find_package(path) {
@@ -532,6 +565,26 @@ async fn execute_chunk(
             }
 
             Instr::ImportFrom(path, names) => {
+                // ── Native packages ─────────────────────────────────────────
+                if let Some(pkg_name) = path.strip_prefix("native/") {
+                    let lib_path = state.native_packages.get(pkg_name)
+                        .cloned()
+                        .ok_or_else(|| JadeError::IoError {
+                            message: format!(
+                                "native package '{}' not declared in jade.toml [native]",
+                                pkg_name
+                            ),
+                            span,
+                        })?;
+                    let fns = crate::native::load_native_package(&lib_path, span)?;
+                    for name in names {
+                        if let Some(val) = fns.get(name) {
+                            state.globals.insert(name.clone(), val.clone());
+                        }
+                    }
+                    continue;
+                }
+
                 if let Some(pkg) = stdlib::find_package(path) {
                     // Build the package dict, then extract only the requested names.
                     let dict = if pkg.import_name == "llm" {
@@ -1234,6 +1287,7 @@ async fn call_value(
             call_fn(&method, full_args, state, span).await
         }
         VmValue::BuiltinFn(bf) => (bf.vm_impl)(&args).map_err(|e| patch_builtin_span(e, span)),
+        VmValue::NativeLibFn(nfn) => nfn.call(&args, span),
         VmValue::NativeBoundMethod(nbm) => {
             let mut full_args = Vec::with_capacity(args.len() + 1);
             full_args.push(nbm.receiver.clone());

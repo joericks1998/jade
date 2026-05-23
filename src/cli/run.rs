@@ -149,11 +149,30 @@ pub async fn run_file(path: &str, verbose: bool) {
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
         .unwrap_or_else(|| std::path::PathBuf::from("."));
 
+    // Resolve native packages from jade.toml [native], if present.
+    let native_packages = {
+        let mut map = std::collections::HashMap::new();
+        if let Some(root) = crate::project::find_project_root() {
+            if let Ok(manifest) = crate::project::load_project(&root) {
+                for (name, lib_path) in manifest.native.unwrap_or_default() {
+                    let abs = if std::path::Path::new(&lib_path).is_absolute() {
+                        std::path::PathBuf::from(&lib_path)
+                    } else {
+                        root.join(&lib_path)
+                    };
+                    map.insert(name, abs);
+                }
+            }
+        }
+        map
+    };
+
     let opts = vm::VmOpts {
         backend,
         default_model: cfg.model,
         max_retries: cfg.max_retries,
         source_dir,
+        native_packages,
     };
 
     // Execute.
@@ -209,7 +228,7 @@ pub async fn run_file(path: &str, verbose: bool) {
                 vm::VmValue::BoundMethod(_) => println!("{} = <bound method>", name),
                 vm::VmValue::Prompt(_)      => println!("{} = <prompt>", name),
                 vm::VmValue::Dict(_) => println!("{} = {}", name, vm::value_to_display(val)),
-                vm::VmValue::NativeFn(_) | vm::VmValue::BuiltinFn(_) | vm::VmValue::NativeBoundMethod(_) => {} // not shown
+                vm::VmValue::NativeFn(_) | vm::VmValue::BuiltinFn(_) | vm::VmValue::NativeBoundMethod(_) | vm::VmValue::NativeLibFn(_) => {} // not shown
                 vm::VmValue::Future(_)      => println!("{} = <future>", name),
                 vm::VmValue::TokenStream(_) => println!("{} = <token stream>", name),
                 vm::VmValue::Grammar { .. }  => {} // not shown

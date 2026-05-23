@@ -4,6 +4,7 @@ mod compiler;
 mod config;
 mod frontend;
 mod llm;
+mod native;
 mod project;
 
 use clap::{Parser, Subcommand};
