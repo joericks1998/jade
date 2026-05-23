@@ -9,6 +9,10 @@ pub mod time_pkg;
 pub mod grammar_pkg;
 pub mod http_pkg;
 pub mod sh_pkg;
+pub mod json_pkg;
+pub mod env_pkg;
+pub mod path_pkg;
+pub mod random_pkg;
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -131,6 +135,10 @@ static PACKAGES: &[&Package] = &[
     &time_pkg::TIME_PKG,
     &http_pkg::HTTP_PKG,
     &sh_pkg::SH_PKG,
+    &json_pkg::JSON_PKG,
+    &env_pkg::ENV_PKG,
+    &path_pkg::PATH_PKG,
+    &random_pkg::RANDOM_PKG,
 ];
 
 // ── Primitive method tables ───────────────────────────────────────────────────
