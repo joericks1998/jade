@@ -7,18 +7,6 @@ use crate::{
 
 use super::BuiltinFn;
 
-// ── print ─────────────────────────────────────────────────────────────────────
-
-fn native_print(args: &[VmValue]) -> Result<VmValue> {
-    if args.len() != 1 {
-        return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: Span { line: 0, col: 0 } });
-    }
-    println!("{}", value_to_display(&args[0]));
-    Ok(VmValue::Nil)
-}
-
-pub const PRINT: BuiltinFn = BuiltinFn { name: "print", vm_impl: native_print };
-
 // ── write ─────────────────────────────────────────────────────────────────────
 
 fn native_write(args: &[VmValue]) -> Result<VmValue> {
@@ -31,19 +19,6 @@ fn native_write(args: &[VmValue]) -> Result<VmValue> {
 }
 
 pub const WRITE: BuiltinFn = BuiltinFn { name: "write", vm_impl: native_write };
-
-// ── stream ────────────────────────────────────────────────────────────────────
-
-fn native_stream(args: &[VmValue]) -> Result<VmValue> {
-    if args.len() != 1 {
-        return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: Span { line: 0, col: 0 } });
-    }
-    let s = value_to_display(&args[0]);
-    println!("{}", s);
-    Ok(VmValue::Str(s))
-}
-
-pub const STREAM: BuiltinFn = BuiltinFn { name: "stream", vm_impl: native_stream };
 
 // ── len ───────────────────────────────────────────────────────────────────────
 

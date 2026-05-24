@@ -19,7 +19,7 @@ use std::{collections::HashMap, sync::Arc};
 use parking_lot::Mutex;
 
 use crate::{
-    compiler::{tir::JadeType, type_infer::TypeContext, vm::{NativeFnId, VmValue}},
+    compiler::{type_infer::TypeContext, vm::{NativeFnId, VmValue}},
     frontend::error::Result,
 };
 
@@ -154,10 +154,6 @@ pub fn find_primitive_method(ty: PrimType, method: &str) -> Option<BuiltinFn> {
 }
 
 // ── Public lookup API ─────────────────────────────────────────────────────────
-
-pub fn find_core_builtin(name: &str) -> Option<BuiltinFn> {
-    CORE_BUILTINS.iter().find(|b| b.name == name).copied()
-}
 
 pub fn find_package(import_name: &str) -> Option<&'static Package> {
     PACKAGES.iter().find(|p| p.import_name == import_name).copied()

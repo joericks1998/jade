@@ -4,7 +4,6 @@ pub mod check;
 pub mod configure;
 pub mod env;
 pub mod fmt;
-pub mod help;
 pub mod model;
 pub mod new;
 pub mod repl;

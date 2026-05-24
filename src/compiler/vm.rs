@@ -2435,6 +2435,8 @@ fn cmp_dynamic(slots: &[VmValue], l: Reg, r: Reg, op: &str, span: Span) -> Resul
             (VmValue::Float(a),VmValue::Float(b)) => a==b,
             (VmValue::Bool(a),VmValue::Bool(b))   => a==b,
             (VmValue::Str(a),VmValue::Str(b))     => a==b,
+            (VmValue::Nil, VmValue::Nil)           => true,
+            (VmValue::Nil, _) | (_, VmValue::Nil) => false,
             (lv,rv) => return Err(JadeError::TypeError{message:format!("'{}' cannot compare {} and {}", op, value_type_name(&lv), value_type_name(&rv)),span}),
         },
         "!=" => match (lv,rv) {
@@ -2442,6 +2444,8 @@ fn cmp_dynamic(slots: &[VmValue], l: Reg, r: Reg, op: &str, span: Span) -> Resul
             (VmValue::Float(a),VmValue::Float(b)) => a!=b,
             (VmValue::Bool(a),VmValue::Bool(b))   => a!=b,
             (VmValue::Str(a),VmValue::Str(b))     => a!=b,
+            (VmValue::Nil, VmValue::Nil)           => false,
+            (VmValue::Nil, _) | (_, VmValue::Nil) => true,
             (lv,rv) => return Err(JadeError::TypeError{message:format!("'{}' cannot compare {} and {}", op, value_type_name(&lv), value_type_name(&rv)),span}),
         },
         "<"  => match (lv,rv) {

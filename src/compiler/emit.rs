@@ -26,8 +26,6 @@ pub struct CompiledProgram {
     pub struct_decorators: HashMap<String, Vec<(String, Vec<crate::compiler::vm::VmValue>)>>,
     /// Compiled extend-block methods: `type_name → method_name → CompiledFn`.
     pub extend_methods: HashMap<String, HashMap<String, Arc<CompiledFn>>>,
-    /// Interface definitions (method names required per interface).
-    pub interface_defs: HashMap<String, Vec<String>>,
     /// `@route("field")` on extend blocks: type_name → field_name to read for routing.
     pub route_configs: HashMap<String, String>,
 }
@@ -38,7 +36,6 @@ pub struct CompiledProgram {
 struct EmitCtx {
     struct_defs: HashMap<String, Vec<StructFieldDef>>,
     struct_decorators: HashMap<String, Vec<(String, Vec<crate::compiler::vm::VmValue>)>>,
-    interface_defs: HashMap<String, Vec<String>>,
     extend_methods: HashMap<String, HashMap<String, Arc<CompiledFn>>>,
     route_configs: HashMap<String, String>,
     /// Counter for generating unique closure names (`__closure_0__`, etc.).
@@ -155,7 +152,6 @@ pub fn emit(program: TProgram) -> Result<CompiledProgram> {
     let mut ctx = EmitCtx {
         struct_defs: HashMap::new(),
         struct_decorators: HashMap::new(),
-        interface_defs: HashMap::new(),
         extend_methods: HashMap::new(),
         route_configs: HashMap::new(),
         next_closure_id: 0,
@@ -197,12 +193,6 @@ pub fn emit(program: TProgram) -> Result<CompiledProgram> {
                     ctx.struct_decorators.insert(name.clone(), compiled?);
                 }
             }
-            TStmt::InterfaceDef { name, methods, .. } => {
-                ctx.interface_defs.insert(
-                    name.clone(),
-                    methods.iter().map(|m| m.name.clone()).collect(),
-                );
-            }
             _ => {}
         }
     }
@@ -221,7 +211,6 @@ pub fn emit(program: TProgram) -> Result<CompiledProgram> {
         struct_defs: ctx.struct_defs,
         struct_decorators: ctx.struct_decorators,
         extend_methods: ctx.extend_methods,
-        interface_defs: ctx.interface_defs,
         route_configs: ctx.route_configs,
     })
 }
@@ -475,8 +464,8 @@ fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
             // Collect jumps to end that need patching after all arms.
             let mut end_jumps: Vec<usize> = Vec::new();
 
-            let n_arms = arms.len();
-            for (i, arm) in arms.into_iter().enumerate() {
+            let _n_arms = arms.len();
+            for (_i, arm) in arms.into_iter().enumerate() {
                 let TCatchArm { catch_type, binding, body: arm_body } = arm;
 
                 // For typed arms, check the caught value's type name.

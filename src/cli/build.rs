@@ -1,4 +1,7 @@
-use std::{fs, path::Path, process};
+use std::process;
+
+#[cfg(feature = "llvm")]
+use std::{fs, path::Path};
 
 #[cfg(feature = "llvm")]
 use crate::compiler::codegen;

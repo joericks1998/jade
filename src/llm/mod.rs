@@ -93,31 +93,6 @@ pub fn select_backend(config: &crate::config::JadeConfig) -> Option<Arc<dyn Infe
         .and_then(|key| build_backend(&config.provider, key, &config.model, config.max_parallel).ok())
 }
 
-
-/// Synchronous bridge: run an async `infer` call from the tree-walk REPL path.
-///
-/// Uses `block_in_place` when a multi-threaded tokio runtime is active (REPL under
-/// `#[tokio::main]`), which yields the thread to the scheduler without panicking.
-/// Falls back to a fresh single-threaded runtime in tests or bare sync contexts.
-pub fn infer_sync(
-    backend: &dyn InferenceBackend,
-    req: InferenceRequest,
-    span: crate::frontend::error::Span,
-) -> crate::frontend::error::Result<InferenceResponse> {
-    let fut = backend.infer(req, span);
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(fut)),
-        Err(_) => tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| crate::frontend::error::JadeError::InferenceError {
-                message: format!("failed to create tokio runtime for sync inference: {e}"),
-                span: crate::frontend::error::Span { line: 0, col: 0 },
-            })?
-            .block_on(fut),
-    }
-}
-
 // ── Mock backend (test builds only) ──────────────────────────────────────────
 
 /// Deterministic mock backend for unit tests. Not available at runtime.

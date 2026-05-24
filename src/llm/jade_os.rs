@@ -20,10 +20,6 @@ impl JadeOsBackend {
     pub fn new() -> Self {
         Self { sock_path: jade_sock_path() }
     }
-
-    pub fn with_device(path: impl Into<String>) -> Self {
-        Self { sock_path: path.into() }
-    }
 }
 
 #[async_trait::async_trait]

@@ -83,7 +83,7 @@ pub fn find_array_method(name: &str) -> Option<BuiltinFn> {
 
 // ── std/array package functions (functional style) ────────────────────────────
 
-fn pkg_map(args: &[VmValue]) -> Result<VmValue> {
+fn pkg_map(_args: &[VmValue]) -> Result<VmValue> {
     // map(arr, f) is async-capable but we need the VM call context.
     // For now, return an error explaining this must be done with a for-loop.
     // Full async-capable map would require VmState access.
@@ -93,7 +93,7 @@ fn pkg_map(args: &[VmValue]) -> Result<VmValue> {
     })
 }
 
-fn pkg_filter(args: &[VmValue]) -> Result<VmValue> {
+fn pkg_filter(_args: &[VmValue]) -> Result<VmValue> {
     Err(JadeError::TypeError {
         message: "array.filter: use a for-loop to filter arrays".to_string(),
         span: ZERO,

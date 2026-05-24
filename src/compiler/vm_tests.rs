@@ -1697,6 +1697,28 @@ fn test_fs_write_arity_error() {
     assert!(matches!(err, JadeError::ArityMismatch { expected: 2, .. }));
 }
 
+// ── nil equality with unknown-typed values ────────────────────────────────
+
+#[test]
+fn test_nil_eq_struct_via_unknown_param() {
+    // When a function param has type Unknown, `param != nil` must work at
+    // runtime even when the argument is a struct (CmpNe dynamic path).
+    let s = run_src(
+        "struct Foo {}\nfn check(x) {\n if x != nil { return 1 }\n return 0\n}\nlet a = check(Foo {})\nlet b = check(nil)"
+    ).unwrap();
+    assert_eq!(get_int(&s, "a"), 1);
+    assert_eq!(get_int(&s, "b"), 0);
+}
+
+#[test]
+fn test_nil_eq_eq_struct_via_unknown_param() {
+    let s = run_src(
+        "struct Bar {}\nfn is_nil(x) {\n return x == nil\n}\nlet a = is_nil(nil)\nlet b = is_nil(Bar {})"
+    ).unwrap();
+    assert!(get_bool(&s, "a"));
+    assert!(!get_bool(&s, "b"));
+}
+
 // ── module stdlib promotion ───────────────────────────────────────────────
 
 /// A module that imports `use std.fs` should expose functions that use `fs`

@@ -11,8 +11,6 @@ use serde::Deserialize;
 pub struct ProjectManifest {
     pub project: Option<ProjectSection>,
     pub scripts: Option<HashMap<String, String>>,
-    pub model: Option<ManifestModelSection>,
-    pub dependencies: Option<HashMap<String, String>>,
     /// `[native]` section: maps package name → entry with `path` and required `alias`.
     /// Used via `use "native/<name>"` in Jade source; the package binds as `alias`.
     pub native: Option<HashMap<String, NativePackageEntry>>,
@@ -31,16 +29,6 @@ pub struct ProjectSection {
     pub name: String,
     pub version: Option<String>,
     pub entry: Option<String>,
-    pub description: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ManifestModelSection {
-    pub provider: Option<String>,
-    pub model: Option<String>,
-    pub api_key: Option<String>,
-    pub max_retries: Option<usize>,
-    pub max_parallel: Option<usize>,
 }
 
 impl ProjectManifest {
