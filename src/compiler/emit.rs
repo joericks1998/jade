@@ -430,8 +430,15 @@ fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
             }
         }
 
-        TStmt::Use { path, span } => {
-            em.chunk.emit(Instr::ImportFile(path), span);
+        TStmt::Use { path, as_name, span } => {
+            let namespace = as_name.unwrap_or_else(|| {
+                std::path::Path::new(&path)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(&path)
+                    .to_string()
+            });
+            em.chunk.emit(Instr::ImportFile(path, namespace), span);
         }
 
         TStmt::FromUse { path, names, span } => {

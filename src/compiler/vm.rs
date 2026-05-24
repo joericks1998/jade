@@ -459,7 +459,7 @@ async fn execute_chunk(
             Instr::Halt => break,
 
             // ── Imports ───────────────────────────────────────────────────────
-            Instr::ImportFile(path) => {
+            Instr::ImportFile(path, namespace) => {
                 // ── Native packages ─────────────────────────────────────────
                 // `use "native/<name>"` loads a .dylib/.so registered in jade.toml [native].
                 if let Some(pkg_name) = path.strip_prefix("native/") {
@@ -473,18 +473,14 @@ async fn execute_chunk(
                             span,
                         })?;
                     let fns = crate::native::load_native_package(&lib_path, span)?;
-                    state.globals.insert(
-                        pkg_name.to_string(),
-                        VmValue::Dict(fns),
-                    );
+                    state.globals.insert(pkg_name.to_string(), VmValue::Dict(fns));
                     continue;
                 }
 
                 // ── Built-in packages ───────────────────────────────────────
-                // Intercept stdlib package names before touching the filesystem.
+                // stdlib packages always bind under their own global_name; namespace param ignored.
                 if let Some(pkg) = stdlib::find_package(path) {
                     let val = if pkg.import_name == "llm" {
-                        // llm has a state-mutating function — use the special dict builder
                         stdlib::llm_pkg::llm_vm_dict_value()
                     } else {
                         pkg.vm_dict_value()
@@ -493,6 +489,7 @@ async fn execute_chunk(
                     continue;
                 }
 
+                // ── User .jde files — namespaced ────────────────────────────
                 let abs_path = state.source_dir.join(path);
                 let canon = abs_path.canonicalize().map_err(|_| JadeError::ImportNotFound {
                     path: path.clone(),
@@ -508,13 +505,10 @@ async fn execute_chunk(
 
                 state.import_stack.insert(canon.clone());
 
-                // Save and update source_dir for the imported file's own imports.
-                let prev_dir = state.source_dir.clone();
-                state.source_dir = canon.parent()
+                let sub_source_dir = canon.parent()
                     .unwrap_or_else(|| std::path::Path::new("."))
                     .to_path_buf();
 
-                // Compile in a sync closure (lex/parse/emit are all sync).
                 let compile_result: Result<crate::compiler::emit::CompiledProgram> = (|| {
                     let source = std::fs::read_to_string(&canon).map_err(|_| {
                         JadeError::ImportNotFound { path: path.clone(), span }
@@ -552,15 +546,72 @@ async fn execute_chunk(
                     crate::compiler::emit::emit(tprogram)
                 })();
 
-                let result = match compile_result {
-                    Ok(compiled) => Box::pin(run_with_state(compiled, state)).await,
-                    Err(e) => Err(e),
+                let result: Result<()> = match compile_result {
+                    Ok(compiled) => {
+                        // Run the imported file in an isolated sub-state so its
+                        // top-level bindings don't bleed into the parent namespace.
+                        let mut sub_state = VmState::new();
+                        // Capture keys already present so we can filter them out later.
+                        let initial_keys: std::collections::HashSet<String> =
+                            sub_state.globals.keys().cloned().collect();
+                        // Propagate runtime config from parent.
+                        sub_state.source_dir = sub_source_dir;
+                        sub_state.import_stack = state.import_stack.clone();
+                        sub_state.native_packages = state.native_packages.clone();
+                        sub_state.inference_backend = state.inference_backend.clone();
+                        sub_state.max_retries = state.max_retries;
+                        sub_state.max_tokens = state.max_tokens;
+                        sub_state.default_model = state.default_model.clone();
+
+                        let r = Box::pin(run_with_state(compiled, &mut sub_state)).await;
+                        if r.is_ok() {
+                            // Collect user-defined globals (exclude stdlib and internal keys).
+                            let mut module_globals: HashMap<String, VmValue> = sub_state
+                                .globals
+                                .drain()
+                                .filter(|(k, _)| !initial_keys.contains(k))
+                                .collect();
+                            // Qualify any TypeRef values so coercion calls resolve correctly.
+                            for v in module_globals.values_mut() {
+                                if let VmValue::TypeRef(t) = v {
+                                    *t = format!("{}.{}", namespace, t);
+                                }
+                            }
+                            state.globals.insert(namespace.clone(), VmValue::Dict(module_globals));
+
+                            // Merge struct_defs prefixed with the namespace.
+                            for (k, v) in sub_state.struct_defs.drain() {
+                                state.struct_defs.insert(format!("{}.{}", namespace, k), v);
+                            }
+                            // Merge extend_methods prefixed with the namespace.
+                            for (type_name, methods) in sub_state.extend_methods.drain() {
+                                state.extend_methods
+                                    .entry(format!("{}.{}", namespace, type_name))
+                                    .or_default()
+                                    .extend(methods);
+                            }
+                            // Merge struct_decorators prefixed with the namespace.
+                            for (type_name, decs) in sub_state.struct_decorators.drain() {
+                                state.struct_decorators
+                                    .entry(format!("{}.{}", namespace, type_name))
+                                    .or_default()
+                                    .extend(decs);
+                            }
+                            // Propagate LLM token usage back to parent.
+                            state.token_count += sub_state.token_count;
+                        }
+                        r.map_err(|e| JadeError::InFile {
+                            file: path.clone(),
+                            cause: Box::new(e),
+                        })
+                    }
+                    Err(e) => Err(JadeError::InFile {
+                        file: path.clone(),
+                        cause: Box::new(e),
+                    }),
                 };
 
-                // Always restore source_dir and release the import_stack entry.
-                state.source_dir = prev_dir;
                 state.import_stack.remove(&canon);
-
                 result?;
             }
 
@@ -601,8 +652,8 @@ async fn execute_chunk(
                     }
                     continue;
                 }
-                // File import: run the file (all its globals merge in), then names
-                // are already available in scope — no additional filtering needed.
+                // File import: run in an isolated sub-state, then bind only the
+                // requested names directly into the parent namespace.
                 let abs_path = state.source_dir.join(path);
                 let canon = abs_path.canonicalize().map_err(|_| JadeError::ImportNotFound {
                     path: path.clone(),
@@ -612,8 +663,7 @@ async fn execute_chunk(
                     return Err(JadeError::CircularImport { path: path.clone(), span });
                 }
                 state.import_stack.insert(canon.clone());
-                let prev_dir = state.source_dir.clone();
-                state.source_dir = canon.parent()
+                let sub_source_dir = canon.parent()
                     .unwrap_or_else(|| std::path::Path::new("."))
                     .to_path_buf();
                 let compile_result: Result<crate::compiler::emit::CompiledProgram> = (|| {
@@ -625,11 +675,45 @@ async fn execute_chunk(
                     let tp = crate::compiler::type_infer::infer(p)?;
                     crate::compiler::emit::emit(tp)
                 })();
-                let result = match compile_result {
-                    Ok(compiled) => Box::pin(run_with_state(compiled, state)).await,
-                    Err(e) => Err(e),
+                let result: Result<()> = match compile_result {
+                    Ok(compiled) => {
+                        let mut sub_state = VmState::new();
+                        sub_state.source_dir = sub_source_dir;
+                        sub_state.import_stack = state.import_stack.clone();
+                        sub_state.native_packages = state.native_packages.clone();
+                        sub_state.inference_backend = state.inference_backend.clone();
+                        sub_state.max_retries = state.max_retries;
+                        sub_state.max_tokens = state.max_tokens;
+                        sub_state.default_model = state.default_model.clone();
+                        let r = Box::pin(run_with_state(compiled, &mut sub_state)).await;
+                        if r.is_ok() {
+                            for name in names {
+                                if let Some(val) = sub_state.globals.remove(name) {
+                                    state.globals.insert(name.clone(), val);
+                                }
+                                // If the requested name is a struct type, also import its def.
+                                if let Some(def) = sub_state.struct_defs.remove(name) {
+                                    state.struct_defs.insert(name.clone(), def);
+                                }
+                                if let Some(methods) = sub_state.extend_methods.remove(name) {
+                                    state.extend_methods
+                                        .entry(name.clone())
+                                        .or_default()
+                                        .extend(methods);
+                                }
+                            }
+                            state.token_count += sub_state.token_count;
+                        }
+                        r.map_err(|e| JadeError::InFile {
+                            file: path.clone(),
+                            cause: Box::new(e),
+                        })
+                    }
+                    Err(e) => Err(JadeError::InFile {
+                        file: path.clone(),
+                        cause: Box::new(e),
+                    }),
                 };
-                state.source_dir = prev_dir;
                 state.import_stack.remove(&canon);
                 result?;
             }
@@ -2523,7 +2607,7 @@ fn instr_max_reg(instr: &Instr) -> u32 {
         Instr::SetField(o,_,v) => (*o).max(*v),
         Instr::JumpIfFalse(c,_)|Instr::JumpIfTrue(c,_) => *c,
         Instr::Jump(_)|Instr::Halt|Instr::Return(None)
-        |Instr::ImportFile(_)|Instr::ImportFrom(_,_) => 0,
+        |Instr::ImportFile(_,_)|Instr::ImportFrom(_,_) => 0,
         Instr::Return(Some(r)) => *r,
         Instr::Call(d,c,args) => {
             let mut m = (*d).max(*c);

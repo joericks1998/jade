@@ -1,4 +1,4 @@
 use "math_lib.jde"
 
-let x = add(2, 3)
-let y = mul(4, 5)
+let x = math_lib.add(2, 3)
+let y = math_lib.mul(4, 5)

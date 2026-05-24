@@ -442,12 +442,12 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
 
         // ── Imports ───────────────────────────────────────────────────────────
 
-        Stmt::Use { path, span } => {
+        Stmt::Use { path, as_name, span } => {
             ctx.has_imports = true;
             if let Some(pkg) = stdlib::find_package(path) {
                 (pkg.register_types)(ctx);
             }
-            Ok(TStmt::Use { path: path.clone(), span: *span })
+            Ok(TStmt::Use { path: path.clone(), as_name: as_name.clone(), span: *span })
         }
 
         Stmt::FromUse { path, names, span } => {

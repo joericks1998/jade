@@ -272,9 +272,10 @@ pub enum Instr {
     Join(Reg, Vec<Reg>),
 
     // ── Imports ────────────────────────────────────────────────────────────
-    /// Run the full pipeline for the file at `path` (relative to the current
-    /// file's directory) and merge its top-level exports into the running state.
-    ImportFile(String),
+    /// Run the full pipeline for the file at `path` and bind its exports under `namespace`.
+    /// `namespace` is either the explicit `as` alias or the file's stem (e.g. `lib` for `lib.jde`).
+    /// stdlib packages ignore this field and use their own `global_name`.
+    ImportFile(String, String),
     /// `from X use Y, Z` — load package/file at path, then bind only the listed names directly.
     ImportFrom(String, Vec<String>),
 }

@@ -215,6 +215,7 @@ pub enum TStmt {
     /// `use "path"` — passed through unchanged from the AST; resolved at VM runtime.
     Use {
         path: String,
+        as_name: Option<String>,
         span: Span,
     },
     /// `from std.time use now, sleep` — named selective imports.

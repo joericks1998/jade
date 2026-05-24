@@ -128,6 +128,10 @@ pub enum JadeError {
 
     /// A filesystem I/O operation failed.
     IoError { message: String, span: Span },
+
+    /// An error that originated inside an imported file.
+    /// Wraps the inner error and records the import path for traceback display.
+    InFile { file: String, cause: Box<JadeError> },
 }
 
 impl std::fmt::Display for JadeError {
@@ -215,6 +219,8 @@ impl std::fmt::Display for JadeError {
                 write!(f, "[{}:{}] async task panicked: {}", span.line, span.col, message),
             JadeError::IoError { message, span } =>
                 write!(f, "[{}:{}] I/O error: {}", span.line, span.col, message),
+            JadeError::InFile { file, cause } =>
+                write!(f, "in \"{}\": {}", file, cause),
         }
     }
 }

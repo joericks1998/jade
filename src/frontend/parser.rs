@@ -575,14 +575,20 @@ impl Parser {
         Ok(stmts)
     }
 
-    /// Parse `prompt name = expr ;`
-    /// Parse `use "path/to/file.jde" ;`
+    /// Parse `use "path/to/file.jde" [as name] ;`
     fn parse_use(&mut self) -> Result<Stmt> {
         let span = self.peek().span;
         self.advance(); // consume `use`
         let path = self.parse_import_path()?;
+        // Optional `as alias` — only meaningful for .jde file imports; ignored for stdlib.
+        let as_name = if self.peek().kind == TokenKind::As {
+            self.advance(); // consume `as`
+            Some(self.expect_ident("alias name after `as`")?)
+        } else {
+            None
+        };
         self.consume_semicolon()?;
-        Ok(Stmt::Use { path, span })
+        Ok(Stmt::Use { path, as_name, span })
     }
 
     fn parse_from_use(&mut self) -> Result<Stmt> {
@@ -1413,13 +1419,23 @@ impl Parser {
             TokenKind::Identifier(ref name) => {
                 let name = name.clone();
                 self.advance();
-                // `TypeName { field: expr, … }` is a struct literal, but only when
-                // struct literals are allowed in this position (not in if/while conditions).
+                // `TypeName { field: expr, … }` — plain struct literal.
                 if self.struct_literal_allowed && self.peek().kind == TokenKind::LBrace {
-                    self.parse_struct_literal_body(name, token.span)
-                } else {
-                    Ok(Expr::Identifier { name, span: token.span })
+                    return self.parse_struct_literal_body(name, token.span);
                 }
+                // `ns.TypeName { field: expr, … }` — namespace-qualified struct literal.
+                // Requires: `.` then `Identifier` then `{` (3-token lookahead).
+                if self.struct_literal_allowed
+                    && self.peek().kind == TokenKind::Dot
+                    && matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::Identifier(_)))
+                    && self.tokens.get(self.pos + 2).map(|t| &t.kind) == Some(&TokenKind::LBrace)
+                {
+                    self.advance(); // consume `.`
+                    let type_name = self.expect_ident("struct type name")?;
+                    let qualified = format!("{}.{}", name, type_name);
+                    return self.parse_struct_literal_body(qualified, token.span);
+                }
+                Ok(Expr::Identifier { name, span: token.span })
             }
             TokenKind::LParen => {
                 self.advance(); // consume `(`
