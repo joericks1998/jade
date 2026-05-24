@@ -622,7 +622,7 @@ fn emit_fn(
     }
 
     let n_slots = fn_em.next_reg;
-    Ok(CompiledFn { params: param_names, defaults, chunk: fn_em.chunk, n_slots })
+    Ok(CompiledFn { params: param_names, defaults, chunk: fn_em.chunk, n_slots, source_file: String::new() })
 }
 
 // ── Expression emission ───────────────────────────────────────────────────────

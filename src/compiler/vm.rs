@@ -405,6 +405,21 @@ async fn run_with_state(program: CompiledProgram, state: &mut VmState) -> Result
     Ok(())
 }
 
+// ── Source-file attribution ───────────────────────────────────────────────────
+
+/// Recursively stamp `source_file` onto every `CompiledFn` reachable from
+/// `chunk`. Called on freshly-compiled import modules so that runtime errors
+/// inside those functions can be attributed to the correct file.
+fn stamp_source_file(chunk: &mut Chunk, file: &str) {
+    for fn_arc in &mut chunk.fn_defs {
+        let cf = Arc::make_mut(fn_arc);
+        if cf.source_file.is_empty() {
+            cf.source_file = file.to_string();
+        }
+        stamp_source_file(&mut cf.chunk, file);
+    }
+}
+
 // ── Execution engine ──────────────────────────────────────────────────────────
 
 /// Build a `RuntimeError { message }` struct value for wrapping built-in errors
@@ -571,7 +586,20 @@ async fn execute_chunk(
                 })();
 
                 let result: Result<()> = match compile_result {
-                    Ok(compiled) => {
+                    Ok(mut compiled) => {
+                        // Stamp source file on all compiled functions so runtime
+                        // errors inside module functions attribute to the correct file.
+                        let file_label = canon.to_string_lossy().into_owned();
+                        stamp_source_file(&mut compiled.top, &file_label);
+                        for methods in compiled.extend_methods.values_mut() {
+                            for cf_arc in methods.values_mut() {
+                                let cf = Arc::make_mut(cf_arc);
+                                if cf.source_file.is_empty() {
+                                    cf.source_file = file_label.clone();
+                                }
+                                stamp_source_file(&mut cf.chunk, &file_label);
+                            }
+                        }
                         // Run the imported file in an isolated sub-state so its
                         // top-level bindings don't bleed into the parent namespace.
                         let mut sub_state = VmState::new();
@@ -714,7 +742,9 @@ async fn execute_chunk(
                     crate::compiler::emit::emit(tp)
                 })();
                 let result: Result<()> = match compile_result {
-                    Ok(compiled) => {
+                    Ok(mut compiled) => {
+                        let file_label = canon.to_string_lossy().into_owned();
+                        stamp_source_file(&mut compiled.top, &file_label);
                         let mut sub_state = VmState::new();
                         sub_state.source_dir = sub_source_dir;
                         sub_state.import_stack = state.import_stack.clone();
@@ -1604,7 +1634,14 @@ async fn call_fn(
     for (i, v) in args.into_iter().enumerate() {
         frame[i] = vm_maybe_drain(v, state, span).await?;
     }
-    let result = execute_chunk(&cf.chunk, &mut frame, state).await?;
+    let result = execute_chunk(&cf.chunk, &mut frame, state).await
+        .map_err(|e| {
+            if cf.source_file.is_empty() || matches!(e, JadeError::InFile { .. }) {
+                e
+            } else {
+                JadeError::InFile { file: cf.source_file.clone(), cause: Box::new(e) }
+            }
+        })?;
     Ok(result.unwrap_or(VmValue::Nil))
 }
 

@@ -27,6 +27,9 @@ pub struct CompiledFn {
     pub chunk: Chunk,
     /// Total number of register slots needed by this function frame.
     pub n_slots: u32,
+    /// Source file this function was compiled from. Empty for top-level programs;
+    /// set to the module's path when the function is loaded from an imported file.
+    pub source_file: String,
 }
 
 /// A compiled code unit: top-level program or function body.
