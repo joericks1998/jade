@@ -441,7 +441,7 @@ fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
             em.chunk.emit(Instr::ImportFile(path, namespace), span);
         }
 
-        TStmt::FromUse { path, names, span } => {
+        TStmt::FromUse { path, names, span, .. } => {
             em.chunk.emit(Instr::ImportFrom(path, names), span);
         }
 

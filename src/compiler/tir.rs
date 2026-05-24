@@ -223,6 +223,7 @@ pub enum TStmt {
     FromUse {
         path: String,
         names: Vec<String>,
+        path_is_string: bool,
         span: Span,
     },
     /// `raise expr`

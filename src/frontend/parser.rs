@@ -599,6 +599,7 @@ impl Parser {
     fn parse_from_use(&mut self) -> Result<Stmt> {
         let span = self.peek().span;
         self.advance(); // consume `from`
+        let path_is_string = matches!(self.peek().kind, TokenKind::Str(_));
         let path = self.parse_import_path()?;
         // expect `use`
         let use_tok = self.peek().clone();
@@ -622,7 +623,7 @@ impl Parser {
             }
         }
         self.consume_semicolon()?;
-        Ok(Stmt::FromUse { path, names, span })
+        Ok(Stmt::FromUse { path, names, path_is_string, span })
     }
 
     /// Parse an import path: either a string literal `"std/time"` or dot notation

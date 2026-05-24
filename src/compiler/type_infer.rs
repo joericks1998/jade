@@ -455,12 +455,15 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
             Ok(TStmt::Use { path: path.clone(), as_name: as_name.clone(), path_is_string: *path_is_string, span: *span })
         }
 
-        Stmt::FromUse { path, names, span } => {
+        Stmt::FromUse { path, names, path_is_string, span } => {
             ctx.has_imports = true;
             if let Some(pkg) = stdlib::find_package(path) {
+                if *path_is_string {
+                    return Err(JadeError::StdlibStringImport { path: path.clone(), span: *span });
+                }
                 (pkg.register_types)(ctx);
             }
-            Ok(TStmt::FromUse { path: path.clone(), names: names.clone(), span: *span })
+            Ok(TStmt::FromUse { path: path.clone(), names: names.clone(), path_is_string: *path_is_string, span: *span })
         }
 
         // ── Exception handling ────────────────────────────────────────────────

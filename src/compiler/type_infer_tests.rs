@@ -276,6 +276,17 @@ fn test_infer_stdlib_string_import_is_error() {
     assert!(matches!(err, JadeError::StdlibStringImport { .. }));
 }
 
+#[test]
+fn test_infer_from_use_string_stdlib_is_error() {
+    let err = infer_err(r#"from "std/math" use floor"#);
+    assert!(matches!(err, JadeError::StdlibStringImport { .. }));
+}
+
+#[test]
+fn test_infer_from_use_dot_stdlib_is_ok() {
+    infer_ok("from std.math use floor");
+}
+
 // ── Prompts ───────────────────────────────────────────────────────────────
 
 #[test]

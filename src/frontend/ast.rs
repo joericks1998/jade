@@ -196,6 +196,7 @@ pub enum Stmt {
     FromUse {
         path: String,
         names: Vec<String>,
+        path_is_string: bool,
         span: Span,
     },
 
