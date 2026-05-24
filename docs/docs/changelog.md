@@ -4,6 +4,15 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.1.8
+
+- Stdlib package imports must now use dot notation — `use std.math`, `use std.fs`, etc.; string-literal forms (`use "std/math"`) are now a compile-time error. Applies to both `use` and `from … use` forms
+- File-path imports now require an alias — `use "lib.jde" as lib`; bare string imports without `as name` are now a compile-time error
+- Native packages declared in `jade.toml [native]` now require an `alias` field specifying the global binding name
+- Fixed: functions exported from imported modules can now access stdlib packages the module imported (e.g. `use std.fs` in a module is visible when module functions are called in the parent scope)
+- Improved error messages — type errors now include the actual type of the offending value; heterogeneous array literals, nested function definitions, and non-string prompt struct fields each emit a dedicated error
+- Added empty struct test coverage (`struct Unit {}`)
+
 ## v1.1.7
 
 - Added `std/sh` package — execute shell commands from Jade via `sh.exec`, `sh.run`, and `sh.output`
