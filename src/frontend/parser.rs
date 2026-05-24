@@ -1015,6 +1015,13 @@ impl Parser {
                     args.insert(0, left);
                     Expr::Call { callee, args, kwargs, span: call_span }
                 }
+                // `val |> obj.method` → `obj.method(val)` (bound method reference)
+                Expr::FieldAccess { object, field, span: fa_span } => Expr::Call {
+                    callee: Box::new(Expr::FieldAccess { object, field, span: fa_span }),
+                    args: vec![left],
+                    kwargs: vec![],
+                    span,
+                },
                 _ => return Err(JadeError::UnexpectedToken {
                     expected: "function or call on right side of |>".to_string(),
                     got: "expression".to_string(),

@@ -933,6 +933,33 @@ async fn execute_chunk(
                     }
                     fields.insert(fname.clone(), val);
                 }
+                // Fill in defaults for any fields omitted from the literal.
+                // Needed when the struct type was unknown at compile time (imported type).
+                if let Some(def_fields) = state.struct_defs.get(type_name.as_str()).cloned() {
+                    for def_field in &def_fields {
+                        match def_field {
+                            StructFieldDef::Let { name, default } => {
+                                if !fields.contains_key(name.as_str()) {
+                                    if let Some(v) = eval_literal_default(default) {
+                                        fields.insert(name.clone(), v);
+                                    }
+                                }
+                            }
+                            StructFieldDef::Prompt { name, default } => {
+                                if !fields.contains_key(name.as_str()) {
+                                    if let Some(v) = eval_literal_default(default) {
+                                        let v = match v {
+                                            VmValue::Str(s) => VmValue::Prompt(s),
+                                            other => other,
+                                        };
+                                        fields.insert(name.clone(), v);
+                                    }
+                                }
+                            }
+                            StructFieldDef::Required(_) => {}
+                        }
+                    }
+                }
                 let mut result = VmValue::Struct(Arc::new(Mutex::new(VmStruct {
                     type_name: type_name.clone(),
                     fields,
@@ -2436,6 +2463,25 @@ fn str2<'a>(slots: &'a [VmValue], l: Reg, r: Reg, span: Span) -> Result<(&'a str
 
 /// Walk an instruction and return the highest register index it references.
 /// Used to size the slots vec defensively in `execute_chunk`.
+/// Evaluate a struct field default expression if it is a simple literal.
+/// Returns None for non-literal defaults (they stay unset and will cause a
+/// runtime error if accessed — the same behaviour as before this fix).
+fn eval_literal_default(expr: &crate::frontend::ast::Expr) -> Option<VmValue> {
+    use crate::frontend::ast::Expr;
+    match expr {
+        Expr::Str { value, .. }     => Some(VmValue::Str(value.clone())),
+        Expr::Integer { value, .. } => Some(VmValue::Int(*value)),
+        Expr::Float { value, .. }   => Some(VmValue::Float(*value)),
+        Expr::Bool { value, .. }    => Some(VmValue::Bool(*value)),
+        Expr::Identifier { name, .. } if name == "nil" => Some(VmValue::Nil),
+        Expr::Array { elements, .. } if elements.is_empty() =>
+            Some(VmValue::Array(Arc::new(Mutex::new(vec![])))),
+        Expr::Dict { entries, .. } if entries.is_empty() =>
+            Some(VmValue::Dict(HashMap::new())),
+        _ => None,
+    }
+}
+
 fn instr_max_reg(instr: &Instr) -> u32 {
     match instr {
         Instr::LoadInt(d,_)|Instr::LoadFloat(d,_)|Instr::LoadBool(d,_)
