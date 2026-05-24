@@ -250,6 +250,10 @@ pub struct VmState {
     pub import_stack: HashSet<PathBuf>,
     /// Native package map from `[native]` in jade.toml: name → (absolute path, alias).
     pub native_packages: HashMap<String, (PathBuf, String)>,
+    /// The module scope of the currently-executing module function, if any.
+    /// `GetGlobal` checks here before `globals`; `SetGlobal` writes here when
+    /// the name already exists in scope, preserving mutations across calls.
+    pub active_module_scope: Option<Arc<Mutex<HashMap<String, VmValue>>>>,
 }
 
 impl VmState {
@@ -276,6 +280,7 @@ impl VmState {
             source_dir: PathBuf::new(),
             import_stack: HashSet::new(),
             native_packages: HashMap::new(),
+            active_module_scope: None,
         }
     }
 
@@ -335,6 +340,7 @@ impl VmState {
             source_dir: self.source_dir.clone(),
             import_stack: HashSet::new(),
             native_packages: self.native_packages.clone(),
+            active_module_scope: None,
         }
     }
 }
@@ -637,6 +643,20 @@ async fn execute_chunk(
                                     state.globals.entry(k).or_insert(v);
                                 }
                             }
+                            // Create a persistent module scope shared by all functions from
+                            // this file. Populated with user-defined module-level values so
+                            // that reads and writes inside module functions are stable across
+                            // calls. Functions in the scope are stored as Fn (not stamped) —
+                            // they inherit the active scope via call_fn's save/restore logic.
+                            let module_scope: Arc<Mutex<HashMap<String, VmValue>>> =
+                                Arc::new(Mutex::new(module_globals.clone()));
+                            // Stamp all Fn values in the exported dict with the module scope.
+                            for v in module_globals.values_mut() {
+                                if let VmValue::Fn(cf) = v {
+                                    let cf_mut = Arc::make_mut(cf);
+                                    cf_mut.module_scope = Some(Arc::clone(&module_scope));
+                                }
+                            }
                             // Qualify any TypeRef values so coercion calls resolve correctly.
                             for v in module_globals.values_mut() {
                                 if let VmValue::TypeRef(t) = v {
@@ -650,7 +670,15 @@ async fn execute_chunk(
                                 state.struct_defs.insert(format!("{}.{}", namespace, k), v);
                             }
                             // Merge extend_methods prefixed with the namespace.
-                            for (type_name, methods) in sub_state.extend_methods.drain() {
+                            // Stamp module_scope on each method so they can resolve
+                            // module-level variables when called from the parent context.
+                            for (type_name, mut methods) in sub_state.extend_methods.drain() {
+                                for cf_arc in methods.values_mut() {
+                                    let cf = Arc::make_mut(cf_arc);
+                                    if cf.module_scope.is_none() {
+                                        cf.module_scope = Some(Arc::clone(&module_scope));
+                                    }
+                                }
                                 state.extend_methods
                                     .entry(format!("{}.{}", namespace, type_name))
                                     .or_default()
@@ -762,15 +790,38 @@ async fn execute_chunk(
                                     state.globals.entry(k.clone()).or_insert_with(|| v.clone());
                                 }
                             }
+                            // Build the persistent module scope for from-imports.
+                            let initial_keys: std::collections::HashSet<String> =
+                                VmState::new().globals.keys().cloned().collect();
+                            let scope_map: HashMap<String, VmValue> = sub_state.globals.iter()
+                                .filter(|(k, _)| !initial_keys.contains(*k) && !stdlib::is_package_global_name(k))
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect();
+                            let module_scope: Arc<Mutex<HashMap<String, VmValue>>> =
+                                Arc::new(Mutex::new(scope_map));
                             for name in names {
-                                if let Some(val) = sub_state.globals.remove(name) {
+                                let val = sub_state.globals.remove(name);
+                                let val = val.map(|v| match v {
+                                    VmValue::Fn(mut cf) => {
+                                        Arc::make_mut(&mut cf).module_scope = Some(Arc::clone(&module_scope));
+                                        VmValue::Fn(cf)
+                                    }
+                                    other => other,
+                                });
+                                if let Some(val) = val {
                                     state.globals.insert(name.clone(), val);
                                 }
                                 // If the requested name is a struct type, also import its def.
                                 if let Some(def) = sub_state.struct_defs.remove(name) {
                                     state.struct_defs.insert(name.clone(), def);
                                 }
-                                if let Some(methods) = sub_state.extend_methods.remove(name) {
+                                if let Some(mut methods) = sub_state.extend_methods.remove(name) {
+                                    for cf_arc in methods.values_mut() {
+                                        let cf = Arc::make_mut(cf_arc);
+                                        if cf.module_scope.is_none() {
+                                            cf.module_scope = Some(Arc::clone(&module_scope));
+                                        }
+                                    }
                                     state.extend_methods
                                         .entry(name.clone())
                                         .or_default()
@@ -805,9 +856,14 @@ async fn execute_chunk(
             }
             Instr::MakeClosure(d, idx) => {
                 let cf = Arc::clone(&chunk.fn_defs[*idx]);
-                let captured: HashMap<String, VmValue> = state.globals.iter()
+                let mut captured: HashMap<String, VmValue> = state.globals.iter()
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect();
+                if let Some(sc) = &state.active_module_scope {
+                    for (k, v) in sc.lock().iter() {
+                        captured.entry(k.clone()).or_insert_with(|| v.clone());
+                    }
+                }
                 set(slots, *d, VmValue::Closure(cf, Arc::new(captured)));
             }
             Instr::Move(d, s) => {
@@ -817,14 +873,28 @@ async fn execute_chunk(
 
             // ── Variables ─────────────────────────────────────────────────────
             Instr::GetGlobal(d, name) => {
-                let v = state.globals.get(name)
-                    .ok_or_else(|| JadeError::UndefinedVariable { name: name.clone(), span })?
-                    .clone();
+                let v = state.active_module_scope.as_ref()
+                    .and_then(|sc| sc.lock().get(name).cloned())
+                    .or_else(|| state.globals.get(name).cloned())
+                    .ok_or_else(|| JadeError::UndefinedVariable { name: name.clone(), span })?;
                 set(slots, *d, v);
             }
             Instr::SetGlobal(name, s) => {
                 let v = vm_try!(vm_maybe_drain(get(slots, *s).clone(), state, span).await);
-                state.globals.insert(name.clone(), v);
+                let wrote_to_scope = if let Some(sc) = &state.active_module_scope {
+                    let mut locked = sc.lock();
+                    if locked.contains_key(name) {
+                        locked.insert(name.clone(), v.clone());
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if !wrote_to_scope {
+                    state.globals.insert(name.clone(), v);
+                }
             }
             Instr::GetLocal(d, slot) => {
                 let v = slots.get(*slot as usize)
@@ -1634,6 +1704,10 @@ async fn call_fn(
     for (i, v) in args.into_iter().enumerate() {
         frame[i] = vm_maybe_drain(v, state, span).await?;
     }
+    let saved_scope = state.active_module_scope.clone();
+    if let Some(scope) = &cf.module_scope {
+        state.active_module_scope = Some(Arc::clone(scope));
+    }
     let result = execute_chunk(&cf.chunk, &mut frame, state).await
         .map_err(|e| {
             if cf.source_file.is_empty() || matches!(e, JadeError::InFile { .. }) {
@@ -1641,8 +1715,9 @@ async fn call_fn(
             } else {
                 JadeError::InFile { file: cf.source_file.clone(), cause: Box::new(e) }
             }
-        })?;
-    Ok(result.unwrap_or(VmValue::Nil))
+        });
+    state.active_module_scope = saved_scope;
+    Ok(result?.unwrap_or(VmValue::Nil))
 }
 
 

@@ -1721,6 +1721,62 @@ fn test_nil_eq_eq_struct_via_unknown_param() {
 
 // ── module stdlib promotion ───────────────────────────────────────────────
 
+/// Module-level `let` bindings must be visible inside module functions when
+/// those functions are called from the parent. Functions are exported as
+/// closures capturing the module scope.
+#[test]
+fn test_import_module_let_binding_visible_in_fn() {
+    let dir = std::env::temp_dir();
+    let mod_path = dir.join("jade_test_mod_let.jde");
+    std::fs::write(&mod_path, "let _PREFIX = \"hi \"\nfn greet(name) {\n return _PREFIX + name\n}\n").unwrap();
+    let mod_str = mod_path.to_str().unwrap();
+    let src = format!("use \"{mod_str}\" as m\nlet v = m.greet(\"jade\")");
+
+    let tokens = crate::frontend::lexer::tokenize(&src).expect("lex");
+    let program = crate::frontend::parser::parse(tokens).expect("parse");
+    let tprogram = crate::compiler::type_infer::infer(program).expect("type infer");
+    let compiled = crate::compiler::emit::emit(tprogram).expect("emit");
+    let opts = VmOpts { source_dir: dir.clone(), ..VmOpts::default() };
+    let s = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(run(compiled, opts))
+        .expect("vm run");
+
+    assert_eq!(get_str(&s, "v"), "hi jade");
+    let _ = std::fs::remove_file(&mod_path);
+}
+
+/// Mutable module-level state (let bindings updated by module functions) must
+/// persist across calls — SetGlobal inside a module function writes to the
+/// module scope, not the parent globals.
+#[test]
+fn test_import_module_mutable_state() {
+    let dir = std::env::temp_dir();
+    let mod_path = dir.join("jade_test_mod_mut.jde");
+    std::fs::write(&mod_path, "let count = 0\nfn inc() { count = count + 1 }\nfn get() { return count }\n").unwrap();
+    let mod_str = mod_path.to_str().unwrap();
+    let src = format!(
+        "use \"{mod_str}\" as c\nc.inc()\nc.inc()\nc.inc()\nlet v = c.get()"
+    );
+
+    let tokens = crate::frontend::lexer::tokenize(&src).expect("lex");
+    let program = crate::frontend::parser::parse(tokens).expect("parse");
+    let tprogram = crate::compiler::type_infer::infer(program).expect("type infer");
+    let compiled = crate::compiler::emit::emit(tprogram).expect("emit");
+    let opts = VmOpts { source_dir: dir.clone(), ..VmOpts::default() };
+    let s = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(run(compiled, opts))
+        .expect("vm run");
+
+    assert_eq!(get_int(&s, "v"), 3);
+    let _ = std::fs::remove_file(&mod_path);
+}
+
 /// A module that imports `use std.fs` should expose functions that use `fs`
 /// to callers in the parent scope — the stdlib import must be promoted to the
 /// parent globals rather than buried inside the module dict.

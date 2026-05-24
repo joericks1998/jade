@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
+use parking_lot::Mutex;
 
 use crate::frontend::{
     ast::{BinOpKind, UnaryOpKind},
@@ -30,6 +31,10 @@ pub struct CompiledFn {
     /// Source file this function was compiled from. Empty for top-level programs;
     /// set to the module's path when the function is loaded from an imported file.
     pub source_file: String,
+    /// Persistent module scope shared by all functions from the same imported file.
+    /// `None` for top-level functions. Reads and writes to module-level variables
+    /// are routed through this scope so mutations survive across calls.
+    pub module_scope: Option<Arc<Mutex<HashMap<String, crate::compiler::vm::VmValue>>>>,
 }
 
 /// A compiled code unit: top-level program or function body.
