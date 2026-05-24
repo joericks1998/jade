@@ -18,6 +18,9 @@ pub struct InferenceRequest {
     /// Anchor string; if set, grammar enforcement begins only after the model emits this string.
     /// Passed through to the inference daemon; ignored by API-based backends.
     pub anchor: Option<String>,
+    /// Stop anchor; if set, generation stops and the stop string is stripped when it appears.
+    /// Passed through to the inference daemon; ignored by API-based backends.
+    pub stop_anchor: Option<String>,
 }
 
 /// A successful response from an inference backend.
