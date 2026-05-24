@@ -1344,9 +1344,28 @@ async fn execute_chunk(
                     None => (None, None, None),
                     Some(r) => match get(slots, *r).clone() {
                         VmValue::Grammar { pattern, anchor, stop_anchor } => {
-                            (Some(crate::compiler::gbnf::grammar_from_pattern(&pattern)), anchor, stop_anchor)
+                            // `pattern` may be either:
+                            //   a) a complete GBNF (already has `root ::=` lines) — pass as-is,
+                            //   b) a simple pattern RHS (e.g. `"yes" | "no"`) — wrap with grammar_from_pattern.
+                            let gbnf = if pattern.contains("root") && pattern.contains("::=") {
+                                pattern
+                            } else {
+                                crate::compiler::gbnf::grammar_from_pattern(&pattern)
+                            };
+                            (Some(gbnf), anchor, stop_anchor)
                         }
-                        _ => panic!("grammar register did not hold a Grammar value"),
+                        VmValue::Nil => {
+                            // Grammar expression evaluated to nil (e.g. self.grammar before it
+                            // was set).  Fall through to unconstrained streaming inference.
+                            (None, None, None)
+                        }
+                        other => vm_err!(JadeError::TypeError {
+                            message: format!(
+                                "|> constraint must be a Grammar value or type name, got {}",
+                                value_type_name(&other)
+                            ),
+                            span,
+                        }),
                     },
                 };
                 let result = if output_type.is_none() && grammar_override.is_none() {
@@ -1565,19 +1584,36 @@ async fn call_value(
                 }
             }
             NativeFnId::Print => {
-                if args.len() != 1 {
+                if args.is_empty() || args.len() > 2 {
                     return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span });
                 }
-                match args.into_iter().next().unwrap() {
+                use std::io::Write as _;
+                let mut iter = args.into_iter();
+                let val = iter.next().unwrap();
+                // Optional `end` kwarg (arrives positionally for native callees).
+                // Default "\n" matches Python's print() behaviour.
+                let end = match iter.next() {
+                    None | Some(VmValue::Nil) => "\n".to_owned(),
+                    Some(VmValue::Str(s))     => s,
+                    Some(other) => return Err(JadeError::TypeError {
+                        message: format!("print() end= must be str, got {}", value_type_name(&other)),
+                        span,
+                    }),
+                };
+                match val {
                     VmValue::TokenStream(ts) => {
-                        vm_drain_token_stream_printing(ts, state, span, true).await?;
-                        Ok(VmValue::Nil)
+                        vm_drain_token_stream_printing(ts, state, span, end == "\n").await?;
+                        if end != "\n" && !end.is_empty() {
+                            print!("{}", end);
+                            let _ = std::io::stdout().flush();
+                        }
                     }
                     other => {
-                        println!("{}", value_to_display(&other));
-                        Ok(VmValue::Nil)
+                        print!("{}{}", value_to_display(&other), end);
+                        let _ = std::io::stdout().flush();
                     }
                 }
+                Ok(VmValue::Nil)
             }
             NativeFnId::Stream => {
                 if args.len() != 1 {

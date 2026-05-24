@@ -897,21 +897,65 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
                 });
             }
 
-            // Resolve the |> constraint: Grammar value → grammar_expr; otherwise → output_type string.
+            // Resolve the |> constraint: Grammar value → grammar_expr; type name string → output_type.
+            //
+            // Resolution order:
+            // 1. Try `extract_type_name(c)` first.  If it yields a known built-in type keyword
+            //    ("int", "float", "bool", "str", "array", "dict") or an uppercase struct name,
+            //    use it directly as `output_type` — do NOT call `infer_expr`, which would fail
+            //    with "undefined variable" for bare identifiers like `array` and `dict` that are
+            //    valid type targets but are not in-scope variables.
+            // 2. Otherwise call `infer_expr(c)`:
+            //    a. If the result type is Grammar → grammar_expr path.
+            //    b. If the result type is Unknown (e.g. `self.grammar` field on a struct whose
+            //       field type is not statically tracked) → treat as a runtime Grammar value
+            //       and emit it as grammar_expr.  This avoids the retry-loop that firing
+            //       `output_type = Some("self.grammar")` would cause at runtime.
+            //    c. Otherwise → error.
             let (output_type, grammar_texpr, result_ty) = match constraint {
                 None => (None, None, JadeType::Unknown),
                 Some(c) => {
-                    let tc = infer_expr(c, ctx)?;
-                    if tc.ty == JadeType::Grammar {
-                        (None, Some(Box::new(tc)), JadeType::Str)
+                    if let Some(name) = extract_type_name(c) {
+                        let is_builtin = matches!(
+                            name.as_str(),
+                            "int" | "float" | "bool" | "str" | "nil"
+                            | "array" | "Array"
+                            | "dict"  | "Dict"
+                        );
+                        let is_struct_name = name.chars().next()
+                            .map(|ch| ch.is_uppercase())
+                            .unwrap_or(false);
+                        if is_builtin || is_struct_name {
+                            // Known type keyword or struct name — use directly.
+                            let ty = parse_type_name(&name);
+                            (Some(name), None, ty)
+                        } else {
+                            // Might be a Grammar variable (e.g. `gram`) or a field path
+                            // (e.g. `self.grammar`).  Infer it to determine which.
+                            let tc = infer_expr(c, ctx)?;
+                            if tc.ty == JadeType::Grammar {
+                                // Statically known Grammar value.
+                                (None, Some(Box::new(tc)), JadeType::Str)
+                            } else {
+                                // Unknown type (common for struct fields) — treat as a
+                                // runtime Grammar expression rather than a coerce type name.
+                                // This is the correct path for `?p |> self.grammar`.
+                                (None, Some(Box::new(tc)), JadeType::Str)
+                            }
+                        }
                     } else {
-                        let name = extract_type_name(c).ok_or_else(|| JadeError::TypeMismatch {
-                            expected: "type name or Grammar value after |>".to_string(),
-                            got: jade_type_name(&tc.ty),
-                            span: *span,
-                        })?;
-                        let ty = parse_type_name(&name);
-                        (Some(name), None, ty)
+                        // Not an identifier / dotted path (e.g. a call expression).
+                        // Infer normally.
+                        let tc = infer_expr(c, ctx)?;
+                        if tc.ty == JadeType::Grammar || tc.ty == JadeType::Unknown {
+                            (None, Some(Box::new(tc)), JadeType::Str)
+                        } else {
+                            return Err(JadeError::TypeMismatch {
+                                expected: "type name or Grammar value after |>".to_string(),
+                                got: jade_type_name(&tc.ty),
+                                span: *span,
+                            });
+                        }
                     }
                 }
             };
