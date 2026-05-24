@@ -442,12 +442,17 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
 
         // ── Imports ───────────────────────────────────────────────────────────
 
-        Stmt::Use { path, as_name, span } => {
+        Stmt::Use { path, as_name, path_is_string, span } => {
             ctx.has_imports = true;
             if let Some(pkg) = stdlib::find_package(path) {
+                if *path_is_string {
+                    return Err(JadeError::StdlibStringImport { path: path.clone(), span: *span });
+                }
                 (pkg.register_types)(ctx);
+            } else if as_name.is_none() && !path.starts_with("native/") {
+                return Err(JadeError::MissingImportAlias { path: path.clone(), span: *span });
             }
-            Ok(TStmt::Use { path: path.clone(), as_name: as_name.clone(), span: *span })
+            Ok(TStmt::Use { path: path.clone(), as_name: as_name.clone(), path_is_string: *path_is_string, span: *span })
         }
 
         Stmt::FromUse { path, names, span } => {

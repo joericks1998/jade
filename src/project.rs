@@ -13,9 +13,17 @@ pub struct ProjectManifest {
     pub scripts: Option<HashMap<String, String>>,
     pub model: Option<ManifestModelSection>,
     pub dependencies: Option<HashMap<String, String>>,
-    /// `[native]` section: maps package name → path to compiled shared library.
-    /// Used via `use "native/<name>"` in Jade source.
-    pub native: Option<HashMap<String, String>>,
+    /// `[native]` section: maps package name → entry with `path` and required `alias`.
+    /// Used via `use "native/<name>"` in Jade source; the package binds as `alias`.
+    pub native: Option<HashMap<String, NativePackageEntry>>,
+}
+
+/// Entry in the `[native]` section of `jade.toml`.
+/// Both fields are required — the `alias` is the name the package is bound to in Jade.
+#[derive(Debug, Clone, Deserialize)]
+pub struct NativePackageEntry {
+    pub path: String,
+    pub alias: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]

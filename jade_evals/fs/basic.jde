@@ -1,4 +1,4 @@
-use "std/fs"
+use std.fs
 
 let path = "/tmp/jade_eval_fs_basic.txt"
 

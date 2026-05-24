@@ -583,6 +583,7 @@ impl Parser {
     fn parse_use(&mut self) -> Result<Stmt> {
         let span = self.peek().span;
         self.advance(); // consume `use`
+        let path_is_string = matches!(self.peek().kind, TokenKind::Str(_));
         let path = self.parse_import_path()?;
         // Optional `as alias` — only meaningful for .jde file imports; ignored for stdlib.
         let as_name = if self.peek().kind == TokenKind::As {
@@ -592,7 +593,7 @@ impl Parser {
             None
         };
         self.consume_semicolon()?;
-        Ok(Stmt::Use { path, as_name, span })
+        Ok(Stmt::Use { path, as_name, path_is_string, span })
     }
 
     fn parse_from_use(&mut self) -> Result<Stmt> {

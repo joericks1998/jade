@@ -248,8 +248,8 @@ pub struct VmState {
     pub source_dir: PathBuf,
     /// Set of canonical paths currently being imported (cycle detection).
     pub import_stack: HashSet<PathBuf>,
-    /// Native package map from `[native]` in jade.toml: name → absolute path to .dylib/.so.
-    pub native_packages: HashMap<String, PathBuf>,
+    /// Native package map from `[native]` in jade.toml: name → (absolute path, alias).
+    pub native_packages: HashMap<String, (PathBuf, String)>,
 }
 
 impl VmState {
@@ -347,8 +347,8 @@ pub struct VmOpts {
     /// Directory of the source file being run — used to resolve relative `use` paths.
     /// Defaults to the current working directory when running in-memory (tests, REPL).
     pub source_dir: PathBuf,
-    /// Native package map from `[native]` in jade.toml: name → absolute path to .dylib/.so.
-    pub native_packages: HashMap<String, PathBuf>,
+    /// Native package map from `[native]` in jade.toml: name → (absolute path, alias).
+    pub native_packages: HashMap<String, (PathBuf, String)>,
 }
 
 impl Default for VmOpts {
@@ -487,7 +487,7 @@ async fn execute_chunk(
                 // ── Native packages ─────────────────────────────────────────
                 // `use "native/<name>"` loads a .dylib/.so registered in jade.toml [native].
                 if let Some(pkg_name) = path.strip_prefix("native/") {
-                    let lib_path = state.native_packages.get(pkg_name)
+                    let (lib_path, alias) = state.native_packages.get(pkg_name)
                         .cloned()
                         .ok_or_else(|| JadeError::IoError {
                             message: format!(
@@ -497,7 +497,7 @@ async fn execute_chunk(
                             span,
                         })?;
                     let fns = crate::native::load_native_package(&lib_path, span)?;
-                    state.globals.insert(pkg_name.to_string(), VmValue::Dict(fns));
+                    state.globals.insert(alias, VmValue::Dict(fns));
                     continue;
                 }
 
@@ -642,7 +642,7 @@ async fn execute_chunk(
             Instr::ImportFrom(path, names) => {
                 // ── Native packages ─────────────────────────────────────────
                 if let Some(pkg_name) = path.strip_prefix("native/") {
-                    let lib_path = state.native_packages.get(pkg_name)
+                    let (lib_path, _alias) = state.native_packages.get(pkg_name)
                         .cloned()
                         .ok_or_else(|| JadeError::IoError {
                             message: format!(

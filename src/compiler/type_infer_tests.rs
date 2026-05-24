@@ -257,6 +257,25 @@ fn test_infer_empty_struct_extra_field_is_error() {
     assert!(matches!(err, JadeError::UndefinedField { .. }));
 }
 
+// ── Imports ───────────────────────────────────────────────────────────────
+
+#[test]
+fn test_infer_file_import_without_alias_is_error() {
+    let err = infer_err(r#"use "my_lib.jde""#);
+    assert!(matches!(err, JadeError::MissingImportAlias { .. }));
+}
+
+#[test]
+fn test_infer_stdlib_import_without_alias_is_ok() {
+    infer_ok("use std.math");
+}
+
+#[test]
+fn test_infer_stdlib_string_import_is_error() {
+    let err = infer_err(r#"use "std/math""#);
+    assert!(matches!(err, JadeError::StdlibStringImport { .. }));
+}
+
 // ── Prompts ───────────────────────────────────────────────────────────────
 
 #[test]

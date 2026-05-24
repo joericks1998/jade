@@ -183,9 +183,11 @@ pub enum Stmt {
     /// Also accepts dot notation: `use std.time` → path `"std/time"`.
     /// `as_name` binds the module under that name; if absent, the stem of the path is used.
     /// stdlib packages are unaffected (they always bind under their own `global_name`).
+    /// `path_is_string` is true when the user wrote `use "..."` (string literal form).
     Use {
         path: String,
         as_name: Option<String>,
+        path_is_string: bool,
         span: Span,
     },
 

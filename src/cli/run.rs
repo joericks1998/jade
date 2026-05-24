@@ -154,13 +154,13 @@ pub async fn run_file(path: &str, verbose: bool) {
         let mut map = std::collections::HashMap::new();
         if let Some(root) = crate::project::find_project_root() {
             if let Ok(manifest) = crate::project::load_project(&root) {
-                for (name, lib_path) in manifest.native.unwrap_or_default() {
-                    let abs = if std::path::Path::new(&lib_path).is_absolute() {
-                        std::path::PathBuf::from(&lib_path)
+                for (name, entry) in manifest.native.unwrap_or_default() {
+                    let abs = if std::path::Path::new(&entry.path).is_absolute() {
+                        std::path::PathBuf::from(&entry.path)
                     } else {
-                        root.join(&lib_path)
+                        root.join(&entry.path)
                     };
-                    map.insert(name, abs);
+                    map.insert(name, (abs, entry.alias));
                 }
             }
         }

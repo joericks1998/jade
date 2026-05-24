@@ -430,7 +430,7 @@ fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
             }
         }
 
-        TStmt::Use { path, as_name, span } => {
+        TStmt::Use { path, as_name, span, .. } => {
             let namespace = as_name.unwrap_or_else(|| {
                 std::path::Path::new(&path)
                     .file_stem()

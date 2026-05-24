@@ -216,6 +216,7 @@ pub enum TStmt {
     Use {
         path: String,
         as_name: Option<String>,
+        path_is_string: bool,
         span: Span,
     },
     /// `from std.time use now, sleep` — named selective imports.

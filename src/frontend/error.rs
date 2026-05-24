@@ -104,6 +104,12 @@ pub enum JadeError {
     /// Type checker: an array literal contains elements of different concrete types.
     HeterogeneousArray { first: String, got: String, span: Span },
 
+    /// `use "path"` for a file import is missing the required `as alias` clause.
+    MissingImportAlias { path: String, span: Span },
+
+    /// `use "std/pkg"` used string syntax for a stdlib package — dot notation is required.
+    StdlibStringImport { path: String, span: Span },
+
     /// `use "path"` could not find the referenced file.
     ImportNotFound { path: String, span: Span },
 
@@ -203,6 +209,12 @@ impl std::fmt::Display for JadeError {
                 write!(f, "[{}:{}] type mismatch: expected {}, got {}", span.line, span.col, expected, got),
             JadeError::HeterogeneousArray { first, got, span } =>
                 write!(f, "[{}:{}] heterogeneous array: first element is {}, found {}", span.line, span.col, first, got),
+            JadeError::MissingImportAlias { path, span } =>
+                write!(f, "[{}:{}] file import '{}' requires an alias: write `use \"{}\" as <name>`", span.line, span.col, path, path),
+            JadeError::StdlibStringImport { path, span } => {
+                let dot = path.replace('/', ".");
+                write!(f, "[{}:{}] stdlib package '{}' must be imported with dot notation: `use {}`", span.line, span.col, path, dot)
+            }
             JadeError::ImportNotFound { path, span } =>
                 write!(f, "[{}:{}] cannot find import '{}': file not found", span.line, span.col, path),
             JadeError::CircularImport { path, span } =>
