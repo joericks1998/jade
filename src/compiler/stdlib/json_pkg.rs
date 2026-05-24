@@ -58,7 +58,7 @@ fn json_parse(args: &[VmValue]) -> Result<VmValue> {
     }
     let s = match &args[0] {
         VmValue::Str(s) => s.as_str(),
-        _ => return Err(JadeError::TypeError { op: "json.parse".to_string(), span: ZERO }),
+        _ => return Err(JadeError::TypeError { message: "json.parse".to_string(), span: ZERO }),
     };
     let val: serde_json::Value = serde_json::from_str(s).map_err(|e| JadeError::IoError {
         message: format!("json.parse: {}", e),

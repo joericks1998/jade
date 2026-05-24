@@ -12,7 +12,7 @@ const ZERO: Span = Span { line: 0, col: 0 };
 fn dict_len(args: &[VmValue]) -> Result<VmValue> {
     match &args[0] {
         VmValue::Dict(m) => Ok(VmValue::Int(m.len() as i64)),
-        _ => Err(JadeError::TypeError { op: "dict.len".to_string(), span: ZERO }),
+        _ => Err(JadeError::TypeError { message: "dict.len".to_string(), span: ZERO }),
     }
 }
 
@@ -23,7 +23,7 @@ fn dict_keys(args: &[VmValue]) -> Result<VmValue> {
             keys.sort();
             Ok(make_array(keys.into_iter().map(VmValue::Str).collect()))
         }
-        _ => Err(JadeError::TypeError { op: "dict.keys".to_string(), span: ZERO }),
+        _ => Err(JadeError::TypeError { message: "dict.keys".to_string(), span: ZERO }),
     }
 }
 
@@ -34,21 +34,21 @@ fn dict_values(args: &[VmValue]) -> Result<VmValue> {
             pairs.sort_by_key(|(k, _)| k.as_str());
             Ok(make_array(pairs.into_iter().map(|(_, v)| v.clone()).collect()))
         }
-        _ => Err(JadeError::TypeError { op: "dict.values".to_string(), span: ZERO }),
+        _ => Err(JadeError::TypeError { message: "dict.values".to_string(), span: ZERO }),
     }
 }
 
 fn dict_has(args: &[VmValue]) -> Result<VmValue> {
     match (&args[0], args.get(1)) {
         (VmValue::Dict(m), Some(VmValue::Str(k))) => Ok(VmValue::Bool(m.contains_key(k.as_str()))),
-        _ => Err(JadeError::TypeError { op: "dict.has".to_string(), span: ZERO }),
+        _ => Err(JadeError::TypeError { message: "dict.has".to_string(), span: ZERO }),
     }
 }
 
 fn dict_get(args: &[VmValue]) -> Result<VmValue> {
     match (&args[0], args.get(1)) {
         (VmValue::Dict(m), Some(VmValue::Str(k))) => Ok(m.get(k.as_str()).cloned().unwrap_or(VmValue::Nil)),
-        _ => Err(JadeError::TypeError { op: "dict.get".to_string(), span: ZERO }),
+        _ => Err(JadeError::TypeError { message: "dict.get".to_string(), span: ZERO }),
     }
 }
 
@@ -80,7 +80,7 @@ fn pkg_merge(args: &[VmValue]) -> Result<VmValue> {
             }
             Ok(VmValue::Dict(merged))
         }
-        _ => Err(JadeError::TypeError { op: "dict.merge".to_string(), span: ZERO }),
+        _ => Err(JadeError::TypeError { message: "dict.merge".to_string(), span: ZERO }),
     }
 }
 

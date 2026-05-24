@@ -806,8 +806,10 @@ fn test_vm_integer_overflow_mul() {
 
 #[test]
 fn test_vm_nested_fn_ok() {
-    let s = run_src("fn outer() {\n  fn inner() {\n    return 1\n  }\n  return 2\n}").unwrap();
-    assert!(s.globals.contains_key("outer"));
+    // Nested function definitions are now a parse error.
+    let tokens = crate::frontend::lexer::tokenize("fn outer() {\n  fn inner() {\n    return 1\n  }\n  return 2\n}").expect("lex");
+    let result = crate::frontend::parser::parse(tokens);
+    assert!(matches!(result, Err(crate::frontend::error::JadeError::NestedFunction { .. })));
 }
 
 // ── while loops (ported from eval.rs) ────────────────────────────────────

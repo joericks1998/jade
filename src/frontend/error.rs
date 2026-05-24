@@ -30,7 +30,7 @@ pub enum JadeError {
     InvalidShift { amount: i64, span: Span },
 
     /// Evaluator applied an operator to an incompatible type.
-    TypeError { op: String, span: Span },
+    TypeError { message: String, span: Span },
 
     /// Lexer encountered a numeric literal that overflows its target type.
     LiteralOverflow { span: Span },
@@ -151,8 +151,8 @@ impl std::fmt::Display for JadeError {
                 write!(f, "[{}:{}] remainder by zero", span.line, span.col),
             JadeError::InvalidShift { amount, span } =>
                 write!(f, "[{}:{}] invalid shift amount {}", span.line, span.col, amount),
-            JadeError::TypeError { op, span } =>
-                write!(f, "[{}:{}] type error: operator '{}' applied to incompatible types", span.line, span.col, op),
+            JadeError::TypeError { message, span } =>
+                write!(f, "[{}:{}] type error: {}", span.line, span.col, message),
             JadeError::LiteralOverflow { span } =>
                 write!(f, "[{}:{}] numeric literal overflows its type", span.line, span.col),
             JadeError::ArityMismatch { expected, got, span } =>

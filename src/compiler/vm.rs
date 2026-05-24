@@ -194,6 +194,30 @@ pub fn value_to_display(v: &VmValue) -> String {
     }
 }
 
+/// Return the runtime type name of a `VmValue` as a static string.
+pub fn value_type_name(v: &VmValue) -> &'static str {
+    match v {
+        VmValue::Int(_) => "int",
+        VmValue::Float(_) => "float",
+        VmValue::Bool(_) => "bool",
+        VmValue::Str(_) => "str",
+        VmValue::Array(_) => "array",
+        VmValue::Dict(_) => "dict",
+        VmValue::Struct(_) => "struct",
+        VmValue::Fn(_) | VmValue::Closure(_, _) => "fn",
+        VmValue::BoundMethod(_) | VmValue::NativeBoundMethod(_) => "method",
+        VmValue::BuiltinFn(_) => "builtin",
+        VmValue::NativeFn(_) => "native fn",
+        VmValue::NativeLibFn(_) => "native fn",
+        VmValue::Future(_) => "future",
+        VmValue::TokenStream(_) => "token stream",
+        VmValue::TypeRef(_) => "type",
+        VmValue::Prompt(_) => "prompt",
+        VmValue::Grammar { .. } => "grammar",
+        VmValue::Nil => "nil",
+    }
+}
+
 // ── VM state ──────────────────────────────────────────────────────────────────
 
 /// The global execution state, including LLM integration.
@@ -333,7 +357,7 @@ impl Default for VmOpts {
             backend: None,
             default_model: String::new(),
             max_retries: 15,
-            source_dir: std::env::current_dir().unwrap_or_default(),
+            source_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             native_packages: HashMap::new(),
         }
     }
@@ -967,9 +991,10 @@ async fn execute_chunk(
             Instr::MakeDict(dest, pairs) => {
                 let mut map = HashMap::with_capacity(pairs.len());
                 for &(kr, vr) in pairs {
-                    let key = match get(slots, kr).clone() {
+                    let key_val = get(slots, kr).clone();
+                    let key = match key_val {
                         VmValue::Str(s) => s,
-                        _ => { vm_err!(JadeError::TypeError { op: "dict key".to_string(), span }); }
+                        ref other => { vm_err!(JadeError::TypeError { message: format!("dict key must be str, got {}", value_type_name(other)), span }); }
                     };
                     let val = get(slots, vr).clone();
                     map.insert(key, val);
@@ -990,17 +1015,17 @@ async fn execute_chunk(
                 let obj = get(slots, *obj_reg).clone();
                 match obj {
                     VmValue::Array(arc) => {
-                        let i = match idx { VmValue::Int(n) => n, _ => { vm_err!(JadeError::TypeError { op: "array index".to_string(), span }); } };
+                        let i = match idx { VmValue::Int(n) => n, ref other => { vm_err!(JadeError::TypeError { message: format!("array index must be int, got {}", value_type_name(other)), span }); } };
                         let len = arc.lock().len();
                         if i < 0 || i as usize >= len { vm_err!(JadeError::IndexOutOfBounds { index: i, len, span }); }
                         arc.lock()[i as usize] = val;
                     }
                     VmValue::Dict(mut m) => {
-                        let k = match idx { VmValue::Str(s) => s, _ => { vm_err!(JadeError::TypeError { op: "dict index".to_string(), span }); } };
+                        let k = match idx { VmValue::Str(s) => s, ref other => { vm_err!(JadeError::TypeError { message: format!("dict index must be str, got {}", value_type_name(other)), span }); } };
                         m.insert(k, val);
                         slots[*obj_reg as usize] = VmValue::Dict(m);
                     }
-                    _ => { vm_err!(JadeError::TypeError { op: "index assign".to_string(), span }); }
+                    ref other => { vm_err!(JadeError::TypeError { message: format!("value of type {} is not indexable", value_type_name(other)), span }); }
                 }
             }
 
@@ -1183,7 +1208,7 @@ async fn execute_chunk(
                 let text = match get(slots, *text_reg).clone() {
                     VmValue::Str(s) => s,
                     _ => { vm_err!(JadeError::TypeError {
-                        op: "prompt declaration requires a string body".to_string(),
+                        message: "prompt declaration requires a string body".to_string(),
                         span,
                     }); }
                 };
@@ -1348,7 +1373,7 @@ fn resolve_named_args(
             for (name, v) in named {
                 let pos = params.iter().position(|p| p == &name)
                     .ok_or_else(|| JadeError::TypeError {
-                        op: format!("unknown parameter '{}'", name),
+                        message: format!("unknown parameter '{}'", name),
                         span,
                     })?;
                 result[pos] = v;
@@ -1415,7 +1440,7 @@ async fn call_value(
                         state.max_tokens = *n as u32;
                         Ok(VmValue::Nil)
                     }
-                    _ => Err(JadeError::TypeError { op: "llm.set_max_tokens".to_string(), span }),
+                    ref other => Err(JadeError::TypeError { message: format!("llm.set_max_tokens() requires a positive int, got {}", value_type_name(other)), span }),
                 }
             }
             NativeFnId::Print => {
@@ -1491,7 +1516,7 @@ async fn call_value(
                         }
                     }
                     other => Err(JadeError::TypeError {
-                        op: format!("route(): expected string method name, got {}", value_to_display(&other)),
+                        message: format!("route(): expected string method name, got {}", value_to_display(&other)),
                         span,
                     }),
                 }
@@ -2266,20 +2291,20 @@ fn eval_binop_dynamic(op: &BinOpKind, l: VmValue, r: VmValue, span: Span) -> Res
                 if bf == 0.0 { Err(JadeError::RemainderByZero{span}) } else { Ok(VmValue::Float(af%bf)) }
             }
         },
-        BitAnd => match (l,r) { (VmValue::Int(a),VmValue::Int(b)) => Ok(VmValue::Int(a&b)), _ => Err(JadeError::TypeError{op:"&".to_string(),span}) },
-        BitOr  => match (l,r) { (VmValue::Int(a),VmValue::Int(b)) => Ok(VmValue::Int(a|b)), _ => Err(JadeError::TypeError{op:"|".to_string(),span}) },
-        BitXor => match (l,r) { (VmValue::Int(a),VmValue::Int(b)) => Ok(VmValue::Int(a^b)), _ => Err(JadeError::TypeError{op:"^".to_string(),span}) },
+        BitAnd => match (l,r) { (VmValue::Int(a),VmValue::Int(b)) => Ok(VmValue::Int(a&b)), (l,r) => Err(JadeError::TypeError{message:format!("'&' requires int operands, got {} and {}", value_type_name(&l), value_type_name(&r)),span}) },
+        BitOr  => match (l,r) { (VmValue::Int(a),VmValue::Int(b)) => Ok(VmValue::Int(a|b)), (l,r) => Err(JadeError::TypeError{message:format!("'|' requires int operands, got {} and {}", value_type_name(&l), value_type_name(&r)),span}) },
+        BitXor => match (l,r) { (VmValue::Int(a),VmValue::Int(b)) => Ok(VmValue::Int(a^b)), (l,r) => Err(JadeError::TypeError{message:format!("'^' requires int operands, got {} and {}", value_type_name(&l), value_type_name(&r)),span}) },
         Shl => match (l,r) {
             (VmValue::Int(a),VmValue::Int(b)) => {
                 if b<0||b>=64 { Err(JadeError::InvalidShift{amount:b,span}) } else { Ok(VmValue::Int(a<<b as u32)) }
             }
-            _ => Err(JadeError::TypeError{op:"<<".to_string(),span})
+            _ => Err(JadeError::TypeError{message:"'<<' requires int operands".to_string(),span})
         },
         Shr => match (l,r) {
             (VmValue::Int(a),VmValue::Int(b)) => {
                 if b<0||b>=64 { Err(JadeError::InvalidShift{amount:b,span}) } else { Ok(VmValue::Int(a>>b as u32)) }
             }
-            _ => Err(JadeError::TypeError{op:">>".to_string(),span})
+            _ => Err(JadeError::TypeError{message:"'>>' requires int operands".to_string(),span})
         },
         Eq => match (l,r) {
             (VmValue::Int(a),VmValue::Int(b))       => Ok(VmValue::Bool(a==b)),
@@ -2288,7 +2313,7 @@ fn eval_binop_dynamic(op: &BinOpKind, l: VmValue, r: VmValue, span: Span) -> Res
             (VmValue::Str(a),VmValue::Str(b))       => Ok(VmValue::Bool(a==b)),
             (VmValue::Nil, VmValue::Nil)            => Ok(VmValue::Bool(true)),
             (VmValue::Nil, _) | (_, VmValue::Nil)  => Ok(VmValue::Bool(false)),
-            _ => Err(JadeError::TypeError{op:"==".to_string(),span})
+            (l,r) => Err(JadeError::TypeError{message:format!("'==' cannot compare {} and {}", value_type_name(&l), value_type_name(&r)),span})
         },
         Ne => match (l,r) {
             (VmValue::Int(a),VmValue::Int(b))       => Ok(VmValue::Bool(a!=b)),
@@ -2297,7 +2322,7 @@ fn eval_binop_dynamic(op: &BinOpKind, l: VmValue, r: VmValue, span: Span) -> Res
             (VmValue::Str(a),VmValue::Str(b))       => Ok(VmValue::Bool(a!=b)),
             (VmValue::Nil, VmValue::Nil)            => Ok(VmValue::Bool(false)),
             (VmValue::Nil, _) | (_, VmValue::Nil)  => Ok(VmValue::Bool(true)),
-            _ => Err(JadeError::TypeError{op:"!=".to_string(),span})
+            (l,r) => Err(JadeError::TypeError{message:format!("'!=' cannot compare {} and {}", value_type_name(&l), value_type_name(&r)),span})
         },
         Lt => cmp_order(l,r,"<",span,|a:f64,b:f64| a<b, |a:i64,b:i64| a<b, |a:&str,b:&str| a<b, |a:bool,b:bool| !a&&b),
         Gt => cmp_order(l,r,">",span,|a:f64,b:f64| a>b, |a:i64,b:i64| a>b, |a:&str,b:&str| a>b, |a:bool,b:bool| a&&!b),
@@ -2329,18 +2354,18 @@ fn vm_contains(needle: VmValue, haystack: VmValue, span: Span) -> Result<bool> {
         VmValue::Dict(map) => {
             let key = match needle {
                 VmValue::Str(s) => s,
-                _ => return Err(JadeError::TypeError { op: "in (dict key must be str)".to_string(), span }),
+                ref other => return Err(JadeError::TypeError { message: format!("'in' dict key must be str, got {}", value_type_name(other)), span }),
             };
             Ok(map.contains_key(&key))
         }
         VmValue::Str(s) => {
             let sub = match needle {
                 VmValue::Str(sub) => sub,
-                _ => return Err(JadeError::TypeError { op: "in (substring must be str)".to_string(), span }),
+                ref other => return Err(JadeError::TypeError { message: format!("'in' substring must be str, got {}", value_type_name(other)), span }),
             };
             Ok(s.contains(sub.as_str()))
         }
-        _ => Err(JadeError::TypeError { op: "in".to_string(), span }),
+        ref other => Err(JadeError::TypeError { message: format!("'in' requires array, dict, or str, got {}", value_type_name(other)), span }),
     }
 }
 
@@ -2358,25 +2383,25 @@ fn cmp_order(
         (VmValue::Float(a), VmValue::Int(b))   => Ok(VmValue::Bool(ff(a,b as f64))),
         (VmValue::Bool(a),  VmValue::Bool(b))  => Ok(VmValue::Bool(bb(a,b))),
         (VmValue::Str(a),   VmValue::Str(b))   => Ok(VmValue::Bool(ss(&a,&b))),
-        _ => Err(JadeError::TypeError { op: op.to_string(), span }),
+        (l, r) => Err(JadeError::TypeError { message: format!("'{}' cannot compare {} and {}", op, value_type_name(&l), value_type_name(&r)), span }),
     }
 }
 
 fn eval_unaryop_dynamic(op: &UnaryOpKind, v: VmValue, span: Span) -> Result<VmValue> {
     match op {
-        UnaryOpKind::BitNot => match v { VmValue::Int(i) => Ok(VmValue::Int(!i)), _ => Err(JadeError::TypeError{op:"~".to_string(),span}) },
-        UnaryOpKind::Not    => match v { VmValue::Bool(b)=> Ok(VmValue::Bool(!b)),_ => Err(JadeError::TypeError{op:"!".to_string(),span}) },
+        UnaryOpKind::BitNot => match v { VmValue::Int(i) => Ok(VmValue::Int(!i)), ref v => Err(JadeError::TypeError{message:format!("'~' requires int, got {}", value_type_name(v)),span}) },
+        UnaryOpKind::Not    => match v { VmValue::Bool(b)=> Ok(VmValue::Bool(!b)), ref v => Err(JadeError::TypeError{message:format!("'!' requires bool, got {}", value_type_name(v)),span}) },
         UnaryOpKind::Neg    => match v {
             VmValue::Int(i)   => Ok(VmValue::Int(-i)),
             VmValue::Float(f) => Ok(VmValue::Float(-f)),
-            _ => Err(JadeError::TypeError{op:"-".to_string(),span})
+            ref v => Err(JadeError::TypeError{message:format!("unary '-' requires int or float, got {}", value_type_name(v)),span})
         },
     }
 }
 
 fn to_floats(l: VmValue, r: VmValue, op: &BinOpKind, span: Span) -> Result<(f64, f64)> {
-    let lf = match l { VmValue::Int(i) => i as f64, VmValue::Float(f) => f, _ => return Err(JadeError::TypeError { op: format!("{:?}", op), span }) };
-    let rf = match r { VmValue::Int(i) => i as f64, VmValue::Float(f) => f, _ => return Err(JadeError::TypeError { op: format!("{:?}", op), span }) };
+    let lf = match l { VmValue::Int(i) => i as f64, VmValue::Float(f) => f, _ => return Err(JadeError::TypeError { message: format!("{:?} requires numeric operands", op), span }) };
+    let rf = match r { VmValue::Int(i) => i as f64, VmValue::Float(f) => f, _ => return Err(JadeError::TypeError { message: format!("{:?} requires numeric operands", op), span }) };
     Ok((lf, rf))
 }
 
@@ -2389,14 +2414,14 @@ fn cmp_dynamic(slots: &[VmValue], l: Reg, r: Reg, op: &str, span: Span) -> Resul
             (VmValue::Float(a),VmValue::Float(b)) => a==b,
             (VmValue::Bool(a),VmValue::Bool(b))   => a==b,
             (VmValue::Str(a),VmValue::Str(b))     => a==b,
-            _ => return Err(JadeError::TypeError{op:op.to_string(),span}),
+            (lv,rv) => return Err(JadeError::TypeError{message:format!("'{}' cannot compare {} and {}", op, value_type_name(&lv), value_type_name(&rv)),span}),
         },
         "!=" => match (lv,rv) {
             (VmValue::Int(a),VmValue::Int(b))     => a!=b,
             (VmValue::Float(a),VmValue::Float(b)) => a!=b,
             (VmValue::Bool(a),VmValue::Bool(b))   => a!=b,
             (VmValue::Str(a),VmValue::Str(b))     => a!=b,
-            _ => return Err(JadeError::TypeError{op:op.to_string(),span}),
+            (lv,rv) => return Err(JadeError::TypeError{message:format!("'{}' cannot compare {} and {}", op, value_type_name(&lv), value_type_name(&rv)),span}),
         },
         "<"  => match (lv,rv) {
             (VmValue::Int(a),VmValue::Int(b))     => a<b,
@@ -2405,7 +2430,7 @@ fn cmp_dynamic(slots: &[VmValue], l: Reg, r: Reg, op: &str, span: Span) -> Resul
             (VmValue::Float(a),VmValue::Int(b))   => a<(b as f64),
             (VmValue::Bool(a),VmValue::Bool(b))   => !a&&b,
             (VmValue::Str(a),VmValue::Str(b))     => a<b,
-            _ => return Err(JadeError::TypeError{op:op.to_string(),span}),
+            (lv,rv) => return Err(JadeError::TypeError{message:format!("'{}' cannot compare {} and {}", op, value_type_name(&lv), value_type_name(&rv)),span}),
         },
         ">"  => match (lv,rv) {
             (VmValue::Int(a),VmValue::Int(b))     => a>b,
@@ -2414,7 +2439,7 @@ fn cmp_dynamic(slots: &[VmValue], l: Reg, r: Reg, op: &str, span: Span) -> Resul
             (VmValue::Float(a),VmValue::Int(b))   => a>(b as f64),
             (VmValue::Bool(a),VmValue::Bool(b))   => a&&!b,
             (VmValue::Str(a),VmValue::Str(b))     => a>b,
-            _ => return Err(JadeError::TypeError{op:op.to_string(),span}),
+            (lv,rv) => return Err(JadeError::TypeError{message:format!("'{}' cannot compare {} and {}", op, value_type_name(&lv), value_type_name(&rv)),span}),
         },
         "<=" => match (lv,rv) {
             (VmValue::Int(a),VmValue::Int(b))     => a<=b,
@@ -2423,7 +2448,7 @@ fn cmp_dynamic(slots: &[VmValue], l: Reg, r: Reg, op: &str, span: Span) -> Resul
             (VmValue::Float(a),VmValue::Int(b))   => a<=(b as f64),
             (VmValue::Bool(a),VmValue::Bool(b))   => a==b||(!a&&b),
             (VmValue::Str(a),VmValue::Str(b))     => a<=b,
-            _ => return Err(JadeError::TypeError{op:op.to_string(),span}),
+            (lv,rv) => return Err(JadeError::TypeError{message:format!("'{}' cannot compare {} and {}", op, value_type_name(&lv), value_type_name(&rv)),span}),
         },
         ">=" => match (lv,rv) {
             (VmValue::Int(a),VmValue::Int(b))     => a>=b,
@@ -2432,7 +2457,7 @@ fn cmp_dynamic(slots: &[VmValue], l: Reg, r: Reg, op: &str, span: Span) -> Resul
             (VmValue::Float(a),VmValue::Int(b))   => a>=(b as f64),
             (VmValue::Bool(a),VmValue::Bool(b))   => a==b||(a&&!b),
             (VmValue::Str(a),VmValue::Str(b))     => a>=b,
-            _ => return Err(JadeError::TypeError{op:op.to_string(),span}),
+            (lv,rv) => return Err(JadeError::TypeError{message:format!("'{}' cannot compare {} and {}", op, value_type_name(&lv), value_type_name(&rv)),span}),
         },
         _ => unreachable!(),
     };
@@ -2462,8 +2487,8 @@ fn vm_index(obj: VmValue, idx: VmValue, span: Span) -> Result<VmValue> {
         (VmValue::Dict(m), VmValue::Str(k)) => {
             m.get(&k).cloned().ok_or_else(|| JadeError::KeyNotFound { key: k, span })
         }
-        (VmValue::Dict(_), _) => Err(JadeError::TypeError { op: "dict index".to_string(), span }),
-        _ => Err(JadeError::TypeError { op: "[]".to_string(), span }),
+        (VmValue::Dict(_), idx) => Err(JadeError::TypeError { message: format!("dict index must be str, got {}", value_type_name(&idx)), span }),
+        (obj, idx) => Err(JadeError::TypeError { message: format!("value of type {} is not indexable with {}", value_type_name(&obj), value_type_name(&idx)), span }),
     }
 }
 
@@ -2492,28 +2517,28 @@ fn ensure_slot(slots: &mut Vec<VmValue>, r: Reg) {
 fn get_int(slots: &[VmValue], r: Reg, span: Span) -> Result<i64> {
     match get(slots, r) {
         VmValue::Int(i) => Ok(*i),
-        _ => Err(JadeError::TypeError { op: "expected int".to_string(), span }),
+        _ => Err(JadeError::TypeError { message: "expected int".to_string(), span }),
     }
 }
 
 fn get_flt(slots: &[VmValue], r: Reg, span: Span) -> Result<f64> {
     match get(slots, r) {
         VmValue::Float(f) => Ok(*f),
-        _ => Err(JadeError::TypeError { op: "expected float".to_string(), span }),
+        _ => Err(JadeError::TypeError { message: "expected float".to_string(), span }),
     }
 }
 
 fn get_bool(slots: &[VmValue], r: Reg, span: Span) -> Result<bool> {
     match get(slots, r) {
         VmValue::Bool(b) => Ok(*b),
-        _ => Err(JadeError::TypeError { op: "expected bool".to_string(), span }),
+        _ => Err(JadeError::TypeError { message: "expected bool".to_string(), span }),
     }
 }
 
 fn get_str(slots: &[VmValue], r: Reg, span: Span) -> Result<String> {
     match get(slots, r) {
         VmValue::Str(s) => Ok(s.clone()),
-        _ => Err(JadeError::TypeError { op: "expected str".to_string(), span }),
+        _ => Err(JadeError::TypeError { message: "expected str".to_string(), span }),
     }
 }
 
@@ -2523,7 +2548,7 @@ fn get_str(slots: &[VmValue], r: Reg, span: Span) -> Result<String> {
 fn get_str_ref<'a>(slots: &'a [VmValue], r: Reg, span: Span) -> Result<&'a str> {
     match get(slots, r) {
         VmValue::Str(s) => Ok(s.as_str()),
-        _ => Err(JadeError::TypeError { op: "expected str".to_string(), span }),
+        _ => Err(JadeError::TypeError { message: "expected str".to_string(), span }),
     }
 }
 

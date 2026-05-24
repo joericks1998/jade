@@ -38,7 +38,7 @@ fn time_sleep(args: &[VmValue]) -> Result<VmValue> {
     let secs = match &args[0] {
         VmValue::Int(n)   => *n as f64,
         VmValue::Float(f) => *f,
-        _ => return Err(JadeError::TypeError { op: "time.sleep".to_string(), span: ZERO }),
+        _ => return Err(JadeError::TypeError { message: "time.sleep".to_string(), span: ZERO }),
     };
     if secs > 0.0 {
         std::thread::sleep(std::time::Duration::from_secs_f64(secs));

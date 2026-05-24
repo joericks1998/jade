@@ -589,7 +589,8 @@ fn resolve_imports(
                 let tp = crate::compiler::type_infer::infer(ast)
                     .map_err(|e| e.to_string())?;
 
-                let import_dir = canon.parent().unwrap_or(dir);
+                let import_dir = canon.parent()
+                    .ok_or_else(|| format!("import '{}': cannot resolve parent directory of '{}'", path, canon.display()))?;
                 resolve_imports(tp.stmts, import_dir, visited, out)?;
             }
             other => out.push(other),

@@ -321,7 +321,7 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
                 JadeType::Array(elem) => *elem.clone(),
                 JadeType::Unknown     => JadeType::Unknown,
                 other => return Err(JadeError::TypeError {
-                    op: format!("cannot iterate over {}", jade_type_name(other)),
+                    message: format!("cannot iterate over {}", jade_type_name(other)),
                     span: *span,
                 }),
             };
@@ -675,7 +675,14 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
                     }
                     StructFieldDef::Prompt { name, default } => {
                         let e = provided.get(name.as_str()).copied().unwrap_or(default);
-                        tfields.push((name.clone(), infer_expr(e, ctx)?, true));
+                        let te = infer_expr(e, ctx)?;
+                        if te.ty != JadeType::Str && te.ty != JadeType::Unknown {
+                            return Err(JadeError::PromptFieldNotStr {
+                                field: name.clone(),
+                                span: te.span,
+                            });
+                        }
+                        tfields.push((name.clone(), te, true));
                     }
                 }
             }
@@ -783,11 +790,16 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
                 .map(|t| t.ty.clone())
                 .unwrap_or(JadeType::Unknown);
 
-            // If elements have mixed types, widen to Unknown.
-            let array_elem_ty = if elem_ty != JadeType::Unknown
-                && telems.iter().any(|t| t.ty != JadeType::Unknown && t.ty != elem_ty)
-            {
-                JadeType::Unknown
+            // If elements have mixed concrete types, emit an error.
+            let array_elem_ty = if elem_ty != JadeType::Unknown {
+                if let Some(mismatch) = telems.iter().find(|t| t.ty != JadeType::Unknown && t.ty != elem_ty) {
+                    return Err(JadeError::HeterogeneousArray {
+                        first: jade_type_name(&elem_ty).to_string(),
+                        got: jade_type_name(&mismatch.ty).to_string(),
+                        span: *span,
+                    });
+                }
+                elem_ty
             } else {
                 elem_ty
             };

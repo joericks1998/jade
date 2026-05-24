@@ -55,7 +55,7 @@ fn native_len(args: &[VmValue]) -> Result<VmValue> {
         VmValue::Str(s)   => s.chars().count() as i64,
         VmValue::Array(a) => a.lock().len() as i64,
         VmValue::Dict(d)  => d.len() as i64,
-        _ => return Err(JadeError::TypeError { op: "len".to_string(), span: Span { line: 0, col: 0 } }),
+        _ => return Err(JadeError::TypeError { message: "len".to_string(), span: Span { line: 0, col: 0 } }),
     };
     Ok(VmValue::Int(n))
 }
@@ -74,7 +74,7 @@ fn native_input(args: &[VmValue]) -> Result<VmValue> {
                 print!("{}", s);
                 std::io::stdout().flush().ok();
             }
-            _ => return Err(JadeError::TypeError { op: "input".to_string(), span: Span { line: 0, col: 0 } }),
+            _ => return Err(JadeError::TypeError { message: "input".to_string(), span: Span { line: 0, col: 0 } }),
         }
     }
     let mut line = String::new();

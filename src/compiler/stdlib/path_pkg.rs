@@ -10,7 +10,7 @@ const ZERO: Span = Span { line: 0, col: 0 };
 fn require_str<'a>(args: &'a [VmValue], pos: usize, fn_name: &str) -> Result<&'a str> {
     match args.get(pos) {
         Some(VmValue::Str(s)) => Ok(s.as_str()),
-        Some(_) => Err(JadeError::TypeError { op: fn_name.to_string(), span: ZERO }),
+        Some(_) => Err(JadeError::TypeError { message: fn_name.to_string(), span: ZERO }),
         None    => Err(JadeError::ArityMismatch { expected: pos + 1, got: args.len(), span: ZERO }),
     }
 }

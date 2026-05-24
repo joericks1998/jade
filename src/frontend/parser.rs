@@ -350,6 +350,10 @@ impl Parser {
 
     /// Parse `fn <ident> ( <params> ) { <body> }` with pre-collected decorators.
     fn parse_fn_with_decorators(&mut self, decorators: Vec<(String, Vec<(Option<String>, Expr)>)>) -> Result<Stmt> {
+        if self.fn_depth > 0 {
+            let span = self.peek().span;
+            return Err(JadeError::NestedFunction { span });
+        }
         let span = self.peek().span;
         self.advance(); // consume `fn`
 

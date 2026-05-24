@@ -16,7 +16,7 @@ fn http_err(detail: &str) -> JadeError {
 fn require_str_owned(args: &[VmValue], pos: usize, fn_name: &str) -> Result<String> {
     match args.get(pos) {
         Some(VmValue::Str(s)) => Ok(s.clone()),
-        Some(_) => Err(JadeError::TypeError { op: fn_name.to_string(), span: ZERO }),
+        Some(_) => Err(JadeError::TypeError { message: fn_name.to_string(), span: ZERO }),
         None    => Err(JadeError::ArityMismatch { expected: pos + 1, got: args.len(), span: ZERO }),
     }
 }
@@ -30,14 +30,14 @@ fn extract_headers(val: Option<&VmValue>) -> Result<Vec<(String, String)>> {
                 match v {
                     VmValue::Str(s) => headers.push((k.clone(), s.clone())),
                     _ => return Err(JadeError::TypeError {
-                        op: "http header value must be str".to_string(),
+                        message: "http header value must be str".to_string(),
                         span: ZERO,
                     }),
                 }
             }
             Ok(headers)
         }
-        Some(_) => Err(JadeError::TypeError { op: "http headers must be a dict".to_string(), span: ZERO }),
+        Some(_) => Err(JadeError::TypeError { message: "http headers must be a dict".to_string(), span: ZERO }),
     }
 }
 

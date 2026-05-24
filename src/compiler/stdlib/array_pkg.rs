@@ -12,7 +12,7 @@ const ZERO: Span = Span { line: 0, col: 0 };
 fn arr_len(args: &[VmValue]) -> Result<VmValue> {
     match &args[0] {
         VmValue::Array(arc) => Ok(VmValue::Int(arc.lock().len() as i64)),
-        _ => Err(JadeError::TypeError { op: "array.len".to_string(), span: ZERO }),
+        _ => Err(JadeError::TypeError { message: "array.len".to_string(), span: ZERO }),
     }
 }
 
@@ -22,7 +22,7 @@ fn arr_push(args: &[VmValue]) -> Result<VmValue> {
             arc.lock().push(val.clone());
             Ok(VmValue::Nil)
         }
-        _ => Err(JadeError::TypeError { op: "array.push".to_string(), span: ZERO }),
+        _ => Err(JadeError::TypeError { message: "array.push".to_string(), span: ZERO }),
     }
 }
 
@@ -32,7 +32,7 @@ fn arr_pop(args: &[VmValue]) -> Result<VmValue> {
             let v = arc.lock().pop().unwrap_or(VmValue::Nil);
             Ok(v)
         }
-        _ => Err(JadeError::TypeError { op: "array.pop".to_string(), span: ZERO }),
+        _ => Err(JadeError::TypeError { message: "array.pop".to_string(), span: ZERO }),
     }
 }
 
@@ -43,7 +43,7 @@ fn arr_contains(args: &[VmValue]) -> Result<VmValue> {
             let found = guard.iter().any(|elem| vm_values_equal(elem, needle));
             Ok(VmValue::Bool(found))
         }
-        _ => Err(JadeError::TypeError { op: "array.contains".to_string(), span: ZERO }),
+        _ => Err(JadeError::TypeError { message: "array.contains".to_string(), span: ZERO }),
     }
 }
 
@@ -54,7 +54,7 @@ fn arr_sort(args: &[VmValue]) -> Result<VmValue> {
             guard.sort_by(|a, b| vm_cmp_for_sort(a, b));
             Ok(VmValue::Nil)
         }
-        _ => Err(JadeError::TypeError { op: "array.sort".to_string(), span: ZERO }),
+        _ => Err(JadeError::TypeError { message: "array.sort".to_string(), span: ZERO }),
     }
 }
 
@@ -64,7 +64,7 @@ fn arr_reverse(args: &[VmValue]) -> Result<VmValue> {
             arc.lock().reverse();
             Ok(VmValue::Nil)
         }
-        _ => Err(JadeError::TypeError { op: "array.reverse".to_string(), span: ZERO }),
+        _ => Err(JadeError::TypeError { message: "array.reverse".to_string(), span: ZERO }),
     }
 }
 
@@ -88,14 +88,14 @@ fn pkg_map(args: &[VmValue]) -> Result<VmValue> {
     // For now, return an error explaining this must be done with a for-loop.
     // Full async-capable map would require VmState access.
     Err(JadeError::TypeError {
-        op: "array.map: use a for-loop to transform arrays".to_string(),
+        message: "array.map: use a for-loop to transform arrays".to_string(),
         span: ZERO,
     })
 }
 
 fn pkg_filter(args: &[VmValue]) -> Result<VmValue> {
     Err(JadeError::TypeError {
-        op: "array.filter: use a for-loop to filter arrays".to_string(),
+        message: "array.filter: use a for-loop to filter arrays".to_string(),
         span: ZERO,
     })
 }
@@ -109,7 +109,7 @@ fn pkg_sort(args: &[VmValue]) -> Result<VmValue> {
             v.sort_by(|a, b| vm_cmp_for_sort(a, b));
             Ok(make_array(v))
         }
-        _ => Err(JadeError::TypeError { op: "array.sort".to_string(), span: ZERO }),
+        _ => Err(JadeError::TypeError { message: "array.sort".to_string(), span: ZERO }),
     }
 }
 
@@ -122,7 +122,7 @@ fn pkg_reverse(args: &[VmValue]) -> Result<VmValue> {
             v.reverse();
             Ok(make_array(v))
         }
-        _ => Err(JadeError::TypeError { op: "array.reverse".to_string(), span: ZERO }),
+        _ => Err(JadeError::TypeError { message: "array.reverse".to_string(), span: ZERO }),
     }
 }
 

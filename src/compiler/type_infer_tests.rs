@@ -164,14 +164,9 @@ fn test_infer_array_empty() {
 
 #[test]
 fn test_infer_heterogeneous_array_widens_to_unknown() {
-    // Heterogeneous arrays are allowed; the type widens to Array(Unknown).
-    let prog = infer_ok(r#"let a = [1, "hello"]"#);
-    match &prog.stmts[0] {
-        crate::compiler::tir::TStmt::Let { value, .. } => {
-            assert!(matches!(value.ty, crate::compiler::tir::JadeType::Array(_)));
-        }
-        _ => panic!("expected Let"),
-    }
+    // Heterogeneous arrays are now a type error.
+    let err = infer_err(r#"let a = [1, "hello"]"#);
+    assert!(matches!(err, crate::frontend::error::JadeError::HeterogeneousArray { .. }));
 }
 
 // ── Control flow ──────────────────────────────────────────────────────────

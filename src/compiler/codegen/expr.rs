@@ -871,7 +871,10 @@ fn emit_closure<'ctx>(
     }
 
     // Restore captured variables from the env struct.
-    let env_param = cl_fn.get_nth_param(params.len() as u32).unwrap().into_pointer_value();
+    let env_param = cl_fn
+        .get_nth_param(params.len() as u32)
+        .ok_or_else(|| "closure environment parameter missing — LLVM codegen error".to_string())?
+        .into_pointer_value();
     for (i, (cap_name, cap_ty)) in captures.iter().enumerate() {
         let env_slot = ctx.gep(
             i64_ty, env_param,

@@ -320,9 +320,9 @@ fn test_parse_fn_as_value_in_let() {
 
 #[test]
 fn test_parse_nested_fn_ok() {
-    // Nested function definitions are now allowed.
-    let prog = parse_src("fn outer() {\n    fn inner() {\n        return 1\n    }\n    return 2\n}");
-    assert_eq!(prog.stmts.len(), 1);
+    // Nested function definitions are now a parse error.
+    let err = parse_src_err("fn outer() {\n    fn inner() {\n        return 1\n    }\n    return 2\n}");
+    assert!(matches!(err, JadeError::NestedFunction { .. }));
 }
 
 #[test]

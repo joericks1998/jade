@@ -13,7 +13,7 @@ fn env_get(args: &[VmValue]) -> Result<VmValue> {
     }
     let name = match &args[0] {
         VmValue::Str(s) => s.as_str(),
-        _ => return Err(JadeError::TypeError { op: "env.get".to_string(), span: ZERO }),
+        _ => return Err(JadeError::TypeError { message: "env.get".to_string(), span: ZERO }),
     };
     Ok(match std::env::var(name) {
         Ok(val) => VmValue::Str(val),
@@ -27,11 +27,11 @@ fn env_set(args: &[VmValue]) -> Result<VmValue> {
     }
     let name = match &args[0] {
         VmValue::Str(s) => s.clone(),
-        _ => return Err(JadeError::TypeError { op: "env.set".to_string(), span: ZERO }),
+        _ => return Err(JadeError::TypeError { message: "env.set".to_string(), span: ZERO }),
     };
     let val = match &args[1] {
         VmValue::Str(s) => s.clone(),
-        _ => return Err(JadeError::TypeError { op: "env.set".to_string(), span: ZERO }),
+        _ => return Err(JadeError::TypeError { message: "env.set".to_string(), span: ZERO }),
     };
     // Safety: jade programs are single-threaded at the OS/process level.
     #[allow(deprecated)]
