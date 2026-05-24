@@ -1697,6 +1697,44 @@ fn test_fs_write_arity_error() {
     assert!(matches!(err, JadeError::ArityMismatch { expected: 2, .. }));
 }
 
+// ── module stdlib promotion ───────────────────────────────────────────────
+
+/// A module that imports `use std.fs` should expose functions that use `fs`
+/// to callers in the parent scope — the stdlib import must be promoted to the
+/// parent globals rather than buried inside the module dict.
+#[test]
+fn test_import_module_stdlib_promotion() {
+    let dir = std::env::temp_dir();
+    let mod_path = dir.join("jade_test_stdlib_promo_mod.jde");
+    let txt_path = dir.join("jade_test_stdlib_promo_out.txt");
+    std::fs::write(&mod_path, "use std.fs\nfn write_file(p, s) {\n fs.write(p, s)\n}\n").unwrap();
+
+    let mod_str = mod_path.to_str().unwrap();
+    let txt_str = txt_path.to_str().unwrap();
+    let src = format!(
+        "use \"{mod_str}\" as io\nio.write_file(\"{txt_str}\", \"ok\")\nlet v = true"
+    );
+
+    let tokens = crate::frontend::lexer::tokenize(&src).expect("lex");
+    let program = crate::frontend::parser::parse(tokens).expect("parse");
+    let tprogram = crate::compiler::type_infer::infer(program).expect("type infer");
+    let compiled = crate::compiler::emit::emit(tprogram).expect("emit");
+    let opts = VmOpts { source_dir: dir.clone(), ..VmOpts::default() };
+    let s = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(run(compiled, opts))
+        .expect("vm run");
+
+    assert!(get_bool(&s, "v"));
+    let content = std::fs::read_to_string(&txt_path).expect("output not written");
+    assert_eq!(content, "ok");
+
+    let _ = std::fs::remove_file(&mod_path);
+    let _ = std::fs::remove_file(&txt_path);
+}
+
 // ── type constructors ─────────────────────────────────────────────────────
 
 #[test]

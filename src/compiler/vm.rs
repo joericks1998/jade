@@ -595,6 +595,20 @@ async fn execute_chunk(
                                 .drain()
                                 .filter(|(k, _)| !initial_keys.contains(k))
                                 .collect();
+                            // Stdlib packages imported by the module (e.g. `use std.fs`) must
+                            // be promoted to the parent globals so that module functions can
+                            // resolve them via GetGlobal when called in the parent context.
+                            // They are NOT included in the module dict (they're not exports).
+                            let pkg_keys: Vec<String> = module_globals
+                                .keys()
+                                .filter(|k| stdlib::is_package_global_name(k))
+                                .cloned()
+                                .collect();
+                            for k in pkg_keys {
+                                if let Some(v) = module_globals.remove(&k) {
+                                    state.globals.entry(k).or_insert(v);
+                                }
+                            }
                             // Qualify any TypeRef values so coercion calls resolve correctly.
                             for v in module_globals.values_mut() {
                                 if let VmValue::TypeRef(t) = v {
@@ -711,6 +725,13 @@ async fn execute_chunk(
                         sub_state.default_model = state.default_model.clone();
                         let r = Box::pin(run_with_state(compiled, &mut sub_state)).await;
                         if r.is_ok() {
+                            // Promote stdlib package imports from the module so that
+                            // imported functions can resolve them via GetGlobal.
+                            for (k, v) in sub_state.globals.iter() {
+                                if stdlib::is_package_global_name(k) {
+                                    state.globals.entry(k.clone()).or_insert_with(|| v.clone());
+                                }
+                            }
                             for name in names {
                                 if let Some(val) = sub_state.globals.remove(name) {
                                     state.globals.insert(name.clone(), val);

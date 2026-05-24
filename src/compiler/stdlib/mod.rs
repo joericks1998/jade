@@ -163,6 +163,13 @@ pub fn find_package(import_name: &str) -> Option<&'static Package> {
     PACKAGES.iter().find(|p| p.import_name == import_name).copied()
 }
 
+/// Returns true if `name` is the global binding name of any stdlib package
+/// (e.g. "fs", "http", "json"). Used to separate stdlib imports from
+/// user-defined exports when packaging module globals.
+pub fn is_package_global_name(name: &str) -> bool {
+    PACKAGES.iter().any(|p| p.global_name == name)
+}
+
 /// Pre-seed `globals` with all core built-in functions.
 pub fn seed_globals(globals: &mut HashMap<String, VmValue>) {
     for f in CORE_BUILTINS {
