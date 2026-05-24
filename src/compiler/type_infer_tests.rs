@@ -249,6 +249,19 @@ fn test_infer_struct_extra_field_is_error() {
     assert!(matches!(err, JadeError::UndefinedField { .. }));
 }
 
+#[test]
+fn test_infer_empty_struct_literal_type() {
+    let tp = infer_ok("struct Unit {}\nlet u = Unit {}");
+    let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!() };
+    assert_eq!(value.ty, JadeType::Struct("Unit".to_string()));
+}
+
+#[test]
+fn test_infer_empty_struct_extra_field_is_error() {
+    let err = infer_err("struct Unit {}\nlet u = Unit { x: 1 }");
+    assert!(matches!(err, JadeError::UndefinedField { .. }));
+}
+
 // ── Prompts ───────────────────────────────────────────────────────────────
 
 #[test]

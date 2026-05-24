@@ -1545,6 +1545,50 @@ fn test_vm_struct_required_after_let_field() {
     assert!(matches!(err, JadeError::MissingField { field, .. } if field == "y"));
 }
 
+// ── Empty struct tests ────────────────────────────────────────────────────
+
+#[test]
+fn test_vm_empty_struct_define_and_instantiate() {
+    let s = run_src("struct Unit {}\nlet u = Unit {}").unwrap();
+    match s.globals.get("u").unwrap() {
+        VmValue::Struct(rc) => assert_eq!(rc.lock().type_name, "Unit"),
+        v => panic!("expected Struct, got {:?}", v),
+    }
+}
+
+#[test]
+fn test_vm_empty_struct_method() {
+    let src = "struct Unit {}\nextend Unit {\n  fn tag(self) { return 42 }\n}\nlet u = Unit {}\nlet v = u.tag()";
+    let s = run_src(src).unwrap();
+    assert_eq!(get_int(&s, "v"), 42);
+}
+
+#[test]
+fn test_vm_empty_struct_in_array() {
+    let src = "struct Unit {}\nlet arr = [Unit {}, Unit {}, Unit {}]\nlet n = len(arr)";
+    let s = run_src(src).unwrap();
+    assert_eq!(get_int(&s, "n"), 3);
+}
+
+#[test]
+fn test_vm_empty_struct_as_function_arg() {
+    let src = "struct Unit {}\nfn consume(x) { return 1 }\nlet u = Unit {}\nlet v = consume(u)";
+    let s = run_src(src).unwrap();
+    assert_eq!(get_int(&s, "v"), 1);
+}
+
+#[test]
+fn test_vm_empty_struct_extra_field_is_error() {
+    let err = try_run_src("struct Unit {}\nlet u = Unit { x: 1 }").err().expect("expected error");
+    assert!(matches!(err, JadeError::UndefinedField { .. }));
+}
+
+#[test]
+fn test_vm_empty_struct_raised_and_caught() {
+    let src = "struct MyErr {}\ntry {\n  raise MyErr {}\n} catch MyErr e {\n  print(\"caught\")\n}";
+    run_src(src).unwrap();
+}
+
 // ── std/fs tests ──────────────────────────────────────────────────────────
 
 #[test]
