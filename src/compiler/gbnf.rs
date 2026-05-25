@@ -1,6 +1,55 @@
 use std::collections::HashMap;
 use crate::frontend::ast::StructFieldDef;
 
+/// Extract all quoted-literal strings from a GBNF pattern (the RHS of `root ::=`).
+///
+/// Only handles quoted-string literals and `|`-alternations of them.
+/// Non-literal alternatives (character classes, rule references) are silently skipped.
+/// Used to build the literal set for prefix-aware mute buffering in `stream()`.
+pub fn grammar_literals(pattern: &str) -> Vec<String> {
+    split_gbnf_alternations(pattern)
+        .into_iter()
+        .filter_map(|alt| parse_quoted_literal(alt))
+        .collect()
+}
+
+/// Returns true if `token` exactly matches the GBNF `pattern` (the RHS of `root ::=`).
+pub fn token_matches_grammar(token: &str, pattern: &str) -> bool {
+    grammar_literals(pattern).iter().any(|lit| lit == token)
+}
+
+fn split_gbnf_alternations(pattern: &str) -> Vec<&str> {
+    let mut alts = Vec::new();
+    let mut start = 0;
+    let mut in_quotes = false;
+    let bytes = pattern.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => in_quotes = !in_quotes,
+            b'\\' if in_quotes => i += 1, // skip escaped char
+            b'|' if !in_quotes => {
+                alts.push(pattern[start..i].trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    alts.push(pattern[start..].trim());
+    alts
+}
+
+fn parse_quoted_literal(s: &str) -> Option<String> {
+    let s = s.trim();
+    if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
+        let inner = &s[1..s.len()-1];
+        Some(inner.replace("\\\"", "\"").replace("\\n", "\n").replace("\\t", "\t"))
+    } else {
+        None
+    }
+}
+
 /// Wrap a user-supplied GBNF pattern (RHS only) into a complete grammar.
 ///
 /// `pattern` is the right-hand side of the root rule, e.g. `"yes" | "no"`.
@@ -107,5 +156,31 @@ mod tests {
         let g = grammar_for("dict", &no_defs()).unwrap();
         assert!(g.starts_with("root"));
         assert!(g.contains("\"{\""), "should anchor opening brace");
+    }
+
+    #[test]
+    fn token_matches_single_literal() {
+        assert!(token_matches_grammar("<think>", "\"<think>\""));
+        assert!(!token_matches_grammar("other", "\"<think>\""));
+    }
+
+    #[test]
+    fn token_matches_alternation() {
+        assert!(token_matches_grammar("yes", "\"yes\" | \"no\""));
+        assert!(token_matches_grammar("no", "\"yes\" | \"no\""));
+        assert!(!token_matches_grammar("maybe", "\"yes\" | \"no\""));
+    }
+
+    #[test]
+    fn token_matches_pipe_in_literal() {
+        // A literal containing '|' should not be split on it
+        assert!(token_matches_grammar("a|b", "\"a|b\""));
+        assert!(!token_matches_grammar("a", "\"a|b\""));
+    }
+
+    #[test]
+    fn token_no_match_non_literal_pattern() {
+        // Character-class patterns aren't handled — return false, no panic
+        assert!(!token_matches_grammar("abc", "[a-z]+"));
     }
 }

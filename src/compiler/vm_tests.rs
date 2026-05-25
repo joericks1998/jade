@@ -996,8 +996,12 @@ fn test_vm_print_builtin() {
 
 #[test]
 fn test_vm_print_arity_error() {
-    let err = try_run_src(r#"print("a", "b")"#).err().expect("expected error");
-    assert!(matches!(err, JadeError::ArityMismatch { expected: 1, got: 2, .. }));
+    // print() with no args is an error
+    let err = try_run_src(r#"print()"#).err().expect("expected error");
+    assert!(matches!(err, JadeError::ArityMismatch { .. }));
+    // print() with 3 args is an error (max 2: value + optional end=)
+    let err = try_run_src(r#"print("a", "b", "c")"#).err().expect("expected error");
+    assert!(matches!(err, JadeError::ArityMismatch { .. }));
 }
 
 #[test]
@@ -1336,7 +1340,7 @@ fn test_vm_typed_deref_retry_succeeds_on_second_attempt() {
 fn test_grammar_new_returns_grammar_value() {
     let s = run_src(r#"let g = Grammar.new('"yes" | "no"')"#).unwrap();
     match s.globals.get("g").unwrap() {
-        VmValue::Grammar { pattern, anchor } => {
+        VmValue::Grammar { pattern, anchor, .. } => {
             assert_eq!(pattern, r#""yes" | "no""#);
             assert_eq!(*anchor, None);
         }
@@ -1361,7 +1365,7 @@ let answer = ?p |> g
 fn test_grammar_new_with_anchor() {
     let s = run_src(r#"let g = Grammar.new('"yes" | "no"', anchor = "Answer:")"#).unwrap();
     match s.globals.get("g").unwrap() {
-        VmValue::Grammar { pattern, anchor } => {
+        VmValue::Grammar { pattern, anchor, .. } => {
             assert_eq!(pattern, r#""yes" | "no""#);
             assert_eq!(anchor.as_deref(), Some("Answer:"));
         }

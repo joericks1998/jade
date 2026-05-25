@@ -1602,7 +1602,7 @@ async fn call_value(
                 };
                 match val {
                     VmValue::TokenStream(ts) => {
-                        vm_drain_token_stream_printing(ts, state, span, end == "\n").await?;
+                        vm_drain_token_stream_printing(ts, state, span, end == "\n", &[]).await?;
                         if end != "\n" && !end.is_empty() {
                             print!("{}", end);
                             let _ = std::io::stdout().flush();
@@ -1616,12 +1616,30 @@ async fn call_value(
                 Ok(VmValue::Nil)
             }
             NativeFnId::Stream => {
-                if args.len() != 1 {
-                    return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span });
+                if args.is_empty() {
+                    return Err(JadeError::ArityMismatch { expected: 1, got: 0, span });
                 }
-                match args.into_iter().next().unwrap() {
+                let mut iter = args.into_iter();
+                let val = iter.next().unwrap();
+                let mute_patterns: Vec<String> = match iter.next() {
+                    None | Some(VmValue::Nil) => Vec::new(),
+                    Some(VmValue::Array(arr)) => {
+                        arr.lock().iter().filter_map(|v| {
+                            if let VmValue::Grammar { pattern, .. } = v {
+                                Some(pattern.clone())
+                            } else {
+                                None
+                            }
+                        }).collect()
+                    }
+                    Some(other) => return Err(JadeError::TypeError {
+                        message: format!("stream() mute_on= must be an array of grammars, got {}", value_type_name(&other)),
+                        span,
+                    }),
+                };
+                match val {
                     VmValue::TokenStream(ts) => {
-                        let text = vm_drain_token_stream_printing(ts, state, span, true).await?;
+                        let text = vm_drain_token_stream_printing(ts, state, span, true, &mute_patterns).await?;
                         Ok(VmValue::Str(text))
                     }
                     other => {
@@ -2207,21 +2225,76 @@ async fn vm_drain_token_stream(
 
 /// Drain a `TokenStream`, printing each token to stdout as it arrives.
 /// Returns the accumulated text so `stream()` can return it as a `Str`.
+///
+/// `mute_patterns` is a list of GBNF patterns from Grammar values. Tokens whose
+/// accumulated text (across token boundaries) matches a literal in any pattern are
+/// suppressed from stdout. The full text is still returned.
+///
+/// Algorithm: prefix-aware buffering. Tokens are held in `pending` until the
+/// accumulated text either (a) fully matches a literal → suppress, (b) is a prefix
+/// of some literal → keep buffering, or (c) matches neither → flush oldest token
+/// and retry. This correctly handles patterns split across multiple LLM tokens.
 async fn vm_drain_token_stream_printing(
     ts: Arc<JadeTokenStream>,
     state: &mut VmState,
     span: Span,
     newline: bool,
+    mute_patterns: &[String],
 ) -> Result<String> {
+    use std::io::Write as _;
+
+    // Pre-extract literal strings from all Grammar patterns once.
+    let mute_literals: Vec<String> = mute_patterns.iter()
+        .flat_map(|pat| crate::compiler::gbnf::grammar_literals(pat))
+        .collect();
+
     let rx_opt = ts.rx.lock().take();
     let mut rx = rx_opt.ok_or(JadeError::DoubleStreamDrain { span })?;
     let mut text = String::new();
+
+    // Tokens held back while we wait to see if they complete a mute literal.
+    let mut pending: Vec<String> = Vec::new();
+
     while let Some(token) = rx.recv().await {
-        use std::io::Write as _;
-        print!("{}", token);
-        let _ = std::io::stdout().flush();
         text.push_str(&token);
+
+        if mute_literals.is_empty() {
+            print!("{}", token);
+            let _ = std::io::stdout().flush();
+            continue;
+        }
+
+        pending.push(token);
+
+        // Resolve pending: flush or suppress once we know whether a match completes.
+        loop {
+            if pending.is_empty() { break; }
+
+            // Build pending text from current buffered tokens.
+            let pending_text: String = pending.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("");
+
+            if mute_literals.iter().any(|lit| *lit == pending_text) {
+                // Full match — suppress all buffered tokens.
+                pending.clear();
+                break;
+            } else if mute_literals.iter().any(|lit| lit.starts_with(&pending_text)) {
+                // Pending text is a strict prefix of some literal — keep buffering.
+                break;
+            } else {
+                // No match possible starting here — flush the oldest token and retry.
+                let flush = pending.remove(0);
+                print!("{}", flush);
+                let _ = std::io::stdout().flush();
+            }
+        }
     }
+
+    // End of stream: flush any remaining buffered tokens (can't complete a match).
+    for flush in pending {
+        print!("{}", flush);
+        let _ = std::io::stdout().flush();
+    }
+
     if newline { println!(); }
     let h_opt = ts.tokens_handle.lock().take();
     if let Some(h) = h_opt {
