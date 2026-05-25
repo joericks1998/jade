@@ -1682,8 +1682,14 @@ async fn call_value(
                 }
                 let mut iter = args.into_iter();
                 let val = iter.next().unwrap();
-                // Extract anchor strings for VM-side muting AND full Grammar info
-                // so we can start lazy inference with stop_anchor (prevents model loops).
+                // Build VM-side mute literals AND daemon inference constraints.
+                //
+                // Mute source: union of BOTH sources for every Grammar:
+                //   1. Quoted literals extracted from the pattern via grammar_literals()
+                //      (e.g. `"<think>" | "</think>"` → suppress those exact strings)
+                //   2. The anchor string, if set (explicit trigger, e.g. "<tool>")
+                // Using both means the filter catches any token that fits the grammar
+                // pattern or the anchor, regardless of which was provided.
                 let mut mute_patterns: Vec<String> = Vec::new();
                 let mut infer_grammar: Option<String> = None;
                 let mut infer_anchor: Option<String> = None;
@@ -1698,8 +1704,15 @@ async fn call_value(
                                     infer_anchor = anchor.clone();
                                     infer_stop = stop_anchor.clone();
                                 }
+                                // Always extract literals from the pattern itself.
+                                mute_patterns.extend(
+                                    crate::compiler::gbnf::grammar_literals(pattern)
+                                );
+                                // Also include the explicit anchor if set.
                                 if let Some(a) = anchor {
-                                    mute_patterns.push(a.clone());
+                                    if !mute_patterns.contains(a) {
+                                        mute_patterns.push(a.clone());
+                                    }
                                 }
                             }
                         }
@@ -2336,25 +2349,35 @@ async fn vm_drain_token_stream(
     Ok(VmValue::Str(text))
 }
 
+/// Panic-guard for the mute pending buffer. In practice this is unreachable:
+/// for any mute literal of length N chars, the buffer resolves (match or flush)
+/// within N/avg_token_size tokens — well under a dozen for typical tags.
+/// This constant only exists to prevent an infinite loop if there is ever a
+/// bug in the prefix-check logic.
+const MUTE_BUFFER_BAILOUT: usize = 10_000;
+
 /// Core streaming-mute loop — separated from I/O so it can be tested directly.
 ///
 /// Reads tokens from `rx`, writing non-muted bytes to `out`, and returns the
 /// full accumulated text (printed + muted combined) so callers can inspect the
 /// complete response.
 ///
-/// **Algorithm** — prefix-aware buffering with sub-token anchor detection:
-/// 1. Tokens accumulate in `pending` until the joined text *contains* a mute
-///    literal. Everything before the literal is flushed; everything from the
-///    literal onward is silenced.
-/// 2. If the joined text could still become a mute literal (it is a strict
-///    prefix of some literal) the tokens stay in `pending` — keep buffering.
-/// 3. Otherwise the oldest pending token is flushed and we retry.
+/// **Algorithm** — prefix-aware buffering, non-permanent, with bailout:
 ///
-/// This correctly handles every tokenization pattern:
-/// - anchor split across multiple tokens: `["<", "tool", ">"]`
-/// - anchor as single token: `["<tool>"]`
-/// - anchor merged with following bytes by BPE: `["<tool>{"]`
-/// - anchor embedded in a larger token: `["Sure!\n<tool>{"]` → prints "Sure!\n"
+/// Tokens accumulate in `pending`. Each inner-loop pass over `pending`:
+///   1. If `pending.join("")` *contains* a mute literal at position P:
+///      - Print the text before P, suppress the literal, put the remainder
+///        back into `pending` and loop again (non-permanent — subsequent text
+///        is checked fresh).
+///   2. If the joined text is a strict prefix of some mute literal, keep
+///      buffering — but if `pending.len()` hits `MUTE_BUFFER_BAILOUT`, flush
+///      the oldest token and retry (prevents indefinite blocking).
+///   3. Otherwise flush the oldest token and retry.
+///
+/// Mute source rule (callers decide what goes into `mute_literals`):
+///   Grammar has anchor  → anchor string is the mute trigger
+///   Grammar has no anchor → GBNF quoted literals are the mute triggers
+/// This keeps the daemon agnostic — all filtering is pure VM-side.
 pub(crate) async fn drain_tokens_with_mute<W: std::io::Write + Send>(
     rx: &mut tokio::sync::mpsc::Receiver<String>,
     mute_literals: &[String],
@@ -2363,7 +2386,6 @@ pub(crate) async fn drain_tokens_with_mute<W: std::io::Write + Send>(
 ) -> String {
     let mut text = String::new();
     let mut pending: Vec<String> = Vec::new();
-    let mut muted = false;
 
     while let Some(token) = rx.recv().await {
         text.push_str(&token);
@@ -2373,7 +2395,6 @@ pub(crate) async fn drain_tokens_with_mute<W: std::io::Write + Send>(
             let _ = out.flush();
             continue;
         }
-        if muted { continue; }
 
         pending.push(token);
 
@@ -2381,23 +2402,31 @@ pub(crate) async fn drain_tokens_with_mute<W: std::io::Write + Send>(
             if pending.is_empty() { break; }
             let pending_text: String = pending.join("");
 
-            // Find earliest occurrence of any mute literal in the accumulated text.
+            // Find the earliest occurrence of any mute literal.
             let hit = mute_literals.iter().filter_map(|lit| {
                 pending_text.find(lit.as_str()).map(|pos| (pos, lit.len()))
             }).min_by_key(|&(pos, _)| pos);
 
-            if let Some((pre_len, _lit_len)) = hit {
-                // Print everything before the anchor, then go silent.
+            if let Some((pre_len, lit_len)) = hit {
+                // Print everything before the match; suppress the literal itself.
                 if pre_len > 0 {
                     let _ = out.write_all(pending_text[..pre_len].as_bytes());
                     let _ = out.flush();
                 }
+                // Put the remainder back and loop — there may be more matches.
+                let remainder = pending_text[pre_len + lit_len..].to_owned();
                 pending.clear();
-                muted = true;
-                break;
+                if !remainder.is_empty() { pending.push(remainder); }
             } else if mute_literals.iter().any(|lit| lit.starts_with(&pending_text)) {
-                // pending_text could still grow into a literal — keep buffering.
-                break;
+                // Still a strict prefix of some literal — keep buffering unless
+                // the buffer has grown too large (bailout).
+                if pending.len() >= MUTE_BUFFER_BAILOUT {
+                    let flush = pending.remove(0);
+                    let _ = out.write_all(flush.as_bytes());
+                    let _ = out.flush();
+                } else {
+                    break;
+                }
             } else {
                 // No match and no prefix — flush oldest token and retry.
                 let flush = pending.remove(0);
@@ -2407,12 +2436,10 @@ pub(crate) async fn drain_tokens_with_mute<W: std::io::Write + Send>(
         }
     }
 
-    // End of stream: flush any remaining buffered tokens (no anchor found).
-    if !muted {
-        for flush in pending {
-            let _ = out.write_all(flush.as_bytes());
-            let _ = out.flush();
-        }
+    // End of stream: flush any remaining buffered tokens.
+    for flush in pending {
+        let _ = out.write_all(flush.as_bytes());
+        let _ = out.flush();
     }
     if newline { let _ = writeln!(out); }
     text

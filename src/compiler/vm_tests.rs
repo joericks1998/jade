@@ -2374,69 +2374,69 @@ fn test_mute_no_literals_prints_everything() {
 
 #[test]
 fn test_mute_anchor_as_exact_single_token() {
-    // "<tool>" arrives as one token, followed by the payload.
+    // "<tool>" suppressed as a point; payload after it prints normally.
     let (full, printed) = run_mute(
         vec!["<tool>", r#"{"tool_name": "x"}"#],
         vec!["<tool>"],
     );
     assert_eq!(full, r#"<tool>{"tool_name": "x"}"#);
-    assert_eq!(printed, "");
+    assert_eq!(printed, r#"{"tool_name": "x"}"#);
 }
 
 #[test]
 fn test_mute_anchor_split_across_three_tokens() {
-    // "<", "tool", ">" arrive as separate tokens.
+    // "<", "tool", ">" reassembled by buffering → suppressed; payload prints.
     let (full, printed) = run_mute(
         vec!["<", "tool", ">", r#"{"tool_name": "x"}"#],
         vec!["<tool>"],
     );
     assert_eq!(full, r#"<tool>{"tool_name": "x"}"#);
-    assert_eq!(printed, "");
+    assert_eq!(printed, r#"{"tool_name": "x"}"#);
 }
 
 #[test]
 fn test_mute_bpe_merge_anchor_plus_brace() {
-    // Tokenizer merged "<tool>" with the following "{" — was the BPE bug.
+    // Tokenizer merged "<tool>" with the following "{". The anchor is suppressed;
+    // the remainder "{" and the next token print normally.
     let (full, printed) = run_mute(
         vec![r#"<tool>{"#, r#""tool_name": "x"}"#],
         vec!["<tool>"],
     );
     assert_eq!(full, r#"<tool>{"tool_name": "x"}"#);
-    assert_eq!(printed, "");
+    assert_eq!(printed, r#"{"tool_name": "x"}"#);
 }
 
 #[test]
 fn test_mute_bpe_merge_entire_tool_call() {
-    // Entire tool call as one token (extreme BPE merge).
+    // Entire tool call as one token. Only "<tool>" itself is suppressed.
     let (full, printed) = run_mute(
         vec![r#"<tool>{"tool_name": "x"}</tool>"#],
         vec!["<tool>"],
     );
     assert_eq!(full, r#"<tool>{"tool_name": "x"}</tool>"#);
-    assert_eq!(printed, "");
+    assert_eq!(printed, r#"{"tool_name": "x"}</tool>"#);
 }
 
 #[test]
 fn test_mute_preamble_then_anchor_multi_token() {
-    // Pre-anchor text in separate tokens; anchor itself split.
+    // Preamble prints; split anchor is reassembled and suppressed; payload prints.
     let (full, printed) = run_mute(
         vec!["Sure!", "\n", "<", "tool", ">", r#"{"tool_name": "x"}"#],
         vec!["<tool>"],
     );
     assert_eq!(full, r#"Sure!\n<tool>{"tool_name": "x"}"#.replace("\\n", "\n"));
-    assert_eq!(printed, "Sure!\n");
+    assert_eq!(printed, "Sure!\n{\"tool_name\": \"x\"}");
 }
 
 #[test]
 fn test_mute_preamble_and_anchor_in_single_token() {
-    // Pre-anchor text and anchor are in the same BPE token — sub-token search.
+    // Preamble and anchor in one BPE token — sub-token split, payload follows.
     let (full, printed) = run_mute(
         vec![r#"Sure!\n<tool>{"tool_name": "x"}"#.replace("\\n", "\n").as_str()],
         vec!["<tool>"],
     );
-    let full_expected = "Sure!\n<tool>{\"tool_name\": \"x\"}";
-    assert_eq!(full, full_expected);
-    assert_eq!(printed, "Sure!\n");
+    assert_eq!(full, "Sure!\n<tool>{\"tool_name\": \"x\"}");
+    assert_eq!(printed, "Sure!\n{\"tool_name\": \"x\"}");
 }
 
 #[test]
@@ -2531,79 +2531,81 @@ fn test_mute_newline_not_appended_when_false() {
 
 #[test]
 fn test_mute_anchor_split_two_tokens_midpoint() {
-    // "<too" + "l>" accumulate to "<tool>" — tests 2-token boundary.
+    // "<too" + "l>" reassembled → suppressed; payload prints.
     let (full, printed) = run_mute(
         vec!["<too", "l>", r#"{"tool_name": "x"}"#],
         vec!["<tool>"],
     );
     assert_eq!(full, r#"<tool>{"tool_name": "x"}"#);
-    assert_eq!(printed, "");
+    assert_eq!(printed, r#"{"tool_name": "x"}"#);
 }
 
 #[test]
 fn test_mute_anchor_split_as_name_then_close() {
-    // "<tool" + ">" — different 2-token split.
+    // "<tool" + ">" — different 2-token split; same result.
     let (full, printed) = run_mute(
         vec!["<tool", ">", r#"{"tool_name": "x"}"#],
         vec!["<tool>"],
     );
     assert_eq!(full, r#"<tool>{"tool_name": "x"}"#);
-    assert_eq!(printed, "");
+    assert_eq!(printed, r#"{"tool_name": "x"}"#);
 }
 
 // ── Gap: multiple mute literals ───────────────────────────────────────────
 
 #[test]
 fn test_mute_multiple_literals_first_fires() {
-    // Two anchors; the one that appears first in the response wins.
+    // Two possible anchors; the one that appears first is suppressed; rest prints.
     let (full, printed) = run_mute(
         vec!["think: ", "<tool>", r#"{"tool_name": "x"}"#],
         vec!["<tool>", "<call>"],
     );
     assert_eq!(full, r#"think: <tool>{"tool_name": "x"}"#);
-    assert_eq!(printed, "think: ");
+    assert_eq!(printed, "think: {\"tool_name\": \"x\"}");
 }
 
 #[test]
 fn test_mute_multiple_literals_second_fires() {
-    // Same two anchors; this response uses the second one.
+    // Same two anchors; second one in this response is suppressed; rest prints.
     let (full, printed) = run_mute(
         vec!["think: ", "<call>", r#"{"tool_name": "x"}"#],
         vec!["<tool>", "<call>"],
     );
     assert_eq!(full, r#"think: <call>{"tool_name": "x"}"#);
-    assert_eq!(printed, "think: ");
+    assert_eq!(printed, "think: {\"tool_name\": \"x\"}");
 }
 
-// ── Gap: stays silent after first trigger ────────────────────────────────
+// ── Non-permanent: each mute literal is a point filter ───────────────────
 
 #[test]
-fn test_mute_stays_silent_after_trigger() {
-    // A second "<tool>" after mute must not re-surface anything.
+fn test_mute_non_permanent_second_trigger_also_suppressed() {
+    // Muting is non-permanent: both occurrences of "<tool>" are suppressed;
+    // text between them (the payload) and after the second one ("more") print.
     let (full, printed) = run_mute(
         vec!["<tool>", r#"{"tool_name": "x"}"#, "<tool>more"],
         vec!["<tool>"],
     );
     assert_eq!(full, r#"<tool>{"tool_name": "x"}<tool>more"#);
-    assert_eq!(printed, "");
+    assert_eq!(printed, "{\"tool_name\": \"x\"}more");
 }
 
 #[test]
-fn test_mute_preamble_stays_silent_after_trigger() {
+fn test_mute_non_permanent_preamble_payload_and_trailing_all_print() {
+    // Preamble, payload between two triggers, and trailing text all print.
     let (full, printed) = run_mute(
         vec!["before ", "<tool>", "payload", "<tool>second"],
         vec!["<tool>"],
     );
     assert_eq!(full, "before <tool>payload<tool>second");
-    assert_eq!(printed, "before ");
+    assert_eq!(printed, "before payloadsecond");
 }
 
-// ── Gap: Grammar.new with no anchor is a no-op ───────────────────────────
+// ── Gap: Grammar.new with no anchor and no literals is a no-op ─────────────
 
 #[test]
 fn test_mute_grammar_with_no_anchor_is_noop_via_vm() {
-    // Grammar.new with only a pattern (no anchor arg) → anchor is None →
-    // mute_patterns is empty → nothing is muted.
+    // Regex-only pattern (no quoted literals) with no anchor → grammar_literals
+    // returns [] → mute_patterns empty → nothing is muted.
     let s = run_src_with_mock(
         r#"prompt p = "test"
 let g = Grammar.new("root ::= [a-z]+")
@@ -2617,8 +2619,8 @@ let reply = stream(?p, mute_on=[g])"#,
 
 #[test]
 fn test_mute_stream_returns_full_text_via_vm() {
-    // Full VM integration: MockBackend sends response as one token.
-    // stream() must return complete text (for parse_tag) even though muted.
+    // stream() must return the complete text (including muted spans) so callers
+    // can parse structured data from it.
     let s = run_src_with_mock(
         r#"prompt p = "test"
 let g = Grammar.new("root ::= \"{\" [a-z]+ \"}\"", "<tool>")
@@ -2639,43 +2641,45 @@ let reply = stream(?p, mute_on=[g])"#,
     assert_eq!(get_str(&s, "reply"), r#"Sure thing!<tool>{"tool_name": "x"}"#);
 }
 
-// ── Stdout capture: Grammar anchor extraction → actual suppression ─────────
+// ── Stdout capture: mute_on= point-suppression behaviour ──────────────────
 //
-// These tests go through the full VM pipeline:
-//   Grammar.new(gbnf, anchor) → VmValue::Grammar
-//   stream(?p, mute_on=[g])   → NativeFnId::Stream extracts anchor
-//   vm_drain_token_stream_printing → drain_tokens_with_mute → TestWriter
+// The mute algorithm is non-permanent: each mute literal is a point filter.
+// Text matching a literal is suppressed; text before/after it prints normally.
 //
-// MockBackend.infer_stream() sends the whole response as one token, which is
-// also the worst-case BPE scenario that originally surfaced the bug.
+// Mute source rule:
+//   Grammar has anchor  → anchor is the mute trigger (used for complex GBNFs
+//                         where extracting grammar literals would be wrong)
+//   Grammar has no anchor → quoted literals from the pattern are mute triggers
+//
+// MockBackend sends the whole response as one token (worst-case BPE scenario).
 
 #[test]
-fn test_mute_grammar_anchor_suppresses_stdout() {
-    // Tool call only — nothing should be printed except the trailing newline.
+fn test_mute_grammar_anchor_suppresses_anchor_token() {
+    // anchor = "<tool>" → only "<tool>" itself is suppressed; payload prints.
     let (_s, printed) = run_src_with_stdout_capture(
         r#"prompt p = "test"
 let g = Grammar.new("root ::= \"{\" [a-z]+ \"}\"", "<tool>")
 let reply = stream(?p, mute_on=[g])"#,
         vec![r#"<tool>{"tool_name": "x"}"#],
     ).unwrap();
-    assert_eq!(printed, "\n");
+    assert_eq!(printed, "{\"tool_name\": \"x\"}\n");
 }
 
 #[test]
-fn test_mute_grammar_preamble_printed_tool_suppressed() {
-    // Preamble before the anchor must print; anchor and payload must not.
+fn test_mute_grammar_preamble_printed_anchor_suppressed() {
+    // Preamble prints; anchor is suppressed as a point; payload prints.
     let (_s, printed) = run_src_with_stdout_capture(
         r#"prompt p = "test"
 let g = Grammar.new("root ::= \"{\" [a-z]+ \"}\"", "<tool>")
 let reply = stream(?p, mute_on=[g])"#,
         vec![r#"Sure thing!<tool>{"tool_name": "x"}"#],
     ).unwrap();
-    assert_eq!(printed, "Sure thing!\n");
+    assert_eq!(printed, "Sure thing!{\"tool_name\": \"x\"}\n");
 }
 
 #[test]
-fn test_mute_grammar_no_anchor_prints_everything() {
-    // Grammar without an anchor → mute_patterns is empty → all text printed.
+fn test_mute_grammar_no_anchor_regex_prints_everything() {
+    // Regex-only pattern, no anchor → grammar_literals returns [] → all printed.
     let (_s, printed) = run_src_with_stdout_capture(
         r#"prompt p = "test"
 let g = Grammar.new("root ::= [a-z]+")
@@ -2697,8 +2701,9 @@ let reply = stream(?p)"#,
 }
 
 #[test]
-fn test_mute_grammar_full_tool_gbnf_anchor_suppresses_stdout() {
-    // Use the real GBNF from tools.jde — anchor "<tool>", stop "</tool>".
+fn test_mute_grammar_full_tool_gbnf_anchor_suppresses_anchor_only() {
+    // Complex GBNF + anchor: only the anchor token "<tool>" is suppressed.
+    // The JSON payload and closing tag print normally (non-permanent muting).
     let gbnf = r#"root   ::= "{" ws toolkv (ws "," ws pair)* ws "}"
 toolkv ::= [\x22] "tool_name" [\x22] ws ":" ws str
 pair   ::= str ws ":" ws val
@@ -2716,7 +2721,49 @@ let reply = stream(?p, mute_on=[g])"#,
         &src,
         vec![r#"<tool>{"tool_name": "get_weather", "city": "Paris"}</tool>"#],
     ).unwrap();
-    assert_eq!(printed, "\n");
+    // "<tool>" suppressed; JSON payload and "</tool>" print.
+    assert_eq!(printed, "{\"tool_name\": \"get_weather\", \"city\": \"Paris\"}</tool>\n");
+}
+
+// ── Pattern-literal muting (no anchor) ────────────────────────────────────
+
+#[test]
+fn test_mute_pattern_literal_no_anchor() {
+    // Simple quoted-literal grammar, no anchor → literals ARE the mute triggers.
+    let (_s, printed) = run_src_with_stdout_capture(
+        r#"prompt p = "test"
+let g = Grammar.new("\"<think>\" | \"</think>\"")
+let reply = stream(?p, mute_on=[g])"#,
+        vec!["<think>some reasoning</think>final answer"],
+    ).unwrap();
+    // <think> and </think> suppressed; content between and after them prints.
+    assert_eq!(printed, "some reasoningfinal answer\n");
+}
+
+#[test]
+fn test_mute_pattern_literal_split_across_tokens() {
+    // MockBackend sends one token; the unit-level run_mute tests cover actual
+    // multi-token splits. Here we verify the full VM pipeline suppresses the
+    // literal and prints surrounding text when it arrives in one chunk.
+    let (_s, printed) = run_src_with_stdout_capture(
+        r#"prompt p = "test"
+let g = Grammar.new("\"<think>\"")
+let reply = stream(?p, mute_on=[g])"#,
+        vec!["before<think>after"],
+    ).unwrap();
+    assert_eq!(printed, "beforeafter\n");
+}
+
+#[test]
+fn test_mute_pattern_literal_non_permanent() {
+    // After a match is suppressed, subsequent non-matching text still prints.
+    let (_s, printed) = run_src_with_stdout_capture(
+        r#"prompt p = "test"
+let g = Grammar.new("\"<think>\"")
+let reply = stream(?p, mute_on=[g])"#,
+        vec!["hello <think> world"],
+    ).unwrap();
+    assert_eq!(printed, "hello  world\n");
 }
 
 // ── Constrained lazy inference: stop_anchor reaches jade-tree ────────────────
