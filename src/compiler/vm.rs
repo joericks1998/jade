@@ -2293,6 +2293,7 @@ async fn vm_drain_token_stream_printing(
 
     // Tokens held back while we wait to see if they complete a mute literal.
     let mut pending: Vec<String> = Vec::new();
+    let mut muted = false;
 
     while let Some(token) = rx.recv().await {
         text.push_str(&token);
@@ -2300,6 +2301,11 @@ async fn vm_drain_token_stream_printing(
         if mute_literals.is_empty() {
             print!("{}", token);
             let _ = std::io::stdout().flush();
+            continue;
+        }
+
+        if muted {
+            // Already silenced — accumulate but do not print.
             continue;
         }
 
@@ -2313,8 +2319,9 @@ async fn vm_drain_token_stream_printing(
             let pending_text: String = pending.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("");
 
             if mute_literals.iter().any(|lit| *lit == pending_text) {
-                // Full match — suppress all buffered tokens.
+                // Full match — suppress all buffered tokens and silence the rest.
                 pending.clear();
+                muted = true;
                 break;
             } else if mute_literals.iter().any(|lit| lit.starts_with(&pending_text)) {
                 // Pending text is a strict prefix of some literal — keep buffering.
@@ -2329,9 +2336,12 @@ async fn vm_drain_token_stream_printing(
     }
 
     // End of stream: flush any remaining buffered tokens (can't complete a match).
-    for flush in pending {
-        print!("{}", flush);
-        let _ = std::io::stdout().flush();
+    // Skip if muted — pending was cleared at the mute point.
+    if !muted {
+        for flush in pending {
+            print!("{}", flush);
+            let _ = std::io::stdout().flush();
+        }
     }
 
     if newline { println!(); }
