@@ -1663,7 +1663,7 @@ async fn call_value(
                 };
                 match val {
                     VmValue::TokenStream(ts) => {
-                        vm_drain_token_stream_printing(ts, state, span, end == "\n", &[]).await?;
+                        vm_drain_token_stream_printing(ts, state, span, end == "\n", false, &[], &[]).await?;
                         if end != "\n" && !end.is_empty() {
                             print!("{}", end);
                             let _ = std::io::stdout().flush();
@@ -1682,15 +1682,16 @@ async fn call_value(
                 }
                 let mut iter = args.into_iter();
                 let val = iter.next().unwrap();
-                // Build VM-side mute literals AND daemon inference constraints.
+                // Build VM-side mute spec AND daemon inference constraints.
                 //
-                // Mute source: union of BOTH sources for every Grammar:
-                //   1. Quoted literals extracted from the pattern via grammar_literals()
-                //      (e.g. `"<think>" | "</think>"` → suppress those exact strings)
-                //   2. The anchor string, if set (explicit trigger, e.g. "<tool>")
-                // Using both means the filter catches any token that fits the grammar
-                // pattern or the anchor, regardless of which was provided.
-                let mut mute_patterns: Vec<String> = Vec::new();
+                // Mute semantics:
+                //   No anchor  → start muted immediately (from first token).
+                //   Anchor     → enter muted mode when anchor string appears.
+                //   Stop_anchor → exit muted mode when stop string appears.
+                //   No stop_anchor → stay muted until end of stream.
+                let mut start_muted = false;
+                let mut region_start: Vec<String> = Vec::new();
+                let mut region_stop: Vec<String> = Vec::new();
                 let mut infer_grammar: Option<String> = None;
                 let mut infer_anchor: Option<String> = None;
                 let mut infer_stop: Option<String> = None;
@@ -1704,18 +1705,19 @@ async fn call_value(
                                     infer_anchor = anchor.clone();
                                     infer_stop = stop_anchor.clone();
                                 }
-                                // Always extract literals from the pattern itself.
-                                mute_patterns.extend(
-                                    crate::compiler::gbnf::grammar_literals(pattern)
-                                );
-                                // Also include anchor and stop_anchor if set.
-                                // stop_anchor can arrive as a partial token at end-of-stream
-                                // (daemon stops mid-split) and must be suppressed too.
-                                for tag in [anchor.as_ref(), stop_anchor.as_ref()].into_iter().flatten() {
-                                    if !mute_patterns.contains(tag) {
-                                        mute_patterns.push(tag.clone());
+                                if let Some(a) = anchor {
+                                    if !region_start.contains(a) { region_start.push(a.clone()); }
+                                    if let Some(s) = stop_anchor {
+                                        if !region_stop.contains(s) { region_stop.push(s.clone()); }
+                                    }
+                                } else {
+                                    // No anchor → mute from the very start of generation.
+                                    start_muted = true;
+                                    if let Some(s) = stop_anchor {
+                                        if !region_stop.contains(s) { region_stop.push(s.clone()); }
                                     }
                                 }
+                                let _ = pattern; // suppress unused warning (used via infer_grammar)
                             }
                         }
                     }
@@ -1745,7 +1747,10 @@ async fn call_value(
                                 *ts.tokens_handle.lock() = Some(handle);
                             }
                         }
-                        let text = vm_drain_token_stream_printing(ts, state, span, true, &mute_patterns).await?;
+                        let text = vm_drain_token_stream_printing(
+                            ts, state, span, true,
+                            start_muted, &region_start, &region_stop,
+                        ).await?;
                         Ok(VmValue::Str(text))
                     }
                     other => {
@@ -2364,35 +2369,41 @@ const MUTE_BUFFER_BAILOUT: usize = 10_000;
 /// full accumulated text (printed + muted combined) so callers can inspect the
 /// complete response.
 ///
-/// **Algorithm** — prefix-aware buffering, non-permanent, with bailout:
+/// Mute semantics (all use prefix-aware buffering):
 ///
-/// Tokens accumulate in `pending`. Each inner-loop pass over `pending`:
-///   1. If `pending.join("")` *contains* a mute literal at position P:
-///      - Print the text before P, suppress the literal, put the remainder
-///        back into `pending` and loop again (non-permanent — subsequent text
-///        is checked fresh).
-///   2. If the joined text is a strict prefix of some mute literal, keep
-///      buffering — but if `pending.len()` hits `MUTE_BUFFER_BAILOUT`, flush
-///      the oldest token and retry (prevents indefinite blocking).
-///   3. Otherwise flush the oldest token and retry.
+///   `start_muted` — if true, suppression begins immediately from the first token.
+///       Used when a Grammar has no `anchor` (the entire response is structured
+///       output — suppress from generation start).
 ///
-/// Mute source rule (callers decide what goes into `mute_literals`):
-///   Grammar has anchor  → anchor string is the mute trigger
-///   Grammar has no anchor → GBNF quoted literals are the mute triggers
-/// This keeps the daemon agnostic — all filtering is pure VM-side.
+///   `region_start` — strings that enter muted mode on match. Once matched, ALL
+///       subsequent tokens are suppressed until a `region_stop` match (or EOS).
+///       Used when Grammar has an explicit `anchor` value.
+///
+///   `region_stop` — strings that exit muted mode on match (match itself is
+///       suppressed). If empty, muting is permanent once entered.
+///       Used for `stop_anchor` values.
+///
+/// While muted, partial `region_stop` prefixes at end-of-stream are discarded
+/// (handles daemon stopping mid-token on stop_anchor detection).
 pub(crate) async fn drain_tokens_with_mute<W: std::io::Write + Send>(
     rx: &mut tokio::sync::mpsc::Receiver<String>,
-    mute_literals: &[String],
+    start_muted: bool,
+    region_start: &[String],
+    region_stop: &[String],
     out: &mut W,
     newline: bool,
 ) -> String {
     let mut text = String::new();
     let mut pending: Vec<String> = Vec::new();
+    let mut muted = start_muted;
 
     while let Some(token) = rx.recv().await {
         text.push_str(&token);
 
-        if mute_literals.is_empty() {
+        // Fast path: permanent mute (no stop anchor).
+        if muted && region_stop.is_empty() { continue; }
+        // Fast path: nothing to check while not muted.
+        if !muted && region_start.is_empty() {
             let _ = out.write_all(token.as_bytes());
             let _ = out.flush();
             continue;
@@ -2404,49 +2415,74 @@ pub(crate) async fn drain_tokens_with_mute<W: std::io::Write + Send>(
             if pending.is_empty() { break; }
             let pending_text: String = pending.join("");
 
-            // Find the earliest occurrence of any mute literal.
-            let hit = mute_literals.iter().filter_map(|lit| {
-                pending_text.find(lit.as_str()).map(|pos| (pos, lit.len()))
-            }).min_by_key(|&(pos, _)| pos);
+            if muted {
+                // Scanning for region_stop to exit muted mode.
+                let stop_hit = region_stop.iter()
+                    .filter_map(|s| pending_text.find(s.as_str()).map(|pos| (pos, s.len())))
+                    .min_by_key(|&(pos, _)| pos);
 
-            if let Some((pre_len, lit_len)) = hit {
-                // Print everything before the match; suppress the literal itself.
-                if pre_len > 0 {
-                    let _ = out.write_all(pending_text[..pre_len].as_bytes());
-                    let _ = out.flush();
+                if let Some((pos, len)) = stop_hit {
+                    let after = pending_text[pos + len..].to_owned();
+                    pending.clear();
+                    if !after.is_empty() { pending.push(after); }
+                    muted = false;
+                    // continue inner loop to process remainder
+                } else if region_stop.iter().any(|s| s.starts_with(pending_text.as_str())) {
+                    if pending.len() >= MUTE_BUFFER_BAILOUT { pending.remove(0); }
+                    else { break; }
+                } else {
+                    pending.remove(0); // still muted, discard oldest
                 }
-                // Put the remainder back and loop — there may be more matches.
-                let remainder = pending_text[pre_len + lit_len..].to_owned();
-                pending.clear();
-                if !remainder.is_empty() { pending.push(remainder); }
-            } else if mute_literals.iter().any(|lit| lit.starts_with(&pending_text)) {
-                // Still a strict prefix of some literal — keep buffering unless
-                // the buffer has grown too large (bailout).
-                if pending.len() >= MUTE_BUFFER_BAILOUT {
+            } else {
+                // Scanning for region_start to enter muted mode.
+                let hit = region_start.iter()
+                    .filter_map(|s| {
+                        pending_text.find(s.as_str()).map(|pos| (pos, s.len()))
+                    })
+                    .min_by_key(|&(pos, _)| pos);
+
+                let is_prefix = region_start.iter()
+                    .any(|s| s.starts_with(pending_text.as_str()));
+
+                if let Some((pre_len, lit_len)) = hit {
+                    if pre_len > 0 {
+                        let _ = out.write_all(pending_text[..pre_len].as_bytes());
+                        let _ = out.flush();
+                    }
+                    let after = pending_text[pre_len + lit_len..].to_owned();
+                    pending.clear();
+                    if !after.is_empty() { pending.push(after); }
+                    muted = true;
+                    // continue inner loop
+                } else if is_prefix {
+                    if pending.len() >= MUTE_BUFFER_BAILOUT {
+                        let flush = pending.remove(0);
+                        let _ = out.write_all(flush.as_bytes());
+                        let _ = out.flush();
+                    } else {
+                        break;
+                    }
+                } else {
                     let flush = pending.remove(0);
                     let _ = out.write_all(flush.as_bytes());
                     let _ = out.flush();
-                } else {
-                    break;
                 }
-            } else {
-                // No match and no prefix — flush oldest token and retry.
-                let flush = pending.remove(0);
-                let _ = out.write_all(flush.as_bytes());
-                let _ = out.flush();
             }
         }
     }
 
-    // End of stream: flush remaining buffered tokens, but suppress any trailing
-    // content that looks like an incomplete mute literal (e.g. "</" when the
-    // daemon stopped mid-"</tool>" after detecting the stop_anchor).
-    let trailing: String = pending.join("");
-    if !trailing.is_empty() {
-        let is_partial_mute = mute_literals.iter().any(|lit| lit.starts_with(&trailing));
-        if !is_partial_mute {
-            let _ = out.write_all(trailing.as_bytes());
-            let _ = out.flush();
+    // End of stream.
+    if muted {
+        // Inside unclosed region — discard remaining (handles partial stop tags).
+    } else {
+        let trailing: String = pending.join("");
+        if !trailing.is_empty() {
+            let is_partial = region_start.iter()
+                .any(|s| s.starts_with(trailing.as_str()));
+            if !is_partial {
+                let _ = out.write_all(trailing.as_bytes());
+                let _ = out.flush();
+            }
         }
     }
     if newline { let _ = writeln!(out); }
@@ -2464,7 +2500,9 @@ async fn vm_drain_token_stream_printing(
     state: &mut VmState,
     span: Span,
     newline: bool,
-    mute_patterns: &[String],
+    start_muted: bool,
+    region_start: &[String],
+    region_stop: &[String],
 ) -> Result<String> {
     // Fallback lazy start with no constraints (for print(?p) and similar paths).
     // If stream() already started inference with grammar constraints, this is a no-op.
@@ -2483,19 +2521,18 @@ async fn vm_drain_token_stream_printing(
             *ts.tokens_handle.lock() = Some(handle);
         }
     }
-    let mute_literals: Vec<String> = mute_patterns.to_vec();
     let rx_opt = ts.rx.lock().take();
     let mut rx = rx_opt.ok_or(JadeError::DoubleStreamDrain { span })?;
 
     #[cfg(test)]
     let text = if let Some(buf) = &state.test_stdout {
         let mut w = TestWriter(std::sync::Arc::clone(buf));
-        drain_tokens_with_mute(&mut rx, &mute_literals, &mut w, newline).await
+        drain_tokens_with_mute(&mut rx, start_muted, region_start, region_stop, &mut w, newline).await
     } else {
-        drain_tokens_with_mute(&mut rx, &mute_literals, &mut std::io::stdout(), newline).await
+        drain_tokens_with_mute(&mut rx, start_muted, region_start, region_stop, &mut std::io::stdout(), newline).await
     };
     #[cfg(not(test))]
-    let text = drain_tokens_with_mute(&mut rx, &mute_literals, &mut std::io::stdout(), newline).await;
+    let text = drain_tokens_with_mute(&mut rx, start_muted, region_start, region_stop, &mut std::io::stdout(), newline).await;
 
     let h_opt = ts.tokens_handle.lock().take();
     if let Some(h) = h_opt {
