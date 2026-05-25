@@ -2452,13 +2452,26 @@ fn test_mute_no_anchor_in_response_prints_all() {
 
 #[test]
 fn test_mute_partial_prefix_at_end_of_stream_flushes() {
-    // "<too" starts like the anchor but never completes — must flush at end.
+    // "<too" followed by "k " — accumulates to "<took " which is NOT a prefix
+    // of "<tool>", so it gets flushed token-by-token during the stream.
     let (full, printed) = run_mute(
         vec!["<too", "k "],
         vec!["<tool>"],
     );
     assert_eq!(full, "<took ");
     assert_eq!(printed, "<took ");
+}
+
+#[test]
+fn test_mute_incomplete_literal_at_end_of_stream_suppressed() {
+    // Daemon stopped mid-"</tool>" (split token), sending only "</". That "</
+    // is a strict prefix of "</tool>" so it is suppressed rather than flushed.
+    let (full, printed) = run_mute(
+        vec!["payload", "</"],
+        vec!["</tool>"],
+    );
+    assert_eq!(full, "payload</");
+    assert_eq!(printed, "payload");
 }
 
 #[test]
@@ -2701,9 +2714,9 @@ let reply = stream(?p)"#,
 }
 
 #[test]
-fn test_mute_grammar_full_tool_gbnf_anchor_suppresses_anchor_only() {
-    // Complex GBNF + anchor: only the anchor token "<tool>" is suppressed.
-    // The JSON payload and closing tag print normally (non-permanent muting).
+fn test_mute_grammar_full_tool_gbnf_anchor_and_stop_suppressed() {
+    // Complex GBNF + anchor + stop_anchor: both "<tool>" and "</tool>" are
+    // suppressed as point filters; JSON payload between them prints.
     let gbnf = r#"root   ::= "{" ws toolkv (ws "," ws pair)* ws "}"
 toolkv ::= [\x22] "tool_name" [\x22] ws ":" ws str
 pair   ::= str ws ":" ws val
@@ -2721,8 +2734,8 @@ let reply = stream(?p, mute_on=[g])"#,
         &src,
         vec![r#"<tool>{"tool_name": "get_weather", "city": "Paris"}</tool>"#],
     ).unwrap();
-    // "<tool>" suppressed; JSON payload and "</tool>" print.
-    assert_eq!(printed, "{\"tool_name\": \"get_weather\", \"city\": \"Paris\"}</tool>\n");
+    // "<tool>" and "</tool>" both suppressed; JSON payload prints.
+    assert_eq!(printed, "{\"tool_name\": \"get_weather\", \"city\": \"Paris\"}\n");
 }
 
 // ── Pattern-literal muting (no anchor) ────────────────────────────────────

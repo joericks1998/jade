@@ -1708,10 +1708,12 @@ async fn call_value(
                                 mute_patterns.extend(
                                     crate::compiler::gbnf::grammar_literals(pattern)
                                 );
-                                // Also include the explicit anchor if set.
-                                if let Some(a) = anchor {
-                                    if !mute_patterns.contains(a) {
-                                        mute_patterns.push(a.clone());
+                                // Also include anchor and stop_anchor if set.
+                                // stop_anchor can arrive as a partial token at end-of-stream
+                                // (daemon stops mid-split) and must be suppressed too.
+                                for tag in [anchor.as_ref(), stop_anchor.as_ref()].into_iter().flatten() {
+                                    if !mute_patterns.contains(tag) {
+                                        mute_patterns.push(tag.clone());
                                     }
                                 }
                             }
@@ -2436,10 +2438,16 @@ pub(crate) async fn drain_tokens_with_mute<W: std::io::Write + Send>(
         }
     }
 
-    // End of stream: flush any remaining buffered tokens.
-    for flush in pending {
-        let _ = out.write_all(flush.as_bytes());
-        let _ = out.flush();
+    // End of stream: flush remaining buffered tokens, but suppress any trailing
+    // content that looks like an incomplete mute literal (e.g. "</" when the
+    // daemon stopped mid-"</tool>" after detecting the stop_anchor).
+    let trailing: String = pending.join("");
+    if !trailing.is_empty() {
+        let is_partial_mute = mute_literals.iter().any(|lit| lit.starts_with(&trailing));
+        if !is_partial_mute {
+            let _ = out.write_all(trailing.as_bytes());
+            let _ = out.flush();
+        }
     }
     if newline { let _ = writeln!(out); }
     text
