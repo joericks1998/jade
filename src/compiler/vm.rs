@@ -1653,8 +1653,8 @@ async fn call_value(
                     None | Some(VmValue::Nil) => Vec::new(),
                     Some(VmValue::Array(arr)) => {
                         arr.lock().iter().filter_map(|v| {
-                            if let VmValue::Grammar { pattern, .. } = v {
-                                Some(pattern.clone())
+                            if let VmValue::Grammar { anchor: Some(a), .. } = v {
+                                Some(a.clone())
                             } else {
                                 None
                             }
