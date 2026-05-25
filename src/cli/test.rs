@@ -134,6 +134,8 @@ async fn run_test_file(
         max_retries,
         source_dir,
         native_packages: std::collections::HashMap::new(),
+        #[cfg(test)]
+        test_stdout: None,
     };
 
     vm::run(compiled, opts).await.map_err(|e| e.to_string())?;

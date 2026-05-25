@@ -308,12 +308,33 @@ fn try_run_src(src: &str) -> Result<VmState> {
 }
 
 fn run_src_with_mock(src: &str, responses: Vec<&str>) -> Result<VmState> {
+    run_src_with_mock_inner(src, responses, None)
+}
+
+/// Like `run_src_with_mock` but also returns a string of everything written to
+/// stdout by `vm_drain_token_stream_printing` (i.e. the `stream()` output path).
+fn run_src_with_stdout_capture(
+    src: &str,
+    responses: Vec<&str>,
+) -> Result<(VmState, String)> {
+    let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let state = run_src_with_mock_inner(src, responses, Some(std::sync::Arc::clone(&buf)))?;
+    let printed = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    Ok((state, printed))
+}
+
+fn run_src_with_mock_inner(
+    src: &str,
+    responses: Vec<&str>,
+    test_stdout: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
+) -> Result<VmState> {
     let tokens = lexer::tokenize(src).expect("lex failed");
     let program = parser::parse(tokens).expect("parse failed");
     let tprogram = type_infer::infer(program).expect("type inference failed");
     let compiled = emit::emit(tprogram).expect("emit failed");
     let opts = VmOpts {
         backend: Some(std::sync::Arc::new(crate::llm::MockBackend::new(responses))),
+        test_stdout,
         ..VmOpts::default()
     };
     tokio::runtime::Builder::new_current_thread()
@@ -2316,4 +2337,467 @@ fn test_http_post_arity_error() {
 fn test_http_get_connection_refused_errors() {
     let err = try_run_src("use std.http\nhttp.get(\"http://127.0.0.1:1/\")").err().expect("expected error");
     assert!(matches!(err, JadeError::IoError { .. }));
+}
+
+// ── Stream muting unit tests ──────────────────────────────────────────────
+//
+// Tests for `drain_tokens_with_mute`. We construct a channel, push tokens,
+// then run the drainer with a Vec<u8> buffer instead of stdout so we can
+// assert on exactly what was printed vs what was silenced.
+
+fn run_mute(tokens: Vec<&str>, mute_literals: Vec<&str>) -> (String, String) {
+    let literals: Vec<String> = mute_literals.into_iter().map(|s| s.to_string()).collect();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async move {
+            let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+            for t in tokens {
+                tx.send(t.to_string()).await.unwrap();
+            }
+            drop(tx); // close channel so drain terminates
+            let mut out = Vec::<u8>::new();
+            let full = super::drain_tokens_with_mute(&mut rx, &literals, &mut out, false).await;
+            let printed = String::from_utf8(out).unwrap();
+            (full, printed)
+        })
+}
+
+#[test]
+fn test_mute_no_literals_prints_everything() {
+    // Empty mute list — every token reaches stdout.
+    let (full, printed) = run_mute(vec!["hello ", "world"], vec![]);
+    assert_eq!(full, "hello world");
+    assert_eq!(printed, "hello world");
+}
+
+#[test]
+fn test_mute_anchor_as_exact_single_token() {
+    // "<tool>" arrives as one token, followed by the payload.
+    let (full, printed) = run_mute(
+        vec!["<tool>", r#"{"tool_name": "x"}"#],
+        vec!["<tool>"],
+    );
+    assert_eq!(full, r#"<tool>{"tool_name": "x"}"#);
+    assert_eq!(printed, "");
+}
+
+#[test]
+fn test_mute_anchor_split_across_three_tokens() {
+    // "<", "tool", ">" arrive as separate tokens.
+    let (full, printed) = run_mute(
+        vec!["<", "tool", ">", r#"{"tool_name": "x"}"#],
+        vec!["<tool>"],
+    );
+    assert_eq!(full, r#"<tool>{"tool_name": "x"}"#);
+    assert_eq!(printed, "");
+}
+
+#[test]
+fn test_mute_bpe_merge_anchor_plus_brace() {
+    // Tokenizer merged "<tool>" with the following "{" — was the BPE bug.
+    let (full, printed) = run_mute(
+        vec![r#"<tool>{"#, r#""tool_name": "x"}"#],
+        vec!["<tool>"],
+    );
+    assert_eq!(full, r#"<tool>{"tool_name": "x"}"#);
+    assert_eq!(printed, "");
+}
+
+#[test]
+fn test_mute_bpe_merge_entire_tool_call() {
+    // Entire tool call as one token (extreme BPE merge).
+    let (full, printed) = run_mute(
+        vec![r#"<tool>{"tool_name": "x"}</tool>"#],
+        vec!["<tool>"],
+    );
+    assert_eq!(full, r#"<tool>{"tool_name": "x"}</tool>"#);
+    assert_eq!(printed, "");
+}
+
+#[test]
+fn test_mute_preamble_then_anchor_multi_token() {
+    // Pre-anchor text in separate tokens; anchor itself split.
+    let (full, printed) = run_mute(
+        vec!["Sure!", "\n", "<", "tool", ">", r#"{"tool_name": "x"}"#],
+        vec!["<tool>"],
+    );
+    assert_eq!(full, r#"Sure!\n<tool>{"tool_name": "x"}"#.replace("\\n", "\n"));
+    assert_eq!(printed, "Sure!\n");
+}
+
+#[test]
+fn test_mute_preamble_and_anchor_in_single_token() {
+    // Pre-anchor text and anchor are in the same BPE token — sub-token search.
+    let (full, printed) = run_mute(
+        vec![r#"Sure!\n<tool>{"tool_name": "x"}"#.replace("\\n", "\n").as_str()],
+        vec!["<tool>"],
+    );
+    let full_expected = "Sure!\n<tool>{\"tool_name\": \"x\"}";
+    assert_eq!(full, full_expected);
+    assert_eq!(printed, "Sure!\n");
+}
+
+#[test]
+fn test_mute_no_anchor_in_response_prints_all() {
+    // Normal response — nothing muted.
+    let (full, printed) = run_mute(
+        vec!["Hello, ", "world!"],
+        vec!["<tool>"],
+    );
+    assert_eq!(full, "Hello, world!");
+    assert_eq!(printed, "Hello, world!");
+}
+
+#[test]
+fn test_mute_partial_prefix_at_end_of_stream_flushes() {
+    // "<too" starts like the anchor but never completes — must flush at end.
+    let (full, printed) = run_mute(
+        vec!["<too", "k "],
+        vec!["<tool>"],
+    );
+    assert_eq!(full, "<took ");
+    assert_eq!(printed, "<took ");
+}
+
+#[test]
+fn test_mute_preamble_partial_prefix_then_no_anchor() {
+    // Sequence: text, then something that looks like anchor start, but isn't.
+    let (full, printed) = run_mute(
+        vec!["price < today"],
+        vec!["<tool>"],
+    );
+    assert_eq!(full, "price < today");
+    assert_eq!(printed, "price < today");
+}
+
+// ── Gap: empty stream ────────────────────────────────────────────────────
+
+#[test]
+fn test_mute_empty_stream() {
+    // Zero tokens — function must return empty strings without hanging.
+    let (full, printed) = run_mute(vec![], vec!["<tool>"]);
+    assert_eq!(full, "");
+    assert_eq!(printed, "");
+}
+
+#[test]
+fn test_mute_empty_stream_no_literals() {
+    let (full, printed) = run_mute(vec![], vec![]);
+    assert_eq!(full, "");
+    assert_eq!(printed, "");
+}
+
+// ── Gap: newline=true path ────────────────────────────────────────────────
+
+#[test]
+fn test_mute_newline_appended_to_printed() {
+    // newline=true must append '\n' to the printed output.
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+            tx.send("hello".to_string()).await.unwrap();
+            drop(tx);
+            let mut out = Vec::<u8>::new();
+            let full = super::drain_tokens_with_mute(&mut rx, &[], &mut out, true).await;
+            let printed = String::from_utf8(out).unwrap();
+            assert_eq!(full, "hello");
+            assert_eq!(printed, "hello\n");
+        });
+}
+
+#[test]
+fn test_mute_newline_not_appended_when_false() {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+            tx.send("hello".to_string()).await.unwrap();
+            drop(tx);
+            let mut out = Vec::<u8>::new();
+            super::drain_tokens_with_mute(&mut rx, &[], &mut out, false).await;
+            let printed = String::from_utf8(out).unwrap();
+            assert_eq!(printed, "hello");
+        });
+}
+
+// ── Gap: additional anchor split boundaries ───────────────────────────────
+
+#[test]
+fn test_mute_anchor_split_two_tokens_midpoint() {
+    // "<too" + "l>" accumulate to "<tool>" — tests 2-token boundary.
+    let (full, printed) = run_mute(
+        vec!["<too", "l>", r#"{"tool_name": "x"}"#],
+        vec!["<tool>"],
+    );
+    assert_eq!(full, r#"<tool>{"tool_name": "x"}"#);
+    assert_eq!(printed, "");
+}
+
+#[test]
+fn test_mute_anchor_split_as_name_then_close() {
+    // "<tool" + ">" — different 2-token split.
+    let (full, printed) = run_mute(
+        vec!["<tool", ">", r#"{"tool_name": "x"}"#],
+        vec!["<tool>"],
+    );
+    assert_eq!(full, r#"<tool>{"tool_name": "x"}"#);
+    assert_eq!(printed, "");
+}
+
+// ── Gap: multiple mute literals ───────────────────────────────────────────
+
+#[test]
+fn test_mute_multiple_literals_first_fires() {
+    // Two anchors; the one that appears first in the response wins.
+    let (full, printed) = run_mute(
+        vec!["think: ", "<tool>", r#"{"tool_name": "x"}"#],
+        vec!["<tool>", "<call>"],
+    );
+    assert_eq!(full, r#"think: <tool>{"tool_name": "x"}"#);
+    assert_eq!(printed, "think: ");
+}
+
+#[test]
+fn test_mute_multiple_literals_second_fires() {
+    // Same two anchors; this response uses the second one.
+    let (full, printed) = run_mute(
+        vec!["think: ", "<call>", r#"{"tool_name": "x"}"#],
+        vec!["<tool>", "<call>"],
+    );
+    assert_eq!(full, r#"think: <call>{"tool_name": "x"}"#);
+    assert_eq!(printed, "think: ");
+}
+
+// ── Gap: stays silent after first trigger ────────────────────────────────
+
+#[test]
+fn test_mute_stays_silent_after_trigger() {
+    // A second "<tool>" after mute must not re-surface anything.
+    let (full, printed) = run_mute(
+        vec!["<tool>", r#"{"tool_name": "x"}"#, "<tool>more"],
+        vec!["<tool>"],
+    );
+    assert_eq!(full, r#"<tool>{"tool_name": "x"}<tool>more"#);
+    assert_eq!(printed, "");
+}
+
+#[test]
+fn test_mute_preamble_stays_silent_after_trigger() {
+    let (full, printed) = run_mute(
+        vec!["before ", "<tool>", "payload", "<tool>second"],
+        vec!["<tool>"],
+    );
+    assert_eq!(full, "before <tool>payload<tool>second");
+    assert_eq!(printed, "before ");
+}
+
+// ── Gap: Grammar.new with no anchor is a no-op ───────────────────────────
+
+#[test]
+fn test_mute_grammar_with_no_anchor_is_noop_via_vm() {
+    // Grammar.new with only a pattern (no anchor arg) → anchor is None →
+    // mute_patterns is empty → nothing is muted.
+    let s = run_src_with_mock(
+        r#"prompt p = "test"
+let g = Grammar.new("root ::= [a-z]+")
+let reply = stream(?p, mute_on=[g])"#,
+        vec!["hello world"],
+    ).unwrap();
+    assert_eq!(get_str(&s, "reply"), "hello world");
+}
+
+// ── Return-value correctness (no stdout needed) ───────────────────────────
+
+#[test]
+fn test_mute_stream_returns_full_text_via_vm() {
+    // Full VM integration: MockBackend sends response as one token.
+    // stream() must return complete text (for parse_tag) even though muted.
+    let s = run_src_with_mock(
+        r#"prompt p = "test"
+let g = Grammar.new("root ::= \"{\" [a-z]+ \"}\"", "<tool>")
+let reply = stream(?p, mute_on=[g])"#,
+        vec![r#"<tool>{"tool_name": "x"}"#],
+    ).unwrap();
+    assert_eq!(get_str(&s, "reply"), r#"<tool>{"tool_name": "x"}"#);
+}
+
+#[test]
+fn test_mute_stream_returns_full_text_with_preamble_via_vm() {
+    let s = run_src_with_mock(
+        r#"prompt p = "test"
+let g = Grammar.new("root ::= \"{\" [a-z]+ \"}\"", "<tool>")
+let reply = stream(?p, mute_on=[g])"#,
+        vec![r#"Sure thing!<tool>{"tool_name": "x"}"#],
+    ).unwrap();
+    assert_eq!(get_str(&s, "reply"), r#"Sure thing!<tool>{"tool_name": "x"}"#);
+}
+
+// ── Stdout capture: Grammar anchor extraction → actual suppression ─────────
+//
+// These tests go through the full VM pipeline:
+//   Grammar.new(gbnf, anchor) → VmValue::Grammar
+//   stream(?p, mute_on=[g])   → NativeFnId::Stream extracts anchor
+//   vm_drain_token_stream_printing → drain_tokens_with_mute → TestWriter
+//
+// MockBackend.infer_stream() sends the whole response as one token, which is
+// also the worst-case BPE scenario that originally surfaced the bug.
+
+#[test]
+fn test_mute_grammar_anchor_suppresses_stdout() {
+    // Tool call only — nothing should be printed except the trailing newline.
+    let (_s, printed) = run_src_with_stdout_capture(
+        r#"prompt p = "test"
+let g = Grammar.new("root ::= \"{\" [a-z]+ \"}\"", "<tool>")
+let reply = stream(?p, mute_on=[g])"#,
+        vec![r#"<tool>{"tool_name": "x"}"#],
+    ).unwrap();
+    assert_eq!(printed, "\n");
+}
+
+#[test]
+fn test_mute_grammar_preamble_printed_tool_suppressed() {
+    // Preamble before the anchor must print; anchor and payload must not.
+    let (_s, printed) = run_src_with_stdout_capture(
+        r#"prompt p = "test"
+let g = Grammar.new("root ::= \"{\" [a-z]+ \"}\"", "<tool>")
+let reply = stream(?p, mute_on=[g])"#,
+        vec![r#"Sure thing!<tool>{"tool_name": "x"}"#],
+    ).unwrap();
+    assert_eq!(printed, "Sure thing!\n");
+}
+
+#[test]
+fn test_mute_grammar_no_anchor_prints_everything() {
+    // Grammar without an anchor → mute_patterns is empty → all text printed.
+    let (_s, printed) = run_src_with_stdout_capture(
+        r#"prompt p = "test"
+let g = Grammar.new("root ::= [a-z]+")
+let reply = stream(?p, mute_on=[g])"#,
+        vec!["hello world"],
+    ).unwrap();
+    assert_eq!(printed, "hello world\n");
+}
+
+#[test]
+fn test_mute_no_mute_on_kwarg_prints_everything() {
+    // stream() with no mute_on at all → nothing suppressed.
+    let (_s, printed) = run_src_with_stdout_capture(
+        r#"prompt p = "test"
+let reply = stream(?p)"#,
+        vec!["hello world"],
+    ).unwrap();
+    assert_eq!(printed, "hello world\n");
+}
+
+#[test]
+fn test_mute_grammar_full_tool_gbnf_anchor_suppresses_stdout() {
+    // Use the real GBNF from tools.jde — anchor "<tool>", stop "</tool>".
+    let gbnf = r#"root   ::= "{" ws toolkv (ws "," ws pair)* ws "}"
+toolkv ::= [\x22] "tool_name" [\x22] ws ":" ws str
+pair   ::= str ws ":" ws val
+val    ::= str | num | "true" | "false" | "null"
+str    ::= [\x22] [^\x22]* [\x22]
+num    ::= "-"? [0-9]+ ("." [0-9]+)?
+ws     ::= [ ]*"#;
+    let src = format!(
+        r#"let g = Grammar.new("{gbnf}", "<tool>", "</tool>")
+prompt p = "test"
+let reply = stream(?p, mute_on=[g])"#,
+        gbnf = gbnf.replace('\\', "\\\\").replace('"', "\\\""),
+    );
+    let (_s, printed) = run_src_with_stdout_capture(
+        &src,
+        vec![r#"<tool>{"tool_name": "get_weather", "city": "Paris"}</tool>"#],
+    ).unwrap();
+    assert_eq!(printed, "\n");
+}
+
+// ── Constrained lazy inference: stop_anchor reaches jade-tree ────────────────
+//
+// These tests verify that when `stream(?p, mute_on=[g])` is called with a
+// Grammar that has a stop_anchor, the inference request sent to the backend
+// carries that stop_anchor — i.e. the lazy stream starts with constraints.
+//
+// A helper that shares the Arc<MockBackend> with the test so we can inspect
+// what InferenceRequest was actually sent after the run.
+
+fn run_src_with_shared_backend(
+    src: &str,
+    backend: std::sync::Arc<crate::llm::MockBackend>,
+) -> Result<VmState> {
+    let tokens = lexer::tokenize(src).expect("lex failed");
+    let program = parser::parse(tokens).expect("parse failed");
+    let tprogram = type_infer::infer(program).expect("type inference failed");
+    let compiled = emit::emit(tprogram).expect("emit failed");
+    let opts = VmOpts {
+        backend: Some(std::sync::Arc::clone(&backend) as std::sync::Arc<dyn crate::llm::InferenceBackend>),
+        #[cfg(test)]
+        test_stdout: None,
+        ..VmOpts::default()
+    };
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime")
+        .block_on(run(compiled, opts))
+}
+
+#[test]
+fn test_stream_with_grammar_passes_stop_anchor_to_backend() {
+    // Verify that `stream(?p, mute_on=[g])` sends stop_anchor="</tool>" to the
+    // inference backend rather than None — this is what prevents the model loop.
+    let backend = std::sync::Arc::new(crate::llm::MockBackend::new(
+        vec![r#"<tool>{"tool_name": "x"}</tool>"#],
+    ));
+    let src = r#"prompt p = "test"
+let g = Grammar.new("root ::= \"{\" [a-z]+ \"}\"", "<tool>", "</tool>")
+let reply = stream(?p, mute_on=[g])"#;
+    run_src_with_shared_backend(src, std::sync::Arc::clone(&backend)).unwrap();
+    let captured = backend.captured.lock().unwrap();
+    assert_eq!(captured.len(), 1, "exactly one inference call expected");
+    assert_eq!(captured[0].stop_anchor.as_deref(), Some("</tool>"));
+    assert_eq!(captured[0].anchor.as_deref(), Some("<tool>"));
+}
+
+#[test]
+fn test_stream_with_grammar_no_stop_anchor_passes_none() {
+    // Grammar.new with only anchor (no stop_anchor) → stop_anchor is None in request.
+    let backend = std::sync::Arc::new(crate::llm::MockBackend::new(vec!["hello"]));
+    let src = r#"prompt p = "test"
+let g = Grammar.new("root ::= [a-z]+", "<tool>")
+let reply = stream(?p, mute_on=[g])"#;
+    run_src_with_shared_backend(src, std::sync::Arc::clone(&backend)).unwrap();
+    let captured = backend.captured.lock().unwrap();
+    assert_eq!(captured[0].stop_anchor, None);
+    assert_eq!(captured[0].anchor.as_deref(), Some("<tool>"));
+}
+
+#[test]
+fn test_stream_no_mute_on_passes_no_constraints() {
+    // stream(?p) without mute_on= → backend receives no grammar/anchor/stop.
+    let backend = std::sync::Arc::new(crate::llm::MockBackend::new(vec!["hello"]));
+    let src = "prompt p = \"test\"\nlet reply = stream(?p)";
+    run_src_with_shared_backend(src, std::sync::Arc::clone(&backend)).unwrap();
+    let captured = backend.captured.lock().unwrap();
+    assert_eq!(captured[0].grammar, None);
+    assert_eq!(captured[0].anchor, None);
+    assert_eq!(captured[0].stop_anchor, None);
+}
+
+#[test]
+fn test_prompt_deref_outside_stream_passes_no_constraints() {
+    // `let x = ?p` (not inside stream) → lazy start with no constraints.
+    let backend = std::sync::Arc::new(crate::llm::MockBackend::new(vec!["hello"]));
+    let src = "prompt p = \"test\"\nlet x = ?p";
+    run_src_with_shared_backend(src, std::sync::Arc::clone(&backend)).unwrap();
+    let captured = backend.captured.lock().unwrap();
+    assert_eq!(captured[0].grammar, None);
+    assert_eq!(captured[0].stop_anchor, None);
 }

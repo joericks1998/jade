@@ -8,6 +8,7 @@ pub mod jade_os;
 pub mod openai;
 
 /// A request sent to an inference backend.
+#[derive(Clone)]
 pub struct InferenceRequest {
     pub prompt: String,
     pub model: String,
@@ -125,12 +126,17 @@ pub struct MockBackend {
     /// When non-empty, responses are consumed in FIFO order regardless of heuristics.
     /// Used by unit tests that need precise control.
     pub responses: std::sync::Mutex<std::collections::VecDeque<String>>,
+    /// All requests sent to this backend, in order. Lets tests verify grammar constraints.
+    pub captured: std::sync::Mutex<Vec<InferenceRequest>>,
 }
 
 #[cfg(test)]
 impl Default for MockBackend {
     fn default() -> Self {
-        MockBackend { responses: std::sync::Mutex::new(std::collections::VecDeque::new()) }
+        MockBackend {
+            responses: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            captured: std::sync::Mutex::new(Vec::new()),
+        }
     }
 }
 
@@ -141,6 +147,7 @@ impl MockBackend {
             responses: std::sync::Mutex::new(
                 responses.into_iter().map(|s| s.to_string()).collect()
             ),
+            captured: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -160,6 +167,7 @@ impl MockBackend {
 #[async_trait::async_trait]
 impl InferenceBackend for MockBackend {
     async fn infer(&self, req: InferenceRequest, _span: Span) -> Result<InferenceResponse> {
+        self.captured.lock().unwrap().push(req.clone());
         let text = self.responses.lock().unwrap().pop_front()
             .unwrap_or_else(|| Self::mock_response(&req.prompt));
         Ok(InferenceResponse { text, tokens_used: 10_i64 })

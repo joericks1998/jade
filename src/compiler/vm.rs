@@ -97,6 +97,9 @@ pub struct JadeTokenStream {
     pub rx: Mutex<Option<tokio::sync::mpsc::Receiver<String>>>,
     pub tokens_handle: Mutex<Option<JoinHandle<Result<i64>>>>,
     pub prompt_key: (String, Option<String>),
+    /// Set when `?p` creates the stream lazily. Inference starts on first drain
+    /// so callers (e.g. `stream()`) can inject grammar constraints first.
+    pub lazy_prompt: Mutex<Option<String>>,
 }
 
 impl Drop for JadeFuture {
@@ -223,6 +226,21 @@ pub fn value_type_name(v: &VmValue) -> &'static str {
 // ── VM state ──────────────────────────────────────────────────────────────────
 
 /// The global execution state, including LLM integration.
+/// Test-only writer that forwards to a shared buffer without holding the lock
+/// across `.await` points (each `write` call locks and immediately releases).
+/// `Send`-safe because `Arc<Mutex<Vec<u8>>>` is `Send`.
+#[cfg(test)]
+pub(crate) struct TestWriter(pub std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+#[cfg(test)]
+impl std::io::Write for TestWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+}
+
 pub struct VmState {
     /// The value most recently raised by `Instr::Raise` that propagated past its
     /// frame's handler stack. Consumed by the nearest enclosing `SetupHandler`.
@@ -256,6 +274,10 @@ pub struct VmState {
     /// `GetGlobal` checks here before `globals`; `SetGlobal` writes here when
     /// the name already exists in scope, preserving mutations across calls.
     pub active_module_scope: Option<Arc<Mutex<HashMap<String, VmValue>>>>,
+    /// Test-only stdout capture. When set, `vm_drain_token_stream_printing` writes
+    /// here instead of stdout so tests can assert on the printed output.
+    #[cfg(test)]
+    pub test_stdout: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
 }
 
 impl VmState {
@@ -283,6 +305,8 @@ impl VmState {
             import_stack: HashSet::new(),
             native_packages: HashMap::new(),
             active_module_scope: None,
+            #[cfg(test)]
+            test_stdout: None,
         }
     }
 
@@ -302,6 +326,8 @@ impl VmState {
         self.native_packages = opts.native_packages;
         self.set_session("__model__", VmValue::Str(opts.default_model));
         self.set_session("__max_retries__", VmValue::Int(opts.max_retries as i64));
+        #[cfg(test)]
+        { self.test_stdout = opts.test_stdout; }
     }
 
     /// Iterate over all global bindings — used by `-v` verbose output.
@@ -343,6 +369,8 @@ impl VmState {
             import_stack: HashSet::new(),
             native_packages: self.native_packages.clone(),
             active_module_scope: None,
+            #[cfg(test)]
+            test_stdout: self.test_stdout.clone(),
         }
     }
 }
@@ -357,6 +385,9 @@ pub struct VmOpts {
     pub source_dir: PathBuf,
     /// Native package map from `[native]` in jade.toml: name → (absolute path, alias).
     pub native_packages: HashMap<String, (PathBuf, String)>,
+    /// Test-only stdout capture buffer. See `VmState::test_stdout`.
+    #[cfg(test)]
+    pub test_stdout: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
 }
 
 impl Default for VmOpts {
@@ -367,6 +398,8 @@ impl Default for VmOpts {
             max_retries: 15,
             source_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             native_packages: HashMap::new(),
+            #[cfg(test)]
+            test_stdout: None,
         }
     }
 }
@@ -1649,16 +1682,27 @@ async fn call_value(
                 }
                 let mut iter = args.into_iter();
                 let val = iter.next().unwrap();
-                let mute_patterns: Vec<String> = match iter.next() {
-                    None | Some(VmValue::Nil) => Vec::new(),
+                // Extract anchor strings for VM-side muting AND full Grammar info
+                // so we can start lazy inference with stop_anchor (prevents model loops).
+                let mut mute_patterns: Vec<String> = Vec::new();
+                let mut infer_grammar: Option<String> = None;
+                let mut infer_anchor: Option<String> = None;
+                let mut infer_stop: Option<String> = None;
+                match iter.next() {
+                    None | Some(VmValue::Nil) => {}
                     Some(VmValue::Array(arr)) => {
-                        arr.lock().iter().filter_map(|v| {
-                            if let VmValue::Grammar { anchor: Some(a), .. } = v {
-                                Some(a.clone())
-                            } else {
-                                None
+                        for v in arr.lock().iter() {
+                            if let VmValue::Grammar { pattern, anchor, stop_anchor } = v {
+                                if infer_grammar.is_none() {
+                                    infer_grammar = Some(pattern.clone());
+                                    infer_anchor = anchor.clone();
+                                    infer_stop = stop_anchor.clone();
+                                }
+                                if let Some(a) = anchor {
+                                    mute_patterns.push(a.clone());
+                                }
                             }
-                        }).collect()
+                        }
                     }
                     Some(other) => return Err(JadeError::TypeError {
                         message: format!("stream() mute_on= must be an array of grammars, got {}", value_type_name(&other)),
@@ -1667,6 +1711,25 @@ async fn call_value(
                 };
                 match val {
                     VmValue::TokenStream(ts) => {
+                        // Start lazy inference with grammar constraints so jade-tree
+                        // receives stop_anchor and stops before the model can loop.
+                        {
+                            let lazy = ts.lazy_prompt.lock().take();
+                            if let Some(prompt_text) = lazy {
+                                let backend = state.inference_backend.as_ref()
+                                    .ok_or(JadeError::MissingApiKey { span })?.clone();
+                                let (rx, handle) = backend.infer_stream(llm::InferenceRequest {
+                                    prompt: prompt_text,
+                                    model: state.default_model.clone(),
+                                    max_tokens: state.max_tokens,
+                                    grammar: infer_grammar,
+                                    anchor: infer_anchor,
+                                    stop_anchor: infer_stop,
+                                }, span).await?;
+                                *ts.rx.lock() = Some(rx);
+                                *ts.tokens_handle.lock() = Some(handle);
+                            }
+                        }
                         let text = vm_drain_token_stream_printing(ts, state, span, true, &mute_patterns).await?;
                         Ok(VmValue::Str(text))
                     }
@@ -2207,21 +2270,16 @@ async fn vm_prompt_deref_stream(
     if let Some(cached) = state.prompt_cache.get(&cache_key).cloned() {
         return Ok(VmValue::Str(cached));
     }
-    let backend = state.inference_backend.as_ref()
-        .ok_or(JadeError::MissingApiKey { span })?
-        .clone();
-    let (rx, handle) = backend.infer_stream(llm::InferenceRequest {
-        prompt: prompt_text.clone(),
-        model: state.default_model.clone(),
-        max_tokens: state.max_tokens,
-        grammar: None,
-        anchor: None,
-        stop_anchor: None,
-    }, span).await?;
+    // Return a lazy stream. Inference starts on first drain so callers
+    // (e.g. stream() with mute_on=) can inject grammar constraints first.
+    // MissingApiKey is checked here eagerly so the error site is ?p, not drain.
+    state.inference_backend.as_ref()
+        .ok_or(JadeError::MissingApiKey { span })?;
     Ok(VmValue::TokenStream(Arc::new(JadeTokenStream {
-        rx: Mutex::new(Some(rx)),
-        tokens_handle: Mutex::new(Some(handle)),
-        prompt_key: (prompt_text, None),
+        rx: Mutex::new(None),
+        tokens_handle: Mutex::new(None),
+        prompt_key: (prompt_text.clone(), None),
+        lazy_prompt: Mutex::new(Some(prompt_text)),
     })))
 }
 
@@ -2231,6 +2289,22 @@ async fn vm_drain_token_stream(
     state: &mut VmState,
     span: Span,
 ) -> Result<VmValue> {
+    // Start lazy inference (no constraints) if ?p hasn't been started yet.
+    {
+        let lazy = ts.lazy_prompt.lock().take();
+        if let Some(prompt_text) = lazy {
+            let backend = state.inference_backend.as_ref()
+                .ok_or(JadeError::MissingApiKey { span })?.clone();
+            let (rx, handle) = backend.infer_stream(llm::InferenceRequest {
+                prompt: prompt_text,
+                model: state.default_model.clone(),
+                max_tokens: state.max_tokens,
+                grammar: None, anchor: None, stop_anchor: None,
+            }, span).await?;
+            *ts.rx.lock() = Some(rx);
+            *ts.tokens_handle.lock() = Some(handle);
+        }
+    }
     let rx_opt = ts.rx.lock().take();
     let mut rx = rx_opt.ok_or(JadeError::DoubleStreamDrain { span })?;
     let mut text = String::new();
@@ -2262,34 +2336,32 @@ async fn vm_drain_token_stream(
     Ok(VmValue::Str(text))
 }
 
-/// Drain a `TokenStream`, printing each token to stdout as it arrives.
-/// Returns the accumulated text so `stream()` can return it as a `Str`.
+/// Core streaming-mute loop — separated from I/O so it can be tested directly.
 ///
-/// `mute_patterns` is a list of GBNF patterns from Grammar values. Tokens whose
-/// accumulated text (across token boundaries) matches a literal in any pattern are
-/// suppressed from stdout. The full text is still returned.
+/// Reads tokens from `rx`, writing non-muted bytes to `out`, and returns the
+/// full accumulated text (printed + muted combined) so callers can inspect the
+/// complete response.
 ///
-/// Algorithm: prefix-aware buffering. Tokens are held in `pending` until the
-/// accumulated text either (a) fully matches a literal → suppress, (b) is a prefix
-/// of some literal → keep buffering, or (c) matches neither → flush oldest token
-/// and retry. This correctly handles patterns split across multiple LLM tokens.
-async fn vm_drain_token_stream_printing(
-    ts: Arc<JadeTokenStream>,
-    state: &mut VmState,
-    span: Span,
+/// **Algorithm** — prefix-aware buffering with sub-token anchor detection:
+/// 1. Tokens accumulate in `pending` until the joined text *contains* a mute
+///    literal. Everything before the literal is flushed; everything from the
+///    literal onward is silenced.
+/// 2. If the joined text could still become a mute literal (it is a strict
+///    prefix of some literal) the tokens stay in `pending` — keep buffering.
+/// 3. Otherwise the oldest pending token is flushed and we retry.
+///
+/// This correctly handles every tokenization pattern:
+/// - anchor split across multiple tokens: `["<", "tool", ">"]`
+/// - anchor as single token: `["<tool>"]`
+/// - anchor merged with following bytes by BPE: `["<tool>{"]`
+/// - anchor embedded in a larger token: `["Sure!\n<tool>{"]` → prints "Sure!\n"
+pub(crate) async fn drain_tokens_with_mute<W: std::io::Write + Send>(
+    rx: &mut tokio::sync::mpsc::Receiver<String>,
+    mute_literals: &[String],
+    out: &mut W,
     newline: bool,
-    mute_patterns: &[String],
-) -> Result<String> {
-    use std::io::Write as _;
-
-    // Anchor strings are plain text (e.g. "<tool>") — use them directly.
-    let mute_literals: Vec<String> = mute_patterns.to_vec();
-
-    let rx_opt = ts.rx.lock().take();
-    let mut rx = rx_opt.ok_or(JadeError::DoubleStreamDrain { span })?;
+) -> String {
     let mut text = String::new();
-
-    // Tokens held back while we wait to see if they complete a mute literal.
     let mut pending: Vec<String> = Vec::new();
     let mut muted = false;
 
@@ -2297,53 +2369,99 @@ async fn vm_drain_token_stream_printing(
         text.push_str(&token);
 
         if mute_literals.is_empty() {
-            print!("{}", token);
-            let _ = std::io::stdout().flush();
+            let _ = out.write_all(token.as_bytes());
+            let _ = out.flush();
             continue;
         }
-
-        if muted {
-            // Already silenced — accumulate but do not print.
-            continue;
-        }
+        if muted { continue; }
 
         pending.push(token);
 
-        // Resolve pending: flush or suppress once we know whether a match completes.
         loop {
             if pending.is_empty() { break; }
+            let pending_text: String = pending.join("");
 
-            // Build pending text from current buffered tokens.
-            let pending_text: String = pending.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("");
+            // Find earliest occurrence of any mute literal in the accumulated text.
+            let hit = mute_literals.iter().filter_map(|lit| {
+                pending_text.find(lit.as_str()).map(|pos| (pos, lit.len()))
+            }).min_by_key(|&(pos, _)| pos);
 
-            if mute_literals.iter().any(|lit| pending_text.starts_with(lit.as_str())) {
-                // pending_text starts with a mute literal (may have extra chars after it
-                // if the tokenizer merged the anchor with following bytes). Mute.
+            if let Some((pre_len, _lit_len)) = hit {
+                // Print everything before the anchor, then go silent.
+                if pre_len > 0 {
+                    let _ = out.write_all(pending_text[..pre_len].as_bytes());
+                    let _ = out.flush();
+                }
                 pending.clear();
                 muted = true;
                 break;
             } else if mute_literals.iter().any(|lit| lit.starts_with(&pending_text)) {
-                // Pending text is a strict prefix of some literal — keep buffering.
+                // pending_text could still grow into a literal — keep buffering.
                 break;
             } else {
-                // No match possible starting here — flush the oldest token and retry.
+                // No match and no prefix — flush oldest token and retry.
                 let flush = pending.remove(0);
-                print!("{}", flush);
-                let _ = std::io::stdout().flush();
+                let _ = out.write_all(flush.as_bytes());
+                let _ = out.flush();
             }
         }
     }
 
-    // End of stream: flush any remaining buffered tokens (can't complete a match).
-    // Skip if muted — pending was cleared at the mute point.
+    // End of stream: flush any remaining buffered tokens (no anchor found).
     if !muted {
         for flush in pending {
-            print!("{}", flush);
-            let _ = std::io::stdout().flush();
+            let _ = out.write_all(flush.as_bytes());
+            let _ = out.flush();
         }
     }
+    if newline { let _ = writeln!(out); }
+    text
+}
 
-    if newline { println!(); }
+/// Drain a `TokenStream`, printing each token to stdout as it arrives.
+/// Returns the accumulated text so `stream()` can return it as a `Str`.
+///
+/// `mute_patterns` lists the plain-text anchor strings extracted from Grammar
+/// values passed via `mute_on=`. Tokens at or after the anchor are suppressed
+/// from stdout; the full text is still returned for downstream parsing.
+async fn vm_drain_token_stream_printing(
+    ts: Arc<JadeTokenStream>,
+    state: &mut VmState,
+    span: Span,
+    newline: bool,
+    mute_patterns: &[String],
+) -> Result<String> {
+    // Fallback lazy start with no constraints (for print(?p) and similar paths).
+    // If stream() already started inference with grammar constraints, this is a no-op.
+    {
+        let lazy = ts.lazy_prompt.lock().take();
+        if let Some(prompt_text) = lazy {
+            let backend = state.inference_backend.as_ref()
+                .ok_or(JadeError::MissingApiKey { span })?.clone();
+            let (rx, handle) = backend.infer_stream(llm::InferenceRequest {
+                prompt: prompt_text,
+                model: state.default_model.clone(),
+                max_tokens: state.max_tokens,
+                grammar: None, anchor: None, stop_anchor: None,
+            }, span).await?;
+            *ts.rx.lock() = Some(rx);
+            *ts.tokens_handle.lock() = Some(handle);
+        }
+    }
+    let mute_literals: Vec<String> = mute_patterns.to_vec();
+    let rx_opt = ts.rx.lock().take();
+    let mut rx = rx_opt.ok_or(JadeError::DoubleStreamDrain { span })?;
+
+    #[cfg(test)]
+    let text = if let Some(buf) = &state.test_stdout {
+        let mut w = TestWriter(std::sync::Arc::clone(buf));
+        drain_tokens_with_mute(&mut rx, &mute_literals, &mut w, newline).await
+    } else {
+        drain_tokens_with_mute(&mut rx, &mute_literals, &mut std::io::stdout(), newline).await
+    };
+    #[cfg(not(test))]
+    let text = drain_tokens_with_mute(&mut rx, &mute_literals, &mut std::io::stdout(), newline).await;
+
     let h_opt = ts.tokens_handle.lock().take();
     if let Some(h) = h_opt {
         match h.await {

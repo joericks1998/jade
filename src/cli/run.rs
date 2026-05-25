@@ -173,6 +173,8 @@ pub async fn run_file(path: &str, verbose: bool) {
         max_retries: cfg.max_retries,
         source_dir,
         native_packages,
+        #[cfg(test)]
+        test_stdout: None,
     };
 
     // Execute.
