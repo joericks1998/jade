@@ -31,6 +31,8 @@ const RETRY_MAX_TOKENS_COMPLEX: u32 = 512;
 #[derive(Clone, Debug, PartialEq)]
 pub enum NativeFnId {
     LlmSetMaxTokens,
+    LlmCountTokens,
+    LlmTotalTokens,
     Print,
     Stream,
     Route,
@@ -1583,6 +1585,32 @@ async fn call_value(
                     ref other => Err(JadeError::TypeError { message: format!("llm.set_max_tokens() requires a positive int, got {}", value_type_name(other)), span }),
                 }
             }
+            NativeFnId::LlmCountTokens => {
+                if args.len() != 1 {
+                    return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span });
+                }
+                match &args[0] {
+                    VmValue::Str(text) => {
+                        let backend = state.inference_backend.as_ref()
+                            .ok_or_else(|| JadeError::MissingApiKey { span })?;
+                        let n = backend.count_tokens(text, span).await?;
+                        Ok(VmValue::Int(n))
+                    }
+                    ref other => Err(JadeError::TypeError {
+                        message: format!("llm.count_tokens() requires str, got {}", value_type_name(other)),
+                        span,
+                    }),
+                }
+            }
+            NativeFnId::LlmTotalTokens => {
+                if !args.is_empty() {
+                    return Err(JadeError::ArityMismatch { expected: 0, got: args.len(), span });
+                }
+                let backend = state.inference_backend.as_ref()
+                    .ok_or_else(|| JadeError::MissingApiKey { span })?;
+                let n = backend.total_tokens(span).await?;
+                Ok(VmValue::Int(n))
+            }
             NativeFnId::Print => {
                 if args.is_empty() || args.len() > 2 {
                     return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span });
@@ -1821,6 +1849,11 @@ async fn vm_prompt_deref(
         anchor: grammar_anchor.clone(),
         stop_anchor: grammar_stop.clone(),
     }, span).await?;
+
+    if let Some(name) = backend.reported_model_name() {
+        state.default_model = name.clone();
+        state.globals.insert("__model__".to_string(), VmValue::Str(name));
+    }
 
     state.token_count += initial_resp.tokens_used;
     let tc = state.token_count;
@@ -2211,6 +2244,12 @@ async fn vm_drain_token_stream(
                 state.token_count += tokens;
                 let tc = state.token_count;
                 state.globals.insert("__tokens__".to_string(), VmValue::Int(tc));
+                if let Some(backend) = &state.inference_backend {
+                    if let Some(name) = backend.reported_model_name() {
+                        state.default_model = name.clone();
+                        state.globals.insert("__model__".to_string(), VmValue::Str(name));
+                    }
+                }
             }
             Ok(Err(e)) => return Err(e),
             Err(e) => return Err(JadeError::AsyncPanic {
@@ -2303,6 +2342,12 @@ async fn vm_drain_token_stream_printing(
                 state.token_count += tokens;
                 let tc = state.token_count;
                 state.globals.insert("__tokens__".to_string(), VmValue::Int(tc));
+                if let Some(backend) = &state.inference_backend {
+                    if let Some(name) = backend.reported_model_name() {
+                        state.default_model = name.clone();
+                        state.globals.insert("__model__".to_string(), VmValue::Str(name));
+                    }
+                }
             }
             Ok(Err(e)) => return Err(e),
             Err(e) => return Err(JadeError::AsyncPanic {

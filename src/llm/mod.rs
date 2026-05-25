@@ -34,6 +34,22 @@ pub struct InferenceResponse {
 pub trait InferenceBackend: Send + Sync {
     async fn infer(&self, req: InferenceRequest, span: Span) -> Result<InferenceResponse>;
 
+    /// Returns the model name reported by the backend after inference, if available.
+    /// Only implemented by `JadeOsBackend`; API backends return `None`.
+    fn reported_model_name(&self) -> Option<String> { None }
+
+    /// Count the tokens in `prompt` without running generation.
+    /// Falls back to character-count estimate for backends that don't support it.
+    async fn count_tokens(&self, prompt: &str, _span: Span) -> Result<i64> {
+        Ok((prompt.len() / 4) as i64)
+    }
+
+    /// Return the daemon-wide cumulative token counter.
+    /// Returns 0 for backends that don't track it (API backends).
+    async fn total_tokens(&self, _span: Span) -> Result<i64> {
+        Ok(0)
+    }
+
     /// Stream tokens as they arrive. Returns a channel receiver and a join handle
     /// that resolves to `tokens_used` when the stream is exhausted.
     /// Default: calls `infer` and sends the full response as one token.
