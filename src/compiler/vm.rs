@@ -2282,10 +2282,8 @@ async fn vm_drain_token_stream_printing(
 ) -> Result<String> {
     use std::io::Write as _;
 
-    // Pre-extract literal strings from all Grammar patterns once.
-    let mute_literals: Vec<String> = mute_patterns.iter()
-        .flat_map(|pat| crate::compiler::gbnf::grammar_literals(pat))
-        .collect();
+    // Anchor strings are plain text (e.g. "<tool>") — use them directly.
+    let mute_literals: Vec<String> = mute_patterns.to_vec();
 
     let rx_opt = ts.rx.lock().take();
     let mut rx = rx_opt.ok_or(JadeError::DoubleStreamDrain { span })?;
@@ -2318,8 +2316,9 @@ async fn vm_drain_token_stream_printing(
             // Build pending text from current buffered tokens.
             let pending_text: String = pending.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("");
 
-            if mute_literals.iter().any(|lit| *lit == pending_text) {
-                // Full match — suppress all buffered tokens and silence the rest.
+            if mute_literals.iter().any(|lit| pending_text.starts_with(lit.as_str())) {
+                // pending_text starts with a mute literal (may have extra chars after it
+                // if the tokenizer merged the anchor with following bytes). Mute.
                 pending.clear();
                 muted = true;
                 break;
