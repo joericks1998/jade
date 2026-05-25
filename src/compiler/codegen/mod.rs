@@ -92,6 +92,12 @@ pub struct CodegenCtx<'ctx> {
     pub jrt_prompt_typed_fn: FunctionValue<'ctx>,
     /// jrt_prompt_grammar(ptr prompt, ptr model, ptr grammar) -> ptr
     pub jrt_prompt_grammar_fn: FunctionValue<'ctx>,
+    /// jrt_prompt_grammar_ex(ptr prompt, ptr model, ptr pattern, ptr anchor_or_null, ptr stop_or_null) -> ptr
+    pub jrt_prompt_grammar_ex_fn: FunctionValue<'ctx>,
+
+    // ── Grammar heap struct layout ─────────────────────────────────────────
+    /// `%jade.grammar = type { ptr pattern, ptr anchor, ptr stop_anchor }`
+    pub jade_grammar_ty: inkwell::types::StructType<'ctx>,
 
     // ── libc helpers for typed prompt parsing ──────────────────────────────
     /// atoll(ptr) -> i64
@@ -246,6 +252,17 @@ impl<'ctx> CodegenCtx<'ctx> {
         let jrt_prompt_grammar_ty = ptr_ty.fn_type(&[ptr_ty.into(), ptr_ty.into(), ptr_ty.into()], false);
         let jrt_prompt_grammar_fn = module.add_function("jrt_prompt_grammar", jrt_prompt_grammar_ty, None);
 
+        // jrt_prompt_grammar_ex(ptr prompt, ptr model, ptr pattern, ptr anchor, ptr stop) -> ptr
+        let jrt_prompt_grammar_ex_ty = ptr_ty.fn_type(
+            &[ptr_ty.into(), ptr_ty.into(), ptr_ty.into(), ptr_ty.into(), ptr_ty.into()],
+            false,
+        );
+        let jrt_prompt_grammar_ex_fn = module.add_function("jrt_prompt_grammar_ex", jrt_prompt_grammar_ex_ty, None);
+
+        // %jade.grammar = type { ptr pattern, ptr anchor, ptr stop_anchor }
+        let jade_grammar_ty = context.opaque_struct_type("jade.grammar");
+        jade_grammar_ty.set_body(&[ptr_ty.into(), ptr_ty.into(), ptr_ty.into()], false);
+
         // atoll(ptr) -> i64
         let atoll_ty = i64_ty.fn_type(&[ptr_ty.into()], false);
         let atoll_fn = module.add_function("atoll", atoll_ty, None);
@@ -301,6 +318,8 @@ impl<'ctx> CodegenCtx<'ctx> {
             jrt_prompt_fn,
             jrt_prompt_typed_fn,
             jrt_prompt_grammar_fn,
+            jrt_prompt_grammar_ex_fn,
+            jade_grammar_ty,
             atoll_fn,
             strtod_fn,
             strcmp_fn,

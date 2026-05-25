@@ -120,12 +120,23 @@ pub fn emit_expr<'ctx>(
                 .map_err(|e| e.to_string())?
                 .as_pointer_value();
 
-            // Grammar-constrained deref: jrt_prompt_grammar(prompt, model, grammar)
+            // Grammar-constrained deref: jrt_prompt_grammar_ex(prompt, model, pattern, anchor, stop)
             if let Some(gexpr) = grammar_expr {
-                let grammar_ptr = emit_expr(gexpr, ctx)?.into_pointer_value();
+                let struct_ptr = as_pointer(emit_expr(gexpr, ctx)?, ctx)?;
+                let ptr_ty = ctx.context.ptr_type(inkwell::AddressSpace::default());
+
+                let f0 = ctx.builder.build_struct_gep(ctx.jade_grammar_ty, struct_ptr, 0, "gm_r0").map_err(|e| e.to_string())?;
+                let pattern_ptr = ctx.builder.build_load(ptr_ty, f0, "gm_pattern").map_err(|e| e.to_string())?.into_pointer_value();
+
+                let f1 = ctx.builder.build_struct_gep(ctx.jade_grammar_ty, struct_ptr, 1, "gm_r1").map_err(|e| e.to_string())?;
+                let anchor_ptr = ctx.builder.build_load(ptr_ty, f1, "gm_anchor").map_err(|e| e.to_string())?.into_pointer_value();
+
+                let f2 = ctx.builder.build_struct_gep(ctx.jade_grammar_ty, struct_ptr, 2, "gm_r2").map_err(|e| e.to_string())?;
+                let stop_ptr = ctx.builder.build_load(ptr_ty, f2, "gm_stop").map_err(|e| e.to_string())?.into_pointer_value();
+
                 return ctx.call_rv(
-                    ctx.jrt_prompt_grammar_fn,
-                    &[prompt_ptr.into(), model_ptr.into(), grammar_ptr.into()],
+                    ctx.jrt_prompt_grammar_ex_fn,
+                    &[prompt_ptr.into(), model_ptr.into(), pattern_ptr.into(), anchor_ptr.into(), stop_ptr.into()],
                     "infer_grammar_r",
                 );
             }
@@ -1447,13 +1458,46 @@ fn emit_call<'ctx>(
     ret_ty: &JadeType,
     ctx: &mut CodegenCtx<'ctx>,
 ) -> Result<BasicValueEnum<'ctx>, String> {
-    // ── Grammar.new(pattern) — wire-identical to its string argument ──────────
+    // ── Grammar.new(pattern[, anchor[, stop_anchor]]) ─────────────────────────
+    // Allocates a %jade.grammar = { ptr, ptr, ptr } struct on the heap.
+    // Missing args (or nil) become null pointers.
     if let TExprKind::FieldAccess { object, field } = &callee.kind {
         if let TExprKind::Identifier(obj_name) = &object.kind {
             if obj_name == "Grammar" && field == "new" {
-                if let Some(arg) = args.first() {
-                    return emit_expr(arg, ctx);
-                }
+                let ptr_ty = ctx.context.ptr_type(inkwell::AddressSpace::default());
+                let null_ptr = ptr_ty.const_null();
+
+                // Helper: emit arg at index, returning null ptr if missing or nil.
+                let emit_grammar_arg = |idx: usize, ctx: &mut CodegenCtx<'ctx>| -> Result<inkwell::values::PointerValue<'ctx>, String> {
+                    if let Some(arg) = args.get(idx) {
+                        if matches!(arg.ty, JadeType::Nil) {
+                            return Ok(null_ptr);
+                        }
+                        let v = emit_expr(arg, ctx)?;
+                        as_pointer(v, ctx)
+                    } else {
+                        Ok(null_ptr)
+                    }
+                };
+
+                let pattern_ptr    = emit_grammar_arg(0, ctx)?;
+                let anchor_ptr     = emit_grammar_arg(1, ctx)?;
+                let stop_ptr       = emit_grammar_arg(2, ctx)?;
+
+                // Allocate a %jade.grammar struct (3 ptrs = 24 bytes).
+                let i64_ty = ctx.context.i64_type();
+                let struct_ptr = ctx.malloc_ptr(i64_ty.const_int(24, false), "grammar_ptr")?;
+
+                let f0 = ctx.builder.build_struct_gep(ctx.jade_grammar_ty, struct_ptr, 0, "gm_f0").map_err(|e| e.to_string())?;
+                ctx.builder.build_store(f0, pattern_ptr).map_err(|e| e.to_string())?;
+
+                let f1 = ctx.builder.build_struct_gep(ctx.jade_grammar_ty, struct_ptr, 1, "gm_f1").map_err(|e| e.to_string())?;
+                ctx.builder.build_store(f1, anchor_ptr).map_err(|e| e.to_string())?;
+
+                let f2 = ctx.builder.build_struct_gep(ctx.jade_grammar_ty, struct_ptr, 2, "gm_f2").map_err(|e| e.to_string())?;
+                ctx.builder.build_store(f2, stop_ptr).map_err(|e| e.to_string())?;
+
+                return Ok(struct_ptr.into());
             }
         }
     }
