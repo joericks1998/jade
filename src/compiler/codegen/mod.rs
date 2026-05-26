@@ -1,5 +1,6 @@
 pub mod expr;
 pub mod stmt;
+pub mod stdlib;
 pub mod types;
 
 use std::collections::HashMap;
@@ -127,7 +128,7 @@ pub struct CodegenCtx<'ctx> {
     // ── Heap type layouts ──────────────────────────────────────────────────
     /// `%jade.array = type { ptr data, i64 len, i64 cap }`
     pub array_ty: StructType<'ctx>,
-    /// `%jade.fn = type { ptr fn_ptr, ptr env_ptr }` — fat pointer for first-class functions.
+    /// `%jade.fn = type { ptr fn_ptr, ptr env_ptr, ptr name_ptr }` — fat pointer for first-class functions.
     pub jade_fn_ty: StructType<'ctx>,
 
     /// Counter for unique closure body function names (`closure_0`, `closure_1`, …).
@@ -140,6 +141,15 @@ pub struct CodegenCtx<'ctx> {
     /// Struct name → field name → JadeType, learned from StructLiteral expressions.
     /// Filled by the StructLiteral pre-pass; used to reinterpret i64 slots correctly.
     pub struct_field_types: HashMap<String, HashMap<String, crate::compiler::tir::JadeType>>,
+
+    /// Module-level (top-level) `let` bindings stored as LLVM globals so that
+    /// struct methods compiled in separate functions can load them without
+    /// crossing stack-frame boundaries.
+    pub module_globals: HashMap<String, (inkwell::values::GlobalValue<'ctx>, JadeType)>,
+
+    /// Nesting depth of function bodies currently being compiled.  0 = module
+    /// (top-level code in `main`); incremented on entry to every `emit_fn_body`.
+    pub fn_depth: usize,
 }
 
 impl<'ctx> CodegenCtx<'ctx> {
@@ -284,9 +294,9 @@ impl<'ctx> CodegenCtx<'ctx> {
         let strstr_ty = ptr_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], false);
         let strstr_fn = module.add_function("strstr", strstr_ty, None);
 
-        // %jade.fn = type { ptr, ptr }  — fat pointer for first-class functions / closures
+        // %jade.fn = type { ptr fn_ptr, ptr env_ptr, ptr name_ptr }
         let jade_fn_ty = context.opaque_struct_type("jade.fn");
-        jade_fn_ty.set_body(&[ptr_ty.into(), ptr_ty.into()], false);
+        jade_fn_ty.set_body(&[ptr_ty.into(), ptr_ty.into(), ptr_ty.into()], false);
 
         CodegenCtx {
             context,
@@ -335,11 +345,74 @@ impl<'ctx> CodegenCtx<'ctx> {
             closure_counter: 0,
             struct_field_order: HashMap::new(),
             struct_field_types: HashMap::new(),
+            module_globals: HashMap::new(),
+            fn_depth: 0,
         }
     }
 
     pub fn push_scope(&mut self) { self.scopes.push(HashMap::new()); }
     pub fn pop_scope(&mut self)  { self.scopes.pop(); }
+
+    // ── Lazy-declare stdlib runtime functions ──────────────────────────────
+    //
+    // lazy_fn is kept for potential future use with Optional FunctionValue slots.
+    #[allow(dead_code)]
+    fn lazy_fn(
+        module: &Module<'ctx>,
+        name: &str,
+        ty: inkwell::types::FunctionType<'ctx>,
+        slot: &mut Option<FunctionValue<'ctx>>,
+    ) -> FunctionValue<'ctx> {
+        if let Some(f) = *slot { return f; }
+        let f = module.get_function(name).unwrap_or_else(|| module.add_function(name, ty, None));
+        *slot = Some(f);
+        f
+    }
+
+    /// Lazily declare an external C function by looking it up in the module first.
+    /// Replaces all the get_jrt_*() methods — driven by the stdlib::Sig table.
+    pub fn extern_fn(&self, sig: &stdlib::Sig) -> FunctionValue<'ctx> {
+        if let Some(f) = self.module.get_function(sig.c_name) { return f; }
+        let ptr = self.context.ptr_type(AddressSpace::default());
+        let i64t = self.context.i64_type();
+        let params: Vec<inkwell::types::BasicMetadataTypeEnum<'ctx>> = sig.args.iter().map(|a| match a {
+            stdlib::Arg::Ptr => ptr.into(),
+            stdlib::Arg::I64 => i64t.into(),
+        }).collect();
+        let fn_ty = match sig.ret {
+            stdlib::Ret::Ptr       => ptr.fn_type(&params, false),
+            stdlib::Ret::I64
+            | stdlib::Ret::I64Typed => i64t.fn_type(&params, false),
+            stdlib::Ret::Bool      => self.context.i32_type().fn_type(&params, false),
+            stdlib::Ret::Void      => self.context.void_type().fn_type(&params, false),
+        };
+        self.module.add_function(sig.c_name, fn_ty, None)
+    }
+
+    /// Lazily declare jrt_readline(ptr) -> ptr (used by emit_input, not in the main table).
+    pub fn get_jrt_readline(&self) -> FunctionValue<'ctx> {
+        let ptr = self.context.ptr_type(AddressSpace::default());
+        let ty = ptr.fn_type(&[ptr.into()], false);
+        self.module.get_function("jrt_readline")
+            .unwrap_or_else(|| self.module.add_function("jrt_readline", ty, None))
+    }
+
+    /// Lazily declare jrt_json_esc_str(ptr) -> ptr (used by emit_json_stringify).
+    pub fn get_jrt_json_esc_str(&self) -> FunctionValue<'ctx> {
+        let ptr = self.context.ptr_type(AddressSpace::default());
+        let ty = ptr.fn_type(&[ptr.into()], false);
+        self.module.get_function("jrt_json_esc_str")
+            .unwrap_or_else(|| self.module.add_function("jrt_json_esc_str", ty, None))
+    }
+
+    /// Lazily declare jrt_json_arr_dicts(i64) -> ptr (used by emit_json_stringify).
+    pub fn get_jrt_json_arr_dicts(&self) -> FunctionValue<'ctx> {
+        let ptr = self.context.ptr_type(AddressSpace::default());
+        let i64t = self.context.i64_type();
+        let ty = ptr.fn_type(&[i64t.into()], false);
+        self.module.get_function("jrt_json_arr_dicts")
+            .unwrap_or_else(|| self.module.add_function("jrt_json_arr_dicts", ty, None))
+    }
 
     pub fn define(&mut self, name: String, ptr: PointerValue<'ctx>, ty: JadeType) {
         if let Some(scope) = self.scopes.last_mut() {

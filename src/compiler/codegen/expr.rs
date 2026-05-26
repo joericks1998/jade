@@ -10,7 +10,7 @@ use inkwell::{
 use crate::frontend::ast::{BinOpKind, UnaryOpKind};
 use crate::compiler::tir::{JadeType, TExpr, TExprKind, TFStrPart};
 
-use super::{stmt, types, CodegenCtx};
+use super::{stmt, stdlib, types, CodegenCtx};
 
 /// Emit LLVM IR for `expr`, returning the resulting LLVM value.
 pub fn emit_expr<'ctx>(
@@ -47,9 +47,25 @@ pub fn emit_expr<'ctx>(
                     .build_load(llvm_ty, ptr, name)
                     .map_err(|e| e.to_string());
             }
+            // Module-level global (defined at top level, stored as LLVM global).
+            if let Some((global, ty)) = ctx.module_globals.get(name.as_str()).cloned() {
+                let llvm_ty = types::jade_to_llvm(&ty, ctx.context);
+                return ctx.builder
+                    .build_load(llvm_ty, global.as_pointer_value(), name)
+                    .map_err(|e| e.to_string());
+            }
             // Named function referenced as a first-class value (not a direct call).
             if ctx.fn_info.contains_key(name.as_str()) {
                 return emit_fn_as_value(name, ctx);
+            }
+            // Compiler-injected global identifiers.
+            if name == "__model__" {
+                let s = ctx.builder.build_global_string_ptr("", "jade_model_name")
+                    .map_err(|e| e.to_string())?.as_pointer_value();
+                return Ok(s.into());
+            }
+            if name == "__tokens__" {
+                return Ok(ctx.context.i64_type().const_int(0, false).into());
             }
             Err(format!("undefined variable: {name}"))
         }
@@ -283,6 +299,19 @@ fn emit_index<'ctx>(
         return i64_to_value(raw, result_ty, ctx);
     }
 
+    // Unknown object with Str index → treat as dict (covers resp["status"], call["tool_name"], etc.)
+    if matches!(&object.ty, JadeType::Unknown) && matches!(&index.ty, JadeType::Str) {
+        ctx.uses_dicts = true;
+        let dict_ptr = as_pointer(emit_expr(object, ctx)?, ctx)?;
+        let key_ptr  = as_pointer(emit_expr(index, ctx)?, ctx)?;
+        let raw = ctx.call_rv(
+            ctx.jade_dict_get_fn,
+            &[dict_ptr.into(), key_ptr.into()],
+            "dict_idx_unk",
+        )?.into_int_value();
+        return i64_to_value(raw, result_ty, ctx);
+    }
+
     let i64_ty = ctx.context.i64_type();
     let ptr_ty = ctx.context.ptr_type(AddressSpace::default());
 
@@ -332,8 +361,11 @@ fn emit_struct_literal<'ctx>(
     let slot0 = ctx.gep(i64_ty, struct_ptr, &[i64_ty.const_int(0, false)], "sty_slot")?;
     ctx.builder.build_store(slot0, type_name_i64).map_err(|e| e.to_string())?;
 
+    // Look up bare name, falling back to stripping a module prefix (e.g. "tools.ToolGroup" → "ToolGroup").
+    let bare_name = type_name.rsplit_once('.').map(|(_, b)| b).unwrap_or(type_name);
     let field_names = ctx.struct_field_order
         .get(type_name)
+        .or_else(|| ctx.struct_field_order.get(bare_name))
         .cloned()
         .ok_or_else(|| format!("unknown struct type: {type_name}"))?;
 
@@ -361,6 +393,19 @@ fn emit_field_access<'ctx>(
     result_ty: &JadeType,
     ctx: &mut CodegenCtx<'ctx>,
 ) -> Result<BasicValueEnum<'ctx>, String> {
+    // ── Dict field access: obj["field"] via jade_dict_get ─────────────────
+    if matches!(&object.ty, JadeType::Dict) {
+        ctx.uses_dicts = true;
+        let dict_ptr = as_pointer(emit_expr(object, ctx)?, ctx)?;
+        let key_lit = ctx.builder
+            .build_global_string_ptr(field, "fa_dict_key")
+            .map_err(|e| e.to_string())?
+            .as_pointer_value();
+        let raw = ctx.call_rv(ctx.jade_dict_get_fn, &[dict_ptr.into(), key_lit.into()], "fa_dg")?
+            .into_int_value();
+        return i64_to_value(raw, result_ty, ctx);
+    }
+
     let type_name = match &object.ty {
         JadeType::Struct(n) => n.clone(),
         // Inside method bodies `self` is Unknown-typed in TIR; resolve via scope.
@@ -368,10 +413,62 @@ fn emit_field_access<'ctx>(
             if let TExprKind::Identifier(var) = &object.kind {
                 match ctx.lookup(var).map(|(_, ty)| ty) {
                     Some(JadeType::Struct(n)) => n,
-                    _ => return Err(format!("field access on '{var}' with unresolved struct type")),
+                    _ => {
+                        // Check for magic function attributes (__name__, __params__)
+                        if field == "__name__" {
+                            let ptr_ty = ctx.context.ptr_type(AddressSpace::default());
+                            let fn_ptr = as_pointer(emit_expr(object, ctx)?, ctx)?;
+                            let f2 = ctx.builder
+                                .build_struct_gep(ctx.jade_fn_ty, fn_ptr, 2, "fn_name_slot")
+                                .map_err(|e| e.to_string())?;
+                            return ctx.builder.build_load(ptr_ty, f2, "fn_name")
+                                .map_err(|e| e.to_string());
+                        }
+                        if field == "__params__" {
+                            let empty = ctx.builder
+                                .build_global_string_ptr("", "empty_params")
+                                .map_err(|e| e.to_string())?
+                                .as_pointer_value();
+                            return Ok(empty.into());
+                        }
+                        // Treat as dict: use jade_dict_get with field name as key
+                        ctx.uses_dicts = true;
+                        let dict_ptr = as_pointer(emit_expr(object, ctx)?, ctx)?;
+                        let key_lit = ctx.builder
+                            .build_global_string_ptr(field, "fa_unk_key")
+                            .map_err(|e| e.to_string())?
+                            .as_pointer_value();
+                        let raw = ctx.call_rv(
+                            ctx.jade_dict_get_fn,
+                            &[dict_ptr.into(), key_lit.into()],
+                            "fa_unk_dg",
+                        )?.into_int_value();
+                        return i64_to_value(raw, result_ty, ctx);
+                    }
                 }
             } else {
-                return Err(format!("field access on Unknown-typed non-identifier expression"));
+                // Non-identifier Unknown expression: treat as dict
+                if field == "__name__" {
+                    let ptr_ty = ctx.context.ptr_type(AddressSpace::default());
+                    let fn_ptr = as_pointer(emit_expr(object, ctx)?, ctx)?;
+                    let f2 = ctx.builder
+                        .build_struct_gep(ctx.jade_fn_ty, fn_ptr, 2, "fn_name_slot2")
+                        .map_err(|e| e.to_string())?;
+                    return ctx.builder.build_load(ptr_ty, f2, "fn_name2")
+                        .map_err(|e| e.to_string());
+                }
+                ctx.uses_dicts = true;
+                let dict_ptr = as_pointer(emit_expr(object, ctx)?, ctx)?;
+                let key_lit = ctx.builder
+                    .build_global_string_ptr(field, "fa_unk2_key")
+                    .map_err(|e| e.to_string())?
+                    .as_pointer_value();
+                let raw = ctx.call_rv(
+                    ctx.jade_dict_get_fn,
+                    &[dict_ptr.into(), key_lit.into()],
+                    "fa_unk2_dg",
+                )?.into_int_value();
+                return i64_to_value(raw, result_ty, ctx);
             }
         }
         _ => return Err(format!("field access on non-struct: {:?}", object.ty)),
@@ -534,6 +631,28 @@ fn extract_i32_from_call<'ctx>(
     }
 }
 
+// ── Int → heap char* (for mixed-type Add) ────────────────────────────────────
+
+fn emit_int_to_str<'ctx>(
+    val: IntValue<'ctx>,
+    ctx: &mut CodegenCtx<'ctx>,
+) -> Result<PointerValue<'ctx>, String> {
+    let i8_ty  = ctx.context.i8_type();
+    let i64_ty = ctx.context.i64_type();
+    // i64 max is 20 digits + sign + null = 22 chars; 32 is plenty
+    let buf = ctx.builder
+        .build_array_alloca(i8_ty, i64_ty.const_int(32, false), "int2s_buf")
+        .map_err(|e| e.to_string())?;
+    let fmt = ctx.builder
+        .build_global_string_ptr("%lld", "int2s_fmt")
+        .map_err(|e| e.to_string())?
+        .as_pointer_value();
+    ctx.builder
+        .build_call(ctx.snprintf_fn, &[buf.into(), i64_ty.const_int(32, false).into(), fmt.into(), val.into()], "int2s")
+        .map_err(|e| e.to_string())?;
+    Ok(buf)
+}
+
 // ── String concatenation ──────────────────────────────────────────────────────
 
 fn emit_str_concat<'ctx>(
@@ -593,6 +712,15 @@ fn emit_len<'ctx>(
         JadeType::Dict => {
             ctx.uses_dicts = true;
             ctx.call_rv(ctx.jade_dict_len_fn, &[val.into_pointer_value().into()], "dict_len")
+        }
+        JadeType::Unknown => {
+            // Unknown return (e.g. from history() or split()) — treat as jade array.
+            let i64_ty = ctx.context.i64_type();
+            let arr_ptr = as_pointer(val, ctx)?;
+            let f1 = ctx.builder
+                .build_struct_gep(ctx.array_ty, arr_ptr, 1, "len_unk_f1")
+                .map_err(|e| e.to_string())?;
+            ctx.builder.build_load(i64_ty, f1, "unk_arr_len").map_err(|e| e.to_string())
         }
         _ => Err(format!("len() not supported for type {:?}", arg.ty)),
     }
@@ -786,8 +914,8 @@ fn emit_fn_as_value<'ctx>(
         wrapper_fn
     };
 
-    // Allocate a jade_fn_t: { &wrapper_fn, null }
-    let jade_fn_ptr = ctx.malloc_ptr(i64_ty.const_int(16, false), "named_fn_val")?;
+    // Allocate a jade_fn_t: { &wrapper_fn, null, &name_str }
+    let jade_fn_ptr = ctx.malloc_ptr(i64_ty.const_int(24, false), "named_fn_val")?;
     let f0 = ctx.builder
         .build_struct_gep(ctx.jade_fn_ty, jade_fn_ptr, 0, "nfv_f0")
         .map_err(|e| e.to_string())?;
@@ -799,6 +927,16 @@ fn emit_fn_as_value<'ctx>(
         .map_err(|e| e.to_string())?;
     ctx.builder
         .build_store(f1, ptr_ty.const_null())
+        .map_err(|e| e.to_string())?;
+    let name_lit = ctx.builder
+        .build_global_string_ptr(name, "fn_name_lit")
+        .map_err(|e| e.to_string())?
+        .as_pointer_value();
+    let f2 = ctx.builder
+        .build_struct_gep(ctx.jade_fn_ty, jade_fn_ptr, 2, "nfv_f2")
+        .map_err(|e| e.to_string())?;
+    ctx.builder
+        .build_store(f2, name_lit)
         .map_err(|e| e.to_string())?;
 
     Ok(jade_fn_ptr.into())
@@ -921,8 +1059,9 @@ fn emit_closure<'ctx>(
         ctx.builder.position_at_end(bb);
     }
 
-    // ── 3. Allocate jade_fn_t { &closure_N, env_ptr } ─────────────────────
-    let jade_fn_ptr = ctx.malloc_ptr(i64_ty.const_int(16, false), "jade_fn")?;
+    // ── 3. Allocate jade_fn_t { &closure_N, env_ptr, null } ──────────────
+    let ptr_ty_loc = ctx.context.ptr_type(AddressSpace::default());
+    let jade_fn_ptr = ctx.malloc_ptr(i64_ty.const_int(24, false), "jade_fn")?;
     let f0 = ctx.builder
         .build_struct_gep(ctx.jade_fn_ty, jade_fn_ptr, 0, "cl_f0")
         .map_err(|e| e.to_string())?;
@@ -933,6 +1072,10 @@ fn emit_closure<'ctx>(
         .build_struct_gep(ctx.jade_fn_ty, jade_fn_ptr, 1, "cl_f1")
         .map_err(|e| e.to_string())?;
     ctx.builder.build_store(f1, env_ptr).map_err(|e| e.to_string())?;
+    let f2 = ctx.builder
+        .build_struct_gep(ctx.jade_fn_ty, jade_fn_ptr, 2, "cl_f2")
+        .map_err(|e| e.to_string())?;
+    ctx.builder.build_store(f2, ptr_ty_loc.const_null()).map_err(|e| e.to_string())?;
 
     Ok(jade_fn_ptr.into())
 }
@@ -1068,6 +1211,14 @@ fn emit_binop<'ctx>(
 
         // ── String concatenation ──────────────────────────────────────────────
         (JadeType::Str, Add, JadeType::Str) => emit_str_concat(lhs, rhs, ctx),
+        (JadeType::Str, Add, JadeType::Int) => {
+            let s = emit_int_to_str(rhs.into_int_value(), ctx)?;
+            emit_str_concat(lhs, s.into(), ctx)
+        }
+        (JadeType::Int, Add, JadeType::Str) => {
+            let s = emit_int_to_str(lhs.into_int_value(), ctx)?;
+            emit_str_concat(s.into(), rhs, ctx)
+        }
 
         // ── Bitwise (integers only) ───────────────────────────────────────────
         (JadeType::Int, BitAnd, JadeType::Int) =>
@@ -1131,6 +1282,56 @@ fn emit_binop<'ctx>(
                 _ => unreachable!(),
             };
             Ok(ctx.builder.build_int_compare(pred, cmp, zero, "scmp_r").map_err(|e| e.to_string())?.into())
+        }
+
+        // ── Nil comparisons — nil is i64(0), compare as integers ─────────────
+        (_, Eq, JadeType::Nil) | (JadeType::Nil, Eq, _) => {
+            let lv = value_to_i64(lhs, lty, ctx)?;
+            let rv = value_to_i64(rhs, rty, ctx)?;
+            icmp(IntPredicate::EQ, lv.into(), rv.into(), ctx)
+        }
+        (_, Ne, JadeType::Nil) | (JadeType::Nil, Ne, _) => {
+            let lv = value_to_i64(lhs, lty, ctx)?;
+            let rv = value_to_i64(rhs, rty, ctx)?;
+            icmp(IntPredicate::NE, lv.into(), rv.into(), ctx)
+        }
+
+        // ── Mixed Int/Bool comparisons ────────────────────────────────────────
+        // Dict values are stored as i64; bool values from literals are i1.
+        // Extend the narrower to i64 for comparison.
+        (JadeType::Int, Eq, JadeType::Bool) | (JadeType::Bool, Eq, JadeType::Int) => {
+            let i64_ty = ctx.context.i64_type();
+            let lv = if lhs.into_int_value().get_type().get_bit_width() < 64 {
+                ctx.builder.build_int_z_extend(lhs.into_int_value(), i64_ty, "ib_ext_l")
+                    .map_err(|e| e.to_string())?.into()
+            } else { lhs };
+            let rv = if rhs.into_int_value().get_type().get_bit_width() < 64 {
+                ctx.builder.build_int_z_extend(rhs.into_int_value(), i64_ty, "ib_ext_r")
+                    .map_err(|e| e.to_string())?.into()
+            } else { rhs };
+            icmp(IntPredicate::EQ, lv, rv, ctx)
+        }
+        (JadeType::Int, Ne, JadeType::Bool) | (JadeType::Bool, Ne, JadeType::Int) => {
+            let i64_ty = ctx.context.i64_type();
+            let lv = if lhs.into_int_value().get_type().get_bit_width() < 64 {
+                ctx.builder.build_int_z_extend(lhs.into_int_value(), i64_ty, "ib_ext_l")
+                    .map_err(|e| e.to_string())?.into()
+            } else { lhs };
+            let rv = if rhs.into_int_value().get_type().get_bit_width() < 64 {
+                ctx.builder.build_int_z_extend(rhs.into_int_value(), i64_ty, "ib_ext_r")
+                    .map_err(|e| e.to_string())?.into()
+            } else { rhs };
+            icmp(IntPredicate::NE, lv, rv, ctx)
+        }
+
+        // ── Mixed Int/Str comparisons ─────────────────────────────────────────
+        // Int and Str are never equal; return a compile-time constant so code
+        // that reaches this (e.g. via dict type unification) still compiles.
+        (JadeType::Int, Eq, JadeType::Str) | (JadeType::Str, Eq, JadeType::Int) => {
+            Ok(ctx.context.bool_type().const_int(0, false).into())
+        }
+        (JadeType::Int, Ne, JadeType::Str) | (JadeType::Str, Ne, JadeType::Int) => {
+            Ok(ctx.context.bool_type().const_int(1, false).into())
         }
 
         // ── Membership (in / not in) ──────────────────────────────────────────
@@ -1452,6 +1653,47 @@ fn emit_call_with_kwargs<'ctx>(
     emit_call(callee, &all_args, ret_ty, ctx)
 }
 
+/// Generic emitter for a table-driven C function call.
+/// Handles Arg::Ptr/I64 coercion and Ret::Ptr/I64/Bool/Void/I64Typed return kinds.
+fn emit_from_sig<'ctx>(
+    sig: &stdlib::Sig,
+    args: &[TExpr],
+    ret_ty: &JadeType,
+    ctx: &mut CodegenCtx<'ctx>,
+) -> Result<BasicValueEnum<'ctx>, String> {
+    if sig.uses_dicts { ctx.uses_dicts = true; }
+    let fn_val = ctx.extern_fn(sig);
+    let mut llvm_args: Vec<BasicMetadataValueEnum<'ctx>> = Vec::with_capacity(sig.args.len());
+    for (kind, arg_expr) in sig.args.iter().zip(args.iter()) {
+        let v = emit_expr(arg_expr, ctx)?;
+        let coerced: BasicMetadataValueEnum = match kind {
+            stdlib::Arg::Ptr => as_pointer(v, ctx)?.into(),
+            stdlib::Arg::I64 => value_to_i64(v, &arg_expr.ty, ctx)?.into(),
+        };
+        llvm_args.push(coerced);
+    }
+    let i64_ty = ctx.context.i64_type();
+    match sig.ret {
+        stdlib::Ret::Void => {
+            ctx.call_void(fn_val, &llvm_args)?;
+            Ok(i64_ty.const_int(0, false).into())
+        }
+        stdlib::Ret::Bool => {
+            let r = ctx.call_rv(fn_val, &llvm_args, "sig_b")?.into_int_value();
+            let b = ctx.builder.build_int_compare(
+                inkwell::IntPredicate::NE, r,
+                ctx.context.i32_type().const_zero(), "sig_bool"
+            ).map_err(|e| e.to_string())?;
+            Ok(b.into())
+        }
+        stdlib::Ret::I64Typed => {
+            let raw = ctx.call_rv(fn_val, &llvm_args, "sig_tv")?.into_int_value();
+            i64_to_value(raw, ret_ty, ctx)
+        }
+        _ => ctx.call_rv(fn_val, &llvm_args, "sig_r"),
+    }
+}
+
 fn emit_call<'ctx>(
     callee: &TExpr,
     args: &[TExpr],
@@ -1511,12 +1753,34 @@ fn emit_call<'ctx>(
         }
     }
 
+    // ── Stdlib module dispatch (table-driven) ────────────────────────────────────
+    if let TExprKind::FieldAccess { object, field } = &callee.kind {
+        if let TExprKind::Identifier(obj_name) = &object.kind {
+            // Special case: json.stringify has complex inline codegen.
+            if obj_name == "json" && field == "stringify" {
+                ctx.uses_dicts = true;
+                let arg = args.get(0).ok_or("json.stringify: missing arg")?;
+                return emit_json_stringify(arg, ctx);
+            }
+            // Special case: llm.set_max_tokens is a no-op stub.
+            if obj_name == "llm" && field == "set_max_tokens" {
+                return Ok(ctx.context.i64_type().const_int(0, false).into());
+            }
+            if let Some(sig) = stdlib::module_sig(obj_name, field) {
+                return emit_from_sig(&sig, args, ret_ty, ctx);
+            }
+        }
+    }
+
     // ── Built-in functions ────────────────────────────────────────────────────
     if let TExprKind::Identifier(name) = &callee.kind {
         match name.as_str() {
-            "print" => return emit_print(args, ctx),
-            "len"   => return emit_len(args, ctx),
-            "join"  => return emit_join(args, ctx),
+            "print"  => return emit_print(args, ctx),
+            "write"  => return emit_write(args, ctx),
+            "stream" => return emit_stream(args, ctx),
+            "input"  => return emit_input(args, ctx),
+            "len"    => return emit_len(args, ctx),
+            "join"   => return emit_join(args, ctx),
             _ => {}
         }
     }
@@ -1559,12 +1823,33 @@ fn emit_call<'ctx>(
                     ctx.lookup(var).and_then(|(_, ty)| {
                         if let JadeType::Struct(n) = ty { Some(n) } else { None }
                     })
+                } else if let TExprKind::FieldAccess { object: inner_obj, field: inner_field } = &object.kind {
+                    // Handle patterns like self.tools.grammar() — resolve the inner
+                    // field's struct type from struct_field_types.
+                    let inner_struct_name = match &inner_obj.ty {
+                        JadeType::Struct(n) => Some(n.clone()),
+                        JadeType::Unknown => {
+                            if let TExprKind::Identifier(var) = &inner_obj.kind {
+                                ctx.lookup(var).and_then(|(_, ty)| {
+                                    if let JadeType::Struct(n) = ty { Some(n) } else { None }
+                                })
+                            } else { None }
+                        }
+                        _ => None,
+                    };
+                    inner_struct_name.and_then(|sn| {
+                        ctx.struct_field_types.get(&sn)
+                            .and_then(|m| m.get(inner_field.as_str()))
+                            .and_then(|ft| if let JadeType::Struct(n) = ft { Some(n.clone()) } else { None })
+                    })
                 } else { None }
             }
             _ => None,
         };
         if let Some(type_name) = type_name_opt {
-            let mangled = format!("{type_name}__{field}");
+            // Strip module prefix for struct method lookup (e.g. "tools.ToolGroup" → "ToolGroup").
+            let bare_ty = type_name.rsplit_once('.').map(|(_, b)| b.to_string()).unwrap_or(type_name.clone());
+            let mangled = format!("{bare_ty}__{field}");
             if let Some((fn_val, param_tys, fn_ret_ty)) = ctx.fn_info.get(mangled.as_str()).cloned() {
                 // Emit the receiver (self) as the first argument.
                 let self_val = emit_expr(object, ctx)?;
@@ -1588,6 +1873,47 @@ fn emit_call<'ctx>(
                         _ => Ok(ctx.context.i64_type().const_int(0, false).into()),
                     },
                 };
+            }
+        }
+    }
+
+    // ── Primitive method dispatch (table-driven) ─────────────────────────────────
+    if let TExprKind::FieldAccess { object, field } = &callee.kind {
+        if stdlib::is_builtin_method(field) {
+            return emit_primitive_method(object, field, args, ret_ty, ctx);
+        }
+    }
+
+    // ── Module-alias function call: alias.fn(…) where alias is imported with `as` ─
+    // The LLVM codegen imports modules flat (bare names), so `context.build(…)` should
+    // resolve to the bare function `build` registered in fn_info by declare_fns.
+    if let TExprKind::FieldAccess { object, field } = &callee.kind {
+        if let TExprKind::Identifier(alias) = &object.kind {
+            // Only treat as module-alias call when the object isn't in scope.
+            let is_module_alias = ctx.lookup(alias).is_none()
+                && !ctx.module_globals.contains_key(alias.as_str());
+            if is_module_alias {
+                if let Some((fn_val, param_tys, fn_ret_ty)) = ctx.fn_info.get(field.as_str()).cloned() {
+                    let mut llvm_args: Vec<BasicMetadataValueEnum<'ctx>> = Vec::with_capacity(args.len());
+                    for (i, arg_expr) in args.iter().enumerate() {
+                        let arg_val = emit_expr(arg_expr, ctx)?;
+                        let param_ty = param_tys.get(i).unwrap_or(&JadeType::Unknown);
+                        let coerced = coerce(arg_val, &arg_expr.ty, param_ty, ctx)?;
+                        llvm_args.push(coerced.into());
+                    }
+                    let call_site = ctx.builder
+                        .build_call(fn_val, &llvm_args, "alias_call")
+                        .map_err(|e| e.to_string())?;
+                    return match fn_ret_ty {
+                        JadeType::Nil => Ok(ctx.context.i64_type().const_int(0, false).into()),
+                        _ => match call_site.as_any_value_enum() {
+                            AnyValueEnum::IntValue(v)     => Ok(v.into()),
+                            AnyValueEnum::FloatValue(v)   => Ok(v.into()),
+                            AnyValueEnum::PointerValue(v) => Ok(v.into()),
+                            _ => Ok(ctx.context.i64_type().const_int(0, false).into()),
+                        },
+                    };
+                }
             }
         }
     }
@@ -1650,6 +1976,239 @@ fn emit_indirect_call<'ctx>(
         _ => i64_ty.const_int(0, false),
     };
     i64_to_value(raw, ret_ty, ctx)
+}
+
+// ── Primitive method dispatch ─────────────────────────────────────────────────
+
+fn emit_primitive_method<'ctx>(
+    object: &TExpr,
+    method: &str,
+    args: &[TExpr],
+    ret_ty: &JadeType,
+    ctx: &mut CodegenCtx<'ctx>,
+) -> Result<BasicValueEnum<'ctx>, String> {
+    let obj_val = emit_expr(object, ctx)?;
+    let obj_ty  = &object.ty;
+    let i64_ty  = ctx.context.i64_type();
+
+    match method {
+        // ── contains: dict path uses jade_dict_has; str path uses table ──────
+        "contains" => {
+            let obj_ptr = as_pointer(obj_val, ctx)?;
+            let needle  = as_pointer(emit_expr(args.get(0).ok_or("contains: missing arg")?, ctx)?, ctx)?;
+            match effective_ty(obj_ty) {
+                JadeType::Dict => {
+                    ctx.uses_dicts = true;
+                    let res = ctx.call_rv(ctx.jade_dict_has_fn, &[obj_ptr.into(), needle.into()], "pm_has")?.into_int_value();
+                    let b = ctx.builder.build_int_compare(IntPredicate::NE, res, ctx.context.i32_type().const_zero(), "has_b").map_err(|e| e.to_string())?;
+                    Ok(b.into())
+                }
+                _ => {
+                    let sig = stdlib::str_method_sig("contains").unwrap();
+                    let fn_val = ctx.extern_fn(&sig);
+                    let res = ctx.call_rv(fn_val, &[obj_ptr.into(), needle.into()], "pm_contains")?.into_int_value();
+                    let b = ctx.builder.build_int_compare(IntPredicate::NE, res, ctx.context.i32_type().const_zero(), "cont_b").map_err(|e| e.to_string())?;
+                    Ok(b.into())
+                }
+            }
+        }
+
+        // ── String primitive methods (table-driven) ───────────────────────────
+        "split" | "trim" | "replace" => {
+            let sig = stdlib::str_method_sig(method)
+                .ok_or_else(|| format!("str_method_sig: unknown method '{method}'"))?;
+            // Build args: receiver ptr first, then additional args per sig
+            let obj_ptr = as_pointer(obj_val, ctx)?;
+            let mut llvm_args: Vec<BasicMetadataValueEnum<'ctx>> = Vec::with_capacity(sig.args.len());
+            llvm_args.push(obj_ptr.into());
+            // sig.args[0] is always Ptr (receiver), so iterate sig.args[1..] vs args
+            for (kind, arg_expr) in sig.args[1..].iter().zip(args.iter()) {
+                let v = emit_expr(arg_expr, ctx)?;
+                let coerced: BasicMetadataValueEnum = match kind {
+                    stdlib::Arg::Ptr => as_pointer(v, ctx)?.into(),
+                    stdlib::Arg::I64 => value_to_i64(v, &arg_expr.ty, ctx)?.into(),
+                };
+                llvm_args.push(coerced);
+            }
+            let fn_val = ctx.extern_fn(&sig);
+            ctx.call_rv(fn_val, &llvm_args, "pm_str")
+        }
+
+        // ── Array primitive methods (table-driven) ────────────────────────────
+        "push" => {
+            let sig = stdlib::array_method_sig("push").unwrap();
+            let obj_ptr = as_pointer(obj_val, ctx)?;
+            let arg = args.get(0).ok_or("push: missing arg")?;
+            let val = emit_expr(arg, ctx)?;
+            let val_i64 = value_to_i64(val, &arg.ty, ctx)?;
+            let fn_val = ctx.extern_fn(&sig);
+            ctx.call_void(fn_val, &[obj_ptr.into(), val_i64.into()])?;
+            Ok(i64_ty.const_int(0, false).into())
+        }
+        "pop" => {
+            let sig = stdlib::array_method_sig("pop").unwrap();
+            let obj_ptr = as_pointer(obj_val, ctx)?;
+            let fn_val = ctx.extern_fn(&sig);
+            let raw = ctx.call_rv(fn_val, &[obj_ptr.into()], "pm_pop")?.into_int_value();
+            i64_to_value(raw, ret_ty, ctx)
+        }
+
+        // ── Dict-specific methods (keep pre-declared fns) ─────────────────────
+        "has" => {
+            ctx.uses_dicts = true;
+            let obj_ptr = as_pointer(obj_val, ctx)?;
+            let key = as_pointer(emit_expr(args.get(0).ok_or("has: missing arg")?, ctx)?, ctx)?;
+            let res = ctx.call_rv(ctx.jade_dict_has_fn, &[obj_ptr.into(), key.into()], "pm_has")?.into_int_value();
+            let b = ctx.builder.build_int_compare(IntPredicate::NE, res, ctx.context.i32_type().const_zero(), "pm_has_b").map_err(|e| e.to_string())?;
+            Ok(b.into())
+        }
+        "get" => {
+            ctx.uses_dicts = true;
+            let obj_ptr = as_pointer(obj_val, ctx)?;
+            let key = as_pointer(emit_expr(args.get(0).ok_or("get: missing arg")?, ctx)?, ctx)?;
+            let raw = ctx.call_rv(ctx.jade_dict_get_fn, &[obj_ptr.into(), key.into()], "pm_get")?.into_int_value();
+            i64_to_value(raw, ret_ty, ctx)
+        }
+
+        // ── sort: stub ────────────────────────────────────────────────────────
+        "sort" => {
+            // Not yet implemented in the LLVM backend; return the array unchanged.
+            Ok(obj_val)
+        }
+
+        // ── len: type-dispatch special case ───────────────────────────────────
+        "len" => {
+            match effective_ty(obj_ty) {
+                JadeType::Str => {
+                    let obj_ptr = as_pointer(obj_val, ctx)?;
+                    ctx.call_rv(ctx.strlen_fn, &[obj_ptr.into()], "pm_slen")
+                }
+                JadeType::Dict => {
+                    ctx.uses_dicts = true;
+                    let obj_ptr = as_pointer(obj_val, ctx)?;
+                    ctx.call_rv(ctx.jade_dict_len_fn, &[obj_ptr.into()], "pm_dlen")
+                }
+                _ => {
+                    // Array or Unknown — read .len field from jade.array header
+                    let arr_ptr = as_pointer(obj_val, ctx)?;
+                    let f1 = ctx.builder.build_struct_gep(ctx.array_ty, arr_ptr, 1, "pm_alen_f1").map_err(|e| e.to_string())?;
+                    ctx.builder.build_load(i64_ty, f1, "pm_alen").map_err(|e| e.to_string())
+                }
+            }
+        }
+
+        _ => Err(format!("emit_primitive_method: unknown method '{method}'")),
+    }
+}
+
+// ── json.stringify (inline codegen — not table-driven) ────────────────────────
+
+fn emit_json_stringify<'ctx>(
+    arg: &TExpr,
+    ctx: &mut CodegenCtx<'ctx>,
+) -> Result<BasicValueEnum<'ctx>, String> {
+    // For dict literals: build JSON string inline by concatenating key/value strings.
+    if let TExprKind::Dict { entries } = &arg.kind {
+        // Start with "{"
+        let mut acc: BasicValueEnum<'ctx> = ctx.builder
+            .build_global_string_ptr("{", "json_open")
+            .map_err(|e| e.to_string())?.as_pointer_value().into();
+
+        for (i, (key_expr, val_expr)) in entries.iter().enumerate() {
+            let key_str = match &key_expr.kind {
+                TExprKind::Str(s) => s.clone(),
+                _ => return Err("json.stringify: non-string dict key".to_string()),
+            };
+            let prefix = if i == 0 {
+                format!("\"{key_str}\": ")
+            } else {
+                format!(", \"{key_str}\": ")
+            };
+            let prefix_lit: BasicValueEnum<'ctx> = ctx.builder
+                .build_global_string_ptr(&prefix, "json_key")
+                .map_err(|e| e.to_string())?.as_pointer_value().into();
+            acc = emit_str_concat(acc, prefix_lit, ctx)?;
+
+            let val_str: BasicValueEnum<'ctx> = match &val_expr.ty {
+                JadeType::Str => {
+                    let v = as_pointer(emit_expr(val_expr, ctx)?, ctx)?;
+                    let f = ctx.get_jrt_json_esc_str();
+                    ctx.call_rv(f, &[v.into()], "json_esc")?
+                }
+                _ => {
+                    // Unknown / Array / Dict: pass as i64 to jrt_json_arr_dicts
+                    // (covers the messages array in the _encode protocol).
+                    let v = emit_expr(val_expr, ctx)?;
+                    let as_i64 = value_to_i64(v, &val_expr.ty, ctx)?;
+                    let f = ctx.get_jrt_json_arr_dicts();
+                    ctx.call_rv(f, &[as_i64.into()], "json_arr")?
+                }
+            };
+            acc = emit_str_concat(acc, val_str, ctx)?;
+        }
+
+        let close: BasicValueEnum<'ctx> = ctx.builder
+            .build_global_string_ptr("}", "json_close")
+            .map_err(|e| e.to_string())?.as_pointer_value().into();
+        return emit_str_concat(acc, close, ctx);
+    }
+
+    // Non-dict: treat as array of dicts (i64-typed pointer).
+    let v = emit_expr(arg, ctx)?;
+    let as_i64 = value_to_i64(v, &arg.ty, ctx)?;
+    let f = ctx.get_jrt_json_arr_dicts();
+    ctx.call_rv(f, &[as_i64.into()], "json_stringify_r")
+}
+
+// ── write() built-in ──────────────────────────────────────────────────────────
+
+fn emit_write<'ctx>(
+    args: &[TExpr],
+    ctx: &mut CodegenCtx<'ctx>,
+) -> Result<BasicValueEnum<'ctx>, String> {
+    for arg in args {
+        let val = emit_expr(arg, ctx)?;
+        emit_printf_value(val, &arg.ty, "", ctx)?;
+    }
+    Ok(ctx.context.i64_type().const_int(0, false).into())
+}
+
+// ── stream() built-in ─────────────────────────────────────────────────────────
+// In the LLVM path there is no true token streaming — we evaluate the prompt
+// expression (which calls jrt_prompt), print the complete response, and return it.
+// The mute_on kwarg is accepted but ignored.
+
+fn emit_stream<'ctx>(
+    args: &[TExpr],
+    ctx: &mut CodegenCtx<'ctx>,
+) -> Result<BasicValueEnum<'ctx>, String> {
+    let result = emit_expr(args.get(0).ok_or("stream: missing arg")?, ctx)?;
+    // Print the response string (no trailing newline — caller prints one if needed).
+    let fmt = ctx.builder.build_global_string_ptr("%s", "stream_fmt")
+        .map_err(|e| e.to_string())?.as_pointer_value();
+    let s_ptr = match result {
+        BasicValueEnum::PointerValue(p) => p,
+        _ => ctx.builder.build_global_string_ptr("", "stream_empty").map_err(|e| e.to_string())?.as_pointer_value(),
+    };
+    ctx.builder.build_call(ctx.printf_fn, &[fmt.into(), s_ptr.into()], "")
+        .map_err(|e| e.to_string())?;
+    Ok(s_ptr.into())
+}
+
+// ── input() built-in ──────────────────────────────────────────────────────────
+
+fn emit_input<'ctx>(
+    args: &[TExpr],
+    ctx: &mut CodegenCtx<'ctx>,
+) -> Result<BasicValueEnum<'ctx>, String> {
+    ctx.uses_prompts = true; // ensures jade_rt is linked
+    let prompt_ptr = if let Some(arg) = args.first() {
+        as_pointer(emit_expr(arg, ctx)?, ctx)?
+    } else {
+        ctx.context.ptr_type(AddressSpace::default()).const_null()
+    };
+    let f = ctx.get_jrt_readline();
+    ctx.call_rv(f, &[prompt_ptr.into()], "input_r")
 }
 
 // ── print() built-in ─────────────────────────────────────────────────────────

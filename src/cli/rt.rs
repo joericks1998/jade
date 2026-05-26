@@ -51,7 +51,8 @@ pub fn run_rt_build(target: &str, output: Option<&str>, cc: &str, ar: &str) {
         .unwrap_or_else(|e| { eprintln!("error: {}", e); process::exit(1); });
 
     // ── Compile: cc -O2 -Wall -std=c11 -fPIC -c -o jade_rt.o <src> ──────────
-    let mut cflags: Vec<&str> = vec!["-O2", "-Wall", "-std=c11", "-fPIC", "-c"];
+    // _POSIX_C_SOURCE=200809L exposes strdup, usleep, etc. under strict C11.
+    let mut cflags: Vec<&str> = vec!["-O2", "-Wall", "-std=c11", "-D_GNU_SOURCE", "-fPIC", "-c"];
     if jadeos {
         cflags.push("-D__JADE_OS__");
     }

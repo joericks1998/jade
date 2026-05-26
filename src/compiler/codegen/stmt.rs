@@ -205,22 +205,47 @@ pub fn emit_stmt<'ctx>(ctx: &mut CodegenCtx<'ctx>, stmt: &TStmt) -> Result<(), S
         TStmt::Let { name, value, .. } => {
             let val = expr::emit_expr(value, ctx)?;
             let llvm_ty = types::jade_to_llvm(&value.ty, ctx.context);
-            let ptr = ctx.build_entry_alloca(llvm_ty, name)?;
-            ctx.builder
-                .build_store(ptr, val)
-                .map_err(|e| e.to_string())?;
-            ctx.define(name.clone(), ptr, value.ty.clone());
+            // Module-level lets (fn_depth == 0) become LLVM globals so that
+            // struct methods in separate functions can reference them without
+            // crossing stack-frame boundaries.
+            if ctx.fn_depth == 0 {
+                let global = ctx.module.add_global(llvm_ty, None, name);
+                let zero_init: inkwell::values::BasicValueEnum = match llvm_ty {
+                    inkwell::types::BasicTypeEnum::IntType(t)     => t.const_zero().into(),
+                    inkwell::types::BasicTypeEnum::FloatType(t)   => t.const_zero().into(),
+                    inkwell::types::BasicTypeEnum::PointerType(t) => t.const_null().into(),
+                    _ => ctx.context.i64_type().const_zero().into(),
+                };
+                global.set_initializer(&zero_init);
+                ctx.builder
+                    .build_store(global.as_pointer_value(), val)
+                    .map_err(|e| e.to_string())?;
+                ctx.module_globals.insert(name.clone(), (global, value.ty.clone()));
+            } else {
+                let ptr = ctx.build_entry_alloca(llvm_ty, name)?;
+                ctx.builder
+                    .build_store(ptr, val)
+                    .map_err(|e| e.to_string())?;
+                ctx.define(name.clone(), ptr, value.ty.clone());
+            }
         }
 
         // ── name = expr ───────────────────────────────────────────────────────
         TStmt::Assign { name, value, .. } => {
             let val = expr::emit_expr(value, ctx)?;
-            let (ptr, _) = ctx
-                .lookup(name)
-                .ok_or_else(|| format!("assignment to undefined variable: {name}"))?;
-            ctx.builder
-                .build_store(ptr, val)
-                .map_err(|e| e.to_string())?;
+            // Check module globals first (may be assigned after initial decl).
+            if let Some((global, _)) = ctx.module_globals.get(name).cloned() {
+                ctx.builder
+                    .build_store(global.as_pointer_value(), val)
+                    .map_err(|e| e.to_string())?;
+            } else {
+                let (ptr, _) = ctx
+                    .lookup(name)
+                    .ok_or_else(|| format!("assignment to undefined variable: {name}"))?;
+                ctx.builder
+                    .build_store(ptr, val)
+                    .map_err(|e| e.to_string())?;
+            }
         }
 
         // ── fn definitions ────────────────────────────────────────────────────
@@ -241,13 +266,45 @@ pub fn emit_stmt<'ctx>(ctx: &mut CodegenCtx<'ctx>, stmt: &TStmt) -> Result<(), S
             // (jade_value_t).  async_body_ret_ty carries the original Jade type
             // needed to convert non-integer values correctly.
             let conv_ty = ctx.async_body_ret_ty.clone();
+            // Get the current LLVM function's declared return type so we can coerce.
+            let llvm_ret_kind = ctx.builder.get_insert_block()
+                .and_then(|bb| bb.get_parent())
+                .map(|f| f.get_type().get_return_type());
             match value {
                 Some(e) => {
                     let val = expr::emit_expr(e, ctx)?;
                     let ret_val: inkwell::values::BasicValueEnum = if let Some(ref ty) = conv_ty {
                         expr::value_to_i64(val, ty, ctx)?.into()
                     } else {
-                        val
+                        // Coerce emitted value to match the function's declared LLVM return type.
+                        match llvm_ret_kind {
+                            // void return type — emit expr for side effects then ret void
+                            Some(None) => {
+                                ctx.builder.build_return(None).map_err(|e| e.to_string())?;
+                                return Ok(());
+                            }
+                            // ptr return but got int — inttoptr
+                            Some(Some(inkwell::types::BasicTypeEnum::PointerType(pt))) => {
+                                match val {
+                                    inkwell::values::BasicValueEnum::IntValue(iv) => {
+                                        ctx.builder.build_int_to_ptr(iv, pt, "ret_i2p")
+                                            .map_err(|e| e.to_string())?.into()
+                                    }
+                                    _ => val,
+                                }
+                            }
+                            // int return but got ptr — ptrtoint
+                            Some(Some(inkwell::types::BasicTypeEnum::IntType(it))) => {
+                                match val {
+                                    inkwell::values::BasicValueEnum::PointerValue(pv) => {
+                                        ctx.builder.build_ptr_to_int(pv, it, "ret_p2i")
+                                            .map_err(|e| e.to_string())?.into()
+                                    }
+                                    _ => val,
+                                }
+                            }
+                            _ => val,
+                        }
                     };
                     ctx.builder
                         .build_return(Some(&ret_val))
@@ -272,7 +329,11 @@ pub fn emit_stmt<'ctx>(ctx: &mut CodegenCtx<'ctx>, stmt: &TStmt) -> Result<(), S
                 .and_then(|bb| bb.get_parent())
                 .ok_or("if outside function")?;
 
-            let cond = expr::emit_expr(condition, ctx)?.into_int_value();
+            let cond_raw = expr::emit_expr(condition, ctx)?.into_int_value();
+            let cond = if cond_raw.get_type().get_bit_width() != 1 {
+                ctx.builder.build_int_compare(inkwell::IntPredicate::NE, cond_raw,
+                    cond_raw.get_type().const_zero(), "cond_i1").map_err(|e| e.to_string())?
+            } else { cond_raw };
             let then_bb  = ctx.context.append_basic_block(fn_val, "if_then");
             let else_bb  = ctx.context.append_basic_block(fn_val, "if_else");
             let merge_bb = ctx.context.append_basic_block(fn_val, "if_merge");
@@ -315,7 +376,11 @@ pub fn emit_stmt<'ctx>(ctx: &mut CodegenCtx<'ctx>, stmt: &TStmt) -> Result<(), S
             ctx.builder.build_unconditional_branch(cond_bb).map_err(|e| e.to_string())?;
 
             ctx.builder.position_at_end(cond_bb);
-            let cond = expr::emit_expr(condition, ctx)?.into_int_value();
+            let cond_raw = expr::emit_expr(condition, ctx)?.into_int_value();
+            let cond = if cond_raw.get_type().get_bit_width() != 1 {
+                ctx.builder.build_int_compare(inkwell::IntPredicate::NE, cond_raw,
+                    cond_raw.get_type().const_zero(), "wcond_i1").map_err(|e| e.to_string())?
+            } else { cond_raw };
             ctx.builder.build_conditional_branch(cond, loop_bb, exit_bb).map_err(|e| e.to_string())?;
 
             ctx.builder.position_at_end(loop_bb);
@@ -339,6 +404,8 @@ pub fn emit_stmt<'ctx>(ctx: &mut CodegenCtx<'ctx>, stmt: &TStmt) -> Result<(), S
 
             let elem_ty = match &iterable.ty {
                 JadeType::Array(inner) => *inner.clone(),
+                // Unknown covers struct fields typed Unknown (e.g. self._registry = [])
+                JadeType::Unknown => JadeType::Unknown,
                 _ => return Err(format!(
                     "for-loop iterable must be an array, got {:?}", iterable.ty
                 )),
@@ -347,8 +414,8 @@ pub fn emit_stmt<'ctx>(ctx: &mut CodegenCtx<'ctx>, stmt: &TStmt) -> Result<(), S
             let i64_ty = ctx.context.i64_type();
             let ptr_ty = ctx.context.ptr_type(AddressSpace::default());
 
-            // Emit the iterable
-            let arr_ptr = expr::emit_expr(iterable, ctx)?.into_pointer_value();
+            // Emit the iterable; use as_pointer to handle int-typed Unknown results.
+            let arr_ptr = expr::as_pointer(expr::emit_expr(iterable, ctx)?, ctx)?;
 
             // Load len from field 1
             let f1 = ctx.builder
@@ -907,6 +974,7 @@ fn emit_fn_body<'ctx>(
     ctx.builder.position_at_end(entry_bb);
 
     ctx.push_scope();
+    ctx.fn_depth += 1;
     let saved_ret = ctx.current_ret_ty.take();
     ctx.current_ret_ty = Some(ret_ty.clone());
 
@@ -927,11 +995,17 @@ fn emit_fn_body<'ctx>(
 
     emit_stmts(ctx, body)?;
 
-    // If the body didn't terminate, add a default return.
+    // If the body didn't terminate, add a default return matching the declared type.
     if !ctx.is_terminated() {
         match ret_ty {
             JadeType::Nil => {
                 ctx.builder.build_return(None).map_err(|e| e.to_string())?;
+            }
+            JadeType::Str | JadeType::Dict | JadeType::Struct(_)
+            | JadeType::Array(_) | JadeType::Fn { .. } | JadeType::AsyncFn { .. }
+            | JadeType::Future(_) | JadeType::Prompt | JadeType::Grammar => {
+                let null = ctx.context.ptr_type(inkwell::AddressSpace::default()).const_null();
+                ctx.builder.build_return(Some(&null)).map_err(|e| e.to_string())?;
             }
             _ => {
                 let zero = ctx.context.i64_type().const_int(0, false);
@@ -941,6 +1015,7 @@ fn emit_fn_body<'ctx>(
     }
 
     ctx.pop_scope();
+    ctx.fn_depth -= 1;
     ctx.current_ret_ty = saved_ret;
 
     if let Some(bb) = restore_bb {
