@@ -121,12 +121,6 @@ enum Commands {
         subcommand: ModelCommands,
     },
 
-    /// Manage the jade async runtime library (jade_rt)
-    Rt {
-        #[command(subcommand)]
-        subcommand: RtCommands,
-    },
-
     /// Upgrade jade to the latest release
     Upgrade,
 
@@ -163,35 +157,6 @@ enum ModelCommands {
     },
 }
 
-#[derive(Subcommand)]
-enum RtCommands {
-    /// Build libJadeRuntime.a from the bundled C source
-    ///
-    /// The jade binary embeds jade_rt_pthread.c (Linux/macOS) and
-    /// jade_rt_jadeos.c (Jade OS kernel).  This command compiles the
-    /// appropriate file and produces libJadeRuntime.a without requiring
-    /// the Jade source tree.
-    ///
-    /// Examples:
-    ///   jade rt build                          # pthread, outputs ./libJadeRuntime.a
-    ///   jade rt build --target jade-os         # Jade OS kernel backend
-    ///   jade rt build --output /opt/jade/lib   # custom output directory
-    ///   JADE_RT_LIB=. jade build myapp.jde     # then compile a Jade program
-    Build {
-        /// Target OS backend: "host" (pthread, default) or "jade-os"
-        #[arg(long, default_value = "host", value_name = "TARGET")]
-        target: String,
-        /// Output directory or file path (default: current directory)
-        #[arg(short, long, value_name = "PATH")]
-        output: Option<String>,
-        /// C compiler to use (default: cc)
-        #[arg(long, default_value = "cc", value_name = "CC")]
-        cc: String,
-        /// Archiver to use (default: ar)
-        #[arg(long, default_value = "ar", value_name = "AR")]
-        ar: String,
-    },
-}
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
@@ -276,13 +241,6 @@ async fn run_cli() {
         Commands::Model { subcommand } => match subcommand {
             ModelCommands::List => cli::model::run_model_list(),
             ModelCommands::Use { spec } => cli::model::run_model_use(&spec),
-        },
-
-        // ── rt ────────────────────────────────────────────────────────────────
-        Commands::Rt { subcommand } => match subcommand {
-            RtCommands::Build { target, output, cc, ar } => {
-                cli::rt::run_rt_build(&target, output.as_deref(), &cc, &ar);
-            }
         },
 
         // ── upgrade ───────────────────────────────────────────────────────────

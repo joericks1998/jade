@@ -54,7 +54,7 @@ pub struct CodegenCtx<'ctx> {
     /// snprintf(ptr buf, i64 max, ptr fmt, ...) -> i32  — variadic (fstring safe writes)
     pub snprintf_fn: FunctionValue<'ctx>,
 
-    // ── jade_rt async runtime (jade_rt_pthread.c / jade_rt_jadeos.c) ──────
+    // ── Async runtime extern symbols ──────────────────────────────────────
     /// jade_spawn(fn_ptr: ptr, args: ptr, n: i32) -> ptr
     pub jade_spawn_fn: FunctionValue<'ctx>,
     /// jade_await(future: ptr) -> i64
