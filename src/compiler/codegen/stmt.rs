@@ -204,7 +204,22 @@ pub fn emit_stmt<'ctx>(ctx: &mut CodegenCtx<'ctx>, stmt: &TStmt) -> Result<(), S
         // ── let name = expr ───────────────────────────────────────────────────
         TStmt::Let { name, value, .. } => {
             let val = expr::emit_expr(value, ctx)?;
-            let llvm_ty = types::jade_to_llvm(&value.ty, ctx.context);
+            // Recover a concrete struct type for imported structs whose
+            // TIR inference was forced to Unknown (the lenient import path).
+            // Without this, ctx.lookup later returns Unknown and method
+            // dispatch can't resolve `s.method(...)` for `s : ImportedStruct`.
+            let value_ty = match &value.ty {
+                crate::compiler::tir::JadeType::Unknown => match &value.kind {
+                    crate::compiler::tir::TExprKind::StructLiteral { type_name, .. } => {
+                        let bare = type_name.rsplit_once('.').map(|(_, b)| b.to_string())
+                            .unwrap_or_else(|| type_name.clone());
+                        crate::compiler::tir::JadeType::Struct(bare)
+                    }
+                    _ => value.ty.clone(),
+                },
+                _ => value.ty.clone(),
+            };
+            let llvm_ty = types::jade_to_llvm(&value_ty, ctx.context);
             // Module-level lets (fn_depth == 0) become LLVM globals so that
             // struct methods in separate functions can reference them without
             // crossing stack-frame boundaries.
@@ -220,13 +235,13 @@ pub fn emit_stmt<'ctx>(ctx: &mut CodegenCtx<'ctx>, stmt: &TStmt) -> Result<(), S
                 ctx.builder
                     .build_store(global.as_pointer_value(), val)
                     .map_err(|e| e.to_string())?;
-                ctx.module_globals.insert(name.clone(), (global, value.ty.clone()));
+                ctx.module_globals.insert(name.clone(), (global, value_ty.clone()));
             } else {
                 let ptr = ctx.build_entry_alloca(llvm_ty, name)?;
                 ctx.builder
                     .build_store(ptr, val)
                     .map_err(|e| e.to_string())?;
-                ctx.define(name.clone(), ptr, value.ty.clone());
+                ctx.define(name.clone(), ptr, value_ty.clone());
             }
         }
 

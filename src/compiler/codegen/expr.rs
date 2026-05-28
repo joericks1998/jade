@@ -27,13 +27,7 @@ pub fn emit_expr<'ctx>(
 
         Bool(b) => Ok(ctx.context.bool_type().const_int(*b as u64, false).into()),
 
-        Str(s) => {
-            let global = ctx
-                .builder
-                .build_global_string_ptr(s, "str_lit")
-                .map_err(|e| e.to_string())?;
-            Ok(global.as_pointer_value().into())
-        }
+        Str(s) => emit_tagged_literal(s, ctx),
 
         // ── Variable reference ────────────────────────────────────────────────
         Identifier(name) => {
@@ -381,13 +375,23 @@ fn emit_struct_literal<'ctx>(
     ctx: &mut CodegenCtx<'ctx>,
 ) -> Result<BasicValueEnum<'ctx>, String> {
     let i64_ty = ctx.context.i64_type();
-    let n = fields.len() as u64;
 
-    // Layout: slot 0 = type_name ptr (as i64), slots 1..=n = field values.
-    // Allocates (n+1) * 8 bytes — same as the old n*8+8 but now slot 0 is used.
-    let struct_ptr = ctx.malloc_ptr(i64_ty.const_int((n + 1) * 8, false), "struct_ptr")?;
+    // Look up bare name, falling back to stripping a module prefix (e.g. "tools.ToolGroup" → "ToolGroup").
+    let bare_name = type_name.rsplit_once('.').map(|(_, b)| b).unwrap_or(type_name);
+    let field_names = ctx.struct_field_order
+        .get(type_name)
+        .or_else(|| ctx.struct_field_order.get(bare_name))
+        .cloned()
+        .ok_or_else(|| format!("unknown struct type: {type_name}"))?;
 
-    // Store the type name pointer at slot 0 for typed catch dispatch.
+    // Size by the struct's full field count, not the user-provided subset.
+    // type_infer fills in defaults for known structs, but imports can pass
+    // through a partial field list — without using the full count here we'd
+    // write past the malloc'd buffer when the caller omits fields.
+    let total = field_names.len().max(fields.len()) as u64;
+    let struct_ptr = ctx.malloc_ptr(i64_ty.const_int((total + 1) * 8, false), "struct_ptr")?;
+
+    // Slot 0: type name pointer (for typed catch dispatch).
     let type_name_lit = ctx.builder
         .build_global_string_ptr(type_name, "sty_name")
         .map_err(|e| e.to_string())?
@@ -398,13 +402,12 @@ fn emit_struct_literal<'ctx>(
     let slot0 = ctx.gep(i64_ty, struct_ptr, &[i64_ty.const_int(0, false)], "sty_slot")?;
     ctx.builder.build_store(slot0, type_name_i64).map_err(|e| e.to_string())?;
 
-    // Look up bare name, falling back to stripping a module prefix (e.g. "tools.ToolGroup" → "ToolGroup").
-    let bare_name = type_name.rsplit_once('.').map(|(_, b)| b).unwrap_or(type_name);
-    let field_names = ctx.struct_field_order
-        .get(type_name)
-        .or_else(|| ctx.struct_field_order.get(bare_name))
-        .cloned()
-        .ok_or_else(|| format!("unknown struct type: {type_name}"))?;
+    // Zero-initialize any field slots the caller didn't supply (nil-ish).
+    for idx in 0..field_names.len() {
+        if fields.iter().any(|(n, _, _)| n == &field_names[idx]) { continue; }
+        let slot = ctx.gep(i64_ty, struct_ptr, &[i64_ty.const_int((idx as u64) + 1, false)], "sf_zero")?;
+        ctx.builder.build_store(slot, i64_ty.const_int(0, false)).map_err(|e| e.to_string())?;
+    }
 
     for (field_name, field_expr, _) in fields {
         let idx = field_names
@@ -552,12 +555,11 @@ fn emit_fstr<'ctx>(
     let i8_ty  = ctx.context.i8_type();
     let i64_ty = ctx.context.i64_type();
 
-    // Stack buffer — writes are bounded by remaining capacity via snprintf.
-    let buf_ptr = ctx.builder
+    // Stage into a stack buffer first; copy into tagged heap allocation at end.
+    let staging = ctx.builder
         .build_array_alloca(i8_ty, i64_ty.const_int(FSTR_BUF_SIZE, false), "fstr_buf")
         .map_err(|e| e.to_string())?;
 
-    // Current write offset
     let pos_slot = ctx.builder
         .build_alloca(i64_ty, "fstr_pos")
         .map_err(|e| e.to_string())?;
@@ -565,19 +567,29 @@ fn emit_fstr<'ctx>(
         .build_store(pos_slot, i64_ty.const_int(0, false))
         .map_err(|e| e.to_string())?;
 
+    // Accumulate trust across any string-typed interpolated expressions.
+    let trust_slot = ctx.builder
+        .build_alloca(i8_ty, "fstr_trust")
+        .map_err(|e| e.to_string())?;
+    ctx.builder
+        .build_store(trust_slot, i8_ty.const_int(JRT_TRUSTED_LIT, false))
+        .map_err(|e| e.to_string())?;
+
     for part in parts {
         let pos = ctx.builder
             .build_load(i64_ty, pos_slot, "fstr_pos_v")
             .map_err(|e| e.to_string())?
             .into_int_value();
-        // Remaining capacity for snprintf (including the null terminator).
         let remaining = ctx.builder
             .build_int_sub(i64_ty.const_int(FSTR_BUF_SIZE, false), pos, "fstr_rem")
             .map_err(|e| e.to_string())?;
-        let write_ptr = ctx.gep(i8_ty, buf_ptr, &[pos], "fstr_wptr")?;
+        let write_ptr = ctx.gep(i8_ty, staging, &[pos], "fstr_wptr")?;
 
         let written = match part {
             TFStrPart::Literal(s) => {
+                // Literal strings within an f-string itself are trusted; emit
+                // them as plain `%s` writes from a non-tagged global (they
+                // never escape the f-string body as a standalone value).
                 let lit = ctx.builder
                     .build_global_string_ptr(s, "fstr_lit")
                     .map_err(|e| e.to_string())?
@@ -593,6 +605,27 @@ fn emit_fstr<'ctx>(
             }
             TFStrPart::Expr(e) => {
                 let val = emit_expr(e, ctx)?;
+                // For string-typed parts, OR in their trust byte. Strings may
+                // arrive as PointerValue OR as IntValue (i64 representation of
+                // a pointer — used in jade_value_t-typed paths like dict.get).
+                if matches!(effective_ty(&e.ty), JadeType::Str) {
+                    let p = match val {
+                        BasicValueEnum::PointerValue(pv) => pv,
+                        BasicValueEnum::IntValue(iv) => ctx.builder
+                            .build_int_to_ptr(iv, ctx.context.ptr_type(AddressSpace::default()), "fstr_iv2p")
+                            .map_err(|e| e.to_string())?,
+                        _ => return Err("fstring: unexpected str value kind".into()),
+                    };
+                    let t = emit_jrt_trust_of(p, ctx, "fstr_part_trust")?;
+                    let cur = ctx.builder
+                        .build_load(i8_ty, trust_slot, "fstr_trust_v")
+                        .map_err(|e| e.to_string())?
+                        .into_int_value();
+                    let new = ctx.builder
+                        .build_or(cur, t, "fstr_trust_or")
+                        .map_err(|e| e.to_string())?;
+                    ctx.builder.build_store(trust_slot, new).map_err(|e| e.to_string())?;
+                }
                 emit_snprintf_value(val, &e.ty, write_ptr, remaining, ctx)?
             }
         };
@@ -606,7 +639,36 @@ fn emit_fstr<'ctx>(
         ctx.builder.build_store(pos_slot, new_pos).map_err(|e| e.to_string())?;
     }
 
-    Ok(buf_ptr.into())
+    // Allocate a tagged heap copy of [0..pos) and memcpy from staging.
+    let final_pos = ctx.builder
+        .build_load(i64_ty, pos_slot, "fstr_final_pos")
+        .map_err(|e| e.to_string())?
+        .into_int_value();
+    let final_trust = ctx.builder
+        .build_load(i8_ty, trust_slot, "fstr_final_trust")
+        .map_err(|e| e.to_string())?
+        .into_int_value();
+    let heap_buf = emit_jrt_str_new(final_pos, final_trust, ctx, "fstr_out")?;
+
+    // memcpy(heap_buf, staging, final_pos). Use sprintf-style loop via memcpy
+    // intrinsic isn't trivially available; use a small inline copy via memcpy
+    // declared as an extern. For simplicity we call snprintf("%s") again,
+    // which is acceptable since staging is NUL-terminated by snprintf's last
+    // write. Use memcpy via printf-family is fragile — declare and use memcpy.
+    // Inline-build memcpy declaration once via module:
+    let memcpy_fn = match ctx.module.get_function("memcpy") {
+        Some(f) => f,
+        None => {
+            let ptr_ty = ctx.context.ptr_type(AddressSpace::default());
+            let memcpy_ty = ptr_ty.fn_type(&[ptr_ty.into(), ptr_ty.into(), i64_ty.into()], false);
+            ctx.module.add_function("memcpy", memcpy_ty, None)
+        }
+    };
+    ctx.builder
+        .build_call(memcpy_fn, &[heap_buf.into(), staging.into(), final_pos.into()], "fstr_cp")
+        .map_err(|e| e.to_string())?;
+
+    Ok(heap_buf.into())
 }
 
 fn emit_snprintf_value<'ctx>(
@@ -668,6 +730,73 @@ fn extract_i32_from_call<'ctx>(
     }
 }
 
+// ── Tagged-string helpers ─────────────────────────────────────────────────────
+
+const JRT_TRUSTED_LIT: u64 = 0;
+const JRT_TAINTED_LIT: u64 = 1;
+
+/// Emit a string literal as a globally-allocated tagged array
+/// `[trust:i8 = 0][bytes…][NUL:i8]` and return a pointer one byte past
+/// the trust header (the canonical data pointer).
+fn emit_tagged_literal<'ctx>(
+    s: &str,
+    ctx: &mut CodegenCtx<'ctx>,
+) -> Result<BasicValueEnum<'ctx>, String> {
+    let i8_ty  = ctx.context.i8_type();
+    let i32_ty = ctx.context.i32_type();
+
+    // [trust][bytes...][nul]
+    let bytes = s.as_bytes();
+    let mut data: Vec<u8> = Vec::with_capacity(bytes.len() + 2);
+    data.push(JRT_TRUSTED_LIT as u8);
+    data.extend_from_slice(bytes);
+    data.push(0);
+
+    let arr_ty  = i8_ty.array_type(data.len() as u32);
+    let const_arr = ctx.context.const_string(&data, false);
+    let global = ctx.module.add_global(arr_ty, None, "str_lit_t");
+    global.set_initializer(&const_arr);
+    global.set_linkage(inkwell::module::Linkage::Internal);
+    global.set_constant(true);
+
+    let zero = i32_ty.const_zero();
+    let one  = i32_ty.const_int(1, false);
+    let data_ptr = unsafe {
+        ctx.builder
+            .build_in_bounds_gep(arr_ty, global.as_pointer_value(), &[zero, one], "lit_data")
+            .map_err(|e| e.to_string())?
+    };
+    Ok(data_ptr.into())
+}
+
+/// Allocate a tagged string of `len` bytes with `trust` byte already
+/// written at offset -1 and NUL at offset `len`. Returns the data pointer.
+fn emit_jrt_str_new<'ctx>(
+    len: IntValue<'ctx>,
+    trust: IntValue<'ctx>,
+    ctx: &mut CodegenCtx<'ctx>,
+    name: &str,
+) -> Result<PointerValue<'ctx>, String> {
+    ctx.uses_runtime = true;
+    let cs = ctx.builder
+        .build_call(ctx.jrt_str_new_fn, &[len.into(), trust.into()], name)
+        .map_err(|e| e.to_string())?;
+    Ok(cs.as_any_value_enum().into_pointer_value())
+}
+
+/// Read the trust byte of a tagged string at runtime.
+fn emit_jrt_trust_of<'ctx>(
+    ptr: PointerValue<'ctx>,
+    ctx: &mut CodegenCtx<'ctx>,
+    name: &str,
+) -> Result<IntValue<'ctx>, String> {
+    ctx.uses_runtime = true;
+    let cs = ctx.builder
+        .build_call(ctx.jrt_trust_of_fn, &[ptr.into()], name)
+        .map_err(|e| e.to_string())?;
+    Ok(cs.as_any_value_enum().into_int_value())
+}
+
 // ── Int → heap char* (for mixed-type Add) ────────────────────────────────────
 
 fn emit_int_to_str<'ctx>(
@@ -676,16 +805,22 @@ fn emit_int_to_str<'ctx>(
 ) -> Result<PointerValue<'ctx>, String> {
     let i8_ty  = ctx.context.i8_type();
     let i64_ty = ctx.context.i64_type();
-    // i64 max is 20 digits + sign + null = 22 chars; 32 is plenty
-    let buf = ctx.builder
-        .build_array_alloca(i8_ty, i64_ty.const_int(32, false), "int2s_buf")
-        .map_err(|e| e.to_string())?;
+
+    // 22 chars max for i64; round up to 32. Allocate tagged TRUSTED.
+    let buf = emit_jrt_str_new(
+        i64_ty.const_int(32, false),
+        i8_ty.const_int(JRT_TRUSTED_LIT, false),
+        ctx,
+        "int2s_buf",
+    )?;
     let fmt = ctx.builder
         .build_global_string_ptr("%lld", "int2s_fmt")
         .map_err(|e| e.to_string())?
         .as_pointer_value();
     ctx.builder
-        .build_call(ctx.snprintf_fn, &[buf.into(), i64_ty.const_int(32, false).into(), fmt.into(), val.into()], "int2s")
+        .build_call(ctx.snprintf_fn,
+                    &[buf.into(), i64_ty.const_int(33, false).into(), fmt.into(), val.into()],
+                    "int2s")
         .map_err(|e| e.to_string())?;
     Ok(buf)
 }
@@ -697,6 +832,7 @@ fn emit_str_concat<'ctx>(
     rhs: BasicValueEnum<'ctx>,
     ctx: &mut CodegenCtx<'ctx>,
 ) -> Result<BasicValueEnum<'ctx>, String> {
+    let i8_ty  = ctx.context.i8_type();
     let i64_ty = ctx.context.i64_type();
     let lp = lhs.into_pointer_value();
     let rp = rhs.into_pointer_value();
@@ -704,11 +840,15 @@ fn emit_str_concat<'ctx>(
     let ll = ctx.call_rv(ctx.strlen_fn, &[lp.into()], "llen")?.into_int_value();
     let rl = ctx.call_rv(ctx.strlen_fn, &[rp.into()], "rlen")?.into_int_value();
     let total = ctx.builder.build_int_add(ll, rl, "concat_len").map_err(|e| e.to_string())?;
-    let total1 = ctx.builder
-        .build_int_add(total, i64_ty.const_int(1, false), "concat_len1")
-        .map_err(|e| e.to_string())?;
 
-    let buf = ctx.malloc_ptr(total1, "concat_buf")?;
+    // Compute trust = jrt_trust_of(lhs) | jrt_trust_of(rhs).
+    let lt = emit_jrt_trust_of(lp, ctx, "ltrust")?;
+    let rt = emit_jrt_trust_of(rp, ctx, "rtrust")?;
+    let trust = ctx.builder.build_or(lt, rt, "concat_trust").map_err(|e| e.to_string())?;
+    // OR is enough since TRUSTED=0 and TAINTED=1.
+    let _ = i8_ty; // suppress unused
+
+    let buf = emit_jrt_str_new(total, trust, ctx, "concat_buf")?;
     let fmt = ctx.builder
         .build_global_string_ptr("%s%s", "concat_fmt")
         .map_err(|e| e.to_string())?
@@ -1707,6 +1847,7 @@ fn emit_from_sig<'ctx>(
     ctx: &mut CodegenCtx<'ctx>,
 ) -> Result<BasicValueEnum<'ctx>, String> {
     if sig.uses_dicts { ctx.uses_dicts = true; }
+    ctx.uses_runtime = true;
     let fn_val = ctx.extern_fn(sig);
     let mut llvm_args: Vec<BasicMetadataValueEnum<'ctx>> = Vec::with_capacity(sig.args.len());
     for (kind, arg_expr) in sig.args.iter().zip(args.iter()) {
@@ -1868,6 +2009,14 @@ fn emit_call<'ctx>(
                     ctx.lookup(var).and_then(|(_, ty)| {
                         if let JadeType::Struct(n) = ty { Some(n) } else { None }
                     })
+                    // Also check module-level globals; imported-struct lets at
+                    // the top level live there and ctx.lookup only walks scopes.
+                    .or_else(|| {
+                        ctx.module_globals.get(var.as_str())
+                            .and_then(|(_, ty)| if let JadeType::Struct(n) = ty {
+                                Some(n.clone())
+                            } else { None })
+                    })
                 } else if let TExprKind::FieldAccess { object: inner_obj, field: inner_field } = &object.kind {
                     // Handle patterns like self.tools.grammar() — resolve the inner
                     // field's struct type from struct_field_types.
@@ -1877,6 +2026,12 @@ fn emit_call<'ctx>(
                             if let TExprKind::Identifier(var) = &inner_obj.kind {
                                 ctx.lookup(var).and_then(|(_, ty)| {
                                     if let JadeType::Struct(n) = ty { Some(n) } else { None }
+                                })
+                                .or_else(|| {
+                                    ctx.module_globals.get(var.as_str())
+                                        .and_then(|(_, ty)| if let JadeType::Struct(n) = ty {
+                                            Some(n.clone())
+                                        } else { None })
                                 })
                             } else { None }
                         }
@@ -2148,16 +2303,42 @@ fn emit_primitive_method<'ctx>(
 
 // ── json.stringify (inline codegen — not table-driven) ────────────────────────
 
+/// Best-effort lookup of a field access's effective type. Used to recover
+/// from `Unknown` types on `self.<field>` inside extend methods, where the
+/// TIR didn't track per-field types. Returns None if the expression isn't
+/// a field access we can resolve.
+fn resolve_field_ty<'ctx>(expr: &TExpr, ctx: &CodegenCtx<'ctx>) -> Option<JadeType> {
+    if !matches!(expr.ty, JadeType::Unknown) {
+        return Some(expr.ty.clone());
+    }
+    let TExprKind::FieldAccess { object, field } = &expr.kind else { return None };
+    let struct_name = match &object.ty {
+        JadeType::Struct(n) => n.clone(),
+        JadeType::Unknown => {
+            if let TExprKind::Identifier(var) = &object.kind {
+                match ctx.lookup(var).map(|(_, ty)| ty)? {
+                    JadeType::Struct(n) => n,
+                    _ => return None,
+                }
+            } else {
+                return None;
+            }
+        }
+        _ => return None,
+    };
+    ctx.struct_field_types.get(&struct_name)?
+        .get(field).cloned()
+}
+
 fn emit_json_stringify<'ctx>(
     arg: &TExpr,
     ctx: &mut CodegenCtx<'ctx>,
 ) -> Result<BasicValueEnum<'ctx>, String> {
-    // For dict literals: build JSON string inline by concatenating key/value strings.
     if let TExprKind::Dict { entries } = &arg.kind {
-        // Start with "{"
-        let mut acc: BasicValueEnum<'ctx> = ctx.builder
-            .build_global_string_ptr("{", "json_open")
-            .map_err(|e| e.to_string())?.as_pointer_value().into();
+        // Seeds must be tagged literals — emit_str_concat reads the trust
+        // header of both operands; a bare `build_global_string_ptr` would
+        // dereference offset -1 of .rodata (undefined behaviour, often a fault).
+        let mut acc: BasicValueEnum<'ctx> = emit_tagged_literal("{", ctx)?;
 
         for (i, (key_expr, val_expr)) in entries.iter().enumerate() {
             let key_str = match &key_expr.kind {
@@ -2169,20 +2350,23 @@ fn emit_json_stringify<'ctx>(
             } else {
                 format!(", \"{key_str}\": ")
             };
-            let prefix_lit: BasicValueEnum<'ctx> = ctx.builder
-                .build_global_string_ptr(&prefix, "json_key")
-                .map_err(|e| e.to_string())?.as_pointer_value().into();
+            let prefix_lit = emit_tagged_literal(&prefix, ctx)?;
             acc = emit_str_concat(acc, prefix_lit, ctx)?;
 
-            let val_str: BasicValueEnum<'ctx> = match &val_expr.ty {
+            // Resolve the value's effective type. For struct field accesses
+            // the TIR type is often Unknown — look it up in the recorded
+            // struct field types if possible so we don't mis-dispatch a Str
+            // field as an array (which would cause jrt_json_arr_dicts to
+            // dereference the string bytes as an array header).
+            let resolved_ty = resolve_field_ty(val_expr, ctx).unwrap_or_else(|| val_expr.ty.clone());
+
+            let val_str: BasicValueEnum<'ctx> = match resolved_ty {
                 JadeType::Str => {
                     let v = as_pointer(emit_expr(val_expr, ctx)?, ctx)?;
                     let f = ctx.get_jrt_json_esc_str();
                     ctx.call_rv(f, &[v.into()], "json_esc")?
                 }
                 _ => {
-                    // Unknown / Array / Dict: pass as i64 to jrt_json_arr_dicts
-                    // (covers the messages array in the _encode protocol).
                     let v = emit_expr(val_expr, ctx)?;
                     let as_i64 = value_to_i64(v, &val_expr.ty, ctx)?;
                     let f = ctx.get_jrt_json_arr_dicts();
@@ -2192,9 +2376,7 @@ fn emit_json_stringify<'ctx>(
             acc = emit_str_concat(acc, val_str, ctx)?;
         }
 
-        let close: BasicValueEnum<'ctx> = ctx.builder
-            .build_global_string_ptr("}", "json_close")
-            .map_err(|e| e.to_string())?.as_pointer_value().into();
+        let close = emit_tagged_literal("}", ctx)?;
         return emit_str_concat(acc, close, ctx);
     }
 
@@ -2238,6 +2420,8 @@ fn emit_stream_with_kwargs<'ctx>(
     kwargs: &[(String, TExpr)],
     ctx: &mut CodegenCtx<'ctx>,
 ) -> Result<BasicValueEnum<'ctx>, String> {
+    ctx.uses_prompts = true;
+    ctx.uses_runtime = true;
     let first = args.get(0).ok_or("stream: missing arg")?;
 
     // Locate mute_on kwarg and extract the first grammar element if present.

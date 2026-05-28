@@ -117,6 +117,23 @@ impl TypeContext {
 ///
 /// Errors are fatal (first error stops inference). The `Unknown` type is used
 /// conservatively whenever a type cannot be determined — no false positives.
+/// Static return type for stdlib calls of the form `mod.method(...)`. Mirrors
+/// the runtime signatures so codegen sees `JadeType::Str` (not `Unknown`)
+/// for string-producing builtins — required for taint-flow gates.
+fn stdlib_return_type(module: &str, method: &str) -> Option<JadeType> {
+    match (module, method) {
+        ("sh",   "exec")    => Some(JadeType::Str),
+        ("fs",   "read")    => Some(JadeType::Str),
+        ("fs",   "exists")  => Some(JadeType::Bool),
+        ("http", "get")     => Some(JadeType::Dict),
+        ("llm",  "count_tokens") => Some(JadeType::Int),
+        ("json", "stringify") => Some(JadeType::Str),
+        // json.parse intentionally stays Unknown — it can fail and return nil,
+        // which would conflict with strict Dict typing on `if x != nil { … }`.
+        _ => None,
+    }
+}
+
 pub fn infer(program: Program) -> Result<TProgram> {
     let mut ctx = TypeContext::new();
     pre_pass(&program.stmts, &mut ctx);
@@ -583,6 +600,17 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
                 if field == "new" && matches!(object.as_ref(), Expr::Identifier { name, .. } if name == "Grammar")
             );
 
+            // Recognize stdlib calls (sh.exec, fs.read, http.get, …) so their
+            // return types are known statically — codegen needs Str (not
+            // Unknown→i64) for tagged-string flow analysis.
+            let stdlib_ret: Option<JadeType> = match callee.as_ref() {
+                Expr::FieldAccess { object, field, .. } => match object.as_ref() {
+                    Expr::Identifier { name, .. } => stdlib_return_type(name, field),
+                    _ => None,
+                },
+                _ => None,
+            };
+
             let tcallee = infer_expr(callee, ctx)?;
             let targs: Vec<TExpr> = args.iter().map(|a| infer_expr(a, ctx)).collect::<Result<_>>()?;
             let tkwargs: Vec<(String, TExpr)> = kwargs.iter()
@@ -590,6 +618,8 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
                 .collect::<Result<_>>()?;
             let ret_ty = if is_grammar_new {
                 JadeType::Grammar
+            } else if let Some(t) = stdlib_ret {
+                t
             } else {
                 match &tcallee.ty {
                     JadeType::Fn { ret, .. }      => *ret.clone(),
@@ -913,7 +943,7 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
             //       `output_type = Some("self.grammar")` would cause at runtime.
             //    c. Otherwise → error.
             let (output_type, grammar_texpr, result_ty) = match constraint {
-                None => (None, None, JadeType::Unknown),
+                None => (None, None, JadeType::Str),
                 Some(c) => {
                     if let Some(name) = extract_type_name(c) {
                         let is_builtin = matches!(

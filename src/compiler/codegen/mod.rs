@@ -100,6 +100,11 @@ pub struct CodegenCtx<'ctx> {
     /// jrt_get_model() -> ptr
     pub jrt_get_model_fn: FunctionValue<'ctx>,
 
+    /// jrt_str_new(i64 len, i8 trust) -> ptr (data pointer past header byte)
+    pub jrt_str_new_fn: FunctionValue<'ctx>,
+    /// jrt_trust_of(ptr) -> i8
+    pub jrt_trust_of_fn: FunctionValue<'ctx>,
+
     // ── Grammar heap struct layout ─────────────────────────────────────────
     /// `%jade.grammar = type { ptr pattern, ptr anchor, ptr stop_anchor }`
     pub jade_grammar_ty: inkwell::types::StructType<'ctx>,
@@ -121,6 +126,7 @@ pub struct CodegenCtx<'ctx> {
     /// converts its value via `value_to_i64(val, ty)` before emitting `ret i64`.
     pub async_body_ret_ty: Option<JadeType>,
     /// Set to `true` when any async construct (spawn/await/join) is emitted.
+    pub uses_runtime: bool,
     pub uses_async: bool,
     /// Set to `true` when any dict runtime call is emitted.
     pub uses_dicts: bool,
@@ -284,6 +290,15 @@ impl<'ctx> CodegenCtx<'ctx> {
         let jrt_get_model_ty = ptr_ty.fn_type(&[], false);
         let jrt_get_model_fn = module.add_function("jrt_get_model", jrt_get_model_ty, None);
 
+        // jrt_str_new(i64 len, i8 trust) -> ptr
+        let i8_ty = context.i8_type();
+        let jrt_str_new_ty = ptr_ty.fn_type(&[i64_ty.into(), i8_ty.into()], false);
+        let jrt_str_new_fn = module.add_function("jrt_str_new", jrt_str_new_ty, None);
+
+        // jrt_trust_of(ptr) -> i8
+        let jrt_trust_of_ty = i8_ty.fn_type(&[ptr_ty.into()], false);
+        let jrt_trust_of_fn = module.add_function("jrt_trust_of", jrt_trust_of_ty, None);
+
         // %jade.grammar = type { ptr pattern, ptr anchor, ptr stop_anchor }
         let jade_grammar_ty = context.opaque_struct_type("jade.grammar");
         jade_grammar_ty.set_body(&[ptr_ty.into(), ptr_ty.into(), ptr_ty.into()], false);
@@ -346,6 +361,8 @@ impl<'ctx> CodegenCtx<'ctx> {
             jrt_prompt_grammar_ex_fn,
             jrt_prompt_stream_ex_fn,
             jrt_get_model_fn,
+            jrt_str_new_fn,
+            jrt_trust_of_fn,
             jade_grammar_ty,
             atoll_fn,
             strtod_fn,
@@ -353,6 +370,7 @@ impl<'ctx> CodegenCtx<'ctx> {
             free_fn,
             strstr_fn,
             async_body_ret_ty: None,
+            uses_runtime: false,
             uses_async: false,
             uses_dicts: false,
             uses_exceptions: false,
@@ -651,7 +669,7 @@ pub fn compile(program: TProgram, source_path: Option<&Path>, output_path: &Path
         }
     }
     // Link jade_rt if any runtime calls were emitted.
-    if ctx.uses_async || ctx.uses_dicts || ctx.uses_exceptions || ctx.uses_prompts {
+    if ctx.uses_runtime || ctx.uses_async || ctx.uses_dicts || ctx.uses_exceptions || ctx.uses_prompts {
         if let Ok(lib_dir) = std::env::var("JADE_RT_LIB") {
             cc.arg(format!("-L{}", lib_dir));
         } else {
