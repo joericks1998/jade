@@ -95,6 +95,10 @@ pub struct CodegenCtx<'ctx> {
     pub jrt_prompt_grammar_fn: FunctionValue<'ctx>,
     /// jrt_prompt_grammar_ex(ptr prompt, ptr model, ptr pattern, ptr anchor_or_null, ptr stop_or_null) -> ptr
     pub jrt_prompt_grammar_ex_fn: FunctionValue<'ctx>,
+    /// jrt_prompt_stream_ex(ptr prompt, ptr model, ptr pattern_or_null, ptr anchor_or_null, ptr stop_or_null, i32 start_muted) -> ptr
+    pub jrt_prompt_stream_ex_fn: FunctionValue<'ctx>,
+    /// jrt_get_model() -> ptr
+    pub jrt_get_model_fn: FunctionValue<'ctx>,
 
     // ── Grammar heap struct layout ─────────────────────────────────────────
     /// `%jade.grammar = type { ptr pattern, ptr anchor, ptr stop_anchor }`
@@ -269,6 +273,17 @@ impl<'ctx> CodegenCtx<'ctx> {
         );
         let jrt_prompt_grammar_ex_fn = module.add_function("jrt_prompt_grammar_ex", jrt_prompt_grammar_ex_ty, None);
 
+        // jrt_prompt_stream_ex(ptr, ptr, ptr, ptr, ptr, i32) -> ptr
+        let jrt_prompt_stream_ex_ty = ptr_ty.fn_type(
+            &[ptr_ty.into(), ptr_ty.into(), ptr_ty.into(), ptr_ty.into(), ptr_ty.into(), i32_ty.into()],
+            false,
+        );
+        let jrt_prompt_stream_ex_fn = module.add_function("jrt_prompt_stream_ex", jrt_prompt_stream_ex_ty, None);
+
+        // jrt_get_model() -> ptr
+        let jrt_get_model_ty = ptr_ty.fn_type(&[], false);
+        let jrt_get_model_fn = module.add_function("jrt_get_model", jrt_get_model_ty, None);
+
         // %jade.grammar = type { ptr pattern, ptr anchor, ptr stop_anchor }
         let jade_grammar_ty = context.opaque_struct_type("jade.grammar");
         jade_grammar_ty.set_body(&[ptr_ty.into(), ptr_ty.into(), ptr_ty.into()], false);
@@ -329,6 +344,8 @@ impl<'ctx> CodegenCtx<'ctx> {
             jrt_prompt_typed_fn,
             jrt_prompt_grammar_fn,
             jrt_prompt_grammar_ex_fn,
+            jrt_prompt_stream_ex_fn,
+            jrt_get_model_fn,
             jade_grammar_ty,
             atoll_fn,
             strtod_fn,

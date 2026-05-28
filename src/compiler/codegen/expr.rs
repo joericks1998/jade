@@ -60,9 +60,8 @@ pub fn emit_expr<'ctx>(
             }
             // Compiler-injected global identifiers.
             if name == "__model__" {
-                let s = ctx.builder.build_global_string_ptr("", "jade_model_name")
-                    .map_err(|e| e.to_string())?.as_pointer_value();
-                return Ok(s.into());
+                // Resolve from $JADE_MODEL at runtime via the C runtime helper.
+                return ctx.call_rv(ctx.jrt_get_model_fn, &[], "model_r");
             }
             if name == "__tokens__" {
                 return Ok(ctx.context.i64_type().const_int(0, false).into());
@@ -150,17 +149,23 @@ pub fn emit_expr<'ctx>(
                 let f2 = ctx.builder.build_struct_gep(ctx.jade_grammar_ty, struct_ptr, 2, "gm_r2").map_err(|e| e.to_string())?;
                 let stop_ptr = ctx.builder.build_load(ptr_ty, f2, "gm_stop").map_err(|e| e.to_string())?.into_pointer_value();
 
-                return ctx.call_rv(
+                let r = ctx.call_rv(
                     ctx.jrt_prompt_grammar_ex_fn,
                     &[prompt_ptr.into(), model_ptr.into(), pattern_ptr.into(), anchor_ptr.into(), stop_ptr.into()],
                     "infer_grammar_r",
-                );
+                )?;
+                let ptr = r.into_pointer_value();
+                emit_null_check_and_exit(ptr, "jade: grammar-constrained ?p failed — jade-tree daemon unreachable or returned an error\n", ctx)?;
+                return Ok(ptr.into());
             }
 
             match output_type {
                 // ── Untyped: jrt_prompt(prompt, model) -> char* ──────────────
                 None => {
-                    ctx.call_rv(ctx.jrt_prompt_fn, &[prompt_ptr.into(), model_ptr.into()], "infer_r")
+                    let r = ctx.call_rv(ctx.jrt_prompt_fn, &[prompt_ptr.into(), model_ptr.into()], "infer_r")?;
+                    let ptr = r.into_pointer_value();
+                    emit_null_check_and_exit(ptr, "jade: ?p failed — jade-tree daemon unreachable or returned an error\n", ctx)?;
+                    Ok(ptr.into())
                 }
 
                 // ── Typed: jrt_prompt_typed → parse to target type ────────────
@@ -231,6 +236,38 @@ pub fn emit_expr<'ctx>(
             }
         }
     }
+}
+
+/// Emit `if (ptr == NULL) { printf(msg); exit(1); }` at the current insert point,
+/// positioning the builder at the success (non-NULL) block on return.
+fn emit_null_check_and_exit<'ctx>(
+    ptr: PointerValue<'ctx>,
+    err_msg: &str,
+    ctx: &mut CodegenCtx<'ctx>,
+) -> Result<(), String> {
+    let fn_val = ctx.builder.get_insert_block()
+        .and_then(|b| b.get_parent())
+        .ok_or("null check outside function")?;
+    let ok_bb   = ctx.context.append_basic_block(fn_val, "rt_ok");
+    let fail_bb = ctx.context.append_basic_block(fn_val, "rt_fail");
+
+    let is_null = ctx.builder.build_is_null(ptr, "rt_isnull")
+        .map_err(|e| e.to_string())?;
+    ctx.builder.build_conditional_branch(is_null, fail_bb, ok_bb)
+        .map_err(|e| e.to_string())?;
+
+    ctx.builder.position_at_end(fail_bb);
+    let err = ctx.builder.build_global_string_ptr(err_msg, "rt_err")
+        .map_err(|e| e.to_string())?.as_pointer_value();
+    ctx.builder.build_call(ctx.printf_fn, &[err.into()], "")
+        .map_err(|e| e.to_string())?;
+    ctx.builder.build_call(ctx.exit_fn,
+        &[ctx.context.i32_type().const_int(1, false).into()], "")
+        .map_err(|e| e.to_string())?;
+    ctx.builder.build_unreachable().map_err(|e| e.to_string())?;
+
+    ctx.builder.position_at_end(ok_bb);
+    Ok(())
 }
 
 // ── Array creation ────────────────────────────────────────────────────────────
@@ -1615,6 +1652,14 @@ fn emit_call_with_kwargs<'ctx>(
     ret_ty: &JadeType,
     ctx: &mut CodegenCtx<'ctx>,
 ) -> Result<BasicValueEnum<'ctx>, String> {
+    // stream() needs kwargs intact (mute_on=) — intercept before the fallback
+    // flattening drops them.
+    if let TExprKind::Identifier(name) = &callee.kind {
+        if name == "stream" {
+            return emit_stream_with_kwargs(args, kwargs, ctx);
+        }
+    }
+
     if kwargs.is_empty() {
         return emit_call(callee, args, ret_ty, ctx);
     }
@@ -2174,25 +2219,94 @@ fn emit_write<'ctx>(
 }
 
 // ── stream() built-in ─────────────────────────────────────────────────────────
-// In the LLVM path there is no true token streaming — we evaluate the prompt
-// expression (which calls jrt_prompt), print the complete response, and return it.
-// The mute_on kwarg is accepted but ignored.
+// `stream(?p)` and `stream(?p, mute_on=[grammar])` lower to a single call into
+// `jrt_prompt_stream_ex`, which streams tokens token-by-token to stdout (with
+// prefix-aware muting) and returns the full collected text.
+//
+// If the first arg is anything other than `?p` (e.g. a precomputed string),
+// fall back to printing the value — no daemon round-trip.
 
 fn emit_stream<'ctx>(
     args: &[TExpr],
     ctx: &mut CodegenCtx<'ctx>,
 ) -> Result<BasicValueEnum<'ctx>, String> {
-    let result = emit_expr(args.get(0).ok_or("stream: missing arg")?, ctx)?;
-    // Print the response string (no trailing newline — caller prints one if needed).
-    let fmt = ctx.builder.build_global_string_ptr("%s", "stream_fmt")
-        .map_err(|e| e.to_string())?.as_pointer_value();
-    let s_ptr = match result {
-        BasicValueEnum::PointerValue(p) => p,
-        _ => ctx.builder.build_global_string_ptr("", "stream_empty").map_err(|e| e.to_string())?.as_pointer_value(),
-    };
-    ctx.builder.build_call(ctx.printf_fn, &[fmt.into(), s_ptr.into()], "")
-        .map_err(|e| e.to_string())?;
-    Ok(s_ptr.into())
+    emit_stream_with_kwargs(args, &[], ctx)
+}
+
+fn emit_stream_with_kwargs<'ctx>(
+    args: &[TExpr],
+    kwargs: &[(String, TExpr)],
+    ctx: &mut CodegenCtx<'ctx>,
+) -> Result<BasicValueEnum<'ctx>, String> {
+    let first = args.get(0).ok_or("stream: missing arg")?;
+
+    // Locate mute_on kwarg and extract the first grammar element if present.
+    // Supported shape: `mute_on = [grammar_expr]` (single-element array literal).
+    // Any other shape is treated as "no mute" — the response still streams.
+    let mute_grammar: Option<&TExpr> = kwargs.iter()
+        .find(|(k, _)| k == "mute_on")
+        .and_then(|(_, e)| match &e.kind {
+            TExprKind::Array { elements } => elements.first(),
+            _ => None,
+        });
+
+    // Fast path: arg is `?p` — bypass jrt_prompt and use the streaming runtime.
+    if let TExprKind::PromptDeref { expr: pexpr, output_type: None, grammar_expr: None } = &first.kind {
+        let prompt_ptr = emit_expr(pexpr, ctx)?.into_pointer_value();
+        let ptr_ty = ctx.context.ptr_type(AddressSpace::default());
+        let model_ptr = ctx.builder.build_global_string_ptr("", "stream_model_empty")
+            .map_err(|e| e.to_string())?.as_pointer_value();
+
+        let (pattern_ptr, anchor_ptr, stop_ptr, start_muted) = match mute_grammar {
+            Some(gexpr) => {
+                let struct_ptr = as_pointer(emit_expr(gexpr, ctx)?, ctx)?;
+                let f0 = ctx.builder.build_struct_gep(ctx.jade_grammar_ty, struct_ptr, 0, "gm_p")
+                    .map_err(|e| e.to_string())?;
+                let pattern = ctx.builder.build_load(ptr_ty, f0, "gm_pattern")
+                    .map_err(|e| e.to_string())?.into_pointer_value();
+
+                let f1 = ctx.builder.build_struct_gep(ctx.jade_grammar_ty, struct_ptr, 1, "gm_a")
+                    .map_err(|e| e.to_string())?;
+                let anchor = ctx.builder.build_load(ptr_ty, f1, "gm_anchor")
+                    .map_err(|e| e.to_string())?.into_pointer_value();
+
+                let f2 = ctx.builder.build_struct_gep(ctx.jade_grammar_ty, struct_ptr, 2, "gm_s")
+                    .map_err(|e| e.to_string())?;
+                let stop = ctx.builder.build_load(ptr_ty, f2, "gm_stop")
+                    .map_err(|e| e.to_string())?.into_pointer_value();
+
+                // start_muted = (anchor == NULL). Runtime treats anchor=NULL +
+                // start_muted=1 as "mute from token 0 until stop".
+                let is_null = ctx.builder.build_is_null(anchor, "gm_anchor_null")
+                    .map_err(|e| e.to_string())?;
+                let start_muted = ctx.builder.build_int_z_extend(is_null, ctx.context.i32_type(), "gm_start_muted")
+                    .map_err(|e| e.to_string())?;
+
+                (pattern, anchor, stop, start_muted)
+            }
+            None => {
+                let null = ptr_ty.const_null();
+                let zero = ctx.context.i32_type().const_zero();
+                (null, null, null, zero)
+            }
+        };
+
+        let r = ctx.call_rv(
+            ctx.jrt_prompt_stream_ex_fn,
+            &[prompt_ptr.into(), model_ptr.into(),
+              pattern_ptr.into(), anchor_ptr.into(), stop_ptr.into(),
+              start_muted.into()],
+            "stream_r",
+        )?;
+        let ptr = r.into_pointer_value();
+        emit_null_check_and_exit(ptr, "jade: stream(?p) failed — jade-tree daemon unreachable or returned an error\n", ctx)?;
+        return Ok(ptr.into());
+    }
+
+    // Fallback: arg is a precomputed value — print it.
+    let result = emit_expr(first, ctx)?;
+    emit_printf_value(result, &first.ty, "", ctx)?;
+    Ok(result)
 }
 
 // ── input() built-in ──────────────────────────────────────────────────────────
