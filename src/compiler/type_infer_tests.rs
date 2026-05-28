@@ -302,10 +302,10 @@ fn test_infer_prompt_decl_non_str_is_error() {
 }
 
 #[test]
-fn test_infer_prompt_deref_untyped_is_unknown() {
+fn test_infer_prompt_deref_untyped_is_str() {
     let tp = infer_ok("prompt p = \"hi\"\nlet r = ?p");
     let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!() };
-    assert_eq!(value.ty, JadeType::Unknown);
+    assert_eq!(value.ty, JadeType::Str);
 }
 
 #[test]

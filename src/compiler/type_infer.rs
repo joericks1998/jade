@@ -643,12 +643,19 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
             let def_fields_opt = ctx.struct_defs.get(type_name).cloned();
             if def_fields_opt.is_none() && ctx.has_imports {
                 // Type may be defined in an imported file; skip static checks.
+                // Normalize the type name to its bare form (strip any module
+                // prefix like "messages.Session" → "Session") so the literal
+                // agrees with the StructDef registered after import flattening
+                // and with method-body callsites that see the bare name.
+                let bare = type_name.rsplit_once('.')
+                    .map(|(_, b)| b.to_string())
+                    .unwrap_or_else(|| type_name.clone());
                 let tfields = fields.iter()
                     .map(|(n, e)| infer_expr(e, ctx).map(|te| (n.clone(), te, false)))
                     .collect::<Result<Vec<_>>>()?;
                 return Ok(TExpr {
-                    kind: TExprKind::StructLiteral { type_name: type_name.clone(), fields: tfields },
-                    ty: JadeType::Unknown,
+                    kind: TExprKind::StructLiteral { type_name: bare.clone(), fields: tfields },
+                    ty: JadeType::Struct(bare),
                     span: *span,
                 });
             }
@@ -739,19 +746,25 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
             let ty = match &tobj.ty {
                 JadeType::Struct(tn) => {
                     let tn = tn.clone();
-                    // Check field/method exists on the struct.
-                    let has_field = ctx.struct_defs.get(&tn)
-                        .map(|defs| defs.iter().any(|f| f.name() == field))
-                        .unwrap_or(false);
-                    let has_method = ctx.extend_methods.get(&tn)
-                        .map(|m| m.contains_key(field.as_str()))
-                        .unwrap_or(false);
-                    if !has_field && !has_method {
-                        return Err(JadeError::UndefinedField {
-                            type_name: tn,
-                            field: field.clone(),
-                            span: *span,
-                        });
+                    // Skip validation for imported structs whose definitions are
+                    // resolved in a separate file (and therefore aren't in this
+                    // file's ctx.struct_defs).  Fields/methods can't be checked
+                    // until the importer merges TIRs at codegen time.
+                    let is_imported = ctx.has_imports && !ctx.struct_defs.contains_key(&tn);
+                    if !is_imported {
+                        let has_field = ctx.struct_defs.get(&tn)
+                            .map(|defs| defs.iter().any(|f| f.name() == field))
+                            .unwrap_or(false);
+                        let has_method = ctx.extend_methods.get(&tn)
+                            .map(|m| m.contains_key(field.as_str()))
+                            .unwrap_or(false);
+                        if !has_field && !has_method {
+                            return Err(JadeError::UndefinedField {
+                                type_name: tn,
+                                field: field.clone(),
+                                span: *span,
+                            });
+                        }
                     }
                     // Field/method value types are not tracked at Stage B — return Unknown.
                     JadeType::Unknown
