@@ -3,7 +3,7 @@ pub mod stmt;
 pub mod stdlib;
 pub mod types;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use inkwell::{
@@ -597,7 +597,14 @@ pub fn compile(program: TProgram, source_path: Option<&Path>, output_path: &Path
         let mut visited = std::collections::HashSet::new();
         if let Ok(canon) = src.canonicalize() { visited.insert(canon); }
         let mut out = Vec::new();
-        resolve_imports(program.stmts, dir, &mut visited, &mut out)?;
+        let mut namespaces: HashMap<String, HashSet<String>> = HashMap::new();
+        resolve_imports(program.stmts, dir, &mut visited, &mut out, &mut namespaces)?;
+        // After flattening, rewrite `ns.foo` (where ns is an import alias and
+        // foo is a name defined in that imported file) to a bare `foo` lookup.
+        // The bytecode VM binds imports under their alias as live values; the
+        // LLVM backend flattens everything into one global namespace, so we
+        // canonicalize the access form to match.
+        rewrite_namespace_access_stmts(&mut out, &namespaces);
         crate::compiler::tir::TProgram { stmts: out }
     } else {
         program
@@ -700,19 +707,37 @@ pub fn compile(program: TProgram, source_path: Option<&Path>, output_path: &Path
 fn resolve_imports(
     stmts: Vec<crate::compiler::tir::TStmt>,
     dir: &Path,
-    visited: &mut std::collections::HashSet<std::path::PathBuf>,
+    visited: &mut HashSet<std::path::PathBuf>,
     out: &mut Vec<crate::compiler::tir::TStmt>,
+    namespaces: &mut HashMap<String, HashSet<String>>,
 ) -> Result<(), String> {
     use crate::compiler::tir::TStmt;
     for stmt in stmts {
         match stmt {
-            TStmt::Use { path, .. } => {
-                // Skip stdlib packages — they are VM-runtime values, not source files.
+            TStmt::Use { path, as_name, .. } => {
+                // Skip stdlib packages — they bind a real namespace value at
+                // codegen time and don't participate in source-file flattening.
                 if crate::compiler::stdlib::find_package(&path).is_some() { continue; }
                 let full = dir.join(&path);
                 let canon = full.canonicalize()
                     .map_err(|e| format!("import '{}': {e}", path))?;
-                if visited.contains(&canon) { continue; }
+
+                // Compute the alias the importer will use when writing `ns.foo`.
+                // Defaults to the file stem when `as` is omitted (matches VM/emit).
+                let alias = as_name.unwrap_or_else(|| {
+                    std::path::Path::new(&path)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or(&path)
+                        .to_string()
+                });
+
+                if visited.contains(&canon) {
+                    // Already inlined on a prior import path. The namespaces
+                    // map was populated then, so the rewrite pass can still
+                    // resolve `alias.foo` accesses correctly.
+                    continue;
+                }
                 visited.insert(canon.clone());
 
                 let src = std::fs::read_to_string(&canon)
@@ -724,12 +749,185 @@ fn resolve_imports(
                 let tp = crate::compiler::type_infer::infer(ast)
                     .map_err(|e| e.to_string())?;
 
+                // Record every top-level binding the imported file contributes
+                // under this alias so the rewrite pass knows that `alias.name`
+                // really means the (now-flattened) global `name`.
+                namespaces
+                    .entry(alias)
+                    .or_insert_with(HashSet::new)
+                    .extend(collect_top_level_names(&tp.stmts));
+
                 let import_dir = canon.parent()
                     .ok_or_else(|| format!("import '{}': cannot resolve parent directory of '{}'", path, canon.display()))?;
-                resolve_imports(tp.stmts, import_dir, visited, out)?;
+                resolve_imports(tp.stmts, import_dir, visited, out, namespaces)?;
             }
             other => out.push(other),
         }
     }
     Ok(())
+}
+
+// ── Namespace-access rewrite (LLVM only) ──────────────────────────────────────
+//
+// After resolve_imports inlines every user .jde file into a single statement
+// stream, all top-level names from imported files become bare globals. But the
+// importer may still write `ns.foo` to call them — which the codegen otherwise
+// has to interpret as a FieldAccess on a runtime value, and there's no runtime
+// value bound under `ns`. This pass canonicalizes those accesses by walking the
+// flattened TIR and rewriting `FieldAccess { Identifier(ns), foo }` to a plain
+// `Identifier(foo)` whenever `ns` is a known import alias and `foo` is a name
+// defined in that imported file.
+//
+// Stdlib packages (json, fs, sh, ...) keep their namespace-qualified access
+// because they're never added to the namespaces map; the codegen handles them
+// through a separate stdlib-dispatch path.
+
+fn collect_top_level_names(stmts: &[crate::compiler::tir::TStmt]) -> HashSet<String> {
+    use crate::compiler::tir::TStmt;
+    let mut names = HashSet::new();
+    for s in stmts {
+        match s {
+            TStmt::Let { name, .. }
+            | TStmt::FnDef { name, .. }
+            | TStmt::AsyncFnDef { name, .. }
+            | TStmt::StructDef { name, .. }
+            | TStmt::PromptDecl { name, .. } => {
+                names.insert(name.clone());
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
+fn rewrite_namespace_access_stmts(
+    stmts: &mut Vec<crate::compiler::tir::TStmt>,
+    ns: &HashMap<String, HashSet<String>>,
+) {
+    for s in stmts {
+        rewrite_namespace_access_stmt(s, ns);
+    }
+}
+
+fn rewrite_namespace_access_stmt(
+    s: &mut crate::compiler::tir::TStmt,
+    ns: &HashMap<String, HashSet<String>>,
+) {
+    use crate::compiler::tir::TStmt;
+    match s {
+        TStmt::Let { value, .. } | TStmt::Assign { value, .. } => {
+            rewrite_namespace_access_expr(value, ns);
+        }
+        TStmt::FnDef { params, body, .. } | TStmt::AsyncFnDef { params, body, .. } => {
+            for (_, def) in params {
+                if let Some(e) = def { rewrite_namespace_access_expr(e, ns); }
+            }
+            rewrite_namespace_access_stmts(body, ns);
+        }
+        TStmt::Return { value: Some(e), .. } => rewrite_namespace_access_expr(e, ns),
+        TStmt::If { condition, then_body, else_body, .. } => {
+            rewrite_namespace_access_expr(condition, ns);
+            rewrite_namespace_access_stmts(then_body, ns);
+            if let Some(else_b) = else_body { rewrite_namespace_access_stmts(else_b, ns); }
+        }
+        TStmt::While { condition, body, .. } => {
+            rewrite_namespace_access_expr(condition, ns);
+            rewrite_namespace_access_stmts(body, ns);
+        }
+        TStmt::For { iterable, body, .. } => {
+            rewrite_namespace_access_expr(iterable, ns);
+            rewrite_namespace_access_stmts(body, ns);
+        }
+        TStmt::ExtendBlock { methods, .. } => rewrite_namespace_access_stmts(methods, ns),
+        TStmt::FieldAssign { value, .. } => rewrite_namespace_access_expr(value, ns),
+        TStmt::IndexAssign { index, value, .. } => {
+            rewrite_namespace_access_expr(index, ns);
+            rewrite_namespace_access_expr(value, ns);
+        }
+        TStmt::PromptDecl { body, .. } => rewrite_namespace_access_expr(body, ns),
+        TStmt::Raise { value, .. } => rewrite_namespace_access_expr(value, ns),
+        TStmt::TryCatch { body, arms, .. } => {
+            rewrite_namespace_access_stmts(body, ns);
+            for arm in arms { rewrite_namespace_access_stmts(&mut arm.body, ns); }
+        }
+        TStmt::Expr(e) => rewrite_namespace_access_expr(e, ns),
+        // No expressions to walk:
+        TStmt::Return { value: None, .. }
+        | TStmt::StructDef { .. }
+        | TStmt::InterfaceDef { .. }
+        | TStmt::Use { .. }
+        | TStmt::FromUse { .. } => {}
+    }
+}
+
+fn rewrite_namespace_access_expr(
+    e: &mut crate::compiler::tir::TExpr,
+    ns: &HashMap<String, HashSet<String>>,
+) {
+    use crate::compiler::tir::{TExprKind, TFStrPart};
+    // Walk children first so deeper accesses get resolved before we look at
+    // the outer FieldAccess (handles chained `ns.X.Y` cleanly).
+    match &mut e.kind {
+        TExprKind::Call { callee, args, kwargs } => {
+            rewrite_namespace_access_expr(callee, ns);
+            for a in args { rewrite_namespace_access_expr(a, ns); }
+            for (_, v) in kwargs { rewrite_namespace_access_expr(v, ns); }
+        }
+        TExprKind::BinOp { left, right, .. } => {
+            rewrite_namespace_access_expr(left, ns);
+            rewrite_namespace_access_expr(right, ns);
+        }
+        TExprKind::UnaryOp { operand, .. } => rewrite_namespace_access_expr(operand, ns),
+        TExprKind::StructLiteral { fields, .. } => {
+            for (_, v, _) in fields { rewrite_namespace_access_expr(v, ns); }
+        }
+        TExprKind::FieldAccess { object, .. } => rewrite_namespace_access_expr(object, ns),
+        TExprKind::Index { object, index } => {
+            rewrite_namespace_access_expr(object, ns);
+            rewrite_namespace_access_expr(index, ns);
+        }
+        TExprKind::Array { elements } => {
+            for el in elements { rewrite_namespace_access_expr(el, ns); }
+        }
+        TExprKind::FStr { parts } => {
+            for p in parts {
+                if let TFStrPart::Expr(inner) = p { rewrite_namespace_access_expr(inner, ns); }
+            }
+        }
+        TExprKind::PromptDeref { expr, grammar_expr, .. } => {
+            rewrite_namespace_access_expr(expr, ns);
+            if let Some(g) = grammar_expr { rewrite_namespace_access_expr(g, ns); }
+        }
+        TExprKind::Dict { entries } => {
+            for (k, v) in entries {
+                rewrite_namespace_access_expr(k, ns);
+                rewrite_namespace_access_expr(v, ns);
+            }
+        }
+        TExprKind::Closure { body, .. } => rewrite_namespace_access_stmts(body, ns),
+        TExprKind::Await { expr } => rewrite_namespace_access_expr(expr, ns),
+        TExprKind::PromptLiteral { body } => rewrite_namespace_access_expr(body, ns),
+        TExprKind::Integer(_)
+        | TExprKind::Float(_)
+        | TExprKind::Bool(_)
+        | TExprKind::Str(_)
+        | TExprKind::Identifier(_) => {}
+    }
+
+    // After child rewrite: if this node is `ns.foo` where ns is a known
+    // import alias and foo was defined in that imported file, collapse to
+    // bare `Identifier(foo)`.
+    let collapse = if let TExprKind::FieldAccess { object, field } = &e.kind {
+        if let TExprKind::Identifier(name) = &object.kind {
+            ns.get(name).map(|names| names.contains(field)).unwrap_or(false)
+                .then(|| field.clone())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    if let Some(new_name) = collapse {
+        e.kind = TExprKind::Identifier(new_name);
+    }
 }
