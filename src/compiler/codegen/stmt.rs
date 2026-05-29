@@ -199,6 +199,75 @@ pub fn emit_stmts<'ctx>(ctx: &mut CodegenCtx<'ctx>, stmts: &[TStmt]) -> Result<(
     Ok(())
 }
 
+/// Apply module-level decorators to a freshly-defined function `fn_name`.
+/// Mirrors the VM emit: for each `@dec(kwargs…)`, emit `fn_name = dec(fn_name, kwargs…)`.
+/// In the LLVM backend, named functions aren't first-class globals you can
+/// reassign, so the return value is discarded — only the side effects of the
+/// decorator body matter (typically `group.add(fn_val, context)`).
+fn emit_fn_decorators<'ctx>(
+    ctx: &mut CodegenCtx<'ctx>,
+    fn_name: &str,
+    decorators: &[(String, Vec<(Option<String>, crate::compiler::tir::TExpr)>)],
+) -> Result<(), String> {
+    use crate::compiler::tir::JadeType;
+    use inkwell::values::BasicMetadataValueEnum;
+    for (dec_name, dec_args) in decorators {
+        // Resolve the decorator: "tools.register" → fn_info["register"] (imports
+        // are flattened, so the bare name is registered globally).
+        let bare = dec_name.rsplit_once('.').map(|(_, b)| b).unwrap_or(dec_name);
+        let Some((fn_val, param_tys, _ret_ty)) = ctx.fn_info.get(bare).cloned() else {
+            continue; // unknown decorator — leave fn alone, matching VM tolerance
+        };
+        let param_names = ctx.fn_param_names.get(bare).cloned().unwrap_or_default();
+
+        // Build the arg vector in the decorator's declared param order.
+        // First param is the decorated function (wrapped as fat pointer);
+        // remaining params come from the kwargs supplied at the decoration site.
+        let mut llvm_args: Vec<BasicMetadataValueEnum<'ctx>> = Vec::with_capacity(param_tys.len());
+
+        // arg 0 = fn_val as jade_fn_t*, coerced to the declared param type.
+        let fn_as_val = expr::emit_fn_as_value(fn_name, ctx)?;
+        let fn_param_ty = param_tys.first().cloned().unwrap_or(JadeType::Unknown);
+        let fn_coerced = expr::coerce(fn_as_val, &JadeType::Unknown, &fn_param_ty, ctx)?;
+        llvm_args.push(fn_coerced.into());
+
+        // Build a name→TExpr map of the supplied kwargs (and a positional list).
+        let mut kwargs_by_name: HashMap<&str, &crate::compiler::tir::TExpr> = HashMap::new();
+        let mut positional: Vec<&crate::compiler::tir::TExpr> = Vec::new();
+        for (name_opt, te) in dec_args {
+            match name_opt {
+                Some(n) => { kwargs_by_name.insert(n.as_str(), te); }
+                None => positional.push(te),
+            }
+        }
+
+        // Walk params (skipping arg 0, the fn_val) and emit each arg, coercing
+        // to the declared param type so the LLVM call signature matches.
+        let mut next_pos = 0usize;
+        for i in 1..param_tys.len() {
+            let pname = param_names.get(i).map(|s| s.as_str()).unwrap_or("");
+            let te = if let Some(te) = kwargs_by_name.get(pname).copied() {
+                te
+            } else if next_pos < positional.len() {
+                let te = positional[next_pos];
+                next_pos += 1;
+                te
+            } else {
+                continue;
+            };
+            let v = expr::emit_expr(te, ctx)?;
+            let coerced = expr::coerce(v, &te.ty, &param_tys[i], ctx)?;
+            llvm_args.push(coerced.into());
+        }
+
+        ctx.builder
+            .build_call(fn_val, &llvm_args, "dec_call")
+            .map_err(|e| e.to_string())?;
+        ctx.uses_runtime = true;
+    }
+    Ok(())
+}
+
 pub fn emit_stmt<'ctx>(ctx: &mut CodegenCtx<'ctx>, stmt: &TStmt) -> Result<(), String> {
     match stmt {
         // ── let name = expr ───────────────────────────────────────────────────
@@ -264,15 +333,25 @@ pub fn emit_stmt<'ctx>(ctx: &mut CodegenCtx<'ctx>, stmt: &TStmt) -> Result<(), S
         }
 
         // ── fn definitions ────────────────────────────────────────────────────
-        TStmt::FnDef { name, params, body, ret_ty, .. } => {
+        TStmt::FnDef { name, params, body, ret_ty, decorators, .. } => {
             let param_names: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
             emit_fn_body(ctx, name, &param_names, body, ret_ty)?;
+            // Module-level decorators run at startup as `name = dec(name, args…)`.
+            // Nested decorators aren't reachable: nested fns are emitted only as
+            // LLVM symbols inside the enclosing function body and aren't routed
+            // through main()'s entry block where decorator calls would live.
+            if ctx.fn_depth == 0 && !decorators.is_empty() {
+                emit_fn_decorators(ctx, name, decorators)?;
+            }
         }
 
         // ── async fn definitions ──────────────────────────────────────────────
-        TStmt::AsyncFnDef { name, params, body, ret_ty, .. } => {
+        TStmt::AsyncFnDef { name, params, body, ret_ty, decorators, .. } => {
             let param_names: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
             emit_async_fn_def(ctx, name, &param_names, body, ret_ty)?;
+            if ctx.fn_depth == 0 && !decorators.is_empty() {
+                emit_fn_decorators(ctx, name, decorators)?;
+            }
         }
 
         // ── return [expr] ─────────────────────────────────────────────────────

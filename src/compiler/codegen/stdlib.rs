@@ -69,6 +69,12 @@ pub fn module_sig(module: &str, method: &str) -> Option<Sig> {
             ret: Ret::I64,
             uses_dicts: false,
         }),
+        ("time", "local") => Some(Sig {
+            c_name: "jrt_time_local",
+            args: &[Arg::Ptr],
+            ret: Ret::Ptr,
+            uses_dicts: false,
+        }),
         _ => None,
     }
 }

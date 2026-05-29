@@ -592,7 +592,7 @@ impl<'ctx> CodegenCtx<'ctx> {
 
 pub fn compile(program: TProgram, source_path: Option<&Path>, output_path: &Path, emit_ir: bool) -> Result<(), String> {
     // ── Import resolution (inline all `use` statements) ───────────────────
-    let program = if let Some(src) = source_path {
+    let mut program = if let Some(src) = source_path {
         let dir = src.parent().unwrap_or(Path::new("."));
         let mut visited = std::collections::HashSet::new();
         if let Ok(canon) = src.canonicalize() { visited.insert(canon); }
@@ -602,6 +602,14 @@ pub fn compile(program: TProgram, source_path: Option<&Path>, output_path: &Path
     } else {
         program
     };
+
+    // ── Inline defaults into cross-file struct literals ───────────────────
+    // The per-file inference pass can't see imported StructDefs, so literals
+    // like `messages.Session { system: ..., tools: ... }` leave default-bearing
+    // fields (e.g. `let _history = []`) missing.  Without this pass the emitter
+    // would zero-initialise those slots — turning `[]` into a NULL pointer.
+    crate::compiler::type_infer::fill_struct_literal_defaults(&mut program)
+        .map_err(|e| e.to_string())?;
 
     let context = Context::create();
     let module = context.create_module("jade_program");

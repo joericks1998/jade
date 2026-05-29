@@ -155,6 +155,171 @@ pub fn infer_with_globals(program: Program, known_globals: &[String]) -> Result<
     Ok(TProgram { stmts })
 }
 
+/// Post-import pass: walk every `StructLiteral` node in the merged TIR and
+/// fill in any fields the caller omitted, using the inlined defaults from the
+/// matching `StructDef`. Necessary because the per-file inference pass that
+/// runs before imports are resolved cannot see imported struct definitions —
+/// so cross-file literals like `messages.Session { system: "...", tools: g }`
+/// otherwise reach codegen with default-bearing fields (e.g. `let _history = []`)
+/// missing, which the emitter then zero-initialises into nil pointers.
+pub fn fill_struct_literal_defaults(program: &mut TProgram) -> Result<()> {
+    // Collect every StructDef (from this file and from inlined imports).
+    let mut defs: HashMap<String, Vec<StructFieldDef>> = HashMap::new();
+    collect_struct_defs_into(&program.stmts, &mut defs);
+
+    // Set up an inference context that knows about every struct in the merged
+    // program so default expressions referencing other structs type-check.
+    // `has_imports = true` keeps it lenient for any unresolved identifiers.
+    let mut ctx = TypeContext::new();
+    ctx.has_imports = true;
+    for (n, fs) in &defs {
+        ctx.struct_defs.insert(n.clone(), fs.clone());
+        ctx.define(n.clone(), JadeType::Fn {
+            params: vec![JadeType::Unknown],
+            ret: Box::new(JadeType::Struct(n.clone())),
+        });
+    }
+
+    fill_in_stmts(&mut program.stmts, &defs, &mut ctx)?;
+    Ok(())
+}
+
+fn collect_struct_defs_into(
+    stmts: &[TStmt],
+    out: &mut HashMap<String, Vec<StructFieldDef>>,
+) {
+    for s in stmts {
+        match s {
+            TStmt::StructDef { name, fields, .. } => {
+                out.entry(name.clone()).or_insert_with(|| fields.clone());
+            }
+            TStmt::FnDef { body, .. } | TStmt::AsyncFnDef { body, .. } => {
+                collect_struct_defs_into(body, out);
+            }
+            TStmt::ExtendBlock { methods, .. } => collect_struct_defs_into(methods, out),
+            _ => {}
+        }
+    }
+}
+
+fn fill_in_stmts(
+    stmts: &mut [TStmt],
+    defs: &HashMap<String, Vec<StructFieldDef>>,
+    ctx: &mut TypeContext,
+) -> Result<()> {
+    for s in stmts.iter_mut() {
+        fill_in_stmt(s, defs, ctx)?;
+    }
+    Ok(())
+}
+
+fn fill_in_stmt(
+    s: &mut TStmt,
+    defs: &HashMap<String, Vec<StructFieldDef>>,
+    ctx: &mut TypeContext,
+) -> Result<()> {
+    match s {
+        TStmt::Let { value, .. }
+        | TStmt::Assign { value, .. }
+        | TStmt::Expr(value)
+        | TStmt::PromptDecl { body: value, .. }
+        | TStmt::Raise { value, .. } => fill_in_expr(value, defs, ctx),
+        TStmt::Return { value: Some(value), .. } => fill_in_expr(value, defs, ctx),
+        TStmt::FnDef { body, .. } | TStmt::AsyncFnDef { body, .. } => {
+            fill_in_stmts(body, defs, ctx)
+        }
+        TStmt::If { condition, then_body, else_body, .. } => {
+            fill_in_expr(condition, defs, ctx)?;
+            fill_in_stmts(then_body, defs, ctx)?;
+            if let Some(eb) = else_body { fill_in_stmts(eb, defs, ctx)?; }
+            Ok(())
+        }
+        TStmt::While { condition, body, .. } => {
+            fill_in_expr(condition, defs, ctx)?;
+            fill_in_stmts(body, defs, ctx)
+        }
+        TStmt::For { iterable, body, .. } => {
+            fill_in_expr(iterable, defs, ctx)?;
+            fill_in_stmts(body, defs, ctx)
+        }
+        TStmt::FieldAssign { value, .. } | TStmt::IndexAssign { value, .. } => {
+            fill_in_expr(value, defs, ctx)
+        }
+        TStmt::ExtendBlock { methods, .. } => fill_in_stmts(methods, defs, ctx),
+        TStmt::TryCatch { body, arms, .. } => {
+            fill_in_stmts(body, defs, ctx)?;
+            for arm in arms.iter_mut() { fill_in_stmts(&mut arm.body, defs, ctx)?; }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn fill_in_expr(
+    e: &mut TExpr,
+    defs: &HashMap<String, Vec<StructFieldDef>>,
+    ctx: &mut TypeContext,
+) -> Result<()> {
+    // Recurse first so nested literals get filled before we patch this one.
+    match &mut e.kind {
+        TExprKind::Await { expr } => fill_in_expr(expr, defs, ctx)?,
+        TExprKind::Call { callee, args, kwargs } => {
+            fill_in_expr(callee, defs, ctx)?;
+            for a in args.iter_mut() { fill_in_expr(a, defs, ctx)?; }
+            for (_, a) in kwargs.iter_mut() { fill_in_expr(a, defs, ctx)?; }
+        }
+        TExprKind::BinOp { left, right, .. } => {
+            fill_in_expr(left, defs, ctx)?;
+            fill_in_expr(right, defs, ctx)?;
+        }
+        TExprKind::UnaryOp { operand, .. } => fill_in_expr(operand, defs, ctx)?,
+        TExprKind::FieldAccess { object, .. } => fill_in_expr(object, defs, ctx)?,
+        TExprKind::Index { object, index } => {
+            fill_in_expr(object, defs, ctx)?;
+            fill_in_expr(index, defs, ctx)?;
+        }
+        TExprKind::Array { elements } => {
+            for el in elements.iter_mut() { fill_in_expr(el, defs, ctx)?; }
+        }
+        TExprKind::FStr { parts } => {
+            for p in parts.iter_mut() {
+                if let TFStrPart::Expr(ex) = p { fill_in_expr(ex, defs, ctx)?; }
+            }
+        }
+        TExprKind::Dict { entries } => {
+            for (k, v) in entries.iter_mut() {
+                fill_in_expr(k, defs, ctx)?;
+                fill_in_expr(v, defs, ctx)?;
+            }
+        }
+        TExprKind::Closure { body, .. } => fill_in_stmts(body, defs, ctx)?,
+        TExprKind::PromptDeref { expr, .. } => fill_in_expr(expr, defs, ctx)?,
+        TExprKind::StructLiteral { type_name, fields } => {
+            for (_, fe, _) in fields.iter_mut() { fill_in_expr(fe, defs, ctx)?; }
+            // Patch missing fields with their declared defaults.
+            if let Some(def_fields) = defs.get(type_name.as_str()) {
+                for def_field in def_fields {
+                    let already_present = fields.iter().any(|(n, _, _)| n == def_field.name());
+                    if already_present { continue; }
+                    match def_field {
+                        StructFieldDef::Required(_) => { /* leave; will error at runtime if read */ }
+                        StructFieldDef::Let { name, default } => {
+                            let te = infer_expr(default, ctx)?;
+                            fields.push((name.clone(), te, false));
+                        }
+                        StructFieldDef::Prompt { name, default } => {
+                            let te = infer_expr(default, ctx)?;
+                            fields.push((name.clone(), te, true));
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 // ── Pass 1: pre_pass ──────────────────────────────────────────────────────────
 
 /// Register top-level names without descending into bodies.
@@ -616,9 +781,26 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
             let tkwargs: Vec<(String, TExpr)> = kwargs.iter()
                 .map(|(k, v)| infer_expr(v, ctx).map(|tv| (k.clone(), tv)))
                 .collect::<Result<_>>()?;
+            // Builtin primitive methods have a fixed return type regardless of
+            // the receiver type — so even `unknown.len()` reliably yields Int.
+            // Without this, methods called on Unknown receivers (struct fields
+            // whose types we don't track, untyped fn params) propagate Unknown
+            // into subsequent operations, where prefer_known in emit_binop can
+            // wrongly promote a small integer to a string pointer.
+            let builtin_ret: Option<JadeType> = match callee.as_ref() {
+                Expr::FieldAccess { field, .. } => match field.as_str() {
+                    "len" => Some(JadeType::Int),
+                    "has" | "contains" => Some(JadeType::Bool),
+                    _ => None,
+                },
+                _ => None,
+            };
+
             let ret_ty = if is_grammar_new {
                 JadeType::Grammar
             } else if let Some(t) = stdlib_ret {
+                t
+            } else if let Some(t) = builtin_ret {
                 t
             } else {
                 match &tcallee.ty {
