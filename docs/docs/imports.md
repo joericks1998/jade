@@ -57,7 +57,7 @@ Absolute paths are not supported. Always use paths relative to the importing fil
 
 ## Library Imports (`[lib]`)
 
-Relative paths get awkward across a deep project tree (`use "../../shared/util.jde"`). To import a module from anywhere in a project, register a **library** in `jade.toml`: a named directory plus an explicit allowlist of its modules.
+Relative paths get awkward across a deep project tree (`use "../../shared/util.jde"`). To import a module from anywhere in a project, register a **library** in `jade.toml`: a named directory, optionally with an allowlist of its modules.
 
 ```toml
 # jade.toml
@@ -65,9 +65,14 @@ Relative paths get awkward across a deep project tree (`use "../../shared/util.j
 name = "myapp"
 
 [lib.utils]
-path  = "src/utils"          # directory, relative to the project root
-files = ["math", "strings"]  # importable module stems (no .jde extension)
+path  = "src/utils"             # directory, relative to the project root
+files = ["math.jde", "io.jde"]  # optional: allowlist of importable filenames
 ```
+
+`files` is optional:
+
+- **Omit it** to make every `.jde` file in the directory importable.
+- **List filenames** (with the `.jde` extension) to restrict imports to that allowlist. Using the extension keeps things unambiguous when the directory also holds non-Jade files (e.g. Rust sources alongside `.jde` modules) — only the listed `.jde` files are importable.
 
 Then import the module with **dot notation** from **any** file in the project — the path is resolved against the library's directory anchored at the project root, not the importing file. The import binds to its last segment automatically (no `as` needed):
 
@@ -79,7 +84,7 @@ print(math.square(5))        // binds as `math` (the last segment)
 Rules:
 
 - **Dot notation names a module** — a stdlib package (`use std.math`) or a registered library (`use utils.math`). It binds the last segment and needs no alias. **String notation names a file path** (`use "lib/helper.jde" as h`) and still requires an alias.
-- Only modules listed in `files` are importable. `use utils.secret` (unregistered) is a hard error in both `jade run` and `jade build`.
+- With a `files` allowlist, importing an unlisted module is a hard error in both `jade run` and `jade build`. Without one, a missing file is a normal not-found error.
 - Dot notation is treated as a library reference only when its first segment names a registered library; plain relative file imports (string form) keep working unchanged.
 - Library resolution is identical in the VM and the native (AOT) build.
 

@@ -33,25 +33,33 @@ pub struct NativePackageEntry {
 ///
 /// ```toml
 /// [lib.utils]
-/// path  = "src/utils"         # directory, relative to the project root
-/// files = ["math", "strings"] # importable module stems (no .jde extension)
+/// path  = "src/utils"             # directory, relative to the project root
+/// files = ["math.jde", "io.jde"]  # optional allowlist of importable filenames
 /// ```
+///
+/// `files` is an allowlist of importable module **filenames, with extension** —
+/// the `.jde` extension keeps modules unambiguous when a directory also holds
+/// e.g. Rust sources. Omit `files` entirely to make every `.jde` file in `path`
+/// importable.
 #[derive(Debug, Clone, Deserialize)]
 pub struct LibraryEntry {
     pub path: String,
-    pub files: Vec<String>,
+    #[serde(default)]
+    pub files: Option<Vec<String>>,
 }
 
 /// Resolve a `use` path against registered `[lib]` libraries, anchored at `root`.
 ///
 /// A path is a *library reference* when it has the form `<lib>/<module>` and
-/// `<lib>` names a registered library. The module must appear in the library's
-/// `files` allowlist, and resolution is anchored at the project `root` (not the
-/// importing file) — this is what enables cross-directory imports.
+/// `<lib>` names a registered library. Resolution is anchored at the project
+/// `root` (not the importing file) — this is what enables cross-directory
+/// imports. When the library declares a `files` allowlist, the module's `.jde`
+/// filename must appear in it; otherwise every `.jde` file in the directory is
+/// importable (and a missing file surfaces as a normal not-found at canonicalize).
 ///
 /// Returns:
 ///   * `Ok(Some(path))` — a registered library file (a trailing `.jde` in the
-///     import is optional and is appended here),
+///     import is optional and is normalized here),
 ///   * `Ok(None)` — not a library reference; the caller falls back to normal
 ///     relative-path resolution (hybrid mode),
 ///   * `Err(msg)` — the library exists but the module is not in its `files` list.
@@ -66,20 +74,27 @@ pub fn resolve_library_import(
     let Some(entry) = libs.get(lib_name) else {
         return Ok(None);
     };
+    // The import may carry a trailing `.jde` (string form); normalize to a stem,
+    // then to the on-disk `.jde` filename.
     let module = rest.strip_suffix(".jde").unwrap_or(rest);
-    if !entry.files.iter().any(|f| f == module) {
-        return Err(format!(
-            "module '{module}' is not registered in [lib.{lib_name}] of jade.toml \
-             (registered files: {:?})",
-            entry.files
-        ));
+    let filename = format!("{module}.jde");
+
+    if let Some(files) = &entry.files {
+        if !files.iter().any(|f| f == &filename) {
+            return Err(format!(
+                "module '{filename}' is not registered in [lib.{lib_name}] of jade.toml \
+                 (registered files: {:?})",
+                files
+            ));
+        }
     }
+
     let base = if Path::new(&entry.path).is_absolute() {
         PathBuf::from(&entry.path)
     } else {
         root.join(&entry.path)
     };
-    Ok(Some(base.join(format!("{module}.jde"))))
+    Ok(Some(base.join(filename)))
 }
 
 #[derive(Debug, Clone, Deserialize)]
