@@ -69,17 +69,18 @@ path  = "src/utils"          # directory, relative to the project root
 files = ["math", "strings"]  # importable module stems (no .jde extension)
 ```
 
-Then import `<lib>/<module>` from **any** file in the project — the path is resolved against the library's directory anchored at the project root, not the importing file:
+Then import the module with **dot notation** from **any** file in the project — the path is resolved against the library's directory anchored at the project root, not the importing file. The import binds to its last segment automatically (no `as` needed):
 
 ```jade
-use "utils/math" as m        // -> <root>/src/utils/math.jde, from anywhere
-print(m.square(5))
+use utils.math               // -> <root>/src/utils/math.jde, from anywhere
+print(math.square(5))        // binds as `math` (the last segment)
 ```
 
 Rules:
 
-- Only modules listed in `files` are importable. `use "utils/secret"` (unregistered) is a hard error in both `jade run` and `jade build`.
-- A `use` path is treated as a library reference only when its first segment names a registered library; everything else still resolves as a normal relative path (so existing relative imports keep working).
+- **Dot notation names a module** — a stdlib package (`use std.math`) or a registered library (`use utils.math`). It binds the last segment and needs no alias. **String notation names a file path** (`use "lib/helper.jde" as h`) and still requires an alias.
+- Only modules listed in `files` are importable. `use utils.secret` (unregistered) is a hard error in both `jade run` and `jade build`.
+- Dot notation is treated as a library reference only when its first segment names a registered library; plain relative file imports (string form) keep working unchanged.
 - Library resolution is identical in the VM and the native (AOT) build.
 
 ## What Gets Imported
