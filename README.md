@@ -79,6 +79,7 @@ jade run <file.jde>           # Run a Jade source file
 jade run <file.jde> --verbose # Run and print all variables after execution
 jade run                      # Run the project entry point (main.jde)
 jade check <file.jde>         # Type-check without executing
+jade build <file.jde>         # Compile to a native binary via the build daemon
 jade repl                     # Start an interactive REPL
 jade test                     # Discover and run test files
 jade fmt <file.jde>           # Format source files
@@ -132,18 +133,20 @@ Errors are written to stderr with the format `<file>: <phase> error: <descriptio
 | Type inference | ✓ |
 | `try`/`catch`/`raise` exception handling | ✓ |
 | `async fn` definitions and `await` expressions | ✓ |
-| `use "std/math"` — floor, ceil, abs, sqrt, min, max, pow | ✓ |
-| `use "std/string"` — split, upper, lower, trim, contains, replace, starts_with, ends_with | ✓ |
-| `use "std/array"` — map, filter, sort, reverse (higher-order) | ✓ |
-| `use "std/dict"` — keys, values, has, get, merge | ✓ |
-| `use "std/fs"` — read, write, append, exists, delete, list_dir, mkdir | ✓ |
-| `use "std/time"` — now, now_ms, sleep | ✓ |
-| `use "std/http"` — get, post, put, delete, head | ✓ |
-| `use "std/sh"` — exec, run, output (shell command execution) | ✓ |
-| `use "std/json"` — parse, stringify, stringify_pretty | ✓ |
-| `use "std/env"` — get, set, args, cwd | ✓ |
-| `use "std/path"` — join, basename, dirname, ext, stem, abs, is_abs | ✓ |
-| `use "std/random"` — int, float, choice, shuffle, seed | ✓ |
+| `use std.math` — floor, ceil, abs, sqrt, min, max, pow | ✓ |
+| `use std.string` — split, upper, lower, trim, contains, replace, starts_with, ends_with | ✓ |
+| `use std.array` — map, filter, sort, reverse (higher-order) | ✓ |
+| `use std.dict` — keys, values, has, get, merge | ✓ |
+| `use std.fs` — read, write, append, exists, delete, list_dir, mkdir | ✓ |
+| `use std.time` — now, now_ms, sleep, local | ✓ |
+| `use std.http` — get, post, put, delete, head | ✓ |
+| `use std.sh` — exec, run, output (shell command execution) | ✓ |
+| `use std.json` — parse, stringify, stringify_pretty | ✓ |
+| `use std.env` — get, set, args, cwd | ✓ |
+| `use std.path` — join, basename, dirname, ext, stem, abs, is_abs | ✓ |
+| `use std.random` — int, float, choice, shuffle, seed | ✓ |
+| `use llm` — set_max_tokens, count_tokens, total_tokens | ✓ |
+| Native `jade build` via the build daemon (`src/build.rs`) | ✓ |
 
 Operator precedence (tightest to loosest): unary (`~` `!` `-`) → `*` `/` `%` → `+` `-` → `<<` `>>` → `&` → `^` → `|` → `==` `!=` `<` `>` `<=` `>=` → `&&` → `||` → `|>`
 
@@ -154,9 +157,11 @@ Operator precedence (tightest to loosest): unary (`~` `!` `-`) → `*` `/` `%` �
 ```
 src/
   main.rs                   CLI entry point — argument parsing and dispatch
+  build.rs                  Build-daemon client — serializes TIR to $HOME/.jade/build.sock for `jade build`
   cli/
     help.rs                 Prints usage text
     run.rs                  Reads a .jde file and drives the full pipeline
+    build.rs                Frontend → build-daemon client for `jade build`
     configure.rs            Interactive wizard for LLM backend configuration
     check.rs                Static check command (jade check <file>)
   cache/                    Multi-level AST and TIR caching (file-hash keyed)
@@ -191,9 +196,10 @@ jade_evals/
 planning/
   REQUIREMENTS.md           Full build plan across all phases
 docs/
-  index.html                Documentation website (jadelang.org)
-  CNAME                     Custom domain configuration for GitHub Pages
-  extras/logo.png           Project logo
+  docs/                     Docusaurus documentation pages (jadelang.org) — language reference, CLI, stdlib, changelog
+  docusaurus.config.js      Docusaurus site configuration
+  sidebars.js               Documentation sidebar layout
+  static/                   Static assets (logo, CNAME)
 ```
 
 The pipeline is: source text → `frontend/lexer.rs` → `frontend/parser.rs` → `compiler/type_infer.rs` → `compiler/emit.rs` → `compiler/vm.rs` (for `jade run`). For `jade build`, the type-inferred program (TIR) is handed to the build daemon over a Unix socket (`src/build.rs`), which generates and links the native binary.

@@ -149,12 +149,12 @@ print(__max_retries__)  // 3
 print(__tokens__)       // tokens used so far
 ```
 
-## Runtime Configuration — `use "llm"`
+## Runtime Configuration — `use llm`
 
-Import the built-in `llm` package to adjust LLM settings at runtime:
+Import the built-in `llm` package (dot notation, like all packages) to adjust LLM settings at runtime:
 
 ```jade
-use "llm"
+use llm
 
 llm.set_max_tokens(256)    // cap responses at 256 tokens
 ```
@@ -164,7 +164,7 @@ llm.set_max_tokens(256)    // cap responses at 256 tokens
 Sets the maximum number of tokens the model may generate per inference call. `n` must be a positive integer. The setting takes effect for all subsequent `?` dereferences in the same run.
 
 ```jade
-use "llm"
+use llm
 
 llm.set_max_tokens(64)
 
@@ -176,6 +176,29 @@ print(haiku)
 :::note
 `set_max_tokens` overrides any `max_tokens` value set in `jade.toml` or environment variables for the remainder of the program run. There is no way to reset it to the config file value once changed.
 :::
+
+### `llm.count_tokens(text)`
+
+Returns the number of tokens in `text` under the active model's tokenizer, as an `int`. Useful for budgeting prompt size before a `?` dereference.
+
+```jade
+use llm
+
+let n = llm.count_tokens("How many tokens is this?")
+print(n)
+```
+
+### `llm.total_tokens()`
+
+Returns the total number of tokens consumed by LLM inference so far in the current run, as an `int`.
+
+```jade
+use llm
+
+prompt p = "Summarize Jade in one line."
+let _ = ?p
+print(llm.total_tokens())   // tokens used so far this run
+```
 
 ## Async Inference
 

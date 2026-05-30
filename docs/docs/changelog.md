@@ -6,6 +6,7 @@ sidebar_label: Changelog
 
 ## v1.1.8
 
+- Native code generation moved out of the `jade` binary — `jade build` now runs the language frontend (lex → parse → type-infer → typed IR) and hands the typed program to the **build daemon** over `$HOME/.jade/build.sock`, which performs import resolution, code generation, and linking. The in-process LLVM backend and the `llvm` Cargo feature were removed; `jade env` now reports build-daemon reachability instead of LLVM status
 - Stdlib package imports must now use dot notation — `use std.math`, `use std.fs`, etc.; string-literal forms (`use "std/math"`) are now a compile-time error. Applies to both `use` and `from … use` forms
 - File-path imports now require an alias — `use "lib.jde" as lib`; bare string imports without `as name` are now a compile-time error
 - Native packages declared in `jade.toml [native]` now require an `alias` field specifying the global binding name

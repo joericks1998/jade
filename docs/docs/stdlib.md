@@ -4,40 +4,44 @@ title: Standard Library
 sidebar_label: Standard Library
 ---
 
-Jade ships a standard library of built-in packages. Import any package with `use "std/<name>"` and it becomes a global variable in scope for the rest of the file.
+Jade ships a standard library of built-in packages. Import any package with **dot notation** — `use std.<name>` — and it becomes a global variable in scope for the rest of the file.
 
 ```jade
-use "std/json"
-use "std/path"
-use "std/random"
+use std.json
+use std.path
+use std.random
 
 let data = json.parse('{"x": 1}')
 let p = path.join("/home/user", "projects", "app")
 let n = random.int(1, 100)
 ```
 
-| Import string | Global name | Description |
-|---------------|-------------|-------------|
-| `use "std/math"` | `math` | Numeric functions |
-| `use "std/string"` | `string` | String utilities |
-| `use "std/array"` | `array` | Higher-order array functions |
-| `use "std/dict"` | `dict` | Dict utilities |
-| `use "std/fs"` | `fs` | File system I/O |
-| `use "std/time"` | `time` | Clock and sleep |
-| `use "std/http"` | `http` | HTTP client |
-| `use "std/sh"` | `sh` | Shell command execution |
-| `use "std/json"` | `json` | JSON encode / decode |
-| `use "std/env"` | `env` | Environment variables and process info |
-| `use "std/path"` | `path` | Path manipulation |
-| `use "std/random"` | `random` | Random number generation |
-| `use "llm"` | `llm` | LLM runtime configuration |
+:::warning
+Standard-library packages must be imported with dot notation. The string-literal form — `use std.json` — is **rejected at compile time** (`StdlibStringImport`). Quoted paths are reserved for file imports, which require an `as <name>` alias. See [Imports](imports).
+:::
+
+| Import | Global name | Description |
+|--------|-------------|-------------|
+| `use std.math` | `math` | Numeric functions |
+| `use std.string` | `string` | String utilities |
+| `use std.array` | `array` | Higher-order array functions |
+| `use std.dict` | `dict` | Dict utilities |
+| `use std.fs` | `fs` | File system I/O |
+| `use std.time` | `time` | Clock and sleep |
+| `use std.http` | `http` | HTTP client |
+| `use std.sh` | `sh` | Shell command execution |
+| `use std.json` | `json` | JSON encode / decode |
+| `use std.env` | `env` | Environment variables and process info |
+| `use std.path` | `path` | Path manipulation |
+| `use std.random` | `random` | Random number generation |
+| `use llm` | `llm` | LLM runtime configuration |
 
 ---
 
 ## `std/math`
 
 ```jade
-use "std/math"
+use std.math
 ```
 
 | Function | Returns | Description |
@@ -51,7 +55,7 @@ use "std/math"
 | `math.pow(base, exp)` | `float` | base raised to exp |
 
 ```jade
-use "std/math"
+use std.math
 
 print(math.floor(3.7))    // 3
 print(math.ceil(3.2))     // 4
@@ -67,7 +71,7 @@ print(math.pow(2.0, 10.0)) // 1024.0
 ## `std/string`
 
 ```jade
-use "std/string"
+use std.string
 ```
 
 The `std/string` package exposes functions that take the target string as the first argument. The same operations are also available as **primitive methods** directly on any `str` value — see the method form in the table below.
@@ -103,7 +107,7 @@ print(s.ends_with("!"))                // true
 ## `std/array`
 
 ```jade
-use "std/array"
+use std.array
 ```
 
 The `std/array` package adds higher-order functions (`map`, `filter`) that are not available as primitive methods, plus standalone versions of `sort` and `reverse` that return new arrays.
@@ -127,7 +131,7 @@ The `std/array` package adds higher-order functions (`map`, `filter`) that are n
 | `arr.reverse()` | `nil` | Reverse in place |
 
 ```jade
-use "std/array"
+use std.array
 
 let nums = [3, 1, 4, 1, 5, 9]
 
@@ -159,7 +163,7 @@ print(nums)             // [1, 1, 3, 4, 5, 9]
 ## `std/dict`
 
 ```jade
-use "std/dict"
+use std.dict
 ```
 
 The `std/dict` package adds a `merge` function plus standalone versions of the primitive dict methods.
@@ -183,7 +187,7 @@ The `std/dict` package adds a `merge` function plus standalone versions of the p
 | `d.get(key)` | value \| nil | Value at key, or nil if missing |
 
 ```jade
-use "std/dict"
+use std.dict
 
 let a = {"x": 1, "y": 2}
 let b = {"y": 99, "z": 3}
@@ -202,7 +206,7 @@ print(a.get("missing"))        // nil
 ## `std/fs`
 
 ```jade
-use "std/fs"
+use std.fs
 ```
 
 | Function | Returns | Description |
@@ -216,7 +220,7 @@ use "std/fs"
 | `fs.mkdir(path)` | `nil` | Create directory (and all parents) |
 
 ```jade
-use "std/fs"
+use std.fs
 
 fs.write("hello.txt", "Hello, world!\n")
 let content = fs.read("hello.txt")
@@ -244,7 +248,7 @@ fs.delete("hello.txt")
 ## `std/time`
 
 ```jade
-use "std/time"
+use std.time
 ```
 
 | Function | Returns | Description |
@@ -252,9 +256,10 @@ use "std/time"
 | `time.now()` | `int` | Current Unix timestamp in seconds |
 | `time.now_ms()` | `int` | Current Unix timestamp in milliseconds |
 | `time.sleep(secs)` | `nil` | Block execution for `secs` seconds (int or float) |
+| `time.local(tz)` | `str` | Formatted local time string. Pass a timezone name (e.g. `"America/Denver"`) or `nil` for the system timezone. |
 
 ```jade
-use "std/time"
+use std.time
 
 let start = time.now_ms()
 time.sleep(0.1)
@@ -267,7 +272,7 @@ print(f"elapsed: {elapsed}ms")   // elapsed: ~100ms
 ## `std/http`
 
 ```jade
-use "std/http"
+use std.http
 ```
 
 All HTTP functions return a `dict` with two keys:
@@ -288,8 +293,8 @@ An optional `headers` dict may be passed as the last argument to any function. K
 | `http.head(url, headers?)` | HTTP HEAD (body will be empty) |
 
 ```jade
-use "std/http"
-use "std/json"
+use std.http
+use std.json
 
 // Simple GET
 let resp = http.get("https://api.example.com/status")
@@ -315,7 +320,7 @@ Requests time out after 30 seconds. HTTP errors (non-2xx status) do **not** rais
 ## `std/sh`
 
 ```jade
-use "std/sh"
+use std.sh
 ```
 
 All three functions run commands through `sh -c`, so shell features like pipes, redirection, and globbing work.
@@ -327,7 +332,7 @@ All three functions run commands through `sh -c`, so shell features like pipes, 
 | `sh.output(cmd)` | `dict` | Capture all output. Returns `{stdout: str, stderr: str, code: int}`. Never raises. |
 
 ```jade
-use "std/sh"
+use std.sh
 
 // exec — great for capturing output of simple commands
 let branch = sh.exec("git rev-parse --abbrev-ref HEAD")
@@ -354,7 +359,7 @@ print(result["stderr"])  // ls: cannot access...
 ## `std/json`
 
 ```jade
-use "std/json"
+use std.json
 ```
 
 | Function | Returns | Description |
@@ -376,7 +381,7 @@ use "std/json"
 | object | `dict` |
 
 ```jade
-use "std/json"
+use std.json
 
 // Parse
 let data = json.parse('{"name": "jade", "version": 1, "stable": true}')
@@ -410,7 +415,7 @@ print(back[2]["x"])     // 3
 ## `std/env`
 
 ```jade
-use "std/env"
+use std.env
 ```
 
 | Function | Returns | Description |
@@ -421,7 +426,7 @@ use "std/env"
 | `env.cwd()` | `str` | Current working directory as an absolute path |
 
 ```jade
-use "std/env"
+use std.env
 
 // Read an env var with a fallback
 let key = env.get("API_KEY")
@@ -448,7 +453,7 @@ print(env.cwd())   // /home/user/myproject
 ## `std/path`
 
 ```jade
-use "std/path"
+use std.path
 ```
 
 | Function | Returns | Description |
@@ -462,7 +467,7 @@ use "std/path"
 | `path.is_abs(p)` | `bool` | True if the path is absolute |
 
 ```jade
-use "std/path"
+use std.path
 
 let p = path.join("/home/user", "projects", "app", "main.jde")
 print(p)                    // /home/user/projects/app/main.jde
@@ -488,7 +493,7 @@ print(path.abs(rel))        // /current/working/dir/src/main.jde
 ## `std/random`
 
 ```jade
-use "std/random"
+use std.random
 ```
 
 Jade uses a single global RNG (seeded from OS entropy at first use). Calling `random.seed` replaces it with a deterministic seed.
@@ -502,7 +507,7 @@ Jade uses a single global RNG (seeded from OS entropy at first use). Calling `ra
 | `random.seed(n)` | `nil` | Reseed the global RNG with integer `n` for reproducible output |
 
 ```jade
-use "std/random"
+use std.random
 
 // Reproducible output
 random.seed(42)
@@ -527,7 +532,7 @@ print(deck)
 ## `llm` (LLM configuration)
 
 ```jade
-use "llm"
+use llm
 ```
 
 The `llm` package exposes runtime controls for LLM inference. See [LLM Integration](llm) for the full reference on prompts, typed dereferences, and configuration.
@@ -535,9 +540,11 @@ The `llm` package exposes runtime controls for LLM inference. See [LLM Integrati
 | Function | Returns | Description |
 |----------|---------|-------------|
 | `llm.set_max_tokens(n)` | `nil` | Cap model responses at `n` tokens for all subsequent `?` calls |
+| `llm.count_tokens(text)` | `int` | Token count of `text` under the active model's tokenizer |
+| `llm.total_tokens()` | `int` | Total tokens consumed by LLM inference so far this run |
 
 ```jade
-use "llm"
+use llm
 
 llm.set_max_tokens(128)
 

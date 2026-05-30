@@ -4,17 +4,21 @@ title: Imports
 sidebar_label: Imports
 ---
 
-Jade's `use` statement loads another `.jde` file and makes its top-level function and variable definitions available in the importing file.
+Jade's `use` statement loads another `.jde` file or a standard-library package and makes its definitions available in the importing file. There are two import forms with different syntax:
 
-## Syntax
+- **File imports** use a quoted path and **require an alias**: `use "lib.jde" as lib`.
+- **Package imports** (standard library) use **dot notation**: `use std.math`.
+
+## File Imports
 
 ```jade
-use "<path>"
+use "<path>" as <name>
 ```
 
 - `<path>` — a relative path to another `.jde` file, resolved relative to the directory of the importing file.
+- `<name>` — the alias the imported module is bound to. The alias is **required**; a bare `use "lib.jde"` without `as <name>` is a compile-time error (`MissingImportAlias`).
 - The `use` statement must appear at the top level (not inside a function body).
-- The imported file is executed once; all top-level bindings it produces become available in the importing scope.
+- The imported file is executed once; its definitions are reachable through the alias.
 
 ## Basic Example
 
@@ -28,13 +32,13 @@ fn mul(a, b) { return a * b }
 **main.jde** — the importer:
 
 ```jade
-use "math_lib.jde"
+use "math_lib.jde" as math_lib
 
-let x = add(2, 3)   // 5
-let y = mul(4, 5)   // 20
+let x = math_lib.add(2, 3)   // 5
+let y = math_lib.mul(4, 5)   // 20
 ```
 
-After the `use` statement executes, `add` and `mul` are defined in the importing scope exactly as if they had been written inline. They can be called, passed as values, or stored in variables.
+After the `use` statement executes, the imported module's functions are reachable through the alias (`math_lib.add`, `math_lib.mul`). They can be called, passed as values, or stored in variables.
 
 ## Path Resolution
 
@@ -48,7 +52,7 @@ Paths in `use` are resolved relative to the directory containing the *importing*
 //       utils.jde
 
 // Inside main.jde:
-use "lib/utils.jde"
+use "lib/utils.jde" as utils
 ```
 
 :::note
@@ -108,24 +112,24 @@ Rules:
 
 ## What Gets Imported
 
-All top-level bindings in the imported file are brought into scope — including functions, variables, and struct definitions. The imported file runs to completion before execution of the importing file continues past the `use` statement.
+The imported module's top-level functions, variables, and struct definitions are reachable through the alias (`<alias>.<name>`). The imported file runs to completion before execution of the importing file continues past the `use` statement.
 
-| Exported from lib | Available after `use` |
-|-------------------|-----------------------|
-| `fn add(a, b) { … }` | `add(2, 3)` works |
-| `let PI = 3.14159` | `PI` is in scope |
-| `struct Point { x, y }` | `Point { x: 1, y: 2 }` works |
+| Exported from `lib.jde` (imported `as lib`) | Available after `use` |
+|----------------------------------------------|-----------------------|
+| `fn add(a, b) { … }` | `lib.add(2, 3)` works |
+| `let PI = 3.14159` | `lib.PI` is in scope |
+| `struct Point { x, y }` | `lib.Point { x: 1, y: 2 }` works |
 
 ## Multiple Imports
 
-A file may contain multiple `use` statements. Each is processed in order. If two imported files define the same name, the later import wins.
+A file may contain multiple `use` statements. Each is processed in order; each file import must have its own alias.
 
 ```jade
-use "math_lib.jde"
-use "string_lib.jde"
+use "math_lib.jde" as m
+use "string_lib.jde" as s
 
-let n = add(1, 2)
-let s = concat("hello", " world")
+let n = m.add(1, 2)
+let greeting = s.concat("hello", " world")
 ```
 
 ## No Re-export
@@ -136,13 +140,13 @@ Imports are not re-exported. If `a.jde` uses `b.jde`, a third file that uses `a.
 
 ## Standard Library Packages
 
-Jade's standard library is also imported with `use`, but with a built-in string like `"std/json"` instead of a file path. These packages are always available — no installation required.
+Jade's standard library is imported with **dot notation** — `use std.json`, not a quoted path. These packages are always available; no installation required.
 
 ```jade
-use "std/math"
-use "std/json"
-use "std/path"
-use "std/random"
+use std.math
+use std.json
+use std.path
+use std.random
 
 let n = math.sqrt(144.0)          // 12.0
 let data = json.parse('{"x": 1}')
@@ -150,22 +154,55 @@ let p = path.join("src", "main.jde")
 let roll = random.int(1, 6)
 ```
 
-Importing a stdlib package binds it as a global variable named after the package (`math`, `json`, `path`, etc.). The table below lists all available packages.
+Importing a package binds it as a global variable named after the package (`math`, `json`, `path`, etc.). The table below lists all available packages.
 
-| Import string | Global | Summary |
-|---------------|--------|---------|
-| `use "std/math"` | `math` | `floor`, `ceil`, `abs`, `sqrt`, `min`, `max`, `pow` |
-| `use "std/string"` | `string` | `split`, `upper`, `lower`, `trim`, `contains`, `replace`, `starts_with`, `ends_with` |
-| `use "std/array"` | `array` | `map`, `filter`, `sort`, `reverse` (higher-order; non-mutating) |
-| `use "std/dict"` | `dict` | `keys`, `values`, `has`, `get`, `merge` |
-| `use "std/fs"` | `fs` | `read`, `write`, `append`, `exists`, `delete`, `list_dir`, `mkdir` |
-| `use "std/time"` | `time` | `now`, `now_ms`, `sleep` |
-| `use "std/http"` | `http` | `get`, `post`, `put`, `delete`, `head` |
-| `use "std/sh"` | `sh` | `exec`, `run`, `output` |
-| `use "std/json"` | `json` | `parse`, `stringify`, `stringify_pretty` |
-| `use "std/env"` | `env` | `get`, `set`, `args`, `cwd` |
-| `use "std/path"` | `path` | `join`, `basename`, `dirname`, `ext`, `stem`, `abs`, `is_abs` |
-| `use "std/random"` | `random` | `int`, `float`, `choice`, `shuffle`, `seed` |
-| `use "llm"` | `llm` | `set_max_tokens` |
+:::warning
+The string-literal form for stdlib packages — `use "std/math"` — is **rejected at compile time** (`StdlibStringImport`). Always use dot notation: `use std.math`. Quoted paths are reserved for file imports, which require an alias.
+:::
+
+| Import | Global | Summary |
+|--------|--------|---------|
+| `use std.math` | `math` | `floor`, `ceil`, `abs`, `sqrt`, `min`, `max`, `pow` |
+| `use std.string` | `string` | `split`, `upper`, `lower`, `trim`, `contains`, `replace`, `starts_with`, `ends_with` |
+| `use std.array` | `array` | `map`, `filter`, `sort`, `reverse` (higher-order; non-mutating) |
+| `use std.dict` | `dict` | `keys`, `values`, `has`, `get`, `merge` |
+| `use std.fs` | `fs` | `read`, `write`, `append`, `exists`, `delete`, `list_dir`, `mkdir` |
+| `use std.time` | `time` | `now`, `now_ms`, `sleep`, `local` |
+| `use std.http` | `http` | `get`, `post`, `put`, `delete`, `head` |
+| `use std.sh` | `sh` | `exec`, `run`, `output` |
+| `use std.json` | `json` | `parse`, `stringify`, `stringify_pretty` |
+| `use std.env` | `env` | `get`, `set`, `args`, `cwd` |
+| `use std.path` | `path` | `join`, `basename`, `dirname`, `ext`, `stem`, `abs`, `is_abs` |
+| `use std.random` | `random` | `int`, `float`, `choice`, `shuffle`, `seed` |
+| `use llm` | `llm` | `set_max_tokens`, `count_tokens`, `total_tokens` |
 
 See the [Standard Library](stdlib) reference for full API documentation.
+
+## Selective Imports (`from … use`)
+
+The `from <package> use <names>` form imports specific names from a package directly into scope, without the package prefix. It uses the same dot notation as `use`.
+
+```jade
+from std.math use floor, ceil, sqrt
+
+let a = floor(3.7)   // 3
+let b = sqrt(16.0)   // 4.0
+```
+
+As with `use`, the string-literal form (`from "std/math" use floor`) is a compile-time error — use dot notation.
+
+## Native Packages
+
+Native packages declared in `jade.toml` under a `[native]` section are imported by their `native/<name>` path and bound to the `alias` declared in the manifest. Unlike other file imports, native packages do not need an inline `as <name>` — the alias comes from the manifest:
+
+```toml
+# jade.toml
+[native]
+mylib = { path = "/path/to/libmylib.dylib", alias = "mylib" }
+```
+
+```jade
+use "native/mylib"   // bound as `mylib` per the manifest alias
+
+let r = mylib.compute(21)
+```
