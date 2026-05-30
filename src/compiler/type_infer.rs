@@ -1071,11 +1071,15 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
             // Collect free variables BEFORE popping scope so ctx.get() still resolves them.
             let captures = collect_captures(&tbody, params, ctx);
             ctx.pop_scope();
+            // Infer the return type from the body (like named fns) so callers know
+            // a closure returns e.g. a Str — without it the AOT backend treats the
+            // uniform i64 result as an integer and prints a string as a pointer.
+            let ret_ty = infer_return_type(&tbody);
             Ok(TExpr {
                 kind: TExprKind::Closure { params: params.clone(), body: tbody, captures },
                 ty: JadeType::Fn {
                     params: params.iter().map(|_| JadeType::Unknown).collect(),
-                    ret: Box::new(JadeType::Unknown),
+                    ret: Box::new(ret_ty),
                 },
                 span: *span,
             })
