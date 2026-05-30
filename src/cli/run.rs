@@ -149,29 +149,12 @@ pub async fn run_file(path: &str, verbose: bool) {
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
         .unwrap_or_else(|| std::path::PathBuf::from("."));
 
-    // Resolve native packages and registered libraries from jade.toml, if present.
+    // Resolve registered libraries from jade.toml, if present.
     let project_root = crate::project::find_project_root();
-    let manifest = project_root
+    let libraries = project_root
         .as_ref()
-        .and_then(|root| crate::project::load_project(root).ok());
-
-    let native_packages = {
-        let mut map = std::collections::HashMap::new();
-        if let (Some(root), Some(m)) = (project_root.as_ref(), manifest.as_ref()) {
-            for (name, entry) in m.native.clone().unwrap_or_default() {
-                let abs = if std::path::Path::new(&entry.path).is_absolute() {
-                    std::path::PathBuf::from(&entry.path)
-                } else {
-                    root.join(&entry.path)
-                };
-                map.insert(name, (abs, entry.alias));
-            }
-        }
-        map
-    };
-    let libraries = manifest
-        .as_ref()
-        .and_then(|m| m.lib.clone())
+        .and_then(|root| crate::project::load_project(root).ok())
+        .and_then(|m| m.lib)
         .unwrap_or_default();
 
     let opts = vm::VmOpts {
@@ -179,7 +162,6 @@ pub async fn run_file(path: &str, verbose: bool) {
         default_model: cfg.model,
         max_retries: cfg.max_retries,
         source_dir,
-        native_packages,
         project_root,
         libraries,
         #[cfg(test)]

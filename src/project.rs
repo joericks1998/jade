@@ -11,35 +11,27 @@ use serde::Deserialize;
 pub struct ProjectManifest {
     pub project: Option<ProjectSection>,
     pub scripts: Option<HashMap<String, String>>,
-    /// `[native]` section: maps package name → entry with `path` and required `alias`.
-    /// Used via `use "native/<name>"` in Jade source; the package binds as `alias`.
-    pub native: Option<HashMap<String, NativePackageEntry>>,
-    /// `[lib.<name>]` sections: register a directory and its `.jde` modules as a
-    /// named library so they can be imported cross-directory via
-    /// `use "<name>/<module>"`, anchored at the project root. See
-    /// [`resolve_library_import`].
+    /// `[lib.<name>]` sections: register a directory and its modules as a named
+    /// library so they can be imported cross-directory via `use <name>.<module>`,
+    /// anchored at the project root. A module is a Jade source file (`.jde`) or a
+    /// native C-ABI shared library (`.dylib` / `.so` / `.dll`) — the file
+    /// extension decides. See [`resolve_library_import`].
     pub lib: Option<HashMap<String, LibraryEntry>>,
-}
-
-/// Entry in the `[native]` section of `jade.toml`.
-/// Both fields are required — the `alias` is the name the package is bound to in Jade.
-#[derive(Debug, Clone, Deserialize)]
-pub struct NativePackageEntry {
-    pub path: String,
-    pub alias: String,
 }
 
 /// Entry in a `[lib.<name>]` section of `jade.toml`.
 ///
 /// ```toml
 /// [lib.utils]
-/// path  = "src/utils"             # directory, relative to the project root
-/// files = ["math.jde", "io.jde"]  # optional allowlist of importable filenames
+/// path  = "src/utils"                  # directory, relative to the project root
+/// files = ["math.jde", "fast.dylib"]   # optional allowlist of importable filenames
 /// ```
 ///
-/// `files` is an allowlist of importable module **filenames, with extension** —
-/// the `.jde` extension keeps modules unambiguous when a directory also holds
-/// e.g. Rust sources. Omit `files` entirely to make every `.jde` file in `path`
+/// `files` is an allowlist of importable module **filenames, with extension**.
+/// The extension both disambiguates modules from other files in the directory
+/// and selects how each is loaded: `.jde` is a Jade source module, while
+/// `.dylib` / `.so` / `.dll` is a native shared library (loaded over the
+/// `jade_pkg_init` C ABI). Omit `files` to make every recognized file in `path`
 /// importable.
 #[derive(Debug, Clone, Deserialize)]
 pub struct LibraryEntry {
@@ -48,53 +40,112 @@ pub struct LibraryEntry {
     pub files: Option<Vec<String>>,
 }
 
+/// How a resolved `[lib]` module is loaded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportKind {
+    /// A Jade source module (`.jde`).
+    Jade,
+    /// A native C-ABI shared library (`.dylib` / `.so` / `.dll`).
+    Native,
+}
+
+/// A resolved `[lib]` import: the on-disk file plus how to load it.
+#[derive(Debug, Clone)]
+pub struct ResolvedLib {
+    pub path: PathBuf,
+    pub kind: ImportKind,
+}
+
+/// Map a recognized library file extension to its import kind.
+fn kind_for_ext(ext: &str) -> Option<ImportKind> {
+    match ext {
+        "jde" => Some(ImportKind::Jade),
+        "dylib" | "so" | "dll" => Some(ImportKind::Native),
+        _ => None,
+    }
+}
+
+/// Split a recognized library extension off a filename, preserving any
+/// subdirectory in the stem. Returns `(stem, ext)`, or `(name, "")` if none match.
+fn split_lib_ext(name: &str) -> (&str, &str) {
+    for (suffix, ext) in [(".jde", "jde"), (".dylib", "dylib"), (".so", "so"), (".dll", "dll")] {
+        if let Some(stem) = name.strip_suffix(suffix) {
+            return (stem, ext);
+        }
+    }
+    (name, "")
+}
+
 /// Resolve a `use` path against registered `[lib]` libraries, anchored at `root`.
 ///
 /// A path is a *library reference* when it has the form `<lib>/<module>` and
 /// `<lib>` names a registered library. Resolution is anchored at the project
 /// `root` (not the importing file) — this is what enables cross-directory
-/// imports. When the library declares a `files` allowlist, the module's `.jde`
-/// filename must appear in it; otherwise every `.jde` file in the directory is
-/// importable (and a missing file surfaces as a normal not-found at canonicalize).
+/// imports. The resolved file's extension determines its [`ImportKind`]. With a
+/// `files` allowlist the module must match one of its entries (by stem);
+/// otherwise the directory is probed for `<module>.jde` then a native library.
 ///
 /// Returns:
-///   * `Ok(Some(path))` — a registered library file (a trailing `.jde` in the
-///     import is optional and is normalized here),
+///   * `Ok(Some(resolved))` — a registered library module + how to load it,
 ///   * `Ok(None)` — not a library reference; the caller falls back to normal
 ///     relative-path resolution (hybrid mode),
-///   * `Err(msg)` — the library exists but the module is not in its `files` list.
+///   * `Err(msg)` — the library exists but the module is not registered / has an
+///     unsupported extension.
 pub fn resolve_library_import(
     libs: &HashMap<String, LibraryEntry>,
     import_path: &str,
     root: &Path,
-) -> Result<Option<PathBuf>, String> {
+) -> Result<Option<ResolvedLib>, String> {
     let Some((lib_name, rest)) = import_path.split_once('/') else {
         return Ok(None);
     };
     let Some(entry) = libs.get(lib_name) else {
         return Ok(None);
     };
-    // The import may carry a trailing `.jde` (string form); normalize to a stem,
-    // then to the on-disk `.jde` filename.
-    let module = rest.strip_suffix(".jde").unwrap_or(rest);
-    let filename = format!("{module}.jde");
-
-    if let Some(files) = &entry.files {
-        if !files.iter().any(|f| f == &filename) {
-            return Err(format!(
-                "module '{filename}' is not registered in [lib.{lib_name}] of jade.toml \
-                 (registered files: {:?})",
-                files
-            ));
-        }
-    }
+    // The import may carry a recognized extension (string form); normalize to a
+    // bare module stem, preserving any subpath.
+    let (module, _) = split_lib_ext(rest);
 
     let base = if Path::new(&entry.path).is_absolute() {
         PathBuf::from(&entry.path)
     } else {
         root.join(&entry.path)
     };
-    Ok(Some(base.join(filename)))
+
+    if let Some(files) = &entry.files {
+        for f in files {
+            let (stem, ext) = split_lib_ext(f);
+            if stem == module {
+                let kind = kind_for_ext(ext).ok_or_else(|| {
+                    format!(
+                        "module '{f}' in [lib.{lib_name}] of jade.toml has an unsupported \
+                         extension (expected .jde, .dylib, .so, or .dll)"
+                    )
+                })?;
+                return Ok(Some(ResolvedLib { path: base.join(f), kind }));
+            }
+        }
+        return Err(format!(
+            "module '{module}' is not registered in [lib.{lib_name}] of jade.toml \
+             (registered files: {:?})",
+            files
+        ));
+    }
+
+    // No allowlist: prefer a Jade source module, then probe for a native library.
+    let jde = base.join(format!("{module}.jde"));
+    if jde.exists() {
+        return Ok(Some(ResolvedLib { path: jde, kind: ImportKind::Jade }));
+    }
+    for suffix in [".dylib", ".so", ".dll"] {
+        let cand = base.join(format!("{module}{suffix}"));
+        if cand.exists() {
+            return Ok(Some(ResolvedLib { path: cand, kind: ImportKind::Native }));
+        }
+    }
+    // Nothing on disk — return the `.jde` candidate so the caller surfaces a
+    // normal not-found error.
+    Ok(Some(ResolvedLib { path: jde, kind: ImportKind::Jade }))
 }
 
 #[derive(Debug, Clone, Deserialize)]

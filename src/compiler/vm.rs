@@ -66,7 +66,8 @@ pub enum VmValue {
     NativeBoundMethod(Arc<NativeBoundMethod>),
     /// A Rust-backed callable returned by a built-in module (e.g. `llm.set_max_tokens`).
     NativeFn(NativeFnId),
-    /// A function loaded from a native shared library via `use "native/<pkg>"`.
+    /// A function loaded from a native shared library registered as a `[lib]`
+    /// module whose file is a `.dylib`/`.so`/`.dll`.
     NativeLibFn(Arc<NativeLibFn>),
     /// A handle to an in-flight async task.
     Future(Arc<JadeFuture>),
@@ -268,8 +269,6 @@ pub struct VmState {
     pub source_dir: PathBuf,
     /// Set of canonical paths currently being imported (cycle detection).
     pub import_stack: HashSet<PathBuf>,
-    /// Native package map from `[native]` in jade.toml: name → (absolute path, alias).
-    pub native_packages: HashMap<String, (PathBuf, String)>,
     /// Project root (the dir holding the `jade.toml` with `[project]`). Anchor
     /// for resolving registered `[lib]` library imports.
     pub project_root: Option<PathBuf>,
@@ -308,7 +307,6 @@ impl VmState {
             prompt_cache: HashMap::new(),
             source_dir: PathBuf::new(),
             import_stack: HashSet::new(),
-            native_packages: HashMap::new(),
             project_root: None,
             libraries: HashMap::new(),
             active_module_scope: None,
@@ -330,7 +328,6 @@ impl VmState {
         self.max_retries = opts.max_retries;
         self.default_model = opts.default_model.clone();
         self.source_dir = opts.source_dir;
-        self.native_packages = opts.native_packages;
         self.project_root = opts.project_root;
         self.libraries = opts.libraries;
         self.set_session("__model__", VmValue::Str(opts.default_model));
@@ -376,7 +373,6 @@ impl VmState {
             prompt_cache: self.prompt_cache.clone(),
             source_dir: self.source_dir.clone(),
             import_stack: HashSet::new(),
-            native_packages: self.native_packages.clone(),
             project_root: self.project_root.clone(),
             libraries: self.libraries.clone(),
             active_module_scope: None,
@@ -394,8 +390,6 @@ pub struct VmOpts {
     /// Directory of the source file being run — used to resolve relative `use` paths.
     /// Defaults to the current working directory when running in-memory (tests, REPL).
     pub source_dir: PathBuf,
-    /// Native package map from `[native]` in jade.toml: name → (absolute path, alias).
-    pub native_packages: HashMap<String, (PathBuf, String)>,
     /// Project root — anchor for registered `[lib]` library imports.
     pub project_root: Option<PathBuf>,
     /// Registered libraries from `jade.toml` `[lib]`: name → {path, files}.
@@ -412,7 +406,6 @@ impl Default for VmOpts {
             default_model: String::new(),
             max_retries: 15,
             source_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-            native_packages: HashMap::new(),
             project_root: None,
             libraries: HashMap::new(),
             #[cfg(test)]
@@ -427,15 +420,27 @@ impl Default for VmOpts {
 /// against the library's directory anchored at the project root (cross-directory
 /// imports). Everything else falls back to relative-to-importer resolution
 /// (hybrid mode). An unregistered module under a known library name is an error.
-fn resolve_user_import(state: &VmState, path: &str, span: Span) -> Result<PathBuf> {
+/// A `use` path resolved to either a native shared library (loaded over the FFI)
+/// or a Jade source file (parsed + run in a sub-state).
+enum ResolvedImport {
+    Native(PathBuf),
+    File(PathBuf),
+}
+
+fn resolve_user_import(state: &VmState, path: &str, span: Span) -> Result<ResolvedImport> {
     if let Some(root) = &state.project_root {
         match crate::project::resolve_library_import(&state.libraries, path, root) {
-            Ok(Some(p)) => return Ok(p),
+            Ok(Some(r)) => {
+                return Ok(match r.kind {
+                    crate::project::ImportKind::Native => ResolvedImport::Native(r.path),
+                    crate::project::ImportKind::Jade => ResolvedImport::File(r.path),
+                });
+            }
             Ok(None) => {}
             Err(message) => return Err(JadeError::IoError { message, span }),
         }
     }
-    Ok(state.source_dir.join(path))
+    Ok(ResolvedImport::File(state.source_dir.join(path)))
 }
 
 // ── Public entry point ────────────────────────────────────────────────────────
@@ -574,23 +579,6 @@ async fn execute_chunk(
 
             // ── Imports ───────────────────────────────────────────────────────
             Instr::ImportFile(path, namespace) => {
-                // ── Native packages ─────────────────────────────────────────
-                // `use "native/<name>"` loads a .dylib/.so registered in jade.toml [native].
-                if let Some(pkg_name) = path.strip_prefix("native/") {
-                    let (lib_path, alias) = state.native_packages.get(pkg_name)
-                        .cloned()
-                        .ok_or_else(|| JadeError::IoError {
-                            message: format!(
-                                "native package '{}' not declared in jade.toml [native]",
-                                pkg_name
-                            ),
-                            span,
-                        })?;
-                    let fns = crate::native::load_native_package(&lib_path, span)?;
-                    state.globals.insert(alias, VmValue::Dict(fns));
-                    continue;
-                }
-
                 // ── Built-in packages ───────────────────────────────────────
                 // stdlib packages always bind under their own global_name; namespace param ignored.
                 if let Some(pkg) = builtins::find_package(path) {
@@ -603,8 +591,19 @@ async fn execute_chunk(
                     continue;
                 }
 
+                // ── Native library modules ──────────────────────────────────
+                // A `[lib]` module whose file is a .dylib/.so/.dll is loaded over
+                // the C ABI and bound (as a dict of functions) under its module name.
+                let abs_path = match resolve_user_import(state, path, span)? {
+                    ResolvedImport::Native(lib_path) => {
+                        let fns = crate::native::load_native_package(&lib_path, span)?;
+                        state.globals.insert(namespace.clone(), VmValue::Dict(fns));
+                        continue;
+                    }
+                    ResolvedImport::File(p) => p,
+                };
+
                 // ── User .jde files — namespaced ────────────────────────────
-                let abs_path = resolve_user_import(state, path, span)?;
                 let canon = abs_path.canonicalize().map_err(|_| JadeError::ImportNotFound {
                     path: path.clone(),
                     span,
@@ -684,7 +683,6 @@ async fn execute_chunk(
                         // Propagate runtime config from parent.
                         sub_state.source_dir = sub_source_dir;
                         sub_state.import_stack = state.import_stack.clone();
-                        sub_state.native_packages = state.native_packages.clone();
                         sub_state.project_root = state.project_root.clone();
                         sub_state.libraries = state.libraries.clone();
                         sub_state.inference_backend = state.inference_backend.clone();
@@ -781,26 +779,6 @@ async fn execute_chunk(
             }
 
             Instr::ImportFrom(path, names) => {
-                // ── Native packages ─────────────────────────────────────────
-                if let Some(pkg_name) = path.strip_prefix("native/") {
-                    let (lib_path, _alias) = state.native_packages.get(pkg_name)
-                        .cloned()
-                        .ok_or_else(|| JadeError::IoError {
-                            message: format!(
-                                "native package '{}' not declared in jade.toml [native]",
-                                pkg_name
-                            ),
-                            span,
-                        })?;
-                    let fns = crate::native::load_native_package(&lib_path, span)?;
-                    for name in names {
-                        if let Some(val) = fns.get(name) {
-                            state.globals.insert(name.clone(), val.clone());
-                        }
-                    }
-                    continue;
-                }
-
                 if let Some(pkg) = builtins::find_package(path) {
                     // Build the package dict, then extract only the requested names.
                     let dict = if pkg.import_name == "llm" {
@@ -817,9 +795,24 @@ async fn execute_chunk(
                     }
                     continue;
                 }
+
+                // Native library: load over the C ABI and bind the requested
+                // function names directly.
+                let abs_path = match resolve_user_import(state, path, span)? {
+                    ResolvedImport::Native(lib_path) => {
+                        let fns = crate::native::load_native_package(&lib_path, span)?;
+                        for name in names {
+                            if let Some(val) = fns.get(name) {
+                                state.globals.insert(name.clone(), val.clone());
+                            }
+                        }
+                        continue;
+                    }
+                    ResolvedImport::File(p) => p,
+                };
+
                 // File import: run in an isolated sub-state, then bind only the
                 // requested names directly into the parent namespace.
-                let abs_path = resolve_user_import(state, path, span)?;
                 let canon = abs_path.canonicalize().map_err(|_| JadeError::ImportNotFound {
                     path: path.clone(),
                     span,
@@ -847,7 +840,6 @@ async fn execute_chunk(
                         let mut sub_state = VmState::new();
                         sub_state.source_dir = sub_source_dir;
                         sub_state.import_stack = state.import_stack.clone();
-                        sub_state.native_packages = state.native_packages.clone();
                         sub_state.project_root = state.project_root.clone();
                         sub_state.libraries = state.libraries.clone();
                         sub_state.inference_backend = state.inference_backend.clone();

@@ -71,8 +71,26 @@ files = ["math.jde", "io.jde"]  # optional: allowlist of importable filenames
 
 `files` is optional:
 
-- **Omit it** to make every `.jde` file in the directory importable.
-- **List filenames** (with the `.jde` extension) to restrict imports to that allowlist. Using the extension keeps things unambiguous when the directory also holds non-Jade files (e.g. Rust sources alongside `.jde` modules) — only the listed `.jde` files are importable.
+- **Omit it** to make every recognized file in the directory importable.
+- **List filenames** (with extension) to restrict imports to that allowlist.
+
+A module's **file extension decides how it loads**:
+
+- `.jde` → a Jade source module.
+- `.dylib` / `.so` / `.dll` → a **native** C-ABI shared library (e.g. a Rust crate built as `cdylib`), loaded over the `jade_pkg_init` FFI and bound as a dict of functions. This replaces the old `[native]` section — Jade and native modules now live under one `[lib]` system.
+
+```toml
+[lib.ext]
+path  = "lib"
+files = ["math.jde", "fastmath.dylib"]   # one Jade module, one native library
+```
+
+```jade
+use ext.math       // -> lib/math.jde     (Jade)
+use ext.fastmath   // -> lib/fastmath.dylib (native), then fastmath.some_fn(...)
+```
+
+Native libraries run under the interpreter only: `jade build` (the AOT/native compiler) can't link the FFI loader into a static binary, so it rejects native imports with a message pointing you at `jade run`.
 
 Then import the module with **dot notation** from **any** file in the project — the path is resolved against the library's directory anchored at the project root, not the importing file. The import binds to its last segment automatically (no `as` needed):
 

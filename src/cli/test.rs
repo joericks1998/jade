@@ -141,7 +141,6 @@ async fn run_test_file(
         default_model: model.clone(),
         max_retries,
         source_dir,
-        native_packages: std::collections::HashMap::new(),
         project_root,
         libraries,
         #[cfg(test)]
