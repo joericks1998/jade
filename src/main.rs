@@ -1,3 +1,4 @@
+mod build;
 mod cache;
 mod cli;
 mod compiler;
@@ -44,14 +45,14 @@ enum Commands {
         file: String,
     },
 
-    /// Compile a Jade file to a native binary via LLVM
+    /// Compile a Jade file to a native binary via the build daemon
     Build {
         /// Source file to compile
         file: String,
         /// Output binary path (default: input filename without extension)
         #[arg(short, long, value_name = "PATH")]
         output: Option<String>,
-        /// Emit LLVM IR instead of compiling
+        /// Emit LLVM IR from the daemon instead of compiling a binary
         #[arg(long = "emit", value_name = "FORMAT")]
         emit: Option<String>,
     },

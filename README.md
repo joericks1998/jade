@@ -196,7 +196,7 @@ docs/
   extras/logo.png           Project logo
 ```
 
-The pipeline is: source text → `frontend/lexer.rs` → `frontend/parser.rs` → `compiler/type_infer.rs` → `compiler/emit.rs` → `compiler/vm.rs` (for `jade run`) or `compiler/codegen/` (for `jade build`).
+The pipeline is: source text → `frontend/lexer.rs` → `frontend/parser.rs` → `compiler/type_infer.rs` → `compiler/emit.rs` → `compiler/vm.rs` (for `jade run`). For `jade build`, the type-inferred program (TIR) is handed to the build daemon over a Unix socket (`src/build.rs`), which generates and links the native binary.
 
 ---
 
