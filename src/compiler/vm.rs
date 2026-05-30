@@ -6,7 +6,7 @@ use crate::{
     compiler::{
         bytecode::{Chunk, CompiledFn, FStrPart, Instr, Reg},
         emit::CompiledProgram,
-        stdlib::{self, BuiltinFn, NativeBoundMethod, PrimType},
+        builtins::{self, BuiltinFn, NativeBoundMethod, PrimType},
     },
     frontend::{
         ast::{BinOpKind, StructFieldDef, UnaryOpKind},
@@ -59,7 +59,7 @@ pub enum VmValue {
     /// `anchor`: if set, grammar enforcement begins only after the model emits this string.
     Grammar { pattern: String, anchor: Option<String>, stop_anchor: Option<String> },
     Dict(HashMap<String, VmValue>),
-    /// A pure Rust-backed callable (no VM state mutation). Used for stdlib
+    /// A pure Rust-backed callable (no VM state mutation). Used for builtin
     /// core built-ins (print, len, write, input) and package functions.
     BuiltinFn(BuiltinFn),
     /// A BuiltinFn pre-loaded with its receiver for primitive method dispatch.
@@ -287,7 +287,7 @@ impl VmState {
         globals.insert("__model__".to_string(), VmValue::Str(String::new()));
         globals.insert("__max_retries__".to_string(), VmValue::Int(15));
         globals.insert("__retry_log__".to_string(), VmValue::Array(Arc::new(Mutex::new(vec![]))));
-        stdlib::seed_globals(&mut globals);
+        builtins::seed_globals(&mut globals);
         VmState {
             raised_exception: None,
             globals,
@@ -559,9 +559,9 @@ async fn execute_chunk(
 
                 // ── Built-in packages ───────────────────────────────────────
                 // stdlib packages always bind under their own global_name; namespace param ignored.
-                if let Some(pkg) = stdlib::find_package(path) {
+                if let Some(pkg) = builtins::find_package(path) {
                     let val = if pkg.import_name == "llm" {
-                        stdlib::llm_pkg::llm_vm_dict_value()
+                        builtins::llm_pkg::llm_vm_dict_value()
                     } else {
                         pkg.vm_dict_value()
                     };
@@ -658,7 +658,7 @@ async fn execute_chunk(
 
                         let r = Box::pin(run_with_state(compiled, &mut sub_state)).await;
                         if r.is_ok() {
-                            // Collect user-defined globals (exclude stdlib and internal keys).
+                            // Collect user-defined globals (exclude builtins and internal keys).
                             let mut module_globals: HashMap<String, VmValue> = sub_state
                                 .globals
                                 .drain()
@@ -670,7 +670,7 @@ async fn execute_chunk(
                             // They are NOT included in the module dict (they're not exports).
                             let pkg_keys: Vec<String> = module_globals
                                 .keys()
-                                .filter(|k| stdlib::is_package_global_name(k))
+                                .filter(|k| builtins::is_package_global_name(k))
                                 .cloned()
                                 .collect();
                             for k in pkg_keys {
@@ -765,10 +765,10 @@ async fn execute_chunk(
                     continue;
                 }
 
-                if let Some(pkg) = stdlib::find_package(path) {
+                if let Some(pkg) = builtins::find_package(path) {
                     // Build the package dict, then extract only the requested names.
                     let dict = if pkg.import_name == "llm" {
-                        stdlib::llm_pkg::llm_vm_dict_value()
+                        builtins::llm_pkg::llm_vm_dict_value()
                     } else {
                         pkg.vm_dict_value()
                     };
@@ -821,7 +821,7 @@ async fn execute_chunk(
                             // Promote stdlib package imports from the module so that
                             // imported functions can resolve them via GetGlobal.
                             for (k, v) in sub_state.globals.iter() {
-                                if stdlib::is_package_global_name(k) {
+                                if builtins::is_package_global_name(k) {
                                     state.globals.entry(k.clone()).or_insert_with(|| v.clone());
                                 }
                             }
@@ -829,7 +829,7 @@ async fn execute_chunk(
                             let initial_keys: std::collections::HashSet<String> =
                                 VmState::new().globals.keys().cloned().collect();
                             let scope_map: HashMap<String, VmValue> = sub_state.globals.iter()
-                                .filter(|(k, _)| !initial_keys.contains(*k) && !stdlib::is_package_global_name(k))
+                                .filter(|(k, _)| !initial_keys.contains(*k) && !builtins::is_package_global_name(k))
                                 .map(|(k, v)| (k.clone(), v.clone()))
                                 .collect();
                             let module_scope: Arc<Mutex<HashMap<String, VmValue>>> =
@@ -1267,7 +1267,7 @@ async fn execute_chunk(
                     VmValue::Dict(ref map) => {
                         if let Some(v) = map.get(field.as_str()) {
                             set(slots, *dest, v.clone());
-                        } else if let Some(method) = stdlib::find_primitive_method(PrimType::Dict, field) {
+                        } else if let Some(method) = builtins::find_primitive_method(PrimType::Dict, field) {
                             set(slots, *dest, VmValue::NativeBoundMethod(Arc::new(NativeBoundMethod {
                                 receiver: obj.clone(),
                                 method,
@@ -1284,7 +1284,7 @@ async fn execute_chunk(
                     ref prim @ (VmValue::Str(_) | VmValue::Array(_)
                                | VmValue::Int(_) | VmValue::Float(_)) => {
                         if let Some(ty) = PrimType::from_value(prim) {
-                            if let Some(method) = stdlib::find_primitive_method(ty, field) {
+                            if let Some(method) = builtins::find_primitive_method(ty, field) {
                                 set(slots, *dest, VmValue::NativeBoundMethod(Arc::new(NativeBoundMethod {
                                     receiver: prim.clone(),
                                     method,

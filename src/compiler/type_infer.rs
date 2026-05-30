@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    compiler::stdlib,
+    compiler::builtins,
     frontend::{
         ast::{BinOpKind, Expr, FStrPart, Program, StructFieldDef, Stmt, UnaryOpKind},
         error::{JadeError, Result, Span},
@@ -44,8 +44,8 @@ impl TypeContext {
             primitive_methods: HashMap::new(),
             has_imports: false,
         };
-        stdlib::register_core_types(&mut ctx);
-        stdlib::register_primitive_method_types(&mut ctx);
+        builtins::register_core_types(&mut ctx);
+        builtins::register_primitive_method_types(&mut ctx);
         ctx
     }
 
@@ -117,10 +117,10 @@ impl TypeContext {
 ///
 /// Errors are fatal (first error stops inference). The `Unknown` type is used
 /// conservatively whenever a type cannot be determined — no false positives.
-/// Static return type for stdlib calls of the form `mod.method(...)`. Mirrors
+/// Static return type for package calls of the form `mod.method(...)`. Mirrors
 /// the runtime signatures so codegen sees `JadeType::Str` (not `Unknown`)
 /// for string-producing builtins — required for taint-flow gates.
-fn stdlib_return_type(module: &str, method: &str) -> Option<JadeType> {
+fn pkg_call_return_type(module: &str, method: &str) -> Option<JadeType> {
     match (module, method) {
         ("sh",   "exec")    => Some(JadeType::Str),
         ("fs",   "read")    => Some(JadeType::Str),
@@ -461,7 +461,7 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
 
         Stmt::Use { path, as_name, path_is_string, span } => {
             ctx.has_imports = true;
-            if let Some(pkg) = stdlib::find_package(path) {
+            if let Some(pkg) = builtins::find_package(path) {
                 if *path_is_string {
                     return Err(JadeError::StdlibStringImport { path: path.clone(), span: *span });
                 }
@@ -474,7 +474,7 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
 
         Stmt::FromUse { path, names, path_is_string, span } => {
             ctx.has_imports = true;
-            if let Some(pkg) = stdlib::find_package(path) {
+            if let Some(pkg) = builtins::find_package(path) {
                 if *path_is_string {
                     return Err(JadeError::StdlibStringImport { path: path.clone(), span: *span });
                 }
@@ -600,12 +600,12 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
                 if field == "new" && matches!(object.as_ref(), Expr::Identifier { name, .. } if name == "Grammar")
             );
 
-            // Recognize stdlib calls (sh.exec, fs.read, http.get, …) so their
+            // Recognize package calls (sh.exec, fs.read, http.get, …) so their
             // return types are known statically — codegen needs Str (not
             // Unknown→i64) for tagged-string flow analysis.
-            let stdlib_ret: Option<JadeType> = match callee.as_ref() {
+            let pkg_call_ret: Option<JadeType> = match callee.as_ref() {
                 Expr::FieldAccess { object, field, .. } => match object.as_ref() {
-                    Expr::Identifier { name, .. } => stdlib_return_type(name, field),
+                    Expr::Identifier { name, .. } => pkg_call_return_type(name, field),
                     _ => None,
                 },
                 _ => None,
@@ -633,7 +633,7 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
 
             let ret_ty = if is_grammar_new {
                 JadeType::Grammar
-            } else if let Some(t) = stdlib_ret {
+            } else if let Some(t) = pkg_call_ret {
                 t
             } else if let Some(t) = builtin_ret {
                 t
