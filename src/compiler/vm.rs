@@ -270,6 +270,11 @@ pub struct VmState {
     pub import_stack: HashSet<PathBuf>,
     /// Native package map from `[native]` in jade.toml: name → (absolute path, alias).
     pub native_packages: HashMap<String, (PathBuf, String)>,
+    /// Project root (the dir holding the `jade.toml` with `[project]`). Anchor
+    /// for resolving registered `[lib]` library imports.
+    pub project_root: Option<PathBuf>,
+    /// Registered libraries from `jade.toml` `[lib]`: name → {path, files}.
+    pub libraries: HashMap<String, crate::project::LibraryEntry>,
     /// The module scope of the currently-executing module function, if any.
     /// `GetGlobal` checks here before `globals`; `SetGlobal` writes here when
     /// the name already exists in scope, preserving mutations across calls.
@@ -304,6 +309,8 @@ impl VmState {
             source_dir: PathBuf::new(),
             import_stack: HashSet::new(),
             native_packages: HashMap::new(),
+            project_root: None,
+            libraries: HashMap::new(),
             active_module_scope: None,
             #[cfg(test)]
             test_stdout: None,
@@ -324,6 +331,8 @@ impl VmState {
         self.default_model = opts.default_model.clone();
         self.source_dir = opts.source_dir;
         self.native_packages = opts.native_packages;
+        self.project_root = opts.project_root;
+        self.libraries = opts.libraries;
         self.set_session("__model__", VmValue::Str(opts.default_model));
         self.set_session("__max_retries__", VmValue::Int(opts.max_retries as i64));
         #[cfg(test)]
@@ -368,6 +377,8 @@ impl VmState {
             source_dir: self.source_dir.clone(),
             import_stack: HashSet::new(),
             native_packages: self.native_packages.clone(),
+            project_root: self.project_root.clone(),
+            libraries: self.libraries.clone(),
             active_module_scope: None,
             #[cfg(test)]
             test_stdout: self.test_stdout.clone(),
@@ -385,6 +396,10 @@ pub struct VmOpts {
     pub source_dir: PathBuf,
     /// Native package map from `[native]` in jade.toml: name → (absolute path, alias).
     pub native_packages: HashMap<String, (PathBuf, String)>,
+    /// Project root — anchor for registered `[lib]` library imports.
+    pub project_root: Option<PathBuf>,
+    /// Registered libraries from `jade.toml` `[lib]`: name → {path, files}.
+    pub libraries: HashMap<String, crate::project::LibraryEntry>,
     /// Test-only stdout capture buffer. See `VmState::test_stdout`.
     #[cfg(test)]
     pub test_stdout: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
@@ -398,10 +413,29 @@ impl Default for VmOpts {
             max_retries: 15,
             source_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             native_packages: HashMap::new(),
+            project_root: None,
+            libraries: HashMap::new(),
             #[cfg(test)]
             test_stdout: None,
         }
     }
+}
+
+/// Resolve a user `.jde` import path to a filesystem path (pre-canonicalization).
+///
+/// Registered `[lib]` libraries take precedence: a `<lib>/<module>` path resolves
+/// against the library's directory anchored at the project root (cross-directory
+/// imports). Everything else falls back to relative-to-importer resolution
+/// (hybrid mode). An unregistered module under a known library name is an error.
+fn resolve_user_import(state: &VmState, path: &str, span: Span) -> Result<PathBuf> {
+    if let Some(root) = &state.project_root {
+        match crate::project::resolve_library_import(&state.libraries, path, root) {
+            Ok(Some(p)) => return Ok(p),
+            Ok(None) => {}
+            Err(message) => return Err(JadeError::IoError { message, span }),
+        }
+    }
+    Ok(state.source_dir.join(path))
 }
 
 // ── Public entry point ────────────────────────────────────────────────────────
@@ -570,7 +604,7 @@ async fn execute_chunk(
                 }
 
                 // ── User .jde files — namespaced ────────────────────────────
-                let abs_path = state.source_dir.join(path);
+                let abs_path = resolve_user_import(state, path, span)?;
                 let canon = abs_path.canonicalize().map_err(|_| JadeError::ImportNotFound {
                     path: path.clone(),
                     span,
@@ -651,6 +685,8 @@ async fn execute_chunk(
                         sub_state.source_dir = sub_source_dir;
                         sub_state.import_stack = state.import_stack.clone();
                         sub_state.native_packages = state.native_packages.clone();
+                        sub_state.project_root = state.project_root.clone();
+                        sub_state.libraries = state.libraries.clone();
                         sub_state.inference_backend = state.inference_backend.clone();
                         sub_state.max_retries = state.max_retries;
                         sub_state.max_tokens = state.max_tokens;
@@ -783,7 +819,7 @@ async fn execute_chunk(
                 }
                 // File import: run in an isolated sub-state, then bind only the
                 // requested names directly into the parent namespace.
-                let abs_path = state.source_dir.join(path);
+                let abs_path = resolve_user_import(state, path, span)?;
                 let canon = abs_path.canonicalize().map_err(|_| JadeError::ImportNotFound {
                     path: path.clone(),
                     span,
@@ -812,6 +848,8 @@ async fn execute_chunk(
                         sub_state.source_dir = sub_source_dir;
                         sub_state.import_stack = state.import_stack.clone();
                         sub_state.native_packages = state.native_packages.clone();
+                        sub_state.project_root = state.project_root.clone();
+                        sub_state.libraries = state.libraries.clone();
                         sub_state.inference_backend = state.inference_backend.clone();
                         sub_state.max_retries = state.max_retries;
                         sub_state.max_tokens = state.max_tokens;

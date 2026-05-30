@@ -14,6 +14,11 @@ pub struct ProjectManifest {
     /// `[native]` section: maps package name → entry with `path` and required `alias`.
     /// Used via `use "native/<name>"` in Jade source; the package binds as `alias`.
     pub native: Option<HashMap<String, NativePackageEntry>>,
+    /// `[lib.<name>]` sections: register a directory and its `.jde` modules as a
+    /// named library so they can be imported cross-directory via
+    /// `use "<name>/<module>"`, anchored at the project root. See
+    /// [`resolve_library_import`].
+    pub lib: Option<HashMap<String, LibraryEntry>>,
 }
 
 /// Entry in the `[native]` section of `jade.toml`.
@@ -22,6 +27,59 @@ pub struct ProjectManifest {
 pub struct NativePackageEntry {
     pub path: String,
     pub alias: String,
+}
+
+/// Entry in a `[lib.<name>]` section of `jade.toml`.
+///
+/// ```toml
+/// [lib.utils]
+/// path  = "src/utils"         # directory, relative to the project root
+/// files = ["math", "strings"] # importable module stems (no .jde extension)
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+pub struct LibraryEntry {
+    pub path: String,
+    pub files: Vec<String>,
+}
+
+/// Resolve a `use` path against registered `[lib]` libraries, anchored at `root`.
+///
+/// A path is a *library reference* when it has the form `<lib>/<module>` and
+/// `<lib>` names a registered library. The module must appear in the library's
+/// `files` allowlist, and resolution is anchored at the project `root` (not the
+/// importing file) — this is what enables cross-directory imports.
+///
+/// Returns:
+///   * `Ok(Some(path))` — a registered library file (a trailing `.jde` in the
+///     import is optional and is appended here),
+///   * `Ok(None)` — not a library reference; the caller falls back to normal
+///     relative-path resolution (hybrid mode),
+///   * `Err(msg)` — the library exists but the module is not in its `files` list.
+pub fn resolve_library_import(
+    libs: &HashMap<String, LibraryEntry>,
+    import_path: &str,
+    root: &Path,
+) -> Result<Option<PathBuf>, String> {
+    let Some((lib_name, rest)) = import_path.split_once('/') else {
+        return Ok(None);
+    };
+    let Some(entry) = libs.get(lib_name) else {
+        return Ok(None);
+    };
+    let module = rest.strip_suffix(".jde").unwrap_or(rest);
+    if !entry.files.iter().any(|f| f == module) {
+        return Err(format!(
+            "module '{module}' is not registered in [lib.{lib_name}] of jade.toml \
+             (registered files: {:?})",
+            entry.files
+        ));
+    }
+    let base = if Path::new(&entry.path).is_absolute() {
+        PathBuf::from(&entry.path)
+    } else {
+        root.join(&entry.path)
+    };
+    Ok(Some(base.join(format!("{module}.jde"))))
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -51,7 +109,14 @@ impl ProjectManifest {
 /// Walk up from the current working directory searching for a `jade.toml` that
 /// contains a `[project]` section.  Returns the directory containing that file.
 pub fn find_project_root() -> Option<PathBuf> {
-    let mut dir = std::env::current_dir().ok()?;
+    find_project_root_from(&std::env::current_dir().ok()?)
+}
+
+/// Like [`find_project_root`] but starts from `start` instead of the current
+/// working directory. Used by the AOT build daemon, which resolves a project
+/// relative to the source file it was handed rather than its own CWD.
+pub fn find_project_root_from(start: &Path) -> Option<PathBuf> {
+    let mut dir = start.to_path_buf();
     loop {
         let candidate = dir.join("jade.toml");
         if candidate.exists() {

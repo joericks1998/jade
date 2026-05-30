@@ -128,12 +128,22 @@ async fn run_test_file(
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
         .unwrap_or_else(|| std::path::PathBuf::from("."));
 
+    // Honor registered [lib] libraries so test files can import them too.
+    let project_root = crate::project::find_project_root();
+    let libraries = project_root
+        .as_ref()
+        .and_then(|root| crate::project::load_project(root).ok())
+        .and_then(|m| m.lib)
+        .unwrap_or_default();
+
     let opts = vm::VmOpts {
         backend,
         default_model: model.clone(),
         max_retries,
         source_dir,
         native_packages: std::collections::HashMap::new(),
+        project_root,
+        libraries,
         #[cfg(test)]
         test_stdout: None,
     };

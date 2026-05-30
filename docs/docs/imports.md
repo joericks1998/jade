@@ -55,6 +55,33 @@ use "lib/utils.jde"
 Absolute paths are not supported. Always use paths relative to the importing file's location.
 :::
 
+## Library Imports (`[lib]`)
+
+Relative paths get awkward across a deep project tree (`use "../../shared/util.jde"`). To import a module from anywhere in a project, register a **library** in `jade.toml`: a named directory plus an explicit allowlist of its modules.
+
+```toml
+# jade.toml
+[project]
+name = "myapp"
+
+[lib.utils]
+path  = "src/utils"          # directory, relative to the project root
+files = ["math", "strings"]  # importable module stems (no .jde extension)
+```
+
+Then import `<lib>/<module>` from **any** file in the project — the path is resolved against the library's directory anchored at the project root, not the importing file:
+
+```jade
+use "utils/math" as m        // -> <root>/src/utils/math.jde, from anywhere
+print(m.square(5))
+```
+
+Rules:
+
+- Only modules listed in `files` are importable. `use "utils/secret"` (unregistered) is a hard error in both `jade run` and `jade build`.
+- A `use` path is treated as a library reference only when its first segment names a registered library; everything else still resolves as a normal relative path (so existing relative imports keep working).
+- Library resolution is identical in the VM and the native (AOT) build.
+
 ## What Gets Imported
 
 All top-level bindings in the imported file are brought into scope — including functions, variables, and struct definitions. The imported file runs to completion before execution of the importing file continues past the `use` statement.
