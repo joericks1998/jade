@@ -1,12 +1,4 @@
-mod build;
-mod cache;
-mod cli;
-mod compiler;
-mod config;
-mod frontend;
-mod llm;
-mod native;
-mod project;
+use jade::cli;
 
 use clap::{Parser, Subcommand};
 
