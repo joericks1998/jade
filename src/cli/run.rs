@@ -149,30 +149,23 @@ pub async fn run_file(path: &str, verbose: bool) {
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
         .unwrap_or_else(|| std::path::PathBuf::from("."));
 
-    // Resolve native packages from jade.toml [native], if present.
-    let native_packages = {
-        let mut map = std::collections::HashMap::new();
-        if let Some(root) = crate::project::find_project_root() {
-            if let Ok(manifest) = crate::project::load_project(&root) {
-                for (name, lib_path) in manifest.native.unwrap_or_default() {
-                    let abs = if std::path::Path::new(&lib_path).is_absolute() {
-                        std::path::PathBuf::from(&lib_path)
-                    } else {
-                        root.join(&lib_path)
-                    };
-                    map.insert(name, abs);
-                }
-            }
-        }
-        map
-    };
+    // Resolve registered libraries from jade.toml, if present.
+    let project_root = crate::project::find_project_root();
+    let libraries = project_root
+        .as_ref()
+        .and_then(|root| crate::project::load_project(root).ok())
+        .and_then(|m| m.lib)
+        .unwrap_or_default();
 
     let opts = vm::VmOpts {
         backend,
         default_model: cfg.model,
         max_retries: cfg.max_retries,
         source_dir,
-        native_packages,
+        project_root,
+        libraries,
+        #[cfg(test)]
+        test_stdout: None,
     };
 
     // Execute.

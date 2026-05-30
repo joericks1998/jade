@@ -308,12 +308,33 @@ fn try_run_src(src: &str) -> Result<VmState> {
 }
 
 fn run_src_with_mock(src: &str, responses: Vec<&str>) -> Result<VmState> {
+    run_src_with_mock_inner(src, responses, None)
+}
+
+/// Like `run_src_with_mock` but also returns a string of everything written to
+/// stdout by `vm_drain_token_stream_printing` (i.e. the `stream()` output path).
+fn run_src_with_stdout_capture(
+    src: &str,
+    responses: Vec<&str>,
+) -> Result<(VmState, String)> {
+    let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let state = run_src_with_mock_inner(src, responses, Some(std::sync::Arc::clone(&buf)))?;
+    let printed = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    Ok((state, printed))
+}
+
+fn run_src_with_mock_inner(
+    src: &str,
+    responses: Vec<&str>,
+    test_stdout: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
+) -> Result<VmState> {
     let tokens = lexer::tokenize(src).expect("lex failed");
     let program = parser::parse(tokens).expect("parse failed");
     let tprogram = type_infer::infer(program).expect("type inference failed");
     let compiled = emit::emit(tprogram).expect("emit failed");
     let opts = VmOpts {
         backend: Some(std::sync::Arc::new(crate::llm::MockBackend::new(responses))),
+        test_stdout,
         ..VmOpts::default()
     };
     tokio::runtime::Builder::new_current_thread()
@@ -806,8 +827,10 @@ fn test_vm_integer_overflow_mul() {
 
 #[test]
 fn test_vm_nested_fn_ok() {
-    let s = run_src("fn outer() {\n  fn inner() {\n    return 1\n  }\n  return 2\n}").unwrap();
-    assert!(s.globals.contains_key("outer"));
+    // Nested function definitions are now a parse error.
+    let tokens = crate::frontend::lexer::tokenize("fn outer() {\n  fn inner() {\n    return 1\n  }\n  return 2\n}").expect("lex");
+    let result = crate::frontend::parser::parse(tokens);
+    assert!(matches!(result, Err(crate::frontend::error::JadeError::NestedFunction { .. })));
 }
 
 // ── while loops (ported from eval.rs) ────────────────────────────────────
@@ -994,8 +1017,12 @@ fn test_vm_print_builtin() {
 
 #[test]
 fn test_vm_print_arity_error() {
-    let err = try_run_src(r#"print("a", "b")"#).err().expect("expected error");
-    assert!(matches!(err, JadeError::ArityMismatch { expected: 1, got: 2, .. }));
+    // print() with no args is an error
+    let err = try_run_src(r#"print()"#).err().expect("expected error");
+    assert!(matches!(err, JadeError::ArityMismatch { .. }));
+    // print() with 3 args is an error (max 2: value + optional end=)
+    let err = try_run_src(r#"print("a", "b", "c")"#).err().expect("expected error");
+    assert!(matches!(err, JadeError::ArityMismatch { .. }));
 }
 
 #[test]
@@ -1334,7 +1361,7 @@ fn test_vm_typed_deref_retry_succeeds_on_second_attempt() {
 fn test_grammar_new_returns_grammar_value() {
     let s = run_src(r#"let g = Grammar.new('"yes" | "no"')"#).unwrap();
     match s.globals.get("g").unwrap() {
-        VmValue::Grammar { pattern, anchor } => {
+        VmValue::Grammar { pattern, anchor, .. } => {
             assert_eq!(pattern, r#""yes" | "no""#);
             assert_eq!(*anchor, None);
         }
@@ -1359,7 +1386,7 @@ let answer = ?p |> g
 fn test_grammar_new_with_anchor() {
     let s = run_src(r#"let g = Grammar.new('"yes" | "no"', anchor = "Answer:")"#).unwrap();
     match s.globals.get("g").unwrap() {
-        VmValue::Grammar { pattern, anchor } => {
+        VmValue::Grammar { pattern, anchor, .. } => {
             assert_eq!(pattern, r#""yes" | "no""#);
             assert_eq!(anchor.as_deref(), Some("Answer:"));
         }
@@ -1545,6 +1572,50 @@ fn test_vm_struct_required_after_let_field() {
     assert!(matches!(err, JadeError::MissingField { field, .. } if field == "y"));
 }
 
+// ── Empty struct tests ────────────────────────────────────────────────────
+
+#[test]
+fn test_vm_empty_struct_define_and_instantiate() {
+    let s = run_src("struct Unit {}\nlet u = Unit {}").unwrap();
+    match s.globals.get("u").unwrap() {
+        VmValue::Struct(rc) => assert_eq!(rc.lock().type_name, "Unit"),
+        v => panic!("expected Struct, got {:?}", v),
+    }
+}
+
+#[test]
+fn test_vm_empty_struct_method() {
+    let src = "struct Unit {}\nextend Unit {\n  fn tag(self) { return 42 }\n}\nlet u = Unit {}\nlet v = u.tag()";
+    let s = run_src(src).unwrap();
+    assert_eq!(get_int(&s, "v"), 42);
+}
+
+#[test]
+fn test_vm_empty_struct_in_array() {
+    let src = "struct Unit {}\nlet arr = [Unit {}, Unit {}, Unit {}]\nlet n = len(arr)";
+    let s = run_src(src).unwrap();
+    assert_eq!(get_int(&s, "n"), 3);
+}
+
+#[test]
+fn test_vm_empty_struct_as_function_arg() {
+    let src = "struct Unit {}\nfn consume(x) { return 1 }\nlet u = Unit {}\nlet v = consume(u)";
+    let s = run_src(src).unwrap();
+    assert_eq!(get_int(&s, "v"), 1);
+}
+
+#[test]
+fn test_vm_empty_struct_extra_field_is_error() {
+    let err = try_run_src("struct Unit {}\nlet u = Unit { x: 1 }").err().expect("expected error");
+    assert!(matches!(err, JadeError::UndefinedField { .. }));
+}
+
+#[test]
+fn test_vm_empty_struct_raised_and_caught() {
+    let src = "struct MyErr {}\ntry {\n  raise MyErr {}\n} catch MyErr e {\n  print(\"caught\")\n}";
+    run_src(src).unwrap();
+}
+
 // ── std/fs tests ──────────────────────────────────────────────────────────
 
 #[test]
@@ -1553,7 +1624,7 @@ fn test_fs_write_and_read() {
     let path = dir.join("jade_test_fs_write_read.txt");
     let path_str = path.to_str().unwrap();
     let src = format!(
-        "use \"std/fs\"\nfs.write(\"{path_str}\", \"hello jade\")\nlet v = fs.read(\"{path_str}\")"
+        "use std.fs\nfs.write(\"{path_str}\", \"hello jade\")\nlet v = fs.read(\"{path_str}\")"
     );
     let s = run_src(&src).unwrap();
     assert_eq!(get_str(&s, "v"), "hello jade");
@@ -1566,7 +1637,7 @@ fn test_fs_exists_true() {
     let path = dir.join("jade_test_fs_exists_true.txt");
     std::fs::write(&path, "x").unwrap();
     let path_str = path.to_str().unwrap();
-    let src = format!("use \"std/fs\"\nlet v = fs.exists(\"{path_str}\")");
+    let src = format!("use std.fs\nlet v = fs.exists(\"{path_str}\")");
     let s = run_src(&src).unwrap();
     assert!(get_bool(&s, "v"));
     let _ = std::fs::remove_file(&path);
@@ -1574,7 +1645,7 @@ fn test_fs_exists_true() {
 
 #[test]
 fn test_fs_exists_false() {
-    let src = "use \"std/fs\"\nlet v = fs.exists(\"/tmp/jade_test_no_such_file_xyz.txt\")";
+    let src = "use std.fs\nlet v = fs.exists(\"/tmp/jade_test_no_such_file_xyz.txt\")";
     let s = run_src(src).unwrap();
     assert!(!get_bool(&s, "v"));
 }
@@ -1585,7 +1656,7 @@ fn test_fs_delete() {
     let path = dir.join("jade_test_fs_delete.txt");
     std::fs::write(&path, "bye").unwrap();
     let path_str = path.to_str().unwrap();
-    let src = format!("use \"std/fs\"\nfs.delete(\"{path_str}\")\nlet v = fs.exists(\"{path_str}\")");
+    let src = format!("use std.fs\nfs.delete(\"{path_str}\")\nlet v = fs.exists(\"{path_str}\")");
     let s = run_src(&src).unwrap();
     assert!(!get_bool(&s, "v"));
 }
@@ -1596,7 +1667,7 @@ fn test_fs_append() {
     let path = dir.join("jade_test_fs_append.txt");
     let path_str = path.to_str().unwrap();
     let src = format!(
-        "use \"std/fs\"\nfs.write(\"{path_str}\", \"hello\")\nfs.append(\"{path_str}\", \" world\")\nlet v = fs.read(\"{path_str}\")"
+        "use std.fs\nfs.write(\"{path_str}\", \"hello\")\nfs.append(\"{path_str}\", \" world\")\nlet v = fs.read(\"{path_str}\")"
     );
     let s = run_src(&src).unwrap();
     assert_eq!(get_str(&s, "v"), "hello world");
@@ -1611,7 +1682,7 @@ fn test_fs_list_dir() {
     std::fs::write(subdir.join("a.txt"), "").unwrap();
     std::fs::write(subdir.join("b.txt"), "").unwrap();
     let path_str = subdir.to_str().unwrap();
-    let src = format!("use \"std/fs\"\nlet v = fs.list_dir(\"{path_str}\")");
+    let src = format!("use std.fs\nlet v = fs.list_dir(\"{path_str}\")");
     let s = run_src(&src).unwrap();
     match s.globals.get("v").unwrap() {
         VmValue::Array(a) => {
@@ -1633,7 +1704,7 @@ fn test_fs_mkdir() {
     let newdir = dir.join("jade_test_fs_mkdir_new/nested");
     let path_str = newdir.to_str().unwrap();
     let _ = std::fs::remove_dir_all(dir.join("jade_test_fs_mkdir_new"));
-    let src = format!("use \"std/fs\"\nfs.mkdir(\"{path_str}\")\nlet v = fs.exists(\"{path_str}\")");
+    let src = format!("use std.fs\nfs.mkdir(\"{path_str}\")\nlet v = fs.exists(\"{path_str}\")");
     let s = run_src(&src).unwrap();
     assert!(get_bool(&s, "v"));
     let _ = std::fs::remove_dir_all(dir.join("jade_test_fs_mkdir_new"));
@@ -1641,14 +1712,130 @@ fn test_fs_mkdir() {
 
 #[test]
 fn test_fs_read_nonexistent_errors() {
-    let err = try_run_src("use \"std/fs\"\nlet v = fs.read(\"/tmp/jade_no_such_file_xyz.txt\")").err().expect("expected error");
+    let err = try_run_src("use std.fs\nlet v = fs.read(\"/tmp/jade_no_such_file_xyz.txt\")").err().expect("expected error");
     assert!(matches!(err, JadeError::IoError { .. }));
 }
 
 #[test]
 fn test_fs_write_arity_error() {
-    let err = try_run_src("use \"std/fs\"\nfs.write(\"path\")").err().expect("expected error");
+    let err = try_run_src("use std.fs\nfs.write(\"path\")").err().expect("expected error");
     assert!(matches!(err, JadeError::ArityMismatch { expected: 2, .. }));
+}
+
+// ── nil equality with unknown-typed values ────────────────────────────────
+
+#[test]
+fn test_nil_eq_struct_via_unknown_param() {
+    // When a function param has type Unknown, `param != nil` must work at
+    // runtime even when the argument is a struct (CmpNe dynamic path).
+    let s = run_src(
+        "struct Foo {}\nfn check(x) {\n if x != nil { return 1 }\n return 0\n}\nlet a = check(Foo {})\nlet b = check(nil)"
+    ).unwrap();
+    assert_eq!(get_int(&s, "a"), 1);
+    assert_eq!(get_int(&s, "b"), 0);
+}
+
+#[test]
+fn test_nil_eq_eq_struct_via_unknown_param() {
+    let s = run_src(
+        "struct Bar {}\nfn is_nil(x) {\n return x == nil\n}\nlet a = is_nil(nil)\nlet b = is_nil(Bar {})"
+    ).unwrap();
+    assert!(get_bool(&s, "a"));
+    assert!(!get_bool(&s, "b"));
+}
+
+// ── module stdlib promotion ───────────────────────────────────────────────
+
+/// Module-level `let` bindings must be visible inside module functions when
+/// those functions are called from the parent. Functions are exported as
+/// closures capturing the module scope.
+#[test]
+fn test_import_module_let_binding_visible_in_fn() {
+    let dir = std::env::temp_dir();
+    let mod_path = dir.join("jade_test_mod_let.jde");
+    std::fs::write(&mod_path, "let _PREFIX = \"hi \"\nfn greet(name) {\n return _PREFIX + name\n}\n").unwrap();
+    let mod_str = mod_path.to_str().unwrap();
+    let src = format!("use \"{mod_str}\" as m\nlet v = m.greet(\"jade\")");
+
+    let tokens = crate::frontend::lexer::tokenize(&src).expect("lex");
+    let program = crate::frontend::parser::parse(tokens).expect("parse");
+    let tprogram = crate::compiler::type_infer::infer(program).expect("type infer");
+    let compiled = crate::compiler::emit::emit(tprogram).expect("emit");
+    let opts = VmOpts { source_dir: dir.clone(), ..VmOpts::default() };
+    let s = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(run(compiled, opts))
+        .expect("vm run");
+
+    assert_eq!(get_str(&s, "v"), "hi jade");
+    let _ = std::fs::remove_file(&mod_path);
+}
+
+/// Mutable module-level state (let bindings updated by module functions) must
+/// persist across calls — SetGlobal inside a module function writes to the
+/// module scope, not the parent globals.
+#[test]
+fn test_import_module_mutable_state() {
+    let dir = std::env::temp_dir();
+    let mod_path = dir.join("jade_test_mod_mut.jde");
+    std::fs::write(&mod_path, "let count = 0\nfn inc() { count = count + 1 }\nfn get() { return count }\n").unwrap();
+    let mod_str = mod_path.to_str().unwrap();
+    let src = format!(
+        "use \"{mod_str}\" as c\nc.inc()\nc.inc()\nc.inc()\nlet v = c.get()"
+    );
+
+    let tokens = crate::frontend::lexer::tokenize(&src).expect("lex");
+    let program = crate::frontend::parser::parse(tokens).expect("parse");
+    let tprogram = crate::compiler::type_infer::infer(program).expect("type infer");
+    let compiled = crate::compiler::emit::emit(tprogram).expect("emit");
+    let opts = VmOpts { source_dir: dir.clone(), ..VmOpts::default() };
+    let s = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(run(compiled, opts))
+        .expect("vm run");
+
+    assert_eq!(get_int(&s, "v"), 3);
+    let _ = std::fs::remove_file(&mod_path);
+}
+
+/// A module that imports `use std.fs` should expose functions that use `fs`
+/// to callers in the parent scope — the stdlib import must be promoted to the
+/// parent globals rather than buried inside the module dict.
+#[test]
+fn test_import_module_stdlib_promotion() {
+    let dir = std::env::temp_dir();
+    let mod_path = dir.join("jade_test_stdlib_promo_mod.jde");
+    let txt_path = dir.join("jade_test_stdlib_promo_out.txt");
+    std::fs::write(&mod_path, "use std.fs\nfn write_file(p, s) {\n fs.write(p, s)\n}\n").unwrap();
+
+    let mod_str = mod_path.to_str().unwrap();
+    let txt_str = txt_path.to_str().unwrap();
+    let src = format!(
+        "use \"{mod_str}\" as io\nio.write_file(\"{txt_str}\", \"ok\")\nlet v = true"
+    );
+
+    let tokens = crate::frontend::lexer::tokenize(&src).expect("lex");
+    let program = crate::frontend::parser::parse(tokens).expect("parse");
+    let tprogram = crate::compiler::type_infer::infer(program).expect("type infer");
+    let compiled = crate::compiler::emit::emit(tprogram).expect("emit");
+    let opts = VmOpts { source_dir: dir.clone(), ..VmOpts::default() };
+    let s = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(run(compiled, opts))
+        .expect("vm run");
+
+    assert!(get_bool(&s, "v"));
+    let content = std::fs::read_to_string(&txt_path).expect("output not written");
+    assert_eq!(content, "ok");
+
+    let _ = std::fs::remove_file(&mod_path);
+    let _ = std::fs::remove_file(&txt_path);
 }
 
 // ── type constructors ─────────────────────────────────────────────────────
@@ -2072,7 +2259,7 @@ fn start_http_test_server(status: u16, body: &'static str) -> u16 {
 fn test_http_get_status_and_body() {
     let port = start_http_test_server(200, "hello jade");
     let src = format!(
-        "use \"std/http\"\nlet r = http.get(\"http://127.0.0.1:{port}/\")"
+        "use std.http\nlet r = http.get(\"http://127.0.0.1:{port}/\")"
     );
     let s = run_src(&src).unwrap();
     match s.globals.get("r").unwrap() {
@@ -2094,7 +2281,7 @@ fn test_http_get_status_and_body() {
 fn test_http_post_returns_response() {
     let port = start_http_test_server(201, "created");
     let src = format!(
-        "use \"std/http\"\nlet r = http.post(\"http://127.0.0.1:{port}/\", \"payload\")"
+        "use std.http\nlet r = http.post(\"http://127.0.0.1:{port}/\", \"payload\")"
     );
     let s = run_src(&src).unwrap();
     match s.globals.get("r").unwrap() {
@@ -2116,7 +2303,7 @@ fn test_http_post_returns_response() {
 fn test_http_get_with_headers() {
     let port = start_http_test_server(200, "ok");
     let src = format!(
-        "use \"std/http\"\nlet r = http.get(\"http://127.0.0.1:{port}/\", {{\"X-Test\": \"jade\"}})"
+        "use std.http\nlet r = http.get(\"http://127.0.0.1:{port}/\", {{\"X-Test\": \"jade\"}})"
     );
     let s = run_src(&src).unwrap();
     match s.globals.get("r").unwrap() {
@@ -2130,24 +2317,573 @@ fn test_http_get_with_headers() {
 
 #[test]
 fn test_http_get_arity_error() {
-    let err = try_run_src("use \"std/http\"\nhttp.get()").err().expect("expected error");
+    let err = try_run_src("use std.http\nhttp.get()").err().expect("expected error");
     assert!(matches!(err, JadeError::ArityMismatch { .. }));
 }
 
 #[test]
 fn test_http_get_type_error() {
-    let err = try_run_src("use \"std/http\"\nhttp.get(42)").err().expect("expected error");
+    let err = try_run_src("use std.http\nhttp.get(42)").err().expect("expected error");
     assert!(matches!(err, JadeError::TypeError { .. }));
 }
 
 #[test]
 fn test_http_post_arity_error() {
-    let err = try_run_src("use \"std/http\"\nhttp.post(\"http://example.com\")").err().expect("expected error");
+    let err = try_run_src("use std.http\nhttp.post(\"http://example.com\")").err().expect("expected error");
     assert!(matches!(err, JadeError::ArityMismatch { .. }));
 }
 
 #[test]
 fn test_http_get_connection_refused_errors() {
-    let err = try_run_src("use \"std/http\"\nhttp.get(\"http://127.0.0.1:1/\")").err().expect("expected error");
+    let err = try_run_src("use std.http\nhttp.get(\"http://127.0.0.1:1/\")").err().expect("expected error");
     assert!(matches!(err, JadeError::IoError { .. }));
+}
+
+// ── Stream muting unit tests ──────────────────────────────────────────────
+//
+// Tests for `drain_tokens_with_mute`. We construct a channel, push tokens,
+// then run the drainer with a Vec<u8> buffer instead of stdout so we can
+// assert on exactly what was printed vs what was silenced.
+
+// start_muted=false, region_start=start, region_stop=stop
+fn run_mute_region(tokens: Vec<&str>, start: Vec<&str>, stop: Vec<&str>) -> (String, String) {
+    run_mute_full(tokens, false, start, stop)
+}
+
+// start_muted=true, region_start=[], region_stop=stop
+fn run_mute_from_start(tokens: Vec<&str>, stop: Vec<&str>) -> (String, String) {
+    run_mute_full(tokens, true, vec![], stop)
+}
+
+fn run_mute_full(
+    tokens: Vec<&str>,
+    start_muted: bool,
+    start: Vec<&str>,
+    stop: Vec<&str>,
+) -> (String, String) {
+    let s: Vec<String> = start.into_iter().map(|s| s.to_string()).collect();
+    let e: Vec<String> = stop.into_iter().map(|s| s.to_string()).collect();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async move {
+            let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+            for t in tokens {
+                tx.send(t.to_string()).await.unwrap();
+            }
+            drop(tx);
+            let mut out = Vec::<u8>::new();
+            let full = super::drain_tokens_with_mute(&mut rx, start_muted, &s, &e, &mut out, false).await;
+            let printed = String::from_utf8(out).unwrap();
+            (full, printed)
+        })
+}
+
+#[test]
+fn test_mute_no_region_prints_everything() {
+    // No muting configured — every token reaches stdout.
+    let (full, printed) = run_mute_region(vec!["hello ", "world"], vec![], vec![]);
+    assert_eq!(full, "hello world");
+    assert_eq!(printed, "hello world");
+}
+
+#[test]
+fn test_mute_region_anchor_enters_permanent_mute() {
+    // anchor fires → region entered, everything after suppressed (no stop_anchor).
+    let (full, printed) = run_mute_region(
+        vec!["<tool>", r#"{"tool_name": "x"}"#],
+        vec!["<tool>"],
+        vec![],
+    );
+    assert_eq!(full, r#"<tool>{"tool_name": "x"}"#);
+    assert_eq!(printed, "");
+}
+
+#[test]
+fn test_mute_anchor_split_across_three_tokens() {
+    // "<", "tool", ">" reassembled by buffering → anchor matched, region entered.
+    let (full, printed) = run_mute_region(
+        vec!["<", "tool", ">", r#"{"tool_name": "x"}"#],
+        vec!["<tool>"],
+        vec![],
+    );
+    assert_eq!(full, r#"<tool>{"tool_name": "x"}"#);
+    assert_eq!(printed, "");
+}
+
+#[test]
+fn test_mute_bpe_merge_anchor_plus_brace() {
+    // Tokenizer merged "<tool>" with "{" — anchor found at sub-token boundary,
+    // region entered, remainder ("{…") suppressed.
+    let (full, printed) = run_mute_region(
+        vec![r#"<tool>{"#, r#""tool_name": "x"}"#],
+        vec!["<tool>"],
+        vec![],
+    );
+    assert_eq!(full, r#"<tool>{"tool_name": "x"}"#);
+    assert_eq!(printed, "");
+}
+
+#[test]
+fn test_mute_bpe_merge_entire_tool_call_with_stop() {
+    // Entire tool call as one token; anchor enters region, stop exits it, nothing after.
+    let (full, printed) = run_mute_region(
+        vec![r#"<tool>{"tool_name": "x"}</tool>"#],
+        vec!["<tool>"],
+        vec!["</tool>"],
+    );
+    assert_eq!(full, r#"<tool>{"tool_name": "x"}</tool>"#);
+    assert_eq!(printed, "");
+}
+
+#[test]
+fn test_mute_preamble_then_anchor_multi_token() {
+    // Preamble prints; split anchor is reassembled, region entered, payload suppressed.
+    let (full, printed) = run_mute_region(
+        vec!["Sure!", "\n", "<", "tool", ">", r#"{"tool_name": "x"}"#],
+        vec!["<tool>"],
+        vec![],
+    );
+    assert_eq!(full, r#"Sure!\n<tool>{"tool_name": "x"}"#.replace("\\n", "\n"));
+    assert_eq!(printed, "Sure!\n");
+}
+
+#[test]
+fn test_mute_preamble_and_anchor_in_single_token() {
+    // Preamble and anchor in one BPE token — preamble flushed, region entered.
+    let (full, printed) = run_mute_region(
+        vec![r#"Sure!\n<tool>{"tool_name": "x"}"#.replace("\\n", "\n").as_str()],
+        vec!["<tool>"],
+        vec![],
+    );
+    assert_eq!(full, "Sure!\n<tool>{\"tool_name\": \"x\"}");
+    assert_eq!(printed, "Sure!\n");
+}
+
+#[test]
+fn test_mute_no_anchor_in_response_prints_all() {
+    // Anchor configured but never appears → prints everything.
+    let (full, printed) = run_mute_region(
+        vec!["Hello, ", "world!"],
+        vec!["<tool>"],
+        vec![],
+    );
+    assert_eq!(full, "Hello, world!");
+    assert_eq!(printed, "Hello, world!");
+}
+
+#[test]
+fn test_mute_partial_prefix_at_end_of_stream_flushes() {
+    // "<too" + "k " accumulates to "<took " which is NOT a prefix of "<tool>",
+    // so it flushes without entering muted mode.
+    let (full, printed) = run_mute_region(
+        vec!["<too", "k "],
+        vec!["<tool>"],
+        vec![],
+    );
+    assert_eq!(full, "<took ");
+    assert_eq!(printed, "<took ");
+}
+
+#[test]
+fn test_mute_incomplete_stop_at_end_of_stream_suppressed() {
+    // Daemon stopped mid-"</tool>" sending only "</". We're inside a muted
+    // region (after "<tool>"), so the partial stop is just discarded.
+    let (full, printed) = run_mute_region(
+        vec!["<tool>", "payload", "</"],
+        vec!["<tool>"],
+        vec!["</tool>"],
+    );
+    assert_eq!(full, "<tool>payload</");
+    assert_eq!(printed, "");
+}
+
+#[test]
+fn test_mute_preamble_partial_prefix_then_no_anchor() {
+    // "< " is a prefix of "<tool>" briefly, but "price < today" never completes it.
+    let (full, printed) = run_mute_region(
+        vec!["price < today"],
+        vec!["<tool>"],
+        vec![],
+    );
+    assert_eq!(full, "price < today");
+    assert_eq!(printed, "price < today");
+}
+
+// ── Gap: empty stream ────────────────────────────────────────────────────
+
+#[test]
+fn test_mute_empty_stream() {
+    // Zero tokens — function must return empty strings without hanging.
+    let (full, printed) = run_mute_region(vec![], vec!["<tool>"], vec![]);
+    assert_eq!(full, "");
+    assert_eq!(printed, "");
+}
+
+#[test]
+fn test_mute_empty_stream_no_region() {
+    let (full, printed) = run_mute_region(vec![], vec![], vec![]);
+    assert_eq!(full, "");
+    assert_eq!(printed, "");
+}
+
+// ── Gap: newline=true path ────────────────────────────────────────────────
+
+#[test]
+fn test_mute_newline_appended_to_printed() {
+    // newline=true must append '\n' to the printed output.
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+            tx.send("hello".to_string()).await.unwrap();
+            drop(tx);
+            let mut out = Vec::<u8>::new();
+            let full = super::drain_tokens_with_mute(&mut rx, false, &[], &[], &mut out, true).await;
+            let printed = String::from_utf8(out).unwrap();
+            assert_eq!(full, "hello");
+            assert_eq!(printed, "hello\n");
+        });
+}
+
+#[test]
+fn test_mute_newline_not_appended_when_false() {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+            tx.send("hello".to_string()).await.unwrap();
+            drop(tx);
+            let mut out = Vec::<u8>::new();
+            super::drain_tokens_with_mute(&mut rx, false, &[], &[], &mut out, false).await;
+            let printed = String::from_utf8(out).unwrap();
+            assert_eq!(printed, "hello");
+        });
+}
+
+// ── Gap: additional anchor split boundaries ───────────────────────────────
+
+#[test]
+fn test_mute_anchor_split_two_tokens_midpoint() {
+    // "<too" + "l>" reassembled → anchor matched, region entered, payload suppressed.
+    let (full, printed) = run_mute_region(
+        vec!["<too", "l>", r#"{"tool_name": "x"}"#],
+        vec!["<tool>"],
+        vec![],
+    );
+    assert_eq!(full, r#"<tool>{"tool_name": "x"}"#);
+    assert_eq!(printed, "");
+}
+
+#[test]
+fn test_mute_anchor_split_as_name_then_close() {
+    // "<tool" + ">" — different 2-token split; same result.
+    let (full, printed) = run_mute_region(
+        vec!["<tool", ">", r#"{"tool_name": "x"}"#],
+        vec!["<tool>"],
+        vec![],
+    );
+    assert_eq!(full, r#"<tool>{"tool_name": "x"}"#);
+    assert_eq!(printed, "");
+}
+
+// ── Multiple region_start triggers ───────────────────────────────────────
+
+#[test]
+fn test_mute_multiple_literals_first_fires() {
+    // Two possible anchors; the first one matched enters the muted region.
+    let (full, printed) = run_mute_region(
+        vec!["think: ", "<tool>", r#"{"tool_name": "x"}"#],
+        vec!["<tool>", "<call>"],
+        vec![],
+    );
+    assert_eq!(full, r#"think: <tool>{"tool_name": "x"}"#);
+    assert_eq!(printed, "think: ");
+}
+
+#[test]
+fn test_mute_multiple_literals_second_fires() {
+    // Two possible anchors; the second one fires in this response.
+    let (full, printed) = run_mute_region(
+        vec!["think: ", "<call>", r#"{"tool_name": "x"}"#],
+        vec!["<tool>", "<call>"],
+        vec![],
+    );
+    assert_eq!(full, r#"think: <call>{"tool_name": "x"}"#);
+    assert_eq!(printed, "think: ");
+}
+
+// ── Region with stop_anchor: text after stop prints ───────────────────────
+
+#[test]
+fn test_mute_region_stop_exits_and_trailing_prints() {
+    // Region between <tool> and </tool> suppressed; text after </tool> prints.
+    let (full, printed) = run_mute_region(
+        vec!["<tool>", r#"{"tool_name": "x"}"#, "</tool>", "more"],
+        vec!["<tool>"],
+        vec!["</tool>"],
+    );
+    assert_eq!(full, r#"<tool>{"tool_name": "x"}</tool>more"#);
+    assert_eq!(printed, "more");
+}
+
+#[test]
+fn test_mute_from_start_stop_anchor_exits_then_prints() {
+    // start_muted=true: suppressed from token 1 until stop_anchor; rest prints.
+    let (full, printed) = run_mute_from_start(
+        vec!["reasoning", "</think>", "answer"],
+        vec!["</think>"],
+    );
+    assert_eq!(full, "reasoning</think>answer");
+    assert_eq!(printed, "answer");
+}
+
+#[test]
+fn test_mute_from_start_no_stop_suppresses_all() {
+    // start_muted=true, no stop → entire response suppressed.
+    let (full, printed) = run_mute_from_start(
+        vec!["all", "suppressed"],
+        vec![],
+    );
+    assert_eq!(full, "allsuppressed");
+    assert_eq!(printed, "");
+}
+
+// ── Gap: Grammar.new with no anchor suppresses from start ──────────────────
+
+#[test]
+fn test_mute_grammar_no_anchor_suppresses_from_start() {
+    // No anchor → start_muted=true. Return value still has full text.
+    let s = run_src_with_mock(
+        r#"prompt p = "test"
+let g = Grammar.new("root ::= [a-z]+")
+let reply = stream(?p, mute_on=[g])"#,
+        vec!["hello world"],
+    ).unwrap();
+    assert_eq!(get_str(&s, "reply"), "hello world");
+}
+
+// ── Return-value correctness (no stdout needed) ───────────────────────────
+
+#[test]
+fn test_mute_stream_returns_full_text_via_vm() {
+    // stream() must return the complete text (including muted spans) so callers
+    // can parse structured data from it.
+    let s = run_src_with_mock(
+        r#"prompt p = "test"
+let g = Grammar.new("root ::= \"{\" [a-z]+ \"}\"", "<tool>")
+let reply = stream(?p, mute_on=[g])"#,
+        vec![r#"<tool>{"tool_name": "x"}"#],
+    ).unwrap();
+    assert_eq!(get_str(&s, "reply"), r#"<tool>{"tool_name": "x"}"#);
+}
+
+#[test]
+fn test_mute_stream_returns_full_text_with_preamble_via_vm() {
+    let s = run_src_with_mock(
+        r#"prompt p = "test"
+let g = Grammar.new("root ::= \"{\" [a-z]+ \"}\"", "<tool>")
+let reply = stream(?p, mute_on=[g])"#,
+        vec![r#"Sure thing!<tool>{"tool_name": "x"}"#],
+    ).unwrap();
+    assert_eq!(get_str(&s, "reply"), r#"Sure thing!<tool>{"tool_name": "x"}"#);
+}
+
+// ── Stdout capture: mute_on= region and point suppression ─────────────────
+//
+// Mute source rule:
+//   Grammar has anchor  → anchor enters region mute; stop_anchor exits it;
+//                         everything from anchor to stop_anchor is suppressed.
+//                         If no stop_anchor, muting is permanent to EOS.
+//   Grammar has no anchor → quoted literals from the pattern are point filters
+//                         (non-permanent; each occurrence suppressed, text
+//                         between occurrences prints normally).
+//
+// MockBackend sends the whole response as one token (worst-case BPE scenario).
+
+#[test]
+fn test_mute_grammar_anchor_suppresses_entire_region() {
+    // anchor = "<tool>", no stop_anchor → everything from "<tool>" to EOS is suppressed.
+    let (_s, printed) = run_src_with_stdout_capture(
+        r#"prompt p = "test"
+let g = Grammar.new("root ::= \"{\" [a-z]+ \"}\"", "<tool>")
+let reply = stream(?p, mute_on=[g])"#,
+        vec![r#"<tool>{"tool_name": "x"}"#],
+    ).unwrap();
+    assert_eq!(printed, "\n");
+}
+
+#[test]
+fn test_mute_grammar_preamble_printed_anchor_suppressed() {
+    // Preamble before anchor prints; anchor enters region mute → payload suppressed.
+    let (_s, printed) = run_src_with_stdout_capture(
+        r#"prompt p = "test"
+let g = Grammar.new("root ::= \"{\" [a-z]+ \"}\"", "<tool>")
+let reply = stream(?p, mute_on=[g])"#,
+        vec![r#"Sure thing!<tool>{"tool_name": "x"}"#],
+    ).unwrap();
+    assert_eq!(printed, "Sure thing!\n");
+}
+
+
+#[test]
+fn test_mute_no_mute_on_kwarg_prints_everything() {
+    // stream() with no mute_on at all → nothing suppressed.
+    let (_s, printed) = run_src_with_stdout_capture(
+        r#"prompt p = "test"
+let reply = stream(?p)"#,
+        vec!["hello world"],
+    ).unwrap();
+    assert_eq!(printed, "hello world\n");
+}
+
+#[test]
+fn test_mute_grammar_full_tool_gbnf_anchor_and_stop_suppressed() {
+    // Complex GBNF + anchor + stop_anchor: anchor enters region mute, stop_anchor
+    // exits it — entire region (anchor, payload, stop_anchor) is suppressed.
+    let gbnf = r#"root   ::= "{" ws toolkv (ws "," ws pair)* ws "}"
+toolkv ::= [\x22] "tool_name" [\x22] ws ":" ws str
+pair   ::= str ws ":" ws val
+val    ::= str | num | "true" | "false" | "null"
+str    ::= [\x22] [^\x22]* [\x22]
+num    ::= "-"? [0-9]+ ("." [0-9]+)?
+ws     ::= [ ]*"#;
+    let src = format!(
+        r#"let g = Grammar.new("{gbnf}", "<tool>", "</tool>")
+prompt p = "test"
+let reply = stream(?p, mute_on=[g])"#,
+        gbnf = gbnf.replace('\\', "\\\\").replace('"', "\\\""),
+    );
+    let (_s, printed) = run_src_with_stdout_capture(
+        &src,
+        vec![r#"<tool>{"tool_name": "get_weather", "city": "Paris"}</tool>"#],
+    ).unwrap();
+    // "<tool>" enters region mute, "</tool>" exits it; entire region suppressed, nothing prints.
+    assert_eq!(printed, "\n");
+}
+
+// ── No-anchor grammar: suppress from start of generation ─────────────────
+
+#[test]
+fn test_mute_no_anchor_suppresses_entire_response() {
+    // No anchor, no stop_anchor → start_muted=true, permanent → nothing prints.
+    let (_s, printed) = run_src_with_stdout_capture(
+        r#"prompt p = "test"
+let g = Grammar.new("\"<think>\" | \"</think>\"")
+let reply = stream(?p, mute_on=[g])"#,
+        vec!["<think>some reasoning</think>final answer"],
+    ).unwrap();
+    assert_eq!(printed, "\n");
+}
+
+#[test]
+fn test_mute_no_anchor_with_stop_anchor_prints_after() {
+    // No anchor → start muted; stop_anchor "</think>" exits muted mode; "answer" prints.
+    let (_s, printed) = run_src_with_stdout_capture(
+        r#"prompt p = "test"
+let g = Grammar.new("root ::= [a-z]+", nil, "</think>")
+let reply = stream(?p, mute_on=[g])"#,
+        vec!["reasoning</think>answer"],
+    ).unwrap();
+    assert_eq!(printed, "answer\n");
+}
+
+#[test]
+fn test_mute_grammar_no_anchor_regex_suppresses_everything() {
+    // Regex-only pattern, no anchor → start_muted=true → all tokens suppressed.
+    let (_s, printed) = run_src_with_stdout_capture(
+        r#"prompt p = "test"
+let g = Grammar.new("root ::= [a-z]+")
+let reply = stream(?p, mute_on=[g])"#,
+        vec!["hello world"],
+    ).unwrap();
+    assert_eq!(printed, "\n");
+}
+
+// ── Constrained lazy inference: stop_anchor reaches jade-tree ────────────────
+//
+// These tests verify that when `stream(?p, mute_on=[g])` is called with a
+// Grammar that has a stop_anchor, the inference request sent to the backend
+// carries that stop_anchor — i.e. the lazy stream starts with constraints.
+//
+// A helper that shares the Arc<MockBackend> with the test so we can inspect
+// what InferenceRequest was actually sent after the run.
+
+fn run_src_with_shared_backend(
+    src: &str,
+    backend: std::sync::Arc<crate::llm::MockBackend>,
+) -> Result<VmState> {
+    let tokens = lexer::tokenize(src).expect("lex failed");
+    let program = parser::parse(tokens).expect("parse failed");
+    let tprogram = type_infer::infer(program).expect("type inference failed");
+    let compiled = emit::emit(tprogram).expect("emit failed");
+    let opts = VmOpts {
+        backend: Some(std::sync::Arc::clone(&backend) as std::sync::Arc<dyn crate::llm::InferenceBackend>),
+        #[cfg(test)]
+        test_stdout: None,
+        ..VmOpts::default()
+    };
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime")
+        .block_on(run(compiled, opts))
+}
+
+#[test]
+fn test_stream_with_grammar_passes_stop_anchor_to_backend() {
+    // Verify that `stream(?p, mute_on=[g])` sends stop_anchor="</tool>" to the
+    // inference backend rather than None — this is what prevents the model loop.
+    let backend = std::sync::Arc::new(crate::llm::MockBackend::new(
+        vec![r#"<tool>{"tool_name": "x"}</tool>"#],
+    ));
+    let src = r#"prompt p = "test"
+let g = Grammar.new("root ::= \"{\" [a-z]+ \"}\"", "<tool>", "</tool>")
+let reply = stream(?p, mute_on=[g])"#;
+    run_src_with_shared_backend(src, std::sync::Arc::clone(&backend)).unwrap();
+    let captured = backend.captured.lock().unwrap();
+    assert_eq!(captured.len(), 1, "exactly one inference call expected");
+    assert_eq!(captured[0].stop_anchor.as_deref(), Some("</tool>"));
+    assert_eq!(captured[0].anchor.as_deref(), Some("<tool>"));
+}
+
+#[test]
+fn test_stream_with_grammar_no_stop_anchor_passes_none() {
+    // Grammar.new with only anchor (no stop_anchor) → stop_anchor is None in request.
+    let backend = std::sync::Arc::new(crate::llm::MockBackend::new(vec!["hello"]));
+    let src = r#"prompt p = "test"
+let g = Grammar.new("root ::= [a-z]+", "<tool>")
+let reply = stream(?p, mute_on=[g])"#;
+    run_src_with_shared_backend(src, std::sync::Arc::clone(&backend)).unwrap();
+    let captured = backend.captured.lock().unwrap();
+    assert_eq!(captured[0].stop_anchor, None);
+    assert_eq!(captured[0].anchor.as_deref(), Some("<tool>"));
+}
+
+#[test]
+fn test_stream_no_mute_on_passes_no_constraints() {
+    // stream(?p) without mute_on= → backend receives no grammar/anchor/stop.
+    let backend = std::sync::Arc::new(crate::llm::MockBackend::new(vec!["hello"]));
+    let src = "prompt p = \"test\"\nlet reply = stream(?p)";
+    run_src_with_shared_backend(src, std::sync::Arc::clone(&backend)).unwrap();
+    let captured = backend.captured.lock().unwrap();
+    assert_eq!(captured[0].grammar, None);
+    assert_eq!(captured[0].anchor, None);
+    assert_eq!(captured[0].stop_anchor, None);
+}
+
+#[test]
+fn test_prompt_deref_outside_stream_passes_no_constraints() {
+    // `let x = ?p` (not inside stream) → lazy start with no constraints.
+    let backend = std::sync::Arc::new(crate::llm::MockBackend::new(vec!["hello"]));
+    let src = "prompt p = \"test\"\nlet x = ?p";
+    run_src_with_shared_backend(src, std::sync::Arc::clone(&backend)).unwrap();
+    let captured = backend.captured.lock().unwrap();
+    assert_eq!(captured[0].grammar, None);
+    assert_eq!(captured[0].stop_anchor, None);
 }

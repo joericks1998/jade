@@ -1,0 +1,43 @@
+// Empty structs — structs with zero fields.
+// Useful as marker/tag types, unit types, or exception types.
+
+struct Unit {}
+struct Done {}
+struct MyError {}
+
+// Instantiation
+let u = Unit {}
+// u is a Unit struct
+
+// Methods work on empty structs
+extend Unit {
+    fn tag(self) {
+        return "unit"
+    }
+}
+
+let tag = u.tag()
+// tag == "unit"
+
+// Empty structs can be collected
+let units = [Unit {}, Unit {}, Unit {}]
+let count = len(units)
+// count == 3
+
+// Empty structs work as exception types
+fn must_be_positive(n) {
+    if n < 0 {
+        raise MyError {}
+    }
+    return n
+}
+
+try {
+    let r = must_be_positive(-1)
+} catch MyError e {
+    let caught = true
+    // caught == true
+}
+
+// Empty struct extra field is an error
+// let bad = Unit { x: 1 }  // → UndefinedField

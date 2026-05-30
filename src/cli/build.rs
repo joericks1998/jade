@@ -1,20 +1,23 @@
-use std::{fs, path::Path, process};
+use std::process;
 
-#[cfg(feature = "llvm")]
-use crate::compiler::codegen;
-
+/// `jade build <file.jde>` — compile to a native binary via the build daemon.
+///
+/// This repo runs the frontend (lex → parse → type-infer → TIR); the typed
+/// program is then handed to the build daemon over `$HOME/.jade/build.sock`,
+/// which performs import resolution, code generation, and linking.
 pub fn run_build(path: &str, output: Option<&str>, emit_ir: bool) {
-    #[cfg(not(feature = "llvm"))]
+    #[cfg(not(unix))]
     {
         let _ = (path, output, emit_ir);
-        eprintln!("error: jade was not compiled with LLVM support.");
-        eprintln!("       Rebuild with:  cargo build --release --features llvm");
+        eprintln!("error: `jade build` requires the build daemon (Unix only).");
         process::exit(1);
     }
 
-    #[cfg(feature = "llvm")]
+    #[cfg(unix)]
     {
-        let source = match fs::read_to_string(path) {
+        use std::path::{Path, PathBuf};
+
+        let source = match std::fs::read_to_string(path) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("error: could not read '{}': {}", path, e);
@@ -22,7 +25,7 @@ pub fn run_build(path: &str, output: Option<&str>, emit_ir: bool) {
             }
         };
 
-        // Lex + parse.
+        // Frontend: lex → parse → type-infer.
         let tokens = match crate::frontend::lexer::tokenize(&source) {
             Ok(t) => t,
             Err(e) => {
@@ -37,8 +40,6 @@ pub fn run_build(path: &str, output: Option<&str>, emit_ir: bool) {
                 process::exit(1);
             }
         };
-
-        // Type inference.
         let tprogram = match crate::compiler::type_infer::infer(program) {
             Ok(tp) => tp,
             Err(e) => {
@@ -47,21 +48,28 @@ pub fn run_build(path: &str, output: Option<&str>, emit_ir: bool) {
             }
         };
 
-        // Determine output path.
+        // Absolute source path so the daemon resolves imports relative to it.
+        let abs_source = std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
+
+        // Output path: default to the input filename without its extension.
         let out = match output {
-            Some(o) => std::path::PathBuf::from(o),
+            Some(o) => PathBuf::from(o),
             None => {
-                // Strip extension from input file and use that as the binary name.
                 let src = Path::new(path);
                 let stem = src.file_stem().unwrap_or(src.as_os_str());
-                src.parent()
-                    .unwrap_or(Path::new("."))
-                    .join(stem)
+                src.parent().unwrap_or(Path::new(".")).join(stem)
             }
         };
+        // Make the output path absolute so the daemon writes where the user expects.
+        let abs_out = if out.is_absolute() {
+            out.clone()
+        } else {
+            std::env::current_dir()
+                .map(|d| d.join(&out))
+                .unwrap_or_else(|_| out.clone())
+        };
 
-        // LLVM codegen + link.
-        if let Err(e) = codegen::compile(tprogram, Some(std::path::Path::new(path)), &out, emit_ir) {
+        if let Err(e) = crate::build::build(&tprogram, &abs_source, &abs_out, emit_ir) {
             eprintln!("{path}: build error: {e}");
             process::exit(1);
         }

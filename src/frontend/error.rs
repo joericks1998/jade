@@ -30,7 +30,7 @@ pub enum JadeError {
     InvalidShift { amount: i64, span: Span },
 
     /// Evaluator applied an operator to an incompatible type.
-    TypeError { op: String, span: Span },
+    TypeError { message: String, span: Span },
 
     /// Lexer encountered a numeric literal that overflows its target type.
     LiteralOverflow { span: Span },
@@ -104,6 +104,12 @@ pub enum JadeError {
     /// Type checker: an array literal contains elements of different concrete types.
     HeterogeneousArray { first: String, got: String, span: Span },
 
+    /// `use "path"` for a file import is missing the required `as alias` clause.
+    MissingImportAlias { path: String, span: Span },
+
+    /// `use "std/pkg"` used string syntax for a stdlib package — dot notation is required.
+    StdlibStringImport { path: String, span: Span },
+
     /// `use "path"` could not find the referenced file.
     ImportNotFound { path: String, span: Span },
 
@@ -128,6 +134,10 @@ pub enum JadeError {
 
     /// A filesystem I/O operation failed.
     IoError { message: String, span: Span },
+
+    /// An error that originated inside an imported file.
+    /// Wraps the inner error and records the import path for traceback display.
+    InFile { file: String, cause: Box<JadeError> },
 }
 
 impl std::fmt::Display for JadeError {
@@ -147,8 +157,8 @@ impl std::fmt::Display for JadeError {
                 write!(f, "[{}:{}] remainder by zero", span.line, span.col),
             JadeError::InvalidShift { amount, span } =>
                 write!(f, "[{}:{}] invalid shift amount {}", span.line, span.col, amount),
-            JadeError::TypeError { op, span } =>
-                write!(f, "[{}:{}] type error: operator '{}' applied to incompatible types", span.line, span.col, op),
+            JadeError::TypeError { message, span } =>
+                write!(f, "[{}:{}] type error: {}", span.line, span.col, message),
             JadeError::LiteralOverflow { span } =>
                 write!(f, "[{}:{}] numeric literal overflows its type", span.line, span.col),
             JadeError::ArityMismatch { expected, got, span } =>
@@ -199,6 +209,12 @@ impl std::fmt::Display for JadeError {
                 write!(f, "[{}:{}] type mismatch: expected {}, got {}", span.line, span.col, expected, got),
             JadeError::HeterogeneousArray { first, got, span } =>
                 write!(f, "[{}:{}] heterogeneous array: first element is {}, found {}", span.line, span.col, first, got),
+            JadeError::MissingImportAlias { path, span } =>
+                write!(f, "[{}:{}] file import '{}' requires an alias: write `use \"{}\" as <name>`", span.line, span.col, path, path),
+            JadeError::StdlibStringImport { path, span } => {
+                let dot = path.replace('/', ".");
+                write!(f, "[{}:{}] stdlib package '{}' must be imported with dot notation: `use {}`", span.line, span.col, path, dot)
+            }
             JadeError::ImportNotFound { path, span } =>
                 write!(f, "[{}:{}] cannot find import '{}': file not found", span.line, span.col, path),
             JadeError::CircularImport { path, span } =>
@@ -215,6 +231,8 @@ impl std::fmt::Display for JadeError {
                 write!(f, "[{}:{}] async task panicked: {}", span.line, span.col, message),
             JadeError::IoError { message, span } =>
                 write!(f, "[{}:{}] I/O error: {}", span.line, span.col, message),
+            JadeError::InFile { file, cause } =>
+                write!(f, "in \"{}\": {}", file, cause),
         }
     }
 }

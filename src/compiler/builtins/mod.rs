@@ -19,7 +19,7 @@ use std::{collections::HashMap, sync::Arc};
 use parking_lot::Mutex;
 
 use crate::{
-    compiler::{tir::JadeType, type_infer::TypeContext, vm::{NativeFnId, VmValue}},
+    compiler::{type_infer::TypeContext, vm::{NativeFnId, VmValue}},
     frontend::error::Result,
 };
 
@@ -155,12 +155,15 @@ pub fn find_primitive_method(ty: PrimType, method: &str) -> Option<BuiltinFn> {
 
 // ── Public lookup API ─────────────────────────────────────────────────────────
 
-pub fn find_core_builtin(name: &str) -> Option<BuiltinFn> {
-    CORE_BUILTINS.iter().find(|b| b.name == name).copied()
-}
-
 pub fn find_package(import_name: &str) -> Option<&'static Package> {
     PACKAGES.iter().find(|p| p.import_name == import_name).copied()
+}
+
+/// Returns true if `name` is the global binding name of any stdlib package
+/// (e.g. "fs", "http", "json"). Used to separate stdlib imports from
+/// user-defined exports when packaging module globals.
+pub fn is_package_global_name(name: &str) -> bool {
+    PACKAGES.iter().any(|p| p.global_name == name)
 }
 
 /// Pre-seed `globals` with all core built-in functions.

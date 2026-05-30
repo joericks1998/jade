@@ -7,18 +7,6 @@ use crate::{
 
 use super::BuiltinFn;
 
-// ── print ─────────────────────────────────────────────────────────────────────
-
-fn native_print(args: &[VmValue]) -> Result<VmValue> {
-    if args.len() != 1 {
-        return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: Span { line: 0, col: 0 } });
-    }
-    println!("{}", value_to_display(&args[0]));
-    Ok(VmValue::Nil)
-}
-
-pub const PRINT: BuiltinFn = BuiltinFn { name: "print", vm_impl: native_print };
-
 // ── write ─────────────────────────────────────────────────────────────────────
 
 fn native_write(args: &[VmValue]) -> Result<VmValue> {
@@ -32,19 +20,6 @@ fn native_write(args: &[VmValue]) -> Result<VmValue> {
 
 pub const WRITE: BuiltinFn = BuiltinFn { name: "write", vm_impl: native_write };
 
-// ── stream ────────────────────────────────────────────────────────────────────
-
-fn native_stream(args: &[VmValue]) -> Result<VmValue> {
-    if args.len() != 1 {
-        return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: Span { line: 0, col: 0 } });
-    }
-    let s = value_to_display(&args[0]);
-    println!("{}", s);
-    Ok(VmValue::Str(s))
-}
-
-pub const STREAM: BuiltinFn = BuiltinFn { name: "stream", vm_impl: native_stream };
-
 // ── len ───────────────────────────────────────────────────────────────────────
 
 fn native_len(args: &[VmValue]) -> Result<VmValue> {
@@ -55,7 +30,7 @@ fn native_len(args: &[VmValue]) -> Result<VmValue> {
         VmValue::Str(s)   => s.chars().count() as i64,
         VmValue::Array(a) => a.lock().len() as i64,
         VmValue::Dict(d)  => d.len() as i64,
-        _ => return Err(JadeError::TypeError { op: "len".to_string(), span: Span { line: 0, col: 0 } }),
+        _ => return Err(JadeError::TypeError { message: "len".to_string(), span: Span { line: 0, col: 0 } }),
     };
     Ok(VmValue::Int(n))
 }
@@ -74,7 +49,7 @@ fn native_input(args: &[VmValue]) -> Result<VmValue> {
                 print!("{}", s);
                 std::io::stdout().flush().ok();
             }
-            _ => return Err(JadeError::TypeError { op: "input".to_string(), span: Span { line: 0, col: 0 } }),
+            _ => return Err(JadeError::TypeError { message: "input".to_string(), span: Span { line: 0, col: 0 } }),
         }
     }
     let mut line = String::new();

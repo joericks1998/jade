@@ -14,8 +14,18 @@ fn unreachable_set_max_tokens(_args: &[VmValue]) -> Result<VmValue> {
     unreachable!("llm.set_max_tokens is handled by NativeFnId dispatch in the VM")
 }
 
-static LLM_FNS: [BuiltinFn; 1] = [
+fn unreachable_count_tokens(_args: &[VmValue]) -> Result<VmValue> {
+    unreachable!("llm.count_tokens is handled by NativeFnId dispatch in the VM")
+}
+
+fn unreachable_total_tokens(_args: &[VmValue]) -> Result<VmValue> {
+    unreachable!("llm.total_tokens is handled by NativeFnId dispatch in the VM")
+}
+
+static LLM_FNS: [BuiltinFn; 3] = [
     BuiltinFn { name: "set_max_tokens", vm_impl: unreachable_set_max_tokens },
+    BuiltinFn { name: "count_tokens",   vm_impl: unreachable_count_tokens },
+    BuiltinFn { name: "total_tokens",   vm_impl: unreachable_total_tokens },
 ];
 
 fn register_llm_types(ctx: &mut TypeContext) {
@@ -32,10 +42,9 @@ pub static LLM_PKG: Package = Package {
 /// Override: inject the real NativeFn value for set_max_tokens.
 pub fn llm_vm_dict_value() -> VmValue {
     let mut map = std::collections::HashMap::new();
-    map.insert(
-        "set_max_tokens".to_string(),
-        VmValue::NativeFn(NativeFnId::LlmSetMaxTokens),
-    );
+    map.insert("set_max_tokens".to_string(), VmValue::NativeFn(NativeFnId::LlmSetMaxTokens));
+    map.insert("count_tokens".to_string(),   VmValue::NativeFn(NativeFnId::LlmCountTokens));
+    map.insert("total_tokens".to_string(),   VmValue::NativeFn(NativeFnId::LlmTotalTokens));
     VmValue::Dict(map)
 }
 

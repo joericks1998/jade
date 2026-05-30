@@ -11,7 +11,7 @@ fn math_floor(args: &[VmValue]) -> Result<VmValue> {
     match &args[0] {
         VmValue::Float(f) => Ok(VmValue::Int(f.floor() as i64)),
         VmValue::Int(i)   => Ok(VmValue::Int(*i)),
-        _ => Err(JadeError::TypeError { op: "math.floor".to_string(), span: ZERO }),
+        _ => Err(JadeError::TypeError { message: "math.floor".to_string(), span: ZERO }),
     }
 }
 
@@ -19,7 +19,7 @@ fn math_ceil(args: &[VmValue]) -> Result<VmValue> {
     match &args[0] {
         VmValue::Float(f) => Ok(VmValue::Int(f.ceil() as i64)),
         VmValue::Int(i)   => Ok(VmValue::Int(*i)),
-        _ => Err(JadeError::TypeError { op: "math.ceil".to_string(), span: ZERO }),
+        _ => Err(JadeError::TypeError { message: "math.ceil".to_string(), span: ZERO }),
     }
 }
 
@@ -27,7 +27,7 @@ fn math_abs(args: &[VmValue]) -> Result<VmValue> {
     match &args[0] {
         VmValue::Int(i)   => Ok(VmValue::Int(i.abs())),
         VmValue::Float(f) => Ok(VmValue::Float(f.abs())),
-        _ => Err(JadeError::TypeError { op: "math.abs".to_string(), span: ZERO }),
+        _ => Err(JadeError::TypeError { message: "math.abs".to_string(), span: ZERO }),
     }
 }
 
@@ -35,7 +35,7 @@ fn math_sqrt(args: &[VmValue]) -> Result<VmValue> {
     match &args[0] {
         VmValue::Float(f) => Ok(VmValue::Float(f.sqrt())),
         VmValue::Int(i)   => Ok(VmValue::Float((*i as f64).sqrt())),
-        _ => Err(JadeError::TypeError { op: "math.sqrt".to_string(), span: ZERO }),
+        _ => Err(JadeError::TypeError { message: "math.sqrt".to_string(), span: ZERO }),
     }
 }
 
@@ -45,7 +45,7 @@ fn math_min(args: &[VmValue]) -> Result<VmValue> {
         (Some(VmValue::Float(a)), Some(VmValue::Float(b))) => Ok(VmValue::Float(a.min(*b))),
         (Some(VmValue::Int(a)), Some(VmValue::Float(b)))   => Ok(VmValue::Float((*a as f64).min(*b))),
         (Some(VmValue::Float(a)), Some(VmValue::Int(b)))   => Ok(VmValue::Float(a.min(*b as f64))),
-        _ => Err(JadeError::TypeError { op: "math.min".to_string(), span: ZERO }),
+        _ => Err(JadeError::TypeError { message: "math.min".to_string(), span: ZERO }),
     }
 }
 
@@ -55,7 +55,7 @@ fn math_max(args: &[VmValue]) -> Result<VmValue> {
         (Some(VmValue::Float(a)), Some(VmValue::Float(b))) => Ok(VmValue::Float(a.max(*b))),
         (Some(VmValue::Int(a)), Some(VmValue::Float(b)))   => Ok(VmValue::Float((*a as f64).max(*b))),
         (Some(VmValue::Float(a)), Some(VmValue::Int(b)))   => Ok(VmValue::Float(a.max(*b as f64))),
-        _ => Err(JadeError::TypeError { op: "math.max".to_string(), span: ZERO }),
+        _ => Err(JadeError::TypeError { message: "math.max".to_string(), span: ZERO }),
     }
 }
 
@@ -71,7 +71,7 @@ fn math_pow(args: &[VmValue]) -> Result<VmValue> {
         (Some(VmValue::Float(base)), Some(VmValue::Float(exp))) => Ok(VmValue::Float(base.powf(*exp))),
         (Some(VmValue::Int(base)), Some(VmValue::Float(exp)))   => Ok(VmValue::Float((*base as f64).powf(*exp))),
         (Some(VmValue::Float(base)), Some(VmValue::Int(exp)))   => Ok(VmValue::Float(base.powi(*exp as i32))),
-        _ => Err(JadeError::TypeError { op: "math.pow".to_string(), span: ZERO }),
+        _ => Err(JadeError::TypeError { message: "math.pow".to_string(), span: ZERO }),
     }
 }
 

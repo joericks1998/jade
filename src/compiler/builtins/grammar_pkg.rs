@@ -26,7 +26,16 @@ fn grammar_new(args: &[VmValue]) -> Result<VmValue> {
             span: ZERO,
         }),
     };
-    Ok(VmValue::Grammar { pattern, anchor })
+    let stop_anchor = match args.get(2) {
+        None | Some(VmValue::Nil) => None,
+        Some(VmValue::Str(s)) => Some(s.clone()),
+        Some(other) => return Err(JadeError::TypeMismatch {
+            expected: "str".to_string(),
+            got: format!("{:?}", other),
+            span: ZERO,
+        }),
+    };
+    Ok(VmValue::Grammar { pattern, anchor, stop_anchor })
 }
 
 pub static GRAMMAR_NEW: BuiltinFn = BuiltinFn { name: "new", vm_impl: grammar_new };

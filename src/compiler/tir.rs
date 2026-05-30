@@ -215,12 +215,15 @@ pub enum TStmt {
     /// `use "path"` — passed through unchanged from the AST; resolved at VM runtime.
     Use {
         path: String,
+        as_name: Option<String>,
+        path_is_string: bool,
         span: Span,
     },
     /// `from std.time use now, sleep` — named selective imports.
     FromUse {
         path: String,
         names: Vec<String>,
+        path_is_string: bool,
         span: Span,
     },
     /// `raise expr`

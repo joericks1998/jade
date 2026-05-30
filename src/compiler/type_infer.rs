@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    compiler::stdlib,
+    compiler::builtins,
     frontend::{
         ast::{BinOpKind, Expr, FStrPart, Program, StructFieldDef, Stmt, UnaryOpKind},
         error::{JadeError, Result, Span},
@@ -44,8 +44,8 @@ impl TypeContext {
             primitive_methods: HashMap::new(),
             has_imports: false,
         };
-        stdlib::register_core_types(&mut ctx);
-        stdlib::register_primitive_method_types(&mut ctx);
+        builtins::register_core_types(&mut ctx);
+        builtins::register_primitive_method_types(&mut ctx);
         ctx
     }
 
@@ -117,6 +117,23 @@ impl TypeContext {
 ///
 /// Errors are fatal (first error stops inference). The `Unknown` type is used
 /// conservatively whenever a type cannot be determined — no false positives.
+/// Static return type for package calls of the form `mod.method(...)`. Mirrors
+/// the runtime signatures so codegen sees `JadeType::Str` (not `Unknown`)
+/// for string-producing builtins — required for taint-flow gates.
+fn pkg_call_return_type(module: &str, method: &str) -> Option<JadeType> {
+    match (module, method) {
+        ("sh",   "exec")    => Some(JadeType::Str),
+        ("fs",   "read")    => Some(JadeType::Str),
+        ("fs",   "exists")  => Some(JadeType::Bool),
+        ("http", "get")     => Some(JadeType::Dict),
+        ("llm",  "count_tokens") => Some(JadeType::Int),
+        ("json", "stringify") => Some(JadeType::Str),
+        // json.parse intentionally stays Unknown — it can fail and return nil,
+        // which would conflict with strict Dict typing on `if x != nil { … }`.
+        _ => None,
+    }
+}
+
 pub fn infer(program: Program) -> Result<TProgram> {
     let mut ctx = TypeContext::new();
     pre_pass(&program.stmts, &mut ctx);
@@ -136,6 +153,173 @@ pub fn infer_with_globals(program: Program, known_globals: &[String]) -> Result<
     pre_pass(&program.stmts, &mut ctx);
     let stmts = check_stmts(&program.stmts, &mut ctx)?;
     Ok(TProgram { stmts })
+}
+
+// ── Cross-file struct-literal default fill ────────────────────────────────────
+//
+// Used by the AOT backend (build daemon), not the VM. The per-file inference
+// pass can't see imported `StructDef`s, so a literal like
+// `messages.Session { system: ..., tools: ... }` leaves default-bearing fields
+// (e.g. `let _history = []`) missing. Without this pass the emitter would
+// zero-initialise those slots — turning `[]` into a NULL pointer. Runs over the
+// fully-inlined, import-resolved program just before codegen.
+
+pub fn fill_struct_literal_defaults(program: &mut TProgram) -> Result<()> {
+    // Collect every StructDef (from this file and from inlined imports).
+    let mut defs: HashMap<String, Vec<StructFieldDef>> = HashMap::new();
+    collect_struct_defs_into(&program.stmts, &mut defs);
+
+    // Set up an inference context that knows about every struct in the merged
+    // program so default expressions referencing other structs type-check.
+    // `has_imports = true` keeps it lenient for any unresolved identifiers.
+    let mut ctx = TypeContext::new();
+    ctx.has_imports = true;
+    for (n, fs) in &defs {
+        ctx.struct_defs.insert(n.clone(), fs.clone());
+        ctx.define(n.clone(), JadeType::Fn {
+            params: vec![JadeType::Unknown],
+            ret: Box::new(JadeType::Struct(n.clone())),
+        });
+    }
+
+    fill_in_stmts(&mut program.stmts, &defs, &mut ctx)?;
+    Ok(())
+}
+
+fn collect_struct_defs_into(
+    stmts: &[TStmt],
+    out: &mut HashMap<String, Vec<StructFieldDef>>,
+) {
+    for s in stmts {
+        match s {
+            TStmt::StructDef { name, fields, .. } => {
+                out.entry(name.clone()).or_insert_with(|| fields.clone());
+            }
+            TStmt::FnDef { body, .. } | TStmt::AsyncFnDef { body, .. } => {
+                collect_struct_defs_into(body, out);
+            }
+            TStmt::ExtendBlock { methods, .. } => collect_struct_defs_into(methods, out),
+            _ => {}
+        }
+    }
+}
+
+fn fill_in_stmts(
+    stmts: &mut [TStmt],
+    defs: &HashMap<String, Vec<StructFieldDef>>,
+    ctx: &mut TypeContext,
+) -> Result<()> {
+    for s in stmts.iter_mut() {
+        fill_in_stmt(s, defs, ctx)?;
+    }
+    Ok(())
+}
+
+fn fill_in_stmt(
+    s: &mut TStmt,
+    defs: &HashMap<String, Vec<StructFieldDef>>,
+    ctx: &mut TypeContext,
+) -> Result<()> {
+    match s {
+        TStmt::Let { value, .. }
+        | TStmt::Assign { value, .. }
+        | TStmt::Expr(value)
+        | TStmt::PromptDecl { body: value, .. }
+        | TStmt::Raise { value, .. } => fill_in_expr(value, defs, ctx),
+        TStmt::Return { value: Some(value), .. } => fill_in_expr(value, defs, ctx),
+        TStmt::FnDef { body, .. } | TStmt::AsyncFnDef { body, .. } => {
+            fill_in_stmts(body, defs, ctx)
+        }
+        TStmt::If { condition, then_body, else_body, .. } => {
+            fill_in_expr(condition, defs, ctx)?;
+            fill_in_stmts(then_body, defs, ctx)?;
+            if let Some(eb) = else_body { fill_in_stmts(eb, defs, ctx)?; }
+            Ok(())
+        }
+        TStmt::While { condition, body, .. } => {
+            fill_in_expr(condition, defs, ctx)?;
+            fill_in_stmts(body, defs, ctx)
+        }
+        TStmt::For { iterable, body, .. } => {
+            fill_in_expr(iterable, defs, ctx)?;
+            fill_in_stmts(body, defs, ctx)
+        }
+        TStmt::FieldAssign { value, .. } | TStmt::IndexAssign { value, .. } => {
+            fill_in_expr(value, defs, ctx)
+        }
+        TStmt::ExtendBlock { methods, .. } => fill_in_stmts(methods, defs, ctx),
+        TStmt::TryCatch { body, arms, .. } => {
+            fill_in_stmts(body, defs, ctx)?;
+            for arm in arms.iter_mut() { fill_in_stmts(&mut arm.body, defs, ctx)?; }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn fill_in_expr(
+    e: &mut TExpr,
+    defs: &HashMap<String, Vec<StructFieldDef>>,
+    ctx: &mut TypeContext,
+) -> Result<()> {
+    // Recurse first so nested literals get filled before we patch this one.
+    match &mut e.kind {
+        TExprKind::Await { expr } => fill_in_expr(expr, defs, ctx)?,
+        TExprKind::Call { callee, args, kwargs } => {
+            fill_in_expr(callee, defs, ctx)?;
+            for a in args.iter_mut() { fill_in_expr(a, defs, ctx)?; }
+            for (_, a) in kwargs.iter_mut() { fill_in_expr(a, defs, ctx)?; }
+        }
+        TExprKind::BinOp { left, right, .. } => {
+            fill_in_expr(left, defs, ctx)?;
+            fill_in_expr(right, defs, ctx)?;
+        }
+        TExprKind::UnaryOp { operand, .. } => fill_in_expr(operand, defs, ctx)?,
+        TExprKind::FieldAccess { object, .. } => fill_in_expr(object, defs, ctx)?,
+        TExprKind::Index { object, index } => {
+            fill_in_expr(object, defs, ctx)?;
+            fill_in_expr(index, defs, ctx)?;
+        }
+        TExprKind::Array { elements } => {
+            for el in elements.iter_mut() { fill_in_expr(el, defs, ctx)?; }
+        }
+        TExprKind::FStr { parts } => {
+            for p in parts.iter_mut() {
+                if let TFStrPart::Expr(ex) = p { fill_in_expr(ex, defs, ctx)?; }
+            }
+        }
+        TExprKind::Dict { entries } => {
+            for (k, v) in entries.iter_mut() {
+                fill_in_expr(k, defs, ctx)?;
+                fill_in_expr(v, defs, ctx)?;
+            }
+        }
+        TExprKind::Closure { body, .. } => fill_in_stmts(body, defs, ctx)?,
+        TExprKind::PromptDeref { expr, .. } => fill_in_expr(expr, defs, ctx)?,
+        TExprKind::StructLiteral { type_name, fields } => {
+            for (_, fe, _) in fields.iter_mut() { fill_in_expr(fe, defs, ctx)?; }
+            // Patch missing fields with their declared defaults.
+            if let Some(def_fields) = defs.get(type_name.as_str()) {
+                for def_field in def_fields {
+                    let already_present = fields.iter().any(|(n, _, _)| n == def_field.name());
+                    if already_present { continue; }
+                    match def_field {
+                        StructFieldDef::Required(_) => { /* leave; will error at runtime if read */ }
+                        StructFieldDef::Let { name, default } => {
+                            let te = infer_expr(default, ctx)?;
+                            fields.push((name.clone(), te, false));
+                        }
+                        StructFieldDef::Prompt { name, default } => {
+                            let te = infer_expr(default, ctx)?;
+                            fields.push((name.clone(), te, true));
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 // ── Pass 1: pre_pass ──────────────────────────────────────────────────────────
@@ -321,7 +505,7 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
                 JadeType::Array(elem) => *elem.clone(),
                 JadeType::Unknown     => JadeType::Unknown,
                 other => return Err(JadeError::TypeError {
-                    op: format!("cannot iterate over {}", jade_type_name(other)),
+                    message: format!("cannot iterate over {}", jade_type_name(other)),
                     span: *span,
                 }),
             };
@@ -442,20 +626,31 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
 
         // ── Imports ───────────────────────────────────────────────────────────
 
-        Stmt::Use { path, span } => {
+        Stmt::Use { path, as_name, path_is_string, span } => {
             ctx.has_imports = true;
-            if let Some(pkg) = stdlib::find_package(path) {
+            if let Some(pkg) = builtins::find_package(path) {
+                if *path_is_string {
+                    return Err(JadeError::StdlibStringImport { path: path.clone(), span: *span });
+                }
                 (pkg.register_types)(ctx);
+            } else if *path_is_string && as_name.is_none() {
+                // Only raw string-path file imports require an alias. Dot-notation
+                // imports (`use utils.math`) name a registered [lib] library (or a
+                // stdlib package) and bind the last path segment automatically.
+                return Err(JadeError::MissingImportAlias { path: path.clone(), span: *span });
             }
-            Ok(TStmt::Use { path: path.clone(), span: *span })
+            Ok(TStmt::Use { path: path.clone(), as_name: as_name.clone(), path_is_string: *path_is_string, span: *span })
         }
 
-        Stmt::FromUse { path, names, span } => {
+        Stmt::FromUse { path, names, path_is_string, span } => {
             ctx.has_imports = true;
-            if let Some(pkg) = stdlib::find_package(path) {
+            if let Some(pkg) = builtins::find_package(path) {
+                if *path_is_string {
+                    return Err(JadeError::StdlibStringImport { path: path.clone(), span: *span });
+                }
                 (pkg.register_types)(ctx);
             }
-            Ok(TStmt::FromUse { path: path.clone(), names: names.clone(), span: *span })
+            Ok(TStmt::FromUse { path: path.clone(), names: names.clone(), path_is_string: *path_is_string, span: *span })
         }
 
         // ── Exception handling ────────────────────────────────────────────────
@@ -575,13 +770,43 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
                 if field == "new" && matches!(object.as_ref(), Expr::Identifier { name, .. } if name == "Grammar")
             );
 
+            // Recognize package calls (sh.exec, fs.read, http.get, …) so their
+            // return types are known statically — codegen needs Str (not
+            // Unknown→i64) for tagged-string flow analysis.
+            let pkg_call_ret: Option<JadeType> = match callee.as_ref() {
+                Expr::FieldAccess { object, field, .. } => match object.as_ref() {
+                    Expr::Identifier { name, .. } => pkg_call_return_type(name, field),
+                    _ => None,
+                },
+                _ => None,
+            };
+
             let tcallee = infer_expr(callee, ctx)?;
             let targs: Vec<TExpr> = args.iter().map(|a| infer_expr(a, ctx)).collect::<Result<_>>()?;
             let tkwargs: Vec<(String, TExpr)> = kwargs.iter()
                 .map(|(k, v)| infer_expr(v, ctx).map(|tv| (k.clone(), tv)))
                 .collect::<Result<_>>()?;
+            // Builtin primitive methods have a fixed return type regardless of
+            // the receiver type — so even `unknown.len()` reliably yields Int.
+            // Without this, methods called on Unknown receivers (struct fields
+            // whose types we don't track, untyped fn params) propagate Unknown
+            // into subsequent operations, where prefer_known in emit_binop can
+            // wrongly promote a small integer to a string pointer.
+            let builtin_ret: Option<JadeType> = match callee.as_ref() {
+                Expr::FieldAccess { field, .. } => match field.as_str() {
+                    "len" => Some(JadeType::Int),
+                    "has" | "contains" => Some(JadeType::Bool),
+                    _ => None,
+                },
+                _ => None,
+            };
+
             let ret_ty = if is_grammar_new {
                 JadeType::Grammar
+            } else if let Some(t) = pkg_call_ret {
+                t
+            } else if let Some(t) = builtin_ret {
+                t
             } else {
                 match &tcallee.ty {
                     JadeType::Fn { ret, .. }      => *ret.clone(),
@@ -605,12 +830,19 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
             let def_fields_opt = ctx.struct_defs.get(type_name).cloned();
             if def_fields_opt.is_none() && ctx.has_imports {
                 // Type may be defined in an imported file; skip static checks.
+                // Normalize the type name to its bare form (strip any module
+                // prefix like "messages.Session" → "Session") so the literal
+                // agrees with the StructDef registered after import flattening
+                // and with method-body callsites that see the bare name.
+                let bare = type_name.rsplit_once('.')
+                    .map(|(_, b)| b.to_string())
+                    .unwrap_or_else(|| type_name.clone());
                 let tfields = fields.iter()
                     .map(|(n, e)| infer_expr(e, ctx).map(|te| (n.clone(), te, false)))
                     .collect::<Result<Vec<_>>>()?;
                 return Ok(TExpr {
-                    kind: TExprKind::StructLiteral { type_name: type_name.clone(), fields: tfields },
-                    ty: JadeType::Unknown,
+                    kind: TExprKind::StructLiteral { type_name: bare.clone(), fields: tfields },
+                    ty: JadeType::Struct(bare),
                     span: *span,
                 });
             }
@@ -675,7 +907,14 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
                     }
                     StructFieldDef::Prompt { name, default } => {
                         let e = provided.get(name.as_str()).copied().unwrap_or(default);
-                        tfields.push((name.clone(), infer_expr(e, ctx)?, true));
+                        let te = infer_expr(e, ctx)?;
+                        if te.ty != JadeType::Str && te.ty != JadeType::Unknown {
+                            return Err(JadeError::PromptFieldNotStr {
+                                field: name.clone(),
+                                span: te.span,
+                            });
+                        }
+                        tfields.push((name.clone(), te, true));
                     }
                 }
             }
@@ -694,19 +933,25 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
             let ty = match &tobj.ty {
                 JadeType::Struct(tn) => {
                     let tn = tn.clone();
-                    // Check field/method exists on the struct.
-                    let has_field = ctx.struct_defs.get(&tn)
-                        .map(|defs| defs.iter().any(|f| f.name() == field))
-                        .unwrap_or(false);
-                    let has_method = ctx.extend_methods.get(&tn)
-                        .map(|m| m.contains_key(field.as_str()))
-                        .unwrap_or(false);
-                    if !has_field && !has_method {
-                        return Err(JadeError::UndefinedField {
-                            type_name: tn,
-                            field: field.clone(),
-                            span: *span,
-                        });
+                    // Skip validation for imported structs whose definitions are
+                    // resolved in a separate file (and therefore aren't in this
+                    // file's ctx.struct_defs).  Fields/methods can't be checked
+                    // until the importer merges TIRs at codegen time.
+                    let is_imported = ctx.has_imports && !ctx.struct_defs.contains_key(&tn);
+                    if !is_imported {
+                        let has_field = ctx.struct_defs.get(&tn)
+                            .map(|defs| defs.iter().any(|f| f.name() == field))
+                            .unwrap_or(false);
+                        let has_method = ctx.extend_methods.get(&tn)
+                            .map(|m| m.contains_key(field.as_str()))
+                            .unwrap_or(false);
+                        if !has_field && !has_method {
+                            return Err(JadeError::UndefinedField {
+                                type_name: tn,
+                                field: field.clone(),
+                                span: *span,
+                            });
+                        }
                     }
                     // Field/method value types are not tracked at Stage B — return Unknown.
                     JadeType::Unknown
@@ -783,11 +1028,16 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
                 .map(|t| t.ty.clone())
                 .unwrap_or(JadeType::Unknown);
 
-            // If elements have mixed types, widen to Unknown.
-            let array_elem_ty = if elem_ty != JadeType::Unknown
-                && telems.iter().any(|t| t.ty != JadeType::Unknown && t.ty != elem_ty)
-            {
-                JadeType::Unknown
+            // If elements have mixed concrete types, emit an error.
+            let array_elem_ty = if elem_ty != JadeType::Unknown {
+                if let Some(mismatch) = telems.iter().find(|t| t.ty != JadeType::Unknown && t.ty != elem_ty) {
+                    return Err(JadeError::HeterogeneousArray {
+                        first: jade_type_name(&elem_ty).to_string(),
+                        got: jade_type_name(&mismatch.ty).to_string(),
+                        span: *span,
+                    });
+                }
+                elem_ty
             } else {
                 elem_ty
             };
@@ -824,11 +1074,15 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
             // Collect free variables BEFORE popping scope so ctx.get() still resolves them.
             let captures = collect_captures(&tbody, params, ctx);
             ctx.pop_scope();
+            // Infer the return type from the body (like named fns) so callers know
+            // a closure returns e.g. a Str — without it the AOT backend treats the
+            // uniform i64 result as an integer and prints a string as a pointer.
+            let ret_ty = infer_return_type(&tbody);
             Ok(TExpr {
                 kind: TExprKind::Closure { params: params.clone(), body: tbody, captures },
                 ty: JadeType::Fn {
                     params: params.iter().map(|_| JadeType::Unknown).collect(),
-                    ret: Box::new(JadeType::Unknown),
+                    ret: Box::new(ret_ty),
                 },
                 span: *span,
             })
@@ -877,21 +1131,65 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
                 });
             }
 
-            // Resolve the |> constraint: Grammar value → grammar_expr; otherwise → output_type string.
+            // Resolve the |> constraint: Grammar value → grammar_expr; type name string → output_type.
+            //
+            // Resolution order:
+            // 1. Try `extract_type_name(c)` first.  If it yields a known built-in type keyword
+            //    ("int", "float", "bool", "str", "array", "dict") or an uppercase struct name,
+            //    use it directly as `output_type` — do NOT call `infer_expr`, which would fail
+            //    with "undefined variable" for bare identifiers like `array` and `dict` that are
+            //    valid type targets but are not in-scope variables.
+            // 2. Otherwise call `infer_expr(c)`:
+            //    a. If the result type is Grammar → grammar_expr path.
+            //    b. If the result type is Unknown (e.g. `self.grammar` field on a struct whose
+            //       field type is not statically tracked) → treat as a runtime Grammar value
+            //       and emit it as grammar_expr.  This avoids the retry-loop that firing
+            //       `output_type = Some("self.grammar")` would cause at runtime.
+            //    c. Otherwise → error.
             let (output_type, grammar_texpr, result_ty) = match constraint {
-                None => (None, None, JadeType::Unknown),
+                None => (None, None, JadeType::Str),
                 Some(c) => {
-                    let tc = infer_expr(c, ctx)?;
-                    if tc.ty == JadeType::Grammar {
-                        (None, Some(Box::new(tc)), JadeType::Str)
+                    if let Some(name) = extract_type_name(c) {
+                        let is_builtin = matches!(
+                            name.as_str(),
+                            "int" | "float" | "bool" | "str" | "nil"
+                            | "array" | "Array"
+                            | "dict"  | "Dict"
+                        );
+                        let is_struct_name = name.chars().next()
+                            .map(|ch| ch.is_uppercase())
+                            .unwrap_or(false);
+                        if is_builtin || is_struct_name {
+                            // Known type keyword or struct name — use directly.
+                            let ty = parse_type_name(&name);
+                            (Some(name), None, ty)
+                        } else {
+                            // Might be a Grammar variable (e.g. `gram`) or a field path
+                            // (e.g. `self.grammar`).  Infer it to determine which.
+                            let tc = infer_expr(c, ctx)?;
+                            if tc.ty == JadeType::Grammar {
+                                // Statically known Grammar value.
+                                (None, Some(Box::new(tc)), JadeType::Str)
+                            } else {
+                                // Unknown type (common for struct fields) — treat as a
+                                // runtime Grammar expression rather than a coerce type name.
+                                // This is the correct path for `?p |> self.grammar`.
+                                (None, Some(Box::new(tc)), JadeType::Str)
+                            }
+                        }
                     } else {
-                        let name = extract_type_name(c).ok_or_else(|| JadeError::TypeMismatch {
-                            expected: "type name or Grammar value after |>".to_string(),
-                            got: jade_type_name(&tc.ty),
-                            span: *span,
-                        })?;
-                        let ty = parse_type_name(&name);
-                        (Some(name), None, ty)
+                        // Not an identifier / dotted path (e.g. a call expression).
+                        // Infer normally.
+                        let tc = infer_expr(c, ctx)?;
+                        if tc.ty == JadeType::Grammar || tc.ty == JadeType::Unknown {
+                            (None, Some(Box::new(tc)), JadeType::Str)
+                        } else {
+                            return Err(JadeError::TypeMismatch {
+                                expected: "type name or Grammar value after |>".to_string(),
+                                got: jade_type_name(&tc.ty),
+                                span: *span,
+                            });
+                        }
                     }
                 }
             };
@@ -1051,6 +1349,17 @@ fn infer_return_type(stmts: &[TStmt]) -> JadeType {
             TStmt::While { body, .. } | TStmt::For { body, .. } => {
                 let t = infer_return_type(body);
                 if t != JadeType::Unknown && t != JadeType::Nil { return t; }
+            }
+            TStmt::TryCatch { body, arms, .. } => {
+                // A `return` can live in the try body or any catch arm. Without
+                // descending here the function is inferred Nil and the AOT
+                // backend emits `ret void`, discarding the value (prints `nil`).
+                let t = infer_return_type(body);
+                if t != JadeType::Unknown && t != JadeType::Nil { return t; }
+                for arm in arms {
+                    let ta = infer_return_type(&arm.body);
+                    if ta != JadeType::Unknown && ta != JadeType::Nil { return ta; }
+                }
             }
             TStmt::FnDef { .. } | TStmt::AsyncFnDef { .. } => {} // nested fn def — do not recurse
             _ => {}

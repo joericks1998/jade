@@ -150,9 +150,7 @@ pub fn read_tir_cache(hash: &[u8; 32]) -> Option<TProgram> {
 
 /// Summary of a single cache entry, used by `jade cache info/clean`.
 pub struct CacheEntry {
-    pub hash: String,
     pub version: String,
-    pub source_path: String,
     pub dir: PathBuf,
     pub size_bytes: u64,
     pub modified: Option<std::time::SystemTime>,
@@ -178,16 +176,16 @@ pub fn list_entries() -> Vec<CacheEntry> {
             let dir = hash_entry.path();
             if !dir.is_dir() { continue; }
 
-            // Read meta.json to get version and source path.
+            // Read meta.json to get version.
             let meta_path = dir.join("meta.json");
-            let (version, source_path) = if let Ok(bytes) = fs::read(&meta_path) {
+            let version = if let Ok(bytes) = fs::read(&meta_path) {
                 if let Ok(m) = serde_json::from_slice::<CacheMeta>(&bytes) {
-                    (m.version, m.source_path)
+                    m.version
                 } else {
-                    (String::new(), String::new())
+                    String::new()
                 }
             } else {
-                (String::new(), String::new())
+                String::new()
             };
 
             // Sum the size of all files in this entry's directory.
@@ -204,13 +202,7 @@ pub fn list_entries() -> Vec<CacheEntry> {
                 .ok()
                 .and_then(|m| m.modified().ok());
 
-            let hash = dir
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("")
-                .to_string();
-
-            entries.push(CacheEntry { hash, version, source_path, dir, size_bytes, modified });
+            entries.push(CacheEntry { version, dir, size_bytes, modified });
         }
     }
 

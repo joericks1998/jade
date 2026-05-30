@@ -350,6 +350,10 @@ impl Parser {
 
     /// Parse `fn <ident> ( <params> ) { <body> }` with pre-collected decorators.
     fn parse_fn_with_decorators(&mut self, decorators: Vec<(String, Vec<(Option<String>, Expr)>)>) -> Result<Stmt> {
+        if self.fn_depth > 0 {
+            let span = self.peek().span;
+            return Err(JadeError::NestedFunction { span });
+        }
         let span = self.peek().span;
         self.advance(); // consume `fn`
 
@@ -575,19 +579,27 @@ impl Parser {
         Ok(stmts)
     }
 
-    /// Parse `prompt name = expr ;`
-    /// Parse `use "path/to/file.jde" ;`
+    /// Parse `use "path/to/file.jde" [as name] ;`
     fn parse_use(&mut self) -> Result<Stmt> {
         let span = self.peek().span;
         self.advance(); // consume `use`
+        let path_is_string = matches!(self.peek().kind, TokenKind::Str(_));
         let path = self.parse_import_path()?;
+        // Optional `as alias` — only meaningful for .jde file imports; ignored for stdlib.
+        let as_name = if self.peek().kind == TokenKind::As {
+            self.advance(); // consume `as`
+            Some(self.expect_ident("alias name after `as`")?)
+        } else {
+            None
+        };
         self.consume_semicolon()?;
-        Ok(Stmt::Use { path, span })
+        Ok(Stmt::Use { path, as_name, path_is_string, span })
     }
 
     fn parse_from_use(&mut self) -> Result<Stmt> {
         let span = self.peek().span;
         self.advance(); // consume `from`
+        let path_is_string = matches!(self.peek().kind, TokenKind::Str(_));
         let path = self.parse_import_path()?;
         // expect `use`
         let use_tok = self.peek().clone();
@@ -611,7 +623,7 @@ impl Parser {
             }
         }
         self.consume_semicolon()?;
-        Ok(Stmt::FromUse { path, names, span })
+        Ok(Stmt::FromUse { path, names, path_is_string, span })
     }
 
     /// Parse an import path: either a string literal `"std/time"` or dot notation
@@ -1015,6 +1027,13 @@ impl Parser {
                     args.insert(0, left);
                     Expr::Call { callee, args, kwargs, span: call_span }
                 }
+                // `val |> obj.method` → `obj.method(val)` (bound method reference)
+                Expr::FieldAccess { object, field, span: fa_span } => Expr::Call {
+                    callee: Box::new(Expr::FieldAccess { object, field, span: fa_span }),
+                    args: vec![left],
+                    kwargs: vec![],
+                    span,
+                },
                 _ => return Err(JadeError::UnexpectedToken {
                     expected: "function or call on right side of |>".to_string(),
                     got: "expression".to_string(),
@@ -1406,13 +1425,23 @@ impl Parser {
             TokenKind::Identifier(ref name) => {
                 let name = name.clone();
                 self.advance();
-                // `TypeName { field: expr, … }` is a struct literal, but only when
-                // struct literals are allowed in this position (not in if/while conditions).
+                // `TypeName { field: expr, … }` — plain struct literal.
                 if self.struct_literal_allowed && self.peek().kind == TokenKind::LBrace {
-                    self.parse_struct_literal_body(name, token.span)
-                } else {
-                    Ok(Expr::Identifier { name, span: token.span })
+                    return self.parse_struct_literal_body(name, token.span);
                 }
+                // `ns.TypeName { field: expr, … }` — namespace-qualified struct literal.
+                // Requires: `.` then `Identifier` then `{` (3-token lookahead).
+                if self.struct_literal_allowed
+                    && self.peek().kind == TokenKind::Dot
+                    && matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::Identifier(_)))
+                    && self.tokens.get(self.pos + 2).map(|t| &t.kind) == Some(&TokenKind::LBrace)
+                {
+                    self.advance(); // consume `.`
+                    let type_name = self.expect_ident("struct type name")?;
+                    let qualified = format!("{}.{}", name, type_name);
+                    return self.parse_struct_literal_body(qualified, token.span);
+                }
+                Ok(Expr::Identifier { name, span: token.span })
             }
             TokenKind::LParen => {
                 self.advance(); // consume `(`

@@ -1,5 +1,10 @@
 # Jade Benchmark Results
 
+> **⚠️ Historical snapshot (Jade 1.0.9).** The "Jade LLVM" column below was produced by the
+> in-repo LLVM backend, which was removed in v1.1.8. Native compilation now runs through the
+> out-of-process build daemon (`jade build` → `$HOME/.jade/build.sock`), so these LLVM timings
+> no longer reflect the current build path. Kept for historical comparison.
+
 **Date:** 2026-04-12  
 **Platform:** macOS Darwin 25.3.0 (Apple Silicon, aarch64)  
 **Jade version:** 1.0.9  

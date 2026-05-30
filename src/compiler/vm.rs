@@ -6,7 +6,7 @@ use crate::{
     compiler::{
         bytecode::{Chunk, CompiledFn, FStrPart, Instr, Reg},
         emit::CompiledProgram,
-        stdlib::{self, BuiltinFn, NativeBoundMethod, PrimType},
+        builtins::{self, BuiltinFn, NativeBoundMethod, PrimType},
     },
     frontend::{
         ast::{BinOpKind, StructFieldDef, UnaryOpKind},
@@ -31,6 +31,8 @@ const RETRY_MAX_TOKENS_COMPLEX: u32 = 512;
 #[derive(Clone, Debug, PartialEq)]
 pub enum NativeFnId {
     LlmSetMaxTokens,
+    LlmCountTokens,
+    LlmTotalTokens,
     Print,
     Stream,
     Route,
@@ -55,16 +57,17 @@ pub enum VmValue {
     /// A user-defined GBNF pattern (RHS only, e.g. `"yes" | "no"`).
     /// Used with `?p |> grammar_var` to constrain LLM token sampling.
     /// `anchor`: if set, grammar enforcement begins only after the model emits this string.
-    Grammar { pattern: String, anchor: Option<String> },
+    Grammar { pattern: String, anchor: Option<String>, stop_anchor: Option<String> },
     Dict(HashMap<String, VmValue>),
-    /// A pure Rust-backed callable (no VM state mutation). Used for stdlib
+    /// A pure Rust-backed callable (no VM state mutation). Used for builtin
     /// core built-ins (print, len, write, input) and package functions.
     BuiltinFn(BuiltinFn),
     /// A BuiltinFn pre-loaded with its receiver for primitive method dispatch.
     NativeBoundMethod(Arc<NativeBoundMethod>),
     /// A Rust-backed callable returned by a built-in module (e.g. `llm.set_max_tokens`).
     NativeFn(NativeFnId),
-    /// A function loaded from a native shared library via `use "native/<pkg>"`.
+    /// A function loaded from a native shared library registered as a `[lib]`
+    /// module whose file is a `.dylib`/`.so`/`.dll`.
     NativeLibFn(Arc<NativeLibFn>),
     /// A handle to an in-flight async task.
     Future(Arc<JadeFuture>),
@@ -95,6 +98,9 @@ pub struct JadeTokenStream {
     pub rx: Mutex<Option<tokio::sync::mpsc::Receiver<String>>>,
     pub tokens_handle: Mutex<Option<JoinHandle<Result<i64>>>>,
     pub prompt_key: (String, Option<String>),
+    /// Set when `?p` creates the stream lazily. Inference starts on first drain
+    /// so callers (e.g. `stream()`) can inject grammar constraints first.
+    pub lazy_prompt: Mutex<Option<String>>,
 }
 
 impl Drop for JadeFuture {
@@ -133,8 +139,8 @@ impl std::fmt::Debug for VmValue {
             VmValue::BoundMethod(_) => write!(f, "<bound method>"),
             VmValue::Array(arc) => write!(f, "Array[{} elem(s)]", arc.lock().len()),
             VmValue::Prompt(s)   => write!(f, "Prompt({:?})", s),
-            VmValue::Grammar { pattern, anchor: None }    => write!(f, "Grammar({:?})", pattern),
-            VmValue::Grammar { pattern, anchor: Some(a) } => write!(f, "Grammar({:?}, anchor={:?})", pattern, a),
+            VmValue::Grammar { pattern, anchor: None, .. }    => write!(f, "Grammar({:?})", pattern),
+            VmValue::Grammar { pattern, anchor: Some(a), .. } => write!(f, "Grammar({:?}, anchor={:?})", pattern, a),
             VmValue::Dict(m)     => write!(f, "Dict({} key(s))", m.len()),
             VmValue::BuiltinFn(bf) => write!(f, "BuiltinFn({})", bf.name),
             VmValue::NativeBoundMethod(nbm) => write!(f, "NativeBoundMethod({})", nbm.method.name),
@@ -194,9 +200,48 @@ pub fn value_to_display(v: &VmValue) -> String {
     }
 }
 
+/// Return the runtime type name of a `VmValue` as a static string.
+pub fn value_type_name(v: &VmValue) -> &'static str {
+    match v {
+        VmValue::Int(_) => "int",
+        VmValue::Float(_) => "float",
+        VmValue::Bool(_) => "bool",
+        VmValue::Str(_) => "str",
+        VmValue::Array(_) => "array",
+        VmValue::Dict(_) => "dict",
+        VmValue::Struct(_) => "struct",
+        VmValue::Fn(_) | VmValue::Closure(_, _) => "fn",
+        VmValue::BoundMethod(_) | VmValue::NativeBoundMethod(_) => "method",
+        VmValue::BuiltinFn(_) => "builtin",
+        VmValue::NativeFn(_) => "native fn",
+        VmValue::NativeLibFn(_) => "native fn",
+        VmValue::Future(_) => "future",
+        VmValue::TokenStream(_) => "token stream",
+        VmValue::TypeRef(_) => "type",
+        VmValue::Prompt(_) => "prompt",
+        VmValue::Grammar { .. } => "grammar",
+        VmValue::Nil => "nil",
+    }
+}
+
 // ── VM state ──────────────────────────────────────────────────────────────────
 
 /// The global execution state, including LLM integration.
+/// Test-only writer that forwards to a shared buffer without holding the lock
+/// across `.await` points (each `write` call locks and immediately releases).
+/// `Send`-safe because `Arc<Mutex<Vec<u8>>>` is `Send`.
+#[cfg(test)]
+pub(crate) struct TestWriter(pub std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+#[cfg(test)]
+impl std::io::Write for TestWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+}
+
 pub struct VmState {
     /// The value most recently raised by `Instr::Raise` that propagated past its
     /// frame's handler stack. Consumed by the nearest enclosing `SetupHandler`.
@@ -224,8 +269,19 @@ pub struct VmState {
     pub source_dir: PathBuf,
     /// Set of canonical paths currently being imported (cycle detection).
     pub import_stack: HashSet<PathBuf>,
-    /// Native package map from `[native]` in jade.toml: name → absolute path to .dylib/.so.
-    pub native_packages: HashMap<String, PathBuf>,
+    /// Project root (the dir holding the `jade.toml` with `[project]`). Anchor
+    /// for resolving registered `[lib]` library imports.
+    pub project_root: Option<PathBuf>,
+    /// Registered libraries from `jade.toml` `[lib]`: name → {path, files}.
+    pub libraries: HashMap<String, crate::project::LibraryEntry>,
+    /// The module scope of the currently-executing module function, if any.
+    /// `GetGlobal` checks here before `globals`; `SetGlobal` writes here when
+    /// the name already exists in scope, preserving mutations across calls.
+    pub active_module_scope: Option<Arc<Mutex<HashMap<String, VmValue>>>>,
+    /// Test-only stdout capture. When set, `vm_drain_token_stream_printing` writes
+    /// here instead of stdout so tests can assert on the printed output.
+    #[cfg(test)]
+    pub test_stdout: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
 }
 
 impl VmState {
@@ -235,7 +291,7 @@ impl VmState {
         globals.insert("__model__".to_string(), VmValue::Str(String::new()));
         globals.insert("__max_retries__".to_string(), VmValue::Int(15));
         globals.insert("__retry_log__".to_string(), VmValue::Array(Arc::new(Mutex::new(vec![]))));
-        stdlib::seed_globals(&mut globals);
+        builtins::seed_globals(&mut globals);
         VmState {
             raised_exception: None,
             globals,
@@ -251,7 +307,11 @@ impl VmState {
             prompt_cache: HashMap::new(),
             source_dir: PathBuf::new(),
             import_stack: HashSet::new(),
-            native_packages: HashMap::new(),
+            project_root: None,
+            libraries: HashMap::new(),
+            active_module_scope: None,
+            #[cfg(test)]
+            test_stdout: None,
         }
     }
 
@@ -268,9 +328,12 @@ impl VmState {
         self.max_retries = opts.max_retries;
         self.default_model = opts.default_model.clone();
         self.source_dir = opts.source_dir;
-        self.native_packages = opts.native_packages;
+        self.project_root = opts.project_root;
+        self.libraries = opts.libraries;
         self.set_session("__model__", VmValue::Str(opts.default_model));
         self.set_session("__max_retries__", VmValue::Int(opts.max_retries as i64));
+        #[cfg(test)]
+        { self.test_stdout = opts.test_stdout; }
     }
 
     /// Iterate over all global bindings — used by `-v` verbose output.
@@ -310,7 +373,11 @@ impl VmState {
             prompt_cache: self.prompt_cache.clone(),
             source_dir: self.source_dir.clone(),
             import_stack: HashSet::new(),
-            native_packages: self.native_packages.clone(),
+            project_root: self.project_root.clone(),
+            libraries: self.libraries.clone(),
+            active_module_scope: None,
+            #[cfg(test)]
+            test_stdout: self.test_stdout.clone(),
         }
     }
 }
@@ -323,8 +390,13 @@ pub struct VmOpts {
     /// Directory of the source file being run — used to resolve relative `use` paths.
     /// Defaults to the current working directory when running in-memory (tests, REPL).
     pub source_dir: PathBuf,
-    /// Native package map from `[native]` in jade.toml: name → absolute path to .dylib/.so.
-    pub native_packages: HashMap<String, PathBuf>,
+    /// Project root — anchor for registered `[lib]` library imports.
+    pub project_root: Option<PathBuf>,
+    /// Registered libraries from `jade.toml` `[lib]`: name → {path, files}.
+    pub libraries: HashMap<String, crate::project::LibraryEntry>,
+    /// Test-only stdout capture buffer. See `VmState::test_stdout`.
+    #[cfg(test)]
+    pub test_stdout: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
 }
 
 impl Default for VmOpts {
@@ -333,10 +405,42 @@ impl Default for VmOpts {
             backend: None,
             default_model: String::new(),
             max_retries: 15,
-            source_dir: std::env::current_dir().unwrap_or_default(),
-            native_packages: HashMap::new(),
+            source_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            project_root: None,
+            libraries: HashMap::new(),
+            #[cfg(test)]
+            test_stdout: None,
         }
     }
+}
+
+/// Resolve a user `.jde` import path to a filesystem path (pre-canonicalization).
+///
+/// Registered `[lib]` libraries take precedence: a `<lib>/<module>` path resolves
+/// against the library's directory anchored at the project root (cross-directory
+/// imports). Everything else falls back to relative-to-importer resolution
+/// (hybrid mode). An unregistered module under a known library name is an error.
+/// A `use` path resolved to either a native shared library (loaded over the FFI)
+/// or a Jade source file (parsed + run in a sub-state).
+enum ResolvedImport {
+    Native(PathBuf),
+    File(PathBuf),
+}
+
+fn resolve_user_import(state: &VmState, path: &str, span: Span) -> Result<ResolvedImport> {
+    if let Some(root) = &state.project_root {
+        match crate::project::resolve_library_import(&state.libraries, path, root) {
+            Ok(Some(r)) => {
+                return Ok(match r.kind {
+                    crate::project::ImportKind::Native => ResolvedImport::Native(r.path),
+                    crate::project::ImportKind::Jade => ResolvedImport::File(r.path),
+                });
+            }
+            Ok(None) => {}
+            Err(message) => return Err(JadeError::IoError { message, span }),
+        }
+    }
+    Ok(ResolvedImport::File(state.source_dir.join(path)))
 }
 
 // ── Public entry point ────────────────────────────────────────────────────────
@@ -379,6 +483,21 @@ async fn run_with_state(program: CompiledProgram, state: &mut VmState) -> Result
     let mut slots: Vec<VmValue> = vec![VmValue::Nil; program.top_n_slots as usize];
     execute_chunk(&program.top, &mut slots, state).await?;
     Ok(())
+}
+
+// ── Source-file attribution ───────────────────────────────────────────────────
+
+/// Recursively stamp `source_file` onto every `CompiledFn` reachable from
+/// `chunk`. Called on freshly-compiled import modules so that runtime errors
+/// inside those functions can be attributed to the correct file.
+fn stamp_source_file(chunk: &mut Chunk, file: &str) {
+    for fn_arc in &mut chunk.fn_defs {
+        let cf = Arc::make_mut(fn_arc);
+        if cf.source_file.is_empty() {
+            cf.source_file = file.to_string();
+        }
+        stamp_source_file(&mut cf.chunk, file);
+    }
 }
 
 // ── Execution engine ──────────────────────────────────────────────────────────
@@ -459,33 +578,12 @@ async fn execute_chunk(
             Instr::Halt => break,
 
             // ── Imports ───────────────────────────────────────────────────────
-            Instr::ImportFile(path) => {
-                // ── Native packages ─────────────────────────────────────────
-                // `use "native/<name>"` loads a .dylib/.so registered in jade.toml [native].
-                if let Some(pkg_name) = path.strip_prefix("native/") {
-                    let lib_path = state.native_packages.get(pkg_name)
-                        .cloned()
-                        .ok_or_else(|| JadeError::IoError {
-                            message: format!(
-                                "native package '{}' not declared in jade.toml [native]",
-                                pkg_name
-                            ),
-                            span,
-                        })?;
-                    let fns = crate::native::load_native_package(&lib_path, span)?;
-                    state.globals.insert(
-                        pkg_name.to_string(),
-                        VmValue::Dict(fns),
-                    );
-                    continue;
-                }
-
+            Instr::ImportFile(path, namespace) => {
                 // ── Built-in packages ───────────────────────────────────────
-                // Intercept stdlib package names before touching the filesystem.
-                if let Some(pkg) = stdlib::find_package(path) {
+                // stdlib packages always bind under their own global_name; namespace param ignored.
+                if let Some(pkg) = builtins::find_package(path) {
                     let val = if pkg.import_name == "llm" {
-                        // llm has a state-mutating function — use the special dict builder
-                        stdlib::llm_pkg::llm_vm_dict_value()
+                        builtins::llm_pkg::llm_vm_dict_value()
                     } else {
                         pkg.vm_dict_value()
                     };
@@ -493,7 +591,19 @@ async fn execute_chunk(
                     continue;
                 }
 
-                let abs_path = state.source_dir.join(path);
+                // ── Native library modules ──────────────────────────────────
+                // A `[lib]` module whose file is a .dylib/.so/.dll is loaded over
+                // the C ABI and bound (as a dict of functions) under its module name.
+                let abs_path = match resolve_user_import(state, path, span)? {
+                    ResolvedImport::Native(lib_path) => {
+                        let fns = crate::native::load_native_package(&lib_path, span)?;
+                        state.globals.insert(namespace.clone(), VmValue::Dict(fns));
+                        continue;
+                    }
+                    ResolvedImport::File(p) => p,
+                };
+
+                // ── User .jde files — namespaced ────────────────────────────
                 let canon = abs_path.canonicalize().map_err(|_| JadeError::ImportNotFound {
                     path: path.clone(),
                     span,
@@ -508,13 +618,10 @@ async fn execute_chunk(
 
                 state.import_stack.insert(canon.clone());
 
-                // Save and update source_dir for the imported file's own imports.
-                let prev_dir = state.source_dir.clone();
-                state.source_dir = canon.parent()
+                let sub_source_dir = canon.parent()
                     .unwrap_or_else(|| std::path::Path::new("."))
                     .to_path_buf();
 
-                // Compile in a sync closure (lex/parse/emit are all sync).
                 let compile_result: Result<crate::compiler::emit::CompiledProgram> = (|| {
                     let source = std::fs::read_to_string(&canon).map_err(|_| {
                         JadeError::ImportNotFound { path: path.clone(), span }
@@ -552,43 +659,130 @@ async fn execute_chunk(
                     crate::compiler::emit::emit(tprogram)
                 })();
 
-                let result = match compile_result {
-                    Ok(compiled) => Box::pin(run_with_state(compiled, state)).await,
-                    Err(e) => Err(e),
+                let result: Result<()> = match compile_result {
+                    Ok(mut compiled) => {
+                        // Stamp source file on all compiled functions so runtime
+                        // errors inside module functions attribute to the correct file.
+                        let file_label = canon.to_string_lossy().into_owned();
+                        stamp_source_file(&mut compiled.top, &file_label);
+                        for methods in compiled.extend_methods.values_mut() {
+                            for cf_arc in methods.values_mut() {
+                                let cf = Arc::make_mut(cf_arc);
+                                if cf.source_file.is_empty() {
+                                    cf.source_file = file_label.clone();
+                                }
+                                stamp_source_file(&mut cf.chunk, &file_label);
+                            }
+                        }
+                        // Run the imported file in an isolated sub-state so its
+                        // top-level bindings don't bleed into the parent namespace.
+                        let mut sub_state = VmState::new();
+                        // Capture keys already present so we can filter them out later.
+                        let initial_keys: std::collections::HashSet<String> =
+                            sub_state.globals.keys().cloned().collect();
+                        // Propagate runtime config from parent.
+                        sub_state.source_dir = sub_source_dir;
+                        sub_state.import_stack = state.import_stack.clone();
+                        sub_state.project_root = state.project_root.clone();
+                        sub_state.libraries = state.libraries.clone();
+                        sub_state.inference_backend = state.inference_backend.clone();
+                        sub_state.max_retries = state.max_retries;
+                        sub_state.max_tokens = state.max_tokens;
+                        sub_state.default_model = state.default_model.clone();
+
+                        let r = Box::pin(run_with_state(compiled, &mut sub_state)).await;
+                        if r.is_ok() {
+                            // Collect user-defined globals (exclude builtins and internal keys).
+                            let mut module_globals: HashMap<String, VmValue> = sub_state
+                                .globals
+                                .drain()
+                                .filter(|(k, _)| !initial_keys.contains(k))
+                                .collect();
+                            // Stdlib packages imported by the module (e.g. `use std.fs`) must
+                            // be promoted to the parent globals so that module functions can
+                            // resolve them via GetGlobal when called in the parent context.
+                            // They are NOT included in the module dict (they're not exports).
+                            let pkg_keys: Vec<String> = module_globals
+                                .keys()
+                                .filter(|k| builtins::is_package_global_name(k))
+                                .cloned()
+                                .collect();
+                            for k in pkg_keys {
+                                if let Some(v) = module_globals.remove(&k) {
+                                    state.globals.entry(k).or_insert(v);
+                                }
+                            }
+                            // Create a persistent module scope shared by all functions from
+                            // this file. Populated with user-defined module-level values so
+                            // that reads and writes inside module functions are stable across
+                            // calls. Functions in the scope are stored as Fn (not stamped) —
+                            // they inherit the active scope via call_fn's save/restore logic.
+                            let module_scope: Arc<Mutex<HashMap<String, VmValue>>> =
+                                Arc::new(Mutex::new(module_globals.clone()));
+                            // Stamp all Fn values in the exported dict with the module scope.
+                            for v in module_globals.values_mut() {
+                                if let VmValue::Fn(cf) = v {
+                                    let cf_mut = Arc::make_mut(cf);
+                                    cf_mut.module_scope = Some(Arc::clone(&module_scope));
+                                }
+                            }
+                            // Qualify any TypeRef values so coercion calls resolve correctly.
+                            for v in module_globals.values_mut() {
+                                if let VmValue::TypeRef(t) = v {
+                                    *t = format!("{}.{}", namespace, t);
+                                }
+                            }
+                            state.globals.insert(namespace.clone(), VmValue::Dict(module_globals));
+
+                            // Merge struct_defs prefixed with the namespace.
+                            for (k, v) in sub_state.struct_defs.drain() {
+                                state.struct_defs.insert(format!("{}.{}", namespace, k), v);
+                            }
+                            // Merge extend_methods prefixed with the namespace.
+                            // Stamp module_scope on each method so they can resolve
+                            // module-level variables when called from the parent context.
+                            for (type_name, mut methods) in sub_state.extend_methods.drain() {
+                                for cf_arc in methods.values_mut() {
+                                    let cf = Arc::make_mut(cf_arc);
+                                    if cf.module_scope.is_none() {
+                                        cf.module_scope = Some(Arc::clone(&module_scope));
+                                    }
+                                }
+                                state.extend_methods
+                                    .entry(format!("{}.{}", namespace, type_name))
+                                    .or_default()
+                                    .extend(methods);
+                            }
+                            // Merge struct_decorators prefixed with the namespace.
+                            for (type_name, decs) in sub_state.struct_decorators.drain() {
+                                state.struct_decorators
+                                    .entry(format!("{}.{}", namespace, type_name))
+                                    .or_default()
+                                    .extend(decs);
+                            }
+                            // Propagate LLM token usage back to parent.
+                            state.token_count += sub_state.token_count;
+                        }
+                        r.map_err(|e| JadeError::InFile {
+                            file: path.clone(),
+                            cause: Box::new(e),
+                        })
+                    }
+                    Err(e) => Err(JadeError::InFile {
+                        file: path.clone(),
+                        cause: Box::new(e),
+                    }),
                 };
 
-                // Always restore source_dir and release the import_stack entry.
-                state.source_dir = prev_dir;
                 state.import_stack.remove(&canon);
-
                 result?;
             }
 
             Instr::ImportFrom(path, names) => {
-                // ── Native packages ─────────────────────────────────────────
-                if let Some(pkg_name) = path.strip_prefix("native/") {
-                    let lib_path = state.native_packages.get(pkg_name)
-                        .cloned()
-                        .ok_or_else(|| JadeError::IoError {
-                            message: format!(
-                                "native package '{}' not declared in jade.toml [native]",
-                                pkg_name
-                            ),
-                            span,
-                        })?;
-                    let fns = crate::native::load_native_package(&lib_path, span)?;
-                    for name in names {
-                        if let Some(val) = fns.get(name) {
-                            state.globals.insert(name.clone(), val.clone());
-                        }
-                    }
-                    continue;
-                }
-
-                if let Some(pkg) = stdlib::find_package(path) {
+                if let Some(pkg) = builtins::find_package(path) {
                     // Build the package dict, then extract only the requested names.
                     let dict = if pkg.import_name == "llm" {
-                        stdlib::llm_pkg::llm_vm_dict_value()
+                        builtins::llm_pkg::llm_vm_dict_value()
                     } else {
                         pkg.vm_dict_value()
                     };
@@ -601,9 +795,24 @@ async fn execute_chunk(
                     }
                     continue;
                 }
-                // File import: run the file (all its globals merge in), then names
-                // are already available in scope — no additional filtering needed.
-                let abs_path = state.source_dir.join(path);
+
+                // Native library: load over the C ABI and bind the requested
+                // function names directly.
+                let abs_path = match resolve_user_import(state, path, span)? {
+                    ResolvedImport::Native(lib_path) => {
+                        let fns = crate::native::load_native_package(&lib_path, span)?;
+                        for name in names {
+                            if let Some(val) = fns.get(name) {
+                                state.globals.insert(name.clone(), val.clone());
+                            }
+                        }
+                        continue;
+                    }
+                    ResolvedImport::File(p) => p,
+                };
+
+                // File import: run in an isolated sub-state, then bind only the
+                // requested names directly into the parent namespace.
                 let canon = abs_path.canonicalize().map_err(|_| JadeError::ImportNotFound {
                     path: path.clone(),
                     span,
@@ -612,8 +821,7 @@ async fn execute_chunk(
                     return Err(JadeError::CircularImport { path: path.clone(), span });
                 }
                 state.import_stack.insert(canon.clone());
-                let prev_dir = state.source_dir.clone();
-                state.source_dir = canon.parent()
+                let sub_source_dir = canon.parent()
                     .unwrap_or_else(|| std::path::Path::new("."))
                     .to_path_buf();
                 let compile_result: Result<crate::compiler::emit::CompiledProgram> = (|| {
@@ -625,11 +833,78 @@ async fn execute_chunk(
                     let tp = crate::compiler::type_infer::infer(p)?;
                     crate::compiler::emit::emit(tp)
                 })();
-                let result = match compile_result {
-                    Ok(compiled) => Box::pin(run_with_state(compiled, state)).await,
-                    Err(e) => Err(e),
+                let result: Result<()> = match compile_result {
+                    Ok(mut compiled) => {
+                        let file_label = canon.to_string_lossy().into_owned();
+                        stamp_source_file(&mut compiled.top, &file_label);
+                        let mut sub_state = VmState::new();
+                        sub_state.source_dir = sub_source_dir;
+                        sub_state.import_stack = state.import_stack.clone();
+                        sub_state.project_root = state.project_root.clone();
+                        sub_state.libraries = state.libraries.clone();
+                        sub_state.inference_backend = state.inference_backend.clone();
+                        sub_state.max_retries = state.max_retries;
+                        sub_state.max_tokens = state.max_tokens;
+                        sub_state.default_model = state.default_model.clone();
+                        let r = Box::pin(run_with_state(compiled, &mut sub_state)).await;
+                        if r.is_ok() {
+                            // Promote stdlib package imports from the module so that
+                            // imported functions can resolve them via GetGlobal.
+                            for (k, v) in sub_state.globals.iter() {
+                                if builtins::is_package_global_name(k) {
+                                    state.globals.entry(k.clone()).or_insert_with(|| v.clone());
+                                }
+                            }
+                            // Build the persistent module scope for from-imports.
+                            let initial_keys: std::collections::HashSet<String> =
+                                VmState::new().globals.keys().cloned().collect();
+                            let scope_map: HashMap<String, VmValue> = sub_state.globals.iter()
+                                .filter(|(k, _)| !initial_keys.contains(*k) && !builtins::is_package_global_name(k))
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect();
+                            let module_scope: Arc<Mutex<HashMap<String, VmValue>>> =
+                                Arc::new(Mutex::new(scope_map));
+                            for name in names {
+                                let val = sub_state.globals.remove(name);
+                                let val = val.map(|v| match v {
+                                    VmValue::Fn(mut cf) => {
+                                        Arc::make_mut(&mut cf).module_scope = Some(Arc::clone(&module_scope));
+                                        VmValue::Fn(cf)
+                                    }
+                                    other => other,
+                                });
+                                if let Some(val) = val {
+                                    state.globals.insert(name.clone(), val);
+                                }
+                                // If the requested name is a struct type, also import its def.
+                                if let Some(def) = sub_state.struct_defs.remove(name) {
+                                    state.struct_defs.insert(name.clone(), def);
+                                }
+                                if let Some(mut methods) = sub_state.extend_methods.remove(name) {
+                                    for cf_arc in methods.values_mut() {
+                                        let cf = Arc::make_mut(cf_arc);
+                                        if cf.module_scope.is_none() {
+                                            cf.module_scope = Some(Arc::clone(&module_scope));
+                                        }
+                                    }
+                                    state.extend_methods
+                                        .entry(name.clone())
+                                        .or_default()
+                                        .extend(methods);
+                                }
+                            }
+                            state.token_count += sub_state.token_count;
+                        }
+                        r.map_err(|e| JadeError::InFile {
+                            file: path.clone(),
+                            cause: Box::new(e),
+                        })
+                    }
+                    Err(e) => Err(JadeError::InFile {
+                        file: path.clone(),
+                        cause: Box::new(e),
+                    }),
                 };
-                state.source_dir = prev_dir;
                 state.import_stack.remove(&canon);
                 result?;
             }
@@ -646,9 +921,14 @@ async fn execute_chunk(
             }
             Instr::MakeClosure(d, idx) => {
                 let cf = Arc::clone(&chunk.fn_defs[*idx]);
-                let captured: HashMap<String, VmValue> = state.globals.iter()
+                let mut captured: HashMap<String, VmValue> = state.globals.iter()
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect();
+                if let Some(sc) = &state.active_module_scope {
+                    for (k, v) in sc.lock().iter() {
+                        captured.entry(k.clone()).or_insert_with(|| v.clone());
+                    }
+                }
                 set(slots, *d, VmValue::Closure(cf, Arc::new(captured)));
             }
             Instr::Move(d, s) => {
@@ -658,14 +938,28 @@ async fn execute_chunk(
 
             // ── Variables ─────────────────────────────────────────────────────
             Instr::GetGlobal(d, name) => {
-                let v = state.globals.get(name)
-                    .ok_or_else(|| JadeError::UndefinedVariable { name: name.clone(), span })?
-                    .clone();
+                let v = state.active_module_scope.as_ref()
+                    .and_then(|sc| sc.lock().get(name).cloned())
+                    .or_else(|| state.globals.get(name).cloned())
+                    .ok_or_else(|| JadeError::UndefinedVariable { name: name.clone(), span })?;
                 set(slots, *d, v);
             }
             Instr::SetGlobal(name, s) => {
                 let v = vm_try!(vm_maybe_drain(get(slots, *s).clone(), state, span).await);
-                state.globals.insert(name.clone(), v);
+                let wrote_to_scope = if let Some(sc) = &state.active_module_scope {
+                    let mut locked = sc.lock();
+                    if locked.contains_key(name) {
+                        locked.insert(name.clone(), v.clone());
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if !wrote_to_scope {
+                    state.globals.insert(name.clone(), v);
+                }
             }
             Instr::GetLocal(d, slot) => {
                 let v = slots.get(*slot as usize)
@@ -883,9 +1177,10 @@ async fn execute_chunk(
             Instr::MakeDict(dest, pairs) => {
                 let mut map = HashMap::with_capacity(pairs.len());
                 for &(kr, vr) in pairs {
-                    let key = match get(slots, kr).clone() {
+                    let key_val = get(slots, kr).clone();
+                    let key = match key_val {
                         VmValue::Str(s) => s,
-                        _ => { vm_err!(JadeError::TypeError { op: "dict key".to_string(), span }); }
+                        ref other => { vm_err!(JadeError::TypeError { message: format!("dict key must be str, got {}", value_type_name(other)), span }); }
                     };
                     let val = get(slots, vr).clone();
                     map.insert(key, val);
@@ -906,17 +1201,17 @@ async fn execute_chunk(
                 let obj = get(slots, *obj_reg).clone();
                 match obj {
                     VmValue::Array(arc) => {
-                        let i = match idx { VmValue::Int(n) => n, _ => { vm_err!(JadeError::TypeError { op: "array index".to_string(), span }); } };
+                        let i = match idx { VmValue::Int(n) => n, ref other => { vm_err!(JadeError::TypeError { message: format!("array index must be int, got {}", value_type_name(other)), span }); } };
                         let len = arc.lock().len();
                         if i < 0 || i as usize >= len { vm_err!(JadeError::IndexOutOfBounds { index: i, len, span }); }
                         arc.lock()[i as usize] = val;
                     }
                     VmValue::Dict(mut m) => {
-                        let k = match idx { VmValue::Str(s) => s, _ => { vm_err!(JadeError::TypeError { op: "dict index".to_string(), span }); } };
+                        let k = match idx { VmValue::Str(s) => s, ref other => { vm_err!(JadeError::TypeError { message: format!("dict index must be str, got {}", value_type_name(other)), span }); } };
                         m.insert(k, val);
                         slots[*obj_reg as usize] = VmValue::Dict(m);
                     }
-                    _ => { vm_err!(JadeError::TypeError { op: "index assign".to_string(), span }); }
+                    ref other => { vm_err!(JadeError::TypeError { message: format!("value of type {} is not indexable", value_type_name(other)), span }); }
                 }
             }
 
@@ -932,6 +1227,33 @@ async fn execute_chunk(
                         };
                     }
                     fields.insert(fname.clone(), val);
+                }
+                // Fill in defaults for any fields omitted from the literal.
+                // Needed when the struct type was unknown at compile time (imported type).
+                if let Some(def_fields) = state.struct_defs.get(type_name.as_str()).cloned() {
+                    for def_field in &def_fields {
+                        match def_field {
+                            StructFieldDef::Let { name, default } => {
+                                if !fields.contains_key(name.as_str()) {
+                                    if let Some(v) = eval_literal_default(default) {
+                                        fields.insert(name.clone(), v);
+                                    }
+                                }
+                            }
+                            StructFieldDef::Prompt { name, default } => {
+                                if !fields.contains_key(name.as_str()) {
+                                    if let Some(v) = eval_literal_default(default) {
+                                        let v = match v {
+                                            VmValue::Str(s) => VmValue::Prompt(s),
+                                            other => other,
+                                        };
+                                        fields.insert(name.clone(), v);
+                                    }
+                                }
+                            }
+                            StructFieldDef::Required(_) => {}
+                        }
+                    }
                 }
                 let mut result = VmValue::Struct(Arc::new(Mutex::new(VmStruct {
                     type_name: type_name.clone(),
@@ -975,7 +1297,7 @@ async fn execute_chunk(
                     VmValue::Dict(ref map) => {
                         if let Some(v) = map.get(field.as_str()) {
                             set(slots, *dest, v.clone());
-                        } else if let Some(method) = stdlib::find_primitive_method(PrimType::Dict, field) {
+                        } else if let Some(method) = builtins::find_primitive_method(PrimType::Dict, field) {
                             set(slots, *dest, VmValue::NativeBoundMethod(Arc::new(NativeBoundMethod {
                                 receiver: obj.clone(),
                                 method,
@@ -992,7 +1314,7 @@ async fn execute_chunk(
                     ref prim @ (VmValue::Str(_) | VmValue::Array(_)
                                | VmValue::Int(_) | VmValue::Float(_)) => {
                         if let Some(ty) = PrimType::from_value(prim) {
-                            if let Some(method) = stdlib::find_primitive_method(ty, field) {
+                            if let Some(method) = builtins::find_primitive_method(ty, field) {
                                 set(slots, *dest, VmValue::NativeBoundMethod(Arc::new(NativeBoundMethod {
                                     receiver: prim.clone(),
                                     method,
@@ -1072,7 +1394,7 @@ async fn execute_chunk(
                 let text = match get(slots, *text_reg).clone() {
                     VmValue::Str(s) => s,
                     _ => { vm_err!(JadeError::TypeError {
-                        op: "prompt declaration requires a string body".to_string(),
+                        message: "prompt declaration requires a string body".to_string(),
                         span,
                     }); }
                 };
@@ -1083,19 +1405,38 @@ async fn execute_chunk(
                     VmValue::Prompt(t) => t,
                     _ => { vm_err!(JadeError::NotAPrompt { name: "<expr>".to_string(), span }); }
                 };
-                let (grammar_override, grammar_anchor) = match grammar_reg {
-                    None => (None, None),
+                let (grammar_override, grammar_anchor, grammar_stop) = match grammar_reg {
+                    None => (None, None, None),
                     Some(r) => match get(slots, *r).clone() {
-                        VmValue::Grammar { pattern, anchor } => {
-                            (Some(crate::compiler::gbnf::grammar_from_pattern(&pattern)), anchor)
+                        VmValue::Grammar { pattern, anchor, stop_anchor } => {
+                            // `pattern` may be either:
+                            //   a) a complete GBNF (already has `root ::=` lines) — pass as-is,
+                            //   b) a simple pattern RHS (e.g. `"yes" | "no"`) — wrap with grammar_from_pattern.
+                            let gbnf = if pattern.contains("root") && pattern.contains("::=") {
+                                pattern
+                            } else {
+                                crate::compiler::gbnf::grammar_from_pattern(&pattern)
+                            };
+                            (Some(gbnf), anchor, stop_anchor)
                         }
-                        _ => panic!("grammar register did not hold a Grammar value"),
+                        VmValue::Nil => {
+                            // Grammar expression evaluated to nil (e.g. self.grammar before it
+                            // was set).  Fall through to unconstrained streaming inference.
+                            (None, None, None)
+                        }
+                        other => vm_err!(JadeError::TypeError {
+                            message: format!(
+                                "|> constraint must be a Grammar value or type name, got {}",
+                                value_type_name(&other)
+                            ),
+                            span,
+                        }),
                     },
                 };
                 let result = if output_type.is_none() && grammar_override.is_none() {
                     vm_try!(vm_prompt_deref_stream(text, state, span).await)
                 } else {
-                    vm_try!(vm_prompt_deref(text, output_type.as_deref(), grammar_override, grammar_anchor, state, span).await)
+                    vm_try!(vm_prompt_deref(text, output_type.as_deref(), grammar_override, grammar_anchor, grammar_stop, state, span).await)
                 };
                 set(slots, *dest, result);
             }
@@ -1237,7 +1578,7 @@ fn resolve_named_args(
             for (name, v) in named {
                 let pos = params.iter().position(|p| p == &name)
                     .ok_or_else(|| JadeError::TypeError {
-                        op: format!("unknown parameter '{}'", name),
+                        message: format!("unknown parameter '{}'", name),
                         span,
                     })?;
                 result[pos] = v;
@@ -1304,31 +1645,142 @@ async fn call_value(
                         state.max_tokens = *n as u32;
                         Ok(VmValue::Nil)
                     }
-                    _ => Err(JadeError::TypeError { op: "llm.set_max_tokens".to_string(), span }),
+                    ref other => Err(JadeError::TypeError { message: format!("llm.set_max_tokens() requires a positive int, got {}", value_type_name(other)), span }),
                 }
+            }
+            NativeFnId::LlmCountTokens => {
+                if args.len() != 1 {
+                    return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span });
+                }
+                match &args[0] {
+                    VmValue::Str(text) => {
+                        let backend = state.inference_backend.as_ref()
+                            .ok_or_else(|| JadeError::MissingApiKey { span })?;
+                        let n = backend.count_tokens(text, span).await?;
+                        Ok(VmValue::Int(n))
+                    }
+                    ref other => Err(JadeError::TypeError {
+                        message: format!("llm.count_tokens() requires str, got {}", value_type_name(other)),
+                        span,
+                    }),
+                }
+            }
+            NativeFnId::LlmTotalTokens => {
+                if !args.is_empty() {
+                    return Err(JadeError::ArityMismatch { expected: 0, got: args.len(), span });
+                }
+                let backend = state.inference_backend.as_ref()
+                    .ok_or_else(|| JadeError::MissingApiKey { span })?;
+                let n = backend.total_tokens(span).await?;
+                Ok(VmValue::Int(n))
             }
             NativeFnId::Print => {
-                if args.len() != 1 {
+                if args.is_empty() || args.len() > 2 {
                     return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span });
                 }
-                match args.into_iter().next().unwrap() {
+                use std::io::Write as _;
+                let mut iter = args.into_iter();
+                let val = iter.next().unwrap();
+                // Optional `end` kwarg (arrives positionally for native callees).
+                // Default "\n" matches Python's print() behaviour.
+                let end = match iter.next() {
+                    None | Some(VmValue::Nil) => "\n".to_owned(),
+                    Some(VmValue::Str(s))     => s,
+                    Some(other) => return Err(JadeError::TypeError {
+                        message: format!("print() end= must be str, got {}", value_type_name(&other)),
+                        span,
+                    }),
+                };
+                match val {
                     VmValue::TokenStream(ts) => {
-                        vm_drain_token_stream_printing(ts, state, span, true).await?;
-                        Ok(VmValue::Nil)
+                        vm_drain_token_stream_printing(ts, state, span, end == "\n", false, &[], &[]).await?;
+                        if end != "\n" && !end.is_empty() {
+                            print!("{}", end);
+                            let _ = std::io::stdout().flush();
+                        }
                     }
                     other => {
-                        println!("{}", value_to_display(&other));
-                        Ok(VmValue::Nil)
+                        print!("{}{}", value_to_display(&other), end);
+                        let _ = std::io::stdout().flush();
                     }
                 }
+                Ok(VmValue::Nil)
             }
             NativeFnId::Stream => {
-                if args.len() != 1 {
-                    return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span });
+                if args.is_empty() {
+                    return Err(JadeError::ArityMismatch { expected: 1, got: 0, span });
                 }
-                match args.into_iter().next().unwrap() {
+                let mut iter = args.into_iter();
+                let val = iter.next().unwrap();
+                // Build VM-side mute spec AND daemon inference constraints.
+                //
+                // Mute semantics:
+                //   No anchor  → start muted immediately (from first token).
+                //   Anchor     → enter muted mode when anchor string appears.
+                //   Stop_anchor → exit muted mode when stop string appears.
+                //   No stop_anchor → stay muted until end of stream.
+                let mut start_muted = false;
+                let mut region_start: Vec<String> = Vec::new();
+                let mut region_stop: Vec<String> = Vec::new();
+                let mut infer_grammar: Option<String> = None;
+                let mut infer_anchor: Option<String> = None;
+                let mut infer_stop: Option<String> = None;
+                match iter.next() {
+                    None | Some(VmValue::Nil) => {}
+                    Some(VmValue::Array(arr)) => {
+                        for v in arr.lock().iter() {
+                            if let VmValue::Grammar { pattern, anchor, stop_anchor } = v {
+                                if infer_grammar.is_none() {
+                                    infer_grammar = Some(pattern.clone());
+                                    infer_anchor = anchor.clone();
+                                    infer_stop = stop_anchor.clone();
+                                }
+                                if let Some(a) = anchor {
+                                    if !region_start.contains(a) { region_start.push(a.clone()); }
+                                    if let Some(s) = stop_anchor {
+                                        if !region_stop.contains(s) { region_stop.push(s.clone()); }
+                                    }
+                                } else {
+                                    // No anchor → mute from the very start of generation.
+                                    start_muted = true;
+                                    if let Some(s) = stop_anchor {
+                                        if !region_stop.contains(s) { region_stop.push(s.clone()); }
+                                    }
+                                }
+                                let _ = pattern; // suppress unused warning (used via infer_grammar)
+                            }
+                        }
+                    }
+                    Some(other) => return Err(JadeError::TypeError {
+                        message: format!("stream() mute_on= must be an array of grammars, got {}", value_type_name(&other)),
+                        span,
+                    }),
+                };
+                match val {
                     VmValue::TokenStream(ts) => {
-                        let text = vm_drain_token_stream_printing(ts, state, span, true).await?;
+                        // Start lazy inference with grammar constraints so jade-tree
+                        // receives stop_anchor and stops before the model can loop.
+                        {
+                            let lazy = ts.lazy_prompt.lock().take();
+                            if let Some(prompt_text) = lazy {
+                                let backend = state.inference_backend.as_ref()
+                                    .ok_or(JadeError::MissingApiKey { span })?.clone();
+                                let (rx, handle) = backend.infer_stream(llm::InferenceRequest {
+                                    prompt: prompt_text,
+                                    model: state.default_model.clone(),
+                                    max_tokens: state.max_tokens,
+                                    grammar: infer_grammar,
+                                    anchor: infer_anchor,
+                                    stop_anchor: infer_stop,
+                                }, span).await?;
+                                *ts.rx.lock() = Some(rx);
+                                *ts.tokens_handle.lock() = Some(handle);
+                            }
+                        }
+                        let text = vm_drain_token_stream_printing(
+                            ts, state, span, true,
+                            start_muted, &region_start, &region_stop,
+                        ).await?;
                         Ok(VmValue::Str(text))
                     }
                     other => {
@@ -1380,7 +1832,7 @@ async fn call_value(
                         }
                     }
                     other => Err(JadeError::TypeError {
-                        op: format!("route(): expected string method name, got {}", value_to_display(&other)),
+                        message: format!("route(): expected string method name, got {}", value_to_display(&other)),
                         span,
                     }),
                 }
@@ -1447,8 +1899,20 @@ async fn call_fn(
     for (i, v) in args.into_iter().enumerate() {
         frame[i] = vm_maybe_drain(v, state, span).await?;
     }
-    let result = execute_chunk(&cf.chunk, &mut frame, state).await?;
-    Ok(result.unwrap_or(VmValue::Nil))
+    let saved_scope = state.active_module_scope.clone();
+    if let Some(scope) = &cf.module_scope {
+        state.active_module_scope = Some(Arc::clone(scope));
+    }
+    let result = execute_chunk(&cf.chunk, &mut frame, state).await
+        .map_err(|e| {
+            if cf.source_file.is_empty() || matches!(e, JadeError::InFile { .. }) {
+                e
+            } else {
+                JadeError::InFile { file: cf.source_file.clone(), cause: Box::new(e) }
+            }
+        });
+    state.active_module_scope = saved_scope;
+    Ok(result?.unwrap_or(VmValue::Nil))
 }
 
 
@@ -1459,6 +1923,7 @@ async fn vm_prompt_deref(
     output_type: Option<&str>,
     grammar_override: Option<String>,
     grammar_anchor: Option<String>,
+    grammar_stop: Option<String>,
     state: &mut VmState,
     span: Span,
 ) -> Result<VmValue> {
@@ -1495,7 +1960,13 @@ async fn vm_prompt_deref(
         max_tokens: state.max_tokens,
         grammar: grammar.clone(),
         anchor: grammar_anchor.clone(),
+        stop_anchor: grammar_stop.clone(),
     }, span).await?;
+
+    if let Some(name) = backend.reported_model_name() {
+        state.default_model = name.clone();
+        state.globals.insert("__model__".to_string(), VmValue::Str(name));
+    }
 
     state.token_count += initial_resp.tokens_used;
     let tc = state.token_count;
@@ -1538,6 +2009,7 @@ async fn vm_prompt_deref(
                     max_tokens: retry_max_tokens,
                     grammar: grammar.clone(),
                     anchor: grammar_anchor.clone(),
+                    stop_anchor: grammar_stop.clone(),
                 }, span).await?;
                 current = retry.text;
             }
@@ -1848,20 +2320,16 @@ async fn vm_prompt_deref_stream(
     if let Some(cached) = state.prompt_cache.get(&cache_key).cloned() {
         return Ok(VmValue::Str(cached));
     }
-    let backend = state.inference_backend.as_ref()
-        .ok_or(JadeError::MissingApiKey { span })?
-        .clone();
-    let (rx, handle) = backend.infer_stream(llm::InferenceRequest {
-        prompt: prompt_text.clone(),
-        model: state.default_model.clone(),
-        max_tokens: state.max_tokens,
-        grammar: None,
-        anchor: None,
-    }, span).await?;
+    // Return a lazy stream. Inference starts on first drain so callers
+    // (e.g. stream() with mute_on=) can inject grammar constraints first.
+    // MissingApiKey is checked here eagerly so the error site is ?p, not drain.
+    state.inference_backend.as_ref()
+        .ok_or(JadeError::MissingApiKey { span })?;
     Ok(VmValue::TokenStream(Arc::new(JadeTokenStream {
-        rx: Mutex::new(Some(rx)),
-        tokens_handle: Mutex::new(Some(handle)),
-        prompt_key: (prompt_text, None),
+        rx: Mutex::new(None),
+        tokens_handle: Mutex::new(None),
+        prompt_key: (prompt_text.clone(), None),
+        lazy_prompt: Mutex::new(Some(prompt_text)),
     })))
 }
 
@@ -1871,6 +2339,22 @@ async fn vm_drain_token_stream(
     state: &mut VmState,
     span: Span,
 ) -> Result<VmValue> {
+    // Start lazy inference (no constraints) if ?p hasn't been started yet.
+    {
+        let lazy = ts.lazy_prompt.lock().take();
+        if let Some(prompt_text) = lazy {
+            let backend = state.inference_backend.as_ref()
+                .ok_or(JadeError::MissingApiKey { span })?.clone();
+            let (rx, handle) = backend.infer_stream(llm::InferenceRequest {
+                prompt: prompt_text,
+                model: state.default_model.clone(),
+                max_tokens: state.max_tokens,
+                grammar: None, anchor: None, stop_anchor: None,
+            }, span).await?;
+            *ts.rx.lock() = Some(rx);
+            *ts.tokens_handle.lock() = Some(handle);
+        }
+    }
     let rx_opt = ts.rx.lock().take();
     let mut rx = rx_opt.ok_or(JadeError::DoubleStreamDrain { span })?;
     let mut text = String::new();
@@ -1884,6 +2368,12 @@ async fn vm_drain_token_stream(
                 state.token_count += tokens;
                 let tc = state.token_count;
                 state.globals.insert("__tokens__".to_string(), VmValue::Int(tc));
+                if let Some(backend) = &state.inference_backend {
+                    if let Some(name) = backend.reported_model_name() {
+                        state.default_model = name.clone();
+                        state.globals.insert("__model__".to_string(), VmValue::Str(name));
+                    }
+                }
             }
             Ok(Err(e)) => return Err(e),
             Err(e) => return Err(JadeError::AsyncPanic {
@@ -1896,24 +2386,184 @@ async fn vm_drain_token_stream(
     Ok(VmValue::Str(text))
 }
 
+/// Panic-guard for the mute pending buffer. In practice this is unreachable:
+/// for any mute literal of length N chars, the buffer resolves (match or flush)
+/// within N/avg_token_size tokens — well under a dozen for typical tags.
+/// This constant only exists to prevent an infinite loop if there is ever a
+/// bug in the prefix-check logic.
+const MUTE_BUFFER_BAILOUT: usize = 10_000;
+
+/// Core streaming-mute loop — separated from I/O so it can be tested directly.
+///
+/// Reads tokens from `rx`, writing non-muted bytes to `out`, and returns the
+/// full accumulated text (printed + muted combined) so callers can inspect the
+/// complete response.
+///
+/// Mute semantics (all use prefix-aware buffering):
+///
+///   `start_muted` — if true, suppression begins immediately from the first token.
+///       Used when a Grammar has no `anchor` (the entire response is structured
+///       output — suppress from generation start).
+///
+///   `region_start` — strings that enter muted mode on match. Once matched, ALL
+///       subsequent tokens are suppressed until a `region_stop` match (or EOS).
+///       Used when Grammar has an explicit `anchor` value.
+///
+///   `region_stop` — strings that exit muted mode on match (match itself is
+///       suppressed). If empty, muting is permanent once entered.
+///       Used for `stop_anchor` values.
+///
+/// While muted, partial `region_stop` prefixes at end-of-stream are discarded
+/// (handles daemon stopping mid-token on stop_anchor detection).
+pub(crate) async fn drain_tokens_with_mute<W: std::io::Write + Send>(
+    rx: &mut tokio::sync::mpsc::Receiver<String>,
+    start_muted: bool,
+    region_start: &[String],
+    region_stop: &[String],
+    out: &mut W,
+    newline: bool,
+) -> String {
+    let mut text = String::new();
+    let mut pending: Vec<String> = Vec::new();
+    let mut muted = start_muted;
+
+    while let Some(token) = rx.recv().await {
+        text.push_str(&token);
+
+        // Fast path: permanent mute (no stop anchor).
+        if muted && region_stop.is_empty() { continue; }
+        // Fast path: nothing to check while not muted.
+        if !muted && region_start.is_empty() {
+            let _ = out.write_all(token.as_bytes());
+            let _ = out.flush();
+            continue;
+        }
+
+        pending.push(token);
+
+        loop {
+            if pending.is_empty() { break; }
+            let pending_text: String = pending.join("");
+
+            if muted {
+                // Scanning for region_stop to exit muted mode.
+                let stop_hit = region_stop.iter()
+                    .filter_map(|s| pending_text.find(s.as_str()).map(|pos| (pos, s.len())))
+                    .min_by_key(|&(pos, _)| pos);
+
+                if let Some((pos, len)) = stop_hit {
+                    let after = pending_text[pos + len..].to_owned();
+                    pending.clear();
+                    if !after.is_empty() { pending.push(after); }
+                    muted = false;
+                    // continue inner loop to process remainder
+                } else if region_stop.iter().any(|s| s.starts_with(pending_text.as_str())) {
+                    if pending.len() >= MUTE_BUFFER_BAILOUT { pending.remove(0); }
+                    else { break; }
+                } else {
+                    pending.remove(0); // still muted, discard oldest
+                }
+            } else {
+                // Scanning for region_start to enter muted mode.
+                let hit = region_start.iter()
+                    .filter_map(|s| {
+                        pending_text.find(s.as_str()).map(|pos| (pos, s.len()))
+                    })
+                    .min_by_key(|&(pos, _)| pos);
+
+                let is_prefix = region_start.iter()
+                    .any(|s| s.starts_with(pending_text.as_str()));
+
+                if let Some((pre_len, lit_len)) = hit {
+                    if pre_len > 0 {
+                        let _ = out.write_all(pending_text[..pre_len].as_bytes());
+                        let _ = out.flush();
+                    }
+                    let after = pending_text[pre_len + lit_len..].to_owned();
+                    pending.clear();
+                    if !after.is_empty() { pending.push(after); }
+                    muted = true;
+                    // continue inner loop
+                } else if is_prefix {
+                    if pending.len() >= MUTE_BUFFER_BAILOUT {
+                        let flush = pending.remove(0);
+                        let _ = out.write_all(flush.as_bytes());
+                        let _ = out.flush();
+                    } else {
+                        break;
+                    }
+                } else {
+                    let flush = pending.remove(0);
+                    let _ = out.write_all(flush.as_bytes());
+                    let _ = out.flush();
+                }
+            }
+        }
+    }
+
+    // End of stream.
+    if muted {
+        // Inside unclosed region — discard remaining (handles partial stop tags).
+    } else {
+        let trailing: String = pending.join("");
+        if !trailing.is_empty() {
+            let is_partial = region_start.iter()
+                .any(|s| s.starts_with(trailing.as_str()));
+            if !is_partial {
+                let _ = out.write_all(trailing.as_bytes());
+                let _ = out.flush();
+            }
+        }
+    }
+    if newline { let _ = writeln!(out); }
+    text
+}
+
 /// Drain a `TokenStream`, printing each token to stdout as it arrives.
 /// Returns the accumulated text so `stream()` can return it as a `Str`.
+///
+/// `mute_patterns` lists the plain-text anchor strings extracted from Grammar
+/// values passed via `mute_on=`. Tokens at or after the anchor are suppressed
+/// from stdout; the full text is still returned for downstream parsing.
 async fn vm_drain_token_stream_printing(
     ts: Arc<JadeTokenStream>,
     state: &mut VmState,
     span: Span,
     newline: bool,
+    start_muted: bool,
+    region_start: &[String],
+    region_stop: &[String],
 ) -> Result<String> {
+    // Fallback lazy start with no constraints (for print(?p) and similar paths).
+    // If stream() already started inference with grammar constraints, this is a no-op.
+    {
+        let lazy = ts.lazy_prompt.lock().take();
+        if let Some(prompt_text) = lazy {
+            let backend = state.inference_backend.as_ref()
+                .ok_or(JadeError::MissingApiKey { span })?.clone();
+            let (rx, handle) = backend.infer_stream(llm::InferenceRequest {
+                prompt: prompt_text,
+                model: state.default_model.clone(),
+                max_tokens: state.max_tokens,
+                grammar: None, anchor: None, stop_anchor: None,
+            }, span).await?;
+            *ts.rx.lock() = Some(rx);
+            *ts.tokens_handle.lock() = Some(handle);
+        }
+    }
     let rx_opt = ts.rx.lock().take();
     let mut rx = rx_opt.ok_or(JadeError::DoubleStreamDrain { span })?;
-    let mut text = String::new();
-    while let Some(token) = rx.recv().await {
-        use std::io::Write as _;
-        print!("{}", token);
-        let _ = std::io::stdout().flush();
-        text.push_str(&token);
-    }
-    if newline { println!(); }
+
+    #[cfg(test)]
+    let text = if let Some(buf) = &state.test_stdout {
+        let mut w = TestWriter(std::sync::Arc::clone(buf));
+        drain_tokens_with_mute(&mut rx, start_muted, region_start, region_stop, &mut w, newline).await
+    } else {
+        drain_tokens_with_mute(&mut rx, start_muted, region_start, region_stop, &mut std::io::stdout(), newline).await
+    };
+    #[cfg(not(test))]
+    let text = drain_tokens_with_mute(&mut rx, start_muted, region_start, region_stop, &mut std::io::stdout(), newline).await;
+
     let h_opt = ts.tokens_handle.lock().take();
     if let Some(h) = h_opt {
         match h.await {
@@ -1921,6 +2571,12 @@ async fn vm_drain_token_stream_printing(
                 state.token_count += tokens;
                 let tc = state.token_count;
                 state.globals.insert("__tokens__".to_string(), VmValue::Int(tc));
+                if let Some(backend) = &state.inference_backend {
+                    if let Some(name) = backend.reported_model_name() {
+                        state.default_model = name.clone();
+                        state.globals.insert("__model__".to_string(), VmValue::Str(name));
+                    }
+                }
             }
             Ok(Err(e)) => return Err(e),
             Err(e) => return Err(JadeError::AsyncPanic {
@@ -2155,20 +2811,20 @@ fn eval_binop_dynamic(op: &BinOpKind, l: VmValue, r: VmValue, span: Span) -> Res
                 if bf == 0.0 { Err(JadeError::RemainderByZero{span}) } else { Ok(VmValue::Float(af%bf)) }
             }
         },
-        BitAnd => match (l,r) { (VmValue::Int(a),VmValue::Int(b)) => Ok(VmValue::Int(a&b)), _ => Err(JadeError::TypeError{op:"&".to_string(),span}) },
-        BitOr  => match (l,r) { (VmValue::Int(a),VmValue::Int(b)) => Ok(VmValue::Int(a|b)), _ => Err(JadeError::TypeError{op:"|".to_string(),span}) },
-        BitXor => match (l,r) { (VmValue::Int(a),VmValue::Int(b)) => Ok(VmValue::Int(a^b)), _ => Err(JadeError::TypeError{op:"^".to_string(),span}) },
+        BitAnd => match (l,r) { (VmValue::Int(a),VmValue::Int(b)) => Ok(VmValue::Int(a&b)), (l,r) => Err(JadeError::TypeError{message:format!("'&' requires int operands, got {} and {}", value_type_name(&l), value_type_name(&r)),span}) },
+        BitOr  => match (l,r) { (VmValue::Int(a),VmValue::Int(b)) => Ok(VmValue::Int(a|b)), (l,r) => Err(JadeError::TypeError{message:format!("'|' requires int operands, got {} and {}", value_type_name(&l), value_type_name(&r)),span}) },
+        BitXor => match (l,r) { (VmValue::Int(a),VmValue::Int(b)) => Ok(VmValue::Int(a^b)), (l,r) => Err(JadeError::TypeError{message:format!("'^' requires int operands, got {} and {}", value_type_name(&l), value_type_name(&r)),span}) },
         Shl => match (l,r) {
             (VmValue::Int(a),VmValue::Int(b)) => {
                 if b<0||b>=64 { Err(JadeError::InvalidShift{amount:b,span}) } else { Ok(VmValue::Int(a<<b as u32)) }
             }
-            _ => Err(JadeError::TypeError{op:"<<".to_string(),span})
+            _ => Err(JadeError::TypeError{message:"'<<' requires int operands".to_string(),span})
         },
         Shr => match (l,r) {
             (VmValue::Int(a),VmValue::Int(b)) => {
                 if b<0||b>=64 { Err(JadeError::InvalidShift{amount:b,span}) } else { Ok(VmValue::Int(a>>b as u32)) }
             }
-            _ => Err(JadeError::TypeError{op:">>".to_string(),span})
+            _ => Err(JadeError::TypeError{message:"'>>' requires int operands".to_string(),span})
         },
         Eq => match (l,r) {
             (VmValue::Int(a),VmValue::Int(b))       => Ok(VmValue::Bool(a==b)),
@@ -2177,7 +2833,7 @@ fn eval_binop_dynamic(op: &BinOpKind, l: VmValue, r: VmValue, span: Span) -> Res
             (VmValue::Str(a),VmValue::Str(b))       => Ok(VmValue::Bool(a==b)),
             (VmValue::Nil, VmValue::Nil)            => Ok(VmValue::Bool(true)),
             (VmValue::Nil, _) | (_, VmValue::Nil)  => Ok(VmValue::Bool(false)),
-            _ => Err(JadeError::TypeError{op:"==".to_string(),span})
+            (l,r) => Err(JadeError::TypeError{message:format!("'==' cannot compare {} and {}", value_type_name(&l), value_type_name(&r)),span})
         },
         Ne => match (l,r) {
             (VmValue::Int(a),VmValue::Int(b))       => Ok(VmValue::Bool(a!=b)),
@@ -2186,7 +2842,7 @@ fn eval_binop_dynamic(op: &BinOpKind, l: VmValue, r: VmValue, span: Span) -> Res
             (VmValue::Str(a),VmValue::Str(b))       => Ok(VmValue::Bool(a!=b)),
             (VmValue::Nil, VmValue::Nil)            => Ok(VmValue::Bool(false)),
             (VmValue::Nil, _) | (_, VmValue::Nil)  => Ok(VmValue::Bool(true)),
-            _ => Err(JadeError::TypeError{op:"!=".to_string(),span})
+            (l,r) => Err(JadeError::TypeError{message:format!("'!=' cannot compare {} and {}", value_type_name(&l), value_type_name(&r)),span})
         },
         Lt => cmp_order(l,r,"<",span,|a:f64,b:f64| a<b, |a:i64,b:i64| a<b, |a:&str,b:&str| a<b, |a:bool,b:bool| !a&&b),
         Gt => cmp_order(l,r,">",span,|a:f64,b:f64| a>b, |a:i64,b:i64| a>b, |a:&str,b:&str| a>b, |a:bool,b:bool| a&&!b),
@@ -2218,18 +2874,18 @@ fn vm_contains(needle: VmValue, haystack: VmValue, span: Span) -> Result<bool> {
         VmValue::Dict(map) => {
             let key = match needle {
                 VmValue::Str(s) => s,
-                _ => return Err(JadeError::TypeError { op: "in (dict key must be str)".to_string(), span }),
+                ref other => return Err(JadeError::TypeError { message: format!("'in' dict key must be str, got {}", value_type_name(other)), span }),
             };
             Ok(map.contains_key(&key))
         }
         VmValue::Str(s) => {
             let sub = match needle {
                 VmValue::Str(sub) => sub,
-                _ => return Err(JadeError::TypeError { op: "in (substring must be str)".to_string(), span }),
+                ref other => return Err(JadeError::TypeError { message: format!("'in' substring must be str, got {}", value_type_name(other)), span }),
             };
             Ok(s.contains(sub.as_str()))
         }
-        _ => Err(JadeError::TypeError { op: "in".to_string(), span }),
+        ref other => Err(JadeError::TypeError { message: format!("'in' requires array, dict, or str, got {}", value_type_name(other)), span }),
     }
 }
 
@@ -2247,25 +2903,25 @@ fn cmp_order(
         (VmValue::Float(a), VmValue::Int(b))   => Ok(VmValue::Bool(ff(a,b as f64))),
         (VmValue::Bool(a),  VmValue::Bool(b))  => Ok(VmValue::Bool(bb(a,b))),
         (VmValue::Str(a),   VmValue::Str(b))   => Ok(VmValue::Bool(ss(&a,&b))),
-        _ => Err(JadeError::TypeError { op: op.to_string(), span }),
+        (l, r) => Err(JadeError::TypeError { message: format!("'{}' cannot compare {} and {}", op, value_type_name(&l), value_type_name(&r)), span }),
     }
 }
 
 fn eval_unaryop_dynamic(op: &UnaryOpKind, v: VmValue, span: Span) -> Result<VmValue> {
     match op {
-        UnaryOpKind::BitNot => match v { VmValue::Int(i) => Ok(VmValue::Int(!i)), _ => Err(JadeError::TypeError{op:"~".to_string(),span}) },
-        UnaryOpKind::Not    => match v { VmValue::Bool(b)=> Ok(VmValue::Bool(!b)),_ => Err(JadeError::TypeError{op:"!".to_string(),span}) },
+        UnaryOpKind::BitNot => match v { VmValue::Int(i) => Ok(VmValue::Int(!i)), ref v => Err(JadeError::TypeError{message:format!("'~' requires int, got {}", value_type_name(v)),span}) },
+        UnaryOpKind::Not    => match v { VmValue::Bool(b)=> Ok(VmValue::Bool(!b)), ref v => Err(JadeError::TypeError{message:format!("'!' requires bool, got {}", value_type_name(v)),span}) },
         UnaryOpKind::Neg    => match v {
             VmValue::Int(i)   => Ok(VmValue::Int(-i)),
             VmValue::Float(f) => Ok(VmValue::Float(-f)),
-            _ => Err(JadeError::TypeError{op:"-".to_string(),span})
+            ref v => Err(JadeError::TypeError{message:format!("unary '-' requires int or float, got {}", value_type_name(v)),span})
         },
     }
 }
 
 fn to_floats(l: VmValue, r: VmValue, op: &BinOpKind, span: Span) -> Result<(f64, f64)> {
-    let lf = match l { VmValue::Int(i) => i as f64, VmValue::Float(f) => f, _ => return Err(JadeError::TypeError { op: format!("{:?}", op), span }) };
-    let rf = match r { VmValue::Int(i) => i as f64, VmValue::Float(f) => f, _ => return Err(JadeError::TypeError { op: format!("{:?}", op), span }) };
+    let lf = match l { VmValue::Int(i) => i as f64, VmValue::Float(f) => f, _ => return Err(JadeError::TypeError { message: format!("{:?} requires numeric operands", op), span }) };
+    let rf = match r { VmValue::Int(i) => i as f64, VmValue::Float(f) => f, _ => return Err(JadeError::TypeError { message: format!("{:?} requires numeric operands", op), span }) };
     Ok((lf, rf))
 }
 
@@ -2278,14 +2934,18 @@ fn cmp_dynamic(slots: &[VmValue], l: Reg, r: Reg, op: &str, span: Span) -> Resul
             (VmValue::Float(a),VmValue::Float(b)) => a==b,
             (VmValue::Bool(a),VmValue::Bool(b))   => a==b,
             (VmValue::Str(a),VmValue::Str(b))     => a==b,
-            _ => return Err(JadeError::TypeError{op:op.to_string(),span}),
+            (VmValue::Nil, VmValue::Nil)           => true,
+            (VmValue::Nil, _) | (_, VmValue::Nil) => false,
+            (lv,rv) => return Err(JadeError::TypeError{message:format!("'{}' cannot compare {} and {}", op, value_type_name(&lv), value_type_name(&rv)),span}),
         },
         "!=" => match (lv,rv) {
             (VmValue::Int(a),VmValue::Int(b))     => a!=b,
             (VmValue::Float(a),VmValue::Float(b)) => a!=b,
             (VmValue::Bool(a),VmValue::Bool(b))   => a!=b,
             (VmValue::Str(a),VmValue::Str(b))     => a!=b,
-            _ => return Err(JadeError::TypeError{op:op.to_string(),span}),
+            (VmValue::Nil, VmValue::Nil)           => false,
+            (VmValue::Nil, _) | (_, VmValue::Nil) => true,
+            (lv,rv) => return Err(JadeError::TypeError{message:format!("'{}' cannot compare {} and {}", op, value_type_name(&lv), value_type_name(&rv)),span}),
         },
         "<"  => match (lv,rv) {
             (VmValue::Int(a),VmValue::Int(b))     => a<b,
@@ -2294,7 +2954,7 @@ fn cmp_dynamic(slots: &[VmValue], l: Reg, r: Reg, op: &str, span: Span) -> Resul
             (VmValue::Float(a),VmValue::Int(b))   => a<(b as f64),
             (VmValue::Bool(a),VmValue::Bool(b))   => !a&&b,
             (VmValue::Str(a),VmValue::Str(b))     => a<b,
-            _ => return Err(JadeError::TypeError{op:op.to_string(),span}),
+            (lv,rv) => return Err(JadeError::TypeError{message:format!("'{}' cannot compare {} and {}", op, value_type_name(&lv), value_type_name(&rv)),span}),
         },
         ">"  => match (lv,rv) {
             (VmValue::Int(a),VmValue::Int(b))     => a>b,
@@ -2303,7 +2963,7 @@ fn cmp_dynamic(slots: &[VmValue], l: Reg, r: Reg, op: &str, span: Span) -> Resul
             (VmValue::Float(a),VmValue::Int(b))   => a>(b as f64),
             (VmValue::Bool(a),VmValue::Bool(b))   => a&&!b,
             (VmValue::Str(a),VmValue::Str(b))     => a>b,
-            _ => return Err(JadeError::TypeError{op:op.to_string(),span}),
+            (lv,rv) => return Err(JadeError::TypeError{message:format!("'{}' cannot compare {} and {}", op, value_type_name(&lv), value_type_name(&rv)),span}),
         },
         "<=" => match (lv,rv) {
             (VmValue::Int(a),VmValue::Int(b))     => a<=b,
@@ -2312,7 +2972,7 @@ fn cmp_dynamic(slots: &[VmValue], l: Reg, r: Reg, op: &str, span: Span) -> Resul
             (VmValue::Float(a),VmValue::Int(b))   => a<=(b as f64),
             (VmValue::Bool(a),VmValue::Bool(b))   => a==b||(!a&&b),
             (VmValue::Str(a),VmValue::Str(b))     => a<=b,
-            _ => return Err(JadeError::TypeError{op:op.to_string(),span}),
+            (lv,rv) => return Err(JadeError::TypeError{message:format!("'{}' cannot compare {} and {}", op, value_type_name(&lv), value_type_name(&rv)),span}),
         },
         ">=" => match (lv,rv) {
             (VmValue::Int(a),VmValue::Int(b))     => a>=b,
@@ -2321,7 +2981,7 @@ fn cmp_dynamic(slots: &[VmValue], l: Reg, r: Reg, op: &str, span: Span) -> Resul
             (VmValue::Float(a),VmValue::Int(b))   => a>=(b as f64),
             (VmValue::Bool(a),VmValue::Bool(b))   => a==b||(a&&!b),
             (VmValue::Str(a),VmValue::Str(b))     => a>=b,
-            _ => return Err(JadeError::TypeError{op:op.to_string(),span}),
+            (lv,rv) => return Err(JadeError::TypeError{message:format!("'{}' cannot compare {} and {}", op, value_type_name(&lv), value_type_name(&rv)),span}),
         },
         _ => unreachable!(),
     };
@@ -2351,8 +3011,8 @@ fn vm_index(obj: VmValue, idx: VmValue, span: Span) -> Result<VmValue> {
         (VmValue::Dict(m), VmValue::Str(k)) => {
             m.get(&k).cloned().ok_or_else(|| JadeError::KeyNotFound { key: k, span })
         }
-        (VmValue::Dict(_), _) => Err(JadeError::TypeError { op: "dict index".to_string(), span }),
-        _ => Err(JadeError::TypeError { op: "[]".to_string(), span }),
+        (VmValue::Dict(_), idx) => Err(JadeError::TypeError { message: format!("dict index must be str, got {}", value_type_name(&idx)), span }),
+        (obj, idx) => Err(JadeError::TypeError { message: format!("value of type {} is not indexable with {}", value_type_name(&obj), value_type_name(&idx)), span }),
     }
 }
 
@@ -2381,28 +3041,28 @@ fn ensure_slot(slots: &mut Vec<VmValue>, r: Reg) {
 fn get_int(slots: &[VmValue], r: Reg, span: Span) -> Result<i64> {
     match get(slots, r) {
         VmValue::Int(i) => Ok(*i),
-        _ => Err(JadeError::TypeError { op: "expected int".to_string(), span }),
+        _ => Err(JadeError::TypeError { message: "expected int".to_string(), span }),
     }
 }
 
 fn get_flt(slots: &[VmValue], r: Reg, span: Span) -> Result<f64> {
     match get(slots, r) {
         VmValue::Float(f) => Ok(*f),
-        _ => Err(JadeError::TypeError { op: "expected float".to_string(), span }),
+        _ => Err(JadeError::TypeError { message: "expected float".to_string(), span }),
     }
 }
 
 fn get_bool(slots: &[VmValue], r: Reg, span: Span) -> Result<bool> {
     match get(slots, r) {
         VmValue::Bool(b) => Ok(*b),
-        _ => Err(JadeError::TypeError { op: "expected bool".to_string(), span }),
+        _ => Err(JadeError::TypeError { message: "expected bool".to_string(), span }),
     }
 }
 
 fn get_str(slots: &[VmValue], r: Reg, span: Span) -> Result<String> {
     match get(slots, r) {
         VmValue::Str(s) => Ok(s.clone()),
-        _ => Err(JadeError::TypeError { op: "expected str".to_string(), span }),
+        _ => Err(JadeError::TypeError { message: "expected str".to_string(), span }),
     }
 }
 
@@ -2412,7 +3072,7 @@ fn get_str(slots: &[VmValue], r: Reg, span: Span) -> Result<String> {
 fn get_str_ref<'a>(slots: &'a [VmValue], r: Reg, span: Span) -> Result<&'a str> {
     match get(slots, r) {
         VmValue::Str(s) => Ok(s.as_str()),
-        _ => Err(JadeError::TypeError { op: "expected str".to_string(), span }),
+        _ => Err(JadeError::TypeError { message: "expected str".to_string(), span }),
     }
 }
 
@@ -2436,6 +3096,25 @@ fn str2<'a>(slots: &'a [VmValue], l: Reg, r: Reg, span: Span) -> Result<(&'a str
 
 /// Walk an instruction and return the highest register index it references.
 /// Used to size the slots vec defensively in `execute_chunk`.
+/// Evaluate a struct field default expression if it is a simple literal.
+/// Returns None for non-literal defaults (they stay unset and will cause a
+/// runtime error if accessed — the same behaviour as before this fix).
+fn eval_literal_default(expr: &crate::frontend::ast::Expr) -> Option<VmValue> {
+    use crate::frontend::ast::Expr;
+    match expr {
+        Expr::Str { value, .. }     => Some(VmValue::Str(value.clone())),
+        Expr::Integer { value, .. } => Some(VmValue::Int(*value)),
+        Expr::Float { value, .. }   => Some(VmValue::Float(*value)),
+        Expr::Bool { value, .. }    => Some(VmValue::Bool(*value)),
+        Expr::Identifier { name, .. } if name == "nil" => Some(VmValue::Nil),
+        Expr::Array { elements, .. } if elements.is_empty() =>
+            Some(VmValue::Array(Arc::new(Mutex::new(vec![])))),
+        Expr::Dict { entries, .. } if entries.is_empty() =>
+            Some(VmValue::Dict(HashMap::new())),
+        _ => None,
+    }
+}
+
 fn instr_max_reg(instr: &Instr) -> u32 {
     match instr {
         Instr::LoadInt(d,_)|Instr::LoadFloat(d,_)|Instr::LoadBool(d,_)
@@ -2477,7 +3156,7 @@ fn instr_max_reg(instr: &Instr) -> u32 {
         Instr::SetField(o,_,v) => (*o).max(*v),
         Instr::JumpIfFalse(c,_)|Instr::JumpIfTrue(c,_) => *c,
         Instr::Jump(_)|Instr::Halt|Instr::Return(None)
-        |Instr::ImportFile(_)|Instr::ImportFrom(_,_) => 0,
+        |Instr::ImportFile(_,_)|Instr::ImportFrom(_,_) => 0,
         Instr::Return(Some(r)) => *r,
         Instr::Call(d,c,args) => {
             let mut m = (*d).max(*c);

@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
+use parking_lot::Mutex;
 
 use crate::frontend::{
     ast::{BinOpKind, UnaryOpKind},
@@ -27,6 +28,13 @@ pub struct CompiledFn {
     pub chunk: Chunk,
     /// Total number of register slots needed by this function frame.
     pub n_slots: u32,
+    /// Source file this function was compiled from. Empty for top-level programs;
+    /// set to the module's path when the function is loaded from an imported file.
+    pub source_file: String,
+    /// Persistent module scope shared by all functions from the same imported file.
+    /// `None` for top-level functions. Reads and writes to module-level variables
+    /// are routed through this scope so mutations survive across calls.
+    pub module_scope: Option<Arc<Mutex<HashMap<String, crate::compiler::vm::VmValue>>>>,
 }
 
 /// A compiled code unit: top-level program or function body.
@@ -84,10 +92,6 @@ impl Chunk {
 
     pub fn len(&self) -> usize {
         self.code.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.code.is_empty()
     }
 }
 
@@ -272,9 +276,10 @@ pub enum Instr {
     Join(Reg, Vec<Reg>),
 
     // ── Imports ────────────────────────────────────────────────────────────
-    /// Run the full pipeline for the file at `path` (relative to the current
-    /// file's directory) and merge its top-level exports into the running state.
-    ImportFile(String),
+    /// Run the full pipeline for the file at `path` and bind its exports under `namespace`.
+    /// `namespace` is either the explicit `as` alias or the file's stem (e.g. `lib` for `lib.jde`).
+    /// stdlib packages ignore this field and use their own `global_name`.
+    ImportFile(String, String),
     /// `from X use Y, Z` — load package/file at path, then bind only the listed names directly.
     ImportFrom(String, Vec<String>),
 }

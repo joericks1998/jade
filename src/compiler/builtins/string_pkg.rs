@@ -12,28 +12,28 @@ const ZERO: Span = Span { line: 0, col: 0 };
 fn str_len(args: &[VmValue]) -> Result<VmValue> {
     match &args[0] {
         VmValue::Str(s) => Ok(VmValue::Int(s.chars().count() as i64)),
-        _ => Err(JadeError::TypeError { op: "str.len".to_string(), span: ZERO }),
+        _ => Err(JadeError::TypeError { message: "str.len".to_string(), span: ZERO }),
     }
 }
 
 fn str_upper(args: &[VmValue]) -> Result<VmValue> {
     match &args[0] {
         VmValue::Str(s) => Ok(VmValue::Str(s.to_uppercase())),
-        _ => Err(JadeError::TypeError { op: "str.upper".to_string(), span: ZERO }),
+        _ => Err(JadeError::TypeError { message: "str.upper".to_string(), span: ZERO }),
     }
 }
 
 fn str_lower(args: &[VmValue]) -> Result<VmValue> {
     match &args[0] {
         VmValue::Str(s) => Ok(VmValue::Str(s.to_lowercase())),
-        _ => Err(JadeError::TypeError { op: "str.lower".to_string(), span: ZERO }),
+        _ => Err(JadeError::TypeError { message: "str.lower".to_string(), span: ZERO }),
     }
 }
 
 fn str_trim(args: &[VmValue]) -> Result<VmValue> {
     match &args[0] {
         VmValue::Str(s) => Ok(VmValue::Str(s.trim().to_string())),
-        _ => Err(JadeError::TypeError { op: "str.trim".to_string(), span: ZERO }),
+        _ => Err(JadeError::TypeError { message: "str.trim".to_string(), span: ZERO }),
     }
 }
 
@@ -43,14 +43,14 @@ fn str_split(args: &[VmValue]) -> Result<VmValue> {
             let parts: Vec<VmValue> = s.split(sep.as_str()).map(|p| VmValue::Str(p.to_string())).collect();
             Ok(make_array(parts))
         }
-        _ => Err(JadeError::TypeError { op: "str.split".to_string(), span: ZERO }),
+        _ => Err(JadeError::TypeError { message: "str.split".to_string(), span: ZERO }),
     }
 }
 
 fn str_contains(args: &[VmValue]) -> Result<VmValue> {
     match (&args[0], args.get(1)) {
         (VmValue::Str(s), Some(VmValue::Str(sub))) => Ok(VmValue::Bool(s.contains(sub.as_str()))),
-        _ => Err(JadeError::TypeError { op: "str.contains".to_string(), span: ZERO }),
+        _ => Err(JadeError::TypeError { message: "str.contains".to_string(), span: ZERO }),
     }
 }
 
@@ -59,21 +59,21 @@ fn str_replace(args: &[VmValue]) -> Result<VmValue> {
         (VmValue::Str(s), Some(VmValue::Str(from)), Some(VmValue::Str(to))) => {
             Ok(VmValue::Str(s.replace(from.as_str(), to.as_str())))
         }
-        _ => Err(JadeError::TypeError { op: "str.replace".to_string(), span: ZERO }),
+        _ => Err(JadeError::TypeError { message: "str.replace".to_string(), span: ZERO }),
     }
 }
 
 fn str_starts_with(args: &[VmValue]) -> Result<VmValue> {
     match (&args[0], args.get(1)) {
         (VmValue::Str(s), Some(VmValue::Str(prefix))) => Ok(VmValue::Bool(s.starts_with(prefix.as_str()))),
-        _ => Err(JadeError::TypeError { op: "str.starts_with".to_string(), span: ZERO }),
+        _ => Err(JadeError::TypeError { message: "str.starts_with".to_string(), span: ZERO }),
     }
 }
 
 fn str_ends_with(args: &[VmValue]) -> Result<VmValue> {
     match (&args[0], args.get(1)) {
         (VmValue::Str(s), Some(VmValue::Str(suffix))) => Ok(VmValue::Bool(s.ends_with(suffix.as_str()))),
-        _ => Err(JadeError::TypeError { op: "str.ends_with".to_string(), span: ZERO }),
+        _ => Err(JadeError::TypeError { message: "str.ends_with".to_string(), span: ZERO }),
     }
 }
 
@@ -101,35 +101,35 @@ fn pkg_split(args: &[VmValue]) -> Result<VmValue> {
             let parts: Vec<VmValue> = s.split(sep.as_str()).map(|p| VmValue::Str(p.to_string())).collect();
             Ok(make_array(parts))
         }
-        _ => Err(JadeError::TypeError { op: "string.split".to_string(), span: ZERO }),
+        _ => Err(JadeError::TypeError { message: "string.split".to_string(), span: ZERO }),
     }
 }
 
 fn pkg_upper(args: &[VmValue]) -> Result<VmValue> {
     match &args[0] {
         VmValue::Str(s) => Ok(VmValue::Str(s.to_uppercase())),
-        _ => Err(JadeError::TypeError { op: "string.upper".to_string(), span: ZERO }),
+        _ => Err(JadeError::TypeError { message: "string.upper".to_string(), span: ZERO }),
     }
 }
 
 fn pkg_lower(args: &[VmValue]) -> Result<VmValue> {
     match &args[0] {
         VmValue::Str(s) => Ok(VmValue::Str(s.to_lowercase())),
-        _ => Err(JadeError::TypeError { op: "string.lower".to_string(), span: ZERO }),
+        _ => Err(JadeError::TypeError { message: "string.lower".to_string(), span: ZERO }),
     }
 }
 
 fn pkg_trim(args: &[VmValue]) -> Result<VmValue> {
     match &args[0] {
         VmValue::Str(s) => Ok(VmValue::Str(s.trim().to_string())),
-        _ => Err(JadeError::TypeError { op: "string.trim".to_string(), span: ZERO }),
+        _ => Err(JadeError::TypeError { message: "string.trim".to_string(), span: ZERO }),
     }
 }
 
 fn pkg_contains(args: &[VmValue]) -> Result<VmValue> {
     match (&args[0], args.get(1)) {
         (VmValue::Str(s), Some(VmValue::Str(sub))) => Ok(VmValue::Bool(s.contains(sub.as_str()))),
-        _ => Err(JadeError::TypeError { op: "string.contains".to_string(), span: ZERO }),
+        _ => Err(JadeError::TypeError { message: "string.contains".to_string(), span: ZERO }),
     }
 }
 
@@ -138,21 +138,21 @@ fn pkg_replace(args: &[VmValue]) -> Result<VmValue> {
         (VmValue::Str(s), Some(VmValue::Str(from)), Some(VmValue::Str(to))) => {
             Ok(VmValue::Str(s.replace(from.as_str(), to.as_str())))
         }
-        _ => Err(JadeError::TypeError { op: "string.replace".to_string(), span: ZERO }),
+        _ => Err(JadeError::TypeError { message: "string.replace".to_string(), span: ZERO }),
     }
 }
 
 fn pkg_starts_with(args: &[VmValue]) -> Result<VmValue> {
     match (&args[0], args.get(1)) {
         (VmValue::Str(s), Some(VmValue::Str(prefix))) => Ok(VmValue::Bool(s.starts_with(prefix.as_str()))),
-        _ => Err(JadeError::TypeError { op: "string.starts_with".to_string(), span: ZERO }),
+        _ => Err(JadeError::TypeError { message: "string.starts_with".to_string(), span: ZERO }),
     }
 }
 
 fn pkg_ends_with(args: &[VmValue]) -> Result<VmValue> {
     match (&args[0], args.get(1)) {
         (VmValue::Str(s), Some(VmValue::Str(suffix))) => Ok(VmValue::Bool(s.ends_with(suffix.as_str()))),
-        _ => Err(JadeError::TypeError { op: "string.ends_with".to_string(), span: ZERO }),
+        _ => Err(JadeError::TypeError { message: "string.ends_with".to_string(), span: ZERO }),
     }
 }
 

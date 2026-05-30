@@ -8,6 +8,7 @@ pub mod jade_os;
 pub mod openai;
 
 /// A request sent to an inference backend.
+#[derive(Clone)]
 pub struct InferenceRequest {
     pub prompt: String,
     pub model: String,
@@ -18,6 +19,9 @@ pub struct InferenceRequest {
     /// Anchor string; if set, grammar enforcement begins only after the model emits this string.
     /// Passed through to the inference daemon; ignored by API-based backends.
     pub anchor: Option<String>,
+    /// Stop anchor; if set, generation stops and the stop string is stripped when it appears.
+    /// Passed through to the inference daemon; ignored by API-based backends.
+    pub stop_anchor: Option<String>,
 }
 
 /// A successful response from an inference backend.
@@ -30,6 +34,22 @@ pub struct InferenceResponse {
 #[async_trait::async_trait]
 pub trait InferenceBackend: Send + Sync {
     async fn infer(&self, req: InferenceRequest, span: Span) -> Result<InferenceResponse>;
+
+    /// Returns the model name reported by the backend after inference, if available.
+    /// Only implemented by `JadeOsBackend`; API backends return `None`.
+    fn reported_model_name(&self) -> Option<String> { None }
+
+    /// Count the tokens in `prompt` without running generation.
+    /// Falls back to character-count estimate for backends that don't support it.
+    async fn count_tokens(&self, prompt: &str, _span: Span) -> Result<i64> {
+        Ok((prompt.len() / 4) as i64)
+    }
+
+    /// Return the daemon-wide cumulative token counter.
+    /// Returns 0 for backends that don't track it (API backends).
+    async fn total_tokens(&self, _span: Span) -> Result<i64> {
+        Ok(0)
+    }
 
     /// Stream tokens as they arrive. Returns a channel receiver and a join handle
     /// that resolves to `tokens_used` when the stream is exhausted.
@@ -93,31 +113,6 @@ pub fn select_backend(config: &crate::config::JadeConfig) -> Option<Arc<dyn Infe
         .and_then(|key| build_backend(&config.provider, key, &config.model, config.max_parallel).ok())
 }
 
-
-/// Synchronous bridge: run an async `infer` call from the tree-walk REPL path.
-///
-/// Uses `block_in_place` when a multi-threaded tokio runtime is active (REPL under
-/// `#[tokio::main]`), which yields the thread to the scheduler without panicking.
-/// Falls back to a fresh single-threaded runtime in tests or bare sync contexts.
-pub fn infer_sync(
-    backend: &dyn InferenceBackend,
-    req: InferenceRequest,
-    span: crate::frontend::error::Span,
-) -> crate::frontend::error::Result<InferenceResponse> {
-    let fut = backend.infer(req, span);
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(fut)),
-        Err(_) => tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| crate::frontend::error::JadeError::InferenceError {
-                message: format!("failed to create tokio runtime for sync inference: {e}"),
-                span: crate::frontend::error::Span { line: 0, col: 0 },
-            })?
-            .block_on(fut),
-    }
-}
-
 // ── Mock backend (test builds only) ──────────────────────────────────────────
 
 /// Deterministic mock backend for unit tests. Not available at runtime.
@@ -131,12 +126,17 @@ pub struct MockBackend {
     /// When non-empty, responses are consumed in FIFO order regardless of heuristics.
     /// Used by unit tests that need precise control.
     pub responses: std::sync::Mutex<std::collections::VecDeque<String>>,
+    /// All requests sent to this backend, in order. Lets tests verify grammar constraints.
+    pub captured: std::sync::Mutex<Vec<InferenceRequest>>,
 }
 
 #[cfg(test)]
 impl Default for MockBackend {
     fn default() -> Self {
-        MockBackend { responses: std::sync::Mutex::new(std::collections::VecDeque::new()) }
+        MockBackend {
+            responses: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            captured: std::sync::Mutex::new(Vec::new()),
+        }
     }
 }
 
@@ -147,6 +147,7 @@ impl MockBackend {
             responses: std::sync::Mutex::new(
                 responses.into_iter().map(|s| s.to_string()).collect()
             ),
+            captured: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -166,6 +167,7 @@ impl MockBackend {
 #[async_trait::async_trait]
 impl InferenceBackend for MockBackend {
     async fn infer(&self, req: InferenceRequest, _span: Span) -> Result<InferenceResponse> {
+        self.captured.lock().unwrap().push(req.clone());
         let text = self.responses.lock().unwrap().pop_front()
             .unwrap_or_else(|| Self::mock_response(&req.prompt));
         Ok(InferenceResponse { text, tokens_used: 10_i64 })

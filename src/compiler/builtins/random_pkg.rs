@@ -25,11 +25,11 @@ fn random_int(args: &[VmValue]) -> Result<VmValue> {
     }
     let lo = match &args[0] {
         VmValue::Int(i) => *i,
-        _ => return Err(JadeError::TypeError { op: "random.int".to_string(), span: ZERO }),
+        _ => return Err(JadeError::TypeError { message: "random.int".to_string(), span: ZERO }),
     };
     let hi = match &args[1] {
         VmValue::Int(i) => *i,
-        _ => return Err(JadeError::TypeError { op: "random.int".to_string(), span: ZERO }),
+        _ => return Err(JadeError::TypeError { message: "random.int".to_string(), span: ZERO }),
     };
     if lo > hi {
         return Err(JadeError::IoError {
@@ -67,7 +67,7 @@ fn random_choice(args: &[VmValue]) -> Result<VmValue> {
             let idx = get_rng().lock().gen_range(0..guard.len());
             Ok(guard[idx].clone())
         }
-        _ => Err(JadeError::TypeError { op: "random.choice".to_string(), span: ZERO }),
+        _ => Err(JadeError::TypeError { message: "random.choice".to_string(), span: ZERO }),
     }
 }
 
@@ -88,7 +88,7 @@ fn random_shuffle(args: &[VmValue]) -> Result<VmValue> {
             }
             Ok(VmValue::Nil)
         }
-        _ => Err(JadeError::TypeError { op: "random.shuffle".to_string(), span: ZERO }),
+        _ => Err(JadeError::TypeError { message: "random.shuffle".to_string(), span: ZERO }),
     }
 }
 
@@ -99,7 +99,7 @@ fn random_seed(args: &[VmValue]) -> Result<VmValue> {
     }
     let n = match &args[0] {
         VmValue::Int(i) => *i as u64,
-        _ => return Err(JadeError::TypeError { op: "random.seed".to_string(), span: ZERO }),
+        _ => return Err(JadeError::TypeError { message: "random.seed".to_string(), span: ZERO }),
     };
     *get_rng().lock() = StdRng::seed_from_u64(n);
     Ok(VmValue::Nil)

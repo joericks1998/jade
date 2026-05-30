@@ -164,14 +164,9 @@ fn test_infer_array_empty() {
 
 #[test]
 fn test_infer_heterogeneous_array_widens_to_unknown() {
-    // Heterogeneous arrays are allowed; the type widens to Array(Unknown).
-    let prog = infer_ok(r#"let a = [1, "hello"]"#);
-    match &prog.stmts[0] {
-        crate::compiler::tir::TStmt::Let { value, .. } => {
-            assert!(matches!(value.ty, crate::compiler::tir::JadeType::Array(_)));
-        }
-        _ => panic!("expected Let"),
-    }
+    // Heterogeneous arrays are now a type error.
+    let err = infer_err(r#"let a = [1, "hello"]"#);
+    assert!(matches!(err, crate::frontend::error::JadeError::HeterogeneousArray { .. }));
 }
 
 // ── Control flow ──────────────────────────────────────────────────────────
@@ -249,6 +244,49 @@ fn test_infer_struct_extra_field_is_error() {
     assert!(matches!(err, JadeError::UndefinedField { .. }));
 }
 
+#[test]
+fn test_infer_empty_struct_literal_type() {
+    let tp = infer_ok("struct Unit {}\nlet u = Unit {}");
+    let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!() };
+    assert_eq!(value.ty, JadeType::Struct("Unit".to_string()));
+}
+
+#[test]
+fn test_infer_empty_struct_extra_field_is_error() {
+    let err = infer_err("struct Unit {}\nlet u = Unit { x: 1 }");
+    assert!(matches!(err, JadeError::UndefinedField { .. }));
+}
+
+// ── Imports ───────────────────────────────────────────────────────────────
+
+#[test]
+fn test_infer_file_import_without_alias_is_error() {
+    let err = infer_err(r#"use "my_lib.jde""#);
+    assert!(matches!(err, JadeError::MissingImportAlias { .. }));
+}
+
+#[test]
+fn test_infer_stdlib_import_without_alias_is_ok() {
+    infer_ok("use std.math");
+}
+
+#[test]
+fn test_infer_stdlib_string_import_is_error() {
+    let err = infer_err(r#"use "std/math""#);
+    assert!(matches!(err, JadeError::StdlibStringImport { .. }));
+}
+
+#[test]
+fn test_infer_from_use_string_stdlib_is_error() {
+    let err = infer_err(r#"from "std/math" use floor"#);
+    assert!(matches!(err, JadeError::StdlibStringImport { .. }));
+}
+
+#[test]
+fn test_infer_from_use_dot_stdlib_is_ok() {
+    infer_ok("from std.math use floor");
+}
+
 // ── Prompts ───────────────────────────────────────────────────────────────
 
 #[test]
@@ -264,10 +302,10 @@ fn test_infer_prompt_decl_non_str_is_error() {
 }
 
 #[test]
-fn test_infer_prompt_deref_untyped_is_unknown() {
+fn test_infer_prompt_deref_untyped_is_str() {
     let tp = infer_ok("prompt p = \"hi\"\nlet r = ?p");
     let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!() };
-    assert_eq!(value.ty, JadeType::Unknown);
+    assert_eq!(value.ty, JadeType::Str);
 }
 
 #[test]

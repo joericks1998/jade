@@ -36,7 +36,7 @@ pub async fn run_test(pattern: Option<&str>, verbose: bool) {
         print!("  {} ... ", name);
 
         // Fix 5: pass &Path directly instead of converting to an owned String.
-        match run_test_file(file, verbose, &cfg.provider, &cfg.model, cfg.max_retries, cfg.api_key.as_deref()).await {
+        match run_test_file(file, verbose, &cfg).await {
             Ok(()) => {
                 println!("ok");
                 passed += 1;
@@ -66,16 +66,17 @@ pub async fn run_test(pattern: Option<&str>, verbose: bool) {
 /// Run a single test file.  Returns `Ok(())` on clean exit, `Err(msg)` on any error.
 ///
 /// Fix 4/5: accepts `&Path` directly (no intermediate `String` allocation) and
-/// receives pre-loaded config values so `load_config` is not called per file.
+/// receives pre-loaded config so `load_config` is not called per file.
+/// Uses `select_backend` (same as `jade run`) so the jade-tree socket is tried
+/// first, matching the inference path that regular `jade run` uses.
 async fn run_test_file(
     path: &std::path::Path,
     _verbose: bool,
-    provider: &str,
-    model: &str,
-    max_retries: usize,
-    api_key: Option<&str>,
+    cfg: &crate::config::JadeConfig,
 ) -> Result<(), String> {
     use crate::compiler::{emit, type_infer, vm};
+    let model      = &cfg.model;
+    let max_retries = cfg.max_retries;
 
     let source = std::fs::read_to_string(path)
         .map_err(|e| format!("could not read file: {}", e))?;
@@ -117,10 +118,9 @@ async fn run_test_file(
     let compiled = emit::emit(tprogram)
         .map_err(|e| format!("compile error: {}", e))?;
 
-    let backend = api_key
-        .map(|key| crate::llm::build_backend(provider, key, model, None))
-        .transpose()
-        .map_err(|e| format!("config error: {}", e))?;
+    // Use select_backend so the jade-tree socket is preferred over API keys,
+    // matching the behaviour of `jade run`.
+    let backend = crate::llm::select_backend(cfg);
 
     let source_dir = path
         .canonicalize()
@@ -128,12 +128,23 @@ async fn run_test_file(
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
         .unwrap_or_else(|| std::path::PathBuf::from("."));
 
+    // Honor registered [lib] libraries so test files can import them too.
+    let project_root = crate::project::find_project_root();
+    let libraries = project_root
+        .as_ref()
+        .and_then(|root| crate::project::load_project(root).ok())
+        .and_then(|m| m.lib)
+        .unwrap_or_default();
+
     let opts = vm::VmOpts {
         backend,
-        default_model: model.to_string(),
+        default_model: model.clone(),
         max_retries,
         source_dir,
-        native_packages: std::collections::HashMap::new(),
+        project_root,
+        libraries,
+        #[cfg(test)]
+        test_stdout: None,
     };
 
     vm::run(compiled, opts).await.map_err(|e| e.to_string())?;
