@@ -1350,6 +1350,17 @@ fn infer_return_type(stmts: &[TStmt]) -> JadeType {
                 let t = infer_return_type(body);
                 if t != JadeType::Unknown && t != JadeType::Nil { return t; }
             }
+            TStmt::TryCatch { body, arms, .. } => {
+                // A `return` can live in the try body or any catch arm. Without
+                // descending here the function is inferred Nil and the AOT
+                // backend emits `ret void`, discarding the value (prints `nil`).
+                let t = infer_return_type(body);
+                if t != JadeType::Unknown && t != JadeType::Nil { return t; }
+                for arm in arms {
+                    let ta = infer_return_type(&arm.body);
+                    if ta != JadeType::Unknown && ta != JadeType::Nil { return ta; }
+                }
+            }
             TStmt::FnDef { .. } | TStmt::AsyncFnDef { .. } => {} // nested fn def — do not recurse
             _ => {}
         }
