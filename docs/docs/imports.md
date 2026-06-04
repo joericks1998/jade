@@ -7,7 +7,7 @@ sidebar_label: Imports
 Jade's `use` statement loads another `.jde` file or a standard-library package and makes its definitions available in the importing file. There are two import forms with different syntax:
 
 - **File imports** use a quoted path and **require an alias**: `use "lib.jde" as lib`.
-- **Package imports** (standard library) use **dot notation**: `use std.math`.
+- **Package imports** (standard library) use **`::` notation**: `use std::math`.
 
 ## File Imports
 
@@ -90,24 +90,24 @@ files = ["math.jde", "fastmath.dylib"]   # one Jade module, one native library
 ```
 
 ```jade
-use ext.math       // -> lib/math.jde     (Jade)
-use ext.fastmath   // -> lib/fastmath.dylib (native), then fastmath.some_fn(...)
+use ext::math       // -> lib/math.jde     (Jade)
+use ext::fastmath   // -> lib/fastmath.dylib (native), then fastmath.some_fn(...)
 ```
 
 Native libraries run under the interpreter only: `jade build` (the AOT/native compiler) can't link the FFI loader into a static binary, so it rejects native imports with a message pointing you at `jade run`.
 
-Then import the module with **dot notation** from **any** file in the project — the path is resolved against the library's directory anchored at the project root, not the importing file. The import binds to its last segment automatically (no `as` needed):
+Then import the module with **`::` notation** from **any** file in the project — the path is resolved against the library's directory anchored at the project root, not the importing file. The import binds to its last segment automatically (no `as` needed):
 
 ```jade
-use utils.math               // -> <root>/src/utils/math.jde, from anywhere
+use utils::math               // -> <root>/src/utils/math.jde, from anywhere
 print(math.square(5))        // binds as `math` (the last segment)
 ```
 
 Rules:
 
-- **Dot notation names a module** — a stdlib package (`use std.math`) or a registered library (`use utils.math`). It binds the last segment and needs no alias. **String notation names a file path** (`use "lib/helper.jde" as h`) and still requires an alias.
+- **`::` notation names a module** — a stdlib package (`use std::math`) or a registered library (`use utils::math`). It binds the last segment and needs no alias. **String notation names a file path** (`use "lib/helper.jde" as h`) and still requires an alias.
 - With a `files` allowlist, importing an unlisted module is a hard error in both `jade run` and `jade build`. Without one, a missing file is a normal not-found error.
-- Dot notation is treated as a library reference only when its first segment names a registered library; plain relative file imports (string form) keep working unchanged.
+- `::` notation is treated as a library reference only when its first segment names a registered library; plain relative file imports (string form) keep working unchanged.
 - Library resolution is identical in the VM and the native (AOT) build.
 
 ## What Gets Imported
@@ -140,13 +140,13 @@ Imports are not re-exported. If `a.jde` uses `b.jde`, a third file that uses `a.
 
 ## Standard Library Packages
 
-Jade's standard library is imported with **dot notation** — `use std.json`, not a quoted path. These packages are always available; no installation required.
+Jade's standard library is imported with **`::` notation** — `use std::json`, not a quoted path. These packages are always available; no installation required.
 
 ```jade
-use std.math
-use std.json
-use std.path
-use std.random
+use std::math
+use std::json
+use std::path
+use std::random
 
 let n = math.sqrt(144.0)          // 12.0
 let data = json.parse('{"x": 1}')
@@ -157,39 +157,39 @@ let roll = random.int(1, 6)
 Importing a package binds it as a global variable named after the package (`math`, `json`, `path`, etc.). The table below lists all available packages.
 
 :::warning
-The string-literal form for stdlib packages — `use "std/math"` — is **rejected at compile time** (`StdlibStringImport`). Always use dot notation: `use std.math`. Quoted paths are reserved for file imports, which require an alias.
+The string-literal form for stdlib packages — `use "std/math"` — is **rejected at compile time** (`StdlibStringImport`). Always use `::` notation: `use std::math`. Quoted paths are reserved for file imports, which require an alias.
 :::
 
 | Import | Global | Summary |
 |--------|--------|---------|
-| `use std.math` | `math` | `floor`, `ceil`, `abs`, `sqrt`, `min`, `max`, `pow` |
-| `use std.string` | `string` | `split`, `upper`, `lower`, `trim`, `contains`, `replace`, `starts_with`, `ends_with` |
-| `use std.array` | `array` | `map`, `filter`, `sort`, `reverse` (higher-order; non-mutating) |
-| `use std.dict` | `dict` | `keys`, `values`, `has`, `get`, `merge` |
-| `use std.fs` | `fs` | `read`, `write`, `append`, `exists`, `delete`, `list_dir`, `mkdir` |
-| `use std.time` | `time` | `now`, `now_ms`, `sleep`, `local` |
-| `use std.http` | `http` | `get`, `post`, `put`, `delete`, `head` |
-| `use std.sh` | `sh` | `exec`, `run`, `output` |
-| `use std.json` | `json` | `parse`, `stringify`, `stringify_pretty` |
-| `use std.env` | `env` | `get`, `set`, `args`, `cwd` |
-| `use std.path` | `path` | `join`, `basename`, `dirname`, `ext`, `stem`, `abs`, `is_abs` |
-| `use std.random` | `random` | `int`, `float`, `choice`, `shuffle`, `seed` |
+| `use std::math` | `math` | `floor`, `ceil`, `abs`, `sqrt`, `min`, `max`, `pow` |
+| `use std::string` | `string` | `split`, `upper`, `lower`, `trim`, `contains`, `replace`, `starts_with`, `ends_with` |
+| `use std::array` | `array` | `map`, `filter`, `sort`, `reverse` (higher-order; non-mutating) |
+| `use std::dict` | `dict` | `keys`, `values`, `has`, `get`, `merge` |
+| `use std::fs` | `fs` | `read`, `write`, `append`, `exists`, `delete`, `list_dir`, `mkdir` |
+| `use std::time` | `time` | `now`, `now_ms`, `sleep`, `local` |
+| `use std::http` | `http` | `get`, `post`, `put`, `delete`, `head` |
+| `use std::sh` | `sh` | `exec`, `run`, `output` |
+| `use std::json` | `json` | `parse`, `stringify`, `stringify_pretty` |
+| `use std::env` | `env` | `get`, `set`, `args`, `cwd` |
+| `use std::path` | `path` | `join`, `basename`, `dirname`, `ext`, `stem`, `abs`, `is_abs` |
+| `use std::random` | `random` | `int`, `float`, `choice`, `shuffle`, `seed` |
 | `use llm` | `llm` | `set_max_tokens`, `count_tokens`, `total_tokens` |
 
 See the [Standard Library](stdlib) reference for full API documentation.
 
 ## Selective Imports (`from … use`)
 
-The `from <package> use <names>` form imports specific names from a package directly into scope, without the package prefix. It uses the same dot notation as `use`.
+The `from <package> use <names>` form imports specific names from a package directly into scope, without the package prefix. It uses the same `::` notation as `use`.
 
 ```jade
-from std.math use floor, ceil, sqrt
+from std::math use floor, ceil, sqrt
 
 let a = floor(3.7)   // 3
 let b = sqrt(16.0)   // 4.0
 ```
 
-As with `use`, the string-literal form (`from "std/math" use floor`) is a compile-time error — use dot notation.
+As with `use`, the string-literal form (`from "std/math" use floor`) is a compile-time error — use `::` notation.
 
 ## Native Packages
 

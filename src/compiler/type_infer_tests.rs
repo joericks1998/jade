@@ -267,7 +267,7 @@ fn test_infer_file_import_without_alias_is_error() {
 
 #[test]
 fn test_infer_stdlib_import_without_alias_is_ok() {
-    infer_ok("use std.math");
+    infer_ok("use std::math");
 }
 
 #[test]
@@ -284,7 +284,7 @@ fn test_infer_from_use_string_stdlib_is_error() {
 
 #[test]
 fn test_infer_from_use_dot_stdlib_is_ok() {
-    infer_ok("from std.math use floor");
+    infer_ok("from std::math use floor");
 }
 
 // ── Prompts ───────────────────────────────────────────────────────────────

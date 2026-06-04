@@ -698,7 +698,7 @@ async fn execute_chunk(
                                 .drain()
                                 .filter(|(k, _)| !initial_keys.contains(k))
                                 .collect();
-                            // Stdlib packages imported by the module (e.g. `use std.fs`) must
+                            // Stdlib packages imported by the module (e.g. `use std::fs`) must
                             // be promoted to the parent globals so that module functions can
                             // resolve them via GetGlobal when called in the parent context.
                             // They are NOT included in the module dict (they're not exports).

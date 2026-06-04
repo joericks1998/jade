@@ -805,3 +805,37 @@ fn test_parse_implicit_self_assignment() {
     assert_eq!(object, "self");
     assert_eq!(field, "count");
 }
+
+// ── module-path separator (`::`) ──────────────────────────────────────────
+
+#[test]
+fn test_parse_use_path_sep_colon_colon() {
+    // `use std::math` parses and normalizes the path to slash-separated form.
+    let p = parse_src("use std::math");
+    let Stmt::Use { path, path_is_string, as_name, .. } = &p.stmts[0] else { panic!() };
+    assert_eq!(path, "std/math");
+    assert!(!path_is_string);
+    assert!(as_name.is_none());
+}
+
+#[test]
+fn test_parse_from_use_path_sep_colon_colon() {
+    let p = parse_src("from std::math use floor, ceil");
+    let Stmt::FromUse { path, names, .. } = &p.stmts[0] else { panic!() };
+    assert_eq!(path, "std/math");
+    assert_eq!(names, &vec!["floor".to_string(), "ceil".to_string()]);
+}
+
+#[test]
+fn test_parse_use_dot_separator_is_error() {
+    // The old `.` separator is no longer accepted in module-path position.
+    let _ = parse_src_err("use std.math");
+}
+
+#[test]
+fn test_parse_decorator_namespaced_colon_colon() {
+    // `@tools::register` normalizes to the dot-joined internal name `tools.register`.
+    let p = parse_src("@tools::register\nfn f() {}");
+    let Stmt::FnDef { decorators, .. } = &p.stmts[0] else { panic!() };
+    assert_eq!(decorators[0].0, "tools.register");
+}

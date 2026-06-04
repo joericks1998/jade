@@ -628,8 +628,8 @@ impl Parser {
         Ok(Stmt::FromUse { path, names, path_is_string, span })
     }
 
-    /// Parse an import path: either a string literal `"std/time"` or dot notation
-    /// `std.time` / `llm`. Dot notation converts dots to `/` so `std.time` → `"std/time"`.
+    /// Parse an import path: either a string literal `"std/time"` or `::` notation
+    /// `std::time` / `llm`. The `::` separator converts to `/` so `std::time` → `"std/time"`.
     fn parse_import_path(&mut self) -> Result<String> {
         let tok = self.peek().clone();
         match &tok.kind {

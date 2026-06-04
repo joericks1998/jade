@@ -180,7 +180,7 @@ pub enum Stmt {
     },
 
     /// `use "path/to/file.jde"` — import all top-level definitions from another file.
-    /// Also accepts dot notation: `use std.time` → path `"std/time"`.
+    /// Also accepts `::` notation: `use std::time` → path `"std/time"`.
     /// `as_name` binds the module under that name; if absent, the stem of the path is used.
     /// stdlib packages are unaffected (they always bind under their own `global_name`).
     /// `path_is_string` is true when the user wrote `use "..."` (string literal form).
@@ -191,8 +191,8 @@ pub enum Stmt {
         span: Span,
     },
 
-    /// `from std.time use now, sleep` — import specific names directly into scope.
-    /// Path follows the same rules as `Use` (string literal or dot notation).
+    /// `from std::time use now, sleep` — import specific names directly into scope.
+    /// Path follows the same rules as `Use` (string literal or `::` notation).
     FromUse {
         path: String,
         names: Vec<String>,

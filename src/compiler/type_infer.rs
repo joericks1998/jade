@@ -634,8 +634,8 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
                 }
                 (pkg.register_types)(ctx);
             } else if *path_is_string && as_name.is_none() {
-                // Only raw string-path file imports require an alias. Dot-notation
-                // imports (`use utils.math`) name a registered [lib] library (or a
+                // Only raw string-path file imports require an alias. `::`
+                // imports (`use utils::math`) name a registered [lib] library (or a
                 // stdlib package) and bind the last path segment automatically.
                 return Err(JadeError::MissingImportAlias { path: path.clone(), span: *span });
             }

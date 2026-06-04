@@ -133,18 +133,18 @@ Errors are written to stderr with the format `<file>: <phase> error: <descriptio
 | Type inference | ✓ |
 | `try`/`catch`/`raise` exception handling | ✓ |
 | `async fn` definitions and `await` expressions | ✓ |
-| `use std.math` — floor, ceil, abs, sqrt, min, max, pow | ✓ |
-| `use std.string` — split, upper, lower, trim, contains, replace, starts_with, ends_with | ✓ |
-| `use std.array` — map, filter, sort, reverse (higher-order) | ✓ |
-| `use std.dict` — keys, values, has, get, merge | ✓ |
-| `use std.fs` — read, write, append, exists, delete, list_dir, mkdir | ✓ |
-| `use std.time` — now, now_ms, sleep, local | ✓ |
-| `use std.http` — get, post, put, delete, head | ✓ |
-| `use std.sh` — exec, run, output (shell command execution) | ✓ |
-| `use std.json` — parse, stringify, stringify_pretty | ✓ |
-| `use std.env` — get, set, args, cwd | ✓ |
-| `use std.path` — join, basename, dirname, ext, stem, abs, is_abs | ✓ |
-| `use std.random` — int, float, choice, shuffle, seed | ✓ |
+| `use std::math` — floor, ceil, abs, sqrt, min, max, pow | ✓ |
+| `use std::string` — split, upper, lower, trim, contains, replace, starts_with, ends_with | ✓ |
+| `use std::array` — map, filter, sort, reverse (higher-order) | ✓ |
+| `use std::dict` — keys, values, has, get, merge | ✓ |
+| `use std::fs` — read, write, append, exists, delete, list_dir, mkdir | ✓ |
+| `use std::time` — now, now_ms, sleep, local | ✓ |
+| `use std::http` — get, post, put, delete, head | ✓ |
+| `use std::sh` — exec, run, output (shell command execution) | ✓ |
+| `use std::json` — parse, stringify, stringify_pretty | ✓ |
+| `use std::env` — get, set, args, cwd | ✓ |
+| `use std::path` — join, basename, dirname, ext, stem, abs, is_abs | ✓ |
+| `use std::random` — int, float, choice, shuffle, seed | ✓ |
 | `use llm` — set_max_tokens, count_tokens, total_tokens | ✓ |
 | Native `jade build` via the build daemon (`src/build.rs`) | ✓ |
 
