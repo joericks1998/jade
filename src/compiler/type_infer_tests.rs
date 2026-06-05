@@ -53,6 +53,16 @@ fn test_infer_nil_literal() {
 }
 
 #[test]
+fn test_infer_null_literal() {
+    // `null` is a third spelling of nil (alongside `None`); all infer as JadeType::Nil
+    for src in ["let x = null", "let x = None", "let x = nil"] {
+        let tp = infer_ok(src);
+        let TStmt::Let { value, .. } = &tp.stmts[0] else { panic!() };
+        assert_eq!(value.ty, JadeType::Nil, "failed for: {src}");
+    }
+}
+
+#[test]
 fn test_infer_bool_nil() {
     // bool(nil) must pass type inference with nil recognized as JadeType::Nil.
     let tp = infer_ok("let x = bool(nil)");

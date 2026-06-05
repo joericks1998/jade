@@ -136,9 +136,9 @@ fn eval_literal_expr(
         TExprKind::Float(f)    => Ok(VmValue::Float(*f)),
         TExprKind::Bool(b)     => Ok(VmValue::Bool(*b)),
         TExprKind::Str(s)      => Ok(VmValue::Str(s.clone())),
-        TExprKind::Identifier(s) if s == "None" || s == "nil" => Ok(VmValue::Nil),
+        TExprKind::Identifier(s) if s == "None" || s == "nil" || s == "null" => Ok(VmValue::Nil),
         _ => Err(crate::frontend::error::JadeError::Exception {
-            message: "struct decorator arguments must be literals (None, nil, numbers, booleans, strings)".to_string(),
+            message: "struct decorator arguments must be literals (None, nil, null, numbers, booleans, strings)".to_string(),
             span,
         }),
     }
@@ -582,11 +582,11 @@ fn emit_fn(
                     crate::compiler::tir::TExprKind::Float(f)   => Ok(Some(crate::compiler::vm::VmValue::Float(*f))),
                     crate::compiler::tir::TExprKind::Bool(b)    => Ok(Some(crate::compiler::vm::VmValue::Bool(*b))),
                     crate::compiler::tir::TExprKind::Str(s)     => Ok(Some(crate::compiler::vm::VmValue::Str(s.clone()))),
-                    crate::compiler::tir::TExprKind::Identifier(s) if s == "None" || s == "nil" => {
+                    crate::compiler::tir::TExprKind::Identifier(s) if s == "None" || s == "nil" || s == "null" => {
                         Ok(Some(crate::compiler::vm::VmValue::Nil))
                     }
                     _ => Err(crate::frontend::error::JadeError::Exception {
-                        message: "default parameter values must be literals (None, nil, numbers, booleans, strings)".to_string(),
+                        message: "default parameter values must be literals (None, nil, null, numbers, booleans, strings)".to_string(),
                         span,
                     }),
                 }
@@ -657,7 +657,7 @@ fn emit_expr(expr: &TExpr, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<Reg> {
 
         TExprKind::Identifier(name) => {
             // nil/None are built-in literals, not globals — emit directly.
-            if name == "nil" || name == "None" {
+            if name == "nil" || name == "None" || name == "null" {
                 let dest = em.alloc_reg();
                 em.chunk.emit(Instr::LoadNil(dest), span);
                 return Ok(dest);

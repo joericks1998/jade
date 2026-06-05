@@ -2053,6 +2053,23 @@ fn test_default_param_nil() {
 }
 
 #[test]
+fn test_null_alias_of_nil() {
+    // `null` evaluates to Nil and compares equal to both `nil` and `None`
+    let src = "let a = null\nlet b = (null == nil)\nlet c = (null == None)";
+    let s = run_src(src).unwrap();
+    assert!(matches!(s.globals.get("a").unwrap(), VmValue::Nil));
+    assert!(get_bool(&s, "b"));
+    assert!(get_bool(&s, "c"));
+}
+
+#[test]
+fn test_default_param_null() {
+    let src = "fn f(x, on = null) {\n  return on\n}\nlet v = f(1)";
+    let s = run_src(src).unwrap();
+    assert!(matches!(s.globals.get("v").unwrap(), VmValue::Nil));
+}
+
+#[test]
 fn test_default_param_str() {
     let src = "fn f(x, label = \"default\") {\n  return label\n}\nlet v = f(0)";
     let s = run_src(src).unwrap();

@@ -711,8 +711,8 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
         // ── Variables ─────────────────────────────────────────────────────────
 
         Expr::Identifier { name, span } => {
-            // `nil` and `None` are built-in literal values; don't require a prior definition.
-            if name == "nil" || name == "None" {
+            // `nil`, `None`, and `null` are built-in literal values; don't require a prior definition.
+            if name == "nil" || name == "None" || name == "null" {
                 return Ok(TExpr { kind: TExprKind::Identifier(name.clone()), ty: JadeType::Nil, span: *span });
             }
             let ty = match ctx.get(name) {
@@ -1172,7 +1172,7 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
                     if let Some(name) = extract_type_name(c) {
                         let is_builtin = matches!(
                             name.as_str(),
-                            "int" | "float" | "bool" | "str" | "nil"
+                            "int" | "float" | "bool" | "str" | "nil" | "null"
                             | "array" | "Array"
                             | "dict"  | "Dict"
                         );
@@ -1625,6 +1625,7 @@ fn parse_type_name(s: &str) -> JadeType {
         "bool"  => JadeType::Bool,
         "str"   => JadeType::Str,
         "nil"   => JadeType::Nil,
+        "null"  => JadeType::Nil,
         _       => JadeType::Unknown,
     }
 }

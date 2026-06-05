@@ -97,9 +97,10 @@ pub fn register_types(ctx: &mut TypeContext) {
             ret: Box::new(JadeType::Unknown),
         });
     }
-    // nil / None literals — both spellings are valid
+    // nil / None / null literals — all three spellings are valid
     ctx.define("nil".to_string(),  JadeType::Nil);
     ctx.define("None".to_string(), JadeType::Nil);
+    ctx.define("null".to_string(), JadeType::Nil);
     // LLM session globals
     ctx.define("__tokens__".to_string(), JadeType::Int);
     ctx.define("__model__".to_string(), JadeType::Str);

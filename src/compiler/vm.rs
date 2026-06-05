@@ -3106,7 +3106,7 @@ fn eval_literal_default(expr: &crate::frontend::ast::Expr) -> Option<VmValue> {
         Expr::Integer { value, .. } => Some(VmValue::Int(*value)),
         Expr::Float { value, .. }   => Some(VmValue::Float(*value)),
         Expr::Bool { value, .. }    => Some(VmValue::Bool(*value)),
-        Expr::Identifier { name, .. } if name == "nil" => Some(VmValue::Nil),
+        Expr::Identifier { name, .. } if name == "nil" || name == "None" || name == "null" => Some(VmValue::Nil),
         Expr::Array { elements, .. } if elements.is_empty() =>
             Some(VmValue::Array(Arc::new(Mutex::new(vec![])))),
         Expr::Dict { entries, .. } if entries.is_empty() =>
