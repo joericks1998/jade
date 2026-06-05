@@ -808,11 +808,31 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
             } else if let Some(t) = builtin_ret {
                 t
             } else {
-                match &tcallee.ty {
+                let generic = match &tcallee.ty {
                     JadeType::Fn { ret, .. }      => *ret.clone(),
                     JadeType::AsyncFn { ret, .. } => JadeType::Future(ret.clone()),
                     JadeType::Unknown             => JadeType::Unknown,
                     _                             => return Err(JadeError::NotCallable { span: *span }),
+                };
+                // Type-conversion constructors int/float/bool/str are registered
+                // as Fn{ret: Unknown}; refine a direct `int(x)`/`str(x)`/… call to
+                // the concrete result type so codegen formats it correctly (notably
+                // bool → "true"/"false" rather than the Unknown→1/0 path). Only
+                // applied when the call would otherwise be Unknown, so a user
+                // function shadowing the name with a real return type keeps its own.
+                if matches!(generic, JadeType::Unknown) {
+                    match callee.as_ref() {
+                        Expr::Identifier { name, .. } => match name.as_str() {
+                            "int"   => JadeType::Int,
+                            "float" => JadeType::Float,
+                            "bool"  => JadeType::Bool,
+                            "str"   => JadeType::Str,
+                            _ => generic,
+                        },
+                        _ => generic,
+                    }
+                } else {
+                    generic
                 }
             };
             Ok(TExpr {
@@ -1213,7 +1233,19 @@ fn infer_binop(op: &BinOpKind, lty: &JadeType, rty: &JadeType, span: Span) -> Re
     use BinOpKind::*;
     use JadeType::*;
 
-    // Unknown on either side propagates without error.
+    // Comparison and membership operators always produce a boolean, regardless
+    // of operand types — they compare values and return Bool. Typing these as
+    // Bool even when an operand is Unknown lets an inferred-Bool function return
+    // type match the `i1` the comparison emits in codegen (otherwise the LLVM fn
+    // signature is i64 while the body returns i1), and lets `print` format the
+    // result as true/false rather than 1/0.
+    if matches!(op, Eq | Ne | Lt | Gt | Le | Ge | In | NotIn)
+        && (*lty == Unknown || *rty == Unknown)
+    {
+        return Ok(Bool);
+    }
+
+    // Unknown on either side propagates without error (arithmetic, bitwise, …).
     if *lty == Unknown || *rty == Unknown {
         return Ok(Unknown);
     }

@@ -54,10 +54,13 @@ fn test_infer_nil_literal() {
 
 #[test]
 fn test_infer_bool_nil() {
-    // bool(nil) must pass type inference with nil recognized as JadeType::Nil
+    // bool(nil) must pass type inference with nil recognized as JadeType::Nil.
     let tp = infer_ok("let x = bool(nil)");
     let TStmt::Let { value, .. } = &tp.stmts[0] else { panic!() };
-    assert_eq!(value.ty, JadeType::Unknown); // bool() returns Unknown
+    // The conversion constructors int/float/bool/str now infer their concrete
+    // result type (so AOT codegen can format e.g. bool → "true"/"false" instead
+    // of the Unknown→1/0 path); `bool(_)` is therefore Bool, not Unknown.
+    assert_eq!(value.ty, JadeType::Bool);
 }
 
 // ── Arithmetic ────────────────────────────────────────────────────────────
