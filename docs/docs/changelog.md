@@ -9,6 +9,7 @@ sidebar_label: Changelog
 - **Breaking:** module-path imports now use `::` as the separator instead of `.` — `use std::math`, `from std::math use floor`, `use utils::math` for `[lib]` libraries. The `.` form is no longer accepted in module-path position (`.` is reserved for field and method access on values); `use std.math` is now a parse error
 - Namespaced decorators also use `::` — `@tools::register` instead of `@tools.register`
 - Quoted file-path imports (`use "lib.jde" as lib`) are unchanged
+- Added `null` as a third spelling of `nil` — `nil`, `None`, and `null` are interchangeable aliases for the same value; they compare equal and may be used as literals, default parameter values, and type annotations
 
 ## v1.1.8
 
