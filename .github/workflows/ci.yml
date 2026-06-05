@@ -59,25 +59,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    permissions:
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/configure-pages@v4
-
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: docs/
-
-      - name: Deploy to GitHub Pages
-        id: deploy
-        uses: actions/deploy-pages@v4
+  # NOTE: Docs are deployed exclusively by deploy-docs.yml, which runs
+  # `npm run build` and publishes the compiled site (docs/build). A second
+  # deploy job used to live here and uploaded the raw, unbuilt `docs/` tree
+  # straight to GitHub Pages — on code-only releases (no docs/** changes)
+  # deploy-docs.yml is skipped, so this job would clobber Pages with source
+  # files and 404 the site. It was removed; do not re-add a Pages deploy here.
