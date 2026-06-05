@@ -93,6 +93,7 @@ pub enum TokenKind {
     Semicolon,
     Dot,
     Colon,
+    ColonColon,
 
     // Grouping
     LParen,
@@ -167,6 +168,7 @@ pub fn token_kind_desc(kind: &TokenKind) -> String {
         TokenKind::Semicolon     => "`;`".to_string(),
         TokenKind::Dot           => "`.`".to_string(),
         TokenKind::Colon         => "`:`".to_string(),
+        TokenKind::ColonColon    => "`::`".to_string(),
         TokenKind::LParen        => "`(`".to_string(),
         TokenKind::RParen        => "`)`".to_string(),
         TokenKind::LBrace        => "`{`".to_string(),
@@ -558,7 +560,15 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
             ']' => { tokens.push(Token { kind: TokenKind::RBracket,  span: Span { line, col } }); bracket_depth -= 1; col += 1; i += 1; }
             ',' => { tokens.push(Token { kind: TokenKind::Comma,   span: Span { line, col } }); col += 1; i += 1; }
             '.' => { tokens.push(Token { kind: TokenKind::Dot,     span: Span { line, col } }); col += 1; i += 1; }
-            ':' => { tokens.push(Token { kind: TokenKind::Colon,   span: Span { line, col } }); col += 1; i += 1; }
+            ':' => {
+                if i + 1 < chars.len() && chars[i + 1] == ':' {
+                    tokens.push(Token { kind: TokenKind::ColonColon, span: Span { line, col } });
+                    col += 2; i += 2;
+                } else {
+                    tokens.push(Token { kind: TokenKind::Colon, span: Span { line, col } });
+                    col += 1; i += 1;
+                }
+            }
 
             // `&` or `&&`
             '&' => {

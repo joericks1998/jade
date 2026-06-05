@@ -142,8 +142,10 @@ impl Parser {
         while self.peek().kind == TokenKind::At {
             self.advance(); // consume `@`
             let mut name = self.expect_ident("decorator name")?;
-            // Support dotted decorator names: @tools.register → "tools.register"
-            while self.peek().kind == TokenKind::Dot {
+            // Support namespaced decorator names: @tools::register → "tools.register".
+            // The `::` separator is normalized to a dot internally so downstream
+            // resolution (emit/vm) can keep splitting on `.`.
+            while self.peek().kind == TokenKind::ColonColon {
                 self.advance();
                 let part = self.expect_ident("decorator field")?;
                 name = format!("{}.{}", name, part);
@@ -626,8 +628,8 @@ impl Parser {
         Ok(Stmt::FromUse { path, names, path_is_string, span })
     }
 
-    /// Parse an import path: either a string literal `"std/time"` or dot notation
-    /// `std.time` / `llm`. Dot notation converts dots to `/` so `std.time` → `"std/time"`.
+    /// Parse an import path: either a string literal `"std/time"` or `::` notation
+    /// `std::time` / `llm`. The `::` separator converts to `/` so `std::time` → `"std/time"`.
     fn parse_import_path(&mut self) -> Result<String> {
         let tok = self.peek().clone();
         match &tok.kind {
@@ -639,11 +641,11 @@ impl Parser {
             TokenKind::Identifier(first) => {
                 let mut parts = vec![first.clone()];
                 self.advance();
-                while self.peek().kind == TokenKind::Dot {
-                    // peek ahead: only consume the dot if the next token is an identifier
+                while self.peek().kind == TokenKind::ColonColon {
+                    // peek ahead: only consume the `::` if the next token is an identifier
                     let next = self.peek_at(1).map(|t| matches!(t.kind, TokenKind::Identifier(_))).unwrap_or(false);
                     if !next { break; }
-                    self.advance(); // consume `.`
+                    self.advance(); // consume `::`
                     let ident_tok = self.peek().clone();
                     if let TokenKind::Identifier(part) = &ident_tok.kind {
                         parts.push(part.clone());
@@ -655,7 +657,7 @@ impl Parser {
                 Ok(parts.join("/"))
             }
             _ => Err(JadeError::UnexpectedToken {
-                expected: "module path (string or dot notation) after `use`".to_string(),
+                expected: "module path (string or `::` notation) after `use`".to_string(),
                 got: token_kind_desc(&tok.kind),
                 span: tok.span,
             }),

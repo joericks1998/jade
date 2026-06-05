@@ -698,7 +698,7 @@ async fn execute_chunk(
                                 .drain()
                                 .filter(|(k, _)| !initial_keys.contains(k))
                                 .collect();
-                            // Stdlib packages imported by the module (e.g. `use std.fs`) must
+                            // Stdlib packages imported by the module (e.g. `use std::fs`) must
                             // be promoted to the parent globals so that module functions can
                             // resolve them via GetGlobal when called in the parent context.
                             // They are NOT included in the module dict (they're not exports).
@@ -3106,7 +3106,7 @@ fn eval_literal_default(expr: &crate::frontend::ast::Expr) -> Option<VmValue> {
         Expr::Integer { value, .. } => Some(VmValue::Int(*value)),
         Expr::Float { value, .. }   => Some(VmValue::Float(*value)),
         Expr::Bool { value, .. }    => Some(VmValue::Bool(*value)),
-        Expr::Identifier { name, .. } if name == "nil" => Some(VmValue::Nil),
+        Expr::Identifier { name, .. } if name == "nil" || name == "None" || name == "null" => Some(VmValue::Nil),
         Expr::Array { elements, .. } if elements.is_empty() =>
             Some(VmValue::Array(Arc::new(Mutex::new(vec![])))),
         Expr::Dict { entries, .. } if entries.is_empty() =>

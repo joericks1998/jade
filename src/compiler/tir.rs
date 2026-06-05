@@ -219,7 +219,7 @@ pub enum TStmt {
         path_is_string: bool,
         span: Span,
     },
-    /// `from std.time use now, sleep` — named selective imports.
+    /// `from std::time use now, sleep` — named selective imports.
     FromUse {
         path: String,
         names: Vec<String>,

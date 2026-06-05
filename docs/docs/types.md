@@ -4,7 +4,7 @@ title: Types
 sidebar_label: Types
 ---
 
-Jade has eight runtime value types.
+Jade has nine runtime value types.
 
 | Type | Description | Status |
 |------|-------------|--------|
@@ -16,7 +16,7 @@ Jade has eight runtime value types.
 | `str` | UTF-8 string with indexing and concatenation | Implemented |
 | `array` | Heterogeneous mutable array with index access | Implemented |
 | `dict` | String-keyed mutable hash map | Implemented |
-| `nil` | Absence of value | Planned |
+| `nil` | Absence of value | Implemented |
 
 ## Type Coercion Rules
 
@@ -33,6 +33,32 @@ Jade does not implicitly coerce types except in specific arithmetic and comparis
 
 :::note
 Arithmetic promotion converts an `int` to `float` when the other operand is a `float`. Equality never promotes — comparing `1` to `1.0` is always a `TypeError`.
+:::
+
+## Nil
+
+`nil` is Jade's single "absence of value" type. A function that reaches the end of its body without returning, a bare `return`, and most mutating built-ins (`arr.push(x)`, `fs.write(...)`) all evaluate to `nil`.
+
+### Three spellings
+
+`nil`, `None`, and `null` are interchangeable spellings of the **same** value. They all evaluate to the one `nil`, compare equal to each other, and can be used anywhere a literal is expected (including default parameter values and type annotations).
+
+```jade
+let a = nil
+let b = None
+let c = null
+
+print(a == b)   // true
+print(b == c)   // true
+
+fn greet(name = null) {   // default parameter
+    return name
+}
+print(greet())  // nil
+```
+
+:::note
+The three spellings are aliases, not distinct types — there is no separate `null` type. JSON `null` also decodes to this same `nil`.
 :::
 
 ## Dict

@@ -1624,7 +1624,7 @@ fn test_fs_write_and_read() {
     let path = dir.join("jade_test_fs_write_read.txt");
     let path_str = path.to_str().unwrap();
     let src = format!(
-        "use std.fs\nfs.write(\"{path_str}\", \"hello jade\")\nlet v = fs.read(\"{path_str}\")"
+        "use std::fs\nfs.write(\"{path_str}\", \"hello jade\")\nlet v = fs.read(\"{path_str}\")"
     );
     let s = run_src(&src).unwrap();
     assert_eq!(get_str(&s, "v"), "hello jade");
@@ -1637,7 +1637,7 @@ fn test_fs_exists_true() {
     let path = dir.join("jade_test_fs_exists_true.txt");
     std::fs::write(&path, "x").unwrap();
     let path_str = path.to_str().unwrap();
-    let src = format!("use std.fs\nlet v = fs.exists(\"{path_str}\")");
+    let src = format!("use std::fs\nlet v = fs.exists(\"{path_str}\")");
     let s = run_src(&src).unwrap();
     assert!(get_bool(&s, "v"));
     let _ = std::fs::remove_file(&path);
@@ -1645,7 +1645,7 @@ fn test_fs_exists_true() {
 
 #[test]
 fn test_fs_exists_false() {
-    let src = "use std.fs\nlet v = fs.exists(\"/tmp/jade_test_no_such_file_xyz.txt\")";
+    let src = "use std::fs\nlet v = fs.exists(\"/tmp/jade_test_no_such_file_xyz.txt\")";
     let s = run_src(src).unwrap();
     assert!(!get_bool(&s, "v"));
 }
@@ -1656,7 +1656,7 @@ fn test_fs_delete() {
     let path = dir.join("jade_test_fs_delete.txt");
     std::fs::write(&path, "bye").unwrap();
     let path_str = path.to_str().unwrap();
-    let src = format!("use std.fs\nfs.delete(\"{path_str}\")\nlet v = fs.exists(\"{path_str}\")");
+    let src = format!("use std::fs\nfs.delete(\"{path_str}\")\nlet v = fs.exists(\"{path_str}\")");
     let s = run_src(&src).unwrap();
     assert!(!get_bool(&s, "v"));
 }
@@ -1667,7 +1667,7 @@ fn test_fs_append() {
     let path = dir.join("jade_test_fs_append.txt");
     let path_str = path.to_str().unwrap();
     let src = format!(
-        "use std.fs\nfs.write(\"{path_str}\", \"hello\")\nfs.append(\"{path_str}\", \" world\")\nlet v = fs.read(\"{path_str}\")"
+        "use std::fs\nfs.write(\"{path_str}\", \"hello\")\nfs.append(\"{path_str}\", \" world\")\nlet v = fs.read(\"{path_str}\")"
     );
     let s = run_src(&src).unwrap();
     assert_eq!(get_str(&s, "v"), "hello world");
@@ -1682,7 +1682,7 @@ fn test_fs_list_dir() {
     std::fs::write(subdir.join("a.txt"), "").unwrap();
     std::fs::write(subdir.join("b.txt"), "").unwrap();
     let path_str = subdir.to_str().unwrap();
-    let src = format!("use std.fs\nlet v = fs.list_dir(\"{path_str}\")");
+    let src = format!("use std::fs\nlet v = fs.list_dir(\"{path_str}\")");
     let s = run_src(&src).unwrap();
     match s.globals.get("v").unwrap() {
         VmValue::Array(a) => {
@@ -1704,7 +1704,7 @@ fn test_fs_mkdir() {
     let newdir = dir.join("jade_test_fs_mkdir_new/nested");
     let path_str = newdir.to_str().unwrap();
     let _ = std::fs::remove_dir_all(dir.join("jade_test_fs_mkdir_new"));
-    let src = format!("use std.fs\nfs.mkdir(\"{path_str}\")\nlet v = fs.exists(\"{path_str}\")");
+    let src = format!("use std::fs\nfs.mkdir(\"{path_str}\")\nlet v = fs.exists(\"{path_str}\")");
     let s = run_src(&src).unwrap();
     assert!(get_bool(&s, "v"));
     let _ = std::fs::remove_dir_all(dir.join("jade_test_fs_mkdir_new"));
@@ -1712,13 +1712,13 @@ fn test_fs_mkdir() {
 
 #[test]
 fn test_fs_read_nonexistent_errors() {
-    let err = try_run_src("use std.fs\nlet v = fs.read(\"/tmp/jade_no_such_file_xyz.txt\")").err().expect("expected error");
+    let err = try_run_src("use std::fs\nlet v = fs.read(\"/tmp/jade_no_such_file_xyz.txt\")").err().expect("expected error");
     assert!(matches!(err, JadeError::IoError { .. }));
 }
 
 #[test]
 fn test_fs_write_arity_error() {
-    let err = try_run_src("use std.fs\nfs.write(\"path\")").err().expect("expected error");
+    let err = try_run_src("use std::fs\nfs.write(\"path\")").err().expect("expected error");
     assert!(matches!(err, JadeError::ArityMismatch { expected: 2, .. }));
 }
 
@@ -1802,7 +1802,7 @@ fn test_import_module_mutable_state() {
     let _ = std::fs::remove_file(&mod_path);
 }
 
-/// A module that imports `use std.fs` should expose functions that use `fs`
+/// A module that imports `use std::fs` should expose functions that use `fs`
 /// to callers in the parent scope — the stdlib import must be promoted to the
 /// parent globals rather than buried inside the module dict.
 #[test]
@@ -1810,7 +1810,7 @@ fn test_import_module_stdlib_promotion() {
     let dir = std::env::temp_dir();
     let mod_path = dir.join("jade_test_stdlib_promo_mod.jde");
     let txt_path = dir.join("jade_test_stdlib_promo_out.txt");
-    std::fs::write(&mod_path, "use std.fs\nfn write_file(p, s) {\n fs.write(p, s)\n}\n").unwrap();
+    std::fs::write(&mod_path, "use std::fs\nfn write_file(p, s) {\n fs.write(p, s)\n}\n").unwrap();
 
     let mod_str = mod_path.to_str().unwrap();
     let txt_str = txt_path.to_str().unwrap();
@@ -2053,6 +2053,23 @@ fn test_default_param_nil() {
 }
 
 #[test]
+fn test_null_alias_of_nil() {
+    // `null` evaluates to Nil and compares equal to both `nil` and `None`
+    let src = "let a = null\nlet b = (null == nil)\nlet c = (null == None)";
+    let s = run_src(src).unwrap();
+    assert!(matches!(s.globals.get("a").unwrap(), VmValue::Nil));
+    assert!(get_bool(&s, "b"));
+    assert!(get_bool(&s, "c"));
+}
+
+#[test]
+fn test_default_param_null() {
+    let src = "fn f(x, on = null) {\n  return on\n}\nlet v = f(1)";
+    let s = run_src(src).unwrap();
+    assert!(matches!(s.globals.get("v").unwrap(), VmValue::Nil));
+}
+
+#[test]
 fn test_default_param_str() {
     let src = "fn f(x, label = \"default\") {\n  return label\n}\nlet v = f(0)";
     let s = run_src(src).unwrap();
@@ -2259,7 +2276,7 @@ fn start_http_test_server(status: u16, body: &'static str) -> u16 {
 fn test_http_get_status_and_body() {
     let port = start_http_test_server(200, "hello jade");
     let src = format!(
-        "use std.http\nlet r = http.get(\"http://127.0.0.1:{port}/\")"
+        "use std::http\nlet r = http.get(\"http://127.0.0.1:{port}/\")"
     );
     let s = run_src(&src).unwrap();
     match s.globals.get("r").unwrap() {
@@ -2281,7 +2298,7 @@ fn test_http_get_status_and_body() {
 fn test_http_post_returns_response() {
     let port = start_http_test_server(201, "created");
     let src = format!(
-        "use std.http\nlet r = http.post(\"http://127.0.0.1:{port}/\", \"payload\")"
+        "use std::http\nlet r = http.post(\"http://127.0.0.1:{port}/\", \"payload\")"
     );
     let s = run_src(&src).unwrap();
     match s.globals.get("r").unwrap() {
@@ -2303,7 +2320,7 @@ fn test_http_post_returns_response() {
 fn test_http_get_with_headers() {
     let port = start_http_test_server(200, "ok");
     let src = format!(
-        "use std.http\nlet r = http.get(\"http://127.0.0.1:{port}/\", {{\"X-Test\": \"jade\"}})"
+        "use std::http\nlet r = http.get(\"http://127.0.0.1:{port}/\", {{\"X-Test\": \"jade\"}})"
     );
     let s = run_src(&src).unwrap();
     match s.globals.get("r").unwrap() {
@@ -2317,25 +2334,25 @@ fn test_http_get_with_headers() {
 
 #[test]
 fn test_http_get_arity_error() {
-    let err = try_run_src("use std.http\nhttp.get()").err().expect("expected error");
+    let err = try_run_src("use std::http\nhttp.get()").err().expect("expected error");
     assert!(matches!(err, JadeError::ArityMismatch { .. }));
 }
 
 #[test]
 fn test_http_get_type_error() {
-    let err = try_run_src("use std.http\nhttp.get(42)").err().expect("expected error");
+    let err = try_run_src("use std::http\nhttp.get(42)").err().expect("expected error");
     assert!(matches!(err, JadeError::TypeError { .. }));
 }
 
 #[test]
 fn test_http_post_arity_error() {
-    let err = try_run_src("use std.http\nhttp.post(\"http://example.com\")").err().expect("expected error");
+    let err = try_run_src("use std::http\nhttp.post(\"http://example.com\")").err().expect("expected error");
     assert!(matches!(err, JadeError::ArityMismatch { .. }));
 }
 
 #[test]
 fn test_http_get_connection_refused_errors() {
-    let err = try_run_src("use std.http\nhttp.get(\"http://127.0.0.1:1/\")").err().expect("expected error");
+    let err = try_run_src("use std::http\nhttp.get(\"http://127.0.0.1:1/\")").err().expect("expected error");
     assert!(matches!(err, JadeError::IoError { .. }));
 }
 

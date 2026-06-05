@@ -1,4 +1,4 @@
-use std.math
+use std::math
 print(math.floor(3.7))
 print(math.ceil(2.1))
 print(math.sqrt(16.0))

@@ -1,4 +1,4 @@
-use std.http
+use std::http
 
 // GET — returns Dict { "status": int, "body": str }
 let r = http.get("https://httpbin.org/get")
