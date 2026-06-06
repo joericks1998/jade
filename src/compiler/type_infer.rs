@@ -1239,7 +1239,10 @@ fn infer_binop(op: &BinOpKind, lty: &JadeType, rty: &JadeType, span: Span) -> Re
     // type match the `i1` the comparison emits in codegen (otherwise the LLVM fn
     // signature is i64 while the body returns i1), and lets `print` format the
     // result as true/false rather than 1/0.
-    if matches!(op, Eq | Ne | Lt | Gt | Le | Ge | In | NotIn)
+    // Logical and/or also always yield Bool (codegen emits i1), so an
+    // Unknown operand must not demote the result to i64 — same reasoning as
+    // the comparisons above.
+    if matches!(op, Eq | Ne | Lt | Gt | Le | Ge | In | NotIn | And | Or)
         && (*lty == Unknown || *rty == Unknown)
     {
         return Ok(Bool);
@@ -1324,6 +1327,13 @@ fn infer_binop(op: &BinOpKind, lty: &JadeType, rty: &JadeType, span: Span) -> Re
 fn infer_unaryop(op: &UnaryOpKind, ty: &JadeType, span: Span) -> Result<JadeType> {
     use UnaryOpKind::*;
     use JadeType::*;
+
+    // `!x` is always a Bool (codegen emits i1), even when the operand type is
+    // Unknown — otherwise an inferred-Bool function returning `!expr` gets an
+    // i64 signature while the body returns i1.
+    if matches!(op, Not) {
+        return Ok(Bool);
+    }
 
     if *ty == Unknown {
         return Ok(Unknown);
