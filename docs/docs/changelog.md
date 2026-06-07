@@ -4,6 +4,10 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.1.10
+
+- Fixed a native build failure (LLVM verification error) when a function returns a logical expression with an untyped operand — `!x`, `a && b`, and `a || b` are now always typed as `bool` (matching the `i1` codegen emits), even when an operand is `Unknown` such as a method call on an untyped parameter. Previously these inferred `int`, mismatching the generated function signature. Mirrors the earlier comparison-operator fix
+
 ## v1.1.9
 
 - **Breaking:** module-path imports now use `::` as the separator instead of `.` — `use std::math`, `from std::math use floor`, `use utils::math` for `[lib]` libraries. The `.` form is no longer accepted in module-path position (`.` is reserved for field and method access on values); `use std.math` is now a parse error
