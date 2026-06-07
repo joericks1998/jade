@@ -19,6 +19,13 @@ use super::tir::{JadeType, TExpr, TExprKind, TFStrPart, TProgram, TStmt};
 pub struct TypeContext {
     /// Variable name → resolved type, innermost scope last.
     scopes: Vec<HashMap<String, JadeType>>,
+    /// Parallel to `scopes`: for a variable bound to a homogeneous dict literal,
+    /// the dict's value type. Lets `d["k"]` infer that concrete type instead of
+    /// `Unknown` (`JadeType::Dict` is a unit variant and can't carry it). Only
+    /// the AOT backend cares — it picks print/format codegen by static type; the
+    /// VM dispatches on runtime tags and ignores this. Mirrors `scopes` exactly
+    /// (pushed/popped together) so shadowed bindings resolve to the right level.
+    dict_value_scopes: Vec<HashMap<String, JadeType>>,
     /// Struct type name → field definitions (copied from AST).
     struct_defs: HashMap<String, Vec<StructFieldDef>>,
     /// Interface name → required method names.
@@ -38,6 +45,7 @@ impl TypeContext {
     pub fn new() -> Self {
         let mut ctx = TypeContext {
             scopes: vec![HashMap::new()],
+            dict_value_scopes: vec![HashMap::new()],
             struct_defs: HashMap::new(),
             interface_defs: HashMap::new(),
             extend_methods: HashMap::new(),
@@ -59,11 +67,13 @@ impl TypeContext {
 
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
+        self.dict_value_scopes.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
         if self.scopes.len() > 1 {
             self.scopes.pop();
+            self.dict_value_scopes.pop();
         }
     }
 
@@ -103,6 +113,77 @@ impl TypeContext {
             }
         }
         None
+    }
+
+    /// Record (or clear) a `let`-bound variable's dict value type in the
+    /// innermost scope, mirroring `define`. `Some(t)` sets it; `None` clears any
+    /// prior entry (e.g. re-`let`ting the same name to a non-dict value).
+    fn define_dict_vt(&mut self, name: &str, vt: Option<JadeType>) {
+        if let Some(scope) = self.dict_value_scopes.last_mut() {
+            match vt {
+                Some(t) => { scope.insert(name.to_string(), t); }
+                None => { scope.remove(name); }
+            }
+        }
+    }
+
+    /// Record (or clear) a reassigned variable's dict value type at the scope
+    /// level where the variable lives, mirroring `assign` (nearest holding it,
+    /// else global). Must be called after `assign` so the name already exists.
+    fn assign_dict_vt(&mut self, name: &str, vt: Option<JadeType>) {
+        for i in (0..self.scopes.len()).rev() {
+            if self.scopes[i].contains_key(name) {
+                match vt {
+                    Some(t) => { self.dict_value_scopes[i].insert(name.to_string(), t); }
+                    None => { self.dict_value_scopes[i].remove(name); }
+                }
+                return;
+            }
+        }
+        if let Some(g) = self.dict_value_scopes.first_mut() {
+            match vt {
+                Some(t) => { g.insert(name.to_string(), t); }
+                None => { g.remove(name); }
+            }
+        }
+    }
+
+    /// Look up a variable's tracked dict value type, innermost scope outward.
+    fn dict_value_type(&self, name: &str) -> Option<JadeType> {
+        for scope in self.dict_value_scopes.iter().rev() {
+            if let Some(ty) = scope.get(name) {
+                return Some(ty.clone());
+            }
+        }
+        None
+    }
+}
+
+/// The homogeneous concrete value type of a dict literal's entries, or `None`
+/// if the dict is empty, heterogeneous, or has any non-concrete value. Mirrors
+/// the array element-type rule: only when every value shares one concrete type
+/// can `d[k]` be given that type. `Unknown`/`Nil` values force `None` so a
+/// runtime-populated or mixed dict stays conservatively `Unknown`.
+fn dict_literal_value_type(entries: &[(TExpr, TExpr)]) -> Option<JadeType> {
+    let mut vt: Option<JadeType> = None;
+    for (_, v) in entries {
+        if v.ty == JadeType::Unknown || v.ty == JadeType::Nil {
+            return None;
+        }
+        match &vt {
+            None => vt = Some(v.ty.clone()),
+            Some(t) if *t != v.ty => return None,
+            _ => {}
+        }
+    }
+    vt
+}
+
+/// If `tval` is a dict literal, its homogeneous value type (for tracking).
+fn dict_vt_of(tval: &TExpr) -> Option<JadeType> {
+    match &tval.kind {
+        TExprKind::Dict { entries } => dict_literal_value_type(entries),
+        _ => None,
     }
 }
 
@@ -385,12 +466,16 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
         Stmt::Let { name, value, span } => {
             let tval = infer_expr(value, ctx)?;
             ctx.define(name.clone(), tval.ty.clone());
+            ctx.define_dict_vt(name, dict_vt_of(&tval));
             Ok(TStmt::Let { name: name.clone(), value: tval, span: *span })
         }
 
         Stmt::Assign { name, value, span } => {
             let tval = infer_expr(value, ctx)?;
             ctx.assign(name, tval.ty.clone());
+            // Refresh (or clear) the tracked dict value type so a reassignment to
+            // a non-dict / heterogeneous value doesn't leave a stale concrete type.
+            ctx.assign_dict_vt(name, dict_vt_of(&tval));
             Ok(TStmt::Assign { name: name.clone(), value: tval, span: *span })
         }
 
@@ -600,6 +685,15 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
         Stmt::IndexAssign { name, index, value, span } => {
             let tidx = infer_expr(index, ctx)?;
             let tval = infer_expr(value, ctx)?;
+            // Inserting a value whose type differs from the tracked homogeneous
+            // dict value type makes the dict heterogeneous — clear the tracking
+            // so `d[k]` falls back to `Unknown` rather than a now-wrong concrete
+            // type. (A matching insert keeps the tracking intact.)
+            if let Some(tracked) = ctx.dict_value_type(name) {
+                if tval.ty != tracked {
+                    ctx.assign_dict_vt(name, None);
+                }
+            }
             Ok(TStmt::IndexAssign {
                 name: name.clone(),
                 index: tidx,
@@ -973,8 +1067,29 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
                             });
                         }
                     }
-                    // Field/method value types are not tracked at Stage B — return Unknown.
-                    JadeType::Unknown
+                    // Resolve the field's value type from its default expression
+                    // so a field-access expression carries a concrete type. This
+                    // keeps the inferred type of e.g. `p.plan_mode` (a `let
+                    // plan_mode = false` field) as `Bool` rather than `Unknown`,
+                    // which is what lets a function returning a struct field get
+                    // the right LLVM return type in the AOT backend (otherwise
+                    // codegen narrows the loaded slot to the field's type while
+                    // the signature stays i64 — an `ret i1 … i64` mismatch) and
+                    // lets `print` format it as the right kind. Methods, required
+                    // fields, and defaults that don't infer stay `Unknown`. The
+                    // default is cloned first to release the borrow on `ctx`.
+                    let field_def = ctx.struct_defs.get(&tn)
+                        .and_then(|defs| defs.iter().find(|f| f.name() == field).cloned());
+                    match field_def {
+                        Some(StructFieldDef::Let { default, .. }) => {
+                            infer_expr(&default, ctx).map(|t| t.ty).unwrap_or(JadeType::Unknown)
+                        }
+                        // A prompt field holds a Prompt value (its default is a
+                        // string, but the field is dereferenced with `?`).
+                        Some(StructFieldDef::Prompt { .. }) => JadeType::Prompt,
+                        // Required field (no default) or a method — type unknown.
+                        _ => JadeType::Unknown,
+                    }
                 }
                 // Primitive types: check registered primitive methods
                 JadeType::Str => {
@@ -1012,7 +1127,15 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
             let tidx = infer_expr(index, ctx)?;
             let ty = match &tobj.ty {
                 JadeType::Array(elem_ty) => *elem_ty.clone(),
-                JadeType::Dict           => JadeType::Unknown,
+                // A dict bound to a homogeneous literal carries a tracked value
+                // type; use it so `d[k]` is concretely typed (drives AOT print/
+                // format codegen). Anything else stays `Unknown`.
+                JadeType::Dict => match object.as_ref() {
+                    Expr::Identifier { name, .. } => {
+                        ctx.dict_value_type(name).unwrap_or(JadeType::Unknown)
+                    }
+                    _ => JadeType::Unknown,
+                },
                 JadeType::Str            => JadeType::Str,
                 JadeType::Unknown        => JadeType::Unknown,
                 other => return Err(JadeError::TypeMismatch {
