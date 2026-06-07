@@ -4,6 +4,11 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.1.11
+
+- Improved type inference for values read out of a dict. A `let`-bound homogeneous dict literal now records its value type, so indexing it (`d["k"]`) infers that concrete type instead of `Unknown`. This lets the native (AOT) backend pick the right print/format codegen for, e.g., `bool` values stored in a dict; the VM is unaffected (it dispatches on runtime tags)
+- Fixed a regression in unary `!` type inference. The v1.1.10 logical-operator fix typed *every* `!expr` as `bool`, which incorrectly accepted `!` on a known non-`bool` operand such as `!1` (this should be a `TypeError`). `!x` now short-circuits to `bool` only when the operand type is `Unknown` (e.g. `!method_call(x)` on an untyped value, where native codegen emits an `i1`); a known non-`bool` operand once again reports a `TypeError`. `&&` and `||` are unaffected — they continue to yield `bool` whenever an operand is `Unknown`
+
 ## v1.1.10
 
 - Fixed a native build failure (LLVM verification error) when a function returns a logical expression with an untyped operand — `!x`, `a && b`, and `a || b` are now always typed as `bool` (matching the `i1` codegen emits), even when an operand is `Unknown` such as a method call on an untyped parameter. Previously these inferred `int`, mismatching the generated function signature. Mirrors the earlier comparison-operator fix
