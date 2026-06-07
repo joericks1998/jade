@@ -363,3 +363,43 @@ fn test_infer_unknown_param_propagates() {
     let TStmt::FnDef { ret_ty, .. } = &tp.stmts[0] else { panic!() };
     assert_eq!(*ret_ty, JadeType::Unknown);
 }
+
+// ── Dict value-type tracking ───────────────────────────────────────────────
+// A variable bound to a homogeneous dict literal lets `d[k]` infer the value's
+// concrete type (drives the AOT backend's static print/format codegen); mixed
+// or mutated dicts fall back to Unknown so the type is never wrong.
+
+#[test]
+fn test_index_homogeneous_bool_dict_is_bool() {
+    let tp = infer_ok("let d = {\"ok\": true}\nlet r = d[\"ok\"]");
+    let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!() };
+    assert_eq!(value.ty, JadeType::Bool);
+}
+
+#[test]
+fn test_index_homogeneous_int_dict_is_int() {
+    let tp = infer_ok("let d = {\"a\": 1, \"b\": 2}\nlet r = d[\"a\"]");
+    let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!() };
+    assert_eq!(value.ty, JadeType::Int);
+}
+
+#[test]
+fn test_index_mixed_dict_is_unknown() {
+    let tp = infer_ok("let d = {\"name\": \"jade\", \"version\": 1}\nlet r = d[\"name\"]");
+    let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!() };
+    assert_eq!(value.ty, JadeType::Unknown);
+}
+
+#[test]
+fn test_reassigned_dict_clears_value_type() {
+    let tp = infer_ok("let d = {\"ok\": true}\nd = {\"a\": 1, \"b\": \"x\"}\nlet r = d[\"a\"]");
+    let TStmt::Let { value, .. } = &tp.stmts[2] else { panic!() };
+    assert_eq!(value.ty, JadeType::Unknown);
+}
+
+#[test]
+fn test_index_assign_heterogeneous_clears_value_type() {
+    let tp = infer_ok("let d = {\"a\": true}\nd[\"b\"] = 5\nlet r = d[\"a\"]");
+    let TStmt::Let { value, .. } = &tp.stmts[2] else { panic!() };
+    assert_eq!(value.ty, JadeType::Unknown);
+}
