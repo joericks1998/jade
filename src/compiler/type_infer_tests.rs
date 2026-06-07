@@ -159,6 +159,24 @@ fn test_infer_unary_not_int_is_error() {
     assert!(matches!(err, JadeError::TypeMismatch { .. }));
 }
 
+#[test]
+fn test_infer_logical_with_unknown_operand_is_bool() {
+    // `!x`, `x && y`, `x || y` on untyped (Unknown) params must infer Bool,
+    // not int/Unknown — native codegen emits i1 for these, so a function
+    // returning one needs a Bool signature or LLVM verification fails.
+    // Regression for the v1.1.10 fix (and guards against re-widening `!`
+    // to accept non-bool concrete operands).
+    for (src, label) in [
+        ("fn f(x) {\n return !x\n}",       "not"),
+        ("fn f(x, y) {\n return x && y\n}", "and"),
+        ("fn f(x, y) {\n return x || y\n}", "or"),
+    ] {
+        let tp = infer_ok(src);
+        let TStmt::FnDef { ret_ty, .. } = &tp.stmts[0] else { panic!() };
+        assert_eq!(*ret_ty, JadeType::Bool, "failed for: {label}");
+    }
+}
+
 // ── Arrays ────────────────────────────────────────────────────────────────
 
 #[test]

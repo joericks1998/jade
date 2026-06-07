@@ -1328,10 +1328,11 @@ fn infer_unaryop(op: &UnaryOpKind, ty: &JadeType, span: Span) -> Result<JadeType
     use UnaryOpKind::*;
     use JadeType::*;
 
-    // `!x` is always a Bool (codegen emits i1), even when the operand type is
-    // Unknown — otherwise an inferred-Bool function returning `!expr` gets an
-    // i64 signature while the body returns i1.
-    if matches!(op, Not) {
+    // `!x` on an Unknown operand still yields Bool (codegen emits i1) —
+    // otherwise an inferred-Bool function returning `!expr` gets an i64
+    // signature while the body returns i1. A known non-bool operand (e.g.
+    // `!1`) is still a TypeError, handled by the match below.
+    if matches!(op, Not) && *ty == Unknown {
         return Ok(Bool);
     }
 
