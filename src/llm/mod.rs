@@ -5,10 +5,16 @@ use crate::frontend::error::{JadeError, Result, Span};
 pub mod anthropic;
 #[cfg(unix)]
 pub mod jade_os;
+pub mod model_profile;
 pub mod openai;
 
 /// A request sent to an inference backend.
-#[derive(Clone)]
+///
+/// Mirrors the daemon's `jade-protocol::InferenceRequest` field-for-field (the
+/// socket is the contract — see `design/llm-package-1.1.12.md`). `Default` lets
+/// construction sites set only the fields they care about and lets the wire
+/// struct grow without churning every call site.
+#[derive(Clone, Default)]
 pub struct InferenceRequest {
     pub prompt: String,
     pub model: String,
@@ -22,6 +28,16 @@ pub struct InferenceRequest {
     /// Stop anchor; if set, generation stops and the stop string is stripped when it appears.
     /// Passed through to the inference daemon; ignored by API-based backends.
     pub stop_anchor: Option<String>,
+    /// When true, the daemon makes the `stop_anchor` boundary observable in-band
+    /// (it is not stripped, and is synthesized at span close if the model retired
+    /// the grammar without emitting it) — letting a client delimit an anchored
+    /// span by pure string parsing. `false` = legacy strip behavior.
+    /// Passed through to the inference daemon; ignored by API-based backends.
+    pub keep_anchors: bool,
+    /// Prompt provenance: `0` TRUSTED (program-author-controlled), `1` TAINTED
+    /// (derived from an LLM, network, or other untrusted source). The daemon logs
+    /// it; runtime enforcement lives in the C runtime. Defaults to TRUSTED.
+    pub trust: u8,
 }
 
 /// A successful response from an inference backend.
@@ -49,6 +65,21 @@ pub trait InferenceBackend: Send + Sync {
     /// Returns 0 for backends that don't track it (API backends).
     async fn total_tokens(&self, _span: Span) -> Result<i64> {
         Ok(0)
+    }
+
+    /// Return a daemon health snapshot as a JSON object (see
+    /// `design/llm-package-1.1.12.md` §2.3 — `{status, model, model_loaded, …}`).
+    /// Backends that aren't the jade daemon synthesize a minimal `ok` snapshot.
+    async fn health(&self, _span: Span) -> Result<serde_json::Value> {
+        // Same field set as the daemon's `jade-protocol::Health` so `llm.health()`
+        // returns a consistent dict shape regardless of backend.
+        Ok(serde_json::json!({
+            "status": "ok",
+            "model": self.reported_model_name().unwrap_or_default(),
+            "model_loaded": true,
+            "uptime_secs": 0,
+            "protocol_version": 0,
+        }))
     }
 
     /// Stream tokens as they arrive. Returns a channel receiver and a join handle

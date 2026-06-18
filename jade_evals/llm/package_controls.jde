@@ -1,0 +1,68 @@
+// Expanded `llm` package — 1.1.12. Backed by the jade inference daemon over
+// ~/.jade/llm.sock, consuming the daemon's `jade-protocol` and
+// `jade-model-profile` crates as git dependencies.
+//
+// Fixture-first: this documents the intended Jade-facing API. Contract:
+// design/llm-package-1.1.12.md.
+//
+// Phase 1 surfaces (all resolve at runtime through VmState.inference_backend):
+//   1. model profile     llm.model(), llm.profile()        (introspection)
+//   2. protocol controls llm.set_max_tokens(n), llm.keep_anchors(b)
+//   3. token & stats      llm.count_tokens(s), llm.total_tokens()
+//   4. daemon lifecycle   llm.health()                      (new wire op)
+//
+// Tool-call streaming (ToolStreamParser → content/tool_call events) is phase 2.
+
+use llm
+
+
+// ── 1. Model profile (read-only introspection) ───────────────────────────────
+// The profile is selected by the model the daemon reports in its Meta frame and
+// loaded from the jade-model-profile crate (per-model token vocabulary).
+
+print(llm.model())            // → "Qwen3-Coder-30B"
+
+let prof = llm.profile()
+print(prof.tool_call.open)    // → "<tool>"
+print(prof.tool_call.close)   // → "</tool>"
+
+// Search an LLM response for a tool call delimited per this model's profile.
+// Returns { name, args } (args = verbatim JSON body), or nil if none present.
+let reply = ?prompt "What's the weather in SF? Use a tool."
+let call = llm.find_tool_call(reply)
+if call != nil {
+    print(call.name)          // → e.g. "get_weather"
+    print(call.args)          // → e.g. {"tool_name": "get_weather", "city": "SF"}
+}
+
+
+// ── 2. Protocol controls (sticky VM session state) ───────────────────────────
+// These flow into every subsequent prompt's infer request.
+
+llm.set_max_tokens(512)       // existing scalar setter, kept
+
+// Make the tool-span boundary observable in-band so a client can delimit
+// <tool>…</tool> by string match (jade-protocol `keep_anchors`).
+llm.keep_anchors(true)
+
+// grammar/anchor are already available via  ?p |> grammar
+let p = prompt "What is 2 + 2? Respond with only the number."
+print(?p)                     // → 4
+
+
+// ── 3. Token & stats ─────────────────────────────────────────────────────────
+
+let n = llm.count_tokens("how many tokens is this?")
+print(n)                      // → e.g. 7
+
+let total = llm.total_tokens()
+print(total)
+
+
+// ── 4. Daemon lifecycle (new `health` op) ────────────────────────────────────
+
+let h = llm.health()
+print(h.status)        // → "ok" | "degraded" | "loading" | "error"
+print(h.model)         // → "Qwen3-Coder-30B"
+print(h.model_loaded)  // → true
+print(h.uptime_secs)   // → 12345
