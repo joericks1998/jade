@@ -4,6 +4,14 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.1.12
+
+- Expanded the built-in `llm` package to expose the inference daemon's model profiles, tool-call helpers, protocol controls, and health to Jade programs. The package stays decoupled from the daemon — the Unix socket (`~/.jade/llm.sock`) is the only contract; jadelang implements the wire format itself, drift-guarded by a golden-bytes test
+- Added **model profile** introspection — `llm.model()` returns the active model name; `llm.profile()` returns the model's token/tool vocabulary (tool-call delimiters, name field, special-token spans) as a dict. Profiles are selected by the model name the daemon reports
+- Added **tool-call helpers** — `llm.find_tool_call(text)` returns the first tool call in a response as `{name, args}` (or `nil`); `llm.find_tool_calls(text)` returns all of them; `llm.tool_grammar()` returns the canonical tool-call GBNF. All resolve tool-call delimiters from the active model's profile, so they work across models. The canonical grammar is checked in at `grammars/tool_call.gbnf`
+- Added **protocol controls** — the wire request now carries `keep_anchors` (toggle via `llm.keep_anchors(b)`, making tool-span boundaries observable in-band) and `trust` (prompt provenance), matching the daemon's request schema
+- Added **daemon lifecycle** — `llm.health()` returns a daemon health snapshot (`status`, `model`, `model_loaded`, `uptime_secs`, `protocol_version`) via a new `health` op and structured-JSON response frame
+
 ## v1.1.11
 
 - Improved type inference for values read out of a dict. A `let`-bound homogeneous dict literal now records its value type, so indexing it (`d["k"]`) infers that concrete type instead of `Unknown`. This lets the native (AOT) backend pick the right print/format codegen for, e.g., `bool` values stored in a dict; the VM is unaffected (it dispatches on runtime tags)

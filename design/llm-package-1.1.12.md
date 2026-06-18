@@ -1,6 +1,7 @@
 # `llm` package overhaul — 1.1.12
 
-Status: **plan, in progress**
+Status: **shipped in 1.1.12** (daemon `health` op + `0x05` frame landed; tool-call
+helpers, model profiles, protocol controls, and health all wired and tested)
 Goal: make the inference daemon's contract *consumable in `llm`* so model
 profiles, protocol controls, token/stats, and daemon lifecycle are exposed to
 Jade users — **decoupled from the daemon's source** (no shared crate, no git dep).
