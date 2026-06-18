@@ -84,6 +84,18 @@ impl InferenceBackend for JadeOsBackend {
             span,
         })?
     }
+
+    async fn health(&self, span: Span) -> Result<serde_json::Value> {
+        let sock_path = self.sock_path.clone();
+        tokio::task::spawn_blocking(move || {
+            Self::health_blocking(&sock_path, span)
+        })
+        .await
+        .map_err(|e| JadeError::InferenceError {
+            message: format!("spawn_blocking panic: {e}"),
+            span,
+        })?
+    }
 }
 
 impl JadeOsBackend {
@@ -117,6 +129,8 @@ impl JadeOsBackend {
                     *reported_model.lock().unwrap() = Some(model);
                     buf.drain(..consumed);
                 }
+                // Generation ops don't expect structured JSON frames — ignore.
+                FrameResult::Json(_, consumed) => { buf.drain(..consumed); }
                 FrameResult::Token(token, consumed) => {
                     text.push_str(&token);
                     buf.drain(..consumed);
@@ -205,6 +219,8 @@ impl JadeOsBackend {
                     *reported_model.lock().unwrap() = Some(model);
                     buf.drain(..consumed);
                 }
+                // Generation ops don't expect structured JSON frames — ignore.
+                FrameResult::Json(_, consumed) => { buf.drain(..consumed); }
                 FrameResult::Token(token, consumed) => {
                     let _ = tx.blocking_send(token);
                     buf.drain(..consumed);
@@ -299,6 +315,80 @@ impl JadeOsBackend {
         Self::drain_to_done(&mut stream, sock_path, span)
     }
 
+    // Request a daemon health snapshot (`health_only`) and accumulate the
+    // `0x05 JSON` frames until DONE, then parse. Mirrors the wire contract in
+    // design/llm-package-1.1.12.md §2.3.
+    fn health_blocking(sock_path: &str, span: Span) -> Result<serde_json::Value> {
+        let json = serde_json::json!({
+            "prompt": "",
+            "model": "",
+            "max_tokens": 0u32,
+            "health_only": true,
+        });
+        let json_bytes = serde_json::to_vec(&json).map_err(|e| JadeError::InferenceError {
+            message: format!("failed to encode health request: {e}"),
+            span,
+        })?;
+        let len = json_bytes.len() as u32;
+        let mut payload = Vec::with_capacity(4 + json_bytes.len());
+        payload.extend_from_slice(&len.to_le_bytes());
+        payload.extend_from_slice(&json_bytes);
+
+        let mut stream = UnixStream::connect(sock_path).map_err(|e| JadeError::InferenceError {
+            message: format!("could not connect to {} — is the inference daemon running? ({e})", sock_path),
+            span,
+        })?;
+        stream.write_all(&payload).map_err(|e| JadeError::InferenceError {
+            message: format!("write to {} failed: {e}", sock_path),
+            span,
+        })?;
+
+        let mut buf: Vec<u8> = Vec::new();
+        let mut read_tmp = [0u8; 4096];
+        let mut json_text = String::new();
+        loop {
+            match decode_frame(&buf) {
+                FrameResult::Json(chunk, consumed) => {
+                    json_text.push_str(&chunk);
+                    buf.drain(..consumed);
+                }
+                FrameResult::Meta(_, consumed) | FrameResult::Token(_, consumed) => {
+                    buf.drain(..consumed);
+                }
+                FrameResult::Done(_, consumed) => {
+                    buf.drain(..consumed);
+                    return serde_json::from_str(&json_text).map_err(|e| JadeError::InferenceError {
+                        message: format!("daemon health response was not valid JSON: {e}"),
+                        span,
+                    });
+                }
+                FrameResult::Error(msg, consumed) => {
+                    buf.drain(..consumed);
+                    return Err(JadeError::InferenceError { message: msg, span });
+                }
+                FrameResult::Incomplete => {
+                    let n = stream.read(&mut read_tmp).map_err(|e| JadeError::InferenceError {
+                        message: format!("read from {} failed: {e}", sock_path),
+                        span,
+                    })?;
+                    if n == 0 {
+                        return Err(JadeError::InferenceError {
+                            message: "socket closed before DONE frame".to_owned(),
+                            span,
+                        });
+                    }
+                    buf.extend_from_slice(&read_tmp[..n]);
+                }
+                FrameResult::UnknownType(t) => {
+                    return Err(JadeError::InferenceError {
+                        message: format!("unknown frame type from daemon: {t:#04x}"),
+                        span,
+                    });
+                }
+            }
+        }
+    }
+
     // Read frames from stream until Done, return tokens_used. Ignores Token frames.
     fn drain_to_done(stream: &mut UnixStream, sock_path: &str, span: Span) -> Result<i64> {
         let mut buf: Vec<u8> = Vec::new();
@@ -306,6 +396,7 @@ impl JadeOsBackend {
         loop {
             match decode_frame(&buf) {
                 FrameResult::Meta(_, consumed) => { buf.drain(..consumed); }
+                FrameResult::Json(_, consumed) => { buf.drain(..consumed); }
                 FrameResult::Token(_, consumed) => { buf.drain(..consumed); }
                 FrameResult::Done(tokens_used, consumed) => {
                     buf.drain(..consumed);
@@ -353,6 +444,10 @@ fn encode_request(req: &InferenceRequest) -> std::result::Result<Vec<u8>, serde_
         anchor: Option<&'a str>,
         #[serde(skip_serializing_if = "Option::is_none")]
         stop_anchor: Option<&'a str>,
+        // Always emitted (the daemon reads them with serde defaults, but being
+        // explicit keeps the wire unambiguous and the golden test meaningful).
+        keep_anchors: bool,
+        trust: u8,
     }
     let json = serde_json::to_vec(&Wire {
         prompt: &req.prompt,
@@ -361,6 +456,8 @@ fn encode_request(req: &InferenceRequest) -> std::result::Result<Vec<u8>, serde_
         grammar: req.grammar.as_deref(),
         anchor: req.anchor.as_deref(),
         stop_anchor: req.stop_anchor.as_deref(),
+        keep_anchors: req.keep_anchors,
+        trust: req.trust,
     })?;
     let len = json.len() as u32;
     let mut buf = Vec::with_capacity(4 + json.len());
@@ -372,6 +469,9 @@ fn encode_request(req: &InferenceRequest) -> std::result::Result<Vec<u8>, serde_
 enum FrameResult {
     Meta(String, usize),
     Token(String, usize),
+    /// `0x05 JSON` — a structured (non-token) result chunk. Accumulated until
+    /// DONE by ops that expect it (health); ignored by token-streaming ops.
+    Json(String, usize),
     Done(u64, usize),
     Error(String, usize),
     Incomplete,
@@ -412,6 +512,66 @@ fn decode_frame(buf: &[u8]) -> FrameResult {
             Ok(s) => FrameResult::Meta(s.to_owned(), consumed),
             Err(_) => FrameResult::Error("daemon sent invalid UTF-8 in META frame".to_owned(), consumed),
         },
+        0x05 => match std::str::from_utf8(payload) {
+            Ok(s) => FrameResult::Json(s.to_owned(), consumed),
+            Err(_) => FrameResult::Error("daemon sent invalid UTF-8 in JSON frame".to_owned(), consumed),
+        },
         other => FrameResult::UnknownType(other),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Golden wire tests: lock the exact bytes jadelang sends to the daemon so any
+    // drift from the documented protocol (design/llm-package-1.1.12.md) fails CI.
+    // The daemon mirrors these field names with serde(default); what this pins is
+    // field ORDER and the presence of `keep_anchors` / `trust`.
+
+    fn split_prefix(buf: &[u8]) -> (u32, &[u8]) {
+        let len = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+        (len, &buf[4..])
+    }
+
+    #[test]
+    fn encode_minimal_request_golden() {
+        let req = InferenceRequest {
+            prompt: "hi".into(),
+            model: "m".into(),
+            max_tokens: 10,
+            ..Default::default()
+        };
+        let buf = encode_request(&req).unwrap();
+        let (len, json) = split_prefix(&buf);
+        assert_eq!(len as usize, json.len(), "length prefix must match payload");
+        assert_eq!(
+            std::str::from_utf8(json).unwrap(),
+            r#"{"prompt":"hi","model":"m","max_tokens":10,"keep_anchors":false,"trust":0}"#,
+        );
+    }
+
+    #[test]
+    fn encode_full_request_golden() {
+        // Tool delimiters come from the model profile, not inline literals — the
+        // single source of truth for this model's tool format.
+        let profile = crate::llm::model_profile::QWEN3_CODER_30B;
+        let req = InferenceRequest {
+            prompt: "p".into(),
+            model: profile.model.into(),
+            max_tokens: 64,
+            grammar: Some(r#"root ::= "{" [^}]* "}""#.into()),
+            anchor: Some(profile.tool_call.open.into()),
+            stop_anchor: Some(profile.tool_call.close.into()),
+            keep_anchors: true,
+            trust: 1,
+        };
+        let buf = encode_request(&req).unwrap();
+        let (len, json) = split_prefix(&buf);
+        assert_eq!(len as usize, json.len());
+        assert_eq!(
+            std::str::from_utf8(json).unwrap(),
+            r#"{"prompt":"p","model":"Qwen3-Coder-30B","max_tokens":64,"grammar":"root ::= \"{\" [^}]* \"}\"","anchor":"<tool_call>","stop_anchor":"</tool_call>","keep_anchors":true,"trust":1}"#,
+        );
     }
 }

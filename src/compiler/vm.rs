@@ -33,6 +33,13 @@ pub enum NativeFnId {
     LlmSetMaxTokens,
     LlmCountTokens,
     LlmTotalTokens,
+    LlmKeepAnchors,
+    LlmModel,
+    LlmProfile,
+    LlmFindToolCall,
+    LlmFindToolCalls,
+    LlmToolGrammar,
+    LlmHealth,
     Print,
     Stream,
     Route,
@@ -261,6 +268,10 @@ pub struct VmState {
     pub token_count: i64,
     pub max_retries: usize,
     pub max_tokens: u32,
+    /// Sticky session control: when true, prompt requests ask the daemon to make
+    /// tool-span boundaries observable in-band (`keep_anchors` on the wire). Set
+    /// from Jade via `llm.keep_anchors(b)`.
+    pub keep_anchors: bool,
     pub default_model: String,
     /// Memoisation cache: maps `(prompt_text, output_type)` → the raw response
     /// text that produced a successful result. Mirrors the same cache in `Env`.
@@ -303,6 +314,7 @@ impl VmState {
             token_count: 0,
             max_retries: 15,
             max_tokens: DEFAULT_MAX_TOKENS,
+            keep_anchors: false,
             default_model: String::new(),
             prompt_cache: HashMap::new(),
             source_dir: PathBuf::new(),
@@ -369,6 +381,7 @@ impl VmState {
             token_count: 0,
             max_retries: self.max_retries,
             max_tokens: self.max_tokens,
+            keep_anchors: self.keep_anchors,
             default_model: self.default_model.clone(),
             prompt_cache: self.prompt_cache.clone(),
             source_dir: self.source_dir.clone(),
@@ -1771,7 +1784,7 @@ async fn call_value(
                                     max_tokens: state.max_tokens,
                                     grammar: infer_grammar,
                                     anchor: infer_anchor,
-                                    stop_anchor: infer_stop,
+                                    stop_anchor: infer_stop, keep_anchors: state.keep_anchors, ..Default::default()
                                 }, span).await?;
                                 *ts.rx.lock() = Some(rx);
                                 *ts.tokens_handle.lock() = Some(handle);
@@ -1836,6 +1849,110 @@ async fn call_value(
                         span,
                     }),
                 }
+            }
+            NativeFnId::LlmKeepAnchors => {
+                if args.len() != 1 {
+                    return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span });
+                }
+                match &args[0] {
+                    VmValue::Bool(b) => {
+                        state.keep_anchors = *b;
+                        Ok(VmValue::Nil)
+                    }
+                    ref other => Err(JadeError::TypeError {
+                        message: format!("llm.keep_anchors() requires a bool, got {}", value_type_name(other)),
+                        span,
+                    }),
+                }
+            }
+            NativeFnId::LlmModel => {
+                if !args.is_empty() {
+                    return Err(JadeError::ArityMismatch { expected: 0, got: args.len(), span });
+                }
+                // The active model — set from the daemon's Meta frame after the
+                // first inference, else the configured default (may be empty).
+                Ok(VmValue::Str(state.default_model.clone()))
+            }
+            NativeFnId::LlmProfile => {
+                if !args.is_empty() {
+                    return Err(JadeError::ArityMismatch { expected: 0, got: args.len(), span });
+                }
+                // Look up this model's token/tool vocabulary. nil when unknown.
+                match llm::model_profile::select(&state.default_model) {
+                    Some(p) => Ok(model_profile_to_vm(p)),
+                    None => Ok(VmValue::Nil),
+                }
+            }
+            NativeFnId::LlmFindToolCall => {
+                if args.len() != 1 {
+                    return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span });
+                }
+                match &args[0] {
+                    VmValue::Str(text) => {
+                        // Search the model's output for a tool call delimited per
+                        // the active model's profile. nil when no profile is known
+                        // for the model, or no tool call is present.
+                        let found = llm::model_profile::select(&state.default_model)
+                            .and_then(|p| p.find_tool_call(text));
+                        match found {
+                            Some(tc) => Ok(VmValue::Dict(HashMap::from([
+                                ("name".to_string(), VmValue::Str(tc.name)),
+                                ("args".to_string(), VmValue::Str(tc.args)),
+                            ]))),
+                            None => Ok(VmValue::Nil),
+                        }
+                    }
+                    ref other => Err(JadeError::TypeError {
+                        message: format!("llm.find_tool_call() requires str, got {}", value_type_name(other)),
+                        span,
+                    }),
+                }
+            }
+            NativeFnId::LlmFindToolCalls => {
+                if args.len() != 1 {
+                    return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span });
+                }
+                match &args[0] {
+                    VmValue::Str(text) => {
+                        // Every tool call in the text, in order, per the active
+                        // model's profile delimiters. Empty array when none.
+                        let calls = llm::model_profile::select(&state.default_model)
+                            .map(|p| p.find_all_tool_calls(text))
+                            .unwrap_or_default();
+                        let items = calls.into_iter().map(|tc| {
+                            VmValue::Dict(HashMap::from([
+                                ("name".to_string(), VmValue::Str(tc.name)),
+                                ("args".to_string(), VmValue::Str(tc.args)),
+                            ]))
+                        }).collect::<Vec<_>>();
+                        Ok(VmValue::Array(Arc::new(Mutex::new(items))))
+                    }
+                    ref other => Err(JadeError::TypeError {
+                        message: format!("llm.find_tool_calls() requires str, got {}", value_type_name(other)),
+                        span,
+                    }),
+                }
+            }
+            NativeFnId::LlmToolGrammar => {
+                if !args.is_empty() {
+                    return Err(JadeError::ArityMismatch { expected: 0, got: args.len(), span });
+                }
+                // The canonical tool-call body grammar (grammars/tool_call.gbnf),
+                // compiled in. Pair with the profile delimiters for a full
+                // anchored grammar via Grammar.new(g, open, close).
+                Ok(VmValue::Str(crate::compiler::gbnf::TOOL_CALL_GBNF.to_owned()))
+            }
+            NativeFnId::LlmHealth => {
+                if !args.is_empty() {
+                    return Err(JadeError::ArityMismatch { expected: 0, got: args.len(), span });
+                }
+                let backend = state.inference_backend.as_ref()
+                    .ok_or_else(|| JadeError::MissingApiKey { span })?;
+                let snapshot = backend.health(span).await?;
+                json_to_vm_value(&snapshot).map_err(|e| JadeError::InferenceError {
+                    message: format!("daemon health snapshot could not be read: {e}"),
+                    span,
+                })
             }
         },
         VmValue::TypeRef(type_name) => {
@@ -1960,7 +2077,7 @@ async fn vm_prompt_deref(
         max_tokens: state.max_tokens,
         grammar: grammar.clone(),
         anchor: grammar_anchor.clone(),
-        stop_anchor: grammar_stop.clone(),
+        stop_anchor: grammar_stop.clone(), keep_anchors: state.keep_anchors, ..Default::default()
     }, span).await?;
 
     if let Some(name) = backend.reported_model_name() {
@@ -2009,7 +2126,7 @@ async fn vm_prompt_deref(
                     max_tokens: retry_max_tokens,
                     grammar: grammar.clone(),
                     anchor: grammar_anchor.clone(),
-                    stop_anchor: grammar_stop.clone(),
+                    stop_anchor: grammar_stop.clone(), keep_anchors: state.keep_anchors, ..Default::default()
                 }, span).await?;
                 current = retry.text;
             }
@@ -2239,6 +2356,28 @@ fn json_to_vm_value(json: &serde_json::Value) -> std::result::Result<VmValue, St
     }
 }
 
+/// Convert a model profile into the dict shape `llm.profile()` returns:
+/// `{ model, tool_call: { open, close, name_field }, spans: [ { tag, open, close } ] }`.
+fn model_profile_to_vm(p: &llm::model_profile::ModelProfile) -> VmValue {
+    let tool_call = HashMap::from([
+        ("open".to_string(), VmValue::Str(p.tool_call.open.to_string())),
+        ("close".to_string(), VmValue::Str(p.tool_call.close.to_string())),
+        ("name_field".to_string(), VmValue::Str(p.tool_call.name_field.to_string())),
+    ]);
+    let spans = p.spans.iter().map(|s| {
+        VmValue::Dict(HashMap::from([
+            ("tag".to_string(), VmValue::Str(s.tag.to_string())),
+            ("open".to_string(), VmValue::Str(s.open.to_string())),
+            ("close".to_string(), VmValue::Str(s.close.to_string())),
+        ]))
+    }).collect::<Vec<_>>();
+    VmValue::Dict(HashMap::from([
+        ("model".to_string(), VmValue::Str(p.model.to_string())),
+        ("tool_call".to_string(), VmValue::Dict(tool_call)),
+        ("spans".to_string(), VmValue::Array(Arc::new(Mutex::new(spans)))),
+    ]))
+}
+
 /// Summarise struct field names and optionality for LLM error messages.
 fn vm_field_summary(def: &[StructFieldDef]) -> String {
     def.iter().map(|f| match f {
@@ -2349,7 +2488,7 @@ async fn vm_drain_token_stream(
                 prompt: prompt_text,
                 model: state.default_model.clone(),
                 max_tokens: state.max_tokens,
-                grammar: None, anchor: None, stop_anchor: None,
+                grammar: None, anchor: None, stop_anchor: None, keep_anchors: state.keep_anchors, ..Default::default()
             }, span).await?;
             *ts.rx.lock() = Some(rx);
             *ts.tokens_handle.lock() = Some(handle);
@@ -2545,7 +2684,7 @@ async fn vm_drain_token_stream_printing(
                 prompt: prompt_text,
                 model: state.default_model.clone(),
                 max_tokens: state.max_tokens,
-                grammar: None, anchor: None, stop_anchor: None,
+                grammar: None, anchor: None, stop_anchor: None, keep_anchors: state.keep_anchors, ..Default::default()
             }, span).await?;
             *ts.rx.lock() = Some(rx);
             *ts.tokens_handle.lock() = Some(handle);

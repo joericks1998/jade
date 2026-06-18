@@ -22,10 +22,45 @@ fn unreachable_total_tokens(_args: &[VmValue]) -> Result<VmValue> {
     unreachable!("llm.total_tokens is handled by NativeFnId dispatch in the VM")
 }
 
-static LLM_FNS: [BuiltinFn; 3] = [
+fn unreachable_keep_anchors(_args: &[VmValue]) -> Result<VmValue> {
+    unreachable!("llm.keep_anchors is handled by NativeFnId dispatch in the VM")
+}
+
+fn unreachable_model(_args: &[VmValue]) -> Result<VmValue> {
+    unreachable!("llm.model is handled by NativeFnId dispatch in the VM")
+}
+
+fn unreachable_profile(_args: &[VmValue]) -> Result<VmValue> {
+    unreachable!("llm.profile is handled by NativeFnId dispatch in the VM")
+}
+
+fn unreachable_health(_args: &[VmValue]) -> Result<VmValue> {
+    unreachable!("llm.health is handled by NativeFnId dispatch in the VM")
+}
+
+fn unreachable_find_tool_call(_args: &[VmValue]) -> Result<VmValue> {
+    unreachable!("llm.find_tool_call is handled by NativeFnId dispatch in the VM")
+}
+
+fn unreachable_find_tool_calls(_args: &[VmValue]) -> Result<VmValue> {
+    unreachable!("llm.find_tool_calls is handled by NativeFnId dispatch in the VM")
+}
+
+fn unreachable_tool_grammar(_args: &[VmValue]) -> Result<VmValue> {
+    unreachable!("llm.tool_grammar is handled by NativeFnId dispatch in the VM")
+}
+
+static LLM_FNS: [BuiltinFn; 10] = [
     BuiltinFn { name: "set_max_tokens", vm_impl: unreachable_set_max_tokens },
     BuiltinFn { name: "count_tokens",   vm_impl: unreachable_count_tokens },
     BuiltinFn { name: "total_tokens",   vm_impl: unreachable_total_tokens },
+    BuiltinFn { name: "keep_anchors",   vm_impl: unreachable_keep_anchors },
+    BuiltinFn { name: "model",          vm_impl: unreachable_model },
+    BuiltinFn { name: "profile",        vm_impl: unreachable_profile },
+    BuiltinFn { name: "health",         vm_impl: unreachable_health },
+    BuiltinFn { name: "find_tool_call", vm_impl: unreachable_find_tool_call },
+    BuiltinFn { name: "find_tool_calls", vm_impl: unreachable_find_tool_calls },
+    BuiltinFn { name: "tool_grammar",   vm_impl: unreachable_tool_grammar },
 ];
 
 fn register_llm_types(ctx: &mut TypeContext) {
@@ -45,6 +80,13 @@ pub fn llm_vm_dict_value() -> VmValue {
     map.insert("set_max_tokens".to_string(), VmValue::NativeFn(NativeFnId::LlmSetMaxTokens));
     map.insert("count_tokens".to_string(),   VmValue::NativeFn(NativeFnId::LlmCountTokens));
     map.insert("total_tokens".to_string(),   VmValue::NativeFn(NativeFnId::LlmTotalTokens));
+    map.insert("keep_anchors".to_string(),   VmValue::NativeFn(NativeFnId::LlmKeepAnchors));
+    map.insert("model".to_string(),          VmValue::NativeFn(NativeFnId::LlmModel));
+    map.insert("profile".to_string(),        VmValue::NativeFn(NativeFnId::LlmProfile));
+    map.insert("health".to_string(),         VmValue::NativeFn(NativeFnId::LlmHealth));
+    map.insert("find_tool_call".to_string(), VmValue::NativeFn(NativeFnId::LlmFindToolCall));
+    map.insert("find_tool_calls".to_string(), VmValue::NativeFn(NativeFnId::LlmFindToolCalls));
+    map.insert("tool_grammar".to_string(),   VmValue::NativeFn(NativeFnId::LlmToolGrammar));
     VmValue::Dict(map)
 }
 

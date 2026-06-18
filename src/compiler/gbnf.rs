@@ -1,6 +1,18 @@
 use std::collections::HashMap;
 use crate::frontend::ast::StructFieldDef;
 
+/// Canonical GBNF for the JSON body of a Jade tool call. Kept as a checked-in
+/// `.gbnf` file (`grammars/tool_call.gbnf`) and compiled in here so it ships with
+/// the binary and is covered by tests. The model-specific delimiters that wrap
+/// this body come from the active model profile (`src/llm/model_profile.rs`), not
+/// from the grammar — so this body grammar is reusable across models.
+pub const TOOL_CALL_GBNF: &str = include_str!("../../grammars/tool_call.gbnf");
+
+/// The canonical tool-call body grammar (see [`TOOL_CALL_GBNF`]).
+pub fn tool_call_grammar() -> &'static str {
+    TOOL_CALL_GBNF
+}
+
 /// Wrap a user-supplied GBNF pattern (RHS only) into a complete grammar.
 ///
 /// `pattern` is the right-hand side of the root rule, e.g. `"yes" | "no"`.
@@ -107,5 +119,26 @@ mod tests {
         let g = grammar_for("dict", &no_defs()).unwrap();
         assert!(g.starts_with("root"));
         assert!(g.contains("\"{\""), "should anchor opening brace");
+    }
+
+    #[test]
+    fn tool_call_gbnf_is_present_and_well_formed() {
+        let g = tool_call_grammar();
+        assert!(!g.trim().is_empty(), "tool_call.gbnf must ship non-empty");
+        assert!(g.contains("\"name\""), "must constrain the name member");
+        assert!(g.contains("arguments"), "must constrain the arguments member");
+
+        // Collect defined rule names (LHS of every `name ::= …` line).
+        let defined: std::collections::HashSet<&str> = g
+            .lines()
+            .filter_map(|l| l.split_once("::="))
+            .map(|(lhs, _)| lhs.trim())
+            .collect();
+        assert!(defined.contains("root"), "must define the root start rule");
+        // No dangling nonterminals — every rule the grammar relies on is defined.
+        // Rule set mirrors the live, unit-tested tool-call grammar.
+        for rule in ["pair", "val", "obj", "arr", "str", "num", "ws"] {
+            assert!(defined.contains(rule), "rule `{rule}` is referenced but not defined");
+        }
     }
 }

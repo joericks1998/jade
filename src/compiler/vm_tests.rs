@@ -2904,3 +2904,122 @@ fn test_prompt_deref_outside_stream_passes_no_constraints() {
     assert_eq!(captured[0].grammar, None);
     assert_eq!(captured[0].stop_anchor, None);
 }
+
+// ── llm package: protocol controls / profile / health (1.1.12) ───────────────
+
+/// Run with a MockBackend and an explicit active model, so `llm.profile()` /
+/// `llm.model()` resolve against the model-profile table.
+fn run_with_model(src: &str, model: &str) -> VmState {
+    let tokens = lexer::tokenize(src).expect("lex failed");
+    let program = parser::parse(tokens).expect("parse failed");
+    let tprogram = type_infer::infer(program).expect("type inference failed");
+    let compiled = emit::emit(tprogram).expect("emit failed");
+    let opts = VmOpts {
+        backend: Some(std::sync::Arc::new(crate::llm::MockBackend::new(vec!["hi"]))),
+        default_model: model.to_string(),
+        #[cfg(test)]
+        test_stdout: None,
+        ..VmOpts::default()
+    };
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime")
+        .block_on(run(compiled, opts))
+        .expect("run failed")
+}
+
+#[test]
+fn test_llm_keep_anchors_reaches_request() {
+    // `llm.keep_anchors(true)` is sticky session state → every later request
+    // carries keep_anchors=true on the wire.
+    let backend = std::sync::Arc::new(crate::llm::MockBackend::new(vec!["hi"]));
+    let src = "use llm\nllm.keep_anchors(true)\nprompt p = \"test\"\nlet x = ?p";
+    run_src_with_shared_backend(src, std::sync::Arc::clone(&backend)).unwrap();
+    let captured = backend.captured.lock().unwrap();
+    assert!(captured[0].keep_anchors, "keep_anchors must reach the request");
+}
+
+#[test]
+fn test_llm_keep_anchors_defaults_false() {
+    let backend = std::sync::Arc::new(crate::llm::MockBackend::new(vec!["hi"]));
+    let src = "prompt p = \"test\"\nlet x = ?p";
+    run_src_with_shared_backend(src, std::sync::Arc::clone(&backend)).unwrap();
+    let captured = backend.captured.lock().unwrap();
+    assert!(!captured[0].keep_anchors);
+}
+
+#[test]
+fn test_llm_model_returns_active_model() {
+    let state = run_with_model("use llm\nlet m = llm.model()", "Qwen3-Coder-30B");
+    assert_eq!(get_str(&state, "m"), "Qwen3-Coder-30B");
+}
+
+#[test]
+fn test_llm_profile_returns_tool_format() {
+    // `llm.profile()` resolves the model's token/tool vocabulary into a dict.
+    let state = run_with_model(
+        "use llm\nlet p = llm.profile()\nlet open = p.tool_call.open\nlet close = p.tool_call.close\nlet nf = p.tool_call.name_field",
+        "Qwen3-Coder-30B",
+    );
+    assert_eq!(get_str(&state, "open"), "<tool_call>");
+    assert_eq!(get_str(&state, "close"), "</tool_call>");
+    assert_eq!(get_str(&state, "nf"), "name");
+}
+
+#[test]
+fn test_llm_profile_unknown_model_is_nil() {
+    let state = run_with_model("use llm\nlet p = llm.profile()", "some-unknown-model");
+    assert!(matches!(state.globals.get("p"), Some(VmValue::Nil)));
+}
+
+#[test]
+fn test_llm_find_tool_call_matches_profile() {
+    // `llm.find_tool_call(text)` finds a tool call delimited per the active
+    // model's profile and returns { name, args }.
+    let state = run_with_model(
+        "use llm\nlet r = \"Let me check. <tool_call>{\\\"name\\\": \\\"get_weather\\\", \\\"arguments\\\": {\\\"city\\\": \\\"SF\\\"}}</tool_call>\"\nlet tc = llm.find_tool_call(r)\nlet name = tc.name\nlet args = tc.args",
+        "Qwen3-Coder-30B",
+    );
+    assert_eq!(get_str(&state, "name"), "get_weather");
+    assert_eq!(get_str(&state, "args"), r#"{"name": "get_weather", "arguments": {"city": "SF"}}"#);
+}
+
+#[test]
+fn test_llm_find_tool_call_none_is_nil() {
+    let state = run_with_model(
+        "use llm\nlet tc = llm.find_tool_call(\"plain reply, no tool call\")",
+        "Qwen3-Coder-30B",
+    );
+    assert!(matches!(state.globals.get("tc"), Some(VmValue::Nil)));
+}
+
+#[test]
+fn test_llm_find_tool_calls_returns_all() {
+    let state = run_with_model(
+        "use llm\nlet r = \"<tool_call>{\\\"name\\\":\\\"a\\\",\\\"arguments\\\":{}}</tool_call> mid <tool_call>{\\\"name\\\":\\\"b\\\",\\\"arguments\\\":{}}</tool_call>\"\nlet cs = llm.find_tool_calls(r)\nlet n = cs.len()\nlet first = cs[0].name\nlet second = cs[1].name",
+        "Qwen3-Coder-30B",
+    );
+    assert_eq!(get_int(&state, "n"), 2);
+    assert_eq!(get_str(&state, "first"), "a");
+    assert_eq!(get_str(&state, "second"), "b");
+}
+
+#[test]
+fn test_llm_tool_grammar_is_the_canonical_gbnf() {
+    let state = run_with_model("use llm\nlet g = llm.tool_grammar()", "Qwen3-Coder-30B");
+    let g = get_str(&state, "g");
+    assert!(g.contains("\"name\"") && g.contains("arguments"), "must be the tool-call grammar");
+    assert_eq!(g, crate::compiler::gbnf::TOOL_CALL_GBNF);
+}
+
+#[test]
+fn test_llm_health_returns_snapshot_dict() {
+    // The mock backend uses the trait default health(): a minimal ok snapshot.
+    let state = run_with_model(
+        "use llm\nlet h = llm.health()\nlet s = h.status\nlet loaded = h.model_loaded",
+        "Qwen3-Coder-30B",
+    );
+    assert_eq!(get_str(&state, "s"), "ok");
+    assert!(get_bool(&state, "loaded"));
+}

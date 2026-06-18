@@ -18,6 +18,11 @@ const config = {
     locales: ['en'],
   },
 
+  plugins: [
+    // Emits /llms.txt (+ /llms) — all docs as raw markdown for LLM ingestion.
+    require.resolve('./plugins/llms-txt.js'),
+  ],
+
   presets: [
     [
       'classic',
@@ -54,6 +59,13 @@ const config = {
             sidebarId: 'docs',
             position: 'left',
             label: 'Docs',
+          },
+          {
+            // `pathname://` opts out of SPA routing + broken-link checks so this
+            // resolves to the raw static file emitted by the llms-txt plugin.
+            href: 'pathname:///llms.txt',
+            label: 'llms.txt',
+            position: 'right',
           },
           {
             href: 'https://github.com/joericks1998/jade',
