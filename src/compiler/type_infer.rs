@@ -204,11 +204,31 @@ fn dict_vt_of(tval: &TExpr) -> Option<JadeType> {
 fn pkg_call_return_type(module: &str, method: &str) -> Option<JadeType> {
     match (module, method) {
         ("sh",   "exec")    => Some(JadeType::Str),
+        ("sh",   "run")     => Some(JadeType::Int),
         ("fs",   "read")    => Some(JadeType::Str),
         ("fs",   "exists")  => Some(JadeType::Bool),
         ("http", "get")     => Some(JadeType::Dict),
         ("llm",  "count_tokens") => Some(JadeType::Int),
         ("json", "stringify") => Some(JadeType::Str),
+        ("json", "stringify_pretty") => Some(JadeType::Str),
+        ("time", "now")     => Some(JadeType::Int),
+        ("time", "now_ms")  => Some(JadeType::Int),
+        ("path", "dirname") => Some(JadeType::Str),
+        ("path", "stem")    => Some(JadeType::Str),
+        ("path", "abs")     => Some(JadeType::Str),
+        ("path", "is_abs")  => Some(JadeType::Bool),
+        ("http", "post")    => Some(JadeType::Dict),
+        ("http", "put")     => Some(JadeType::Dict),
+        ("http", "delete")  => Some(JadeType::Dict),
+        ("http", "head")    => Some(JadeType::Dict),
+        ("random", "int")   => Some(JadeType::Int),
+        ("random", "float") => Some(JadeType::Float),
+        ("dict", "merge")   => Some(JadeType::Dict),
+        ("array", "map")    => Some(JadeType::Array(Box::new(JadeType::Unknown))),
+        ("array", "filter") => Some(JadeType::Array(Box::new(JadeType::Unknown))),
+        // env.get stays Unknown: it returns str-or-nil (like json.parse), and the
+        // AOT backend tags the result accordingly. random.choice stays Unknown
+        // (any element type); shuffle/seed return Nil.
         // json.parse intentionally stays Unknown — it can fail and return nil,
         // which would conflict with strict Dict typing on `if x != nil { … }`.
         _ => None,
