@@ -22,6 +22,15 @@ pub fn grammar_from_pattern(pattern: &str) -> String {
     format!("root ::= {} [ \\t\\n\\r]*", pattern)
 }
 
+/// Build a prefix grammar that pins the first emitted token to `open` (the
+/// structure's opening bracket) and then permits any continuation. `rest`
+/// matches "zero or more of any byte but NUL", so once the bracket is in place
+/// the grammar imposes no further constraint — bounded enforcement at the start,
+/// free generation after.
+fn prefix_grammar(open: &str) -> String {
+    format!("root ::= {:?} rest\nrest ::= [^\\x00]*", open)
+}
+
 /// Generate a GBNF grammar string for the given JadeLang type name.
 ///
 /// Primitives (int, float, bool): full grammar — output is short, state count is tiny.
@@ -51,15 +60,24 @@ pub fn grammar_for(
             r#"root ::= ("true" | "false") [ \t\n\r]*"#.to_owned()
         ),
         "str" => None,
-        // Anchor-only: force the opening `[` as the first token; the inference
-        // daemon drops the grammar sampler after token 1 — zero masking overhead.
-        "array" | "Array" => Some("root ::= \"[\"".to_owned()),
-        // Anchor-only: force the opening `{`.
-        "dict" | "Dict" => Some("root ::= \"{\"".to_owned()),
+        // Prefix grammar: force the opening `[` as the first token, then let the
+        // model generate the rest freely (`rest ::= [^\x00]*` matches anything).
+        //
+        // An anchor-only grammar (`root ::= "["`) is a trap: it matches *only*
+        // the single opening token with no legal continuation, so the model is
+        // forced straight to EOG and emits literally `[`, which never coerces.
+        // The daemon only retires a grammar after its anchor when an explicit
+        // anchor is sent on the request — these auto-generated grammars carry
+        // none, so the grammar stays active for the whole generation and the
+        // model never escapes the opening bracket. The free `rest` rule keeps
+        // masking effectively zero-cost (every token is permitted) while still
+        // guaranteeing the value opens with the right bracket.
+        "array" | "Array" => Some(prefix_grammar("[")),
+        "dict" | "Dict" => Some(prefix_grammar("{")),
         name => {
             let def = struct_defs.get(name)?;
             let _ = def;
-            Some("root ::= \"{\"".to_owned())
+            Some(prefix_grammar("{"))
         }
     }
 }
@@ -96,7 +114,7 @@ mod tests {
     }
 
     #[test]
-    fn struct_grammar_is_anchor_only() {
+    fn struct_grammar_is_prefix_with_free_rest() {
         let fields = vec![
             StructFieldDef::Required("name".to_string()),
             StructFieldDef::Required("age".to_string()),
@@ -105,6 +123,10 @@ mod tests {
         defs.insert("Person".to_string(), fields);
         let g = grammar_for("Person", &defs).unwrap();
         assert!(g.contains("\"{\""), "grammar should anchor opening brace");
+        // Must allow a continuation after the brace — an anchor-only grammar
+        // (`root ::= "{"`) forces premature EOG and never coerces.
+        assert!(g.contains("rest"), "grammar must permit a continuation after `{{`");
+        assert_ne!(g.trim(), "root ::= \"{\"", "grammar must not be anchor-only");
     }
 
     #[test]
@@ -112,6 +134,8 @@ mod tests {
         let g = grammar_for("array", &no_defs()).unwrap();
         assert!(g.starts_with("root"));
         assert!(g.contains("\"[\""), "should anchor opening bracket");
+        assert!(g.contains("rest"), "grammar must permit a continuation after `[`");
+        assert_ne!(g.trim(), "root ::= \"[\"", "grammar must not be anchor-only");
     }
 
     #[test]
@@ -119,6 +143,8 @@ mod tests {
         let g = grammar_for("dict", &no_defs()).unwrap();
         assert!(g.starts_with("root"));
         assert!(g.contains("\"{\""), "should anchor opening brace");
+        assert!(g.contains("rest"), "grammar must permit a continuation after `{{`");
+        assert_ne!(g.trim(), "root ::= \"{\"", "grammar must not be anchor-only");
     }
 
     #[test]

@@ -72,24 +72,38 @@ impl ModelProfile {
     /// Find the first tool call in `text`, delimited by this model's
     /// `tool_call.open`/`tool_call.close`.
     ///
-    /// Returns `None` when no opening delimiter is present. If the opening
-    /// delimiter is found without a matching close, the remainder of the text is
-    /// treated as the body — matching the daemon's defensive finish behavior
-    /// (`ToolStreamParser::finish`), since with `keep_anchors` a complete
-    /// response normally carries both delimiters in-band.
+    /// Returns `None` when neither a delimited nor a bare-JSON tool call is
+    /// present. If the opening delimiter is found without a matching close, the
+    /// remainder of the text is treated as the body — matching the daemon's
+    /// defensive finish behavior (`ToolStreamParser::finish`), since with
+    /// `keep_anchors` a complete response normally carries both delimiters
+    /// in-band. When no opening delimiter appears at all (the daemon strips the
+    /// anchors when `keep_anchors` is off), the first bare-JSON tool call is
+    /// recovered instead — see [`Self::bare_tool_calls`].
     pub fn find_tool_call(&self, text: &str) -> Option<ToolCallMatch> {
-        let start = text.find(self.tool_call.open)? + self.tool_call.open.len();
-        let rest = &text[start..];
-        let body = match rest.find(self.tool_call.close) {
-            Some(end) => &rest[..end],
-            None => rest,
-        };
-        Some(self.match_from_body(body))
+        if let Some(open_rel) = text.find(self.tool_call.open) {
+            let start = open_rel + self.tool_call.open.len();
+            let rest = &text[start..];
+            let body = match rest.find(self.tool_call.close) {
+                Some(end) => &rest[..end],
+                None => rest,
+            };
+            return Some(self.match_from_body(body));
+        }
+        // No delimiter in the stream → recover a bare-JSON call.
+        self.bare_tool_calls(text).into_iter().next()
     }
 
     /// Find EVERY tool call in `text`, in order. Empty when none are present.
     /// Each match is delimited by this model's `open`/`close`; a trailing
     /// unterminated call (open without close) is recovered from the remainder.
+    ///
+    /// When the stream carries no delimiters at all — e.g. the daemon stripped
+    /// the anchors because `keep_anchors` was off, so a multi-call turn arrives
+    /// as a run of bare JSON objects — the delimiter scan finds nothing and we
+    /// fall back to [`Self::bare_tool_calls`] so those calls aren't silently
+    /// dropped. The fallback only fires when the delimited scan is empty, so
+    /// well-formed delimited output keeps its exact previous behavior.
     pub fn find_all_tool_calls(&self, text: &str) -> Vec<ToolCallMatch> {
         let mut out = Vec::new();
         let mut rest = text;
@@ -105,7 +119,34 @@ impl ModelProfile {
             }
             rest = &after[advance..];
         }
+        if out.is_empty() {
+            return self.bare_tool_calls(text);
+        }
         out
+    }
+
+    /// Recover tool calls emitted as **bare JSON** (no `open`/`close` delimiters
+    /// wrapping them). Scans `text` for top-level JSON objects (brace-depth
+    /// matched, string-aware) and keeps each one that actually carries the
+    /// `name_field` as a string — that field is the only signal distinguishing a
+    /// tool call from arbitrary JSON the model may have emitted as prose. A JSON
+    /// array of calls (`[{…},{…}]`) is handled too, since the enclosing brackets
+    /// don't affect brace depth.
+    fn bare_tool_calls(&self, text: &str) -> Vec<ToolCallMatch> {
+        scan_top_level_objects(text)
+            .into_iter()
+            .filter(|obj| {
+                serde_json::from_str::<serde_json::Value>(obj.trim())
+                    .ok()
+                    .and_then(|v| {
+                        v.get(self.tool_call.name_field)
+                            .and_then(|n| n.as_str())
+                            .map(|_| ())
+                    })
+                    .is_some()
+            })
+            .map(|obj| self.match_from_body(obj))
+            .collect()
     }
 
     /// Build a [`ToolCallMatch`] from a raw delimiter body: trim it and lift the
@@ -185,6 +226,50 @@ fn glob_match(pattern: &str, text: &str) -> bool {
     pi == p.len()
 }
 
+/// Scan `text` for top-level JSON objects, returning each `{…}` substring in
+/// order. Brace depth is tracked string-aware: `{`/`}` bytes inside a JSON
+/// string literal (and `\"` escapes within it) don't open or close an object,
+/// so braces in string values can't split a call. Nested objects (e.g. an
+/// `"arguments": {…}`) stay part of their enclosing top-level object. Used by
+/// [`ModelProfile::bare_tool_calls`] to recover delimiter-less tool calls.
+fn scan_top_level_objects(text: &str) -> Vec<&str> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    let mut in_str = false;
+    let mut escaped = false;
+    for (i, &b) in bytes.iter().enumerate() {
+        if in_str {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_str = false;
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_str = true,
+            b'{' => {
+                if depth == 0 {
+                    start = i;
+                }
+                depth += 1;
+            }
+            b'}' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    out.push(&text[start..=i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,5 +340,62 @@ mod tests {
     #[test]
     fn find_all_tool_calls_empty_when_none() {
         assert!(QWEN3_CODER_30B.find_all_tool_calls("no tools here").is_empty());
+    }
+
+    #[test]
+    fn find_all_tool_calls_recovers_bare_json_when_no_delimiters() {
+        // No <tool_call> wrappers — the daemon stripped the anchors. Two calls
+        // emitted back-to-back as bare JSON must both be recovered, in order.
+        let p = QWEN3_CODER_30B;
+        let text = concat!(
+            r#"{"name":"a","arguments":{"x":1}}"#,
+            "\n",
+            r#"{"name":"b","arguments":{"y":"}"}}"#, // brace inside a string value
+        );
+        let calls = p.find_all_tool_calls(text);
+        assert_eq!(calls.len(), 2, "both bare calls recovered");
+        assert_eq!(calls[0].name, "a");
+        assert_eq!(calls[1].name, "b");
+        // The `}` inside the string value must not split the second object.
+        assert_eq!(calls[1].args, r#"{"name":"b","arguments":{"y":"}"}}"#);
+    }
+
+    #[test]
+    fn find_all_tool_calls_recovers_bare_json_array() {
+        let p = QWEN3_CODER_30B;
+        let text = r#"[{"name":"a","arguments":{}}, {"name":"b","arguments":{}}]"#;
+        let calls = p.find_all_tool_calls(text);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].name, "a");
+        assert_eq!(calls[1].name, "b");
+    }
+
+    #[test]
+    fn bare_fallback_ignores_non_tool_json_objects() {
+        // Bare JSON objects without the name field aren't tool calls.
+        let p = QWEN3_CODER_30B;
+        assert!(p.find_all_tool_calls(r#"{"city":"SF"} {"value":42}"#).is_empty());
+        assert!(p.find_tool_call(r#"{"city":"SF"}"#).is_none());
+    }
+
+    #[test]
+    fn delimited_scan_takes_precedence_over_bare_fallback() {
+        // When delimiters ARE present, behavior is unchanged: the bare fallback
+        // must not also kick in and double-count.
+        let p = QWEN3_CODER_30B;
+        let text = r#"<tool_call>{"name":"a","arguments":{}}</tool_call>"#;
+        let calls = p.find_all_tool_calls(text);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "a");
+    }
+
+    #[test]
+    fn find_tool_call_recovers_first_bare_json() {
+        let p = QWEN3_CODER_30B;
+        let tc = p
+            .find_tool_call(r#"sure: {"name":"get_weather","arguments":{"city":"SF"}} done"#)
+            .expect("bare call recovered");
+        assert_eq!(tc.name, "get_weather");
+        assert_eq!(tc.args, r#"{"name":"get_weather","arguments":{"city":"SF"}}"#);
     }
 }
