@@ -1,5 +1,7 @@
+use std::collections::HashMap;
+
 use crate::{
-    compiler::{tir::JadeType, type_infer::TypeContext, vm::VmValue},
+    compiler::{tir::JadeType, type_infer::TypeContext, vm::{NativeFnId, VmValue}},
     frontend::error::{JadeError, Result, Span},
 };
 
@@ -83,21 +85,17 @@ pub fn find_array_method(name: &str) -> Option<BuiltinFn> {
 
 // ── std/array package functions (functional style) ────────────────────────────
 
+// array.map / array.filter call a user function per element, which needs the VM
+// call context (VmState + async). They are dispatched through
+// NativeFnId::ArrayMap / ArrayFilter in the VM; array_vm_dict_value() injects
+// those variants. These BuiltinFn stubs exist only so the package table still
+// lists the names — they are never invoked.
 fn pkg_map(_args: &[VmValue]) -> Result<VmValue> {
-    // map(arr, f) is async-capable but we need the VM call context.
-    // For now, return an error explaining this must be done with a for-loop.
-    // Full async-capable map would require VmState access.
-    Err(JadeError::TypeError {
-        message: "array.map: use a for-loop to transform arrays".to_string(),
-        span: ZERO,
-    })
+    unreachable!("array.map is handled by NativeFnId::ArrayMap dispatch in the VM")
 }
 
 fn pkg_filter(_args: &[VmValue]) -> Result<VmValue> {
-    Err(JadeError::TypeError {
-        message: "array.filter: use a for-loop to filter arrays".to_string(),
-        span: ZERO,
-    })
+    unreachable!("array.filter is handled by NativeFnId::ArrayFilter dispatch in the VM")
 }
 
 fn pkg_sort(args: &[VmValue]) -> Result<VmValue> {
@@ -143,6 +141,18 @@ pub static ARRAY_PKG: Package = Package {
     fns: ARRAY_PKG_FNS,
     register_types: register_array_pkg_types,
 };
+
+/// Override of `Package::vm_dict_value` for the array package: `map`/`filter`
+/// bind to their `NativeFn` variants (which can run a Jade function per element),
+/// while `sort`/`reverse` stay pure BuiltinFns. Mirrors `llm_vm_dict_value`.
+pub fn array_vm_dict_value() -> VmValue {
+    let mut map = HashMap::new();
+    map.insert("map".to_string(),     VmValue::NativeFn(NativeFnId::ArrayMap));
+    map.insert("filter".to_string(),  VmValue::NativeFn(NativeFnId::ArrayFilter));
+    map.insert("sort".to_string(),    VmValue::BuiltinFn(BuiltinFn { name: "sort",    vm_impl: pkg_sort }));
+    map.insert("reverse".to_string(), VmValue::BuiltinFn(BuiltinFn { name: "reverse", vm_impl: pkg_reverse }));
+    VmValue::Dict(map)
+}
 
 // ── Type checker primitive method registration ────────────────────────────────
 

@@ -43,6 +43,11 @@ pub enum NativeFnId {
     Print,
     Stream,
     Route,
+    /// `array.map(arr, fn)` / `array.filter(arr, fn)` — need VmState + async to
+    /// call the user function per element, so they dispatch here rather than as
+    /// pure BuiltinFns (which can't run Jade code).
+    ArrayMap,
+    ArrayFilter,
 }
 
 /// A value at VM runtime, carrying `Arc<CompiledFn>` for functions so the VM
@@ -597,6 +602,8 @@ async fn execute_chunk(
                 if let Some(pkg) = builtins::find_package(path) {
                     let val = if pkg.import_name == "llm" {
                         builtins::llm_pkg::llm_vm_dict_value()
+                    } else if pkg.import_name == "std/array" {
+                        builtins::array_pkg::array_vm_dict_value()
                     } else {
                         pkg.vm_dict_value()
                     };
@@ -796,6 +803,8 @@ async fn execute_chunk(
                     // Build the package dict, then extract only the requested names.
                     let dict = if pkg.import_name == "llm" {
                         builtins::llm_pkg::llm_vm_dict_value()
+                    } else if pkg.import_name == "std/array" {
+                        builtins::array_pkg::array_vm_dict_value()
                     } else {
                         pkg.vm_dict_value()
                     };
@@ -1849,6 +1858,51 @@ async fn call_value(
                         span,
                     }),
                 }
+            }
+            NativeFnId::ArrayMap => {
+                // array.map(arr, fn) → new array of fn(elem) for each element.
+                if args.len() != 2 {
+                    return Err(JadeError::ArityMismatch { expected: 2, got: args.len(), span });
+                }
+                let elems = match &args[0] {
+                    VmValue::Array(arc) => arc.lock().clone(),
+                    other => return Err(JadeError::TypeError {
+                        message: format!("array.map: first argument must be an array, got {}", value_type_name(other)),
+                        span,
+                    }),
+                };
+                let f = args[1].clone();
+                let mut out = Vec::with_capacity(elems.len());
+                for e in elems {
+                    out.push(call_value(f.clone(), vec![e], state, span).await?);
+                }
+                Ok(VmValue::Array(Arc::new(Mutex::new(out))))
+            }
+            NativeFnId::ArrayFilter => {
+                // array.filter(arr, fn) → elements for which fn(elem) is true.
+                if args.len() != 2 {
+                    return Err(JadeError::ArityMismatch { expected: 2, got: args.len(), span });
+                }
+                let elems = match &args[0] {
+                    VmValue::Array(arc) => arc.lock().clone(),
+                    other => return Err(JadeError::TypeError {
+                        message: format!("array.filter: first argument must be an array, got {}", value_type_name(other)),
+                        span,
+                    }),
+                };
+                let f = args[1].clone();
+                let mut out = Vec::new();
+                for e in elems {
+                    match call_value(f.clone(), vec![e.clone()], state, span).await? {
+                        VmValue::Bool(true)  => out.push(e),
+                        VmValue::Bool(false) => {}
+                        other => return Err(JadeError::TypeError {
+                            message: format!("array.filter: predicate must return a bool, got {}", value_type_name(&other)),
+                            span,
+                        }),
+                    }
+                }
+                Ok(VmValue::Array(Arc::new(Mutex::new(out))))
             }
             NativeFnId::LlmKeepAnchors => {
                 if args.len() != 1 {
