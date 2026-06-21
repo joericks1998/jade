@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::{
-    compiler::{tir::JadeType, type_infer::TypeContext, vm::VmValue},
+    compiler::{tir::JadeType, type_infer::TypeContext, vm::{value_type_name, VmValue}},
     frontend::error::{JadeError, Result, Span},
 };
 
@@ -58,10 +58,12 @@ fn json_parse(args: &[VmValue]) -> Result<VmValue> {
     }
     let s = match &args[0] {
         VmValue::Str(s) => s.as_str(),
-        _ => return Err(JadeError::TypeError { message: "json.parse".to_string(), span: ZERO }),
+        other => return Err(JadeError::TypeError {
+            message: format!("json.parse: expected a JSON string, got {}", value_type_name(other)),
+            span: ZERO }),
     };
     let val: serde_json::Value = serde_json::from_str(s).map_err(|e| JadeError::IoError {
-        message: format!("json.parse: {}", e),
+        message: format!("json.parse: invalid JSON: {}", e),
         span: ZERO,
     })?;
     Ok(json_to_vm(val))

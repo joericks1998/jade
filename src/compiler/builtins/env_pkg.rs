@@ -1,5 +1,5 @@
 use crate::{
-    compiler::{tir::JadeType, type_infer::TypeContext, vm::VmValue},
+    compiler::{tir::JadeType, type_infer::TypeContext, vm::{value_type_name, VmValue}},
     frontend::error::{JadeError, Result, Span},
 };
 
@@ -13,7 +13,9 @@ fn env_get(args: &[VmValue]) -> Result<VmValue> {
     }
     let name = match &args[0] {
         VmValue::Str(s) => s.as_str(),
-        _ => return Err(JadeError::TypeError { message: "env.get".to_string(), span: ZERO }),
+        other => return Err(JadeError::TypeError {
+            message: format!("env.get: expected a string variable name, got {}", value_type_name(other)),
+            span: ZERO }),
     };
     Ok(match std::env::var(name) {
         Ok(val) => VmValue::Str(val),
@@ -27,11 +29,15 @@ fn env_set(args: &[VmValue]) -> Result<VmValue> {
     }
     let name = match &args[0] {
         VmValue::Str(s) => s.clone(),
-        _ => return Err(JadeError::TypeError { message: "env.set".to_string(), span: ZERO }),
+        other => return Err(JadeError::TypeError {
+            message: format!("env.set: name must be a string, got {}", value_type_name(other)),
+            span: ZERO }),
     };
     let val = match &args[1] {
         VmValue::Str(s) => s.clone(),
-        _ => return Err(JadeError::TypeError { message: "env.set".to_string(), span: ZERO }),
+        other => return Err(JadeError::TypeError {
+            message: format!("env.set: value must be a string, got {}", value_type_name(other)),
+            span: ZERO }),
     };
     // Safety: jade programs are single-threaded at the OS/process level.
     #[allow(deprecated)]

@@ -1,7 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::{
-    compiler::{tir::JadeType, type_infer::TypeContext, vm::VmValue},
+    compiler::{tir::JadeType, type_infer::TypeContext, vm::{value_type_name, VmValue}},
     frontend::error::{JadeError, Result, Span},
 };
 
@@ -38,7 +38,7 @@ fn time_sleep(args: &[VmValue]) -> Result<VmValue> {
     let secs = match &args[0] {
         VmValue::Int(n)   => *n as f64,
         VmValue::Float(f) => *f,
-        _ => return Err(JadeError::TypeError { message: "time.sleep".to_string(), span: ZERO }),
+        other => return Err(JadeError::TypeError { message: format!("time.sleep: expected a number of seconds, got {}", value_type_name(other)), span: ZERO }),
     };
     if secs > 0.0 {
         std::thread::sleep(std::time::Duration::from_secs_f64(secs));
@@ -56,7 +56,7 @@ fn time_local(args: &[VmValue]) -> Result<VmValue> {
     let tz = match &args[0] {
         VmValue::Str(s) => s.clone(),
         VmValue::Nil    => String::new(),
-        _ => return Err(JadeError::TypeError { message: "time.local: tz must be str".to_string(), span: ZERO }),
+        other => return Err(JadeError::TypeError { message: format!("time.local: tz must be a string, got {}", value_type_name(other)), span: ZERO }),
     };
     let mut cmd = std::process::Command::new("date");
     cmd.arg("+%a %b %e %H:%M:%S %Z %Y");

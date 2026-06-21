@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::{
-    compiler::{tir::JadeType, type_infer::TypeContext, vm::VmValue},
+    compiler::{tir::JadeType, type_infer::TypeContext, vm::{value_type_name, VmValue}},
     frontend::error::{JadeError, Result, Span},
 };
 
@@ -16,8 +16,11 @@ fn http_err(detail: &str) -> JadeError {
 fn require_str_owned(args: &[VmValue], pos: usize, fn_name: &str) -> Result<String> {
     match args.get(pos) {
         Some(VmValue::Str(s)) => Ok(s.clone()),
-        Some(_) => Err(JadeError::TypeError { message: fn_name.to_string(), span: ZERO }),
-        None    => Err(JadeError::ArityMismatch { expected: pos + 1, got: args.len(), span: ZERO }),
+        Some(other) => Err(JadeError::TypeError {
+            message: format!("{}: expected a string url, got {}", fn_name, value_type_name(other)),
+            span: ZERO,
+        }),
+        None => Err(JadeError::ArityMismatch { expected: pos + 1, got: args.len(), span: ZERO }),
     }
 }
 

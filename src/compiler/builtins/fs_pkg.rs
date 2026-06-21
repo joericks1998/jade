@@ -1,7 +1,7 @@
 use std::io::Write as IoWrite;
 
 use crate::{
-    compiler::{tir::JadeType, type_infer::TypeContext, vm::VmValue},
+    compiler::{tir::JadeType, type_infer::TypeContext, vm::{value_type_name, VmValue}},
     frontend::error::{JadeError, Result, Span},
 };
 
@@ -19,8 +19,11 @@ fn io_err(op: &str, path: &str, e: std::io::Error) -> JadeError {
 fn require_str<'a>(args: &'a [VmValue], pos: usize, fn_name: &str) -> Result<&'a str> {
     match args.get(pos) {
         Some(VmValue::Str(s)) => Ok(s.as_str()),
-        Some(_) => Err(JadeError::TypeError { message: fn_name.to_string(), span: ZERO }),
-        None    => Err(JadeError::ArityMismatch { expected: pos + 1, got: args.len(), span: ZERO }),
+        Some(other) => Err(JadeError::TypeError {
+            message: format!("{}: expected a string path, got {}", fn_name, value_type_name(other)),
+            span: ZERO,
+        }),
+        None => Err(JadeError::ArityMismatch { expected: pos + 1, got: args.len(), span: ZERO }),
     }
 }
 
