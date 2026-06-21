@@ -95,29 +95,39 @@ impl ModelProfile {
     }
 
     /// Find EVERY tool call in `text`, in order. Empty when none are present.
-    /// Each match is delimited by this model's `open`/`close`; a trailing
-    /// unterminated call (open without close) is recovered from the remainder.
+    ///
+    /// At each `open` delimiter, the **balanced JSON object** that follows is
+    /// taken as the body (brace-depth, string-aware — see [`first_object`]),
+    /// rather than slicing to the next `close`. Slicing to the next `close`
+    /// loses calls when a `</tool_call>` is missing between two consecutive
+    /// opens: the first slice would run past the second open and swallow it.
+    /// Taking the balanced object recovers every call regardless of missing
+    /// closes. The trailing `close` (when present) is simply skipped by the next
+    /// `find(open)`.
     ///
     /// When the stream carries no delimiters at all — e.g. the daemon stripped
     /// the anchors because `keep_anchors` was off, so a multi-call turn arrives
     /// as a run of bare JSON objects — the delimiter scan finds nothing and we
     /// fall back to [`Self::bare_tool_calls`] so those calls aren't silently
-    /// dropped. The fallback only fires when the delimited scan is empty, so
-    /// well-formed delimited output keeps its exact previous behavior.
+    /// dropped.
     pub fn find_all_tool_calls(&self, text: &str) -> Vec<ToolCallMatch> {
         let mut out = Vec::new();
         let mut rest = text;
         while let Some(open_at) = rest.find(self.tool_call.open) {
             let after = &rest[open_at + self.tool_call.open.len()..];
-            let (body, advance) = match after.find(self.tool_call.close) {
-                Some(end) => (&after[..end], end + self.tool_call.close.len()),
-                None => (after, after.len()),
-            };
-            out.push(self.match_from_body(body));
-            if advance == 0 {
-                break; // empty close delimiter would loop forever; defensive.
+            match first_object(after) {
+                Some((obj, end)) => {
+                    out.push(self.match_from_body(obj));
+                    rest = &after[end..];
+                }
+                None => {
+                    // No JSON object after this open (malformed/truncated tail):
+                    // fall back to the remainder, matching the daemon's
+                    // defensive finish behavior.
+                    out.push(self.match_from_body(after));
+                    break;
+                }
             }
-            rest = &after[advance..];
         }
         if out.is_empty() {
             return self.bare_tool_calls(text);
@@ -226,15 +236,13 @@ fn glob_match(pattern: &str, text: &str) -> bool {
     pi == p.len()
 }
 
-/// Scan `text` for top-level JSON objects, returning each `{…}` substring in
-/// order. Brace depth is tracked string-aware: `{`/`}` bytes inside a JSON
-/// string literal (and `\"` escapes within it) don't open or close an object,
-/// so braces in string values can't split a call. Nested objects (e.g. an
-/// `"arguments": {…}`) stay part of their enclosing top-level object. Used by
-/// [`ModelProfile::bare_tool_calls`] to recover delimiter-less tool calls.
-fn scan_top_level_objects(text: &str) -> Vec<&str> {
+/// Extract the first balanced top-level JSON object in `text`, returning the
+/// object substring and the byte offset just past its closing `}`. Brace depth
+/// is tracked string-aware: `{`/`}` bytes inside a JSON string literal (and `\"`
+/// escapes within it) don't open or close an object, so braces in string values
+/// can't end the object early. `None` if no complete object is present.
+fn first_object(text: &str) -> Option<(&str, usize)> {
     let bytes = text.as_bytes();
-    let mut out = Vec::new();
     let mut depth = 0usize;
     let mut start = 0usize;
     let mut in_str = false;
@@ -261,11 +269,25 @@ fn scan_top_level_objects(text: &str) -> Vec<&str> {
             b'}' if depth > 0 => {
                 depth -= 1;
                 if depth == 0 {
-                    out.push(&text[start..=i]);
+                    return Some((&text[start..=i], i + 1));
                 }
             }
             _ => {}
         }
+    }
+    None
+}
+
+/// Scan `text` for every top-level JSON object, in order. Nested objects (e.g.
+/// an `"arguments": {…}`) stay part of their enclosing top-level object; braces
+/// inside string values can't split one (see [`first_object`]). Used by
+/// [`ModelProfile::bare_tool_calls`] to recover delimiter-less tool calls.
+fn scan_top_level_objects(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some((obj, end)) = first_object(rest) {
+        out.push(obj);
+        rest = &rest[end..];
     }
     out
 }
@@ -340,6 +362,23 @@ mod tests {
     #[test]
     fn find_all_tool_calls_empty_when_none() {
         assert!(QWEN3_CODER_30B.find_all_tool_calls("no tools here").is_empty());
+    }
+
+    #[test]
+    fn find_all_tool_calls_recovers_calls_with_missing_closes() {
+        // The model emits two calls but drops the </tool_call> on the first.
+        // Slicing to the next close would make call 1 swallow call 2's open;
+        // taking the balanced object after each open recovers both.
+        let p = QWEN3_CODER_30B;
+        let text = concat!(
+            r#"<tool_call>{"name":"a","arguments":{"k":"}"}}"#, // brace inside a string value
+            r#"<tool_call>{"name":"b","arguments":{"x":1}}</tool_call>"#,
+        );
+        let calls = p.find_all_tool_calls(text);
+        assert_eq!(calls.len(), 2, "both calls recovered despite the missing close");
+        assert_eq!(calls[0].name, "a");
+        assert_eq!(calls[0].args, r#"{"name":"a","arguments":{"k":"}"}}"#);
+        assert_eq!(calls[1].name, "b");
     }
 
     #[test]
