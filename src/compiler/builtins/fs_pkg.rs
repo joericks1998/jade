@@ -24,8 +24,12 @@ fn require_str<'a>(args: &'a [VmValue], pos: usize, fn_name: &str) -> Result<&'a
     }
 }
 
+// fs.read/write/append accept an optional trailing `trust` bool (positional or
+// `trust=`). It only affects the AOT taint model (trust=true → TRUSTED content,
+// skip the tainted-path refusal); the VM has no trust model, so it accepts and
+// ignores the flag — keeping a program that passes `trust=true` portable.
 fn fs_read(args: &[VmValue]) -> Result<VmValue> {
-    if args.len() != 1 {
+    if args.is_empty() || args.len() > 2 {
         return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: ZERO });
     }
     let path = require_str(args, 0, "fs.read")?;
@@ -35,7 +39,7 @@ fn fs_read(args: &[VmValue]) -> Result<VmValue> {
 }
 
 fn fs_write(args: &[VmValue]) -> Result<VmValue> {
-    if args.len() != 2 {
+    if args.len() < 2 || args.len() > 3 {
         return Err(JadeError::ArityMismatch { expected: 2, got: args.len(), span: ZERO });
     }
     let path    = require_str(args, 0, "fs.write")?;
@@ -46,7 +50,7 @@ fn fs_write(args: &[VmValue]) -> Result<VmValue> {
 }
 
 fn fs_append(args: &[VmValue]) -> Result<VmValue> {
-    if args.len() != 2 {
+    if args.len() < 2 || args.len() > 3 {
         return Err(JadeError::ArityMismatch { expected: 2, got: args.len(), span: ZERO });
     }
     let path    = require_str(args, 0, "fs.append")?;
