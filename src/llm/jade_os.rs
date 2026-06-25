@@ -109,6 +109,7 @@ impl JadeOsBackend {
                 span,
             })?;
 
+        // Serialize and send the request as a length-prefixed JSON frame.
         let payload = encode_request(&req).map_err(|e| JadeError::InferenceError {
             message: format!("failed to encode inference request: {e}"),
             span,
@@ -123,8 +124,12 @@ impl JadeOsBackend {
         let mut read_tmp = [0u8; 4096];
         let mut text = String::new();
 
+        // Read frames from the daemon, accumulating token text until DONE.
+        // Each iteration either decodes a complete frame from `buf` or reads
+        // more bytes from the socket when the buffer holds only a partial frame.
         loop {
             match decode_frame(&buf) {
+                // Daemon announces the active model name before streaming tokens.
                 FrameResult::Meta(model, consumed) => {
                     *reported_model.lock().unwrap() = Some(model);
                     buf.drain(..consumed);
@@ -137,19 +142,29 @@ impl JadeOsBackend {
                 }
                 FrameResult::Done(tokens_used, consumed) => {
                     buf.drain(..consumed);
-                    // Strip any partial stop-anchor prefix left in the last token.
-                    // jade-tree's depth tracker breaks on the closing '}' but the
-                    // token that contained '}' may also carry the beginning of the
-                    // stop string (e.g. "</" from "</tool>").  Those extra bytes are
-                    // already in `text` because on_token fires before depth tracking.
-                    if let Some(stop) = req.stop_anchor.as_deref() {
-                        let mut tail = stop.len().min(text.len());
-                        while tail > 0 {
-                            if stop.starts_with(&text[text.len() - tail..]) {
-                                text.truncate(text.len() - tail);
-                                break;
+                    // Only strip a partial stop-anchor suffix when keep_anchors is
+                    // false (legacy strip mode). In that mode jade-tree's depth
+                    // tracker fires on the closing '}', but the token may also carry
+                    // the start of the stop string (e.g. "</" from "</tool_call>"),
+                    // which leaks into `text` because on_token fires before the
+                    // depth tracker acts.
+                    //
+                    // When keep_anchors is true the daemon intentionally emits the
+                    // stop_anchor as tokens and synthesizes it at span-close if the
+                    // model didn't produce it — stripping here would remove the
+                    // closing tag the caller needs for parsing.
+                    if !req.keep_anchors {
+                        if let Some(stop) = req.stop_anchor.as_deref() {
+                            // Walk backwards through possible prefix lengths and trim
+                            // the longest suffix of `text` that is a prefix of `stop`.
+                            let mut tail = stop.len().min(text.len());
+                            while tail > 0 {
+                                if stop.starts_with(&text[text.len() - tail..]) {
+                                    text.truncate(text.len() - tail);
+                                    break;
+                                }
+                                tail -= 1;
                             }
-                            tail -= 1;
                         }
                     }
                     return Ok(InferenceResponse {
@@ -161,6 +176,7 @@ impl JadeOsBackend {
                     buf.drain(..consumed);
                     return Err(JadeError::InferenceError { message: msg, span });
                 }
+                // Buffer holds an incomplete frame — read more bytes from the socket.
                 FrameResult::Incomplete => {
                     let n = stream.read(&mut read_tmp).map_err(|e| JadeError::InferenceError {
                         message: format!("read from {} failed: {e}", sock_path),
@@ -213,6 +229,9 @@ impl JadeOsBackend {
         let mut buf: Vec<u8> = Vec::new();
         let mut read_tmp = [0u8; 4096];
 
+        // Same frame-drain loop as infer_blocking, but tokens are forwarded to
+        // the async channel instead of accumulated.  `blocking_send` is safe here
+        // because we're already on a dedicated blocking thread via spawn_blocking.
         loop {
             match decode_frame(&buf) {
                 FrameResult::Meta(model, consumed) => {
@@ -222,6 +241,7 @@ impl JadeOsBackend {
                 // Generation ops don't expect structured JSON frames — ignore.
                 FrameResult::Json(_, consumed) => { buf.drain(..consumed); }
                 FrameResult::Token(token, consumed) => {
+                    // Silently drop the token if the receiver was dropped (caller cancelled).
                     let _ = tx.blocking_send(token);
                     buf.drain(..consumed);
                 }
@@ -258,8 +278,8 @@ impl JadeOsBackend {
 
 
     fn count_tokens_blocking(sock_path: &str, prompt: &str, span: Span) -> Result<i64> {
-        // Build a minimal count_only request using the same wire encoding as encode_request.
-        // We construct the JSON manually since count_only isn't in InferenceRequest.
+        // `count_only` is a daemon-side flag not modelled in InferenceRequest, so
+        // we build the JSON manually rather than going through encode_request.
         let json = serde_json::json!({
             "prompt": prompt,
             "model": "",
@@ -288,6 +308,8 @@ impl JadeOsBackend {
     }
 
     fn total_tokens_blocking(sock_path: &str, span: Span) -> Result<i64> {
+        // `stats_only` asks the daemon to return cumulative session token usage
+        // without running any inference.
         let json = serde_json::json!({
             "prompt": "",
             "model": "",
@@ -389,7 +411,9 @@ impl JadeOsBackend {
         }
     }
 
-    // Read frames from stream until Done, return tokens_used. Ignores Token frames.
+    // Shared tail for count_tokens and total_tokens: drain all frames until DONE,
+    // returning the token count embedded in the DONE frame. Token/Meta/JSON frames
+    // are discarded — these ops don't produce text output.
     fn drain_to_done(stream: &mut UnixStream, sock_path: &str, span: Span) -> Result<i64> {
         let mut buf: Vec<u8> = Vec::new();
         let mut read_tmp = [0u8; 4096];
@@ -432,6 +456,10 @@ impl JadeOsBackend {
 
 // ── Wire protocol ────────────────────────────────────────────────────────────
 
+// Serialize an InferenceRequest into the daemon wire format:
+//   [payload_len: u32 LE][JSON bytes]
+// Field order is stable (serde serializes struct fields in declaration order),
+// which matters for the golden tests that pin the exact byte sequence.
 fn encode_request(req: &InferenceRequest) -> std::result::Result<Vec<u8>, serde_json::Error> {
     #[derive(serde::Serialize)]
     struct Wire<'a> {
@@ -478,7 +506,13 @@ enum FrameResult {
     UnknownType(u8),
 }
 
+// Parse one framed message from the front of `buf`.
+// Frame layout (daemon → client):
+//   [type: u8][payload_len: u16 LE][payload: bytes…]
+// Returns the decoded variant plus the number of bytes consumed so the caller
+// can drain exactly that many bytes with `buf.drain(..consumed)`.
 fn decode_frame(buf: &[u8]) -> FrameResult {
+    // Need at least the 3-byte header before we know the payload length.
     if buf.len() < 3 {
         return FrameResult::Incomplete;
     }
@@ -491,11 +525,11 @@ fn decode_frame(buf: &[u8]) -> FrameResult {
     let consumed = 3 + payload_len;
 
     match frame_type {
-        0x01 => match std::str::from_utf8(payload) {
+        0x01 => match std::str::from_utf8(payload) { // TOKEN — a generated text chunk
             Ok(s) => FrameResult::Token(s.to_owned(), consumed),
             Err(_) => FrameResult::Error("daemon sent invalid UTF-8 in TOKEN frame".to_owned(), consumed),
         },
-        0x02 => {
+        0x02 => { // DONE — payload is tokens_used as u64 LE
             if payload_len != 8 {
                 return FrameResult::Error("malformed DONE frame".to_owned(), consumed);
             }
@@ -504,15 +538,15 @@ fn decode_frame(buf: &[u8]) -> FrameResult {
             );
             FrameResult::Done(tokens_used, consumed)
         }
-        0x03 => match std::str::from_utf8(payload) {
+        0x03 => match std::str::from_utf8(payload) { // ERROR — human-readable message
             Ok(s) => FrameResult::Error(s.to_owned(), consumed),
             Err(_) => FrameResult::Error("daemon sent invalid UTF-8 in ERROR frame".to_owned(), consumed),
         },
-        0x04 => match std::str::from_utf8(payload) {
+        0x04 => match std::str::from_utf8(payload) { // META — model name string
             Ok(s) => FrameResult::Meta(s.to_owned(), consumed),
             Err(_) => FrameResult::Error("daemon sent invalid UTF-8 in META frame".to_owned(), consumed),
         },
-        0x05 => match std::str::from_utf8(payload) {
+        0x05 => match std::str::from_utf8(payload) { // JSON — structured result chunk (e.g. health)
             Ok(s) => FrameResult::Json(s.to_owned(), consumed),
             Err(_) => FrameResult::Error("daemon sent invalid UTF-8 in JSON frame".to_owned(), consumed),
         },
