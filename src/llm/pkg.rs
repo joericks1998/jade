@@ -3,7 +3,7 @@ use crate::{
     frontend::error::{Result, Span},
 };
 
-use super::{BuiltinFn, Package};
+use crate::builtins::{BuiltinFn, Package};
 
 // `llm.set_max_tokens` is state-mutating so it cannot be a pure BuiltinFn.
 // We expose a sentinel BuiltinFn that is never called directly — the VM's

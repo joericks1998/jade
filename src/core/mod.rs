@@ -5,7 +5,7 @@ use crate::{
     frontend::error::{JadeError, Result, Span},
 };
 
-use super::BuiltinFn;
+use crate::builtins::BuiltinFn;
 
 // ── write ─────────────────────────────────────────────────────────────────────
 

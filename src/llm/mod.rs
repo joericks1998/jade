@@ -7,6 +7,9 @@ pub mod anthropic;
 pub mod jade_os;
 pub mod model_profile;
 pub mod openai;
+/// The `use llm` built-in package (`LLM_PKG`) — registered in `crate::builtins`,
+/// but housed here beside the inference backend it wraps.
+pub mod pkg;
 
 /// A request sent to an inference backend.
 ///

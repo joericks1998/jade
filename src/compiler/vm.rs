@@ -3,10 +3,10 @@ use parking_lot::Mutex;
 use tokio::task::JoinHandle;
 
 use crate::{
+    builtins::{self, BuiltinFn, NativeBoundMethod, PrimType},
     compiler::{
         bytecode::{Chunk, CompiledFn, FStrPart, Instr, Reg},
         emit::CompiledProgram,
-        builtins::{self, BuiltinFn, NativeBoundMethod, PrimType},
     },
     frontend::{
         ast::{BinOpKind, StructFieldDef, UnaryOpKind},
@@ -1613,14 +1613,14 @@ fn resolve_named_args(
 /// it to inject state-mutating `NativeFn` entries the generic path can't express.
 fn package_dict_value(pkg: &builtins::Package) -> VmValue {
     if pkg.import_name == "llm" {
-        return builtins::llm_pkg::llm_vm_dict_value();
+        return crate::llm::pkg::llm_vm_dict_value();
     }
     if pkg.import_name == "std/array" {
-        return builtins::array_pkg::array_vm_dict_value();
+        return crate::array::array_vm_dict_value();
     }
     #[cfg(unix)]
     if pkg.import_name == "std/uhttp" {
-        return builtins::uhttp_pkg::uhttp_vm_dict_value();
+        return crate::uhttp::uhttp_vm_dict_value();
     }
     pkg.vm_dict_value()
 }
@@ -1915,7 +1915,7 @@ async fn call_value(
             }
             #[cfg(unix)]
             NativeFnId::UhttpStream => {
-                use crate::compiler::builtins::uhttp_pkg::{self, StreamEvent};
+                use crate::uhttp::{self, StreamEvent};
                 if args.len() < 2 || args.len() > 3 {
                     return Err(JadeError::ArityMismatch { expected: 2, got: args.len(), span });
                 }
@@ -1934,10 +1934,10 @@ async fn call_value(
                         span,
                     });
                 }
-                let headers = uhttp_pkg::extract_headers(args.get(2))
+                let headers = uhttp::extract_headers(args.get(2))
                     .map_err(|e| patch_builtin_span(e, span))?;
 
-                let mut rx = uhttp_pkg::open_stream(&url, headers)
+                let mut rx = uhttp::open_stream(&url, headers)
                     .map_err(|e| patch_builtin_span(e, span))?;
                 let mut status: i64 = 0;
                 while let Some(ev) = rx.recv().await {
@@ -1952,7 +1952,7 @@ async fn call_value(
                             }
                         }
                         StreamEvent::Error(e) => {
-                            return Err(patch_builtin_span(uhttp_pkg::uhttp_io_error(&e), span));
+                            return Err(patch_builtin_span(uhttp::uhttp_io_error(&e), span));
                         }
                     }
                 }

@@ -1,20 +1,7 @@
-pub mod core;
-pub mod llm_pkg;
-pub mod string_pkg;
-pub mod array_pkg;
-pub mod dict_pkg;
-pub mod math_pkg;
-pub mod fs_pkg;
-pub mod time_pkg;
-pub mod grammar_pkg;
-pub mod http_pkg;
-#[cfg(unix)]
-pub mod uhttp_pkg;
-pub mod sh_pkg;
-pub mod json_pkg;
-pub mod env_pkg;
-pub mod path_pkg;
-pub mod random_pkg;
+//! The native built-in registry: shared types (`BuiltinFn`, `Package`,
+//! `PrimType`), the `PACKAGES` table, and `seed_globals`. Each package is a
+//! flat top-level module (`crate::array`, `crate::math`, …); the `llm` package
+//! lives with the inference backend at `crate::llm::pkg`.
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -24,6 +11,14 @@ use crate::{
     compiler::{type_infer::TypeContext, vm::{NativeFnId, VmValue}},
     frontend::error::Result,
 };
+
+// The built-in packages are flat top-level modules; pull them into scope so the
+// registry can refer to them by bare name. `llm` is the one exception — its
+// package lives beside the inference backend at `crate::llm::pkg`.
+use crate::{array, core, dict, env, fs, grammar, http, json, math, path, random, sh, string, time};
+use crate::llm::pkg as llm;
+#[cfg(unix)]
+use crate::uhttp;
 
 // ── BuiltinFn ─────────────────────────────────────────────────────────────────
 
@@ -128,30 +123,30 @@ static CORE_BUILTINS: &[BuiltinFn] = &[
 
 /// All stdlib packages (available via `use "..."`).
 static PACKAGES: &[&Package] = &[
-    &llm_pkg::LLM_PKG,
-    &string_pkg::STRING_PKG,
-    &math_pkg::MATH_PKG,
-    &array_pkg::ARRAY_PKG,
-    &dict_pkg::DICT_PKG,
-    &fs_pkg::FS_PKG,
-    &time_pkg::TIME_PKG,
-    &http_pkg::HTTP_PKG,
+    &llm::LLM_PKG,
+    &string::STRING_PKG,
+    &math::MATH_PKG,
+    &array::ARRAY_PKG,
+    &dict::DICT_PKG,
+    &fs::FS_PKG,
+    &time::TIME_PKG,
+    &http::HTTP_PKG,
     #[cfg(unix)]
-    &uhttp_pkg::UHTTP_PKG,
-    &sh_pkg::SH_PKG,
-    &json_pkg::JSON_PKG,
-    &env_pkg::ENV_PKG,
-    &path_pkg::PATH_PKG,
-    &random_pkg::RANDOM_PKG,
+    &uhttp::UHTTP_PKG,
+    &sh::SH_PKG,
+    &json::JSON_PKG,
+    &env::ENV_PKG,
+    &path::PATH_PKG,
+    &random::RANDOM_PKG,
 ];
 
 // ── Primitive method tables ───────────────────────────────────────────────────
 
 pub fn find_primitive_method(ty: PrimType, method: &str) -> Option<BuiltinFn> {
     match ty {
-        PrimType::Str   => string_pkg::find_str_method(method),
-        PrimType::Array => array_pkg::find_array_method(method),
-        PrimType::Dict  => dict_pkg::find_dict_method(method),
+        PrimType::Str   => string::find_str_method(method),
+        PrimType::Array => array::find_array_method(method),
+        PrimType::Dict  => dict::find_dict_method(method),
         PrimType::Int   => None,
         PrimType::Float => None,
     }
@@ -186,7 +181,7 @@ pub fn seed_globals(globals: &mut HashMap<String, VmValue>) {
     }
     // Grammar global: Grammar.new(pattern) → VmValue::Grammar(pattern)
     let mut grammar_fields = std::collections::HashMap::new();
-    grammar_fields.insert("new".to_string(), VmValue::BuiltinFn(grammar_pkg::GRAMMAR_NEW));
+    grammar_fields.insert("new".to_string(), VmValue::BuiltinFn(grammar::GRAMMAR_NEW));
     globals.insert("Grammar".to_string(), VmValue::Dict(grammar_fields));
 }
 
@@ -197,9 +192,9 @@ pub fn register_core_types(ctx: &mut TypeContext) {
 
 /// Register primitive method type information into the type checker.
 pub fn register_primitive_method_types(ctx: &mut TypeContext) {
-    string_pkg::register_str_method_types(ctx);
-    array_pkg::register_array_method_types(ctx);
-    dict_pkg::register_dict_method_types(ctx);
+    string::register_str_method_types(ctx);
+    array::register_array_method_types(ctx);
+    dict::register_dict_method_types(ctx);
 }
 
 // ── Helpers shared across package implementations ─────────────────────────────

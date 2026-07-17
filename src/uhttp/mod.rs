@@ -30,7 +30,7 @@ use crate::{
     frontend::error::{JadeError, Result, Span},
 };
 
-use super::{BuiltinFn, Package};
+use crate::builtins::{BuiltinFn, Package};
 
 const ZERO: Span = Span { line: 0, col: 0 };
 const TIMEOUT: Duration = Duration::from_secs(30);
@@ -133,7 +133,7 @@ impl HttpMethod {
     }
 }
 
-// Runs the request on a fresh OS thread to mirror `http_pkg::execute` (keeps the
+// Runs the request on a fresh OS thread to mirror `http::execute` (keeps the
 // blocking socket I/O off any surrounding async runtime's worker threads).
 fn execute(url: String, method: HttpMethod, headers: Vec<(String, String)>) -> Result<VmValue> {
     let (sock_path, req_path) = parse_unix_url(&url)?;

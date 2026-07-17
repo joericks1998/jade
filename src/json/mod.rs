@@ -5,7 +5,7 @@ use crate::{
     frontend::error::{JadeError, Result, Span},
 };
 
-use super::{BuiltinFn, Package, make_array};
+use crate::builtins::{BuiltinFn, Package, make_array};
 
 const ZERO: Span = Span { line: 0, col: 0 };
 

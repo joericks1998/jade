@@ -3,7 +3,7 @@ use crate::{
     frontend::error::{JadeError, Result, Span},
 };
 
-use super::BuiltinFn;
+use crate::builtins::BuiltinFn;
 
 const ZERO: Span = Span { line: 0, col: 0 };
 
