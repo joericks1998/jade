@@ -3453,8 +3453,4 @@ fn instr_max_reg(instr: &Instr) -> u32 {
     }
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-#[path = "vm_tests.rs"]
-mod tests;
+// Tests for this module live in `src/compiler/tests.rs` (`mod vm`).

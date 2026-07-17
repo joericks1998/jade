@@ -460,7 +460,7 @@ impl JadeOsBackend {
 //   [payload_len: u32 LE][JSON bytes]
 // Field order is stable (serde serializes struct fields in declaration order),
 // which matters for the golden tests that pin the exact byte sequence.
-fn encode_request(req: &InferenceRequest) -> std::result::Result<Vec<u8>, serde_json::Error> {
+pub(crate) fn encode_request(req: &InferenceRequest) -> std::result::Result<Vec<u8>, serde_json::Error> {
     #[derive(serde::Serialize)]
     struct Wire<'a> {
         prompt: &'a str,
@@ -551,61 +551,5 @@ fn decode_frame(buf: &[u8]) -> FrameResult {
             Err(_) => FrameResult::Error("daemon sent invalid UTF-8 in JSON frame".to_owned(), consumed),
         },
         other => FrameResult::UnknownType(other),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // Golden wire tests: lock the exact bytes jadelang sends to the daemon so any
-    // drift from the documented protocol (design/llm-package-1.1.12.md) fails CI.
-    // The daemon mirrors these field names with serde(default); what this pins is
-    // field ORDER and the presence of `keep_anchors` / `trust`.
-
-    fn split_prefix(buf: &[u8]) -> (u32, &[u8]) {
-        let len = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
-        (len, &buf[4..])
-    }
-
-    #[test]
-    fn encode_minimal_request_golden() {
-        let req = InferenceRequest {
-            prompt: "hi".into(),
-            model: "m".into(),
-            max_tokens: 10,
-            ..Default::default()
-        };
-        let buf = encode_request(&req).unwrap();
-        let (len, json) = split_prefix(&buf);
-        assert_eq!(len as usize, json.len(), "length prefix must match payload");
-        assert_eq!(
-            std::str::from_utf8(json).unwrap(),
-            r#"{"prompt":"hi","model":"m","max_tokens":10,"keep_anchors":false,"trust":0}"#,
-        );
-    }
-
-    #[test]
-    fn encode_full_request_golden() {
-        // Tool delimiters come from the model profile, not inline literals — the
-        // single source of truth for this model's tool format.
-        let profile = crate::llm::model_profile::QWEN3_CODER_30B;
-        let req = InferenceRequest {
-            prompt: "p".into(),
-            model: profile.model.into(),
-            max_tokens: 64,
-            grammar: Some(r#"root ::= "{" [^}]* "}""#.into()),
-            anchor: Some(profile.tool_call.open.into()),
-            stop_anchor: Some(profile.tool_call.close.into()),
-            keep_anchors: true,
-            trust: 1,
-        };
-        let buf = encode_request(&req).unwrap();
-        let (len, json) = split_prefix(&buf);
-        assert_eq!(len as usize, json.len());
-        assert_eq!(
-            std::str::from_utf8(json).unwrap(),
-            r#"{"prompt":"p","model":"Qwen3-Coder-30B","max_tokens":64,"grammar":"root ::= \"{\" [^}]* \"}\"","anchor":"<tool_call>","stop_anchor":"</tool_call>","keep_anchors":true,"trust":1}"#,
-        );
     }
 }

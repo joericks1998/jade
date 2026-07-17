@@ -5,6 +5,9 @@ use std::{
 
 use serde::Deserialize;
 
+#[cfg(test)]
+mod tests;
+
 // ── Manifest types ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, Default)]

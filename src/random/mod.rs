@@ -10,6 +10,9 @@ use crate::{
 
 use crate::builtins::{BuiltinFn, Package};
 
+#[cfg(test)]
+mod tests;
+
 const ZERO: Span = Span { line: 0, col: 0 };
 
 static RNG: OnceLock<Mutex<StdRng>> = OnceLock::new();

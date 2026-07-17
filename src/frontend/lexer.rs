@@ -680,7 +680,3 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
 
     Ok(tokens)
 }
-
-#[cfg(test)]
-#[path = "lexer_tests.rs"]
-mod tests;

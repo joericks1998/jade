@@ -203,3 +203,6 @@ pub fn register_primitive_method_types(ctx: &mut TypeContext) {
 pub fn make_array(v: Vec<VmValue>) -> VmValue {
     VmValue::Array(Arc::new(Mutex::new(v)))
 }
+
+#[cfg(test)]
+mod tests;

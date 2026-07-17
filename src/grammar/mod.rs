@@ -39,3 +39,6 @@ fn grammar_new(args: &[VmValue]) -> Result<VmValue> {
 }
 
 pub static GRAMMAR_NEW: BuiltinFn = BuiltinFn { name: "new", vm_impl: grammar_new };
+
+#[cfg(test)]
+mod tests;

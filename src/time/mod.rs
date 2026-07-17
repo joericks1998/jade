@@ -7,6 +7,9 @@ use crate::{
 
 use crate::builtins::{BuiltinFn, Package};
 
+#[cfg(test)]
+mod tests;
+
 const ZERO: Span = Span { line: 0, col: 0 };
 
 fn time_now(args: &[VmValue]) -> Result<VmValue> {

@@ -11,6 +11,9 @@ pub mod openai;
 /// but housed here beside the inference backend it wraps.
 pub mod pkg;
 
+#[cfg(test)]
+mod tests;
+
 /// A request sent to an inference backend.
 ///
 /// Mirrors the daemon's `jade-protocol::InferenceRequest` field-for-field (the

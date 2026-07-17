@@ -5,6 +5,9 @@ use crate::{
 
 use crate::builtins::{BuiltinFn, Package, make_array};
 
+#[cfg(test)]
+mod tests;
+
 const ZERO: Span = Span { line: 0, col: 0 };
 
 fn env_get(args: &[VmValue]) -> Result<VmValue> {

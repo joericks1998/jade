@@ -141,3 +141,6 @@ pub fn load_config() -> JadeConfig {
 
     cfg
 }
+
+#[cfg(test)]
+mod tests;

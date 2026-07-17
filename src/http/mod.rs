@@ -157,3 +157,6 @@ pub static HTTP_PKG: Package = Package {
     fns: HTTP_PKG_FNS,
     register_types: register_http_pkg_types,
 };
+
+#[cfg(test)]
+mod tests;

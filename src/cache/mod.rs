@@ -273,3 +273,6 @@ pub fn write_tir_cache(hash: &[u8; 32], source_path: &str, tprogram: &TProgram) 
         Err(_) => {}
     }
 }
+
+#[cfg(test)]
+mod tests;

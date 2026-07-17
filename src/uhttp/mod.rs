@@ -491,3 +491,6 @@ pub fn uhttp_vm_dict_value() -> VmValue {
     map.insert("stream".to_string(), VmValue::NativeFn(NativeFnId::UhttpStream));
     VmValue::Dict(map)
 }
+
+#[cfg(test)]
+mod tests;

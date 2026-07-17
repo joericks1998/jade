@@ -23,6 +23,9 @@ use std::path::Path;
 
 use crate::compiler::tir::TProgram;
 
+#[cfg(test)]
+mod tests;
+
 fn build_sock_path() -> String {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_owned());
     format!("{home}/.jade/build.sock")

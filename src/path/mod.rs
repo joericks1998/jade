@@ -5,6 +5,9 @@ use crate::{
 
 use crate::builtins::{BuiltinFn, Package};
 
+#[cfg(test)]
+mod tests;
+
 const ZERO: Span = Span { line: 0, col: 0 };
 
 fn require_str<'a>(args: &'a [VmValue], pos: usize, fn_name: &str) -> Result<&'a str> {

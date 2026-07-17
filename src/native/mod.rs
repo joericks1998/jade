@@ -249,3 +249,6 @@ pub fn ffi_to_vm(val: &JadeVal, span: Span) -> Result<VmValue> {
         }),
     }
 }
+
+#[cfg(test)]
+mod tests;

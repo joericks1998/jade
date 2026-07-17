@@ -7,6 +7,9 @@ use crate::{
 
 use crate::builtins::{BuiltinFn, Package, make_array};
 
+#[cfg(test)]
+mod tests;
+
 const ZERO: Span = Span { line: 0, col: 0 };
 
 fn io_err(op: &str, path: &str, e: std::io::Error) -> JadeError {

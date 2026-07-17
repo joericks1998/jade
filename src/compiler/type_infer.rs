@@ -1822,8 +1822,4 @@ fn expr_span(e: &Expr) -> Span {
     }
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-#[path = "type_infer_tests.rs"]
-mod tests;
+// Tests for this module live in `src/compiler/tests.rs` (`mod type_infer`).

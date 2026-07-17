@@ -4,3 +4,6 @@ pub mod gbnf;
 pub mod tir;
 pub mod type_infer;
 pub mod vm;
+
+#[cfg(test)]
+mod tests;
