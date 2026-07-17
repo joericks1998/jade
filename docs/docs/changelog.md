@@ -4,6 +4,13 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.1.19
+
+- Added the **`std/uhttp`** package — an HTTP/1.1 client that speaks over a **Unix domain socket** rather than a TCP host, for talking to local daemons such as the Docker Engine API (`/var/run/docker.sock`) and other socket-backed OS services. Mirrors `std/http`: `uhttp.get`/`post`/`put`/`delete`/`head` return the same `{status, body}` dict and accept an optional trailing `headers` dict
+- The target is a single pseudo-URL of the form `unix://<socket-path>:<request-path>` (e.g. `unix:///var/run/docker.sock:/v1.43/containers/json`); the socket path runs to the first `:` after the scheme, the rest is the request path (defaulting to `/`)
+- The transport is hand-framed HTTP/1.1 written directly onto a `UnixStream` — no new dependencies. Response framing honors `Content-Length`, `Transfer-Encoding: chunked` (de-chunked), and read-to-EOF on `Connection: close`. Unix-only; a missing socket, malformed pseudo-URL, or connection failure raises an `IoError`
+- Added **`uhttp.stream(url, handler, headers?)`** for long-lived streaming endpoints (Docker `/events`, `/logs?follow=1`, image-pull progress). A worker thread owns the socket and decodes the body incrementally; the VM invokes the Jade `handler` once per newline-delimited line (mirroring the LLM token-stream drain pattern). The handler returning `false` stops the stream and closes the socket; `stream` returns the HTTP status once the stream ends
+
 ## v1.1.12
 
 - Expanded the built-in `llm` package to expose the inference daemon's model profiles, tool-call helpers, protocol controls, and health to Jade programs. The package stays decoupled from the daemon — the Unix socket (`~/.jade/llm.sock`) is the only contract; jadelang implements the wire format itself, drift-guarded by a golden-bytes test

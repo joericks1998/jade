@@ -48,6 +48,10 @@ pub enum NativeFnId {
     /// pure BuiltinFns (which can't run Jade code).
     ArrayMap,
     ArrayFilter,
+    /// `uhttp.stream(url, handler, headers?)` — stream an HTTP response over a
+    /// Unix socket, invoking a Jade handler per line. Unix-only.
+    #[cfg(unix)]
+    UhttpStream,
 }
 
 /// A value at VM runtime, carrying `Arc<CompiledFn>` for functions so the VM
@@ -600,13 +604,7 @@ async fn execute_chunk(
                 // ── Built-in packages ───────────────────────────────────────
                 // stdlib packages always bind under their own global_name; namespace param ignored.
                 if let Some(pkg) = builtins::find_package(path) {
-                    let val = if pkg.import_name == "llm" {
-                        builtins::llm_pkg::llm_vm_dict_value()
-                    } else if pkg.import_name == "std/array" {
-                        builtins::array_pkg::array_vm_dict_value()
-                    } else {
-                        pkg.vm_dict_value()
-                    };
+                    let val = package_dict_value(pkg);
                     state.globals.insert(pkg.global_name.to_string(), val);
                     continue;
                 }
@@ -801,13 +799,7 @@ async fn execute_chunk(
             Instr::ImportFrom(path, names) => {
                 if let Some(pkg) = builtins::find_package(path) {
                     // Build the package dict, then extract only the requested names.
-                    let dict = if pkg.import_name == "llm" {
-                        builtins::llm_pkg::llm_vm_dict_value()
-                    } else if pkg.import_name == "std/array" {
-                        builtins::array_pkg::array_vm_dict_value()
-                    } else {
-                        pkg.vm_dict_value()
-                    };
+                    let dict = package_dict_value(pkg);
                     if let VmValue::Dict(map) = dict {
                         for name in names {
                             if let Some(val) = map.get(name) {
@@ -1616,6 +1608,23 @@ fn resolve_named_args(
     }
 }
 
+/// Build the VM dict value for an imported stdlib package. Most packages use the
+/// generic `vm_dict_value`; `llm`, `std/array`, and (on unix) `std/uhttp` override
+/// it to inject state-mutating `NativeFn` entries the generic path can't express.
+fn package_dict_value(pkg: &builtins::Package) -> VmValue {
+    if pkg.import_name == "llm" {
+        return builtins::llm_pkg::llm_vm_dict_value();
+    }
+    if pkg.import_name == "std/array" {
+        return builtins::array_pkg::array_vm_dict_value();
+    }
+    #[cfg(unix)]
+    if pkg.import_name == "std/uhttp" {
+        return builtins::uhttp_pkg::uhttp_vm_dict_value();
+    }
+    pkg.vm_dict_value()
+}
+
 #[async_recursion::async_recursion]
 async fn call_value(
     callee: VmValue,
@@ -1903,6 +1912,51 @@ async fn call_value(
                     }
                 }
                 Ok(VmValue::Array(Arc::new(Mutex::new(out))))
+            }
+            #[cfg(unix)]
+            NativeFnId::UhttpStream => {
+                use crate::compiler::builtins::uhttp_pkg::{self, StreamEvent};
+                if args.len() < 2 || args.len() > 3 {
+                    return Err(JadeError::ArityMismatch { expected: 2, got: args.len(), span });
+                }
+                let url = match &args[0] {
+                    VmValue::Str(s) => s.clone(),
+                    other => return Err(JadeError::TypeError {
+                        message: format!("uhttp.stream() url must be a str, got {}", value_type_name(other)),
+                        span,
+                    }),
+                };
+                let handler = args[1].clone();
+                if !matches!(handler,
+                    VmValue::Fn(_) | VmValue::Closure(_, _) | VmValue::BoundMethod(_)) {
+                    return Err(JadeError::TypeError {
+                        message: format!("uhttp.stream() handler must be a function, got {}", value_type_name(&handler)),
+                        span,
+                    });
+                }
+                let headers = uhttp_pkg::extract_headers(args.get(2))
+                    .map_err(|e| patch_builtin_span(e, span))?;
+
+                let mut rx = uhttp_pkg::open_stream(&url, headers)
+                    .map_err(|e| patch_builtin_span(e, span))?;
+                let mut status: i64 = 0;
+                while let Some(ev) = rx.recv().await {
+                    match ev {
+                        StreamEvent::Status(s) => status = s as i64,
+                        StreamEvent::Line(line) => {
+                            let r = call_value(handler.clone(), vec![VmValue::Str(line)], state, span).await?;
+                            // A handler returning `false` stops the stream early;
+                            // dropping `rx` closes the socket on the worker side.
+                            if matches!(r, VmValue::Bool(false)) {
+                                break;
+                            }
+                        }
+                        StreamEvent::Error(e) => {
+                            return Err(patch_builtin_span(uhttp_pkg::uhttp_io_error(&e), span));
+                        }
+                    }
+                }
+                Ok(VmValue::Int(status))
             }
             NativeFnId::LlmKeepAnchors => {
                 if args.len() != 1 {

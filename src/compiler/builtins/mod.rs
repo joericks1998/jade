@@ -8,6 +8,8 @@ pub mod fs_pkg;
 pub mod time_pkg;
 pub mod grammar_pkg;
 pub mod http_pkg;
+#[cfg(unix)]
+pub mod uhttp_pkg;
 pub mod sh_pkg;
 pub mod json_pkg;
 pub mod env_pkg;
@@ -134,6 +136,8 @@ static PACKAGES: &[&Package] = &[
     &fs_pkg::FS_PKG,
     &time_pkg::TIME_PKG,
     &http_pkg::HTTP_PKG,
+    #[cfg(unix)]
+    &uhttp_pkg::UHTTP_PKG,
     &sh_pkg::SH_PKG,
     &json_pkg::JSON_PKG,
     &env_pkg::ENV_PKG,

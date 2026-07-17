@@ -2356,6 +2356,300 @@ fn test_http_get_connection_refused_errors() {
     assert!(matches!(err, JadeError::IoError { .. }));
 }
 
+// ── std/uhttp ─────────────────────────────────────────────────────────────
+
+// Binds a UnixListener on a unique temp path and serves one canned HTTP/1.1
+// response. Returns the socket path (unlinked on the listener thread's drop is
+// not guaranteed, so we bind under a per-test unique name to avoid AddrInUse).
+#[cfg(unix)]
+fn start_uhttp_test_server(response: String) -> String {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixListener;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NONCE: AtomicU64 = AtomicU64::new(0);
+    let n = NONCE.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    let path = std::env::temp_dir().join(format!("jade_uhttp_test_{pid}_{n}.sock"));
+    // Clear any stale socket file from a prior aborted run.
+    let _ = std::fs::remove_file(&path);
+    let listener = UnixListener::bind(&path).unwrap();
+    let path_str = path.to_string_lossy().into_owned();
+    let cleanup = path.clone();
+    std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut buf = vec![0u8; 8192];
+            let _ = stream.read(&mut buf);
+            let _ = stream.write_all(response.as_bytes());
+        }
+        let _ = std::fs::remove_file(&cleanup);
+    });
+    path_str
+}
+
+#[cfg(unix)]
+fn canned_response(status: u16, body: &str) -> String {
+    format!(
+        "HTTP/1.1 {} OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        status,
+        body.len(),
+        body
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn test_uhttp_get_status_and_body() {
+    let sock = start_uhttp_test_server(canned_response(200, "hello jade"));
+    let src = format!("use std::uhttp\nlet r = uhttp.get(\"unix://{sock}:/\")");
+    let s = run_src(&src).unwrap();
+    match s.globals.get("r").unwrap() {
+        VmValue::Dict(map) => {
+            match map.get("status").unwrap() {
+                VmValue::Int(n) => assert_eq!(*n, 200),
+                v => panic!("expected Int, got {:?}", v),
+            }
+            match map.get("body").unwrap() {
+                VmValue::Str(b) => assert_eq!(b, "hello jade"),
+                v => panic!("expected Str, got {:?}", v),
+            }
+        }
+        v => panic!("expected Dict, got {:?}", v),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn test_uhttp_post_returns_response() {
+    let sock = start_uhttp_test_server(canned_response(201, "created"));
+    let src = format!("use std::uhttp\nlet r = uhttp.post(\"unix://{sock}:/submit\", \"payload\")");
+    let s = run_src(&src).unwrap();
+    match s.globals.get("r").unwrap() {
+        VmValue::Dict(map) => {
+            match map.get("status").unwrap() {
+                VmValue::Int(n) => assert_eq!(*n, 201),
+                v => panic!("expected Int, got {:?}", v),
+            }
+            match map.get("body").unwrap() {
+                VmValue::Str(b) => assert_eq!(b, "created"),
+                v => panic!("expected Str, got {:?}", v),
+            }
+        }
+        v => panic!("expected Dict, got {:?}", v),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn test_uhttp_get_with_headers() {
+    let sock = start_uhttp_test_server(canned_response(200, "ok"));
+    let src = format!(
+        "use std::uhttp\nlet r = uhttp.get(\"unix://{sock}:/\", {{\"X-Test\": \"jade\"}})"
+    );
+    let s = run_src(&src).unwrap();
+    match s.globals.get("r").unwrap() {
+        VmValue::Dict(map) => match map.get("status").unwrap() {
+            VmValue::Int(n) => assert_eq!(*n, 200),
+            v => panic!("expected Int, got {:?}", v),
+        },
+        v => panic!("expected Dict, got {:?}", v),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn test_uhttp_get_chunked_body() {
+    // "Wiki" + "pedia" split across two chunks (RFC 7230 example shape).
+    let response = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n\
+                    4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n"
+        .to_string();
+    let sock = start_uhttp_test_server(response);
+    let src = format!("use std::uhttp\nlet r = uhttp.get(\"unix://{sock}:/\")");
+    let s = run_src(&src).unwrap();
+    match s.globals.get("r").unwrap() {
+        VmValue::Dict(map) => match map.get("body").unwrap() {
+            VmValue::Str(b) => assert_eq!(b, "Wikipedia"),
+            v => panic!("expected Str, got {:?}", v),
+        },
+        v => panic!("expected Dict, got {:?}", v),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn test_uhttp_head_empty_body() {
+    let sock = start_uhttp_test_server(canned_response(200, "should-be-ignored"));
+    let src = format!("use std::uhttp\nlet r = uhttp.head(\"unix://{sock}:/\")");
+    let s = run_src(&src).unwrap();
+    match s.globals.get("r").unwrap() {
+        VmValue::Dict(map) => match map.get("body").unwrap() {
+            VmValue::Str(b) => assert_eq!(b, ""),
+            v => panic!("expected Str, got {:?}", v),
+        },
+        v => panic!("expected Dict, got {:?}", v),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn test_uhttp_get_arity_error() {
+    let err = try_run_src("use std::uhttp\nuhttp.get()").err().expect("expected error");
+    assert!(matches!(err, JadeError::ArityMismatch { .. }));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_uhttp_get_type_error() {
+    let err = try_run_src("use std::uhttp\nuhttp.get(42)").err().expect("expected error");
+    assert!(matches!(err, JadeError::TypeError { .. }));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_uhttp_post_arity_error() {
+    let err = try_run_src("use std::uhttp\nuhttp.post(\"unix:///tmp/x.sock:/\")")
+        .err()
+        .expect("expected error");
+    assert!(matches!(err, JadeError::ArityMismatch { .. }));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_uhttp_connect_error() {
+    let err = try_run_src("use std::uhttp\nuhttp.get(\"unix:///nonexistent/jade-uhttp.sock:/\")")
+        .err()
+        .expect("expected error");
+    assert!(matches!(err, JadeError::IoError { .. }));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_uhttp_bad_scheme_error() {
+    let err = try_run_src("use std::uhttp\nuhttp.get(\"http://127.0.0.1/\")")
+        .err()
+        .expect("expected error");
+    assert!(matches!(err, JadeError::IoError { .. }));
+}
+
+// Streams a chunked HTTP/1.1 response where each line is its own chunk (the
+// shape Docker's /events and /logs endpoints use — newline-delimited JSON).
+#[cfg(unix)]
+fn start_uhttp_stream_server(status: u16, lines: Vec<&'static str>) -> String {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixListener;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NONCE: AtomicU64 = AtomicU64::new(1_000);
+    let n = NONCE.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    let path = std::env::temp_dir().join(format!("jade_uhttp_stream_{pid}_{n}.sock"));
+    let _ = std::fs::remove_file(&path);
+    let listener = UnixListener::bind(&path).unwrap();
+    let path_str = path.to_string_lossy().into_owned();
+    let cleanup = path.clone();
+    std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut buf = vec![0u8; 8192];
+            let _ = stream.read(&mut buf);
+            let mut resp = format!(
+                "HTTP/1.1 {} OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+                status
+            );
+            for line in &lines {
+                let payload = format!("{line}\n"); // one event per chunk
+                resp.push_str(&format!("{:x}\r\n{}\r\n", payload.len(), payload));
+            }
+            resp.push_str("0\r\n\r\n"); // final chunk
+            let _ = stream.write_all(resp.as_bytes());
+        }
+        let _ = std::fs::remove_file(&cleanup);
+    });
+    path_str
+}
+
+#[cfg(unix)]
+#[test]
+fn test_uhttp_stream_collects_lines() {
+    let sock = start_uhttp_stream_server(200, vec!["event-a", "event-b", "event-c"]);
+    let src = format!(
+        "use std::uhttp\n\
+         let seen = []\n\
+         fn collect(line) {{ seen.push(line) }}\n\
+         let status = uhttp.stream(\"unix://{sock}:/events\", collect)"
+    );
+    let s = run_src(&src).unwrap();
+    match s.globals.get("status").unwrap() {
+        VmValue::Int(n) => assert_eq!(*n, 200),
+        v => panic!("expected Int, got {:?}", v),
+    }
+    match s.globals.get("seen").unwrap() {
+        VmValue::Array(arc) => {
+            let guard = arc.lock();
+            let got: Vec<String> = guard
+                .iter()
+                .map(|v| match v {
+                    VmValue::Str(s) => s.clone(),
+                    other => panic!("expected Str, got {:?}", other),
+                })
+                .collect();
+            assert_eq!(got, vec!["event-a", "event-b", "event-c"]);
+        }
+        v => panic!("expected Array, got {:?}", v),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn test_uhttp_stream_early_stop() {
+    // Handler returns false after the first line → stream stops early.
+    let sock = start_uhttp_stream_server(200, vec!["first", "second", "third"]);
+    let src = format!(
+        "use std::uhttp\n\
+         let seen = []\n\
+         fn once(line) {{\n\
+             seen.push(line)\n\
+             return false\n\
+         }}\n\
+         uhttp.stream(\"unix://{sock}:/events\", once)"
+    );
+    let s = run_src(&src).unwrap();
+    match s.globals.get("seen").unwrap() {
+        VmValue::Array(arc) => {
+            let guard = arc.lock();
+            assert_eq!(guard.len(), 1, "handler returning false should stop after one line");
+        }
+        v => panic!("expected Array, got {:?}", v),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn test_uhttp_stream_arity_error() {
+    let err = try_run_src("use std::uhttp\nuhttp.stream(\"unix:///tmp/x.sock:/\")")
+        .err()
+        .expect("expected error");
+    assert!(matches!(err, JadeError::ArityMismatch { .. }));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_uhttp_stream_handler_type_error() {
+    let err = try_run_src("use std::uhttp\nuhttp.stream(\"unix:///tmp/x.sock:/\", 42)")
+        .err()
+        .expect("expected error");
+    assert!(matches!(err, JadeError::TypeError { .. }));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_uhttp_stream_connect_error() {
+    let src = "use std::uhttp\n\
+               fn noop(line) {}\n\
+               uhttp.stream(\"unix:///nonexistent/jade-stream.sock:/\", noop)";
+    let err = try_run_src(src).err().expect("expected error");
+    assert!(matches!(err, JadeError::IoError { .. }));
+}
+
 // ── Stream muting unit tests ──────────────────────────────────────────────
 //
 // Tests for `drain_tokens_with_mute`. We construct a channel, push tokens,
