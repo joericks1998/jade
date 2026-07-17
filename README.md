@@ -178,7 +178,7 @@ src/
     parser.rs               Recursive descent parser — produces an AST
     ast.rs                  AST node definitions (Stmt, Expr, BinOpKind, UnaryOpKind)
     error.rs                Error types (JadeError, Span)
-jade_evals/
+examples/                   Each fixture lives in its own directory (<category>/<name>/<name>.jde)
   arithmatic/               Fixture files for arithmetic and bitwise operations
   arrays/                   Fixture files for array literals, indexing, and assignment
   assignment/               Fixture files for let bindings, assignment, and comparison expressions
@@ -190,9 +190,9 @@ jade_evals/
   structs/                  Fixture files for struct definitions, field access, extend blocks
   dicts/                    Fixture files for dict literals, key access, and mutation
   imports/                  Fixture files for multi-file use imports
-  pipe.jde                  Fixture file for the |> pipe operator
-  closures.jde              Fixture file for anonymous closures
-  for_loop.jde              Fixture file for for loops
+  pipe/                     Fixture file for the |> pipe operator
+  closures/                 Fixture file for anonymous closures
+  for_loop/                 Fixture file for for loops
 planning/
   REQUIREMENTS.md           Full build plan across all phases
 docs/
@@ -219,8 +219,8 @@ Full documentation is available at **[jadelang.org](https://jadelang.org)**. The
 ```sh
 cargo build
 cargo test
-jade run jade_evals/arithmatic/arithmetic.jde --verbose
-jade run jade_evals/strings/fstrings.jde
+jade run examples/arithmatic/arithmetic/arithmetic.jde --verbose
+jade run examples/strings/fstrings/fstrings.jde
 ```
 
 **Guidelines**

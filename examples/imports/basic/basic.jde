@@ -1,4 +1,4 @@
-use "math_lib.jde" as math_lib
+use "../math_lib/math_lib.jde" as math_lib
 
 let x = math_lib.add(2, 3)
 let y = math_lib.mul(4, 5)
