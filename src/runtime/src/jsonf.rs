@@ -9,7 +9,7 @@
 //! Conversions bridge `serde_json::Value` and the Chunk backend's ObjHeader
 //! collections: parse builds `ArrayObj`/`DictObj` trees; stringify walks them.
 
-use core::ffi::{c_char, c_void};
+use core::ffi::c_char;
 
 use serde_json::Value;
 
