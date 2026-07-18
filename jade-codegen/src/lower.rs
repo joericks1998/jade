@@ -83,7 +83,7 @@ fn chunk_module_supported(module: &str, method: &str, argc: usize) -> bool {
         ("path", "basename" | "ext" | "dirname" | "stem" | "abs") => argc == 1,
         ("path", "is_abs") => argc == 1,
         ("path", "join") => argc >= 1,
-        ("fs", "read") => argc == 1, // optional trust arg not modeled → 1-arg only
+        ("fs", "read") => argc == 1 || argc == 2, // read(path) or read(path, trust)
         ("fs", "exists" | "delete" | "mkdir") => argc == 1,
         ("fs", "write" | "append") => argc == 2,
         ("fs", "list_dir") => argc == 1,
@@ -1021,6 +1021,12 @@ enum CallKind {
     /// method → direct call to `jf_<uid>` with the receiver (`self_reg`) prepended
     /// as `self` (param 0) and omitted trailing defaults filled at the call site.
     MethodDirect { uid: usize, self_reg: Reg, args: Vec<Reg> },
+    /// A genuinely-ambiguous struct method call `obj.method(args)` — two types
+    /// define `method` with the same arity, so the target depends on `obj`'s
+    /// runtime type. Looked up at runtime by (type-name, method) via
+    /// `jrt_method_lookup` and called indirectly (`self` prepended). See
+    /// `emit_dynamic_method`.
+    MethodDynamic { recv: Reg, method: String, args: Vec<Reg> },
     /// A stdlib module-namespace call `module.method(args)` (`fs.read`, `path.ext`,
     /// …) resolved statically by name to a runtime symbol. Only layout-safe methods
     /// (string/scalar I/O — no legacy-layout collections) are lowered; the rest
@@ -1151,11 +1157,16 @@ fn resolve_user_calls(
             // exact-arity argument list is lowered (no defaults through spawn).
             Instr::Spawn(d, callee, args) => {
                 if let Some(&uid) = reg_fn.get(callee) {
-                    if args.len() == fnctx.defs[uid].params.len() {
-                        out.insert(i, CallKind::Spawn { uid, args: args.clone() });
-                    } else {
-                        return Err("lower.rs: spawn arity mismatch".into());
+                    let cf = &fnctx.defs[uid];
+                    if args.len() > cf.params.len() {
+                        return Err("lower.rs: spawn passes more arguments than parameters".into());
                     }
+                    for j in args.len()..cf.params.len() {
+                        if cf.defaults.get(j).and_then(|x| x.as_ref()).is_none() {
+                            return Err("lower.rs: spawn omits a required argument".into());
+                        }
+                    }
+                    out.insert(i, CallKind::Spawn { uid, args: args.clone() });
                 } else {
                     return Err("lower.rs: spawn of a non-static function".into());
                 }
@@ -1183,6 +1194,11 @@ fn resolve_user_calls(
                         out.insert(i, CallKind::MethodDirect { uid, self_reg, args: args.clone() });
                         // The producing GetField is a method lookup (would raise as a
                         // data-field access) and its result is now unused → skip it.
+                        skip_getfields.insert(gf_idx);
+                    } else if fnctx.method_candidates.contains_key(&mname) {
+                        // A known extend method whose target is ambiguous by arity →
+                        // dispatch on the receiver's runtime type.
+                        out.insert(i, CallKind::MethodDynamic { recv: self_reg, method: mname, args: args.clone() });
                         skip_getfields.insert(gf_idx);
                     } else if chunk_str_method_supported(&mname, args.len()) {
                         out.insert(i, CallKind::PrimStrMethod { recv: self_reg, method: mname, args: args.clone() });
@@ -1238,8 +1254,39 @@ fn resolve_user_calls(
             // lowerable (named args need the callee's parameter names, which a
             // runtime function value doesn't carry) — anything else declines.
             Instr::CallNamed(d, callee, pairs) => {
-                if reg_getfield.contains_key(callee) || reg_getfield_module.contains_key(callee) {
-                    return Err("lower.rs: keyword method/module call (GetField result) is unsupported".into());
+                if reg_getfield.contains_key(callee) {
+                    return Err("lower.rs: keyword method call (GetField result) is unsupported".into());
+                }
+                if let Some((module, method, gf_idx)) = reg_getfield_module.get(callee).cloned() {
+                    // The one supported keyword module call: fs.read(path, trust=<bool>).
+                    let resolved = if module == "fs" && method == "read" {
+                        let (mut path, mut trust, mut ok) = (None, None, true);
+                        for (name, reg) in pairs {
+                            match name.as_deref() {
+                                None if path.is_none() => path = Some(*reg),
+                                Some("trust") => trust = Some(*reg),
+                                _ => ok = false,
+                            }
+                        }
+                        match (ok, path, trust) {
+                            (true, Some(p), Some(t)) => Some(vec![p, t]),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+                    match resolved {
+                        Some(args) => {
+                            out.insert(i, CallKind::ModuleCall { module, method, args });
+                            skip_getfields.insert(gf_idx);
+                        }
+                        None => return Err("lower.rs: unsupported keyword module call".into()),
+                    }
+                    reg_fn.remove(d);
+                    reg_global.remove(d);
+                    reg_getfield.remove(d);
+                    reg_getfield_module.remove(d);
+                    continue;
                 }
                 if let Some(&uid) = reg_fn.get(callee) {
                     let cf = &fnctx.defs[uid];
@@ -1295,6 +1342,53 @@ fn resolve_user_calls(
         }
     }
     Ok((out, skip_getfields))
+}
+
+/// Emit a runtime-dispatched struct method `recv.method(args)`: look up the
+/// implementation by the receiver's runtime type name (`jrt_get_type_name` →
+/// `jrt_method_lookup`), then indirect-call it with `self` (the receiver)
+/// prepended. Used only for genuinely-ambiguous method names (same name+arity on
+/// >1 type); exact-arity, so no default filling.
+fn emit_dynamic_method<'ctx>(
+    low: &Lowerer<'_, 'ctx>,
+    recv: Reg,
+    method: &str,
+    args: &[Reg],
+) -> Result<IntValue<'ctx>, String> {
+    let b = low.builder;
+    let i64_ty = low.i64t();
+    let ptrt = low.ptrt();
+    let err = |e: inkwell::builder::BuilderError| e.to_string();
+
+    // type_word = tag_str(jrt_get_type_name(recv))
+    let gtn = low.runtime_fn("jrt_get_type_name", ptrt.fn_type(&[i64_ty.into()], false));
+    let tn = b
+        .build_call(gtn, &[low.load(recv).into()], "tname")
+        .map_err(err)?
+        .as_any_value_enum()
+        .into_pointer_value();
+    let type_word = low.tag_str(tn);
+    // fnptr = jrt_method_lookup(type_word, "method")
+    let lookup = low.runtime_fn("jrt_method_lookup", ptrt.fn_type(&[i64_ty.into(), ptrt.into()], false));
+    let fnptr = b
+        .build_call(lookup, &[type_word.into(), low.cstr(method).into()], "mfn")
+        .map_err(err)?
+        .as_any_value_enum()
+        .into_pointer_value();
+    // Indirect call: fnptr(self, args...) — one i64 param per (self + args).
+    let arity = args.len() + 1;
+    let arg_tys = vec![i64_ty.into(); arity];
+    let fn_ty = i64_ty.fn_type(&arg_tys, false);
+    let mut argv: Vec<BasicMetadataValueEnum> = Vec::with_capacity(arity);
+    argv.push(low.load(recv).into());
+    for a in args {
+        argv.push(low.load(*a).into());
+    }
+    Ok(b
+        .build_indirect_call(fn_ty, fnptr, &argv, "dmcall")
+        .map_err(err)?
+        .as_any_value_enum()
+        .into_int_value())
 }
 
 /// Emit a string primitive method `recv.method(args)` via the shared `jrt_str_*`
@@ -1556,10 +1650,19 @@ fn emit_module_call<'ctx>(
             Ok(low.tag_str(acc))
         }
         ("fs", "read") => {
-            // jrt_fs_read(path, i32 trust=0) -> TAINTED str (raises on error).
+            // jrt_fs_read(path, i32 trust) -> str (TAINTED unless trust, raises on
+            // error). `fs.read(path, trust=<bool>)` passes the bool's bit4 as trust.
             let f = low.runtime_fn("jrt_fs_read", ptrt.fn_type(&[ptrt.into(), i32_ty.into()], false));
+            let trust = if args.len() == 2 {
+                let w = low.load(args[1]);
+                let sh = b.build_right_shift(w, i64_ty.const_int(4, false), false, "tsh").map_err(err)?;
+                let bit = b.build_and(sh, i64_ty.const_int(1, false), "tbit").map_err(err)?;
+                b.build_int_truncate(bit, i32_ty, "t32").map_err(err)?
+            } else {
+                i32_ty.const_zero()
+            };
             let r = b
-                .build_call(f, &[strp(0).into(), i32_ty.const_zero().into()], "read")
+                .build_call(f, &[strp(0).into(), trust.into()], "read")
                 .map_err(err)?
                 .as_any_value_enum()
                 .into_pointer_value();
@@ -1824,6 +1927,47 @@ pub fn lower_program<'ctx>(
 
     let top_fn = module.add_function("jade_toplevel", i64_ty.fn_type(&[], false), None);
     lower_body(context, module, top_fn, &top.code, &top.fn_defs, top_n_slots, 0, &fnctx)?;
+
+    // Populate the runtime method registry (for dynamic dispatch of
+    // ambiguous-arity extend methods) at the very start of `jade_toplevel`, which
+    // `main` calls before any user code. Registering every extend method is
+    // harmless; only ambiguous names are ever looked up.
+    let regs: Vec<(&String, &String, usize)> = {
+        let mut v = Vec::new();
+        for (ty, methods) in extend_methods {
+            for (m, mfn) in methods {
+                if let Some(&uid) = fnctx.ptr2uid.get(&Arc::as_ptr(mfn)) {
+                    v.push((ty, m, uid));
+                }
+            }
+        }
+        v.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1))); // deterministic order
+        v
+    };
+    if !regs.is_empty() {
+        let ptr_ty = context.ptr_type(AddressSpace::default());
+        let void_ty = context.void_type();
+        let reg_fn = module.get_function("jrt_method_register").unwrap_or_else(|| {
+            module.add_function(
+                "jrt_method_register",
+                void_ty.fn_type(&[ptr_ty.into(), ptr_ty.into(), ptr_ty.into()], false),
+                None,
+            )
+        });
+        let entry = top_fn.get_first_basic_block().ok_or("lower.rs: jade_toplevel has no entry block")?;
+        let rb = context.create_builder();
+        match entry.get_first_instruction() {
+            Some(first) => rb.position_before(&first),
+            None => rb.position_at_end(entry),
+        }
+        for (ty, m, uid) in regs {
+            let tcstr = rb.build_global_string_ptr(ty, "mtype").map_err(|e| e.to_string())?.as_pointer_value();
+            let mcstr = rb.build_global_string_ptr(m, "mname").map_err(|e| e.to_string())?.as_pointer_value();
+            let fnptr = fnctx.funcs[uid].as_global_value().as_pointer_value();
+            rb.build_call(reg_fn, &[tcstr.into(), mcstr.into(), fnptr.into()], "")
+                .map_err(|e| e.to_string())?;
+        }
+    }
     Ok(top_fn)
 }
 
@@ -2431,15 +2575,26 @@ fn lower_instr<'ctx>(
         // pointer word (futures only flow to await/join, never generic ops).
         Spawn(dest, _callee, _args) => match user_calls.get(&idx) {
             Some(CallKind::Spawn { uid, args }) => {
-                let n = args.len();
+                // Pack `params.len()` slots: provided args, then omitted trailing
+                // defaults (the task wrapper unpacks exactly that many).
+                let cf = &fnctx.defs[*uid];
+                let n = cf.params.len();
                 let count = i64_ty.const_int(n.max(1) as u64, false);
                 let arr = b.build_array_alloca(i64_ty, count, "spawn_args").map_err(|e| e.to_string())?;
-                for (i, r) in args.iter().enumerate() {
+                let store_slot = |slot_i: usize, val: IntValue| -> Result<(), String> {
                     let slot = unsafe {
-                        b.build_in_bounds_gep(i64_ty, arr, &[i64_ty.const_int(i as u64, false)], "sa")
+                        b.build_in_bounds_gep(i64_ty, arr, &[i64_ty.const_int(slot_i as u64, false)], "sa")
                             .map_err(|e| e.to_string())?
                     };
-                    b.build_store(slot, low.load(*r)).map_err(|e| e.to_string())?;
+                    b.build_store(slot, val).map_err(|e| e.to_string())?;
+                    Ok(())
+                };
+                for (i, r) in args.iter().enumerate() {
+                    store_slot(i, low.load(*r))?;
+                }
+                for j in args.len()..n {
+                    let dv = cf.defaults[j].as_ref().ok_or("lower.rs: missing spawn default")?;
+                    store_slot(j, low.default_word(dv)?)?;
                 }
                 let task = low
                     .module
@@ -2689,6 +2844,11 @@ fn lower_instr<'ctx>(
                     low.store(*dest, ret);
                     return Ok(false);
                 }
+                Some(CallKind::MethodDynamic { recv, method, args: margs }) => {
+                    let ret = emit_dynamic_method(low, *recv, method, margs)?;
+                    low.store(*dest, ret);
+                    return Ok(false);
+                }
                 Some(CallKind::Indirect) => {
                     let ret = low.indirect_call(*callee, args)?;
                     low.store(*dest, ret);
@@ -2773,6 +2933,12 @@ fn lower_instr<'ctx>(
                     .map_err(|e| e.to_string())?
                     .as_any_value_enum()
                     .into_int_value();
+                low.store(*dest, ret);
+                Ok(false)
+            }
+            // A keyword module call pre-resolved to a module call (fs.read trust).
+            Some(CallKind::ModuleCall { module, method, args: margs }) => {
+                let ret = emit_module_call(low, module, method, margs)?;
                 low.store(*dest, ret);
                 Ok(false)
             }

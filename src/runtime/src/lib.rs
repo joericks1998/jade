@@ -47,6 +47,7 @@ pub mod float;
 pub mod heap;
 pub mod jsonf;
 pub mod mathf;
+pub mod methods;
 pub mod num;
 pub mod ops;
 pub mod render;
