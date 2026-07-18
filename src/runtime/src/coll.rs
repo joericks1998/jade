@@ -83,6 +83,17 @@ impl<T: Clone> ArrayObj<T> {
         self.data.get(i)
     }
 
+    /// Remove and return the last element (syncing the header length), or `None`
+    /// if empty. Matches the VM's `array.pop` (nil on empty).
+    #[inline]
+    pub fn pop(&mut self) -> Option<T> {
+        let r = self.data.pop();
+        if r.is_some() {
+            self.sync_len();
+        }
+        r
+    }
+
     /// Overwrite element `i` in place; `Err(())` if out of bounds.
     #[inline]
     pub fn set(&mut self, i: usize, v: T) -> Result<(), ()> {

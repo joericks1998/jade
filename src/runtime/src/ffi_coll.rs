@@ -155,6 +155,70 @@ pub extern "C" fn jrt_coll_array_set(arr: *mut c_void, i: i64, val: W) {
     }
 }
 
+/// `array.pop()`: remove and return the last element, or a nil word if empty
+/// (matches the VM — no raise on empty).
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_coll_array_pop(arr: *mut c_void) -> W {
+    unsafe {
+        (*(arr as *mut ArrayObj<W>))
+            .pop()
+            .unwrap_or(JadeValue::from_bits(crate::value::NIL_BITS).bits() as i64)
+    }
+}
+
+/// `array.reverse()`: reverse in place (length unchanged).
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_coll_array_reverse(arr: *mut c_void) {
+    unsafe { (*(arr as *mut ArrayObj<W>)).reverse() }
+}
+
+/// `array.sort()`: sort in place by the VM's total order (`vm_cmp_for_sort`):
+/// numeric compares numerically (int/float mixed), strings lexicographically,
+/// bools false<true, and any other/mixed pairing compares equal (stable).
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_coll_array_sort(arr: *mut c_void) {
+    unsafe { (*(arr as *mut ArrayObj<W>)).sort_by(|a, b| cmp_for_sort(*a, *b)) }
+}
+
+/// Total order over tagged words matching the VM's `vm_cmp_for_sort`.
+fn cmp_for_sort(a: W, b: W) -> core::cmp::Ordering {
+    use core::cmp::Ordering::Equal;
+    let (va, vb) = (JadeValue::from_bits(a as u64), JadeValue::from_bits(b as u64));
+    if va.is_int() && vb.is_int() {
+        return va.as_int().cmp(&vb.as_int());
+    }
+    let num = |x: JadeValue| -> Option<f64> {
+        if x.is_int() {
+            Some(x.as_int() as f64)
+        } else if x.is_float() {
+            Some(crate::float::unbox_float(x))
+        } else {
+            None
+        }
+    };
+    if let (Some(x), Some(y)) = (num(va), num(vb)) {
+        return x.partial_cmp(&y).unwrap_or(Equal);
+    }
+    if va.is_str() && vb.is_str() {
+        let sa = unsafe { cstr_slice(va.as_ptr() as *const u8) };
+        let sb = unsafe { cstr_slice(vb.as_ptr() as *const u8) };
+        return sa.cmp(sb);
+    }
+    if va.is_bool() && vb.is_bool() {
+        return va.as_bool().cmp(&vb.as_bool());
+    }
+    Equal
+}
+
+/// Borrow a NUL-terminated string's bytes (no trailing NUL). NULL → `&[]`.
+#[inline]
+unsafe fn cstr_slice<'a>(p: *const u8) -> &'a [u8] {
+    if p.is_null() {
+        return &[];
+    }
+    unsafe { core::slice::from_raw_parts(p, strlen(p)) }
+}
+
 // ── Dict ──────────────────────────────────────────────────────────────────────
 
 /// Allocate an empty kind-tagged dict (leaked; see module docs).
@@ -195,6 +259,39 @@ pub extern "C" fn jrt_coll_dict_copy(dict: *const c_void) -> *mut c_void {
     unsafe {
         let copy = (*(dict as *const DictObj<W>)).value_copy();
         Box::into_raw(Box::new(copy)) as *mut c_void
+    }
+}
+
+/// `dict.keys()`: a new array of the keys as TRUSTED tagged strings, sorted
+/// ascending (matching the VM's `dict.keys`).
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_coll_dict_keys(dict: *const c_void) -> *mut c_void {
+    unsafe {
+        let d = &*(dict as *const DictObj<W>);
+        let mut keys: Vec<&str> = d.entries().iter().map(|(k, _)| k.as_str()).collect();
+        keys.sort_unstable();
+        let mut arr = ArrayObj::<W>::new();
+        for k in keys {
+            let s = tagged_string(k.as_bytes(), string::TRUSTED);
+            arr.push(JadeValue::from_str_ptr(s as *const ()).bits() as i64);
+        }
+        Box::into_raw(Box::new(arr)) as *mut c_void
+    }
+}
+
+/// `dict.values()`: a new array of the values in key-sorted order (matching the
+/// VM's `dict.values`). Values are shared words (cloned by word copy).
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_coll_dict_values(dict: *const c_void) -> *mut c_void {
+    unsafe {
+        let d = &*(dict as *const DictObj<W>);
+        let mut entries: Vec<&(String, W)> = d.entries().iter().collect();
+        entries.sort_by(|x, y| x.0.cmp(&y.0));
+        let mut arr = ArrayObj::<W>::new();
+        for (_, v) in entries {
+            arr.push(*v);
+        }
+        Box::into_raw(Box::new(arr)) as *mut c_void
     }
 }
 

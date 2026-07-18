@@ -113,6 +113,19 @@ fn chunk_str_method_supported(method: &str, argc: usize) -> bool {
     }
 }
 
+/// Whether `method` is an array/dict primitive method unique to one collection
+/// kind (so the receiver's kind is known by the method name — the frontend has
+/// type-checked it). `contains` (str/array/dict) and `len` (all) are excluded.
+fn chunk_val_method_supported(method: &str, argc: usize) -> bool {
+    match method {
+        "push" => argc == 1,                       // array
+        "pop" | "sort" | "reverse" => argc == 0,   // array
+        "keys" | "values" => argc == 0,            // dict
+        "has" | "get" => argc == 1,                // dict
+        _ => false,
+    }
+}
+
 /// Per-function lowering helper: bundles the builder, the i64 slot type, and the
 /// register `alloca`s so the instruction handlers stay terse.
 struct Lowerer<'a, 'ctx> {
@@ -984,6 +997,12 @@ enum CallKind {
     /// `emit_str_method`. (Method names unique to strings; `contains`/`split` are
     /// excluded — ambiguous with dict / returns a collection.)
     PrimStrMethod { recv: Reg, method: String, args: Vec<Reg> },
+    /// An array/dict primitive method `recv.method(args)` whose name is unique to
+    /// one collection kind (`push`/`pop`/`sort`/`reverse` → array;
+    /// `keys`/`values`/`has`/`get` → dict), so the receiver kind is known by name
+    /// (frontend-checked). Lowered via the ObjHeader-aware `jrt_coll_*`/`jrt_karr_*`
+    /// helpers. See `emit_val_method`. (`contains`/`len` are ambiguous → excluded.)
+    PrimValMethod { recv: Reg, method: String, args: Vec<Reg> },
     Indirect,
     /// `Spawn` of a statically-known async function → `jade_spawn(jf_task_<uid>,
     /// args, n)`. Only exact-arity spawns of a known function are lowered.
@@ -1139,6 +1158,9 @@ fn resolve_user_calls(
                         skip_getfields.insert(gf_idx);
                     } else if chunk_str_method_supported(&mname, args.len()) {
                         out.insert(i, CallKind::PrimStrMethod { recv: self_reg, method: mname, args: args.clone() });
+                        skip_getfields.insert(gf_idx);
+                    } else if chunk_val_method_supported(&mname, args.len()) {
+                        out.insert(i, CallKind::PrimValMethod { recv: self_reg, method: mname, args: args.clone() });
                         skip_getfields.insert(gf_idx);
                     } else {
                         return Err("lower.rs: method call (GetField result) is unsupported".into());
@@ -1300,6 +1322,77 @@ fn emit_str_method<'ctx>(
             Ok(low.bool_word(bit))
         }
         _ => Err(format!("lower.rs: emit_str_method: unhandled {method}")),
+    }
+}
+
+/// Emit an array/dict primitive method `recv.method(args)` via the ObjHeader-aware
+/// `jrt_karr_*`/`jrt_coll_*` helpers. The receiver kind is implied by the method
+/// name (`chunk_val_method_supported`). Array push/pop/sort/reverse mutate in
+/// place (push/sort/reverse → nil, pop → element); dict keys/values build a new
+/// array, has → bool, get → value-or-nil.
+fn emit_val_method<'ctx>(
+    low: &Lowerer<'_, 'ctx>,
+    recv: Reg,
+    method: &str,
+    args: &[Reg],
+) -> Result<IntValue<'ctx>, String> {
+    let b = low.builder;
+    let i64_ty = low.i64t();
+    let ptrt = low.ptrt();
+    let i32_ty = low.ctx.i32_type();
+    let void_ty = low.ctx.void_type();
+    let err = |e: inkwell::builder::BuilderError| e.to_string();
+    let recv_p = low.untag_ptr(low.load(recv));
+    let nil = i64_ty.const_int(NIL, false);
+
+    match method {
+        "push" => {
+            let f = low.runtime_fn("jrt_karr_push", void_ty.fn_type(&[ptrt.into(), i64_ty.into()], false));
+            b.build_call(f, &[recv_p.into(), low.load(args[0]).into()], "").map_err(err)?;
+            Ok(nil)
+        }
+        "pop" => {
+            let f = low.runtime_fn("jrt_coll_array_pop", i64_ty.fn_type(&[ptrt.into()], false));
+            Ok(b.build_call(f, &[recv_p.into()], "pop").map_err(err)?.as_any_value_enum().into_int_value())
+        }
+        "sort" | "reverse" => {
+            let cname = if method == "sort" { "jrt_coll_array_sort" } else { "jrt_coll_array_reverse" };
+            let f = low.runtime_fn(cname, void_ty.fn_type(&[ptrt.into()], false));
+            b.build_call(f, &[recv_p.into()], "").map_err(err)?;
+            Ok(nil)
+        }
+        "keys" | "values" => {
+            let cname = if method == "keys" { "jrt_coll_dict_keys" } else { "jrt_coll_dict_values" };
+            let f = low.runtime_fn(cname, ptrt.fn_type(&[ptrt.into()], false));
+            let p = b.build_call(f, &[recv_p.into()], "kv").map_err(err)?.as_any_value_enum().into_pointer_value();
+            Ok(low.tag_ptr(p))
+        }
+        "has" | "get" => {
+            // jrt_coll_dict_get(dict, key_cstr, *out) -> found?  (key arg is a
+            // tagged string → its data pointer).
+            let f = low.runtime_fn(
+                "jrt_coll_dict_get",
+                i32_ty.fn_type(&[ptrt.into(), ptrt.into(), ptrt.into()], false),
+            );
+            let out = b.build_alloca(i64_ty, "dget").map_err(err)?;
+            let key_p = low.untag_ptr(low.load(args[0]));
+            let found = b
+                .build_call(f, &[recv_p.into(), key_p.into(), out.into()], "has")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_int_value();
+            let bit = b
+                .build_int_compare(inkwell::IntPredicate::NE, found, i32_ty.const_zero(), "f")
+                .map_err(err)?;
+            if method == "has" {
+                Ok(low.bool_word(bit))
+            } else {
+                // get: found ? *out : nil.
+                let val = b.build_load(i64_ty, out, "getval").map_err(err)?.into_int_value();
+                Ok(b.build_select(bit, val, nil, "getornil").map_err(err)?.into_int_value())
+            }
+        }
+        _ => Err(format!("lower.rs: emit_val_method: unhandled {method}")),
     }
 }
 
@@ -2446,6 +2539,11 @@ fn lower_instr<'ctx>(
                 }
                 Some(CallKind::PrimStrMethod { recv, method, args: margs }) => {
                     let ret = emit_str_method(low, *recv, method, margs)?;
+                    low.store(*dest, ret);
+                    return Ok(false);
+                }
+                Some(CallKind::PrimValMethod { recv, method, args: margs }) => {
+                    let ret = emit_val_method(low, *recv, method, margs)?;
                     low.store(*dest, ret);
                     return Ok(false);
                 }
