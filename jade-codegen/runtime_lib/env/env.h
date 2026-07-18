@@ -11,9 +11,10 @@ char*   jrt_env_cwd(void);
 char*   jrt_env_get(const char* name);
 /* env.set(name, value) — set a process environment variable. Returns Nil. */
 void    jrt_env_set(const char* name, const char* value);
-/* env.args() — process arguments as a jade_array* of TRUSTED char* (argv[0]
- * first). Empty until jrt_set_args has run. */
-void*   jrt_env_args(void);
+/* env.args() — process arguments as a tagged ObjHeader array of TRUSTED string
+ * words (argv[0] first). Already boxed (jrt_box_ptr). Empty until jrt_set_args
+ * has run. */
+jade_value_t jrt_env_args(void);
 /* jrt_set_args — record process argv for jrt_env_args (called once by main). */
 void    jrt_set_args(int argc, char** argv);
 

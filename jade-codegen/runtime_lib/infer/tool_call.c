@@ -112,21 +112,21 @@ static jade_value_t make_tool_call(const ModelProfile* p,
     if (blen > 0) memcpy(args, body, blen);
 
     /* Lift the tool name: parse the body as a JSON object and read name_field
-     * if present as a string (jrt_json_parse is lenient — a non-object body
-     * yields an empty dict, so a missing/invalid name reads back as nil). */
+     * if present as a string (a non-object body → nil/non-dict, so a
+     * missing/invalid name reads back as an empty string). */
     char* name = NULL;
-    void* d = jrt_json_parse(args);
-    if (d) {
-        int64_t nv = jade_dict_get(d, p->name_field);
-        if (jrt_is_str(nv)) {
-            name = jrt_str_dup((const char*)jrt_unbox_ptr(nv), trust);
+    jade_value_t d = jrt_json_parse_chunk(args);
+    if (jrt_is_ptr(d) && jrt_kind_of(jrt_unbox_ptr(d)) == JK_DICT) {
+        int64_t nv;
+        if (jrt_coll_dict_get(jrt_unbox_ptr(d), p->name_field, &nv) && jrt_is_str((jade_value_t)nv)) {
+            name = jrt_str_dup((const char*)jrt_unbox_ptr((jade_value_t)nv), trust);
         }
     }
     if (!name) name = jrt_str_dup("", trust);
 
-    void* dict = jade_dict_create();
-    jade_dict_set(dict, "name", jrt_box_str(name));
-    jade_dict_set(dict, "args", jrt_box_str(args));
+    void* dict = jrt_kdict_new();
+    jrt_kdict_set(dict, jrt_box_str(jrt_str_dup("name", JRT_TRUSTED)), jrt_box_str(name));
+    jrt_kdict_set(dict, jrt_box_str(jrt_str_dup("args", JRT_TRUSTED)), jrt_box_str(args));
     return jrt_box_ptr(dict);
 }
 
@@ -142,9 +142,12 @@ static int bare_obj_is_tool_call(const ModelProfile* p,
     if (blen == 0) return 0;
     char* tmp = jrt_str_new(blen, JRT_TRUSTED);
     memcpy(tmp, body, blen);
-    void* d = jrt_json_parse(tmp);     /* copies what it keeps; tmp is ours to free */
+    jade_value_t d = jrt_json_parse_chunk(tmp);  /* copies what it keeps; tmp is ours to free */
     int ok = 0;
-    if (d) ok = jrt_is_str(jade_dict_get(d, p->name_field));
+    if (jrt_is_ptr(d) && jrt_kind_of(jrt_unbox_ptr(d)) == JK_DICT) {
+        int64_t nv;
+        ok = jrt_coll_dict_get(jrt_unbox_ptr(d), p->name_field, &nv) && jrt_is_str((jade_value_t)nv);
+    }
     jrt_str_free(tmp);
     return ok;
 }
@@ -202,7 +205,7 @@ static jade_value_t scan_bare_tool_calls(void* arr, const ModelProfile* p,
         if (bare_obj_is_tool_call(p, obj, olen)) {
             jade_value_t tc = make_tool_call(p, obj, olen, trust);
             if (first_only) return tc;
-            jrt_array_push(arr, tc);
+            jrt_karr_push(arr, tc);
         }
         rest += consumed;
     }
@@ -244,7 +247,7 @@ jade_value_t jrt_llm_find_tool_call(const char* text) {
  * `close` — so a missing </tool_call> between two opens can't make the first
  * call swallow the second. */
 jade_value_t jrt_llm_find_tool_calls(const char* text) {
-    void* arr = jrt_array_new();
+    void* arr = jrt_karr_new();
     const ModelProfile* p = current_profile();
     if (p && text) {
         uint8_t trust = jrt_trust_of(text);
@@ -256,13 +259,13 @@ jade_value_t jrt_llm_find_tool_calls(const char* text) {
             const char* obj;
             size_t olen, consumed;
             if (first_object(after, &obj, &olen, &consumed)) {
-                jrt_array_push(arr, make_tool_call(p, obj, olen, trust));
+                jrt_karr_push(arr, make_tool_call(p, obj, olen, trust));
                 found = 1;
                 rest = after + consumed;
             } else {
                 /* No JSON object after this open (malformed/truncated tail):
                  * fall back to the remainder, matching the VM's defensive finish. */
-                jrt_array_push(arr, make_tool_call(p, after, strlen(after), trust));
+                jrt_karr_push(arr, make_tool_call(p, after, strlen(after), trust));
                 found = 1;
                 break;
             }
@@ -276,6 +279,12 @@ jade_value_t jrt_llm_find_tool_calls(const char* text) {
     return jrt_box_ptr(arr);
 }
 
+/* ObjHeader dict.set with a literal string key, boxed as a TRUSTED tagged word.
+ * (jrt_kdict_set takes the key as a tagged-string value word, copied.) */
+static void kd_set(void* dict, const char* key, jade_value_t val) {
+    jrt_kdict_set(dict, jrt_box_str(jrt_str_dup(key, JRT_TRUSTED)), val);
+}
+
 /* The active model's profile as a dict
  * { model, tool_call:{open,close,name_field}, spans:[{tag,open,close}] },
  * or nil when unknown. Mirrors vm.rs::model_profile_to_vm. Profile data is
@@ -284,23 +293,23 @@ jade_value_t jrt_llm_profile(void) {
     const ModelProfile* p = current_profile();
     if (!p) return JRT_NIL;
 
-    void* tool_call = jade_dict_create();
-    jade_dict_set(tool_call, "open",       jrt_box_str(jrt_str_dup(p->open, JRT_TRUSTED)));
-    jade_dict_set(tool_call, "close",      jrt_box_str(jrt_str_dup(p->close, JRT_TRUSTED)));
-    jade_dict_set(tool_call, "name_field", jrt_box_str(jrt_str_dup(p->name_field, JRT_TRUSTED)));
+    void* tool_call = jrt_kdict_new();
+    kd_set(tool_call, "open",       jrt_box_str(jrt_str_dup(p->open, JRT_TRUSTED)));
+    kd_set(tool_call, "close",      jrt_box_str(jrt_str_dup(p->close, JRT_TRUSTED)));
+    kd_set(tool_call, "name_field", jrt_box_str(jrt_str_dup(p->name_field, JRT_TRUSTED)));
 
-    void* spans = jrt_array_new();
+    void* spans = jrt_karr_new();
     for (size_t i = 0; i < p->n_spans; i++) {
-        void* s = jade_dict_create();
-        jade_dict_set(s, "tag",   jrt_box_str(jrt_str_dup(p->spans[i].tag, JRT_TRUSTED)));
-        jade_dict_set(s, "open",  jrt_box_str(jrt_str_dup(p->spans[i].open, JRT_TRUSTED)));
-        jade_dict_set(s, "close", jrt_box_str(jrt_str_dup(p->spans[i].close, JRT_TRUSTED)));
-        jrt_array_push(spans, jrt_box_ptr(s));
+        void* s = jrt_kdict_new();
+        kd_set(s, "tag",   jrt_box_str(jrt_str_dup(p->spans[i].tag, JRT_TRUSTED)));
+        kd_set(s, "open",  jrt_box_str(jrt_str_dup(p->spans[i].open, JRT_TRUSTED)));
+        kd_set(s, "close", jrt_box_str(jrt_str_dup(p->spans[i].close, JRT_TRUSTED)));
+        jrt_karr_push(spans, jrt_box_ptr(s));
     }
 
-    void* dict = jade_dict_create();
-    jade_dict_set(dict, "model",     jrt_box_str(jrt_str_dup(p->model, JRT_TRUSTED)));
-    jade_dict_set(dict, "tool_call", jrt_box_ptr(tool_call));
-    jade_dict_set(dict, "spans",     jrt_box_ptr(spans));
+    void* dict = jrt_kdict_new();
+    kd_set(dict, "model",     jrt_box_str(jrt_str_dup(p->model, JRT_TRUSTED)));
+    kd_set(dict, "tool_call", jrt_box_ptr(tool_call));
+    kd_set(dict, "spans",     jrt_box_ptr(spans));
     return jrt_box_ptr(dict);
 }

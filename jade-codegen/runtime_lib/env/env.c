@@ -35,11 +35,14 @@ static int    g_argc = 0;
 static char** g_argv = NULL;
 void jrt_set_args(int argc, char** argv) { g_argc = argc; g_argv = argv; }
 
-void* jrt_env_args(void) {
-    void* arr = jrt_array_new();
+/* env.args() — process arguments as a tagged ObjHeader array of TRUSTED string
+ * words (argv[0] first). Chunk-path native: the returned word is already boxed
+ * (jrt_box_ptr), so codegen consumes it directly. */
+jade_value_t jrt_env_args(void) {
+    void* arr = jrt_karr_new();
     for (int i = 0; i < g_argc; i++) {
         const char* a = g_argv && g_argv[i] ? g_argv[i] : "";
-        jrt_array_push(arr, jrt_box_str(jrt_str_dup(a, JRT_TRUSTED)));
+        jrt_karr_push(arr, jrt_box_str(jrt_str_dup(a, JRT_TRUSTED)));
     }
-    return arr;
+    return jrt_box_ptr(arr);
 }

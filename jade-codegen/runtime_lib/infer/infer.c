@@ -107,6 +107,13 @@ static int g_keep_anchors = 0;
 
 void jrt_llm_keep_anchors(int on) { g_keep_anchors = on ? 1 : 0; }
 
+/* Sticky per-run token budget, set from Jade via `llm.set_max_tokens(n)`.
+ * Mirrors the VM's `VmState.max_tokens`: every prompt/count request reads it.
+ * Defaults to the compiled-in JADE_INFER_MAX_TOKENS until overridden. */
+static int g_max_tokens = JADE_INFER_MAX_TOKENS;
+
+void jrt_llm_set_max_tokens(int64_t n) { if (n > 0) g_max_tokens = (int)n; }
+
 static void build_request(const infer_req_t* req, infer_buf_t* out) {
     buf_init(out);
     buf_putc(out, '{');
@@ -155,7 +162,7 @@ char* jrt_prompt(const char* prompt, const char* model) {
     infer_req_t req = {
         .prompt = prompt,
         .model = model ? model : "",
-        .max_tokens = JADE_INFER_MAX_TOKENS,
+        .max_tokens = g_max_tokens,
         .keep_anchors = g_keep_anchors,
         .trust = jrt_trust_of(prompt),
     };
@@ -183,7 +190,7 @@ char* jrt_prompt_grammar(const char* prompt, const char* model, const char* gram
         .prompt = prompt,
         .model = model ? model : "",
         .grammar = grammar,
-        .max_tokens = JADE_INFER_MAX_TOKENS,
+        .max_tokens = g_max_tokens,
         .keep_anchors = g_keep_anchors,
         .trust = jrt_trust_of(prompt),
     };
@@ -216,7 +223,7 @@ char* jrt_prompt_grammar_ex(const char* prompt, const char* model,
         .grammar = pattern,
         .anchor = anchor_or_null,
         .stop_anchor = stop_or_null,
-        .max_tokens = JADE_INFER_MAX_TOKENS,
+        .max_tokens = g_max_tokens,
         .keep_anchors = g_keep_anchors,
         .trust = jrt_trust_of(prompt),
     };
@@ -423,7 +430,7 @@ char* jrt_prompt_stream_ex(const char* prompt, const char* model,
         .grammar = pattern_or_null,
         .anchor = anchor_or_null,
         .stop_anchor = stop_or_null,
-        .max_tokens = JADE_INFER_MAX_TOKENS,
+        .max_tokens = g_max_tokens,
         .keep_anchors = g_keep_anchors,
         /* Tell the daemon the prompt's actual taint (a tainted prompt must not
          * be reported as trusted), matching the non-streaming jrt_prompt* paths. */
@@ -526,11 +533,15 @@ jade_value_t jrt_llm_health(void) {
     free(json.data);
     if (!resp) return JRT_NIL;
 
-    /* resp is the accumulated JSON text (0x05 frames). Parse into a dict. */
-    void* dict = jrt_json_parse(resp);
+    /* resp is a plain malloc'd buffer of accumulated JSON text (0x05 frames).
+     * jrt_json_parse_chunk reads a trust byte at s[-1], so wrap resp in a
+     * tagged TAINTED string (external daemon data) before parsing. Returns a
+     * tagged ObjHeader value word directly (dict, or JRT_NIL on parse error). */
+    char* tagged = jrt_str_dup(resp, JRT_TAINTED);
     free(resp);
-    if (!dict) return JRT_NIL;
-    return jrt_box_ptr(dict);
+    jade_value_t v = jrt_json_parse_chunk(tagged);
+    jrt_str_free(tagged);
+    return v;
 }
 
 /* ── Model name resolution (env-derived, TRUSTED) ─────────────────────── */

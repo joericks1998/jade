@@ -296,6 +296,10 @@ char*   jrt_get_model(void);
  * wire). Mirrors the VM's VmState.keep_anchors.                              */
 void    jrt_llm_keep_anchors(int on);
 
+/* llm.set_max_tokens(n) — sticky per-run token budget for prompt/count requests
+ * (positive only; ignored otherwise). Mirrors the VM's VmState.max_tokens.    */
+void    jrt_llm_set_max_tokens(int64_t n);
+
 /* llm.total_tokens() — cumulative session token count via a `stats_only`
  * request (the DONE frame carries the running total). Mirrors the VM.        */
 int64_t jrt_total_tokens(void);
@@ -380,6 +384,9 @@ int64_t jrt_coll_array_get(void* p, int64_t i);
 void    jrt_coll_array_set(void* p, int64_t i, int64_t val);
 int32_t jrt_coll_dict_get(void* p, const char* key, int64_t* out);
 void*   jrt_coll_dict_copy(void* p);
+/* jrt_coll_dict_keys — new ObjHeader array of the dict's keys as TRUSTED tagged
+ * strings, sorted ascending (matches the VM's dict.keys). */
+void*   jrt_coll_dict_keys(void* p);
 int32_t jrt_coll_struct_get(void* p, const char* field, int64_t* out);
 /* jrt_karr_new/push — build a kind-tagged array (elements are tagged words). */
 void*   jrt_karr_new(void);
@@ -468,6 +475,12 @@ void*   jrt_json_parse(const char* json_str);
 char*   jrt_json_esc_str(const char* s);
 /* jrt_json_arr_dicts — serialize jade_array* of JadeDicts to JSON.    */
 char*   jrt_json_arr_dicts(int64_t arr_i64);
+/* jrt_json_parse_chunk — parse a (tagged) JSON string into an ObjHeader value
+ * word (dict/array/scalar), or JRT_NIL on invalid JSON. Chunk-path native. */
+jade_value_t jrt_json_parse_chunk(const char* s);
+/* jrt_json_stringify_chunk — render an ObjHeader value word to a fresh TRUSTED
+ * tagged string (compact, or 2-space pretty when pretty != 0).               */
+char*   jrt_json_stringify_chunk(jade_value_t word, int pretty);
 
 /* ── Conversions ──────────────────────────────────────────────────── */
 /* jrt_bool_of_str — parse a string to a bool, matching the VM's bool():

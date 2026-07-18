@@ -18,6 +18,11 @@
 #include <fcntl.h>
 #include <sys/wait.h>
 
+/* ObjHeader dict.set with a literal string key, boxed as a TRUSTED tagged word. */
+static void kd_set(void* dict, const char* key, jade_value_t val) {
+    jrt_kdict_set(dict, jrt_box_str(jrt_str_dup(key, JRT_TRUSTED)), val);
+}
+
 /* Build one "Key: Value" header line (heap, caller frees) from a dict entry. */
 static char* header_line(const char* k, const char* v) {
     size_t kl = strlen(k), vl = strlen(v);
@@ -33,28 +38,29 @@ static char* header_line(const char* k, const char* v) {
 /* Core: exec curl with the given method/body/headers, capture stdout. Returns
  * the { status, body } dict. `body` (NULL for none) is streamed to curl's stdin
  * via --data-binary @- so arbitrary/binary content is safe. */
-static void* http_request(const char* method, const char* url,
-                          const char* body, void* headers) {
-    void* dict = jade_dict_create();
-    jade_dict_set(dict, "status", jrt_box_int(0));
-    jade_dict_set(dict, "body", jrt_box_str(jrt_str_dup("", JRT_TAINTED)));
-    if (!url) return dict;
+static jade_value_t http_request(const char* method, const char* url,
+                                 const char* body, void* headers) {
+    void* dict = jrt_kdict_new();
+    kd_set(dict, "status", jrt_box_int(0));
+    kd_set(dict, "body", jrt_box_str(jrt_str_dup("", JRT_TAINTED)));
+    if (!url) return jrt_box_ptr(dict);
 
     int is_head = (strcmp(method, "HEAD") == 0);
 
-    /* Flatten the headers dict into "K: V" lines (sorted, deterministic). */
+    /* Flatten the headers ObjHeader dict into "K: V" lines (sorted keys,
+     * deterministic — jrt_coll_dict_keys returns them sorted). */
     char** hlines = NULL;
     int64_t nh = 0;
     if (headers) {
-        void* keys = jrt_dict_keys(headers);
-        nh = jrt_array_len(keys);
+        void* keys = jrt_coll_dict_keys(headers);
+        nh = jrt_coll_array_len(keys);
         if (nh > 0) {
             hlines = calloc((size_t)nh, sizeof(char*));
             for (int64_t i = 0; i < nh; i++) {
-                int64_t kv = jrt_array_get(keys, i);
+                int64_t kv = jrt_coll_array_get(keys, i);
                 const char* k = (const char*)jrt_unbox_ptr((jade_value_t)kv);
-                int64_t vv = jade_dict_get(headers, k);
-                const char* v = jrt_is_str((jade_value_t)vv)
+                int64_t vv = 0;
+                const char* v = (jrt_coll_dict_get(headers, k, &vv) && jrt_is_str((jade_value_t)vv))
                               ? (const char*)jrt_unbox_ptr((jade_value_t)vv) : "";
                 hlines[i] = header_line(k, v);
             }
@@ -149,7 +155,7 @@ static void* http_request(const char* method, const char* url,
         if (hlines) { for (int64_t i = 0; i < nh; i++) free(hlines[i]); free(hlines); }
         free(argv);
         jade_exc_throw_typed(jrt_box_str(jrt_str_dup(msg, JRT_TRUSTED)), NULL);
-        return dict; /* unreachable: throw longjmps or exits */
+        return jrt_box_ptr(dict); /* unreachable: throw longjmps or exits */
     }
 
     if (buf) {
@@ -161,28 +167,28 @@ static void* http_request(const char* method, const char* url,
         char* rbody = jrt_str_new(body_len, JRT_TAINTED);
         if (body_len > 0) memcpy(rbody, buf, body_len);
         free(buf);
-        jade_dict_set(dict, "status", jrt_box_int(status));
-        jade_dict_set(dict, "body", jrt_box_str(rbody));
+        kd_set(dict, "status", jrt_box_int(status));
+        kd_set(dict, "body", jrt_box_str(rbody));
     }
 
 cleanup:
     if (hlines) { for (int64_t i = 0; i < nh; i++) free(hlines[i]); free(hlines); }
     free(argv);
-    return dict;
+    return jrt_box_ptr(dict);
 }
 
-void* jrt_http_get(const char* url, void* headers) {
+jade_value_t jrt_http_get(const char* url, void* headers) {
     return http_request("GET", url, NULL, headers);
 }
-void* jrt_http_post(const char* url, const char* body, void* headers) {
+jade_value_t jrt_http_post(const char* url, const char* body, void* headers) {
     return http_request("POST", url, body ? body : "", headers);
 }
-void* jrt_http_put(const char* url, const char* body, void* headers) {
+jade_value_t jrt_http_put(const char* url, const char* body, void* headers) {
     return http_request("PUT", url, body ? body : "", headers);
 }
-void* jrt_http_delete(const char* url, void* headers) {
+jade_value_t jrt_http_delete(const char* url, void* headers) {
     return http_request("DELETE", url, NULL, headers);
 }
-void* jrt_http_head(const char* url, void* headers) {
+jade_value_t jrt_http_head(const char* url, void* headers) {
     return http_request("HEAD", url, NULL, headers);
 }

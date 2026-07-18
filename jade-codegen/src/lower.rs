@@ -100,8 +100,12 @@ fn chunk_module_supported(module: &str, method: &str, argc: usize) -> bool {
         ("env", "cwd") => argc == 0,
         ("env", "get") => argc == 1,
         ("env", "set") => argc == 2,
+        ("env", "args") => argc == 0,
         ("time", "now" | "now_ms") => argc == 0,
         ("time", "sleep") => argc == 1,
+        ("time", "local") => argc == 1,
+        ("http", "get" | "delete" | "head") => argc == 1 || argc == 2,
+        ("http", "post" | "put") => argc == 2 || argc == 3,
         ("array", "map" | "filter") => argc == 2,
         ("random", "int") => argc == 2,
         ("random", "seed") => argc == 1,
@@ -109,6 +113,10 @@ fn chunk_module_supported(module: &str, method: &str, argc: usize) -> bool {
         ("llm", "count_tokens") => argc == 1,
         ("llm", "total_tokens") => argc == 0,
         ("llm", "tool_grammar") => argc == 0,
+        ("llm", "model") => argc == 0,
+        ("llm", "set_max_tokens" | "keep_anchors") => argc == 1,
+        ("llm", "profile" | "health") => argc == 0,
+        ("llm", "find_tool_call" | "find_tool_calls") => argc == 1,
         ("dict", "merge") => argc == 2,
         ("json", "parse" | "stringify" | "stringify_pretty") => argc == 1,
         _ => false,
@@ -1942,6 +1950,59 @@ fn emit_module_call<'ctx>(
         ("llm", "count_tokens") => int_fn("jrt_count_tokens", 1),
         ("llm", "total_tokens") => int_fn("jrt_total_tokens", 0),
         ("llm", "tool_grammar") => Ok(low.tag_str(str_fn("jrt_tool_grammar", 0)?)),
+        ("llm", "model") => Ok(low.tag_str(str_fn("jrt_get_model", 0)?)),
+        ("llm", "keep_anchors") => {
+            // (bool word) -> void. Extract bit4 (the bool payload) as an i32.
+            let w = low.load(args[0]);
+            let sh = b.build_right_shift(w, i64_ty.const_int(4, false), false, "ksh").map_err(err)?;
+            let bit = b.build_and(sh, i64_ty.const_int(1, false), "kbit").map_err(err)?;
+            let on = b.build_int_truncate(bit, i32_ty, "k32").map_err(err)?;
+            let f = low.runtime_fn("jrt_llm_keep_anchors", void_ty.fn_type(&[i32_ty.into()], false));
+            b.build_call(f, &[on.into()], "").map_err(err)?;
+            Ok(nil)
+        }
+        ("llm", "set_max_tokens") => {
+            // (int word) -> void. Untag to a raw i64.
+            let n = low.untag_int(low.load(args[0]));
+            let f = low.runtime_fn("jrt_llm_set_max_tokens", void_ty.fn_type(&[i64_ty.into()], false));
+            b.build_call(f, &[n.into()], "").map_err(err)?;
+            Ok(nil)
+        }
+        // These return already-tagged ObjHeader value words (dict/array or nil).
+        ("llm", "profile") => {
+            let f = low.runtime_fn("jrt_llm_profile", i64_ty.fn_type(&[], false));
+            Ok(b.build_call(f, &[], "profile").map_err(err)?.as_any_value_enum().into_int_value())
+        }
+        ("llm", "health") => {
+            let f = low.runtime_fn("jrt_llm_health", i64_ty.fn_type(&[], false));
+            Ok(b.build_call(f, &[], "health").map_err(err)?.as_any_value_enum().into_int_value())
+        }
+        ("llm", "find_tool_call") => {
+            let f = low.runtime_fn("jrt_llm_find_tool_call", i64_ty.fn_type(&[ptrt.into()], false));
+            Ok(b.build_call(f, &[strp(0).into()], "ftc").map_err(err)?.as_any_value_enum().into_int_value())
+        }
+        ("llm", "find_tool_calls") => {
+            let f = low.runtime_fn("jrt_llm_find_tool_calls", i64_ty.fn_type(&[ptrt.into()], false));
+            Ok(b.build_call(f, &[strp(0).into()], "ftcs").map_err(err)?.as_any_value_enum().into_int_value())
+        }
+        ("env", "args") => {
+            // () -> already-tagged array word (TRUSTED strings).
+            let f = low.runtime_fn("jrt_env_args", i64_ty.fn_type(&[], false));
+            Ok(b.build_call(f, &[], "args").map_err(err)?.as_any_value_enum().into_int_value())
+        }
+        ("time", "local") => Ok(low.tag_str(str_fn("jrt_time_local", 1)?)),
+        ("http", "get" | "delete" | "head") => {
+            // (url, [headers]) -> already-tagged { status, body } dict word.
+            let f = low.runtime_fn(&format!("jrt_http_{method}"), i64_ty.fn_type(&[ptrt.into(), ptrt.into()], false));
+            let headers = if args.len() >= 2 { strp(1) } else { ptrt.const_null() };
+            Ok(b.build_call(f, &[strp(0).into(), headers.into()], "http").map_err(err)?.as_any_value_enum().into_int_value())
+        }
+        ("http", "post" | "put") => {
+            // (url, body, [headers]) -> tagged { status, body } dict word.
+            let f = low.runtime_fn(&format!("jrt_http_{method}"), i64_ty.fn_type(&[ptrt.into(), ptrt.into(), ptrt.into()], false));
+            let headers = if args.len() >= 3 { strp(2) } else { ptrt.const_null() };
+            Ok(b.build_call(f, &[strp(0).into(), strp(1).into(), headers.into()], "http").map_err(err)?.as_any_value_enum().into_int_value())
+        }
         ("dict", "merge") => {
             // (d1, d2) -> new dict word (tagged ptr).
             let f = low.runtime_fn("jrt_coll_dict_merge", ptrt.fn_type(&[ptrt.into(), ptrt.into()], false));
