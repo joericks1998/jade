@@ -1,3 +1,4 @@
+use jade_runtime::coll::DictObj;
 use crate::{
     compiler::{tir::JadeType, type_infer::TypeContext, vm::{NativeFnId, VmValue}},
     frontend::error::{Result, Span},
@@ -76,7 +77,7 @@ pub static LLM_PKG: Package = Package {
 
 /// Override: inject the real NativeFn value for set_max_tokens.
 pub fn llm_vm_dict_value() -> VmValue {
-    let mut map = std::collections::HashMap::new();
+    let mut map = DictObj::new();
     map.insert("set_max_tokens".to_string(), VmValue::NativeFn(NativeFnId::LlmSetMaxTokens));
     map.insert("count_tokens".to_string(),   VmValue::NativeFn(NativeFnId::LlmCountTokens));
     map.insert("total_tokens".to_string(),   VmValue::NativeFn(NativeFnId::LlmTotalTokens));

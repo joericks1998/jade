@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use jade_runtime::coll::DictObj;
 
 use crate::{
     compiler::{tir::JadeType, type_infer::TypeContext, vm::VmValue},
@@ -82,7 +82,7 @@ fn sh_output(args: &[VmValue]) -> Result<VmValue> {
             message: format!("sh.output: could not spawn shell: {}", e),
             span: ZERO,
         })?;
-    let mut map = HashMap::new();
+    let mut map = DictObj::new();
     map.insert("stdout".to_string(), VmValue::Str(String::from_utf8_lossy(&out.stdout).into_owned()));
     map.insert("stderr".to_string(), VmValue::Str(String::from_utf8_lossy(&out.stderr).into_owned()));
     map.insert("code".to_string(),   VmValue::Int(out.status.code().unwrap_or(-1) as i64));

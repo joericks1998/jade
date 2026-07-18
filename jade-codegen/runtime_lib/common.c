@@ -212,138 +212,29 @@ char* jrt_str_of_any(int64_t val) {
 }
 
 /* ── Kind-tagged heap objects (Chunk backend collections) ──────────────────
- * kind at offset 0, len at offset 8 (matches JrtArrayHdr so jrt_len_* work). */
-typedef struct {
-    int64_t  kind;   /* JK_ARRAY */
-    int64_t  len;
-    int64_t  cap;
-    int64_t* data;   /* tagged element words */
-} JKArray;
-
-typedef struct { char* key; int64_t val; } JKDSlot;
-typedef struct {
-    int64_t   kind;   /* JK_DICT */
-    int64_t   len;    /* entry count (offset 8) */
-    int64_t   cap;
-    JKDSlot*  slots;
-} JKDict;
-
-int64_t jrt_kind_of(void* p) { return ((JKArray*)p)->kind; }
-
-void* jrt_karr_new(void) {
-    JKArray* a = malloc(sizeof(JKArray));
-    a->kind = JK_ARRAY;
-    a->len = 0;
-    a->cap = 0;
-    a->data = NULL;
-    return a;
-}
-
-void jrt_karr_push(void* ap, int64_t val) {
-    JKArray* a = (JKArray*)ap;
-    if (a->len >= a->cap) {
-        int64_t nc = a->cap ? a->cap * 2 : 4;
-        a->data = realloc(a->data, (size_t)nc * sizeof(int64_t));
-        a->cap = nc;
-    }
-    a->data[a->len++] = val;
-}
-
-void* jrt_kdict_new(void) {
-    JKDict* d = malloc(sizeof(JKDict));
-    d->kind = JK_DICT;
-    d->len = 0;
-    d->cap = 0;
-    d->slots = NULL;
-    return d;
-}
-
-/* Set key→val, updating in place if present else appending (linear probe —
- * dicts are small). `key_word` is a tagged string; its bytes are copied. */
-void jrt_kdict_set(void* dp, int64_t key_word, int64_t val) {
-    JKDict* d = (JKDict*)dp;
-    const char* k = (const char*)jrt_unbox_ptr((jade_value_t)key_word);
-    for (int64_t i = 0; i < d->len; i++) {
-        if (strcmp(d->slots[i].key, k) == 0) { d->slots[i].val = val; return; }
-    }
-    if (d->len >= d->cap) {
-        int64_t nc = d->cap ? d->cap * 2 : 4;
-        d->slots = realloc(d->slots, (size_t)nc * sizeof(JKDSlot));
-        d->cap = nc;
-    }
-    size_t kl = strlen(k);
-    char* kc = malloc(kl + 1);
-    memcpy(kc, k, kl + 1);
-    d->slots[d->len].key = kc;
-    d->slots[d->len].val = val;
-    d->len++;
-}
-
-/* Shallow copy (VM dict value semantics: assignment/mutation clones the map;
- * values are shared words). Keys are re-duplicated so frees stay independent. */
-static JKDict* jk_dict_copy(JKDict* s) {
-    JKDict* d = malloc(sizeof(JKDict));
-    d->kind = JK_DICT;
-    d->len = s->len;
-    d->cap = s->len ? s->len : 0;
-    d->slots = s->len ? malloc((size_t)s->len * sizeof(JKDSlot)) : NULL;
-    for (int64_t i = 0; i < s->len; i++) {
-        size_t kl = strlen(s->slots[i].key);
-        char* kc = malloc(kl + 1);
-        memcpy(kc, s->slots[i].key, kl + 1);
-        d->slots[i].key = kc;
-        d->slots[i].val = s->slots[i].val;
-    }
-    return d;
-}
-
-typedef struct {
-    int64_t  kind;        /* JK_STRUCT */
-    int64_t  len;         /* field count (offset 8) */
-    int64_t  cap;
-    char*    type_name;
-    JKDSlot* fields;
-} JKStruct;
-
-void* jrt_kstruct_new(const char* type_name) {
-    JKStruct* s = malloc(sizeof(JKStruct));
-    s->kind = JK_STRUCT;
-    s->len = 0;
-    s->cap = 0;
-    s->fields = NULL;
-    size_t n = strlen(type_name);
-    s->type_name = malloc(n + 1);
-    memcpy(s->type_name, type_name, n + 1);
-    return s;
-}
-
-void jrt_kstruct_set(void* sp, const char* field, int64_t val) {
-    JKStruct* s = (JKStruct*)sp;
-    for (int64_t i = 0; i < s->len; i++) {
-        if (strcmp(s->fields[i].key, field) == 0) { s->fields[i].val = val; return; }
-    }
-    if (s->len >= s->cap) {
-        int64_t nc = s->cap ? s->cap * 2 : 4;
-        s->fields = realloc(s->fields, (size_t)nc * sizeof(JKDSlot));
-        s->cap = nc;
-    }
-    size_t n = strlen(field);
-    char* fc = malloc(n + 1);
-    memcpy(fc, field, n + 1);
-    s->fields[s->len].key = fc;
-    s->fields[s->len].val = val;
-    s->len++;
-}
+ * The object storage — arrays, dicts, structs — now lives ONCE in the shared
+ * Rust runtime crate (jade-runtime, src/coll.rs) behind a common ObjHeader, and
+ * the builders / accessors / kind byte / type-name / dict value-copy / recursive
+ * renderer are exported from there (src/ffi_coll.rs) under their historical jrt_*
+ * names. Their former C definitions (the JKArray/JKDict/JKStruct structs,
+ * jrt_kind_of, jrt_karr_*, jrt_kdict_*, jrt_kstruct_*, jk_dict_copy,
+ * jrt_get_type_name, jk_render/jrt_render_any) are deleted; the declarations
+ * remain in runtime.h and calls resolve against the staticlib.
+ *
+ * What stays here are thin forwarders for the operations that can RAISE a
+ * catchable Jade error: an exception is a longjmp, which must not cross a Rust
+ * frame, so the bounds/type checks and throw_msg stay on the C side. They call
+ * the jrt_coll_* storage helpers (in Rust) for the raw reads/writes and
+ * jrt_kind_of for the runtime kind (JK_ARRAY/JK_DICT/JK_STRUCT now equal the
+ * ObjKind discriminants — see runtime.h). */
 
 int64_t jrt_get_field(int64_t obj, const char* field) {
     jade_value_t v = (jade_value_t)obj;
     if (jrt_is_ptr(v)) {
         void* p = jrt_unbox_ptr(v);
-        if (((JKArray*)p)->kind == JK_STRUCT) {
-            JKStruct* s = (JKStruct*)p;
-            for (int64_t i = 0; i < s->len; i++) {
-                if (strcmp(s->fields[i].key, field) == 0) return s->fields[i].val;
-            }
+        if (jrt_kind_of(p) == JK_STRUCT) {
+            int64_t out;
+            if (jrt_coll_struct_get(p, field, &out)) return out;
             throw_msg("undefined field");
         }
     }
@@ -355,20 +246,9 @@ void jrt_set_field(int64_t obj, const char* field, int64_t val) {
     jade_value_t v = (jade_value_t)obj;
     if (jrt_is_ptr(v)) {
         void* p = jrt_unbox_ptr(v);
-        if (((JKArray*)p)->kind == JK_STRUCT) { jrt_kstruct_set(p, field, val); return; }
+        if (jrt_kind_of(p) == JK_STRUCT) { jrt_kstruct_set(p, field, val); return; }
     }
     throw_msg("value does not support field assignment");
-}
-
-char* jrt_get_type_name(int64_t obj) {
-    jade_value_t v = (jade_value_t)obj;
-    if (jrt_is_ptr(v)) {
-        void* p = jrt_unbox_ptr(v);
-        if (((JKArray*)p)->kind == JK_STRUCT) {
-            return jrt_str_dup(((JKStruct*)p)->type_name, JRT_TRUSTED);
-        }
-    }
-    return jrt_str_dup("", JRT_TRUSTED);
 }
 
 /* i-th UTF-8 codepoint of a tagged string as a fresh tagged string (VM char
@@ -402,21 +282,18 @@ int64_t jrt_val_index(int64_t obj, int64_t idx) {
     if (jrt_is_str(v)) return jk_str_index(obj, idx);
     if (jrt_is_ptr(v)) {
         void* p = jrt_unbox_ptr(v);
-        int64_t kind = ((JKArray*)p)->kind;
+        int64_t kind = jrt_kind_of(p);
         if (kind == JK_ARRAY) {
             if (!jrt_is_int((jade_value_t)idx)) throw_msg("array index must be int");
             int64_t i = jrt_unbox_int((jade_value_t)idx);
-            JKArray* a = (JKArray*)p;
-            if (i < 0 || i >= a->len) throw_msg("index out of bounds");
-            return a->data[i];
+            if (i < 0 || i >= jrt_coll_array_len(p)) throw_msg("index out of bounds");
+            return jrt_coll_array_get(p, i);
         }
         if (kind == JK_DICT) {
             if (!jrt_is_str((jade_value_t)idx)) throw_msg("dict index must be str");
             const char* k = (const char*)jrt_unbox_ptr((jade_value_t)idx);
-            JKDict* d = (JKDict*)p;
-            for (int64_t i = 0; i < d->len; i++) {
-                if (strcmp(d->slots[i].key, k) == 0) return d->slots[i].val;
-            }
+            int64_t out;
+            if (jrt_coll_dict_get(p, k, &out)) return out;
             throw_msg("key not found");
         }
     }
@@ -428,21 +305,20 @@ int64_t jrt_val_set_index(int64_t obj, int64_t idx, int64_t val) {
     jade_value_t v = (jade_value_t)obj;
     if (jrt_is_ptr(v)) {
         void* p = jrt_unbox_ptr(v);
-        int64_t kind = ((JKArray*)p)->kind;
+        int64_t kind = jrt_kind_of(p);
         if (kind == JK_ARRAY) {
             /* Arrays are reference-semantic (VM Arc): mutate in place. */
             if (!jrt_is_int((jade_value_t)idx)) throw_msg("array index must be int");
             int64_t i = jrt_unbox_int((jade_value_t)idx);
-            JKArray* a = (JKArray*)p;
-            if (i < 0 || i >= a->len) throw_msg("index out of bounds");
-            a->data[i] = val;
+            if (i < 0 || i >= jrt_coll_array_len(p)) throw_msg("index out of bounds");
+            jrt_coll_array_set(p, i, val);
             return obj;
         }
         if (kind == JK_DICT) {
             /* Dicts are value-semantic (VM clones on mutation): copy then set,
              * and return the new container so the caller rebinds the variable. */
             if (!jrt_is_str((jade_value_t)idx)) throw_msg("dict index must be str");
-            JKDict* d = jk_dict_copy((JKDict*)p);
+            void* d = jrt_coll_dict_copy(p);
             jrt_kdict_set(d, idx, val);
             return (int64_t)jrt_box_ptr(d);
         }
@@ -451,92 +327,11 @@ int64_t jrt_val_set_index(int64_t obj, int64_t idx, int64_t val) {
     return obj;
 }
 
-/* Growable byte buffer for the recursive renderer. */
-typedef struct { char* buf; size_t len; size_t cap; } JKSB;
-static void jksb_puts(JKSB* s, const char* str) {
-    size_t n = strlen(str);
-    if (s->len + n + 1 > s->cap) {
-        while (s->len + n + 1 > s->cap) s->cap *= 2;
-        s->buf = realloc(s->buf, s->cap);
-    }
-    memcpy(s->buf + s->len, str, n);
-    s->len += n;
-}
-/* Append a string as a Rust-`{:?}`-style quoted literal (used for dict keys). */
-static void jksb_quoted(JKSB* s, const char* k) {
-    jksb_puts(s, "\"");
-    char esc[2] = {0, 0};
-    for (const char* p = k; *p; p++) {
-        switch (*p) {
-            case '"':  jksb_puts(s, "\\\""); break;
-            case '\\': jksb_puts(s, "\\\\"); break;
-            case '\n': jksb_puts(s, "\\n"); break;
-            case '\t': jksb_puts(s, "\\t"); break;
-            case '\r': jksb_puts(s, "\\r"); break;
-            default:   esc[0] = *p; jksb_puts(s, esc); break;
-        }
-    }
-    jksb_puts(s, "\"");
-}
-
-static void jk_render(JKSB* s, int64_t val) {
-    jade_value_t v = (jade_value_t)val;
-    if (jrt_is_str(v)) { jksb_puts(s, (const char*)jrt_unbox_ptr(v)); return; }
-    if (jrt_is_ptr(v)) {
-        void* p = jrt_unbox_ptr(v);
-        int64_t kind = ((JKArray*)p)->kind;
-        if (kind == JK_ARRAY) {
-            JKArray* a = (JKArray*)p;
-            jksb_puts(s, "[");
-            for (int64_t i = 0; i < a->len; i++) {
-                if (i) jksb_puts(s, ", ");
-                jk_render(s, a->data[i]);
-            }
-            jksb_puts(s, "]");
-            return;
-        }
-        if (kind == JK_DICT) {
-            /* `{"k": v, …}` with keys sorted ascending (VM value_to_display). */
-            JKDict* d = (JKDict*)p;
-            int64_t n = d->len;
-            int64_t* order = malloc((size_t)(n > 0 ? n : 1) * sizeof(int64_t));
-            for (int64_t i = 0; i < n; i++) order[i] = i;
-            for (int64_t i = 1; i < n; i++) {   /* insertion sort by key */
-                int64_t j = i, cur = order[i];
-                while (j > 0 && strcmp(d->slots[order[j - 1]].key, d->slots[cur].key) > 0) {
-                    order[j] = order[j - 1];
-                    j--;
-                }
-                order[j] = cur;
-            }
-            jksb_puts(s, "{");
-            for (int64_t i = 0; i < n; i++) {
-                if (i) jksb_puts(s, ", ");
-                jksb_quoted(s, d->slots[order[i]].key);
-                jksb_puts(s, ": ");
-                jk_render(s, d->slots[order[i]].val);
-            }
-            jksb_puts(s, "}");
-            free(order);
-            return;
-        }
-        if (kind == JK_STRUCT) { jksb_puts(s, "<struct>"); return; }
-        jksb_puts(s, "<object>");
-        return;
-    }
-    char tmp[64];
-    jrt_snprintf_any(tmp, sizeof tmp, val);
-    jksb_puts(s, tmp);
-}
-char* jrt_render_any(int64_t val) {
-    JKSB s;
-    s.cap = 64;
-    s.len = 0;
-    s.buf = malloc(s.cap);
-    jk_render(&s, val);
-    s.buf[s.len] = '\0';
-    return s.buf;
-}
+/* jk_render / jrt_render_any moved to the shared Rust runtime crate
+ * (jade-runtime, src/render.rs + src/ffi_coll.rs jrt_render_any): a recursive,
+ * kind-aware renderer that formats scalars/strings with the SAME primitives the
+ * VM's value_to_display uses, so AOT and VM output are byte-identical. It returns
+ * a plain system-malloc'd buffer this file's callers still free() as before. */
 
 int32_t jrt_in_any(int64_t needle, int64_t haystack) {
     jade_value_t h = (jade_value_t)haystack;
@@ -548,22 +343,19 @@ int32_t jrt_in_any(int64_t needle, int64_t haystack) {
     }
     if (jrt_is_ptr(h)) {
         void* p = jrt_unbox_ptr(h);
-        int64_t kind = ((JKArray*)p)->kind;
+        int64_t kind = jrt_kind_of(p);
         if (kind == JK_ARRAY) {
-            JKArray* a = (JKArray*)p;
-            for (int64_t i = 0; i < a->len; i++) {
-                if (jrt_eq_any((uint64_t)a->data[i], (uint64_t)needle)) return 1;
+            int64_t n = jrt_coll_array_len(p);
+            for (int64_t i = 0; i < n; i++) {
+                if (jrt_eq_any((uint64_t)jrt_coll_array_get(p, i), (uint64_t)needle)) return 1;
             }
             return 0;
         }
         if (kind == JK_DICT) {
             if (!jrt_is_str((jade_value_t)needle)) throw_msg("'in' dict key must be str");
             const char* k = (const char*)jrt_unbox_ptr((jade_value_t)needle);
-            JKDict* d = (JKDict*)p;
-            for (int64_t i = 0; i < d->len; i++) {
-                if (strcmp(d->slots[i].key, k) == 0) return 1;
-            }
-            return 0;
+            int64_t out;
+            return jrt_coll_dict_get(p, k, &out) ? 1 : 0;
         }
     }
     throw_msg("'in' requires array, dict, or str");

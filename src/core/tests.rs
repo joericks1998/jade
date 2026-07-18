@@ -1,6 +1,6 @@
+use jade_runtime::coll::DictObj;
 use super::*;
 use crate::builtins::make_array;
-use std::collections::HashMap;
 
 // native_write / native_len / native_input are private; reachable via `use super::*`.
 
@@ -38,7 +38,7 @@ fn len_array() {
 
 #[test]
 fn len_dict() {
-    let mut m = HashMap::new();
+    let mut m = DictObj::new();
     m.insert("a".to_string(), VmValue::Int(1));
     assert!(matches!(native_len(&[VmValue::Dict(m)]), Ok(VmValue::Int(1))));
 }

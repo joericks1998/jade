@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use jade_runtime::coll::DictObj;
 
 use crate::{
     compiler::{tir::JadeType, type_infer::TypeContext, vm::VmValue},
@@ -26,7 +26,7 @@ fn extract_headers(val: Option<&VmValue>) -> Result<Vec<(String, String)>> {
         None | Some(VmValue::Nil) => Ok(vec![]),
         Some(VmValue::Dict(map)) => {
             let mut headers = Vec::new();
-            for (k, v) in map {
+            for (k, v) in map.iter() {
                 match v {
                     VmValue::Str(s) => headers.push((k.clone(), s.clone())),
                     _ => return Err(JadeError::TypeError {
@@ -42,7 +42,7 @@ fn extract_headers(val: Option<&VmValue>) -> Result<Vec<(String, String)>> {
 }
 
 fn make_response(status: u16, body: String) -> VmValue {
-    let mut map = HashMap::new();
+    let mut map = DictObj::new();
     map.insert("status".to_string(), VmValue::Int(status as i64));
     map.insert("body".to_string(), VmValue::Str(body));
     VmValue::Dict(map)

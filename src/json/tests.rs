@@ -1,6 +1,6 @@
+use jade_runtime::coll::DictObj;
 use super::*;
 use crate::builtins::make_array;
-use std::collections::HashMap;
 
 fn s(x: &str) -> VmValue {
     VmValue::Str(x.to_string())
@@ -149,7 +149,7 @@ fn stringify_arity() {
 
 #[test]
 fn roundtrip_object() {
-    let mut m = HashMap::new();
+    let mut m = DictObj::new();
     m.insert("n".to_string(), VmValue::Int(5));
     let orig = VmValue::Dict(m);
     let text = stringify(orig);
@@ -169,7 +169,7 @@ fn roundtrip_null() {
 #[test]
 fn roundtrip_nested() {
     let inner = make_array(vec![VmValue::Bool(true), VmValue::Nil]);
-    let mut m = HashMap::new();
+    let mut m = DictObj::new();
     m.insert("list".to_string(), inner);
     let text = stringify(VmValue::Dict(m));
     let back = parse(&text);

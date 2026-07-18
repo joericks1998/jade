@@ -18,7 +18,7 @@
 
 #![cfg(unix)]
 
-use std::collections::HashMap;
+use jade_runtime::coll::DictObj;
 use std::io::{BufRead, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
@@ -56,7 +56,7 @@ pub fn extract_headers(val: Option<&VmValue>) -> Result<Vec<(String, String)>> {
         None | Some(VmValue::Nil) => Ok(vec![]),
         Some(VmValue::Dict(map)) => {
             let mut headers = Vec::new();
-            for (k, v) in map {
+            for (k, v) in map.iter() {
                 match v {
                     VmValue::Str(s) => headers.push((k.clone(), s.clone())),
                     _ => return Err(JadeError::TypeError {
@@ -72,7 +72,7 @@ pub fn extract_headers(val: Option<&VmValue>) -> Result<Vec<(String, String)>> {
 }
 
 fn make_response(status: u16, body: String) -> VmValue {
-    let mut map = HashMap::new();
+    let mut map = DictObj::new();
     map.insert("status".to_string(), VmValue::Int(status as i64));
     map.insert("body".to_string(), VmValue::Str(body));
     VmValue::Dict(map)
@@ -484,7 +484,7 @@ pub static UHTTP_PKG: Package = Package {
 /// `BuiltinFn`s, but `stream` is state-mutating (it invokes a Jade handler), so
 /// it is injected as `NativeFn(NativeFnId::UhttpStream)` and dispatched in the VM.
 pub fn uhttp_vm_dict_value() -> VmValue {
-    let mut map = HashMap::new();
+    let mut map = DictObj::new();
     for f in UHTTP_PKG_FNS {
         map.insert(f.name.to_string(), VmValue::BuiltinFn(*f));
     }

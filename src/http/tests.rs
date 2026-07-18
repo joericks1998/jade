@@ -1,3 +1,4 @@
+use jade_runtime::coll::DictObj;
 use super::*;
 
 // NOTE: no live-network tests here. The request-dispatch path (`execute`) opens
@@ -47,7 +48,7 @@ fn extract_headers_nil_is_empty() {
 
 #[test]
 fn extract_headers_dict_of_strings() {
-    let mut map = HashMap::new();
+    let mut map = DictObj::new();
     map.insert("Accept".to_string(), VmValue::Str("application/json".to_string()));
     let hs = extract_headers(Some(&VmValue::Dict(map))).unwrap();
     assert_eq!(hs.len(), 1);
@@ -56,7 +57,7 @@ fn extract_headers_dict_of_strings() {
 
 #[test]
 fn extract_headers_non_str_value_errors() {
-    let mut map = HashMap::new();
+    let mut map = DictObj::new();
     map.insert("X".to_string(), VmValue::Int(1));
     match extract_headers(Some(&VmValue::Dict(map))).unwrap_err() {
         JadeError::TypeError { message, .. } => assert!(message.contains("header value")),

@@ -16,6 +16,7 @@ use crate::{
     native::NativeLibFn,
 };
 use jade_runtime::dynop;
+use jade_runtime::coll::{ArrayObj, DictObj, StructObj};
 
 // ── Token budgets (mirror eval.rs) ────────────────────────────────────────────
 
@@ -66,16 +67,16 @@ pub enum VmValue {
     Fn(Arc<CompiledFn>),
     /// A closure: compiled function + snapshot of globals at creation time.
     Closure(Arc<CompiledFn>, Arc<HashMap<String, VmValue>>),
-    Struct(Arc<Mutex<VmStruct>>),
+    Struct(Arc<Mutex<StructObj<VmValue>>>),
     BoundMethod(Arc<VmBoundMethod>),
     /// Reference-counted array — mutations are visible to all aliases.
-    Array(Arc<Mutex<Vec<VmValue>>>),
+    Array(Arc<Mutex<ArrayObj<VmValue>>>),
     Prompt(String),
     /// A user-defined GBNF pattern (RHS only, e.g. `"yes" | "no"`).
     /// Used with `?p |> grammar_var` to constrain LLM token sampling.
     /// `anchor`: if set, grammar enforcement begins only after the model emits this string.
     Grammar { pattern: String, anchor: Option<String>, stop_anchor: Option<String> },
-    Dict(HashMap<String, VmValue>),
+    Dict(DictObj<VmValue>),
     /// A pure Rust-backed callable (no VM state mutation). Used for builtin
     /// core built-ins (print, len, write, input) and package functions.
     BuiltinFn(BuiltinFn),
@@ -130,13 +131,8 @@ impl Drop for JadeFuture {
     }
 }
 
-pub struct VmStruct {
-    pub type_name: String,
-    pub fields: HashMap<String, VmValue>,
-}
-
 pub struct VmBoundMethod {
-    pub receiver: Arc<Mutex<VmStruct>>,
+    pub receiver: Arc<Mutex<StructObj<VmValue>>>,
     pub method: Arc<CompiledFn>,
 }
 
@@ -151,7 +147,7 @@ impl std::fmt::Debug for VmValue {
             VmValue::Closure(cf, _) => write!(f, "Closure({})", cf.params.join(", ")),
             VmValue::Struct(rc) => {
                 let inst = rc.lock();
-                write!(f, "{} {{...}}", inst.type_name)
+                write!(f, "{} {{...}}", inst.type_name())
             }
             VmValue::BoundMethod(_) => write!(f, "<bound method>"),
             VmValue::Array(arc) => write!(f, "Array[{} elem(s)]", arc.lock().len()),
@@ -175,30 +171,26 @@ impl std::fmt::Debug for VmValue {
 
 /// Convert a `VmValue` to its user-visible string representation.
 pub fn value_to_display(v: &VmValue) -> String {
+    // Scalar/collection formatting rules live once in the shared runtime crate
+    // (jade_runtime::render) so the VM and the AOT renderer (render_word) cannot
+    // drift — same float `.0` rule, same `[a, b]` / sorted-quoted `{"k": v}`
+    // framing. Only the per-engine iteration differs (VmValue vs tagged words).
     match v {
         VmValue::Int(i) => i.to_string(),
-        VmValue::Float(f) => {
-            let s = format!("{}", f);
-            if s.chars().all(|c| c.is_ascii_digit() || c == '-') {
-                format!("{}.0", s)
-            } else {
-                s
-            }
-        }
+        VmValue::Float(f) => jade_runtime::render::format_float(*f),
         VmValue::Bool(b)   => b.to_string(),
         VmValue::Str(s)    => s.clone(),
         VmValue::Array(arc) => {
             let guard = arc.lock();
             let parts: Vec<String> = guard.iter().map(value_to_display).collect();
-            format!("[{}]", parts.join(", "))
+            jade_runtime::render::render_array(&parts)
         }
         VmValue::Dict(m) => {
-            let mut pairs: Vec<_> = m.iter().collect();
-            pairs.sort_by_key(|(k, _)| k.as_str());
-            let parts: Vec<String> = pairs.iter()
-                .map(|(k, v)| format!("{:?}: {}", k, value_to_display(v)))
+            let mut entries: Vec<(String, String)> = m
+                .iter()
+                .map(|(k, v)| (k.clone(), value_to_display(v)))
                 .collect();
-            format!("{{{}}}", parts.join(", "))
+            jade_runtime::render::render_dict(&mut entries)
         }
         VmValue::Fn(_)                 => "<fn>".to_string(),
         VmValue::Closure(_, _)         => "<fn>".to_string(),
@@ -311,7 +303,7 @@ impl VmState {
         globals.insert("__tokens__".to_string(), VmValue::Int(0));
         globals.insert("__model__".to_string(), VmValue::Str(String::new()));
         globals.insert("__max_retries__".to_string(), VmValue::Int(15));
-        globals.insert("__retry_log__".to_string(), VmValue::Array(Arc::new(Mutex::new(vec![]))));
+        globals.insert("__retry_log__".to_string(), VmValue::Array(Arc::new(Mutex::new(ArrayObj::from_vec(vec![])))));
         builtins::seed_globals(&mut globals);
         VmState {
             raised_exception: None,
@@ -528,12 +520,9 @@ fn stamp_source_file(chunk: &mut Chunk, file: &str) {
 /// Build a `RuntimeError { message }` struct value for wrapping built-in errors
 /// when they are caught by a `try/catch` block.
 fn make_vm_runtime_error(message: String) -> VmValue {
-    let mut fields = HashMap::new();
-    fields.insert("message".to_string(), VmValue::Str(message));
-    VmValue::Struct(Arc::new(Mutex::new(VmStruct {
-        type_name: "RuntimeError".to_string(),
-        fields,
-    })))
+    let mut sobj = StructObj::<VmValue>::new("RuntimeError");
+    sobj.set_field("message", VmValue::Str(message));
+    VmValue::Struct(Arc::new(Mutex::new(sobj)))
 }
 
 /// Execute `chunk` with the provided register frame.  Returns `Some(value)` if
@@ -616,7 +605,7 @@ async fn execute_chunk(
                 let abs_path = match resolve_user_import(state, path, span)? {
                     ResolvedImport::Native(lib_path) => {
                         let fns = crate::native::load_native_package(&lib_path, span)?;
-                        state.globals.insert(namespace.clone(), VmValue::Dict(fns));
+                        state.globals.insert(namespace.clone(), VmValue::Dict(fns.into_iter().collect()));
                         continue;
                     }
                     ResolvedImport::File(p) => p,
@@ -751,7 +740,7 @@ async fn execute_chunk(
                                     *t = format!("{}.{}", namespace, t);
                                 }
                             }
-                            state.globals.insert(namespace.clone(), VmValue::Dict(module_globals));
+                            state.globals.insert(namespace.clone(), VmValue::Dict(module_globals.into_iter().collect()));
 
                             // Merge struct_defs prefixed with the namespace.
                             for (k, v) in sub_state.struct_defs.drain() {
@@ -1187,10 +1176,10 @@ async fn execute_chunk(
             // ── Collections ───────────────────────────────────────────────────
             Instr::MakeArray(dest, elem_regs) => {
                 let elems: Vec<VmValue> = elem_regs.iter().map(|&r| get(slots, r).clone()).collect();
-                set(slots, *dest, VmValue::Array(Arc::new(Mutex::new(elems))));
+                set(slots, *dest, VmValue::Array(Arc::new(Mutex::new(ArrayObj::from_vec(elems)))));
             }
             Instr::MakeDict(dest, pairs) => {
-                let mut map = HashMap::with_capacity(pairs.len());
+                let mut map = DictObj::new();
                 for &(kr, vr) in pairs {
                     let key_val = get(slots, kr).clone();
                     let key = match key_val {
@@ -1232,7 +1221,7 @@ async fn execute_chunk(
 
             // ── Struct ────────────────────────────────────────────────────────
             Instr::MakeStruct(dest, type_name, field_specs) => {
-                let mut fields = HashMap::with_capacity(field_specs.len());
+                let mut sobj = StructObj::<VmValue>::new(type_name);
                 for (fname, freg, is_prompt) in field_specs {
                     let mut val = get(slots, *freg).clone();
                     if *is_prompt {
@@ -1241,7 +1230,7 @@ async fn execute_chunk(
                             other => other, // already Prompt, or wrong type caught at type-check
                         };
                     }
-                    fields.insert(fname.clone(), val);
+                    sobj.set_field(fname, val);
                 }
                 // Fill in defaults for any fields omitted from the literal.
                 // Needed when the struct type was unknown at compile time (imported type).
@@ -1249,20 +1238,20 @@ async fn execute_chunk(
                     for def_field in &def_fields {
                         match def_field {
                             StructFieldDef::Let { name, default } => {
-                                if !fields.contains_key(name.as_str()) {
+                                if sobj.get_field(name).is_none() {
                                     if let Some(v) = eval_literal_default(default) {
-                                        fields.insert(name.clone(), v);
+                                        sobj.set_field(name, v);
                                     }
                                 }
                             }
                             StructFieldDef::Prompt { name, default } => {
-                                if !fields.contains_key(name.as_str()) {
+                                if sobj.get_field(name).is_none() {
                                     if let Some(v) = eval_literal_default(default) {
                                         let v = match v {
                                             VmValue::Str(s) => VmValue::Prompt(s),
                                             other => other,
                                         };
-                                        fields.insert(name.clone(), v);
+                                        sobj.set_field(name, v);
                                     }
                                 }
                             }
@@ -1270,10 +1259,7 @@ async fn execute_chunk(
                         }
                     }
                 }
-                let mut result = VmValue::Struct(Arc::new(Mutex::new(VmStruct {
-                    type_name: type_name.clone(),
-                    fields,
-                })));
+                let mut result = VmValue::Struct(Arc::new(Mutex::new(sobj)));
                 // Call struct decorators: dec(instance, arg1, ...) for each @dec.
                 let decs = state.struct_decorators.get(type_name).cloned().unwrap_or_default();
                 for (dec_name, dec_args) in decs {
@@ -1291,7 +1277,7 @@ async fn execute_chunk(
                     VmValue::Struct(rc) => {
                         let (type_name, field_val) = {
                             let guard = rc.lock();
-                            (guard.type_name.clone(), guard.fields.get(field.as_str()).cloned())
+                            (guard.type_name().to_string(), guard.get_field(field.as_str()).cloned())
                         };
                         if let Some(v) = field_val {
                             set(slots, *dest, v);
@@ -1353,7 +1339,7 @@ async fn execute_chunk(
                                 let arr: Vec<VmValue> = cf.params.iter()
                                     .map(|p| VmValue::Str(p.clone()))
                                     .collect();
-                                VmValue::Array(Arc::new(Mutex::new(arr)))
+                                VmValue::Array(Arc::new(Mutex::new(ArrayObj::from_vec(arr))))
                             }
                             _ => vm_err!(JadeError::UndefinedField {
                                 type_name: "fn".to_string(),
@@ -1373,10 +1359,10 @@ async fn execute_chunk(
                     VmValue::Struct(rc) => {
                         let error_type_name = {
                             let guard = rc.lock();
-                            if guard.fields.contains_key(field.as_str()) {
+                            if guard.get_field(field.as_str()).is_some() {
                                 None
                             } else {
-                                Some(guard.type_name.clone())
+                                Some(guard.type_name().to_string())
                             }
                         };
                         if let Some(type_name) = error_type_name {
@@ -1386,7 +1372,7 @@ async fn execute_chunk(
                                 span,
                             });
                         }
-                        rc.lock().fields.insert(field.clone(), val);
+                        rc.lock().set_field(field, val);
                     }
                     _ => { vm_err!(JadeError::NotAStruct { span }); }
                 }
@@ -1481,7 +1467,7 @@ async fn execute_chunk(
 
             Instr::GetTypeName(dest, src) => {
                 let name = match get(slots, *src) {
-                    VmValue::Struct(rc) => rc.lock().type_name.clone(),
+                    VmValue::Struct(rc) => rc.lock().type_name().to_string(),
                     _ => String::new(),
                 };
                 set(slots, *dest, VmValue::Str(name));
@@ -1550,7 +1536,7 @@ async fn execute_chunk(
                     results.push(value);
                 }
                 state.globals.insert("__tokens__".to_string(), VmValue::Int(state.token_count));
-                set(slots, *dest, VmValue::Array(Arc::new(Mutex::new(results))));
+                set(slots, *dest, VmValue::Array(Arc::new(Mutex::new(ArrayObj::from_vec(results)))));
             }
         }
     }
@@ -1831,10 +1817,10 @@ async fn call_value(
                 // If `on` is omitted, try route_configs for this struct's type.
                 let on = iter.next().unwrap_or_else(|| {
                     if let VmValue::Struct(ref s) = obj {
-                        let type_name = s.lock().type_name.clone();
+                        let type_name = s.lock().type_name().to_string();
                         if let Some(field_name) = state.route_configs.get(&type_name) {
                             let fields = s.lock();
-                            return fields.fields.get(field_name)
+                            return fields.get_field(field_name)
                                 .cloned()
                                 .unwrap_or(VmValue::Nil);
                         }
@@ -1846,7 +1832,7 @@ async fn call_value(
                     VmValue::Str(method_name) => {
                         // Prefer the struct's own extend methods; fall back to globals.
                         let fn_val = if let VmValue::Struct(ref s) = obj {
-                            let type_name = s.lock().type_name.clone();
+                            let type_name = s.lock().type_name().to_string();
                             state.extend_methods
                                 .get(&type_name)
                                 .and_then(|m| m.get(&method_name))
@@ -1886,7 +1872,7 @@ async fn call_value(
                 for e in elems {
                     out.push(call_value(f.clone(), vec![e], state, span).await?);
                 }
-                Ok(VmValue::Array(Arc::new(Mutex::new(out))))
+                Ok(VmValue::Array(Arc::new(Mutex::new(ArrayObj::from_vec(out)))))
             }
             NativeFnId::ArrayFilter => {
                 // array.filter(arr, fn) → elements for which fn(elem) is true.
@@ -1912,7 +1898,7 @@ async fn call_value(
                         }),
                     }
                 }
-                Ok(VmValue::Array(Arc::new(Mutex::new(out))))
+                Ok(VmValue::Array(Arc::new(Mutex::new(ArrayObj::from_vec(out)))))
             }
             #[cfg(unix)]
             NativeFnId::UhttpStream => {
@@ -2004,7 +1990,7 @@ async fn call_value(
                         let found = llm::model_profile::select(&state.default_model)
                             .and_then(|p| p.find_tool_call(text));
                         match found {
-                            Some(tc) => Ok(VmValue::Dict(HashMap::from([
+                            Some(tc) => Ok(VmValue::Dict(DictObj::from_iter([
                                 ("name".to_string(), VmValue::Str(tc.name)),
                                 ("args".to_string(), VmValue::Str(tc.args)),
                             ]))),
@@ -2029,12 +2015,12 @@ async fn call_value(
                             .map(|p| p.find_all_tool_calls(text))
                             .unwrap_or_default();
                         let items = calls.into_iter().map(|tc| {
-                            VmValue::Dict(HashMap::from([
+                            VmValue::Dict(DictObj::from_iter([
                                 ("name".to_string(), VmValue::Str(tc.name)),
                                 ("args".to_string(), VmValue::Str(tc.args)),
                             ]))
                         }).collect::<Vec<_>>();
-                        Ok(VmValue::Array(Arc::new(Mutex::new(items))))
+                        Ok(VmValue::Array(Arc::new(Mutex::new(ArrayObj::from_vec(items)))))
                     }
                     ref other => Err(JadeError::TypeError {
                         message: format!("llm.find_tool_calls() requires str, got {}", value_type_name(other)),
@@ -2262,7 +2248,7 @@ fn resolve_decorator_fn(dec_name: &str, state: &VmState) -> Option<VmValue> {
             VmValue::Struct(arc) => {
                 let (type_name, field_val) = {
                     let guard = arc.lock();
-                    (guard.type_name.clone(), guard.fields.get(field_name).cloned())
+                    (guard.type_name().to_string(), guard.get_field(field_name).cloned())
                 };
                 if let Some(v) = field_val {
                     return Some(v);
@@ -2455,12 +2441,12 @@ fn json_to_vm_value(json: &serde_json::Value) -> std::result::Result<VmValue, St
         serde_json::Value::Array(arr) => arr.iter().enumerate()
             .map(|(i, v)| json_to_vm_value(v).map_err(|e| format!("element {}: {}", i, e)))
             .collect::<std::result::Result<Vec<VmValue>, String>>()
-            .map(|v| VmValue::Array(Arc::new(Mutex::new(v)))),
+            .map(|v| VmValue::Array(Arc::new(Mutex::new(ArrayObj::from_vec(v))))),
         serde_json::Value::Object(obj) => obj.iter()
             .map(|(k, v)| json_to_vm_value(v)
                 .map(|val| (k.clone(), val))
                 .map_err(|e| format!("field '{}': {}", k, e)))
-            .collect::<std::result::Result<HashMap<String, VmValue>, String>>()
+            .collect::<std::result::Result<DictObj<VmValue>, String>>()
             .map(VmValue::Dict),
     }
 }
@@ -2468,22 +2454,22 @@ fn json_to_vm_value(json: &serde_json::Value) -> std::result::Result<VmValue, St
 /// Convert a model profile into the dict shape `llm.profile()` returns:
 /// `{ model, tool_call: { open, close, name_field }, spans: [ { tag, open, close } ] }`.
 fn model_profile_to_vm(p: &llm::model_profile::ModelProfile) -> VmValue {
-    let tool_call = HashMap::from([
+    let tool_call = DictObj::from_iter([
         ("open".to_string(), VmValue::Str(p.tool_call.open.to_string())),
         ("close".to_string(), VmValue::Str(p.tool_call.close.to_string())),
         ("name_field".to_string(), VmValue::Str(p.tool_call.name_field.to_string())),
     ]);
     let spans = p.spans.iter().map(|s| {
-        VmValue::Dict(HashMap::from([
+        VmValue::Dict(DictObj::from_iter([
             ("tag".to_string(), VmValue::Str(s.tag.to_string())),
             ("open".to_string(), VmValue::Str(s.open.to_string())),
             ("close".to_string(), VmValue::Str(s.close.to_string())),
         ]))
     }).collect::<Vec<_>>();
-    VmValue::Dict(HashMap::from([
+    VmValue::Dict(DictObj::from_iter([
         ("model".to_string(), VmValue::Str(p.model.to_string())),
         ("tool_call".to_string(), VmValue::Dict(tool_call)),
-        ("spans".to_string(), VmValue::Array(Arc::new(Mutex::new(spans)))),
+        ("spans".to_string(), VmValue::Array(Arc::new(Mutex::new(ArrayObj::from_vec(spans))))),
     ]))
 }
 
@@ -2551,10 +2537,11 @@ fn vm_coerce_struct(
         }
     }
 
-    Ok(VmValue::Struct(Arc::new(Mutex::new(VmStruct {
-        type_name: type_name.to_string(),
-        fields,
-    }))))
+    let mut sobj = StructObj::<VmValue>::new(type_name);
+    for (k, v) in fields {
+        sobj.set_field(&k, v);
+    }
+    Ok(VmValue::Struct(Arc::new(Mutex::new(sobj))))
 }
 
 /// Start a streaming inference call and return a lazy `VmValue::TokenStream`.
@@ -2909,21 +2896,15 @@ fn vm_type_call(
             if let Some(def) = state.struct_defs.get(name) {
                 match arg {
                     VmValue::Dict(map) => {
-                        let mut fields = HashMap::new();
+                        let mut sobj = StructObj::<VmValue>::new(name);
                         for field_def in def {
                             let fname = field_def.name();
-                            if let Some(v) = map.get(fname) {
-                                fields.insert(fname.to_string(), v.clone());
-                            } else {
-                                fields.insert(fname.to_string(), VmValue::Nil);
-                            }
+                            let v = map.get(fname).cloned().unwrap_or(VmValue::Nil);
+                            sobj.set_field(fname, v);
                         }
-                        Ok(VmValue::Struct(Arc::new(Mutex::new(VmStruct {
-                            type_name: name.to_string(),
-                            fields,
-                        }))))
+                        Ok(VmValue::Struct(Arc::new(Mutex::new(sobj))))
                     }
-                    VmValue::Struct(s) if s.lock().type_name == name => Ok(VmValue::Struct(s)),
+                    VmValue::Struct(s) if s.lock().type_name() == name => Ok(VmValue::Struct(s)),
                     other => err(format!(
                         "{}(): cannot construct from {}", name, value_to_display(&other)
                     )),
@@ -2977,7 +2958,7 @@ fn coerce(
                         .map(|(i, elem)| json_to_vm_value(elem)
                             .map_err(|e| format!("element {}: {}", i, e)))
                         .collect::<std::result::Result<Vec<VmValue>, String>>()
-                        .map(|v| VmValue::Array(Arc::new(Mutex::new(v))))
+                        .map(|v| VmValue::Array(Arc::new(Mutex::new(ArrayObj::from_vec(v)))))
                         .map_err(|e| format!(
                             "Your response array could not be fully converted: {}. \
                              Respond with only a JSON array of int, float, bool, or string values.",
@@ -3000,7 +2981,7 @@ fn coerce(
                         .map(|(k, val)| json_to_vm_value(val)
                             .map(|v| (k.clone(), v))
                             .map_err(|e| format!("field '{}': {}", k, e)))
-                        .collect::<std::result::Result<HashMap<String, VmValue>, String>>()
+                        .collect::<std::result::Result<DictObj<VmValue>, String>>()
                         .map(VmValue::Dict)
                         .map_err(|e| format!(
                             "Your response dict could not be fully converted: {}. \
@@ -3322,9 +3303,9 @@ fn eval_literal_default(expr: &crate::frontend::ast::Expr) -> Option<VmValue> {
         Expr::Bool { value, .. }    => Some(VmValue::Bool(*value)),
         Expr::Identifier { name, .. } if name == "nil" || name == "None" || name == "null" => Some(VmValue::Nil),
         Expr::Array { elements, .. } if elements.is_empty() =>
-            Some(VmValue::Array(Arc::new(Mutex::new(vec![])))),
+            Some(VmValue::Array(Arc::new(Mutex::new(ArrayObj::from_vec(vec![]))))),
         Expr::Dict { entries, .. } if entries.is_empty() =>
-            Some(VmValue::Dict(HashMap::new())),
+            Some(VmValue::Dict(DictObj::new())),
         _ => None,
     }
 }

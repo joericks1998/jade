@@ -1,3 +1,4 @@
+use jade_runtime::coll::DictObj;
 use super::*;
 
 const ZERO: Span = Span { line: 0, col: 0 };
@@ -70,7 +71,7 @@ fn vm_to_ffi_str_pushes_cstring_and_points_at_it() {
 fn vm_to_ffi_non_primitive_becomes_nil() {
     let mut scratch = Vec::new();
     // A Dict is non-primitive — native fns can't consume it.
-    let v = vm_to_ffi(&VmValue::Dict(HashMap::new()), &mut scratch);
+    let v = vm_to_ffi(&VmValue::Dict(DictObj::new()), &mut scratch);
     assert_eq!(v.tag, JADE_TAG_NIL);
     assert!(scratch.is_empty());
 }

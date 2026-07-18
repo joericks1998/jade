@@ -2,6 +2,7 @@
 //! primitive-method lookup, the `PACKAGES`/`CORE_BUILTINS` tables, and the
 //! `PrimType` / `Package` helpers.
 
+use jade_runtime::coll::DictObj;
 use super::*;
 use crate::compiler::vm::VmValue;
 
@@ -17,7 +18,7 @@ fn prim_type_from_value_covers_all_primitives() {
         Some(PrimType::Array)
     );
     assert_eq!(
-        PrimType::from_value(&VmValue::Dict(std::collections::HashMap::new())),
+        PrimType::from_value(&VmValue::Dict(DictObj::new())),
         Some(PrimType::Dict)
     );
 }
@@ -154,7 +155,7 @@ fn package_vm_dict_value_exposes_fns() {
         VmValue::Dict(map) => {
             assert!(!map.is_empty(), "math package should expose functions");
             // Each entry must be a BuiltinFn.
-            for (name, v) in &map {
+            for (name, v) in map.iter() {
                 match v {
                     VmValue::BuiltinFn(f) => assert_eq!(&f.name, name),
                     other => panic!("expected BuiltinFn for {name}, got {other:?}"),

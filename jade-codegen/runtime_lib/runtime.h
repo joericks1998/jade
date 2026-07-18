@@ -351,15 +351,36 @@ int64_t jrt_bool_any(int64_t val);
 
 /* ── Kind-tagged heap objects (Chunk backend collections) ──────────────────
  * The Chunk backend can't recover the static array/dict/struct type the way the
- * legacy path does, so its collections carry a runtime kind tag at offset 0
- * (JK_ARRAY/JK_DICT/JK_STRUCT). These live alongside the legacy headerless
- * objects (a program is wholly one path). `len` is at offset 8, matching
- * JrtArrayHdr, so jrt_len_any/jrt_len_unknown read either. */
-#define JK_ARRAY  1
-#define JK_DICT   2
-#define JK_STRUCT 3
-/* jrt_kind_of — kind byte of a kind-tagged object pointer (offset 0). */
+ * legacy path does, so its collections carry a runtime kind tag. The storage now
+ * lives in the shared Rust runtime crate (jade-runtime, src/coll.rs) behind an
+ * ObjHeader; these `jrt_*`/`jrt_coll_*` symbols resolve against its staticlib.
+ * JK_ARRAY/JK_DICT/JK_STRUCT equal the Rust ObjKind discriminants (heap.rs:
+ * Array=2, Dict=3, Struct=4) — jrt_kind_of returns that byte. (New objects carry
+ * `len` at ObjHeader offset 4, NOT the legacy JrtArrayHdr offset 8; they never
+ * flow to jrt_len_any/jrt_len_unknown, which serve the legacy path — a program is
+ * wholly one path. The Chunk path reads a collection's length via jrt_coll_len.) */
+#define JK_ARRAY  2
+#define JK_DICT   3
+#define JK_STRUCT 4
+/* jrt_kind_of — ObjKind byte of a kind-tagged object pointer (from its header). */
 int64_t jrt_kind_of(void* p);
+/* jrt_coll_len — element/field count from the object header (O(1)); the Chunk
+ * backend's len() on a collection. */
+int64_t jrt_coll_len(void* p);
+/* jrt_len_chunk — len() for the Chunk backend's Unknown arm: strlen for a STRING
+ * word, ObjHeader.len (offset 4) for a kind-tagged collection, else 0. The
+ * Chunk-path twin of jrt_len_unknown (which reads the legacy offset-8 length). */
+int64_t jrt_len_chunk(int64_t word);
+/* jrt_coll_* — raw storage helpers for the C forwarders below (never raise; the
+ * forwarder owns the bounds/type checks + throw). array_get/set are unchecked
+ * (caller bounds-checks via array_len); dict/struct _get write *out and return
+ * found?; dict_copy is the value-semantic clone (fresh header). */
+int64_t jrt_coll_array_len(void* p);
+int64_t jrt_coll_array_get(void* p, int64_t i);
+void    jrt_coll_array_set(void* p, int64_t i, int64_t val);
+int32_t jrt_coll_dict_get(void* p, const char* key, int64_t* out);
+void*   jrt_coll_dict_copy(void* p);
+int32_t jrt_coll_struct_get(void* p, const char* field, int64_t* out);
 /* jrt_karr_new/push — build a kind-tagged array (elements are tagged words). */
 void*   jrt_karr_new(void);
 void    jrt_karr_push(void* arr, int64_t val);

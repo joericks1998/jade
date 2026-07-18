@@ -1,8 +1,8 @@
+use jade_runtime::coll::DictObj;
 use super::*;
-use std::collections::HashMap;
 
 fn dict(pairs: &[(&str, VmValue)]) -> VmValue {
-    let mut m = HashMap::new();
+    let mut m = DictObj::new();
     for (k, v) in pairs {
         m.insert(k.to_string(), v.clone());
     }

@@ -706,13 +706,12 @@ fn try_chunk_toplevel<'ctx>(
     program: &TProgram,
 ) -> Result<inkwell::values::FunctionValue<'ctx>, String> {
     let cp = jade::compiler::emit::emit(program.clone()).map_err(|e| e.to_string())?;
-    let has_methods = !cp.extend_methods.is_empty();
     {
         let probe_ctx = Context::create();
         let probe_mod = probe_ctx.create_module("probe");
-        lower::lower_program(&probe_ctx, &probe_mod, &cp.top, cp.top_n_slots, &cp.struct_defs, has_methods)?;
+        lower::lower_program(&probe_ctx, &probe_mod, &cp.top, cp.top_n_slots, &cp.struct_defs, &cp.extend_methods)?;
     }
-    lower::lower_program(context, module, &cp.top, cp.top_n_slots, &cp.struct_defs, has_methods)
+    lower::lower_program(context, module, &cp.top, cp.top_n_slots, &cp.struct_defs, &cp.extend_methods)
 }
 
 pub fn compile(program: TProgram, source_path: Option<&Path>, output_path: &Path, emit_ir: bool) -> Result<Option<String>, String> {

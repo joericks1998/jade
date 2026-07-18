@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashMap;
+use jade_runtime::coll::DictObj;
 
 use crate::{
     compiler::{tir::JadeType, type_infer::TypeContext, vm::{NativeFnId, VmValue}},
@@ -149,7 +149,7 @@ pub static ARRAY_PKG: Package = Package {
 /// bind to their `NativeFn` variants (which can run a Jade function per element),
 /// while `sort`/`reverse` stay pure BuiltinFns. Mirrors `llm_vm_dict_value`.
 pub fn array_vm_dict_value() -> VmValue {
-    let mut map = HashMap::new();
+    let mut map = DictObj::new();
     map.insert("map".to_string(),     VmValue::NativeFn(NativeFnId::ArrayMap));
     map.insert("filter".to_string(),  VmValue::NativeFn(NativeFnId::ArrayFilter));
     map.insert("sort".to_string(),    VmValue::BuiltinFn(BuiltinFn { name: "sort",    vm_impl: pkg_sort }));

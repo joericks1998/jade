@@ -30,23 +30,30 @@
 //!    string-value helpers they need. **(Stage 1)**
 //!  * [`string`] — the tagged-string allocator (`new`/`dup`/`free`/`concat`/
 //!    `trust_of`). **(Stage 1)**
-//!  * heap collections (dict/array/struct) with refcount + cycle collection —
-//!    *later increments / stages*.
+//!  * [`coll`] — the shared heap collections (dict/array/struct), generic over
+//!    the element word type so the VM (`VmValue`) and AOT (`i64`) share one
+//!    implementation; value/reference semantics fall out of `T: Clone`. The
+//!    refcount/cycle-collector wiring on their [`heap::ObjHeader`] is a later
+//!    increment. **(this brick)**
 //!
 //! It is intentionally dependency-free and LLVM-free so it builds everywhere
 //! `jade run` runs.
 
+pub mod coll;
 pub mod dynop;
 pub mod ffi;
+pub mod ffi_coll;
 pub mod float;
 pub mod heap;
 pub mod num;
 pub mod ops;
+pub mod render;
 pub mod string;
 pub mod strval;
 pub mod sys;
 pub mod value;
 
+pub use coll::{ArrayObj, DictObj, StructObj};
 pub use heap::{Color, ObjHeader, ObjKind};
 pub use value::{JadeValue, FALSE, NIL, TRUE};
 

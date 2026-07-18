@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashMap;
+use jade_runtime::coll::DictObj;
 
 use crate::{
     compiler::{tir::JadeType, type_infer::TypeContext, vm::VmValue},
@@ -25,7 +25,7 @@ fn json_to_vm(val: serde_json::Value) -> VmValue {
             make_array(arr.into_iter().map(json_to_vm).collect())
         }
         serde_json::Value::Object(map) => {
-            let mut d = HashMap::new();
+            let mut d = DictObj::new();
             for (k, v) in map { d.insert(k, json_to_vm(v)); }
             VmValue::Dict(d)
         }

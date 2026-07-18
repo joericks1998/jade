@@ -5,6 +5,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
+use jade_runtime::coll::{ArrayObj, DictObj};
 use parking_lot::Mutex;
 
 use crate::{
@@ -102,7 +103,7 @@ pub struct Package {
 impl Package {
     /// Build the VmValue::Dict for this package's functions.
     pub fn vm_dict_value(&self) -> VmValue {
-        let mut map = HashMap::new();
+        let mut map = DictObj::new();
         for f in self.fns {
             map.insert(f.name.to_string(), VmValue::BuiltinFn(*f));
         }
@@ -180,7 +181,7 @@ pub fn seed_globals(globals: &mut HashMap<String, VmValue>) {
         globals.insert(name.to_string(), VmValue::TypeRef(name.to_string()));
     }
     // Grammar global: Grammar.new(pattern) → VmValue::Grammar(pattern)
-    let mut grammar_fields = std::collections::HashMap::new();
+    let mut grammar_fields = DictObj::new();
     grammar_fields.insert("new".to_string(), VmValue::BuiltinFn(grammar::GRAMMAR_NEW));
     globals.insert("Grammar".to_string(), VmValue::Dict(grammar_fields));
 }
@@ -201,7 +202,7 @@ pub fn register_primitive_method_types(ctx: &mut TypeContext) {
 
 /// Wrap a `Vec<VmValue>` as the standard Jade array value.
 pub fn make_array(v: Vec<VmValue>) -> VmValue {
-    VmValue::Array(Arc::new(Mutex::new(v)))
+    VmValue::Array(Arc::new(Mutex::new(ArrayObj::from_vec(v))))
 }
 
 #[cfg(test)]

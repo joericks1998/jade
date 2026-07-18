@@ -1588,7 +1588,7 @@ mod vm {
     fn test_vm_empty_struct_define_and_instantiate() {
         let s = run_src("struct Unit {}\nlet u = Unit {}").unwrap();
         match s.globals.get("u").unwrap() {
-            VmValue::Struct(rc) => assert_eq!(rc.lock().type_name, "Unit"),
+            VmValue::Struct(rc) => assert_eq!(rc.lock().type_name(), "Unit"),
             v => panic!("expected Struct, got {:?}", v),
         }
     }

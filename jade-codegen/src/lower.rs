@@ -748,6 +748,13 @@ struct FnCtx<'ctx> {
     /// Struct type name → its optional fields' (name, scalar-literal default),
     /// used to fill fields a struct literal omits (the VM fills these at runtime).
     struct_defaults: HashMap<String, Vec<(String, VmValue)>>,
+    /// Extend-block method NAME → uid, for names that are unique across *all*
+    /// types. A unique method name identifies exactly one `jf_<uid>`, so a call
+    /// `obj.name(args)` devirtualizes to a direct call (`self` prepended). A name
+    /// defined on more than one type is ambiguous (its target depends on the
+    /// receiver's runtime type) and is omitted — such calls decline to the legacy
+    /// path until runtime type dispatch lands.
+    unique_methods: HashMap<String, usize>,
 }
 
 impl<'ctx> FnCtx<'ctx> {
@@ -758,6 +765,7 @@ impl<'ctx> FnCtx<'ctx> {
             ptr2uid: HashMap::new(),
             global_fns: HashMap::new(),
             struct_defaults: HashMap::new(),
+            unique_methods: HashMap::new(),
         }
     }
 
@@ -782,6 +790,64 @@ fn collect_fns(top: &Chunk) -> (Vec<Arc<CompiledFn>>, HashMap<*const CompiledFn,
         defs.push(f);
     }
     (defs, ptr2uid)
+}
+
+/// Append every extend-block method body to `defs`/`ptr2uid` (assigning uids and
+/// BFS-collecting each method's nested `fn_defs`), and return the map of method
+/// NAMES that are unique across all types → uid. A method body is an ordinary
+/// `CompiledFn` whose first parameter is `self`, so once it has a uid the normal
+/// forward-declare / lower / task-wrapper loops emit it like any other function.
+fn collect_method_fns(
+    extend_methods: &HashMap<String, HashMap<String, Arc<CompiledFn>>>,
+    defs: &mut Vec<Arc<CompiledFn>>,
+    ptr2uid: &mut HashMap<*const CompiledFn, usize>,
+) -> HashMap<String, usize> {
+    // How many types define each method name (for the uniqueness test).
+    let mut name_count: HashMap<&str, usize> = HashMap::new();
+    for methods in extend_methods.values() {
+        for name in methods.keys() {
+            *name_count.entry(name.as_str()).or_default() += 1;
+        }
+    }
+
+    let mut unique_methods: HashMap<String, usize> = HashMap::new();
+    let mut queue: VecDeque<Arc<CompiledFn>> = VecDeque::new();
+    // Deterministic order: sort by (type, method) so uids are stable across runs.
+    let mut types: Vec<&String> = extend_methods.keys().collect();
+    types.sort();
+    for ty in types {
+        let methods = &extend_methods[ty];
+        let mut names: Vec<&String> = methods.keys().collect();
+        names.sort();
+        for name in names {
+            let mfn = &methods[name];
+            let uid = match ptr2uid.get(&Arc::as_ptr(mfn)) {
+                Some(&u) => u,
+                None => {
+                    let u = defs.len();
+                    ptr2uid.insert(Arc::as_ptr(mfn), u);
+                    defs.push(mfn.clone());
+                    queue.push_back(mfn.clone());
+                    u
+                }
+            };
+            if name_count.get(name.as_str()).copied() == Some(1) {
+                unique_methods.insert(name.clone(), uid);
+            }
+        }
+    }
+    // BFS the method bodies' nested function literals.
+    while let Some(f) = queue.pop_front() {
+        for c in &f.chunk.fn_defs {
+            if !ptr2uid.contains_key(&Arc::as_ptr(c)) {
+                let u = defs.len();
+                ptr2uid.insert(Arc::as_ptr(c), u);
+                defs.push(c.clone());
+                queue.push_back(c.clone());
+            }
+        }
+    }
+    unique_methods
 }
 
 /// Names that provably hold a function: bound once (whole-program) from a
@@ -850,6 +916,10 @@ enum CallKind {
     /// parameter: `Some(reg)` was supplied (positionally or by name), `None` is
     /// filled from the parameter's default at the call site.
     DirectNamed { uid: usize, arg_slots: Vec<Option<Reg>> },
+    /// A struct method call `obj.name(args)` where `name` is a unique extend-block
+    /// method → direct call to `jf_<uid>` with the receiver (`self_reg`) prepended
+    /// as `self` (param 0) and omitted trailing defaults filled at the call site.
+    MethodDirect { uid: usize, self_reg: Reg, args: Vec<Reg> },
     Indirect,
     /// `Spawn` of a statically-known async function → `jade_spawn(jf_task_<uid>,
     /// args, n)`. Only exact-arity spawns of a known function are lowered.
@@ -868,24 +938,30 @@ fn resolve_user_calls(
     code: &[Instr],
     fn_defs: &[Arc<CompiledFn>],
     fnctx: &FnCtx,
-) -> Result<HashMap<usize, CallKind>, String> {
+) -> Result<(HashMap<usize, CallKind>, std::collections::HashSet<usize>), String> {
     // reg → uid of a statically-known function (for direct-call devirtualization).
     let mut reg_fn: HashMap<Reg, usize> = HashMap::new();
     // local slot → uid (a function stored into a local).
     let mut slot_fn: HashMap<u32, usize> = HashMap::new();
     // reg → the global name it was last loaded from (to classify builtin callees).
     let mut reg_global: HashMap<Reg, String> = HashMap::new();
-    // regs holding a `GetField` result — calling one is a method call (struct or
-    // primitive), which the Chunk backend doesn't lower yet → decline.
-    let mut reg_getfield: std::collections::HashSet<Reg> = std::collections::HashSet::new();
+    // reg holding a `GetField` result → (receiver reg, field/method name, the
+    // GetField's instruction index). Calling one is a method call: a unique struct
+    // method devirtualizes (self = receiver), anything else declines.
+    let mut reg_getfield: HashMap<Reg, (Reg, String, usize)> = HashMap::new();
     let mut out: HashMap<usize, CallKind> = HashMap::new();
+    // GetField instruction indices whose result is consumed *only* as the callee of
+    // a devirtualized method call. Their field is a method (not a data field), so
+    // lowering them would raise "undefined field" — the method dispatch replaces
+    // them, so `lower_body` skips these opcodes entirely.
+    let mut skip_getfields: std::collections::HashSet<usize> = std::collections::HashSet::new();
 
     for (i, instr) in code.iter().enumerate() {
         match instr {
-            Instr::GetField(d, _, _) => {
+            Instr::GetField(d, obj, field) => {
                 reg_fn.remove(d);
                 reg_global.remove(d);
-                reg_getfield.insert(*d);
+                reg_getfield.insert(*d, (*obj, field.clone(), i));
                 continue;
             }
             Instr::LoadFn(d, idx) | Instr::MakeClosure(d, idx) => {
@@ -902,8 +978,11 @@ fn resolve_user_calls(
                     None => { reg_fn.remove(d); }
                 }
                 reg_global.remove(d);
-                // Propagate method-value-ness so `let m = obj.f; m()` still declines.
-                if reg_getfield.contains(s) { reg_getfield.insert(*d); } else { reg_getfield.remove(d); }
+                // Propagate method-value-ness so `let m = obj.f; m()` still resolves.
+                match reg_getfield.get(s).cloned() {
+                    Some(v) => { reg_getfield.insert(*d, v); }
+                    None => { reg_getfield.remove(d); }
+                }
             }
             Instr::GetGlobal(d, name) => {
                 reg_getfield.remove(d);
@@ -943,42 +1022,65 @@ fn resolve_user_calls(
                 reg_getfield.remove(d);
             }
             Instr::Call(d, callee, args) => {
-                if reg_getfield.contains(callee) {
-                    return Err("lower.rs: method call (GetField result) is unsupported".into());
-                }
-                let kind = if let Some(&uid) = reg_fn.get(callee) {
-                    // Statically-known function → direct call (fill defaults).
-                    let cf = &fnctx.defs[uid];
-                    if args.len() > cf.params.len() {
-                        return Err("lower.rs: call passes more arguments than parameters".into());
-                    }
-                    for j in args.len()..cf.params.len() {
-                        if cf.defaults.get(j).and_then(|x| x.as_ref()).is_none() {
-                            return Err("lower.rs: call omits a required argument".into());
+                if let Some((self_reg, mname, gf_idx)) = reg_getfield.get(callee).cloned() {
+                    // A method call `obj.mname(args)`. Devirtualize only when the
+                    // method name is a *unique* extend-block method (one target);
+                    // ambiguous names, primitive methods, and module members decline.
+                    if let Some(&uid) = fnctx.unique_methods.get(&mname) {
+                        let cf = &fnctx.defs[uid];
+                        // Params include `self` (param 0), supplied implicitly by the
+                        // receiver; `args` are the explicit trailing arguments.
+                        let provided = args.len() + 1;
+                        if provided > cf.params.len() {
+                            return Err("lower.rs: method call passes more arguments than parameters".into());
                         }
-                    }
-                    Some(CallKind::Direct { uid, args: args.clone() })
-                } else if let Some(name) = reg_global.get(callee) {
-                    // A named global callee. If it's a builtin this backend lowers
-                    // itself, leave it to `resolve_builtin_calls`. If it's any other
-                    // reserved builtin, decline (fallback). Otherwise it's a user
-                    // variable holding a function → indirect call.
-                    let lowered = LOWERABLE_BUILTINS.contains(&name.as_str())
-                        && matches!(name.as_str(), "print" | "str" | "int" | "float" | "bool" | "len")
-                        && args.len() == 1;
-                    if lowered {
-                        None
-                    } else if RESERVED_BUILTINS.contains(&name.as_str()) {
-                        return Err(format!("lower.rs: unsupported builtin call `{name}`"));
+                        for j in provided..cf.params.len() {
+                            if cf.defaults.get(j).and_then(|x| x.as_ref()).is_none() {
+                                return Err("lower.rs: method call omits a required argument".into());
+                            }
+                        }
+                        out.insert(i, CallKind::MethodDirect { uid, self_reg, args: args.clone() });
+                        // The producing GetField is a method lookup (would raise as a
+                        // data-field access) and its result is now unused → skip it.
+                        skip_getfields.insert(gf_idx);
                     } else {
-                        Some(CallKind::Indirect)
+                        return Err("lower.rs: method call (GetField result) is unsupported".into());
                     }
                 } else {
-                    // A runtime function value (parameter / temporary) → indirect.
-                    Some(CallKind::Indirect)
-                };
-                if let Some(k) = kind {
-                    out.insert(i, k);
+                    let kind = if let Some(&uid) = reg_fn.get(callee) {
+                        // Statically-known function → direct call (fill defaults).
+                        let cf = &fnctx.defs[uid];
+                        if args.len() > cf.params.len() {
+                            return Err("lower.rs: call passes more arguments than parameters".into());
+                        }
+                        for j in args.len()..cf.params.len() {
+                            if cf.defaults.get(j).and_then(|x| x.as_ref()).is_none() {
+                                return Err("lower.rs: call omits a required argument".into());
+                            }
+                        }
+                        Some(CallKind::Direct { uid, args: args.clone() })
+                    } else if let Some(name) = reg_global.get(callee) {
+                        // A named global callee. If it's a builtin this backend lowers
+                        // itself, leave it to `resolve_builtin_calls`. If it's any other
+                        // reserved builtin, decline (fallback). Otherwise it's a user
+                        // variable holding a function → indirect call.
+                        let lowered = LOWERABLE_BUILTINS.contains(&name.as_str())
+                            && matches!(name.as_str(), "print" | "str" | "int" | "float" | "bool" | "len")
+                            && args.len() == 1;
+                        if lowered {
+                            None
+                        } else if RESERVED_BUILTINS.contains(&name.as_str()) {
+                            return Err(format!("lower.rs: unsupported builtin call `{name}`"));
+                        } else {
+                            Some(CallKind::Indirect)
+                        }
+                    } else {
+                        // A runtime function value (parameter / temporary) → indirect.
+                        Some(CallKind::Indirect)
+                    };
+                    if let Some(k) = kind {
+                        out.insert(i, k);
+                    }
                 }
                 reg_fn.remove(d);
                 reg_global.remove(d);
@@ -988,8 +1090,8 @@ fn resolve_user_calls(
             // lowerable (named args need the callee's parameter names, which a
             // runtime function value doesn't carry) — anything else declines.
             Instr::CallNamed(d, callee, pairs) => {
-                if reg_getfield.contains(callee) {
-                    return Err("lower.rs: method call (GetField result) is unsupported".into());
+                if reg_getfield.contains_key(callee) {
+                    return Err("lower.rs: keyword method call (GetField result) is unsupported".into());
                 }
                 if let Some(&uid) = reg_fn.get(callee) {
                     let cf = &fnctx.defs[uid];
@@ -1043,7 +1145,7 @@ fn resolve_user_calls(
             }
         }
     }
-    Ok(out)
+    Ok((out, skip_getfields))
 }
 
 /// A struct field default the backend can materialize (scalar literals only;
@@ -1095,14 +1197,18 @@ pub fn lower_program<'ctx>(
     top: &Chunk,
     top_n_slots: u32,
     struct_defs: &HashMap<String, Vec<StructFieldDef>>,
-    has_methods: bool,
+    extend_methods: &HashMap<String, HashMap<String, Arc<CompiledFn>>>,
 ) -> Result<FunctionValue<'ctx>, String> {
-    // Method dispatch (extend-block methods) isn't lowered yet — decline the whole
-    // program so it falls back to the legacy path. Data-only structs still lower.
-    if has_methods {
-        return Err("lower.rs: extend-block methods are unsupported".into());
-    }
-    let (defs, ptr2uid) = collect_fns(top);
+    let (mut defs, mut ptr2uid) = collect_fns(top);
+
+    // Extend-block methods are ordinary compiled functions (`self` is param 0),
+    // but they live in the `extend_methods` side table, not in `top`'s reachable
+    // tree — so append them as functions with their own uids (BFS their nested
+    // fn_defs too), and record which method NAMES are unique across all types.
+    // A unique name devirtualizes to a direct call; an ambiguous name (same
+    // method on >1 type) needs runtime type dispatch and is left out, so calls to
+    // it decline (`resolve_user_calls`).
+    let unique_methods = collect_method_fns(extend_methods, &mut defs, &mut ptr2uid);
 
     // Native (C-ABI FFI) references — `__native$<pkgid>$<fn>` globals produced by
     // import namespacing — are not user functions and have no `jf_<uid>` body, so
@@ -1167,7 +1273,7 @@ pub fn lower_program<'ctx>(
     }
 
     let struct_defaults = build_struct_defaults(struct_defs);
-    let fnctx = FnCtx { funcs, defs, ptr2uid, global_fns, struct_defaults };
+    let fnctx = FnCtx { funcs, defs, ptr2uid, global_fns, struct_defaults, unique_methods };
 
     for uid in 0..fnctx.defs.len() {
         let cf = fnctx.defs[uid].clone();
@@ -1272,12 +1378,17 @@ fn lower_body<'ctx>(
 
     let low = Lowerer { ctx: context, module, builder: &builder, slots: &slots };
     let call_builtins = resolve_builtin_calls(code);
-    let user_calls = resolve_user_calls(code, fn_defs, fnctx)?;
+    let (user_calls, skip_getfields) = resolve_user_calls(code, fn_defs, fnctx)?;
 
     for (bi, block) in graph.blocks.iter().enumerate() {
         builder.position_at_end(llblocks[bi]);
         let mut terminated = false;
         for idx in block.start..block.end {
+            // Skip a GetField whose only use is a devirtualized method call (its
+            // field is a method, so lowering it would raise "undefined field").
+            if skip_getfields.contains(&idx) {
+                continue;
+            }
             terminated = lower_instr(
                 &low,
                 &code[idx],
@@ -2006,6 +2117,30 @@ fn lower_instr<'ctx>(
                     low.store(*dest, ret);
                     return Ok(false);
                 }
+                // A unique struct method → direct call with the receiver as `self`
+                // (param 0), the explicit args next, then omitted trailing defaults.
+                Some(CallKind::MethodDirect { uid, self_reg, args: margs }) => {
+                    let f = fnctx.funcs[*uid];
+                    let cf = &fnctx.defs[*uid];
+                    let mut argv: Vec<BasicMetadataValueEnum> = Vec::with_capacity(cf.params.len());
+                    argv.push(low.load(*self_reg).into());
+                    for a in margs {
+                        argv.push(low.load(*a).into());
+                    }
+                    for j in (1 + margs.len())..cf.params.len() {
+                        let dv = cf.defaults[j]
+                            .as_ref()
+                            .ok_or("lower.rs: missing method default at call site")?;
+                        argv.push(low.default_word(dv)?.into());
+                    }
+                    let ret = b
+                        .build_call(f, &argv, "mcallret")
+                        .map_err(|e| e.to_string())?
+                        .as_any_value_enum()
+                        .into_int_value();
+                    low.store(*dest, ret);
+                    return Ok(false);
+                }
                 Some(CallKind::Indirect) => {
                     let ret = low.indirect_call(*callee, args)?;
                     low.store(*dest, ret);
@@ -2047,12 +2182,13 @@ fn lower_instr<'ctx>(
                     low.store(*dest, r);
                     Ok(false)
                 }
-                // len(x) → jrt_len_unknown (tag-dispatched: strlen for a string,
-                // array-header length otherwise) returns a raw count → tag as int.
-                // In a Chunk-lowerable program the arg is always a string, since a
-                // collection is built with MakeArray/MakeDict (unsupported → fallback).
+                // len(x) → jrt_len_chunk (tag-dispatched: strlen for a string, the
+                // shared ObjHeader.len for a kind-tagged collection) → tag as int.
+                // Collections now lower on the Chunk path (MakeArray/MakeDict), so
+                // len() over them must read the header count — jrt_len_unknown reads
+                // the legacy offset-8 length and would return the kind byte here.
                 Some(bc) if bc.name == "len" => {
-                    let f = low.runtime_fn("jrt_len_unknown", i64_ty.fn_type(&[i64_ty.into()], false));
+                    let f = low.runtime_fn("jrt_len_chunk", i64_ty.fn_type(&[i64_ty.into()], false));
                     let arg = low.load(bc.args[0]);
                     let count = b
                         .build_call(f, &[arg.into()], "len")

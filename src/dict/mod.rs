@@ -78,7 +78,7 @@ fn pkg_merge(args: &[VmValue]) -> Result<VmValue> {
     match (&args[0], args.get(1)) {
         (VmValue::Dict(d1), Some(VmValue::Dict(d2))) => {
             let mut merged = d1.clone();
-            for (k, v) in d2 {
+            for (k, v) in d2.iter() {
                 merged.insert(k.clone(), v.clone());
             }
             Ok(VmValue::Dict(merged))
