@@ -60,6 +60,14 @@ const RESERVED_BUILTINS: &[&str] = &[
     "path", "random",
 ];
 
+/// Parse a native package reference `__native$<pkgid>$<fn>` (produced by import
+/// namespacing) into `(pkgid, fn_name)`. `None` for ordinary names.
+fn parse_native_ref(name: &str) -> Option<(u32, &str)> {
+    let rest = name.strip_prefix("__native$")?;
+    let (id, fname) = rest.split_once('$')?;
+    Some((id.parse().ok()?, fname))
+}
+
 /// Stdlib module namespaces whose `module.method(...)` calls the Chunk backend can
 /// recognize (a `GetField` whose base was `GetGlobal`'d from one of these names is
 /// a module call, not a struct/primitive method).
@@ -458,26 +466,94 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
             .unwrap()
     }
 
-    /// Indirect call through a first-class function value: untag the callee box,
-    /// load the function pointer, and call it with `args` (all tagged i64 words).
-    /// The callee's arity must equal `args.len()` — the frontend guarantees a
-    /// call passes the right number of arguments.
+    /// Indirect call through a first-class function value: untag the callee box and
+    /// load its `fn_ptr` (field 0). If `fn_ptr` is the `jrt_native_call` sentinel,
+    /// the box is a native function value `{ sentinel, env={handle,name}, name }` —
+    /// dispatch through `jrt_native_call`. Otherwise it is an ordinary `jf_<uid>`
+    /// box — call it directly with `args` (all tagged i64 words). The callee's arity
+    /// equals `args.len()` (the frontend guarantees it).
     fn indirect_call(&self, callee: Reg, args: &[Reg]) -> Result<IntValue<'ctx>, String> {
+        let e = |x: inkwell::builder::BuilderError| x.to_string();
+        let b = self.builder;
+        let i64_ty = self.i64t();
+        let ptrt = self.ptrt();
+
         let box_ptr = self.untag_ptr(self.load(callee));
-        let fn_ptr = self
-            .builder
-            .build_load(self.ptrt(), box_ptr, "fnld")
-            .map_err(|e| e.to_string())?
-            .into_pointer_value();
-        let arg_tys = vec![self.i64t().into(); args.len()];
-        let fn_ty = self.i64t().fn_type(&arg_tys, false);
-        let argv: Vec<BasicMetadataValueEnum> = args.iter().map(|a| self.load(*a).into()).collect();
-        Ok(self
-            .builder
-            .build_indirect_call(fn_ty, fn_ptr, &argv, "icall")
-            .map_err(|e| e.to_string())?
+        let fn_ptr = b.build_load(ptrt, box_ptr, "fnld").map_err(e)?.into_pointer_value();
+
+        // Sentinel = the jrt_native_call address.
+        let native_fn = self.runtime_fn(
+            "jrt_native_call",
+            i64_ty.fn_type(&[ptrt.into(), ptrt.into(), ptrt.into(), i64_ty.into()], false),
+        );
+        let sentinel = native_fn.as_global_value().as_pointer_value();
+        let fp_int = b.build_ptr_to_int(fn_ptr, i64_ty, "fpi").map_err(e)?;
+        let sent_int = b.build_ptr_to_int(sentinel, i64_ty, "si").map_err(e)?;
+        let is_native = b
+            .build_int_compare(inkwell::IntPredicate::EQ, fp_int, sent_int, "isnat")
+            .map_err(e)?;
+
+        let cur_fn = b.get_insert_block().unwrap().get_parent().unwrap();
+        let nat_bb = self.ctx.append_basic_block(cur_fn, "icall_native");
+        let reg_bb = self.ctx.append_basic_block(cur_fn, "icall_reg");
+        let merge_bb = self.ctx.append_basic_block(cur_fn, "icall_merge");
+        b.build_conditional_branch(is_native, nat_bb, reg_bb).map_err(e)?;
+
+        // ── native: read env {handle, name}, marshal args, jrt_native_call ──
+        b.position_at_end(nat_bb);
+        let env_slot = unsafe {
+            b.build_in_bounds_gep(ptrt, box_ptr, &[i64_ty.const_int(1, false)], "envs").map_err(e)?
+        };
+        let env = b.build_load(ptrt, env_slot, "env").map_err(e)?.into_pointer_value();
+        let handle = b.build_load(ptrt, env, "nh").map_err(e)?.into_pointer_value();
+        let name_slot = unsafe {
+            b.build_in_bounds_gep(ptrt, env, &[i64_ty.const_int(1, false)], "nns").map_err(e)?
+        };
+        let name = b.build_load(ptrt, name_slot, "nn").map_err(e)?.into_pointer_value();
+        let argv = if args.is_empty() {
+            ptrt.const_null()
+        } else {
+            let arr = b
+                .build_array_alloca(i64_ty, i64_ty.const_int(args.len() as u64, false), "iargv")
+                .map_err(e)?;
+            for (i, a) in args.iter().enumerate() {
+                let slot = unsafe {
+                    b.build_in_bounds_gep(i64_ty, arr, &[i64_ty.const_int(i as u64, false)], "ia").map_err(e)?
+                };
+                b.build_store(slot, self.load(*a)).map_err(e)?;
+            }
+            arr
+        };
+        let nat_ret = b
+            .build_call(
+                native_fn,
+                &[handle.into(), name.into(), argv.into(), i64_ty.const_int(args.len() as u64, false).into()],
+                "natret",
+            )
+            .map_err(e)?
             .as_any_value_enum()
-            .into_int_value())
+            .into_int_value();
+        b.build_unconditional_branch(merge_bb).map_err(e)?;
+        let nat_end = b.get_insert_block().unwrap();
+
+        // ── regular: direct indirect call jf_ptr(args) ──
+        b.position_at_end(reg_bb);
+        let arg_tys = vec![i64_ty.into(); args.len()];
+        let fn_ty = i64_ty.fn_type(&arg_tys, false);
+        let cargv: Vec<BasicMetadataValueEnum> = args.iter().map(|a| self.load(*a).into()).collect();
+        let reg_ret = b
+            .build_indirect_call(fn_ty, fn_ptr, &cargv, "icall")
+            .map_err(e)?
+            .as_any_value_enum()
+            .into_int_value();
+        b.build_unconditional_branch(merge_bb).map_err(e)?;
+        let reg_end = b.get_insert_block().unwrap();
+
+        // ── merge ──
+        b.position_at_end(merge_bb);
+        let phi = b.build_phi(i64_ty, "icall_ret").map_err(e)?;
+        phi.add_incoming(&[(&nat_ret, nat_end), (&reg_ret, reg_end)]);
+        Ok(phi.as_basic_value().into_int_value())
     }
 
     /// The module-level global cell for `name`, created (initialized to nil) on
@@ -1032,6 +1108,10 @@ enum CallKind {
     /// (string/scalar I/O — no legacy-layout collections) are lowered; the rest
     /// decline. See `emit_module_call`.
     ModuleCall { module: String, method: String, args: Vec<Reg> },
+    /// A native (C-ABI) package call `__native$<pkgid>$<fn>(args)` → dispatch
+    /// through `jrt_native_call` against the `dlopen`'d package handle. Args and
+    /// the result are already tagged words. See `emit_native_call`.
+    NativeCall { pkgid: u32, fname: String, args: Vec<Reg> },
     /// A string primitive method `s.method(args)` (`trim`/`upper`/`starts_with`/…)
     /// → the shared `jrt_str_*` symbol. Strings have one representation across both
     /// paths, so these reuse the legacy string helpers directly. See
@@ -1223,19 +1303,23 @@ fn resolve_user_calls(
                         }
                         Some(CallKind::Direct { uid, args: args.clone() })
                     } else if let Some(name) = reg_global.get(callee) {
-                        // A named global callee. If it's a builtin this backend lowers
-                        // itself, leave it to `resolve_builtin_calls`. If it's any other
-                        // reserved builtin, decline (fallback). Otherwise it's a user
-                        // variable holding a function → indirect call.
-                        let lowered = LOWERABLE_BUILTINS.contains(&name.as_str())
-                            && matches!(name.as_str(), "print" | "str" | "int" | "float" | "bool" | "len")
-                            && args.len() == 1;
-                        if lowered {
-                            None
-                        } else if RESERVED_BUILTINS.contains(&name.as_str()) {
-                            return Err(format!("lower.rs: unsupported builtin call `{name}`"));
+                        // A named global callee. A native package reference dispatches
+                        // through jrt_native_call; a builtin this backend lowers itself
+                        // is left to `resolve_builtin_calls`; any other reserved builtin
+                        // declines; otherwise it's a user variable holding a function.
+                        if let Some((pkgid, fname)) = parse_native_ref(name) {
+                            Some(CallKind::NativeCall { pkgid, fname: fname.to_string(), args: args.clone() })
                         } else {
-                            Some(CallKind::Indirect)
+                            let lowered = LOWERABLE_BUILTINS.contains(&name.as_str())
+                                && matches!(name.as_str(), "print" | "str" | "int" | "float" | "bool" | "len")
+                                && args.len() == 1;
+                            if lowered {
+                                None
+                            } else if RESERVED_BUILTINS.contains(&name.as_str()) {
+                                return Err(format!("lower.rs: unsupported builtin call `{name}`"));
+                            } else {
+                                Some(CallKind::Indirect)
+                            }
                         }
                     } else {
                         // A runtime function value (parameter / temporary) → indirect.
@@ -1389,6 +1473,124 @@ fn emit_dynamic_method<'ctx>(
         .map_err(err)?
         .as_any_value_enum()
         .into_int_value())
+}
+
+/// Load a native package's `dlopen` handle from its `native_pkg$<pkgid>` global.
+/// `compile()` creates + fills this in `main`'s prologue for the real module; it
+/// is created lazily (nil) if missing so the throwaway probe module also lowers.
+fn native_pkg_handle<'ctx>(low: &Lowerer<'_, 'ctx>, pkgid: u32) -> Result<PointerValue<'ctx>, String> {
+    let gname = format!("native_pkg${pkgid}");
+    let g = low.module.get_global(&gname).unwrap_or_else(|| {
+        let g = low.module.add_global(low.ptrt(), None, &gname);
+        g.set_initializer(&low.ptrt().const_null());
+        g.set_linkage(inkwell::module::Linkage::Internal);
+        g
+    });
+    low.builder
+        .build_load(low.ptrt(), g.as_pointer_value(), "nhandle")
+        .map_err(|e| e.to_string())
+        .map(|v| v.into_pointer_value())
+}
+
+/// Emit a direct native (C-ABI) call `__native$<pkgid>$<fname>(args)`: marshal the
+/// (already-tagged) args into a stack array and dispatch through `jrt_native_call`.
+/// The result is a tagged word (native output strings are TAINTED); it is used
+/// directly (no reinterpret — the Chunk path is uniformly tagged). Can raise.
+fn emit_native_call<'ctx>(
+    low: &Lowerer<'_, 'ctx>,
+    pkgid: u32,
+    fname: &str,
+    args: &[Reg],
+) -> Result<IntValue<'ctx>, String> {
+    let b = low.builder;
+    let i64_ty = low.i64t();
+    let ptrt = low.ptrt();
+    let err = |e: inkwell::builder::BuilderError| e.to_string();
+
+    let handle = native_pkg_handle(low, pkgid)?;
+    let argv = if args.is_empty() {
+        ptrt.const_null()
+    } else {
+        let arr = b
+            .build_array_alloca(i64_ty, i64_ty.const_int(args.len() as u64, false), "nargv")
+            .map_err(err)?;
+        for (i, r) in args.iter().enumerate() {
+            let slot = unsafe {
+                b.build_in_bounds_gep(i64_ty, arr, &[i64_ty.const_int(i as u64, false)], "na")
+                    .map_err(err)?
+            };
+            b.build_store(slot, low.load(*r)).map_err(err)?;
+        }
+        arr
+    };
+    let name_ptr = b.build_global_string_ptr(fname, "nfname").map_err(err)?.as_pointer_value();
+    let call_fn = low.runtime_fn(
+        "jrt_native_call",
+        i64_ty.fn_type(&[ptrt.into(), ptrt.into(), ptrt.into(), i64_ty.into()], false),
+    );
+    Ok(b
+        .build_call(
+            call_fn,
+            &[handle.into(), name_ptr.into(), argv.into(), i64_ty.const_int(args.len() as u64, false).into()],
+            "ncall",
+        )
+        .map_err(err)?
+        .as_any_value_enum()
+        .into_int_value())
+}
+
+/// Materialize a first-class native function value: a heap `{ fn_ptr, env, name }`
+/// where `fn_ptr` is the `jrt_native_call` address used purely as a sentinel (a
+/// real `jf_<uid>` box never holds this symbol), and `env = { handle, name }`.
+/// `indirect_call` recognizes the sentinel and routes through `jrt_native_call`.
+/// Returned as a `TAG_PTR` word. Layout mirrors the legacy path's `jade_fn_t`.
+fn emit_native_fn_value<'ctx>(
+    low: &Lowerer<'_, 'ctx>,
+    pkgid: u32,
+    fname: &str,
+) -> Result<IntValue<'ctx>, String> {
+    let b = low.builder;
+    let i64_ty = low.i64t();
+    let ptrt = low.ptrt();
+    let err = |e: inkwell::builder::BuilderError| e.to_string();
+    let malloc = low.runtime_fn("malloc", ptrt.fn_type(&[i64_ty.into()], false));
+    let alloc = |n: u64, name: &str| -> Result<PointerValue<'ctx>, String> {
+        Ok(b.build_call(malloc, &[i64_ty.const_int(n, false).into()], name)
+            .map_err(err)?
+            .as_any_value_enum()
+            .into_pointer_value())
+    };
+    let store_ptr = |base: PointerValue<'ctx>, idx: u64, val: BasicMetadataValueEnum<'ctx>| -> Result<(), String> {
+        let slot = unsafe {
+            b.build_in_bounds_gep(ptrt, base, &[i64_ty.const_int(idx, false)], "fslot").map_err(err)?
+        };
+        let v: inkwell::values::BasicValueEnum = match val {
+            BasicMetadataValueEnum::PointerValue(p) => p.into(),
+            _ => return Err("native fn value: expected pointer".into()),
+        };
+        b.build_store(slot, v).map_err(err)?;
+        Ok(())
+    };
+
+    let handle = native_pkg_handle(low, pkgid)?;
+    let name_ptr = b.build_global_string_ptr(fname, "nfname").map_err(err)?.as_pointer_value();
+    // env = { handle, name }
+    let env = alloc(16, "native_env")?;
+    store_ptr(env, 0, handle.into())?;
+    store_ptr(env, 1, name_ptr.into())?;
+    // fn value = { sentinel, env, name }
+    let sentinel = low
+        .runtime_fn(
+            "jrt_native_call",
+            i64_ty.fn_type(&[ptrt.into(), ptrt.into(), ptrt.into(), i64_ty.into()], false),
+        )
+        .as_global_value()
+        .as_pointer_value();
+    let fnval = alloc(24, "native_fn_val")?;
+    store_ptr(fnval, 0, sentinel.into())?;
+    store_ptr(fnval, 1, env.into())?;
+    store_ptr(fnval, 2, name_ptr.into())?;
+    Ok(low.tag_ptr(fnval))
 }
 
 /// Emit a string primitive method `recv.method(args)` via the shared `jrt_str_*`
@@ -1833,19 +2035,11 @@ pub fn lower_program<'ctx>(
     let method_candidates = collect_method_fns(extend_methods, &mut defs, &mut ptr2uid);
 
     // Native (C-ABI FFI) references — `__native$<pkgid>$<fn>` globals produced by
-    // import namespacing — are not user functions and have no `jf_<uid>` body, so
-    // an (indirect) call through one would jump into a non-function value. The
-    // Chunk backend has no in-binary FFI loader anyway, so any program that
-    // references a native symbol declines to the legacy path.
-    let references_native = |chunk: &Chunk| {
-        chunk.code.iter().any(|i| match i {
-            Instr::GetGlobal(_, n) | Instr::SetGlobal(n, _) => n.starts_with("__native$"),
-            _ => false,
-        })
-    };
-    if references_native(top) || defs.iter().any(|d| references_native(&d.chunk)) {
-        return Err("lower.rs: native FFI references are unsupported".into());
-    }
+    // import namespacing — are lowered directly: a `Call` on one dispatches through
+    // `jrt_native_call` (against the package `dlopen`'d in main's prologue), and a
+    // native ref used as a value materializes a `jade_fn_t` sentinel value that the
+    // indirect-call path recognizes. See `parse_native_ref`, `emit_native_call`,
+    // and `emit_native_fn_value` / `indirect_call`.
 
     let global_fns = build_global_fns(top, &defs, &ptr2uid);
     let i64_ty = context.i64_type();
@@ -2160,8 +2354,16 @@ fn lower_instr<'ctx>(
         }
         // Module-scoped globals: load/store the named LLVM global cell.
         GetGlobal(d, name) => {
-            let g = low.global_slot(name);
-            let v = b.build_load(i64_ty, g, "gld").map_err(|e| e.to_string())?.into_int_value();
+            // A native package reference used as a value materializes a first-class
+            // native function value (a jade_fn sentinel); an ordinary global loads
+            // its cell. (When immediately called, the `Call` devirtualizes to a
+            // NativeCall and this materialized value is dead-code-eliminated.)
+            let v = if let Some((pkgid, fname)) = parse_native_ref(name) {
+                emit_native_fn_value(low, pkgid, fname)?
+            } else {
+                let g = low.global_slot(name);
+                b.build_load(i64_ty, g, "gld").map_err(|e| e.to_string())?.into_int_value()
+            };
             low.store(*d, v);
             Ok(false)
         }
@@ -2831,6 +3033,11 @@ fn lower_instr<'ctx>(
                 }
                 Some(CallKind::ModuleCall { module, method, args: margs }) => {
                     let ret = emit_module_call(low, module, method, margs)?;
+                    low.store(*dest, ret);
+                    return Ok(false);
+                }
+                Some(CallKind::NativeCall { pkgid, fname, args: margs }) => {
+                    let ret = emit_native_call(low, *pkgid, fname, margs)?;
                     low.store(*dest, ret);
                     return Ok(false);
                 }
