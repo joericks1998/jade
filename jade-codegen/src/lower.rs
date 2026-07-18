@@ -3480,7 +3480,7 @@ mod tests {
         let context = Context::create();
         let module = context.create_module("t");
         let top = add_program();
-        lower_program(&context, &module, &top, 5, &HashMap::new(), false).expect("program lowering failed");
+        lower_program(&context, &module, &top, 5, &HashMap::new(), &HashMap::new()).expect("program lowering failed");
         module.verify().expect("module failed verification");
         let ir = module.print_to_string().to_string();
         // The function body is its own LLVM function taking two i64 params.
@@ -3514,7 +3514,7 @@ mod tests {
         ];
         let context = Context::create();
         let module = context.create_module("t");
-        lower_program(&context, &module, &top, 3, &HashMap::new(), false).expect("lowering failed");
+        lower_program(&context, &module, &top, 3, &HashMap::new(), &HashMap::new()).expect("lowering failed");
         module.verify().expect("verification failed");
         let ir = module.print_to_string().to_string();
         // Default 5 materialized as a tagged int (5<<1 = 10) passed to the call.
@@ -3539,7 +3539,7 @@ mod tests {
         top.code = vec![LoadFn(0, 0), Return(Some(0))];
         let context = Context::create();
         let module = context.create_module("t");
-        lower_program(&context, &module, &top, 1, &HashMap::new(), false).expect("first-class fn value should lower");
+        lower_program(&context, &module, &top, 1, &HashMap::new(), &HashMap::new()).expect("first-class fn value should lower");
         let ir = module.print_to_string().to_string();
         assert!(ir.contains("@jf_box_0"), "boxed function pointer global emitted:\n{ir}");
     }
@@ -3571,7 +3571,7 @@ mod tests {
         ];
         let context = Context::create();
         let module = context.create_module("t");
-        lower_program(&context, &module, &top, 6, &HashMap::new(), false).expect("keyword call lowering");
+        lower_program(&context, &module, &top, 6, &HashMap::new(), &HashMap::new()).expect("keyword call lowering");
         module.verify().expect("module failed verification");
         let ir = module.print_to_string().to_string();
         // A direct call to jf_0 with three i64 args (reordered to a, b, c).
@@ -3601,7 +3601,7 @@ mod tests {
         ];
         let context = Context::create();
         let module = context.create_module("t");
-        lower_program(&context, &module, &top, 1, &HashMap::new(), false).expect("higher-order lowering");
+        lower_program(&context, &module, &top, 1, &HashMap::new(), &HashMap::new()).expect("higher-order lowering");
         module.verify().expect("module failed verification");
         let ir = module.print_to_string().to_string();
         // apply's body calls its parameter indirectly (a load then a call of a ptr).
@@ -3673,7 +3673,7 @@ mod tests {
         ];
         let context = Context::create();
         let module = context.create_module("t");
-        lower_program(&context, &module, &top, 5, &HashMap::new(), false).expect("async lowering");
+        lower_program(&context, &module, &top, 5, &HashMap::new(), &HashMap::new()).expect("async lowering");
         module.verify().expect("module failed verification");
         let ir = module.print_to_string().to_string();
         assert!(ir.contains("@jf_task_0"), "task wrapper emitted:\n{ir}");
