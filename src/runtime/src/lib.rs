@@ -45,6 +45,7 @@ pub mod ffi;
 pub mod ffi_coll;
 pub mod float;
 pub mod heap;
+pub mod mathf;
 pub mod num;
 pub mod ops;
 pub mod render;

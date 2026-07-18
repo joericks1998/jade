@@ -60,6 +60,59 @@ const RESERVED_BUILTINS: &[&str] = &[
     "path", "random",
 ];
 
+/// Stdlib module namespaces whose `module.method(...)` calls the Chunk backend can
+/// recognize (a `GetField` whose base was `GetGlobal`'d from one of these names is
+/// a module call, not a struct/primitive method).
+fn is_stdlib_module(name: &str) -> bool {
+    matches!(
+        name,
+        "math" | "json" | "llm" | "path" | "time" | "env" | "fs" | "random" | "http" | "sh"
+            | "dict" | "array" | "string"
+    )
+}
+
+/// Whether the Chunk backend can lower `module.method` with `argc` explicit args.
+/// Restricted to **layout-safe** methods — string/scalar I/O whose runtime symbols
+/// don't produce or consume the legacy `JrtArrayHdr`/`JadeDict` collection layouts
+/// (those need ObjHeader-aware runtime helpers, a later brick). Everything else
+/// declines to the legacy path. Keep in lockstep with `emit_module_call`.
+fn chunk_module_supported(module: &str, method: &str, argc: usize) -> bool {
+    match (module, method) {
+        ("math", "floor" | "ceil" | "abs" | "sqrt") => argc == 1,
+        ("math", "min" | "max" | "pow") => argc == 2,
+        ("path", "basename" | "ext" | "dirname" | "stem" | "abs") => argc == 1,
+        ("path", "is_abs") => argc == 1,
+        ("path", "join") => argc >= 1,
+        ("fs", "read") => argc == 1, // optional trust arg not modeled → 1-arg only
+        ("fs", "exists" | "delete" | "mkdir") => argc == 1,
+        ("fs", "write" | "append") => argc == 2,
+        ("sh", "exec" | "run") => argc == 1,
+        ("env", "cwd") => argc == 0,
+        ("env", "get") => argc == 1,
+        ("env", "set") => argc == 2,
+        ("time", "now" | "now_ms") => argc == 0,
+        ("random", "int") => argc == 2,
+        ("random", "seed") => argc == 1,
+        ("random", "float") => argc == 0,
+        ("llm", "count_tokens") => argc == 1,
+        ("llm", "total_tokens") => argc == 0,
+        _ => false,
+    }
+}
+
+/// Whether `method` is a string-only primitive method the Chunk path lowers via
+/// the shared `jrt_str_*` symbol (the receiver is unambiguously a string). These
+/// names don't belong to dict/array, so no runtime kind dispatch is needed.
+/// `contains` (also a dict method) and `split` (returns a collection) are excluded.
+fn chunk_str_method_supported(method: &str, argc: usize) -> bool {
+    match method {
+        "trim" | "upper" | "lower" => argc == 0,
+        "starts_with" | "ends_with" => argc == 1,
+        "replace" => argc == 2,
+        _ => false,
+    }
+}
+
 /// Per-function lowering helper: bundles the builder, the i64 slot type, and the
 /// register `alloca`s so the instruction handlers stay terse.
 struct Lowerer<'a, 'ctx> {
@@ -920,6 +973,17 @@ enum CallKind {
     /// method → direct call to `jf_<uid>` with the receiver (`self_reg`) prepended
     /// as `self` (param 0) and omitted trailing defaults filled at the call site.
     MethodDirect { uid: usize, self_reg: Reg, args: Vec<Reg> },
+    /// A stdlib module-namespace call `module.method(args)` (`fs.read`, `path.ext`,
+    /// …) resolved statically by name to a runtime symbol. Only layout-safe methods
+    /// (string/scalar I/O — no legacy-layout collections) are lowered; the rest
+    /// decline. See `emit_module_call`.
+    ModuleCall { module: String, method: String, args: Vec<Reg> },
+    /// A string primitive method `s.method(args)` (`trim`/`upper`/`starts_with`/…)
+    /// → the shared `jrt_str_*` symbol. Strings have one representation across both
+    /// paths, so these reuse the legacy string helpers directly. See
+    /// `emit_str_method`. (Method names unique to strings; `contains`/`split` are
+    /// excluded — ambiguous with dict / returns a collection.)
+    PrimStrMethod { recv: Reg, method: String, args: Vec<Reg> },
     Indirect,
     /// `Spawn` of a statically-known async function → `jade_spawn(jf_task_<uid>,
     /// args, n)`. Only exact-arity spawns of a known function are lowered.
@@ -949,6 +1013,10 @@ fn resolve_user_calls(
     // GetField's instruction index). Calling one is a method call: a unique struct
     // method devirtualizes (self = receiver), anything else declines.
     let mut reg_getfield: HashMap<Reg, (Reg, String, usize)> = HashMap::new();
+    // reg holding a `module.method` GetField result → (module name, method, the
+    // GetField's instruction index). The base was `GetGlobal`'d from a reserved
+    // stdlib module name, so calling it is a module call, not a value method.
+    let mut reg_getfield_module: HashMap<Reg, (String, String, usize)> = HashMap::new();
     let mut out: HashMap<usize, CallKind> = HashMap::new();
     // GetField instruction indices whose result is consumed *only* as the callee of
     // a devirtualized method call. Their field is a method (not a data field), so
@@ -960,13 +1028,23 @@ fn resolve_user_calls(
         match instr {
             Instr::GetField(d, obj, field) => {
                 reg_fn.remove(d);
+                // A field access whose base was loaded from a reserved stdlib
+                // module global is a `module.method` access (resolved by name);
+                // otherwise it's a struct/primitive value method.
+                let module = reg_global.get(obj).filter(|n| is_stdlib_module(n)).cloned();
                 reg_global.remove(d);
-                reg_getfield.insert(*d, (*obj, field.clone(), i));
+                reg_getfield.remove(d);
+                reg_getfield_module.remove(d);
+                match module {
+                    Some(m) => { reg_getfield_module.insert(*d, (m, field.clone(), i)); }
+                    None => { reg_getfield.insert(*d, (*obj, field.clone(), i)); }
+                }
                 continue;
             }
             Instr::LoadFn(d, idx) | Instr::MakeClosure(d, idx) => {
                 reg_global.remove(d);
                 reg_getfield.remove(d);
+                reg_getfield_module.remove(d);
                 match fnctx.uid_of(fn_defs, *idx) {
                     Some(uid) => { reg_fn.insert(*d, uid); }
                     None => { reg_fn.remove(d); }
@@ -983,9 +1061,14 @@ fn resolve_user_calls(
                     Some(v) => { reg_getfield.insert(*d, v); }
                     None => { reg_getfield.remove(d); }
                 }
+                match reg_getfield_module.get(s).cloned() {
+                    Some(v) => { reg_getfield_module.insert(*d, v); }
+                    None => { reg_getfield_module.remove(d); }
+                }
             }
             Instr::GetGlobal(d, name) => {
                 reg_getfield.remove(d);
+                reg_getfield_module.remove(d);
                 match fnctx.global_fns.get(name).copied() {
                     Some(u) => { reg_fn.insert(*d, u); }
                     None => { reg_fn.remove(d); }
@@ -999,6 +1082,7 @@ fn resolve_user_calls(
                 }
                 reg_global.remove(d);
                 reg_getfield.remove(d);
+                reg_getfield_module.remove(d);
             }
             Instr::SetLocal(slot, src) => match reg_fn.get(src).copied() {
                 Some(u) => { slot_fn.insert(*slot, u); }
@@ -1020,9 +1104,19 @@ fn resolve_user_calls(
                 reg_fn.remove(d);
                 reg_global.remove(d);
                 reg_getfield.remove(d);
+                reg_getfield_module.remove(d);
             }
             Instr::Call(d, callee, args) => {
-                if let Some((self_reg, mname, gf_idx)) = reg_getfield.get(callee).cloned() {
+                if let Some((module, method, gf_idx)) = reg_getfield_module.get(callee).cloned() {
+                    // A stdlib module call `module.method(args)`. Lower the
+                    // layout-safe subset; anything else declines to the legacy path.
+                    if chunk_module_supported(&module, &method, args.len()) {
+                        out.insert(i, CallKind::ModuleCall { module, method, args: args.clone() });
+                        skip_getfields.insert(gf_idx);
+                    } else {
+                        return Err(format!("lower.rs: unsupported module call {module}.{method}"));
+                    }
+                } else if let Some((self_reg, mname, gf_idx)) = reg_getfield.get(callee).cloned() {
                     // A method call `obj.mname(args)`. Devirtualize only when the
                     // method name is a *unique* extend-block method (one target);
                     // ambiguous names, primitive methods, and module members decline.
@@ -1042,6 +1136,9 @@ fn resolve_user_calls(
                         out.insert(i, CallKind::MethodDirect { uid, self_reg, args: args.clone() });
                         // The producing GetField is a method lookup (would raise as a
                         // data-field access) and its result is now unused → skip it.
+                        skip_getfields.insert(gf_idx);
+                    } else if chunk_str_method_supported(&mname, args.len()) {
+                        out.insert(i, CallKind::PrimStrMethod { recv: self_reg, method: mname, args: args.clone() });
                         skip_getfields.insert(gf_idx);
                     } else {
                         return Err("lower.rs: method call (GetField result) is unsupported".into());
@@ -1085,13 +1182,14 @@ fn resolve_user_calls(
                 reg_fn.remove(d);
                 reg_global.remove(d);
                 reg_getfield.remove(d);
+                reg_getfield_module.remove(d);
             }
             // Keyword-argument call. Only a direct call to a known function is
             // lowerable (named args need the callee's parameter names, which a
             // runtime function value doesn't carry) — anything else declines.
             Instr::CallNamed(d, callee, pairs) => {
-                if reg_getfield.contains_key(callee) {
-                    return Err("lower.rs: keyword method call (GetField result) is unsupported".into());
+                if reg_getfield.contains_key(callee) || reg_getfield_module.contains_key(callee) {
+                    return Err("lower.rs: keyword method/module call (GetField result) is unsupported".into());
                 }
                 if let Some(&uid) = reg_fn.get(callee) {
                     let cf = &fnctx.defs[uid];
@@ -1135,6 +1233,7 @@ fn resolve_user_calls(
                 reg_fn.remove(d);
                 reg_global.remove(d);
                 reg_getfield.remove(d);
+                reg_getfield_module.remove(d);
             }
             other => {
                 if let Some(d) = dest_reg(other) {
@@ -1146,6 +1245,205 @@ fn resolve_user_calls(
         }
     }
     Ok((out, skip_getfields))
+}
+
+/// Emit a string primitive method `recv.method(args)` via the shared `jrt_str_*`
+/// symbol (the receiver and any args are strings; results are tagged strings or
+/// bool words). Only methods `chunk_str_method_supported` accepts reach here.
+fn emit_str_method<'ctx>(
+    low: &Lowerer<'_, 'ctx>,
+    recv: Reg,
+    method: &str,
+    args: &[Reg],
+) -> Result<IntValue<'ctx>, String> {
+    let b = low.builder;
+    let ptrt = low.ptrt();
+    let i32_ty = low.ctx.i32_type();
+    let err = |e: inkwell::builder::BuilderError| e.to_string();
+    let sp = |r: Reg| low.untag_ptr(low.load(r));
+
+    match method {
+        "trim" | "upper" | "lower" => {
+            let f = low.runtime_fn(&format!("jrt_str_{method}"), ptrt.fn_type(&[ptrt.into()], false));
+            let r = b
+                .build_call(f, &[sp(recv).into()], "strm")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_pointer_value();
+            Ok(low.tag_str(r))
+        }
+        "replace" => {
+            let f = low.runtime_fn(
+                "jrt_str_replace",
+                ptrt.fn_type(&[ptrt.into(), ptrt.into(), ptrt.into()], false),
+            );
+            let r = b
+                .build_call(f, &[sp(recv).into(), sp(args[0]).into(), sp(args[1]).into()], "strm")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_pointer_value();
+            Ok(low.tag_str(r))
+        }
+        "starts_with" | "ends_with" => {
+            let f = low.runtime_fn(
+                &format!("jrt_str_{method}"),
+                i32_ty.fn_type(&[ptrt.into(), ptrt.into()], false),
+            );
+            let r = b
+                .build_call(f, &[sp(recv).into(), sp(args[0]).into()], "strm")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_int_value();
+            let bit = b
+                .build_int_compare(inkwell::IntPredicate::NE, r, i32_ty.const_zero(), "b")
+                .map_err(err)?;
+            Ok(low.bool_word(bit))
+        }
+        _ => Err(format!("lower.rs: emit_str_method: unhandled {method}")),
+    }
+}
+
+/// Emit a layout-safe stdlib `module.method(args)` call, returning the tagged
+/// result word. Only methods `chunk_module_supported` accepts reach here; each
+/// reuses the same runtime `jrt_*` symbol the legacy path calls. String returns
+/// are null-checked → tagged nil (covers `path.ext`/`env.get`); scalar returns
+/// tag directly. Collection-producing/consuming methods are excluded (they use
+/// the legacy `JrtArrayHdr`/`JadeDict` layout, not the Chunk path's ObjHeader).
+fn emit_module_call<'ctx>(
+    low: &Lowerer<'_, 'ctx>,
+    module: &str,
+    method: &str,
+    args: &[Reg],
+) -> Result<IntValue<'ctx>, String> {
+    let b = low.builder;
+    let i64_ty = low.i64t();
+    let ptrt = low.ptrt();
+    let i32_ty = low.ctx.i32_type();
+    let void_ty = low.ctx.void_type();
+    let f64_ty = low.f64t();
+    let err = |e: inkwell::builder::BuilderError| e.to_string();
+
+    // Untag arg `k` as a data pointer (string/collection char*/void*).
+    let strp = |k: usize| low.untag_ptr(low.load(args[k]));
+    let nil = i64_ty.const_int(NIL, false);
+
+    // A returned char* → tagged str word, or nil when NULL.
+    let tag_str_or_nil = |p: PointerValue<'ctx>| -> Result<IntValue<'ctx>, String> {
+        let asint = b.build_ptr_to_int(p, i64_ty, "sp2i").map_err(err)?;
+        let is_null = b
+            .build_int_compare(inkwell::IntPredicate::EQ, asint, i64_ty.const_zero(), "isnull")
+            .map_err(err)?;
+        let tagged = b.build_or(asint, i64_ty.const_int(TAG_STR, false), "tagstr").map_err(err)?;
+        Ok(b.build_select(is_null, nil, tagged, "strornil").map_err(err)?.into_int_value())
+    };
+
+    // Call a `(ptr, ptr, …) -> ptr` string function over `strp(0..n)`.
+    let str_fn = |name: &str, n: usize| -> Result<PointerValue<'ctx>, String> {
+        let params: Vec<inkwell::types::BasicMetadataTypeEnum> = vec![ptrt.into(); n];
+        let f = low.runtime_fn(name, ptrt.fn_type(&params, false));
+        let argv: Vec<BasicMetadataValueEnum> = (0..n).map(|k| strp(k).into()).collect();
+        Ok(b.build_call(f, &argv, "modcall").map_err(err)?.as_any_value_enum().into_pointer_value())
+    };
+    // A `(ptr, …) -> void` sink → nil word.
+    let void_ptr_fn = |name: &str, n: usize| -> Result<IntValue<'ctx>, String> {
+        let params: Vec<inkwell::types::BasicMetadataTypeEnum> = vec![ptrt.into(); n];
+        let f = low.runtime_fn(name, void_ty.fn_type(&params, false));
+        let argv: Vec<BasicMetadataValueEnum> = (0..n).map(|k| strp(k).into()).collect();
+        b.build_call(f, &argv, "").map_err(err)?;
+        Ok(nil)
+    };
+    // A `(ptr) -> i32` predicate → bool word.
+    let bool_ptr_fn = |name: &str| -> Result<IntValue<'ctx>, String> {
+        let f = low.runtime_fn(name, i32_ty.fn_type(&[ptrt.into()], false));
+        let r = b.build_call(f, &[strp(0).into()], "").map_err(err)?.as_any_value_enum().into_int_value();
+        let bit = b
+            .build_int_compare(inkwell::IntPredicate::NE, r, i32_ty.const_zero(), "b")
+            .map_err(err)?;
+        Ok(low.bool_word(bit))
+    };
+    // A `() / (ptr) -> i64` scalar → tagged int.
+    let int_fn = |name: &str, n_ptr: usize| -> Result<IntValue<'ctx>, String> {
+        let params: Vec<inkwell::types::BasicMetadataTypeEnum> = vec![ptrt.into(); n_ptr];
+        let f = low.runtime_fn(name, i64_ty.fn_type(&params, false));
+        let argv: Vec<BasicMetadataValueEnum> = (0..n_ptr).map(|k| strp(k).into()).collect();
+        let r = b.build_call(f, &argv, "").map_err(err)?.as_any_value_enum().into_int_value();
+        Ok(low.tag_int(r))
+    };
+
+    // math.* take/return tagged value words directly (int-or-float dispatch is in
+    // the runtime helper), so no arg/return coercion is needed.
+    let math_fn = |name: &str, n: usize| -> Result<IntValue<'ctx>, String> {
+        let params: Vec<inkwell::types::BasicMetadataTypeEnum> = vec![i64_ty.into(); n];
+        let f = low.runtime_fn(name, i64_ty.fn_type(&params, false));
+        let argv: Vec<BasicMetadataValueEnum> = (0..n).map(|k| low.load(args[k]).into()).collect();
+        Ok(b.build_call(f, &argv, "math").map_err(err)?.as_any_value_enum().into_int_value())
+    };
+
+    match (module, method) {
+        ("math", "floor" | "ceil" | "abs" | "sqrt") => math_fn(&format!("jrt_math_{method}"), 1),
+        ("math", "min" | "max" | "pow") => math_fn(&format!("jrt_math_{method}"), 2),
+        ("path", "basename" | "ext" | "dirname" | "stem" | "abs") => {
+            tag_str_or_nil(str_fn(&format!("jrt_path_{method}"), 1)?)
+        }
+        ("path", "is_abs") => bool_ptr_fn("jrt_path_is_abs"),
+        ("path", "join") => {
+            // Variadic left-fold through the 2-arg jrt_path_join primitive.
+            let f = low.runtime_fn("jrt_path_join", ptrt.fn_type(&[ptrt.into(), ptrt.into()], false));
+            let mut acc = strp(0);
+            for k in 1..args.len() {
+                acc = b
+                    .build_call(f, &[acc.into(), strp(k).into()], "join")
+                    .map_err(err)?
+                    .as_any_value_enum()
+                    .into_pointer_value();
+            }
+            Ok(low.tag_str(acc))
+        }
+        ("fs", "read") => {
+            // jrt_fs_read(path, i32 trust=0) -> TAINTED str (raises on error).
+            let f = low.runtime_fn("jrt_fs_read", ptrt.fn_type(&[ptrt.into(), i32_ty.into()], false));
+            let r = b
+                .build_call(f, &[strp(0).into(), i32_ty.const_zero().into()], "read")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_pointer_value();
+            Ok(low.tag_str(r))
+        }
+        ("fs", "exists") => bool_ptr_fn("jrt_fs_exists"),
+        ("fs", "write") => void_ptr_fn("jrt_fs_write", 2),
+        ("fs", "append") => void_ptr_fn("jrt_fs_append", 2),
+        ("fs", "delete") => void_ptr_fn("jrt_fs_delete", 1),
+        ("fs", "mkdir") => void_ptr_fn("jrt_fs_mkdir", 1),
+        ("sh", "exec") => Ok(low.tag_str(str_fn("jrt_sh_exec", 1)?)),
+        ("sh", "run") => int_fn("jrt_sh_run", 1),
+        ("env", "cwd") => Ok(low.tag_str(str_fn("jrt_env_cwd", 0)?)),
+        ("env", "get") => tag_str_or_nil(str_fn("jrt_env_get", 1)?),
+        ("env", "set") => void_ptr_fn("jrt_env_set", 2),
+        ("time", "now") => int_fn("jrt_time_now", 0),
+        ("time", "now_ms") => int_fn("jrt_time_now_ms", 0),
+        ("random", "int") => {
+            // Raw (untagged) i64 bounds; raises if lo > hi.
+            let f = low.runtime_fn("jrt_random_int", i64_ty.fn_type(&[i64_ty.into(), i64_ty.into()], false));
+            let lo = low.untag_int(low.load(args[0]));
+            let hi = low.untag_int(low.load(args[1]));
+            let r = b.build_call(f, &[lo.into(), hi.into()], "").map_err(err)?.as_any_value_enum().into_int_value();
+            Ok(low.tag_int(r))
+        }
+        ("random", "seed") => {
+            let f = low.runtime_fn("jrt_random_seed", void_ty.fn_type(&[i64_ty.into()], false));
+            b.build_call(f, &[low.untag_int(low.load(args[0])).into()], "").map_err(err)?;
+            Ok(nil)
+        }
+        ("random", "float") => {
+            let f = low.runtime_fn("jrt_random_float", f64_ty.fn_type(&[], false));
+            let d = b.build_call(f, &[], "").map_err(err)?.as_any_value_enum().into_float_value();
+            let boxf = low.runtime_fn("jrt_box_float", i64_ty.fn_type(&[f64_ty.into()], false));
+            Ok(b.build_call(boxf, &[d.into()], "boxf").map_err(err)?.as_any_value_enum().into_int_value())
+        }
+        ("llm", "count_tokens") => int_fn("jrt_count_tokens", 1),
+        ("llm", "total_tokens") => int_fn("jrt_total_tokens", 0),
+        _ => Err(format!("lower.rs: emit_module_call: unhandled {module}.{method}")),
+    }
 }
 
 /// A struct field default the backend can materialize (scalar literals only;
@@ -2138,6 +2436,16 @@ fn lower_instr<'ctx>(
                         .map_err(|e| e.to_string())?
                         .as_any_value_enum()
                         .into_int_value();
+                    low.store(*dest, ret);
+                    return Ok(false);
+                }
+                Some(CallKind::ModuleCall { module, method, args: margs }) => {
+                    let ret = emit_module_call(low, module, method, margs)?;
+                    low.store(*dest, ret);
+                    return Ok(false);
+                }
+                Some(CallKind::PrimStrMethod { recv, method, args: margs }) => {
+                    let ret = emit_str_method(low, *recv, method, margs)?;
                     low.store(*dest, ret);
                     return Ok(false);
                 }
