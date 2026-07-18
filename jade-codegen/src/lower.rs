@@ -86,7 +86,9 @@ fn chunk_module_supported(module: &str, method: &str, argc: usize) -> bool {
         ("fs", "read") => argc == 1, // optional trust arg not modeled → 1-arg only
         ("fs", "exists" | "delete" | "mkdir") => argc == 1,
         ("fs", "write" | "append") => argc == 2,
-        ("sh", "exec" | "run") => argc == 1,
+        ("fs", "list_dir") => argc == 1,
+        ("sh", "exec" | "run" | "output") => argc == 1,
+        ("random", "choice" | "shuffle") => argc == 1,
         ("env", "cwd") => argc == 0,
         ("env", "get") => argc == 1,
         ("env", "set") => argc == 2,
@@ -96,6 +98,8 @@ fn chunk_module_supported(module: &str, method: &str, argc: usize) -> bool {
         ("random", "float") => argc == 0,
         ("llm", "count_tokens") => argc == 1,
         ("llm", "total_tokens") => argc == 0,
+        ("dict", "merge") => argc == 2,
+        ("json", "parse" | "stringify" | "stringify_pretty") => argc == 1,
         _ => false,
     }
 }
@@ -109,6 +113,7 @@ fn chunk_str_method_supported(method: &str, argc: usize) -> bool {
         "trim" | "upper" | "lower" => argc == 0,
         "starts_with" | "ends_with" => argc == 1,
         "replace" => argc == 2,
+        "split" => argc == 1,
         _ => false,
     }
 }
@@ -122,6 +127,8 @@ fn chunk_val_method_supported(method: &str, argc: usize) -> bool {
         "pop" | "sort" | "reverse" => argc == 0,   // array
         "keys" | "values" => argc == 0,            // dict
         "has" | "get" => argc == 1,                // dict
+        "contains" => argc == 1,                   // str / array (runtime-dispatched)
+        "len" => argc == 0,                        // str / array / dict (runtime-dispatched)
         _ => false,
     }
 }
@@ -821,6 +828,11 @@ struct FnCtx<'ctx> {
     /// receiver's runtime type) and is omitted — such calls decline to the legacy
     /// path until runtime type dispatch lands.
     unique_methods: HashMap<String, usize>,
+    /// Global names the program `SetGlobal`s (assigns) anywhere. A name here is a
+    /// user variable, so `name.method(...)` is a value method, NOT a stdlib module
+    /// call — even when `name` happens to be a reserved module name (`let sh = []`
+    /// shadows `use std::sh`). Guards `module.method` recognition against shadowing.
+    user_globals: std::collections::HashSet<String>,
 }
 
 impl<'ctx> FnCtx<'ctx> {
@@ -832,6 +844,7 @@ impl<'ctx> FnCtx<'ctx> {
             global_fns: HashMap::new(),
             struct_defaults: HashMap::new(),
             unique_methods: HashMap::new(),
+            user_globals: std::collections::HashSet::new(),
         }
     }
 
@@ -1048,9 +1061,13 @@ fn resolve_user_calls(
             Instr::GetField(d, obj, field) => {
                 reg_fn.remove(d);
                 // A field access whose base was loaded from a reserved stdlib
-                // module global is a `module.method` access (resolved by name);
-                // otherwise it's a struct/primitive value method.
-                let module = reg_global.get(obj).filter(|n| is_stdlib_module(n)).cloned();
+                // module global is a `module.method` access (resolved by name) —
+                // UNLESS the program assigns that name (a user variable shadowing
+                // the module, e.g. `let sh = []`), in which case it's a value method.
+                let module = reg_global
+                    .get(obj)
+                    .filter(|n| is_stdlib_module(n) && !fnctx.user_globals.contains(n.as_str()))
+                    .cloned();
                 reg_global.remove(d);
                 reg_getfield.remove(d);
                 reg_getfield_module.remove(d);
@@ -1321,6 +1338,16 @@ fn emit_str_method<'ctx>(
                 .map_err(err)?;
             Ok(low.bool_word(bit))
         }
+        "split" => {
+            // (s, sep) -> new array of substrings (tagged ptr).
+            let f = low.runtime_fn("jrt_coll_str_split", ptrt.fn_type(&[ptrt.into(), ptrt.into()], false));
+            let p = b
+                .build_call(f, &[sp(recv).into(), sp(args[0]).into()], "split")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_pointer_value();
+            Ok(low.tag_ptr(p))
+        }
         _ => Err(format!("lower.rs: emit_str_method: unhandled {method}")),
     }
 }
@@ -1366,6 +1393,31 @@ fn emit_val_method<'ctx>(
             let f = low.runtime_fn(cname, ptrt.fn_type(&[ptrt.into()], false));
             let p = b.build_call(f, &[recv_p.into()], "kv").map_err(err)?.as_any_value_enum().into_pointer_value();
             Ok(low.tag_ptr(p))
+        }
+        "len" => {
+            // `recv.len()` == `len(recv)`: jrt_len_chunk tag-dispatches str
+            // (byte length) / collection (ObjHeader.len) at runtime → tagged int.
+            let f = low.runtime_fn("jrt_len_chunk", i64_ty.fn_type(&[i64_ty.into()], false));
+            let n = b
+                .build_call(f, &[low.load(recv).into()], "len")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_int_value();
+            Ok(low.tag_int(n))
+        }
+        "contains" => {
+            // `haystack.contains(needle)` == `needle in haystack`: jrt_in_any
+            // dispatches str (substring) / array (element eq) at runtime.
+            let f = low.runtime_fn("jrt_in_any", i32_ty.fn_type(&[i64_ty.into(), i64_ty.into()], false));
+            let r = b
+                .build_call(f, &[low.load(args[0]).into(), low.load(recv).into()], "cont")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_int_value();
+            let bit = b
+                .build_int_compare(inkwell::IntPredicate::NE, r, i32_ty.const_zero(), "c")
+                .map_err(err)?;
+            Ok(low.bool_word(bit))
         }
         "has" | "get" => {
             // jrt_coll_dict_get(dict, key_cstr, *out) -> found?  (key arg is a
@@ -1509,6 +1561,26 @@ fn emit_module_call<'ctx>(
         ("fs", "mkdir") => void_ptr_fn("jrt_fs_mkdir", 1),
         ("sh", "exec") => Ok(low.tag_str(str_fn("jrt_sh_exec", 1)?)),
         ("sh", "run") => int_fn("jrt_sh_run", 1),
+        ("sh", "output") => {
+            let f = low.runtime_fn("jrt_coll_sh_output", ptrt.fn_type(&[ptrt.into()], false));
+            let p = b.build_call(f, &[strp(0).into()], "shout").map_err(err)?.as_any_value_enum().into_pointer_value();
+            Ok(low.tag_ptr(p))
+        }
+        ("fs", "list_dir") => {
+            // raises on I/O error; returns an already-tagged array pointer word.
+            let f = low.runtime_fn("jrt_fs_list_dir_chunk", i64_ty.fn_type(&[ptrt.into()], false));
+            Ok(b.build_call(f, &[strp(0).into()], "ld").map_err(err)?.as_any_value_enum().into_int_value())
+        }
+        ("random", "choice") => {
+            // (arr word) -> element word (already tagged).
+            let f = low.runtime_fn("jrt_random_choice_chunk", i64_ty.fn_type(&[i64_ty.into()], false));
+            Ok(b.build_call(f, &[low.load(args[0]).into()], "choice").map_err(err)?.as_any_value_enum().into_int_value())
+        }
+        ("random", "shuffle") => {
+            let f = low.runtime_fn("jrt_random_shuffle_chunk", void_ty.fn_type(&[i64_ty.into()], false));
+            b.build_call(f, &[low.load(args[0]).into()], "").map_err(err)?;
+            Ok(nil)
+        }
         ("env", "cwd") => Ok(low.tag_str(str_fn("jrt_env_cwd", 0)?)),
         ("env", "get") => tag_str_or_nil(str_fn("jrt_env_get", 1)?),
         ("env", "set") => void_ptr_fn("jrt_env_set", 2),
@@ -1535,6 +1607,32 @@ fn emit_module_call<'ctx>(
         }
         ("llm", "count_tokens") => int_fn("jrt_count_tokens", 1),
         ("llm", "total_tokens") => int_fn("jrt_total_tokens", 0),
+        ("dict", "merge") => {
+            // (d1, d2) -> new dict word (tagged ptr).
+            let f = low.runtime_fn("jrt_coll_dict_merge", ptrt.fn_type(&[ptrt.into(), ptrt.into()], false));
+            let p = b
+                .build_call(f, &[strp(0).into(), strp(1).into()], "merge")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_pointer_value();
+            Ok(low.tag_ptr(p))
+        }
+        ("json", "parse") => {
+            // (str) -> value word (already tagged: dict/array/scalar).
+            let f = low.runtime_fn("jrt_json_parse_chunk", i64_ty.fn_type(&[ptrt.into()], false));
+            Ok(b.build_call(f, &[strp(0).into()], "jparse").map_err(err)?.as_any_value_enum().into_int_value())
+        }
+        ("json", "stringify" | "stringify_pretty") => {
+            // (value word, i32 pretty) -> tagged string.
+            let f = low.runtime_fn("jrt_json_stringify_chunk", ptrt.fn_type(&[i64_ty.into(), i32_ty.into()], false));
+            let pretty = i32_ty.const_int(u64::from(method == "stringify_pretty"), false);
+            let p = b
+                .build_call(f, &[low.load(args[0]).into(), pretty.into()], "jstr")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_pointer_value();
+            Ok(low.tag_str(p))
+        }
         _ => Err(format!("lower.rs: emit_module_call: unhandled {module}.{method}")),
     }
 }
@@ -1664,7 +1762,21 @@ pub fn lower_program<'ctx>(
     }
 
     let struct_defaults = build_struct_defaults(struct_defs);
-    let fnctx = FnCtx { funcs, defs, ptr2uid, global_fns, struct_defaults, unique_methods };
+    // Every global the program assigns (SetGlobal) anywhere — a user variable that
+    // shadows any reserved module name (so `name.method()` is not a module call).
+    let mut user_globals = std::collections::HashSet::new();
+    let mut collect_setglobals = |chunk: &Chunk| {
+        for instr in &chunk.code {
+            if let Instr::SetGlobal(n, _) = instr {
+                user_globals.insert(n.clone());
+            }
+        }
+    };
+    collect_setglobals(top);
+    for d in &defs {
+        collect_setglobals(&d.chunk);
+    }
+    let fnctx = FnCtx { funcs, defs, ptr2uid, global_fns, struct_defaults, unique_methods, user_globals };
 
     for uid in 0..fnctx.defs.len() {
         let cf = fnctx.defs[uid].clone();

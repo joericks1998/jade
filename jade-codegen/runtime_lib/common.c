@@ -230,6 +230,10 @@ char* jrt_str_of_any(int64_t val) {
 
 int64_t jrt_get_field(int64_t obj, const char* field) {
     jade_value_t v = (jade_value_t)obj;
+    /* A caught runtime error is a bare (message) string in the AOT, whereas the
+     * VM models it as a RuntimeError struct with a `.message` field. So
+     * `error.message` on a string yields the string itself — matching the VM. */
+    if (jrt_is_str(v) && strcmp(field, "message") == 0) return obj;
     if (jrt_is_ptr(v)) {
         void* p = jrt_unbox_ptr(v);
         if (jrt_kind_of(p) == JK_STRUCT) {
@@ -360,6 +364,43 @@ int32_t jrt_in_any(int64_t needle, int64_t haystack) {
     }
     throw_msg("'in' requires array, dict, or str");
     return 0;
+}
+
+/* ── Chunk-backend collection-producing stdlib forwarders ──────────────────
+ * These bridge the C RNG / the raising boundary to the Rust ObjHeader helpers
+ * (a Jade exception is a longjmp and must not cross a Rust frame). */
+
+/* fs.list_dir: the Rust helper builds the array or flags an I/O error; raise it
+ * here as a catchable exception (message is generic — difftest only checks that
+ * it is caught). Returns the array as a tagged pointer word. */
+int64_t jrt_fs_list_dir_chunk(const char* path) {
+    int32_t err = 0;
+    void* arr = jrt_coll_fs_list_dir(path, &err);
+    if (err) throw_msg("list_dir: could not read directory");
+    return (int64_t)jrt_box_ptr(arr);
+}
+
+/* random.choice(arr) -> a random element (already a tagged word); nil on empty.
+ * Uses the C RNG (jrt_random_int) so it shares the VM-seeded sequence, and the
+ * Rust ObjHeader accessors for element access. */
+int64_t jrt_random_choice_chunk(int64_t arr_word) {
+    void* arr = jrt_unbox_ptr((jade_value_t)arr_word);
+    int64_t n = jrt_coll_array_len(arr);
+    if (n == 0) return JRT_NIL;
+    int64_t idx = jrt_random_int(0, n - 1);
+    return jrt_coll_array_get(arr, idx);
+}
+
+/* random.shuffle(arr): Fisher-Yates in place (C RNG). Returns nothing. */
+void jrt_random_shuffle_chunk(int64_t arr_word) {
+    void* arr = jrt_unbox_ptr((jade_value_t)arr_word);
+    int64_t n = jrt_coll_array_len(arr);
+    for (int64_t i = n - 1; i > 0; i--) {
+        int64_t j = jrt_random_int(0, i);
+        int64_t tmp = jrt_coll_array_get(arr, i);
+        jrt_coll_array_set(arr, i, jrt_coll_array_get(arr, j));
+        jrt_coll_array_set(arr, j, tmp);
+    }
 }
 
 int jrt_snprintf_float(char* buf, size_t cap, double val) {

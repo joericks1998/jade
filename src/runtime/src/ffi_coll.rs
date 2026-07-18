@@ -219,6 +219,23 @@ unsafe fn cstr_slice<'a>(p: *const u8) -> &'a [u8] {
     unsafe { core::slice::from_raw_parts(p, strlen(p)) }
 }
 
+/// `str.split(s, sep)`: split `s` on `sep` into a new array of substrings
+/// (Rust `str::split` semantics, matching the VM). Each part inherits the
+/// source string's trust byte (taint propagates).
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_coll_str_split(s: *const c_char, sep: *const c_char) -> *mut c_void {
+    unsafe {
+        let trust = string::trust_of(s as *const u8);
+        let (sv, sepv) = (cstr_str(s), cstr_str(sep));
+        let mut arr = ArrayObj::<W>::new();
+        for part in sv.split(sepv) {
+            let ts = tagged_string(part.as_bytes(), trust);
+            arr.push(JadeValue::from_str_ptr(ts as *const ()).bits() as i64);
+        }
+        Box::into_raw(Box::new(arr)) as *mut c_void
+    }
+}
+
 // ── Dict ──────────────────────────────────────────────────────────────────────
 
 /// Allocate an empty kind-tagged dict (leaked; see module docs).
@@ -259,6 +276,19 @@ pub extern "C" fn jrt_coll_dict_copy(dict: *const c_void) -> *mut c_void {
     unsafe {
         let copy = (*(dict as *const DictObj<W>)).value_copy();
         Box::into_raw(Box::new(copy)) as *mut c_void
+    }
+}
+
+/// `dict.merge(a, b)`: a new dict = a's entries overlaid with b's (b wins on
+/// conflict); the inputs are unchanged. Matches the VM's `dict.merge`.
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_coll_dict_merge(a: *const c_void, b: *const c_void) -> *mut c_void {
+    unsafe {
+        let mut out = (*(a as *const DictObj<W>)).value_copy();
+        for (k, v) in (*(b as *const DictObj<W>)).entries() {
+            out.set(k, *v);
+        }
+        Box::into_raw(Box::new(out)) as *mut c_void
     }
 }
 
@@ -344,6 +374,71 @@ pub extern "C" fn jrt_get_type_name(obj: W) -> *mut c_char {
             }
         }
         tagged_string(b"", string::TRUSTED)
+    }
+}
+
+// ── Collection-producing stdlib ops (build ObjHeader collections) ─────────────
+
+/// `sh.output(cmd)`: run `sh -c cmd`, capturing output → a new dict
+/// `{stdout, stderr, code}` (stdout/stderr TAINTED — shell output; code Int).
+/// Never raises (mirrors the VM). Returns the raw dict pointer (codegen tags it).
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_coll_sh_output(cmd: *const c_char) -> *mut c_void {
+    let cmd = unsafe { cstr_str(cmd) };
+    let out = std::process::Command::new("sh").args(["-c", cmd]).output();
+    let mut d = DictObj::<W>::new();
+    let (so, se, code) = match out {
+        Ok(o) => (
+            String::from_utf8_lossy(&o.stdout).into_owned(),
+            String::from_utf8_lossy(&o.stderr).into_owned(),
+            o.status.code().unwrap_or(-1) as i64,
+        ),
+        Err(_) => (String::new(), String::new(), -1),
+    };
+    unsafe {
+        let so_w = JadeValue::from_str_ptr(tagged_string(so.as_bytes(), 1 /*TAINTED*/) as *const ()).bits() as i64;
+        let se_w = JadeValue::from_str_ptr(tagged_string(se.as_bytes(), 1) as *const ()).bits() as i64;
+        d.insert("stdout", so_w);
+        d.insert("stderr", se_w);
+        d.insert("code", JadeValue::from_int(code).bits() as i64);
+    }
+    Box::into_raw(Box::new(d)) as *mut c_void
+}
+
+/// `fs.list_dir(path)`: a new array of the directory's entry names (TAINTED —
+/// file-derived; no `.`/`..`; order is the OS enumeration, matching the VM's
+/// `std::fs::read_dir`). On any I/O error sets `*err = 1` and returns null; the
+/// C forwarder turns that into a catchable Jade error (a Rust frame can't
+/// `longjmp`).
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_coll_fs_list_dir(path: *const c_char, err: *mut i32) -> *mut c_void {
+    let path = unsafe { cstr_str(path) };
+    match std::fs::read_dir(path) {
+        Ok(rd) => {
+            let mut arr = ArrayObj::<W>::new();
+            for entry in rd {
+                match entry {
+                    Ok(e) => {
+                        let name = e.file_name();
+                        let name = name.to_string_lossy();
+                        let w = unsafe {
+                            JadeValue::from_str_ptr(tagged_string(name.as_bytes(), 1) as *const ()).bits() as i64
+                        };
+                        arr.push(w);
+                    }
+                    Err(_) => {
+                        unsafe { *err = 1 };
+                        return core::ptr::null_mut();
+                    }
+                }
+            }
+            unsafe { *err = 0 };
+            Box::into_raw(Box::new(arr)) as *mut c_void
+        }
+        Err(_) => {
+            unsafe { *err = 1 };
+            core::ptr::null_mut()
+        }
     }
 }
 
