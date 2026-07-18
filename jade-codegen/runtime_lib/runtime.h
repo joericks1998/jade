@@ -421,6 +421,8 @@ void*   jrt_coll_fs_list_dir(const char* path, int32_t* err); /* -> array | null
 int64_t jrt_fs_list_dir_chunk(const char* path);      /* raises on err; tagged ptr word */
 int64_t jrt_random_choice_chunk(int64_t arr_word);    /* random element word */
 void    jrt_random_shuffle_chunk(int64_t arr_word);   /* Fisher-Yates in place */
+int64_t jrt_coll_array_map(int64_t arr_word, int64_t fn_word);    /* -> new array */
+int64_t jrt_coll_array_filter(int64_t arr_word, int64_t fn_word); /* -> new array */
 /* jrt_len_any — len() on an Unknown-typed value, dispatched on the runtime tag. */
 int64_t jrt_len_any(jade_value_t v);
 /* jrt_len_unknown — len() for codegen's Unknown arm: strlen for STRING-tagged

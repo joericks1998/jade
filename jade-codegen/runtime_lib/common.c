@@ -391,6 +391,36 @@ int64_t jrt_random_choice_chunk(int64_t arr_word) {
     return jrt_coll_array_get(arr, idx);
 }
 
+/* array.map(arr, fn) -> new array of fn(elem). The Chunk backend's function
+ * value is a boxed function pointer: the value word (TAG_PTR) points at an
+ * 8-byte global holding jf_<uid>'s address, so `*box` is the callable
+ * `int64_t(*)(int64_t)` (closures read captured globals via GetGlobal, so they
+ * need no environment arg). Elements are tagged words. */
+int64_t jrt_coll_array_map(int64_t arr_word, int64_t fn_word) {
+    void* arr = jrt_unbox_ptr((jade_value_t)arr_word);
+    void** box = (void**)jrt_unbox_ptr((jade_value_t)fn_word);
+    int64_t (*fn)(int64_t) = (int64_t (*)(int64_t))(*box);
+    void* out = jrt_karr_new();
+    int64_t n = jrt_coll_array_len(arr);
+    for (int64_t i = 0; i < n; i++)
+        jrt_karr_push(out, fn(jrt_coll_array_get(arr, i)));
+    return (int64_t)jrt_box_ptr(out);
+}
+
+/* array.filter(arr, fn) -> elements where fn(elem) is truthy. */
+int64_t jrt_coll_array_filter(int64_t arr_word, int64_t fn_word) {
+    void* arr = jrt_unbox_ptr((jade_value_t)arr_word);
+    void** box = (void**)jrt_unbox_ptr((jade_value_t)fn_word);
+    int64_t (*fn)(int64_t) = (int64_t (*)(int64_t))(*box);
+    void* out = jrt_karr_new();
+    int64_t n = jrt_coll_array_len(arr);
+    for (int64_t i = 0; i < n; i++) {
+        int64_t e = jrt_coll_array_get(arr, i);
+        if (jrt_unbox_bool((jade_value_t)fn(e))) jrt_karr_push(out, e);
+    }
+    return (int64_t)jrt_box_ptr(out);
+}
+
 /* random.shuffle(arr): Fisher-Yates in place (C RNG). Returns nothing. */
 void jrt_random_shuffle_chunk(int64_t arr_word) {
     void* arr = jrt_unbox_ptr((jade_value_t)arr_word);

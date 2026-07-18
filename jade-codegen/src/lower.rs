@@ -93,11 +93,14 @@ fn chunk_module_supported(module: &str, method: &str, argc: usize) -> bool {
         ("env", "get") => argc == 1,
         ("env", "set") => argc == 2,
         ("time", "now" | "now_ms") => argc == 0,
+        ("time", "sleep") => argc == 1,
+        ("array", "map" | "filter") => argc == 2,
         ("random", "int") => argc == 2,
         ("random", "seed") => argc == 1,
         ("random", "float") => argc == 0,
         ("llm", "count_tokens") => argc == 1,
         ("llm", "total_tokens") => argc == 0,
+        ("llm", "tool_grammar") => argc == 0,
         ("dict", "merge") => argc == 2,
         ("json", "parse" | "stringify" | "stringify_pretty") => argc == 1,
         _ => false,
@@ -821,13 +824,16 @@ struct FnCtx<'ctx> {
     /// Struct type name → its optional fields' (name, scalar-literal default),
     /// used to fill fields a struct literal omits (the VM fills these at runtime).
     struct_defaults: HashMap<String, Vec<(String, VmValue)>>,
-    /// Extend-block method NAME → uid, for names that are unique across *all*
-    /// types. A unique method name identifies exactly one `jf_<uid>`, so a call
-    /// `obj.name(args)` devirtualizes to a direct call (`self` prepended). A name
-    /// defined on more than one type is ambiguous (its target depends on the
-    /// receiver's runtime type) and is omitted — such calls decline to the legacy
-    /// path until runtime type dispatch lands.
-    unique_methods: HashMap<String, usize>,
+    /// Extend-block method NAME → its candidate implementations `(uid, required,
+    /// total)`, where `required`/`total` are the arg counts (excluding `self`)
+    /// the method accepts (`required` = params without a default, `total` = all
+    /// params). A call `obj.name(k args)` resolves to the *one* candidate whose
+    /// range accepts `k` (`required <= k <= total`); if exactly one matches it
+    /// devirtualizes to a direct `jf_<uid>` call, so same-named methods on
+    /// different types disambiguate by arity (`put(a,b)` vs `put(a)`) with no
+    /// runtime type dispatch. Two candidates accepting the same `k` (same name +
+    /// arity on two types) are genuinely ambiguous → decline.
+    method_candidates: HashMap<String, Vec<(usize, usize, usize)>>,
     /// Global names the program `SetGlobal`s (assigns) anywhere. A name here is a
     /// user variable, so `name.method(...)` is a value method, NOT a stdlib module
     /// call — even when `name` happens to be a reserved module name (`let sh = []`
@@ -843,7 +849,7 @@ impl<'ctx> FnCtx<'ctx> {
             ptr2uid: HashMap::new(),
             global_fns: HashMap::new(),
             struct_defaults: HashMap::new(),
-            unique_methods: HashMap::new(),
+            method_candidates: HashMap::new(),
             user_globals: std::collections::HashSet::new(),
         }
     }
@@ -851,6 +857,25 @@ impl<'ctx> FnCtx<'ctx> {
     /// uid of the function `fn_defs[idx]` refers to (by `Arc` identity).
     fn uid_of(&self, fn_defs: &[Arc<CompiledFn>], idx: usize) -> Option<usize> {
         fn_defs.get(idx).and_then(|f| self.ptr2uid.get(&Arc::as_ptr(f)).copied())
+    }
+
+    /// Resolve an extend-method call `obj.name(k args)` to a single `jf_<uid>`:
+    /// the one candidate named `name` whose arg range accepts `k` (`required <= k
+    /// <= total`, both excluding `self`). Returns `None` if no candidate matches
+    /// (not a struct method) or more than one does (same name+arity on two types
+    /// — genuinely ambiguous, needs runtime type dispatch).
+    fn resolve_method(&self, name: &str, k: usize) -> Option<usize> {
+        let cands = self.method_candidates.get(name)?;
+        let mut hit = None;
+        for &(uid, required, total) in cands {
+            if required <= k && k <= total {
+                if hit.is_some() {
+                    return None; // ambiguous
+                }
+                hit = Some(uid);
+            }
+        }
+        hit
     }
 }
 
@@ -872,24 +897,17 @@ fn collect_fns(top: &Chunk) -> (Vec<Arc<CompiledFn>>, HashMap<*const CompiledFn,
 }
 
 /// Append every extend-block method body to `defs`/`ptr2uid` (assigning uids and
-/// BFS-collecting each method's nested `fn_defs`), and return the map of method
-/// NAMES that are unique across all types → uid. A method body is an ordinary
-/// `CompiledFn` whose first parameter is `self`, so once it has a uid the normal
-/// forward-declare / lower / task-wrapper loops emit it like any other function.
+/// BFS-collecting each method's nested `fn_defs`), and return the method-name →
+/// candidate-`(uid, required, total)` map (arg counts exclude `self`). A method
+/// body is an ordinary `CompiledFn` whose first parameter is `self`, so once it
+/// has a uid the normal forward-declare / lower / task-wrapper loops emit it like
+/// any other function.
 fn collect_method_fns(
     extend_methods: &HashMap<String, HashMap<String, Arc<CompiledFn>>>,
     defs: &mut Vec<Arc<CompiledFn>>,
     ptr2uid: &mut HashMap<*const CompiledFn, usize>,
-) -> HashMap<String, usize> {
-    // How many types define each method name (for the uniqueness test).
-    let mut name_count: HashMap<&str, usize> = HashMap::new();
-    for methods in extend_methods.values() {
-        for name in methods.keys() {
-            *name_count.entry(name.as_str()).or_default() += 1;
-        }
-    }
-
-    let mut unique_methods: HashMap<String, usize> = HashMap::new();
+) -> HashMap<String, Vec<(usize, usize, usize)>> {
+    let mut candidates: HashMap<String, Vec<(usize, usize, usize)>> = HashMap::new();
     let mut queue: VecDeque<Arc<CompiledFn>> = VecDeque::new();
     // Deterministic order: sort by (type, method) so uids are stable across runs.
     let mut types: Vec<&String> = extend_methods.keys().collect();
@@ -910,9 +928,13 @@ fn collect_method_fns(
                     u
                 }
             };
-            if name_count.get(name.as_str()).copied() == Some(1) {
-                unique_methods.insert(name.clone(), uid);
-            }
+            // Arg counts excluding `self` (param 0): `total` = all trailing params,
+            // `required` = those without a default.
+            let total = mfn.params.len().saturating_sub(1);
+            let required = (1..mfn.params.len())
+                .filter(|&j| mfn.defaults.get(j).and_then(|d| d.as_ref()).is_none())
+                .count();
+            candidates.entry(name.clone()).or_default().push((uid, required, total));
         }
     }
     // BFS the method bodies' nested function literals.
@@ -926,7 +948,7 @@ fn collect_method_fns(
             }
         }
     }
-    unique_methods
+    candidates
 }
 
 /// Names that provably hold a function: bound once (whole-program) from a
@@ -1153,22 +1175,11 @@ fn resolve_user_calls(
                         return Err(format!("lower.rs: unsupported module call {module}.{method}"));
                     }
                 } else if let Some((self_reg, mname, gf_idx)) = reg_getfield.get(callee).cloned() {
-                    // A method call `obj.mname(args)`. Devirtualize only when the
-                    // method name is a *unique* extend-block method (one target);
-                    // ambiguous names, primitive methods, and module members decline.
-                    if let Some(&uid) = fnctx.unique_methods.get(&mname) {
-                        let cf = &fnctx.defs[uid];
-                        // Params include `self` (param 0), supplied implicitly by the
-                        // receiver; `args` are the explicit trailing arguments.
-                        let provided = args.len() + 1;
-                        if provided > cf.params.len() {
-                            return Err("lower.rs: method call passes more arguments than parameters".into());
-                        }
-                        for j in provided..cf.params.len() {
-                            if cf.defaults.get(j).and_then(|x| x.as_ref()).is_none() {
-                                return Err("lower.rs: method call omits a required argument".into());
-                            }
-                        }
+                    // A method call `obj.mname(args)`. Devirtualize to the one
+                    // extend-block method named `mname` whose arg range accepts this
+                    // call's arg count (disambiguating same-named methods by arity);
+                    // otherwise try primitive methods, else decline.
+                    if let Some(uid) = fnctx.resolve_method(&mname, args.len()) {
                         out.insert(i, CallKind::MethodDirect { uid, self_reg, args: args.clone() });
                         // The producing GetField is a method lookup (would raise as a
                         // data-field access) and its result is now unused → skip it.
@@ -1586,6 +1597,24 @@ fn emit_module_call<'ctx>(
         ("env", "set") => void_ptr_fn("jrt_env_set", 2),
         ("time", "now") => int_fn("jrt_time_now", 0),
         ("time", "now_ms") => int_fn("jrt_time_now_ms", 0),
+        ("time", "sleep") => {
+            // (float seconds) -> nil. Unbox the boxed-float arg to a native f64.
+            let unbox = low.runtime_fn("jrt_unbox_float", f64_ty.fn_type(&[i64_ty.into()], false));
+            let d = b.build_call(unbox, &[low.load(args[0]).into()], "sec").map_err(err)?.as_any_value_enum().into_float_value();
+            let f = low.runtime_fn("jrt_time_sleep", void_ty.fn_type(&[f64_ty.into()], false));
+            b.build_call(f, &[d.into()], "").map_err(err)?;
+            Ok(nil)
+        }
+        ("array", "map" | "filter") => {
+            // (arr word, fn word) -> new array word. Both args are tagged words.
+            let cname = if method == "map" { "jrt_coll_array_map" } else { "jrt_coll_array_filter" };
+            let f = low.runtime_fn(cname, i64_ty.fn_type(&[i64_ty.into(), i64_ty.into()], false));
+            Ok(b
+                .build_call(f, &[low.load(args[0]).into(), low.load(args[1]).into()], "mapf")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_int_value())
+        }
         ("random", "int") => {
             // Raw (untagged) i64 bounds; raises if lo > hi.
             let f = low.runtime_fn("jrt_random_int", i64_ty.fn_type(&[i64_ty.into(), i64_ty.into()], false));
@@ -1607,6 +1636,7 @@ fn emit_module_call<'ctx>(
         }
         ("llm", "count_tokens") => int_fn("jrt_count_tokens", 1),
         ("llm", "total_tokens") => int_fn("jrt_total_tokens", 0),
+        ("llm", "tool_grammar") => Ok(low.tag_str(str_fn("jrt_tool_grammar", 0)?)),
         ("dict", "merge") => {
             // (d1, d2) -> new dict word (tagged ptr).
             let f = low.runtime_fn("jrt_coll_dict_merge", ptrt.fn_type(&[ptrt.into(), ptrt.into()], false));
@@ -1697,7 +1727,7 @@ pub fn lower_program<'ctx>(
     // A unique name devirtualizes to a direct call; an ambiguous name (same
     // method on >1 type) needs runtime type dispatch and is left out, so calls to
     // it decline (`resolve_user_calls`).
-    let unique_methods = collect_method_fns(extend_methods, &mut defs, &mut ptr2uid);
+    let method_candidates = collect_method_fns(extend_methods, &mut defs, &mut ptr2uid);
 
     // Native (C-ABI FFI) references — `__native$<pkgid>$<fn>` globals produced by
     // import namespacing — are not user functions and have no `jf_<uid>` body, so
@@ -1776,7 +1806,7 @@ pub fn lower_program<'ctx>(
     for d in &defs {
         collect_setglobals(&d.chunk);
     }
-    let fnctx = FnCtx { funcs, defs, ptr2uid, global_fns, struct_defaults, unique_methods, user_globals };
+    let fnctx = FnCtx { funcs, defs, ptr2uid, global_fns, struct_defaults, method_candidates, user_globals };
 
     for uid in 0..fnctx.defs.len() {
         let cf = fnctx.defs[uid].clone();
