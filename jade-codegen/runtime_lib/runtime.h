@@ -226,19 +226,6 @@ void jade_join(jade_future_t* futures, int n, jade_value_t* results_out);
  */
 void jade_future_free(jade_future_t future);
 
-/* ── Dict ─────────────────────────────────────────────────────────────── */
-void*    jade_dict_create(void);
-void     jade_dict_set(void* dict, const char* key, int64_t val);
-int64_t  jade_dict_get(void* dict, const char* key);   /* JRT_NIL on miss */
-/* Like jade_dict_get but RAISES a catchable runtime error on a missing key,
- * matching the VM's "key 'X' not found in dict". Used for `d[k]` reads. */
-int64_t  jade_dict_get_checked(void* dict, const char* key);
-int32_t  jade_dict_has(void* dict, const char* key);
-int64_t  jade_dict_len(void* dict);
-/* jade_dict_copy — shallow copy into a fresh dict (VM dict value semantics). */
-void*    jade_dict_copy(void* dict);
-void     jade_dict_free(void* dict);
-
 /* ── Exceptions ───────────────────────────────────────────────────────── */
 /* Registers jmpbuf (alloca'd by the LLVM-compiled caller) as the current
  * exception frame. The caller calls setjmp on the same buffer immediately
@@ -328,8 +315,6 @@ jade_value_t jrt_llm_profile(void);
 /* ── String methods ───────────────────────────────────────────────── */
 /* jrt_str_contains — 1 if needle found in haystack, else 0.         */
 int32_t jrt_str_contains(const char* haystack, const char* needle);
-/* jrt_str_split — split str on delim, returns jade_array* of char*. */
-void*   jrt_str_split(const char* str, const char* delim);
 /* jrt_str_trim — heap copy with leading/trailing whitespace stripped. */
 char*   jrt_str_trim(const char* str);
 /* jrt_str_replace — replace all occurrences of from with to. */
@@ -354,15 +339,14 @@ int64_t jrt_float_any(int64_t val);
 int64_t jrt_bool_any(int64_t val);
 
 /* ── Kind-tagged heap objects (Chunk backend collections) ──────────────────
- * The Chunk backend can't recover the static array/dict/struct type the way the
- * legacy path does, so its collections carry a runtime kind tag. The storage now
- * lives in the shared Rust runtime crate (jade-runtime, src/coll.rs) behind an
- * ObjHeader; these `jrt_*`/`jrt_coll_*` symbols resolve against its staticlib.
+ * Collections carry a runtime kind tag so the backend can recover their
+ * array/dict/struct kind at runtime. The storage lives in the shared Rust
+ * runtime crate (jade-runtime, src/coll.rs) behind an ObjHeader; these
+ * `jrt_*`/`jrt_coll_*` symbols resolve against its staticlib.
  * JK_ARRAY/JK_DICT/JK_STRUCT equal the Rust ObjKind discriminants (heap.rs:
- * Array=2, Dict=3, Struct=4) — jrt_kind_of returns that byte. (New objects carry
- * `len` at ObjHeader offset 4, NOT the legacy JrtArrayHdr offset 8; they never
- * flow to jrt_len_any/jrt_len_unknown, which serve the legacy path — a program is
- * wholly one path. The Chunk path reads a collection's length via jrt_coll_len.) */
+ * Array=2, Dict=3, Struct=4) — jrt_kind_of returns that byte. Objects carry
+ * `len` at ObjHeader offset 4; the Chunk path reads a collection's length via
+ * jrt_coll_len. */
 #define JK_ARRAY  2
 #define JK_DICT   3
 #define JK_STRUCT 4
@@ -372,8 +356,7 @@ int64_t jrt_kind_of(void* p);
  * backend's len() on a collection. */
 int64_t jrt_coll_len(void* p);
 /* jrt_len_chunk — len() for the Chunk backend's Unknown arm: strlen for a STRING
- * word, ObjHeader.len (offset 4) for a kind-tagged collection, else 0. The
- * Chunk-path twin of jrt_len_unknown (which reads the legacy offset-8 length). */
+ * word, ObjHeader.len (offset 4) for a kind-tagged collection, else 0. */
 int64_t jrt_len_chunk(int64_t word);
 /* jrt_coll_* — raw storage helpers for the C forwarders below (never raise; the
  * forwarder owns the bounds/type checks + throw). array_get/set are unchecked
@@ -430,51 +413,8 @@ int64_t jrt_random_choice_chunk(int64_t arr_word);    /* random element word */
 void    jrt_random_shuffle_chunk(int64_t arr_word);   /* Fisher-Yates in place */
 int64_t jrt_coll_array_map(int64_t arr_word, int64_t fn_word);    /* -> new array */
 int64_t jrt_coll_array_filter(int64_t arr_word, int64_t fn_word); /* -> new array */
-/* jrt_len_any — len() on an Unknown-typed value, dispatched on the runtime tag. */
-int64_t jrt_len_any(jade_value_t v);
-/* jrt_len_unknown — len() for codegen's Unknown arm: strlen for STRING-tagged
- * values, array-header .len (offset 8) for every other word — including a raw
- * untagged heap pointer (a stdlib Ret::Ptr result). NULL → 0. */
-int64_t jrt_len_unknown(int64_t val);
-
-/* ── Array methods ────────────────────────────────────────────────── */
-/* jrt_array_new — allocate an empty jade_array header (cap 0; push grows it).
- * Box with jrt_box_ptr to surface it as a value. Returns NULL on OOM.       */
-void*   jrt_array_new(void);
-/* jrt_array_push — append val (as i64) to jade_array, grow if needed. */
-void    jrt_array_push(void* arr, int64_t val);
-/* jrt_array_pop — remove and return last element; returns 0 if empty. */
-int64_t jrt_array_pop(void* arr);
-/* jrt_array_len — element count (NULL → 0). */
-int64_t jrt_array_len(void* arr);
-/* jrt_array_get — element i as a tagged value; JRT_NIL if out of range. */
-int64_t jrt_array_get(void* arr, int64_t i);
-/* jrt_array_set — store tagged val at element i (no-op if out of range). */
-void    jrt_array_set(void* arr, int64_t i, int64_t val);
-/* jrt_array_reverse — reverse in place (arr.reverse(), returns Nil). */
-void    jrt_array_reverse(void* arr);
-/* jrt_array_sort — sort in place by the VM value ordering (arr.sort(), Nil). */
-void    jrt_array_sort(void* arr);
-/* jrt_array_map — new array of fn(elem) (array.map). `fnval` is a jade_fn_t*. */
-void*   jrt_array_map(void* arr, void* fnval);
-/* jrt_array_filter — elements where fn(elem) is true (array.filter). */
-void*   jrt_array_filter(void* arr, void* fnval);
-
-/* ── Dict methods ─────────────────────────────────────────────────── */
-/* jrt_dict_keys — keys sorted ascending, as a jade_array* of TRUSTED char*. */
-void*   jrt_dict_keys(void* dict);
-/* jrt_dict_values — values ordered by key, as a jade_array* (tagged). */
-void*   jrt_dict_values(void* dict);
-/* jrt_dict_merge — new dict = d1 then d2 (d2 wins on conflict); inputs unchanged. */
-void*   jrt_dict_merge(void* d1, void* d2);
 
 /* ── JSON ─────────────────────────────────────────────────────────── */
-/* jrt_json_parse — parse a JSON object string into a JadeDict*.       */
-void*   jrt_json_parse(const char* json_str);
-/* jrt_json_esc_str — return heap `"escaped"` string (with quotes).    */
-char*   jrt_json_esc_str(const char* s);
-/* jrt_json_arr_dicts — serialize jade_array* of JadeDicts to JSON.    */
-char*   jrt_json_arr_dicts(int64_t arr_i64);
 /* jrt_json_parse_chunk — parse a (tagged) JSON string into an ObjHeader value
  * word (dict/array/scalar), or JRT_NIL on invalid JSON. Chunk-path native. */
 jade_value_t jrt_json_parse_chunk(const char* s);

@@ -97,28 +97,6 @@ void jrt_fs_delete(const char* path) {
     if (remove(path) != 0) fs_raise("delete", path, errno);
 }
 
-/* fs.list_dir(path) — names of directory entries, excluding "." and "..".
- * File names only (not full paths), hidden files included, OS-defined order.
- * Entries are TAINTED (file-derived). On a read failure it RAISES a catchable
- * runtime exception, mirroring the VM's JadeError::IoError. */
-void* jrt_fs_list_dir(const char* path) {
-    if (!path) errno = ENOENT;
-    DIR* d = path ? opendir(path) : NULL;
-    if (!d) {
-        fs_raise("list_dir", path, errno);
-        return NULL; /* unreachable: fs_raise longjmps or exits */
-    }
-    void* arr = jrt_array_new();
-    struct dirent* de;
-    while ((de = readdir(d)) != NULL) {
-        const char* nm = de->d_name;
-        if (nm[0] == '.' && (nm[1] == '\0' || (nm[1] == '.' && nm[2] == '\0'))) continue;
-        jrt_array_push(arr, jrt_box_str(jrt_str_dup(nm, JRT_TAINTED)));
-    }
-    closedir(d);
-    return arr;
-}
-
 /* Recursively create `path` and any missing parents (VM uses create_dir_all,
  * returns Nil). Each intermediate mkdir's EEXIST is ignored. */
 void jrt_fs_mkdir(const char* path) {

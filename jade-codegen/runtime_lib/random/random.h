@@ -13,10 +13,6 @@
 int64_t jrt_random_int(int64_t lo, int64_t hi);
 /* random.float() — uniform double in [0.0, 1.0). */
 double  jrt_random_float(void);
-/* random.choice(arr) — a random element (tagged). Raises on an empty array. */
-int64_t jrt_random_choice(void* arr);
-/* random.shuffle(arr) — Fisher-Yates in place. Returns Nil. */
-void    jrt_random_shuffle(void* arr);
 /* random.seed(n) — reseed the generator. Returns Nil. */
 void    jrt_random_seed(int64_t n);
 

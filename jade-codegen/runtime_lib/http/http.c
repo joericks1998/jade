@@ -3,7 +3,7 @@
  * get/post/put/delete/head over libcurl-the-binary (exec'd directly, no shell),
  * mirroring the VM's reqwest-backed http_pkg.rs: each returns { status, body }.
  * Response bodies are external → TAINTED. Uses only libc + the public jade ABI;
- * the optional headers dict is read via jrt_dict_keys / jade_dict_get.
+ * the optional headers dict is read via jrt_coll_dict_keys / jrt_coll_dict_get.
  *
  * Note: not covered by the difftest suite (it needs the network). Kept faithful
  * to the VM's observable shape for the offline/error path (status 0, body ""). */

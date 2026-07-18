@@ -82,29 +82,6 @@ double jrt_random_float(void) {
     return (double)r / (double)(1ULL << 53);      /* [0.0, 1.0) */
 }
 
-int64_t jrt_random_choice(void* arr) {
-    int64_t n = jrt_array_len(arr);
-    if (n <= 0) {
-        jade_exc_throw_typed(
-            jrt_box_str(jrt_str_dup("random.choice: array is empty", JRT_TRUSTED)), NULL);
-        return JRT_NIL; /* unreachable */
-    }
-    return jrt_array_get(arr, (int64_t)rng_bounded((uint64_t)n));
-}
-
-/* Fisher-Yates, matching the VM (random_pkg.rs): for i in (1..len).rev(),
- * j = gen_range(0..=i), swap(i, j). Mutates in place, returns Nil. */
-void jrt_random_shuffle(void* arr) {
-    int64_t n = jrt_array_len(arr);
-    for (int64_t i = n - 1; i >= 1; i--) {
-        int64_t j = (int64_t)rng_bounded((uint64_t)i + 1ULL);
-        int64_t vi = jrt_array_get(arr, i);
-        int64_t vj = jrt_array_get(arr, j);
-        jrt_array_set(arr, i, vj);
-        jrt_array_set(arr, j, vi);
-    }
-}
-
 void jrt_random_seed(int64_t n) {
     while (__sync_lock_test_and_set(&rng_lock, 1)) { /* spin */ }
     rng_reseed((uint64_t)n);

@@ -19,9 +19,6 @@ void    jrt_fs_append(const char* path, const char* content);
 int32_t jrt_fs_exists(const char* path);
 /* fs.delete(path) — remove a file. Returns Nil; errors swallowed. */
 void    jrt_fs_delete(const char* path);
-/* fs.list_dir(path) — entry names (no "."/"..", incl. hidden), TAINTED. Raises
- * a catchable runtime exception on read failure. Returns jade_array*. */
-void*   jrt_fs_list_dir(const char* path);
 /* fs.mkdir(path) — create path and missing parents (create_dir_all). Returns Nil. */
 void    jrt_fs_mkdir(const char* path);
 

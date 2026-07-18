@@ -23,8 +23,8 @@ typedef struct {
     size_t          count;
 } JadePkgHandle;
 
-/* Raise a catchable Jade error with a formatted message (TRUSTED string), the
- * same mechanism jade_dict_get_checked uses. Does not return. */
+/* Raise a catchable Jade error with a formatted message (TRUSTED string), via
+ * the runtime's typed-throw mechanism. Does not return. */
 static void native_raise(const char* fmt, const char* arg) {
     char msg[512];
     snprintf(msg, sizeof msg, fmt, arg ? arg : "");
