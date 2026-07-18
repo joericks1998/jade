@@ -15,6 +15,7 @@ use crate::{
     llm,
     native::NativeLibFn,
 };
+use jade_runtime::dynop;
 
 // ── Token budgets (mirror eval.rs) ────────────────────────────────────────────
 
@@ -3024,40 +3025,97 @@ fn coerce(
 
 // ── Dynamic dispatch helpers ──────────────────────────────────────────────────
 
-fn eval_binop_dynamic(op: &BinOpKind, l: VmValue, r: VmValue, span: Span) -> Result<VmValue> {
+/// Decode a `VmValue` into the shared [`dynop`] core's kind view. Scalars carry
+/// their payload; strings and every other value are markers (string bytes and
+/// error type-names are recovered from the original `VmValue` by the caller).
+fn vm_kind(v: &VmValue) -> dynop::Kind {
+    match v {
+        VmValue::Int(i)   => dynop::Kind::Int(*i),
+        VmValue::Float(f) => dynop::Kind::Float(*f),
+        VmValue::Bool(b)  => dynop::Kind::Bool(*b),
+        VmValue::Str(_)   => dynop::Kind::Str,
+        VmValue::Nil      => dynop::Kind::Nil,
+        _                 => dynop::Kind::Other,
+    }
+}
+
+/// The arithmetic/comparison operators the shared core decides; everything else
+/// (bitwise, shift, `in`, short-circuit) stays VM-owned.
+fn binop_to_dynop(op: &BinOpKind) -> Option<dynop::Op> {
+    use BinOpKind as B;
+    use dynop::Op as O;
+    Some(match op {
+        B::Add => O::Add, B::Sub => O::Sub, B::Mul => O::Mul, B::Div => O::Div, B::Mod => O::Mod,
+        B::Eq => O::Eq, B::Ne => O::Ne, B::Lt => O::Lt, B::Gt => O::Gt, B::Le => O::Le, B::Ge => O::Ge,
+        _ => return None,
+    })
+}
+
+/// Apply an equality/ordering operator to two already-known strings (the shared
+/// core defers string bytes to us via `Outcome::StrRel`).
+fn apply_str_rel(op: &BinOpKind, a: &str, b: &str) -> bool {
     use BinOpKind::*;
     match op {
-        Add => match (l, r) {
-            (VmValue::Int(a), VmValue::Int(b))     => a.checked_add(b).ok_or(JadeError::IntegerOverflow{span}).map(VmValue::Int),
-            (VmValue::Str(a), VmValue::Str(b))     => Ok(VmValue::Str(a + &b)),
-            (a, b) => { let (af, bf) = to_floats(a, b, op, span)?; Ok(VmValue::Float(af + bf)) }
+        Eq => a == b, Ne => a != b,
+        Lt => a < b,  Gt => a > b,
+        Le => a <= b, Ge => a >= b,
+        _ => unreachable!("apply_str_rel only for eq/ordering ops"),
+    }
+}
+
+/// Map a shared-core error to the VM's `JadeError`, reconstructing the exact
+/// message the VM produced before it delegated (tests match on the variants).
+fn map_dynop_err(e: dynop::DynErr, op: &BinOpKind, l: &VmValue, r: &VmValue, span: Span) -> JadeError {
+    use dynop::DynErr as D;
+    use BinOpKind::*;
+    match e {
+        D::Overflow => JadeError::IntegerOverflow { span },
+        D::DivZero  => JadeError::DivisionByZero { span },
+        D::RemZero  => JadeError::RemainderByZero { span },
+        D::Type => {
+            let message = match op {
+                Add | Sub | Mul | Div | Mod => format!("{:?} requires numeric operands", op),
+                _ => {
+                    let sym = match op { Eq => "==", Ne => "!=", Lt => "<", Gt => ">", Le => "<=", Ge => ">=", _ => "?" };
+                    format!("'{}' cannot compare {} and {}", sym, value_type_name(l), value_type_name(r))
+                }
+            };
+            JadeError::TypeError { message, span }
+        }
+    }
+}
+
+/// Turn a shared-core [`dynop::Outcome`] back into a `VmValue`, doing the
+/// string byte-work the core deferred (`Concat` for `+`, `StrRel` for
+/// comparisons). `l`/`r` are the original operands (needed for strings + errors).
+fn finish_dynop(out: dynop::Outcome, op: &BinOpKind, l: VmValue, r: VmValue, span: Span) -> Result<VmValue> {
+    use dynop::Outcome as O;
+    match out {
+        O::Int(v)  => Ok(VmValue::Int(v)),
+        O::Float(v) => Ok(VmValue::Float(v)),
+        O::Bool(v) => Ok(VmValue::Bool(v)),
+        O::Concat => match (l, r) {
+            (VmValue::Str(a), VmValue::Str(b)) => Ok(VmValue::Str(a + &b)),
+            _ => unreachable!("Concat is only produced for two strings"),
         },
-        Sub => match (l, r) {
-            (VmValue::Int(a), VmValue::Int(b))     => a.checked_sub(b).ok_or(JadeError::IntegerOverflow{span}).map(VmValue::Int),
-            (a, b) => { let (af, bf) = to_floats(a, b, op, span)?; Ok(VmValue::Float(af - bf)) }
+        O::StrRel => match (&l, &r) {
+            (VmValue::Str(a), VmValue::Str(b)) => Ok(VmValue::Bool(apply_str_rel(op, a, b))),
+            _ => unreachable!("StrRel is only produced for two strings"),
         },
-        Mul => match (l, r) {
-            (VmValue::Int(a), VmValue::Int(b))     => a.checked_mul(b).ok_or(JadeError::IntegerOverflow{span}).map(VmValue::Int),
-            (a, b) => { let (af, bf) = to_floats(a, b, op, span)?; Ok(VmValue::Float(af * bf)) }
-        },
-        Div => match (l, r) {
-            (VmValue::Int(a), VmValue::Int(b)) => {
-                if b == 0 { Err(JadeError::DivisionByZero{span}) } else { Ok(VmValue::Int(a/b)) }
-            }
-            (a, b) => {
-                let (af, bf) = to_floats(a, b, op, span)?;
-                if bf == 0.0 { Err(JadeError::DivisionByZero{span}) } else { Ok(VmValue::Float(af/bf)) }
-            }
-        },
-        Mod => match (l, r) {
-            (VmValue::Int(a), VmValue::Int(b)) => {
-                if b == 0 { Err(JadeError::RemainderByZero{span}) } else { Ok(VmValue::Int(a%b)) }
-            }
-            (a, b) => {
-                let (af, bf) = to_floats(a, b, op, span)?;
-                if bf == 0.0 { Err(JadeError::RemainderByZero{span}) } else { Ok(VmValue::Float(af%bf)) }
-            }
-        },
+        O::Err(e) => Err(map_dynop_err(e, op, &l, &r, span)),
+    }
+}
+
+fn eval_binop_dynamic(op: &BinOpKind, l: VmValue, r: VmValue, span: Span) -> Result<VmValue> {
+    use BinOpKind::*;
+    // Arithmetic + comparison are decided by the shared `dynop` core, so the VM
+    // and AOT cannot diverge on overflow/bool/cross-kind rules.
+    if let Some(dop) = binop_to_dynop(op) {
+        let out = dynop::binop(dop, vm_kind(&l), vm_kind(&r));
+        return finish_dynop(out, op, l, r, span);
+    }
+    // Ops the VM owns: int-only bitwise/shift, container membership, short-circuit.
+    match op {
         BitAnd => match (l,r) { (VmValue::Int(a),VmValue::Int(b)) => Ok(VmValue::Int(a&b)), (l,r) => Err(JadeError::TypeError{message:format!("'&' requires int operands, got {} and {}", value_type_name(&l), value_type_name(&r)),span}) },
         BitOr  => match (l,r) { (VmValue::Int(a),VmValue::Int(b)) => Ok(VmValue::Int(a|b)), (l,r) => Err(JadeError::TypeError{message:format!("'|' requires int operands, got {} and {}", value_type_name(&l), value_type_name(&r)),span}) },
         BitXor => match (l,r) { (VmValue::Int(a),VmValue::Int(b)) => Ok(VmValue::Int(a^b)), (l,r) => Err(JadeError::TypeError{message:format!("'^' requires int operands, got {} and {}", value_type_name(&l), value_type_name(&r)),span}) },
@@ -3073,31 +3131,10 @@ fn eval_binop_dynamic(op: &BinOpKind, l: VmValue, r: VmValue, span: Span) -> Res
             }
             _ => Err(JadeError::TypeError{message:"'>>' requires int operands".to_string(),span})
         },
-        Eq => match (l,r) {
-            (VmValue::Int(a),VmValue::Int(b))       => Ok(VmValue::Bool(a==b)),
-            (VmValue::Float(a),VmValue::Float(b))   => Ok(VmValue::Bool(a==b)),
-            (VmValue::Bool(a),VmValue::Bool(b))     => Ok(VmValue::Bool(a==b)),
-            (VmValue::Str(a),VmValue::Str(b))       => Ok(VmValue::Bool(a==b)),
-            (VmValue::Nil, VmValue::Nil)            => Ok(VmValue::Bool(true)),
-            (VmValue::Nil, _) | (_, VmValue::Nil)  => Ok(VmValue::Bool(false)),
-            (l,r) => Err(JadeError::TypeError{message:format!("'==' cannot compare {} and {}", value_type_name(&l), value_type_name(&r)),span})
-        },
-        Ne => match (l,r) {
-            (VmValue::Int(a),VmValue::Int(b))       => Ok(VmValue::Bool(a!=b)),
-            (VmValue::Float(a),VmValue::Float(b))   => Ok(VmValue::Bool(a!=b)),
-            (VmValue::Bool(a),VmValue::Bool(b))     => Ok(VmValue::Bool(a!=b)),
-            (VmValue::Str(a),VmValue::Str(b))       => Ok(VmValue::Bool(a!=b)),
-            (VmValue::Nil, VmValue::Nil)            => Ok(VmValue::Bool(false)),
-            (VmValue::Nil, _) | (_, VmValue::Nil)  => Ok(VmValue::Bool(true)),
-            (l,r) => Err(JadeError::TypeError{message:format!("'!=' cannot compare {} and {}", value_type_name(&l), value_type_name(&r)),span})
-        },
-        Lt => cmp_order(l,r,"<",span,|a:f64,b:f64| a<b, |a:i64,b:i64| a<b, |a:&str,b:&str| a<b, |a:bool,b:bool| !a&&b),
-        Gt => cmp_order(l,r,">",span,|a:f64,b:f64| a>b, |a:i64,b:i64| a>b, |a:&str,b:&str| a>b, |a:bool,b:bool| a&&!b),
-        Le => cmp_order(l,r,"<=",span,|a:f64,b:f64| a<=b,|a:i64,b:i64| a<=b,|a:&str,b:&str| a<=b,|a:bool,b:bool| a==b||(!a&&b)),
-        Ge => cmp_order(l,r,">=",span,|a:f64,b:f64| a>=b,|a:i64,b:i64| a>=b,|a:&str,b:&str| a>=b,|a:bool,b:bool| a==b||(a&&!b)),
         In => vm_contains(l, r, span).map(VmValue::Bool),
         NotIn => vm_contains(l, r, span).map(|b| VmValue::Bool(!b)),
         And | Or => unreachable!("short-circuit ops must not reach BinOp dynamic dispatch"),
+        _ => unreachable!("arithmetic/comparison handled by the shared core"),
     }
 }
 
@@ -3136,103 +3173,33 @@ fn vm_contains(needle: VmValue, haystack: VmValue, span: Span) -> Result<bool> {
     }
 }
 
-fn cmp_order(
-    l: VmValue, r: VmValue, op: &str, span: Span,
-    ff: impl Fn(f64,f64)->bool,
-    ii: impl Fn(i64,i64)->bool,
-    ss: impl Fn(&str,&str)->bool,
-    bb: impl Fn(bool,bool)->bool,
-) -> Result<VmValue> {
-    match (l, r) {
-        (VmValue::Int(a),   VmValue::Int(b))   => Ok(VmValue::Bool(ii(a,b))),
-        (VmValue::Float(a), VmValue::Float(b)) => Ok(VmValue::Bool(ff(a,b))),
-        (VmValue::Int(a),   VmValue::Float(b)) => Ok(VmValue::Bool(ff(a as f64,b))),
-        (VmValue::Float(a), VmValue::Int(b))   => Ok(VmValue::Bool(ff(a,b as f64))),
-        (VmValue::Bool(a),  VmValue::Bool(b))  => Ok(VmValue::Bool(bb(a,b))),
-        (VmValue::Str(a),   VmValue::Str(b))   => Ok(VmValue::Bool(ss(&a,&b))),
-        (l, r) => Err(JadeError::TypeError { message: format!("'{}' cannot compare {} and {}", op, value_type_name(&l), value_type_name(&r)), span }),
-    }
-}
-
 fn eval_unaryop_dynamic(op: &UnaryOpKind, v: VmValue, span: Span) -> Result<VmValue> {
     match op {
         UnaryOpKind::BitNot => match v { VmValue::Int(i) => Ok(VmValue::Int(!i)), ref v => Err(JadeError::TypeError{message:format!("'~' requires int, got {}", value_type_name(v)),span}) },
         UnaryOpKind::Not    => match v { VmValue::Bool(b)=> Ok(VmValue::Bool(!b)), ref v => Err(JadeError::TypeError{message:format!("'!' requires bool, got {}", value_type_name(v)),span}) },
-        UnaryOpKind::Neg    => match v {
-            VmValue::Int(i)   => Ok(VmValue::Int(-i)),
-            VmValue::Float(f) => Ok(VmValue::Float(-f)),
-            ref v => Err(JadeError::TypeError{message:format!("unary '-' requires int or float, got {}", value_type_name(v)),span})
+        // Numeric negation is decided by the shared core (int/float only).
+        UnaryOpKind::Neg    => match dynop::neg(vm_kind(&v)) {
+            dynop::Outcome::Int(i)   => Ok(VmValue::Int(i)),
+            dynop::Outcome::Float(f) => Ok(VmValue::Float(f)),
+            _ => Err(JadeError::TypeError{message:format!("unary '-' requires int or float, got {}", value_type_name(&v)),span}),
         },
     }
-}
-
-fn to_floats(l: VmValue, r: VmValue, op: &BinOpKind, span: Span) -> Result<(f64, f64)> {
-    let lf = match l { VmValue::Int(i) => i as f64, VmValue::Float(f) => f, _ => return Err(JadeError::TypeError { message: format!("{:?} requires numeric operands", op), span }) };
-    let rf = match r { VmValue::Int(i) => i as f64, VmValue::Float(f) => f, _ => return Err(JadeError::TypeError { message: format!("{:?} requires numeric operands", op), span }) };
-    Ok((lf, rf))
 }
 
 fn cmp_dynamic(slots: &[VmValue], l: Reg, r: Reg, op: &str, span: Span) -> Result<VmValue> {
     let lv = get(slots, l).clone();
     let rv = get(slots, r).clone();
-    let result = match op {
-        "==" => match (lv,rv) {
-            (VmValue::Int(a),VmValue::Int(b))     => a==b,
-            (VmValue::Float(a),VmValue::Float(b)) => a==b,
-            (VmValue::Bool(a),VmValue::Bool(b))   => a==b,
-            (VmValue::Str(a),VmValue::Str(b))     => a==b,
-            (VmValue::Nil, VmValue::Nil)           => true,
-            (VmValue::Nil, _) | (_, VmValue::Nil) => false,
-            (lv,rv) => return Err(JadeError::TypeError{message:format!("'{}' cannot compare {} and {}", op, value_type_name(&lv), value_type_name(&rv)),span}),
-        },
-        "!=" => match (lv,rv) {
-            (VmValue::Int(a),VmValue::Int(b))     => a!=b,
-            (VmValue::Float(a),VmValue::Float(b)) => a!=b,
-            (VmValue::Bool(a),VmValue::Bool(b))   => a!=b,
-            (VmValue::Str(a),VmValue::Str(b))     => a!=b,
-            (VmValue::Nil, VmValue::Nil)           => false,
-            (VmValue::Nil, _) | (_, VmValue::Nil) => true,
-            (lv,rv) => return Err(JadeError::TypeError{message:format!("'{}' cannot compare {} and {}", op, value_type_name(&lv), value_type_name(&rv)),span}),
-        },
-        "<"  => match (lv,rv) {
-            (VmValue::Int(a),VmValue::Int(b))     => a<b,
-            (VmValue::Float(a),VmValue::Float(b)) => a<b,
-            (VmValue::Int(a),VmValue::Float(b))   => (a as f64)<b,
-            (VmValue::Float(a),VmValue::Int(b))   => a<(b as f64),
-            (VmValue::Bool(a),VmValue::Bool(b))   => !a&&b,
-            (VmValue::Str(a),VmValue::Str(b))     => a<b,
-            (lv,rv) => return Err(JadeError::TypeError{message:format!("'{}' cannot compare {} and {}", op, value_type_name(&lv), value_type_name(&rv)),span}),
-        },
-        ">"  => match (lv,rv) {
-            (VmValue::Int(a),VmValue::Int(b))     => a>b,
-            (VmValue::Float(a),VmValue::Float(b)) => a>b,
-            (VmValue::Int(a),VmValue::Float(b))   => (a as f64)>b,
-            (VmValue::Float(a),VmValue::Int(b))   => a>(b as f64),
-            (VmValue::Bool(a),VmValue::Bool(b))   => a&&!b,
-            (VmValue::Str(a),VmValue::Str(b))     => a>b,
-            (lv,rv) => return Err(JadeError::TypeError{message:format!("'{}' cannot compare {} and {}", op, value_type_name(&lv), value_type_name(&rv)),span}),
-        },
-        "<=" => match (lv,rv) {
-            (VmValue::Int(a),VmValue::Int(b))     => a<=b,
-            (VmValue::Float(a),VmValue::Float(b)) => a<=b,
-            (VmValue::Int(a),VmValue::Float(b))   => (a as f64)<=b,
-            (VmValue::Float(a),VmValue::Int(b))   => a<=(b as f64),
-            (VmValue::Bool(a),VmValue::Bool(b))   => a==b||(!a&&b),
-            (VmValue::Str(a),VmValue::Str(b))     => a<=b,
-            (lv,rv) => return Err(JadeError::TypeError{message:format!("'{}' cannot compare {} and {}", op, value_type_name(&lv), value_type_name(&rv)),span}),
-        },
-        ">=" => match (lv,rv) {
-            (VmValue::Int(a),VmValue::Int(b))     => a>=b,
-            (VmValue::Float(a),VmValue::Float(b)) => a>=b,
-            (VmValue::Int(a),VmValue::Float(b))   => (a as f64)>=b,
-            (VmValue::Float(a),VmValue::Int(b))   => a>=(b as f64),
-            (VmValue::Bool(a),VmValue::Bool(b))   => a==b||(a&&!b),
-            (VmValue::Str(a),VmValue::Str(b))     => a>=b,
-            (lv,rv) => return Err(JadeError::TypeError{message:format!("'{}' cannot compare {} and {}", op, value_type_name(&lv), value_type_name(&rv)),span}),
-        },
-        _ => unreachable!(),
+    // The `CmpEq..CmpGe` opcodes map onto the same shared comparison core as
+    // the `BinOp` path, so all three of the VM's former comparison copies (this
+    // one, `eval_binop_dynamic`, and the AOT runtime) are now one implementation.
+    let bop = match op {
+        "==" => BinOpKind::Eq, "!=" => BinOpKind::Ne,
+        "<"  => BinOpKind::Lt, ">"  => BinOpKind::Gt,
+        "<=" => BinOpKind::Le, ">=" => BinOpKind::Ge,
+        _ => unreachable!("cmp_dynamic op: {op}"),
     };
-    Ok(VmValue::Bool(result))
+    let out = dynop::binop(binop_to_dynop(&bop).unwrap(), vm_kind(&lv), vm_kind(&rv));
+    finish_dynop(out, &bop, lv, rv, span)
 }
 
 fn vm_index(obj: VmValue, idx: VmValue, span: Span) -> Result<VmValue> {

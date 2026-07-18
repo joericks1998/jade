@@ -1,0 +1,17 @@
+[package]
+name = "jade-runtime"
+version = "0.1.0"
+edition = "2024"
+description = "Shared Jade runtime core: the tagged value ABI, unified heap, and value semantics used by both the bytecode VM (rlib) and AOT-compiled binaries (C-ABI staticlib)."
+license = "MIT"
+
+# rlib  → linked natively by the `jade` VM crate.
+# staticlib → linked via C-ABI (`#[no_mangle] extern "C"`) by AOT binaries,
+#             replacing the hand-rolled semantics in runtime_lib/common.c.
+[lib]
+crate-type = ["rlib", "staticlib"]
+
+# Deliberately dependency-free and LLVM-free: this crate must build on every
+# platform `jade run` supports, and must not drag the language frontend into an
+# LLVM toolchain requirement.
+[dependencies]
