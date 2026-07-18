@@ -1,0 +1,1174 @@
+use std::collections::HashMap;
+
+use inkwell::{AddressSpace, IntPredicate};
+
+use jade::compiler::tir::{JadeType, TStmt};
+
+use super::{expr, types, CodegenCtx};
+
+// ── Struct pre-pass ───────────────────────────────────────────────────────────
+
+/// Walk all statements and record field names for every `StructDef`.
+pub fn collect_struct_defs(
+    stmts: &[TStmt],
+    field_order: &mut HashMap<String, Vec<String>>,
+) {
+    for stmt in stmts {
+        match stmt {
+            TStmt::StructDef { name, fields, .. } => {
+                let names = fields.iter().map(|f| f.name().to_string()).collect();
+                field_order.insert(name.clone(), names);
+            }
+            TStmt::ExtendBlock { methods, .. } => {
+                collect_struct_defs(methods, field_order);
+            }
+            TStmt::FnDef { body, .. } | TStmt::AsyncFnDef { body, .. } => {
+                collect_struct_defs(body, field_order);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Walk all expressions to find `StructLiteral` nodes and record their field
+/// types.  This allows `emit_field_access` to correctly reinterpret i64 slots
+/// even though the type-inferencer sets field-access results to `Unknown`.
+pub fn collect_struct_literal_types(
+    stmts: &[TStmt],
+    field_types: &mut HashMap<String, HashMap<String, jade::compiler::tir::JadeType>>,
+) {
+    use jade::compiler::tir::{TExpr, TExprKind, TStmt};
+
+    fn walk_expr(e: &TExpr, ft: &mut HashMap<String, HashMap<String, jade::compiler::tir::JadeType>>) {
+        match &e.kind {
+            TExprKind::Await { expr } => walk_expr(expr, ft),
+            TExprKind::StructLiteral { type_name, fields } => {
+                // Record field types first, then recurse into field expressions.
+                let entries: Vec<(String, jade::compiler::tir::JadeType)> = fields
+                    .iter()
+                    .map(|(n, e, _)| (n.clone(), e.ty.clone()))
+                    .collect();
+                let map = ft.entry(type_name.clone()).or_default();
+                for (n, ty) in entries {
+                    map.entry(n).or_insert(ty);
+                }
+                for (_, field_expr, _) in fields {
+                    walk_expr(field_expr, ft);
+                }
+            }
+            TExprKind::Call { callee, args, .. } => {
+                walk_expr(callee, ft);
+                for a in args { walk_expr(a, ft); }
+            }
+            TExprKind::BinOp { left, right, .. } => { walk_expr(left, ft); walk_expr(right, ft); }
+            TExprKind::UnaryOp { operand, .. } => walk_expr(operand, ft),
+            TExprKind::FieldAccess { object, .. } => walk_expr(object, ft),
+            TExprKind::Index { object, index } => { walk_expr(object, ft); walk_expr(index, ft); }
+            TExprKind::Array { elements } => { for e in elements { walk_expr(e, ft); } }
+            TExprKind::FStr { parts } => {
+                for p in parts {
+                    if let jade::compiler::tir::TFStrPart::Expr(e) = p { walk_expr(e, ft); }
+                }
+            }
+            TExprKind::Dict { entries } => {
+                for (k, v) in entries { walk_expr(k, ft); walk_expr(v, ft); }
+            }
+            TExprKind::Closure { body, .. } => walk_stmts(body, ft),
+            TExprKind::PromptDeref { expr, .. } => walk_expr(expr, ft),
+            _ => {}
+        }
+    }
+
+    fn walk_stmts(stmts: &[TStmt], ft: &mut HashMap<String, HashMap<String, jade::compiler::tir::JadeType>>) {
+        for s in stmts { walk_stmt(s, ft); }
+    }
+
+    fn walk_stmt(s: &TStmt, ft: &mut HashMap<String, HashMap<String, jade::compiler::tir::JadeType>>) {
+        match s {
+            TStmt::Let { value, .. } | TStmt::Assign { value, .. }
+            | TStmt::Return { value: Some(value), .. }
+            | TStmt::Expr(value)
+            | TStmt::PromptDecl { body: value, .. }
+            | TStmt::Raise { value, .. } => walk_expr(value, ft),
+            TStmt::FnDef { body, .. } | TStmt::AsyncFnDef { body, .. } => walk_stmts(body, ft),
+            TStmt::If { condition, then_body, else_body, .. } => {
+                walk_expr(condition, ft);
+                walk_stmts(then_body, ft);
+                if let Some(eb) = else_body { walk_stmts(eb, ft); }
+            }
+            TStmt::While { condition, body, .. } => {
+                walk_expr(condition, ft);
+                walk_stmts(body, ft);
+            }
+            TStmt::For { iterable, body, .. } => {
+                walk_expr(iterable, ft);
+                walk_stmts(body, ft);
+            }
+            TStmt::FieldAssign { value, .. } | TStmt::IndexAssign { value, .. } => walk_expr(value, ft),
+            TStmt::ExtendBlock { methods, .. } => walk_stmts(methods, ft),
+            TStmt::TryCatch { body, arms, .. } => {
+                walk_stmts(body, ft);
+                for arm in arms { walk_stmts(&arm.body, ft); }
+            }
+            _ => {}
+        }
+    }
+
+    walk_stmts(stmts, field_types);
+}
+
+// ── First pass: declare all top-level function signatures ─────────────────────
+
+/// Forward-declare every top-level `FnDef` so recursive / out-of-order calls
+/// resolve correctly in the second pass.
+pub fn declare_fns<'ctx>(ctx: &mut CodegenCtx<'ctx>, stmts: &[TStmt]) -> Result<(), String> {
+    for stmt in stmts {
+        match stmt {
+            TStmt::FnDef { name, params, ret_ty, .. } => {
+                let param_meta: Vec<_> = params
+                    .iter()
+                    .map(|_| types::jade_to_meta(&JadeType::Unknown, ctx.context))
+                    .collect();
+                let fn_ty = types::jade_fn_type(ret_ty, &param_meta, ctx.context);
+                let fn_val = ctx.module.add_function(name, fn_ty, None);
+                let param_jt: Vec<JadeType> = params.iter().map(|_| JadeType::Unknown).collect();
+                ctx.fn_info.insert(name.clone(), (fn_val, param_jt, ret_ty.clone()));
+                let names: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
+                ctx.fn_param_names.insert(name.clone(), names);
+                let defaults: Vec<Option<_>> = params.iter().map(|(_, d)| d.clone()).collect();
+                ctx.fn_param_defaults.insert(name.clone(), defaults);
+            }
+            TStmt::AsyncFnDef { name, params, ret_ty, .. } => {
+                let i64_ty = ctx.context.i64_type();
+                let i32_ty = ctx.context.i32_type();
+                let ptr_ty = ctx.context.ptr_type(AddressSpace::default());
+
+                // Body helper: i64 (ptr %args, i32 %n)
+                let body_name = format!("{name}__async_body");
+                let body_fn_ty = i64_ty.fn_type(&[ptr_ty.into(), i32_ty.into()], false);
+                ctx.module.add_function(&body_name, body_fn_ty, None);
+
+                // Public wrapper: ptr (i64, i64, ...) — returns a jade_future_t
+                let param_meta: Vec<_> = params
+                    .iter()
+                    .map(|_| types::jade_to_meta(&JadeType::Unknown, ctx.context))
+                    .collect();
+                let wrapper_ret_ty = JadeType::Future(Box::new(ret_ty.clone()));
+                let fn_ty = types::jade_fn_type(&wrapper_ret_ty, &param_meta, ctx.context);
+                let fn_val = ctx.module.add_function(name, fn_ty, None);
+                let param_jt: Vec<JadeType> = params.iter().map(|_| JadeType::Unknown).collect();
+                ctx.fn_info.insert(name.clone(), (fn_val, param_jt, wrapper_ret_ty));
+                let names: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
+                ctx.fn_param_names.insert(name.clone(), names);
+                let defaults: Vec<Option<_>> = params.iter().map(|(_, d)| d.clone()).collect();
+                ctx.fn_param_defaults.insert(name.clone(), defaults);
+            }
+            // Forward-declare extend methods as TypeName__method_name(ptr self, i64...) -> ret
+            TStmt::ExtendBlock { type_name, methods, .. } => {
+                for method_stmt in methods {
+                    if let TStmt::FnDef { name, params, ret_ty, .. } = method_stmt {
+                        let mangled = format!("{type_name}__{name}");
+                        // First param is self (Struct → ptr); rest are Unknown (→ i64).
+                        let mut param_meta: Vec<_> = vec![
+                            types::jade_to_meta(&JadeType::Struct(type_name.clone()), ctx.context),
+                        ];
+                        param_meta.extend(
+                            params.iter().skip(1).map(|_| types::jade_to_meta(&JadeType::Unknown, ctx.context))
+                        );
+                        let fn_ty = types::jade_fn_type(ret_ty, &param_meta, ctx.context);
+                        let fn_val = ctx.module.add_function(&mangled, fn_ty, None);
+                        let mut param_jt = vec![JadeType::Struct(type_name.clone())];
+                        param_jt.extend(params.iter().skip(1).map(|_| JadeType::Unknown));
+                        ctx.fn_info.insert(mangled.clone(), (fn_val, param_jt, ret_ty.clone()));
+                        let names: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
+                        ctx.fn_param_names.insert(mangled.clone(), names);
+                        let defaults: Vec<Option<_>> = params.iter().map(|(_, d)| d.clone()).collect();
+                        ctx.fn_param_defaults.insert(mangled, defaults);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+// ── Second pass: emit statements ──────────────────────────────────────────────
+
+pub fn emit_stmts<'ctx>(ctx: &mut CodegenCtx<'ctx>, stmts: &[TStmt]) -> Result<(), String> {
+    for stmt in stmts {
+        if ctx.is_terminated() {
+            break;
+        }
+        emit_stmt(ctx, stmt)?;
+    }
+    Ok(())
+}
+
+/// Apply module-level decorators to a freshly-defined function `fn_name`.
+/// Mirrors the VM emit: for each `@dec(kwargs…)`, emit `fn_name = dec(fn_name, kwargs…)`.
+/// In the LLVM backend, named functions aren't first-class globals you can
+/// reassign, so the return value is discarded — only the side effects of the
+/// decorator body matter (typically `group.add(fn_val, context)`).
+fn emit_fn_decorators<'ctx>(
+    ctx: &mut CodegenCtx<'ctx>,
+    fn_name: &str,
+    decorators: &[(String, Vec<(Option<String>, jade::compiler::tir::TExpr)>)],
+) -> Result<(), String> {
+    use jade::compiler::tir::JadeType;
+    use inkwell::values::BasicMetadataValueEnum;
+    for (dec_name, dec_args) in decorators {
+        // Resolve the decorator: "tools.register" → fn_info["register"] (imports
+        // are flattened, so the bare name is registered globally).
+        let bare = dec_name.rsplit_once('.').map(|(_, b)| b).unwrap_or(dec_name);
+        let Some((fn_val, param_tys, _ret_ty)) = ctx.fn_info.get(bare).cloned() else {
+            continue; // unknown decorator — leave fn alone, matching VM tolerance
+        };
+        let param_names = ctx.fn_param_names.get(bare).cloned().unwrap_or_default();
+
+        // Build the arg vector in the decorator's declared param order.
+        // First param is the decorated function (wrapped as fat pointer);
+        // remaining params come from the kwargs supplied at the decoration site.
+        let mut llvm_args: Vec<BasicMetadataValueEnum<'ctx>> = Vec::with_capacity(param_tys.len());
+
+        // arg 0 = fn_val as jade_fn_t*, coerced to the declared param type.
+        let fn_as_val = expr::emit_fn_as_value(fn_name, ctx)?;
+        let fn_param_ty = param_tys.first().cloned().unwrap_or(JadeType::Unknown);
+        let fn_coerced = expr::coerce(fn_as_val, &JadeType::Unknown, &fn_param_ty, ctx)?;
+        llvm_args.push(fn_coerced.into());
+
+        // Build a name→TExpr map of the supplied kwargs (and a positional list).
+        let mut kwargs_by_name: HashMap<&str, &jade::compiler::tir::TExpr> = HashMap::new();
+        let mut positional: Vec<&jade::compiler::tir::TExpr> = Vec::new();
+        for (name_opt, te) in dec_args {
+            match name_opt {
+                Some(n) => { kwargs_by_name.insert(n.as_str(), te); }
+                None => positional.push(te),
+            }
+        }
+
+        // Walk params (skipping arg 0, the fn_val) and emit each arg, coercing
+        // to the declared param type so the LLVM call signature matches.
+        let mut next_pos = 0usize;
+        for i in 1..param_tys.len() {
+            let pname = param_names.get(i).map(|s| s.as_str()).unwrap_or("");
+            let te = if let Some(te) = kwargs_by_name.get(pname).copied() {
+                te
+            } else if next_pos < positional.len() {
+                let te = positional[next_pos];
+                next_pos += 1;
+                te
+            } else {
+                continue;
+            };
+            let v = expr::emit_expr(te, ctx)?;
+            let coerced = expr::coerce(v, &te.ty, &param_tys[i], ctx)?;
+            llvm_args.push(coerced.into());
+        }
+
+        ctx.builder
+            .build_call(fn_val, &llvm_args, "dec_call")
+            .map_err(|e| e.to_string())?;
+        ctx.uses_runtime = true;
+    }
+    Ok(())
+}
+
+/// Emit one statement. The central per-statement dispatcher: let/assign
+/// (with representation conversion), field/index assignment, if/while/for,
+/// fn & async-fn & extend-block definitions, return, try/catch, and raise.
+pub fn emit_stmt<'ctx>(ctx: &mut CodegenCtx<'ctx>, stmt: &TStmt) -> Result<(), String> {
+    match stmt {
+        // ── let name = expr ───────────────────────────────────────────────────
+        TStmt::Let { name, value, .. } => {
+            let mut val = expr::emit_expr(value, ctx)?;
+            // Dict value semantics: binding an existing dict variable to a new
+            // name copies it (the VM stores dicts as owned HashMaps, so mutating
+            // one must not affect the other). Only a bare variable *reference*
+            // aliases — a fresh literal or call result is already unaliased.
+            // Arrays are Arc-shared in the VM and are intentionally not copied.
+            if matches!(&value.ty, JadeType::Dict)
+                && matches!(&value.kind, jade::compiler::tir::TExprKind::Identifier(_))
+            {
+                val = expr::emit_dict_copy(val, ctx)?;
+            }
+            // Recover a concrete struct type for imported structs whose
+            // TIR inference was forced to Unknown (the lenient import path).
+            // Without this, ctx.lookup later returns Unknown and method
+            // dispatch can't resolve `s.method(...)` for `s : ImportedStruct`.
+            let value_ty = match &value.ty {
+                jade::compiler::tir::JadeType::Unknown => match &value.kind {
+                    jade::compiler::tir::TExprKind::StructLiteral { type_name, .. } => {
+                        let bare = type_name.rsplit_once('.').map(|(_, b)| b.to_string())
+                            .unwrap_or_else(|| type_name.clone());
+                        jade::compiler::tir::JadeType::Struct(bare)
+                    }
+                    _ => value.ty.clone(),
+                },
+                _ => value.ty.clone(),
+            };
+            let llvm_ty = types::jade_to_llvm(&value_ty, ctx.context);
+            // Module-level lets (fn_depth == 0) become LLVM globals so that
+            // struct methods in separate functions can reference them without
+            // crossing stack-frame boundaries.
+            if ctx.fn_depth == 0 {
+                let global = ctx.module.add_global(llvm_ty, None, name);
+                let zero_init: inkwell::values::BasicValueEnum = match llvm_ty {
+                    inkwell::types::BasicTypeEnum::IntType(t)     => t.const_zero().into(),
+                    inkwell::types::BasicTypeEnum::FloatType(t)   => t.const_zero().into(),
+                    inkwell::types::BasicTypeEnum::PointerType(t) => t.const_null().into(),
+                    _ => ctx.context.i64_type().const_zero().into(),
+                };
+                global.set_initializer(&zero_init);
+                ctx.builder
+                    .build_store(global.as_pointer_value(), val)
+                    .map_err(|e| e.to_string())?;
+                ctx.module_globals.insert(name.clone(), (global, value_ty.clone()));
+            } else {
+                let ptr = ctx.build_entry_alloca(llvm_ty, name)?;
+                ctx.builder
+                    .build_store(ptr, val)
+                    .map_err(|e| e.to_string())?;
+                ctx.define(name.clone(), ptr, value_ty.clone());
+            }
+        }
+
+        // ── name = expr ───────────────────────────────────────────────────────
+        TStmt::Assign { name, value, .. } => {
+            let mut val = expr::emit_expr(value, ctx)?;
+            // Dict value semantics on reassignment (mirrors the `let` arm above).
+            if matches!(&value.ty, JadeType::Dict)
+                && matches!(&value.kind, jade::compiler::tir::TExprKind::Identifier(_))
+            {
+                val = expr::emit_dict_copy(val, ctx)?;
+            }
+            // Store in the binding's representation. The variable keeps its
+            // original binding type even when reassigned to a value of another
+            // type, so convert the RHS to that representation first (e.g. a
+            // tagged Unknown result stored back into an Int-typed accumulator).
+            // Check module globals first (may be assigned after initial decl).
+            if let Some((global, bind_ty)) = ctx.module_globals.get(name).cloned() {
+                let v = expr::convert_repr(val, &value.ty, &bind_ty, ctx)?;
+                ctx.builder
+                    .build_store(global.as_pointer_value(), v)
+                    .map_err(|e| e.to_string())?;
+            } else {
+                let (ptr, bind_ty) = ctx
+                    .lookup(name)
+                    .ok_or_else(|| format!("assignment to undefined variable: {name}"))?;
+                let v = expr::convert_repr(val, &value.ty, &bind_ty, ctx)?;
+                ctx.builder
+                    .build_store(ptr, v)
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+
+        // ── fn definitions ────────────────────────────────────────────────────
+        TStmt::FnDef { name, params, body, ret_ty, decorators, .. } => {
+            let param_names: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
+            emit_fn_body(ctx, name, &param_names, body, ret_ty)?;
+            // Module-level decorators run at startup as `name = dec(name, args…)`.
+            // Nested decorators aren't reachable: nested fns are emitted only as
+            // LLVM symbols inside the enclosing function body and aren't routed
+            // through main()'s entry block where decorator calls would live.
+            if ctx.fn_depth == 0 && !decorators.is_empty() {
+                emit_fn_decorators(ctx, name, decorators)?;
+            }
+        }
+
+        // ── async fn definitions ──────────────────────────────────────────────
+        TStmt::AsyncFnDef { name, params, body, ret_ty, decorators, .. } => {
+            let param_names: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
+            emit_async_fn_def(ctx, name, &param_names, body, ret_ty)?;
+            if ctx.fn_depth == 0 && !decorators.is_empty() {
+                emit_fn_decorators(ctx, name, decorators)?;
+            }
+        }
+
+        // ── return [expr] ─────────────────────────────────────────────────────
+        TStmt::Return { value, .. } => {
+            // Inside an async body function all values must be returned as i64
+            // (jade_value_t).  async_body_ret_ty carries the original Jade type
+            // needed to convert non-integer values correctly.
+            let conv_ty = ctx.async_body_ret_ty.clone();
+            // The function returns a value in its declared return type's
+            // representation: an async body always returns a TAGGED word (Unknown
+            // — jade_await unboxes by the future's result type); a regular
+            // function returns its declared type's representation. Convert the
+            // return expression (whatever its own type) into that target so all
+            // return sites in a function agree (e.g. one branch `return 1` (Int)
+            // and another `return n * f(...)` (Unknown) must produce the same
+            // representation).
+            let fn_ret = ctx.current_ret_ty.clone();
+            let target_ty = if conv_ty.is_some() {
+                JadeType::Unknown
+            } else {
+                fn_ret.unwrap_or(JadeType::Unknown)
+            };
+            // Get the current LLVM function's declared return type (void check).
+            let llvm_ret_kind = ctx.builder.get_insert_block()
+                .and_then(|bb| bb.get_parent())
+                .map(|f| f.get_type().get_return_type());
+            match value {
+                Some(e) => {
+                    let val = expr::emit_expr(e, ctx)?;
+                    // void function: emit for side effects, return void.
+                    if matches!(llvm_ret_kind, Some(None)) {
+                        ctx.builder.build_return(None).map_err(|e| e.to_string())?;
+                        return Ok(());
+                    }
+                    let ret_val = expr::convert_repr(val, &e.ty, &target_ty, ctx)?;
+                    ctx.builder
+                        .build_return(Some(&ret_val))
+                        .map_err(|e| e.to_string())?;
+                }
+                None => {
+                    // Bare `return` yields nil — void for a void fn, else nil in
+                    // the target representation.
+                    if matches!(llvm_ret_kind, Some(None)) {
+                        ctx.builder.build_return(None).map_err(|e| e.to_string())?;
+                    } else {
+                        let nil = ctx.context.i64_type().const_int(7, false);
+                        let ret_val = expr::i64_to_value(nil, &target_ty, ctx)?;
+                        ctx.builder.build_return(Some(&ret_val)).map_err(|e| e.to_string())?;
+                    }
+                }
+            }
+        }
+
+        // ── if condition { then } [else { else }] ─────────────────────────────
+        TStmt::If { condition, then_body, else_body, .. } => {
+            let fn_val = ctx
+                .builder
+                .get_insert_block()
+                .and_then(|bb| bb.get_parent())
+                .ok_or("if outside function")?;
+
+            let cond_v = expr::emit_expr(condition, ctx)?;
+            let cond = expr::emit_cond_i1(cond_v, ctx)?;
+            let then_bb  = ctx.context.append_basic_block(fn_val, "if_then");
+            let else_bb  = ctx.context.append_basic_block(fn_val, "if_else");
+            let merge_bb = ctx.context.append_basic_block(fn_val, "if_merge");
+
+            ctx.builder.build_conditional_branch(cond, then_bb, else_bb).map_err(|e| e.to_string())?;
+
+            ctx.builder.position_at_end(then_bb);
+            ctx.push_scope();
+            emit_stmts(ctx, then_body)?;
+            ctx.pop_scope();
+            if !ctx.is_terminated() {
+                ctx.builder.build_unconditional_branch(merge_bb).map_err(|e| e.to_string())?;
+            }
+
+            ctx.builder.position_at_end(else_bb);
+            if let Some(else_stmts) = else_body {
+                ctx.push_scope();
+                emit_stmts(ctx, else_stmts)?;
+                ctx.pop_scope();
+            }
+            if !ctx.is_terminated() {
+                ctx.builder.build_unconditional_branch(merge_bb).map_err(|e| e.to_string())?;
+            }
+
+            ctx.builder.position_at_end(merge_bb);
+        }
+
+        // ── while condition { body } ──────────────────────────────────────────
+        TStmt::While { condition, body, .. } => {
+            let fn_val = ctx
+                .builder
+                .get_insert_block()
+                .and_then(|bb| bb.get_parent())
+                .ok_or("while outside function")?;
+
+            let cond_bb = ctx.context.append_basic_block(fn_val, "while_cond");
+            let loop_bb = ctx.context.append_basic_block(fn_val, "while_body");
+            let exit_bb = ctx.context.append_basic_block(fn_val, "while_exit");
+
+            ctx.builder.build_unconditional_branch(cond_bb).map_err(|e| e.to_string())?;
+
+            ctx.builder.position_at_end(cond_bb);
+            let cond_v = expr::emit_expr(condition, ctx)?;
+            let cond = expr::emit_cond_i1(cond_v, ctx)?;
+            ctx.builder.build_conditional_branch(cond, loop_bb, exit_bb).map_err(|e| e.to_string())?;
+
+            ctx.builder.position_at_end(loop_bb);
+            ctx.push_scope();
+            emit_stmts(ctx, body)?;
+            ctx.pop_scope();
+            if !ctx.is_terminated() {
+                ctx.builder.build_unconditional_branch(cond_bb).map_err(|e| e.to_string())?;
+            }
+
+            ctx.builder.position_at_end(exit_bb);
+        }
+
+        // ── for var in iterable { body } ──────────────────────────────────────
+        TStmt::For { var, iterable, body, .. } => {
+            let fn_val = ctx
+                .builder
+                .get_insert_block()
+                .and_then(|bb| bb.get_parent())
+                .ok_or("for outside function")?;
+
+            let elem_ty = match &iterable.ty {
+                JadeType::Array(inner) => *inner.clone(),
+                // Unknown covers struct fields typed Unknown (e.g. self._registry = [])
+                JadeType::Unknown => JadeType::Unknown,
+                _ => return Err(format!(
+                    "for-loop iterable must be an array, got {:?}", iterable.ty
+                )),
+            };
+
+            let i64_ty = ctx.context.i64_type();
+            let ptr_ty = ctx.context.ptr_type(AddressSpace::default());
+
+            // Emit the iterable; use as_pointer to handle int-typed Unknown results.
+            let arr_ptr = expr::as_pointer(expr::emit_expr(iterable, ctx)?, ctx)?;
+
+            // Load len from field 1
+            let f1 = ctx.builder
+                .build_struct_gep(ctx.array_ty, arr_ptr, 1, "for_f1")
+                .map_err(|e| e.to_string())?;
+            let arr_len = ctx.builder
+                .build_load(i64_ty, f1, "for_len")
+                .map_err(|e| e.to_string())?
+                .into_int_value();
+
+            // Load data ptr from field 0
+            let f0 = ctx.builder
+                .build_struct_gep(ctx.array_ty, arr_ptr, 0, "for_f0")
+                .map_err(|e| e.to_string())?;
+            let data_ptr = ctx.builder
+                .build_load(ptr_ty, f0, "for_data")
+                .map_err(|e| e.to_string())?
+                .into_pointer_value();
+
+            // Loop counter + variable slot in entry block
+            let loop_i   = ctx.build_entry_alloca(i64_ty.into(), "__for_i")?;
+            let llvm_ety = types::jade_to_llvm(&elem_ty, ctx.context);
+            let var_slot = ctx.build_entry_alloca(llvm_ety, var)?;
+
+            ctx.builder
+                .build_store(loop_i, i64_ty.const_int(0, false))
+                .map_err(|e| e.to_string())?;
+
+            let cond_bb = ctx.context.append_basic_block(fn_val, "for_cond");
+            let body_bb = ctx.context.append_basic_block(fn_val, "for_body");
+            let exit_bb = ctx.context.append_basic_block(fn_val, "for_exit");
+
+            ctx.builder.build_unconditional_branch(cond_bb).map_err(|e| e.to_string())?;
+
+            // Condition
+            ctx.builder.position_at_end(cond_bb);
+            let i = ctx.builder
+                .build_load(i64_ty, loop_i, "for_i")
+                .map_err(|e| e.to_string())?
+                .into_int_value();
+            let cond = ctx.builder
+                .build_int_compare(IntPredicate::SLT, i, arr_len, "for_lt")
+                .map_err(|e| e.to_string())?;
+            ctx.builder.build_conditional_branch(cond, body_bb, exit_bb).map_err(|e| e.to_string())?;
+
+            // Body
+            ctx.builder.position_at_end(body_bb);
+            let i = ctx.builder
+                .build_load(i64_ty, loop_i, "for_i2")
+                .map_err(|e| e.to_string())?
+                .into_int_value();
+            let slot = ctx.gep(i64_ty, data_ptr, &[i], "for_slot")?;
+            let raw = ctx.builder
+                .build_load(i64_ty, slot, "for_raw")
+                .map_err(|e| e.to_string())?
+                .into_int_value();
+            let elem_val = expr::i64_to_value(raw, &elem_ty, ctx)?;
+
+            ctx.builder.build_store(var_slot, elem_val).map_err(|e| e.to_string())?;
+
+            ctx.push_scope();
+            ctx.define(var.clone(), var_slot, elem_ty.clone());
+            emit_stmts(ctx, body)?;
+            ctx.pop_scope();
+
+            if !ctx.is_terminated() {
+                let i = ctx.builder
+                    .build_load(i64_ty, loop_i, "for_i3")
+                    .map_err(|e| e.to_string())?
+                    .into_int_value();
+                let next = ctx.builder
+                    .build_int_add(i, i64_ty.const_int(1, false), "for_next")
+                    .map_err(|e| e.to_string())?;
+                ctx.builder.build_store(loop_i, next).map_err(|e| e.to_string())?;
+                ctx.builder.build_unconditional_branch(cond_bb).map_err(|e| e.to_string())?;
+            }
+
+            ctx.builder.position_at_end(exit_bb);
+        }
+
+        // ── arr[idx] = value  /  dict[key] = value ───────────────────────────
+        TStmt::IndexAssign { name, index, value, .. } => {
+            // Globals-aware (see FieldAssign): a top-level `let arr = [..]` then
+            // `arr[i] = v` / `d[k] = v` targets an LLVM global, not a local.
+            let (arr_slot, arr_ty) = ctx
+                .lookup_or_global(name)
+                .ok_or_else(|| format!("undefined variable: {name}"))?;
+
+            // Dict: d[key] = value  →  jade_dict_set(dict_ptr, key_ptr, value_i64)
+            if matches!(arr_ty, JadeType::Dict) {
+                let ptr_ty = ctx.context.ptr_type(AddressSpace::default());
+                let dict_ptr = ctx.builder
+                    .build_load(ptr_ty, arr_slot, "ia_dict")
+                    .map_err(|e| e.to_string())?
+                    .into_pointer_value();
+                let key_val = expr::emit_expr(index, ctx)?;
+                let key_ptr = expr::as_pointer(key_val, ctx)?;
+                let val = expr::emit_expr(value, ctx)?;
+                let as_i64 = expr::value_to_i64(val, &value.ty, ctx)?;
+                ctx.builder
+                    .build_call(
+                        ctx.jade_dict_set_fn,
+                        &[dict_ptr.into(), key_ptr.into(), as_i64.into()],
+                        "",
+                    )
+                    .map_err(|e| e.to_string())?;
+                ctx.uses_dicts = true;
+                return Ok(());
+            }
+
+            // Parameters with no type annotation are stored as Unknown.  Treat
+            // them as an array of Unknown elements so index assignment still
+            // works at runtime (the pointer bits are valid; only the TIR type
+            // is missing).
+            let elem_ty = match &arr_ty {
+                JadeType::Array(inner) => *inner.clone(),
+                JadeType::Unknown => JadeType::Unknown,
+                _ => return Err(format!(
+                    "index assignment on non-array type {:?}", arr_ty
+                )),
+            };
+
+            let i64_ty = ctx.context.i64_type();
+            let ptr_ty = ctx.context.ptr_type(AddressSpace::default());
+
+            // Load the jade.array header pointer from the variable slot.
+            //
+            // When `arr` is a function parameter typed as Unknown, its alloca
+            // was created for an i64 value (the LLVM function signature uses i64
+            // for all Unknown params).  We must load as i64 and then cast to
+            // pointer.  When the type is Array (a local `let arr = [...]`), the
+            // alloca holds a pointer directly.
+            let load_ty = match &arr_ty {
+                JadeType::Unknown => types::jade_to_llvm(&JadeType::Int, ctx.context),
+                _ => types::jade_to_llvm(&JadeType::Array(Box::new(JadeType::Unknown)), ctx.context),
+            };
+            let raw_load = ctx.builder
+                .build_load(load_ty, arr_slot, "ia_arr_raw")
+                .map_err(|e| e.to_string())?;
+            let arr_ptr = expr::as_pointer(raw_load, ctx)?;
+
+            // An Unknown-typed index arrives tagged (i<<1); untag it to a raw GEP
+            // offset, mirroring the read path in expr::emit_index. Without this the
+            // offset is doubled → out-of-bounds heap write.
+            let idx_raw = expr::emit_expr(index, ctx)?.into_int_value();
+            let idx = if matches!(&index.ty, JadeType::Unknown) {
+                expr::untag_int_iv(idx_raw, ctx)?
+            } else { idx_raw };
+
+            // Load data ptr
+            let f0 = ctx.builder
+                .build_struct_gep(ctx.array_ty, arr_ptr, 0, "ia_f0")
+                .map_err(|e| e.to_string())?;
+            let data_ptr = ctx.builder
+                .build_load(ptr_ty, f0, "ia_data")
+                .map_err(|e| e.to_string())?
+                .into_pointer_value();
+
+            let slot = ctx.gep(i64_ty, data_ptr, &[idx], "ia_slot")?;
+
+            let val = expr::emit_expr(value, ctx)?;
+            let as_i64 = expr::value_to_i64(val, &elem_ty, ctx)?;
+            ctx.builder.build_store(slot, as_i64).map_err(|e| e.to_string())?;
+        }
+
+        // ── obj.field = value ─────────────────────────────────────────────────
+        TStmt::FieldAssign { object, field, value, .. } => {
+            // Resolve through globals too: `let p = Point{..}` at module top level
+            // is an LLVM global, not a scoped local, so a top-level `p.x = v` must
+            // find it via `lookup_or_global` (plain `lookup` sees only locals).
+            let (obj_slot, obj_ty) = ctx
+                .lookup_or_global(object)
+                .ok_or_else(|| format!("undefined variable: {object}"))?;
+
+            let type_name = match &obj_ty {
+                JadeType::Struct(n) => n.clone(),
+                _ => return Err(format!(
+                    "field assignment on non-struct type {:?}", obj_ty
+                )),
+            };
+
+            let field_names = ctx.struct_field_order
+                .get(&type_name)
+                .cloned()
+                .ok_or_else(|| format!("unknown struct type: {type_name}"))?;
+
+            let field_idx = field_names
+                .iter()
+                .position(|n| n == field)
+                .ok_or_else(|| format!("unknown field '{field}' on struct '{type_name}'"))?;
+
+            let i64_ty = ctx.context.i64_type();
+            let ptr_ty = ctx.context.ptr_type(AddressSpace::default());
+
+            // Load the struct pointer from the variable slot
+            let struct_ptr = ctx.builder
+                .build_load(ptr_ty, obj_slot, "fa_struct")
+                .map_err(|e| e.to_string())?
+                .into_pointer_value();
+
+            // +1 to skip the type_name slot at slot 0
+            let slot = ctx.gep(i64_ty, struct_ptr, &[i64_ty.const_int((field_idx as u64) + 1, false)], "fa_slot")?;
+
+            let val = expr::emit_expr(value, ctx)?;
+            let as_i64 = expr::value_to_i64(val, &value.ty, ctx)?;
+            ctx.builder.build_store(slot, as_i64).map_err(|e| e.to_string())?;
+        }
+
+        // ── bare expression (side-effect call, etc.) ──────────────────────────
+        TStmt::Expr(e) => {
+            expr::emit_expr(e, ctx)?;
+        }
+
+        // ── Metadata-only definitions ─────────────────────────────────────────
+        TStmt::StructDef { .. } | TStmt::InterfaceDef { .. } => {}
+
+        // ── Struct method definitions ─────────────────────────────────────────
+        TStmt::ExtendBlock { type_name, methods, .. } => {
+            for method_stmt in methods {
+                if let TStmt::FnDef { name, params, body, ret_ty, .. } = method_stmt {
+                    let mangled = format!("{type_name}__{name}");
+                    let param_names: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
+                    emit_fn_body(ctx, &mangled, &param_names, body, ret_ty)?;
+                }
+            }
+        }
+
+        // ── prompt p = expr ───────────────────────────────────────────────────
+        // A prompt declaration is a string value with Prompt type.  Represented
+        // identically to a Str pointer — the type distinction is only semantic.
+        TStmt::PromptDecl { name, body, .. } => {
+            let ptr_ty = ctx.context.ptr_type(AddressSpace::default());
+            let val = expr::emit_expr(body, ctx)?;
+            let slot = ctx.build_entry_alloca(ptr_ty.into(), name)?;
+            ctx.builder.build_store(slot, val).map_err(|e| e.to_string())?;
+            ctx.define(name.clone(), slot, JadeType::Prompt);
+        }
+
+        // ── use "path" — expanded by resolve_imports before codegen ──────────
+        TStmt::Use { .. } => {}
+
+        // ── from pkg use name, … — stdlib packages resolved at VM runtime ─────
+        TStmt::FromUse { .. } => {}
+
+        // ── try { body } catch binding { arm } ────────────────────────────────
+        TStmt::TryCatch { body, arms, .. } => {
+            ctx.uses_exceptions = true;
+
+            let fn_val = ctx.builder.get_insert_block()
+                .and_then(|b| b.get_parent())
+                .ok_or("try/catch outside function")?;
+
+            // Stack-allocate a 256-byte jmpbuf (conservative for all x86_64 targets).
+            let i8_ty  = ctx.context.i8_type();
+            let buf_ty = i8_ty.array_type(256);
+            let buf    = ctx.build_entry_alloca(buf_ty.into(), "exc_buf")?;
+
+            // Register the frame, then setjmp.
+            ctx.call_void(ctx.jade_exc_push_frame_fn, &[buf.into()])?;
+            let r = ctx.call_rv(ctx.setjmp_fn, &[buf.into()], "exc_r")?
+                .into_int_value();
+
+            let try_bb   = ctx.context.append_basic_block(fn_val, "try_body");
+            let catch_bb = ctx.context.append_basic_block(fn_val, "catch_body");
+            let merge_bb = ctx.context.append_basic_block(fn_val, "exc_merge");
+
+            let is_throw = ctx.builder
+                .build_int_compare(IntPredicate::NE, r, ctx.context.i32_type().const_zero(), "is_throw")
+                .map_err(|e| e.to_string())?;
+            ctx.builder.build_conditional_branch(is_throw, catch_bb, try_bb)
+                .map_err(|e| e.to_string())?;
+
+            // Try body — pop the frame on clean exit.
+            ctx.builder.position_at_end(try_bb);
+            ctx.push_scope();
+            emit_stmts(ctx, body)?;
+            ctx.pop_scope();
+            if !ctx.is_terminated() {
+                ctx.call_void(ctx.jade_exc_pop_fn, &[])?;
+                ctx.builder.build_unconditional_branch(merge_bb).map_err(|e| e.to_string())?;
+            }
+
+            // Catch body — retrieve thrown value, dispatch to typed arms.
+            ctx.builder.position_at_end(catch_bb);
+            let exc_i64 = ctx.call_rv(ctx.jade_exc_value_fn, &[], "exc_val")?.into_int_value();
+
+            let i64_ty  = ctx.context.i64_type();
+            let i32_ty  = ctx.context.i32_type();
+            let ptr_ty  = ctx.context.ptr_type(AddressSpace::default());
+
+            // Block to jump to when no arm matches (swallow the exception).
+            let no_match_bb = ctx.context.append_basic_block(fn_val, "catch_nomatch");
+
+            if arms.is_empty() {
+                // Nothing to bind — swallow.
+                ctx.builder.build_unconditional_branch(merge_bb).map_err(|e| e.to_string())?;
+            }
+
+            for (arm_idx, arm) in arms.iter().enumerate() {
+                if ctx.is_terminated() { break; }
+                let arm_body_bb = ctx.context.append_basic_block(fn_val, &format!("catch_arm{arm_idx}"));
+
+                if let Some(ref expected_type) = arm.catch_type {
+                    // Compare the thrown value's static type name (recorded at
+                    // throw time via jade_exc_throw_typed) against this arm's
+                    // expected type. jade_exc_type() returns null for non-struct
+                    // throws (strings/ints), which never match a typed arm — and
+                    // crucially we no longer dereference the thrown value as a
+                    // struct, which segfaulted when it wasn't one.
+                    let ty_ptr = ctx.call_rv(ctx.jade_exc_type_fn, &[], "exc_ty")?
+                        .into_pointer_value();
+                    let exp_ptr = ctx.builder
+                        .build_global_string_ptr(expected_type, "exp_ty")
+                        .map_err(|e| e.to_string())?
+                        .as_pointer_value();
+
+                    let is_last = arm_idx + 1 >= arms.len();
+                    let else_bb = if is_last {
+                        no_match_bb
+                    } else {
+                        ctx.context.append_basic_block(fn_val, &format!("catch_check{}", arm_idx + 1))
+                    };
+                    let strcmp_bb = ctx.context
+                        .append_basic_block(fn_val, &format!("catch_strcmp{arm_idx}"));
+
+                    // null type → can't match a typed arm; skip strcmp (which
+                    // would dereference a null pointer).
+                    let is_null = ctx.builder
+                        .build_is_null(ty_ptr, "ty_isnull")
+                        .map_err(|e| e.to_string())?;
+                    ctx.builder.build_conditional_branch(is_null, else_bb, strcmp_bb)
+                        .map_err(|e| e.to_string())?;
+
+                    ctx.builder.position_at_end(strcmp_bb);
+                    let cmp = ctx.call_rv(ctx.strcmp_fn, &[ty_ptr.into(), exp_ptr.into()], "ty_cmp")?
+                        .into_int_value();
+                    let is_match = ctx.builder
+                        .build_int_compare(IntPredicate::EQ, cmp, i32_ty.const_zero(), "ty_match")
+                        .map_err(|e| e.to_string())?;
+                    ctx.builder.build_conditional_branch(is_match, arm_body_bb, else_bb)
+                        .map_err(|e| e.to_string())?;
+
+                    // Arm body: bind as struct pointer. The thrown value is a
+                    // tagged pointer — mask off the tag bits before deref.
+                    ctx.builder.position_at_end(arm_body_bb);
+                    let slot = ctx.build_entry_alloca(ptr_ty.into(), &arm.binding)?;
+                    let exc_untagged = ctx.builder
+                        .build_and(exc_i64, i64_ty.const_int(!7u64, false), "exc_untag")
+                        .map_err(|e| e.to_string())?;
+                    let exc_ptr = ctx.builder
+                        .build_int_to_ptr(exc_untagged, ptr_ty, "exc_bind_ptr")
+                        .map_err(|e| e.to_string())?;
+                    ctx.builder.build_store(slot, exc_ptr).map_err(|e| e.to_string())?;
+                    ctx.push_scope();
+                    ctx.define(arm.binding.clone(), slot, JadeType::Struct(expected_type.clone()));
+                    emit_stmts(ctx, &arm.body)?;
+                    ctx.pop_scope();
+                    if !ctx.is_terminated() {
+                        ctx.builder.build_unconditional_branch(merge_bb).map_err(|e| e.to_string())?;
+                    }
+
+                    if !is_last {
+                        ctx.builder.position_at_end(else_bb);
+                    }
+                } else {
+                    // Catch-all arm: bind as raw i64, run body.
+                    ctx.builder.build_unconditional_branch(arm_body_bb).map_err(|e| e.to_string())?;
+                    ctx.builder.position_at_end(arm_body_bb);
+                    let slot = ctx.build_entry_alloca(i64_ty.into(), &arm.binding)?;
+                    ctx.builder.build_store(slot, exc_i64).map_err(|e| e.to_string())?;
+                    ctx.push_scope();
+                    // The thrown value is a tagged word; bind as Unknown so uses
+                    // (print, arithmetic) dispatch on its runtime kind.
+                    ctx.define(arm.binding.clone(), slot, JadeType::Unknown);
+                    emit_stmts(ctx, &arm.body)?;
+                    ctx.pop_scope();
+                    if !ctx.is_terminated() {
+                        ctx.builder.build_unconditional_branch(merge_bb).map_err(|e| e.to_string())?;
+                    }
+                    break; // catch-all terminates the chain
+                }
+            }
+
+            // no_match_bb: no typed arm matched — re-raise to the enclosing
+            // frame (matches the VM: an exception not handled by any arm
+            // propagates outward; it is not silently swallowed). The thrown
+            // value/type are still recorded in the runtime, so re-throw with both
+            // so an outer typed `catch <Type>` can still match.
+            ctx.builder.position_at_end(no_match_bb);
+            if !ctx.is_terminated() {
+                let ty_ptr = ctx.call_rv(ctx.jade_exc_type_fn, &[], "rethrow_ty")?
+                    .into_pointer_value();
+                ctx.call_void(ctx.jade_exc_throw_typed_fn, &[exc_i64.into(), ty_ptr.into()])?;
+                ctx.builder.build_unreachable().map_err(|e| e.to_string())?;
+            }
+
+            ctx.builder.position_at_end(merge_bb);
+        }
+
+        // ── raise expr ────────────────────────────────────────────────────────
+        TStmt::Raise { value, .. } => {
+            ctx.uses_exceptions = true;
+            let val = expr::emit_expr(value, ctx)?;
+            // Box to a tagged value for the exception slot, so a caught value
+            // (bound as Unknown) reads back by its runtime kind — e.g. `catch e
+            // { print(e) }` prints a raised string, not its pointer bits.
+            let i64_val = expr::value_to_i64(val, &value.ty, ctx)?;
+            // Pass the static type name so typed `catch <Type>` arms can match
+            // without dereferencing the thrown value as a struct (a `raise
+            // "string"` carries a string pointer, not a struct with a type name
+            // at slot 0 — dereferencing it segfaults).
+            let ptr_ty = ctx.context.ptr_type(AddressSpace::default());
+            let type_arg = match &value.ty {
+                JadeType::Struct(name) => ctx.builder
+                    .build_global_string_ptr(name, "raise_ty")
+                    .map_err(|e| e.to_string())?
+                    .as_pointer_value(),
+                _ => ptr_ty.const_null(),
+            };
+            ctx.call_void(ctx.jade_exc_throw_typed_fn, &[i64_val.into(), type_arg.into()])?;
+            ctx.builder.build_unreachable().map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+// ── Async function emission ───────────────────────────────────────────────────
+
+/// Emit both halves of an `async fn`:
+///
+/// 1. `<name>__async_body(ptr %args, i32 %n) -> i64`
+///    The actual computation.  Parameters are loaded from the args array.
+///    All return values are bit-cast to i64 (jade_value_t).
+///
+/// 2. `<name>(i64 arg0, ...) -> ptr`
+///    The public wrapper.  Allocates an args array on the stack, fills it,
+///    calls `jade_spawn(&<name>__async_body, args, n)`, and returns the
+///    resulting `jade_future_t` pointer.
+fn emit_async_fn_def<'ctx>(
+    ctx: &mut CodegenCtx<'ctx>,
+    name: &str,
+    params: &[String],
+    body: &[TStmt],
+    ret_ty: &JadeType,
+) -> Result<(), String> {
+    use inkwell::values::BasicValueEnum;
+
+    let i64_ty = ctx.context.i64_type();
+    let i32_ty = ctx.context.i32_type();
+
+    let restore_bb = ctx.builder.get_insert_block();
+
+    // ── 1. Body function ─────────────────────────────────────────────────────
+    let body_name = format!("{name}__async_body");
+    let body_fn = ctx.module.get_function(&body_name)
+        .ok_or_else(|| format!("async body '{body_name}' not declared in pass 1"))?;
+
+    let body_entry = ctx.context.append_basic_block(body_fn, "entry");
+    ctx.builder.position_at_end(body_entry);
+
+    ctx.push_scope();
+    let saved_ret   = ctx.current_ret_ty.take();
+    let saved_async = ctx.async_body_ret_ty.take();
+    ctx.current_ret_ty   = Some(ret_ty.clone());
+    ctx.async_body_ret_ty = Some(ret_ty.clone());
+
+    // Load each parameter from args[i] (uniform i64 slots).
+    let args_ptr = body_fn.get_nth_param(0)
+        .ok_or("async body: missing args param")?
+        .into_pointer_value();
+
+    for (i, param_name) in params.iter().enumerate() {
+        let slot = ctx.gep(
+            i64_ty,
+            args_ptr,
+            &[i64_ty.const_int(i as u64, false)],
+            &format!("abp{i}_slot"),
+        )?;
+        let raw = ctx.builder
+            .build_load(i64_ty, slot, &format!("abp{i}_raw"))
+            .map_err(|e| e.to_string())?;
+        let alloca = ctx.builder
+            .build_alloca(i64_ty, param_name)
+            .map_err(|e| e.to_string())?;
+        ctx.builder.build_store(alloca, raw).map_err(|e| e.to_string())?;
+        ctx.define(param_name.clone(), alloca, JadeType::Unknown);
+    }
+
+    emit_stmts(ctx, body)?;
+
+    // Fall-through return → tagged NIL (0b111) for async bodies.
+    if !ctx.is_terminated() {
+        ctx.builder
+            .build_return(Some(&i64_ty.const_int(7, false)))
+            .map_err(|e| e.to_string())?;
+    }
+
+    ctx.pop_scope();
+    ctx.current_ret_ty   = saved_ret;
+    ctx.async_body_ret_ty = saved_async;
+
+    // ── 2. Wrapper function ──────────────────────────────────────────────────
+    let wrapper_fn = ctx.module.get_function(name)
+        .ok_or_else(|| format!("async wrapper '{name}' not declared in pass 1"))?;
+
+    let wrapper_entry = ctx.context.append_basic_block(wrapper_fn, "entry");
+    ctx.builder.position_at_end(wrapper_entry);
+
+    let n = params.len();
+    let alloc_size = i64_ty.const_int(n.max(1) as u64, false);
+
+    // Stack-allocate `jade_value_t args[n]`.
+    let args_arr = ctx.builder
+        .build_array_alloca(i64_ty, alloc_size, "spawn_args")
+        .map_err(|e| e.to_string())?;
+
+    // Store each argument (always i64 in the wrapper signature) into args[i].
+    for i in 0..n {
+        let arg = wrapper_fn
+            .get_nth_param(i as u32)
+            .ok_or_else(|| format!("param {i} out of range for async wrapper '{name}'"))?;
+        // Wrapper params are Unknown → i64; coerce wider types to i64.
+        let as_i64: inkwell::values::IntValue<'ctx> = match arg {
+            BasicValueEnum::IntValue(v) => {
+                if v.get_type().get_bit_width() < 64 {
+                    ctx.builder
+                        .build_int_z_extend(v, i64_ty, &format!("sw{i}_ext"))
+                        .map_err(|e| e.to_string())?
+                } else {
+                    v
+                }
+            }
+            BasicValueEnum::FloatValue(f) => ctx.float_to_i64_bits(f)?,
+            BasicValueEnum::PointerValue(p) => ctx.builder
+                .build_ptr_to_int(p, i64_ty, &format!("sw{i}_p2i"))
+                .map_err(|e| e.to_string())?,
+            other => {
+                return Err(format!("unsupported arg type in async wrapper: {other:?}"));
+            }
+        };
+        let slot = ctx.gep(
+            i64_ty,
+            args_arr,
+            &[i64_ty.const_int(i as u64, false)],
+            &format!("sw{i}_slot"),
+        )?;
+        ctx.builder.build_store(slot, as_i64).map_err(|e| e.to_string())?;
+    }
+
+    // jade_spawn(&body_fn, args_arr, n)
+    let body_fn_ptr = body_fn.as_global_value().as_pointer_value();
+    let n_val = i32_ty.const_int(n as u64, false);
+    let future_ptr = ctx
+        .call_rv(
+            ctx.jade_spawn_fn,
+            &[body_fn_ptr.into(), args_arr.into(), n_val.into()],
+            "future",
+        )?
+        .into_pointer_value();
+
+    ctx.builder
+        .build_return(Some(&future_ptr))
+        .map_err(|e| e.to_string())?;
+
+    ctx.uses_async = true;
+
+    if let Some(bb) = restore_bb {
+        ctx.builder.position_at_end(bb);
+    }
+
+    Ok(())
+}
+
+// ── Function body emission ────────────────────────────────────────────────────
+
+/// Emit the body of a (non-async) top-level or method function: create the entry
+/// block, store each parameter into an alloca, emit the body statements, and add
+/// a default return matching the declared return type if control falls through.
+fn emit_fn_body<'ctx>(
+    ctx: &mut CodegenCtx<'ctx>,
+    name: &str,
+    params: &[String],
+    body: &[TStmt],
+    ret_ty: &JadeType,
+) -> Result<(), String> {
+    let (fn_val, param_tys, _) = ctx
+        .fn_info
+        .get(name)
+        .ok_or_else(|| format!("function '{name}' not declared in pass 1"))?
+        .clone();
+
+    let restore_bb = ctx.builder.get_insert_block();
+
+    let entry_bb = ctx.context.append_basic_block(fn_val, "entry");
+    ctx.builder.position_at_end(entry_bb);
+
+    ctx.push_scope();
+    ctx.fn_depth += 1;
+    let saved_ret = ctx.current_ret_ty.take();
+    ctx.current_ret_ty = Some(ret_ty.clone());
+
+    // Allocate one slot per parameter in the entry block and store the arg.
+    for (i, param_name) in params.iter().enumerate() {
+        let jt = param_tys.get(i).cloned().unwrap_or(JadeType::Unknown);
+        let llvm_ty = types::jade_to_llvm(&jt, ctx.context);
+        let ptr = ctx
+            .builder
+            .build_alloca(llvm_ty, param_name)
+            .map_err(|e| e.to_string())?;
+        let arg_val = fn_val
+            .get_nth_param(i as u32)
+            .ok_or_else(|| format!("param {i} out of range for '{name}'"))?;
+        ctx.builder.build_store(ptr, arg_val).map_err(|e| e.to_string())?;
+        ctx.define(param_name.clone(), ptr, jt);
+    }
+
+    emit_stmts(ctx, body)?;
+
+    // If the body didn't terminate, add a default return matching the declared type.
+    if !ctx.is_terminated() {
+        match ret_ty {
+            JadeType::Nil => {
+                ctx.builder.build_return(None).map_err(|e| e.to_string())?;
+            }
+            JadeType::Str | JadeType::Dict | JadeType::Struct(_)
+            | JadeType::Array(_) | JadeType::Fn { .. } | JadeType::AsyncFn { .. }
+            | JadeType::Future(_) | JadeType::Prompt | JadeType::Grammar => {
+                let null = ctx.context.ptr_type(inkwell::AddressSpace::default()).const_null();
+                ctx.builder.build_return(Some(&null)).map_err(|e| e.to_string())?;
+            }
+            _ => {
+                let zero = ctx.context.i64_type().const_int(0, false);
+                ctx.builder.build_return(Some(&zero)).map_err(|e| e.to_string())?;
+            }
+        }
+    }
+
+    ctx.pop_scope();
+    ctx.fn_depth -= 1;
+    ctx.current_ret_ty = saved_ret;
+
+    if let Some(bb) = restore_bb {
+        ctx.builder.position_at_end(bb);
+    }
+
+    Ok(())
+}

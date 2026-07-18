@@ -1,0 +1,2705 @@
+//! Bytecode `Instr` → LLVM IR lowering (brick 2 of the Chunk→LLVM backend).
+//!
+//! ## Model: tagged register slots
+//!
+//! `emit.rs` produces a register machine. We give every register an `alloca i64`
+//! holding a **tagged value word** (the same tagged ABI the runtime uses, see
+//! `jade-runtime`/`runtime.h`). Instructions load their operand slots, untag to a
+//! native value, compute, re-tag, and store the result slot. This is simpler
+//! than tracking a static type per register (the emitter reuses register slots
+//! across types), and LLVM's `mem2reg` + `instcombine` promote the allocas to
+//! SSA and fold the `untag(tag(x))` round-trips away, so the tag arithmetic is
+//! mostly free after optimization. Boxed floats and calls still hit the runtime
+//! (added in later bricks).
+//!
+//! This brick handles the no-exception, no-call, no-heap subset: constant loads,
+//! `Move`, integer arithmetic, control flow, and `Return`. Unsupported opcodes
+//! return an `Err` so the daemon can fall back to the legacy `expr.rs` path
+//! while this backend grows (the migration never runs an incomplete lowering).
+
+use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
+
+use inkwell::attributes::AttributeLoc;
+use inkwell::basic_block::BasicBlock as LlvmBlock;
+use inkwell::builder::Builder;
+use inkwell::context::Context;
+use inkwell::module::Module;
+use inkwell::values::{AnyValue, BasicMetadataValueEnum, FloatValue, FunctionValue, IntValue, PointerValue};
+use inkwell::{AddressSpace, FloatPredicate, IntPredicate};
+
+use jade::compiler::bytecode::{Chunk, CompiledFn, FStrPart, Instr, Reg};
+use jade::compiler::vm::VmValue;
+use jade::frontend::ast::{BinOpKind, Expr, StructFieldDef, UnaryOpKind};
+
+use super::cfg;
+
+// Tagged-immediate bit patterns (mirror runtime.h / jade-runtime value.rs).
+const NIL: u64 = 0x07;
+const TRUE: u64 = 0x1f;
+const FALSE: u64 = 0x0f;
+// Low-3-bit heap tags (mirror runtime.h JRT_TAG_*).
+const TAG_PTR: u64 = 1; // 0b001 non-string heap object (incl. a boxed fn value)
+const TAG_STR: u64 = 5; // 0b101 heap string pointer
+// Trust byte for literal (compile-time-known) strings.
+const TRUSTED: u64 = 0;
+
+/// Reserved global names that resolve to a runtime builtin (not a user value),
+/// mirroring `jade::builtins::seed_globals`. A `Call` whose callee is
+/// `GetGlobal(<one of these>)` and which this backend does not itself lower is a
+/// builtin call we can't emit — the whole program falls back to `expr.rs`. (A
+/// user function that shadows one of these names is bound via `SetGlobal`, so it
+/// is tracked as a known function and takes precedence over this check.)
+const RESERVED_BUILTINS: &[&str] = &[
+    // core + native + type-constructor globals
+    "write", "len", "input", "print", "stream", "route", "int", "float", "bool", "str", "func",
+    "Grammar",
+    // stdlib package globals (accessed via `use`; a bare call is invalid, but
+    // reserving them keeps a stray Call from mis-lowering to an indirect call)
+    "llm", "string", "math", "array", "dict", "fs", "time", "http", "uhttp", "sh", "json", "env",
+    "path", "random",
+];
+
+/// Per-function lowering helper: bundles the builder, the i64 slot type, and the
+/// register `alloca`s so the instruction handlers stay terse.
+struct Lowerer<'a, 'ctx> {
+    ctx: &'ctx Context,
+    module: &'a Module<'ctx>,
+    builder: &'a Builder<'ctx>,
+    slots: &'a [PointerValue<'ctx>],
+}
+
+impl<'a, 'ctx> Lowerer<'a, 'ctx> {
+    fn i64t(&self) -> inkwell::types::IntType<'ctx> {
+        self.ctx.i64_type()
+    }
+
+    fn f64t(&self) -> inkwell::types::FloatType<'ctx> {
+        self.ctx.f64_type()
+    }
+
+    /// Get an already-declared runtime symbol, or declare it on first use.
+    fn runtime_fn(
+        &self,
+        name: &str,
+        ty: inkwell::types::FunctionType<'ctx>,
+    ) -> FunctionValue<'ctx> {
+        self.module
+            .get_function(name)
+            .unwrap_or_else(|| self.module.add_function(name, ty, None))
+    }
+
+    /// Box a native f64 into a tagged float word via `jrt_box_float` (a heap
+    /// malloc + `JRT_TAG_FLOAT`; floats do not fit inline in the tagged ABI).
+    fn box_float(&self, d: FloatValue<'ctx>) -> IntValue<'ctx> {
+        let f = self.runtime_fn("jrt_box_float", self.i64t().fn_type(&[self.f64t().into()], false));
+        self.builder
+            .build_call(f, &[d.into()], "boxf")
+            .unwrap()
+            .as_any_value_enum()
+            .into_int_value()
+    }
+
+    /// Load a boxed float word back to a native f64 via `jrt_unbox_float`.
+    fn unbox_float(&self, v: IntValue<'ctx>) -> FloatValue<'ctx> {
+        let f = self.runtime_fn("jrt_unbox_float", self.f64t().fn_type(&[self.i64t().into()], false));
+        self.builder
+            .build_call(f, &[v.into()], "unboxf")
+            .unwrap()
+            .as_any_value_enum()
+            .into_float_value()
+    }
+
+    /// Unbox both operands of a binary float op.
+    fn float_operands(&self, l: Reg, r: Reg) -> (FloatValue<'ctx>, FloatValue<'ctx>) {
+        (self.unbox_float(self.load(l)), self.unbox_float(self.load(r)))
+    }
+
+    fn ptrt(&self) -> inkwell::types::PointerType<'ctx> {
+        self.ctx.ptr_type(AddressSpace::default())
+    }
+
+    /// Strip the low-3-bit tag off a heap word and reinterpret as a data pointer.
+    fn untag_ptr(&self, v: IntValue<'ctx>) -> PointerValue<'ctx> {
+        let masked = self
+            .builder
+            .build_and(v, self.i64t().const_int(!7u64, false), "pmask")
+            .unwrap();
+        self.builder.build_int_to_ptr(masked, self.ptrt(), "asptr").unwrap()
+    }
+
+    /// Tag an 8-aligned data pointer as a heap string word (`ptr | TAG_STR`).
+    fn tag_str(&self, p: PointerValue<'ctx>) -> IntValue<'ctx> {
+        let asint = self.builder.build_ptr_to_int(p, self.i64t(), "p2i").unwrap();
+        self.builder
+            .build_or(asint, self.i64t().const_int(TAG_STR, false), "tagstr")
+            .unwrap()
+    }
+
+    /// Tag a malloc'd (8-aligned) heap object pointer as a non-string heap word
+    /// (`ptr | TAG_PTR`) — used for kind-tagged collections.
+    fn tag_ptr(&self, p: PointerValue<'ctx>) -> IntValue<'ctx> {
+        let asint = self.builder.build_ptr_to_int(p, self.i64t(), "op2i").unwrap();
+        self.builder
+            .build_or(asint, self.i64t().const_int(TAG_PTR, false), "tagptr")
+            .unwrap()
+    }
+
+    /// A plain NUL-terminated C string global (for compile-time struct type/field
+    /// names passed to the runtime — not a tagged Jade string).
+    fn cstr(&self, s: &str) -> PointerValue<'ctx> {
+        self.builder.build_global_string_ptr(s, "cstr").unwrap().as_pointer_value()
+    }
+
+    /// Materialize a compile-time string literal as a TRUSTED tagged-string
+    /// global and return its **data pointer** (8-aligned). Layout mirrors
+    /// `expr.rs::emit_tagged_literal`: `[7 pad][trust][bytes…][nul]`, so the
+    /// data pointer is `global+8` and the trust byte lives at `data[-1]`.
+    fn str_literal_ptr(&self, s: &str) -> Result<PointerValue<'ctx>, String> {
+        let i8_ty = self.ctx.i8_type();
+        let i32_ty = self.ctx.i32_type();
+        let bytes = s.as_bytes();
+        let mut data: Vec<u8> = Vec::with_capacity(bytes.len() + 9);
+        data.extend_from_slice(&[0u8; 7]);
+        data.push(TRUSTED as u8);
+        data.extend_from_slice(bytes);
+        data.push(0);
+
+        let arr_ty = i8_ty.array_type(data.len() as u32);
+        let const_arr = self.ctx.const_string(&data, false);
+        let global = self.module.add_global(arr_ty, None, "str_lit_t");
+        global.set_initializer(&const_arr);
+        global.set_linkage(inkwell::module::Linkage::Internal);
+        global.set_constant(true);
+        global.set_alignment(8);
+
+        let zero = i32_ty.const_zero();
+        let eight = i32_ty.const_int(8, false);
+        unsafe {
+            self.builder
+                .build_in_bounds_gep(arr_ty, global.as_pointer_value(), &[zero, eight], "lit_data")
+                .map_err(|e| e.to_string())
+        }
+    }
+
+    /// Materialize a string literal as a tagged STRING **word** (ready to store
+    /// in a slot), not just its data pointer.
+    fn str_literal_word(&self, s: &str) -> Result<IntValue<'ctx>, String> {
+        let ptr = self.str_literal_ptr(s)?;
+        Ok(self.tag_str(ptr))
+    }
+
+    /// Raise `value` (a tagged word) as an untyped exception via the runtime's
+    /// `jade_exc_throw_typed(value, NULL)`, then close the block with
+    /// `unreachable` (throw is noreturn — it longjmps to the active handler or
+    /// aborts). Callers must not emit anything after this in the same block.
+    fn throw(&self, value: IntValue<'ctx>) -> Result<(), String> {
+        let void = self.ctx.void_type();
+        let f = self.runtime_fn(
+            "jade_exc_throw_typed",
+            void.fn_type(&[self.i64t().into(), self.ptrt().into()], false),
+        );
+        self.builder
+            .build_call(f, &[value.into(), self.ptrt().const_null().into()], "")
+            .map_err(|e| e.to_string())?;
+        self.builder.build_unreachable().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Declare (once) `setjmp(ptr) -> i32` with the `returns_twice` attribute —
+    /// without it LLVM may hoist code across the call and miscompile the second
+    /// (longjmp) return.
+    fn setjmp_fn(&self) -> FunctionValue<'ctx> {
+        if let Some(f) = self.module.get_function("setjmp") {
+            return f;
+        }
+        let ty = self.ctx.i32_type().fn_type(&[self.ptrt().into()], false);
+        let f = self.module.add_function("setjmp", ty, None);
+        let id = inkwell::attributes::Attribute::get_named_enum_kind_id("returns_twice");
+        let attr = self.ctx.create_enum_attribute(id, 0);
+        f.add_attribute(AttributeLoc::Function, attr);
+        f
+    }
+
+    fn push_frame(&self, buf: PointerValue<'ctx>) {
+        let f = self
+            .runtime_fn("jade_exc_push_frame", self.ctx.void_type().fn_type(&[self.ptrt().into()], false));
+        self.builder.build_call(f, &[buf.into()], "").unwrap();
+    }
+
+    fn pop_frame(&self) {
+        let f = self.runtime_fn("jade_exc_pop", self.ctx.void_type().fn_type(&[], false));
+        self.builder.build_call(f, &[], "").unwrap();
+    }
+
+    /// The currently-thrown value word (`jade_exc_value()`), read inside a
+    /// handler's landing block.
+    fn exc_value(&self) -> IntValue<'ctx> {
+        let f = self.runtime_fn("jade_exc_value", self.i64t().fn_type(&[], false));
+        self.builder
+            .build_call(f, &[], "excv")
+            .unwrap()
+            .as_any_value_enum()
+            .into_int_value()
+    }
+
+    /// Lower `print(val)`: the runtime's tag-dispatching `jrt_print_any(val,
+    /// "\n")` (VM-faithful `value_to_display` + trailing newline). `print`
+    /// evaluates to nil.
+    fn print_value(&self, val: IntValue<'ctx>, dest: Reg) -> Result<(), String> {
+        let f = self.runtime_fn(
+            "jrt_print_any",
+            self.ctx.void_type().fn_type(&[self.i64t().into(), self.ptrt().into()], false),
+        );
+        let nl = self
+            .builder
+            .build_global_string_ptr("\n", "jprint_nl")
+            .map_err(|e| e.to_string())?
+            .as_pointer_value();
+        self.builder
+            .build_call(f, &[val.into(), nl.into()], "")
+            .map_err(|e| e.to_string())?;
+        self.store(dest, self.i64t().const_int(NIL, false));
+        Ok(())
+    }
+
+    /// Integer divide (`is_mod == false`) or modulo, with the VM's catchable
+    /// zero-divisor behavior: LLVM `sdiv`/`srem` by 0 is UB (traps on arm64),
+    /// so we branch on a zero divisor and `raise` a "division/modulo by zero"
+    /// string instead. Leaves the builder on the non-zero ("ok") block and
+    /// returns the tagged result word.
+    fn int_div_mod(&self, l: Reg, r: Reg, is_mod: bool) -> Result<IntValue<'ctx>, String> {
+        let (a, c) = self.int_operands(l, r);
+        let func = self
+            .builder
+            .get_insert_block()
+            .and_then(|bb| bb.get_parent())
+            .ok_or("int_div_mod outside a function")?;
+        let is_zero = self
+            .builder
+            .build_int_compare(IntPredicate::EQ, c, self.i64t().const_zero(), "divz")
+            .map_err(|e| e.to_string())?;
+        let throw_bb = self.ctx.append_basic_block(func, "divzero_throw");
+        let ok_bb = self.ctx.append_basic_block(func, "divzero_ok");
+        self.builder
+            .build_conditional_branch(is_zero, throw_bb, ok_bb)
+            .map_err(|e| e.to_string())?;
+
+        self.builder.position_at_end(throw_bb);
+        let msg = self.str_literal_word(if is_mod { "modulo by zero" } else { "division by zero" })?;
+        self.throw(msg)?;
+
+        self.builder.position_at_end(ok_bb);
+        let res = if is_mod {
+            self.builder.build_int_signed_rem(a, c, "iremi").map_err(|e| e.to_string())?
+        } else {
+            self.builder.build_int_signed_div(a, c, "idivi").map_err(|e| e.to_string())?
+        };
+        Ok(self.tag_int(res))
+    }
+
+    /// Concatenate two tagged-string **data pointers** via the shared runtime
+    /// `jrt_str_concat` (trust = max of inputs); returns a new data pointer.
+    fn concat_ptrs(&self, a: PointerValue<'ctx>, b: PointerValue<'ctx>) -> PointerValue<'ctx> {
+        let f = self.runtime_fn(
+            "jrt_str_concat",
+            self.ptrt().fn_type(&[self.ptrt().into(), self.ptrt().into()], false),
+        );
+        self.builder
+            .build_call(f, &[a.into(), b.into()], "concat")
+            .unwrap()
+            .as_any_value_enum()
+            .into_pointer_value()
+    }
+
+    /// Concatenate two tagged-string words; returns a new tagged word.
+    fn str_concat(&self, l: Reg, r: Reg) -> IntValue<'ctx> {
+        let lp = self.untag_ptr(self.load(l));
+        let rp = self.untag_ptr(self.load(r));
+        self.tag_str(self.concat_ptrs(lp, rp))
+    }
+
+    /// Render a value word to a tagged-string **data pointer** via the runtime's
+    /// `jrt_str_of_any` (VM-faithful for scalars/strings; preserves trust). Used
+    /// to interpolate an f-string part.
+    fn str_of_any(&self, r: Reg) -> PointerValue<'ctx> {
+        let f = self.runtime_fn("jrt_str_of_any", self.ptrt().fn_type(&[self.i64t().into()], false));
+        self.builder
+            .build_call(f, &[self.load(r).into()], "strofany")
+            .unwrap()
+            .as_any_value_enum()
+            .into_pointer_value()
+    }
+
+    /// Load a register's tagged word.
+    fn load(&self, r: Reg) -> IntValue<'ctx> {
+        self.builder
+            .build_load(self.i64t(), self.slots[r as usize], "ld")
+            .unwrap()
+            .into_int_value()
+    }
+
+    /// Store a tagged word into a register.
+    fn store(&self, r: Reg, v: IntValue<'ctx>) {
+        self.builder.build_store(self.slots[r as usize], v).unwrap();
+    }
+
+    /// Load a slot by raw index (locals share the register array in the VM, so
+    /// `GetLocal`/`SetLocal` index the same `slots`).
+    fn load_idx(&self, i: usize) -> IntValue<'ctx> {
+        self.builder
+            .build_load(self.i64t(), self.slots[i], "ldl")
+            .unwrap()
+            .into_int_value()
+    }
+
+    fn store_idx(&self, i: usize, v: IntValue<'ctx>) {
+        self.builder.build_store(self.slots[i], v).unwrap();
+    }
+
+    /// A first-class function value for `jf_<uid>`: a `TAG_PTR`-tagged pointer to
+    /// an 8-aligned internal global holding the function's address. All fn values
+    /// for a uid share one box global (allocation-free). An indirect call untags
+    /// this, loads the function pointer, and calls through it; a print/index of it
+    /// would hit the runtime's `<object>` placeholder — the ObjKind gap — but the
+    /// frontend only ever *calls* a function value.
+    fn fn_box_word(&self, uid: usize, f: FunctionValue<'ctx>) -> IntValue<'ctx> {
+        let gname = format!("jf_box_{uid}");
+        let g = self.module.get_global(&gname).unwrap_or_else(|| {
+            let g = self.module.add_global(self.ptrt(), None, &gname);
+            g.set_initializer(&f.as_global_value().as_pointer_value());
+            g.set_constant(true);
+            g.set_linkage(inkwell::module::Linkage::Internal);
+            g.set_alignment(8);
+            g
+        });
+        let asint = self
+            .builder
+            .build_ptr_to_int(g.as_pointer_value(), self.i64t(), "boxp2i")
+            .unwrap();
+        self.builder
+            .build_or(asint, self.i64t().const_int(TAG_PTR, false), "boxtag")
+            .unwrap()
+    }
+
+    /// Indirect call through a first-class function value: untag the callee box,
+    /// load the function pointer, and call it with `args` (all tagged i64 words).
+    /// The callee's arity must equal `args.len()` — the frontend guarantees a
+    /// call passes the right number of arguments.
+    fn indirect_call(&self, callee: Reg, args: &[Reg]) -> Result<IntValue<'ctx>, String> {
+        let box_ptr = self.untag_ptr(self.load(callee));
+        let fn_ptr = self
+            .builder
+            .build_load(self.ptrt(), box_ptr, "fnld")
+            .map_err(|e| e.to_string())?
+            .into_pointer_value();
+        let arg_tys = vec![self.i64t().into(); args.len()];
+        let fn_ty = self.i64t().fn_type(&arg_tys, false);
+        let argv: Vec<BasicMetadataValueEnum> = args.iter().map(|a| self.load(*a).into()).collect();
+        Ok(self
+            .builder
+            .build_indirect_call(fn_ty, fn_ptr, &argv, "icall")
+            .map_err(|e| e.to_string())?
+            .as_any_value_enum()
+            .into_int_value())
+    }
+
+    /// The module-level global cell for `name`, created (initialized to nil) on
+    /// first reference. Globals are module-scoped — shared across the top-level
+    /// chunk and every lowered `fn_def` — so they must be LLVM globals keyed by
+    /// name, not function allocas.
+    fn global_slot(&self, name: &str) -> PointerValue<'ctx> {
+        let gname = format!("jgl_{name}");
+        if let Some(g) = self.module.get_global(&gname) {
+            return g.as_pointer_value();
+        }
+        let g = self.module.add_global(self.i64t(), None, &gname);
+        g.set_initializer(&self.i64t().const_int(NIL, false));
+        g.set_linkage(inkwell::module::Linkage::Internal);
+        g.as_pointer_value()
+    }
+
+    /// Untag an int word to its native i64 (arithmetic shift right by 1).
+    fn untag_int(&self, v: IntValue<'ctx>) -> IntValue<'ctx> {
+        self.builder
+            .build_right_shift(v, self.i64t().const_int(1, false), true, "utag")
+            .unwrap()
+    }
+
+    /// Tag a native i64 as an int word (shift left by 1; low bit 0).
+    fn tag_int(&self, v: IntValue<'ctx>) -> IntValue<'ctx> {
+        self.builder
+            .build_left_shift(v, self.i64t().const_int(1, false), "tag")
+            .unwrap()
+    }
+
+    /// Untag a bool word to an `i1` (bit 4 holds the value).
+    fn untag_bool(&self, v: IntValue<'ctx>) -> IntValue<'ctx> {
+        let shifted = self
+            .builder
+            .build_right_shift(v, self.i64t().const_int(4, false), false, "bsh")
+            .unwrap();
+        let bit = self
+            .builder
+            .build_and(shifted, self.i64t().const_int(1, false), "band")
+            .unwrap();
+        self.builder
+            .build_int_compare(IntPredicate::NE, bit, self.i64t().const_zero(), "btrue")
+            .unwrap()
+    }
+
+    /// Untag both operands of a binary int op.
+    fn int_operands(&self, l: Reg, r: Reg) -> (IntValue<'ctx>, IntValue<'ctx>) {
+        (self.untag_int(self.load(l)), self.untag_int(self.load(r)))
+    }
+
+    /// Wrap an `i1` as a tagged bool word (`true`→0x1f, `false`→0x0f).
+    fn bool_word(&self, b: IntValue<'ctx>) -> IntValue<'ctx> {
+        self.builder
+            .build_select(
+                b,
+                self.i64t().const_int(TRUE, false),
+                self.i64t().const_int(FALSE, false),
+                "boolw",
+            )
+            .unwrap()
+            .into_int_value()
+    }
+
+    /// Untag a bool word and zero-extend to i64 (for bool ordering: false < true).
+    fn zext_bool(&self, r: Reg) -> IntValue<'ctx> {
+        let b = self.untag_bool(self.load(r));
+        self.builder.build_int_z_extend(b, self.i64t(), "zb").unwrap()
+    }
+
+    /// Read register `r` as an f64, widening from int if `is_int` (mixed
+    /// int/float comparisons).
+    fn as_float(&self, r: Reg, is_int: bool) -> FloatValue<'ctx> {
+        if is_int {
+            let i = self.untag_int(self.load(r));
+            self.builder.build_signed_int_to_float(i, self.f64t(), "i2fc").unwrap()
+        } else {
+            self.unbox_float(self.load(r))
+        }
+    }
+
+    fn int_cmp(&self, l: Reg, r: Reg, pred: IntPredicate) -> IntValue<'ctx> {
+        let (a, c) = self.int_operands(l, r);
+        let b = self.builder.build_int_compare(pred, a, c, "icmp").unwrap();
+        self.bool_word(b)
+    }
+
+    fn float_cmp(&self, l: Reg, r: Reg, pred: FloatPredicate) -> IntValue<'ctx> {
+        let (a, c) = self.float_operands(l, r);
+        let b = self.builder.build_float_compare(pred, a, c, "fcmp").unwrap();
+        self.bool_word(b)
+    }
+
+    fn bool_cmp(&self, l: Reg, r: Reg, pred: IntPredicate) -> IntValue<'ctx> {
+        let (a, c) = (self.zext_bool(l), self.zext_bool(r));
+        let b = self.builder.build_int_compare(pred, a, c, "bcmp").unwrap();
+        self.bool_word(b)
+    }
+
+    /// Mixed int/float ordering: widen whichever side is an int, then `fcmp`.
+    fn mixed_cmp(&self, l: Reg, l_int: bool, r: Reg, r_int: bool, pred: FloatPredicate) -> IntValue<'ctx> {
+        let a = self.as_float(l, l_int);
+        let c = self.as_float(r, r_int);
+        let b = self.builder.build_float_compare(pred, a, c, "mcmp").unwrap();
+        self.bool_word(b)
+    }
+
+    /// Native i64 bitwise/shift op on two untagged int operands, re-tagged.
+    fn int_bitop(
+        &self,
+        l: Reg,
+        r: Reg,
+        f: impl FnOnce(IntValue<'ctx>, IntValue<'ctx>) -> Result<IntValue<'ctx>, String>,
+    ) -> Result<IntValue<'ctx>, String> {
+        let (a, c) = self.int_operands(l, r);
+        Ok(self.tag_int(f(a, c)?))
+    }
+
+    // ── Dynamic (Unknown-operand) ops → tag-dispatching runtime (A7) ─────────
+    // Operands are tagged words in slots, so — unlike the legacy static-SSA
+    // backend — we pass the slot words straight to the `jrt_*_any` helpers (the
+    // same decision core the VM runs via `dynop`). Arithmetic returns a tagged
+    // word; comparisons return an i32 that we fold into a bool word.
+
+    /// Dynamic binary arithmetic `jrt_<name>(i64, i64) -> i64` (tagged result).
+    fn any2(&self, name: &str, l: Reg, r: Reg) -> IntValue<'ctx> {
+        let f = self.runtime_fn(
+            name,
+            self.i64t().fn_type(&[self.i64t().into(), self.i64t().into()], false),
+        );
+        self.builder
+            .build_call(f, &[self.load(l).into(), self.load(r).into()], "any2")
+            .unwrap()
+            .as_any_value_enum()
+            .into_int_value()
+    }
+
+    /// `jrt_eq_any(i64, i64) -> i32` (1 when equal).
+    fn eq_any(&self, l: Reg, r: Reg) -> IntValue<'ctx> {
+        let f = self.runtime_fn(
+            "jrt_eq_any",
+            self.ctx.i32_type().fn_type(&[self.i64t().into(), self.i64t().into()], false),
+        );
+        self.builder
+            .build_call(f, &[self.load(l).into(), self.load(r).into()], "eqany")
+            .unwrap()
+            .as_any_value_enum()
+            .into_int_value()
+    }
+
+    /// `jrt_cmp_any(i64, i64) -> i32` (three-way: -1 / 0 / 1).
+    fn cmp_any(&self, l: Reg, r: Reg) -> IntValue<'ctx> {
+        let f = self.runtime_fn(
+            "jrt_cmp_any",
+            self.ctx.i32_type().fn_type(&[self.i64t().into(), self.i64t().into()], false),
+        );
+        self.builder
+            .build_call(f, &[self.load(l).into(), self.load(r).into()], "cmpany")
+            .unwrap()
+            .as_any_value_enum()
+            .into_int_value()
+    }
+
+    /// `jrt_neg_any(i64) -> i64` (tagged result).
+    fn neg_any(&self, s: Reg) -> IntValue<'ctx> {
+        let f = self.runtime_fn("jrt_neg_any", self.i64t().fn_type(&[self.i64t().into()], false));
+        self.builder
+            .build_call(f, &[self.load(s).into()], "negany")
+            .unwrap()
+            .as_any_value_enum()
+            .into_int_value()
+    }
+
+    /// Fold an i32 (from `eq_any`/`cmp_any`) compared to zero into a bool word.
+    fn i32cmp_word(&self, v: IntValue<'ctx>, pred: IntPredicate) -> IntValue<'ctx> {
+        let z = self.ctx.i32_type().const_zero();
+        let b = self.builder.build_int_compare(pred, v, z, "i32c").unwrap();
+        self.bool_word(b)
+    }
+
+    /// Compare two tagged-string words via libc `strcmp` on their data pointers
+    /// (mirrors the legacy typed-string path), folding into a bool word. Strings
+    /// carry their own tag (`TAG_STR`), so this needs no per-object kind header.
+    fn str_cmp(&self, l: Reg, r: Reg, pred: IntPredicate) -> IntValue<'ctx> {
+        let lp = self.untag_ptr(self.load(l));
+        let rp = self.untag_ptr(self.load(r));
+        let f = self.runtime_fn(
+            "strcmp",
+            self.ctx.i32_type().fn_type(&[self.ptrt().into(), self.ptrt().into()], false),
+        );
+        let c = self
+            .builder
+            .build_call(f, &[lp.into(), rp.into()], "scmp")
+            .unwrap()
+            .as_any_value_enum()
+            .into_int_value();
+        self.i32cmp_word(c, pred)
+    }
+
+    /// Materialize a compiled default-parameter value (always a literal, per
+    /// `emit_fn`) as a tagged word for a call-site argument fill. Mirrors the
+    /// tagged ABI used by the constant-load opcodes.
+    fn default_word(&self, v: &VmValue) -> Result<IntValue<'ctx>, String> {
+        Ok(match v {
+            VmValue::Int(n) => self.i64t().const_int((n.wrapping_shl(1)) as u64, false),
+            VmValue::Bool(b) => self.i64t().const_int(if *b { TRUE } else { FALSE }, false),
+            VmValue::Nil => self.i64t().const_int(NIL, false),
+            VmValue::Float(f) => self.box_float(self.f64t().const_float(*f)),
+            VmValue::Str(s) => self.str_literal_word(s)?,
+            other => return Err(format!("lower.rs: unsupported default value {other:?}")),
+        })
+    }
+}
+
+/// Builtins the Chunk backend can lower directly (devirtualized from
+/// `GetGlobal(name)` + `Call`). A name here is only trusted when the program
+/// never `SetGlobal`s it (so the global still holds the builtin, not a user
+/// value). Grows as more builtins are supported.
+const LOWERABLE_BUILTINS: &[&str] = &["print", "str", "int", "float", "bool", "len"];
+
+/// The single register an instruction writes, or `None` for pure
+/// stores/control-flow. Used to invalidate builtin tracking when a register is
+/// overwritten; it must name **every** register-writing opcode (missing one
+/// would let a stale devirtualization survive an overwrite = miscompile).
+fn dest_reg(instr: &Instr) -> Option<Reg> {
+    use Instr::*;
+    match instr {
+        LoadInt(d, _) | LoadFloat(d, _) | LoadBool(d, _) | LoadStr(d, _) | LoadNil(d)
+        | LoadFn(d, _) | MakeClosure(d, _) | GetLocal(d, _) | GetGlobal(d, _) => Some(*d),
+        Move(d, _) | NegInt(d, _) | NegFloat(d, _) | IntToFloat(d, _) | BitNot(d, _)
+        | Not(d, _) | MakePrompt(d, _) | UnaryOp(d, _, _) | GetTypeName(d, _)
+        | Await(d, _) | PromptDeref(d, _, _, _) => Some(*d),
+        AddInt(d, _, _) | SubInt(d, _, _) | MulInt(d, _, _) | DivInt(d, _, _) | ModInt(d, _, _)
+        | AddFloat(d, _, _) | SubFloat(d, _, _) | MulFloat(d, _, _) | DivFloat(d, _, _)
+        | ConcatStr(d, _, _) | BitAnd(d, _, _) | BitOr(d, _, _) | BitXor(d, _, _)
+        | Shl(d, _, _) | Shr(d, _, _) | BinOp(d, _, _, _) | GetIndex(d, _, _)
+        | GetField(d, _, _) => Some(*d),
+        CmpEqInt(d, ..) | CmpNeInt(d, ..) | CmpLtInt(d, ..) | CmpGtInt(d, ..) | CmpLeInt(d, ..)
+        | CmpGeInt(d, ..) | CmpEqFloat(d, ..) | CmpNeFloat(d, ..) | CmpLtFloat(d, ..)
+        | CmpGtFloat(d, ..) | CmpLeFloat(d, ..) | CmpGeFloat(d, ..) | CmpLtIntFloat(d, ..)
+        | CmpGtIntFloat(d, ..) | CmpLeIntFloat(d, ..) | CmpGeIntFloat(d, ..)
+        | CmpLtFloatInt(d, ..) | CmpGtFloatInt(d, ..) | CmpLeFloatInt(d, ..)
+        | CmpGeFloatInt(d, ..) | CmpEqBool(d, ..) | CmpNeBool(d, ..) | CmpLtBool(d, ..)
+        | CmpGtBool(d, ..) | CmpLeBool(d, ..) | CmpGeBool(d, ..) | CmpEqStr(d, ..)
+        | CmpNeStr(d, ..) | CmpLtStr(d, ..) | CmpGtStr(d, ..) | CmpLeStr(d, ..)
+        | CmpGeStr(d, ..) | CmpEq(d, ..) | CmpNe(d, ..) | CmpLt(d, ..) | CmpGt(d, ..)
+        | CmpLe(d, ..) | CmpGe(d, ..) => Some(*d),
+        Call(d, _, _) | CallNamed(d, _, _) | Spawn(d, _, _) | Join(d, _) | MakeArray(d, _)
+        | MakeDict(d, _) | MakeStruct(d, _, _) | BuildFStr(d, _) => Some(*d),
+        // Handler binds its caught register (in the landing block).
+        SetupHandler(r, _) => Some(*r),
+        // Pure stores / control flow / no-reg-dest.
+        SetGlobal(..) | SetLocal(..) | SetIndex(..) | SetField(..) | Jump(_)
+        | JumpIfFalse(..) | JumpIfTrue(..) | Return(_) | Halt | Raise(_) | PopHandler
+        | ImportFile(..) | ImportFrom(..) => None,
+    }
+}
+
+/// A call the pre-scan devirtualized to a supported builtin.
+struct BuiltinCall {
+    name: &'static str,
+    args: Vec<Reg>,
+}
+
+/// Resolve which `Call`s target a lowerable builtin. Tracks, forward over the
+/// flat stream, which registers hold a builtin function value (bound by
+/// `GetGlobal(builtin)` and never overwritten). Sound because the tracked
+/// globals are immutable (the no-`SetGlobal` guard) and any write to a tracked
+/// register clears it — so a resolution can never name the wrong callee; at
+/// worst it conservatively declines and the Call falls back.
+fn resolve_builtin_calls(code: &[Instr]) -> HashMap<usize, BuiltinCall> {
+    let reassigned: std::collections::HashSet<&str> = code
+        .iter()
+        .filter_map(|i| match i {
+            Instr::SetGlobal(n, _) => Some(n.as_str()),
+            _ => None,
+        })
+        .collect();
+    let mut reg_builtin: HashMap<Reg, &'static str> = HashMap::new();
+    let mut out: HashMap<usize, BuiltinCall> = HashMap::new();
+    for (i, instr) in code.iter().enumerate() {
+        match instr {
+            Instr::GetGlobal(d, name) => {
+                match LOWERABLE_BUILTINS.iter().copied().find(|b| *b == name.as_str()) {
+                    Some(b) if !reassigned.contains(name.as_str()) => {
+                        reg_builtin.insert(*d, b);
+                    }
+                    _ => {
+                        reg_builtin.remove(d);
+                    }
+                }
+            }
+            Instr::Call(d, callee, args) => {
+                if let Some(&b) = reg_builtin.get(callee) {
+                    // Only resolve arities this backend lowers; others fall back.
+                    let ok = match b {
+                        "print" | "str" | "int" | "float" | "bool" | "len" => args.len() == 1,
+                        _ => false,
+                    };
+                    if ok {
+                        out.insert(i, BuiltinCall { name: b, args: args.clone() });
+                    }
+                }
+                reg_builtin.remove(d);
+            }
+            other => {
+                if let Some(d) = dest_reg(other) {
+                    reg_builtin.remove(&d);
+                }
+            }
+        }
+    }
+    out
+}
+
+// ── User-function lowering (A6b) ───────────────────────────────────────────────
+//
+// The top-level chunk and every reachable `fn_def`/closure becomes its own LLVM
+// function `jf_<uid>`. Function values are **first-class**: `LoadFn`/`MakeClosure`
+// materialize a boxed function pointer (`fn_box_word`), so a function can be
+// stored, passed as an argument, and returned. A `Call` whose callee is a
+// statically-known function is **devirtualized** to a direct `call jf_<uid>`
+// (filling omitted defaults); any other function value is called **indirectly**
+// through its box. Closures capture only globals (the language forbids nested
+// `fn`s and local capture — a closure body reads outer names as `GetGlobal`), so
+// a closure is just a plain `jf_<uid>` with no environment. Only a call to a
+// reserved builtin this backend doesn't lower (e.g. `len`) forces a fallback.
+
+/// Whole-program function registry, shared across every chunk being lowered.
+struct FnCtx<'ctx> {
+    /// uid → the pre-declared `jf_<uid>` LLVM function (declared before any body
+    /// is lowered, so recursion and mutual recursion resolve).
+    funcs: Vec<FunctionValue<'ctx>>,
+    /// uid → the compiled function (params/defaults/body).
+    defs: Vec<Arc<CompiledFn>>,
+    /// `Arc<CompiledFn>` identity → uid, for resolving a chunk-local `LoadFn`
+    /// index (`chunk.fn_defs[idx]`) to its global uid.
+    ptr2uid: HashMap<*const CompiledFn, usize>,
+    /// Global variable name → uid, for a name that is *provably* a function: it
+    /// is `SetGlobal`'d exactly once in the whole program, from a `LoadFn`. A
+    /// decorated function (`@dec`) writes the global twice, so it is excluded —
+    /// its identity changes at runtime, and the call must fall back.
+    global_fns: HashMap<String, usize>,
+    /// Struct type name → its optional fields' (name, scalar-literal default),
+    /// used to fill fields a struct literal omits (the VM fills these at runtime).
+    struct_defaults: HashMap<String, Vec<(String, VmValue)>>,
+}
+
+impl<'ctx> FnCtx<'ctx> {
+    fn empty() -> Self {
+        FnCtx {
+            funcs: Vec::new(),
+            defs: Vec::new(),
+            ptr2uid: HashMap::new(),
+            global_fns: HashMap::new(),
+            struct_defaults: HashMap::new(),
+        }
+    }
+
+    /// uid of the function `fn_defs[idx]` refers to (by `Arc` identity).
+    fn uid_of(&self, fn_defs: &[Arc<CompiledFn>], idx: usize) -> Option<usize> {
+        fn_defs.get(idx).and_then(|f| self.ptr2uid.get(&Arc::as_ptr(f)).copied())
+    }
+}
+
+/// Assign a stable uid to every `CompiledFn` reachable from `top` (breadth-first
+/// so parents precede children), returning the uid→def table and the identity map.
+fn collect_fns(top: &Chunk) -> (Vec<Arc<CompiledFn>>, HashMap<*const CompiledFn, usize>) {
+    let mut defs: Vec<Arc<CompiledFn>> = Vec::new();
+    let mut ptr2uid: HashMap<*const CompiledFn, usize> = HashMap::new();
+    let mut queue: VecDeque<Arc<CompiledFn>> = top.fn_defs.iter().cloned().collect();
+    while let Some(f) = queue.pop_front() {
+        let uid = defs.len();
+        ptr2uid.insert(Arc::as_ptr(&f), uid);
+        for c in &f.chunk.fn_defs {
+            queue.push_back(c.clone());
+        }
+        defs.push(f);
+    }
+    (defs, ptr2uid)
+}
+
+/// Names that provably hold a function: bound once (whole-program) from a
+/// `LoadFn` at top level. The single-assignment guard is checked across *every*
+/// chunk, so a name a nested function later rebinds to a non-function is excluded.
+fn build_global_fns(
+    top: &Chunk,
+    defs: &[Arc<CompiledFn>],
+    ptr2uid: &HashMap<*const CompiledFn, usize>,
+) -> HashMap<String, usize> {
+    // Count SetGlobal writes to each name across the whole program.
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    let mut count_in = |chunk: &Chunk| {
+        for instr in &chunk.code {
+            if let Instr::SetGlobal(n, _) = instr {
+                *counts.entry(n.clone()).or_default() += 1;
+            }
+        }
+    };
+    count_in(top);
+    for d in defs {
+        count_in(&d.chunk);
+    }
+
+    // Forward-track which top-level register holds which function, and record
+    // the name each such register is stored to.
+    let mut reg_fn: HashMap<Reg, usize> = HashMap::new();
+    let mut candidate: HashMap<String, usize> = HashMap::new();
+    for instr in &top.code {
+        match instr {
+            Instr::LoadFn(d, idx) => {
+                match ptr2uid.get(&Arc::as_ptr(&top.fn_defs[*idx])) {
+                    Some(&uid) => { reg_fn.insert(*d, uid); }
+                    None => { reg_fn.remove(d); }
+                }
+            }
+            Instr::SetGlobal(name, src) => {
+                if let Some(&uid) = reg_fn.get(src) {
+                    candidate.insert(name.clone(), uid);
+                }
+            }
+            other => {
+                if let Some(d) = dest_reg(other) {
+                    reg_fn.remove(&d);
+                }
+            }
+        }
+    }
+
+    candidate
+        .into_iter()
+        .filter(|(name, _)| counts.get(name).copied() == Some(1))
+        .collect()
+}
+
+/// How the backend lowers a `Call`. A callee whose function is statically known
+/// becomes a `Direct` call to `jf_<uid>` (filling omitted trailing defaults); a
+/// callee that is a runtime function value (a parameter, a variable, an escaped
+/// closure) becomes an `Indirect` call through its boxed function pointer. A
+/// builtin call this backend lowers itself (print/str/int/…) is left out of the
+/// map (handled by `resolve_builtin_calls`); a call to a reserved builtin we do
+/// *not* lower makes the whole program decline (`Err`) to the legacy path.
+enum CallKind {
+    Direct { uid: usize, args: Vec<Reg> },
+    /// A keyword-argument call to a known function, pre-resolved to one slot per
+    /// parameter: `Some(reg)` was supplied (positionally or by name), `None` is
+    /// filled from the parameter's default at the call site.
+    DirectNamed { uid: usize, arg_slots: Vec<Option<Reg>> },
+    Indirect,
+    /// `Spawn` of a statically-known async function → `jade_spawn(jf_task_<uid>,
+    /// args, n)`. Only exact-arity spawns of a known function are lowered.
+    Spawn { uid: usize, args: Vec<Reg> },
+}
+
+/// Classify every `Call` in `code`. Function values are first-class (materialized
+/// as boxed pointers), so nothing "escapes" — the only decline is a call to a
+/// reserved builtin this backend doesn't lower (e.g. `len`), which must go to the
+/// legacy path. Direct calls are a devirtualization optimization; every other
+/// call (a runtime function value) lowers to an indirect call, sound because the
+/// frontend guarantees a `Call`'s callee is callable and non-user-fn callables
+/// (builtins/methods) arrive via `GetGlobal(reserved)`/`GetField` — the former
+/// handled here, the latter an unsupported opcode that already forces fallback.
+fn resolve_user_calls(
+    code: &[Instr],
+    fn_defs: &[Arc<CompiledFn>],
+    fnctx: &FnCtx,
+) -> Result<HashMap<usize, CallKind>, String> {
+    // reg → uid of a statically-known function (for direct-call devirtualization).
+    let mut reg_fn: HashMap<Reg, usize> = HashMap::new();
+    // local slot → uid (a function stored into a local).
+    let mut slot_fn: HashMap<u32, usize> = HashMap::new();
+    // reg → the global name it was last loaded from (to classify builtin callees).
+    let mut reg_global: HashMap<Reg, String> = HashMap::new();
+    // regs holding a `GetField` result — calling one is a method call (struct or
+    // primitive), which the Chunk backend doesn't lower yet → decline.
+    let mut reg_getfield: std::collections::HashSet<Reg> = std::collections::HashSet::new();
+    let mut out: HashMap<usize, CallKind> = HashMap::new();
+
+    for (i, instr) in code.iter().enumerate() {
+        match instr {
+            Instr::GetField(d, _, _) => {
+                reg_fn.remove(d);
+                reg_global.remove(d);
+                reg_getfield.insert(*d);
+                continue;
+            }
+            Instr::LoadFn(d, idx) | Instr::MakeClosure(d, idx) => {
+                reg_global.remove(d);
+                reg_getfield.remove(d);
+                match fnctx.uid_of(fn_defs, *idx) {
+                    Some(uid) => { reg_fn.insert(*d, uid); }
+                    None => { reg_fn.remove(d); }
+                }
+            }
+            Instr::Move(d, s) => {
+                match reg_fn.get(s).copied() {
+                    Some(u) => { reg_fn.insert(*d, u); }
+                    None => { reg_fn.remove(d); }
+                }
+                reg_global.remove(d);
+                // Propagate method-value-ness so `let m = obj.f; m()` still declines.
+                if reg_getfield.contains(s) { reg_getfield.insert(*d); } else { reg_getfield.remove(d); }
+            }
+            Instr::GetGlobal(d, name) => {
+                reg_getfield.remove(d);
+                match fnctx.global_fns.get(name).copied() {
+                    Some(u) => { reg_fn.insert(*d, u); }
+                    None => { reg_fn.remove(d); }
+                }
+                reg_global.insert(*d, name.clone());
+            }
+            Instr::GetLocal(d, slot) => {
+                match slot_fn.get(slot).copied() {
+                    Some(u) => { reg_fn.insert(*d, u); }
+                    None => { reg_fn.remove(d); }
+                }
+                reg_global.remove(d);
+                reg_getfield.remove(d);
+            }
+            Instr::SetLocal(slot, src) => match reg_fn.get(src).copied() {
+                Some(u) => { slot_fn.insert(*slot, u); }
+                None => { slot_fn.remove(slot); }
+            },
+            Instr::SetGlobal(_, _) => {}
+            // Spawn an async function: only a statically-known callee with an
+            // exact-arity argument list is lowered (no defaults through spawn).
+            Instr::Spawn(d, callee, args) => {
+                if let Some(&uid) = reg_fn.get(callee) {
+                    if args.len() == fnctx.defs[uid].params.len() {
+                        out.insert(i, CallKind::Spawn { uid, args: args.clone() });
+                    } else {
+                        return Err("lower.rs: spawn arity mismatch".into());
+                    }
+                } else {
+                    return Err("lower.rs: spawn of a non-static function".into());
+                }
+                reg_fn.remove(d);
+                reg_global.remove(d);
+                reg_getfield.remove(d);
+            }
+            Instr::Call(d, callee, args) => {
+                if reg_getfield.contains(callee) {
+                    return Err("lower.rs: method call (GetField result) is unsupported".into());
+                }
+                let kind = if let Some(&uid) = reg_fn.get(callee) {
+                    // Statically-known function → direct call (fill defaults).
+                    let cf = &fnctx.defs[uid];
+                    if args.len() > cf.params.len() {
+                        return Err("lower.rs: call passes more arguments than parameters".into());
+                    }
+                    for j in args.len()..cf.params.len() {
+                        if cf.defaults.get(j).and_then(|x| x.as_ref()).is_none() {
+                            return Err("lower.rs: call omits a required argument".into());
+                        }
+                    }
+                    Some(CallKind::Direct { uid, args: args.clone() })
+                } else if let Some(name) = reg_global.get(callee) {
+                    // A named global callee. If it's a builtin this backend lowers
+                    // itself, leave it to `resolve_builtin_calls`. If it's any other
+                    // reserved builtin, decline (fallback). Otherwise it's a user
+                    // variable holding a function → indirect call.
+                    let lowered = LOWERABLE_BUILTINS.contains(&name.as_str())
+                        && matches!(name.as_str(), "print" | "str" | "int" | "float" | "bool" | "len")
+                        && args.len() == 1;
+                    if lowered {
+                        None
+                    } else if RESERVED_BUILTINS.contains(&name.as_str()) {
+                        return Err(format!("lower.rs: unsupported builtin call `{name}`"));
+                    } else {
+                        Some(CallKind::Indirect)
+                    }
+                } else {
+                    // A runtime function value (parameter / temporary) → indirect.
+                    Some(CallKind::Indirect)
+                };
+                if let Some(k) = kind {
+                    out.insert(i, k);
+                }
+                reg_fn.remove(d);
+                reg_global.remove(d);
+                reg_getfield.remove(d);
+            }
+            // Keyword-argument call. Only a direct call to a known function is
+            // lowerable (named args need the callee's parameter names, which a
+            // runtime function value doesn't carry) — anything else declines.
+            Instr::CallNamed(d, callee, pairs) => {
+                if reg_getfield.contains(callee) {
+                    return Err("lower.rs: method call (GetField result) is unsupported".into());
+                }
+                if let Some(&uid) = reg_fn.get(callee) {
+                    let cf = &fnctx.defs[uid];
+                    let p = cf.params.len();
+                    let mut arg_slots: Vec<Option<Reg>> = vec![None; p];
+                    let mut pos = 0usize;
+                    for (name, reg) in pairs {
+                        let slot = match name {
+                            None => {
+                                let s = pos;
+                                pos += 1;
+                                s
+                            }
+                            Some(n) => cf
+                                .params
+                                .iter()
+                                .position(|param| param == n)
+                                .ok_or_else(|| format!("lower.rs: no parameter `{n}`"))?,
+                        };
+                        if slot >= p || arg_slots[slot].is_some() {
+                            return Err("lower.rs: bad keyword-argument call".into());
+                        }
+                        arg_slots[slot] = Some(*reg);
+                    }
+                    for i in 0..p {
+                        if arg_slots[i].is_none()
+                            && cf.defaults.get(i).and_then(|x| x.as_ref()).is_none()
+                        {
+                            return Err("lower.rs: keyword call omits a required argument".into());
+                        }
+                    }
+                    out.insert(i, CallKind::DirectNamed { uid, arg_slots });
+                } else if let Some(name) = reg_global.get(callee) {
+                    if RESERVED_BUILTINS.contains(&name.as_str()) {
+                        return Err(format!("lower.rs: unsupported builtin kwarg call `{name}`"));
+                    }
+                    return Err("lower.rs: indirect keyword-argument call".into());
+                } else {
+                    return Err("lower.rs: indirect keyword-argument call".into());
+                }
+                reg_fn.remove(d);
+                reg_global.remove(d);
+                reg_getfield.remove(d);
+            }
+            other => {
+                if let Some(d) = dest_reg(other) {
+                    reg_fn.remove(&d);
+                    reg_global.remove(&d);
+                    reg_getfield.remove(&d);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// A struct field default the backend can materialize (scalar literals only;
+/// mirrors the VM's `eval_literal_default` for the representable subset).
+fn eval_scalar_default(e: &Expr) -> Option<VmValue> {
+    match e {
+        Expr::Str { value, .. } => Some(VmValue::Str(value.clone())),
+        Expr::Integer { value, .. } => Some(VmValue::Int(*value)),
+        Expr::Float { value, .. } => Some(VmValue::Float(*value)),
+        Expr::Bool { value, .. } => Some(VmValue::Bool(*value)),
+        Expr::Identifier { name, .. } if name == "nil" || name == "None" || name == "null" => {
+            Some(VmValue::Nil)
+        }
+        _ => None,
+    }
+}
+
+/// Struct type name → its optional fields' (name, scalar default). Non-scalar or
+/// non-literal defaults (e.g. `let xs = []`) are skipped — a literal that omits
+/// such a field would leave it unset, but those appear on method-bearing structs
+/// (declined). Mirrors what the VM fills at `MakeStruct` time.
+fn build_struct_defaults(
+    struct_defs: &HashMap<String, Vec<StructFieldDef>>,
+) -> HashMap<String, Vec<(String, VmValue)>> {
+    let mut out = HashMap::new();
+    for (tn, fields) in struct_defs {
+        let mut ds = Vec::new();
+        for f in fields {
+            if let StructFieldDef::Let { name, default } = f {
+                if let Some(v) = eval_scalar_default(default) {
+                    ds.push((name.clone(), v));
+                }
+            }
+        }
+        if !ds.is_empty() {
+            out.insert(tn.clone(), ds);
+        }
+    }
+    out
+}
+
+/// Lower a whole program: every reachable `fn_def` becomes a `jf_<uid>` function
+/// and the top-level chunk becomes `jade_toplevel() -> i64`. Returns the
+/// top-level function (for `main` to call), or `Err` on any opcode/construct the
+/// backend can't lower yet (the daemon then falls back to `expr.rs`).
+pub fn lower_program<'ctx>(
+    context: &'ctx Context,
+    module: &Module<'ctx>,
+    top: &Chunk,
+    top_n_slots: u32,
+    struct_defs: &HashMap<String, Vec<StructFieldDef>>,
+    has_methods: bool,
+) -> Result<FunctionValue<'ctx>, String> {
+    // Method dispatch (extend-block methods) isn't lowered yet — decline the whole
+    // program so it falls back to the legacy path. Data-only structs still lower.
+    if has_methods {
+        return Err("lower.rs: extend-block methods are unsupported".into());
+    }
+    let (defs, ptr2uid) = collect_fns(top);
+
+    // Native (C-ABI FFI) references — `__native$<pkgid>$<fn>` globals produced by
+    // import namespacing — are not user functions and have no `jf_<uid>` body, so
+    // an (indirect) call through one would jump into a non-function value. The
+    // Chunk backend has no in-binary FFI loader anyway, so any program that
+    // references a native symbol declines to the legacy path.
+    let references_native = |chunk: &Chunk| {
+        chunk.code.iter().any(|i| match i {
+            Instr::GetGlobal(_, n) | Instr::SetGlobal(n, _) => n.starts_with("__native$"),
+            _ => false,
+        })
+    };
+    if references_native(top) || defs.iter().any(|d| references_native(&d.chunk)) {
+        return Err("lower.rs: native FFI references are unsupported".into());
+    }
+
+    let global_fns = build_global_fns(top, &defs, &ptr2uid);
+    let i64_ty = context.i64_type();
+
+    // Forward-declare every function first, so bodies can call each other.
+    let mut funcs = Vec::with_capacity(defs.len());
+    for (uid, cf) in defs.iter().enumerate() {
+        let ptys: Vec<inkwell::types::BasicMetadataTypeEnum> =
+            vec![i64_ty.into(); cf.params.len()];
+        funcs.push(module.add_function(&format!("jf_{uid}"), i64_ty.fn_type(&ptys, false), None));
+    }
+    // Async task-entry wrappers: `jf_task_<uid>(i64* args, i32 n) -> i64` unpacks
+    // the argument array and calls `jf_<uid>` — the `jade_task_fn` ABI expected by
+    // `jade_spawn`. Emitted for every function (unused ones are DCE'd); each only
+    // references the already-declared `jf_<uid>`.
+    {
+        let ptr_ty = context.ptr_type(AddressSpace::default());
+        let i32_ty = context.i32_type();
+        let builder = context.create_builder();
+        for (uid, cf) in defs.iter().enumerate() {
+            let wrapper = module.add_function(
+                &format!("jf_task_{uid}"),
+                i64_ty.fn_type(&[ptr_ty.into(), i32_ty.into()], false),
+                Some(inkwell::module::Linkage::Internal),
+            );
+            let entry = context.append_basic_block(wrapper, "entry");
+            builder.position_at_end(entry);
+            let args_ptr = wrapper.get_nth_param(0).unwrap().into_pointer_value();
+            let n = cf.params.len();
+            let mut argv: Vec<BasicMetadataValueEnum> = Vec::with_capacity(n);
+            for i in 0..n {
+                let slot = unsafe {
+                    builder
+                        .build_in_bounds_gep(i64_ty, args_ptr, &[i64_ty.const_int(i as u64, false)], "argslot")
+                        .map_err(|e| e.to_string())?
+                };
+                let v = builder.build_load(i64_ty, slot, "arg").map_err(|e| e.to_string())?.into_int_value();
+                argv.push(v.into());
+            }
+            let r = builder
+                .build_call(funcs[uid], &argv, "taskret")
+                .map_err(|e| e.to_string())?
+                .as_any_value_enum()
+                .into_int_value();
+            builder.build_return(Some(&r)).map_err(|e| e.to_string())?;
+        }
+    }
+
+    let struct_defaults = build_struct_defaults(struct_defs);
+    let fnctx = FnCtx { funcs, defs, ptr2uid, global_fns, struct_defaults };
+
+    for uid in 0..fnctx.defs.len() {
+        let cf = fnctx.defs[uid].clone();
+        lower_body(
+            context,
+            module,
+            fnctx.funcs[uid],
+            &cf.chunk.code,
+            &cf.chunk.fn_defs,
+            cf.n_slots,
+            cf.params.len(),
+            &fnctx,
+        )?;
+    }
+
+    let top_fn = module.add_function("jade_toplevel", i64_ty.fn_type(&[], false), None);
+    lower_body(context, module, top_fn, &top.code, &top.fn_defs, top_n_slots, 0, &fnctx)?;
+    Ok(top_fn)
+}
+
+/// Lower a single `Chunk` body into a new LLVM function `name() -> i64` (a
+/// tagged value word). Thin wrapper over [`lower_body`] with no functions in
+/// scope — used by the unit tests and any caller lowering an isolated body.
+pub fn lower_chunk<'ctx>(
+    context: &'ctx Context,
+    module: &Module<'ctx>,
+    name: &str,
+    code: &[Instr],
+    n_slots: u32,
+) -> Result<FunctionValue<'ctx>, String> {
+    let function = module.add_function(name, context.i64_type().fn_type(&[], false), None);
+    lower_body(context, module, function, code, &[], n_slots, 0, &FnCtx::empty())?;
+    Ok(function)
+}
+
+/// Lower `code` into an already-declared `function`. `n_params` incoming i64
+/// parameters are copied into slots `0..n_params` (the VM frame convention);
+/// `fn_defs` are this chunk's nested function literals (for `LoadFn`).
+fn lower_body<'ctx>(
+    context: &'ctx Context,
+    module: &Module<'ctx>,
+    function: FunctionValue<'ctx>,
+    code: &[Instr],
+    fn_defs: &[Arc<CompiledFn>],
+    n_slots: u32,
+    n_params: usize,
+    fnctx: &FnCtx<'ctx>,
+) -> Result<(), String> {
+    let i64_ty = context.i64_type();
+    let builder = context.create_builder();
+
+    // Entry block: one alloca per register slot (at least enough for the params).
+    let entry = context.append_basic_block(function, "entry");
+    builder.position_at_end(entry);
+    let n = (n_slots as usize).max(n_params);
+    let mut slots = Vec::with_capacity(n);
+    for i in 0..n {
+        slots.push(
+            builder
+                .build_alloca(i64_ty, &format!("r{i}"))
+                .map_err(|e| e.to_string())?,
+        );
+    }
+    // Copy incoming parameters into slots 0..n_params (params are the first
+    // locals; see `emit_fn`). Callers fill any omitted defaults, so every
+    // parameter slot receives an argument.
+    for i in 0..n_params {
+        let p = function
+            .get_nth_param(i as u32)
+            .ok_or("lower_body: missing parameter")?
+            .into_int_value();
+        builder.build_store(slots[i], p).map_err(|e| e.to_string())?;
+    }
+    // One jmp_buf per SetupHandler, allocated *in the entry block* so a handler
+    // inside a loop reuses one stable buffer instead of growing the stack each
+    // iteration. 256 bytes is conservative for every x86_64/arm64 jmp_buf.
+    let buf_ty = context.i8_type().array_type(256);
+    let mut handler_bufs: HashMap<usize, PointerValue> = HashMap::new();
+    for (idx, instr) in code.iter().enumerate() {
+        if matches!(instr, Instr::SetupHandler(..)) {
+            let buf = builder
+                .build_alloca(buf_ty, &format!("exc_buf{idx}"))
+                .map_err(|e| e.to_string())?;
+            handler_bufs.insert(idx, buf);
+        }
+    }
+
+    // One LLVM block per reconstructed basic block; entry branches to the first.
+    let graph = cfg::build(code);
+    if graph.blocks.is_empty() {
+        builder
+            .build_return(Some(&i64_ty.const_int(NIL, false)))
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    let llblocks: Vec<LlvmBlock> = (0..graph.blocks.len())
+        .map(|bi| context.append_basic_block(function, &format!("bb{bi}")))
+        .collect();
+    builder
+        .build_unconditional_branch(llblocks[0])
+        .map_err(|e| e.to_string())?;
+
+    let low = Lowerer { ctx: context, module, builder: &builder, slots: &slots };
+    let call_builtins = resolve_builtin_calls(code);
+    let user_calls = resolve_user_calls(code, fn_defs, fnctx)?;
+
+    for (bi, block) in graph.blocks.iter().enumerate() {
+        builder.position_at_end(llblocks[bi]);
+        let mut terminated = false;
+        for idx in block.start..block.end {
+            terminated = lower_instr(
+                &low,
+                &code[idx],
+                idx,
+                &llblocks,
+                &graph,
+                &handler_bufs,
+                &call_builtins,
+                &user_calls,
+                fn_defs,
+                fnctx,
+            )?;
+        }
+        // A block whose last instruction wasn't a terminator falls through.
+        if !terminated {
+            match block.succs.first() {
+                Some(&succ) => {
+                    builder
+                        .build_unconditional_branch(llblocks[succ])
+                        .map_err(|e| e.to_string())?;
+                }
+                None => {
+                    builder
+                        .build_return(Some(&i64_ty.const_int(NIL, false)))
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Lower one instruction. Returns `Ok(true)` if it emitted a block terminator
+/// (`Return`/`Jump`/conditional jump), `Ok(false)` otherwise.
+fn lower_instr<'ctx>(
+    low: &Lowerer<'_, 'ctx>,
+    instr: &Instr,
+    idx: usize,
+    llblocks: &[LlvmBlock<'ctx>],
+    graph: &cfg::Cfg,
+    handler_bufs: &HashMap<usize, PointerValue<'ctx>>,
+    call_builtins: &HashMap<usize, BuiltinCall>,
+    user_calls: &HashMap<usize, CallKind>,
+    fn_defs: &[Arc<CompiledFn>],
+    fnctx: &FnCtx<'ctx>,
+) -> Result<bool, String> {
+    use Instr::*;
+    let b = low.builder;
+    let i64_ty = low.i64t();
+    // PC-relative jump target (see cfg / bytecode.rs::patch_jump).
+    let target = |off: i32| -> usize { (idx as i64 + 1 + off as i64) as usize };
+    let block_of = |instr_idx: usize| -> LlvmBlock<'ctx> { llblocks[graph.block_at[&instr_idx]] };
+
+    match instr {
+        // ── Constant loads ────────────────────────────────────────────────
+        LoadInt(d, v) => {
+            // Tagged int = v << 1 (63-bit SMI; large magnitudes truncate — the
+            // documented ABI residual). wrapping avoids a debug-build panic.
+            let tagged = (*v as i64).wrapping_shl(1) as u64;
+            low.store(*d, i64_ty.const_int(tagged, false));
+            Ok(false)
+        }
+        LoadBool(d, v) => {
+            low.store(*d, i64_ty.const_int(if *v { TRUE } else { FALSE }, false));
+            Ok(false)
+        }
+        LoadNil(d) => {
+            low.store(*d, i64_ty.const_int(NIL, false));
+            Ok(false)
+        }
+
+        // ── Move ──────────────────────────────────────────────────────────
+        Move(d, s) => {
+            let v = low.load(*s);
+            low.store(*d, v);
+            Ok(false)
+        }
+
+        // ── Variable access ───────────────────────────────────────────────
+        // Locals share the register slot array (see VM GetLocal/SetLocal), so
+        // these are moves between slot indices.
+        GetLocal(d, slot) => {
+            let v = low.load_idx(*slot as usize);
+            low.store(*d, v);
+            Ok(false)
+        }
+        SetLocal(slot, s) => {
+            let v = low.load(*s);
+            low.store_idx(*slot as usize, v);
+            Ok(false)
+        }
+        // Module-scoped globals: load/store the named LLVM global cell.
+        GetGlobal(d, name) => {
+            let g = low.global_slot(name);
+            let v = b.build_load(i64_ty, g, "gld").map_err(|e| e.to_string())?.into_int_value();
+            low.store(*d, v);
+            Ok(false)
+        }
+        SetGlobal(name, s) => {
+            let v = low.load(*s);
+            let g = low.global_slot(name);
+            b.build_store(g, v).map_err(|e| e.to_string())?;
+            Ok(false)
+        }
+
+        // ── Integer arithmetic (native op on untagged, then re-tag) ───────
+        AddInt(d, l, r) => {
+            let (a, c) = low.int_operands(*l, *r);
+            let s = b.build_int_add(a, c, "addi").map_err(|e| e.to_string())?;
+            low.store(*d, low.tag_int(s));
+            Ok(false)
+        }
+        SubInt(d, l, r) => {
+            let (a, c) = low.int_operands(*l, *r);
+            let s = b.build_int_sub(a, c, "subi").map_err(|e| e.to_string())?;
+            low.store(*d, low.tag_int(s));
+            Ok(false)
+        }
+        MulInt(d, l, r) => {
+            let (a, c) = low.int_operands(*l, *r);
+            let s = b.build_int_mul(a, c, "muli").map_err(|e| e.to_string())?;
+            low.store(*d, low.tag_int(s));
+            Ok(false)
+        }
+        NegInt(d, s) => {
+            let a = low.untag_int(low.load(*s));
+            let n = b.build_int_neg(a, "negi").map_err(|e| e.to_string())?;
+            low.store(*d, low.tag_int(n));
+            Ok(false)
+        }
+        DivInt(d, l, r) => {
+            let res = low.int_div_mod(*l, *r, false)?;
+            low.store(*d, res);
+            Ok(false)
+        }
+        ModInt(d, l, r) => {
+            let res = low.int_div_mod(*l, *r, true)?;
+            low.store(*d, res);
+            Ok(false)
+        }
+
+        // ── Float loads / arithmetic (unbox, native op, re-box) ───────────
+        LoadFloat(d, v) => {
+            let c = i64_ty.const_int(v.to_bits(), false);
+            let f = b
+                .build_bit_cast(c, low.f64t(), "fbits")
+                .map_err(|e| e.to_string())?
+                .into_float_value();
+            low.store(*d, low.box_float(f));
+            Ok(false)
+        }
+        AddFloat(d, l, r) => {
+            let (a, c) = low.float_operands(*l, *r);
+            let s = b.build_float_add(a, c, "addf").map_err(|e| e.to_string())?;
+            low.store(*d, low.box_float(s));
+            Ok(false)
+        }
+        SubFloat(d, l, r) => {
+            let (a, c) = low.float_operands(*l, *r);
+            let s = b.build_float_sub(a, c, "subf").map_err(|e| e.to_string())?;
+            low.store(*d, low.box_float(s));
+            Ok(false)
+        }
+        MulFloat(d, l, r) => {
+            let (a, c) = low.float_operands(*l, *r);
+            let s = b.build_float_mul(a, c, "mulf").map_err(|e| e.to_string())?;
+            low.store(*d, low.box_float(s));
+            Ok(false)
+        }
+        DivFloat(d, l, r) => {
+            let (a, c) = low.float_operands(*l, *r);
+            let s = b.build_float_div(a, c, "divf").map_err(|e| e.to_string())?;
+            low.store(*d, low.box_float(s));
+            Ok(false)
+        }
+        NegFloat(d, s) => {
+            let a = low.unbox_float(low.load(*s));
+            let n = b.build_float_neg(a, "negf").map_err(|e| e.to_string())?;
+            low.store(*d, low.box_float(n));
+            Ok(false)
+        }
+        IntToFloat(d, s) => {
+            let i = low.untag_int(low.load(*s));
+            let f = b
+                .build_signed_int_to_float(i, low.f64t(), "i2f")
+                .map_err(|e| e.to_string())?;
+            low.store(*d, low.box_float(f));
+            Ok(false)
+        }
+
+        // ── Typed comparisons → bool word (native icmp/fcmp) ──────────────
+        CmpEqInt(d, l, r) => { low.store(*d, low.int_cmp(*l, *r, IntPredicate::EQ)); Ok(false) }
+        CmpNeInt(d, l, r) => { low.store(*d, low.int_cmp(*l, *r, IntPredicate::NE)); Ok(false) }
+        CmpLtInt(d, l, r) => { low.store(*d, low.int_cmp(*l, *r, IntPredicate::SLT)); Ok(false) }
+        CmpGtInt(d, l, r) => { low.store(*d, low.int_cmp(*l, *r, IntPredicate::SGT)); Ok(false) }
+        CmpLeInt(d, l, r) => { low.store(*d, low.int_cmp(*l, *r, IntPredicate::SLE)); Ok(false) }
+        CmpGeInt(d, l, r) => { low.store(*d, low.int_cmp(*l, *r, IntPredicate::SGE)); Ok(false) }
+
+        CmpEqFloat(d, l, r) => { low.store(*d, low.float_cmp(*l, *r, FloatPredicate::OEQ)); Ok(false) }
+        CmpNeFloat(d, l, r) => { low.store(*d, low.float_cmp(*l, *r, FloatPredicate::UNE)); Ok(false) }
+        CmpLtFloat(d, l, r) => { low.store(*d, low.float_cmp(*l, *r, FloatPredicate::OLT)); Ok(false) }
+        CmpGtFloat(d, l, r) => { low.store(*d, low.float_cmp(*l, *r, FloatPredicate::OGT)); Ok(false) }
+        CmpLeFloat(d, l, r) => { low.store(*d, low.float_cmp(*l, *r, FloatPredicate::OLE)); Ok(false) }
+        CmpGeFloat(d, l, r) => { low.store(*d, low.float_cmp(*l, *r, FloatPredicate::OGE)); Ok(false) }
+
+        CmpEqBool(d, l, r) => { low.store(*d, low.bool_cmp(*l, *r, IntPredicate::EQ)); Ok(false) }
+        CmpNeBool(d, l, r) => { low.store(*d, low.bool_cmp(*l, *r, IntPredicate::NE)); Ok(false) }
+        CmpLtBool(d, l, r) => { low.store(*d, low.bool_cmp(*l, *r, IntPredicate::ULT)); Ok(false) }
+        CmpGtBool(d, l, r) => { low.store(*d, low.bool_cmp(*l, *r, IntPredicate::UGT)); Ok(false) }
+        CmpLeBool(d, l, r) => { low.store(*d, low.bool_cmp(*l, *r, IntPredicate::ULE)); Ok(false) }
+        CmpGeBool(d, l, r) => { low.store(*d, low.bool_cmp(*l, *r, IntPredicate::UGE)); Ok(false) }
+
+        CmpLtIntFloat(d, l, r) => { low.store(*d, low.mixed_cmp(*l, true, *r, false, FloatPredicate::OLT)); Ok(false) }
+        CmpGtIntFloat(d, l, r) => { low.store(*d, low.mixed_cmp(*l, true, *r, false, FloatPredicate::OGT)); Ok(false) }
+        CmpLeIntFloat(d, l, r) => { low.store(*d, low.mixed_cmp(*l, true, *r, false, FloatPredicate::OLE)); Ok(false) }
+        CmpGeIntFloat(d, l, r) => { low.store(*d, low.mixed_cmp(*l, true, *r, false, FloatPredicate::OGE)); Ok(false) }
+        CmpLtFloatInt(d, l, r) => { low.store(*d, low.mixed_cmp(*l, false, *r, true, FloatPredicate::OLT)); Ok(false) }
+        CmpGtFloatInt(d, l, r) => { low.store(*d, low.mixed_cmp(*l, false, *r, true, FloatPredicate::OGT)); Ok(false) }
+        CmpLeFloatInt(d, l, r) => { low.store(*d, low.mixed_cmp(*l, false, *r, true, FloatPredicate::OLE)); Ok(false) }
+        CmpGeFloatInt(d, l, r) => { low.store(*d, low.mixed_cmp(*l, false, *r, true, FloatPredicate::OGE)); Ok(false) }
+
+        // ── Logical / bitwise (integers) ──────────────────────────────────
+        Not(d, s) => {
+            let b1 = low.untag_bool(low.load(*s));
+            let n = b.build_not(b1, "lnot").map_err(|e| e.to_string())?;
+            low.store(*d, low.bool_word(n));
+            Ok(false)
+        }
+        BitAnd(d, l, r) => { low.store(*d, low.int_bitop(*l, *r, |a, c| b.build_and(a, c, "band").map_err(|e| e.to_string()))?); Ok(false) }
+        BitOr(d, l, r)  => { low.store(*d, low.int_bitop(*l, *r, |a, c| b.build_or(a, c, "bor").map_err(|e| e.to_string()))?); Ok(false) }
+        BitXor(d, l, r) => { low.store(*d, low.int_bitop(*l, *r, |a, c| b.build_xor(a, c, "bxor").map_err(|e| e.to_string()))?); Ok(false) }
+        Shl(d, l, r)    => { low.store(*d, low.int_bitop(*l, *r, |a, c| b.build_left_shift(a, c, "shl").map_err(|e| e.to_string()))?); Ok(false) }
+        Shr(d, l, r)    => { low.store(*d, low.int_bitop(*l, *r, |a, c| b.build_right_shift(a, c, true, "shr").map_err(|e| e.to_string()))?); Ok(false) }
+        BitNot(d, s) => {
+            let a = low.untag_int(low.load(*s));
+            let n = b.build_not(a, "bnot").map_err(|e| e.to_string())?;
+            low.store(*d, low.tag_int(n));
+            Ok(false)
+        }
+
+        // ── Dynamic ops (Unknown-typed operands) → jrt_*_any (A7) ─────────
+        // Emitted when the type-inferrer can't specialize (notably every
+        // function-parameter use, since Jade params are untyped). Routes to the
+        // same tag-dispatching decision core the VM runs.
+        BinOp(d, op, l, r) => {
+            use BinOpKind::*;
+            match op {
+                Add => low.store(*d, low.any2("jrt_add_any", *l, *r)),
+                Sub => low.store(*d, low.any2("jrt_sub_any", *l, *r)),
+                Mul => low.store(*d, low.any2("jrt_mul_any", *l, *r)),
+                Div => low.store(*d, low.any2("jrt_div_any", *l, *r)),
+                Mod => low.store(*d, low.any2("jrt_mod_any", *l, *r)),
+                // Bitwise/shift are int-only: untag, native op, re-tag.
+                BitAnd => low.store(*d, low.int_bitop(*l, *r, |a, c| b.build_and(a, c, "band").map_err(|e| e.to_string()))?),
+                BitOr  => low.store(*d, low.int_bitop(*l, *r, |a, c| b.build_or(a, c, "bor").map_err(|e| e.to_string()))?),
+                BitXor => low.store(*d, low.int_bitop(*l, *r, |a, c| b.build_xor(a, c, "bxor").map_err(|e| e.to_string()))?),
+                Shl    => low.store(*d, low.int_bitop(*l, *r, |a, c| b.build_left_shift(a, c, "shl").map_err(|e| e.to_string()))?),
+                Shr    => low.store(*d, low.int_bitop(*l, *r, |a, c| b.build_right_shift(a, c, true, "shr").map_err(|e| e.to_string()))?),
+                // `x in y` / `x not in y` — runtime containment (substring / array
+                // element / dict key), producing a bool word.
+                In | NotIn => {
+                    let f = low.runtime_fn(
+                        "jrt_in_any",
+                        low.ctx.i32_type().fn_type(&[i64_ty.into(), i64_ty.into()], false),
+                    );
+                    let present = b
+                        .build_call(f, &[low.load(*l).into(), low.load(*r).into()], "inany")
+                        .map_err(|e| e.to_string())?
+                        .as_any_value_enum()
+                        .into_int_value();
+                    let pred = if matches!(op, In) { IntPredicate::NE } else { IntPredicate::EQ };
+                    low.store(*d, low.i32cmp_word(present, pred));
+                }
+                // And/Or are emitted as short-circuit jumps, never a BinOp opcode.
+                _ => return Err(format!("lower.rs: unsupported dynamic BinOp {op:?}")),
+            }
+            Ok(false)
+        }
+        UnaryOp(d, op, s) => {
+            match op {
+                UnaryOpKind::Neg => low.store(*d, low.neg_any(*s)),
+                UnaryOpKind::Not => {
+                    // Untag the (tagged) bool operand, invert, re-wrap as a word.
+                    let b1 = low.untag_bool(low.load(*s));
+                    let n = b.build_not(b1, "lnotd").map_err(|e| e.to_string())?;
+                    low.store(*d, low.bool_word(n));
+                }
+                UnaryOpKind::BitNot => {
+                    let a = low.untag_int(low.load(*s));
+                    let n = b.build_not(a, "bnotd").map_err(|e| e.to_string())?;
+                    low.store(*d, low.tag_int(n));
+                }
+            }
+            Ok(false)
+        }
+        // Dynamic equality/ordering → bool word (mirror expr.rs emit_binop_any).
+        CmpEq(d, l, r) => { let e = low.eq_any(*l, *r); low.store(*d, low.i32cmp_word(e, IntPredicate::NE)); Ok(false) }
+        CmpNe(d, l, r) => { let e = low.eq_any(*l, *r); low.store(*d, low.i32cmp_word(e, IntPredicate::EQ)); Ok(false) }
+        CmpLt(d, l, r) => { let c = low.cmp_any(*l, *r); low.store(*d, low.i32cmp_word(c, IntPredicate::SLT)); Ok(false) }
+        CmpGt(d, l, r) => { let c = low.cmp_any(*l, *r); low.store(*d, low.i32cmp_word(c, IntPredicate::SGT)); Ok(false) }
+        CmpLe(d, l, r) => { let c = low.cmp_any(*l, *r); low.store(*d, low.i32cmp_word(c, IntPredicate::SLE)); Ok(false) }
+        CmpGe(d, l, r) => { let c = low.cmp_any(*l, *r); low.store(*d, low.i32cmp_word(c, IntPredicate::SGE)); Ok(false) }
+
+        // ── Strings (pre-tagged literal globals; runtime concat/compare) ──
+        LoadStr(d, s) => {
+            let ptr = low.str_literal_ptr(s)?;
+            low.store(*d, low.tag_str(ptr));
+            Ok(false)
+        }
+        ConcatStr(d, l, r) => {
+            low.store(*d, low.str_concat(*l, *r));
+            Ok(false)
+        }
+        CmpEqStr(d, l, r) => { low.store(*d, low.str_cmp(*l, *r, IntPredicate::EQ)); Ok(false) }
+        CmpNeStr(d, l, r) => { low.store(*d, low.str_cmp(*l, *r, IntPredicate::NE)); Ok(false) }
+        CmpLtStr(d, l, r) => { low.store(*d, low.str_cmp(*l, *r, IntPredicate::SLT)); Ok(false) }
+        CmpGtStr(d, l, r) => { low.store(*d, low.str_cmp(*l, *r, IntPredicate::SGT)); Ok(false) }
+        CmpLeStr(d, l, r) => { low.store(*d, low.str_cmp(*l, *r, IntPredicate::SLE)); Ok(false) }
+        CmpGeStr(d, l, r) => { low.store(*d, low.str_cmp(*l, *r, IntPredicate::SGE)); Ok(false) }
+
+        // ── f-strings ─────────────────────────────────────────────────────
+        // Fold the parts left-to-right with `jrt_str_concat` (trust = max):
+        // each part is a tagged-string data pointer — a compile-time literal
+        // global, or `jrt_str_of_any(value)` for an interpolated register. An
+        // empty template yields the empty string.
+        BuildFStr(d, parts) => {
+            let mut acc: Option<PointerValue> = None;
+            for part in parts {
+                let p_ptr = match part {
+                    FStrPart::Literal(s) => low.str_literal_ptr(s)?,
+                    FStrPart::Reg(r) => low.str_of_any(*r),
+                };
+                acc = Some(match acc {
+                    None => p_ptr,
+                    Some(prev) => low.concat_ptrs(prev, p_ptr),
+                });
+            }
+            let ptr = match acc {
+                Some(p) => p,
+                None => low.str_literal_ptr("")?,
+            };
+            low.store(*d, low.tag_str(ptr));
+            Ok(false)
+        }
+
+        // ── Collections: kind-tagged arrays (A8) ──────────────────────────
+        // MakeArray: allocate a kind-tagged array, push each element (a tagged
+        // word), tag the pointer as a heap object. GetIndex/SetIndex dispatch on
+        // the object's tag/kind in the runtime (string/array; dict is a later
+        // sub-brick). len/print/str/f-strings are already collection-aware via
+        // jrt_len_unknown / jrt_render_any.
+        MakeArray(d, regs) => {
+            let new_f = low.runtime_fn("jrt_karr_new", low.ptrt().fn_type(&[], false));
+            let arr = b
+                .build_call(new_f, &[], "karr")
+                .map_err(|e| e.to_string())?
+                .as_any_value_enum()
+                .into_pointer_value();
+            let push_f = low.runtime_fn(
+                "jrt_karr_push",
+                low.ctx.void_type().fn_type(&[low.ptrt().into(), i64_ty.into()], false),
+            );
+            for r in regs {
+                let v = low.load(*r);
+                b.build_call(push_f, &[arr.into(), v.into()], "").map_err(|e| e.to_string())?;
+            }
+            low.store(*d, low.tag_ptr(arr));
+            Ok(false)
+        }
+        GetIndex(d, obj, idx) => {
+            let f = low.runtime_fn(
+                "jrt_val_index",
+                i64_ty.fn_type(&[i64_ty.into(), i64_ty.into()], false),
+            );
+            let r = b
+                .build_call(f, &[low.load(*obj).into(), low.load(*idx).into()], "index")
+                .map_err(|e| e.to_string())?
+                .as_any_value_enum()
+                .into_int_value();
+            low.store(*d, r);
+            Ok(false)
+        }
+        MakeDict(d, pairs) => {
+            let new_f = low.runtime_fn("jrt_kdict_new", low.ptrt().fn_type(&[], false));
+            let dict = b
+                .build_call(new_f, &[], "kdict")
+                .map_err(|e| e.to_string())?
+                .as_any_value_enum()
+                .into_pointer_value();
+            let set_f = low.runtime_fn(
+                "jrt_kdict_set",
+                low.ctx.void_type().fn_type(&[low.ptrt().into(), i64_ty.into(), i64_ty.into()], false),
+            );
+            for (kr, vr) in pairs {
+                let k = low.load(*kr);
+                let v = low.load(*vr);
+                b.build_call(set_f, &[dict.into(), k.into(), v.into()], "")
+                    .map_err(|e| e.to_string())?;
+            }
+            low.store(*d, low.tag_ptr(dict));
+            Ok(false)
+        }
+        // SetIndex returns the (possibly new) container word — an array is
+        // mutated in place (same pointer), a dict is copied (value semantics) —
+        // so we store it back into the object register. The emitter's following
+        // write-back (`SetIndex` then a store of `obj`) then rebinds the variable.
+        SetIndex(obj, idx, val) => {
+            let f = low.runtime_fn(
+                "jrt_val_set_index",
+                i64_ty.fn_type(&[i64_ty.into(), i64_ty.into(), i64_ty.into()], false),
+            );
+            let new_word = b
+                .build_call(
+                    f,
+                    &[low.load(*obj).into(), low.load(*idx).into(), low.load(*val).into()],
+                    "setidx",
+                )
+                .map_err(|e| e.to_string())?
+                .as_any_value_enum()
+                .into_int_value();
+            low.store(*obj, new_word);
+            Ok(false)
+        }
+
+        // ── Structs (data fields only; methods decline in resolve_user_calls) ──
+        // MakeStruct: kind-tagged struct carrying the type name + explicit fields,
+        // then fill any omitted optional field from its scalar default (the VM
+        // fills these at runtime). GetField/SetField are data-field access on a
+        // struct (a missing field / non-struct raises).
+        MakeStruct(d, type_name, field_specs) => {
+            if field_specs.iter().any(|(_, _, is_prompt)| *is_prompt) {
+                return Err("lower.rs: prompt struct fields are unsupported".into());
+            }
+            let new_f = low.runtime_fn("jrt_kstruct_new", low.ptrt().fn_type(&[low.ptrt().into()], false));
+            let tn = low.cstr(type_name);
+            let s = b
+                .build_call(new_f, &[tn.into()], "kstruct")
+                .map_err(|e| e.to_string())?
+                .as_any_value_enum()
+                .into_pointer_value();
+            let set_f = low.runtime_fn(
+                "jrt_kstruct_set",
+                low.ctx.void_type().fn_type(&[low.ptrt().into(), low.ptrt().into(), i64_ty.into()], false),
+            );
+            for (fname, freg, _) in field_specs {
+                let v = low.load(*freg);
+                b.build_call(set_f, &[s.into(), low.cstr(fname).into(), v.into()], "")
+                    .map_err(|e| e.to_string())?;
+            }
+            // Fill omitted optional fields from their scalar defaults.
+            if let Some(defaults) = fnctx.struct_defaults.get(type_name) {
+                for (fname, dv) in defaults {
+                    if field_specs.iter().all(|(n, _, _)| n != fname) {
+                        let w = low.default_word(dv)?;
+                        b.build_call(set_f, &[s.into(), low.cstr(fname).into(), w.into()], "")
+                            .map_err(|e| e.to_string())?;
+                    }
+                }
+            }
+            low.store(*d, low.tag_ptr(s));
+            Ok(false)
+        }
+        GetField(d, obj, field) => {
+            let f = low.runtime_fn(
+                "jrt_get_field",
+                i64_ty.fn_type(&[i64_ty.into(), low.ptrt().into()], false),
+            );
+            let r = b
+                .build_call(f, &[low.load(*obj).into(), low.cstr(field).into()], "getfield")
+                .map_err(|e| e.to_string())?
+                .as_any_value_enum()
+                .into_int_value();
+            low.store(*d, r);
+            Ok(false)
+        }
+        SetField(obj, field, val) => {
+            let f = low.runtime_fn(
+                "jrt_set_field",
+                low.ctx.void_type().fn_type(&[i64_ty.into(), low.ptrt().into(), i64_ty.into()], false),
+            );
+            b.build_call(
+                f,
+                &[low.load(*obj).into(), low.cstr(field).into(), low.load(*val).into()],
+                "",
+            )
+            .map_err(|e| e.to_string())?;
+            Ok(false)
+        }
+        // GetTypeName (typed `catch <Type>`): the caught value's struct type name
+        // as a tagged string (empty for a non-struct), compared against the
+        // expected name with CmpEqStr. Now lowerable via the JK_STRUCT type tag.
+        GetTypeName(d, src) => {
+            let f = low.runtime_fn("jrt_get_type_name", low.ptrt().fn_type(&[i64_ty.into()], false));
+            let p = b
+                .build_call(f, &[low.load(*src).into()], "typename")
+                .map_err(|e| e.to_string())?
+                .as_any_value_enum()
+                .into_pointer_value();
+            low.store(*d, low.tag_str(p));
+            Ok(false)
+        }
+
+        // ── Async: spawn / await / join ───────────────────────────────────
+        // Spawn a known async function: pack args into a stack array and call
+        // jade_spawn(jf_task_<uid>, args, n). The future is stored as a raw
+        // pointer word (futures only flow to await/join, never generic ops).
+        Spawn(dest, _callee, _args) => match user_calls.get(&idx) {
+            Some(CallKind::Spawn { uid, args }) => {
+                let n = args.len();
+                let count = i64_ty.const_int(n.max(1) as u64, false);
+                let arr = b.build_array_alloca(i64_ty, count, "spawn_args").map_err(|e| e.to_string())?;
+                for (i, r) in args.iter().enumerate() {
+                    let slot = unsafe {
+                        b.build_in_bounds_gep(i64_ty, arr, &[i64_ty.const_int(i as u64, false)], "sa")
+                            .map_err(|e| e.to_string())?
+                    };
+                    b.build_store(slot, low.load(*r)).map_err(|e| e.to_string())?;
+                }
+                let task = low
+                    .module
+                    .get_function(&format!("jf_task_{uid}"))
+                    .ok_or("lower.rs: missing task wrapper")?;
+                let spawn_f = low.runtime_fn(
+                    "jade_spawn",
+                    low.ptrt().fn_type(&[low.ptrt().into(), low.ptrt().into(), low.ctx.i32_type().into()], false),
+                );
+                let fut = b
+                    .build_call(
+                        spawn_f,
+                        &[
+                            task.as_global_value().as_pointer_value().into(),
+                            arr.into(),
+                            low.ctx.i32_type().const_int(n as u64, false).into(),
+                        ],
+                        "spawn",
+                    )
+                    .map_err(|e| e.to_string())?
+                    .as_any_value_enum()
+                    .into_pointer_value();
+                let word = b.build_ptr_to_int(fut, i64_ty, "futw").map_err(|e| e.to_string())?;
+                low.store(*dest, word);
+                Ok(false)
+            }
+            _ => Err(format!("lower.rs: unsupported spawn at {idx}")),
+        },
+        Await(dest, fut) => {
+            let fp = b.build_int_to_ptr(low.load(*fut), low.ptrt(), "futp").map_err(|e| e.to_string())?;
+            let await_f = low.runtime_fn("jade_await", i64_ty.fn_type(&[low.ptrt().into()], false));
+            let r = b
+                .build_call(await_f, &[fp.into()], "await")
+                .map_err(|e| e.to_string())?
+                .as_any_value_enum()
+                .into_int_value();
+            low.store(*dest, r);
+            Ok(false)
+        }
+        Join(dest, futs) => {
+            let n = futs.len();
+            let cnt = i64_ty.const_int(n.max(1) as u64, false);
+            let futarr = b.build_array_alloca(low.ptrt(), cnt, "join_futs").map_err(|e| e.to_string())?;
+            for (i, r) in futs.iter().enumerate() {
+                let fp = b.build_int_to_ptr(low.load(*r), low.ptrt(), "jf").map_err(|e| e.to_string())?;
+                let slot = unsafe {
+                    b.build_in_bounds_gep(low.ptrt(), futarr, &[i64_ty.const_int(i as u64, false)], "jfs")
+                        .map_err(|e| e.to_string())?
+                };
+                b.build_store(slot, fp).map_err(|e| e.to_string())?;
+            }
+            let resarr = b.build_array_alloca(i64_ty, cnt, "join_res").map_err(|e| e.to_string())?;
+            let join_f = low.runtime_fn(
+                "jade_join",
+                low.ctx.void_type().fn_type(&[low.ptrt().into(), low.ctx.i32_type().into(), low.ptrt().into()], false),
+            );
+            b.build_call(
+                join_f,
+                &[futarr.into(), low.ctx.i32_type().const_int(n as u64, false).into(), resarr.into()],
+                "",
+            )
+            .map_err(|e| e.to_string())?;
+            // Collect results into a kind-tagged array.
+            let new_f = low.runtime_fn("jrt_karr_new", low.ptrt().fn_type(&[], false));
+            let arr = b
+                .build_call(new_f, &[], "jarr")
+                .map_err(|e| e.to_string())?
+                .as_any_value_enum()
+                .into_pointer_value();
+            let push_f = low.runtime_fn(
+                "jrt_karr_push",
+                low.ctx.void_type().fn_type(&[low.ptrt().into(), i64_ty.into()], false),
+            );
+            for i in 0..n {
+                let slot = unsafe {
+                    b.build_in_bounds_gep(i64_ty, resarr, &[i64_ty.const_int(i as u64, false)], "jrs")
+                        .map_err(|e| e.to_string())?
+                };
+                let v = b.build_load(i64_ty, slot, "jr").map_err(|e| e.to_string())?.into_int_value();
+                b.build_call(push_f, &[arr.into(), v.into()], "").map_err(|e| e.to_string())?;
+            }
+            low.store(*dest, low.tag_ptr(arr));
+            Ok(false)
+        }
+
+        // ── Exceptions (raise side; catch side is a later brick) ──────────
+        // Raise longjmps to the active handler (set up by SetupHandler) or, if
+        // none, aborts with an explicit message — matching the VM's uncaught
+        // path. It never returns, so it terminates the block.
+        Raise(val) => {
+            let v = low.load(*val);
+            low.throw(v)?;
+            Ok(true)
+        }
+        // Register a handler frame and split on `setjmp`: 0 → try body
+        // (fallthrough, idx+1); non-zero (a longjmp arrived) → a landing block
+        // that stores the caught value into `caught_reg` and enters the handler
+        // block (idx+1+offset). cfg records the handler as a leader-but-not-
+        // normal-successor, so the only edge into it is this landing.
+        SetupHandler(caught_reg, off) => {
+            let buf = handler_bufs
+                .get(&idx)
+                .copied()
+                .ok_or("SetupHandler: no jmp_buf pre-allocated")?;
+            low.push_frame(buf);
+            let sj = low.setjmp_fn();
+            let r = b
+                .build_call(sj, &[buf.into()], "setjmp_r")
+                .map_err(|e| e.to_string())?
+                .as_any_value_enum()
+                .into_int_value();
+            let is_throw = b
+                .build_int_compare(
+                    IntPredicate::NE,
+                    r,
+                    low.ctx.i32_type().const_zero(),
+                    "is_throw",
+                )
+                .map_err(|e| e.to_string())?;
+            let func = b.get_insert_block().and_then(|bb| bb.get_parent()).unwrap();
+            let landing = low.ctx.append_basic_block(func, "exc_landing");
+            b.build_conditional_branch(is_throw, landing, block_of(idx + 1))
+                .map_err(|e| e.to_string())?;
+            // Landing: bind the caught value, then enter the handler body.
+            b.position_at_end(landing);
+            let caught = low.exc_value();
+            low.store(*caught_reg, caught);
+            b.build_unconditional_branch(block_of(target(*off)))
+                .map_err(|e| e.to_string())?;
+            Ok(true)
+        }
+        PopHandler => {
+            low.pop_frame();
+            Ok(false)
+        }
+
+        // ── Control flow ──────────────────────────────────────────────────
+        Jump(off) => {
+            b.build_unconditional_branch(block_of(target(*off)))
+                .map_err(|e| e.to_string())?;
+            Ok(true)
+        }
+        JumpIfFalse(r, off) => {
+            let cond = low.untag_bool(low.load(*r));
+            // Jump to target when false; fall through (idx+1) when true.
+            b.build_conditional_branch(cond, block_of(idx + 1), block_of(target(*off)))
+                .map_err(|e| e.to_string())?;
+            Ok(true)
+        }
+        JumpIfTrue(r, off) => {
+            let cond = low.untag_bool(low.load(*r));
+            b.build_conditional_branch(cond, block_of(target(*off)), block_of(idx + 1))
+                .map_err(|e| e.to_string())?;
+            Ok(true)
+        }
+        Return(opt) => {
+            let v = match opt {
+                Some(r) => low.load(*r),
+                None => i64_ty.const_int(NIL, false),
+            };
+            b.build_return(Some(&v)).map_err(|e| e.to_string())?;
+            Ok(true)
+        }
+        // Program terminator (the VM breaks its dispatch loop). A lowered
+        // chunk-function ends by returning nil.
+        Halt => {
+            b.build_return(Some(&i64_ty.const_int(NIL, false)))
+                .map_err(|e| e.to_string())?;
+            Ok(true)
+        }
+
+        // ── Function values (first-class: boxed function pointers) ────────
+        // Materialize `jf_<uid>` as a callable value (used by escapes / indirect
+        // calls; a devirtualized direct call ignores it). A closure is just a
+        // plain function here — it captures only globals, read via GetGlobal.
+        LoadFn(d, idx) | MakeClosure(d, idx) => {
+            match fnctx.uid_of(fn_defs, *idx) {
+                Some(uid) => low.store(*d, low.fn_box_word(uid, fnctx.funcs[uid])),
+                None => return Err(format!("lower.rs: unknown fn_def index {idx}")),
+            }
+            Ok(false)
+        }
+
+        // ── Calls ─────────────────────────────────────────────────────────
+        // Direct call to a known function (devirtualized), an indirect call
+        // through a runtime function value, or a devirtualized builtin. A call to
+        // an unlowered reserved builtin already declined in `resolve_user_calls`.
+        Call(dest, callee, args) => {
+            match user_calls.get(&idx) {
+                Some(CallKind::Direct { uid, args: dargs }) => {
+                    let f = fnctx.funcs[*uid];
+                    let cf = &fnctx.defs[*uid];
+                    let mut argv: Vec<BasicMetadataValueEnum> = Vec::with_capacity(cf.params.len());
+                    for a in dargs {
+                        argv.push(low.load(*a).into());
+                    }
+                    for j in dargs.len()..cf.params.len() {
+                        let dv = cf.defaults[j]
+                            .as_ref()
+                            .ok_or("lower.rs: missing default at call site")?;
+                        argv.push(low.default_word(dv)?.into());
+                    }
+                    let ret = b
+                        .build_call(f, &argv, "callret")
+                        .map_err(|e| e.to_string())?
+                        .as_any_value_enum()
+                        .into_int_value();
+                    low.store(*dest, ret);
+                    return Ok(false);
+                }
+                Some(CallKind::Indirect) => {
+                    let ret = low.indirect_call(*callee, args)?;
+                    low.store(*dest, ret);
+                    return Ok(false);
+                }
+                // A plain Call is never resolved as DirectNamed/Spawn.
+                Some(CallKind::DirectNamed { .. }) | Some(CallKind::Spawn { .. }) | None => {}
+            }
+            match call_builtins.get(&idx) {
+                Some(bc) if bc.name == "print" => {
+                    let arg = low.load(bc.args[0]);
+                    low.print_value(arg, *dest)?;
+                    Ok(false)
+                }
+                // str(x) → tagged string via jrt_str_of_any (VM-faithful
+                // value_to_display for scalars/strings; an object arg renders the
+                // runtime's placeholder, but such programs construct the object
+                // and fall back before reaching here).
+                Some(bc) if bc.name == "str" => {
+                    let p = low.str_of_any(bc.args[0]);
+                    low.store(*dest, low.tag_str(p));
+                    Ok(false)
+                }
+                // int(x)/float(x)/bool(x) → tag-dispatching runtime conversions
+                // (VM-faithful; int/float raise a catchable error on bad input).
+                Some(bc) if matches!(bc.name, "int" | "float" | "bool") => {
+                    let fname = match bc.name {
+                        "int" => "jrt_int_any",
+                        "float" => "jrt_float_any",
+                        _ => "jrt_bool_any",
+                    };
+                    let f = low.runtime_fn(fname, i64_ty.fn_type(&[i64_ty.into()], false));
+                    let arg = low.load(bc.args[0]);
+                    let r = b
+                        .build_call(f, &[arg.into()], "conv")
+                        .map_err(|e| e.to_string())?
+                        .as_any_value_enum()
+                        .into_int_value();
+                    low.store(*dest, r);
+                    Ok(false)
+                }
+                // len(x) → jrt_len_unknown (tag-dispatched: strlen for a string,
+                // array-header length otherwise) returns a raw count → tag as int.
+                // In a Chunk-lowerable program the arg is always a string, since a
+                // collection is built with MakeArray/MakeDict (unsupported → fallback).
+                Some(bc) if bc.name == "len" => {
+                    let f = low.runtime_fn("jrt_len_unknown", i64_ty.fn_type(&[i64_ty.into()], false));
+                    let arg = low.load(bc.args[0]);
+                    let count = b
+                        .build_call(f, &[arg.into()], "len")
+                        .map_err(|e| e.to_string())?
+                        .as_any_value_enum()
+                        .into_int_value();
+                    low.store(*dest, low.tag_int(count));
+                    Ok(false)
+                }
+                _ => Err(format!("lower.rs: unsupported call at {idx}")),
+            }
+        }
+
+        // ── Keyword-argument calls (direct to a known function only) ──────
+        CallNamed(dest, _callee, _pairs) => match user_calls.get(&idx) {
+            Some(CallKind::DirectNamed { uid, arg_slots }) => {
+                let f = fnctx.funcs[*uid];
+                let cf = &fnctx.defs[*uid];
+                let mut argv: Vec<BasicMetadataValueEnum> = Vec::with_capacity(arg_slots.len());
+                for (i, slot) in arg_slots.iter().enumerate() {
+                    let w = match slot {
+                        Some(r) => low.load(*r),
+                        None => {
+                            let dv = cf.defaults[i]
+                                .as_ref()
+                                .ok_or("lower.rs: missing default in keyword call")?;
+                            low.default_word(dv)?
+                        }
+                    };
+                    argv.push(w.into());
+                }
+                let ret = b
+                    .build_call(f, &argv, "callret")
+                    .map_err(|e| e.to_string())?
+                    .as_any_value_enum()
+                    .into_int_value();
+                low.store(*dest, ret);
+                Ok(false)
+            }
+            _ => Err(format!("lower.rs: unsupported keyword call at {idx}")),
+        },
+
+        // Everything else is added in later bricks; until then the daemon falls
+        // back to the legacy lowering for programs that use it.
+        other => Err(format!("lower.rs: unsupported opcode {other:?}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jade::compiler::bytecode::Instr::*;
+
+    fn ir_of(code: &[Instr], n_slots: u32) -> String {
+        let context = Context::create();
+        let module = context.create_module("t");
+        lower_chunk(&context, &module, "f", code, n_slots).expect("lowering failed");
+        // Verify catches malformed IR (unterminated blocks, type errors) — the
+        // real correctness gate for a lowering brick before it's wired up.
+        module.verify().expect("module failed LLVM verification");
+        module.print_to_string().to_string()
+    }
+
+    #[test]
+    fn arithmetic_lowers_to_add_and_ret() {
+        // r2 = r0 + r1 ; return r2   with r0=2, r1=3
+        let ir = ir_of(
+            &[LoadInt(0, 2), LoadInt(1, 3), AddInt(2, 0, 1), Return(Some(2))],
+            3,
+        );
+        assert!(ir.contains("alloca i64"), "slots allocated:\n{ir}");
+        assert!(ir.contains(" add "), "native add emitted:\n{ir}");
+        assert!(ir.contains("ret i64"), "returns a value word:\n{ir}");
+    }
+
+    #[test]
+    fn conditional_lowers_to_condbr() {
+        // if r0 { return 1 } else { return 2 }
+        let ir = ir_of(
+            &[
+                LoadBool(0, true),
+                JumpIfFalse(0, 2), // → idx 4
+                LoadInt(1, 1),
+                Return(Some(1)),
+                LoadInt(1, 2),
+                Return(Some(1)),
+            ],
+            2,
+        );
+        assert!(ir.contains("br i1"), "conditional branch emitted:\n{ir}");
+        // Two distinct return sites.
+        assert_eq!(ir.matches("ret i64").count(), 2, "two returns:\n{ir}");
+    }
+
+    #[test]
+    fn every_block_is_terminated() {
+        // Backward loop: must still produce valid (terminated) blocks.
+        let ir = ir_of(&[LoadInt(0, 0), Jump(-1)], 1);
+        // A well-formed module verifies; unterminated blocks would fail printing
+        // to be verifiable, so a non-empty IR with a branch is our smoke signal.
+        assert!(ir.contains("br label"));
+    }
+
+    #[test]
+    fn float_arithmetic_boxes_and_unboxes() {
+        // r2 = r0 + r1 (floats) ; return r2
+        let ir = ir_of(
+            &[LoadFloat(0, 2.5), LoadFloat(1, 1.5), AddFloat(2, 0, 1), Return(Some(2))],
+            3,
+        );
+        assert!(ir.contains("jrt_box_float"), "boxes floats:\n{ir}");
+        assert!(ir.contains("jrt_unbox_float"), "unboxes operands:\n{ir}");
+        assert!(ir.contains("fadd"), "native fadd emitted:\n{ir}");
+        // The runtime symbols are declared exactly once each.
+        assert_eq!(ir.matches("declare i64 @jrt_box_float").count(), 1, "one box decl:\n{ir}");
+        assert_eq!(ir.matches("declare double @jrt_unbox_float").count(), 1, "one unbox decl:\n{ir}");
+    }
+
+    #[test]
+    fn int_to_float_widens_then_boxes() {
+        // r1 = float(r0) ; return r1   with r0 = 3
+        let ir = ir_of(&[LoadInt(0, 3), IntToFloat(1, 0), Return(Some(1))], 2);
+        assert!(ir.contains("sitofp"), "signed int→float conversion:\n{ir}");
+        assert!(ir.contains("jrt_box_float"), "result boxed:\n{ir}");
+    }
+
+    #[test]
+    fn string_literal_and_concat() {
+        // r2 = "ab" + "cd" ; return r2
+        let ir = ir_of(
+            &[
+                LoadStr(0, "ab".to_string()),
+                LoadStr(1, "cd".to_string()),
+                ConcatStr(2, 0, 1),
+                Return(Some(2)),
+            ],
+            3,
+        );
+        // Two pre-tagged, 8-aligned internal literal globals.
+        assert_eq!(ir.matches("str_lit_t").count() >= 2, true, "two literal globals:\n{ir}");
+        assert!(ir.contains("align 8"), "literal globals 8-aligned:\n{ir}");
+        // The literal payload keeps a 7-byte pad + trust header before the bytes.
+        assert!(ir.contains("jrt_str_concat"), "concat via runtime:\n{ir}");
+        // Words carry the STRING tag: an `or …, 5` after ptrtoint.
+        assert!(ir.contains("ptrtoint"), "pointer tagged into a word:\n{ir}");
+    }
+
+    #[test]
+    fn int_div_guards_zero_divisor_with_a_raise() {
+        // r2 = r0 / r1 ; return r2
+        let ir = ir_of(
+            &[LoadInt(0, 6), LoadInt(1, 2), DivInt(2, 0, 1), Return(Some(2))],
+            3,
+        );
+        assert!(ir.contains("sdiv"), "native signed div:\n{ir}");
+        assert!(ir.contains("divzero_throw"), "a throw block guards the divisor:\n{ir}");
+        assert!(ir.contains("jade_exc_throw_typed"), "raises on zero divisor:\n{ir}");
+        assert!(ir.contains("unreachable"), "throw path is noreturn:\n{ir}");
+    }
+
+    #[test]
+    fn mod_uses_srem() {
+        let ir = ir_of(
+            &[LoadInt(0, 7), LoadInt(1, 3), ModInt(2, 0, 1), Return(Some(2))],
+            3,
+        );
+        assert!(ir.contains("srem"), "native signed remainder:\n{ir}");
+        assert!(ir.contains("divzero_throw"), "modulo also guards zero:\n{ir}");
+    }
+
+    #[test]
+    fn raise_throws_and_terminates() {
+        // raise "boom"
+        let ir = ir_of(&[LoadStr(0, "boom".to_string()), Raise(0)], 1);
+        assert!(ir.contains("jade_exc_throw_typed"), "raises the value:\n{ir}");
+        assert!(ir.contains("unreachable"), "raise terminates its block:\n{ir}");
+    }
+
+    #[test]
+    fn try_catch_lowers_to_setjmp_frame() {
+        // 0: SetupHandler(caught=r1, →4)   1: LoadInt r0,1 (try body)
+        // 2: PopHandler                    3: Jump →5 (skip handler)
+        // 4: Move r0,r1 (handler body)     5: Halt
+        let ir = ir_of(
+            &[
+                SetupHandler(1, 3),
+                LoadInt(0, 1),
+                PopHandler,
+                Jump(1),
+                Move(0, 1),
+                Halt,
+            ],
+            2,
+        );
+        assert!(ir.contains("jade_exc_push_frame"), "frame registered:\n{ir}");
+        assert!(ir.contains("call i32 @setjmp"), "setjmp split:\n{ir}");
+        assert!(ir.contains("returns_twice"), "setjmp marked returns_twice:\n{ir}");
+        assert!(ir.contains("jade_exc_pop"), "clean exit pops frame:\n{ir}");
+        assert!(ir.contains("jade_exc_value"), "landing binds the caught value:\n{ir}");
+        assert!(ir.contains("exc_landing"), "distinct landing block:\n{ir}");
+    }
+
+    #[test]
+    fn globals_load_and_store_a_named_cell() {
+        // x = 5 ; return x     (SetGlobal then GetGlobal)
+        let ir = ir_of(
+            &[
+                LoadInt(0, 5),
+                SetGlobal("x".to_string(), 0),
+                GetGlobal(1, "x".to_string()),
+                Return(Some(1)),
+            ],
+            2,
+        );
+        // One internal global cell named for the variable, nil-initialized.
+        assert!(ir.contains("@jgl_x"), "named global cell emitted:\n{ir}");
+        assert_eq!(ir.matches("@jgl_x = internal global").count(), 1, "one cell, reused:\n{ir}");
+    }
+
+    #[test]
+    fn locals_are_moves_within_the_slot_array() {
+        // GetLocal/SetLocal shuffle slots; must verify and touch both slots.
+        let ir = ir_of(
+            &[LoadInt(0, 7), SetLocal(1, 0), GetLocal(2, 1), Return(Some(2))],
+            3,
+        );
+        assert!(ir.contains("ret i64"), "returns a word:\n{ir}");
+    }
+
+    #[test]
+    fn unsupported_opcode_is_reported_not_panicked() {
+        let context = Context::create();
+        let module = context.create_module("t");
+        // `MakePrompt` (LLM prompt) isn't in this brick yet → clean Err → fallback.
+        let err = lower_chunk(&context, &module, "f", &[MakePrompt(0, 0)], 1)
+            .unwrap_err();
+        assert!(err.contains("unsupported opcode"), "got: {err}");
+    }
+
+    #[test]
+    fn typed_comparisons_lower_to_native_icmp_fcmp() {
+        // r2 = (r0 < r1) int ; r5 = (r3 < r4) float ; return via bool words
+        let ir = ir_of(
+            &[
+                LoadInt(0, 1),
+                LoadInt(1, 2),
+                CmpLtInt(2, 0, 1),
+                LoadFloat(3, 1.0),
+                LoadFloat(4, 2.0),
+                CmpLtFloat(5, 3, 4),
+                Return(Some(2)),
+            ],
+            6,
+        );
+        assert!(ir.contains("icmp slt"), "signed int compare:\n{ir}");
+        assert!(ir.contains("fcmp olt"), "ordered float compare:\n{ir}");
+        assert!(ir.contains("select i1"), "bool word materialized:\n{ir}");
+    }
+
+    #[test]
+    fn print_devirtualizes_to_jrt_print_any() {
+        // GetGlobal print ; LoadInt r1,5 ; Call r2 = print(r1) ; Halt
+        let ir = ir_of(
+            &[
+                GetGlobal(0, "print".to_string()),
+                LoadInt(1, 5),
+                Call(2, 0, vec![1]),
+                Halt,
+            ],
+            3,
+        );
+        assert!(ir.contains("jrt_print_any"), "print devirtualized to runtime:\n{ir}");
+    }
+
+    // Build a two-fn program by hand: top defines `add(a, b)` and calls it.
+    fn add_program() -> Chunk {
+        use std::sync::Arc;
+        // fn add(a, b): return a + b   (slots 0=a, 1=b, 2=sum)
+        let body = vec![AddInt(2, 0, 1), Return(Some(2))];
+        let add_fn = Arc::new(CompiledFn {
+            params: vec!["a".to_string(), "b".to_string()],
+            defaults: vec![None, None],
+            chunk: Chunk { name: "add".into(), code: body, spans: vec![], fn_defs: vec![] },
+            n_slots: 3,
+            source_file: String::new(),
+            module_scope: None,
+        });
+        // top:  LoadFn r0 add ; SetGlobal add r0 ;
+        //       GetGlobal r1 add ; LoadInt r2 2 ; LoadInt r3 3 ;
+        //       Call r4 = r1(r2, r3) ; Halt
+        let mut top = Chunk::new("<top>");
+        top.fn_defs.push(add_fn);
+        top.code = vec![
+            LoadFn(0, 0),
+            SetGlobal("add".into(), 0),
+            GetGlobal(1, "add".into()),
+            LoadInt(2, 2),
+            LoadInt(3, 3),
+            Call(4, 1, vec![2, 3]),
+            Halt,
+        ];
+        top
+    }
+
+    #[test]
+    fn user_function_lowers_to_a_direct_call() {
+        let context = Context::create();
+        let module = context.create_module("t");
+        let top = add_program();
+        lower_program(&context, &module, &top, 5, &HashMap::new(), false).expect("program lowering failed");
+        module.verify().expect("module failed verification");
+        let ir = module.print_to_string().to_string();
+        // The function body is its own LLVM function taking two i64 params.
+        assert!(ir.contains("define i64 @jf_0(i64"), "fn lowered with params:\n{ir}");
+        // The top-level call is a *direct* call to it (devirtualized), not indirect.
+        assert!(ir.contains("call i64 @jf_0("), "direct call emitted:\n{ir}");
+        assert!(ir.contains("@jade_toplevel"), "top-level fn present:\n{ir}");
+    }
+
+    #[test]
+    fn call_with_omitted_default_is_filled_at_the_call_site() {
+        use std::sync::Arc;
+        // fn greet(n = 5): return n     ; call greet() with no args → fills 5
+        let body = vec![GetLocal(1, 0), Return(Some(1))];
+        let greet = Arc::new(CompiledFn {
+            params: vec!["n".to_string()],
+            defaults: vec![Some(VmValue::Int(5))],
+            chunk: Chunk { name: "greet".into(), code: body, spans: vec![], fn_defs: vec![] },
+            n_slots: 2,
+            source_file: String::new(),
+            module_scope: None,
+        });
+        let mut top = Chunk::new("<top>");
+        top.fn_defs.push(greet);
+        top.code = vec![
+            LoadFn(0, 0),
+            SetGlobal("greet".into(), 0),
+            GetGlobal(1, "greet".into()),
+            Call(2, 1, vec![]), // no args → default 5
+            Halt,
+        ];
+        let context = Context::create();
+        let module = context.create_module("t");
+        lower_program(&context, &module, &top, 3, &HashMap::new(), false).expect("lowering failed");
+        module.verify().expect("verification failed");
+        let ir = module.print_to_string().to_string();
+        // Default 5 materialized as a tagged int (5<<1 = 10) passed to the call.
+        assert!(ir.contains("call i64 @jf_0(i64 10)"), "default filled as 10:\n{ir}");
+    }
+
+    #[test]
+    fn function_value_is_first_class_and_returnable() {
+        use std::sync::Arc;
+        // A program that *returns* a function value now succeeds — the value is a
+        // boxed function pointer (a global `@jf_box_0`), not a decline.
+        let f = Arc::new(CompiledFn {
+            params: vec![],
+            defaults: vec![],
+            chunk: Chunk { name: "f".into(), code: vec![Return(None)], spans: vec![], fn_defs: vec![] },
+            n_slots: 0,
+            source_file: String::new(),
+            module_scope: None,
+        });
+        let mut top = Chunk::new("<top>");
+        top.fn_defs.push(f);
+        top.code = vec![LoadFn(0, 0), Return(Some(0))];
+        let context = Context::create();
+        let module = context.create_module("t");
+        lower_program(&context, &module, &top, 1, &HashMap::new(), false).expect("first-class fn value should lower");
+        let ir = module.print_to_string().to_string();
+        assert!(ir.contains("@jf_box_0"), "boxed function pointer global emitted:\n{ir}");
+    }
+
+    #[test]
+    fn keyword_call_reorders_args_to_parameter_order() {
+        use std::sync::Arc;
+        // fn f(a, b, c): return a   ; call f(r1, c=r3, b=r2) — named args reorder.
+        let f = Arc::new(CompiledFn {
+            params: vec!["a".into(), "b".into(), "c".into()],
+            defaults: vec![None, None, None],
+            chunk: Chunk { name: "f".into(), code: vec![GetLocal(3, 0), Return(Some(3))], spans: vec![], fn_defs: vec![] },
+            n_slots: 4,
+            source_file: String::new(),
+            module_scope: None,
+        });
+        let mut top = Chunk::new("<top>");
+        top.fn_defs.push(f);
+        top.code = vec![
+            LoadFn(0, 0),
+            SetGlobal("f".into(), 0),
+            GetGlobal(1, "f".into()),
+            LoadInt(2, 1),
+            LoadInt(3, 3),
+            LoadInt(4, 2),
+            // f(a=r2, c=r3, b=r4)  → positional r2 for a, named c=r3, named b=r4
+            CallNamed(5, 1, vec![(None, 2), (Some("c".into()), 3), (Some("b".into()), 4)]),
+            Return(Some(5)),
+        ];
+        let context = Context::create();
+        let module = context.create_module("t");
+        lower_program(&context, &module, &top, 6, &HashMap::new(), false).expect("keyword call lowering");
+        module.verify().expect("module failed verification");
+        let ir = module.print_to_string().to_string();
+        // A direct call to jf_0 with three i64 args (reordered to a, b, c).
+        assert!(ir.contains("call i64 @jf_0(i64"), "direct call with reordered args:\n{ir}");
+    }
+
+    #[test]
+    fn higher_order_call_lowers_to_indirect_call() {
+        use std::sync::Arc;
+        // fn apply(f, x): return f(x)   — f is a param, so f(x) is an indirect call.
+        //   slots: 0=f, 1=x, 2=result
+        let apply_body = vec![GetLocal(3, 0), GetLocal(4, 1), Call(2, 3, vec![4]), Return(Some(2))];
+        let apply = Arc::new(CompiledFn {
+            params: vec!["f".into(), "x".into()],
+            defaults: vec![None, None],
+            chunk: Chunk { name: "apply".into(), code: apply_body, spans: vec![], fn_defs: vec![] },
+            n_slots: 5,
+            source_file: String::new(),
+            module_scope: None,
+        });
+        let mut top = Chunk::new("<top>");
+        top.fn_defs.push(apply);
+        top.code = vec![
+            LoadFn(0, 0),
+            SetGlobal("apply".into(), 0),
+            Halt,
+        ];
+        let context = Context::create();
+        let module = context.create_module("t");
+        lower_program(&context, &module, &top, 1, &HashMap::new(), false).expect("higher-order lowering");
+        module.verify().expect("module failed verification");
+        let ir = module.print_to_string().to_string();
+        // apply's body calls its parameter indirectly (a load then a call of a ptr).
+        assert!(ir.contains("call i64 %fnld") || ir.contains("%icall"), "indirect call emitted:\n{ir}");
+    }
+
+    #[test]
+    fn fstring_folds_parts_with_concat() {
+        // f"n={r0}"  →  concat("n=", str_of_any(r0))
+        let ir = ir_of(
+            &[
+                LoadInt(0, 42),
+                BuildFStr(1, vec![FStrPart::Literal("n=".to_string()), FStrPart::Reg(0)]),
+                Return(Some(1)),
+            ],
+            2,
+        );
+        assert!(ir.contains("jrt_str_of_any"), "interpolated part rendered:\n{ir}");
+        assert!(ir.contains("jrt_str_concat"), "parts folded via concat:\n{ir}");
+    }
+
+    #[test]
+    fn array_make_index_and_set_lower_to_kind_runtime() {
+        // a = [10, 20]; a[0]; a[1] = 30
+        let ir = ir_of(
+            &[
+                LoadInt(0, 10),
+                LoadInt(1, 20),
+                MakeArray(2, vec![0, 1]),
+                LoadInt(3, 0),
+                GetIndex(4, 2, 3),
+                LoadInt(5, 1),
+                LoadInt(6, 30),
+                SetIndex(2, 5, 6),
+                Return(Some(4)),
+            ],
+            7,
+        );
+        assert!(ir.contains("jrt_karr_new"), "array allocated:\n{ir}");
+        assert!(ir.contains("jrt_karr_push"), "elements pushed:\n{ir}");
+        assert!(ir.contains("jrt_val_index"), "GetIndex via runtime dispatch:\n{ir}");
+        assert!(ir.contains("jrt_val_set_index"), "SetIndex via runtime dispatch:\n{ir}");
+        // The array word carries the non-string heap tag (`or …, 1`).
+        assert!(ir.contains("tagptr"), "array pointer tagged TAG_PTR:\n{ir}");
+    }
+
+    #[test]
+    fn async_spawn_await_lower_to_runtime() {
+        use std::sync::Arc;
+        // async fn f(x): return x   ; fa = spawn f(1); await fa
+        let f = Arc::new(CompiledFn {
+            params: vec!["x".into()],
+            defaults: vec![None],
+            chunk: Chunk { name: "f".into(), code: vec![GetLocal(1, 0), Return(Some(1))], spans: vec![], fn_defs: vec![] },
+            n_slots: 2,
+            source_file: String::new(),
+            module_scope: None,
+        });
+        let mut top = Chunk::new("<top>");
+        top.fn_defs.push(f);
+        top.code = vec![
+            LoadFn(0, 0),
+            SetGlobal("f".into(), 0),
+            GetGlobal(1, "f".into()),
+            LoadInt(2, 1),
+            Spawn(3, 1, vec![2]),
+            Await(4, 3),
+            Return(Some(4)),
+        ];
+        let context = Context::create();
+        let module = context.create_module("t");
+        lower_program(&context, &module, &top, 5, &HashMap::new(), false).expect("async lowering");
+        module.verify().expect("module failed verification");
+        let ir = module.print_to_string().to_string();
+        assert!(ir.contains("@jf_task_0"), "task wrapper emitted:\n{ir}");
+        assert!(ir.contains("jade_spawn"), "spawn via runtime:\n{ir}");
+        assert!(ir.contains("jade_await"), "await via runtime:\n{ir}");
+    }
+
+    #[test]
+    fn struct_make_field_and_typename_lower_to_runtime() {
+        // p = Point{x: 10}; p.x; p.x = 20; typename(p)
+        let ir = ir_of(
+            &[
+                LoadInt(0, 10),
+                MakeStruct(1, "Point".to_string(), vec![("x".to_string(), 0, false)]),
+                GetField(2, 1, "x".to_string()),
+                LoadInt(3, 20),
+                SetField(1, "x".to_string(), 3),
+                GetTypeName(4, 1),
+                Return(Some(2)),
+            ],
+            5,
+        );
+        assert!(ir.contains("jrt_kstruct_new"), "struct allocated:\n{ir}");
+        assert!(ir.contains("jrt_kstruct_set"), "fields set:\n{ir}");
+        assert!(ir.contains("jrt_get_field"), "field read:\n{ir}");
+        assert!(ir.contains("jrt_set_field"), "field written:\n{ir}");
+        assert!(ir.contains("jrt_get_type_name"), "type name for typed catch:\n{ir}");
+    }
+
+    #[test]
+    fn in_operator_lowers_to_runtime_membership() {
+        use jade::frontend::ast::BinOpKind;
+        // r2 = (r0 in r1) → jrt_in_any → bool word
+        let ir = ir_of(
+            &[
+                LoadStr(0, "x".to_string()),
+                LoadStr(1, "xyz".to_string()),
+                BinOp(2, BinOpKind::In, 0, 1),
+                Return(Some(2)),
+            ],
+            3,
+        );
+        assert!(ir.contains("jrt_in_any"), "membership via runtime:\n{ir}");
+        assert!(ir.contains("select i1"), "produces a bool word:\n{ir}");
+    }
+
+    #[test]
+    fn dict_make_and_index_lower_to_kind_runtime() {
+        // d = {"k": 1}; d["k"]; d["k"] = 2   (kind-tagged dict, value semantics)
+        let ir = ir_of(
+            &[
+                LoadStr(0, "k".to_string()),
+                LoadInt(1, 1),
+                MakeDict(2, vec![(0, 1)]),
+                LoadStr(3, "k".to_string()),
+                GetIndex(4, 2, 3),
+                LoadStr(5, "k".to_string()),
+                LoadInt(6, 2),
+                SetIndex(2, 5, 6),
+                Return(Some(4)),
+            ],
+            7,
+        );
+        assert!(ir.contains("jrt_kdict_new"), "dict allocated:\n{ir}");
+        assert!(ir.contains("jrt_kdict_set"), "entries set:\n{ir}");
+        assert!(ir.contains("jrt_val_index"), "index via runtime dispatch:\n{ir}");
+        // SetIndex stores the returned container word back (value-semantic copy).
+        assert!(ir.contains("jrt_val_set_index"), "set-index via runtime:\n{ir}");
+    }
+
+    #[test]
+    fn string_comparison_lowers_to_strcmp() {
+        // r2 = ("a" < "b")  → strcmp on untagged data pointers, folded to a bool word.
+        let ir = ir_of(
+            &[
+                LoadStr(0, "a".to_string()),
+                LoadStr(1, "b".to_string()),
+                CmpLtStr(2, 0, 1),
+                Return(Some(2)),
+            ],
+            3,
+        );
+        assert!(ir.contains("call i32 @strcmp"), "compares via strcmp:\n{ir}");
+        assert!(ir.contains("icmp slt"), "folds strcmp result by predicate:\n{ir}");
+        assert!(ir.contains("select i1"), "produces a bool word:\n{ir}");
+    }
+
+    #[test]
+    fn conversion_builtins_devirtualize_to_runtime() {
+        // int("42")  →  jrt_int_any
+        let ir = ir_of(
+            &[
+                GetGlobal(0, "int".to_string()),
+                LoadStr(1, "42".to_string()),
+                Call(2, 0, vec![1]),
+                Return(Some(2)),
+            ],
+            3,
+        );
+        assert!(ir.contains("jrt_int_any"), "int() lowered to runtime conversion:\n{ir}");
+        // bool(x) and float(x) route to their own helpers.
+        let ir2 = ir_of(
+            &[GetGlobal(0, "bool".to_string()), LoadInt(1, 1), Call(2, 0, vec![1]), Return(Some(2))],
+            3,
+        );
+        assert!(ir2.contains("jrt_bool_any"), "bool() lowered:\n{ir2}");
+    }
+
+    #[test]
+    fn str_builtin_devirtualizes_to_str_of_any() {
+        // GetGlobal str ; LoadInt r1,42 ; Call r2 = str(r1) ; Return r2
+        let ir = ir_of(
+            &[
+                GetGlobal(0, "str".to_string()),
+                LoadInt(1, 42),
+                Call(2, 0, vec![1]),
+                Return(Some(2)),
+            ],
+            3,
+        );
+        assert!(ir.contains("jrt_str_of_any"), "str() lowered to runtime render:\n{ir}");
+    }
+
+    #[test]
+    fn print_falls_back_when_shadowed_by_a_user_global() {
+        // If the program SetGlobals `print`, it is a user value, not the builtin
+        // → the Call must NOT devirtualize (stays unsupported → fallback).
+        let context = Context::create();
+        let module = context.create_module("t");
+        let err = lower_chunk(
+            &context,
+            &module,
+            "f",
+            &[
+                LoadInt(0, 1),
+                SetGlobal("print".to_string(), 0),
+                GetGlobal(1, "print".to_string()),
+                LoadInt(2, 5),
+                Call(3, 1, vec![2]),
+                Halt,
+            ],
+            4,
+        )
+        .unwrap_err();
+        assert!(err.contains("unsupported call"), "got: {err}");
+    }
+}
