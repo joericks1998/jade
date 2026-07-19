@@ -154,6 +154,7 @@ mod tests {
 
     #[test]
     fn roundtrip_object() {
+        let _g = crate::gc::test_support::lock_counter();
         let w = jrt_json_parse_chunk(b"{\"b\": 2, \"a\": 1}\0".as_ptr() as *const c_char);
         let s = jrt_json_stringify_chunk(w, 0);
         // serde sorts keys.
@@ -163,6 +164,7 @@ mod tests {
 
     #[test]
     fn pretty_and_nested() {
+        let _g = crate::gc::test_support::lock_counter();
         let w = jrt_json_parse_chunk(b"{\"a\": {\"b\": 7}}\0".as_ptr() as *const c_char);
         let s = jrt_json_stringify_chunk(w, 1);
         assert_eq!(unsafe { read(s) }, "{\n  \"a\": {\n    \"b\": 7\n  }\n}");

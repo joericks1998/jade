@@ -27,6 +27,13 @@
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicI64, Ordering};
 
+use crate::coll::{ArrayObj, DictObj, StructObj};
+use crate::heap::{ObjHeader, ObjKind};
+use crate::value::JadeValue;
+
+/// The AOT element word type stored inside collections (a tagged [`JadeValue`]).
+type W = i64;
+
 /// Number of heap collection objects currently live (allocated minus freed).
 ///
 /// A positive value at program exit is a leak; a value that would go negative is
@@ -68,6 +75,104 @@ pub extern "C" fn jrt_heap_live_count() -> i64 {
     LIVE_OBJECTS.load(Ordering::Relaxed)
 }
 
+// ── Refcounting + destructor (B4.1) ───────────────────────────────────────────
+//
+// The strong-count half of the Bacon–Rajan scheme. `jrt_incref`/`jrt_decref` are
+// the C-ABI mutators codegen will emit (B4.2) at every reference gain/loss; a
+// decref that drops the count to zero runs the destructor, which cascades a
+// decref to each child collection before freeing the object. Cycles survive this
+// (a self-reference keeps the count > 0) — reclaiming them is the trial-deletion
+// pass (B4.3); this brick is the acyclic-reclamation foundation it builds on.
+//
+// **Precondition (important).** A `TAG_PTR` word is only known to be an
+// `ObjHeader`-prefixed *collection* (Array/Dict/Struct) for the objects this
+// crate allocates. Function-pointer boxes and async futures are *also* `TAG_PTR`
+// but carry no `ObjHeader`, so passing one of those words here would read/write
+// out of bounds. Codegen (B4.2) must therefore emit `jrt_incref`/`jrt_decref`
+// only for values it statically knows are collections; a later brick can give
+// fn/future values an `ObjHeader` to make the operation uniform over all
+// `TAG_PTR` words. These functions are AOT-only (element word = `i64`); the VM
+// manages collection lifetime with `Arc` and never calls them.
+
+/// Increment the strong count of the collection a `TAG_PTR` word points at. A
+/// no-op for non-pointer words (ints/bools/nil) and for strings/floats (distinct
+/// tags). See the module precondition: a `TAG_PTR` word must be a collection.
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_incref(word: W) {
+    let v = JadeValue::from_bits(word as u64);
+    if v.is_ptr() {
+        unsafe { (*(v.as_ptr() as *mut ObjHeader)).incref() };
+    }
+}
+
+/// Decrement the strong count of the collection a `TAG_PTR` word points at; when
+/// it reaches zero, run the destructor (cascading a decref to each child, then
+/// freeing). A no-op for non-pointer words and strings/floats. See the module
+/// precondition.
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_decref(word: W) {
+    unsafe { decref_word(word) };
+}
+
+/// The internal recursive decref used by both `jrt_decref` and the destructor's
+/// child cascade. If `word` is a collection pointer whose count hits zero, its
+/// destructor runs.
+///
+/// # Safety
+/// `word`, if `TAG_PTR`, must point at a live `ObjHeader`-prefixed collection.
+#[inline]
+unsafe fn decref_word(word: W) {
+    let v = JadeValue::from_bits(word as u64);
+    if !v.is_ptr() {
+        // Ints/bools/nil carry no allocation; strings/floats are non-refcounted
+        // leaves (a separate leak-reclamation concern — they cannot form cycles).
+        return;
+    }
+    let p = v.as_ptr() as *mut c_void;
+    if unsafe { (*(p as *mut ObjHeader)).decref() } {
+        unsafe { free_obj(p) };
+    }
+}
+
+/// Destroy and free a collection whose strong count has reached zero: cascade a
+/// decref to every child element/value/field (which may recursively free), then
+/// reclaim the payload (`Box::from_raw` + drop) and record the free.
+///
+/// # Safety
+/// `ptr` must be a live, `rc == 0`, `ObjHeader`-prefixed collection allocated by
+/// [`leak_obj`] with element word type `i64`; it must not be referenced again.
+pub(crate) unsafe fn free_obj(ptr: *mut c_void) {
+    let kind = unsafe { (*(ptr as *const ObjHeader)).kind };
+    // Reclaim the box (freeing its `Vec`), decref'ing children first. Reading the
+    // children through the reconstructed box before `drop` is sound: nothing else
+    // references it (rc == 0), and each child points at a *different* object.
+    if kind == ObjKind::Array as u8 {
+        let b = unsafe { Box::from_raw(ptr as *mut ArrayObj<W>) };
+        for &child in b.as_slice() {
+            unsafe { decref_word(child) };
+        }
+        drop(b);
+    } else if kind == ObjKind::Dict as u8 {
+        let b = unsafe { Box::from_raw(ptr as *mut DictObj<W>) };
+        for (_, v) in b.entries() {
+            unsafe { decref_word(*v) };
+        }
+        drop(b);
+    } else if kind == ObjKind::Struct as u8 {
+        let b = unsafe { Box::from_raw(ptr as *mut StructObj<W>) };
+        for (_, v) in b.fields() {
+            unsafe { decref_word(*v) };
+        }
+        drop(b);
+    } else {
+        // Float/Str/Fn/Future/etc.: no child cascade defined here. The collector
+        // only frees collections (the precondition), so this arm is unreached in
+        // practice; leaving the allocation is safe (a leak, not corruption).
+        return;
+    }
+    record_free();
+}
+
 /// Print the live heap-object count to stderr **iff** `JADE_HEAP_REPORT` is set in
 /// the environment. Codegen emits a call to this immediately before `main`'s
 /// `return 0`, so the leak (and, once refcounting lands, a clean zero) is
@@ -80,15 +185,33 @@ pub extern "C" fn jrt_heap_report() {
     }
 }
 
+/// Test-only serialization for the global live-object counter. Exact-count
+/// assertions (the destructor-cascade tests here, and the balanced-cleanup tests
+/// in `ffi_coll`) would race across cargo's parallel test threads, since every
+/// allocation/free mutates one shared atomic. Every counter-touching test holds
+/// this lock for its duration, making those observations effectively serial.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::sync::{Mutex, MutexGuard};
+
+    static LOCK: Mutex<()> = Mutex::new(());
+
+    /// Acquire the counter lock (ignoring poison from an unrelated failed test —
+    /// a poisoned lock still serializes correctly).
+    pub fn lock_counter() -> MutexGuard<'static, ()> {
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::coll::ArrayObj;
+    use super::test_support::lock_counter;
 
     #[test]
     fn leak_obj_increments_the_live_count() {
-        // Race-free under parallel tests: our own allocation guarantees the count
-        // is strictly greater afterward; concurrent allocations only add more.
+        let _g = lock_counter();
         let before = jrt_heap_live_count();
         let p = leak_obj(ArrayObj::<i64>::new());
         assert!(jrt_heap_live_count() > before, "leak_obj must bump the live count");
@@ -98,8 +221,91 @@ mod tests {
         record_free();
     }
 
+    // ── Refcount + destructor (B4.1) ──────────────────────────────────────────
+
+    /// A leaked, empty array (rc = 1); returns its pointer and its tagged word.
+    fn new_array() -> (*mut c_void, W) {
+        let p = leak_obj(ArrayObj::<W>::new());
+        (p, JadeValue::from_ptr(p as *const ()).bits() as i64)
+    }
+
+    /// Push a raw word into a leaked array (by pointer).
+    unsafe fn push(arr: *mut c_void, word: W) {
+        unsafe { (*(arr as *mut ArrayObj<W>)).push(word) };
+    }
+
+    #[test]
+    fn incref_then_decref_reaches_zero_and_frees() {
+        let _g = lock_counter();
+        let base = jrt_heap_live_count();
+        let (_p, w) = new_array(); // rc 1, live +1
+        jrt_incref(w); // rc 2
+        jrt_decref(w); // rc 1 — not freed
+        assert_eq!(jrt_heap_live_count(), base + 1, "must not free while rc > 0");
+        jrt_decref(w); // rc 0 — freed
+        assert_eq!(jrt_heap_live_count(), base, "must free when rc hits 0");
+    }
+
+    #[test]
+    fn decref_cascades_to_owned_children() {
+        // parent -> child, each rc 1 (child was created then moved into parent,
+        // an ownership transfer that needs no incref). Freeing the parent must
+        // free the child too.
+        let _g = lock_counter();
+        let base = jrt_heap_live_count();
+        let (_cp, cw) = new_array();
+        let (pp, pw) = new_array();
+        unsafe { push(pp, cw) };
+        assert_eq!(jrt_heap_live_count(), base + 2);
+        jrt_decref(pw); // parent rc 0 -> free -> decref child -> child rc 0 -> free
+        assert_eq!(jrt_heap_live_count(), base, "child must be reclaimed with parent");
+    }
+
+    #[test]
+    fn shared_child_freed_only_when_last_parent_drops() {
+        // child referenced by two parents: its rc is 2 (the second reference
+        // increfs). Dropping one parent must not free the shared child.
+        let _g = lock_counter();
+        let base = jrt_heap_live_count();
+        let (_cp, cw) = new_array(); // rc 1
+        jrt_incref(cw); // rc 2 — the second alias
+        let (p1, p1w) = new_array();
+        let (p2, p2w) = new_array();
+        unsafe {
+            push(p1, cw);
+            push(p2, cw);
+        }
+        assert_eq!(jrt_heap_live_count(), base + 3);
+        jrt_decref(p1w); // p1 freed; child rc 2 -> 1, survives
+        assert_eq!(jrt_heap_live_count(), base + 2, "shared child must survive");
+        jrt_decref(p2w); // p2 freed; child rc 1 -> 0, freed
+        assert_eq!(jrt_heap_live_count(), base, "child freed with last parent");
+    }
+
+    #[test]
+    fn self_cycle_is_not_reclaimed_by_refcounting() {
+        // a = []; a.push(a) — a references itself, so its rc is 2 (the external
+        // binding + the self-reference). Dropping the external reference leaves
+        // rc 1: pure refcounting leaks the cycle. This is exactly what the
+        // Bacon–Rajan trial-deletion pass (B4.3) exists to collect.
+        let _g = lock_counter();
+        let base = jrt_heap_live_count();
+        let (ap, aw) = new_array(); // rc 1
+        unsafe { push(ap, aw) }; // self-reference
+        jrt_incref(aw); // rc 2 — the self-reference is a real reference
+        jrt_decref(aw); // external ref gone: rc 1, NOT freed
+        assert_eq!(jrt_heap_live_count(), base + 1, "cycle survives refcounting (B4.3 collects it)");
+
+        // Manual teardown for the test: reclaim directly WITHOUT the cascade
+        // (the cascade would re-enter free_obj on the self-word → double free).
+        unsafe { drop(Box::from_raw(ap as *mut ArrayObj<W>)) };
+        record_free();
+        assert_eq!(jrt_heap_live_count(), base);
+    }
+
     #[test]
     fn balanced_alloc_free_never_underflows() {
+        let _g = lock_counter();
         // `record_free` debug-asserts against underflow; a matched sequence of
         // allocations and frees must pass it cleanly. (No assertion on the global
         // count itself — it is shared with concurrently-running tests, so only

@@ -480,6 +480,7 @@ mod tests {
 
     #[test]
     fn array_roundtrip_through_ffi() {
+        let _g = crate::gc::test_support::lock_counter();
         let a = jrt_karr_new();
         jrt_karr_push(a, int_word(10));
         jrt_karr_push(a, int_word(20));
@@ -495,6 +496,7 @@ mod tests {
 
     #[test]
     fn dict_get_and_value_copy_through_ffi() {
+        let _g = crate::gc::test_support::lock_counter();
         let d = jrt_kdict_new();
         // key as a tagged string word.
         let key = unsafe { tagged_string(b"k", string::TRUSTED) };
@@ -528,6 +530,7 @@ mod tests {
 
     #[test]
     fn struct_type_name_and_fields_through_ffi() {
+        let _g = crate::gc::test_support::lock_counter();
         let s = jrt_kstruct_new(b"Point\0".as_ptr() as *const c_char);
         jrt_kstruct_set(s, b"x\0".as_ptr() as *const c_char, int_word(7));
         let obj_word = JadeValue::from_ptr(s as *const ()).bits() as i64;
@@ -554,6 +557,7 @@ mod tests {
 
     #[test]
     fn render_any_returns_freeable_buffer() {
+        let _g = crate::gc::test_support::lock_counter();
         let a = jrt_karr_new();
         jrt_karr_push(a, int_word(1));
         jrt_karr_push(a, int_word(2));
