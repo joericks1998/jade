@@ -9,6 +9,13 @@ use crate::frontend::error::{JadeError, Result, Span};
 use super::{InferenceBackend, InferenceRequest, InferenceResponse};
 
 fn jade_sock_path() -> String {
+    // `JADE_LLM_SOCK` overrides the default location (point at a custom daemon,
+    // or isolate a test from the user's real `~/.jade/llm.sock`).
+    if let Ok(s) = std::env::var("JADE_LLM_SOCK") {
+        if !s.is_empty() {
+            return s;
+        }
+    }
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_owned());
     format!("{home}/.jade/llm.sock")
 }

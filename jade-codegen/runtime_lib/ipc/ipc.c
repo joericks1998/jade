@@ -41,6 +41,13 @@ static void fatal_errno(const char* msg) {
 }
 
 static int sock_path(char* buf, size_t bufsz) {
+    /* JADE_LLM_SOCK overrides the default (custom daemon / test isolation);
+     * mirrors the VM's jade_os.rs::jade_sock_path. */
+    const char* over = getenv("JADE_LLM_SOCK");
+    if (over && *over) {
+        int n = snprintf(buf, bufsz, "%s", over);
+        return (n > 0 && (size_t)n < bufsz) ? 0 : -1;
+    }
     const char* home = getenv("HOME");
     if (!home || !*home) home = "/root";
     int n = snprintf(buf, bufsz, "%s/.jade/llm.sock", home);
