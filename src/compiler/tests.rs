@@ -1869,6 +1869,83 @@ mod vm {
         let _ = std::fs::remove_file(&txt_path);
     }
 
+    // ── imported struct metadata ──────────────────────────────────────────────
+
+    /// Compile and run `main_src` with `mod_src` written to `<tmp>/<stem>.jde`,
+    /// importable as `m`. Returns the final VM state.
+    fn run_with_module(stem: &str, mod_src: &str, main_body: &str) -> VmState {
+        let dir = std::env::temp_dir();
+        let mod_path = dir.join(format!("{stem}.jde"));
+        std::fs::write(&mod_path, mod_src).unwrap();
+        let src = format!("use \"{}\" as m\n{main_body}", mod_path.to_str().unwrap());
+
+        let tokens = crate::frontend::lexer::tokenize(&src).expect("lex");
+        let program = crate::frontend::parser::parse(tokens).expect("parse");
+        let tprogram = crate::compiler::type_infer::infer(program).expect("type infer");
+        let compiled = crate::compiler::emit::emit(tprogram).expect("emit");
+        let opts = VmOpts { source_dir: dir.clone(), ..VmOpts::default() };
+        let s = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(run(compiled, opts))
+            .expect("vm run");
+
+        let _ = std::fs::remove_file(&mod_path);
+        s
+    }
+
+    /// Field defaults on an imported struct must be applied. Instances carry the
+    /// bare type name, so registering the imported def only under the
+    /// namespaced key left `MakeStruct` unable to find the defaults.
+    #[test]
+    fn test_imported_struct_applies_field_defaults() {
+        let s = run_with_module(
+            "jade_test_imported_defaults",
+            "struct Cfg {\n a,\n let b = 99\n}\n",
+            "let c = m.Cfg { a: 1 }\nlet v = c.b",
+        );
+        assert_eq!(get_int(&s, "v"), 99);
+    }
+
+    /// Methods from an imported `extend` block must resolve on instances of the
+    /// imported struct — the same bare-vs-namespaced key mismatch made every
+    /// imported method look like a missing field.
+    #[test]
+    fn test_imported_extend_method_resolves() {
+        let s = run_with_module(
+            "jade_test_imported_extend",
+            "struct P {\n x\n}\nextend P {\n fn double(self) {\n  return self.x * 2\n }\n}\n",
+            "let p = m.P { x: 21 }\nlet v = p.double()",
+        );
+        assert_eq!(get_int(&s, "v"), 42);
+    }
+
+    /// The same, through an interface — this is the case the AOT backend already
+    /// handled while the VM did not.
+    #[test]
+    fn test_imported_interface_method_resolves() {
+        let s = run_with_module(
+            "jade_test_imported_iface",
+            "interface Show {\n fn show(self)\n}\nstruct Q {\n n\n}\nextend Q: Show {\n fn show(self) {\n  return \"n=\" + str(self.n)\n }\n}\n",
+            "let q = m.Q { n: 7 }\nlet v = q.show()",
+        );
+        assert_eq!(get_str(&s, "v"), "n=7");
+    }
+
+    /// A locally-defined type must win over an imported one of the same name:
+    /// the importing file's own defs are merged before its imports execute, and
+    /// bare keys are registered with `or_insert` so they never overwrite.
+    #[test]
+    fn test_local_struct_shadows_imported_same_name() {
+        let s = run_with_module(
+            "jade_test_imported_shadow",
+            "struct Dup {\n a,\n let tag = \"imported\"\n}\n",
+            "struct Dup {\n a,\n let tag = \"local\"\n}\nlet d = Dup { a: 1 }\nlet v = d.tag",
+        );
+        assert_eq!(get_str(&s, "v"), "local");
+    }
+
     // ── type constructors ─────────────────────────────────────────────────────
 
     #[test]

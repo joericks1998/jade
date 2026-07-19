@@ -745,8 +745,28 @@ async fn execute_chunk(
                             }
                             state.globals.insert(namespace.clone(), VmValue::Dict(module_globals.into_iter().collect()));
 
-                            // Merge struct_defs prefixed with the namespace.
+                            // Merge struct_defs under both the namespaced and the
+                            // bare key.
+                            //
+                            // Two lookup conventions meet here. `TypeRef` coercion
+                            // resolves through the qualified name (stamped just
+                            // above), but every instance-side lookup uses the name
+                            // carried on the instance itself — and that is always
+                            // bare, because `infer_expr` normalizes `lib.Cfg` to
+                            // `Cfg` (type_infer.rs:971) so that literals written
+                            // outside the module agree with the ones written inside
+                            // it. Registering only the qualified key left
+                            // `MakeStruct` unable to find field defaults and
+                            // `GetField` unable to find extend methods for any
+                            // imported struct.
+                            //
+                            // Bare keys never overwrite: the importing file's own
+                            // definitions are merged before its imports execute, so
+                            // a local type of the same name keeps priority and two
+                            // modules exporting the same name resolve to the first
+                            // imported rather than the last.
                             for (k, v) in sub_state.struct_defs.drain() {
+                                state.struct_defs.entry(k.clone()).or_insert_with(|| v.clone());
                                 state.struct_defs.insert(format!("{}.{}", namespace, k), v);
                             }
                             // Merge extend_methods prefixed with the namespace.
@@ -759,6 +779,13 @@ async fn execute_chunk(
                                         cf.module_scope = Some(Arc::clone(&module_scope));
                                     }
                                 }
+                                for (m_name, m_fn) in &methods {
+                                    state.extend_methods
+                                        .entry(type_name.clone())
+                                        .or_default()
+                                        .entry(m_name.clone())
+                                        .or_insert_with(|| Arc::clone(m_fn));
+                                }
                                 state.extend_methods
                                     .entry(format!("{}.{}", namespace, type_name))
                                     .or_default()
@@ -766,6 +793,10 @@ async fn execute_chunk(
                             }
                             // Merge struct_decorators prefixed with the namespace.
                             for (type_name, decs) in sub_state.struct_decorators.drain() {
+                                if !state.struct_decorators.contains_key(&type_name) {
+                                    state.struct_decorators
+                                        .insert(type_name.clone(), decs.clone());
+                                }
                                 state.struct_decorators
                                     .entry(format!("{}.{}", namespace, type_name))
                                     .or_default()
