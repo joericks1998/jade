@@ -37,6 +37,17 @@ jobs:
           LLVM_SYS_180_PREFIX: /usr/lib/llvm-18
         run: cargo test --verbose
 
+      # Deliberately not `-D warnings`: the tree carries ~120 style warnings and
+      # failing on them would mean either a large mechanical diff or a step
+      # nobody can keep green. Clippy's correctness lints are deny-by-default,
+      # so this still fails the build on the class that matters — it caught an
+      # `approx_constant` error that had been sitting unnoticed because nothing
+      # ran clippy at all.
+      - name: Clippy
+        env:
+          LLVM_SYS_180_PREFIX: /usr/lib/llvm-18
+        run: cargo clippy --all-targets
+
       # Exercises the real `jade check` binary against every committed fixture,
       # covering the CLI wiring and on-disk cache that the in-process test in
       # cli/check.rs cannot reach. Fixtures named *_error.jde document rejected
@@ -57,6 +68,15 @@ jobs:
             fi
           done < <(find examples -name '*.jde' | sort)
           exit $status
+
+      # Runs every example on both the VM and the AOT backend and diffs the
+      # output. The two paths have silently diverged three times; each was
+      # caught by hand, because no automated check ever ran a program both
+      # ways. See the script header for the skip list.
+      - name: Backend parity
+        env:
+          LLVM_SYS_180_PREFIX: /usr/lib/llvm-18
+        run: ./scripts/backend-parity.sh
 
   tag-release:
     name: Tag release

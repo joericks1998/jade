@@ -19,6 +19,8 @@ mod lexer {
         assert_eq!(kinds("42"), vec![TokenKind::Integer(42), TokenKind::Semicolon, TokenKind::Eof]);
     }
 
+    // The literal is a float to tokenize, not an approximation of pi.
+    #[allow(clippy::approx_constant)]
     #[test]
     fn test_float_literal() {
         assert_eq!(kinds("3.14"), vec![TokenKind::Float(3.14), TokenKind::Semicolon, TokenKind::Eof]);
