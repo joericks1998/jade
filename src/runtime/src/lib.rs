@@ -56,6 +56,7 @@ pub mod ops;
 pub mod pathf;
 pub mod randomf;
 pub mod render;
+pub mod shf;
 pub mod string;
 pub mod strval;
 pub mod sys;

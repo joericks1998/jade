@@ -466,8 +466,15 @@ void    jrt_refuse_if_tainted(const char* arg, const char* sink_name);
  * folder (built by build.rs). They depend only on the core symbols declared
  * above. The data-structure modules (dict/array/json) stay in common.c with the
  * heap object model they manipulate. */
-#include "sh/sh.h"
 #include "http/http.h"
+
+/* sh (std::sh) is implemented in Rust now (jade-runtime, src/shf.rs). exec/run
+ * refuse tainted input (a code-execution sink) — that check + throw stays in the
+ * C forwarders (common.c); the impls never raise. */
+char*   jrt_sh_exec_impl(const char* cmd);
+int64_t jrt_sh_run_impl(const char* cmd);
+char*   jrt_sh_exec(const char* cmd);   /* forwarder: refuse-if-tainted + impl */
+int64_t jrt_sh_run(const char* cmd);    /* forwarder: refuse-if-tainted + impl */
 
 /* fs (std::fs) is implemented in Rust now (jade-runtime, src/fsf.rs). The
  * fallible ops record a pending error instead of throwing (a longjmp must not

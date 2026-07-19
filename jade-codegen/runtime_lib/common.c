@@ -391,6 +391,17 @@ int64_t jrt_random_choice_chunk(int64_t arr_word) {
     return jrt_coll_array_get(arr, idx);
 }
 
+/* sh.exec/run forwarders: refuse a tainted command (a code-execution sink) —
+ * the only throw — then call the non-raising Rust impls (jade-runtime src/shf.rs). */
+char* jrt_sh_exec(const char* cmd) {
+    jrt_refuse_if_tainted(cmd, "sh.exec(cmd)");
+    return jrt_sh_exec_impl(cmd);
+}
+int64_t jrt_sh_run(const char* cmd) {
+    jrt_refuse_if_tainted(cmd, "sh.run(cmd)");
+    return jrt_sh_run_impl(cmd);
+}
+
 /* fs.* raising forwarders: the Rust impls (jade-runtime src/fsf.rs) record a
  * pending error instead of throwing (a longjmp must not cross a Rust frame);
  * throw it here as a catchable exception. fs.read additionally refuses a tainted
