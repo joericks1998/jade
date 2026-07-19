@@ -1,204 +1,73 @@
-//! Build client — hands a type-inferred program (TIR) to the Jade build daemon
-//! over a Unix domain socket and receives a native binary.
+//! Native compilation: TIR → LLVM → object → linked artifact.
 //!
-//! Native code generation + linking now live in the build daemon, alongside the
-//! C runtime that compiled binaries link against. This repo owns the language
-//! frontend (lex → parse → type-infer → TIR); the daemon owns everything
-//! downstream (import resolution → LLVM → object → link → binary).
+//! This used to be a client for a build daemon listening on
+//! `$HOME/.jade/build.sock`, because code generation and the C runtime lived in
+//! a separate repository and keeping LLVM out of the `jade` binary was worth a
+//! socket for it. Both halves of that argument are gone: `src/codegen/` owns the
+//! backend and the C runtime now, so the daemon's only remaining job was
+//! forwarding a request to a function this crate already exports.
 //!
-//! The transport mirrors the inference backend (`llm/jaded.rs`): a
-//! length-prefixed JSON request followed by a stream of typed response frames.
+//! Compiling in-process removes the failure mode that motivated the change — a
+//! daemon built from an older commit resolving imports differently from the CLI
+//! calling it, which stays silent until the two disagree. There is now one
+//! resolver, one code path, one version.
 //!
-//! Wire contract (confirm against the daemon's `build` op):
-//!   request:  `[u32 LE len][ {"op":"build","emit":..,"out":..,"source_path":..,"tir":{..}} ]`
-//!   response: `[u8 type][u16 LE len][payload]` frames —
-//!               0x01 TOKEN (utf8 LLVM IR, when emit=ir), 0x02 DONE,
-//!               0x03 ERROR (utf8), 0x04 META (utf8, informational).
+//! The cost is that building `jade` needs LLVM 18 present. *Running* a released
+//! binary does not — LLVM is linked in, not loaded.
 
-use std::io::{Read, Write};
-use std::os::unix::net::UnixStream;
 use std::path::Path;
 
 use crate::compiler::tir::TProgram;
 
-#[cfg(test)]
-mod tests;
-
-fn build_sock_path() -> String {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_owned());
-    format!("{home}/.jade/build.sock")
-}
-
-/// Send a build request to the daemon. On success the daemon has written the
-/// native binary to `out`; for `emit_ir`, the LLVM IR is streamed to stdout.
-///
-/// The daemon receives the *main file's* TIR plus its `source_path` and resolves
-/// imports itself (reading sibling `.jde` files relative to `source_path`).
-/// What the daemon should produce.
+/// What to produce.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Emit {
     /// A native executable.
     #[default]
     Binary,
-    /// LLVM IR, printed rather than linked.
+    /// LLVM IR, printed to stdout rather than linked.
     Ir,
-    /// A shared library exporting `jade_pkg_init` — a Jade package. `exports`
-    /// narrows which functions are bound; empty means all of them.
+    /// A shared library exporting `jade_pkg_init` — a Jade package other
+    /// projects can depend on. `exports` narrows which functions are bound;
+    /// empty means all of them.
     CDylib { exports: Vec<String> },
 }
 
-impl Emit {
-    fn wire_name(&self) -> &'static str {
-        match self {
-            Emit::Binary => "binary",
-            Emit::Ir => "ir",
-            Emit::CDylib { .. } => "cdylib",
+impl From<&Emit> for crate::codegen::CompileMode {
+    fn from(emit: &Emit) -> Self {
+        match emit {
+            Emit::CDylib { exports } => {
+                crate::codegen::CompileMode::SharedLib { exports: exports.clone() }
+            }
+            // IR is printed rather than linked, so the mode only decides which
+            // entry point gets generated — the binary shape is the right one.
+            Emit::Binary | Emit::Ir => crate::codegen::CompileMode::Binary,
         }
     }
 }
 
-pub fn build(
-    program: &TProgram,
-    source_path: &Path,
-    out: &Path,
-    emit: Emit,
-) -> Result<(), String> {
-    let sock_path = build_sock_path();
-    let mut stream = UnixStream::connect(&sock_path).map_err(|e| {
-        if Path::new(&sock_path).exists() {
-            // Socket is there but nothing is listening — the daemon is down.
-            format!(
-                "the Jade build daemon at {} isn't responding — is it running? ({e})",
-                sock_path
-            )
-        } else {
-            // No socket at all — native compilation isn't available here.
-            "native compilation (`jade build`) needs the Jade build daemon, which \
-             isn't present on this platform yet — standalone Mac/Linux runtimes \
-             aren't released.\n       \
-             To run this program now, use the VM instead:  jade run <file.jde>"
-                .to_owned()
-        }
-    })?;
+/// Compile `program` to `out`.
+///
+/// `source_path` anchors import resolution: imports resolve relative to the file
+/// being compiled, not the working directory.
+pub fn build(program: &TProgram, source_path: &Path, out: &Path, emit: Emit) -> Result<(), String> {
+    let ir = crate::codegen::compile_with_mode(
+        program.clone(),
+        Some(source_path),
+        out,
+        emit == Emit::Ir,
+        (&emit).into(),
+    )?;
 
-    let payload = encode_request(program, source_path, out, &emit)?;
-    stream
-        .write_all(&payload)
-        .map_err(|e| format!("write to {} failed: {e}", sock_path))?;
-
-    let mut buf: Vec<u8> = Vec::new();
-    let mut tmp = [0u8; 8192];
-    loop {
-        match decode_frame(&buf) {
-            FrameResult::Token(text, consumed) => {
-                if emit == Emit::Ir {
-                    crate::stdio::write_str(&text);
-                }
-                buf.drain(..consumed);
-            }
-            FrameResult::Meta(consumed) => {
-                buf.drain(..consumed);
-            }
-            FrameResult::Done(consumed) => {
-                buf.drain(..consumed);
-                return Ok(());
-            }
-            FrameResult::Error(msg, consumed) => {
-                buf.drain(..consumed);
-                return Err(msg);
-            }
-            FrameResult::Incomplete => {
-                let n = stream
-                    .read(&mut tmp)
-                    .map_err(|e| format!("read from {} failed: {e}", sock_path))?;
-                if n == 0 {
-                    return Err("build daemon closed the connection before DONE".to_owned());
-                }
-                buf.extend_from_slice(&tmp[..n]);
-            }
-            FrameResult::UnknownType(t) => {
-                return Err(format!("unknown frame type from build daemon: {t:#04x}"));
-            }
-        }
+    // `compile_with_mode` returns the IR text only when asked for it; a binary
+    // or package build writes to `out` and returns None.
+    if let Some(text) = ir {
+        crate::stdio::write_str(&text);
+        crate::stdio::flush();
     }
+
+    Ok(())
 }
 
-fn encode_request(
-    program: &TProgram,
-    source_path: &Path,
-    out: &Path,
-    emit: &Emit,
-) -> Result<Vec<u8>, String> {
-    let tir =
-        serde_json::to_value(program).map_err(|e| format!("failed to serialize TIR: {e}"))?;
-    let exports = match emit {
-        Emit::CDylib { exports } => serde_json::json!(exports),
-        _ => serde_json::Value::Null,
-    };
-    let req = serde_json::json!({
-        "op": "build",
-        "emit": emit.wire_name(),
-        "exports": exports,
-        "out": out.to_string_lossy(),
-        "source_path": source_path.to_string_lossy(),
-        "target": serde_json::Value::Null,
-        "tir": tir,
-    });
-    let json =
-        serde_json::to_vec(&req).map_err(|e| format!("failed to encode build request: {e}"))?;
-    let len = json.len() as u32;
-    let mut payload = Vec::with_capacity(4 + json.len());
-    payload.extend_from_slice(&len.to_le_bytes());
-    payload.extend_from_slice(&json);
-    Ok(payload)
-}
-
-// ── Response frames ───────────────────────────────────────────────────────────
-// [u8 type][u16 LE len][payload], matching the inference daemon framing.
-
-enum FrameResult {
-    Token(String, usize),
-    Meta(usize),
-    Done(usize),
-    Error(String, usize),
-    Incomplete,
-    UnknownType(u8),
-}
-
-fn decode_frame(buf: &[u8]) -> FrameResult {
-    if buf.len() < 3 {
-        return FrameResult::Incomplete;
-    }
-    let frame_type = buf[0];
-    let payload_len = u16::from_le_bytes([buf[1], buf[2]]) as usize;
-    if buf.len() < 3 + payload_len {
-        return FrameResult::Incomplete;
-    }
-    let payload = &buf[3..3 + payload_len];
-    let consumed = 3 + payload_len;
-    match frame_type {
-        0x01 => match std::str::from_utf8(payload) {
-            Ok(s) => FrameResult::Token(s.to_owned(), consumed),
-            Err(_) => FrameResult::Error(
-                "build daemon sent invalid UTF-8 in TOKEN frame".to_owned(),
-                consumed,
-            ),
-        },
-        0x02 => FrameResult::Done(consumed),
-        0x03 => match std::str::from_utf8(payload) {
-            Ok(s) => FrameResult::Error(s.to_owned(), consumed),
-            Err(_) => FrameResult::Error(
-                "build daemon sent invalid UTF-8 in ERROR frame".to_owned(),
-                consumed,
-            ),
-        },
-        0x04 => match std::str::from_utf8(payload) {
-            Ok(_) => FrameResult::Meta(consumed),
-            Err(_) => FrameResult::Error(
-                "build daemon sent invalid UTF-8 in META frame".to_owned(),
-                consumed,
-            ),
-        },
-        other => FrameResult::UnknownType(other),
-    }
-}
+#[cfg(test)]
+mod tests;

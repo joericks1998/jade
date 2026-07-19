@@ -92,16 +92,14 @@ pub fn resolve_and_namespace(
     let mut reg = Registry::new();
     // Load registered [lib] libraries from the project's jade.toml (walking up
     // from the main file), so `use "<lib>/<module>"` resolves the same way the
-    // VM does. The daemon shares the filesystem with the source, so it can read
-    // jade.toml directly.
-    // Locked dependencies join them as synthetic [lib] entries, so `use <dep>`
-    // lowers exactly like a hand-written library and the two backends cannot
-    // resolve differently.
-    if let Some(root) = crate::project::find_project_root_from(&main_dir) {
-        if let Ok(manifest) = crate::project::load_project(&root) {
-            reg.libraries = crate::pkg::resolved_libraries(&root, &manifest);
-            reg.lib_root = Some(root);
-        }
+    // VM does. Locked dependencies join them as synthetic [lib] entries, so
+    // `use <dep>` lowers exactly like a hand-written library and the two
+    // backends cannot resolve differently.
+    if let Some((root, manifest)) = crate::project::find_project_root_from(&main_dir)
+        .and_then(|r| crate::project::load_project(&r).ok().map(|m| (r, m)))
+    {
+        reg.libraries = crate::pkg::resolved_libraries(&root, &manifest);
+        reg.lib_root = Some(root);
     }
 
     // Mark main as loaded so a self-import is treated as a cycle (skipped), not

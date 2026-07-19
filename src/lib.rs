@@ -1,15 +1,15 @@
 //! The `jade` library crate.
 //!
-//! Exposes the language frontend (lex → parse → type-infer → TIR) and compiler
-//! internals so out-of-process tools — notably the Jade build daemon, which
-//! owns LLVM codegen + linking — can reuse them instead of duplicating the
-//! frontend. The `jade` binary (`src/main.rs`) is a thin CLI on top of this.
+//! Exposes the whole toolchain: the language frontend (lex → parse →
+//! type-infer → TIR), the bytecode VM, the AOT LLVM backend, and the package
+//! manager. The `jade` binary (`src/main.rs`) is a thin CLI on top of this.
 
-// Jade is Unix-only. The core of the toolchain is built on Unix domain sockets —
-// `jade build` talks to the build daemon, and the `jade` inference provider talks
-// to the LLM daemon — so a Windows build could only ever be a language subset
-// with the interesting half stubbed out. Failing here is clearer than shipping
-// that: a build error names the constraint, a silently degraded binary doesn't.
+// Jade is Unix-only. The `jade` inference provider talks to the LLM daemon over
+// a Unix domain socket, native packages are loaded with dlopen, and the C
+// runtime is written against POSIX — so a Windows build could only ever be a
+// language subset with the interesting half stubbed out. Failing here is clearer
+// than shipping that: a build error names the constraint, a silently degraded
+// binary doesn't.
 #[cfg(not(unix))]
 compile_error!(
     "Jade supports Unix-like platforms only (macOS and Linux). \
@@ -20,15 +20,10 @@ pub mod build;
 pub mod builtins;
 pub mod cache;
 pub mod cli;
-/// AOT backend: bytecode `Chunk` → LLVM → native binary (needs LLVM 18). Merged
-/// into this crate from the former `jade-codegen`; `jade-buildd` calls
-/// `codegen::compile`. The C runtime AOT binaries link (`runtime_lib/`) is built
-/// by this crate's `build.rs`.
-///
-/// Behind the `codegen` feature, off by default: linking LLVM 18 would otherwise
-/// be a hard requirement for every build of the `jade` CLI, which never calls
-/// into this module — `jade build` hands TIR to the daemon over a socket.
-#[cfg(feature = "codegen")]
+/// AOT backend: bytecode `Chunk` → LLVM → object → linked artifact. `jade build`
+/// calls straight into this, so LLVM 18 is a build-time requirement for the
+/// toolchain (locate it with `LLVM_SYS_180_PREFIX`). The C runtime that emitted
+/// binaries link against (`runtime_lib/`) is built by this crate's `build.rs`.
 pub mod codegen;
 pub mod compiler;
 pub mod config;

@@ -23,8 +23,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # glibc, not musl: `jade build` links LLVM 18 in-process, and LLVM's
+          # prebuilt distributions are glibc-based — a static musl build would
+          # mean sourcing or building a musl LLVM. Revisit if a fully static
+          # Linux binary becomes worth that.
           - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
+            target: x86_64-unknown-linux-gnu
             archive: jade-linux-x86_64.tar.gz
             binary: jade
 
@@ -48,9 +52,21 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install musl tools (Linux)
-        if: contains(matrix.target, 'musl')
-        run: sudo apt-get install -y musl-tools
+      # LLVM 18 is a hard build dependency: the toolchain compiles Jade to
+      # native code in-process rather than shipping it to a daemon. It is
+      # linked into the released binary, so users install nothing.
+      - name: Install LLVM 18 (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm-18-dev libpolly-18-dev libzstd-dev
+          echo "LLVM_SYS_180_PREFIX=/usr/lib/llvm-18" >> "$GITHUB_ENV"
+
+      - name: Install LLVM 18 (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install llvm@18
+          echo "LLVM_SYS_180_PREFIX=$(brew --prefix llvm@18)" >> "$GITHUB_ENV"
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}

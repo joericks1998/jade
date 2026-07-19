@@ -1,10 +1,9 @@
 use std::process;
 
-/// `jade build <file.jde>` — compile to a native binary via the build daemon.
+/// `jade build <file.jde>` — compile to a native binary.
 ///
-/// This repo runs the frontend (lex → parse → type-infer → TIR); the typed
-/// program is then handed to the build daemon over `$HOME/.jade/build.sock`,
-/// which performs import resolution, code generation, and linking.
+/// Runs the whole pipeline in-process: lex → parse → type-infer → TIR, then
+/// import resolution, LLVM code generation, and linking.
 pub fn run_build(path: &str, output: Option<&str>, emit_ir: bool, lib: bool, exports: &[String]) {
     {
         use std::path::{Path, PathBuf};
@@ -40,7 +39,7 @@ pub fn run_build(path: &str, output: Option<&str>, emit_ir: bool, lib: bool, exp
             }
         };
 
-        // Absolute source path so the daemon resolves imports relative to it.
+        // Absolute source path so imports resolve relative to it, not the CWD.
         let abs_source = std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
 
         // Output path: default to the input filename without its extension —
@@ -61,7 +60,7 @@ pub fn run_build(path: &str, output: Option<&str>, emit_ir: bool, lib: bool, exp
                 src.parent().unwrap_or(Path::new(".")).join(name)
             }
         };
-        // Make the output path absolute so the daemon writes where the user expects.
+        // Make the output path absolute so the artifact lands where the user expects.
         let abs_out = if out.is_absolute() {
             out.clone()
         } else {
@@ -79,19 +78,7 @@ pub fn run_build(path: &str, output: Option<&str>, emit_ir: bool, lib: bool, exp
         };
 
         if let Err(e) = crate::build::build(&tprogram, &abs_source, &abs_out, emit) {
-            // A daemon predating package builds has no idea what "cdylib" means.
-            // Say so plainly rather than leaving the user to decode its error —
-            // the alternative failure mode is worse: an old daemon that ignores
-            // the field and silently hands back an executable.
-            if lib {
-                eprintln!("{path}: build error: {e}");
-                eprintln!(
-                    "note: building a package needs a build daemon that supports \
-                     `emit: cdylib`; run `jade upgrade` if yours predates it"
-                );
-            } else {
-                eprintln!("{path}: build error: {e}");
-            }
+            eprintln!("{path}: build error: {e}");
             process::exit(1);
         }
 

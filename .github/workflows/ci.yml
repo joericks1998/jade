@@ -16,10 +16,25 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      # `jade build` compiles in-process, so LLVM 18 is a hard build dependency
+      # of the toolchain. libpolly-18-dev is not optional: llvm-config lists
+      # Polly in --libnames, so without it llvm-sys fails with "could not find
+      # native static library `Polly`".
+      - name: Install LLVM 18
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm-18-dev libpolly-18-dev libzstd-dev
+
+      # Overrides the Apple Silicon Homebrew path in .cargo/config.toml. Cargo's
+      # [env] does not set a variable that is already present, so this wins.
       - name: Build
+        env:
+          LLVM_SYS_180_PREFIX: /usr/lib/llvm-18
         run: cargo build --verbose
 
       - name: Test
+        env:
+          LLVM_SYS_180_PREFIX: /usr/lib/llvm-18
         run: cargo test --verbose
 
       # Exercises the real `jade check` binary against every committed fixture,
@@ -43,36 +58,9 @@ jobs:
           done < <(find examples -name '*.jde' | sort)
           exit $status
 
-  # The AOT backend (src/codegen/) is behind the `codegen` feature so the CLI,
-  # CI, and release builds don't need LLVM. That would silently drop its ~45
-  # tests from `cargo test`, so they run here instead, on the one machine that
-  # has LLVM 18. libpolly-18-dev is not optional: llvm-config lists Polly in
-  # --libnames, so without it llvm-sys fails with "could not find native static
-  # library `Polly`".
-  codegen:
-    name: Codegen (LLVM 18)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install LLVM 18
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y llvm-18-dev libpolly-18-dev libzstd-dev
-
-      # Overrides the Apple Silicon Homebrew path in .cargo/config.toml. Cargo's
-      # [env] does not set a variable that is already present, so this wins.
-      - name: Build and test the codegen backend
-        env:
-          LLVM_SYS_180_PREFIX: /usr/lib/llvm-18
-        run: cargo test --features codegen --verbose
-
   tag-release:
     name: Tag release
-    needs: [build, codegen]
+    needs: build
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:

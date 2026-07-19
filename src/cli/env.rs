@@ -10,17 +10,6 @@ pub fn run_env(json: bool) {
     // Platform
     let platform = format!("{} {}", std::env::consts::OS, std::env::consts::ARCH);
 
-    // Build daemon status (native compilation happens over this socket).
-    let build_daemon = {
-        let home = std::env::var("HOME").unwrap_or_default();
-        let sock = format!("{home}/.jade/build.sock");
-        if std::path::Path::new(&sock).exists() {
-            "reachable"
-        } else {
-            "not running"
-        }
-    };
-
     // Config
     let cfg = crate::config::load_config();
     let global_path = crate::config::global_config_path();
@@ -79,7 +68,6 @@ pub fn run_env(json: bool) {
         let output = serde_json::json!({
             "jade_version": version,
             "binary":       binary,
-            "build_daemon": build_daemon,
             "platform":     platform,
             "config": {
                 "source":      config_source,
@@ -102,7 +90,6 @@ pub fn run_env(json: bool) {
         // Human-readable output
         println!("jade {}", version);
         println!("  binary    {}", binary);
-        println!("  build     {}", build_daemon);
         println!("  platform  {}", platform);
         println!();
         println!("config:");

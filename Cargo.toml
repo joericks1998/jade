@@ -25,17 +25,14 @@ toml_edit = "0.22"
 bincode = "1"
 sha2 = "0.10"
 libloading = "0.8"
-# LLVM 18 backend for the AOT codegen module (src/codegen/). Optional: only the
-# build daemon lowers TIR to native code, so the `jade` CLI — which ships TIR
-# over a socket and never calls `codegen::` — must not drag LLVM into its build.
-inkwell = { version = "0.8", features = ["llvm18-1"], optional = true }
+# LLVM 18 backend for the AOT codegen module (src/codegen/). `jade build`
+# compiles in-process — there is no build daemon — so this is a hard dependency
+# and LLVM 18 must be present to build the toolchain. Locate it with
+# LLVM_SYS_180_PREFIX. Running a released binary needs nothing installed.
+inkwell = { version = "0.8", features = ["llvm18-1"] }
 
 [features]
 default = []
-# Compile src/codegen/ (Chunk→LLVM AOT backend). Needs LLVM 18 on the build host,
-# located via LLVM_SYS_180_PREFIX. Enabled by `jade-buildd`, which calls
-# `codegen::compile`; left off for the CLI, CI, and release builds.
-codegen = ["dep:inkwell"]
 
 [build-dependencies]
 # Compiles the C runtime (runtime_lib/) that emitted AOT binaries link against.
