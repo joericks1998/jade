@@ -34,11 +34,34 @@ fn build_sock_path() -> String {
 ///
 /// The daemon receives the *main file's* TIR plus its `source_path` and resolves
 /// imports itself (reading sibling `.jde` files relative to `source_path`).
+/// What the daemon should produce.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Emit {
+    /// A native executable.
+    #[default]
+    Binary,
+    /// LLVM IR, printed rather than linked.
+    Ir,
+    /// A shared library exporting `jade_pkg_init` — a Jade package. `exports`
+    /// narrows which functions are bound; empty means all of them.
+    CDylib { exports: Vec<String> },
+}
+
+impl Emit {
+    fn wire_name(&self) -> &'static str {
+        match self {
+            Emit::Binary => "binary",
+            Emit::Ir => "ir",
+            Emit::CDylib { .. } => "cdylib",
+        }
+    }
+}
+
 pub fn build(
     program: &TProgram,
     source_path: &Path,
     out: &Path,
-    emit_ir: bool,
+    emit: Emit,
 ) -> Result<(), String> {
     let sock_path = build_sock_path();
     let mut stream = UnixStream::connect(&sock_path).map_err(|e| {
@@ -58,7 +81,7 @@ pub fn build(
         }
     })?;
 
-    let payload = encode_request(program, source_path, out, emit_ir)?;
+    let payload = encode_request(program, source_path, out, &emit)?;
     stream
         .write_all(&payload)
         .map_err(|e| format!("write to {} failed: {e}", sock_path))?;
@@ -68,7 +91,7 @@ pub fn build(
     loop {
         match decode_frame(&buf) {
             FrameResult::Token(text, consumed) => {
-                if emit_ir {
+                if emit == Emit::Ir {
                     crate::stdio::write_str(&text);
                 }
                 buf.drain(..consumed);
@@ -104,13 +127,18 @@ fn encode_request(
     program: &TProgram,
     source_path: &Path,
     out: &Path,
-    emit_ir: bool,
+    emit: &Emit,
 ) -> Result<Vec<u8>, String> {
     let tir =
         serde_json::to_value(program).map_err(|e| format!("failed to serialize TIR: {e}"))?;
+    let exports = match emit {
+        Emit::CDylib { exports } => serde_json::json!(exports),
+        _ => serde_json::Value::Null,
+    };
     let req = serde_json::json!({
         "op": "build",
-        "emit": if emit_ir { "ir" } else { "binary" },
+        "emit": emit.wire_name(),
+        "exports": exports,
         "out": out.to_string_lossy(),
         "source_path": source_path.to_string_lossy(),
         "target": serde_json::Value::Null,

@@ -47,6 +47,12 @@ enum Commands {
         /// Emit LLVM IR from the daemon instead of compiling a binary
         #[arg(long = "emit", value_name = "FORMAT")]
         emit: Option<String>,
+        /// Build a shared library other Jade projects can depend on
+        #[arg(long)]
+        lib: bool,
+        /// Export only these functions (repeatable; default: all of them)
+        #[arg(long = "export", value_name = "NAME", requires = "lib")]
+        export: Vec<String>,
     },
 
     /// Interactively configure the LLM provider and model
@@ -114,6 +120,12 @@ enum Commands {
         subcommand: ModelCommands,
     },
 
+    /// Manage project dependencies (jade.toml / jade.lock / libs/)
+    ///
+    /// Distinct from `jade upgrade`, which updates the jade toolchain itself.
+    #[command(subcommand)]
+    Pkg(PkgCommands),
+
     /// Upgrade jade to the latest release
     Upgrade,
 
@@ -137,6 +149,44 @@ enum CacheCommands {
         #[arg(long)]
         dry_run: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum PkgCommands {
+    /// Add a dependency and install it
+    Add {
+        /// Name the dependency is imported by (`use <name>`)
+        name: String,
+        /// Local .so/.dylib, relative to the project root
+        #[arg(long, value_name = "FILE", conflicts_with = "url")]
+        path: Option<String>,
+        /// Download URL; may contain {platform}
+        #[arg(long, value_name = "URL")]
+        url: Option<String>,
+        /// Exact version (required for --url; there are no version ranges)
+        #[arg(long, value_name = "VERSION")]
+        version: Option<String>,
+        /// The artifact is a plain C library, not a Jade-ABI package
+        #[arg(long = "c-abi")]
+        c_abi: bool,
+    },
+    /// Remove a dependency from jade.toml, jade.lock, and libs/
+    Remove {
+        name: String,
+    },
+    /// Fetch and verify everything jade.lock pins
+    Install {
+        /// Fail instead of updating jade.lock (use in CI)
+        #[arg(long)]
+        locked: bool,
+    },
+    /// Re-resolve dependencies against jade.toml and rewrite jade.lock
+    Update {
+        /// Only this dependency (default: all)
+        name: Option<String>,
+    },
+    /// List locked dependencies and their install status
+    List,
 }
 
 #[derive(Subcommand)]
@@ -186,9 +236,9 @@ async fn run_cli() {
         }
 
         // ── build ─────────────────────────────────────────────────────────────
-        Commands::Build { file, output, emit } => {
+        Commands::Build { file, output, emit, lib, export } => {
             let emit_ir = emit.as_deref() == Some("ir");
-            cli::build::run_build(&file, output.as_deref(), emit_ir);
+            cli::build::run_build(&file, output.as_deref(), emit_ir, lib, &export);
         }
 
         // ── configure ────────────────────────────────────────────────────────
@@ -241,6 +291,16 @@ async fn run_cli() {
         },
 
         // ── upgrade ───────────────────────────────────────────────────────────
+        Commands::Pkg(subcommand) => match subcommand {
+            PkgCommands::Add { name, path, url, version, c_abi } => {
+                cli::pkg::run_add(&name, path.as_deref(), url.as_deref(), version.as_deref(), c_abi)
+            }
+            PkgCommands::Remove { name } => cli::pkg::run_remove(&name),
+            PkgCommands::Install { locked } => cli::pkg::run_install(locked),
+            PkgCommands::Update { name } => cli::pkg::run_update(name.as_deref()),
+            PkgCommands::List => cli::pkg::run_list(),
+        },
+
         Commands::Upgrade => {
             cli::upgrade::run_upgrade().await;
         }

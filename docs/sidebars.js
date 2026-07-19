@@ -19,6 +19,7 @@ const sidebars = {
         'async',
         'structs',
         'imports',
+        'packages',
         'exceptions',
       ],
     },

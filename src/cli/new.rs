@@ -38,7 +38,9 @@ pub fn scaffold(dir: &Path, name: &str, template: &str) {
     });
 
     // .gitignore
-    fs::write(dir.join(".gitignore"), "dist/\n*.o\n").unwrap_or_else(|e| {
+    // libs/ holds downloaded dependency binaries; jade.lock is what travels, so
+    // the artifacts themselves stay out of the repository.
+    fs::write(dir.join(".gitignore"), "dist/\n*.o\nlibs/\n").unwrap_or_else(|e| {
         eprintln!("error: could not write .gitignore: {}", e);
         process::exit(1);
     });

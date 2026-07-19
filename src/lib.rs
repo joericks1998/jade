@@ -35,6 +35,7 @@ pub mod config;
 pub mod frontend;
 pub mod llm;
 pub mod native;
+pub mod pkg;
 pub mod project;
 pub mod stdio;
 

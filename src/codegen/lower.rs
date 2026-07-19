@@ -2214,6 +2214,16 @@ fn program_collections_only(top: &Chunk, defs: &[Arc<CompiledFn>]) -> bool {
     chunk_ok(&top.code) && defs.iter().all(|d| chunk_ok(&d.chunk.code))
 }
 
+/// A lowered program: its top-level entry plus the named functions it defines.
+pub struct LoweredProgram<'ctx> {
+    /// `jade_toplevel() -> i64`, which `main` (or `jade_pkg_init`) calls.
+    pub toplevel: FunctionValue<'ctx>,
+    /// Global name → the `jf_<uid>` it holds. `jade build --lib` needs this to
+    /// export a function under the name the Jade source gave it; nothing else
+    /// recovers a source-level name once lowering has mangled everything to uids.
+    pub global_fns: HashMap<String, FunctionValue<'ctx>>,
+}
+
 pub fn lower_program<'ctx>(
     context: &'ctx Context,
     module: &Module<'ctx>,
@@ -2221,7 +2231,7 @@ pub fn lower_program<'ctx>(
     top_n_slots: u32,
     struct_defs: &HashMap<String, Vec<StructFieldDef>>,
     extend_methods: &HashMap<String, HashMap<String, Arc<CompiledFn>>>,
-) -> Result<FunctionValue<'ctx>, String> {
+) -> Result<LoweredProgram<'ctx>, String> {
     let (mut defs, mut ptr2uid) = collect_fns(top);
 
     // Extend-block methods are ordinary compiled functions (`self` is param 0),
@@ -2380,7 +2390,16 @@ pub fn lower_program<'ctx>(
                 .map_err(|e| e.to_string())?;
         }
     }
-    Ok(top_fn)
+
+    // Recover source-level names for the lowered functions, so `--lib` can
+    // export `add` rather than `jf_7`.
+    let named = fnctx
+        .global_fns
+        .iter()
+        .filter_map(|(name, uid)| fnctx.funcs.get(*uid).map(|f| (name.clone(), *f)))
+        .collect();
+
+    Ok(LoweredProgram { toplevel: top_fn, global_fns: named })
 }
 
 /// Lower a single `Chunk` body into a new LLVM function `name() -> i64` (a

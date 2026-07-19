@@ -144,12 +144,21 @@ pub async fn run_file(path: &str, verbose: bool) {
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
         .unwrap_or_else(|| std::path::PathBuf::from("."));
 
-    // Resolve registered libraries from jade.toml, if present.
+    // Registered [lib] libraries from jade.toml plus any locked dependencies,
+    // which reach import resolution as synthetic [lib] entries.
     let project_root = crate::project::find_project_root();
     let libraries = project_root
         .as_ref()
-        .and_then(|root| crate::project::load_project(root).ok())
-        .and_then(|m| m.lib)
+        .and_then(|root| {
+            let manifest = crate::project::load_project(root).ok()?;
+            // Fetch anything jade.lock pins but libs/ is missing, so a fresh
+            // clone runs without a separate `jade install` step.
+            if let Err(e) = crate::pkg::ensure_ready(root, &manifest) {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+            Some(crate::pkg::resolved_libraries(root, &manifest))
+        })
         .unwrap_or_default();
 
     let opts = vm::VmOpts {

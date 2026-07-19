@@ -2,15 +2,9 @@ const GITHUB_REPO: &str = "joericks1998/jade-os";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Platform tag embedded in release asset names, e.g. `jade-darwin-aarch64`.
-fn platform_tag() -> Option<&'static str> {
-    match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("macos",   "aarch64") => Some("darwin-aarch64"),
-        ("macos",   "x86_64")  => Some("darwin-x86_64"),
-        ("linux",   "x86_64")  => Some("linux-x86_64"),
-        ("linux",   "aarch64") => Some("linux-aarch64"),
-        _ => None,
-    }
-}
+/// Shared with the package manager, which uses the same tags to select a
+/// dependency's artifact — one table, so the two cannot drift.
+use crate::pkg::fetch::platform_tag;
 
 #[derive(serde::Deserialize)]
 struct GhRelease {

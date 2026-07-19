@@ -443,6 +443,11 @@ enum ResolvedImport {
 
 fn resolve_user_import(state: &VmState, path: &str, span: Span) -> Result<ResolvedImport> {
     if let Some(root) = &state.project_root {
+        if let Some(message) =
+            crate::project::ambiguous_bare_import(path, &state.libraries, &state.source_dir)
+        {
+            return Err(JadeError::IoError { message, span });
+        }
         match crate::project::resolve_library_import(&state.libraries, path, root) {
             Ok(Some(r)) => {
                 return Ok(match r.kind {

@@ -94,9 +94,12 @@ pub fn resolve_and_namespace(
     // from the main file), so `use "<lib>/<module>"` resolves the same way the
     // VM does. The daemon shares the filesystem with the source, so it can read
     // jade.toml directly.
+    // Locked dependencies join them as synthetic [lib] entries, so `use <dep>`
+    // lowers exactly like a hand-written library and the two backends cannot
+    // resolve differently.
     if let Some(root) = crate::project::find_project_root_from(&main_dir) {
         if let Ok(manifest) = crate::project::load_project(&root) {
-            reg.libraries = manifest.lib.unwrap_or_default();
+            reg.libraries = crate::pkg::resolved_libraries(&root, &manifest);
             reg.lib_root = Some(root);
         }
     }
@@ -345,6 +348,9 @@ enum Resolved {
 /// file's extension (via `resolve_library_import`) decides whether it's a native
 /// library or a Jade module.
 fn resolve_use(reg: &Registry, dir: &Path, path: &str) -> Result<Resolved, String> {
+    if let Some(message) = crate::project::ambiguous_bare_import(path, &reg.libraries, dir) {
+        return Err(message);
+    }
     let (target, is_native) = match &reg.lib_root {
         Some(root) => match crate::project::resolve_library_import(&reg.libraries, path, root)? {
             Some(r) => (r.path, r.kind == crate::project::ImportKind::Native),

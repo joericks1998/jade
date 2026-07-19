@@ -33,7 +33,7 @@ fn try_chunk_toplevel<'ctx>(
     context: &'ctx Context,
     module: &Module<'ctx>,
     program: &TProgram,
-) -> Result<inkwell::values::FunctionValue<'ctx>, String> {
+) -> Result<lower::LoweredProgram<'ctx>, String> {
     let cp = crate::compiler::emit::emit(program.clone()).map_err(|e| e.to_string())?;
     {
         let probe_ctx = Context::create();
@@ -43,7 +43,247 @@ fn try_chunk_toplevel<'ctx>(
     lower::lower_program(context, module, &cp.top, cp.top_n_slots, &cp.struct_defs, &cp.extend_methods)
 }
 
-pub fn compile(program: TProgram, source_path: Option<&Path>, output_path: &Path, emit_ir: bool) -> Result<Option<String>, String> {
+/// What `compile` produces.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum CompileMode {
+    /// An executable with a `main` entry point.
+    #[default]
+    Binary,
+    /// A shared library exporting `jade_pkg_init` — a Jade-authored package
+    /// other Jade projects can depend on. `exports` narrows which top-level
+    /// functions are bound; empty means every named function, since Jade has no
+    /// `pub` keyword and everything is public.
+    SharedLib { exports: Vec<String> },
+}
+
+/// Emit the C-ABI surface of a Jade package: a `JadeNativeFnPtr`-shaped wrapper
+/// per exported function, a `JadeBinding[]` table, and `jade_pkg_init`.
+///
+/// Lowered functions already take and return the tagged 64-bit word, so each
+/// wrapper only has to marshal `JadeVal` in and out — `jrt_ffi_to_tagged` /
+/// `jrt_ffi_from_tagged` in runtime_lib/native.c, the same conversions
+/// `jrt_native_call` uses in the other direction.
+#[allow(clippy::too_many_arguments)]
+fn emit_pkg_init<'ctx>(
+    context: &'ctx Context,
+    module: &Module<'ctx>,
+    builder: &inkwell::builder::Builder<'ctx>,
+    init_fn: inkwell::values::FunctionValue<'ctx>,
+    lowered: &lower::LoweredProgram<'ctx>,
+    exports: &[String],
+    output_path: &Path,
+) -> Result<(), String> {
+    let i8_ty = context.i8_type();
+    let i32_ty = context.i32_type();
+    let i64_ty = context.i64_type();
+    let ptr_ty = context.ptr_type(AddressSpace::default());
+    let void_ty = context.void_type();
+
+    // No `exports` list means export everything: Jade has no `pub`, so every
+    // top-level function is public by construction.
+    let mut names: Vec<String> = if exports.is_empty() {
+        lowered.global_fns.keys().cloned().collect()
+    } else {
+        for want in exports {
+            if !lowered.global_fns.contains_key(want) {
+                return Err(format!(
+                    "cannot export '{want}': no top-level function by that name in this file"
+                ));
+            }
+        }
+        exports.to_vec()
+    };
+    // Sorted so the binding table is deterministic rather than HashMap-ordered.
+    names.sort();
+    if names.is_empty() {
+        return Err("nothing to export: this file defines no top-level functions".to_string());
+    }
+
+    let to_tagged = module.get_function("jrt_ffi_to_tagged").unwrap_or_else(|| {
+        module.add_function("jrt_ffi_to_tagged", i64_ty.fn_type(&[ptr_ty.into()], false), None)
+    });
+    let from_tagged = module.get_function("jrt_ffi_from_tagged").unwrap_or_else(|| {
+        module.add_function(
+            "jrt_ffi_from_tagged",
+            void_ty.fn_type(&[i64_ty.into(), ptr_ty.into()], false),
+            None,
+        )
+    });
+
+    // JadeVal is 16 bytes (tag + 7 pad + an 8-byte union), so argv[i] is at
+    // byte offset i*16. Must match src/native/mod.rs and runtime.h.
+    const JADE_VAL_SIZE: u64 = 16;
+
+    let mut wrappers = Vec::new();
+    for name in &names {
+        let target = lowered.global_fns[name];
+        let arity = target.count_params();
+
+        let wrapper = module.add_function(
+            &format!("jade_export${name}"),
+            i32_ty.fn_type(&[i64_ty.into(), ptr_ty.into(), ptr_ty.into()], false),
+            None,
+        );
+        let entry = context.append_basic_block(wrapper, "entry");
+        let bad_arity = context.append_basic_block(wrapper, "bad_arity");
+        let body = context.append_basic_block(wrapper, "body");
+        builder.position_at_end(entry);
+
+        // A host calling with the wrong number of arguments gets a non-zero
+        // status, which the loader turns into a Jade error — rather than us
+        // reading past the end of argv.
+        let argc = wrapper.get_nth_param(0).unwrap().into_int_value();
+        let ok = builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                argc,
+                i64_ty.const_int(arity as u64, false),
+                "arity_ok",
+            )
+            .map_err(|e| e.to_string())?;
+        builder.build_conditional_branch(ok, body, bad_arity).map_err(|e| e.to_string())?;
+
+        builder.position_at_end(bad_arity);
+        builder.build_return(Some(&i32_ty.const_int(1, false))).map_err(|e| e.to_string())?;
+
+        builder.position_at_end(body);
+        let argv = wrapper.get_nth_param(1).unwrap().into_pointer_value();
+        let out = wrapper.get_nth_param(2).unwrap().into_pointer_value();
+
+        let mut args: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
+        for i in 0..arity {
+            let slot = unsafe {
+                builder
+                    .build_in_bounds_gep(
+                        i8_ty,
+                        argv,
+                        &[i64_ty.const_int(i as u64 * JADE_VAL_SIZE, false)],
+                        "argslot",
+                    )
+                    .map_err(|e| e.to_string())?
+            };
+            let tagged = builder
+                .build_call(to_tagged, &[slot.into()], "arg")
+                .map_err(|e| e.to_string())?
+                .as_any_value_enum()
+                .into_int_value();
+            args.push(tagged.into());
+        }
+
+        let result = builder
+            .build_call(target, &args, "ret")
+            .map_err(|e| e.to_string())?
+            .as_any_value_enum()
+            .into_int_value();
+        builder
+            .build_call(from_tagged, &[result.into(), out.into()], "")
+            .map_err(|e| e.to_string())?;
+        builder.build_return(Some(&i32_ty.const_int(0, false))).map_err(|e| e.to_string())?;
+
+        wrappers.push((name.clone(), wrapper));
+    }
+
+    // ── JadeBinding BINDINGS[] ────────────────────────────────────────────
+    let binding_ty = context.struct_type(&[ptr_ty.into(), ptr_ty.into()], false);
+    let entries: Vec<inkwell::values::StructValue> = wrappers
+        .iter()
+        .map(|(name, f)| {
+            let s = builder
+                .build_global_string_ptr(name, "export_name")
+                .map_err(|e| e.to_string())?
+                .as_pointer_value();
+            Ok(binding_ty.const_named_struct(&[
+                s.into(),
+                f.as_global_value().as_pointer_value().into(),
+            ]))
+        })
+        .collect::<Result<_, String>>()?;
+
+    let table_ty = binding_ty.array_type(entries.len() as u32);
+    let table = module.add_global(table_ty, None, "jade_bindings");
+    table.set_initializer(&binding_ty.const_array(&entries));
+    table.set_constant(true);
+
+    // ── int jade_pkg_init(JadeNativePkg* out) ─────────────────────────────
+    let pkg_init = module.add_function(
+        "jade_pkg_init",
+        i32_ty.fn_type(&[ptr_ty.into()], false),
+        None,
+    );
+    let entry = context.append_basic_block(pkg_init, "entry");
+    let do_init = context.append_basic_block(pkg_init, "do_init");
+    let fill = context.append_basic_block(pkg_init, "fill");
+    builder.position_at_end(entry);
+
+    // A host may load the package once but call jade_pkg_init more than once;
+    // running the module's top level twice would re-execute its side effects.
+    let inited = module.add_global(i32_ty, None, "jade_pkg_inited");
+    inited.set_initializer(&i32_ty.const_zero());
+    let seen = builder
+        .build_load(i32_ty, inited.as_pointer_value(), "seen")
+        .map_err(|e| e.to_string())?
+        .into_int_value();
+    let first = builder
+        .build_int_compare(inkwell::IntPredicate::EQ, seen, i32_ty.const_zero(), "first")
+        .map_err(|e| e.to_string())?;
+    builder.build_conditional_branch(first, do_init, fill).map_err(|e| e.to_string())?;
+
+    builder.position_at_end(do_init);
+    builder
+        .build_store(inited.as_pointer_value(), i32_ty.const_int(1, false))
+        .map_err(|e| e.to_string())?;
+    builder.build_call(init_fn, &[], "").map_err(|e| e.to_string())?;
+    builder.build_unconditional_branch(fill).map_err(|e| e.to_string())?;
+
+    // JadeNativePkg { const char* name; const JadeBinding* bindings; size_t n; }
+    builder.position_at_end(fill);
+    let out = pkg_init.get_nth_param(0).unwrap().into_pointer_value();
+    let pkg_ty = context.struct_type(&[ptr_ty.into(), ptr_ty.into(), i64_ty.into()], false);
+
+    let pkg_name = output_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("jade_package")
+        .to_string();
+    let name_ptr = builder
+        .build_global_string_ptr(&pkg_name, "pkg_name")
+        .map_err(|e| e.to_string())?
+        .as_pointer_value();
+
+    for (i, value) in [
+        inkwell::values::BasicValueEnum::from(name_ptr),
+        table.as_pointer_value().into(),
+        i64_ty.const_int(entries.len() as u64, false).into(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let field = builder
+            .build_struct_gep(pkg_ty, out, i as u32, "field")
+            .map_err(|e| e.to_string())?;
+        builder.build_store(field, value).map_err(|e| e.to_string())?;
+    }
+
+    builder.build_return(Some(&i32_ty.const_zero())).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn compile(
+    program: TProgram,
+    source_path: Option<&Path>,
+    output_path: &Path,
+    emit_ir: bool,
+) -> Result<Option<String>, String> {
+    compile_with_mode(program, source_path, output_path, emit_ir, CompileMode::Binary)
+}
+
+pub fn compile_with_mode(
+    program: TProgram,
+    source_path: Option<&Path>,
+    output_path: &Path,
+    emit_ir: bool,
+    mode: CompileMode,
+) -> Result<Option<String>, String> {
     // ── Import resolution + module namespacing ────────────────────────────
     // Inline every imported `.jde` file into one stream, mangling each imported
     // module's globals into its own `name$<id>` namespace so distinct modules
@@ -81,24 +321,14 @@ pub fn compile(program: TProgram, source_path: Option<&Path>, output_path: &Path
         g.set_initializer(&ptr_ty.const_null());
     }
 
-    // ── main(i32 argc, ptr argv) entry point ──────────────────────────────
-    // Forward the args to the runtime via jrt_set_args so env.args() can read
-    // them; a bare main() would leave env.args() empty.
-    let main_fn = module.add_function(
-        "main", i32_ty.fn_type(&[i32_ty.into(), ptr_ty.into()], false), None);
-    let entry_bb = context.append_basic_block(main_fn, "entry");
-    builder.position_at_end(entry_bb);
-
-    {
-        let argc = main_fn.get_nth_param(0).unwrap().into_int_value();
-        let argv = main_fn.get_nth_param(1).unwrap().into_pointer_value();
-        let set_args = module.get_function("jrt_set_args").unwrap_or_else(|| {
-            module.add_function(
-                "jrt_set_args", void_ty.fn_type(&[i32_ty.into(), ptr_ty.into()], false), None)
-        });
-        builder.build_call(set_args, &[argc.into(), argv.into()], "")
-            .map_err(|e| e.to_string())?;
-    }
+    // ── Module initializer ────────────────────────────────────────────────
+    // `jade_mod_init()` holds everything that must run before any exported or
+    // top-level user code: dlopen'ing native packages, then the lowered
+    // top-level chunk. Both entry points below call it, so a binary and a
+    // shared library initialize identically.
+    let init_fn = module.add_function("jade_mod_init", void_ty.fn_type(&[], false), None);
+    let init_bb = context.append_basic_block(init_fn, "entry");
+    builder.position_at_end(init_bb);
 
     // Load every native package once, before any user code runs. The path is a
     // build-time-resolved absolute path embedded as a plain C string (dlopen'd at
@@ -129,23 +359,50 @@ pub fn compile(program: TProgram, source_path: Option<&Path>, output_path: &Path
     // the only lowering path — the legacy `expr.rs`/`stmt.rs` re-lowering of the
     // typed AST is gone — so any opcode the Chunk backend can't handle is a hard
     // build error rather than a silent fallback.
-    let top_fn = try_chunk_toplevel(&context, &module, &program)?;
-    builder.build_call(top_fn, &[], "").map_err(|e| e.to_string())?;
-
-    // Close main() with `return 0` if the body didn't already terminate. Just
-    // before returning, call jrt_heap_report() — a no-op unless JADE_HEAP_REPORT
-    // is set in the environment, in which case it prints the live heap-object
-    // count. This is the cycle collector's instrument: difftest can't observe a
-    // leak (or, once refcounting lands, a premature free), so the count at normal
-    // exit is how those bugs are made visible. See runtime gc.rs.
+    let lowered = try_chunk_toplevel(&context, &module, &program)?;
+    builder.build_call(lowered.toplevel, &[], "").map_err(|e| e.to_string())?;
     if builder.get_insert_block().and_then(|b| b.get_terminator()).is_none() {
-        let report = module.get_function("jrt_heap_report").unwrap_or_else(|| {
-            module.add_function("jrt_heap_report", void_ty.fn_type(&[], false), None)
-        });
-        builder.build_call(report, &[], "").map_err(|e| e.to_string())?;
-        builder
-            .build_return(Some(&i32_ty.const_int(0, false)))
-            .map_err(|e| e.to_string())?;
+        builder.build_return(None).map_err(|e| e.to_string())?;
+    }
+
+    match &mode {
+        CompileMode::Binary => {
+            // ── main(i32 argc, ptr argv) ──────────────────────────────────
+            // Forward the args to the runtime via jrt_set_args so env.args() can
+            // read them; a bare main() would leave env.args() empty.
+            let main_fn = module.add_function(
+                "main", i32_ty.fn_type(&[i32_ty.into(), ptr_ty.into()], false), None);
+            let entry_bb = context.append_basic_block(main_fn, "entry");
+            builder.position_at_end(entry_bb);
+
+            let argc = main_fn.get_nth_param(0).unwrap().into_int_value();
+            let argv = main_fn.get_nth_param(1).unwrap().into_pointer_value();
+            let set_args = module.get_function("jrt_set_args").unwrap_or_else(|| {
+                module.add_function(
+                    "jrt_set_args", void_ty.fn_type(&[i32_ty.into(), ptr_ty.into()], false), None)
+            });
+            builder.build_call(set_args, &[argc.into(), argv.into()], "")
+                .map_err(|e| e.to_string())?;
+
+            builder.build_call(init_fn, &[], "").map_err(|e| e.to_string())?;
+
+            // Just before returning, call jrt_heap_report() — a no-op unless
+            // JADE_HEAP_REPORT is set, in which case it prints the live
+            // heap-object count. This is the cycle collector's instrument:
+            // difftest can't observe a leak (or, once refcounting lands, a
+            // premature free), so the count at normal exit is how those bugs are
+            // made visible. See runtime gc.rs.
+            let report = module.get_function("jrt_heap_report").unwrap_or_else(|| {
+                module.add_function("jrt_heap_report", void_ty.fn_type(&[], false), None)
+            });
+            builder.build_call(report, &[], "").map_err(|e| e.to_string())?;
+            builder
+                .build_return(Some(&i32_ty.const_int(0, false)))
+                .map_err(|e| e.to_string())?;
+        }
+        CompileMode::SharedLib { exports } => {
+            emit_pkg_init(&context, &module, &builder, init_fn, &lowered, exports, output_path)?;
+        }
     }
 
     module.verify().map_err(|e| e.to_string())?;
@@ -176,6 +433,17 @@ pub fn compile(program: TProgram, source_path: Option<&Path>, output_path: &Path
 
     let mut cc = std::process::Command::new("cc");
     cc.arg(&obj_path).arg("-o").arg(output_path);
+    // A package is loaded with dlopen, not exec'd, so it links as a shared
+    // object with no entry point. -fPIC matters here in a way it does not for
+    // an executable: the code is mapped at an arbitrary address.
+    if matches!(mode, CompileMode::SharedLib { .. }) {
+        if cfg!(target_os = "macos") {
+            cc.arg("-dynamiclib");
+        } else {
+            cc.arg("-shared");
+        }
+        cc.arg("-fPIC");
+    }
     if cfg!(target_os = "macos") {
         if let Ok(ver) = std::process::Command::new("sw_vers").args(["-productVersion"]).output() {
             if let Ok(s) = std::str::from_utf8(&ver.stdout) {
@@ -224,10 +492,20 @@ pub fn compile(program: TProgram, source_path: Option<&Path>, output_path: &Path
         // -lJadeRuntime, which references these symbols.
         cc.arg("-lm");
     }
-    let status = cc.status().map_err(|e| format!("linker not found: {e}"))?;
+    let result = cc.output().map_err(|e| format!("linker not found: {e}"))?;
 
     std::fs::remove_file(&obj_path).ok();
-    if !status.success() { return Err("linking failed".into()); }
+    if !result.status.success() {
+        // Include the linker's own output: "linking failed" alone gives the user
+        // nothing to act on, and undefined-symbol lists are the whole diagnosis.
+        return Err(format!(
+            "linking failed\n{}",
+            String::from_utf8_lossy(&result.stderr).trim()
+        ));
+    }
 
     Ok(None)
 }
+
+#[cfg(test)]
+mod tests;

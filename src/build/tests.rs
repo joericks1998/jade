@@ -27,7 +27,7 @@ fn encode_request_length_prefix_matches_body() {
         &prog,
         Path::new("/src/main.jde"),
         Path::new("/out/bin"),
-        false,
+        &Emit::Binary,
     )
     .unwrap();
     let (declared, _) = decode_payload(&payload);
@@ -42,7 +42,7 @@ fn encode_request_binary_emit_fields() {
         &prog,
         Path::new("/proj/app.jde"),
         Path::new("/proj/dist/app"),
-        false,
+        &Emit::Binary,
     )
     .unwrap();
     let (_, v) = decode_payload(&payload);
@@ -59,7 +59,7 @@ fn encode_request_binary_emit_fields() {
 #[test]
 fn encode_request_ir_emit_flag() {
     let prog = empty_program();
-    let payload = encode_request(&prog, Path::new("/a.jde"), Path::new("/a.ll"), true).unwrap();
+    let payload = encode_request(&prog, Path::new("/a.jde"), Path::new("/a.ll"), &Emit::Ir).unwrap();
     let (_, v) = decode_payload(&payload);
     assert_eq!(v["emit"], "ir");
 }
@@ -81,7 +81,7 @@ fn encode_request_roundtrips_tir() {
         span: Span { line: 1, col: 1 },
     };
     let prog = TProgram { stmts: vec![stmt] };
-    let payload = encode_request(&prog, Path::new("/x.jde"), Path::new("/x"), false).unwrap();
+    let payload = encode_request(&prog, Path::new("/x.jde"), Path::new("/x"), &Emit::Binary).unwrap();
     let (_, v) = decode_payload(&payload);
     let stmts = v["tir"]["stmts"].as_array().unwrap();
     assert_eq!(stmts.len(), 1);
@@ -206,4 +206,31 @@ impl std::fmt::Debug for FrameResult {
             FrameResult::UnknownType(t) => write!(f, "UnknownType({t:#04x})"),
         }
     }
+}
+
+#[test]
+fn cdylib_request_carries_emit_and_exports() {
+    let prog = TProgram { stmts: vec![] };
+    let payload = encode_request(
+        &prog,
+        Path::new("/lib.jde"),
+        Path::new("/lib.so"),
+        &Emit::CDylib { exports: vec!["add".into(), "triple".into()] },
+    )
+    .unwrap();
+
+    let json: serde_json::Value = serde_json::from_slice(&payload[4..]).unwrap();
+    assert_eq!(json["emit"], "cdylib");
+    assert_eq!(json["exports"], serde_json::json!(["add", "triple"]));
+}
+
+#[test]
+fn a_non_cdylib_request_has_a_null_exports_field() {
+    // The field is always present so the daemon can read it unconditionally.
+    let prog = TProgram { stmts: vec![] };
+    let payload =
+        encode_request(&prog, Path::new("/a.jde"), Path::new("/a"), &Emit::Binary).unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&payload[4..]).unwrap();
+    assert_eq!(json["emit"], "binary");
+    assert!(json["exports"].is_null());
 }

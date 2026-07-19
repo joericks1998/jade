@@ -616,5 +616,11 @@ void* jrt_native_load(const char* path);
  * the native function, and marshal the result back to a tagged jade_value_t.
  * Native output strings are TAINTED. Raises a catchable Jade error on an unknown
  * function, a non-zero native status, or a JADE_FFI_ERROR result. */
+/* Marshal one JadeVal into a tagged value, and back. Used by the wrappers that
+ * `jade build --lib` emits around exported Jade functions — the mirror of
+ * jrt_native_call's inbound direction. Non-primitives become nil either way. */
+jade_value_t jrt_ffi_to_tagged(const JadeVal* v);
+void         jrt_ffi_from_tagged(jade_value_t v, JadeVal* out);
+
 jade_value_t jrt_native_call(void* handle, const char* fn_name,
                              const jade_value_t* args, int64_t argc);

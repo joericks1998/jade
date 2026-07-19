@@ -159,3 +159,22 @@ jade_value_t jrt_native_call(void* handle, const char* fn_name,
 
     return from_ffi(&out);
 }
+
+/* ── Exported marshalling, for Jade-authored packages (`jade build --lib`) ──
+ *
+ * `jrt_native_call` above marshals in the *consumer* direction: a Jade program
+ * calling into someone else's C library. A Jade package compiled to a shared
+ * library needs the mirror image — its generated `jade_pkg_init` wrappers take
+ * `JadeVal` arguments from a host and hand them to lowered `jf_<uid>` functions,
+ * which speak tagged `jade_value_t`.
+ *
+ * `to_ffi`/`from_ffi` are static, and codegen cannot call a static, so these
+ * thin externs expose them. Same conversions, same limits: non-primitives
+ * become nil in both directions. */
+jade_value_t jrt_ffi_to_tagged(const JadeVal* v) {
+    return from_ffi(v);
+}
+
+void jrt_ffi_from_tagged(jade_value_t v, JadeVal* out) {
+    *out = to_ffi(v);
+}
