@@ -1,0 +1,22 @@
+// Tasks may not mutate state their spawner can still reach.
+//
+// Jade tasks run concurrently on a shared heap: a collection passed into an
+// async fn is aliased, not copied. Mutating it from the task is a data race,
+// so the compiler rejects the program rather than locking every collection or
+// silently deep-copying arguments.
+//
+// This file is a fixture: `jade check` must REJECT it.
+
+let counter = 0
+
+async fn bump() {
+    // Writing a global from a task. The two engines do not even agree on what
+    // this means — the VM gives each task a snapshot of globals, so the write
+    // is invisible to the parent, while the AOT backend shares one cell and
+    // races on it.
+    counter = counter + 1
+}
+
+let f = bump()
+await f
+print(counter)

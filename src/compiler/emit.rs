@@ -205,6 +205,19 @@ pub fn emit(program: TProgram) -> Result<CompiledProgram> {
     em.chunk.emit(Instr::Halt, NO_SPAN);
 
     let n_slots = em.next_reg;
+
+    // Tasks share one heap with no lock on the payload, so a spawned function
+    // that mutates state the spawner can still reach is a data race. Reject it
+    // here rather than locking every collection or silently deep-copying task
+    // arguments; see `taskcheck` for why this is the right trade.
+    //
+    // This runs post-emit because the mutation opcodes only exist in bytecode:
+    // the AST's assignment expression does not distinguish rebinding a local
+    // from writing through a reference.
+    if let Err(v) = crate::compiler::taskcheck::check(&em.chunk, &ctx.extend_methods) {
+        return Err(crate::frontend::error::JadeError::SharedMutation { task: v.task, what: v.what, span: v.span });
+    }
+
     Ok(CompiledProgram {
         top_n_slots: n_slots,
         top: em.chunk,
