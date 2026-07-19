@@ -468,11 +468,26 @@ void    jrt_refuse_if_tainted(const char* arg, const char* sink_name);
  * heap object model they manipulate. */
 #include "fs/fs.h"
 #include "sh/sh.h"
-#include "env/env.h"
-#include "path/path.h"
 #include "http/http.h"
 #include "time/time.h"
 #include "random/random.h"
+
+/* env (std::env) and path (std::path) are implemented in Rust now
+ * (jade-runtime, src/envf.rs + src/pathf.rs) — no C leaf. Codegen resolves these
+ * jrt_* symbols against the shared staticlib; declared here for ABI reference.
+ * None raise (so no C forwarder). */
+char*        jrt_env_cwd(void);
+char*        jrt_env_get(const char* name);
+void         jrt_env_set(const char* name, const char* value);
+void         jrt_set_args(int argc, char** argv);
+jade_value_t jrt_env_args(void);
+char*        jrt_path_basename(const char* p);
+char*        jrt_path_ext(const char* p);
+char*        jrt_path_join(const char* a, const char* b);
+char*        jrt_path_dirname(const char* p);
+char*        jrt_path_stem(const char* p);
+char*        jrt_path_abs(const char* p);
+int32_t      jrt_path_is_abs(const char* p);
 
 /* ── Input ─────────────────────────────────────────────────────────── */
 /* jrt_readline — display prompt then read a line from stdin (strips newline). */

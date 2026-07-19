@@ -41,6 +41,7 @@
 
 pub mod coll;
 pub mod dynop;
+pub mod envf;
 pub mod ffi;
 pub mod ffi_coll;
 pub mod float;
@@ -51,6 +52,7 @@ pub mod mathf;
 pub mod methods;
 pub mod num;
 pub mod ops;
+pub mod pathf;
 pub mod render;
 pub mod string;
 pub mod strval;

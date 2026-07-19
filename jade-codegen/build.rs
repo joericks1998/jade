@@ -39,8 +39,6 @@ fn main() {
         // shadowed by time/time.h.
         .file(rt.join("time/time.c"))
         .file(rt.join("fs/fs.c"))
-        .file(rt.join("path/path.c"))
-        .file(rt.join("env/env.c"))
         .file(rt.join("sh/sh.c"))
         .file(rt.join("http/http.c"))
         .file(rt.join("random/random.c"))
