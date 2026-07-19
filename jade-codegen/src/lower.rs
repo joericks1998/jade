@@ -80,7 +80,7 @@ fn is_stdlib_module(name: &str) -> bool {
     matches!(
         name,
         "math" | "json" | "llm" | "path" | "time" | "env" | "fs" | "random" | "http" | "sh"
-            | "dict" | "array" | "string"
+            | "dict" | "array" | "string" | "Grammar"
     )
 }
 
@@ -124,6 +124,7 @@ fn chunk_module_supported(module: &str, method: &str, argc: usize) -> bool {
         ("llm", "find_tool_call" | "find_tool_calls") => argc == 1,
         ("dict", "merge") => argc == 2,
         ("json", "parse" | "stringify" | "stringify_pretty") => argc == 1,
+        ("Grammar", "new") => (1..=3).contains(&argc), // pattern[, anchor[, stop]]
         _ => false,
     }
 }
@@ -2123,6 +2124,22 @@ fn emit_module_call<'ctx>(
                 .into_pointer_value();
             Ok(low.tag_str(p))
         }
+        ("Grammar", "new") => {
+            // Grammar.new(pattern[, anchor[, stop]]) -> a Grammar object word.
+            // Omitted optional args pass NULL (→ None in the runtime).
+            let f = low.runtime_fn(
+                "jrt_grammar_new",
+                ptrt.fn_type(&[ptrt.into(), ptrt.into(), ptrt.into()], false),
+            );
+            let anchor = if args.len() >= 2 { strp(1) } else { ptrt.const_null() };
+            let stop = if args.len() >= 3 { strp(2) } else { ptrt.const_null() };
+            let g = b
+                .build_call(f, &[strp(0).into(), anchor.into(), stop.into()], "grammar")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_pointer_value();
+            Ok(low.tag_ptr(g))
+        }
         _ => Err(format!("lower.rs: emit_module_call: unhandled {module}.{method}")),
     }
 }
@@ -3017,71 +3034,70 @@ fn lower_instr<'ctx>(
             low.store(*d, low.load(*text));
             Ok(false)
         }
-        // Run inference on the prompt string. Unconstrained → jrt_prompt_stream_ex
-        // (streams tokens to stdout like the VM's streaming deref) → TAINTED str.
-        // Typed (`|> int/float/bool/str`) → jrt_prompt_typed (retries until the
-        // response parses) → coerce via jrt_{int,float,bool}_any. Grammar-
-        // constrained (`|> <grammar value>`) needs a runtime Grammar object the
-        // AOT does not model yet → declines.
+        // Run inference on the prompt string, dispatching like the VM:
+        //   grammar (`|> <Grammar value>`) → jrt_prompt_grammar_obj (reads the
+        //     runtime Grammar object, converts pattern→GBNF, constrains sampling);
+        //   typed (`|> int/float/bool/str`) → jrt_prompt_typed (retries until the
+        //     response parses) → coerce via jrt_{int,float,bool}_any;
+        //   unconstrained (`?p`) → jrt_prompt_stream_ex (streams tokens to stdout,
+        //     matching the VM's streaming deref).
+        // The jrt_prompt* helpers already return a tagged, trust-propagated string
+        // (a trusted prompt yields a trusted response), so the result is tag_str'd
+        // directly — no re-dup, no forced taint. model via jrt_get_model.
         PromptDeref(d, prompt_reg, output_type, grammar_reg) => {
-            if grammar_reg.is_some() {
-                return Err("lower.rs: grammar-constrained prompt (|> <grammar>) is unsupported".into());
-            }
             let ptrt = low.ptrt();
             let i32_ty = low.ctx.i32_type();
-            let i8_ty = low.ctx.i8_type();
             let e = |x: inkwell::builder::BuilderError| x.to_string();
 
-            // prompt string data pointer; model = jrt_get_model().
             let prompt_ptr = low.untag_ptr(low.load(*prompt_reg));
             let model_fn = low.runtime_fn("jrt_get_model", ptrt.fn_type(&[], false));
             let model = b.build_call(model_fn, &[], "model").map_err(e)?.as_any_value_enum().into_pointer_value();
 
-            // Raw (untagged, malloc'd) response char*.
-            let raw = match output_type.as_deref() {
-                None => {
-                    let f = low.runtime_fn(
-                        "jrt_prompt_stream_ex",
-                        ptrt.fn_type(
-                            &[ptrt.into(), ptrt.into(), ptrt.into(), ptrt.into(), ptrt.into(), i32_ty.into()],
-                            false,
-                        ),
-                    );
-                    let nul = ptrt.const_null();
-                    b.build_call(
-                        f,
-                        &[prompt_ptr.into(), model.into(), nul.into(), nul.into(), nul.into(), i32_ty.const_zero().into()],
-                        "prompt",
-                    )
+            let raw = if let Some(gr) = grammar_reg {
+                // Grammar-constrained: pass the Grammar object pointer.
+                let gobj = low.untag_ptr(low.load(*gr));
+                let f = low.runtime_fn(
+                    "jrt_prompt_grammar_obj",
+                    ptrt.fn_type(&[ptrt.into(), ptrt.into(), ptrt.into()], false),
+                );
+                b.build_call(f, &[prompt_ptr.into(), model.into(), gobj.into()], "promptg")
                     .map_err(e)?
                     .as_any_value_enum()
                     .into_pointer_value()
-                }
-                Some(t) => {
-                    let f = low.runtime_fn(
-                        "jrt_prompt_typed",
-                        ptrt.fn_type(&[ptrt.into(), ptrt.into(), ptrt.into(), i32_ty.into()], false),
-                    );
-                    let tname = low.cstr(t);
-                    b.build_call(
-                        f,
-                        &[prompt_ptr.into(), model.into(), tname.into(), i32_ty.const_int(15, false).into()],
-                        "promptt",
-                    )
-                    .map_err(e)?
-                    .as_any_value_enum()
-                    .into_pointer_value()
-                }
-            };
-
-            // Tag the response as a TAINTED heap string (LLM output is external).
-            let dup = low.runtime_fn("jrt_str_dup", ptrt.fn_type(&[ptrt.into(), i8_ty.into()], false));
-            let tagged = b
-                .build_call(dup, &[raw.into(), i8_ty.const_int(1, false).into()], "ptag")
+            } else if let Some(t) = output_type.as_deref() {
+                let f = low.runtime_fn(
+                    "jrt_prompt_typed",
+                    ptrt.fn_type(&[ptrt.into(), ptrt.into(), ptrt.into(), i32_ty.into()], false),
+                );
+                let tname = low.cstr(t);
+                b.build_call(
+                    f,
+                    &[prompt_ptr.into(), model.into(), tname.into(), i32_ty.const_int(15, false).into()],
+                    "promptt",
+                )
                 .map_err(e)?
                 .as_any_value_enum()
-                .into_pointer_value();
-            let str_word = low.tag_str(tagged);
+                .into_pointer_value()
+            } else {
+                let f = low.runtime_fn(
+                    "jrt_prompt_stream_ex",
+                    ptrt.fn_type(
+                        &[ptrt.into(), ptrt.into(), ptrt.into(), ptrt.into(), ptrt.into(), i32_ty.into()],
+                        false,
+                    ),
+                );
+                let nul = ptrt.const_null();
+                b.build_call(
+                    f,
+                    &[prompt_ptr.into(), model.into(), nul.into(), nul.into(), nul.into(), i32_ty.const_zero().into()],
+                    "prompt",
+                )
+                .map_err(e)?
+                .as_any_value_enum()
+                .into_pointer_value()
+            };
+
+            let str_word = low.tag_str(raw);
 
             // Coerce the typed variants (retry guaranteed a parseable response).
             let result = match output_type.as_deref() {

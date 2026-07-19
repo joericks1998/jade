@@ -205,6 +205,13 @@ pub fn compile(program: TProgram, source_path: Option<&Path>, output_path: &Path
     let rust_rt = std::env::var("JADE_RUST_RT").unwrap_or_else(|_| env!("JADE_RUST_RT_DIR").to_string());
     cc.arg(format!("-L{rust_rt}"));
     cc.arg("-ljade_runtime");
+    // The link is now *bidirectional*: the C runtime references Rust symbols
+    // (jrt_coll_*/jrt_core_*), and — since grammar-constrained prompts — the Rust
+    // runtime references a C symbol (jrt_prompt_grammar_obj → C jrt_prompt_grammar_ex).
+    // Static-archive resolution is single-pass left-to-right on Linux, so repeat
+    // the C archive after the Rust one to close the cycle. (macOS's ld resolves
+    // all archives together and doesn't need it, but the repeat is harmless.)
+    cc.arg("-lJadeRuntime");
     #[cfg(target_os = "linux")]
     {
         cc.arg("-lpthread");

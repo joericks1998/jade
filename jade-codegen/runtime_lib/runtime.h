@@ -278,6 +278,13 @@ char*   jrt_prompt_stream_ex(const char* prompt, const char* model,
  * empty string if unset. Caller must free. */
 char*   jrt_get_model(void);
 
+/* Grammar objects (jade-runtime, src/grammarf.rs). Grammar.new(pattern[,anchor
+ * [,stop]]) -> a Grammar object (ObjKind::Grammar; NULL optional args => None).
+ * jrt_prompt_grammar_obj reads it, converts the pattern to GBNF (as the VM does),
+ * and calls jrt_prompt_grammar_ex above — the one Rust->C runtime back-reference. */
+void*   jrt_grammar_new(const char* pattern, const char* anchor, const char* stop);
+char*   jrt_prompt_grammar_obj(const char* prompt, const char* model, const void* grammar_obj);
+
 /* llm.keep_anchors(b) — sticky session flag: when set, prompt requests ask the
  * daemon to make tool-span boundaries observable in-band (keep_anchors on the
  * wire). Mirrors the VM's VmState.keep_anchors.                              */
