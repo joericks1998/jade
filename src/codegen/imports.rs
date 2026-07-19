@@ -51,8 +51,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use jade::compiler::tir::{JadeType, TExpr, TExprKind, TFStrPart, TStmt};
-use jade::frontend::ast::{Expr, FStrPart, StructFieldDef};
+use crate::compiler::tir::{JadeType, TExpr, TExprKind, TFStrPart, TStmt};
+use crate::frontend::ast::{Expr, FStrPart, StructFieldDef};
 
 /// Mangle a module-global `name` into module `id`'s namespace.
 fn mangle(name: &str, id: u32) -> String {
@@ -63,7 +63,7 @@ fn mangle(name: &str, id: u32) -> String {
 /// participate in source-file flattening, and their `ns.foo` accesses stay
 /// qualified for the stdlib path to resolve.
 fn is_stdlib(path: &str) -> bool {
-    jade::builtins::find_package(path).is_some()
+    crate::builtins::find_package(path).is_some()
 }
 
 // ── Public entry point ────────────────────────────────────────────────────────
@@ -94,8 +94,8 @@ pub fn resolve_and_namespace(
     // from the main file), so `use "<lib>/<module>"` resolves the same way the
     // VM does. The daemon shares the filesystem with the source, so it can read
     // jade.toml directly.
-    if let Some(root) = jade::project::find_project_root_from(&main_dir) {
-        if let Ok(manifest) = jade::project::load_project(&root) {
+    if let Some(root) = crate::project::find_project_root_from(&main_dir) {
+        if let Ok(manifest) = crate::project::load_project(&root) {
             reg.libraries = manifest.lib.unwrap_or_default();
             reg.lib_root = Some(root);
         }
@@ -130,7 +130,7 @@ struct Registry {
     /// Project root (anchor for `[lib]` imports) and the registered libraries
     /// from `jade.toml`. Empty when the build isn't inside a project.
     lib_root: Option<PathBuf>,
-    libraries: HashMap<String, jade::project::LibraryEntry>,
+    libraries: HashMap<String, crate::project::LibraryEntry>,
     /// Native (C-ABI) packages, keyed by canonical lib path so a lib imported
     /// from several modules shares one `dlopen` handle / pkgid. Their own id
     /// space, distinct from `.jde` module ids (native refs always carry the
@@ -181,9 +181,9 @@ impl Registry {
 fn parse_and_infer(canon: &Path) -> Result<Vec<TStmt>, String> {
     let src = std::fs::read_to_string(canon)
         .map_err(|e| format!("import '{}': {e}", canon.display()))?;
-    let tokens = jade::frontend::lexer::tokenize(&src).map_err(|e| e.to_string())?;
-    let ast = jade::frontend::parser::parse(tokens).map_err(|e| e.to_string())?;
-    let tp = jade::compiler::type_infer::infer(ast).map_err(|e| e.to_string())?;
+    let tokens = crate::frontend::lexer::tokenize(&src).map_err(|e| e.to_string())?;
+    let ast = crate::frontend::parser::parse(tokens).map_err(|e| e.to_string())?;
+    let tp = crate::compiler::type_infer::infer(ast).map_err(|e| e.to_string())?;
     Ok(tp.stmts)
 }
 
@@ -346,8 +346,8 @@ enum Resolved {
 /// library or a Jade module.
 fn resolve_use(reg: &Registry, dir: &Path, path: &str) -> Result<Resolved, String> {
     let (target, is_native) = match &reg.lib_root {
-        Some(root) => match jade::project::resolve_library_import(&reg.libraries, path, root)? {
-            Some(r) => (r.path, r.kind == jade::project::ImportKind::Native),
+        Some(root) => match crate::project::resolve_library_import(&reg.libraries, path, root)? {
+            Some(r) => (r.path, r.kind == crate::project::ImportKind::Native),
             None => (dir.join(path), false),
         },
         None => (dir.join(path), false),

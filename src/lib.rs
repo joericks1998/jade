@@ -9,6 +9,11 @@ pub mod build;
 pub mod builtins;
 pub mod cache;
 pub mod cli;
+/// AOT backend: bytecode `Chunk` → LLVM → native binary (needs LLVM 18). Merged
+/// into this crate from the former `jade-codegen`; `jade-buildd` calls
+/// `codegen::compile`. The C runtime AOT binaries link (`runtime_lib/`) is built
+/// by this crate's `build.rs`.
+pub mod codegen;
 pub mod compiler;
 pub mod config;
 pub mod frontend;

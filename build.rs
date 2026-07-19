@@ -19,8 +19,8 @@ fn main() {
     // Generate the canonical tool-call GBNF as a C string constant straight from
     // the checked-in grammar (the same file jadelang compiles in via include_str!),
     // so `llm.tool_grammar()` returns byte-identical text under the VM and AOT.
-    // This crate lives inside the jadelang submodule, so the grammar is a sibling.
-    let gbnf_src = PathBuf::from("../grammars/tool_call.gbnf");
+    // build.rs runs in the crate root (jadelang), so the grammar is under grammars/.
+    let gbnf_src = PathBuf::from("grammars/tool_call.gbnf");
     let gbnf = std::fs::read(&gbnf_src)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", gbnf_src.display()));
     let header = PathBuf::from(&out_dir).join("tool_call_gbnf.h");
@@ -60,7 +60,7 @@ fn main() {
     println!("cargo:rustc-env=JADE_RUST_RT_DIR={}", profile_dir.display());
 
     println!("cargo:rerun-if-changed=runtime_lib");
-    println!("cargo:rerun-if-changed=../src/runtime/src");
+    println!("cargo:rerun-if-changed=src/runtime/src");
     println!("cargo:rerun-if-changed={}", gbnf_src.display());
 }
 

@@ -28,9 +28,9 @@ use inkwell::module::Module;
 use inkwell::values::{AnyValue, BasicMetadataValueEnum, FloatValue, FunctionValue, IntValue, PointerValue};
 use inkwell::{AddressSpace, FloatPredicate, IntPredicate};
 
-use jade::compiler::bytecode::{Chunk, CompiledFn, FStrPart, Instr, Reg};
-use jade::compiler::vm::VmValue;
-use jade::frontend::ast::{BinOpKind, Expr, StructFieldDef, UnaryOpKind};
+use crate::compiler::bytecode::{Chunk, CompiledFn, FStrPart, Instr, Reg};
+use crate::compiler::vm::VmValue;
+use crate::frontend::ast::{BinOpKind, Expr, StructFieldDef, UnaryOpKind};
 
 use super::cfg;
 
@@ -50,7 +50,7 @@ const TRUSTED: u64 = 0;
 const OBJKIND_FN: u64 = 5;
 
 /// Reserved global names that resolve to a runtime builtin (not a user value),
-/// mirroring `jade::builtins::seed_globals`. A `Call` whose callee is
+/// mirroring `crate::builtins::seed_globals`. A `Call` whose callee is
 /// `GetGlobal(<one of these>)` and which this backend does not itself lower is a
 /// builtin call we can't emit — the whole program falls back to `expr.rs`. (A
 /// user function that shadows one of these names is bound via `SetGlobal`, so it
@@ -3510,7 +3510,7 @@ fn lower_instr<'ctx>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jade::compiler::bytecode::Instr::*;
+    use crate::compiler::bytecode::Instr::*;
 
     fn ir_of(code: &[Instr], n_slots: u32) -> String {
         let context = Context::create();
@@ -3994,7 +3994,7 @@ mod tests {
 
     #[test]
     fn in_operator_lowers_to_runtime_membership() {
-        use jade::frontend::ast::BinOpKind;
+        use crate::frontend::ast::BinOpKind;
         // r2 = (r0 in r1) → jrt_in_any → bool word
         let ir = ir_of(
             &[

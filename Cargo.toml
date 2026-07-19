@@ -20,3 +20,10 @@ toml = "0.8"
 bincode = "1"
 sha2 = "0.10"
 libloading = "0.8"
+# LLVM 18 backend for the AOT codegen module (src/codegen/). Building this crate
+# now requires LLVM 18 (located via .cargo/config.toml's LLVM_SYS_180_PREFIX).
+inkwell = { version = "0.8", features = ["llvm18-1"] }
+
+[build-dependencies]
+# Compiles the C runtime (runtime_lib/) that emitted AOT binaries link against.
+cc = "1"

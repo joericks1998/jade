@@ -16,7 +16,7 @@ use inkwell::{
     AddressSpace, OptimizationLevel,
 };
 
-use jade::compiler::tir::TProgram;
+use crate::compiler::tir::TProgram;
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
@@ -34,7 +34,7 @@ fn try_chunk_toplevel<'ctx>(
     module: &Module<'ctx>,
     program: &TProgram,
 ) -> Result<inkwell::values::FunctionValue<'ctx>, String> {
-    let cp = jade::compiler::emit::emit(program.clone()).map_err(|e| e.to_string())?;
+    let cp = crate::compiler::emit::emit(program.clone()).map_err(|e| e.to_string())?;
     {
         let probe_ctx = Context::create();
         let probe_mod = probe_ctx.create_module("probe");
@@ -51,7 +51,7 @@ pub fn compile(program: TProgram, source_path: Option<&Path>, output_path: &Path
     // imports namespaced. `main` keeps bare names. See `imports.rs`.
     let (mut program, native_pkgs) = if let Some(src) = source_path {
         let (stmts, native_pkgs) = imports::resolve_and_namespace(program.stmts, src)?;
-        (jade::compiler::tir::TProgram { stmts }, native_pkgs)
+        (crate::compiler::tir::TProgram { stmts }, native_pkgs)
     } else {
         (program, Vec::new())
     };
@@ -61,7 +61,7 @@ pub fn compile(program: TProgram, source_path: Option<&Path>, output_path: &Path
     // like `messages.Session { system: ..., tools: ... }` leave default-bearing
     // fields (e.g. `let _history = []`) missing.  Without this pass the emitter
     // would zero-initialise those slots — turning `[]` into a NULL pointer.
-    jade::compiler::type_infer::fill_struct_literal_defaults(&mut program)
+    crate::compiler::type_infer::fill_struct_literal_defaults(&mut program)
         .map_err(|e| e.to_string())?;
 
     let context = Context::create();
