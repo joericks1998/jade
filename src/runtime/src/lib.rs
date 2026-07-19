@@ -45,6 +45,7 @@ pub mod envf;
 pub mod ffi;
 pub mod ffi_coll;
 pub mod float;
+pub mod fsf;
 pub mod gc;
 pub mod heap;
 pub mod jsonf;

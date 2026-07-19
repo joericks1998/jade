@@ -37,7 +37,6 @@ fn main() {
         // include their headers as "<mod>/<mod>.h" (resolved via -I rt), so no
         // per-folder include is added — this keeps libc's <time.h> from being
         // shadowed by time/time.h.
-        .file(rt.join("fs/fs.c"))
         .file(rt.join("sh/sh.c"))
         .file(rt.join("http/http.c"))
         .include(&rt)

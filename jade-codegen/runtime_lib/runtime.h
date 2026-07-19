@@ -466,9 +466,26 @@ void    jrt_refuse_if_tainted(const char* arg, const char* sink_name);
  * folder (built by build.rs). They depend only on the core symbols declared
  * above. The data-structure modules (dict/array/json) stay in common.c with the
  * heap object model they manipulate. */
-#include "fs/fs.h"
 #include "sh/sh.h"
 #include "http/http.h"
+
+/* fs (std::fs) is implemented in Rust now (jade-runtime, src/fsf.rs). The
+ * fallible ops record a pending error instead of throwing (a longjmp must not
+ * cross a Rust frame); the C forwarders below (common.c) throw it. exists never
+ * fails and exports from Rust directly. */
+int32_t jrt_fs_exists(const char* path);
+char*   jrt_fs_take_error(void);            /* drain pending error, or NULL */
+char*   jrt_fs_read_impl(const char* path, int32_t trust);
+void    jrt_fs_write_impl(const char* path, const char* content);
+void    jrt_fs_append_impl(const char* path, const char* content);
+void    jrt_fs_delete_impl(const char* path);
+void    jrt_fs_mkdir_impl(const char* path);
+/* Codegen-facing raising forwarders (common.c). */
+char*   jrt_fs_read(const char* path, int32_t trust);
+void    jrt_fs_write(const char* path, const char* content);
+void    jrt_fs_append(const char* path, const char* content);
+void    jrt_fs_delete(const char* path);
+void    jrt_fs_mkdir(const char* path);
 
 /* time (std::time) is implemented in Rust now (jade-runtime, src/timef.rs) —
  * no C leaf. Declared here for ABI reference. None raise. */

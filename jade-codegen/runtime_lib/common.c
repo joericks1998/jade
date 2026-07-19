@@ -391,6 +391,25 @@ int64_t jrt_random_choice_chunk(int64_t arr_word) {
     return jrt_coll_array_get(arr, idx);
 }
 
+/* fs.* raising forwarders: the Rust impls (jade-runtime src/fsf.rs) record a
+ * pending error instead of throwing (a longjmp must not cross a Rust frame);
+ * throw it here as a catchable exception. fs.read additionally refuses a tainted
+ * path first (it is a read sink). */
+static void fs_throw_pending(void) {
+    char* e = jrt_fs_take_error();
+    if (e) jade_exc_throw_typed(jrt_box_str(e), NULL);
+}
+char* jrt_fs_read(const char* path, int32_t trust) {
+    if (!trust) jrt_refuse_if_tainted(path, "fs.read(path)");
+    char* r = jrt_fs_read_impl(path, trust);
+    fs_throw_pending();
+    return r;
+}
+void jrt_fs_write(const char* path, const char* content)  { jrt_fs_write_impl(path, content);  fs_throw_pending(); }
+void jrt_fs_append(const char* path, const char* content) { jrt_fs_append_impl(path, content); fs_throw_pending(); }
+void jrt_fs_delete(const char* path)                      { jrt_fs_delete_impl(path);          fs_throw_pending(); }
+void jrt_fs_mkdir(const char* path)                       { jrt_fs_mkdir_impl(path);           fs_throw_pending(); }
+
 /* random.int(lo, hi) — the raising boundary for the Rust RNG core (random.c was
  * ported to jade-runtime src/randomf.rs). A Jade exception is a longjmp and must
  * not cross a Rust frame, so the min>max check + throw live here; the draw is
