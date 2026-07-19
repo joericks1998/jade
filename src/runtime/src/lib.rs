@@ -44,6 +44,7 @@ pub mod dynop;
 pub mod ffi;
 pub mod ffi_coll;
 pub mod float;
+pub mod gc;
 pub mod heap;
 pub mod jsonf;
 pub mod mathf;

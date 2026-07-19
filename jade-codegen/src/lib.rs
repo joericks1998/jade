@@ -132,8 +132,17 @@ pub fn compile(program: TProgram, source_path: Option<&Path>, output_path: &Path
     let top_fn = try_chunk_toplevel(&context, &module, &program)?;
     builder.build_call(top_fn, &[], "").map_err(|e| e.to_string())?;
 
-    // Close main() with `return 0` if the body didn't already terminate.
+    // Close main() with `return 0` if the body didn't already terminate. Just
+    // before returning, call jrt_heap_report() — a no-op unless JADE_HEAP_REPORT
+    // is set in the environment, in which case it prints the live heap-object
+    // count. This is the cycle collector's instrument: difftest can't observe a
+    // leak (or, once refcounting lands, a premature free), so the count at normal
+    // exit is how those bugs are made visible. See runtime gc.rs.
     if builder.get_insert_block().and_then(|b| b.get_terminator()).is_none() {
+        let report = module.get_function("jrt_heap_report").unwrap_or_else(|| {
+            module.add_function("jrt_heap_report", void_ty.fn_type(&[], false), None)
+        });
+        builder.build_call(report, &[], "").map_err(|e| e.to_string())?;
         builder
             .build_return(Some(&i32_ty.const_int(0, false)))
             .map_err(|e| e.to_string())?;

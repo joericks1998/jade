@@ -358,6 +358,16 @@ int64_t jrt_coll_len(void* p);
 /* jrt_len_chunk — len() for the Chunk backend's Unknown arm: strlen for a STRING
  * word, ObjHeader.len (offset 4) for a kind-tagged collection, else 0. */
 int64_t jrt_len_chunk(int64_t word);
+
+/* Heap accounting (jade-runtime, src/gc.rs) — the cycle collector's instrument.
+ * Every collection allocation bumps a global live-object count; the destructor
+ * (a later brick) decrements it. difftest cannot observe a leak or a premature
+ * free, so this count is how those bugs are made visible.
+ * jrt_heap_live_count — allocations minus frees (a leak == positive at exit).
+ * jrt_heap_report — codegen emits a call just before main returns; prints the
+ * live count to stderr iff JADE_HEAP_REPORT is set (else a no-op getenv). */
+int64_t jrt_heap_live_count(void);
+void    jrt_heap_report(void);
 /* jrt_coll_* — raw storage helpers for the C forwarders below (never raise; the
  * forwarder owns the bounds/type checks + throw). array_get/set are unchecked
  * (caller bounds-checks via array_len); dict/struct _get write *out and return

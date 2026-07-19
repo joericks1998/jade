@@ -50,7 +50,7 @@ fn value_to_word(v: &Value, trust: u8) -> W {
             for e in a {
                 arr.push(value_to_word(e, trust));
             }
-            JadeValue::from_ptr(Box::into_raw(Box::new(arr)) as *const ()).bits() as i64
+            JadeValue::from_ptr(crate::gc::leak_obj(arr) as *const ()).bits() as i64
         }
         Value::Object(m) => {
             // serde's Map iterates in sorted key order (BTreeMap) by default.
@@ -58,7 +58,7 @@ fn value_to_word(v: &Value, trust: u8) -> W {
             for (k, e) in m {
                 d.insert(k.clone(), value_to_word(e, trust));
             }
-            JadeValue::from_ptr(Box::into_raw(Box::new(d)) as *const ()).bits() as i64
+            JadeValue::from_ptr(crate::gc::leak_obj(d) as *const ()).bits() as i64
         }
     }
 }

@@ -21,11 +21,14 @@
 //!
 //! ## Allocation
 //!
-//! Objects are `Box::into_raw`'d (Rust global allocator) and **leaked**, exactly
-//! matching the C `JK*` objects, which were `malloc`'d and never freed. A `Box`
-//! (not `sys::malloc`) is required because the payload owns a `Vec`; the future
-//! cycle collector will reclaim via `Box::from_raw`. The pointer is >= 8-aligned
-//! (the header is `align(8)`), so `TAG_PTR` tagging by codegen is valid.
+//! Objects are allocated through [`crate::gc::leak_obj`] — `Box::into_raw` (Rust
+//! global allocator) plus a live-object count bump — and, for now, **leaked**,
+//! exactly matching the C `JK*` objects, which were `malloc`'d and never freed. A
+//! `Box` (not `sys::malloc`) is required because the payload owns a `Vec`; the
+//! cycle collector reclaims via `Box::from_raw` + [`crate::gc::record_free`]. The
+//! pointer is >= 8-aligned (the header is `align(8)`), so `TAG_PTR` tagging by
+//! codegen is valid. Routing every allocation through `gc::leak_obj` is what keeps
+//! the heap population measurable before refcounting exists (see [`crate::gc`]).
 
 use core::ffi::{c_char, c_void};
 
@@ -121,7 +124,7 @@ pub extern "C" fn jrt_len_chunk(word: i64) -> i64 {
 /// Allocate an empty kind-tagged array (leaked; see module docs).
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_karr_new() -> *mut c_void {
-    Box::into_raw(Box::new(ArrayObj::<W>::new())) as *mut c_void
+    crate::gc::leak_obj(ArrayObj::<W>::new())
 }
 
 /// Append a tagged word (reference semantics — mutates in place).
@@ -232,7 +235,7 @@ pub extern "C" fn jrt_coll_str_split(s: *const c_char, sep: *const c_char) -> *m
             let ts = tagged_string(part.as_bytes(), trust);
             arr.push(JadeValue::from_str_ptr(ts as *const ()).bits() as i64);
         }
-        Box::into_raw(Box::new(arr)) as *mut c_void
+        crate::gc::leak_obj(arr)
     }
 }
 
@@ -241,7 +244,7 @@ pub extern "C" fn jrt_coll_str_split(s: *const c_char, sep: *const c_char) -> *m
 /// Allocate an empty kind-tagged dict (leaked; see module docs).
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_kdict_new() -> *mut c_void {
-    Box::into_raw(Box::new(DictObj::<W>::new())) as *mut c_void
+    crate::gc::leak_obj(DictObj::<W>::new())
 }
 
 /// Set `key → val`, where `key_word` is a tagged-string value word (its bytes are
@@ -275,7 +278,7 @@ pub extern "C" fn jrt_coll_dict_get(dict: *const c_void, key: *const c_char, out
 pub extern "C" fn jrt_coll_dict_copy(dict: *const c_void) -> *mut c_void {
     unsafe {
         let copy = (*(dict as *const DictObj<W>)).value_copy();
-        Box::into_raw(Box::new(copy)) as *mut c_void
+        crate::gc::leak_obj(copy)
     }
 }
 
@@ -288,7 +291,7 @@ pub extern "C" fn jrt_coll_dict_merge(a: *const c_void, b: *const c_void) -> *mu
         for (k, v) in (*(b as *const DictObj<W>)).entries() {
             out.set(k, *v);
         }
-        Box::into_raw(Box::new(out)) as *mut c_void
+        crate::gc::leak_obj(out)
     }
 }
 
@@ -305,7 +308,7 @@ pub extern "C" fn jrt_coll_dict_keys(dict: *const c_void) -> *mut c_void {
             let s = tagged_string(k.as_bytes(), string::TRUSTED);
             arr.push(JadeValue::from_str_ptr(s as *const ()).bits() as i64);
         }
-        Box::into_raw(Box::new(arr)) as *mut c_void
+        crate::gc::leak_obj(arr)
     }
 }
 
@@ -321,7 +324,7 @@ pub extern "C" fn jrt_coll_dict_values(dict: *const c_void) -> *mut c_void {
         for (_, v) in entries {
             arr.push(*v);
         }
-        Box::into_raw(Box::new(arr)) as *mut c_void
+        crate::gc::leak_obj(arr)
     }
 }
 
@@ -333,7 +336,7 @@ pub extern "C" fn jrt_coll_dict_values(dict: *const c_void) -> *mut c_void {
 pub extern "C" fn jrt_kstruct_new(type_name: *const c_char) -> *mut c_void {
     unsafe {
         let obj = StructObj::<W>::new(cstr_str(type_name));
-        Box::into_raw(Box::new(obj)) as *mut c_void
+        crate::gc::leak_obj(obj)
     }
 }
 
@@ -402,7 +405,7 @@ pub extern "C" fn jrt_coll_sh_output(cmd: *const c_char) -> *mut c_void {
         d.insert("stderr", se_w);
         d.insert("code", JadeValue::from_int(code).bits() as i64);
     }
-    Box::into_raw(Box::new(d)) as *mut c_void
+    crate::gc::leak_obj(d)
 }
 
 /// `fs.list_dir(path)`: a new array of the directory's entry names (TAINTED —
@@ -433,7 +436,7 @@ pub extern "C" fn jrt_coll_fs_list_dir(path: *const c_char, err: *mut i32) -> *m
                 }
             }
             unsafe { *err = 0 };
-            Box::into_raw(Box::new(arr)) as *mut c_void
+            crate::gc::leak_obj(arr)
         }
         Err(_) => {
             unsafe { *err = 1 };
@@ -487,6 +490,7 @@ mod tests {
         jrt_coll_array_set(a, 0, int_word(99));
         assert_eq!(jrt_coll_array_get(a, 0), int_word(99));
         unsafe { drop(Box::from_raw(a as *mut ArrayObj<W>)) };
+        crate::gc::record_free();
     }
 
     #[test]
@@ -515,7 +519,9 @@ mod tests {
 
         unsafe {
             drop(Box::from_raw(d as *mut DictObj<W>));
+            crate::gc::record_free();
             drop(Box::from_raw(d2 as *mut DictObj<W>));
+            crate::gc::record_free();
             string::free_str(key as *mut u8);
         }
     }
@@ -540,6 +546,7 @@ mod tests {
 
         unsafe {
             drop(Box::from_raw(s as *mut StructObj<W>));
+            crate::gc::record_free();
             string::free_str(name as *mut u8);
             string::free_str(empty as *mut u8);
         }
@@ -556,6 +563,7 @@ mod tests {
         unsafe {
             crate::sys::free(buf as *mut u8); // plain free, as the C caller does
             drop(Box::from_raw(a as *mut ArrayObj<W>));
+            crate::gc::record_free();
         }
     }
 }
