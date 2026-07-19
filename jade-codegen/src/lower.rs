@@ -43,6 +43,11 @@ const TAG_PTR: u64 = 1; // 0b001 non-string heap object (incl. a boxed fn value)
 const TAG_STR: u64 = 5; // 0b101 heap string pointer
 // Trust byte for literal (compile-time-known) strings.
 const TRUSTED: u64 = 0;
+// ObjKind::Fn (mirror jade-runtime heap.rs). A function-value box carries this in
+// the ObjKind byte (header offset 8) so the refcount ops recognise it as a
+// non-collection and no-op on it, while indirect_call still reads fn_ptr at
+// offset 0. See fn_box_word.
+const OBJKIND_FN: u64 = 5;
 
 /// Reserved global names that resolve to a runtime builtin (not a user value),
 /// mirroring `jade::builtins::seed_globals`. A `Call` whose callee is
@@ -159,6 +164,14 @@ struct Lowerer<'a, 'ctx> {
     module: &'a Module<'ctx>,
     builder: &'a Builder<'ctx>,
     slots: &'a [PointerValue<'ctx>],
+    /// Reference-counting enabled for this program (collections-only; see
+    /// `FnCtx::refcount`). When false every rc method below is a no-op, so the
+    /// emitted IR is byte-identical to the pre-B4.2 backend.
+    refcount: bool,
+    /// Parameter count of the function being lowered. Parameter slots (`0..n_params`)
+    /// hold references the *caller* owns (borrowed), so scope-exit release covers
+    /// only the locals (`n_params..`).
+    n_params: usize,
 }
 
 impl<'a, 'ctx> Lowerer<'a, 'ctx> {
@@ -431,8 +444,11 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
             .into_int_value()
     }
 
-    /// Store a tagged word into a register.
+    /// Store a tagged word into a register, releasing the reference the slot
+    /// previously held (in refcount mode). Slots are nil-initialized in the entry
+    /// block, so the first store to any slot releases nil (a no-op).
     fn store(&self, r: Reg, v: IntValue<'ctx>) {
+        self.rc_replace_slot(r as usize, v);
         self.builder.build_store(self.slots[r as usize], v).unwrap();
     }
 
@@ -446,20 +462,91 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
     }
 
     fn store_idx(&self, i: usize, v: IntValue<'ctx>) {
+        self.rc_replace_slot(i, v);
         self.builder.build_store(self.slots[i], v).unwrap();
     }
 
+    // ── Reference counting (B4.2; all no-ops unless `self.refcount`) ──────────
+
+    /// Emit `jrt_incref(w)` — retain a reference. No-op on non-collection words.
+    fn incref(&self, w: IntValue<'ctx>) {
+        if !self.refcount {
+            return;
+        }
+        let f = self.runtime_fn("jrt_incref", self.ctx.void_type().fn_type(&[self.i64t().into()], false));
+        self.builder.build_call(f, &[w.into()], "").unwrap();
+    }
+
+    /// Emit `jrt_decref(w)` — release a reference (frees at zero, cascading).
+    fn decref(&self, w: IntValue<'ctx>) {
+        if !self.refcount {
+            return;
+        }
+        let f = self.runtime_fn("jrt_decref", self.ctx.void_type().fn_type(&[self.i64t().into()], false));
+        self.builder.build_call(f, &[w.into()], "").unwrap();
+    }
+
+    /// Retain a value that is a *borrowed* read of an existing reference (a
+    /// `Move`/`GetLocal`/`GetGlobal`/`GetIndex`/`GetField` result): the destination
+    /// slot becomes a new owner, so the count must rise. Producer/call results are
+    /// already owned and must NOT be routed through here.
+    fn retain(&self, w: IntValue<'ctx>) {
+        self.incref(w);
+    }
+
+    /// Before slot `i` is overwritten with `new`, release whatever reference it
+    /// held (via `jrt_rc_replace`, which skips the release when `old == new` — the
+    /// in-place array-mutation case). No-op unless refcounting is on.
+    fn rc_replace_slot(&self, i: usize, new: IntValue<'ctx>) {
+        if !self.refcount {
+            return;
+        }
+        let old = self
+            .builder
+            .build_load(self.i64t(), self.slots[i], "rcold")
+            .unwrap()
+            .into_int_value();
+        let f = self.runtime_fn(
+            "jrt_rc_replace",
+            self.ctx.void_type().fn_type(&[self.i64t().into(), self.i64t().into()], false),
+        );
+        self.builder.build_call(f, &[old.into(), new.into()], "").unwrap();
+    }
+
+    /// Release every local slot's owned reference — the function's scope-exit
+    /// cleanup, emitted immediately before each `return`. Parameter slots
+    /// (`0..n_params`) are borrowed from the caller and left untouched.
+    fn emit_scope_exit(&self) {
+        if !self.refcount {
+            return;
+        }
+        for i in self.n_params..self.slots.len() {
+            let v = self.load_idx(i);
+            self.decref(v);
+        }
+    }
+
     /// A first-class function value for `jf_<uid>`: a `TAG_PTR`-tagged pointer to
-    /// an 8-aligned internal global holding the function's address. All fn values
-    /// for a uid share one box global (allocation-free). An indirect call untags
-    /// this, loads the function pointer, and calls through it; a print/index of it
-    /// would hit the runtime's `<object>` placeholder — the ObjKind gap — but the
-    /// frontend only ever *calls* a function value.
+    /// an 8-aligned internal global `{ ptr fn_ptr@0, i64 kind@8 }`. All fn values
+    /// for a uid share one box global (allocation-free). `indirect_call` reads
+    /// `fn_ptr` at offset 0 and calls through it; the `kind` word at offset 8 holds
+    /// `ObjKind::Fn`, aligned with `ObjHeader.kind`, so the refcount ops
+    /// (`jrt_incref`/`jrt_decref`) recognise the box as a non-collection and no-op
+    /// on it — which is what lets a program that merely *defines* functions still
+    /// be treated as collections-only for refcounting.
     fn fn_box_word(&self, uid: usize, f: FunctionValue<'ctx>) -> IntValue<'ctx> {
         let gname = format!("jf_box_{uid}");
         let g = self.module.get_global(&gname).unwrap_or_else(|| {
-            let g = self.module.add_global(self.ptrt(), None, &gname);
-            g.set_initializer(&f.as_global_value().as_pointer_value());
+            let box_ty = self.ctx.struct_type(&[self.ptrt().into(), self.i64t().into()], false);
+            let g = self.module.add_global(box_ty, None, &gname);
+            let init = self.ctx.const_struct(
+                &[
+                    f.as_global_value().as_pointer_value().into(),
+                    self.i64t().const_int(OBJKIND_FN, false).into(),
+                ],
+                false,
+            );
+            g.set_initializer(&init);
             g.set_constant(true);
             g.set_linkage(inkwell::module::Linkage::Internal);
             g.set_alignment(8);
@@ -923,6 +1010,12 @@ struct FnCtx<'ctx> {
     /// call — even when `name` happens to be a reserved module name (`let sh = []`
     /// shadows `use std::sh`). Guards `module.method` recognition against shadowing.
     user_globals: std::collections::HashSet<String>,
+    /// Whether the whole program is "collections-only" (no first-class functions,
+    /// no async): if so, every `TAG_PTR` word is guaranteed to be an `ObjHeader`
+    /// collection, so codegen emits reference-counting (incref/decref/scope-exit)
+    /// and turns the runtime's `RC_ACTIVE` on via `jrt_rc_enable`. Otherwise no rc
+    /// is emitted and heap objects leak (the pre-B4.2 behavior). See `gc.rs`.
+    refcount: bool,
 }
 
 impl<'ctx> FnCtx<'ctx> {
@@ -935,6 +1028,7 @@ impl<'ctx> FnCtx<'ctx> {
             struct_defaults: HashMap::new(),
             method_candidates: HashMap::new(),
             user_globals: std::collections::HashSet::new(),
+            refcount: false,
         }
     }
 
@@ -2076,6 +2170,33 @@ fn build_struct_defaults(
 /// and the top-level chunk becomes `jade_toplevel() -> i64`. Returns the
 /// top-level function (for `main` to call), or `Err` on any opcode/construct the
 /// backend can't lower yet (the daemon then falls back to `expr.rs`).
+/// Whether the whole program is **refcount-safe**: every heap value it can put in
+/// a `TAG_PTR` word is header-carrying, so `jrt_incref`/`jrt_decref` (and the
+/// destructor's child cascade) can dispatch on the `ObjKind` byte and never touch
+/// a header-less allocation. That holds for collections (Array/Dict/Struct) and
+/// for function boxes (kind `Fn`, see `fn_box_word`) — so first-class functions
+/// are fine — but NOT for the still-header-less async futures (`Spawn`/`Await`/
+/// `Join`), prompts (`MakePrompt`/`PromptDeref`), or native-FFI function values.
+/// A program using any of those leaves refcounting off and leaks, exactly as
+/// before B4.2. (Header-ifying futures/native/prompts would widen this further.)
+///
+/// `defs` is every function in the program (top's reachable tree plus appended
+/// extend-block methods); scanning `top` + each def's chunk covers all code.
+fn program_collections_only(top: &Chunk, defs: &[Arc<CompiledFn>]) -> bool {
+    let chunk_ok = |code: &[Instr]| {
+        code.iter().all(|instr| match instr {
+            Instr::Spawn(..)
+            | Instr::Await(..)
+            | Instr::Join(..)
+            | Instr::MakePrompt(..)
+            | Instr::PromptDeref(..) => false,
+            Instr::GetGlobal(_, name) => parse_native_ref(name).is_none(),
+            _ => true,
+        })
+    };
+    chunk_ok(&top.code) && defs.iter().all(|d| chunk_ok(&d.chunk.code))
+}
+
 pub fn lower_program<'ctx>(
     context: &'ctx Context,
     module: &Module<'ctx>,
@@ -2164,7 +2285,8 @@ pub fn lower_program<'ctx>(
     for d in &defs {
         collect_setglobals(&d.chunk);
     }
-    let fnctx = FnCtx { funcs, defs, ptr2uid, global_fns, struct_defaults, method_candidates, user_globals };
+    let refcount = program_collections_only(top, &defs);
+    let fnctx = FnCtx { funcs, defs, ptr2uid, global_fns, struct_defaults, method_candidates, user_globals, refcount };
 
     for uid in 0..fnctx.defs.len() {
         let cf = fnctx.defs[uid].clone();
@@ -2182,6 +2304,24 @@ pub fn lower_program<'ctx>(
 
     let top_fn = module.add_function("jade_toplevel", i64_ty.fn_type(&[], false), None);
     lower_body(context, module, top_fn, &top.code, &top.fn_defs, top_n_slots, 0, &fnctx)?;
+
+    // Turn on runtime reference counting for a collections-only program, once, at
+    // the very start of `jade_toplevel` (before any collection is allocated). This
+    // flips `RC_ACTIVE` so the runtime builders retain inserted/copy-shared
+    // elements; codegen has already emitted the matching incref/decref/scope-exit
+    // under the same `fnctx.refcount` decision. See gc.rs / program_collections_only.
+    if fnctx.refcount {
+        let en = module.get_function("jrt_rc_enable").unwrap_or_else(|| {
+            module.add_function("jrt_rc_enable", context.void_type().fn_type(&[], false), None)
+        });
+        let entry = top_fn.get_first_basic_block().ok_or("lower.rs: jade_toplevel has no entry block")?;
+        let eb = context.create_builder();
+        match entry.get_first_instruction() {
+            Some(first) => eb.position_before(&first),
+            None => eb.position_at_end(entry),
+        }
+        eb.build_call(en, &[], "").map_err(|e| e.to_string())?;
+    }
 
     // Populate the runtime method registry (for dynamic dispatch of
     // ambiguous-arity extend methods) at the very start of `jade_toplevel`, which
@@ -2269,6 +2409,16 @@ fn lower_body<'ctx>(
                 .map_err(|e| e.to_string())?,
         );
     }
+    // In refcount mode, nil-initialize every slot so the release-old-value logic
+    // in `store`/`store_idx` (and scope-exit `decref`) never reads uninitialized
+    // stack: a first store releases nil (a no-op), and an unwritten slot decref's
+    // nil at scope exit. Done before the param copies so params overwrite the nil.
+    if fnctx.refcount {
+        let nil = i64_ty.const_int(NIL, false);
+        for s in &slots {
+            builder.build_store(*s, nil).map_err(|e| e.to_string())?;
+        }
+    }
     // Copy incoming parameters into slots 0..n_params (params are the first
     // locals; see `emit_fn`). Callers fill any omitted defaults, so every
     // parameter slot receives an argument.
@@ -2308,7 +2458,14 @@ fn lower_body<'ctx>(
         .build_unconditional_branch(llblocks[0])
         .map_err(|e| e.to_string())?;
 
-    let low = Lowerer { ctx: context, module, builder: &builder, slots: &slots };
+    let low = Lowerer {
+        ctx: context,
+        module,
+        builder: &builder,
+        slots: &slots,
+        refcount: fnctx.refcount,
+        n_params,
+    };
     let call_builtins = resolve_builtin_calls(code);
     let (user_calls, skip_getfields) = resolve_user_calls(code, fn_defs, fnctx)?;
 
@@ -2343,6 +2500,9 @@ fn lower_body<'ctx>(
                         .map_err(|e| e.to_string())?;
                 }
                 None => {
+                    // Implicit `return nil` (function ran off the end): release
+                    // the local slots first, matching an explicit `Return`.
+                    low.emit_scope_exit();
                     builder
                         .build_return(Some(&i64_ty.const_int(NIL, false)))
                         .map_err(|e| e.to_string())?;
@@ -2396,6 +2556,7 @@ fn lower_instr<'ctx>(
         // ── Move ──────────────────────────────────────────────────────────
         Move(d, s) => {
             let v = low.load(*s);
+            low.retain(v); // borrowed alias → the dest slot becomes a new owner
             low.store(*d, v);
             Ok(false)
         }
@@ -2405,11 +2566,13 @@ fn lower_instr<'ctx>(
         // these are moves between slot indices.
         GetLocal(d, slot) => {
             let v = low.load_idx(*slot as usize);
+            low.retain(v); // borrowed alias
             low.store(*d, v);
             Ok(false)
         }
         SetLocal(slot, s) => {
             let v = low.load(*s);
+            low.retain(v); // borrowed alias into the target local
             low.store_idx(*slot as usize, v);
             Ok(false)
         }
@@ -2425,12 +2588,25 @@ fn lower_instr<'ctx>(
                 let g = low.global_slot(name);
                 b.build_load(i64_ty, g, "gld").map_err(|e| e.to_string())?.into_int_value()
             };
+            low.retain(v); // borrowed from the global cell (native path is a fn value, but refcount is off then)
             low.store(*d, v);
             Ok(false)
         }
         SetGlobal(name, s) => {
             let v = low.load(*s);
             let g = low.global_slot(name);
+            // The global cell becomes a new owner: retain the value, and release
+            // whatever the cell held before (globals are never scope-exit-released,
+            // so their final value intentionally lives until process end).
+            low.retain(v);
+            if low.refcount {
+                let old = b.build_load(i64_ty, g, "gold").map_err(|e| e.to_string())?.into_int_value();
+                let f = low.runtime_fn(
+                    "jrt_rc_replace",
+                    low.ctx.void_type().fn_type(&[i64_ty.into(), i64_ty.into()], false),
+                );
+                b.build_call(f, &[old.into(), v.into()], "").map_err(|e| e.to_string())?;
+            }
             b.build_store(g, v).map_err(|e| e.to_string())?;
             Ok(false)
         }
@@ -2709,6 +2885,7 @@ fn lower_instr<'ctx>(
                 .map_err(|e| e.to_string())?
                 .as_any_value_enum()
                 .into_int_value();
+            low.retain(r); // borrowed element (still owned by the container) → retain
             low.store(*d, r);
             Ok(false)
         }
@@ -2802,6 +2979,7 @@ fn lower_instr<'ctx>(
                 .map_err(|e| e.to_string())?
                 .as_any_value_enum()
                 .into_int_value();
+            low.retain(r); // borrowed field value (still owned by the struct) → retain
             low.store(*d, r);
             Ok(false)
         }
@@ -3018,12 +3196,18 @@ fn lower_instr<'ctx>(
                 Some(r) => low.load(*r),
                 None => i64_ty.const_int(NIL, false),
             };
+            // Transfer the returned reference to the caller: retain it, then the
+            // scope-exit release (which decrefs the source slot) nets an ownership
+            // move rather than a free of a value the caller now holds.
+            low.incref(v);
+            low.emit_scope_exit();
             b.build_return(Some(&v)).map_err(|e| e.to_string())?;
             Ok(true)
         }
         // Program terminator (the VM breaks its dispatch loop). A lowered
         // chunk-function ends by returning nil.
         Halt => {
+            low.emit_scope_exit();
             b.build_return(Some(&i64_ty.const_int(NIL, false)))
                 .map_err(|e| e.to_string())?;
             Ok(true)

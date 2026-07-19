@@ -127,9 +127,12 @@ pub extern "C" fn jrt_karr_new() -> *mut c_void {
     crate::gc::leak_obj(ArrayObj::<W>::new())
 }
 
-/// Append a tagged word (reference semantics — mutates in place).
+/// Append a tagged word (reference semantics — mutates in place). The array now
+/// references `val`, so retain it (a no-op unless refcounting is active / `val`
+/// is a collection); its destructor cascades a matching decref.
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_karr_push(arr: *mut c_void, val: W) {
+    crate::gc::retain(val);
     unsafe { (*(arr as *mut ArrayObj<W>)).push(val) }
 }
 
@@ -150,9 +153,13 @@ pub extern "C" fn jrt_coll_array_get(arr: *const c_void, i: i64) -> W {
     }
 }
 
-/// Overwrite element `i` in place (the caller has bounds-checked).
+/// Overwrite element `i` in place (the caller has bounds-checked). Retains the
+/// new element (the array now references it). The overwritten old element is not
+/// released here (a benign leak in the rare index-overwrite case); exact release
+/// is a later refinement.
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_coll_array_set(arr: *mut c_void, i: i64, val: W) {
+    crate::gc::retain(val);
     unsafe {
         let _ = (*(arr as *mut ArrayObj<W>)).set(i as usize, val);
     }
@@ -251,6 +258,7 @@ pub extern "C" fn jrt_kdict_new() -> *mut c_void {
 /// copied). Update-in-place if present, else append.
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_kdict_set(dict: *mut c_void, key_word: W, val: W) {
+    crate::gc::retain(val);
     unsafe {
         let key_ptr = JadeValue::from_bits(key_word as u64).as_ptr() as *const c_char;
         (*(dict as *mut DictObj<W>)).set(cstr_str(key_ptr), val);
@@ -278,6 +286,14 @@ pub extern "C" fn jrt_coll_dict_get(dict: *const c_void, key: *const c_char, out
 pub extern "C" fn jrt_coll_dict_copy(dict: *const c_void) -> *mut c_void {
     unsafe {
         let copy = (*(dict as *const DictObj<W>)).value_copy();
+        // value_copy shares the value words (a shallow word copy, no incref), so
+        // the copy is a new referencer of each — retain them when refcounting is
+        // active (else the copy's later cascade decref would over-free).
+        if crate::gc::rc_active() {
+            for (_, v) in copy.entries() {
+                crate::gc::retain(*v);
+            }
+        }
         crate::gc::leak_obj(copy)
     }
 }
@@ -290,6 +306,13 @@ pub extern "C" fn jrt_coll_dict_merge(a: *const c_void, b: *const c_void) -> *mu
         let mut out = (*(a as *const DictObj<W>)).value_copy();
         for (k, v) in (*(b as *const DictObj<W>)).entries() {
             out.set(k, *v);
+        }
+        // `out` shares both inputs' value words without incref — retain each so
+        // its cascade decref is balanced (active-only).
+        if crate::gc::rc_active() {
+            for (_, v) in out.entries() {
+                crate::gc::retain(*v);
+            }
         }
         crate::gc::leak_obj(out)
     }
@@ -321,7 +344,11 @@ pub extern "C" fn jrt_coll_dict_values(dict: *const c_void) -> *mut c_void {
         let mut entries: Vec<&(String, W)> = d.entries().iter().collect();
         entries.sort_by(|x, y| x.0.cmp(&y.0));
         let mut arr = ArrayObj::<W>::new();
+        let active = crate::gc::rc_active();
         for (_, v) in entries {
+            if active {
+                crate::gc::retain(*v);
+            }
             arr.push(*v);
         }
         crate::gc::leak_obj(arr)
@@ -344,6 +371,7 @@ pub extern "C" fn jrt_kstruct_new(type_name: *const c_char) -> *mut c_void {
 /// place; update if present else append in definition order.
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_kstruct_set(s: *mut c_void, field: *const c_char, val: W) {
+    crate::gc::retain(val);
     unsafe { (*(s as *mut StructObj<W>)).set_field(cstr_str(field), val) }
 }
 

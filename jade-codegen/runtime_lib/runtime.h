@@ -368,6 +368,21 @@ int64_t jrt_len_chunk(int64_t word);
  * live count to stderr iff JADE_HEAP_REPORT is set (else a no-op getenv). */
 int64_t jrt_heap_live_count(void);
 void    jrt_heap_report(void);
+
+/* Reference counting (jade-runtime, src/gc.rs). Emitted by codegen ONLY for a
+ * "collections-only" program (no async/prompt/native — every TAG_PTR word is then
+ * a header-carrying collection or fn-box, so these dispatch on ObjKind and never
+ * touch a header-less allocation).
+ * jrt_rc_enable — turn on the runtime builders' element retention (called once at
+ *   jade_toplevel entry).
+ * jrt_incref/jrt_decref — retain / release a collection word (kind-gated no-op on
+ *   fn-boxes and non-pointers); decref frees + cascades at zero.
+ * jrt_rc_replace(old,new) — release a slot's old reference before overwrite,
+ *   skipped when old==new (in-place array mutation). */
+void jrt_rc_enable(void);
+void jrt_incref(int64_t word);
+void jrt_decref(int64_t word);
+void jrt_rc_replace(int64_t old, int64_t neww);
 /* jrt_coll_* — raw storage helpers for the C forwarders below (never raise; the
  * forwarder owns the bounds/type checks + throw). array_get/set are unchecked
  * (caller bounds-checks via array_len); dict/struct _get write *out and return

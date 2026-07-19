@@ -25,7 +25,7 @@
 //! the AOT path leaks.
 
 use core::ffi::c_void;
-use core::sync::atomic::{AtomicI64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 use crate::coll::{ArrayObj, DictObj, StructObj};
 use crate::heap::{ObjHeader, ObjKind};
@@ -75,6 +75,63 @@ pub extern "C" fn jrt_heap_live_count() -> i64 {
     LIVE_OBJECTS.load(Ordering::Relaxed)
 }
 
+// ── Whole-program refcount activation (B4.2) ──────────────────────────────────
+//
+// Refcounting is only sound when every `TAG_PTR` word is guaranteed to be an
+// `ObjHeader` collection. Function-pointer boxes and futures are also `TAG_PTR`
+// but carry no header, so incref/decref/cascade would corrupt them. Codegen
+// therefore enables refcounting *per program*: if the whole program contains no
+// first-class functions and no async (the "collections-only" property), then no
+// fn-box/future value exists anywhere, every `TAG_PTR` is a collection, and
+// codegen calls `jrt_rc_enable()` once at `jade_toplevel` entry. Otherwise the
+// flag stays off and both engines behave exactly as before (leak everything).
+//
+// The flag gates the *runtime* builders' element retention (below); codegen gates
+// its own emitted incref/decref/scope-exit on the same static decision, so the
+// two never disagree.
+
+static RC_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Turn on reference counting for this process (see the module note on the
+/// collections-only precondition). Idempotent; codegen emits one call at program
+/// start when — and only when — it proved the program collections-only.
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_rc_enable() {
+    RC_ACTIVE.store(true, Ordering::Relaxed);
+}
+
+/// Whether refcounting is active. The collection builders consult this to decide
+/// whether an inserted or copy-shared element must be retained.
+#[inline]
+pub(crate) fn rc_active() -> bool {
+    RC_ACTIVE.load(Ordering::Relaxed)
+}
+
+/// Retain `word` on behalf of a container that now references it — but only when
+/// refcounting is active (else a no-op, preserving the pre-B4.2 behavior). A
+/// no-op for non-collection words regardless (`jrt_incref` checks the tag). The
+/// container's destructor cascades a matching `decref` per element, so every
+/// `retain` here is balanced by exactly one cascade decref when the container
+/// dies.
+#[inline]
+pub(crate) fn retain(word: i64) {
+    if rc_active() {
+        jrt_incref(word);
+    }
+}
+
+/// Codegen's slot-overwrite release: drop the reference a slot (or global cell)
+/// held before it is overwritten by `new`. Skipped when `old == new`, which is
+/// exactly the in-place-mutation case (an array `SetIndex` returns the *same*
+/// pointer, whose count must not change). Codegen emits this only in refcount
+/// mode, so no `RC_ACTIVE` check is needed here.
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_rc_replace(old: i64, new: i64) {
+    if old != new {
+        unsafe { decref_word(old) };
+    }
+}
+
 // ── Refcounting + destructor (B4.1) ───────────────────────────────────────────
 //
 // The strong-count half of the Bacon–Rajan scheme. `jrt_incref`/`jrt_decref` are
@@ -94,14 +151,37 @@ pub extern "C" fn jrt_heap_live_count() -> i64 {
 // `TAG_PTR` words. These functions are AOT-only (element word = `i64`); the VM
 // manages collection lifetime with `Arc` and never calls them.
 
+/// Whether a `TAG_PTR` pointer is a **refcounted collection** (Array/Dict/Struct)
+/// rather than a header-carrying but non-refcounted value. Every `TAG_PTR` word a
+/// refcount-enabled program can produce is header-prefixed: collections have
+/// their `ObjKind`, and a first-class function box carries `ObjKind::Fn` in the
+/// same byte (offset 8) precisely so this check no-ops on it. (Futures, native fn
+/// values, and prompts are header-less, but a program producing any of those is
+/// not collections-only, so refcounting is off and this is never reached for
+/// them.)
+///
+/// # Safety
+/// `p` must be a live `TAG_PTR` pointer whose 8-aligned allocation has a readable
+/// `ObjKind` byte at offset 8 (every collection and fn-box satisfies this).
+#[inline]
+unsafe fn is_collection(p: *const c_void) -> bool {
+    let k = unsafe { (*(p as *const ObjHeader)).kind };
+    k == ObjKind::Array as u8 || k == ObjKind::Dict as u8 || k == ObjKind::Struct as u8
+}
+
 /// Increment the strong count of the collection a `TAG_PTR` word points at. A
-/// no-op for non-pointer words (ints/bools/nil) and for strings/floats (distinct
-/// tags). See the module precondition: a `TAG_PTR` word must be a collection.
+/// no-op for non-pointer words (ints/bools/nil), strings/floats (distinct tags),
+/// and non-collection heap values such as function boxes (kind-gated).
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_incref(word: W) {
     let v = JadeValue::from_bits(word as u64);
     if v.is_ptr() {
-        unsafe { (*(v.as_ptr() as *mut ObjHeader)).incref() };
+        let p = v.as_ptr() as *mut c_void;
+        unsafe {
+            if is_collection(p) {
+                (*(p as *mut ObjHeader)).incref();
+            }
+        }
     }
 }
 
@@ -129,6 +209,11 @@ unsafe fn decref_word(word: W) {
         return;
     }
     let p = v.as_ptr() as *mut c_void;
+    // Skip header-carrying non-collections (a fn-box, kind Fn): they are not
+    // refcounted and their allocation is not a collection payload.
+    if !unsafe { is_collection(p) } {
+        return;
+    }
     if unsafe { (*(p as *mut ObjHeader)).decref() } {
         unsafe { free_obj(p) };
     }
