@@ -3010,6 +3010,99 @@ fn lower_instr<'ctx>(
             Ok(false)
         }
 
+        // ── LLM prompts ───────────────────────────────────────────────────
+        // A prompt value is its underlying string, deferred until PromptDeref.
+        // (No distinct heap kind: the prompt only ever flows to PromptDeref.)
+        MakePrompt(d, text) => {
+            low.store(*d, low.load(*text));
+            Ok(false)
+        }
+        // Run inference on the prompt string. Unconstrained → jrt_prompt_stream_ex
+        // (streams tokens to stdout like the VM's streaming deref) → TAINTED str.
+        // Typed (`|> int/float/bool/str`) → jrt_prompt_typed (retries until the
+        // response parses) → coerce via jrt_{int,float,bool}_any. Grammar-
+        // constrained (`|> <grammar value>`) needs a runtime Grammar object the
+        // AOT does not model yet → declines.
+        PromptDeref(d, prompt_reg, output_type, grammar_reg) => {
+            if grammar_reg.is_some() {
+                return Err("lower.rs: grammar-constrained prompt (|> <grammar>) is unsupported".into());
+            }
+            let ptrt = low.ptrt();
+            let i32_ty = low.ctx.i32_type();
+            let i8_ty = low.ctx.i8_type();
+            let e = |x: inkwell::builder::BuilderError| x.to_string();
+
+            // prompt string data pointer; model = jrt_get_model().
+            let prompt_ptr = low.untag_ptr(low.load(*prompt_reg));
+            let model_fn = low.runtime_fn("jrt_get_model", ptrt.fn_type(&[], false));
+            let model = b.build_call(model_fn, &[], "model").map_err(e)?.as_any_value_enum().into_pointer_value();
+
+            // Raw (untagged, malloc'd) response char*.
+            let raw = match output_type.as_deref() {
+                None => {
+                    let f = low.runtime_fn(
+                        "jrt_prompt_stream_ex",
+                        ptrt.fn_type(
+                            &[ptrt.into(), ptrt.into(), ptrt.into(), ptrt.into(), ptrt.into(), i32_ty.into()],
+                            false,
+                        ),
+                    );
+                    let nul = ptrt.const_null();
+                    b.build_call(
+                        f,
+                        &[prompt_ptr.into(), model.into(), nul.into(), nul.into(), nul.into(), i32_ty.const_zero().into()],
+                        "prompt",
+                    )
+                    .map_err(e)?
+                    .as_any_value_enum()
+                    .into_pointer_value()
+                }
+                Some(t) => {
+                    let f = low.runtime_fn(
+                        "jrt_prompt_typed",
+                        ptrt.fn_type(&[ptrt.into(), ptrt.into(), ptrt.into(), i32_ty.into()], false),
+                    );
+                    let tname = low.cstr(t);
+                    b.build_call(
+                        f,
+                        &[prompt_ptr.into(), model.into(), tname.into(), i32_ty.const_int(15, false).into()],
+                        "promptt",
+                    )
+                    .map_err(e)?
+                    .as_any_value_enum()
+                    .into_pointer_value()
+                }
+            };
+
+            // Tag the response as a TAINTED heap string (LLM output is external).
+            let dup = low.runtime_fn("jrt_str_dup", ptrt.fn_type(&[ptrt.into(), i8_ty.into()], false));
+            let tagged = b
+                .build_call(dup, &[raw.into(), i8_ty.const_int(1, false).into()], "ptag")
+                .map_err(e)?
+                .as_any_value_enum()
+                .into_pointer_value();
+            let str_word = low.tag_str(tagged);
+
+            // Coerce the typed variants (retry guaranteed a parseable response).
+            let result = match output_type.as_deref() {
+                Some(ty @ ("int" | "float" | "bool")) => {
+                    let name = match ty {
+                        "int" => "jrt_int_any",
+                        "float" => "jrt_float_any",
+                        _ => "jrt_bool_any",
+                    };
+                    let f = low.runtime_fn(name, i64_ty.fn_type(&[i64_ty.into()], false));
+                    b.build_call(f, &[str_word.into()], "pconv")
+                        .map_err(e)?
+                        .as_any_value_enum()
+                        .into_int_value()
+                }
+                _ => str_word, // None or "str"
+            };
+            low.store(*d, result);
+            Ok(false)
+        }
+
         // ── Async: spawn / await / join ───────────────────────────────────
         // Spawn a known async function: pack args into a stack array and call
         // jade_spawn(jf_task_<uid>, args, n). The future is stored as a raw
@@ -3588,8 +3681,9 @@ mod tests {
     fn unsupported_opcode_is_reported_not_panicked() {
         let context = Context::create();
         let module = context.create_module("t");
-        // `MakePrompt` (LLM prompt) isn't in this brick yet → clean Err → fallback.
-        let err = lower_chunk(&context, &module, "f", &[MakePrompt(0, 0)], 1)
+        // `ImportFile` is resolved away before lowering, so it never reaches the
+        // backend in a real chunk — a clean "unsupported opcode" Err, not a panic.
+        let err = lower_chunk(&context, &module, "f", &[ImportFile("a".into(), "b".into())], 1)
             .unwrap_err();
         assert!(err.contains("unsupported opcode"), "got: {err}");
     }
