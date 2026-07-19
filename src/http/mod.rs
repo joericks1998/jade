@@ -9,10 +9,6 @@ use crate::builtins::{BuiltinFn, Package};
 
 const ZERO: Span = Span { line: 0, col: 0 };
 
-fn http_err(detail: &str) -> JadeError {
-    JadeError::IoError { message: format!("http: {}", detail), span: ZERO }
-}
-
 fn require_str_owned(args: &[VmValue], pos: usize, fn_name: &str) -> Result<String> {
     match args.get(pos) {
         Some(VmValue::Str(s)) => Ok(s.clone()),
@@ -56,40 +52,18 @@ enum HttpMethod {
     Head,
 }
 
-// Runs the request on a fresh OS thread to avoid nesting inside tokio runtimes.
+// Shares the curl-subprocess core with the AOT backend (jade_runtime::httpf).
 fn execute(url: String, method: HttpMethod, headers: Vec<(String, String)>) -> Result<VmValue> {
-    match std::thread::spawn(move || -> std::result::Result<(u16, String), String> {
-        let client = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(|e| e.to_string())?;
-
-        let rb = match method {
-            HttpMethod::Get        => client.get(&url),
-            HttpMethod::Post(body) => client.post(&url).body(body),
-            HttpMethod::Put(body)  => client.put(&url).body(body),
-            HttpMethod::Delete     => client.delete(&url),
-            HttpMethod::Head       => client.head(&url),
-        };
-
-        let rb = headers.iter().try_fold(rb, |rb, (k, v)| {
-            let name = reqwest::header::HeaderName::from_bytes(k.as_bytes())
-                .map_err(|e| e.to_string())?;
-            let value = reqwest::header::HeaderValue::from_str(v)
-                .map_err(|e| e.to_string())?;
-            Ok::<reqwest::blocking::RequestBuilder, String>(rb.header(name, value))
-        })?;
-
-        let resp = rb.send().map_err(|e| e.to_string())?;
-        let status = resp.status().as_u16();
-        let body = resp.text().unwrap_or_default();
-        Ok((status, body))
-    })
-    .join() {
-        Ok(Ok((status, body))) => Ok(make_response(status, body)),
-        Ok(Err(e))             => Err(http_err(&e)),
-        Err(_)                 => Err(http_err("request thread panicked")),
-    }
+    let (m, body): (&str, Option<String>) = match method {
+        HttpMethod::Get        => ("GET", None),
+        HttpMethod::Post(body) => ("POST", Some(body)),
+        HttpMethod::Put(body)  => ("PUT", Some(body)),
+        HttpMethod::Delete     => ("DELETE", None),
+        HttpMethod::Head       => ("HEAD", None),
+    };
+    jade_runtime::httpf::request(m, &url, body.as_deref(), &headers)
+        .map(|(status, body)| make_response(status as u16, body))
+        .map_err(|message| JadeError::IoError { message, span: ZERO })
 }
 
 fn http_get(args: &[VmValue]) -> Result<VmValue> {

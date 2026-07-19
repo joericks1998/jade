@@ -424,15 +424,22 @@ jade_value_t jrt_http_head(const char* url, void* headers) {
     return r;
 }
 
-/* sh.exec/run forwarders: refuse a tainted command (a code-execution sink) —
- * the only throw — then call the non-raising Rust impls (jade-runtime src/shf.rs). */
+/* sh.exec/run forwarders: refuse a tainted command (a code-execution sink), call
+ * the Rust impl (jade-runtime src/shf.rs), then throw any pending error it
+ * recorded — sh.exec raises on a non-zero exit, run/exec on a spawn failure. */
 char* jrt_sh_exec(const char* cmd) {
     jrt_refuse_if_tainted(cmd, "sh.exec(cmd)");
-    return jrt_sh_exec_impl(cmd);
+    char* r = jrt_sh_exec_impl(cmd);
+    char* e = jrt_sh_take_error();
+    if (e) jade_exc_throw_typed(jrt_box_str(e), NULL);
+    return r;
 }
 int64_t jrt_sh_run(const char* cmd) {
     jrt_refuse_if_tainted(cmd, "sh.run(cmd)");
-    return jrt_sh_run_impl(cmd);
+    int64_t r = jrt_sh_run_impl(cmd);
+    char* e = jrt_sh_take_error();
+    if (e) jade_exc_throw_typed(jrt_box_str(e), NULL);
+    return r;
 }
 
 /* fs.* raising forwarders: the Rust impls (jade-runtime src/fsf.rs) record a

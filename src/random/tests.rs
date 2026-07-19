@@ -1,5 +1,6 @@
 use super::*;
 use crate::builtins::make_array;
+use std::sync::Mutex;
 
 // The RNG is a process-global. Seed-determinism tests must not run concurrently
 // with one another (a reseed in one would perturb another). Serialize them.

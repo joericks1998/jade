@@ -27,29 +27,9 @@ fn sh_exec(args: &[VmValue]) -> Result<VmValue> {
         return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: ZERO });
     }
     let cmd = require_str(args, 0, "sh.exec")?;
-    let out = std::process::Command::new("sh")
-        .args(["-c", cmd])
-        .output()
-        .map_err(|e| JadeError::IoError {
-            message: format!("sh.exec: could not spawn shell: {}", e),
-            span: ZERO,
-        })?;
-    if out.status.success() {
-        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-        let trimmed = stdout.trim_end_matches('\n').to_string();
-        Ok(VmValue::Str(trimmed))
-    } else {
-        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-        let code = out.status.code().unwrap_or(-1);
-        Err(JadeError::IoError {
-            message: format!(
-                "sh.exec: command exited with code {}: {}",
-                code,
-                stderr.trim()
-            ),
-            span: ZERO,
-        })
-    }
+    jade_runtime::shf::exec(cmd)
+        .map(VmValue::Str)
+        .map_err(|message| JadeError::IoError { message, span: ZERO })
 }
 
 /// `sh.run(cmd)` — run `cmd` via `sh -c`, inheriting stdio. Returns exit code as int.
@@ -58,14 +38,9 @@ fn sh_run(args: &[VmValue]) -> Result<VmValue> {
         return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: ZERO });
     }
     let cmd = require_str(args, 0, "sh.run")?;
-    let status = std::process::Command::new("sh")
-        .args(["-c", cmd])
-        .status()
-        .map_err(|e| JadeError::IoError {
-            message: format!("sh.run: could not spawn shell: {}", e),
-            span: ZERO,
-        })?;
-    Ok(VmValue::Int(status.code().unwrap_or(-1) as i64))
+    jade_runtime::shf::run(cmd)
+        .map(VmValue::Int)
+        .map_err(|message| JadeError::IoError { message, span: ZERO })
 }
 
 /// `sh.output(cmd)` — run `cmd` via `sh -c`, capture all streams.
@@ -75,17 +50,12 @@ fn sh_output(args: &[VmValue]) -> Result<VmValue> {
         return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: ZERO });
     }
     let cmd = require_str(args, 0, "sh.output")?;
-    let out = std::process::Command::new("sh")
-        .args(["-c", cmd])
-        .output()
-        .map_err(|e| JadeError::IoError {
-            message: format!("sh.output: could not spawn shell: {}", e),
-            span: ZERO,
-        })?;
+    let (stdout, stderr, code) =
+        jade_runtime::shf::output(cmd).map_err(|message| JadeError::IoError { message, span: ZERO })?;
     let mut map = DictObj::new();
-    map.insert("stdout".to_string(), VmValue::Str(String::from_utf8_lossy(&out.stdout).into_owned()));
-    map.insert("stderr".to_string(), VmValue::Str(String::from_utf8_lossy(&out.stderr).into_owned()));
-    map.insert("code".to_string(),   VmValue::Int(out.status.code().unwrap_or(-1) as i64));
+    map.insert("stdout".to_string(), VmValue::Str(stdout));
+    map.insert("stderr".to_string(), VmValue::Str(stderr));
+    map.insert("code".to_string(), VmValue::Int(code));
     Ok(VmValue::Dict(map))
 }
 

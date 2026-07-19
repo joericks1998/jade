@@ -81,24 +81,43 @@ impl Rng {
     }
 }
 
-/// `random.int` core (the C forwarder guarantees `lo <= hi` before calling).
-/// Returns a uniform integer in `[lo, hi]`.
-#[unsafe(no_mangle)]
-pub extern "C" fn jrt_random_draw(lo: i64, hi: i64) -> i64 {
+// ── Neutral cores (used by both engines; the VM's random.* route here too) ────
+
+/// A uniform integer in `[lo, hi]` inclusive (`lo <= hi` required — the VM checks
+/// `min > max` and the AOT's C forwarder `jrt_random_int` checks it before here).
+pub fn draw(lo: i64, hi: i64) -> i64 {
     let range = (hi as u64).wrapping_sub(lo as u64).wrapping_add(1); // 0 ⇒ full 64-bit span
     let r = RNG.lock().unwrap_or_else(|e| e.into_inner()).bounded(range);
     lo.wrapping_add(r as i64)
 }
 
-/// `random.float()` — a value in `[0.0, 1.0)` (53 random bits).
-#[unsafe(no_mangle)]
-pub extern "C" fn jrt_random_float() -> f64 {
+/// A uniform float in `[0.0, 1.0)` (53 random bits).
+pub fn float() -> f64 {
     let r = RNG.lock().unwrap_or_else(|e| e.into_inner()).bounded(0) >> 11;
     (r as f64) / ((1u64 << 53) as f64)
 }
 
-/// `random.seed(n)` — reseed the generator deterministically.
+/// Reseed the generator deterministically.
+pub fn seed(n: i64) {
+    RNG.lock().unwrap_or_else(|e| e.into_inner()).reseed(n as u64);
+}
+
+// ── AOT C-ABI wrappers ────────────────────────────────────────────────────────
+
+/// `random.int` core (the C forwarder guarantees `lo <= hi` before calling).
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_random_draw(lo: i64, hi: i64) -> i64 {
+    draw(lo, hi)
+}
+
+/// `random.float()` — a value in `[0.0, 1.0)`.
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_random_float() -> f64 {
+    float()
+}
+
+/// `random.seed(n)` — reseed the generator.
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_random_seed(n: i64) {
-    RNG.lock().unwrap_or_else(|e| e.into_inner()).reseed(n as u64);
+    seed(n);
 }

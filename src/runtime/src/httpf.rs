@@ -59,26 +59,7 @@ pub extern "C" fn jrt_http_take_error() -> *mut c_char {
     PENDING.with(|p| p.replace(core::ptr::null_mut()))
 }
 
-/// A tagged-string word's bytes as `&str` (non-string → "").
-fn header_val(word: W) -> &'static str {
-    let v = JadeValue::from_bits(word as u64);
-    if v.is_str() {
-        unsafe { cstr(v.as_ptr() as *const c_char) }
-    } else {
-        ""
-    }
-}
-
-/// Build the result dict `{ status, body: TAINTED }` as a tagged pointer word.
-fn make_dict(status: i64, body: &[u8]) -> W {
-    let mut d = DictObj::<W>::new();
-    d.insert("status", JadeValue::from_int(status).bits() as i64);
-    let body_w = unsafe { JadeValue::from_str_ptr(mk_str(body, TAINTED) as *const ()).bits() as i64 };
-    d.insert("body", body_w);
-    JadeValue::from_ptr(crate::gc::leak_obj(d) as *const c_void as *const ()).bits() as i64
-}
-
-/// Human-readable reason for a curl exit code (matches the C leaf's mapping).
+/// Human-readable reason for a curl exit code.
 fn curl_reason(code: i32) -> &'static str {
     match code {
         6 => "could not resolve host",
@@ -90,11 +71,18 @@ fn curl_reason(code: i32) -> &'static str {
     }
 }
 
-/// Core request: exec curl, capture stdout, parse the `\nJADE_STATUS:<code>`
-/// trailer → `{ status, body }`. On transport failure (curl exit ≠ 0) records a
-/// pending error and returns the default `{ status: 0, body: "" }` (the forwarder
-/// throws before the caller sees it).
-fn request(method: &str, url: &str, body: Option<&[u8]>, headers: *const c_void) -> W {
+// ── Neutral core (used by both engines) ───────────────────────────────────────
+
+/// Exec `curl` for `method url` (optional `body`, `headers`), capture stdout, and
+/// parse the `\nJADE_STATUS:<code>` trailer → `Ok((status, body))`. `Err` (a full
+/// message) only on a transport failure (curl exit ≠ 0); a 4xx/5xx is a normal
+/// status. The VM maps `Err` to `IoError`; the AOT wrappers record it as pending.
+pub fn request(
+    method: &str,
+    url: &str,
+    body: Option<&str>,
+    headers: &[(String, String)],
+) -> Result<(i64, String), String> {
     let is_head = method == "HEAD";
     let mut cmd = Command::new("curl");
     cmd.arg("-sS");
@@ -102,13 +90,8 @@ fn request(method: &str, url: &str, body: Option<&[u8]>, headers: *const c_void)
         cmd.args(["-o", "/dev/null"]);
     }
     cmd.args(["-X", method]);
-    if !headers.is_null() {
-        // Deterministic order (matches the C, which sorts keys) — insertion order
-        // here; header order does not affect difftest (http isn't network-tested).
-        let d = unsafe { &*(headers as *const DictObj<W>) };
-        for (k, v) in d.entries() {
-            cmd.arg("-H").arg(format!("{k}: {}", header_val(*v)));
-        }
+    for (k, v) in headers {
+        cmd.arg("-H").arg(format!("{k}: {v}"));
     }
     if body.is_some() {
         cmd.args(["--data-binary", "@-"]);
@@ -117,27 +100,18 @@ fn request(method: &str, url: &str, body: Option<&[u8]>, headers: *const c_void)
     cmd.stdout(Stdio::piped()).stderr(Stdio::null());
     cmd.stdin(if body.is_some() { Stdio::piped() } else { Stdio::null() });
 
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(_) => {
-            set_err(&format!("http {method} '{url}': {} (curl exit 127)", curl_reason(127)));
-            return make_dict(0, b"");
-        }
-    };
+    let mut child = cmd
+        .spawn()
+        .map_err(|_| format!("http {method} '{url}': {} (curl exit 127)", curl_reason(127)))?;
     if let (Some(b), Some(mut stdin)) = (body, child.stdin.take()) {
-        let _ = stdin.write_all(b); // dropping stdin closes it
+        let _ = stdin.write_all(b.as_bytes()); // dropping stdin closes it
     }
-    let out = match child.wait_with_output() {
-        Ok(o) => o,
-        Err(_) => {
-            set_err(&format!("http {method} '{url}': {} (curl exit -1)", curl_reason(-1)));
-            return make_dict(0, b"");
-        }
-    };
+    let out = child
+        .wait_with_output()
+        .map_err(|_| format!("http {method} '{url}': {} (curl exit -1)", curl_reason(-1)))?;
     let code = out.status.code().unwrap_or(-1);
     if code != 0 {
-        set_err(&format!("http {method} '{url}': {} (curl exit {code})", curl_reason(code)));
-        return make_dict(0, b"");
+        return Err(format!("http {method} '{url}': {} (curl exit {code})", curl_reason(code)));
     }
 
     // Split the "\nJADE_STATUS:<code>" trailer off the body.
@@ -151,32 +125,72 @@ fn request(method: &str, url: &str, body: Option<&[u8]>, headers: *const c_void)
         }
         None => (&buf[..], 0),
     };
-    make_dict(status, body_bytes)
+    Ok((status, String::from_utf8_lossy(body_bytes).into_owned()))
 }
 
-// ── Per-verb impls (the C forwarders throw the pending error) ─────────────────
+// ── AOT C-ABI wrappers ────────────────────────────────────────────────────────
+
+/// A tagged-string word's bytes as `&str` (non-string → "").
+fn header_val(word: W) -> &'static str {
+    let v = JadeValue::from_bits(word as u64);
+    if v.is_str() {
+        unsafe { cstr(v.as_ptr() as *const c_char) }
+    } else {
+        ""
+    }
+}
+
+/// Read the AOT ObjHeader header-dict into `(name, value)` pairs.
+fn read_headers(headers: *const c_void) -> Vec<(String, String)> {
+    if headers.is_null() {
+        return Vec::new();
+    }
+    let d = unsafe { &*(headers as *const DictObj<W>) };
+    d.entries().iter().map(|(k, v)| (k.clone(), header_val(*v).to_owned())).collect()
+}
+
+/// Build the result dict `{ status, body: TAINTED }` as a tagged pointer word.
+fn make_dict(status: i64, body: &str) -> W {
+    let mut d = DictObj::<W>::new();
+    d.insert("status", JadeValue::from_int(status).bits() as i64);
+    let body_w = unsafe { JadeValue::from_str_ptr(mk_str(body.as_bytes(), TAINTED) as *const ()).bits() as i64 };
+    d.insert("body", body_w);
+    JadeValue::from_ptr(crate::gc::leak_obj(d) as *const c_void as *const ()).bits() as i64
+}
+
+/// Run `request`, building the result dict; on transport failure, record the
+/// pending error (the C forwarder throws it) and return `{ status: 0, body: "" }`.
+fn request_aot(method: &str, url: *const c_char, body: Option<&str>, headers: *const c_void) -> W {
+    match request(method, unsafe { cstr(url) }, body, &read_headers(headers)) {
+        Ok((status, body)) => make_dict(status, &body),
+        Err(m) => {
+            set_err(&m);
+            make_dict(0, "")
+        }
+    }
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_http_get_impl(url: *const c_char, headers: *const c_void) -> W {
-    request("GET", unsafe { cstr(url) }, None, headers)
+    request_aot("GET", url, None, headers)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_http_post_impl(url: *const c_char, body: *const c_char, headers: *const c_void) -> W {
-    request("POST", unsafe { cstr(url) }, Some(unsafe { cstr(body) }.as_bytes()), headers)
+    request_aot("POST", url, Some(unsafe { cstr(body) }), headers)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_http_put_impl(url: *const c_char, body: *const c_char, headers: *const c_void) -> W {
-    request("PUT", unsafe { cstr(url) }, Some(unsafe { cstr(body) }.as_bytes()), headers)
+    request_aot("PUT", url, Some(unsafe { cstr(body) }), headers)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_http_delete_impl(url: *const c_char, headers: *const c_void) -> W {
-    request("DELETE", unsafe { cstr(url) }, None, headers)
+    request_aot("DELETE", url, None, headers)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_http_head_impl(url: *const c_char, headers: *const c_void) -> W {
-    request("HEAD", unsafe { cstr(url) }, None, headers)
+    request_aot("HEAD", url, None, headers)
 }

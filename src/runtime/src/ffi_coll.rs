@@ -412,20 +412,14 @@ pub extern "C" fn jrt_get_type_name(obj: W) -> *mut c_char {
 
 /// `sh.output(cmd)`: run `sh -c cmd`, capturing output → a new dict
 /// `{stdout, stderr, code}` (stdout/stderr TAINTED — shell output; code Int).
-/// Never raises (mirrors the VM). Returns the raw dict pointer (codegen tags it).
+/// Shares the `shf::output` core with the VM; on a (pathological) spawn failure
+/// the AOT returns `{"", "", -1}` rather than raising. Returns the raw dict
+/// pointer (codegen tags it).
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_coll_sh_output(cmd: *const c_char) -> *mut c_void {
-    let cmd = unsafe { cstr_str(cmd) };
-    let out = std::process::Command::new("sh").args(["-c", cmd]).output();
     let mut d = DictObj::<W>::new();
-    let (so, se, code) = match out {
-        Ok(o) => (
-            String::from_utf8_lossy(&o.stdout).into_owned(),
-            String::from_utf8_lossy(&o.stderr).into_owned(),
-            o.status.code().unwrap_or(-1) as i64,
-        ),
-        Err(_) => (String::new(), String::new(), -1),
-    };
+    let (so, se, code) =
+        crate::shf::output(unsafe { cstr_str(cmd) }).unwrap_or_else(|_| (String::new(), String::new(), -1));
     unsafe {
         let so_w = JadeValue::from_str_ptr(tagged_string(so.as_bytes(), 1 /*TAINTED*/) as *const ()).bits() as i64;
         let se_w = JadeValue::from_str_ptr(tagged_string(se.as_bytes(), 1) as *const ()).bits() as i64;

@@ -1,16 +1,69 @@
-//! `std::sh` runtime module — the AOT C-ABI surface, ported from the C leaf
-//! `runtime_lib/sh/sh.c`. exec/run via `sh -c` (matching the VM's `sh_pkg.rs`
-//! and the already-Rust `jrt_coll_sh_output`). All captured output is TAINTED.
+//! `std::sh` — the single implementation of the `sh` stdlib, shared by both
+//! engines. Neutral `pub fn` cores (exec/run/output) run via `sh -c` and return
+//! `Result<_, String>` where the `Err` is the full Jade error message. The VM
+//! (`src/sh/mod.rs`) maps `Err` to `JadeError::IoError`; the AOT wrappers record a
+//! thread-local pending error that a C forwarder throws.
 //!
-//! exec/run are code-execution sinks that refuse tainted input — the only throw
-//! — so that check stays in the C forwarder (`jrt_refuse_if_tainted`); these
-//! impls never raise (spawn failure → "" / -1, matching the C leaf).
+//! `exec` RAISES on a non-zero exit (the VM's contract — the canonical one), so
+//! the AOT now raises there too. exec/run are code-execution sinks; the tainted-
+//! input refusal stays in the C forwarder.
 
 use core::ffi::c_char;
+use std::cell::Cell;
 use std::process::Command;
 
-use crate::string::{self, TAINTED};
+use crate::string::{self, TAINTED, TRUSTED};
 use crate::sys::strlen;
+
+// ── Neutral cores (used by both engines) ──────────────────────────────────────
+
+/// `sh.exec(cmd)` — run via `sh -c`, return trimmed stdout. `Err` (a full message)
+/// on spawn failure or a non-zero exit (stderr included).
+pub fn exec(cmd: &str) -> Result<String, String> {
+    let out = Command::new("sh")
+        .args(["-c", cmd])
+        .output()
+        .map_err(|e| format!("sh.exec: could not spawn shell: {e}"))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).trim_end_matches('\n').to_string())
+    } else {
+        Err(format!(
+            "sh.exec: command exited with code {}: {}",
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+    }
+}
+
+/// `sh.run(cmd)` — run via `sh -c` inheriting stdio, return the exit code. `Err`
+/// on spawn failure.
+pub fn run(cmd: &str) -> Result<i64, String> {
+    Command::new("sh")
+        .args(["-c", cmd])
+        .status()
+        .map(|s| s.code().unwrap_or(-1) as i64)
+        .map_err(|e| format!("sh.run: could not spawn shell: {e}"))
+}
+
+/// `sh.output(cmd)` — run via `sh -c`, capture all streams → `(stdout, stderr,
+/// code)`. `Err` on spawn failure.
+pub fn output(cmd: &str) -> Result<(String, String, i64), String> {
+    let out = Command::new("sh")
+        .args(["-c", cmd])
+        .output()
+        .map_err(|e| format!("sh.output: could not spawn shell: {e}"))?;
+    Ok((
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        out.status.code().unwrap_or(-1) as i64,
+    ))
+}
+
+// ── AOT C-ABI wrappers (pending-error channel; forwarders in common.c throw) ───
+
+thread_local! {
+    static PENDING: Cell<*mut c_char> = const { Cell::new(core::ptr::null_mut()) };
+}
 
 unsafe fn mk_str(bytes: &[u8], trust: u8) -> *mut c_char {
     let out = string::new(bytes.len(), trust);
@@ -30,31 +83,43 @@ unsafe fn cstr(p: *const c_char) -> &'static str {
     }
 }
 
-/// `sh.exec(cmd)` core — run via `sh -c`, return trimmed stdout as a TAINTED
-/// string (empty on spawn failure). The forwarder refuses a tainted `cmd` first.
-#[unsafe(no_mangle)]
-pub extern "C" fn jrt_sh_exec_impl(cmd: *const c_char) -> *mut c_char {
-    let out = Command::new("sh").args(["-c", unsafe { cstr(cmd) }]).output();
-    let bytes = match out {
-        Ok(o) => {
-            let mut v = o.stdout;
-            while matches!(v.last(), Some(b'\n' | b'\r')) {
-                v.pop();
-            }
-            v
+fn set_err(msg: &str) {
+    let s = unsafe { mk_str(msg.as_bytes(), TRUSTED) };
+    PENDING.with(|p| {
+        let old = p.replace(s);
+        if !old.is_null() {
+            unsafe { string::free_str(old as *mut u8) };
         }
-        Err(_) => Vec::new(),
-    };
-    unsafe { mk_str(&bytes, TAINTED) }
+    });
 }
 
-/// `sh.run(cmd)` core — run via `sh -c`, discard output, return the exit code
-/// (`status.code().unwrap_or(-1)`; -1 on signal/spawn failure). The forwarder
-/// refuses a tainted `cmd` first.
+/// Drain the pending sh error (a tagged string the caller owns), or null.
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_sh_take_error() -> *mut c_char {
+    PENDING.with(|p| p.replace(core::ptr::null_mut()))
+}
+
+/// `sh.exec` core (the forwarder refuses a tainted cmd, then throws any pending
+/// error). Returns trimmed stdout as a TAINTED string; on error, "" + pending.
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_sh_exec_impl(cmd: *const c_char) -> *mut c_char {
+    match exec(unsafe { cstr(cmd) }) {
+        Ok(s) => unsafe { mk_str(s.as_bytes(), TAINTED) },
+        Err(m) => {
+            set_err(&m);
+            unsafe { mk_str(b"", TAINTED) }
+        }
+    }
+}
+
+/// `sh.run` core — exit code, or -1 + pending on spawn failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_sh_run_impl(cmd: *const c_char) -> i64 {
-    match Command::new("sh").args(["-c", unsafe { cstr(cmd) }]).status() {
-        Ok(s) => s.code().unwrap_or(-1) as i64,
-        Err(_) => -1,
+    match run(unsafe { cstr(cmd) }) {
+        Ok(c) => c,
+        Err(m) => {
+            set_err(&m);
+            -1
+        }
     }
 }

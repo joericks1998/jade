@@ -488,8 +488,9 @@ jade_value_t jrt_http_head(const char* url, void* headers);
  * C forwarders (common.c); the impls never raise. */
 char*   jrt_sh_exec_impl(const char* cmd);
 int64_t jrt_sh_run_impl(const char* cmd);
-char*   jrt_sh_exec(const char* cmd);   /* forwarder: refuse-if-tainted + impl */
-int64_t jrt_sh_run(const char* cmd);    /* forwarder: refuse-if-tainted + impl */
+char*   jrt_sh_take_error(void);        /* drain pending error, or NULL */
+char*   jrt_sh_exec(const char* cmd);   /* forwarder: refuse-if-tainted + impl + throw */
+int64_t jrt_sh_run(const char* cmd);    /* forwarder: refuse-if-tainted + impl + throw */
 
 /* fs (std::fs) is implemented in Rust now (jade-runtime, src/fsf.rs). The
  * fallible ops record a pending error instead of throwing (a longjmp must not
