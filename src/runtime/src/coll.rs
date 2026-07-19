@@ -457,7 +457,7 @@ mod tests {
         assert_eq!(d2.get("k"), Some(&999));
         assert_eq!(d2.get("new"), Some(&7));
         // A fresh header on the copy (rc back to 1, live).
-        assert_eq!(d2.header.rc, 1);
+        assert_eq!(d2.header.rc(), 1);
     }
 
     #[test]
