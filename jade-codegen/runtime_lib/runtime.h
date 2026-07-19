@@ -469,7 +469,6 @@ void    jrt_refuse_if_tainted(const char* arg, const char* sink_name);
 #include "fs/fs.h"
 #include "sh/sh.h"
 #include "http/http.h"
-#include "random/random.h"
 
 /* time (std::time) is implemented in Rust now (jade-runtime, src/timef.rs) —
  * no C leaf. Declared here for ABI reference. None raise. */
@@ -477,6 +476,14 @@ int64_t jrt_time_now(void);
 int64_t jrt_time_now_ms(void);
 void    jrt_time_sleep(double secs);
 char*   jrt_time_local(const char* tz);
+
+/* random (std::random) is implemented in Rust now (jade-runtime, src/randomf.rs).
+ * jrt_random_int is a C forwarder (common.c) that throws on min>max, then calls
+ * the non-raising Rust draw; float/seed export directly from Rust. */
+int64_t jrt_random_int(int64_t lo, int64_t hi);
+int64_t jrt_random_draw(int64_t lo, int64_t hi);
+double  jrt_random_float(void);
+void    jrt_random_seed(int64_t n);
 
 /* env (std::env) and path (std::path) are implemented in Rust now
  * (jade-runtime, src/envf.rs + src/pathf.rs) — no C leaf. Codegen resolves these

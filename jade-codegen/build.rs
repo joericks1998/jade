@@ -40,7 +40,6 @@ fn main() {
         .file(rt.join("fs/fs.c"))
         .file(rt.join("sh/sh.c"))
         .file(rt.join("http/http.c"))
-        .file(rt.join("random/random.c"))
         .include(&rt)
         .include(rt.join("infer"))
         .include(rt.join("ipc"))

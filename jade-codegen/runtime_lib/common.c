@@ -391,6 +391,20 @@ int64_t jrt_random_choice_chunk(int64_t arr_word) {
     return jrt_coll_array_get(arr, idx);
 }
 
+/* random.int(lo, hi) — the raising boundary for the Rust RNG core (random.c was
+ * ported to jade-runtime src/randomf.rs). A Jade exception is a longjmp and must
+ * not cross a Rust frame, so the min>max check + throw live here; the draw is
+ * jrt_random_draw (Rust). Also the RNG entry point for jrt_random_choice_chunk. */
+int64_t jrt_random_int(int64_t lo, int64_t hi) {
+    if (lo > hi) {
+        char m[96];
+        snprintf(m, sizeof m, "random.int: min (%lld) > max (%lld)",
+                 (long long)lo, (long long)hi);
+        jade_exc_throw_typed(jrt_box_str(jrt_str_dup(m, JRT_TRUSTED)), NULL);
+    }
+    return jrt_random_draw(lo, hi);
+}
+
 /* array.map(arr, fn) -> new array of fn(elem). The Chunk backend's function
  * value is a boxed function pointer: the value word (TAG_PTR) points at an
  * 8-byte global holding jf_<uid>'s address, so `*box` is the callable

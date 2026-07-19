@@ -53,6 +53,7 @@ pub mod methods;
 pub mod num;
 pub mod ops;
 pub mod pathf;
+pub mod randomf;
 pub mod render;
 pub mod string;
 pub mod strval;
