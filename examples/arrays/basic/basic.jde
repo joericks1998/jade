@@ -8,9 +8,12 @@ print(a)   // [1, 2, 3]
 let empty = []
 print(empty)   // []
 
-// Heterogeneous elements (int, float, bool, string)
-let mixed = [1, 2.0, true, "hello"]
-print(mixed)   // [1, 2.0, true, hello]
+// Arrays are homogeneous — every element must share one type. Mixing them is a
+// compile-time error, caught by type inference before the program runs:
+//   let mixed = [1, 2.0, true]   // error: heterogeneous array:
+//                                //        first element is int, found float
+let floats = [1.0, 2.0, 3.0]
+print(floats)   // [1.0, 2.0, 3.0]
 
 // Indexing — zero-based
 print(a[0])   // 1
@@ -21,11 +24,12 @@ print(len(a))        // 3
 print(len(empty))    // 0
 print(len("hello"))  // 5
 
-// Index assignment — value semantics: b is an independent copy of a
+// Index assignment — REFERENCE semantics: assignment creates an alias, it does
+// not copy. Mutating through one name is visible through the other.
 let b = a
 b[0] = 42
 print(b[0])   // 42
-print(a[0])   // 1  (a is unchanged)
+print(a[0])   // 42  (a sees the write — a and b are the same array)
 
 // Mutate a directly
 a[1] = 99

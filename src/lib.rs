@@ -20,6 +20,7 @@ pub mod frontend;
 pub mod llm;
 pub mod native;
 pub mod project;
+pub mod stdio;
 
 // Native built-in packages (the `std/*` + core intrinsic registry).
 // The registry types live in `builtins`; each package is a flat top-level module.

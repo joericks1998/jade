@@ -1,8 +1,6 @@
 #[cfg(test)]
 mod tests;
 
-use std::io::Write as _;
-
 use crate::{
     compiler::{tir::JadeType, type_infer::TypeContext, vm::{VmValue, value_to_display}},
     frontend::error::{JadeError, Result, Span},
@@ -16,8 +14,7 @@ fn native_write(args: &[VmValue]) -> Result<VmValue> {
     if args.len() != 1 {
         return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: Span { line: 0, col: 0 } });
     }
-    print!("{}", value_to_display(&args[0]));
-    std::io::stdout().flush().ok();
+    crate::stdio::write_str_flush(&value_to_display(&args[0]));
     Ok(VmValue::Nil)
 }
 
@@ -48,10 +45,7 @@ fn native_input(args: &[VmValue]) -> Result<VmValue> {
     }
     if let Some(prompt) = args.first() {
         match prompt {
-            VmValue::Str(s) => {
-                print!("{}", s);
-                std::io::stdout().flush().ok();
-            }
+            VmValue::Str(s) => crate::stdio::write_str_flush(s),
             _ => return Err(JadeError::TypeError { message: "input".to_string(), span: Span { line: 0, col: 0 } }),
         }
     }

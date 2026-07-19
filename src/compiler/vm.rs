@@ -1696,7 +1696,6 @@ async fn call_value(
                 if args.is_empty() || args.len() > 2 {
                     return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span });
                 }
-                use std::io::Write as _;
                 let mut iter = args.into_iter();
                 let val = iter.next().unwrap();
                 // Optional `end` kwarg (arrives positionally for native callees).
@@ -1713,13 +1712,11 @@ async fn call_value(
                     VmValue::TokenStream(ts) => {
                         vm_drain_token_stream_printing(ts, state, span, end == "\n", false, &[], &[]).await?;
                         if end != "\n" && !end.is_empty() {
-                            print!("{}", end);
-                            let _ = std::io::stdout().flush();
+                            crate::stdio::write_str_flush(&end);
                         }
                     }
                     other => {
-                        print!("{}{}", value_to_display(&other), end);
-                        let _ = std::io::stdout().flush();
+                        crate::stdio::write_str_flush(&format!("{}{}", value_to_display(&other), end));
                     }
                 }
                 Ok(VmValue::Nil)
@@ -1803,7 +1800,7 @@ async fn call_value(
                     }
                     other => {
                         let s = value_to_display(&other);
-                        println!("{}", s);
+                        crate::stdio::write_str_flush(&format!("{s}\n"));
                         Ok(VmValue::Str(s))
                     }
                 }

@@ -71,7 +71,7 @@ pub fn build(
         match decode_frame(&buf) {
             FrameResult::Token(text, consumed) => {
                 if emit_ir {
-                    print!("{text}");
+                    crate::stdio::write_str(&text);
                 }
                 buf.drain(..consumed);
             }
