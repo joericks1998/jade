@@ -63,7 +63,16 @@ source text
   → build/mod.rs           → build daemon       (jade build)
 ```
 
-One thing that surprises people: **native code generation isn't in this repo.** `jade build` runs the frontend here, then ships the TIR over `$HOME/.jade/build.sock`. The daemon owns import resolution, codegen, and linking. This repo's job ends at TIR.
+One thing that surprises people: **the `jade` binary never generates native code.** `jade build` runs the frontend here, then ships the TIR over `$HOME/.jade/build.sock`, and the daemon does the rest.
+
+The LLVM backend itself does live here, in `src/codegen/` — but behind the off-by-default `codegen` feature, because it's the daemon that calls it. That keeps LLVM 18 out of the way for everyone else:
+
+```sh
+cargo build                      # no LLVM needed — this is what CI and releases run
+cargo test --features codegen    # needs LLVM 18 (LLVM_SYS_180_PREFIX)
+```
+
+If you touch `src/codegen/`, run the second one — a plain `cargo test` compiles none of it.
 
 ---
 

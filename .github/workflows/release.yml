@@ -38,11 +38,6 @@ jobs:
             archive: jade-macos-x86_64.tar.gz
             binary: jade
 
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            archive: jade-windows-x86_64.zip
-            binary: jade.exe
-
     steps:
       - uses: actions/checkout@v4
         with:
@@ -60,18 +55,10 @@ jobs:
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Package (Unix)
-        if: runner.os != 'Windows'
+      - name: Package
         run: |
           cp target/${{ matrix.target }}/release/${{ matrix.binary }} jade
           tar -czf ${{ matrix.archive }} jade
-
-      - name: Package (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          Copy-Item target\${{ matrix.target }}\release\${{ matrix.binary }} jade.exe
-          Compress-Archive jade.exe ${{ matrix.archive }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -135,8 +122,7 @@ jobs:
             jade-linux-x86_64.tar.gz \
             jade-macos-arm64.tar.gz \
             jade-macos-x86_64.tar.gz \
-            jade-macos-universal.tar.gz \
-            jade-windows-x86_64.zip > checksums.txt
+            jade-macos-universal.tar.gz > checksums.txt
           cat checksums.txt
 
       - name: Create release and upload assets
@@ -151,5 +137,4 @@ jobs:
             jade-macos-arm64.tar.gz
             jade-macos-x86_64.tar.gz
             jade-macos-universal.tar.gz
-            jade-windows-x86_64.zip
             checksums.txt

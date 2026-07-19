@@ -125,7 +125,6 @@ fn find_package_by_import_path() {
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn find_package_uhttp_present_on_unix() {
     let pkg = find_package("std/uhttp").expect("uhttp should be registered on unix");

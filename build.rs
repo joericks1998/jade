@@ -12,6 +12,21 @@
 use std::path::PathBuf;
 
 fn main() {
+    // Jade is Unix-only (see the matching `compile_error!` in src/lib.rs). This
+    // check has to live here as well, and run first: the C runtime below builds
+    // `posix.c`, so a Windows target would otherwise fail inside `cc` with a
+    // compiler error about missing POSIX headers instead of saying why.
+    //
+    // `cfg!(unix)` would describe the *host*, which is wrong when cross-compiling
+    // — CARGO_CFG_TARGET_FAMILY is the target's, which is what matters.
+    let family = std::env::var("CARGO_CFG_TARGET_FAMILY").unwrap_or_default();
+    if !family.split(',').any(|f| f == "unix") {
+        panic!(
+            "Jade supports Unix-like platforms only (macOS and Linux). \
+             The target you asked for is not Unix; on Windows, build inside WSL2."
+        );
+    }
+
     let rt = PathBuf::from("src/codegen/runtime_lib");
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR");
 

@@ -4,6 +4,11 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## Unreleased
+
+- **Dropped Windows support.** Jade is now macOS and Linux only. The toolchain is built on Unix domain sockets — `jade build` talks to the build daemon and the `jade` inference provider talks to the LLM daemon that way — so a Windows build was only ever the language with its interesting half stubbed out. Building for a non-Unix target now fails immediately with an explanatory error rather than producing a degraded binary. The `jade-windows-x86_64.zip` release artifact is no longer published; on Windows, use WSL2
+- The LLVM AOT backend (`src/codegen/`) moved behind an off-by-default `codegen` Cargo feature. Only the build daemon lowers TIR to native code, so the `jade` CLI no longer requires LLVM 18 to build. Build it with `cargo build --features codegen`
+
 ## v1.1.19
 
 - Added the **`std/uhttp`** package — an HTTP/1.1 client that speaks over a **Unix domain socket** rather than a TCP host, for talking to local daemons such as the Docker Engine API (`/var/run/docker.sock`) and other socket-backed OS services. Mirrors `std/http`: `uhttp.get`/`post`/`put`/`delete`/`head` return the same `{status, body}` dict and accept an optional trailing `headers` dict

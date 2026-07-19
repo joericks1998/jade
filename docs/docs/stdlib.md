@@ -374,7 +374,7 @@ uhttp.stream("unix:///var/run/docker.sock:/v1.43/events", on_event)
 ```
 
 :::note
-Unix-only (unavailable on Windows). One-shot requests (`get`/`post`/…) time out after 30 seconds and send `Connection: close`; `stream` keeps the connection open with no read timeout (events may be sparse). Response framing honors `Content-Length`, `Transfer-Encoding: chunked` (de-chunked), and read-to-EOF on connection close. HTTP errors (non-2xx status) do **not** raise — check `resp["status"]` yourself. A missing socket, a malformed pseudo-URL, or a connection failure raises an `IoError`.
+One-shot requests (`get`/`post`/…) time out after 30 seconds and send `Connection: close`; `stream` keeps the connection open with no read timeout (events may be sparse). Response framing honors `Content-Length`, `Transfer-Encoding: chunked` (de-chunked), and read-to-EOF on connection close. HTTP errors (non-2xx status) do **not** raise — check `resp["status"]` yourself. A missing socket, a malformed pseudo-URL, or a connection failure raises an `IoError`.
 :::
 
 ---

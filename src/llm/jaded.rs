@@ -1,4 +1,3 @@
-#![cfg(unix)]
 //! JadedBackend — native inference via Unix domain socket.
 
 use std::io::{Read, Write};
@@ -282,7 +281,6 @@ impl JadedBackend {
             }
         }
     }
-
 
     fn count_tokens_blocking(sock_path: &str, prompt: &str, span: Span) -> Result<i64> {
         // `count_only` is a daemon-side flag not modelled in InferenceRequest, so

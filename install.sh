@@ -31,7 +31,7 @@ case "$OS" in
     ;;
   *)
     echo "Unsupported OS: $OS"
-    echo "Windows users: download jade-windows-x86_64.zip from https://github.com/$REPO/releases"
+    echo "Jade supports macOS and Linux only. On Windows, install inside WSL2."
     exit 1
     ;;
 esac
