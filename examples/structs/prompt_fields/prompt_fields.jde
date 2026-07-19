@@ -21,11 +21,17 @@ let a3 = Agent { system: "You are a coding assistant" }
 let s3 = a3.system
 // s3 is Value::Prompt("You are a coding assistant")
 
-// Dereference a prompt field directly (requires API key):
-//   let response = ?a.system
-//   print(response)
+// Dereference a prompt field directly (requires API key). Two forms, same
+// operation — `~>` is the terser spelling, the way C's `p->x` beats `(*p).x`:
+//   let response = a.(?system)
+//   let response = a~>system
+//   let n        = a.(?system) |> int          // constraints work as usual
+//   let r        = build(cfg).agent.(?system)
 //
-// Or extract first, then deref:
+// Or extract first, then deref the bare prompt:
 //   let p = a.system
 //   let response = ?p
-//   print(response)
+//
+// Plain `.` is unaffected: `a.system` still just reads the field.
+// Note `?a.system` and `a.?system` are both syntax errors — prefix `?` is for
+// bare prompts only, and the parentheses in `.(?…)` are required.

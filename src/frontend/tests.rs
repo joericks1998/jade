@@ -301,6 +301,20 @@ mod lexer {
     }
 
     #[test]
+    fn test_tokenize_squiggly_arrow() {
+        assert_eq!(kinds("~>"), vec![TokenKind::TildeGt, TokenKind::Eof]);
+    }
+
+    #[test]
+    fn test_tokenize_squiggly_arrow_vs_tilde() {
+        // `~` alone stays Tilde (bitwise NOT); only `~>` becomes TildeGt
+        assert_eq!(
+            kinds("~ ~>"),
+            vec![TokenKind::Tilde, TokenKind::TildeGt, TokenKind::Eof]
+        );
+    }
+
+    #[test]
     fn test_tokenize_arrow_vs_minus() {
         // `-` alone stays Minus; only `->` becomes Arrow
         assert_eq!(
@@ -566,7 +580,7 @@ mod lexer {
 mod parser {
     use crate::frontend::parser::*;
     use crate::frontend::{
-        ast::{BinOpKind, Expr, Program, Stmt, StructFieldDef, UnaryOpKind},
+        ast::{BinOpKind, DerefStyle, Expr, Program, Stmt, StructFieldDef, UnaryOpKind},
         error::JadeError,
         lexer,
     };
@@ -1141,21 +1155,128 @@ mod parser {
     }
 
     #[test]
-    fn test_parse_prompt_deref_field_access() {
-        let p = parse_src("let x = ?obj.system");
-        let Stmt::Let { value: Expr::PromptDeref { expr, constraint, .. }, .. } = &p.stmts[0]
-            else { panic!("expected Let with PromptDeref") };
-        assert!(matches!(expr.as_ref(), Expr::FieldAccess { field, .. } if field == "system"));
-        assert!(constraint.is_none());
+    fn test_prefix_deref_on_field_is_rejected() {
+        // `?obj.field` reads as if `?` applied to `obj`; only the postfix forms
+        // are allowed for fields.
+        for src in ["let x = ?obj.system", "let x = ?obj.field |> int", "let x = ?a.b.c"] {
+            let err = parse_src_err(src);
+            assert!(
+                matches!(err, JadeError::PrefixDerefOnField { .. }),
+                "expected PrefixDerefOnField for {src}, got {err:?}"
+            );
+        }
     }
 
     #[test]
-    fn test_parse_prompt_deref_field_access_typed() {
-        let p = parse_src("let x = ?obj.field |> int");
-        let Stmt::Let { value: Expr::PromptDeref { expr, constraint, .. }, .. } = &p.stmts[0]
+    fn test_dot_question_without_parens_is_rejected() {
+        // `obj.?p` is not one of the two accepted spellings.
+        let err = parse_src_err("let x = obj.?p");
+        assert!(matches!(err, JadeError::UnexpectedToken { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn test_prefix_deref_on_bare_prompt_still_works() {
+        let p = parse_src("let x = ?p");
+        let Stmt::Let { value: Expr::PromptDeref { expr, style, .. }, .. } = &p.stmts[0]
             else { panic!("expected Let with PromptDeref") };
-        assert!(matches!(expr.as_ref(), Expr::FieldAccess { field, .. } if field == "field"));
-        assert!(matches!(constraint.as_deref(), Some(Expr::Identifier { name, .. }) if name == "int"));
+        assert!(matches!(expr.as_ref(), Expr::Identifier { name, .. } if name == "p"));
+        assert_eq!(*style, DerefStyle::Prefix);
+    }
+
+    #[test]
+    fn test_parse_postfix_deref() {
+        for src in ["let x = obj.(?system)", "let x = obj~>system"] {
+            let p = parse_src(src);
+            let Stmt::Let { value: Expr::PromptDeref { expr, constraint, .. }, .. } = &p.stmts[0]
+                else { panic!("expected Let with PromptDeref for {src}") };
+            let Expr::FieldAccess { object, field, .. } = expr.as_ref()
+                else { panic!("expected FieldAccess for {src}") };
+            assert!(matches!(object.as_ref(), Expr::Identifier { name, .. } if name == "obj"));
+            assert_eq!(field, "system");
+            assert!(constraint.is_none());
+        }
+    }
+
+    #[test]
+    fn test_postfix_deref_does_not_shadow_plain_field_access() {
+        // `.` followed by an identifier must still be ordinary field access —
+        // only `.(?` diverts into a deref.
+        let p = parse_src("let x = obj.system");
+        let Stmt::Let { value: Expr::FieldAccess { field, .. }, .. } = &p.stmts[0]
+            else { panic!("expected plain FieldAccess") };
+        assert_eq!(field, "system");
+    }
+
+    #[test]
+    fn test_deref_records_its_surface_style() {
+        for (src, want) in [
+            ("let x = ?p",          DerefStyle::Prefix),
+            ("let x = obj.(?p)",    DerefStyle::DotParen),
+            ("let x = obj~>p",      DerefStyle::Squiggly),
+        ] {
+            let p = parse_src(src);
+            let Stmt::Let { value: Expr::PromptDeref { style, .. }, .. } = &p.stmts[0]
+                else { panic!("expected Let with PromptDeref for {src}") };
+            assert_eq!(*style, want, "wrong style for {src}");
+        }
+    }
+
+    #[test]
+    fn test_deref_style_is_cosmetic_only() {
+        // Both accepted field spellings must agree on everything but `style` (and
+        // spans, which legitimately differ since the operator sits elsewhere in
+        // the line) — the sugar is a spelling, not a semantic distinction.
+        for src in ["let x = obj.(?p)", "let x = obj~>p"] {
+            let p = parse_src(src);
+            let Stmt::Let { value: Expr::PromptDeref { expr, constraint, .. }, .. } = &p.stmts[0]
+                else { panic!("expected PromptDeref for {src}") };
+            let Expr::FieldAccess { object, field, .. } = expr.as_ref()
+                else { panic!("expected FieldAccess for {src}") };
+            assert!(matches!(object.as_ref(), Expr::Identifier { name, .. } if name == "obj"));
+            assert_eq!(field, "p");
+            assert!(constraint.is_none());
+        }
+    }
+
+    #[test]
+    fn test_parse_postfix_deref_typed() {
+        for src in ["let x = obj.(?field) |> int", "let x = obj~>field |> int"] {
+            let p = parse_src(src);
+            let Stmt::Let { value: Expr::PromptDeref { expr, constraint, .. }, .. } = &p.stmts[0]
+                else { panic!("expected Let with PromptDeref for {src}") };
+            assert!(matches!(expr.as_ref(), Expr::FieldAccess { field, .. } if field == "field"));
+            assert!(matches!(constraint.as_deref(), Some(Expr::Identifier { name, .. }) if name == "int"));
+        }
+    }
+
+    #[test]
+    fn test_parse_postfix_deref_after_call() {
+        // The point of the sugar: the deref stays at the tail of a chain.
+        for src in ["let x = make(1).inner.(?p)", "let x = make(1).inner~>p"] {
+            let p = parse_src(src);
+            let Stmt::Let { value: Expr::PromptDeref { expr, .. }, .. } = &p.stmts[0]
+                else { panic!("expected Let with PromptDeref for {src}") };
+            let Expr::FieldAccess { object, field, .. } = expr.as_ref()
+                else { panic!("expected FieldAccess for {src}") };
+            assert_eq!(field, "p");
+            assert!(matches!(object.as_ref(), Expr::FieldAccess { field, .. } if field == "inner"));
+        }
+    }
+
+    #[test]
+    fn test_arrow_does_not_break_bitwise_not() {
+        let p = parse_src("let x = ~a > b");
+        let Stmt::Let { value, .. } = &p.stmts[0] else { panic!("expected Let") };
+        assert!(matches!(value, Expr::BinOp { op: BinOpKind::Gt, .. }));
+    }
+
+    #[test]
+    fn test_parse_postfix_streaming_prohibition() {
+        for src in ["print(obj.(?p) |> int)", "print(obj~>p |> int)"] {
+            let tokens = lexer::tokenize(src).expect("lex");
+            let err = parse(tokens).unwrap_err();
+            assert!(matches!(err, JadeError::StreamingWithType { .. }), "no error for {src}");
+        }
     }
 
     #[test]

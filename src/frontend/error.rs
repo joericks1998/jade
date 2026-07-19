@@ -89,6 +89,10 @@ pub enum JadeError {
     /// `?p |> Type` was used inside `print(...)` where streaming output is expected.
     StreamingWithType { span: Span },
 
+    /// Prefix `?` was applied to a field access (`?obj.field`).  Prefix `?` is for
+    /// bare prompts only; dereferencing a prompt held in a field uses a postfix form.
+    PrefixDerefOnField { field: String, span: Span },
+
     /// Dict lookup used a key that does not exist.
     KeyNotFound { key: String, span: Span },
 
@@ -199,6 +203,8 @@ impl std::fmt::Display for JadeError {
                 write!(f, "[{}:{}] prompt '{}' failed to produce a valid typed value after {} attempt(s)", span.line, span.col, name, attempts),
             JadeError::StreamingWithType { span } =>
                 write!(f, "[{}:{}] typed dereference '?p |> Type' cannot be used inside print() — assign to a variable first", span.line, span.col),
+            JadeError::PrefixDerefOnField { field, span } =>
+                write!(f, "[{}:{}] prefix '?' cannot be applied to a field — write 'obj.(?{})' or 'obj~>{}' instead", span.line, span.col, field, field),
             JadeError::KeyNotFound { key, span } =>
                 write!(f, "[{}:{}] key '{}' not found in dict", span.line, span.col, key),
             JadeError::PromptFieldNotStr { field, span } =>

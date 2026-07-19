@@ -1,44 +1,49 @@
 use super::*;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::frontend::ast::Program;
 use crate::compiler::tir::TProgram;
 
-// Tests that mutate the process-global `HOME` env var (to redirect the cache
-// root into a temp dir) must not run concurrently. Serialize them behind this
-// lock. Pure-logic tests (hashing, path shape) don't touch HOME and run freely.
-static HOME_LOCK: Mutex<()> = Mutex::new(());
+/// Monotonic counter making each test's temp directory name unique.  A
+/// timestamp is not sufficient: two tests starting in the same nanosecond tick
+/// would collide and share a cache root.
+static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
-/// Run `f` with HOME pointed at a fresh unique temp dir, restoring the previous
-/// HOME afterwards. Serialized via HOME_LOCK.
+/// Restores the previous cache-root override and deletes the temp dir on drop —
+/// including when the test body panics, so one failing assertion cannot leak a
+/// redirect onto the thread or leave directories behind.
+struct TempCacheRoot {
+    home: std::path::PathBuf,
+    prev: Option<std::path::PathBuf>,
+}
+
+impl Drop for TempCacheRoot {
+    fn drop(&mut self) {
+        set_cache_root_override(self.prev.take());
+        let _ = std::fs::remove_dir_all(&self.home);
+    }
+}
+
+/// Run `f` with the cache root redirected into a fresh temp dir private to this
+/// thread.  `f` receives the simulated home directory, whose cache root is
+/// `home/.jade/cache` — mirroring the real `HOME`-derived layout.
+///
+/// Deliberately does not touch the `HOME` env var: see the note on
+/// `CACHE_ROOT_OVERRIDE` in `cache/mod.rs`.
 fn with_temp_home<F: FnOnce(&std::path::Path)>(f: F) {
-    let _guard = HOME_LOCK.lock().unwrap();
-    let prev = std::env::var("HOME").ok();
-
     let unique = format!(
         "jade-cache-test-{}-{}",
         std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
+        NEXT_ID.fetch_add(1, Ordering::Relaxed)
     );
     let home = std::env::temp_dir().join(unique);
-    std::fs::create_dir_all(&home).unwrap();
-    // SAFETY: guarded by HOME_LOCK so no other cache test races on HOME.
-    unsafe { std::env::set_var("HOME", &home) };
+    let root = cache_root_from_home(&home);
+    std::fs::create_dir_all(&root).unwrap();
+
+    let prev = set_cache_root_override(Some(root));
+    let _guard = TempCacheRoot { home: home.clone(), prev };
 
     f(&home);
-
-    // restore + cleanup
-    // SAFETY: still holding HOME_LOCK.
-    unsafe {
-        match prev {
-            Some(p) => std::env::set_var("HOME", p),
-            None => std::env::remove_var("HOME"),
-        }
-    }
-    let _ = std::fs::remove_dir_all(&home);
 }
 
 // ── file_hash ─────────────────────────────────────────────────────────────
@@ -97,10 +102,16 @@ fn hex_produces_64_lowercase_chars() {
 // ── cache_root layout ─────────────────────────────────────────────────────
 
 #[test]
-fn cache_root_ends_with_jade_cache() {
+fn cache_root_is_derived_from_home() {
+    // Pure logic — no env mutation needed to pin the layout.
+    let root = cache_root_from_home(std::path::Path::new("/home/someone"));
+    assert_eq!(root, std::path::Path::new("/home/someone/.jade/cache"));
+}
+
+#[test]
+fn cache_root_honours_the_temp_redirect() {
     with_temp_home(|home| {
-        let root = cache_root();
-        assert_eq!(root, home.join(".jade").join("cache"));
+        assert_eq!(cache_root(), home.join(".jade").join("cache"));
     });
 }
 
@@ -212,6 +223,6 @@ fn purge_predicate_filters() {
 
 #[test]
 fn cache_format_version_is_stable() {
-    assert_eq!(CACHE_FORMAT_VERSION, 3);
+    assert_eq!(CACHE_FORMAT_VERSION, 4);
     assert!(!JADE_VERSION.is_empty());
 }

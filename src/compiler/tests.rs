@@ -1285,7 +1285,7 @@ mod vm {
     #[test]
     fn test_vm_prompt_deref_field_access_no_backend() {
         let err = try_run_src(
-            "struct Agent {\n  prompt system = \"helpful\"\n}\nlet a = Agent {}\nlet r = ?a.system"
+            "struct Agent {\n  prompt system = \"helpful\"\n}\nlet a = Agent {}\nlet r = a.(?system)"
         ).err().expect("expected error");
         assert!(matches!(err, JadeError::MissingApiKey { .. }));
     }
@@ -1293,7 +1293,7 @@ mod vm {
     #[test]
     fn test_vm_prompt_deref_field_access_not_a_prompt() {
         let err = run_src_with_mock(
-            "struct S {\n  x,\n}\nlet s = S { x: 42 }\nlet r = ?s.x",
+            "struct S {\n  x,\n}\nlet s = S { x: 42 }\nlet r = s.(?x)",
             vec![]
         ).err().expect("expected error");
         assert!(matches!(err, JadeError::NotAPrompt { .. }));
@@ -1302,10 +1302,32 @@ mod vm {
     #[test]
     fn test_vm_prompt_deref_field_access_with_mock() {
         let s = run_src_with_mock(
-            "struct Agent {\n  prompt system = \"Say hello\"\n}\nlet a = Agent {}\nlet r = ?a.system",
+            "struct Agent {\n  prompt system = \"Say hello\"\n}\nlet a = Agent {}\nlet r = a.(?system)",
             vec!["hello!"]
         ).unwrap();
         assert_eq!(get_str(&s, "r"), "hello!");
+    }
+
+    #[test]
+    fn test_vm_postfix_deref_with_mock() {
+        for deref in ["a.(?system)", "a~>system"] {
+            let src = format!(
+                "struct Agent {{\n  prompt system = \"Say hello\"\n}}\nlet a = Agent {{}}\nlet r = {deref}"
+            );
+            let s = run_src_with_mock(&src, vec!["hello!"]).unwrap();
+            assert_eq!(get_str(&s, "r"), "hello!", "wrong result for {deref}");
+        }
+    }
+
+    #[test]
+    fn test_vm_postfix_deref_typed_with_mock() {
+        for deref in ["q.(?ask)", "q~>ask"] {
+            let src = format!(
+                "struct Q {{\n  prompt ask = \"What is 2+2?\"\n}}\nlet q = Q {{}}\nlet n = {deref} |> int"
+            );
+            let s = run_src_with_mock(&src, vec!["4"]).unwrap();
+            assert_eq!(get_int(&s, "n"), 4, "wrong result for {deref}");
+        }
     }
 
     #[test]

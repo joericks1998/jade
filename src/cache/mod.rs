@@ -16,7 +16,9 @@ pub const JADE_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// version bump in Cargo.toml.
 /// v3: async migration added JadeType::AsyncFn/Future, TStmt::AsyncFnDef,
 ///     TExprKind::Await, and Instr::Spawn/Await/Join — all serde-serialized.
-pub const CACHE_FORMAT_VERSION: u32 = 3;
+/// v4: Expr::PromptDeref gained a `style` field recording whether the source
+///     spelled it `?p`, `x.(?f)`, or `x~>f`.
+pub const CACHE_FORMAT_VERSION: u32 = 4;
 
 // ── Internal types ────────────────────────────────────────────────────────────
 
@@ -56,9 +58,40 @@ fn hex(hash: &[u8; 32]) -> String {
 // The two-level layout bounds per-directory entry counts on filesystems that
 // slow down with large directories (HFS+, older ext4 configs, etc.).
 
+/// The cache root for a given home directory.  Split out from `cache_root` so it
+/// can be tested without touching the process environment.
+fn cache_root_from_home(home: &Path) -> PathBuf {
+    home.join(".jade").join("cache")
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only cache-root override.
+    ///
+    /// Tests must NOT redirect the cache by setting `HOME`: `setenv` mutates
+    /// process-global state, and a concurrent `getenv` on any of the other test
+    /// threads is a data race (hence `set_var` being `unsafe` since the 2024
+    /// edition).  In practice that raced badly enough to make cache tests fail
+    /// intermittently under the full suite.  A thread-local keeps each test's
+    /// redirection private to its own thread, so no locking is needed and the
+    /// tests run in parallel with everything else.
+    static CACHE_ROOT_OVERRIDE: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Set the calling thread's cache-root override, returning the previous value.
+#[cfg(test)]
+pub(crate) fn set_cache_root_override(root: Option<PathBuf>) -> Option<PathBuf> {
+    CACHE_ROOT_OVERRIDE.with(|slot| std::mem::replace(&mut *slot.borrow_mut(), root))
+}
+
 pub(crate) fn cache_root() -> PathBuf {
+    #[cfg(test)]
+    if let Some(root) = CACHE_ROOT_OVERRIDE.with(|slot| slot.borrow().clone()) {
+        return root;
+    }
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".jade").join("cache")
+    cache_root_from_home(Path::new(&home))
 }
 
 fn cache_dir(hash: &[u8; 32]) -> PathBuf {

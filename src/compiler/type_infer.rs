@@ -1284,7 +1284,7 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
 
         // ── LLM prompt dereference ────────────────────────────────────────────
 
-        Expr::PromptDeref { expr, constraint, span } => {
+        Expr::PromptDeref { expr, constraint, span, style: _ } => {
             let texpr = infer_expr(expr, ctx)?;
             if texpr.ty != JadeType::Prompt && texpr.ty != JadeType::Unknown {
                 return Err(JadeError::TypeMismatch {
