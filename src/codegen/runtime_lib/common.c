@@ -38,14 +38,9 @@ void jade_rt_fatal(const char* msg) {
  * file resolve against the Rust symbols. Floats are heap-boxed there exactly as
  * before (system malloc of an 8-byte f64, tagged JRT_TAG_FLOAT). */
 
-/* Await N futures into results_out. Platform-agnostic (only calls jade_await,
- * which each backend supplies), so it lives here rather than being duplicated
- * in each platform backend. */
-void jade_join(jade_future_t* futures, int n, jade_value_t* results_out) {
-    for (int i = 0; i < n; i++) {
-        results_out[i] = jade_await(futures[i]);
-    }
-}
+/* jade_join moved to the platform backend alongside jade_spawn/jade_await: the
+ * scheduler now lives in the Rust runtime (jade-runtime, src/task.rs) and joins
+ * there in one call, so there is no longer a platform-agnostic loop to share. */
 
 /* Length-bounded string equality/ordering moved to the shared Rust runtime
  * (jade-runtime, src/strval.rs) along with the dynamic eq/cmp that used them.

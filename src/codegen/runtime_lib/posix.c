@@ -20,141 +20,95 @@ void jade_rt_exit(int code) { exit(code); }
 void* jade_dlopen(const char* path) { return dlopen(path, RTLD_NOW | RTLD_LOCAL); }
 void* jade_dlsym(void* handle, const char* sym) { return dlsym(handle, sym); }
 
-/* ── Async tasks (pthread-backed) ─────────────────────────────────────── */
+/* ── Async tasks ──────────────────────────────────────────────────────────
+ *
+ * The scheduler now lives in the Rust runtime (`jade-runtime/src/task.rs`):
+ * a bounded worker pool instead of one detached pthread per spawn, and a
+ * future that carries an ObjHeader so it can be refcounted like any other
+ * value. What stays here is the part Rust cannot express.
+ *
+ * Jade exceptions are setjmp/longjmp over a _Thread_local frame stack, so an
+ * exception raised inside a task cannot jump to the awaiting thread's
+ * try/catch — and longjmp past a Rust frame is undefined behavior regardless.
+ * So the task body runs inside a jump frame *here*, on the worker thread, and
+ * the raised value travels back to the awaiter as data. `jade_await` re-raises
+ * it on the awaiting thread, where the frame actually lives.
+ */
 
-struct jade_future {
-    pthread_mutex_t mutex;
-    pthread_cond_t  cond;
-    jade_value_t    result;
-    jade_value_t    error;      /* raised value, valid when `failed` */
-    const char*     error_type; /* struct type name of the raised value, or NULL */
-    int             failed;  /* nonzero if the task raised an uncaught exception */
-    int             done;
-};
+extern void  jrt_set_task_invoker(int (*f)(jade_task_fn, jade_value_t*, int,
+                                           jade_value_t*, jade_value_t*, const char**));
+extern void* jrt_spawn(jade_task_fn fn, const jade_value_t* args, int n);
+extern jade_value_t jrt_await_impl(void* fut, int* failed, jade_value_t* err, const char** ty);
+extern void  jrt_join_impl(void* const* futs, int n, jade_value_t* out,
+                           int* failed, jade_value_t* err, const char** ty);
 
-typedef struct {
-    jade_task_fn        fn;
-    jade_value_t*       args;   /* heap copy; freed after the task returns */
-    int                 n_args;
-    struct jade_future* future;
-} TaskCtx;
-
-static void* task_runner(void* vp) {
-    TaskCtx* tc = (TaskCtx*)vp;
-
-    /* Exception frames are per-thread (exc_stack is _Thread_local), so an
-     * exception raised in the task body can't longjmp to the awaiting thread's
-     * try/catch. Catch it here at the task boundary and stash the raised value;
-     * jade_await re-raises it on the awaiting thread, which owns the frame. */
+/* Run a task body inside a jump frame. Returns nonzero if it raised, and then
+ * reports the thrown value plus its struct type name so the awaiting thread can
+ * re-raise with the type intact — typed `catch <Type>` arms over `await` match
+ * on that name. */
+static int jade_task_invoke(jade_task_fn fn, jade_value_t* args, int n,
+                            jade_value_t* out_result, jade_value_t* out_err,
+                            const char** out_type) {
     jmp_buf task_buf;
-    jade_value_t result = 0;
-    int          failed = 0;
-    jade_value_t error  = 0;
-    const char*  error_type = NULL;
-
     if (setjmp(task_buf) == 0) {
         jade_exc_push_frame(&task_buf);
-        result = tc->fn(tc->args, tc->n_args);
+        *out_result = fn(args, n);
         jade_exc_pop();
-    } else {
-        failed     = 1;
-        error      = jade_exc_value();
-        /* Preserve the struct type name so the awaiting thread re-raises with it
-         * intact — typed `catch <Type>` arms over `await` match on this name. */
-        error_type = jade_exc_type();
+        return 0;
     }
+    *out_err  = jade_exc_value();
+    *out_type = jade_exc_type();
+    return 1;
+}
 
-    free(tc->args);
-    struct jade_future* fut = tc->future;
-    free(tc);
+/* Hand the shim to the Rust pool before main runs. This translation unit also
+ * defines jade_rt_exit, so it is always pulled in from the static archive and
+ * the constructor is never dropped. */
+__attribute__((constructor))
+static void jade_register_task_invoker(void) {
+    jrt_set_task_invoker(jade_task_invoke);
+}
 
-    pthread_mutex_lock(&fut->mutex);
-    fut->result     = result;
-    fut->error      = error;
-    fut->error_type = error_type;
-    fut->failed     = failed;
-    fut->done       = 1;
-    pthread_cond_broadcast(&fut->cond);
-    pthread_mutex_unlock(&fut->mutex);
-
-    return NULL;
+/* Re-raise a task's failure on the calling (awaiting) thread.
+ *
+ * The DoubleAwait / NotAFuture texts are copied verbatim from the VM's
+ * JadeError Display impl (src/frontend/error.rs): the parity gate diffs stdout
+ * byte-for-byte, so a reworded message here reads as a backend divergence. */
+static void jade_task_rethrow(int failed, jade_value_t err, const char* ty) {
+    switch (failed) {
+        case 1:
+            jade_exc_throw_typed(err, ty);
+            break;
+        case 2:
+            jade_exc_throw_typed(
+                jrt_box_str(jrt_str_dup("cannot await the same Future more than once",
+                                        JRT_TRUSTED)), NULL);
+            break;
+        case 3:
+            jade_exc_throw_typed(
+                jrt_box_str(jrt_str_dup("'await' applied to a non-Future value",
+                                        JRT_TRUSTED)), NULL);
+            break;
+        default:
+            break;
+    }
 }
 
 jade_future_t jade_spawn(jade_task_fn fn, jade_value_t* args, int n_args) {
-    struct jade_future* fut = calloc(1, sizeof(struct jade_future));
-    if (!fut) abort();
-
-    if (pthread_mutex_init(&fut->mutex, NULL) != 0) {
-        free(fut);
-        abort();
-    }
-    if (pthread_cond_init(&fut->cond, NULL) != 0) {
-        pthread_mutex_destroy(&fut->mutex);
-        free(fut);
-        abort();
-    }
-
-    jade_value_t* args_copy = NULL;
-    if (n_args > 0) {
-        /* Guard against overflow on 32-bit targets where size_t is 32 bits. */
-        if ((size_t)n_args > SIZE_MAX / sizeof(jade_value_t)) abort();
-        args_copy = malloc(sizeof(jade_value_t) * (size_t)n_args);
-        if (!args_copy) abort();
-        memcpy(args_copy, args, sizeof(jade_value_t) * (size_t)n_args);
-    }
-
-    TaskCtx* tc = malloc(sizeof(TaskCtx));
-    if (!tc) {
-        free(args_copy);
-        pthread_mutex_destroy(&fut->mutex);
-        pthread_cond_destroy(&fut->cond);
-        free(fut);
-        abort();
-    }
-    tc->fn     = fn;
-    tc->args   = args_copy;
-    tc->n_args = n_args;
-    tc->future = fut;
-
-    pthread_t tid;
-    if (pthread_create(&tid, NULL, task_runner, tc) != 0) {
-        free(tc);
-        free(args_copy);
-        pthread_mutex_destroy(&fut->mutex);
-        pthread_cond_destroy(&fut->cond);
-        free(fut);
-        abort();
-    }
-    pthread_detach(tid);
-
-    return fut;
+    return (jade_future_t)jrt_spawn(fn, args, n_args);
 }
 
 jade_value_t jade_await(jade_future_t future) {
-    struct jade_future* fut = future;
-    pthread_mutex_lock(&fut->mutex);
-    while (!fut->done) {
-        pthread_cond_wait(&fut->cond, &fut->mutex);
-    }
-    jade_value_t result     = fut->result;
-    int          failed     = fut->failed;
-    jade_value_t error      = fut->error;
-    const char*  error_type = fut->error_type;
-    pthread_mutex_unlock(&fut->mutex);
-    if (failed) {
-        /* Re-raise on this (awaiting) thread, where the try/catch frame lives.
-         * Carry the type name so typed catch arms still match. */
-        jade_exc_throw_typed(error, error_type);
-    }
-    return result;
+    int failed = 0; jade_value_t err = 0; const char* ty = NULL;
+    jade_value_t r = jrt_await_impl((void*)future, &failed, &err, &ty);
+    jade_task_rethrow(failed, err, ty);
+    return r;
 }
 
-void jade_future_free(jade_future_t future) {
-    struct jade_future* fut = future;
-    assert(fut->done && "jade_future_free called before jade_await");
-    pthread_mutex_destroy(&fut->mutex);
-    pthread_cond_destroy(&fut->cond);
-    free(fut);
+void jade_join(jade_future_t* futures, int n, jade_value_t* results_out) {
+    int failed = 0; jade_value_t err = 0; const char* ty = NULL;
+    jrt_join_impl((void* const*)futures, n, results_out, &failed, &err, &ty);
+    jade_task_rethrow(failed, err, ty);
 }
 
 #endif /* !__JADE_KERNEL__ */

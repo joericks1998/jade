@@ -60,6 +60,7 @@ pub mod randomf;
 pub mod render;
 pub mod shf;
 pub mod string;
+pub mod task;
 pub mod strval;
 pub mod sys;
 pub mod timef;

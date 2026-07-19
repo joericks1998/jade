@@ -249,9 +249,17 @@ pub(crate) unsafe fn free_obj(ptr: *mut c_void) {
             unsafe { decref_word(*v) };
         }
         drop(b);
+    } else if kind == ObjKind::Future as u8 {
+        // A future is header-carrying but not a collection: its payload is a
+        // single result word, not a Vec of children, so there is no cascade to
+        // run. `task::destroy` reclaims the box and records the free itself,
+        // because the allocation is a `FutureObj` (lock + condvar) rather than
+        // one of the `*Obj<W>` shapes above.
+        unsafe { crate::task::destroy(ptr as *mut crate::task::FutureObj) };
+        return;
     } else {
-        // Float/Str/Fn/Future/etc.: no child cascade defined here. The collector
-        // only frees collections (the precondition), so this arm is unreached in
+        // Float/Str/Fn/etc.: no child cascade defined here. The collector only
+        // frees collections (the precondition), so this arm is unreached in
         // practice; leaving the allocation is safe (a leak, not corruption).
         return;
     }
