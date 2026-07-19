@@ -564,7 +564,7 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
 
     /// Indirect call through a first-class function value: untag the callee box and
     /// load its `fn_ptr` (field 0). If `fn_ptr` is the `jrt_native_call` sentinel,
-    /// the box is a native function value `{ sentinel, env={handle,name}, name }` —
+    /// the box is a native function value `{ sentinel, kind, env={handle,name} }` —
     /// dispatch through `jrt_native_call`. Otherwise it is an ordinary `jf_<uid>`
     /// box — call it directly with `args` (all tagged i64 words). The callee's arity
     /// equals `args.len()` (the frontend guarantees it).
@@ -596,9 +596,10 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
         b.build_conditional_branch(is_native, nat_bb, reg_bb).map_err(e)?;
 
         // ── native: read env {handle, name}, marshal args, jrt_native_call ──
+        // env is at slot 2; slot 1 is the ObjKind word (see emit_native_fn_value).
         b.position_at_end(nat_bb);
         let env_slot = unsafe {
-            b.build_in_bounds_gep(ptrt, box_ptr, &[i64_ty.const_int(1, false)], "envs").map_err(e)?
+            b.build_in_bounds_gep(ptrt, box_ptr, &[i64_ty.const_int(2, false)], "envs").map_err(e)?
         };
         let env = b.build_load(ptrt, env_slot, "env").map_err(e)?.into_pointer_value();
         let handle = b.build_load(ptrt, env, "nh").map_err(e)?.into_pointer_value();
@@ -1642,11 +1643,23 @@ fn emit_native_call<'ctx>(
         .into_int_value())
 }
 
-/// Materialize a first-class native function value: a heap `{ fn_ptr, env, name }`
-/// where `fn_ptr` is the `jrt_native_call` address used purely as a sentinel (a
-/// real `jf_<uid>` box never holds this symbol), and `env = { handle, name }`.
-/// `indirect_call` recognizes the sentinel and routes through `jrt_native_call`.
-/// Returned as a `TAG_PTR` word. Layout mirrors the legacy path's `jade_fn_t`.
+/// Materialize a first-class native function value: a heap
+/// `{ fn_ptr@0, kind@8, env@16 }` where `fn_ptr` is the `jrt_native_call`
+/// address used purely as a sentinel (a real `jf_<uid>` box never holds this
+/// symbol), and `env = { handle, name }`. `indirect_call` recognizes the
+/// sentinel and routes through `jrt_native_call`. Returned as a `TAG_PTR` word.
+///
+/// The `kind` word at offset 8 holds `ObjKind::Fn`, aligned with
+/// `ObjHeader.kind`, exactly as `fn_box_word` does for ordinary functions. It is
+/// load-bearing, not decorative: without it, offset 8 held the `env` *pointer*,
+/// so `jrt_decref` reading an `ObjKind` there would interpret a heap address's
+/// low byte as a kind — and a byte that happened to be 2/3/4 would send
+/// `free_obj` off to `Box::from_raw` the value as an Array/Dict/Struct. That
+/// hazard is the reason native refs used to veto refcounting for the whole
+/// program.
+///
+/// The third slot used to hold `name`, which nothing ever read (`env` already
+/// carries it), so the kind word costs no extra space.
 fn emit_native_fn_value<'ctx>(
     low: &Lowerer<'_, 'ctx>,
     pkgid: u32,
@@ -1681,7 +1694,7 @@ fn emit_native_fn_value<'ctx>(
     let env = alloc(16, "native_env")?;
     store_ptr(env, 0, handle.into())?;
     store_ptr(env, 1, name_ptr.into())?;
-    // fn value = { sentinel, env, name }
+    // fn value = { sentinel, kind, env }
     let sentinel = low
         .runtime_fn(
             "jrt_native_call",
@@ -1691,8 +1704,12 @@ fn emit_native_fn_value<'ctx>(
         .as_pointer_value();
     let fnval = alloc(24, "native_fn_val")?;
     store_ptr(fnval, 0, sentinel.into())?;
-    store_ptr(fnval, 1, env.into())?;
-    store_ptr(fnval, 2, name_ptr.into())?;
+    // kind word at offset 8 — see the doc comment.
+    let kind_slot = unsafe {
+        b.build_in_bounds_gep(i64_ty, fnval, &[i64_ty.const_int(1, false)], "nkind").map_err(err)?
+    };
+    b.build_store(kind_slot, i64_ty.const_int(OBJKIND_FN, false)).map_err(err)?;
+    store_ptr(fnval, 2, env.into())?;
     Ok(low.tag_ptr(fnval))
 }
 
@@ -2187,33 +2204,31 @@ fn build_struct_defaults(
 /// and the top-level chunk becomes `jade_toplevel() -> i64`. Returns the
 /// top-level function (for `main` to call), or `Err` on any opcode/construct the
 /// backend can't lower yet (the daemon then falls back to `expr.rs`).
-/// Whether the whole program is **refcount-safe**: every heap value it can put in
-/// a `TAG_PTR` word is header-carrying, so `jrt_incref`/`jrt_decref` (and the
-/// destructor's child cascade) can dispatch on the `ObjKind` byte and never touch
-/// a header-less allocation. That holds for collections (Array/Dict/Struct) and
-/// for function boxes (kind `Fn`, see `fn_box_word`) — so first-class functions
-/// are fine — but NOT for the still-header-less async futures (`Spawn`/`Await`/
-/// `Join`), prompts (`MakePrompt`/`PromptDeref`), or native-FFI function values.
-/// A program using any of those leaves refcounting off and leaks, exactly as
-/// before B4.2. (Header-ifying futures/native/prompts would widen this further.)
+
+/// Whether the whole program is **refcount-safe**: every heap value it can put
+/// in a `TAG_PTR` word is header-carrying, so `jrt_incref`/`jrt_decref` (and the
+/// destructor's child cascade) can dispatch on the `ObjKind` byte at offset 8
+/// and never touch a header-less allocation.
 ///
-/// `defs` is every function in the program (top's reachable tree plus appended
-/// extend-block methods); scanning `top` + each def's chunk covers all code.
-fn program_collections_only(top: &Chunk, defs: &[Arc<CompiledFn>]) -> bool {
-    let chunk_ok = |code: &[Instr]| {
-        code.iter().all(|instr| match instr {
-            // Prompts and native fn values are still header-less, so they
-            // still veto. Async no longer does: a future carries an ObjHeader
-            // and ObjKind::Future, so incref/decref handle it like any other
-            // heap value. Note the veto is an `all()` — a program mixing async
-            // with a prompt is still vetoed by the prompt, so this only turns
-            // refcounting on for programs that were never at risk.
-            Instr::MakePrompt(..) | Instr::PromptDeref(..) => false,
-            Instr::GetGlobal(_, name) => parse_native_ref(name).is_none(),
-            _ => true,
-        })
-    };
-    chunk_ok(&top.code) && defs.iter().all(|d| chunk_ok(&d.chunk.code))
+/// This is now unconditionally true, and the scan is gone. Every `TAG_PTR`
+/// producer accounts for offset 8:
+///
+///  * collections (Array/Dict/Struct) and futures carry a real `ObjHeader`;
+///  * grammar objects carry `ObjKind::Grammar` (`grammarf.rs`);
+///  * ordinary fn boxes (`fn_box_word`) and native fn values
+///    (`emit_native_fn_value`) carry `ObjKind::Fn` there, so the refcount ops
+///    recognise them and no-op;
+///  * a prompt is not a heap kind at all — `MakePrompt` stores the underlying
+///    string, and a `TAG_STR` word is rejected by tag before any header is read.
+///
+/// It is kept as a named predicate rather than inlined as `true` so that the
+/// invariant has somewhere to live: **anything that introduces a new `TAG_PTR`
+/// value must put an `ObjKind` at offset 8, or re-introduce a veto here.** The
+/// last holdout was the native fn value, whose offset 8 held the `env` pointer —
+/// a heap address whose low byte, if it happened to be 2/3/4, would have sent
+/// `free_obj` off to reclaim it as an Array/Dict/Struct.
+fn program_collections_only(_top: &Chunk, _defs: &[Arc<CompiledFn>]) -> bool {
+    true
 }
 
 /// A lowered program: its top-level entry plus the named functions it defines.
@@ -3962,6 +3977,33 @@ mod tests {
         assert!(ir.contains("jrt_val_set_index"), "SetIndex via runtime dispatch:\n{ir}");
         // The array word carries the non-string heap tag (`or …, 1`).
         assert!(ir.contains("tagptr"), "array pointer tagged TAG_PTR:\n{ir}");
+    }
+
+    /// A native fn value's layout is `{ sentinel@0, ObjKind::Fn@8, env@16 }`.
+    ///
+    /// The kind word at offset 8 is what makes the value safe to hand to
+    /// `jrt_decref`: without it, offset 8 held the `env` pointer, and a heap
+    /// address whose low byte happened to be 2/3/4 would have been read as
+    /// Array/Dict/Struct and reclaimed as one. That hazard is why native refs
+    /// used to veto refcounting for the entire program.
+    ///
+    /// Nothing covered this path before, so the slot indices could be changed
+    /// silently — a wrong index compiles cleanly and corrupts at runtime.
+    #[test]
+    fn native_fn_value_carries_an_objkind_at_offset_8() {
+        // `let f = <native ref>` — loading the ref as a value (not calling it)
+        // is what materializes the box.
+        let ir = ir_of(
+            &[GetGlobal(0, "__native$0$somefn".into()), Return(Some(0))],
+            2,
+        );
+        // 24-byte box, and the kind constant stored into it.
+        assert!(ir.contains("native_fn_val"), "native fn box allocated:\n{ir}");
+        assert!(
+            ir.contains(&format!("store i64 {OBJKIND_FN}")),
+            "ObjKind::Fn written at offset 8 — without it jrt_decref misreads the env pointer as a kind:\n{ir}"
+        );
+        assert!(ir.contains("tagptr"), "native fn value tagged TAG_PTR:\n{ir}");
     }
 
     #[test]
