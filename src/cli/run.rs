@@ -51,14 +51,9 @@ pub fn run_script(name: &str) {
     });
 
     // Execute via shell.
-    #[cfg(unix)]
     let status = std::process::Command::new("sh")
         .arg("-c")
         .arg(&cmd)
-        .status();
-    #[cfg(windows)]
-    let status = std::process::Command::new("cmd")
-        .args(["/C", &cmd])
         .status();
 
     match status {

@@ -6,14 +6,6 @@ use std::process;
 /// program is then handed to the build daemon over `$HOME/.jade/build.sock`,
 /// which performs import resolution, code generation, and linking.
 pub fn run_build(path: &str, output: Option<&str>, emit_ir: bool) {
-    #[cfg(not(unix))]
-    {
-        let _ = (path, output, emit_ir);
-        eprintln!("error: `jade build` requires the build daemon (Unix only).");
-        process::exit(1);
-    }
-
-    #[cfg(unix)]
     {
         use std::path::{Path, PathBuf};
 

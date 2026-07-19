@@ -14,9 +14,7 @@
 //! HTTP client in the dependency tree. Response framing honors `Content-Length`,
 //! `Transfer-Encoding: chunked` (de-chunked), and read-to-EOF on
 //! `Connection: close`. True streaming endpoints (bodies that never terminate)
-//! are out of scope. Unix-only (`#![cfg(unix)]`).
-
-#![cfg(unix)]
+//! are out of scope.
 
 use jade_runtime::coll::DictObj;
 use std::io::{BufRead, Read, Write};

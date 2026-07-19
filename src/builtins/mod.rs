@@ -18,7 +18,6 @@ use crate::{
 // package lives beside the inference backend at `crate::llm::pkg`.
 use crate::{array, core, dict, env, fs, grammar, http, json, math, path, random, sh, string, time};
 use crate::llm::pkg as llm;
-#[cfg(unix)]
 use crate::uhttp;
 
 // ── BuiltinFn ─────────────────────────────────────────────────────────────────
@@ -132,7 +131,6 @@ static PACKAGES: &[&Package] = &[
     &fs::FS_PKG,
     &time::TIME_PKG,
     &http::HTTP_PKG,
-    #[cfg(unix)]
     &uhttp::UHTTP_PKG,
     &sh::SH_PKG,
     &json::JSON_PKG,

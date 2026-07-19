@@ -9,6 +9,8 @@ Jade is a programming language written in Rust. It supports value types (`int`, 
 
 ## Installation
 
+Jade runs on macOS and Linux. Windows is not supported — see [below](#windows).
+
 ### macOS and Linux (recommended)
 
 The fastest way to install Jade is with the official install script. Open a terminal and run:
@@ -25,7 +27,9 @@ JADE_INSTALL_DIR=~/.local/bin curl -fsSL https://jadelang.org/install.sh | sh
 
 ### Windows
 
-Download `jade-windows-x86_64.exe` from the [latest release](https://github.com/joericks1998/jade/releases/latest), rename it to `jade.exe`, and place it somewhere on your `PATH`.
+Jade does not support Windows. The toolchain is built on Unix domain sockets — `jade build` and the `jade` inference provider both talk to local daemons that way — so there is no native Windows build.
+
+Use [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install) and follow the Linux instructions above.
 
 ### Build from Source
 

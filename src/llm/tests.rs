@@ -154,7 +154,6 @@ mod model_profile {
 }
 
 // ── jaded (unix-only wire encoding) ─────────────────────────────────────────
-#[cfg(unix)]
 mod jaded {
     use crate::llm::jaded::*;
     use crate::llm::InferenceRequest;

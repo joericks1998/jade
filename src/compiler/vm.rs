@@ -51,8 +51,7 @@ pub enum NativeFnId {
     ArrayMap,
     ArrayFilter,
     /// `uhttp.stream(url, handler, headers?)` — stream an HTTP response over a
-    /// Unix socket, invoking a Jade handler per line. Unix-only.
-    #[cfg(unix)]
+    /// Unix socket, invoking a Jade handler per line.
     UhttpStream,
 }
 
@@ -475,7 +474,6 @@ pub async fn run(program: CompiledProgram, opts: VmOpts) -> Result<VmState> {
 pub async fn run_incremental(program: CompiledProgram, state: &mut VmState) -> Result<()> {
     run_with_state(program, state).await
 }
-
 
 /// Execute a compiled program against an existing `VmState`.
 /// Used internally for imports so they share globals/struct_defs/extend_methods.
@@ -1605,7 +1603,6 @@ fn package_dict_value(pkg: &builtins::Package) -> VmValue {
     if pkg.import_name == "std/array" {
         return crate::array::array_vm_dict_value();
     }
-    #[cfg(unix)]
     if pkg.import_name == "std/uhttp" {
         return crate::uhttp::uhttp_vm_dict_value();
     }
@@ -1897,7 +1894,6 @@ async fn call_value(
                 }
                 Ok(VmValue::Array(Arc::new(Mutex::new(ArrayObj::from_vec(out)))))
             }
-            #[cfg(unix)]
             NativeFnId::UhttpStream => {
                 use crate::uhttp::{self, StreamEvent};
                 if args.len() < 2 || args.len() > 3 {
@@ -2123,7 +2119,6 @@ async fn call_fn(
     state.active_module_scope = saved_scope;
     Ok(result?.unwrap_or(VmValue::Nil))
 }
-
 
 // ── Prompt deref ──────────────────────────────────────────────────────────────
 

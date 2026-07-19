@@ -15,8 +15,6 @@
 //!               0x01 TOKEN (utf8 LLVM IR, when emit=ir), 0x02 DONE,
 //!               0x03 ERROR (utf8), 0x04 META (utf8, informational).
 
-#![cfg(unix)]
-
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;

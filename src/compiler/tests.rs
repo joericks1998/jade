@@ -13,7 +13,6 @@ mod vm {
         frontend::{lexer, parser},
     };
 
-
     fn run_src(src: &str) -> Result<VmState> {
         let tokens = lexer::tokenize(src).expect("lex failed");
         let program = parser::parse(tokens).expect("parse failed");
@@ -2393,7 +2392,6 @@ mod vm {
     // Binds a UnixListener on a unique temp path and serves one canned HTTP/1.1
     // response. Returns the socket path (unlinked on the listener thread's drop is
     // not guaranteed, so we bind under a per-test unique name to avoid AddrInUse).
-    #[cfg(unix)]
     fn start_uhttp_test_server(response: String) -> String {
         use std::io::{Read, Write};
         use std::os::unix::net::UnixListener;
@@ -2419,7 +2417,6 @@ mod vm {
         path_str
     }
 
-    #[cfg(unix)]
     fn canned_response(status: u16, body: &str) -> String {
         format!(
             "HTTP/1.1 {} OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -2429,7 +2426,6 @@ mod vm {
         )
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_uhttp_get_status_and_body() {
         let sock = start_uhttp_test_server(canned_response(200, "hello jade"));
@@ -2450,7 +2446,6 @@ mod vm {
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_uhttp_post_returns_response() {
         let sock = start_uhttp_test_server(canned_response(201, "created"));
@@ -2471,7 +2466,6 @@ mod vm {
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_uhttp_get_with_headers() {
         let sock = start_uhttp_test_server(canned_response(200, "ok"));
@@ -2488,7 +2482,6 @@ mod vm {
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_uhttp_get_chunked_body() {
         // "Wiki" + "pedia" split across two chunks (RFC 7230 example shape).
@@ -2507,7 +2500,6 @@ mod vm {
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_uhttp_head_empty_body() {
         let sock = start_uhttp_test_server(canned_response(200, "should-be-ignored"));
@@ -2522,21 +2514,18 @@ mod vm {
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_uhttp_get_arity_error() {
         let err = try_run_src("use std::uhttp\nuhttp.get()").err().expect("expected error");
         assert!(matches!(err, JadeError::ArityMismatch { .. }));
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_uhttp_get_type_error() {
         let err = try_run_src("use std::uhttp\nuhttp.get(42)").err().expect("expected error");
         assert!(matches!(err, JadeError::TypeError { .. }));
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_uhttp_post_arity_error() {
         let err = try_run_src("use std::uhttp\nuhttp.post(\"unix:///tmp/x.sock:/\")")
@@ -2545,7 +2534,6 @@ mod vm {
         assert!(matches!(err, JadeError::ArityMismatch { .. }));
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_uhttp_connect_error() {
         let err = try_run_src("use std::uhttp\nuhttp.get(\"unix:///nonexistent/jade-uhttp.sock:/\")")
@@ -2554,7 +2542,6 @@ mod vm {
         assert!(matches!(err, JadeError::IoError { .. }));
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_uhttp_bad_scheme_error() {
         let err = try_run_src("use std::uhttp\nuhttp.get(\"http://127.0.0.1/\")")
@@ -2565,7 +2552,6 @@ mod vm {
 
     // Streams a chunked HTTP/1.1 response where each line is its own chunk (the
     // shape Docker's /events and /logs endpoints use — newline-delimited JSON).
-    #[cfg(unix)]
     fn start_uhttp_stream_server(status: u16, lines: Vec<&'static str>) -> String {
         use std::io::{Read, Write};
         use std::os::unix::net::UnixListener;
@@ -2599,7 +2585,6 @@ mod vm {
         path_str
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_uhttp_stream_collects_lines() {
         let sock = start_uhttp_stream_server(200, vec!["event-a", "event-b", "event-c"]);
@@ -2630,7 +2615,6 @@ mod vm {
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_uhttp_stream_early_stop() {
         // Handler returns false after the first line → stream stops early.
@@ -2654,7 +2638,6 @@ mod vm {
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_uhttp_stream_arity_error() {
         let err = try_run_src("use std::uhttp\nuhttp.stream(\"unix:///tmp/x.sock:/\")")
@@ -2663,7 +2646,6 @@ mod vm {
         assert!(matches!(err, JadeError::ArityMismatch { .. }));
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_uhttp_stream_handler_type_error() {
         let err = try_run_src("use std::uhttp\nuhttp.stream(\"unix:///tmp/x.sock:/\", 42)")
@@ -2672,7 +2654,6 @@ mod vm {
         assert!(matches!(err, JadeError::TypeError { .. }));
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_uhttp_stream_connect_error() {
         let src = "use std::uhttp\n\
@@ -3073,7 +3054,6 @@ mod vm {
         assert_eq!(printed, "Sure thing!\n");
     }
 
-
     #[test]
     fn test_mute_no_mute_on_kwarg_prints_everything() {
         // stream() with no mute_on at all → nothing suppressed.
@@ -3356,7 +3336,6 @@ mod type_infer {
     use crate::compiler::tir::{JadeType, TProgram, TStmt};
     use crate::frontend::error::{JadeError, Result};
     use crate::frontend::{lexer, parser};
-
 
     fn infer_src(src: &str) -> Result<TProgram> {
         let tokens = lexer::tokenize(src).expect("lex");
@@ -3766,7 +3745,6 @@ mod gbnf {
     use crate::compiler::gbnf::*;
     use crate::frontend::ast::StructFieldDef;
     use std::collections::HashMap;
-
 
         fn no_defs() -> HashMap<String, Vec<StructFieldDef>> { HashMap::new() }
 

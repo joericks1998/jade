@@ -1,2 +1,7 @@
+# Only consulted when building with `--features codegen` (the LLVM 18 AOT
+# backend); the default build has no LLVM dependency at all. The path below is
+# Apple Silicon Homebrew — on any other host, export LLVM_SYS_180_PREFIX
+# yourself, which wins because cargo's [env] does not overwrite a variable that
+# is already set.
 [env]
 LLVM_SYS_180_PREFIX = "/opt/homebrew/opt/llvm@18"

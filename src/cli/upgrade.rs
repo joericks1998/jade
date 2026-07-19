@@ -130,8 +130,7 @@ pub async fn run_upgrade() {
         std::process::exit(1);
     }
 
-    // Make executable (Unix only — Windows uses ACLs, not POSIX mode bits).
-    #[cfg(unix)]
+    // Make executable.
     {
         use std::os::unix::fs::PermissionsExt;
         if let Err(e) = std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o755)) {
