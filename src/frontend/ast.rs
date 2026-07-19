@@ -2,16 +2,13 @@ use super::error::Span;
 use serde::{Deserialize, Serialize};
 
 /// A method signature within an `interface` definition.
-/// The type checker uses `name` for missing-method checks;
-/// `params`/`return_type` are parsed for documentation and future type inference.
+/// The type checker uses `name` for missing-method checks; `params` is parsed
+/// for documentation and future type inference.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InterfaceMethod {
     pub name: String,
     #[allow(dead_code)] // reserved for future type inference
     pub params: Vec<String>,
-    /// Return type annotation, e.g. `str` in `fn to_str(self) -> str`.
-    #[allow(dead_code)] // reserved for future type inference
-    pub return_type: Option<String>,
     #[allow(dead_code)] // reserved for future error reporting
     pub span: Span,
 }

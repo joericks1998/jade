@@ -589,14 +589,7 @@ impl Renamer {
                     }
                 }
             }
-            TStmt::InterfaceDef { name, methods, .. } => {
-                for m in methods.iter_mut() {
-                    if let Some(rt) = m.return_type.as_mut() {
-                        if let Some(x) = self.ref_type(rt) {
-                            *rt = x;
-                        }
-                    }
-                }
+            TStmt::InterfaceDef { name, .. } => {
                 if top {
                     if let Some(m) = self.def_type(name) {
                         *name = m;

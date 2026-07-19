@@ -84,9 +84,6 @@ pub enum TokenKind {
     LtEq,
     GtEq,
 
-    /// `->` (return type annotation in interface method signatures)
-    Arrow,
-
     // Assignment
     Equals,
 
@@ -165,7 +162,6 @@ pub fn token_kind_desc(kind: &TokenKind) -> String {
         TokenKind::Gt            => "`>`".to_string(),
         TokenKind::LtEq          => "`<=`".to_string(),
         TokenKind::GtEq          => "`>=`".to_string(),
-        TokenKind::Arrow         => "`->`".to_string(),
         TokenKind::Equals        => "`=`".to_string(),
         TokenKind::Comma         => "`,`".to_string(),
         TokenKind::Semicolon     => "`;`".to_string(),
@@ -530,15 +526,7 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
 
             // Unambiguous single-character tokens
             '+' => { tokens.push(Token { kind: TokenKind::Plus,    span: Span { line, col } }); col += 1; i += 1; }
-            '-' => {
-                if chars.get(i + 1) == Some(&'>') {
-                    tokens.push(Token { kind: TokenKind::Arrow, span: Span { line, col } });
-                    col += 2; i += 2;
-                } else {
-                    tokens.push(Token { kind: TokenKind::Minus, span: Span { line, col } });
-                    col += 1; i += 1;
-                }
-            }
+            '-' => { tokens.push(Token { kind: TokenKind::Minus,   span: Span { line, col } }); col += 1; i += 1; }
             '*' => { tokens.push(Token { kind: TokenKind::Star,    span: Span { line, col } }); col += 1; i += 1; }
             // `/` or `//` (line comment)
             '/' => {

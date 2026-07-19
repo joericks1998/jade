@@ -1220,11 +1220,11 @@ mod vm {
     fn test_vm_interface_basic() {
         let src = concat!(
             "interface Displayable {\n",
-            "    fn to_str(self) -> str\n",
+            "    fn to_str(self)\n",
             "}\n",
             "struct Point {\n  x,\n  y\n}\n",
             "extend Point: Displayable {\n",
-            "    fn to_str(self) -> str {\n",
+            "    fn to_str(self) {\n",
             "        return \"point\"\n",
             "    }\n",
             "}\n",
@@ -1239,7 +1239,7 @@ mod vm {
     fn test_vm_interface_missing_method_error() {
         let src = concat!(
             "interface Displayable {\n",
-            "    fn to_str(self) -> str\n",
+            "    fn to_str(self)\n",
             "}\n",
             "struct Point {\n  x,\n  y\n}\n",
             "extend Point: Displayable {\n",
@@ -1257,7 +1257,7 @@ mod vm {
         let src = concat!(
             "struct Point {\n  x,\n  y\n}\n",
             "extend Point: Displayable {\n",
-            "    fn to_str(self) -> str {\n",
+            "    fn to_str(self) {\n",
             "        return \"point\"\n",
             "    }\n",
             "}\n",
