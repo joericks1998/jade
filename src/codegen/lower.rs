@@ -2202,11 +2202,13 @@ fn build_struct_defaults(
 fn program_collections_only(top: &Chunk, defs: &[Arc<CompiledFn>]) -> bool {
     let chunk_ok = |code: &[Instr]| {
         code.iter().all(|instr| match instr {
-            Instr::Spawn(..)
-            | Instr::Await(..)
-            | Instr::Join(..)
-            | Instr::MakePrompt(..)
-            | Instr::PromptDeref(..) => false,
+            // Prompts and native fn values are still header-less, so they
+            // still veto. Async no longer does: a future carries an ObjHeader
+            // and ObjKind::Future, so incref/decref handle it like any other
+            // heap value. Note the veto is an `all()` — a program mixing async
+            // with a prompt is still vetoed by the prompt, so this only turns
+            // refcounting on for programs that were never at risk.
+            Instr::MakePrompt(..) | Instr::PromptDeref(..) => false,
             Instr::GetGlobal(_, name) => parse_native_ref(name).is_none(),
             _ => true,
         })
@@ -3181,17 +3183,24 @@ fn lower_instr<'ctx>(
                     .map_err(|e| e.to_string())?
                     .as_any_value_enum()
                     .into_pointer_value();
-                let word = b.build_ptr_to_int(fut, i64_ty, "futw").map_err(|e| e.to_string())?;
-                low.store(*dest, word);
+                // A future is an ordinary tagged value, not a bare pointer.
+                // Storing it untagged made it indistinguishable from an Int to
+                // every dynamic op: `print(f)` rendered the pointer as a huge
+                // integer, and `await 5` happily int_to_ptr'd an integer and
+                // segfaulted. It now carries TAG_PTR and ObjKind::Future, so
+                // the renderer and the await guard can both recognise it.
+                low.store(*dest, low.tag_ptr(fut));
                 Ok(false)
             }
             _ => Err(format!("lower.rs: unsupported spawn at {idx}")),
         },
         Await(dest, fut) => {
-            let fp = b.build_int_to_ptr(low.load(*fut), low.ptrt(), "futp").map_err(|e| e.to_string())?;
-            let await_f = low.runtime_fn("jade_await", i64_ty.fn_type(&[low.ptrt().into()], false));
+            // Pass the tagged word through: the runtime checks the tag and the
+            // ObjKind before touching the pointer, so awaiting a non-future
+            // raises instead of dereferencing an integer.
+            let await_f = low.runtime_fn("jade_await_word", i64_ty.fn_type(&[i64_ty.into()], false));
             let r = b
-                .build_call(await_f, &[fp.into()], "await")
+                .build_call(await_f, &[low.load(*fut).into()], "await")
                 .map_err(|e| e.to_string())?
                 .as_any_value_enum()
                 .into_int_value();
@@ -3201,18 +3210,17 @@ fn lower_instr<'ctx>(
         Join(dest, futs) => {
             let n = futs.len();
             let cnt = i64_ty.const_int(n.max(1) as u64, false);
-            let futarr = b.build_array_alloca(low.ptrt(), cnt, "join_futs").map_err(|e| e.to_string())?;
+            let futarr = b.build_array_alloca(i64_ty, cnt, "join_futs").map_err(|e| e.to_string())?;
             for (i, r) in futs.iter().enumerate() {
-                let fp = b.build_int_to_ptr(low.load(*r), low.ptrt(), "jf").map_err(|e| e.to_string())?;
                 let slot = unsafe {
-                    b.build_in_bounds_gep(low.ptrt(), futarr, &[i64_ty.const_int(i as u64, false)], "jfs")
+                    b.build_in_bounds_gep(i64_ty, futarr, &[i64_ty.const_int(i as u64, false)], "jfs")
                         .map_err(|e| e.to_string())?
                 };
-                b.build_store(slot, fp).map_err(|e| e.to_string())?;
+                b.build_store(slot, low.load(*r)).map_err(|e| e.to_string())?;
             }
             let resarr = b.build_array_alloca(i64_ty, cnt, "join_res").map_err(|e| e.to_string())?;
             let join_f = low.runtime_fn(
-                "jade_join",
+                "jade_join_words",
                 low.ctx.void_type().fn_type(&[low.ptrt().into(), low.ctx.i32_type().into(), low.ptrt().into()], false),
             );
             b.build_call(
@@ -3986,7 +3994,14 @@ mod tests {
         let ir = module.print_to_string().to_string();
         assert!(ir.contains("@jf_task_0"), "task wrapper emitted:\n{ir}");
         assert!(ir.contains("jade_spawn"), "spawn via runtime:\n{ir}");
-        assert!(ir.contains("jade_await"), "await via runtime:\n{ir}");
+        // The word-taking entry point, not the pointer-taking one. Asserting
+        // "jade_await" alone would pass either way, since it is a prefix of
+        // "jade_await_word" — the test has to name the tagged form to detect a
+        // regression back to raw pointers.
+        assert!(ir.contains("jade_await_word"), "await takes a tagged word:\n{ir}");
+        // A future is a tagged value now, so the spawn result is OR'd with
+        // TAG_PTR rather than passed through as a bare pointer integer.
+        assert!(ir.contains("tagptr"), "spawn result is TAG_PTR-tagged:\n{ir}");
     }
 
     #[test]

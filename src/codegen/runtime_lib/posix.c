@@ -39,6 +39,9 @@ extern void  jrt_set_task_invoker(int (*f)(jade_task_fn, jade_value_t*, int,
                                            jade_value_t*, jade_value_t*, const char**));
 extern void* jrt_spawn(jade_task_fn fn, const jade_value_t* args, int n);
 extern jade_value_t jrt_await_impl(void* fut, int* failed, jade_value_t* err, const char** ty);
+extern jade_value_t jrt_await_word(jade_value_t w, int* failed, jade_value_t* err, const char** ty);
+extern void  jrt_join_words(const jade_value_t* ws, int n, jade_value_t* out,
+                            int* failed, jade_value_t* err, const char** ty);
 extern void  jrt_join_impl(void* const* futs, int n, jade_value_t* out,
                            int* failed, jade_value_t* err, const char** ty);
 
@@ -103,6 +106,22 @@ jade_value_t jade_await(jade_future_t future) {
     jade_value_t r = jrt_await_impl((void*)future, &failed, &err, &ty);
     jade_task_rethrow(failed, err, ty);
     return r;
+}
+
+/* Word-taking entry points. Codegen now passes futures as ordinary tagged
+ * values, so these check the tag before touching the pointer — which is what
+ * turns `await 5` from a segfault into a raised error. */
+jade_value_t jade_await_word(jade_value_t w) {
+    int failed = 0; jade_value_t err = 0; const char* ty = NULL;
+    jade_value_t r = jrt_await_word(w, &failed, &err, &ty);
+    jade_task_rethrow(failed, err, ty);
+    return r;
+}
+
+void jade_join_words(const jade_value_t* ws, int n, jade_value_t* results_out) {
+    int failed = 0; jade_value_t err = 0; const char* ty = NULL;
+    jrt_join_words(ws, n, results_out, &failed, &err, &ty);
+    jade_task_rethrow(failed, err, ty);
 }
 
 void jade_join(jade_future_t* futures, int n, jade_value_t* results_out) {

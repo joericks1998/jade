@@ -166,7 +166,13 @@ pub extern "C" fn jrt_rc_replace(old: i64, new: i64) {
 #[inline]
 unsafe fn is_collection(p: *const c_void) -> bool {
     let k = unsafe { (*(p as *const ObjHeader)).kind };
-    k == ObjKind::Array as u8 || k == ObjKind::Dict as u8 || k == ObjKind::Struct as u8
+    k == ObjKind::Array as u8
+        || k == ObjKind::Dict as u8
+        || k == ObjKind::Struct as u8
+        // A future is not a container, but it is header-carrying and owns a
+        // heap allocation, so it is refcounted on exactly the same terms. Its
+        // destructor arm in `free_obj` reclaims it without a child cascade.
+        || k == ObjKind::Future as u8
 }
 
 /// Increment the strong count of the collection a `TAG_PTR` word points at. A

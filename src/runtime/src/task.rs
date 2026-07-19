@@ -53,6 +53,7 @@ use std::time::Duration;
 
 use crate::gc;
 use crate::heap::{ObjHeader, ObjKind};
+use crate::value::JadeValue;
 
 /// A compiled task body: `jf_task_<uid>(args, n_args) -> result`.
 pub type TaskFn = extern "C" fn(*mut i64, i32) -> i64;
@@ -309,9 +310,17 @@ impl Pool {
 
             let mut args = job.args;
             let outcome = invoke(job.f, &mut args);
-            // Safety: the future is kept alive by whoever holds the handle; the
-            // job never owns the only reference.
-            unsafe { (*job.future).complete(outcome) };
+            // Safety: `spawn` took a reference on the task's behalf, so the
+            // future is guaranteed live here even if every other holder dropped
+            // it while the body ran.
+            unsafe {
+                (*job.future).complete(outcome);
+                // Release the task's reference. If nobody awaited and the handle
+                // is already gone, this is what reclaims the future.
+                if (*job.future).header.decref() {
+                    destroy(job.future);
+                }
+            }
         }
     }
 
@@ -348,6 +357,16 @@ impl Pool {
 /// it, and header-prefixed so it can be refcounted like any other value.
 pub fn spawn(f: TaskFn, args: Vec<i64>) -> *mut FutureObj {
     let fut = gc::leak_obj(FutureObj::new()) as *mut FutureObj;
+    // Two owners, two references. `ObjHeader::new` starts the count at 1 for the
+    // caller; the running task needs its own, because the task writes the result
+    // into the future and must not be doing so through a freed allocation.
+    //
+    // This is not hypothetical now that futures are refcounted: a program that
+    // spawns and drops the handle without awaiting would otherwise take the
+    // count to zero, free the future, and leave the worker writing into
+    // reclaimed memory. The worker releases its reference in `worker_loop`
+    // immediately after `complete`.
+    unsafe { (*fut).header.incref() };
     pool().submit(Job { f, args, future: fut });
     fut
 }
@@ -448,6 +467,84 @@ pub unsafe extern "C" fn jrt_spawn(f: TaskFn, args: *const i64, n: i32) -> *mut 
         Vec::new()
     };
     spawn(f, argv)
+}
+
+/// Resolve a tagged word to a live future, or `None` if it is not one.
+///
+/// This is the check that stops `await 5` from being a segfault. Previously
+/// codegen `int_to_ptr`'d whatever word was in the register and dereferenced
+/// it; now the tag says whether it is a heap pointer at all, and the `ObjKind`
+/// byte says whether that object is a future.
+fn as_future(word: i64) -> Option<*mut FutureObj> {
+    let v = JadeValue::from_bits(word as u64);
+    if !v.is_ptr() {
+        return None;
+    }
+    let p = v.as_ptr() as *mut FutureObj;
+    let kind = unsafe { (*(p as *const ObjHeader)).kind };
+    if kind == ObjKind::Future as u8 { Some(p) } else { None }
+}
+
+/// Await a tagged word. Reports `NotAFuture` rather than dereferencing a
+/// non-pointer.
+///
+/// # Safety
+/// The out-params must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jrt_await_word(
+    word: i64,
+    failed: *mut i32,
+    err: *mut i64,
+    ty: *mut *const c_char,
+) -> i64 {
+    match as_future(word) {
+        Some(f) => unsafe { report(await_one(f), failed, err, ty) },
+        None => unsafe { report(Err(TaskError::NotAFuture), failed, err, ty) },
+    }
+}
+
+/// Join tagged words. A non-future anywhere in the list reports `NotAFuture`.
+///
+/// # Safety
+/// `words` must point at `n` readable words and `out` at `n` writable ones.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jrt_join_words(
+    words: *const i64,
+    n: i32,
+    out: *mut i64,
+    failed: *mut i32,
+    err: *mut i64,
+    ty: *mut *const c_char,
+) {
+    let list = if n > 0 && !words.is_null() {
+        unsafe { core::slice::from_raw_parts(words, n as usize) }.to_vec()
+    } else {
+        Vec::new()
+    };
+
+    let mut first: Option<TaskError> = None;
+    for (i, &w) in list.iter().enumerate() {
+        let slot = match as_future(w) {
+            Some(f) => match unsafe { await_one(f) } {
+                Ok(v) => v,
+                Err(e) => {
+                    if first.is_none() {
+                        first = Some(e);
+                    }
+                    0
+                }
+            },
+            None => {
+                if first.is_none() {
+                    first = Some(TaskError::NotAFuture);
+                }
+                0
+            }
+        };
+        unsafe { *out.add(i) = slot };
+    }
+
+    unsafe { report(first.map_or(Ok(0), Err), failed, err, ty) };
 }
 
 /// Await `fut`. On a raised exception or a double await, `*failed` is set and

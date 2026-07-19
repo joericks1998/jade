@@ -110,8 +110,12 @@ pub fn render_word(word: i64) -> String {
     } else if kind == ObjKind::Struct as u8 {
         // The VM renders any struct opaquely as `<struct>` (no field walk).
         "<struct>".to_string()
+    } else if kind == ObjKind::Future as u8 {
+        // Matches the VM (`VmValue::Future` renders as `<future>`); the parity
+        // gate diffs stdout, so this string is a contract, not a cosmetic.
+        "<future>".to_string()
     } else {
-        // A boxed fn/future/etc. — the pre-existing "ObjKind gap" placeholder.
+        // A boxed fn/etc. — the pre-existing "ObjKind gap" placeholder.
         "<object>".to_string()
     }
 }
