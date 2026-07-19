@@ -48,6 +48,7 @@ pub mod float;
 pub mod fsf;
 pub mod gc;
 pub mod heap;
+pub mod httpf;
 pub mod jsonf;
 pub mod mathf;
 pub mod methods;

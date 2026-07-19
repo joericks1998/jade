@@ -391,6 +391,39 @@ int64_t jrt_random_choice_chunk(int64_t arr_word) {
     return jrt_coll_array_get(arr, idx);
 }
 
+/* http.* forwarders: the Rust impls (jade-runtime src/httpf.rs) record a pending
+ * error on transport failure (curl exit != 0) instead of throwing; throw it here.
+ * A 4xx/5xx is a normal status, not an error. */
+static void http_throw_pending(void) {
+    char* e = jrt_http_take_error();
+    if (e) jade_exc_throw_typed(jrt_box_str(e), NULL);
+}
+jade_value_t jrt_http_get(const char* url, void* headers) {
+    jade_value_t r = (jade_value_t)jrt_http_get_impl(url, headers);
+    http_throw_pending();
+    return r;
+}
+jade_value_t jrt_http_post(const char* url, const char* body, void* headers) {
+    jade_value_t r = (jade_value_t)jrt_http_post_impl(url, body, headers);
+    http_throw_pending();
+    return r;
+}
+jade_value_t jrt_http_put(const char* url, const char* body, void* headers) {
+    jade_value_t r = (jade_value_t)jrt_http_put_impl(url, body, headers);
+    http_throw_pending();
+    return r;
+}
+jade_value_t jrt_http_delete(const char* url, void* headers) {
+    jade_value_t r = (jade_value_t)jrt_http_delete_impl(url, headers);
+    http_throw_pending();
+    return r;
+}
+jade_value_t jrt_http_head(const char* url, void* headers) {
+    jade_value_t r = (jade_value_t)jrt_http_head_impl(url, headers);
+    http_throw_pending();
+    return r;
+}
+
 /* sh.exec/run forwarders: refuse a tainted command (a code-execution sink) —
  * the only throw — then call the non-raising Rust impls (jade-runtime src/shf.rs). */
 char* jrt_sh_exec(const char* cmd) {

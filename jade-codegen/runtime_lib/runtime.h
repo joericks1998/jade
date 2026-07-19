@@ -466,7 +466,22 @@ void    jrt_refuse_if_tainted(const char* arg, const char* sink_name);
  * folder (built by build.rs). They depend only on the core symbols declared
  * above. The data-structure modules (dict/array/json) stay in common.c with the
  * heap object model they manipulate. */
-#include "http/http.h"
+
+/* http (std::http) is implemented in Rust now (jade-runtime, src/httpf.rs), over
+ * the curl binary. Each verb returns an ObjHeader dict { status, body:TAINTED }.
+ * Only transport failure raises: the impls record a pending error, the C
+ * forwarders (common.c) throw it. */
+int64_t      jrt_http_get_impl(const char* url, void* headers);
+int64_t      jrt_http_post_impl(const char* url, const char* body, void* headers);
+int64_t      jrt_http_put_impl(const char* url, const char* body, void* headers);
+int64_t      jrt_http_delete_impl(const char* url, void* headers);
+int64_t      jrt_http_head_impl(const char* url, void* headers);
+char*        jrt_http_take_error(void);
+jade_value_t jrt_http_get(const char* url, void* headers);
+jade_value_t jrt_http_post(const char* url, const char* body, void* headers);
+jade_value_t jrt_http_put(const char* url, const char* body, void* headers);
+jade_value_t jrt_http_delete(const char* url, void* headers);
+jade_value_t jrt_http_head(const char* url, void* headers);
 
 /* sh (std::sh) is implemented in Rust now (jade-runtime, src/shf.rs). exec/run
  * refuse tainted input (a code-execution sink) — that check + throw stays in the
