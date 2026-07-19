@@ -3039,8 +3039,14 @@ fn lower_instr<'ctx>(
         //     runtime Grammar object, converts pattern→GBNF, constrains sampling);
         //   typed (`|> int/float/bool/str`) → jrt_prompt_typed (retries until the
         //     response parses) → coerce via jrt_{int,float,bool}_any;
-        //   unconstrained (`?p`) → jrt_prompt_stream_ex (streams tokens to stdout,
-        //     matching the VM's streaming deref).
+        //   unconstrained (`?p`) → jrt_prompt (returns the full text, no streaming).
+        // OUTPUT PARITY: the VM's unconstrained `?p` is a *lazy* TokenStream — no
+        // output until it is consumed, at which point `print(r)` streams it once
+        // and adds the newline. If the AOT streamed eagerly at the deref *and*
+        // then printed the returned text, `let r = ?p; print(r)` would emit the
+        // response twice. Using the non-streaming jrt_prompt (like the VM's typed
+        // path) makes `print(r)` the single output site → byte-identical stdout
+        // (the VM streams tokens live, the AOT prints them in one go — same bytes).
         // The jrt_prompt* helpers already return a tagged, trust-propagated string
         // (a trusted prompt yields a trusted response), so the result is tag_str'd
         // directly — no re-dup, no forced taint. model via jrt_get_model.
@@ -3079,22 +3085,11 @@ fn lower_instr<'ctx>(
                 .as_any_value_enum()
                 .into_pointer_value()
             } else {
-                let f = low.runtime_fn(
-                    "jrt_prompt_stream_ex",
-                    ptrt.fn_type(
-                        &[ptrt.into(), ptrt.into(), ptrt.into(), ptrt.into(), ptrt.into(), i32_ty.into()],
-                        false,
-                    ),
-                );
-                let nul = ptrt.const_null();
-                b.build_call(
-                    f,
-                    &[prompt_ptr.into(), model.into(), nul.into(), nul.into(), nul.into(), i32_ty.const_zero().into()],
-                    "prompt",
-                )
-                .map_err(e)?
-                .as_any_value_enum()
-                .into_pointer_value()
+                let f = low.runtime_fn("jrt_prompt", ptrt.fn_type(&[ptrt.into(), ptrt.into()], false));
+                b.build_call(f, &[prompt_ptr.into(), model.into()], "prompt")
+                    .map_err(e)?
+                    .as_any_value_enum()
+                    .into_pointer_value()
             };
 
             let str_word = low.tag_str(raw);
