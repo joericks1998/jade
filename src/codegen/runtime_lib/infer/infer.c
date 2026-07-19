@@ -2,8 +2,8 @@
  *
  * Owns the structured JSON request builder and all jrt_prompt_* entry points.
  * Dispatches through ipc for transport — never touches a socket
- * directly. Target-independent: same file is linked into both pthread and
- * jadeos runtime variants. */
+ * directly. Target-independent: the same file is linked into every platform
+ * backend variant. */
 
 #include "runtime.h"
 #include "infer.h"

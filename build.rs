@@ -1,11 +1,10 @@
 //! Compile the C runtime (`runtime_lib/`) into `libJadeRuntime.a`.
 //!
 //! Emitted Jade binaries link against this archive (`-lJadeRuntime`). The
-//! runtime is split into a platform-agnostic core (`common.c`) plus a backend
-//! that supplies concurrency + process-exit: we build `posix.c` (host) here;
-//! the Jade OS build uses `jadeos.c` instead (it pulls in kernel headers
-//! `<jade/*.h>` that only exist on Jade OS). `infer` + `ipc` add the LLM
-//! inference path (talks to the inference daemon over a Unix socket at runtime).
+//! runtime is split into a platform-agnostic core (`common.c`) plus a swappable
+//! platform backend that supplies concurrency + process-exit: we build `posix.c`
+//! (the host backend) here. `infer` + `ipc` add the LLM inference path (talks to
+//! the inference daemon over a Unix socket at runtime).
 //!
 //! The archive lands in `$OUT_DIR`; we surface that directory to the daemon via
 //! the `JADE_RT_LIB_DIR` compile-time env so it can point the linker at it.

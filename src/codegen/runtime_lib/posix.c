@@ -1,7 +1,7 @@
 /* Host (POSIX) backend for the Jade runtime: the concurrency layer over
  * pthreads plus the process-exit primitive. Everything else lives in the
  * platform-agnostic common.c. Compiled by build.rs for macOS/Linux hosts. */
-#ifndef __JADE_OS__
+#ifndef __JADE_KERNEL__
 
 #include "runtime.h"
 
@@ -157,4 +157,4 @@ void jade_future_free(jade_future_t future) {
     free(fut);
 }
 
-#endif /* !__JADE_OS__ */
+#endif /* !__JADE_KERNEL__ */

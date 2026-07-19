@@ -1,6 +1,7 @@
 /* Native (C-ABI) package support for AOT binaries — the counterpart of the VM's
  * libloading FFI (jadelang/src/native.rs). Platform-agnostic: the actual dlopen/
- * dlsym primitives are backend hooks (posix.c real, jadeos.c stubs). Everything
+ * dlsym primitives are backend hooks (posix.c provides the real ones; a target
+ * without an in-binary loader stubs them). Everything
  * here — the registry, jade_pkg_init invocation, and value marshalling — mirrors
  * native.rs's load_native_package / vm_to_ffi / ffi_to_vm so a single .dylib
  * serves both `jade run` and `jade build`. */

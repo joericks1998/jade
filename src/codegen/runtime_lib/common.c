@@ -1,6 +1,7 @@
 /* Platform-agnostic core of the Jade runtime. Shared verbatim by the host
- * (posix.c) and Jade OS (jadeos.c) backends, which supply only the concurrency
- * layer (jade_spawn/await/join) and the process-exit primitive jade_rt_exit. */
+ * backend (posix.c) and any alternate platform backend, which supply only the
+ * concurrency layer (jade_spawn/await/join) and the process-exit primitive
+ * jade_rt_exit. */
 #include "runtime.h"
 
 #include <assert.h>
@@ -13,7 +14,7 @@
 #include <string.h>
 
 /* Fatal error: print `msg`, then terminate via the platform exit primitive
- * (jade_rt_exit is supplied by posix.c / jadeos.c — exit vs jade_task_exit). */
+ * (jade_rt_exit is supplied by the platform backend). */
 void jade_rt_fatal(const char* msg) {
     fprintf(stderr, "%s\n", msg);
     jade_rt_exit(1);
@@ -39,7 +40,7 @@ void jade_rt_fatal(const char* msg) {
 
 /* Await N futures into results_out. Platform-agnostic (only calls jade_await,
  * which each backend supplies), so it lives here rather than being duplicated
- * in posix.c / jadeos.c. */
+ * in each platform backend. */
 void jade_join(jade_future_t* futures, int n, jade_value_t* results_out) {
     for (int i = 0; i < n; i++) {
         results_out[i] = jade_await(futures[i]);

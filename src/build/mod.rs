@@ -45,17 +45,16 @@ pub fn build(
     let sock_path = build_sock_path();
     let mut stream = UnixStream::connect(&sock_path).map_err(|e| {
         if Path::new(&sock_path).exists() {
-            // Socket is there but nothing is listening — daemon is down on a
-            // machine that otherwise has it (i.e. Jade OS).
+            // Socket is there but nothing is listening — the daemon is down.
             format!(
                 "the Jade build daemon at {} isn't responding — is it running? ({e})",
                 sock_path
             )
         } else {
             // No socket at all — native compilation isn't available here.
-            "native compilation (`jade build`) is only supported on Jade OS.\n       \
-             No build daemon is present on this platform — standalone Mac/Linux \
-             runtimes aren't released yet.\n       \
+            "native compilation (`jade build`) needs the Jade build daemon, which \
+             isn't present on this platform yet — standalone Mac/Linux runtimes \
+             aren't released.\n       \
              To run this program now, use the VM instead:  jade run <file.jde>"
                 .to_owned()
         }

@@ -178,10 +178,11 @@ int     jrt_snprintf_float(char* buf, size_t cap, double val);
  * at codegen time, so a fractional result can't be represented as Int. */
 int64_t jrt_ipow(int64_t base, int64_t exp);
 
-/* ── Platform hooks (provided by the backend: posix.c / jadeos.c) ──────────
+/* ── Platform hooks (provided by the platform backend, e.g. posix.c) ───────
  * The shared core (common.c) is platform-agnostic except for two things the
  * backend owns: process exit and concurrency. jade_rt_exit terminates the
- * process with `code` (host: exit(); Jade OS: jade_task_exit()). jade_rt_fatal
+ * process with `code` (host: exit(); other targets: a platform exit primitive).
+ * jade_rt_fatal
  * (defined in common.c) prints a message and calls it. */
 #if defined(__GNUC__) || defined(__clang__)
 __attribute__((noreturn))
@@ -600,8 +601,8 @@ typedef struct {
     size_t             binding_count;
 } JadeNativePkg;
 
-/* Platform hooks for dynamic loading (posix.c: real dlopen/dlsym; jadeos.c:
- * stubs returning NULL, so native packages are host-only). */
+/* Platform hooks for dynamic loading (posix.c: real dlopen/dlsym; a target
+ * without an in-binary loader stubs these, so native packages are host-only). */
 void* jade_dlopen(const char* path);
 void* jade_dlsym(void* handle, const char* sym);
 
