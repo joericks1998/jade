@@ -196,9 +196,9 @@ pub async fn run_file(path: &str, verbose: bool) {
                 vm::VmValue::Fn(_) | vm::VmValue::Closure(_, _) => println!("{} = <fn>", name),
                 vm::VmValue::Struct(rc) => {
                     let inst = rc.lock();
-                    print!("{} = {} {{", name, inst.type_name);
-                    let mut fields: Vec<_> = inst.fields.iter().collect();
-                    fields.sort_by_key(|(k, _): &(&String, _)| k.as_str());
+                    print!("{} = {} {{", name, inst.type_name());
+                    let mut fields: Vec<_> = inst.fields().iter().collect();
+                    fields.sort_by_key(|(k, _): &&(String, _)| k.as_str());
                     let mut first = true;
                     for (k, v) in fields {
                         if !first { print!(", "); }

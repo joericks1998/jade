@@ -331,12 +331,17 @@ pub enum Expr {
     /// `?expr` — dereference a prompt, calling the LLM backend.
     /// `?expr |> TypeName`   — typed deref: coerces output to the named type with retry.
     /// `?expr |> grammar_expr` — grammar-constrained deref: expr must hold a Grammar value.
-    /// `expr` must evaluate to `Value::Prompt`; supports `?name`, `?obj.field`, etc.
+    /// `expr` must evaluate to `Value::Prompt`.  Prefix `?` covers bare prompts
+    /// (`?name`); a prompt in a field uses `obj.(?field)` or `obj~>field`.
     PromptDeref {
         expr: Box<Expr>,
         /// The expression after `|>`, if any.  Resolved at type-inference time into either
         /// an output-type name (Str literal path) or a Grammar constraint expression.
         constraint: Option<Box<Expr>>,
+        /// Which surface syntax produced this node.  Purely cosmetic — both forms
+        /// mean the same thing and compile identically; this only exists so that
+        /// anything rendering the AST back to source can reproduce what was written.
+        style: DerefStyle,
         span: Span,
     },
 
@@ -388,6 +393,19 @@ pub enum BinOpKind {
     // Membership
     In,
     NotIn,
+}
+
+/// Which surface form a `PromptDeref` was written in.  All three spellings parse
+/// to the same node; this records only which one the source used, so anything
+/// rendering the AST back to source can reproduce it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DerefStyle {
+    /// Prefix: `?p` — bare prompts only; never a field access.
+    Prefix,
+    /// Postfix: `obj.(?field)`
+    DotParen,
+    /// Postfix: `obj~>field`
+    Squiggly,
 }
 
 /// All unary operators Jade supports.

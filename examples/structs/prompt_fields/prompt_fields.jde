@@ -1,0 +1,37 @@
+// Prompt fields inside structs — store Value::Prompt, dereferenceable with ?
+// Requires JADE_API_KEY or jade.toml configured for actual ? usage
+
+struct Agent {
+    let name = "Assistant"
+    prompt system = "You are a helpful assistant"
+}
+
+let a = Agent {}
+let n = a.name
+// n == "Assistant"
+let s = a.system
+// s is Value::Prompt("You are a helpful assistant")
+
+let a2 = Agent { name: "Claude" }
+let s2 = a2.system
+// s2 is Value::Prompt("You are a helpful assistant") — default
+
+// Override the prompt field with a custom string (gets wrapped as Value::Prompt)
+let a3 = Agent { system: "You are a coding assistant" }
+let s3 = a3.system
+// s3 is Value::Prompt("You are a coding assistant")
+
+// Dereference a prompt field directly (requires API key). Two forms, same
+// operation — `~>` is the terser spelling, the way C's `p->x` beats `(*p).x`:
+//   let response = a.(?system)
+//   let response = a~>system
+//   let n        = a.(?system) |> int          // constraints work as usual
+//   let r        = build(cfg).agent.(?system)
+//
+// Or extract first, then deref the bare prompt:
+//   let p = a.system
+//   let response = ?p
+//
+// Plain `.` is unaffected: `a.system` still just reads the field.
+// Note `?a.system` and `a.?system` are both syntax errors — prefix `?` is for
+// bare prompts only, and the parentheses in `.(?…)` are required.

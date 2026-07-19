@@ -1,0 +1,34 @@
+use std::uhttp
+use std::json
+
+// HTTP over a Unix domain socket. The target is a single pseudo-URL of the form
+// unix://<socket-path>:<request-path> — here the Docker Engine API.
+// Every function returns a Dict { "status": int, "body": str }, mirroring std/http.
+
+// GET — list running containers
+let r = uhttp.get("unix:///var/run/docker.sock:/v1.43/containers/json")
+print(r["status"])                          // 200
+let containers = json.parse(r["body"])
+print(containers.len())
+
+// POST with body — create a container (JSON payload + Content-Type header)
+let spec = json.stringify({"Image": "alpine", "Cmd": ["echo", "hi"]})
+let c = uhttp.post(
+    "unix:///var/run/docker.sock:/v1.43/containers/create",
+    spec,
+    {"Content-Type": "application/json"}
+)
+print(c["status"])                          // 201
+
+// DELETE — remove a container by id
+let d = uhttp.delete("unix:///var/run/docker.sock:/v1.43/containers/deadbeef?force=true")
+print(d["status"])                          // 204
+
+// HEAD — body is empty, status reflects the resource
+let h = uhttp.head("unix:///var/run/docker.sock:/_ping")
+print(h["status"])                          // 200
+print(h["body"])                            // (empty string)
+
+// GET with a request path that defaults to "/" when omitted
+let ping = uhttp.get("unix:///var/run/docker.sock:/_ping")
+print(ping["body"])                         // OK

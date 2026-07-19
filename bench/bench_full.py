@@ -25,7 +25,7 @@ PYTHON_BIN = sys.executable
 SUITES = [
     {
         "name":     "light  (fib(10), factorial(7), sum_to(10))",
-        "jade":     ROOT / "jade_evals" / "functions" / "recursion.jde",
+        "jade":     ROOT / "examples" / "functions" / "recursion" / "recursion.jde",
         "py":       ROOT / "bench" / "recursion.py",
         "runs":     20,
         "runs_vm":  20,

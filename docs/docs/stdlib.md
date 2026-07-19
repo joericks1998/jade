@@ -29,6 +29,7 @@ Standard-library packages must be imported with `::` notation. The string-litera
 | `use std::fs` | `fs` | File system I/O |
 | `use std::time` | `time` | Clock and sleep |
 | `use std::http` | `http` | HTTP client |
+| `use std::uhttp` | `uhttp` | HTTP client over a Unix domain socket |
 | `use std::sh` | `sh` | Shell command execution |
 | `use std::json` | `json` | JSON encode / decode |
 | `use std::env` | `env` | Environment variables and process info |
@@ -313,6 +314,67 @@ let result = json.parse(resp2["body"])
 
 :::note
 Requests time out after 30 seconds. HTTP errors (non-2xx status) do **not** raise — check `resp["status"]` yourself. Network errors (DNS failure, connection refused, etc.) raise an `IoError`.
+:::
+
+---
+
+## `std/uhttp`
+
+```jade
+use std::uhttp
+```
+
+Speaks HTTP/1.1 over a **Unix domain socket** instead of a TCP host — for talking to local daemons such as the Docker Engine API (`/var/run/docker.sock`) or other socket-backed OS services. The API mirrors `std/http`: every function returns the same `{status, body}` dict, and an optional `headers` dict may be passed as the last argument.
+
+The target is a single pseudo-URL string of the form:
+
+```text
+unix://<socket-path>:<request-path>
+```
+
+The socket path runs up to the **first** `:` after the `unix://` scheme; everything after it is the request path (so colons inside a query string are preserved). If no request path is given it defaults to `/`.
+
+| Function | Description |
+|----------|-------------|
+| `uhttp.get(url, headers?)` | HTTP GET |
+| `uhttp.post(url, body, headers?)` | HTTP POST with string body |
+| `uhttp.put(url, body, headers?)` | HTTP PUT with string body |
+| `uhttp.delete(url, headers?)` | HTTP DELETE |
+| `uhttp.head(url, headers?)` | HTTP HEAD (body will be empty) |
+| `uhttp.stream(url, handler, headers?)` | Stream a long-lived response, calling `handler(line)` per line |
+
+```jade
+use std::uhttp
+use std::json
+
+// Query the Docker Engine API over its socket
+let resp = uhttp.get("unix:///var/run/docker.sock:/v1.43/containers/json")
+print(resp["status"])   // 200
+let containers = json.parse(resp["body"])
+```
+
+### Streaming endpoints
+
+`uhttp.stream` consumes a response that stays open indefinitely — Docker's `/events`, `/logs?follow=1`, or image-pull progress — one line at a time. It calls `handler(line)` for each newline-delimited line of the body (the newline is stripped) and returns the HTTP status code once the stream ends. The framing is decoded incrementally, so `Transfer-Encoding: chunked` responses work.
+
+A handler that returns `false` **stops** the stream early and closes the socket; any other return value continues.
+
+```jade
+use std::uhttp
+use std::json
+
+// Follow the Docker event stream, printing each event's action
+fn on_event(line) {
+    let event = json.parse(line)
+    print(event["Action"])
+    // return false here to stop after the first event
+}
+
+uhttp.stream("unix:///var/run/docker.sock:/v1.43/events", on_event)
+```
+
+:::note
+Unix-only (unavailable on Windows). One-shot requests (`get`/`post`/…) time out after 30 seconds and send `Connection: close`; `stream` keeps the connection open with no read timeout (events may be sparse). Response framing honors `Content-Length`, `Transfer-Encoding: chunked` (de-chunked), and read-to-EOF on connection close. HTTP errors (non-2xx status) do **not** raise — check `resp["status"]` yourself. A missing socket, a malformed pseudo-URL, or a connection failure raises an `IoError`.
 :::
 
 ---

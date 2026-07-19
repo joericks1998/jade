@@ -1,0 +1,27 @@
+use std::uhttp
+use std::json
+
+// Streaming endpoints stay open indefinitely (Docker /events, /logs?follow=1,
+// image-pull progress). uhttp.stream(url, handler, headers?) invokes `handler`
+// once per newline-delimited line of the response body, decoding chunked
+// framing incrementally. It returns the HTTP status once the stream ends.
+
+// Follow the Docker event stream, printing each event's action.
+fn on_event(line) {
+    let event = json.parse(line)
+    print(event["Action"])
+}
+
+let status = uhttp.stream("unix:///var/run/docker.sock:/v1.43/events", on_event)
+print(status)                               // 200 (once the stream closes)
+
+// A handler that returns `false` stops the stream early and closes the socket.
+// Here we grab only the first event, then bail out.
+let first = nil
+fn take_one(line) {
+    first = json.parse(line)
+    return false
+}
+
+uhttp.stream("unix:///var/run/docker.sock:/v1.43/events", take_one)
+print(first["Type"])

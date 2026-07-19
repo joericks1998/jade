@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    compiler::builtins,
+    builtins,
     frontend::{
         ast::{BinOpKind, Expr, FStrPart, Program, StructFieldDef, Stmt, UnaryOpKind},
         error::{JadeError, Result, Span},
@@ -1284,7 +1284,7 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
 
         // ── LLM prompt dereference ────────────────────────────────────────────
 
-        Expr::PromptDeref { expr, constraint, span } => {
+        Expr::PromptDeref { expr, constraint, span, style: _ } => {
             let texpr = infer_expr(expr, ctx)?;
             if texpr.ty != JadeType::Prompt && texpr.ty != JadeType::Unknown {
                 return Err(JadeError::TypeMismatch {
@@ -1822,8 +1822,4 @@ fn expr_span(e: &Expr) -> Span {
     }
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-#[path = "type_infer_tests.rs"]
-mod tests;
+// Tests for this module live in `src/compiler/tests.rs` (`mod type_infer`).

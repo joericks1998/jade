@@ -3,10 +3,10 @@ use parking_lot::Mutex;
 use tokio::task::JoinHandle;
 
 use crate::{
+    builtins::{self, BuiltinFn, NativeBoundMethod, PrimType},
     compiler::{
         bytecode::{Chunk, CompiledFn, FStrPart, Instr, Reg},
         emit::CompiledProgram,
-        builtins::{self, BuiltinFn, NativeBoundMethod, PrimType},
     },
     frontend::{
         ast::{BinOpKind, StructFieldDef, UnaryOpKind},
@@ -15,6 +15,8 @@ use crate::{
     llm,
     native::NativeLibFn,
 };
+use jade_runtime::dynop;
+use jade_runtime::coll::{ArrayObj, DictObj, StructObj};
 
 // ── Token budgets (mirror eval.rs) ────────────────────────────────────────────
 
@@ -48,6 +50,10 @@ pub enum NativeFnId {
     /// pure BuiltinFns (which can't run Jade code).
     ArrayMap,
     ArrayFilter,
+    /// `uhttp.stream(url, handler, headers?)` — stream an HTTP response over a
+    /// Unix socket, invoking a Jade handler per line. Unix-only.
+    #[cfg(unix)]
+    UhttpStream,
 }
 
 /// A value at VM runtime, carrying `Arc<CompiledFn>` for functions so the VM
@@ -61,16 +67,16 @@ pub enum VmValue {
     Fn(Arc<CompiledFn>),
     /// A closure: compiled function + snapshot of globals at creation time.
     Closure(Arc<CompiledFn>, Arc<HashMap<String, VmValue>>),
-    Struct(Arc<Mutex<VmStruct>>),
+    Struct(Arc<Mutex<StructObj<VmValue>>>),
     BoundMethod(Arc<VmBoundMethod>),
     /// Reference-counted array — mutations are visible to all aliases.
-    Array(Arc<Mutex<Vec<VmValue>>>),
+    Array(Arc<Mutex<ArrayObj<VmValue>>>),
     Prompt(String),
     /// A user-defined GBNF pattern (RHS only, e.g. `"yes" | "no"`).
     /// Used with `?p |> grammar_var` to constrain LLM token sampling.
     /// `anchor`: if set, grammar enforcement begins only after the model emits this string.
     Grammar { pattern: String, anchor: Option<String>, stop_anchor: Option<String> },
-    Dict(HashMap<String, VmValue>),
+    Dict(DictObj<VmValue>),
     /// A pure Rust-backed callable (no VM state mutation). Used for builtin
     /// core built-ins (print, len, write, input) and package functions.
     BuiltinFn(BuiltinFn),
@@ -125,13 +131,8 @@ impl Drop for JadeFuture {
     }
 }
 
-pub struct VmStruct {
-    pub type_name: String,
-    pub fields: HashMap<String, VmValue>,
-}
-
 pub struct VmBoundMethod {
-    pub receiver: Arc<Mutex<VmStruct>>,
+    pub receiver: Arc<Mutex<StructObj<VmValue>>>,
     pub method: Arc<CompiledFn>,
 }
 
@@ -146,7 +147,7 @@ impl std::fmt::Debug for VmValue {
             VmValue::Closure(cf, _) => write!(f, "Closure({})", cf.params.join(", ")),
             VmValue::Struct(rc) => {
                 let inst = rc.lock();
-                write!(f, "{} {{...}}", inst.type_name)
+                write!(f, "{} {{...}}", inst.type_name())
             }
             VmValue::BoundMethod(_) => write!(f, "<bound method>"),
             VmValue::Array(arc) => write!(f, "Array[{} elem(s)]", arc.lock().len()),
@@ -170,30 +171,26 @@ impl std::fmt::Debug for VmValue {
 
 /// Convert a `VmValue` to its user-visible string representation.
 pub fn value_to_display(v: &VmValue) -> String {
+    // Scalar/collection formatting rules live once in the shared runtime crate
+    // (jade_runtime::render) so the VM and the AOT renderer (render_word) cannot
+    // drift — same float `.0` rule, same `[a, b]` / sorted-quoted `{"k": v}`
+    // framing. Only the per-engine iteration differs (VmValue vs tagged words).
     match v {
         VmValue::Int(i) => i.to_string(),
-        VmValue::Float(f) => {
-            let s = format!("{}", f);
-            if s.chars().all(|c| c.is_ascii_digit() || c == '-') {
-                format!("{}.0", s)
-            } else {
-                s
-            }
-        }
+        VmValue::Float(f) => jade_runtime::render::format_float(*f),
         VmValue::Bool(b)   => b.to_string(),
         VmValue::Str(s)    => s.clone(),
         VmValue::Array(arc) => {
             let guard = arc.lock();
             let parts: Vec<String> = guard.iter().map(value_to_display).collect();
-            format!("[{}]", parts.join(", "))
+            jade_runtime::render::render_array(&parts)
         }
         VmValue::Dict(m) => {
-            let mut pairs: Vec<_> = m.iter().collect();
-            pairs.sort_by_key(|(k, _)| k.as_str());
-            let parts: Vec<String> = pairs.iter()
-                .map(|(k, v)| format!("{:?}: {}", k, value_to_display(v)))
+            let mut entries: Vec<(String, String)> = m
+                .iter()
+                .map(|(k, v)| (k.clone(), value_to_display(v)))
                 .collect();
-            format!("{{{}}}", parts.join(", "))
+            jade_runtime::render::render_dict(&mut entries)
         }
         VmValue::Fn(_)                 => "<fn>".to_string(),
         VmValue::Closure(_, _)         => "<fn>".to_string(),
@@ -306,7 +303,7 @@ impl VmState {
         globals.insert("__tokens__".to_string(), VmValue::Int(0));
         globals.insert("__model__".to_string(), VmValue::Str(String::new()));
         globals.insert("__max_retries__".to_string(), VmValue::Int(15));
-        globals.insert("__retry_log__".to_string(), VmValue::Array(Arc::new(Mutex::new(vec![]))));
+        globals.insert("__retry_log__".to_string(), VmValue::Array(Arc::new(Mutex::new(ArrayObj::from_vec(vec![])))));
         builtins::seed_globals(&mut globals);
         VmState {
             raised_exception: None,
@@ -523,12 +520,9 @@ fn stamp_source_file(chunk: &mut Chunk, file: &str) {
 /// Build a `RuntimeError { message }` struct value for wrapping built-in errors
 /// when they are caught by a `try/catch` block.
 fn make_vm_runtime_error(message: String) -> VmValue {
-    let mut fields = HashMap::new();
-    fields.insert("message".to_string(), VmValue::Str(message));
-    VmValue::Struct(Arc::new(Mutex::new(VmStruct {
-        type_name: "RuntimeError".to_string(),
-        fields,
-    })))
+    let mut sobj = StructObj::<VmValue>::new("RuntimeError");
+    sobj.set_field("message", VmValue::Str(message));
+    VmValue::Struct(Arc::new(Mutex::new(sobj)))
 }
 
 /// Execute `chunk` with the provided register frame.  Returns `Some(value)` if
@@ -600,13 +594,7 @@ async fn execute_chunk(
                 // ── Built-in packages ───────────────────────────────────────
                 // stdlib packages always bind under their own global_name; namespace param ignored.
                 if let Some(pkg) = builtins::find_package(path) {
-                    let val = if pkg.import_name == "llm" {
-                        builtins::llm_pkg::llm_vm_dict_value()
-                    } else if pkg.import_name == "std/array" {
-                        builtins::array_pkg::array_vm_dict_value()
-                    } else {
-                        pkg.vm_dict_value()
-                    };
+                    let val = package_dict_value(pkg);
                     state.globals.insert(pkg.global_name.to_string(), val);
                     continue;
                 }
@@ -617,7 +605,7 @@ async fn execute_chunk(
                 let abs_path = match resolve_user_import(state, path, span)? {
                     ResolvedImport::Native(lib_path) => {
                         let fns = crate::native::load_native_package(&lib_path, span)?;
-                        state.globals.insert(namespace.clone(), VmValue::Dict(fns));
+                        state.globals.insert(namespace.clone(), VmValue::Dict(fns.into_iter().collect()));
                         continue;
                     }
                     ResolvedImport::File(p) => p,
@@ -752,7 +740,7 @@ async fn execute_chunk(
                                     *t = format!("{}.{}", namespace, t);
                                 }
                             }
-                            state.globals.insert(namespace.clone(), VmValue::Dict(module_globals));
+                            state.globals.insert(namespace.clone(), VmValue::Dict(module_globals.into_iter().collect()));
 
                             // Merge struct_defs prefixed with the namespace.
                             for (k, v) in sub_state.struct_defs.drain() {
@@ -801,13 +789,7 @@ async fn execute_chunk(
             Instr::ImportFrom(path, names) => {
                 if let Some(pkg) = builtins::find_package(path) {
                     // Build the package dict, then extract only the requested names.
-                    let dict = if pkg.import_name == "llm" {
-                        builtins::llm_pkg::llm_vm_dict_value()
-                    } else if pkg.import_name == "std/array" {
-                        builtins::array_pkg::array_vm_dict_value()
-                    } else {
-                        pkg.vm_dict_value()
-                    };
+                    let dict = package_dict_value(pkg);
                     if let VmValue::Dict(map) = dict {
                         for name in names {
                             if let Some(val) = map.get(name) {
@@ -1194,10 +1176,10 @@ async fn execute_chunk(
             // ── Collections ───────────────────────────────────────────────────
             Instr::MakeArray(dest, elem_regs) => {
                 let elems: Vec<VmValue> = elem_regs.iter().map(|&r| get(slots, r).clone()).collect();
-                set(slots, *dest, VmValue::Array(Arc::new(Mutex::new(elems))));
+                set(slots, *dest, VmValue::Array(Arc::new(Mutex::new(ArrayObj::from_vec(elems)))));
             }
             Instr::MakeDict(dest, pairs) => {
-                let mut map = HashMap::with_capacity(pairs.len());
+                let mut map = DictObj::new();
                 for &(kr, vr) in pairs {
                     let key_val = get(slots, kr).clone();
                     let key = match key_val {
@@ -1239,7 +1221,7 @@ async fn execute_chunk(
 
             // ── Struct ────────────────────────────────────────────────────────
             Instr::MakeStruct(dest, type_name, field_specs) => {
-                let mut fields = HashMap::with_capacity(field_specs.len());
+                let mut sobj = StructObj::<VmValue>::new(type_name);
                 for (fname, freg, is_prompt) in field_specs {
                     let mut val = get(slots, *freg).clone();
                     if *is_prompt {
@@ -1248,7 +1230,7 @@ async fn execute_chunk(
                             other => other, // already Prompt, or wrong type caught at type-check
                         };
                     }
-                    fields.insert(fname.clone(), val);
+                    sobj.set_field(fname, val);
                 }
                 // Fill in defaults for any fields omitted from the literal.
                 // Needed when the struct type was unknown at compile time (imported type).
@@ -1256,20 +1238,20 @@ async fn execute_chunk(
                     for def_field in &def_fields {
                         match def_field {
                             StructFieldDef::Let { name, default } => {
-                                if !fields.contains_key(name.as_str()) {
+                                if sobj.get_field(name).is_none() {
                                     if let Some(v) = eval_literal_default(default) {
-                                        fields.insert(name.clone(), v);
+                                        sobj.set_field(name, v);
                                     }
                                 }
                             }
                             StructFieldDef::Prompt { name, default } => {
-                                if !fields.contains_key(name.as_str()) {
+                                if sobj.get_field(name).is_none() {
                                     if let Some(v) = eval_literal_default(default) {
                                         let v = match v {
                                             VmValue::Str(s) => VmValue::Prompt(s),
                                             other => other,
                                         };
-                                        fields.insert(name.clone(), v);
+                                        sobj.set_field(name, v);
                                     }
                                 }
                             }
@@ -1277,10 +1259,7 @@ async fn execute_chunk(
                         }
                     }
                 }
-                let mut result = VmValue::Struct(Arc::new(Mutex::new(VmStruct {
-                    type_name: type_name.clone(),
-                    fields,
-                })));
+                let mut result = VmValue::Struct(Arc::new(Mutex::new(sobj)));
                 // Call struct decorators: dec(instance, arg1, ...) for each @dec.
                 let decs = state.struct_decorators.get(type_name).cloned().unwrap_or_default();
                 for (dec_name, dec_args) in decs {
@@ -1298,7 +1277,7 @@ async fn execute_chunk(
                     VmValue::Struct(rc) => {
                         let (type_name, field_val) = {
                             let guard = rc.lock();
-                            (guard.type_name.clone(), guard.fields.get(field.as_str()).cloned())
+                            (guard.type_name().to_string(), guard.get_field(field.as_str()).cloned())
                         };
                         if let Some(v) = field_val {
                             set(slots, *dest, v);
@@ -1360,7 +1339,7 @@ async fn execute_chunk(
                                 let arr: Vec<VmValue> = cf.params.iter()
                                     .map(|p| VmValue::Str(p.clone()))
                                     .collect();
-                                VmValue::Array(Arc::new(Mutex::new(arr)))
+                                VmValue::Array(Arc::new(Mutex::new(ArrayObj::from_vec(arr))))
                             }
                             _ => vm_err!(JadeError::UndefinedField {
                                 type_name: "fn".to_string(),
@@ -1380,10 +1359,10 @@ async fn execute_chunk(
                     VmValue::Struct(rc) => {
                         let error_type_name = {
                             let guard = rc.lock();
-                            if guard.fields.contains_key(field.as_str()) {
+                            if guard.get_field(field.as_str()).is_some() {
                                 None
                             } else {
-                                Some(guard.type_name.clone())
+                                Some(guard.type_name().to_string())
                             }
                         };
                         if let Some(type_name) = error_type_name {
@@ -1393,7 +1372,7 @@ async fn execute_chunk(
                                 span,
                             });
                         }
-                        rc.lock().fields.insert(field.clone(), val);
+                        rc.lock().set_field(field, val);
                     }
                     _ => { vm_err!(JadeError::NotAStruct { span }); }
                 }
@@ -1488,7 +1467,7 @@ async fn execute_chunk(
 
             Instr::GetTypeName(dest, src) => {
                 let name = match get(slots, *src) {
-                    VmValue::Struct(rc) => rc.lock().type_name.clone(),
+                    VmValue::Struct(rc) => rc.lock().type_name().to_string(),
                     _ => String::new(),
                 };
                 set(slots, *dest, VmValue::Str(name));
@@ -1557,7 +1536,7 @@ async fn execute_chunk(
                     results.push(value);
                 }
                 state.globals.insert("__tokens__".to_string(), VmValue::Int(state.token_count));
-                set(slots, *dest, VmValue::Array(Arc::new(Mutex::new(results))));
+                set(slots, *dest, VmValue::Array(Arc::new(Mutex::new(ArrayObj::from_vec(results)))));
             }
         }
     }
@@ -1614,6 +1593,23 @@ fn resolve_named_args(
             Ok(args)
         }
     }
+}
+
+/// Build the VM dict value for an imported stdlib package. Most packages use the
+/// generic `vm_dict_value`; `llm`, `std/array`, and (on unix) `std/uhttp` override
+/// it to inject state-mutating `NativeFn` entries the generic path can't express.
+fn package_dict_value(pkg: &builtins::Package) -> VmValue {
+    if pkg.import_name == "llm" {
+        return crate::llm::pkg::llm_vm_dict_value();
+    }
+    if pkg.import_name == "std/array" {
+        return crate::array::array_vm_dict_value();
+    }
+    #[cfg(unix)]
+    if pkg.import_name == "std/uhttp" {
+        return crate::uhttp::uhttp_vm_dict_value();
+    }
+    pkg.vm_dict_value()
 }
 
 #[async_recursion::async_recursion]
@@ -1700,7 +1696,6 @@ async fn call_value(
                 if args.is_empty() || args.len() > 2 {
                     return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span });
                 }
-                use std::io::Write as _;
                 let mut iter = args.into_iter();
                 let val = iter.next().unwrap();
                 // Optional `end` kwarg (arrives positionally for native callees).
@@ -1717,13 +1712,11 @@ async fn call_value(
                     VmValue::TokenStream(ts) => {
                         vm_drain_token_stream_printing(ts, state, span, end == "\n", false, &[], &[]).await?;
                         if end != "\n" && !end.is_empty() {
-                            print!("{}", end);
-                            let _ = std::io::stdout().flush();
+                            crate::stdio::write_str_flush(&end);
                         }
                     }
                     other => {
-                        print!("{}{}", value_to_display(&other), end);
-                        let _ = std::io::stdout().flush();
+                        crate::stdio::write_str_flush(&format!("{}{}", value_to_display(&other), end));
                     }
                 }
                 Ok(VmValue::Nil)
@@ -1807,7 +1800,7 @@ async fn call_value(
                     }
                     other => {
                         let s = value_to_display(&other);
-                        println!("{}", s);
+                        crate::stdio::write_str_flush(&format!("{s}\n"));
                         Ok(VmValue::Str(s))
                     }
                 }
@@ -1821,10 +1814,10 @@ async fn call_value(
                 // If `on` is omitted, try route_configs for this struct's type.
                 let on = iter.next().unwrap_or_else(|| {
                     if let VmValue::Struct(ref s) = obj {
-                        let type_name = s.lock().type_name.clone();
+                        let type_name = s.lock().type_name().to_string();
                         if let Some(field_name) = state.route_configs.get(&type_name) {
                             let fields = s.lock();
-                            return fields.fields.get(field_name)
+                            return fields.get_field(field_name)
                                 .cloned()
                                 .unwrap_or(VmValue::Nil);
                         }
@@ -1836,7 +1829,7 @@ async fn call_value(
                     VmValue::Str(method_name) => {
                         // Prefer the struct's own extend methods; fall back to globals.
                         let fn_val = if let VmValue::Struct(ref s) = obj {
-                            let type_name = s.lock().type_name.clone();
+                            let type_name = s.lock().type_name().to_string();
                             state.extend_methods
                                 .get(&type_name)
                                 .and_then(|m| m.get(&method_name))
@@ -1876,7 +1869,7 @@ async fn call_value(
                 for e in elems {
                     out.push(call_value(f.clone(), vec![e], state, span).await?);
                 }
-                Ok(VmValue::Array(Arc::new(Mutex::new(out))))
+                Ok(VmValue::Array(Arc::new(Mutex::new(ArrayObj::from_vec(out)))))
             }
             NativeFnId::ArrayFilter => {
                 // array.filter(arr, fn) → elements for which fn(elem) is true.
@@ -1902,7 +1895,52 @@ async fn call_value(
                         }),
                     }
                 }
-                Ok(VmValue::Array(Arc::new(Mutex::new(out))))
+                Ok(VmValue::Array(Arc::new(Mutex::new(ArrayObj::from_vec(out)))))
+            }
+            #[cfg(unix)]
+            NativeFnId::UhttpStream => {
+                use crate::uhttp::{self, StreamEvent};
+                if args.len() < 2 || args.len() > 3 {
+                    return Err(JadeError::ArityMismatch { expected: 2, got: args.len(), span });
+                }
+                let url = match &args[0] {
+                    VmValue::Str(s) => s.clone(),
+                    other => return Err(JadeError::TypeError {
+                        message: format!("uhttp.stream() url must be a str, got {}", value_type_name(other)),
+                        span,
+                    }),
+                };
+                let handler = args[1].clone();
+                if !matches!(handler,
+                    VmValue::Fn(_) | VmValue::Closure(_, _) | VmValue::BoundMethod(_)) {
+                    return Err(JadeError::TypeError {
+                        message: format!("uhttp.stream() handler must be a function, got {}", value_type_name(&handler)),
+                        span,
+                    });
+                }
+                let headers = uhttp::extract_headers(args.get(2))
+                    .map_err(|e| patch_builtin_span(e, span))?;
+
+                let mut rx = uhttp::open_stream(&url, headers)
+                    .map_err(|e| patch_builtin_span(e, span))?;
+                let mut status: i64 = 0;
+                while let Some(ev) = rx.recv().await {
+                    match ev {
+                        StreamEvent::Status(s) => status = s as i64,
+                        StreamEvent::Line(line) => {
+                            let r = call_value(handler.clone(), vec![VmValue::Str(line)], state, span).await?;
+                            // A handler returning `false` stops the stream early;
+                            // dropping `rx` closes the socket on the worker side.
+                            if matches!(r, VmValue::Bool(false)) {
+                                break;
+                            }
+                        }
+                        StreamEvent::Error(e) => {
+                            return Err(patch_builtin_span(uhttp::uhttp_io_error(&e), span));
+                        }
+                    }
+                }
+                Ok(VmValue::Int(status))
             }
             NativeFnId::LlmKeepAnchors => {
                 if args.len() != 1 {
@@ -1949,7 +1987,7 @@ async fn call_value(
                         let found = llm::model_profile::select(&state.default_model)
                             .and_then(|p| p.find_tool_call(text));
                         match found {
-                            Some(tc) => Ok(VmValue::Dict(HashMap::from([
+                            Some(tc) => Ok(VmValue::Dict(DictObj::from_iter([
                                 ("name".to_string(), VmValue::Str(tc.name)),
                                 ("args".to_string(), VmValue::Str(tc.args)),
                             ]))),
@@ -1974,12 +2012,12 @@ async fn call_value(
                             .map(|p| p.find_all_tool_calls(text))
                             .unwrap_or_default();
                         let items = calls.into_iter().map(|tc| {
-                            VmValue::Dict(HashMap::from([
+                            VmValue::Dict(DictObj::from_iter([
                                 ("name".to_string(), VmValue::Str(tc.name)),
                                 ("args".to_string(), VmValue::Str(tc.args)),
                             ]))
                         }).collect::<Vec<_>>();
-                        Ok(VmValue::Array(Arc::new(Mutex::new(items))))
+                        Ok(VmValue::Array(Arc::new(Mutex::new(ArrayObj::from_vec(items)))))
                     }
                     ref other => Err(JadeError::TypeError {
                         message: format!("llm.find_tool_calls() requires str, got {}", value_type_name(other)),
@@ -2207,7 +2245,7 @@ fn resolve_decorator_fn(dec_name: &str, state: &VmState) -> Option<VmValue> {
             VmValue::Struct(arc) => {
                 let (type_name, field_val) = {
                     let guard = arc.lock();
-                    (guard.type_name.clone(), guard.fields.get(field_name).cloned())
+                    (guard.type_name().to_string(), guard.get_field(field_name).cloned())
                 };
                 if let Some(v) = field_val {
                     return Some(v);
@@ -2400,12 +2438,12 @@ fn json_to_vm_value(json: &serde_json::Value) -> std::result::Result<VmValue, St
         serde_json::Value::Array(arr) => arr.iter().enumerate()
             .map(|(i, v)| json_to_vm_value(v).map_err(|e| format!("element {}: {}", i, e)))
             .collect::<std::result::Result<Vec<VmValue>, String>>()
-            .map(|v| VmValue::Array(Arc::new(Mutex::new(v)))),
+            .map(|v| VmValue::Array(Arc::new(Mutex::new(ArrayObj::from_vec(v))))),
         serde_json::Value::Object(obj) => obj.iter()
             .map(|(k, v)| json_to_vm_value(v)
                 .map(|val| (k.clone(), val))
                 .map_err(|e| format!("field '{}': {}", k, e)))
-            .collect::<std::result::Result<HashMap<String, VmValue>, String>>()
+            .collect::<std::result::Result<DictObj<VmValue>, String>>()
             .map(VmValue::Dict),
     }
 }
@@ -2413,22 +2451,22 @@ fn json_to_vm_value(json: &serde_json::Value) -> std::result::Result<VmValue, St
 /// Convert a model profile into the dict shape `llm.profile()` returns:
 /// `{ model, tool_call: { open, close, name_field }, spans: [ { tag, open, close } ] }`.
 fn model_profile_to_vm(p: &llm::model_profile::ModelProfile) -> VmValue {
-    let tool_call = HashMap::from([
+    let tool_call = DictObj::from_iter([
         ("open".to_string(), VmValue::Str(p.tool_call.open.to_string())),
         ("close".to_string(), VmValue::Str(p.tool_call.close.to_string())),
         ("name_field".to_string(), VmValue::Str(p.tool_call.name_field.to_string())),
     ]);
     let spans = p.spans.iter().map(|s| {
-        VmValue::Dict(HashMap::from([
+        VmValue::Dict(DictObj::from_iter([
             ("tag".to_string(), VmValue::Str(s.tag.to_string())),
             ("open".to_string(), VmValue::Str(s.open.to_string())),
             ("close".to_string(), VmValue::Str(s.close.to_string())),
         ]))
     }).collect::<Vec<_>>();
-    VmValue::Dict(HashMap::from([
+    VmValue::Dict(DictObj::from_iter([
         ("model".to_string(), VmValue::Str(p.model.to_string())),
         ("tool_call".to_string(), VmValue::Dict(tool_call)),
-        ("spans".to_string(), VmValue::Array(Arc::new(Mutex::new(spans)))),
+        ("spans".to_string(), VmValue::Array(Arc::new(Mutex::new(ArrayObj::from_vec(spans))))),
     ]))
 }
 
@@ -2496,10 +2534,11 @@ fn vm_coerce_struct(
         }
     }
 
-    Ok(VmValue::Struct(Arc::new(Mutex::new(VmStruct {
-        type_name: type_name.to_string(),
-        fields,
-    }))))
+    let mut sobj = StructObj::<VmValue>::new(type_name);
+    for (k, v) in fields {
+        sobj.set_field(&k, v);
+    }
+    Ok(VmValue::Struct(Arc::new(Mutex::new(sobj))))
 }
 
 /// Start a streaming inference call and return a lazy `VmValue::TokenStream`.
@@ -2854,21 +2893,15 @@ fn vm_type_call(
             if let Some(def) = state.struct_defs.get(name) {
                 match arg {
                     VmValue::Dict(map) => {
-                        let mut fields = HashMap::new();
+                        let mut sobj = StructObj::<VmValue>::new(name);
                         for field_def in def {
                             let fname = field_def.name();
-                            if let Some(v) = map.get(fname) {
-                                fields.insert(fname.to_string(), v.clone());
-                            } else {
-                                fields.insert(fname.to_string(), VmValue::Nil);
-                            }
+                            let v = map.get(fname).cloned().unwrap_or(VmValue::Nil);
+                            sobj.set_field(fname, v);
                         }
-                        Ok(VmValue::Struct(Arc::new(Mutex::new(VmStruct {
-                            type_name: name.to_string(),
-                            fields,
-                        }))))
+                        Ok(VmValue::Struct(Arc::new(Mutex::new(sobj))))
                     }
-                    VmValue::Struct(s) if s.lock().type_name == name => Ok(VmValue::Struct(s)),
+                    VmValue::Struct(s) if s.lock().type_name() == name => Ok(VmValue::Struct(s)),
                     other => err(format!(
                         "{}(): cannot construct from {}", name, value_to_display(&other)
                     )),
@@ -2922,7 +2955,7 @@ fn coerce(
                         .map(|(i, elem)| json_to_vm_value(elem)
                             .map_err(|e| format!("element {}: {}", i, e)))
                         .collect::<std::result::Result<Vec<VmValue>, String>>()
-                        .map(|v| VmValue::Array(Arc::new(Mutex::new(v))))
+                        .map(|v| VmValue::Array(Arc::new(Mutex::new(ArrayObj::from_vec(v)))))
                         .map_err(|e| format!(
                             "Your response array could not be fully converted: {}. \
                              Respond with only a JSON array of int, float, bool, or string values.",
@@ -2945,7 +2978,7 @@ fn coerce(
                         .map(|(k, val)| json_to_vm_value(val)
                             .map(|v| (k.clone(), v))
                             .map_err(|e| format!("field '{}': {}", k, e)))
-                        .collect::<std::result::Result<HashMap<String, VmValue>, String>>()
+                        .collect::<std::result::Result<DictObj<VmValue>, String>>()
                         .map(VmValue::Dict)
                         .map_err(|e| format!(
                             "Your response dict could not be fully converted: {}. \
@@ -2970,40 +3003,97 @@ fn coerce(
 
 // ── Dynamic dispatch helpers ──────────────────────────────────────────────────
 
-fn eval_binop_dynamic(op: &BinOpKind, l: VmValue, r: VmValue, span: Span) -> Result<VmValue> {
+/// Decode a `VmValue` into the shared [`dynop`] core's kind view. Scalars carry
+/// their payload; strings and every other value are markers (string bytes and
+/// error type-names are recovered from the original `VmValue` by the caller).
+fn vm_kind(v: &VmValue) -> dynop::Kind {
+    match v {
+        VmValue::Int(i)   => dynop::Kind::Int(*i),
+        VmValue::Float(f) => dynop::Kind::Float(*f),
+        VmValue::Bool(b)  => dynop::Kind::Bool(*b),
+        VmValue::Str(_)   => dynop::Kind::Str,
+        VmValue::Nil      => dynop::Kind::Nil,
+        _                 => dynop::Kind::Other,
+    }
+}
+
+/// The arithmetic/comparison operators the shared core decides; everything else
+/// (bitwise, shift, `in`, short-circuit) stays VM-owned.
+fn binop_to_dynop(op: &BinOpKind) -> Option<dynop::Op> {
+    use BinOpKind as B;
+    use dynop::Op as O;
+    Some(match op {
+        B::Add => O::Add, B::Sub => O::Sub, B::Mul => O::Mul, B::Div => O::Div, B::Mod => O::Mod,
+        B::Eq => O::Eq, B::Ne => O::Ne, B::Lt => O::Lt, B::Gt => O::Gt, B::Le => O::Le, B::Ge => O::Ge,
+        _ => return None,
+    })
+}
+
+/// Apply an equality/ordering operator to two already-known strings (the shared
+/// core defers string bytes to us via `Outcome::StrRel`).
+fn apply_str_rel(op: &BinOpKind, a: &str, b: &str) -> bool {
     use BinOpKind::*;
     match op {
-        Add => match (l, r) {
-            (VmValue::Int(a), VmValue::Int(b))     => a.checked_add(b).ok_or(JadeError::IntegerOverflow{span}).map(VmValue::Int),
-            (VmValue::Str(a), VmValue::Str(b))     => Ok(VmValue::Str(a + &b)),
-            (a, b) => { let (af, bf) = to_floats(a, b, op, span)?; Ok(VmValue::Float(af + bf)) }
+        Eq => a == b, Ne => a != b,
+        Lt => a < b,  Gt => a > b,
+        Le => a <= b, Ge => a >= b,
+        _ => unreachable!("apply_str_rel only for eq/ordering ops"),
+    }
+}
+
+/// Map a shared-core error to the VM's `JadeError`, reconstructing the exact
+/// message the VM produced before it delegated (tests match on the variants).
+fn map_dynop_err(e: dynop::DynErr, op: &BinOpKind, l: &VmValue, r: &VmValue, span: Span) -> JadeError {
+    use dynop::DynErr as D;
+    use BinOpKind::*;
+    match e {
+        D::Overflow => JadeError::IntegerOverflow { span },
+        D::DivZero  => JadeError::DivisionByZero { span },
+        D::RemZero  => JadeError::RemainderByZero { span },
+        D::Type => {
+            let message = match op {
+                Add | Sub | Mul | Div | Mod => format!("{:?} requires numeric operands", op),
+                _ => {
+                    let sym = match op { Eq => "==", Ne => "!=", Lt => "<", Gt => ">", Le => "<=", Ge => ">=", _ => "?" };
+                    format!("'{}' cannot compare {} and {}", sym, value_type_name(l), value_type_name(r))
+                }
+            };
+            JadeError::TypeError { message, span }
+        }
+    }
+}
+
+/// Turn a shared-core [`dynop::Outcome`] back into a `VmValue`, doing the
+/// string byte-work the core deferred (`Concat` for `+`, `StrRel` for
+/// comparisons). `l`/`r` are the original operands (needed for strings + errors).
+fn finish_dynop(out: dynop::Outcome, op: &BinOpKind, l: VmValue, r: VmValue, span: Span) -> Result<VmValue> {
+    use dynop::Outcome as O;
+    match out {
+        O::Int(v)  => Ok(VmValue::Int(v)),
+        O::Float(v) => Ok(VmValue::Float(v)),
+        O::Bool(v) => Ok(VmValue::Bool(v)),
+        O::Concat => match (l, r) {
+            (VmValue::Str(a), VmValue::Str(b)) => Ok(VmValue::Str(a + &b)),
+            _ => unreachable!("Concat is only produced for two strings"),
         },
-        Sub => match (l, r) {
-            (VmValue::Int(a), VmValue::Int(b))     => a.checked_sub(b).ok_or(JadeError::IntegerOverflow{span}).map(VmValue::Int),
-            (a, b) => { let (af, bf) = to_floats(a, b, op, span)?; Ok(VmValue::Float(af - bf)) }
+        O::StrRel => match (&l, &r) {
+            (VmValue::Str(a), VmValue::Str(b)) => Ok(VmValue::Bool(apply_str_rel(op, a, b))),
+            _ => unreachable!("StrRel is only produced for two strings"),
         },
-        Mul => match (l, r) {
-            (VmValue::Int(a), VmValue::Int(b))     => a.checked_mul(b).ok_or(JadeError::IntegerOverflow{span}).map(VmValue::Int),
-            (a, b) => { let (af, bf) = to_floats(a, b, op, span)?; Ok(VmValue::Float(af * bf)) }
-        },
-        Div => match (l, r) {
-            (VmValue::Int(a), VmValue::Int(b)) => {
-                if b == 0 { Err(JadeError::DivisionByZero{span}) } else { Ok(VmValue::Int(a/b)) }
-            }
-            (a, b) => {
-                let (af, bf) = to_floats(a, b, op, span)?;
-                if bf == 0.0 { Err(JadeError::DivisionByZero{span}) } else { Ok(VmValue::Float(af/bf)) }
-            }
-        },
-        Mod => match (l, r) {
-            (VmValue::Int(a), VmValue::Int(b)) => {
-                if b == 0 { Err(JadeError::RemainderByZero{span}) } else { Ok(VmValue::Int(a%b)) }
-            }
-            (a, b) => {
-                let (af, bf) = to_floats(a, b, op, span)?;
-                if bf == 0.0 { Err(JadeError::RemainderByZero{span}) } else { Ok(VmValue::Float(af%bf)) }
-            }
-        },
+        O::Err(e) => Err(map_dynop_err(e, op, &l, &r, span)),
+    }
+}
+
+fn eval_binop_dynamic(op: &BinOpKind, l: VmValue, r: VmValue, span: Span) -> Result<VmValue> {
+    use BinOpKind::*;
+    // Arithmetic + comparison are decided by the shared `dynop` core, so the VM
+    // and AOT cannot diverge on overflow/bool/cross-kind rules.
+    if let Some(dop) = binop_to_dynop(op) {
+        let out = dynop::binop(dop, vm_kind(&l), vm_kind(&r));
+        return finish_dynop(out, op, l, r, span);
+    }
+    // Ops the VM owns: int-only bitwise/shift, container membership, short-circuit.
+    match op {
         BitAnd => match (l,r) { (VmValue::Int(a),VmValue::Int(b)) => Ok(VmValue::Int(a&b)), (l,r) => Err(JadeError::TypeError{message:format!("'&' requires int operands, got {} and {}", value_type_name(&l), value_type_name(&r)),span}) },
         BitOr  => match (l,r) { (VmValue::Int(a),VmValue::Int(b)) => Ok(VmValue::Int(a|b)), (l,r) => Err(JadeError::TypeError{message:format!("'|' requires int operands, got {} and {}", value_type_name(&l), value_type_name(&r)),span}) },
         BitXor => match (l,r) { (VmValue::Int(a),VmValue::Int(b)) => Ok(VmValue::Int(a^b)), (l,r) => Err(JadeError::TypeError{message:format!("'^' requires int operands, got {} and {}", value_type_name(&l), value_type_name(&r)),span}) },
@@ -3019,31 +3109,10 @@ fn eval_binop_dynamic(op: &BinOpKind, l: VmValue, r: VmValue, span: Span) -> Res
             }
             _ => Err(JadeError::TypeError{message:"'>>' requires int operands".to_string(),span})
         },
-        Eq => match (l,r) {
-            (VmValue::Int(a),VmValue::Int(b))       => Ok(VmValue::Bool(a==b)),
-            (VmValue::Float(a),VmValue::Float(b))   => Ok(VmValue::Bool(a==b)),
-            (VmValue::Bool(a),VmValue::Bool(b))     => Ok(VmValue::Bool(a==b)),
-            (VmValue::Str(a),VmValue::Str(b))       => Ok(VmValue::Bool(a==b)),
-            (VmValue::Nil, VmValue::Nil)            => Ok(VmValue::Bool(true)),
-            (VmValue::Nil, _) | (_, VmValue::Nil)  => Ok(VmValue::Bool(false)),
-            (l,r) => Err(JadeError::TypeError{message:format!("'==' cannot compare {} and {}", value_type_name(&l), value_type_name(&r)),span})
-        },
-        Ne => match (l,r) {
-            (VmValue::Int(a),VmValue::Int(b))       => Ok(VmValue::Bool(a!=b)),
-            (VmValue::Float(a),VmValue::Float(b))   => Ok(VmValue::Bool(a!=b)),
-            (VmValue::Bool(a),VmValue::Bool(b))     => Ok(VmValue::Bool(a!=b)),
-            (VmValue::Str(a),VmValue::Str(b))       => Ok(VmValue::Bool(a!=b)),
-            (VmValue::Nil, VmValue::Nil)            => Ok(VmValue::Bool(false)),
-            (VmValue::Nil, _) | (_, VmValue::Nil)  => Ok(VmValue::Bool(true)),
-            (l,r) => Err(JadeError::TypeError{message:format!("'!=' cannot compare {} and {}", value_type_name(&l), value_type_name(&r)),span})
-        },
-        Lt => cmp_order(l,r,"<",span,|a:f64,b:f64| a<b, |a:i64,b:i64| a<b, |a:&str,b:&str| a<b, |a:bool,b:bool| !a&&b),
-        Gt => cmp_order(l,r,">",span,|a:f64,b:f64| a>b, |a:i64,b:i64| a>b, |a:&str,b:&str| a>b, |a:bool,b:bool| a&&!b),
-        Le => cmp_order(l,r,"<=",span,|a:f64,b:f64| a<=b,|a:i64,b:i64| a<=b,|a:&str,b:&str| a<=b,|a:bool,b:bool| a==b||(!a&&b)),
-        Ge => cmp_order(l,r,">=",span,|a:f64,b:f64| a>=b,|a:i64,b:i64| a>=b,|a:&str,b:&str| a>=b,|a:bool,b:bool| a==b||(a&&!b)),
         In => vm_contains(l, r, span).map(VmValue::Bool),
         NotIn => vm_contains(l, r, span).map(|b| VmValue::Bool(!b)),
         And | Or => unreachable!("short-circuit ops must not reach BinOp dynamic dispatch"),
+        _ => unreachable!("arithmetic/comparison handled by the shared core"),
     }
 }
 
@@ -3082,103 +3151,33 @@ fn vm_contains(needle: VmValue, haystack: VmValue, span: Span) -> Result<bool> {
     }
 }
 
-fn cmp_order(
-    l: VmValue, r: VmValue, op: &str, span: Span,
-    ff: impl Fn(f64,f64)->bool,
-    ii: impl Fn(i64,i64)->bool,
-    ss: impl Fn(&str,&str)->bool,
-    bb: impl Fn(bool,bool)->bool,
-) -> Result<VmValue> {
-    match (l, r) {
-        (VmValue::Int(a),   VmValue::Int(b))   => Ok(VmValue::Bool(ii(a,b))),
-        (VmValue::Float(a), VmValue::Float(b)) => Ok(VmValue::Bool(ff(a,b))),
-        (VmValue::Int(a),   VmValue::Float(b)) => Ok(VmValue::Bool(ff(a as f64,b))),
-        (VmValue::Float(a), VmValue::Int(b))   => Ok(VmValue::Bool(ff(a,b as f64))),
-        (VmValue::Bool(a),  VmValue::Bool(b))  => Ok(VmValue::Bool(bb(a,b))),
-        (VmValue::Str(a),   VmValue::Str(b))   => Ok(VmValue::Bool(ss(&a,&b))),
-        (l, r) => Err(JadeError::TypeError { message: format!("'{}' cannot compare {} and {}", op, value_type_name(&l), value_type_name(&r)), span }),
-    }
-}
-
 fn eval_unaryop_dynamic(op: &UnaryOpKind, v: VmValue, span: Span) -> Result<VmValue> {
     match op {
         UnaryOpKind::BitNot => match v { VmValue::Int(i) => Ok(VmValue::Int(!i)), ref v => Err(JadeError::TypeError{message:format!("'~' requires int, got {}", value_type_name(v)),span}) },
         UnaryOpKind::Not    => match v { VmValue::Bool(b)=> Ok(VmValue::Bool(!b)), ref v => Err(JadeError::TypeError{message:format!("'!' requires bool, got {}", value_type_name(v)),span}) },
-        UnaryOpKind::Neg    => match v {
-            VmValue::Int(i)   => Ok(VmValue::Int(-i)),
-            VmValue::Float(f) => Ok(VmValue::Float(-f)),
-            ref v => Err(JadeError::TypeError{message:format!("unary '-' requires int or float, got {}", value_type_name(v)),span})
+        // Numeric negation is decided by the shared core (int/float only).
+        UnaryOpKind::Neg    => match dynop::neg(vm_kind(&v)) {
+            dynop::Outcome::Int(i)   => Ok(VmValue::Int(i)),
+            dynop::Outcome::Float(f) => Ok(VmValue::Float(f)),
+            _ => Err(JadeError::TypeError{message:format!("unary '-' requires int or float, got {}", value_type_name(&v)),span}),
         },
     }
-}
-
-fn to_floats(l: VmValue, r: VmValue, op: &BinOpKind, span: Span) -> Result<(f64, f64)> {
-    let lf = match l { VmValue::Int(i) => i as f64, VmValue::Float(f) => f, _ => return Err(JadeError::TypeError { message: format!("{:?} requires numeric operands", op), span }) };
-    let rf = match r { VmValue::Int(i) => i as f64, VmValue::Float(f) => f, _ => return Err(JadeError::TypeError { message: format!("{:?} requires numeric operands", op), span }) };
-    Ok((lf, rf))
 }
 
 fn cmp_dynamic(slots: &[VmValue], l: Reg, r: Reg, op: &str, span: Span) -> Result<VmValue> {
     let lv = get(slots, l).clone();
     let rv = get(slots, r).clone();
-    let result = match op {
-        "==" => match (lv,rv) {
-            (VmValue::Int(a),VmValue::Int(b))     => a==b,
-            (VmValue::Float(a),VmValue::Float(b)) => a==b,
-            (VmValue::Bool(a),VmValue::Bool(b))   => a==b,
-            (VmValue::Str(a),VmValue::Str(b))     => a==b,
-            (VmValue::Nil, VmValue::Nil)           => true,
-            (VmValue::Nil, _) | (_, VmValue::Nil) => false,
-            (lv,rv) => return Err(JadeError::TypeError{message:format!("'{}' cannot compare {} and {}", op, value_type_name(&lv), value_type_name(&rv)),span}),
-        },
-        "!=" => match (lv,rv) {
-            (VmValue::Int(a),VmValue::Int(b))     => a!=b,
-            (VmValue::Float(a),VmValue::Float(b)) => a!=b,
-            (VmValue::Bool(a),VmValue::Bool(b))   => a!=b,
-            (VmValue::Str(a),VmValue::Str(b))     => a!=b,
-            (VmValue::Nil, VmValue::Nil)           => false,
-            (VmValue::Nil, _) | (_, VmValue::Nil) => true,
-            (lv,rv) => return Err(JadeError::TypeError{message:format!("'{}' cannot compare {} and {}", op, value_type_name(&lv), value_type_name(&rv)),span}),
-        },
-        "<"  => match (lv,rv) {
-            (VmValue::Int(a),VmValue::Int(b))     => a<b,
-            (VmValue::Float(a),VmValue::Float(b)) => a<b,
-            (VmValue::Int(a),VmValue::Float(b))   => (a as f64)<b,
-            (VmValue::Float(a),VmValue::Int(b))   => a<(b as f64),
-            (VmValue::Bool(a),VmValue::Bool(b))   => !a&&b,
-            (VmValue::Str(a),VmValue::Str(b))     => a<b,
-            (lv,rv) => return Err(JadeError::TypeError{message:format!("'{}' cannot compare {} and {}", op, value_type_name(&lv), value_type_name(&rv)),span}),
-        },
-        ">"  => match (lv,rv) {
-            (VmValue::Int(a),VmValue::Int(b))     => a>b,
-            (VmValue::Float(a),VmValue::Float(b)) => a>b,
-            (VmValue::Int(a),VmValue::Float(b))   => (a as f64)>b,
-            (VmValue::Float(a),VmValue::Int(b))   => a>(b as f64),
-            (VmValue::Bool(a),VmValue::Bool(b))   => a&&!b,
-            (VmValue::Str(a),VmValue::Str(b))     => a>b,
-            (lv,rv) => return Err(JadeError::TypeError{message:format!("'{}' cannot compare {} and {}", op, value_type_name(&lv), value_type_name(&rv)),span}),
-        },
-        "<=" => match (lv,rv) {
-            (VmValue::Int(a),VmValue::Int(b))     => a<=b,
-            (VmValue::Float(a),VmValue::Float(b)) => a<=b,
-            (VmValue::Int(a),VmValue::Float(b))   => (a as f64)<=b,
-            (VmValue::Float(a),VmValue::Int(b))   => a<=(b as f64),
-            (VmValue::Bool(a),VmValue::Bool(b))   => a==b||(!a&&b),
-            (VmValue::Str(a),VmValue::Str(b))     => a<=b,
-            (lv,rv) => return Err(JadeError::TypeError{message:format!("'{}' cannot compare {} and {}", op, value_type_name(&lv), value_type_name(&rv)),span}),
-        },
-        ">=" => match (lv,rv) {
-            (VmValue::Int(a),VmValue::Int(b))     => a>=b,
-            (VmValue::Float(a),VmValue::Float(b)) => a>=b,
-            (VmValue::Int(a),VmValue::Float(b))   => (a as f64)>=b,
-            (VmValue::Float(a),VmValue::Int(b))   => a>=(b as f64),
-            (VmValue::Bool(a),VmValue::Bool(b))   => a==b||(a&&!b),
-            (VmValue::Str(a),VmValue::Str(b))     => a>=b,
-            (lv,rv) => return Err(JadeError::TypeError{message:format!("'{}' cannot compare {} and {}", op, value_type_name(&lv), value_type_name(&rv)),span}),
-        },
-        _ => unreachable!(),
+    // The `CmpEq..CmpGe` opcodes map onto the same shared comparison core as
+    // the `BinOp` path, so all three of the VM's former comparison copies (this
+    // one, `eval_binop_dynamic`, and the AOT runtime) are now one implementation.
+    let bop = match op {
+        "==" => BinOpKind::Eq, "!=" => BinOpKind::Ne,
+        "<"  => BinOpKind::Lt, ">"  => BinOpKind::Gt,
+        "<=" => BinOpKind::Le, ">=" => BinOpKind::Ge,
+        _ => unreachable!("cmp_dynamic op: {op}"),
     };
-    Ok(VmValue::Bool(result))
+    let out = dynop::binop(binop_to_dynop(&bop).unwrap(), vm_kind(&lv), vm_kind(&rv));
+    finish_dynop(out, &bop, lv, rv, span)
 }
 
 fn vm_index(obj: VmValue, idx: VmValue, span: Span) -> Result<VmValue> {
@@ -3301,9 +3300,9 @@ fn eval_literal_default(expr: &crate::frontend::ast::Expr) -> Option<VmValue> {
         Expr::Bool { value, .. }    => Some(VmValue::Bool(*value)),
         Expr::Identifier { name, .. } if name == "nil" || name == "None" || name == "null" => Some(VmValue::Nil),
         Expr::Array { elements, .. } if elements.is_empty() =>
-            Some(VmValue::Array(Arc::new(Mutex::new(vec![])))),
+            Some(VmValue::Array(Arc::new(Mutex::new(ArrayObj::from_vec(vec![]))))),
         Expr::Dict { entries, .. } if entries.is_empty() =>
-            Some(VmValue::Dict(HashMap::new())),
+            Some(VmValue::Dict(DictObj::new())),
         _ => None,
     }
 }
@@ -3399,8 +3398,4 @@ fn instr_max_reg(instr: &Instr) -> u32 {
     }
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-#[path = "vm_tests.rs"]
-mod tests;
+// Tests for this module live in `src/compiler/tests.rs` (`mod vm`).

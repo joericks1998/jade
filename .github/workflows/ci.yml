@@ -22,6 +22,27 @@ jobs:
       - name: Test
         run: cargo test --verbose
 
+      # Exercises the real `jade check` binary against every committed fixture,
+      # covering the CLI wiring and on-disk cache that the in-process test in
+      # cli/check.rs cannot reach. Fixtures named *_error.jde document rejected
+      # programs and must fail; everything else must pass.
+      - name: Check examples
+        run: |
+          set -uo pipefail
+          status=0
+          while IFS= read -r file; do
+            if [[ "$file" == *_error.jde ]]; then
+              if ./target/debug/jade check "$file" >/dev/null 2>&1; then
+                echo "::error file=$file::expected 'jade check' to reject this fixture, but it passed"
+                status=1
+              fi
+            elif ! output=$(./target/debug/jade check "$file" 2>&1); then
+              echo "::error file=$file::$output"
+              status=1
+            fi
+          done < <(find examples -name '*.jde' | sort)
+          exit $status
+
   tag-release:
     name: Tag release
     needs: build

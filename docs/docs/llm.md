@@ -71,6 +71,37 @@ if result {
 `?p |> type` must be assigned to a variable — it cannot appear directly inside `print()`. Use `let n = ?p |> int` then `print(n)`.
 :::
 
+## Dereferencing a Prompt in a Field
+
+Prefix `?` is for bare prompts. A prompt held in a struct field uses one of two
+postfix forms, which put the operator next to the field it actually applies to:
+
+```jade
+struct Agent {
+    prompt system = "You are a helpful assistant"
+}
+
+let a = Agent {}
+
+let r = a.(?system)                  // explicit
+let r = a~>system                    // terse — same thing
+let n = a.(?system) |> int           // constraints work as usual
+let d = build(cfg).agent.(?system)   // reads left-to-right; no backtracking
+```
+
+`obj.(?field)` and `obj~>field` are the same operation — `~>` is the shorter
+spelling, the way C offers `p->x` for `(*p).x`. The `|>` constraint goes outside
+the parens.
+
+Plain `.` is untouched: `a.system` reads the field and yields the
+undereferenced prompt value.
+
+:::note
+`?obj.field` is a **syntax error**. It reads as though `?` applies to `obj` when
+it applies to `system`, so it's rejected in favor of the two forms above. So is
+`obj.?field` — the parentheses are required.
+:::
+
 ## Retry on Coercion Failure
 
 When the model's response cannot be parsed as the requested type, Jade automatically sends a correction follow-up and tries again. This continues up to `max_retries` times (default: `3`, giving 4 total attempts including the initial one).

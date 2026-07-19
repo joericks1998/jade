@@ -11,6 +11,9 @@ pub mod run;
 pub mod test;
 pub mod upgrade;
 
+#[cfg(test)]
+mod tests;
+
 /// Format a byte count as a human-readable string (B / KB / MB).
 pub(crate) fn format_bytes(bytes: u64) -> String {
     if bytes < 1024 {

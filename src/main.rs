@@ -154,6 +154,10 @@ enum ModelCommands {
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 fn main() {
+    // `jade run app.jde | head` closes stdout early; without this the print
+    // macros panic and dump a Rust backtrace over ordinary shell usage.
+    jade::stdio::install_broken_pipe_hook();
+
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

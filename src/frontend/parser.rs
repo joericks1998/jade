@@ -1,5 +1,5 @@
 use super::{
-    ast::{BinOpKind, CatchArm, Expr, FStrPart, InterfaceMethod, Program, StructFieldDef, Stmt, UnaryOpKind},
+    ast::{BinOpKind, CatchArm, DerefStyle, Expr, FStrPart, InterfaceMethod, Program, StructFieldDef, Stmt, UnaryOpKind},
     error::{JadeError, Result, Span},
     lexer::{token_kind_desc, RawFStrPart, Token, TokenKind},
 };
@@ -1319,6 +1319,33 @@ impl Parser {
 
     /// Parse a primary expression, then handle any trailing `.field` or `(args)` postfix.
     /// This naturally chains: `p.method(arg)` → FieldAccess then Call.
+    /// Finish a postfix prompt dereference (`obj.(?field)` / `obj~>field`) after
+    /// the operator and its `?` have been consumed.  Reads the field name, closes
+    /// the parenthesis for the `.(?…)` form, then takes an optional `|> constraint`
+    /// (which sits outside the parens: `obj.(?p) |> int`).
+    fn finish_postfix_deref(
+        &mut self,
+        object: Expr,
+        style: DerefStyle,
+        span: Span,
+    ) -> Result<Expr> {
+        let field = self.expect_ident("prompt field name")?;
+        if style == DerefStyle::DotParen {
+            self.expect(&TokenKind::RParen)?;
+        }
+        let target = Expr::FieldAccess { object: Box::new(object), field, span };
+        let constraint = if self.peek().kind == TokenKind::PipeGt {
+            if self.in_print_call {
+                return Err(JadeError::StreamingWithType { span });
+            }
+            self.advance(); // consume `|>`
+            Some(Box::new(self.parse_or()?))
+        } else {
+            None
+        };
+        Ok(Expr::PromptDeref { expr: Box::new(target), constraint, style, span })
+    }
+
     fn parse_call(&mut self) -> Result<Expr> {
         let mut expr = self.parse_primary()?;
         loop {
@@ -1366,11 +1393,28 @@ impl Parser {
                 self.expect(&TokenKind::RParen)?;
                 self.in_print_call = was_in_print_call;
                 expr = Expr::Call { callee: Box::new(expr), args, kwargs, span };
+            } else if self.peek().kind == TokenKind::Dot
+                && self.peek_ahead(1).kind == TokenKind::LParen
+                && self.peek_ahead(2).kind == TokenKind::Question
+            {
+                // `obj.(?field)` — postfix prompt dereference. The `?` sits next to
+                // the field it actually applies to, rather than back at the head
+                // of the chain (C's `p->x` vs `(*p).x`).
+                let span = Self::expr_span(&expr);
+                self.advance(); // consume `.`
+                self.advance(); // consume `(`
+                self.advance(); // consume `?`
+                expr = self.finish_postfix_deref(expr, DerefStyle::DotParen, span)?;
             } else if self.peek().kind == TokenKind::Dot {
                 let span = Self::expr_span(&expr);
                 self.advance(); // consume `.`
                 let field = self.expect_ident("field name")?;
                 expr = Expr::FieldAccess { object: Box::new(expr), field, span };
+            } else if self.peek().kind == TokenKind::TildeGt {
+                // `obj~>field` — terse spelling of `obj.?field`.
+                let span = Self::expr_span(&expr);
+                self.advance(); // consume `~>`
+                expr = self.finish_postfix_deref(expr, DerefStyle::Squiggly, span)?;
             } else if self.peek().kind == TokenKind::LBracket {
                 let span = Self::expr_span(&expr);
                 self.advance(); // consume `[`
@@ -1464,8 +1508,17 @@ impl Parser {
             TokenKind::Question => {
                 let span = token.span;
                 self.advance(); // consume `?`
-                // Parse the target expression: supports ?name, ?obj.field, ?arr[i], etc.
+                // Parse the target expression: supports ?name, ?arr[i], etc.
                 let expr = self.parse_call()?;
+                // Field access is deliberately excluded: `?obj.field` reads as if
+                // the `?` applied to `obj`, when it actually applies to `field`.
+                // The postfix forms `obj.(?field)` / `obj~>field` say it properly.
+                if let Expr::FieldAccess { field, span: fspan, .. } = &expr {
+                    return Err(JadeError::PrefixDerefOnField {
+                        field: field.clone(),
+                        span: *fspan,
+                    });
+                }
                 // Optional `|> constraint` — either a type name or a Grammar expression.
                 // Type inference resolves which it is at compile time.
                 let constraint = if self.peek().kind == TokenKind::PipeGt {
@@ -1478,7 +1531,12 @@ impl Parser {
                 } else {
                     None
                 };
-                Ok(Expr::PromptDeref { expr: Box::new(expr), constraint, span })
+                Ok(Expr::PromptDeref {
+                    expr: Box::new(expr),
+                    constraint,
+                    style: DerefStyle::Prefix,
+                    span,
+                })
             }
             // ── Closures: `|x, y| expr` or `|x, y| { body }` ────────────────
             TokenKind::Pipe => {
@@ -1549,7 +1607,3 @@ impl Parser {
         Ok(body)
     }
 }
-
-#[cfg(test)]
-#[path = "parser_tests.rs"]
-mod tests;

@@ -47,6 +47,8 @@ pub enum TokenKind {
 
     // Prompt dereference operator
     Question,
+    // Postfix prompt dereference: `obj~>field` ≡ `obj.(?field)`
+    TildeGt,
 
     // Decorator prefix
     At,
@@ -140,6 +142,7 @@ pub fn token_kind_desc(kind: &TokenKind) -> String {
         TokenKind::From          => "`from`".to_string(),
         TokenKind::As            => "`as`".to_string(),
         TokenKind::Question      => "`?`".to_string(),
+        TokenKind::TildeGt       => "`~>`".to_string(),
         TokenKind::At            => "`@`".to_string(),
         TokenKind::Plus          => "`+`".to_string(),
         TokenKind::Minus         => "`-`".to_string(),
@@ -550,7 +553,16 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
                 }
             }
             '%' => { tokens.push(Token { kind: TokenKind::Percent, span: Span { line, col } }); col += 1; i += 1; }
-            '~' => { tokens.push(Token { kind: TokenKind::Tilde,   span: Span { line, col } }); col += 1; i += 1; }
+            // `~` (bitwise NOT) or `~>` (postfix prompt dereference)
+            '~' => {
+                if i + 1 < chars.len() && chars[i + 1] == '>' {
+                    tokens.push(Token { kind: TokenKind::TildeGt, span: Span { line, col } });
+                    col += 2; i += 2;
+                } else {
+                    tokens.push(Token { kind: TokenKind::Tilde, span: Span { line, col } });
+                    col += 1; i += 1;
+                }
+            }
             '^' => { tokens.push(Token { kind: TokenKind::Caret,   span: Span { line, col } }); col += 1; i += 1; }
             '(' => { tokens.push(Token { kind: TokenKind::LParen,  span: Span { line, col } }); bracket_depth += 1; col += 1; i += 1; }
             ')' => { tokens.push(Token { kind: TokenKind::RParen,  span: Span { line, col } }); bracket_depth -= 1; col += 1; i += 1; }
@@ -680,7 +692,3 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
 
     Ok(tokens)
 }
-
-#[cfg(test)]
-#[path = "lexer_tests.rs"]
-mod tests;
