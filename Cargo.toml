@@ -6,6 +6,28 @@ description = "A language for LLMs"
 license = "MIT"
 
 
+# `jade-runtime` is a workspace member, not merely a path dependency, and
+# `default-members` names it explicitly. Both halves matter:
+#
+#  * Cargo only *uplifts* a build artifact to `target/<profile>/` when the crate
+#    is built as a requested top-level target. As a plain dependency, the
+#    staticlib was produced but left in `target/<profile>/deps/` under a hashed
+#    name, so the `-L target/<profile> -ljade_runtime` that `codegen/mod.rs`
+#    passes to the linker could not find it and every `jade build` failed with
+#    "cannot find -ljade_runtime". It only appeared to work on developer
+#    machines, where a stray `cargo build -p jade-runtime` had left an unhashed
+#    copy behind — a clean checkout on any platform was broken.
+#
+#  * Without a `[workspace]`, `cargo test` never built or ran `jade-runtime`'s
+#    own test suite, so its ~70 tests were invisible to CI.
+#
+# `libjade_runtime.a` is a shipped artifact of this toolchain, not an
+# implementation detail — `jade build` links it into every binary it emits — so
+# it belongs at a stable, predictable path.
+[workspace]
+members = ["src/runtime"]
+default-members = [".", "src/runtime"]
+
 [dependencies]
 jade-runtime = { path = "src/runtime" }
 clap = { version = "4", features = ["derive"] }
