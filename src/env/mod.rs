@@ -18,9 +18,9 @@ fn env_get(args: &[VmValue]) -> Result<VmValue> {
         VmValue::Str(s) => s.as_str(),
         _ => return Err(JadeError::TypeError { message: "env.get".to_string(), span: ZERO }),
     };
-    Ok(match std::env::var(name) {
-        Ok(val) => VmValue::Str(val),
-        Err(_)  => VmValue::Nil,
+    Ok(match jade_runtime::envf::get(name) {
+        Some(val) => VmValue::Str(val),
+        None      => VmValue::Nil,
     })
 }
 
@@ -36,9 +36,7 @@ fn env_set(args: &[VmValue]) -> Result<VmValue> {
         VmValue::Str(s) => s.clone(),
         _ => return Err(JadeError::TypeError { message: "env.set".to_string(), span: ZERO }),
     };
-    // Safety: jade programs are single-threaded at the OS/process level.
-    #[allow(deprecated)]
-    unsafe { std::env::set_var(name, val) };
+    jade_runtime::envf::set(&name, &val);
     Ok(VmValue::Nil)
 }
 
@@ -46,7 +44,7 @@ fn env_args(args: &[VmValue]) -> Result<VmValue> {
     if !args.is_empty() {
         return Err(JadeError::ArityMismatch { expected: 0, got: args.len(), span: ZERO });
     }
-    let argv: Vec<VmValue> = std::env::args().map(VmValue::Str).collect();
+    let argv: Vec<VmValue> = jade_runtime::envf::args().into_iter().map(VmValue::Str).collect();
     Ok(make_array(argv))
 }
 
@@ -54,8 +52,8 @@ fn env_cwd(args: &[VmValue]) -> Result<VmValue> {
     if !args.is_empty() {
         return Err(JadeError::ArityMismatch { expected: 0, got: args.len(), span: ZERO });
     }
-    std::env::current_dir()
-        .map(|p| VmValue::Str(p.to_string_lossy().into_owned()))
+    jade_runtime::envf::cwd()
+        .map(VmValue::Str)
         .map_err(|e| JadeError::IoError { message: format!("env.cwd: {}", e), span: ZERO })
 }
 

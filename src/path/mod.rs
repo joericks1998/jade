@@ -23,11 +23,11 @@ fn path_join(args: &[VmValue]) -> Result<VmValue> {
     if args.len() < 2 {
         return Err(JadeError::ArityMismatch { expected: 2, got: args.len(), span: ZERO });
     }
-    let mut p = std::path::PathBuf::from(require_str(args, 0, "path.join")?);
-    for i in 1..args.len() {
-        p.push(require_str(args, i, "path.join")?);
+    let mut segs: Vec<&str> = Vec::with_capacity(args.len());
+    for i in 0..args.len() {
+        segs.push(require_str(args, i, "path.join")?);
     }
-    Ok(VmValue::Str(p.to_string_lossy().into_owned()))
+    Ok(VmValue::Str(jade_runtime::pathf::join(&segs)))
 }
 
 /// `path.basename(p)` — last component of the path (filename + extension).
@@ -36,11 +36,7 @@ fn path_basename(args: &[VmValue]) -> Result<VmValue> {
         return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: ZERO });
     }
     let p = require_str(args, 0, "path.basename")?;
-    let name = std::path::Path::new(p)
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    Ok(VmValue::Str(name))
+    Ok(VmValue::Str(jade_runtime::pathf::basename(p)))
 }
 
 /// `path.dirname(p)` — parent directory. Returns `"."` for bare filenames.
@@ -49,14 +45,7 @@ fn path_dirname(args: &[VmValue]) -> Result<VmValue> {
         return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: ZERO });
     }
     let p = require_str(args, 0, "path.dirname")?;
-    let dir = std::path::Path::new(p)
-        .parent()
-        .map(|d| {
-            let s = d.to_string_lossy();
-            if s.is_empty() { ".".to_string() } else { s.into_owned() }
-        })
-        .unwrap_or_else(|| ".".to_string());
-    Ok(VmValue::Str(dir))
+    Ok(VmValue::Str(jade_runtime::pathf::dirname(p)))
 }
 
 /// `path.ext(p)` — file extension including the dot (e.g. `".rs"`), or nil.
@@ -65,11 +54,10 @@ fn path_ext(args: &[VmValue]) -> Result<VmValue> {
         return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: ZERO });
     }
     let p = require_str(args, 0, "path.ext")?;
-    let val = std::path::Path::new(p)
-        .extension()
-        .map(|e| VmValue::Str(format!(".{}", e.to_string_lossy())))
-        .unwrap_or(VmValue::Nil);
-    Ok(val)
+    Ok(match jade_runtime::pathf::ext(p) {
+        Some(e) => VmValue::Str(e),
+        None => VmValue::Nil,
+    })
 }
 
 /// `path.stem(p)` — filename without extension.
@@ -78,11 +66,7 @@ fn path_stem(args: &[VmValue]) -> Result<VmValue> {
         return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: ZERO });
     }
     let p = require_str(args, 0, "path.stem")?;
-    let stem = std::path::Path::new(p)
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    Ok(VmValue::Str(stem))
+    Ok(VmValue::Str(jade_runtime::pathf::stem(p)))
 }
 
 /// `path.abs(p)` — absolute path (does not resolve symlinks, path need not exist).
@@ -91,8 +75,8 @@ fn path_abs(args: &[VmValue]) -> Result<VmValue> {
         return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: ZERO });
     }
     let p = require_str(args, 0, "path.abs")?;
-    std::path::absolute(p)
-        .map(|abs| VmValue::Str(abs.to_string_lossy().into_owned()))
+    jade_runtime::pathf::abs(p)
+        .map(VmValue::Str)
         .map_err(|e| JadeError::IoError { message: format!("path.abs: {}", e), span: ZERO })
 }
 
@@ -102,7 +86,7 @@ fn path_is_abs(args: &[VmValue]) -> Result<VmValue> {
         return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: ZERO });
     }
     let p = require_str(args, 0, "path.is_abs")?;
-    Ok(VmValue::Bool(std::path::Path::new(p).is_absolute()))
+    Ok(VmValue::Bool(jade_runtime::pathf::is_abs(p)))
 }
 
 static PATH_PKG_FNS: &[BuiltinFn] = &[

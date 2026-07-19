@@ -1,5 +1,3 @@
-use std::io::Write as IoWrite;
-
 use crate::{
     compiler::{tir::JadeType, type_infer::TypeContext, vm::VmValue},
     frontend::error::{JadeError, Result, Span},
@@ -36,7 +34,7 @@ fn fs_read(args: &[VmValue]) -> Result<VmValue> {
         return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: ZERO });
     }
     let path = require_str(args, 0, "fs.read")?;
-    std::fs::read_to_string(path)
+    jade_runtime::fsf::read(path)
         .map(VmValue::Str)
         .map_err(|e| io_err("read", path, e))
 }
@@ -47,7 +45,7 @@ fn fs_write(args: &[VmValue]) -> Result<VmValue> {
     }
     let path    = require_str(args, 0, "fs.write")?;
     let content = require_str(args, 1, "fs.write")?;
-    std::fs::write(path, content)
+    jade_runtime::fsf::write(path, content)
         .map(|_| VmValue::Nil)
         .map_err(|e| io_err("write", path, e))
 }
@@ -58,12 +56,7 @@ fn fs_append(args: &[VmValue]) -> Result<VmValue> {
     }
     let path    = require_str(args, 0, "fs.append")?;
     let content = require_str(args, 1, "fs.append")?;
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(path)
-        .map_err(|e| io_err("append", path, e))?;
-    file.write_all(content.as_bytes())
+    jade_runtime::fsf::append(path, content)
         .map(|_| VmValue::Nil)
         .map_err(|e| io_err("append", path, e))
 }
@@ -73,7 +66,7 @@ fn fs_exists(args: &[VmValue]) -> Result<VmValue> {
         return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: ZERO });
     }
     let path = require_str(args, 0, "fs.exists")?;
-    Ok(VmValue::Bool(std::path::Path::new(path).exists()))
+    Ok(VmValue::Bool(jade_runtime::fsf::exists(path)))
 }
 
 fn fs_delete(args: &[VmValue]) -> Result<VmValue> {
@@ -81,7 +74,7 @@ fn fs_delete(args: &[VmValue]) -> Result<VmValue> {
         return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: ZERO });
     }
     let path = require_str(args, 0, "fs.delete")?;
-    std::fs::remove_file(path)
+    jade_runtime::fsf::delete(path)
         .map(|_| VmValue::Nil)
         .map_err(|e| io_err("delete", path, e))
 }
@@ -91,15 +84,9 @@ fn fs_list_dir(args: &[VmValue]) -> Result<VmValue> {
         return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: ZERO });
     }
     let path = require_str(args, 0, "fs.list_dir")?;
-    let entries = std::fs::read_dir(path)
-        .map_err(|e| io_err("list_dir", path, e))?
-        .map(|entry| {
-            entry
-                .map(|e| VmValue::Str(e.file_name().to_string_lossy().into_owned()))
-                .map_err(|e| io_err("list_dir", path, e))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    Ok(make_array(entries))
+    jade_runtime::fsf::list_dir(path)
+        .map(|names| make_array(names.into_iter().map(VmValue::Str).collect()))
+        .map_err(|e| io_err("list_dir", path, e))
 }
 
 fn fs_mkdir(args: &[VmValue]) -> Result<VmValue> {
@@ -107,7 +94,7 @@ fn fs_mkdir(args: &[VmValue]) -> Result<VmValue> {
         return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: ZERO });
     }
     let path = require_str(args, 0, "fs.mkdir")?;
-    std::fs::create_dir_all(path)
+    jade_runtime::fsf::mkdir(path)
         .map(|_| VmValue::Nil)
         .map_err(|e| io_err("mkdir", path, e))
 }

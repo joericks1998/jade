@@ -443,25 +443,14 @@ pub extern "C" fn jrt_coll_sh_output(cmd: *const c_char) -> *mut c_void {
 /// `longjmp`).
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_coll_fs_list_dir(path: *const c_char, err: *mut i32) -> *mut c_void {
-    let path = unsafe { cstr_str(path) };
-    match std::fs::read_dir(path) {
-        Ok(rd) => {
+    match crate::fsf::list_dir(unsafe { cstr_str(path) }) {
+        Ok(names) => {
             let mut arr = ArrayObj::<W>::new();
-            for entry in rd {
-                match entry {
-                    Ok(e) => {
-                        let name = e.file_name();
-                        let name = name.to_string_lossy();
-                        let w = unsafe {
-                            JadeValue::from_str_ptr(tagged_string(name.as_bytes(), 1) as *const ()).bits() as i64
-                        };
-                        arr.push(w);
-                    }
-                    Err(_) => {
-                        unsafe { *err = 1 };
-                        return core::ptr::null_mut();
-                    }
-                }
+            for name in names {
+                let w = unsafe {
+                    JadeValue::from_str_ptr(tagged_string(name.as_bytes(), 1 /*TAINTED*/) as *const ()).bits() as i64
+                };
+                arr.push(w);
             }
             unsafe { *err = 0 };
             crate::gc::leak_obj(arr)

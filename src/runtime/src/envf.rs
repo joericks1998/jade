@@ -1,11 +1,11 @@
-//! `std::env` runtime module — the AOT C-ABI surface, ported from the C leaf
-//! `runtime_lib/env/env.c` so the stdlib lives once, in Rust. Codegen's emitted
-//! `jrt_env_*` calls resolve here. None of these raise, so no C forwarder is
-//! needed (unlike the fs/http ops).
+//! `std::env` — the single implementation of the `env` stdlib, shared by both
+//! engines. The neutral `pub fn` cores (`cwd`/`get`/`set`/`args`) operate on plain
+//! Rust types and are called by the VM (`src/env/mod.rs`, wrapping into `VmValue`)
+//! and by the AOT `#[no_mangle]` wrappers below (tagging into the C-string ABI).
 //!
 //! Trust model (AOT-only; the VM has no taint): `env.get` is external,
 //! attacker-influenceable input → TAINTED; `cwd`/`args` are the program's own
-//! invocation → TRUSTED.
+//! invocation → TRUSTED. Trust is applied only in the AOT wrappers.
 
 use core::ffi::{c_char, c_void};
 
@@ -13,6 +13,33 @@ use crate::coll::ArrayObj;
 use crate::string::{self, TAINTED, TRUSTED};
 use crate::sys::strlen;
 use crate::value::JadeValue;
+
+// ── Neutral cores (used by both the VM and the AOT wrappers) ──────────────────
+
+/// The current working directory. `Err` on failure (the VM raises; the AOT
+/// wrapper falls back to "").
+pub fn cwd() -> std::io::Result<String> {
+    Ok(std::env::current_dir()?.to_string_lossy().into_owned())
+}
+
+/// The environment variable `name`, or `None` when unset.
+pub fn get(name: &str) -> Option<String> {
+    std::env::var(name).ok()
+}
+
+/// Set environment variable `name` to `value`.
+pub fn set(name: &str, value: &str) {
+    // Jade programs are single-threaded at the OS/process level.
+    #[allow(deprecated)]
+    unsafe {
+        std::env::set_var(name, value)
+    };
+}
+
+/// The process arguments (argv[0] first).
+pub fn args() -> Vec<String> {
+    std::env::args().collect()
+}
 
 /// Allocate a fresh tagged string holding `bytes` with `trust`; returns the data
 /// pointer (the C runtime's `char*`).
@@ -38,8 +65,7 @@ unsafe fn cstr(p: *const c_char) -> &'static str {
 /// `env.cwd()` — the current working directory as a TRUSTED string (empty on error).
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_env_cwd() -> *mut c_char {
-    let s = std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
-    unsafe { mk_str(s.as_bytes(), TRUSTED) }
+    unsafe { mk_str(cwd().unwrap_or_default().as_bytes(), TRUSTED) }
 }
 
 /// `env.get(name)` — the environment variable as a TAINTED string, or NULL when
@@ -49,9 +75,9 @@ pub extern "C" fn jrt_env_get(name: *const c_char) -> *mut c_char {
     if name.is_null() {
         return core::ptr::null_mut();
     }
-    match std::env::var(unsafe { cstr(name) }) {
-        Ok(v) => unsafe { mk_str(v.as_bytes(), TAINTED) },
-        Err(_) => core::ptr::null_mut(),
+    match get(unsafe { cstr(name) }) {
+        Some(v) => unsafe { mk_str(v.as_bytes(), TAINTED) },
+        None => core::ptr::null_mut(),
     }
 }
 
@@ -61,7 +87,7 @@ pub extern "C" fn jrt_env_set(name: *const c_char, value: *const c_char) {
     if name.is_null() {
         return;
     }
-    unsafe { std::env::set_var(cstr(name), cstr(value)) };
+    set(unsafe { cstr(name) }, unsafe { cstr(value) });
 }
 
 /// Receives `main`'s `(argc, argv)`. Retained for ABI compatibility (codegen
@@ -76,7 +102,7 @@ pub extern "C" fn jrt_set_args(_argc: i32, _argv: *mut *mut c_char) {}
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_env_args() -> i64 {
     let mut arr = ArrayObj::<i64>::new();
-    for a in std::env::args() {
+    for a in args() {
         let s = unsafe { mk_str(a.as_bytes(), TRUSTED) };
         arr.push(JadeValue::from_str_ptr(s as *const ()).bits() as i64);
     }

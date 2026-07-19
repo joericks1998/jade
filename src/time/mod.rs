@@ -1,5 +1,3 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use crate::{
     compiler::{tir::JadeType, type_infer::TypeContext, vm::VmValue},
     frontend::error::{JadeError, Result, Span},
@@ -16,22 +14,14 @@ fn time_now(args: &[VmValue]) -> Result<VmValue> {
     if !args.is_empty() {
         return Err(JadeError::ArityMismatch { expected: 0, got: args.len(), span: ZERO });
     }
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    Ok(VmValue::Int(secs as i64))
+    Ok(VmValue::Int(jade_runtime::timef::now()))
 }
 
 fn time_now_ms(args: &[VmValue]) -> Result<VmValue> {
     if !args.is_empty() {
         return Err(JadeError::ArityMismatch { expected: 0, got: args.len(), span: ZERO });
     }
-    let ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    Ok(VmValue::Int(ms as i64))
+    Ok(VmValue::Int(jade_runtime::timef::now_ms()))
 }
 
 fn time_sleep(args: &[VmValue]) -> Result<VmValue> {
@@ -43,9 +33,7 @@ fn time_sleep(args: &[VmValue]) -> Result<VmValue> {
         VmValue::Float(f) => *f,
         _ => return Err(JadeError::TypeError { message: "time.sleep".to_string(), span: ZERO }),
     };
-    if secs > 0.0 {
-        std::thread::sleep(std::time::Duration::from_secs_f64(secs));
-    }
+    jade_runtime::timef::sleep(secs);
     Ok(VmValue::Nil)
 }
 
@@ -61,17 +49,12 @@ fn time_local(args: &[VmValue]) -> Result<VmValue> {
         VmValue::Nil    => String::new(),
         _ => return Err(JadeError::TypeError { message: "time.local: tz must be str".to_string(), span: ZERO }),
     };
-    let mut cmd = std::process::Command::new("date");
-    cmd.arg("+%a %b %e %H:%M:%S %Z %Y");
-    if !tz.is_empty() {
-        cmd.env("TZ", &tz);
-    }
-    let out = cmd.output().map_err(|e| JadeError::IoError {
-        message: format!("time.local: could not spawn date: {}", e),
-        span: ZERO,
-    })?;
-    let s = String::from_utf8_lossy(&out.stdout).trim_end_matches('\n').to_string();
-    Ok(VmValue::Str(s))
+    jade_runtime::timef::local(&tz)
+        .map(VmValue::Str)
+        .map_err(|e| JadeError::IoError {
+            message: format!("time.local: could not spawn date: {}", e),
+            span: ZERO,
+        })
 }
 
 static TIME_PKG_FNS: &[BuiltinFn] = &[
