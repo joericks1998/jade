@@ -13,7 +13,7 @@
 use std::path::PathBuf;
 
 fn main() {
-    let rt = PathBuf::from("runtime_lib");
+    let rt = PathBuf::from("src/codegen/runtime_lib");
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR");
 
     // Generate the canonical tool-call GBNF as a C string constant straight from
@@ -59,7 +59,7 @@ fn main() {
         .to_path_buf();
     println!("cargo:rustc-env=JADE_RUST_RT_DIR={}", profile_dir.display());
 
-    println!("cargo:rerun-if-changed=runtime_lib");
+    println!("cargo:rerun-if-changed=src/codegen/runtime_lib");
     println!("cargo:rerun-if-changed=src/runtime/src");
     println!("cargo:rerun-if-changed={}", gbnf_src.display());
 }
