@@ -6,7 +6,7 @@
 //! frontend (lex → parse → type-infer → TIR); the daemon owns everything
 //! downstream (import resolution → LLVM → object → link → binary).
 //!
-//! The transport mirrors the inference backend (`llm/jade_os.rs`): a
+//! The transport mirrors the inference backend (`llm/jaded.rs`): a
 //! length-prefixed JSON request followed by a stream of typed response frames.
 //!
 //! Wire contract (confirm against the daemon's `build` op):

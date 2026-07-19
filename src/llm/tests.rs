@@ -1,6 +1,6 @@
 //! Consolidated unit tests for the `llm` module.
 //!
-//! Relocated from inline `#[cfg(test)] mod tests` blocks (model_profile, jade_os)
+//! Relocated from inline `#[cfg(test)] mod tests` blocks (model_profile, jaded)
 //! plus new coverage for the API backends (anthropic, openai) and the built-in
 //! package descriptor (pkg). The API-backend tests never touch the network —
 //! they exercise only the pure pieces: request-body construction, header/auth
@@ -153,10 +153,10 @@ mod model_profile {
     }
 }
 
-// ── jade_os (unix-only wire encoding) ─────────────────────────────────────────
+// ── jaded (unix-only wire encoding) ─────────────────────────────────────────
 #[cfg(unix)]
-mod jade_os {
-    use crate::llm::jade_os::*;
+mod jaded {
+    use crate::llm::jaded::*;
     use crate::llm::InferenceRequest;
 
     // Golden wire tests: lock the exact bytes jadelang sends to the daemon so any

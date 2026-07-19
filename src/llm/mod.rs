@@ -4,7 +4,7 @@ use crate::frontend::error::{JadeError, Result, Span};
 
 pub mod anthropic;
 #[cfg(unix)]
-pub mod jade_os;
+pub mod jaded;
 pub mod model_profile;
 pub mod openai;
 /// The `use llm` built-in package (`LLM_PKG`) — registered in `crate::builtins`,
@@ -58,7 +58,7 @@ pub trait InferenceBackend: Send + Sync {
     async fn infer(&self, req: InferenceRequest, span: Span) -> Result<InferenceResponse>;
 
     /// Returns the model name reported by the backend after inference, if available.
-    /// Only implemented by `JadeOsBackend`; API backends return `None`.
+    /// Only implemented by `JadedBackend`; API backends return `None`.
     fn reported_model_name(&self) -> Option<String> { None }
 
     /// Count the tokens in `prompt` without running generation.
@@ -120,7 +120,7 @@ pub fn build_backend(
         "anthropic" => Ok(Arc::new(anthropic::AnthropicBackend::new(api_key, model, max_parallel)?)),
         "jade"      => {
             #[cfg(unix)]
-            { return Ok(Arc::new(jade_os::JadeOsBackend::new())); }
+            { return Ok(Arc::new(jaded::JadedBackend::new())); }
             #[cfg(not(unix))]
             return Err(JadeError::InferenceError {
                 message: "jade-os backend is not supported on Windows".to_owned(),
@@ -143,7 +143,7 @@ pub fn select_backend(config: &crate::config::JadeConfig) -> Option<Arc<dyn Infe
     {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_owned());
         if std::path::Path::new(&format!("{home}/.jade/llm.sock")).exists() {
-            return Some(Arc::new(jade_os::JadeOsBackend::new()));
+            return Some(Arc::new(jaded::JadedBackend::new()));
         }
     }
     config.api_key.as_ref()

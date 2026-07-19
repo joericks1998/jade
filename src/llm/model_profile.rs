@@ -13,8 +13,8 @@
 //!
 //! The field shape below intentionally mirrors `jade-model-profile::ModelProfile`
 //! (in `jade-inference-daemon`) field-for-field, so the eventual swap is
-//! mechanical. **The source of truth is JadeOS / the daemon, not this file.**
-//! Once profiles are shipped with JadeOS (or fetched from the daemon, whose
+//! mechanical. **The source of truth is jaded (the daemon), not this file.**
+//! Once profiles are shipped with jaded (or fetched from the daemon, whose
 //! `Meta` frame already reports the live model name), [`select`] should resolve
 //! against that source and this hardcoded table goes away. Until then, this is a
 //! small, obvious, swappable stand-in.

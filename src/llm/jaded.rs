@@ -1,5 +1,5 @@
 #![cfg(unix)]
-//! JadeOsBackend — native inference via Unix domain socket.
+//! JadedBackend — native inference via Unix domain socket.
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -20,12 +20,12 @@ fn jade_sock_path() -> String {
     format!("{home}/.jade/llm.sock")
 }
 
-pub struct JadeOsBackend {
+pub struct JadedBackend {
     sock_path: String,
     reported_model: Arc<Mutex<Option<String>>>,
 }
 
-impl JadeOsBackend {
+impl JadedBackend {
     pub fn new() -> Self {
         Self {
             sock_path: jade_sock_path(),
@@ -35,7 +35,7 @@ impl JadeOsBackend {
 }
 
 #[async_trait::async_trait]
-impl InferenceBackend for JadeOsBackend {
+impl InferenceBackend for JadedBackend {
     async fn infer(&self, req: InferenceRequest, span: Span) -> Result<InferenceResponse> {
         let sock_path = self.sock_path.clone();
         let reported_model = Arc::clone(&self.reported_model);
@@ -105,7 +105,7 @@ impl InferenceBackend for JadeOsBackend {
     }
 }
 
-impl JadeOsBackend {
+impl JadedBackend {
     fn infer_blocking(sock_path: &str, req: InferenceRequest, span: Span, reported_model: Arc<Mutex<Option<String>>>) -> Result<InferenceResponse> {
         let mut stream = UnixStream::connect(sock_path)
             .map_err(|e| JadeError::InferenceError {
