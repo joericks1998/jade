@@ -71,10 +71,20 @@ jobs:
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
+      # The tarball ships the toolchain, not just the binary: `jade build` links
+      # libJadeRuntime.a (C) and libjade_runtime.a (Rust) into every executable
+      # it emits. Shipping only `jade` left installed users with a working
+      # `jade run` and a `jade build` that failed with "cannot find
+      # -lJadeRuntime", because the paths baked in at compile time point into
+      # this runner's target/ directory. Layout is `jade` + `lib/*.a`, which
+      # install.sh unpacks to <prefix>/bin and <prefix>/lib/jade.
       - name: Package
         run: |
-          cp target/${{ matrix.target }}/release/${{ matrix.binary }} jade
-          tar -czf ${{ matrix.archive }} jade
+          mkdir -p dist/lib
+          cp target/${{ matrix.target }}/release/${{ matrix.binary }} dist/jade
+          cp target/${{ matrix.target }}/release/libJadeRuntime.a dist/lib/
+          cp target/${{ matrix.target }}/release/libjade_runtime.a dist/lib/
+          tar -czf ${{ matrix.archive }} -C dist .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -95,12 +105,21 @@ jobs:
         with:
           name: jade-macos-x86_64.tar.gz
 
+      # `tar -O` concatenated the whole archive to stdout, which worked only
+      # while the tarball held exactly one file. It now carries lib/*.a too, so
+      # unpack into directories and lipo each artifact — the static archives
+      # have to be universal as well, or `jade build` on one arch would link a
+      # runtime built for the other.
       - name: Create universal binary
         run: |
-          tar -xzf jade-macos-arm64.tar.gz -O > jade-arm64
-          tar -xzf jade-macos-x86_64.tar.gz -O > jade-x86_64
-          lipo -create -output jade jade-arm64 jade-x86_64
-          tar -czf jade-macos-universal.tar.gz jade
+          mkdir -p arm64 x86_64 dist/lib
+          tar -xzf jade-macos-arm64.tar.gz -C arm64
+          tar -xzf jade-macos-x86_64.tar.gz -C x86_64
+          lipo -create -output dist/jade arm64/jade x86_64/jade
+          for a in libJadeRuntime.a libjade_runtime.a; do
+            lipo -create -output "dist/lib/$a" "arm64/lib/$a" "x86_64/lib/$a"
+          done
+          tar -czf jade-macos-universal.tar.gz -C dist .
 
       - uses: actions/upload-artifact@v4
         with:

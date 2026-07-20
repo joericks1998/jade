@@ -62,16 +62,33 @@ fn main() {
 
     // The shared Rust runtime (`jade-runtime` workspace member) is built as a
     // staticlib (`libjade_runtime.a`) that emitted binaries also link against —
-    // it now supplies runtime symbols moved out of common.c. It lands in the
-    // target *profile* directory, three levels up from OUT_DIR
-    // (`target/<profile>/build/jade-buildd-<hash>/out`). Surface that dir the
-    // same way as the C archive; the daemon promotes it to JADE_RUST_RT.
+    // it now supplies runtime symbols moved out of common.c. Cargo uplifts it to
+    // the target *profile* directory, three levels up from OUT_DIR
+    // (`target/<profile>/build/jade-<hash>/out`).
     let profile_dir = PathBuf::from(&out_dir)
         .ancestors()
         .nth(3)
         .expect("OUT_DIR should sit under target/<profile>/build/<pkg>/out")
         .to_path_buf();
     println!("cargo:rustc-env=JADE_RUST_RT_DIR={}", profile_dir.display());
+
+    // Copy the C archive up beside the Rust one, so both runtime archives a
+    // `jade build` needs sit in a single predictable directory rather than one
+    // being in a hash-named OUT_DIR. Two things depend on this:
+    //
+    //  * release packaging can name the files instead of `find`-ing them;
+    //  * an *installed* jade resolves both from one directory next to itself
+    //    (see `codegen::runtime_lib_dirs`).
+    //
+    // `libJadeRuntime.a` is linked into every binary `jade build` emits, so it
+    // is a shipped artifact of the toolchain and belongs somewhere stable —
+    // the same reasoning that made jade-runtime a workspace member.
+    let c_archive = PathBuf::from(&out_dir).join("libJadeRuntime.a");
+    if c_archive.exists() {
+        // Best-effort: a failure here only means the dev-tree fallback to
+        // OUT_DIR (still emitted above) is what gets used.
+        let _ = std::fs::copy(&c_archive, profile_dir.join("libJadeRuntime.a"));
+    }
 
     println!("cargo:rerun-if-changed=src/codegen/runtime_lib");
     println!("cargo:rerun-if-changed=src/runtime/src");

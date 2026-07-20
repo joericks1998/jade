@@ -268,6 +268,48 @@ fn emit_pkg_init<'ctx>(
     Ok(())
 }
 
+/// Directories holding the two runtime archives `jade build` links into every
+/// binary it emits: `libJadeRuntime.a` (C) and `libjade_runtime.a` (Rust).
+/// Returns `(c_dir, rust_dir)`.
+///
+/// Searched in order:
+///
+///  1. `JADE_RT_LIB` / `JADE_RUST_RT` — explicit override, wins outright.
+///  2. `<dir of this executable>/../lib/jade` — the installed layout. A release
+///     tarball ships `jade` plus `lib/*.a`, and `install.sh` puts the binary in
+///     e.g. `/usr/local/bin` and the archives in `/usr/local/lib/jade`.
+///  3. The build.rs-baked paths — correct in a dev tree, and absolute paths into
+///     a `target/` directory that only exists on the machine that compiled the
+///     toolchain.
+///
+/// Before (2) existed, an installed jade had only (3), so `jade run` worked
+/// while `jade build` failed with `cannot find -lJadeRuntime` — the archives
+/// were never shipped and the baked paths pointed at the release runner's
+/// `target/`. Resolving relative to the executable keeps the binary and its
+/// runtime together however the user relocates them.
+fn runtime_lib_dirs() -> (String, String) {
+    let installed = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|d| d.join("..").join("lib").join("jade")))
+        .filter(|d| d.join("libJadeRuntime.a").is_file() && d.join("libjade_runtime.a").is_file());
+
+    let pick = |over: &str, baked: &str| -> String {
+        if let Ok(v) = std::env::var(over) {
+            return v;
+        }
+        if let Some(ref d) = installed {
+            return d.display().to_string();
+        }
+        baked.to_string()
+    };
+
+    (
+        pick("JADE_RT_LIB", env!("JADE_RT_LIB_DIR")),
+        pick("JADE_RUST_RT", env!("JADE_RUST_RT_DIR")),
+    )
+}
+
+
 pub fn compile(
     program: TProgram,
     source_path: Option<&Path>,
@@ -460,17 +502,14 @@ pub fn compile_with_mode(
     // passed and the link failed with undefined `_jrt_*` symbols. The runtime is
     // a static archive, so unreferenced members aren't pulled into trivial
     // binaries — always linking is harmless and removes the whole bug class.
-    // The C runtime archive dir: a caller-set `JADE_RT_LIB` (installed daemon)
-    // wins, else this crate's own build.rs-baked OUT_DIR (dev builds — codegen
-    // now owns the C runtime, so it needs no daemon to hand it the path). Same
-    // for the shared Rust runtime staticlib below.
-    let rt_lib = std::env::var("JADE_RT_LIB").unwrap_or_else(|_| env!("JADE_RT_LIB_DIR").to_string());
+    // Where the two runtime archives live. Both are searched in the same order
+    // (env override → installed layout → dev tree); see `runtime_lib_dirs`.
+    let (rt_lib, rust_rt) = runtime_lib_dirs();
     cc.arg(format!("-L{rt_lib}"));
     cc.arg("-lJadeRuntime");
     // The shared Rust runtime staticlib supplies symbols moved out of the C
     // runtime (float boxing, ipow, …). It must come *after* -lJadeRuntime, whose
     // members reference these symbols (static-archive left-to-right resolution).
-    let rust_rt = std::env::var("JADE_RUST_RT").unwrap_or_else(|_| env!("JADE_RUST_RT_DIR").to_string());
     cc.arg(format!("-L{rust_rt}"));
     cc.arg("-ljade_runtime");
     // The link is now *bidirectional*: the C runtime references Rust symbols
