@@ -1,0 +1,92 @@
+// String edge cases, printed rather than merely computed.
+//
+// The other string fixtures mostly bind results to variables without printing
+// them, so backend-parity — which diffs stdout — could not see a divergence in
+// any of them. Everything here prints.
+//
+// This exists as a net under the string representation work: the VM holds a
+// Rust String while compiled code holds a manually allocated, trust-tagged
+// buffer, and collapsing those is the kind of change where a mistake shows up
+// as corruption rather than as a clean failure.
+
+// ── empty and whitespace ─────────────────────────────────────────────────────
+print(len(""))
+print("[" + "" + "]")
+print(len("   "))
+print("[" + "  padded  ".trim() + "]")
+print("[" + "".trim() + "]")
+
+// ── concatenation, including with empty ──────────────────────────────────────
+print("a" + "")
+print("" + "b")
+print("" + "")
+print("a" + "b" + "c" + "d")
+
+// ── a string long enough to exercise allocation rather than a small buffer ───
+let long = "0123456789012345678901234567890123456789012345678901234567890123456789"
+print(len(long))
+print(long)
+print(len(long + long))
+
+// ── escapes ──────────────────────────────────────────────────────────────────
+print("tab:\tend")
+print("quote:\"end")
+print("backslash:\\end")
+print("newline:\nend")
+print(len("a\tb"))
+
+// ── indexing, including the last character ───────────────────────────────────
+let s = "hello"
+print(s[0])
+print(s[4])
+print(len(s[0]))
+
+// ── comparison ───────────────────────────────────────────────────────────────
+print("abc" == "abc")
+print("abc" == "abd")
+print("" == "")
+print("abc" < "abd")
+print("A" < "a")
+print("apple" < "banana")
+
+// ── methods ──────────────────────────────────────────────────────────────────
+print("Hello World".upper())
+print("Hello World".lower())
+print("hello".starts_with("he"))
+print("hello".ends_with("lo"))
+print("hello".contains("ell"))
+print("hello".contains("xyz"))
+print("a-b-c".replace("-", "+"))
+print("aaa".replace("a", "bb"))
+print("no match here".replace("zzz", "!"))
+
+// split returns an array; print its parts so the contents are compared
+let parts = "a,b,c".split(",")
+print(len(parts))
+print(parts[0])
+print(parts[2])
+
+// ── unicode ──────────────────────────────────────────────────────────────────
+// len() counts characters, not bytes — "é" is two bytes, "→" is three,
+// and an emoji is four.
+print(len("é"))
+print(len("→"))
+print(len("日本語"))
+print("naïve".upper())
+print(len("naïve"))
+print("ÅÄÖ".lower())
+print("mixed ascii ÿ".upper())
+
+// ── strings as dict keys ─────────────────────────────────────────────────────
+let d = {"key": 1, "": 2, "unicode é": 3}
+print(d["key"])
+print(d[""])
+print(d["unicode é"])
+
+// ── interpolation ────────────────────────────────────────────────────────────
+let name = "world"
+let n = 42
+print(f"hello {name}")
+print(f"{n} and {name}")
+print(f"{name}{name}")
+print(f"empty: {""}")
