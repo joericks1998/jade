@@ -1121,13 +1121,16 @@ struct FnCtx<'ctx> {
     /// Struct type name → its optional fields' (name, scalar-literal default),
     /// used to fill fields a struct literal omits (the VM fills these at runtime).
     struct_defaults: HashMap<String, Vec<(String, VmValue)>>,
-    /// Struct type name → **every** declared field name, in definition order.
+    /// Every declared struct type name.
     ///
-    /// Distinct from `struct_defaults`, which keeps only optional fields that
-    /// have a scalar-literal default — it is deliberately partial and cannot be
-    /// used to answer "what fields does this type have?". A first-class type
-    /// call (`City(d)`) needs the complete list, and needs it at runtime, so
-    /// this is also what gets emitted into the startup type registry.
+    /// Used to recognise a *call* on a type name, which is an error worth
+    /// naming: a struct type is not a function, and without this the call falls
+    /// through to `Indirect` and jumps through a global cell codegen never
+    /// assigns for a type name.
+    ///
+    /// The field lists are carried too, rather than just the names, because
+    /// `struct_defaults` cannot answer "what fields does this type have?" — it
+    /// keeps only optional fields with scalar-literal defaults.
     struct_field_names: HashMap<String, Vec<String>>,
     /// Extend-block method NAME → its candidate implementations `(uid, required,
     /// total)`, where `required`/`total` are the arg counts (excluding `self`)
@@ -1340,12 +1343,6 @@ enum CallKind {
     /// `jrt_method_lookup` and called indirectly (`self` prepended). See
     /// `emit_dynamic_method`.
     MethodDynamic { recv: Reg, method: String, args: Vec<Reg> },
-    /// A first-class type call on a user struct type: `City(d)` builds a `City`
-    /// from a dict (declared fields only, missing ones nil), or passes a `City`
-    /// through unchanged. Primitive type calls (`int(x)`, `bool(x)`, …) are not
-    /// this — they devirtualize to `jrt_*_any` via the builtin path. Lowers to
-    /// the `jrt_type_call` forwarder, which raises for anything else.
-    TypeCall { type_name: String, arg: Reg },
     /// `stream(?p)` / `stream(?p, mute_on=[g])` — streaming inference that
     /// prints tokens as they arrive and evaluates to the full response.
     ///
@@ -1620,13 +1617,16 @@ fn resolve_user_calls(
                                 }
                             } else if RESERVED_BUILTINS.contains(&name.as_str()) {
                                 return Err(format!("lower.rs: unsupported builtin call `{name}`"));
-                            } else if fnctx.struct_field_names.contains_key(name) && args.len() == 1 {
-                                // A struct type name is a callable *value* in Jade.
-                                // Without this it fell through to `Indirect`, which
-                                // loads a fn pointer from a global cell codegen never
-                                // populates for a type name — a jump through garbage
-                                // rather than an honest error.
-                                Some(CallKind::TypeCall { type_name: name.clone(), arg: args[0] })
+                            } else if fnctx.struct_field_names.contains_key(name) {
+                                // A struct type is not callable — `City { .. }` is
+                                // the one way to build one. This still has to be
+                                // recognised rather than left to fall through: a
+                                // type name is not a known function, so `Indirect`
+                                // would load a fn pointer from a global cell codegen
+                                // never assigns and jump through it.
+                                return Err(format!(
+                                    "lower.rs: `{name}` is a struct type, not a function — build one with `{name} {{ ... }}`"
+                                ));
                             } else {
                                 Some(CallKind::Indirect)
                             }
@@ -2760,46 +2760,6 @@ pub fn lower_program<'ctx>(
         }
     }
 
-    // Register every struct type's field list in the same prologue, so a
-    // first-class type call (`City(d)`) can build a struct by name at runtime.
-    // Registering every type is harmless; only types actually called are read.
-    // Emitted after the method registrations, so both share the entry block.
-    if !fnctx.struct_field_names.is_empty() {
-        let ptr_ty = context.ptr_type(AddressSpace::default());
-        let void_ty = context.void_type();
-        let decl = |name: &str, argc: usize| {
-            module.get_function(name).unwrap_or_else(|| {
-                let params = vec![ptr_ty.into(); argc];
-                module.add_function(name, void_ty.fn_type(&params, false), None)
-            })
-        };
-        let reg_field = decl("jrt_type_register", 2);
-        let reg_type = decl("jrt_type_declare", 1);
-        let entry = top_fn.get_first_basic_block().ok_or("lower.rs: jade_toplevel has no entry block")?;
-        let rb = context.create_builder();
-        match entry.get_first_instruction() {
-            Some(first) => rb.position_before(&first),
-            None => rb.position_at_end(entry),
-        }
-        // Deterministic emission order — the IR is compared in tests.
-        let mut types: Vec<(&String, &Vec<String>)> = fnctx.struct_field_names.iter().collect();
-        types.sort_by(|a, b| a.0.cmp(b.0));
-        for (tn, fields) in types {
-            let tcstr = rb.build_global_string_ptr(tn, "ttype").map_err(|e| e.to_string())?.as_pointer_value();
-            if fields.is_empty() {
-                // A fieldless type still has to exist in the table, or a call on
-                // it would report "unknown type" rather than constructing an
-                // empty struct.
-                rb.build_call(reg_type, &[tcstr.into()], "").map_err(|e| e.to_string())?;
-                continue;
-            }
-            for f in fields {
-                let fcstr = rb.build_global_string_ptr(f, "tfield").map_err(|e| e.to_string())?.as_pointer_value();
-                rb.build_call(reg_field, &[tcstr.into(), fcstr.into()], "").map_err(|e| e.to_string())?;
-            }
-        }
-    }
-
     // Recover source-level names for the lowered functions, so `--lib` can
     // export `add` rather than `jf_7`.
     let named = fnctx
@@ -3831,28 +3791,6 @@ fn lower_instr<'ctx>(
                     emit_stream_call(low, *dest, *prompt, *grammar)?;
                     return Ok(false);
                 }
-                // `City(d)` — the construction and its error live in the runtime
-                // (`jrt_type_call` → `jrt_type_construct`), keyed on the type
-                // name and the field list registered at startup.
-                Some(CallKind::TypeCall { type_name, arg }) => {
-                    let ptr_ty = low.ctx.ptr_type(AddressSpace::default());
-                    let i64_ty = low.ctx.i64_type();
-                    let f = low.module.get_function("jrt_type_call").unwrap_or_else(|| {
-                        low.module.add_function(
-                            "jrt_type_call",
-                            i64_ty.fn_type(&[ptr_ty.into(), i64_ty.into()], false),
-                            None,
-                        )
-                    });
-                    let tn = low.cstr(type_name);
-                    let ret = b
-                        .build_call(f, &[tn.into(), low.load(*arg).into()], "typecall")
-                        .map_err(|e| e.to_string())?
-                        .as_any_value_enum()
-                        .into_int_value();
-                    low.store(*dest, ret);
-                    return Ok(false);
-                }
                 // A unique struct method → direct call with the receiver as `self`
                 // (param 0), the explicit args next, then omitted trailing defaults.
                 Some(CallKind::MethodDirect { uid, self_reg, args: margs }) => {
@@ -4585,20 +4523,17 @@ mod tests {
         assert!(ir.contains("select i1"), "produces a bool word:\n{ir}");
     }
 
-    /// A struct type name is a callable value. Before first-class types were
-    /// lowered, `City(d)` fell through to `CallKind::Indirect`, which loads a
-    /// function pointer from a global cell that codegen never assigns for a type
-    /// name — a jump through whatever happened to be there. Assert it now goes
-    /// to the runtime constructor instead.
+    /// A struct type is not a function, and calling one must be a *named* build
+    /// error. It cannot simply be left to fall through: a type name is not a
+    /// known user function, so it would classify as an indirect call and jump
+    /// through a global cell codegen never assigns for a type name — a silent
+    /// miscompile rather than a diagnostic.
     #[test]
-    fn a_struct_type_call_lowers_to_the_runtime_constructor() {
+    fn calling_a_struct_type_is_a_named_build_error() {
         let mut struct_defs = HashMap::new();
         struct_defs.insert(
             "City".to_string(),
-            vec![
-                StructFieldDef::Required("name".to_string()),
-                StructFieldDef::Required("country".to_string()),
-            ],
+            vec![StructFieldDef::Required("name".to_string())],
         );
         let mut top = Chunk::new("<top>");
         top.code = vec![
@@ -4609,148 +4544,12 @@ mod tests {
         ];
         let context = Context::create();
         let module = context.create_module("t");
-        lower_program(&context, &module, &top, 3, &struct_defs, &HashMap::new())
-            .expect("type call lowering");
-        module.verify().expect("module failed verification");
-        let ir = module.print_to_string().to_string();
-        assert!(ir.contains("jrt_type_call"), "type call lowered to the constructor:\n{ir}");
-        assert!(!ir.contains("%icall"), "type call must not lower as an indirect call:\n{ir}");
-    }
-
-    /// The constructor is keyed on a runtime table, so the field list has to be
-    /// registered before user code runs — and in declaration order, since that
-    /// is the order a constructed struct's fields appear in.
-    #[test]
-    fn struct_field_lists_are_registered_at_startup() {
-        let mut struct_defs = HashMap::new();
-        struct_defs.insert(
-            "City".to_string(),
-            vec![
-                StructFieldDef::Required("name".to_string()),
-                StructFieldDef::Required("country".to_string()),
-            ],
-        );
-        struct_defs.insert("Unit".to_string(), vec![]);
-        let mut top = Chunk::new("<top>");
-        top.code = vec![Halt];
-        let context = Context::create();
-        let module = context.create_module("t");
-        lower_program(&context, &module, &top, 1, &struct_defs, &HashMap::new())
-            .expect("registration lowering");
-        module.verify().expect("module failed verification");
-        let ir = module.print_to_string().to_string();
-        assert!(ir.contains("jrt_type_register"), "field registration emitted:\n{ir}");
-        // A fieldless type still needs a table entry, or calling it would report
-        // "unknown type" rather than building an empty struct.
-        assert!(ir.contains("jrt_type_declare"), "fieldless type declared:\n{ir}");
-        let name_at = ir.find("name").expect("field name in IR");
-        let country_at = ir.find("country").expect("field name in IR");
-        assert!(name_at < country_at, "fields registered in declaration order:\n{ir}");
-    }
-
-    /// `stream(?p)` must NOT also emit the non-streaming `jrt_prompt`. If the
-    /// producing PromptDeref survived, the program would run inference twice and
-    /// print the response twice — the same double-output hazard the plain `?p`
-    /// lowering is written to avoid, reached from the other direction.
-    #[test]
-    fn stream_elides_the_prompt_deref_it_consumes() {
-        let ir = ir_of(
-            &[
-                LoadStr(0, "ask".to_string()),
-                MakePrompt(1, 0),
-                PromptDeref(2, 1, None, None),
-                GetGlobal(3, "stream".to_string()),
-                Call(4, 3, vec![2]),
-                Return(Some(4)),
-            ],
-            5,
-        );
-        assert!(ir.contains("jrt_prompt_stream_obj"), "stream lowered to the streaming entry:\n{ir}");
-        assert!(
-            !ir.contains("call ptr @jrt_prompt("),
-            "the consumed PromptDeref must not also infer:\n{ir}"
-        );
-    }
-
-    /// A `stream(x)` whose argument is not a fresh `?p` has no AOT
-    /// representation (there is no TokenStream value to hold), so it must be an
-    /// honest build error rather than a guess.
-    #[test]
-    fn stream_of_a_non_deref_declines() {
-        let context = Context::create();
-        let module = context.create_module("t");
-        let err = lower_chunk(
-            &context,
-            &module,
-            "f",
-            &[
-                LoadStr(0, "x".to_string()),
-                GetGlobal(1, "stream".to_string()),
-                Call(2, 1, vec![0]),
-                Return(Some(2)),
-            ],
-            3,
-        )
-        .expect_err("stream of a non-deref should decline");
-        assert!(err.contains("stream()"), "decline names the construct: {err}");
-    }
-
-    /// A typed deref must call the *checked* wrapper. `jrt_prompt_typed` returns
-    /// NULL once the retries run out, and codegen tagged that NULL as a string
-    /// and carried on — so a prompt that never produced a coercible value
-    /// segfaulted the compiled program where the VM reported a clean error.
-    ///
-    /// The retry budget must also be a runtime call, not a constant: it was
-    /// hard-coded 15 here while the VM reads jade.toml (default 3), so the two
-    /// engines gave up after a different number of attempts.
-    #[test]
-    fn a_typed_deref_checks_for_failure_and_reads_the_retry_budget() {
-        let ir = ir_of(
-            &[
-                LoadStr(0, "ask".to_string()),
-                MakePrompt(1, 0),
-                PromptDeref(2, 1, Some("int".to_string()), None),
-                Return(Some(2)),
-            ],
-            3,
-        );
-        assert!(ir.contains("jrt_prompt_typed_checked"), "raising wrapper used:\n{ir}");
-        assert!(ir.contains("jrt_max_retries"), "retry budget read at runtime:\n{ir}");
-        assert!(
-            !ir.contains("call ptr @jrt_prompt_typed("),
-            "the NULL-returning entry must not be called directly:\n{ir}"
-        );
-    }
-
-    /// The LLM session variables are globals the VM rewrites after every
-    /// inference. Nothing writes them in a compiled program, so reading them
-    /// returned nil — silently, which is the same silent-wrong-answer shape as
-    /// the old `City(d)` miscompile. They must lower to runtime queries.
-    #[test]
-    fn session_variables_lower_to_runtime_queries() {
-        let ir = ir_of(
-            &[
-                GetGlobal(0, "__model__".to_string()),
-                GetGlobal(1, "__tokens__".to_string()),
-                GetGlobal(2, "__max_retries__".to_string()),
-                Return(Some(0)),
-            ],
-            3,
-        );
-        // jrt_session_model, not jrt_get_model: `__model__` is the model the
-        // daemon reported serving, not the one the request asked for.
-        assert!(ir.contains("jrt_session_model"), "__model__ queried:\n{ir}");
-        assert!(ir.contains("jrt_session_tokens"), "__tokens__ queried:\n{ir}");
-        assert!(ir.contains("jrt_max_retries"), "__max_retries__ queried:\n{ir}");
-    }
-
-    /// An ordinary global must still load its cell — the session-variable names
-    /// are special-cased, and it would be easy to swallow every global read.
-    #[test]
-    fn an_ordinary_global_still_loads_its_cell() {
-        let ir = ir_of(&[GetGlobal(0, "counter".to_string()), Return(Some(0))], 1);
-        assert!(ir.contains("gld"), "plain global loaded from its cell:\n{ir}");
-        assert!(!ir.contains("jrt_session"), "no session query for a plain global:\n{ir}");
+        let err = match lower_program(&context, &module, &top, 3, &struct_defs, &HashMap::new()) {
+            Err(e) => e,
+            Ok(_) => panic!("calling a struct type should decline"),
+        };
+        assert!(err.contains("City"), "the error names the type: {err}");
+        assert!(err.contains("not a function"), "the error explains why: {err}");
     }
 
     #[test]

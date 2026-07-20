@@ -250,31 +250,6 @@ int64_t jrt_get_field(int64_t obj, const char* field) {
     return JRT_NIL;
 }
 
-/* A first-class type call on a user struct type: `City(d)`.
- *
- * The construction itself lives in Rust (jade-runtime, src/typef.rs) next to
- * the field-name registry, so its semantics sit beside the VM's. That code
- * cannot raise — a Jade error is a longjmp and must not cross a Rust frame — so
- * it reports failure as a status and this forwarder turns it into the error the
- * VM would produce. Same split as jrt_get_field above. */
-int64_t jrt_type_call(const char* type_name, int64_t arg) {
-    int64_t out = JRT_NIL;
-    int st = jrt_type_construct(type_name, arg, &out);
-    if (st == 1) return out;
-
-    char msg[192];
-    if (st < 0) {
-        snprintf(msg, sizeof msg, "%s(): unknown type", type_name);
-    } else {
-        char* shown = jrt_render_any(arg);
-        snprintf(msg, sizeof msg, "%s(): cannot construct from %s",
-                 type_name, shown ? shown : "value");
-        free(shown);
-    }
-    throw_msg(msg);
-    return JRT_NIL; /* unreachable (throw_msg longjmps) */
-}
-
 void jrt_set_field(int64_t obj, const char* field, int64_t val) {
     jade_value_t v = (jade_value_t)obj;
     if (jrt_is_ptr(v)) {

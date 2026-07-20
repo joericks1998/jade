@@ -2099,18 +2099,40 @@ mod vm {
         assert!(try_run_src("let v = int(1, 2)").is_err());
     }
 
+    // A struct type is not callable. `City { .. }` is the one construction,
+    // and the only one that checks required fields and applies declared
+    // defaults. Calling the type used to build a struct from a dict, filling
+    // every absent field with nil — so a *required* field could end up missing
+    // and `let population = 0` was ignored. Nobody declared that path; it fell
+    // out of type names being callable values.
     #[test]
-    fn test_type_struct_from_dict() {
-        let src = "struct City {\n  name,\n  country,\n}\nlet d = {\"name\": \"Paris\", \"country\": \"France\"}\nlet c = City(d)\nlet n = c.name";
-        let s = run_src(src).unwrap();
-        assert_eq!(get_str(&s, "n"), "Paris");
+    fn test_calling_a_struct_type_is_an_error() {
+        let src = "struct City {\n  name,\n}\nlet d = {\"name\": \"Paris\"}\nlet c = City(d)";
+        let err = match try_run_src(src) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("calling a struct type should be an error"),
+        };
+        assert!(
+            err.contains("not a function"),
+            "the error should say a type is not callable, got: {err}"
+        );
     }
 
+    // Not even for a value that is already the right type — there is no
+    // identity-conversion special case to fall back on.
     #[test]
-    fn test_type_struct_from_same_type_is_identity() {
-        let src = "struct Point {\n  x,\n  y,\n}\nlet p = Point { x: 3, y: 4 }\nlet q = Point(p)\nlet v = q.x";
+    fn test_calling_a_struct_type_on_its_own_type_is_an_error() {
+        let src = "struct Point {\n  x,\n}\nlet p = Point { x: 3 }\nlet q = Point(p)";
+        assert!(try_run_src(src).is_err());
+    }
+
+    // The literal keeps applying declared defaults — that is the behaviour the
+    // type call lacked, and the reason it went away rather than being fixed.
+    #[test]
+    fn test_struct_literal_still_applies_declared_defaults() {
+        let src = "struct City {\n  name,\n  let population = 7,\n}\nlet c = City { name: \"Paris\" }\nlet v = c.population";
         let s = run_src(src).unwrap();
-        assert_eq!(get_int(&s, "v"), 3);
+        assert_eq!(get_int(&s, "v"), 7);
     }
 
     #[test]

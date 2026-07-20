@@ -895,6 +895,23 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
                 _ => None,
             };
 
+            // A struct type is not callable — `City { .. }` is the one way to
+            // build one. Caught here so `jade check`, `jade run` and `jade build`
+            // all agree: the AOT backend rejects this at build time, so letting
+            // `jade check` pass it would mean a program that checks clean and
+            // then fails to compile.
+            if let Expr::Identifier { name, .. } = callee.as_ref() {
+                if ctx.struct_defs.contains_key(name) {
+                    return Err(JadeError::TypeError {
+                        message: format!(
+                            "'{}' is a struct type, not a function — build one with {} {{ ... }}",
+                            name, name
+                        ),
+                        span: *span,
+                    });
+                }
+            }
+
             let tcallee = infer_expr(callee, ctx)?;
             let targs: Vec<TExpr> = args.iter().map(|a| infer_expr(a, ctx)).collect::<Result<_>>()?;
             let tkwargs: Vec<(String, TExpr)> = kwargs.iter()

@@ -427,15 +427,6 @@ void    jrt_kdict_set(void* dict, int64_t key_word, int64_t val);
  * fields (field names are compile-time C strings). Reference semantics. */
 void*   jrt_kstruct_new(const char* type_name);
 void    jrt_kstruct_set(void* s, const char* field, int64_t val);
-/* First-class types. jrt_type_register/jrt_type_declare populate the runtime
- * type -> field-list table (emitted once at startup, one call per declared
- * field, in definition order); jrt_type_construct is the non-raising builder in
- * Rust (1 = built, 0 = argument not constructible, -1 = no such type) and
- * jrt_type_call is the raising forwarder codegen actually calls. */
-void    jrt_type_register(const char* type_name, const char* field);
-void    jrt_type_declare(const char* type_name);
-int     jrt_type_construct(const char* type_name, int64_t arg, int64_t* out);
-int64_t jrt_type_call(const char* type_name, int64_t arg);
 /* jrt_bind_method_new — bind an extend method to a receiver, yielding a
  * callable value laid out {fn_ptr@0, ObjKind::BoundMethod@8, self@16}. NULL when
  * the receiver's type has no such method (the caller raises). */

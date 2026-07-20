@@ -2910,23 +2910,22 @@ fn vm_type_call(
             ) => Ok(other),
             other => err(format!("func(): expected a string or function, got {}", value_to_display(&other))),
         },
+        // A struct type is not callable. `City { name: "x" }` is the one way to
+        // build a struct, and it is the only one that checks required fields
+        // and applies declared defaults.
+        //
+        // Calling the type used to work, as an undeclared second construction
+        // path that did neither: it filled every missing field with nil, so a
+        // required field could be silently absent and `let population = 0` was
+        // ignored. Nobody declared that behaviour; it fell out of type names
+        // being callable values. A conversion is an ordinary function.
         name => {
-            if let Some(def) = state.struct_defs.get(name) {
-                match arg {
-                    VmValue::Dict(map) => {
-                        let mut sobj = StructObj::<VmValue>::new(name);
-                        for field_def in def {
-                            let fname = field_def.name();
-                            let v = map.get(fname).cloned().unwrap_or(VmValue::Nil);
-                            sobj.set_field(fname, v);
-                        }
-                        Ok(VmValue::Struct(Arc::new(Mutex::new(sobj))))
-                    }
-                    VmValue::Struct(s) if s.lock().type_name() == name => Ok(VmValue::Struct(s)),
-                    other => err(format!(
-                        "{}(): cannot construct from {}", name, value_to_display(&other)
-                    )),
-                }
+            let _ = &arg;
+            if state.struct_defs.contains_key(name) {
+                err(format!(
+                    "{}(): a struct type is not a function — build one with {} {{ ... }}",
+                    name, name
+                ))
             } else {
                 err(format!("{}(): unknown type", name))
             }
