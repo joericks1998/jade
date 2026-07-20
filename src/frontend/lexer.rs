@@ -458,7 +458,16 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
                         span: Span { line, col: start_col },
                     });
                 } else {
-                    let value: i64 = num_str.parse().map_err(|_| JadeError::LiteralOverflow {
+                    // Jade integers are 63-bit: the compiled representation
+                    // spends one bit on the value tag, and the language follows
+                    // it so both engines accept the same programs. Parsing as
+                    // i64 and then bounding gives one message for "not a
+                    // number" and "too large" alike.
+                    let value: i64 = num_str
+                        .parse()
+                        .ok()
+                        .filter(|v| jade_runtime::value::JadeValue::int_fits(*v))
+                        .ok_or(JadeError::LiteralOverflow {
                         span: Span { line, col: start_col },
                     })?;
                     tokens.push(Token {

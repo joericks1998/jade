@@ -106,13 +106,32 @@ fn num(k: Kind) -> Option<f64> {
     }
 }
 
+/// Yield an integer result, or `Overflow` if it does not fit a Jade integer.
+///
+/// Jade integers are 63-bit: the compiled representation spends one bit on the
+/// value tag, and the language follows the representation so that `jade run`
+/// and `jade build` accept exactly the same programs. Checking here rather than
+/// at each call site means both engines inherit the bound from one place — the
+/// VM's dynamic path and the AOT runtime both land in `binop`.
+///
+/// Note this is *narrower* than `checked_add` and friends: `(2^62 - 1) + 1`
+/// fits an i64 and is not a Jade integer.
+#[inline]
+fn int_out(v: i64) -> Outcome {
+    if crate::value::JadeValue::int_fits(v) {
+        Outcome::Int(v)
+    } else {
+        Outcome::Err(DynErr::Overflow)
+    }
+}
+
 /// Decide a dynamic binary operation. See the module docs for the semantics.
 pub fn binop(op: Op, a: Kind, b: Kind) -> Outcome {
     use Op::*;
     match op {
         Add => match (a, b) {
             (Kind::Int(x), Kind::Int(y)) => match x.checked_add(y) {
-                Some(v) => Outcome::Int(v),
+                Some(v) => int_out(v),
                 None => Outcome::Err(DynErr::Overflow),
             },
             (Kind::Str, Kind::Str) => Outcome::Concat,
@@ -120,14 +139,14 @@ pub fn binop(op: Op, a: Kind, b: Kind) -> Outcome {
         },
         Sub => match (a, b) {
             (Kind::Int(x), Kind::Int(y)) => match x.checked_sub(y) {
-                Some(v) => Outcome::Int(v),
+                Some(v) => int_out(v),
                 None => Outcome::Err(DynErr::Overflow),
             },
             _ => float_arith(a, b, |x, y| x - y),
         },
         Mul => match (a, b) {
             (Kind::Int(x), Kind::Int(y)) => match x.checked_mul(y) {
-                Some(v) => Outcome::Int(v),
+                Some(v) => int_out(v),
                 None => Outcome::Err(DynErr::Overflow),
             },
             _ => float_arith(a, b, |x, y| x * y),
@@ -137,7 +156,7 @@ pub fn binop(op: Op, a: Kind, b: Kind) -> Outcome {
                 if y == 0 {
                     Outcome::Err(DynErr::DivZero)
                 } else {
-                    Outcome::Int(x.wrapping_div(y))
+                    int_out(x.wrapping_div(y))
                 }
             }
             _ => match (num(a), num(b)) {
@@ -156,7 +175,7 @@ pub fn binop(op: Op, a: Kind, b: Kind) -> Outcome {
                 if y == 0 {
                     Outcome::Err(DynErr::RemZero)
                 } else {
-                    Outcome::Int(x.wrapping_rem(y))
+                    int_out(x.wrapping_rem(y))
                 }
             }
             _ => match (num(a), num(b)) {
@@ -197,7 +216,7 @@ pub fn binop(op: Op, a: Kind, b: Kind) -> Outcome {
 /// Numeric negation, VM-strict (only int/float; int negation wraps like the VM).
 pub fn neg(a: Kind) -> Outcome {
     match a {
-        Kind::Int(i) => Outcome::Int(i.wrapping_neg()),
+        Kind::Int(i) => int_out(i.wrapping_neg()),
         Kind::Float(f) => Outcome::Float(-f),
         _ => Outcome::Err(DynErr::Type),
     }
@@ -253,7 +272,7 @@ mod tests {
 
     #[test]
     fn int_arithmetic_overflow_checked() {
-        assert_eq!(binop(Op::Add, Kind::Int(2), Kind::Int(3)), Outcome::Int(5));
+        assert_eq!(binop(Op::Add, Kind::Int(2), Kind::Int(3)), int_out(5));
         assert_eq!(
             binop(Op::Add, Kind::Int(i64::MAX), Kind::Int(1)),
             Outcome::Err(DynErr::Overflow)

@@ -1011,24 +1011,18 @@ async fn execute_chunk(
                 slots[*slot as usize] = v;
             }
 
-            // ── Integer arithmetic ────────────────────────────────────────────
+            // ── Integer arithmetic (63-bit; see `int_ok`) ─────────────────────
             Instr::AddInt(d, l, r) => {
                 let (a, b) = vm_try!(int2(slots, *l, *r, span));
-                set(slots, *d, VmValue::Int(
-                    vm_try!(a.checked_add(b).ok_or(JadeError::IntegerOverflow { span }))
-                ));
+                set(slots, *d, vm_try!(int_ok(a.checked_add(b), span)));
             }
             Instr::SubInt(d, l, r) => {
                 let (a, b) = vm_try!(int2(slots, *l, *r, span));
-                set(slots, *d, VmValue::Int(
-                    vm_try!(a.checked_sub(b).ok_or(JadeError::IntegerOverflow { span }))
-                ));
+                set(slots, *d, vm_try!(int_ok(a.checked_sub(b), span)));
             }
             Instr::MulInt(d, l, r) => {
                 let (a, b) = vm_try!(int2(slots, *l, *r, span));
-                set(slots, *d, VmValue::Int(
-                    vm_try!(a.checked_mul(b).ok_or(JadeError::IntegerOverflow { span }))
-                ));
+                set(slots, *d, vm_try!(int_ok(a.checked_mul(b), span)));
             }
             Instr::DivInt(d, l, r) => {
                 let (a, b) = vm_try!(int2(slots, *l, *r, span));
@@ -1042,7 +1036,8 @@ async fn execute_chunk(
             }
             Instr::NegInt(d, s) => {
                 let a = vm_try!(get_int(slots, *s, span));
-                set(slots, *d, VmValue::Int(-a));
+                // Plain `-a` panicked in a debug build at the range edge.
+                set(slots, *d, vm_try!(int_ok(a.checked_neg(), span)));
             }
 
             // ── Float arithmetic ──────────────────────────────────────────────
@@ -3069,6 +3064,22 @@ fn apply_str_rel(op: &BinOpKind, a: &str, b: &str) -> bool {
         Lt => a < b,  Gt => a > b,
         Le => a <= b, Ge => a >= b,
         _ => unreachable!("apply_str_rel only for eq/ordering ops"),
+    }
+}
+
+/// Wrap a checked-arithmetic result as a Jade integer, or report overflow.
+///
+/// Jade integers are 63-bit. The compiled representation spends one bit on the
+/// value tag, and the language follows the representation so the two engines
+/// accept exactly the same programs — `(2^62 - 1) + 1` fits an i64 but is not a
+/// Jade integer, and used to compute here while raising under `jade build`.
+///
+/// The bound lives in `jade_runtime::value` so there is one definition of what
+/// a Jade integer is; the dynamic path reaches it through `dynop`.
+fn int_ok(v: Option<i64>, span: Span) -> Result<VmValue> {
+    match v {
+        Some(i) if jade_runtime::value::JadeValue::int_fits(i) => Ok(VmValue::Int(i)),
+        _ => Err(JadeError::IntegerOverflow { span }),
     }
 }
 

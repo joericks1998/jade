@@ -816,22 +816,43 @@ mod vm {
 
     // ── integer overflow (ported from eval.rs) ────────────────────────────────
 
+    // A Jade integer is 63-bit, not i64: the compiled representation spends one
+    // bit on the value tag and the language follows it, so both engines accept
+    // the same programs. These used to be written against i64::MAX, which the
+    // lexer now rejects as a literal before any arithmetic runs.
+    const INT_MAX: i64 = jade_runtime::value::JadeValue::INT_MAX;
+
     #[test]
     fn test_vm_integer_overflow_add() {
-        let err = try_run_src(&format!("let x = {} + 1", i64::MAX)).err().expect("expected error");
+        let err = try_run_src(&format!("let x = {INT_MAX} + 1")).err().expect("expected error");
         assert!(matches!(err, JadeError::IntegerOverflow { .. }));
     }
 
     #[test]
     fn test_vm_integer_overflow_sub() {
-        let err = try_run_src(&format!("let x = -{} - 2", i64::MAX)).err().expect("expected error");
+        let err = try_run_src(&format!("let x = -{INT_MAX} - 2")).err().expect("expected error");
         assert!(matches!(err, JadeError::IntegerOverflow { .. }));
     }
 
     #[test]
     fn test_vm_integer_overflow_mul() {
-        let err = try_run_src(&format!("let x = {} * 2", i64::MAX)).err().expect("expected error");
+        let err = try_run_src(&format!("let x = {INT_MAX} * 2")).err().expect("expected error");
         assert!(matches!(err, JadeError::IntegerOverflow { .. }));
+    }
+
+    /// Past the 63-bit range a *literal* is rejected at lex time, before any
+    /// arithmetic — one error for "too large to be a Jade integer" whether it
+    /// is written down or computed.
+    #[test]
+    fn test_literal_beyond_the_integer_range_is_rejected() {
+        let err = try_run_src(&format!("let x = {}", i64::MAX)).err().expect("expected error");
+        assert!(matches!(err, JadeError::LiteralOverflow { .. }), "got {err:?}");
+    }
+
+    /// The boundary itself is a perfectly ordinary integer.
+    #[test]
+    fn test_integer_range_boundary_is_usable() {
+        try_run_src(&format!("let x = {INT_MAX}\nlet y = x - 1")).expect("INT_MAX must be usable");
     }
 
     #[test]
