@@ -1739,7 +1739,7 @@ mod vm {
         match s.globals.get("v").unwrap() {
             VmValue::Array(a) => {
                 let names: Vec<String> = a.lock().iter().map(|v| match v {
-                    VmValue::Str(s) => s.clone(),
+                    VmValue::Str(s) => s.to_string(),
                     _ => panic!("non-str entry"),
                 }).collect();
                 assert!(names.contains(&"a.txt".to_string()));
@@ -2725,7 +2725,7 @@ mod vm {
                 let got: Vec<String> = guard
                     .iter()
                     .map(|v| match v {
-                        VmValue::Str(s) => s.clone(),
+                        VmValue::Str(s) => s.to_string(),
                         other => panic!("expected Str, got {:?}", other),
                     })
                     .collect();

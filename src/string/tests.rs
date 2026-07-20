@@ -1,7 +1,7 @@
 use super::*;
 
 fn s(x: &str) -> VmValue {
-    VmValue::Str(x.to_string())
+    VmValue::Str(x.to_string().into())
 }
 
 fn arr_strs(v: &VmValue) -> Vec<String> {
@@ -10,7 +10,7 @@ fn arr_strs(v: &VmValue) -> Vec<String> {
             .lock()
             .iter()
             .map(|e| match e {
-                VmValue::Str(s) => s.clone(),
+                VmValue::Str(s) => s.to_string(),
                 _ => panic!("not a str"),
             })
             .collect(),

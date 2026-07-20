@@ -18,6 +18,7 @@ use crate::{
 use jade_runtime::dynop;
 use jade_runtime::coll::{ArrayObj, DictObj, StructObj};
 use jade_runtime::grammarf::GrammarObj;
+use jade_runtime::trust::JStr;
 
 // ── Token budgets (mirror eval.rs) ────────────────────────────────────────────
 
@@ -63,7 +64,11 @@ pub enum VmValue {
     Int(i64),
     Float(f64),
     Bool(bool),
-    Str(String),
+    /// A string plus where it came from. The trust byte is the same one
+    /// compiled code keeps in the string header — the interpreter tracked no
+    /// trust at all, so `sh.exec(sh.exec("..."))` ran under `jade run` and was
+    /// refused under `jade build`. See `jade_runtime::trust`.
+    Str(JStr),
     Fn(Arc<CompiledFn>),
     /// A closure: compiled function + snapshot of globals at creation time.
     Closure(Arc<CompiledFn>, Arc<HashMap<String, VmValue>>),
@@ -186,7 +191,7 @@ pub fn value_to_display(v: &VmValue) -> String {
         VmValue::Int(i) => i.to_string(),
         VmValue::Float(f) => jade_runtime::render::format_float(*f),
         VmValue::Bool(b)   => b.to_string(),
-        VmValue::Str(s)    => s.clone(),
+        VmValue::Str(s)    => s.to_string(),
         VmValue::Array(arc) => {
             let guard = arc.lock();
             let parts: Vec<String> = guard.iter().map(value_to_display).collect();
@@ -308,7 +313,7 @@ impl VmState {
     fn new() -> Self {
         let mut globals = HashMap::new();
         globals.insert("__tokens__".to_string(), VmValue::Int(0));
-        globals.insert("__model__".to_string(), VmValue::Str(String::new()));
+        globals.insert("__model__".to_string(), VmValue::Str(String::new().into()));
         globals.insert("__max_retries__".to_string(), VmValue::Int(15));
         globals.insert("__retry_log__".to_string(), VmValue::Array(Arc::new(Mutex::new(ArrayObj::from_vec(vec![])))));
         builtins::seed_globals(&mut globals);
@@ -351,7 +356,7 @@ impl VmState {
         self.source_dir = opts.source_dir;
         self.project_root = opts.project_root;
         self.libraries = opts.libraries;
-        self.set_session("__model__", VmValue::Str(opts.default_model));
+        self.set_session("__model__", VmValue::Str(opts.default_model.into()));
         self.set_session("__max_retries__", VmValue::Int(opts.max_retries as i64));
         #[cfg(test)]
         { self.test_stdout = opts.test_stdout; }
@@ -532,7 +537,7 @@ fn stamp_source_file(chunk: &mut Chunk, file: &str) {
 /// when they are caught by a `try/catch` block.
 fn make_vm_runtime_error(message: String) -> VmValue {
     let mut sobj = StructObj::<VmValue>::new("RuntimeError");
-    sobj.set_field("message", VmValue::Str(message));
+    sobj.set_field("message", VmValue::Str(message.into()));
     VmValue::Struct(Arc::new(Mutex::new(sobj)))
 }
 
@@ -567,7 +572,7 @@ async fn execute_chunk(
             if let Some((__caught, __handler_ip)) = handlers.pop() {
                 let __raised = match __err {
                     JadeError::Exception { .. } => state.raised_exception.take()
-                        .unwrap_or_else(|| VmValue::Str("unknown exception".to_string())),
+                        .unwrap_or_else(|| VmValue::Str("unknown exception".to_string().into())),
                     ref __e => make_vm_runtime_error(__e.to_string()),
                 };
                 set(slots, __caught, __raised);
@@ -959,7 +964,7 @@ async fn execute_chunk(
             Instr::LoadInt(d, v)   => set(slots, *d, VmValue::Int(*v)),
             Instr::LoadFloat(d, v) => set(slots, *d, VmValue::Float(*v)),
             Instr::LoadBool(d, v)  => set(slots, *d, VmValue::Bool(*v)),
-            Instr::LoadStr(d, s)   => set(slots, *d, VmValue::Str(s.clone())),
+            Instr::LoadStr(d, s)   => set(slots, *d, VmValue::Str(s.clone().into())),
             Instr::LoadNil(d)      => set(slots, *d, VmValue::Nil),
             Instr::LoadFn(d, idx)  => {
                 let cf = Arc::clone(&chunk.fn_defs[*idx]);
@@ -1075,9 +1080,13 @@ async fn execute_chunk(
                 set(slots, *d, VmValue::Float(a as f64));
             }
             Instr::ConcatStr(d, l, r) => {
-                let a = vm_try!(get_str(slots, *l, span));
-                let b = vm_try!(get_str(slots, *r, span));
-                set(slots, *d, VmValue::Str(a + &b));
+                let a = vm_try!(get_jstr(slots, *l, span));
+                let b = vm_try!(get_jstr(slots, *r, span));
+                let trust = jade_runtime::trust::combine(a.trust(), b.trust());
+                set(slots, *d, VmValue::Str(JStr::with_trust(
+                    format!("{}{}", a.as_str(), b.as_str()),
+                    trust,
+                )));
             }
 
             // ── Bitwise ───────────────────────────────────────────────────────
@@ -1224,7 +1233,7 @@ async fn execute_chunk(
                         ref other => { vm_err!(JadeError::TypeError { message: format!("dict key must be str, got {}", value_type_name(other)), span }); }
                     };
                     let val = get(slots, vr).clone();
-                    map.insert(key, val);
+                    map.insert(key.into_string(), val);
                 }
                 set(slots, *dest, VmValue::Dict(map));
             }
@@ -1249,7 +1258,7 @@ async fn execute_chunk(
                     }
                     VmValue::Dict(mut m) => {
                         let k = match idx { VmValue::Str(s) => s, ref other => { vm_err!(JadeError::TypeError { message: format!("dict index must be str, got {}", value_type_name(other)), span }); } };
-                        m.insert(k, val);
+                        m.insert(k.into_string(), val);
                         slots[*obj_reg as usize] = VmValue::Dict(m);
                     }
                     ref other => { vm_err!(JadeError::TypeError { message: format!("value of type {} is not indexable", value_type_name(other)), span }); }
@@ -1263,7 +1272,7 @@ async fn execute_chunk(
                     let mut val = get(slots, *freg).clone();
                     if *is_prompt {
                         val = match val {
-                            VmValue::Str(text) => VmValue::Prompt(text),
+                            VmValue::Str(text) => VmValue::Prompt(text.to_string()),
                             other => other, // already Prompt, or wrong type caught at type-check
                         };
                     }
@@ -1285,7 +1294,7 @@ async fn execute_chunk(
                                 if sobj.get_field(name).is_none() {
                                     if let Some(v) = eval_literal_default(default) {
                                         let v = match v {
-                                            VmValue::Str(s) => VmValue::Prompt(s),
+                                            VmValue::Str(s) => VmValue::Prompt(s.to_string()),
                                             other => other,
                                         };
                                         sobj.set_field(name, v);
@@ -1371,10 +1380,10 @@ async fn execute_chunk(
                     // Dunder attributes on function values: fn.__name__, fn.__params__
                     VmValue::Fn(ref cf) => {
                         let v = match field.as_str() {
-                            "__name__" => VmValue::Str(cf.chunk.name.clone()),
+                            "__name__" => VmValue::Str(cf.chunk.name.clone().into()),
                             "__params__" => {
                                 let arr: Vec<VmValue> = cf.params.iter()
-                                    .map(|p| VmValue::Str(p.clone()))
+                                    .map(|p| VmValue::Str(p.clone().into()))
                                     .collect();
                                 VmValue::Array(Arc::new(Mutex::new(ArrayObj::from_vec(arr))))
                             }
@@ -1417,14 +1426,25 @@ async fn execute_chunk(
 
             // ── FStr ──────────────────────────────────────────────────────────
             Instr::BuildFStr(dest, parts) => {
+                // Literal segments come from source and are trusted; an
+                // interpolated value contributes its own trust. The result is as
+                // untrustworthy as the least trustworthy thing in it — otherwise
+                // f"{tainted}" would launder taint exactly as `"" + tainted` did.
                 let mut result = String::new();
+                let mut trust = jade_runtime::trust::TRUSTED;
                 for part in parts {
                     match part {
                         FStrPart::Literal(s) => result.push_str(s),
-                        FStrPart::Reg(r) => result.push_str(&value_to_display(get(slots, *r))),
+                        FStrPart::Reg(r) => {
+                            let v = get(slots, *r);
+                            if let VmValue::Str(s) = v {
+                                trust = jade_runtime::trust::combine(trust, s.trust());
+                            }
+                            result.push_str(&value_to_display(v));
+                        }
                     }
                 }
-                set(slots, *dest, VmValue::Str(result));
+                set(slots, *dest, VmValue::Str(JStr::with_trust(result, trust)));
             }
 
             // ── Prompt ────────────────────────────────────────────────────────
@@ -1436,7 +1456,7 @@ async fn execute_chunk(
                         span,
                     }); }
                 };
-                set(slots, *dest, VmValue::Prompt(text));
+                set(slots, *dest, VmValue::Prompt(text.to_string()));
             }
             Instr::PromptDeref(dest, prompt_reg, output_type, grammar_reg) => {
                 let text = match get(slots, *prompt_reg).clone() {
@@ -1499,7 +1519,7 @@ async fn execute_chunk(
                     VmValue::Struct(rc) => rc.lock().type_name().to_string(),
                     _ => String::new(),
                 };
-                set(slots, *dest, VmValue::Str(name));
+                set(slots, *dest, VmValue::Str(name.into()));
             }
 
             // ── Async ─────────────────────────────────────────────────────────
@@ -1730,7 +1750,7 @@ async fn call_value(
                 // Default "\n" matches Python's print() behaviour.
                 let end = match iter.next() {
                     None | Some(VmValue::Nil) => "\n".to_owned(),
-                    Some(VmValue::Str(s))     => s,
+                    Some(VmValue::Str(s))     => s.to_string(),
                     Some(other) => return Err(JadeError::TypeError {
                         message: format!("print() end= must be str, got {}", value_type_name(&other)),
                         span,
@@ -1827,12 +1847,12 @@ async fn call_value(
                             ts, state, span, true,
                             start_muted, &region_start, &region_stop,
                         ).await?;
-                        Ok(VmValue::Str(text))
+                        Ok(VmValue::Str(text.into()))
                     }
                     other => {
                         let s = value_to_display(&other);
                         crate::stdio::write_str_flush(&format!("{s}\n"));
-                        Ok(VmValue::Str(s))
+                        Ok(VmValue::Str(s.into()))
                     }
                 }
             }
@@ -1863,11 +1883,11 @@ async fn call_value(
                             let type_name = s.lock().type_name().to_string();
                             state.extend_methods
                                 .get(&type_name)
-                                .and_then(|m| m.get(&method_name))
+                                .and_then(|m| m.get(method_name.as_str()))
                                 .map(|cf| VmValue::Fn(Arc::clone(cf)))
-                                .or_else(|| state.globals.get(&method_name).cloned())
+                                .or_else(|| state.globals.get(method_name.as_str()).cloned())
                         } else {
-                            state.globals.get(&method_name).cloned()
+                            state.globals.get(method_name.as_str()).cloned()
                         };
                         match fn_val {
                             Some(f) => call_value(f, vec![obj], state, span).await,
@@ -1958,7 +1978,7 @@ async fn call_value(
                     match ev {
                         StreamEvent::Status(s) => status = s as i64,
                         StreamEvent::Line(line) => {
-                            let r = call_value(handler.clone(), vec![VmValue::Str(line)], state, span).await?;
+                            let r = call_value(handler.clone(), vec![VmValue::Str(line.into())], state, span).await?;
                             // A handler returning `false` stops the stream early;
                             // dropping `rx` closes the socket on the worker side.
                             if matches!(r, VmValue::Bool(false)) {
@@ -1993,7 +2013,7 @@ async fn call_value(
                 }
                 // The active model — set from the daemon's Meta frame after the
                 // first inference, else the configured default (may be empty).
-                Ok(VmValue::Str(state.default_model.clone()))
+                Ok(VmValue::Str(state.default_model.clone().into()))
             }
             NativeFnId::LlmProfile => {
                 if !args.is_empty() {
@@ -2018,8 +2038,8 @@ async fn call_value(
                             .and_then(|p| p.find_tool_call(text));
                         match found {
                             Some(tc) => Ok(VmValue::Dict(DictObj::from_iter([
-                                ("name".to_string(), VmValue::Str(tc.name)),
-                                ("args".to_string(), VmValue::Str(tc.args)),
+                                ("name".to_string(), VmValue::Str(tc.name.into())),
+                                ("args".to_string(), VmValue::Str(tc.args.into())),
                             ]))),
                             None => Ok(VmValue::Nil),
                         }
@@ -2043,8 +2063,8 @@ async fn call_value(
                             .unwrap_or_default();
                         let items = calls.into_iter().map(|tc| {
                             VmValue::Dict(DictObj::from_iter([
-                                ("name".to_string(), VmValue::Str(tc.name)),
-                                ("args".to_string(), VmValue::Str(tc.args)),
+                                ("name".to_string(), VmValue::Str(tc.name.into())),
+                                ("args".to_string(), VmValue::Str(tc.args.into())),
                             ]))
                         }).collect::<Vec<_>>();
                         Ok(VmValue::Array(Arc::new(Mutex::new(ArrayObj::from_vec(items)))))
@@ -2062,7 +2082,7 @@ async fn call_value(
                 // The canonical tool-call body grammar (grammars/tool_call.gbnf),
                 // compiled in. Pair with the profile delimiters for a full
                 // anchored grammar via Grammar.new(g, open, close).
-                Ok(VmValue::Str(crate::compiler::gbnf::TOOL_CALL_GBNF.to_owned()))
+                Ok(VmValue::Str(crate::compiler::gbnf::TOOL_CALL_GBNF.to_owned().into()))
             }
             NativeFnId::LlmHealth => {
                 if !args.is_empty() {
@@ -2169,7 +2189,7 @@ async fn vm_prompt_deref(
     let cache_key = (prompt_text.clone(), output_type.map(str::to_owned));
     if let Some(cached) = state.prompt_cache.get(&cache_key).cloned() {
         return match output_type {
-            None => Ok(VmValue::Str(cached)),
+            None => Ok(VmValue::Str(cached.into())),
             Some(type_name) => {
                 let struct_defs = state.struct_defs.clone();
                 let v = coerce(cached.trim(), type_name, &struct_defs).map_err(|_| {
@@ -2203,7 +2223,7 @@ async fn vm_prompt_deref(
 
     if let Some(name) = backend.reported_model_name() {
         state.default_model = name.clone();
-        state.globals.insert("__model__".to_string(), VmValue::Str(name));
+        state.globals.insert("__model__".to_string(), VmValue::Str(name.into()));
     }
 
     state.token_count += initial_resp.tokens_used;
@@ -2212,7 +2232,7 @@ async fn vm_prompt_deref(
 
     let Some(type_name) = output_type else {
         state.prompt_cache.insert(cache_key, initial_resp.text.clone());
-        return Ok(VmValue::Str(initial_resp.text));
+        return Ok(VmValue::Str(initial_resp.text.into()));
     };
 
     // Typed deref: retry loop — send the raw error string directly to the model.
@@ -2236,7 +2256,7 @@ async fn vm_prompt_deref(
                 let entry = VmValue::Str(format!(
                     "attempt {}: response={:?} hint={:?}",
                     attempt + 1, current.trim(), correction
-                ));
+                ).into());
                 if let Some(VmValue::Array(arc)) = state.globals.get("__retry_log__") {
                     arc.lock().push(entry);
                 }
@@ -2463,7 +2483,7 @@ fn json_to_vm_value(json: &serde_json::Value) -> std::result::Result<VmValue, St
             else if let Some(f) = n.as_f64() { Ok(VmValue::Float(f)) }
             else { Err(format!("number {} cannot be represented as int or float", n)) }
         }
-        serde_json::Value::String(s) => Ok(VmValue::Str(s.clone())),
+        serde_json::Value::String(s) => Ok(VmValue::Str(s.clone().into())),
         serde_json::Value::Array(arr) => arr.iter().enumerate()
             .map(|(i, v)| json_to_vm_value(v).map_err(|e| format!("element {}: {}", i, e)))
             .collect::<std::result::Result<Vec<VmValue>, String>>()
@@ -2481,19 +2501,19 @@ fn json_to_vm_value(json: &serde_json::Value) -> std::result::Result<VmValue, St
 /// `{ model, tool_call: { open, close, name_field }, spans: [ { tag, open, close } ] }`.
 fn model_profile_to_vm(p: &llm::model_profile::ModelProfile) -> VmValue {
     let tool_call = DictObj::from_iter([
-        ("open".to_string(), VmValue::Str(p.tool_call.open.to_string())),
-        ("close".to_string(), VmValue::Str(p.tool_call.close.to_string())),
-        ("name_field".to_string(), VmValue::Str(p.tool_call.name_field.to_string())),
+        ("open".to_string(), VmValue::Str(p.tool_call.open.to_string().into())),
+        ("close".to_string(), VmValue::Str(p.tool_call.close.to_string().into())),
+        ("name_field".to_string(), VmValue::Str(p.tool_call.name_field.to_string().into())),
     ]);
     let spans = p.spans.iter().map(|s| {
         VmValue::Dict(DictObj::from_iter([
-            ("tag".to_string(), VmValue::Str(s.tag.to_string())),
-            ("open".to_string(), VmValue::Str(s.open.to_string())),
-            ("close".to_string(), VmValue::Str(s.close.to_string())),
+            ("tag".to_string(), VmValue::Str(s.tag.to_string().into())),
+            ("open".to_string(), VmValue::Str(s.open.to_string().into())),
+            ("close".to_string(), VmValue::Str(s.close.to_string().into())),
         ]))
     }).collect::<Vec<_>>();
     VmValue::Dict(DictObj::from_iter([
-        ("model".to_string(), VmValue::Str(p.model.to_string())),
+        ("model".to_string(), VmValue::Str(p.model.to_string().into())),
         ("tool_call".to_string(), VmValue::Dict(tool_call)),
         ("spans".to_string(), VmValue::Array(Arc::new(Mutex::new(ArrayObj::from_vec(spans))))),
     ]))
@@ -2595,7 +2615,7 @@ async fn vm_prompt_deref_stream(
 ) -> Result<VmValue> {
     let cache_key = (prompt_text.clone(), None::<String>);
     if let Some(cached) = state.prompt_cache.get(&cache_key).cloned() {
-        return Ok(VmValue::Str(cached));
+        return Ok(VmValue::Str(cached.into()));
     }
     // Return a lazy stream. Inference starts on first drain so callers
     // (e.g. stream() with mute_on=) can inject grammar constraints first.
@@ -2648,7 +2668,7 @@ async fn vm_drain_token_stream(
                 if let Some(backend) = &state.inference_backend {
                     if let Some(name) = backend.reported_model_name() {
                         state.default_model = name.clone();
-                        state.globals.insert("__model__".to_string(), VmValue::Str(name));
+                        state.globals.insert("__model__".to_string(), VmValue::Str(name.into()));
                     }
                 }
             }
@@ -2660,7 +2680,7 @@ async fn vm_drain_token_stream(
         }
     }
     state.prompt_cache.insert(ts.prompt_key.clone(), text.clone());
-    Ok(VmValue::Str(text))
+    Ok(VmValue::Str(text.into()))
 }
 
 /// Find the earliest occurrence of any needle in `hay`, as `(offset, len)`.
@@ -2843,7 +2863,7 @@ async fn vm_drain_token_stream_printing(
                 if let Some(backend) = &state.inference_backend {
                     if let Some(name) = backend.reported_model_name() {
                         state.default_model = name.clone();
-                        state.globals.insert("__model__".to_string(), VmValue::Str(name));
+                        state.globals.insert("__model__".to_string(), VmValue::Str(name.into()));
                     }
                 }
             }
@@ -2912,9 +2932,16 @@ fn vm_type_call(
             },
             other => Ok(VmValue::Bool(!matches!(other, VmValue::Nil))),
         },
-        "str" => Ok(VmValue::Str(value_to_display(&arg))),
+        "str" => {
+            // Rendering a tainted string does not make it trustworthy.
+            let trust = match &arg {
+                VmValue::Str(s) => s.trust(),
+                _ => jade_runtime::trust::TRUSTED,
+            };
+            Ok(VmValue::Str(JStr::with_trust(value_to_display(&arg), trust)))
+        }
         "func" => match arg {
-            VmValue::Str(name) => state.globals.get(&name).cloned().ok_or_else(|| {
+            VmValue::Str(name) => state.globals.get(name.as_str()).cloned().ok_or_else(|| {
                 JadeError::Exception {
                     message: format!("func(): no function named {:?}", name),
                     span,
@@ -2968,7 +2995,7 @@ fn coerce(
              Respond with only a plain float, e.g. 3.14.",
             text
         )),
-        "str" => Ok(VmValue::Str(text.to_string())),
+        "str" => Ok(VmValue::Str(text.to_string().into())),
         "bool" => match text.to_lowercase().as_str() {
             "true"  => Ok(VmValue::Bool(true)),
             "false" => Ok(VmValue::Bool(false)),
@@ -3125,7 +3152,15 @@ fn finish_dynop(out: dynop::Outcome, op: &BinOpKind, l: VmValue, r: VmValue, spa
         O::Float(v) => Ok(VmValue::Float(v)),
         O::Bool(v) => Ok(VmValue::Bool(v)),
         O::Concat => match (l, r) {
-            (VmValue::Str(a), VmValue::Str(b)) => Ok(VmValue::Str(a + &b)),
+            (VmValue::Str(a), VmValue::Str(b)) => {
+                // The result is as untrustworthy as its most untrustworthy
+                // part. Without this the model is escaped by `"" + tainted`.
+                let trust = jade_runtime::trust::combine(a.trust(), b.trust());
+                Ok(VmValue::Str(JStr::with_trust(
+                    format!("{}{}", a.as_str(), b.as_str()),
+                    trust,
+                )))
+            }
             _ => unreachable!("Concat is only produced for two strings"),
         },
         O::StrRel => match (&l, &r) {
@@ -3240,7 +3275,8 @@ fn vm_index(obj: VmValue, idx: VmValue, span: Span) -> Result<VmValue> {
             if i < 0 || i as usize >= len {
                 Err(JadeError::IndexOutOfBounds { index: i, len, span })
             } else {
-                Ok(VmValue::Str(chars[i as usize].to_string()))
+                // A character of a tainted string is still tainted.
+                Ok(VmValue::Str(s.derive(chars[i as usize].to_string())))
             }
         }
         (VmValue::Array(arc), VmValue::Int(i)) => {
@@ -3253,7 +3289,7 @@ fn vm_index(obj: VmValue, idx: VmValue, span: Span) -> Result<VmValue> {
             }
         }
         (VmValue::Dict(m), VmValue::Str(k)) => {
-            m.get(&k).cloned().ok_or_else(|| JadeError::KeyNotFound { key: k, span })
+            m.get(&k).cloned().ok_or_else(|| JadeError::KeyNotFound { key: k.to_string(), span })
         }
         (VmValue::Dict(_), idx) => Err(JadeError::TypeError { message: format!("dict index must be str, got {}", value_type_name(&idx)), span }),
         (obj, idx) => Err(JadeError::TypeError { message: format!("value of type {} is not indexable with {}", value_type_name(&obj), value_type_name(&idx)), span }),
@@ -3305,6 +3341,19 @@ fn get_bool(slots: &[VmValue], r: Reg, span: Span) -> Result<bool> {
 
 fn get_str(slots: &[VmValue], r: Reg, span: Span) -> Result<String> {
     match get(slots, r) {
+        VmValue::Str(s) => Ok(s.to_string()),
+        _ => Err(JadeError::TypeError { message: "expected str".to_string(), span }),
+    }
+}
+
+/// Read a string slot **with its trust**.
+///
+/// Prefer this over [`get_str`] anywhere the result is used to build another
+/// Jade string. `get_str` hands back a bare `String`, and converting that back
+/// into a value marks it trusted — which is exactly how `"" + tainted` laundered
+/// taint and let an untrusted command reach `sh.exec`.
+fn get_jstr(slots: &[VmValue], r: Reg, span: Span) -> Result<JStr> {
+    match get(slots, r) {
         VmValue::Str(s) => Ok(s.clone()),
         _ => Err(JadeError::TypeError { message: "expected str".to_string(), span }),
     }
@@ -3346,7 +3395,7 @@ fn str2<'a>(slots: &'a [VmValue], l: Reg, r: Reg, span: Span) -> Result<(&'a str
 fn eval_literal_default(expr: &crate::frontend::ast::Expr) -> Option<VmValue> {
     use crate::frontend::ast::Expr;
     match expr {
-        Expr::Str { value, .. }     => Some(VmValue::Str(value.clone())),
+        Expr::Str { value, .. }     => Some(VmValue::Str(value.clone().into())),
         Expr::Integer { value, .. } => Some(VmValue::Int(*value)),
         Expr::Float { value, .. }   => Some(VmValue::Float(*value)),
         Expr::Bool { value, .. }    => Some(VmValue::Bool(*value)),

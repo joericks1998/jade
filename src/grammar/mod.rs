@@ -36,7 +36,11 @@ fn grammar_new(args: &[VmValue]) -> Result<VmValue> {
         }),
     };
     Ok(VmValue::Grammar(std::sync::Arc::new(
-        jade_runtime::grammarf::GrammarObj::new(pattern, anchor, stop_anchor),
+        jade_runtime::grammarf::GrammarObj::new(
+            pattern.to_string(),
+            anchor.map(|a| a.into_string()),
+            stop_anchor.map(|s| s.into_string()),
+        ),
     )))
 }
 

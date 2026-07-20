@@ -4,7 +4,7 @@ use super::*;
 
 #[test]
 fn new_with_pattern_only() {
-    let out = (GRAMMAR_NEW.vm_impl)(&[VmValue::Str("[0-9]+".to_string())]).unwrap();
+    let out = (GRAMMAR_NEW.vm_impl)(&[VmValue::Str("[0-9]+".to_string().into())]).unwrap();
     match out {
         VmValue::Grammar(g) => {
             assert_eq!(g.pattern, "[0-9]+");
@@ -18,8 +18,8 @@ fn new_with_pattern_only() {
 #[test]
 fn new_with_anchor() {
     let out = (GRAMMAR_NEW.vm_impl)(&[
-        VmValue::Str("word".to_string()),
-        VmValue::Str("START".to_string()),
+        VmValue::Str("word".to_string().into()),
+        VmValue::Str("START".to_string().into()),
     ])
     .unwrap();
     match out {
@@ -35,9 +35,9 @@ fn new_with_anchor() {
 #[test]
 fn new_with_anchor_and_stop_anchor() {
     let out = (GRAMMAR_NEW.vm_impl)(&[
-        VmValue::Str("p".to_string()),
-        VmValue::Str("A".to_string()),
-        VmValue::Str("Z".to_string()),
+        VmValue::Str("p".to_string().into()),
+        VmValue::Str("A".to_string().into()),
+        VmValue::Str("Z".to_string().into()),
     ])
     .unwrap();
     match out {
@@ -53,7 +53,7 @@ fn new_with_anchor_and_stop_anchor() {
 #[test]
 fn nil_anchor_is_treated_as_none() {
     let out = (GRAMMAR_NEW.vm_impl)(&[
-        VmValue::Str("p".to_string()),
+        VmValue::Str("p".to_string().into()),
         VmValue::Nil,
         VmValue::Nil,
     ])
@@ -91,7 +91,7 @@ fn non_str_pattern_is_type_mismatch() {
 #[test]
 fn non_str_anchor_is_type_mismatch() {
     let err = (GRAMMAR_NEW.vm_impl)(&[
-        VmValue::Str("p".to_string()),
+        VmValue::Str("p".to_string().into()),
         VmValue::Int(1),
     ])
     .unwrap_err();
@@ -104,8 +104,8 @@ fn non_str_anchor_is_type_mismatch() {
 #[test]
 fn non_str_stop_anchor_is_type_mismatch() {
     let err = (GRAMMAR_NEW.vm_impl)(&[
-        VmValue::Str("p".to_string()),
-        VmValue::Str("A".to_string()),
+        VmValue::Str("p".to_string().into()),
+        VmValue::Str("A".to_string().into()),
         VmValue::Bool(true),
     ])
     .unwrap_err();

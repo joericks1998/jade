@@ -4,6 +4,7 @@ use crate::{
 };
 
 use crate::builtins::{BuiltinFn, Package, make_array};
+use jade_runtime::trust::JStr;
 
 #[cfg(test)]
 mod tests;
@@ -19,7 +20,7 @@ fn env_get(args: &[VmValue]) -> Result<VmValue> {
         _ => return Err(JadeError::TypeError { message: "env.get".to_string(), span: ZERO }),
     };
     Ok(match jade_runtime::envf::get(name) {
-        Some(val) => VmValue::Str(val),
+        Some(val) => VmValue::Str(val.into()),
         None      => VmValue::Nil,
     })
 }
@@ -44,7 +45,7 @@ fn env_args(args: &[VmValue]) -> Result<VmValue> {
     if !args.is_empty() {
         return Err(JadeError::ArityMismatch { expected: 0, got: args.len(), span: ZERO });
     }
-    let argv: Vec<VmValue> = jade_runtime::envf::args().into_iter().map(VmValue::Str).collect();
+    let argv: Vec<VmValue> = jade_runtime::envf::args().into_iter().map(|a| VmValue::Str(JStr::trusted(a))).collect();
     Ok(make_array(argv))
 }
 
@@ -53,7 +54,7 @@ fn env_cwd(args: &[VmValue]) -> Result<VmValue> {
         return Err(JadeError::ArityMismatch { expected: 0, got: args.len(), span: ZERO });
     }
     jade_runtime::envf::cwd()
-        .map(VmValue::Str)
+        .map(|v| VmValue::Str(JStr::tainted(v)))
         .map_err(|e| JadeError::IoError { message: format!("env.cwd: {}", e), span: ZERO })
 }
 

@@ -1,7 +1,7 @@
 use super::*;
 
 fn s(x: &str) -> VmValue {
-    VmValue::Str(x.to_string())
+    VmValue::Str(x.to_string().into())
 }
 
 // Unique var names per test avoid cross-test interference (tests run in parallel).

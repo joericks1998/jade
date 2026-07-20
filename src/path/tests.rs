@@ -1,12 +1,12 @@
 use super::*;
 
 fn s(x: &str) -> VmValue {
-    VmValue::Str(x.to_string())
+    VmValue::Str(x.to_string().into())
 }
 
 fn as_str(v: VmValue) -> String {
     match v {
-        VmValue::Str(s) => s,
+        VmValue::Str(s) => s.to_string(),
         other => panic!("expected Str, got {:?}", other),
     }
 }

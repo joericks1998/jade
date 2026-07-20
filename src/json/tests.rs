@@ -3,7 +3,7 @@ use super::*;
 use crate::builtins::make_array;
 
 fn s(x: &str) -> VmValue {
-    VmValue::Str(x.to_string())
+    VmValue::Str(x.to_string().into())
 }
 
 fn parse(x: &str) -> VmValue {
@@ -12,7 +12,7 @@ fn parse(x: &str) -> VmValue {
 
 fn stringify(v: VmValue) -> String {
     match json_stringify(&[v]).unwrap() {
-        VmValue::Str(s) => s,
+        VmValue::Str(s) => s.to_string(),
         _ => panic!("not a str"),
     }
 }

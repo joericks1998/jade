@@ -7,6 +7,7 @@ use crate::{
 };
 
 use crate::builtins::{BuiltinFn, Package, make_array};
+use jade_runtime::trust::JStr;
 
 const ZERO: Span = Span { line: 0, col: 0 };
 
@@ -24,7 +25,7 @@ fn dict_keys(args: &[VmValue]) -> Result<VmValue> {
         VmValue::Dict(m) => {
             let mut keys: Vec<String> = m.keys().cloned().collect();
             keys.sort();
-            Ok(make_array(keys.into_iter().map(VmValue::Str).collect()))
+            Ok(make_array(keys.into_iter().map(|k| VmValue::Str(JStr::trusted(k))).collect()))
         }
         _ => Err(JadeError::TypeError { message: "dict.keys".to_string(), span: ZERO }),
     }

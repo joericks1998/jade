@@ -177,7 +177,7 @@ fn extract_headers_variants() {
     assert!(extract_headers(Some(&VmValue::Nil)).unwrap().is_empty());
 
     let mut map = DictObj::new();
-    map.insert("X-Test".to_string(), VmValue::Str("1".to_string()));
+    map.insert("X-Test".to_string(), VmValue::Str("1".to_string().into()));
     let hs = extract_headers(Some(&VmValue::Dict(map))).unwrap();
     assert_eq!(hs, vec![("X-Test".to_string(), "1".to_string())]);
 
@@ -208,17 +208,17 @@ fn http_method_verb_and_body() {
 #[test]
 fn uhttp_get_arity_errors() {
     assert!(matches!(uhttp_get(&[]).unwrap_err(), JadeError::ArityMismatch { .. }));
-    let three = [VmValue::Str("a".to_string()), VmValue::Nil, VmValue::Nil];
+    let three = [VmValue::Str("a".to_string().into()), VmValue::Nil, VmValue::Nil];
     assert!(matches!(uhttp_get(&three).unwrap_err(), JadeError::ArityMismatch { .. }));
 }
 
 #[test]
 fn uhttp_post_arity_and_type_errors() {
     // too few
-    let one = [VmValue::Str("u".to_string())];
+    let one = [VmValue::Str("u".to_string().into())];
     assert!(matches!(uhttp_post(&one).unwrap_err(), JadeError::ArityMismatch { .. }));
     // bad url type
-    let bad = [VmValue::Int(1), VmValue::Str("b".to_string())];
+    let bad = [VmValue::Int(1), VmValue::Str("b".to_string().into())];
     match uhttp_post(&bad).unwrap_err() {
         JadeError::TypeError { message, .. } => assert_eq!(message, "uhttp.post"),
         other => panic!("expected TypeError, got {:?}", other),
@@ -228,7 +228,7 @@ fn uhttp_post_arity_and_type_errors() {
 #[test]
 fn uhttp_get_bad_url_scheme_returns_ioerror() {
     // Valid arity + type, but url parse fails before any socket connect.
-    let args = [VmValue::Str("not-a-unix-url".to_string())];
+    let args = [VmValue::Str("not-a-unix-url".to_string().into())];
     match uhttp_get(&args).unwrap_err() {
         JadeError::IoError { message, .. } => assert!(message.contains("unix://")),
         other => panic!("expected IoError, got {:?}", other),

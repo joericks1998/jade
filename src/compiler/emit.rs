@@ -135,7 +135,7 @@ fn eval_literal_expr(
         TExprKind::Integer(n)  => Ok(VmValue::Int(*n)),
         TExprKind::Float(f)    => Ok(VmValue::Float(*f)),
         TExprKind::Bool(b)     => Ok(VmValue::Bool(*b)),
-        TExprKind::Str(s)      => Ok(VmValue::Str(s.clone())),
+        TExprKind::Str(s)      => Ok(VmValue::Str(s.clone().into())),
         TExprKind::Identifier(s) if s == "None" || s == "nil" || s == "null" => Ok(VmValue::Nil),
         _ => Err(crate::frontend::error::JadeError::Exception {
             message: "struct decorator arguments must be literals (None, nil, null, numbers, booleans, strings)".to_string(),
@@ -594,7 +594,7 @@ fn emit_fn(
                     crate::compiler::tir::TExprKind::Integer(n) => Ok(Some(crate::compiler::vm::VmValue::Int(*n))),
                     crate::compiler::tir::TExprKind::Float(f)   => Ok(Some(crate::compiler::vm::VmValue::Float(*f))),
                     crate::compiler::tir::TExprKind::Bool(b)    => Ok(Some(crate::compiler::vm::VmValue::Bool(*b))),
-                    crate::compiler::tir::TExprKind::Str(s)     => Ok(Some(crate::compiler::vm::VmValue::Str(s.clone()))),
+                    crate::compiler::tir::TExprKind::Str(s)     => Ok(Some(crate::compiler::vm::VmValue::Str(s.clone().into()))),
                     crate::compiler::tir::TExprKind::Identifier(s) if s == "None" || s == "nil" || s == "null" => {
                         Ok(Some(crate::compiler::vm::VmValue::Nil))
                     }

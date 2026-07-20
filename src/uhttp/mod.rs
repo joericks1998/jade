@@ -43,7 +43,7 @@ pub fn uhttp_io_error(detail: &str) -> JadeError {
 
 fn require_str_owned(args: &[VmValue], pos: usize, fn_name: &str) -> Result<String> {
     match args.get(pos) {
-        Some(VmValue::Str(s)) => Ok(s.clone()),
+        Some(VmValue::Str(s)) => Ok(s.to_string()),
         Some(_) => Err(JadeError::TypeError { message: fn_name.to_string(), span: ZERO }),
         None    => Err(JadeError::ArityMismatch { expected: pos + 1, got: args.len(), span: ZERO }),
     }
@@ -56,7 +56,7 @@ pub fn extract_headers(val: Option<&VmValue>) -> Result<Vec<(String, String)>> {
             let mut headers = Vec::new();
             for (k, v) in map.iter() {
                 match v {
-                    VmValue::Str(s) => headers.push((k.clone(), s.clone())),
+                    VmValue::Str(s) => headers.push((k.clone(), s.to_string())),
                     _ => return Err(JadeError::TypeError {
                         message: "uhttp header value must be str".to_string(),
                         span: ZERO,
@@ -72,7 +72,7 @@ pub fn extract_headers(val: Option<&VmValue>) -> Result<Vec<(String, String)>> {
 fn make_response(status: u16, body: String) -> VmValue {
     let mut map = DictObj::new();
     map.insert("status".to_string(), VmValue::Int(status as i64));
-    map.insert("body".to_string(), VmValue::Str(body));
+    map.insert("body".to_string(), VmValue::Str(body.into()));
     VmValue::Dict(map)
 }
 

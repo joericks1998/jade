@@ -2570,7 +2570,7 @@ fn emit_module_call<'ctx>(
 /// mirrors the VM's `eval_literal_default` for the representable subset).
 fn eval_scalar_default(e: &Expr) -> Option<VmValue> {
     match e {
-        Expr::Str { value, .. } => Some(VmValue::Str(value.clone())),
+        Expr::Str { value, .. } => Some(VmValue::Str(value.clone().into())),
         Expr::Integer { value, .. } => Some(VmValue::Int(*value)),
         Expr::Float { value, .. } => Some(VmValue::Float(*value)),
         Expr::Bool { value, .. } => Some(VmValue::Bool(*value)),

@@ -9,7 +9,7 @@ use super::*;
 
 #[test]
 fn require_str_owned_ok() {
-    let args = [VmValue::Str("hi".to_string())];
+    let args = [VmValue::Str("hi".to_string().into())];
     assert_eq!(require_str_owned(&args, 0, "http.get").unwrap(), "hi");
 }
 
@@ -49,7 +49,7 @@ fn extract_headers_nil_is_empty() {
 #[test]
 fn extract_headers_dict_of_strings() {
     let mut map = DictObj::new();
-    map.insert("Accept".to_string(), VmValue::Str("application/json".to_string()));
+    map.insert("Accept".to_string(), VmValue::Str("application/json".to_string().into()));
     let hs = extract_headers(Some(&VmValue::Dict(map))).unwrap();
     assert_eq!(hs.len(), 1);
     assert_eq!(hs[0], ("Accept".to_string(), "application/json".to_string()));
@@ -67,7 +67,7 @@ fn extract_headers_non_str_value_errors() {
 
 #[test]
 fn extract_headers_non_dict_errors() {
-    match extract_headers(Some(&VmValue::Str("nope".to_string()))).unwrap_err() {
+    match extract_headers(Some(&VmValue::Str("nope".to_string().into()))).unwrap_err() {
         JadeError::TypeError { message, .. } => assert!(message.contains("dict")),
         other => panic!("expected TypeError, got {:?}", other),
     }
@@ -105,7 +105,7 @@ fn http_get_empty_args_arity_err() {
 #[test]
 fn http_get_too_many_args_arity_err() {
     let args = [
-        VmValue::Str("a".to_string()),
+        VmValue::Str("a".to_string().into()),
         VmValue::Nil,
         VmValue::Nil,
     ];
@@ -117,7 +117,7 @@ fn http_get_too_many_args_arity_err() {
 
 #[test]
 fn http_post_too_few_args_arity_err() {
-    let args = [VmValue::Str("url".to_string())];
+    let args = [VmValue::Str("url".to_string().into())];
     match http_post(&args).unwrap_err() {
         JadeError::ArityMismatch { expected, .. } => assert_eq!(expected, 2),
         other => panic!("expected ArityMismatch, got {:?}", other),
@@ -126,7 +126,7 @@ fn http_post_too_few_args_arity_err() {
 
 #[test]
 fn http_post_bad_url_type_err() {
-    let args = [VmValue::Int(1), VmValue::Str("body".to_string())];
+    let args = [VmValue::Int(1), VmValue::Str("body".to_string().into())];
     match http_post(&args).unwrap_err() {
         JadeError::TypeError { message, .. } => assert_eq!(message, "http.post"),
         other => panic!("expected TypeError, got {:?}", other),
@@ -141,7 +141,7 @@ fn http_delete_and_head_reject_empty_args() {
 
 #[test]
 fn http_put_bad_body_type_err() {
-    let args = [VmValue::Str("url".to_string()), VmValue::Int(9)];
+    let args = [VmValue::Str("url".to_string().into()), VmValue::Int(9)];
     match http_put(&args).unwrap_err() {
         JadeError::TypeError { message, .. } => assert_eq!(message, "http.put"),
         other => panic!("expected TypeError, got {:?}", other),

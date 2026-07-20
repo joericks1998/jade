@@ -7,6 +7,7 @@ use crate::{
 };
 
 use crate::builtins::{BuiltinFn, Package, make_array};
+use jade_runtime::trust::JStr;
 
 const ZERO: Span = Span { line: 0, col: 0 };
 
@@ -21,21 +22,21 @@ fn str_len(args: &[VmValue]) -> Result<VmValue> {
 
 fn str_upper(args: &[VmValue]) -> Result<VmValue> {
     match &args[0] {
-        VmValue::Str(s) => Ok(VmValue::Str(s.to_uppercase())),
+        VmValue::Str(s) => Ok(VmValue::Str(s.derive(s.to_uppercase()))),
         _ => Err(JadeError::TypeError { message: "str.upper".to_string(), span: ZERO }),
     }
 }
 
 fn str_lower(args: &[VmValue]) -> Result<VmValue> {
     match &args[0] {
-        VmValue::Str(s) => Ok(VmValue::Str(s.to_lowercase())),
+        VmValue::Str(s) => Ok(VmValue::Str(s.derive(s.to_lowercase()))),
         _ => Err(JadeError::TypeError { message: "str.lower".to_string(), span: ZERO }),
     }
 }
 
 fn str_trim(args: &[VmValue]) -> Result<VmValue> {
     match &args[0] {
-        VmValue::Str(s) => Ok(VmValue::Str(s.trim().to_string())),
+        VmValue::Str(s) => Ok(VmValue::Str(s.derive(s.trim()))),
         _ => Err(JadeError::TypeError { message: "str.trim".to_string(), span: ZERO }),
     }
 }
@@ -43,7 +44,7 @@ fn str_trim(args: &[VmValue]) -> Result<VmValue> {
 fn str_split(args: &[VmValue]) -> Result<VmValue> {
     match (&args[0], args.get(1)) {
         (VmValue::Str(s), Some(VmValue::Str(sep))) => {
-            let parts: Vec<VmValue> = s.split(sep.as_str()).map(|p| VmValue::Str(p.to_string())).collect();
+            let parts: Vec<VmValue> = s.split(sep.as_str()).map(|p| VmValue::Str(s.derive(p))).collect();
             Ok(make_array(parts))
         }
         _ => Err(JadeError::TypeError { message: "str.split".to_string(), span: ZERO }),
@@ -60,7 +61,8 @@ fn str_contains(args: &[VmValue]) -> Result<VmValue> {
 fn str_replace(args: &[VmValue]) -> Result<VmValue> {
     match (&args[0], args.get(1), args.get(2)) {
         (VmValue::Str(s), Some(VmValue::Str(from)), Some(VmValue::Str(to))) => {
-            Ok(VmValue::Str(s.replace(from.as_str(), to.as_str())))
+            let trust = jade_runtime::trust::combine(s.trust(), to.trust());
+            Ok(VmValue::Str(JStr::with_trust(s.replace(from.as_str(), to.as_str()), trust)))
         }
         _ => Err(JadeError::TypeError { message: "str.replace".to_string(), span: ZERO }),
     }
@@ -101,7 +103,7 @@ pub fn find_str_method(name: &str) -> Option<BuiltinFn> {
 fn pkg_split(args: &[VmValue]) -> Result<VmValue> {
     match (&args[0], args.get(1)) {
         (VmValue::Str(s), Some(VmValue::Str(sep))) => {
-            let parts: Vec<VmValue> = s.split(sep.as_str()).map(|p| VmValue::Str(p.to_string())).collect();
+            let parts: Vec<VmValue> = s.split(sep.as_str()).map(|p| VmValue::Str(s.derive(p))).collect();
             Ok(make_array(parts))
         }
         _ => Err(JadeError::TypeError { message: "string.split".to_string(), span: ZERO }),
@@ -110,21 +112,21 @@ fn pkg_split(args: &[VmValue]) -> Result<VmValue> {
 
 fn pkg_upper(args: &[VmValue]) -> Result<VmValue> {
     match &args[0] {
-        VmValue::Str(s) => Ok(VmValue::Str(s.to_uppercase())),
+        VmValue::Str(s) => Ok(VmValue::Str(s.derive(s.to_uppercase()))),
         _ => Err(JadeError::TypeError { message: "string.upper".to_string(), span: ZERO }),
     }
 }
 
 fn pkg_lower(args: &[VmValue]) -> Result<VmValue> {
     match &args[0] {
-        VmValue::Str(s) => Ok(VmValue::Str(s.to_lowercase())),
+        VmValue::Str(s) => Ok(VmValue::Str(s.derive(s.to_lowercase()))),
         _ => Err(JadeError::TypeError { message: "string.lower".to_string(), span: ZERO }),
     }
 }
 
 fn pkg_trim(args: &[VmValue]) -> Result<VmValue> {
     match &args[0] {
-        VmValue::Str(s) => Ok(VmValue::Str(s.trim().to_string())),
+        VmValue::Str(s) => Ok(VmValue::Str(s.derive(s.trim()))),
         _ => Err(JadeError::TypeError { message: "string.trim".to_string(), span: ZERO }),
     }
 }
@@ -139,7 +141,8 @@ fn pkg_contains(args: &[VmValue]) -> Result<VmValue> {
 fn pkg_replace(args: &[VmValue]) -> Result<VmValue> {
     match (&args[0], args.get(1), args.get(2)) {
         (VmValue::Str(s), Some(VmValue::Str(from)), Some(VmValue::Str(to))) => {
-            Ok(VmValue::Str(s.replace(from.as_str(), to.as_str())))
+            let trust = jade_runtime::trust::combine(s.trust(), to.trust());
+            Ok(VmValue::Str(JStr::with_trust(s.replace(from.as_str(), to.as_str()), trust)))
         }
         _ => Err(JadeError::TypeError { message: "string.replace".to_string(), span: ZERO }),
     }

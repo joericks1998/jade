@@ -4,6 +4,7 @@ use crate::{
 };
 
 use crate::builtins::{BuiltinFn, Package, make_array};
+use jade_runtime::trust::JStr;
 
 #[cfg(test)]
 mod tests;
@@ -33,9 +34,22 @@ fn fs_read(args: &[VmValue]) -> Result<VmValue> {
     if args.is_empty() || args.len() > 2 {
         return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: ZERO });
     }
+    // A tainted path is refused unless the caller explicitly vouches for it
+    // with `trust=true` — the same rule as the AOT forwarder in common.c.
+    let vouched = matches!(args.get(1), Some(VmValue::Bool(true)));
+    if !vouched {
+        if let Some(VmValue::Str(s)) = args.first() {
+            if s.is_tainted() {
+                return Err(JadeError::Exception {
+                    message: jade_runtime::trust::refusal_message("fs.read(path)"),
+                    span: ZERO,
+                });
+            }
+        }
+    }
     let path = require_str(args, 0, "fs.read")?;
     jade_runtime::fsf::read(path)
-        .map(VmValue::Str)
+        .map(|s| VmValue::Str(JStr::tainted(s)))
         .map_err(|e| io_err("read", path, e))
 }
 
@@ -85,7 +99,7 @@ fn fs_list_dir(args: &[VmValue]) -> Result<VmValue> {
     }
     let path = require_str(args, 0, "fs.list_dir")?;
     jade_runtime::fsf::list_dir(path)
-        .map(|names| make_array(names.into_iter().map(VmValue::Str).collect()))
+        .map(|names| make_array(names.into_iter().map(|s| VmValue::Str(JStr::tainted(s))).collect()))
         .map_err(|e| io_err("list_dir", path, e))
 }
 

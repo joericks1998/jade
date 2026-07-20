@@ -51,7 +51,7 @@ fn native_input(args: &[VmValue]) -> Result<VmValue> {
     }
     let mut line = String::new();
     std::io::stdin().read_line(&mut line).ok();
-    Ok(VmValue::Str(line.trim_end_matches('\n').trim_end_matches('\r').to_string()))
+    Ok(VmValue::Str(line.trim_end_matches('\n').trim_end_matches('\r').to_string().into()))
 }
 
 pub const INPUT: BuiltinFn = BuiltinFn { name: "input", vm_impl: native_input };

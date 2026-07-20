@@ -6,6 +6,7 @@ use crate::{
 };
 
 use crate::builtins::{BuiltinFn, Package};
+use jade_runtime::trust::JStr;
 
 #[cfg(test)]
 mod tests;
@@ -22,13 +23,32 @@ fn require_str<'a>(args: &'a [VmValue], pos: usize, fn_name: &str) -> Result<&'a
 
 /// `sh.exec(cmd)` — run `cmd` via `sh -c`, return captured stdout as str.
 /// Raises if the process exits non-zero, including stderr in the error message.
+/// Refuse a tainted string at a sink that would execute or fetch it.
+///
+/// The compiled runtime has always done this (`jrt_refuse_if_tainted`); the
+/// interpreter tracked no trust at all, so the same program ran an untrusted
+/// command under `jade run` and was refused under `jade build`. The message
+/// comes from the shared runtime so both engines word it identically.
+fn refuse_if_tainted(args: &[VmValue], pos: usize, sink: &str) -> Result<()> {
+    if let Some(VmValue::Str(s)) = args.get(pos) {
+        if s.is_tainted() {
+            return Err(JadeError::Exception {
+                message: jade_runtime::trust::refusal_message(sink),
+                span: ZERO,
+            });
+        }
+    }
+    Ok(())
+}
+
 fn sh_exec(args: &[VmValue]) -> Result<VmValue> {
     if args.len() != 1 {
         return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: ZERO });
     }
+    refuse_if_tainted(args, 0, "sh.exec(cmd)")?;
     let cmd = require_str(args, 0, "sh.exec")?;
     jade_runtime::shf::exec(cmd)
-        .map(VmValue::Str)
+        .map(|s| VmValue::Str(JStr::tainted(s)))
         .map_err(|message| JadeError::IoError { message, span: ZERO })
 }
 
@@ -37,6 +57,7 @@ fn sh_run(args: &[VmValue]) -> Result<VmValue> {
     if args.len() != 1 {
         return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: ZERO });
     }
+    refuse_if_tainted(args, 0, "sh.run(cmd)")?;
     let cmd = require_str(args, 0, "sh.run")?;
     jade_runtime::shf::run(cmd)
         .map(VmValue::Int)
@@ -53,8 +74,8 @@ fn sh_output(args: &[VmValue]) -> Result<VmValue> {
     let (stdout, stderr, code) =
         jade_runtime::shf::output(cmd).map_err(|message| JadeError::IoError { message, span: ZERO })?;
     let mut map = DictObj::new();
-    map.insert("stdout".to_string(), VmValue::Str(stdout));
-    map.insert("stderr".to_string(), VmValue::Str(stderr));
+    map.insert("stdout".to_string(), VmValue::Str(stdout.into()));
+    map.insert("stderr".to_string(), VmValue::Str(stderr.into()));
     map.insert("code".to_string(), VmValue::Int(code));
     Ok(VmValue::Dict(map))
 }
