@@ -10,9 +10,9 @@
 use core::ffi::{c_char, c_void};
 
 use crate::coll::ArrayObj;
-use crate::string::{self, TAINTED, TRUSTED};
-use crate::sys::strlen;
+use crate::string::{TAINTED, TRUSTED};
 use crate::value::JadeValue;
+use crate::cstr;
 
 // ── Neutral cores (used by both the VM and the AOT wrappers) ──────────────────
 
@@ -41,31 +41,10 @@ pub fn args() -> Vec<String> {
     std::env::args().collect()
 }
 
-/// Allocate a fresh tagged string holding `bytes` with `trust`; returns the data
-/// pointer (the C runtime's `char*`).
-unsafe fn mk_str(bytes: &[u8], trust: u8) -> *mut c_char {
-    let out = string::new(bytes.len(), trust);
-    if !bytes.is_empty() {
-        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), out, bytes.len()) };
-    }
-    out as *mut c_char
-}
-
-/// Borrow a NUL-terminated C string as `&str` (empty on NULL / invalid UTF-8).
-unsafe fn cstr(p: *const c_char) -> &'static str {
-    if p.is_null() {
-        return "";
-    }
-    unsafe {
-        let n = strlen(p as *const u8);
-        core::str::from_utf8(core::slice::from_raw_parts(p as *const u8, n)).unwrap_or("")
-    }
-}
-
 /// `env.cwd()` — the current working directory as a TRUSTED string (empty on error).
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_env_cwd() -> *mut c_char {
-    unsafe { mk_str(cwd().unwrap_or_default().as_bytes(), TRUSTED) }
+    unsafe { cstr::emit(cwd().unwrap_or_default().as_bytes(), TRUSTED) }
 }
 
 /// `env.get(name)` — the environment variable as a TAINTED string, or NULL when
@@ -75,8 +54,8 @@ pub extern "C" fn jrt_env_get(name: *const c_char) -> *mut c_char {
     if name.is_null() {
         return core::ptr::null_mut();
     }
-    match get(unsafe { cstr(name) }) {
-        Some(v) => unsafe { mk_str(v.as_bytes(), TAINTED) },
+    match get(unsafe { cstr::borrow(name) }) {
+        Some(v) => unsafe { cstr::emit(v.as_bytes(), TAINTED) },
         None => core::ptr::null_mut(),
     }
 }
@@ -87,7 +66,7 @@ pub extern "C" fn jrt_env_set(name: *const c_char, value: *const c_char) {
     if name.is_null() {
         return;
     }
-    set(unsafe { cstr(name) }, unsafe { cstr(value) });
+    set(unsafe { cstr::borrow(name) }, unsafe { cstr::borrow(value) });
 }
 
 /// Receives `main`'s `(argc, argv)`. Retained for ABI compatibility (codegen
@@ -103,7 +82,7 @@ pub extern "C" fn jrt_set_args(_argc: i32, _argv: *mut *mut c_char) {}
 pub extern "C" fn jrt_env_args() -> i64 {
     let mut arr = ArrayObj::<i64>::new();
     for a in args() {
-        let s = unsafe { mk_str(a.as_bytes(), TRUSTED) };
+        let s = unsafe { cstr::emit(a.as_bytes(), TRUSTED) };
         arr.push(JadeValue::from_str_ptr(s as *const ()).bits() as i64);
     }
     JadeValue::from_ptr(crate::gc::leak_obj(arr) as *const c_void as *const ()).bits() as i64

@@ -39,8 +39,8 @@ use core::ffi::c_char;
 use std::sync::Mutex;
 
 use crate::coll::StructObj;
-use crate::sys::strlen;
 use crate::value::{JadeValue, NIL_BITS};
+use crate::cstr;
 
 type W = i64;
 
@@ -57,17 +57,6 @@ struct TypeEntry {
 
 static REGISTRY: Mutex<Vec<TypeEntry>> = Mutex::new(Vec::new());
 
-#[inline]
-unsafe fn cstr(p: *const c_char) -> String {
-    if p.is_null() {
-        return String::new();
-    }
-    unsafe {
-        let n = strlen(p as *const u8);
-        String::from_utf8_lossy(core::slice::from_raw_parts(p as *const u8, n)).into_owned()
-    }
-}
-
 /// Declare one field of `type_name`, appended in declaration order.
 ///
 /// `has_default` distinguishes a required field from an optional one whose
@@ -80,7 +69,7 @@ pub extern "C" fn jrt_struct_field(
     default_word: W,
     has_default: i32,
 ) {
-    let (t, f) = unsafe { (cstr(type_name), cstr(field)) };
+    let (t, f) = unsafe { (cstr::to_string(type_name), cstr::to_string(field)) };
     let entry = Field {
         name: f,
         default: if has_default != 0 { Some(default_word) } else { None },
@@ -105,7 +94,7 @@ pub extern "C" fn jrt_struct_field(
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_coerce_struct(json: *const c_char, type_name: *const c_char) -> W {
     let nil = NIL_BITS as W;
-    let tn = unsafe { cstr(type_name) };
+    let tn = unsafe { cstr::to_string(type_name) };
 
     let fields = {
         let Ok(reg) = REGISTRY.lock() else { return nil };
@@ -119,7 +108,7 @@ pub extern "C" fn jrt_coerce_struct(json: *const c_char, type_name: *const c_cha
     // The reply's trust follows its field values: a struct coerced from an
     // untrusted response is made of untrusted parts.
     let trust = crate::string::trust_of(json as *const u8);
-    let text = unsafe { cstr(json) };
+    let text = unsafe { cstr::to_string(json) };
 
     // Extraction, field order, defaults and which failures re-prompt are the
     // shared rule; the only thing supplied here is how a JSON value becomes a

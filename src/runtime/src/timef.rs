@@ -7,8 +7,8 @@
 use core::ffi::c_char;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::string::{self, TAINTED};
-use crate::sys::strlen;
+use crate::string::TAINTED;
+use crate::cstr;
 
 // ── Neutral cores (used by both engines) ──────────────────────────────────────
 
@@ -42,25 +42,6 @@ pub fn local(tz: &str) -> std::io::Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim_end_matches('\n').to_string())
 }
 
-/// Allocate a fresh tagged string holding `bytes` with `trust`; returns `char*`.
-unsafe fn mk_str(bytes: &[u8], trust: u8) -> *mut c_char {
-    let out = string::new(bytes.len(), trust);
-    if !bytes.is_empty() {
-        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), out, bytes.len()) };
-    }
-    out as *mut c_char
-}
-
-unsafe fn cstr(p: *const c_char) -> &'static str {
-    if p.is_null() {
-        return "";
-    }
-    unsafe {
-        let n = strlen(p as *const u8);
-        core::str::from_utf8(core::slice::from_raw_parts(p as *const u8, n)).unwrap_or("")
-    }
-}
-
 /// Duration since the Unix epoch (0 if the clock is before it).
 fn since_epoch() -> Duration {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO)
@@ -88,6 +69,6 @@ pub extern "C" fn jrt_time_sleep(secs: f64) {
 /// spawn failure (the AOT has no raise path here).
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_time_local(tz: *const c_char) -> *mut c_char {
-    let s = local(unsafe { cstr(tz) }).unwrap_or_default();
-    unsafe { mk_str(s.as_bytes(), TAINTED) }
+    let s = local(unsafe { cstr::borrow(tz) }).unwrap_or_default();
+    unsafe { cstr::emit(s.as_bytes(), TAINTED) }
 }

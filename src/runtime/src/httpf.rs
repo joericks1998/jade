@@ -16,8 +16,8 @@ use std::process::{Command, Stdio};
 
 use crate::coll::DictObj;
 use crate::string::{self, TAINTED, TRUSTED};
-use crate::sys::strlen;
 use crate::value::JadeValue;
+use crate::cstr;
 
 type W = i64;
 
@@ -25,26 +25,8 @@ thread_local! {
     static PENDING: Cell<*mut c_char> = const { Cell::new(core::ptr::null_mut()) };
 }
 
-unsafe fn mk_str(bytes: &[u8], trust: u8) -> *mut c_char {
-    let out = string::new(bytes.len(), trust);
-    if !bytes.is_empty() {
-        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), out, bytes.len()) };
-    }
-    out as *mut c_char
-}
-
-unsafe fn cstr(p: *const c_char) -> &'static str {
-    if p.is_null() {
-        return "";
-    }
-    unsafe {
-        let n = strlen(p as *const u8);
-        core::str::from_utf8(core::slice::from_raw_parts(p as *const u8, n)).unwrap_or("")
-    }
-}
-
 fn set_err(msg: &str) {
-    let s = unsafe { mk_str(msg.as_bytes(), TRUSTED) };
+    let s = unsafe { cstr::emit(msg.as_bytes(), TRUSTED) };
     PENDING.with(|p| {
         let old = p.replace(s);
         if !old.is_null() {
@@ -134,7 +116,7 @@ pub fn request(
 fn header_val(word: W) -> &'static str {
     let v = JadeValue::from_bits(word as u64);
     if v.is_str() {
-        unsafe { cstr(v.as_ptr() as *const c_char) }
+        unsafe { cstr::borrow(v.as_ptr() as *const c_char) }
     } else {
         ""
     }
@@ -153,7 +135,7 @@ fn read_headers(headers: *const c_void) -> Vec<(String, String)> {
 fn make_dict(status: i64, body: &str) -> W {
     let mut d = DictObj::<W>::new();
     d.insert("status", JadeValue::from_int(status).bits() as i64);
-    let body_w = unsafe { JadeValue::from_str_ptr(mk_str(body.as_bytes(), TAINTED) as *const ()).bits() as i64 };
+    let body_w = unsafe { JadeValue::from_str_ptr(cstr::emit(body.as_bytes(), TAINTED) as *const ()).bits() as i64 };
     d.insert("body", body_w);
     JadeValue::from_ptr(crate::gc::leak_obj(d) as *const c_void as *const ()).bits() as i64
 }
@@ -161,7 +143,7 @@ fn make_dict(status: i64, body: &str) -> W {
 /// Run `request`, building the result dict; on transport failure, record the
 /// pending error (the C forwarder throws it) and return `{ status: 0, body: "" }`.
 fn request_aot(method: &str, url: *const c_char, body: Option<&str>, headers: *const c_void) -> W {
-    match request(method, unsafe { cstr(url) }, body, &read_headers(headers)) {
+    match request(method, unsafe { cstr::borrow(url) }, body, &read_headers(headers)) {
         Ok((status, body)) => make_dict(status, &body),
         Err(m) => {
             set_err(&m);
@@ -177,12 +159,12 @@ pub extern "C" fn jrt_http_get_impl(url: *const c_char, headers: *const c_void) 
 
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_http_post_impl(url: *const c_char, body: *const c_char, headers: *const c_void) -> W {
-    request_aot("POST", url, Some(unsafe { cstr(body) }), headers)
+    request_aot("POST", url, Some(unsafe { cstr::borrow(body) }), headers)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_http_put_impl(url: *const c_char, body: *const c_char, headers: *const c_void) -> W {
-    request_aot("PUT", url, Some(unsafe { cstr(body) }), headers)
+    request_aot("PUT", url, Some(unsafe { cstr::borrow(body) }), headers)
 }
 
 #[unsafe(no_mangle)]

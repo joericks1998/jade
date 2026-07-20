@@ -64,6 +64,7 @@
 
 pub mod coercef;
 pub mod coll;
+pub mod cstr;
 pub mod dynop;
 pub mod envf;
 pub mod ffi;

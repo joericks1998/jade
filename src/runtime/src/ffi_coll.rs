@@ -38,6 +38,7 @@ use crate::render::render_word;
 use crate::string;
 use crate::sys::{malloc, oom, strlen};
 use crate::value::JadeValue;
+use crate::cstr;
 
 /// The element word type the AOT backend stores: a tagged [`JadeValue`] as `i64`.
 type W = i64;
@@ -48,18 +49,6 @@ type W = i64;
 /// UTF-8 → `""` (Jade strings are always valid UTF-8, so this is lossless in
 /// practice). Used to bridge the C-ABI `const char*` keys/field names to the
 /// shared collections' `String` keys.
-#[inline]
-unsafe fn cstr_str<'a>(p: *const c_char) -> &'a str {
-    if p.is_null() {
-        return "";
-    }
-    unsafe {
-        let n = strlen(p as *const u8);
-        let bytes = core::slice::from_raw_parts(p as *const u8, n);
-        core::str::from_utf8(bytes).unwrap_or("")
-    }
-}
-
 /// The [`ObjKind`] byte at an object pointer's header.
 #[inline]
 unsafe fn kind_of(p: *const c_void) -> u8 {
@@ -223,8 +212,8 @@ fn cmp_for_sort(a: W, b: W) -> core::cmp::Ordering {
         return x.partial_cmp(&y).unwrap_or(Equal);
     }
     if va.is_str() && vb.is_str() {
-        let sa = unsafe { cstr_slice(va.as_ptr() as *const u8) };
-        let sb = unsafe { cstr_slice(vb.as_ptr() as *const u8) };
+        let sa = unsafe { cstr::borrow_bytes(va.as_ptr() as *const c_char) };
+        let sb = unsafe { cstr::borrow_bytes(vb.as_ptr() as *const c_char) };
         return sa.cmp(sb);
     }
     if va.is_bool() && vb.is_bool() {
@@ -235,13 +224,6 @@ fn cmp_for_sort(a: W, b: W) -> core::cmp::Ordering {
 
 /// Borrow a NUL-terminated string's bytes (no trailing NUL). NULL → `&[]`.
 #[inline]
-unsafe fn cstr_slice<'a>(p: *const u8) -> &'a [u8] {
-    if p.is_null() {
-        return &[];
-    }
-    unsafe { core::slice::from_raw_parts(p, strlen(p)) }
-}
-
 /// `str.split(s, sep)`: split `s` on `sep` into a new array of substrings
 /// (Rust `str::split` semantics, matching the VM). Each part inherits the
 /// source string's trust byte (taint propagates).
@@ -249,7 +231,7 @@ unsafe fn cstr_slice<'a>(p: *const u8) -> &'a [u8] {
 pub extern "C" fn jrt_coll_str_split(s: *const c_char, sep: *const c_char) -> *mut c_void {
     unsafe {
         let trust = string::trust_of(s as *const u8);
-        let (sv, sepv) = (cstr_str(s), cstr_str(sep));
+        let (sv, sepv) = (cstr::borrow(s), cstr::borrow(sep));
         let mut arr = ArrayObj::<W>::new();
         for part in sv.split(sepv) {
             let ts = tagged_string(part.as_bytes(), trust);
@@ -274,7 +256,7 @@ pub extern "C" fn jrt_kdict_set(dict: *mut c_void, key_word: W, val: W) {
     crate::gc::retain(val);
     unsafe {
         let key_ptr = JadeValue::from_bits(key_word as u64).as_ptr() as *const c_char;
-        (*(dict as *mut DictObj<W>)).set(cstr_str(key_ptr), val);
+        (*(dict as *mut DictObj<W>)).set(cstr::borrow(key_ptr), val);
     }
 }
 
@@ -283,7 +265,7 @@ pub extern "C" fn jrt_kdict_set(dict: *mut c_void, key_word: W, val: W) {
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_coll_dict_get(dict: *const c_void, key: *const c_char, out: *mut W) -> i32 {
     unsafe {
-        match (*(dict as *const DictObj<W>)).get(cstr_str(key)) {
+        match (*(dict as *const DictObj<W>)).get(cstr::borrow(key)) {
             Some(w) => {
                 *out = *w;
                 1
@@ -375,7 +357,7 @@ pub extern "C" fn jrt_coll_dict_values(dict: *const c_void) -> *mut c_void {
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_kstruct_new(type_name: *const c_char) -> *mut c_void {
     unsafe {
-        let obj = StructObj::<W>::new(cstr_str(type_name));
+        let obj = StructObj::<W>::new(cstr::borrow(type_name));
         crate::gc::leak_obj(obj)
     }
 }
@@ -385,7 +367,7 @@ pub extern "C" fn jrt_kstruct_new(type_name: *const c_char) -> *mut c_void {
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_kstruct_set(s: *mut c_void, field: *const c_char, val: W) {
     crate::gc::retain(val);
-    unsafe { (*(s as *mut StructObj<W>)).set_field(cstr_str(field), val) }
+    unsafe { (*(s as *mut StructObj<W>)).set_field(cstr::borrow(field), val) }
 }
 
 /// Read field `field` (a C string). On hit writes to `*out`, returns `1`; miss
@@ -393,7 +375,7 @@ pub extern "C" fn jrt_kstruct_set(s: *mut c_void, field: *const c_char, val: W) 
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_coll_struct_get(s: *const c_void, field: *const c_char, out: *mut W) -> i32 {
     unsafe {
-        match (*(s as *const StructObj<W>)).get_field(cstr_str(field)) {
+        match (*(s as *const StructObj<W>)).get_field(cstr::borrow(field)) {
             Some(w) => {
                 *out = *w;
                 1
@@ -432,7 +414,7 @@ pub extern "C" fn jrt_get_type_name(obj: W) -> *mut c_char {
 pub extern "C" fn jrt_coll_sh_output(cmd: *const c_char) -> *mut c_void {
     let mut d = DictObj::<W>::new();
     let (so, se, code) =
-        crate::shf::output(unsafe { cstr_str(cmd) }).unwrap_or_else(|_| (String::new(), String::new(), -1));
+        crate::shf::output(unsafe { cstr::borrow(cmd) }).unwrap_or_else(|_| (String::new(), String::new(), -1));
     unsafe {
         let so_w = JadeValue::from_str_ptr(tagged_string(so.as_bytes(), 1 /*TAINTED*/) as *const ()).bits() as i64;
         let se_w = JadeValue::from_str_ptr(tagged_string(se.as_bytes(), 1) as *const ()).bits() as i64;
@@ -450,7 +432,7 @@ pub extern "C" fn jrt_coll_sh_output(cmd: *const c_char) -> *mut c_void {
 /// `longjmp`).
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_coll_fs_list_dir(path: *const c_char, err: *mut i32) -> *mut c_void {
-    match crate::fsf::list_dir(unsafe { cstr_str(path) }) {
+    match crate::fsf::list_dir(unsafe { cstr::borrow(path) }) {
         Ok(names) => {
             let mut arr = ArrayObj::<W>::new();
             for name in names {
@@ -560,7 +542,7 @@ mod tests {
         let obj_word = JadeValue::from_ptr(s as *const ()).bits() as i64;
 
         let name = jrt_get_type_name(obj_word);
-        assert_eq!(unsafe { cstr_str(name as *const c_char) }, "Point");
+        assert_eq!(unsafe { cstr::borrow(name as *const c_char) }, "Point");
 
         let mut out: W = 0;
         assert_eq!(jrt_coll_struct_get(s, b"x\0".as_ptr() as *const c_char, &mut out), 1);
@@ -569,7 +551,7 @@ mod tests {
 
         // type name of a non-struct value is empty.
         let empty = jrt_get_type_name(int_word(5));
-        assert_eq!(unsafe { cstr_str(empty as *const c_char) }, "");
+        assert_eq!(unsafe { cstr::borrow(empty as *const c_char) }, "");
 
         unsafe {
             drop(Box::from_raw(s as *mut StructObj<W>));
@@ -587,7 +569,7 @@ mod tests {
         jrt_karr_push(a, int_word(2));
         let obj_word = JadeValue::from_ptr(a as *const ()).bits() as i64;
         let buf = jrt_render_any(obj_word);
-        assert_eq!(unsafe { cstr_str(buf as *const c_char) }, "[1, 2]");
+        assert_eq!(unsafe { cstr::borrow(buf as *const c_char) }, "[1, 2]");
         unsafe {
             crate::sys::free(buf as *mut u8); // plain free, as the C caller does
             drop(Box::from_raw(a as *mut ArrayObj<W>));

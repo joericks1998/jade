@@ -14,8 +14,8 @@
 use core::ffi::{c_char, c_void};
 use std::sync::Mutex;
 
-use crate::sys::strlen;
 use crate::value::JadeValue;
+use crate::cstr;
 
 struct Entry {
     type_name: String,
@@ -25,22 +25,11 @@ struct Entry {
 
 static REGISTRY: Mutex<Vec<Entry>> = Mutex::new(Vec::new());
 
-#[inline]
-unsafe fn cstr(p: *const c_char) -> String {
-    if p.is_null() {
-        return String::new();
-    }
-    unsafe {
-        let n = strlen(p as *const u8);
-        String::from_utf8_lossy(core::slice::from_raw_parts(p as *const u8, n)).into_owned()
-    }
-}
-
 /// Register that struct type `type_name`'s method `method` is implemented by
 /// `fnptr` (a `jf_<uid>` address). Called once per extend method at startup.
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_method_register(type_name: *const c_char, method: *const c_char, fnptr: *const c_void) {
-    let (t, m) = unsafe { (cstr(type_name), cstr(method)) };
+    let (t, m) = unsafe { (cstr::to_string(type_name), cstr::to_string(method)) };
     if let Ok(mut reg) = REGISTRY.lock() {
         reg.push(Entry { type_name: t, method: m, fnptr: fnptr as usize });
     }
@@ -54,12 +43,12 @@ pub extern "C" fn jrt_method_lookup(type_word: i64, method: *const c_char) -> *c
     let tn = {
         let v = JadeValue::from_bits(type_word as u64);
         if v.is_str() {
-            unsafe { cstr(v.as_ptr() as *const c_char) }
+            unsafe { cstr::to_string(v.as_ptr() as *const c_char) }
         } else {
             String::new()
         }
     };
-    let m = unsafe { cstr(method) };
+    let m = unsafe { cstr::to_string(method) };
     if let Ok(reg) = REGISTRY.lock() {
         for e in reg.iter() {
             if e.type_name == tn && e.method == m {
@@ -126,7 +115,7 @@ pub extern "C" fn jrt_bind_method_new(recv_word: i64, method: *const c_char) -> 
     }
     let tn = unsafe { &*(p as *const crate::coll::StructObj<i64>) }.type_name().to_string();
 
-    let m = unsafe { cstr(method) };
+    let m = unsafe { cstr::to_string(method) };
     let fnptr = {
         let Ok(reg) = REGISTRY.lock() else { return core::ptr::null_mut() };
         match reg.iter().find(|e| e.type_name == tn && e.method == m) {

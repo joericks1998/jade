@@ -881,32 +881,35 @@ mod tests {
         assert_eq!(gc::jrt_heap_live_count(), before, "release at zero must free");
     }
 
-    /// A spawned future that is awaited and released does not leak.
+    /// The worker releases its reference once it has written the result.
     ///
-    /// The wait is not padding. A future has two owners, and the worker releases
-    /// *its* reference after writing the result — so when `await_one` returns,
-    /// the last release may still be a few instructions away on another thread.
-    /// Asserting immediately is a race the test thread usually loses; asserting
-    /// after a bounded wait still fails if the free never happens, which is the
-    /// thing worth catching.
+    /// This is the half of the two-owner protocol that a handle-side test
+    /// cannot see, and it is what the use-after-free came from: the worker's
+    /// release used to land on an allocation the handle had already freed.
+    ///
+    /// Asserted on the future's own refcount rather than the global live count.
+    /// The count is process-wide and frees arrive asynchronously — a worker from
+    /// an *earlier* test can reclaim its future in the middle of this one, so
+    /// the baseline moves under you. Reading the header here is safe because we
+    /// still hold our own reference, and the poll is bounded so a worker that
+    /// never releases still fails.
     #[test]
-    fn an_awaited_future_does_not_leak() {
+    fn the_worker_releases_its_reference_after_completing() {
         let _g = exclusive();
-        let _c = crate::gc::test_support::lock_counter();
-        let before = gc::jrt_heap_live_count();
         let f = spawn(double, vec![5]);
-        assert_eq!(gc::jrt_heap_live_count(), before + 1, "spawn must be instrumented");
         assert_eq!(unsafe { await_one(f) }.unwrap(), 10);
-        unsafe { release(f) };
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while gc::jrt_heap_live_count() != before && std::time::Instant::now() < deadline {
+        while unsafe { (*f).header.rc() } > 1 && std::time::Instant::now() < deadline {
             std::thread::yield_now();
         }
         assert_eq!(
-            gc::jrt_heap_live_count(),
-            before,
-            "the future was never reclaimed — one of its two owners did not release"
+            unsafe { (*f).header.rc() },
+            1,
+            "the worker never released its reference — only the handle's is left"
         );
+
+        // Ours is now the last one, so this is the release that reclaims it.
+        unsafe { release(f) };
     }
 }
