@@ -1,0 +1,25 @@
+// String operations are Unicode-aware, and both engines agree.
+//
+// These used to be implemented twice — Rust in the VM, byte-wise C in the
+// compiled runtime — so every non-ASCII string differed. `len("café")` was 4
+// interpreted and 5 compiled; `.upper()` left accented letters alone.
+
+let s = "café"
+print(len(s))
+print(s.upper())
+// → 4
+// → CAFÉ
+
+// Case mapping is not a per-byte operation: ß uppercases to SS, one character
+// becoming two. The old byte-wise version could not express this at all.
+print("größe".upper())
+// → GRÖSSE
+
+print("HÉLLO".lower())
+// → héllo
+
+// ASCII is unchanged.
+print("hello".upper())
+print(len("hello"))
+// → HELLO
+// → 5

@@ -754,20 +754,11 @@ char* jrt_str_trim(const char* str) {
 /* str.upper / str.lower — ASCII case conversion, preserving the source trust.
  * (The VM uses Unicode to_uppercase/to_lowercase; for ASCII — the case the eval
  * suite and programs cover — these match. Non-ASCII bytes are passed through.) */
-char* jrt_str_upper(const char* str) {
-    uint8_t t = jrt_trust_of(str);
-    size_t n = str ? strlen(str) : 0;
-    char* out = jrt_str_new(n, t);
-    for (size_t i = 0; i < n; i++) out[i] = (char)toupper((unsigned char)str[i]);
-    return out;
-}
-char* jrt_str_lower(const char* str) {
-    uint8_t t = jrt_trust_of(str);
-    size_t n = str ? strlen(str) : 0;
-    char* out = jrt_str_new(n, t);
-    for (size_t i = 0; i < n; i++) out[i] = (char)tolower((unsigned char)str[i]);
-    return out;
-}
+/* jrt_str_upper / jrt_str_lower moved to the shared Rust runtime
+ * (jade-runtime, src/strf.rs). The versions here used byte-wise toupper/
+ * tolower, which is ASCII-only and writes one output byte per input byte — so
+ * every non-ASCII string differed from the VM ("café".upper() was "CAFé"), and
+ * mappings like ß -> SS could not be expressed at all. */
 
 /* str.starts_with / str.ends_with — return 1/0. */
 int32_t jrt_str_starts_with(const char* str, const char* prefix) {

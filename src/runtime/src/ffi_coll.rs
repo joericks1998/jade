@@ -111,7 +111,20 @@ pub extern "C" fn jrt_len_chunk(word: i64) -> i64 {
     let v = JadeValue::from_bits(word as u64);
     if v.is_str() {
         let p = v.as_ptr() as *const u8;
-        return if p.is_null() { 0 } else { unsafe { strlen(p) as i64 } };
+        if p.is_null() {
+            return 0;
+        }
+        // Characters, not bytes. The VM counts `chars()`, so returning
+        // `strlen` made `len("café")` 5 under `jade build` and 4 under
+        // `jade run` — every non-ASCII string disagreed.
+        let n = unsafe { strlen(p) };
+        let bytes = unsafe { core::slice::from_raw_parts(p, n) };
+        return match core::str::from_utf8(bytes) {
+            Ok(s) => s.chars().count() as i64,
+            // Not valid UTF-8 (never produced by Jade itself): fall back to the
+            // byte count rather than silently reporting zero.
+            Err(_) => n as i64,
+        };
     }
     if v.is_ptr() {
         return unsafe { (*(v.as_ptr() as *const ObjHeader)).len as i64 };
