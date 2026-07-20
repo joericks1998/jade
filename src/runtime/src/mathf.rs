@@ -323,7 +323,13 @@ mod tests {
     /// fixable here; it is a property of the value representation.
     #[test]
     fn i64_min_is_not_representable_as_a_word() {
-        assert_ne!(v(int_word(i64::MIN)).as_int(), i64::MIN);
-        assert_eq!(abs(Num::Int(i64::MIN)), Err(MathErr::Overflow), "the core still checks");
+        // A tagged word holds 63 bits, so i64::MIN has no representation.
+        // `try_from_int` is how that stops being silent truncation.
+        assert!(JadeValue::try_from_int(i64::MIN).is_none());
+        assert!(JadeValue::try_from_int(JadeValue::INT_MIN).is_some());
+        assert!(JadeValue::try_from_int(JadeValue::INT_MAX).is_some());
+        assert!(JadeValue::try_from_int(JadeValue::INT_MAX + 1).is_none());
+        // The core checks independently of the representation.
+        assert_eq!(abs(Num::Int(i64::MIN)), Err(MathErr::Overflow));
     }
 }

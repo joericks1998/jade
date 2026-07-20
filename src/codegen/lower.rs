@@ -404,6 +404,71 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
         Ok(self.tag_int(res))
     }
 
+    /// Compute a checked integer result: do the arithmetic in i128, verify it
+    /// fits the 63-bit tagged range, and raise "integer overflow" if not.
+    ///
+    /// `AddInt`/`SubInt`/`MulInt`/`NegInt` used to emit a bare LLVM add/sub/mul
+    /// and tag whatever came out, so compiled integer arithmetic silently
+    /// produced a wrong number on overflow while the VM — which uses
+    /// `checked_add`/`checked_mul` — raised. Two distinct gaps: the result could
+    /// exceed i64, and even an in-i64 result may not fit a tagged word, because
+    /// one bit goes to the tag.
+    ///
+    /// i128 closes both at once: two 63-bit operands cannot overflow it under
+    /// any of these operations, so one range check against the tagged bounds is
+    /// exact. The widening costs a couple of instructions and buys agreement
+    /// with the VM on every integer operation.
+    fn checked_int_result(&self, wide: IntValue<'ctx>, what: &str) -> Result<IntValue<'ctx>, String> {
+        let i128t = self.ctx.i128_type();
+        let func = self
+            .builder
+            .get_insert_block()
+            .and_then(|bb| bb.get_parent())
+            .ok_or("checked_int_result outside a function")?;
+
+        // The inclusive bounds of a tagged integer: -(1<<62) ..= (1<<62)-1.
+        let max = i128t.const_int((1u64 << 62) - 1, false);
+        let min = self
+            .builder
+            .build_int_neg(i128t.const_int(1u64 << 62, false), "imin")
+            .map_err(|e| e.to_string())?;
+
+        let too_big = self
+            .builder
+            .build_int_compare(IntPredicate::SGT, wide, max, "ovf_hi")
+            .map_err(|e| e.to_string())?;
+        let too_small = self
+            .builder
+            .build_int_compare(IntPredicate::SLT, wide, min, "ovf_lo")
+            .map_err(|e| e.to_string())?;
+        let overflowed =
+            self.builder.build_or(too_big, too_small, "ovf").map_err(|e| e.to_string())?;
+
+        let throw_bb = self.ctx.append_basic_block(func, "intovf_throw");
+        let ok_bb = self.ctx.append_basic_block(func, "intovf_ok");
+        self.builder
+            .build_conditional_branch(overflowed, throw_bb, ok_bb)
+            .map_err(|e| e.to_string())?;
+
+        self.builder.position_at_end(throw_bb);
+        let msg = self.str_literal_word("integer overflow")?;
+        self.throw(msg)?;
+
+        self.builder.position_at_end(ok_bb);
+        let narrowed = self
+            .builder
+            .build_int_truncate(wide, self.i64t(), what)
+            .map_err(|e| e.to_string())?;
+        Ok(self.tag_int(narrowed))
+    }
+
+    /// Sign-extend an untagged i64 operand to i128 for checked arithmetic.
+    fn widen(&self, v: IntValue<'ctx>) -> Result<IntValue<'ctx>, String> {
+        self.builder
+            .build_int_s_extend(v, self.ctx.i128_type(), "w")
+            .map_err(|e| e.to_string())
+    }
+
     /// Concatenate two tagged-string **data pointers** via the shared runtime
     /// `jrt_str_concat` (trust = max of inputs); returns a new data pointer.
     fn concat_ptrs(&self, a: PointerValue<'ctx>, b: PointerValue<'ctx>) -> PointerValue<'ctx> {
@@ -2595,8 +2660,19 @@ fn lower_instr<'ctx>(
     match instr {
         // ── Constant loads ────────────────────────────────────────────────
         LoadInt(d, v) => {
-            // Tagged int = v << 1 (63-bit SMI; large magnitudes truncate — the
-            // documented ABI residual). wrapping avoids a debug-build panic.
+            // Tagged int = v << 1. One bit goes to the tag, so a word holds 63
+            // bits, not 64 — and this used to just truncate, so
+            // `print(9223372036854775807)` compiled to `-1`: a wrong answer, not
+            // an error. The magnitude is known here, so refuse it at build time
+            // rather than emitting something that silently computes garbage.
+            const INT_MAX: i64 = (1 << 62) - 1;
+            const INT_MIN: i64 = -(1 << 62);
+            if *v > INT_MAX || *v < INT_MIN {
+                return Err(format!(
+                    "integer overflow: {v} does not fit a Jade integer \
+                     (the compiled representation holds {INT_MIN}..={INT_MAX})"
+                ));
+            }
             let tagged = (*v as i64).wrapping_shl(1) as u64;
             low.store(*d, i64_ty.const_int(tagged, false));
             Ok(false)
@@ -2669,28 +2745,34 @@ fn lower_instr<'ctx>(
         }
 
         // ── Integer arithmetic (native op on untagged, then re-tag) ───────
+        // Overflow-checked, matching the VM's checked_add/sub/mul. See
+        // `checked_int_result` for why the arithmetic widens to i128 first.
         AddInt(d, l, r) => {
             let (a, c) = low.int_operands(*l, *r);
-            let s = b.build_int_add(a, c, "addi").map_err(|e| e.to_string())?;
-            low.store(*d, low.tag_int(s));
+            let s = b.build_int_add(low.widen(a)?, low.widen(c)?, "addi").map_err(|e| e.to_string())?;
+            let res = low.checked_int_result(s, "addi")?;
+            low.store(*d, res);
             Ok(false)
         }
         SubInt(d, l, r) => {
             let (a, c) = low.int_operands(*l, *r);
-            let s = b.build_int_sub(a, c, "subi").map_err(|e| e.to_string())?;
-            low.store(*d, low.tag_int(s));
+            let s = b.build_int_sub(low.widen(a)?, low.widen(c)?, "subi").map_err(|e| e.to_string())?;
+            let res = low.checked_int_result(s, "subi")?;
+            low.store(*d, res);
             Ok(false)
         }
         MulInt(d, l, r) => {
             let (a, c) = low.int_operands(*l, *r);
-            let s = b.build_int_mul(a, c, "muli").map_err(|e| e.to_string())?;
-            low.store(*d, low.tag_int(s));
+            let s = b.build_int_mul(low.widen(a)?, low.widen(c)?, "muli").map_err(|e| e.to_string())?;
+            let res = low.checked_int_result(s, "muli")?;
+            low.store(*d, res);
             Ok(false)
         }
         NegInt(d, s) => {
             let a = low.untag_int(low.load(*s));
-            let n = b.build_int_neg(a, "negi").map_err(|e| e.to_string())?;
-            low.store(*d, low.tag_int(n));
+            let n = b.build_int_neg(low.widen(a)?, "negi").map_err(|e| e.to_string())?;
+            let res = low.checked_int_result(n, "negi")?;
+            low.store(*d, res);
             Ok(false)
         }
         DivInt(d, l, r) => {

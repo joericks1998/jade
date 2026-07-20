@@ -121,11 +121,40 @@ impl JadeValue {
 
     // ── Immediate box/unbox (mirror jrt_box_*/jrt_unbox_*) ──────────────────
 
+    /// Largest integer a tagged word can hold. One bit goes to the tag, so the
+    /// range is 63-bit, not 64.
+    pub const INT_MAX: i64 = (1 << 62) - 1;
+    /// Smallest integer a tagged word can hold.
+    pub const INT_MIN: i64 = -(1 << 62);
+
+    /// Whether `i` survives a `from_int`/`as_int` round trip.
+    #[inline]
+    pub const fn int_fits(i: i64) -> bool {
+        i >= Self::INT_MIN && i <= Self::INT_MAX
+    }
+
     /// Tag a 63-bit integer. High bits beyond 63 are dropped (SMI semantics),
     /// matching the C macro `jrt_box_int`.
+    ///
+    /// **Callers must have checked the range.** Out of range this silently
+    /// produces a different number — `print(9223372036854775807)` used to
+    /// compile to `-1`. Use [`JadeValue::try_from_int`] anywhere the value comes
+    /// from a program rather than from the runtime's own bookkeeping.
     #[inline]
     pub const fn from_int(i: i64) -> Self {
+        debug_assert!(Self::int_fits(i), "from_int would truncate; use try_from_int");
         JadeValue((i as u64) << 1)
+    }
+
+    /// Tag an integer, or `None` if it does not fit the 63-bit range.
+    ///
+    /// This is the boundary where "the VM's integers are wider than the AOT
+    /// backend's" stops being silent data loss and becomes a reportable
+    /// overflow, which is the same thing `+`/`-`/`*` already do when a result
+    /// leaves the representable range.
+    #[inline]
+    pub const fn try_from_int(i: i64) -> Option<Self> {
+        if Self::int_fits(i) { Some(JadeValue((i as u64) << 1)) } else { None }
     }
     /// Untag an integer with an arithmetic (sign-extending) shift.
     #[inline]
