@@ -114,6 +114,44 @@ static int g_max_tokens = JADE_INFER_MAX_TOKENS;
 
 void jrt_llm_set_max_tokens(int64_t n) { if (n > 0) g_max_tokens = (int)n; }
 
+/* Retry budget for a typed deref (`?p |> int`), matching the VM.
+ *
+ * The VM reads this from jade.toml (src/config, default 3). A compiled binary
+ * cannot read jade.toml — it is a standalone executable that may run anywhere —
+ * so it takes JADE_MAX_RETRIES and otherwise uses the same default. This was
+ * hard-coded 15 in codegen, so a typed deref gave up after 16 attempts in a
+ * compiled program and 4 in the VM: the same program, different behaviour, and
+ * `jade.toml` silently ignored by `jade build`.
+ *
+ * Resolved once and cached; getenv is not thread-safe against setenv and this
+ * is read from spawned tasks. */
+#define JADE_DEFAULT_MAX_RETRIES 3
+static int g_max_retries = -1;
+
+int jrt_max_retries(void) {
+    if (g_max_retries < 0) {
+        int v = JADE_DEFAULT_MAX_RETRIES;
+        const char* over = getenv("JADE_MAX_RETRIES");
+        if (over && *over) {
+            char* end = NULL;
+            long n = strtol(over, &end, 10);
+            if (end && *end == '\0' && n >= 0 && n <= 1000) v = (int)n;
+        }
+        g_max_retries = v;
+    }
+    return g_max_retries;
+}
+
+/* Cumulative tokens billed to this process, the AOT half of `__tokens__`.
+ *
+ * Counted locally, exactly as the VM accumulates `VmState.token_count`, rather
+ * than asking the daemon: jrt_total_tokens() reports the daemon's own session
+ * total, which is a different number whenever more than one program has talked
+ * to it. Every inference entry adds its DONE frame's count here. */
+static uint64_t g_session_tokens = 0;
+
+int64_t jrt_session_tokens(void) { return (int64_t)g_session_tokens; }
+
 static void build_request(const infer_req_t* req, infer_buf_t* out) {
     buf_init(out);
     buf_putc(out, '{');
@@ -171,7 +209,9 @@ char* jrt_prompt(const char* prompt, const char* model) {
 
     char* resp = NULL;
     size_t resp_len = 0;
-    jrt_ipc_request(json.data, json.len, &resp, &resp_len, NULL);
+    uint64_t used = 0;
+    jrt_ipc_request(json.data, json.len, &resp, &resp_len, &used);
+    g_session_tokens += used;
     free(json.data);
     if (!resp) return NULL;
     /* jaded is a TRUSTED transformer: it propagates the prompt's trust to its
@@ -320,6 +360,27 @@ char* jrt_prompt_typed(const char* prompt, const char* model,
     return NULL;
 }
 
+/* Raising wrapper around jrt_prompt_typed.
+ *
+ * jrt_prompt_typed returns NULL once it runs out of retries. Codegen used to
+ * tag that NULL as a string and carry on, so a prompt that never produced a
+ * coercible value segfaulted the compiled program while the VM reported a
+ * clean error. The message matches JadeError::PromptOverflow, minus the source
+ * span the AOT does not carry at runtime.
+ *
+ * `attempts` counts the first try plus the retries, as the VM does. */
+char* jrt_prompt_typed_checked(const char* prompt, const char* model,
+                               const char* type_name, int max_retries) {
+    char* out = jrt_prompt_typed(prompt, model, type_name, max_retries);
+    if (out) return out;
+    char msg[160];
+    snprintf(msg, sizeof msg,
+             "prompt '<prompt>' failed to produce a valid typed value after %d attempt(s)",
+             max_retries + 1);
+    jade_exc_throw_typed(jrt_box_str(jrt_str_dup(msg, JRT_TRUSTED)), NULL);
+    return NULL; /* unreachable (the throw longjmps) */
+}
+
 /* ── Streaming prompt deref with prefix-aware mute ────────────────────── */
 
 typedef struct {
@@ -454,8 +515,10 @@ char* jrt_prompt_stream_ex(const char* prompt, const char* model,
     st.stop = stop_or_null;
 
     char* daemon_resp = NULL;
+    uint64_t used = 0;
     jrt_ipc_request_streaming(json.data, json.len, stream_on_token, &st,
-                              &daemon_resp, NULL, NULL);
+                              &daemon_resp, NULL, &used);
+    g_session_tokens += used;
     free(json.data);
     free(daemon_resp);
 
@@ -545,6 +608,18 @@ jade_value_t jrt_llm_health(void) {
 }
 
 /* ── Model name resolution (env-derived, TRUSTED) ─────────────────────── */
+
+/* `__model__`: the model the daemon says it is serving, not the one we asked
+ * for. Distinct from jrt_get_model below, which supplies the *request's* model
+ * — the VM draws the same distinction (default_model for requests, the Meta
+ * frame for __model__). Falls back to the requested model before any inference
+ * has happened, so the variable is never misleadingly empty. */
+char* jrt_session_model(void) {
+    const char* reported = jrt_reported_model();
+    if (reported && *reported) return jrt_str_dup(reported, JRT_TRUSTED);
+    const char* m = getenv("JADE_MODEL");
+    return jrt_str_dup(m ? m : "", JRT_TRUSTED);
+}
 
 char* jrt_get_model(void) {
     const char* m = getenv("JADE_MODEL");

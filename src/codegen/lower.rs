@@ -1795,6 +1795,60 @@ fn resolve_user_calls(
 /// Everything else — the GBNF, the mute anchors, the trailing newline — lives
 /// behind `jrt_prompt_stream_obj` in the shared runtime, so the streaming and
 /// non-streaming paths cannot disagree about what a grammar means.
+/// The LLM session variables, which the VM maintains as globals it rewrites
+/// after every inference: `__model__` (the model the daemon reported),
+/// `__tokens__` (cumulative tokens billed this run) and `__max_retries__` (the
+/// typed-deref retry budget).
+///
+/// A compiled program has no such writer, so these read back as nil — the same
+/// silent-wrong-answer shape as the old `City(d)` miscompile. Each becomes a
+/// runtime query against the same state the inference entries maintain.
+///
+/// Returns `None` for any other name, so ordinary globals are untouched.
+fn emit_session_var<'ctx>(
+    low: &Lowerer<'_, 'ctx>,
+    name: &str,
+) -> Result<Option<IntValue<'ctx>>, String> {
+    let b = low.builder;
+    let i64_ty = low.i64t();
+    let e = |x: inkwell::builder::BuilderError| x.to_string();
+    let v = match name {
+        "__model__" => {
+            // jrt_session_model, not jrt_get_model: `__model__` is what the
+            // daemon reported serving, not what we asked it for.
+            let f = low.runtime_fn("jrt_session_model", low.ptrt().fn_type(&[], false));
+            let raw = b
+                .build_call(f, &[], "sessmodel")
+                .map_err(e)?
+                .as_any_value_enum()
+                .into_pointer_value();
+            low.tag_str(raw)
+        }
+        "__tokens__" => {
+            let f = low.runtime_fn("jrt_session_tokens", i64_ty.fn_type(&[], false));
+            let n = b
+                .build_call(f, &[], "sesstokens")
+                .map_err(e)?
+                .as_any_value_enum()
+                .into_int_value();
+            low.tag_int(n)
+        }
+        "__max_retries__" => {
+            let i32_ty = low.ctx.i32_type();
+            let f = low.runtime_fn("jrt_max_retries", i32_ty.fn_type(&[], false));
+            let n32 = b
+                .build_call(f, &[], "sessretries")
+                .map_err(e)?
+                .as_any_value_enum()
+                .into_int_value();
+            let n = b.build_int_s_extend(n32, i64_ty, "retries64").map_err(e)?;
+            low.tag_int(n)
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(v))
+}
+
 fn emit_stream_call<'ctx>(
     low: &Lowerer<'_, 'ctx>,
     dest: Reg,
@@ -2986,6 +3040,13 @@ fn lower_instr<'ctx>(
             // NativeCall and this materialized value is dead-code-eliminated.)
             let v = if let Some((pkgid, fname)) = parse_native_ref(name) {
                 emit_native_fn_value(low, pkgid, fname)?
+            } else if let Some(v) = emit_session_var(low, name)? {
+                // The `__model__` / `__tokens__` / `__max_retries__` session
+                // variables are ordinary globals the VM rewrites after each
+                // inference. Nothing writes them in a compiled program, so they
+                // read back nil — silently, which is the worst answer. They are
+                // runtime queries here instead.
+                v
             } else {
                 let g = low.global_slot(name);
                 b.build_load(i64_ty, g, "gld").map_err(|e| e.to_string())?.into_int_value()
@@ -3462,14 +3523,27 @@ fn lower_instr<'ctx>(
                     .as_any_value_enum()
                     .into_pointer_value()
             } else if let Some(t) = output_type.as_deref() {
+                // ..._checked, not the bare jrt_prompt_typed: that returns NULL
+                // when the retries run out, and tagging NULL as a string
+                // segfaulted the program where the VM reported a clean error.
                 let f = low.runtime_fn(
-                    "jrt_prompt_typed",
+                    "jrt_prompt_typed_checked",
                     ptrt.fn_type(&[ptrt.into(), ptrt.into(), ptrt.into(), i32_ty.into()], false),
                 );
                 let tname = low.cstr(t);
+                // Retry budget is a runtime value so `jade.toml`'s max_retries
+                // (default 3) reaches a compiled binary the same way it reaches
+                // the VM. It used to be hard-coded 15 here, so the two engines
+                // gave up after different numbers of attempts.
+                let retries_fn = low.runtime_fn("jrt_max_retries", i32_ty.fn_type(&[], false));
+                let retries = b
+                    .build_call(retries_fn, &[], "maxretries")
+                    .map_err(e)?
+                    .as_any_value_enum()
+                    .into_int_value();
                 b.build_call(
                     f,
-                    &[prompt_ptr.into(), model.into(), tname.into(), i32_ty.const_int(15, false).into()],
+                    &[prompt_ptr.into(), model.into(), tname.into(), retries.into()],
                     "promptt",
                 )
                 .map_err(e)?
@@ -4619,6 +4693,64 @@ mod tests {
         )
         .expect_err("stream of a non-deref should decline");
         assert!(err.contains("stream()"), "decline names the construct: {err}");
+    }
+
+    /// A typed deref must call the *checked* wrapper. `jrt_prompt_typed` returns
+    /// NULL once the retries run out, and codegen tagged that NULL as a string
+    /// and carried on — so a prompt that never produced a coercible value
+    /// segfaulted the compiled program where the VM reported a clean error.
+    ///
+    /// The retry budget must also be a runtime call, not a constant: it was
+    /// hard-coded 15 here while the VM reads jade.toml (default 3), so the two
+    /// engines gave up after a different number of attempts.
+    #[test]
+    fn a_typed_deref_checks_for_failure_and_reads_the_retry_budget() {
+        let ir = ir_of(
+            &[
+                LoadStr(0, "ask".to_string()),
+                MakePrompt(1, 0),
+                PromptDeref(2, 1, Some("int".to_string()), None),
+                Return(Some(2)),
+            ],
+            3,
+        );
+        assert!(ir.contains("jrt_prompt_typed_checked"), "raising wrapper used:\n{ir}");
+        assert!(ir.contains("jrt_max_retries"), "retry budget read at runtime:\n{ir}");
+        assert!(
+            !ir.contains("call ptr @jrt_prompt_typed("),
+            "the NULL-returning entry must not be called directly:\n{ir}"
+        );
+    }
+
+    /// The LLM session variables are globals the VM rewrites after every
+    /// inference. Nothing writes them in a compiled program, so reading them
+    /// returned nil — silently, which is the same silent-wrong-answer shape as
+    /// the old `City(d)` miscompile. They must lower to runtime queries.
+    #[test]
+    fn session_variables_lower_to_runtime_queries() {
+        let ir = ir_of(
+            &[
+                GetGlobal(0, "__model__".to_string()),
+                GetGlobal(1, "__tokens__".to_string()),
+                GetGlobal(2, "__max_retries__".to_string()),
+                Return(Some(0)),
+            ],
+            3,
+        );
+        // jrt_session_model, not jrt_get_model: `__model__` is the model the
+        // daemon reported serving, not the one the request asked for.
+        assert!(ir.contains("jrt_session_model"), "__model__ queried:\n{ir}");
+        assert!(ir.contains("jrt_session_tokens"), "__tokens__ queried:\n{ir}");
+        assert!(ir.contains("jrt_max_retries"), "__max_retries__ queried:\n{ir}");
+    }
+
+    /// An ordinary global must still load its cell — the session-variable names
+    /// are special-cased, and it would be easy to swallow every global read.
+    #[test]
+    fn an_ordinary_global_still_loads_its_cell() {
+        let ir = ir_of(&[GetGlobal(0, "counter".to_string()), Return(Some(0))], 1);
+        assert!(ir.contains("gld"), "plain global loaded from its cell:\n{ir}");
+        assert!(!ir.contains("jrt_session"), "no session query for a plain global:\n{ir}");
     }
 
     #[test]

@@ -54,6 +54,13 @@ static int sock_path(char* buf, size_t bufsz) {
     return (n > 0 && (size_t)n < bufsz) ? 0 : -1;
 }
 
+/* The model name from the most recent META frame, i.e. what the daemon is
+ * actually serving — the AOT half of the VM's `__model__` global. Written only
+ * while g_mtx is held (inside do_request) and read after the exchange. */
+static char g_reported_model[128] = "";
+
+const char* jrt_reported_model(void) { return g_reported_model; }
+
 static int write_all(int fd, const void* buf, size_t n) {
     const char* p = (const char*)buf;
     while (n > 0) {
@@ -285,8 +292,12 @@ static void do_request(const void* req_json, size_t req_len,
             exit(1);
         }
         case JRT_FRAME_META: {
-            /* Informational; discard payload. */
+            /* The model the daemon is actually serving. The VM records this and
+             * exposes it as `__model__`; this used to be discarded, so the same
+             * program printed the model under `jade run` and an empty string
+             * under `jade build`. Read under g_mtx, like every other frame. */
             size_t remain = plen;
+            size_t kept = 0;
             while (remain > 0) {
                 char drop[256];
                 size_t d = remain < sizeof(drop) ? remain : sizeof(drop);
@@ -295,8 +306,17 @@ static void do_request(const void* req_json, size_t req_len,
                     pthread_mutex_unlock(&g_mtx);
                     fatal_errno("read from jade-tree failed (truncated META frame)");
                 }
+                /* Keep the leading bytes that fit; a model name longer than the
+                 * buffer is truncated rather than dropped. */
+                if (kept < sizeof(g_reported_model) - 1) {
+                    size_t room = sizeof(g_reported_model) - 1 - kept;
+                    size_t take = d < room ? d : room;
+                    memcpy(g_reported_model + kept, drop, take);
+                    kept += take;
+                }
                 remain -= d;
             }
+            g_reported_model[kept] = '\0';
             break;
         }
         default: {

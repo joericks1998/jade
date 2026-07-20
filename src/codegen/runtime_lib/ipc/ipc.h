@@ -24,6 +24,10 @@
  *   user:    opaque caller pointer */
 typedef void (*jrt_token_cb)(const char* bytes, size_t len, void* user);
 
+/* The model the daemon reported in its most recent META frame ("" before any
+ * request). Backs `__model__`. */
+const char* jrt_reported_model(void);
+
 /* Send a framed request and accumulate TOKEN frames until DONE.
  *   req_json:        already-encoded JSON body (length-prefix is added internally)
  *   req_len:         body length in bytes

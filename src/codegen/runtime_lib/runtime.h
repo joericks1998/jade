@@ -269,6 +269,18 @@ char*   jrt_prompt_grammar_ex(const char* prompt, const char* model,
  * - `anchor` strings enter muted mode when matched (anchor itself suppressed).
  * - `stop` strings exit muted mode when matched (stop itself suppressed).
  * Returns the full collected text (muted+visible). Caller frees. NULL on error. */
+/* Session state mirroring the VM's `__max_retries__` / `__tokens__` globals.
+ * jrt_max_retries reads JADE_MAX_RETRIES (default 3, matching jade.toml's
+ * default); jrt_session_tokens is this process's cumulative token count. */
+char*   jrt_session_model(void);
+int     jrt_max_retries(void);
+int64_t jrt_session_tokens(void);
+
+/* jrt_prompt_typed_checked — jrt_prompt_typed, but raises a catchable Jade
+ * error instead of returning NULL when the retries are exhausted. Codegen calls
+ * this; tagging a NULL as a string crashed the program. */
+char*   jrt_prompt_typed_checked(const char* prompt, const char* model,
+                                 const char* type_name, int max_retries);
 char*   jrt_prompt_stream_ex(const char* prompt, const char* model,
                               const char* pattern_or_null,
                               const char* anchor_or_null,
