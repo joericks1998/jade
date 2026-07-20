@@ -2647,12 +2647,31 @@ async fn vm_drain_token_stream(
     Ok(VmValue::Str(text))
 }
 
-/// Panic-guard for the mute pending buffer. In practice this is unreachable:
-/// for any mute literal of length N chars, the buffer resolves (match or flush)
-/// within N/avg_token_size tokens — well under a dozen for typical tags.
-/// This constant only exists to prevent an infinite loop if there is ever a
-/// bug in the prefix-check logic.
-const MUTE_BUFFER_BAILOUT: usize = 10_000;
+/// Find the earliest occurrence of any needle in `hay`, as `(offset, len)`.
+fn first_match(needles: &[String], hay: &str) -> Option<(usize, usize)> {
+    needles
+        .iter()
+        .filter_map(|n| hay.find(n.as_str()).map(|pos| (pos, n.len())))
+        .min_by_key(|&(pos, _)| pos)
+}
+
+/// Whether `buf` is the beginning of some needle — i.e. it may yet grow into a
+/// match, so nothing in it can be released yet.
+///
+/// This asks about the *whole* buffer, which is only meaningful because the
+/// scan loop retreats one character at a time: text that cannot be part of a
+/// needle is released character by character until what remains is either a
+/// genuine partial match or empty.
+fn is_partial_match(needles: &[String], buf: &str) -> bool {
+    needles.iter().any(|n| n.starts_with(buf))
+}
+
+/// Drop the first character of `buf`, returning it.
+fn pop_first_char(buf: &mut String) -> Option<char> {
+    let c = buf.chars().next()?;
+    buf.drain(..c.len_utf8());
+    Some(c)
+}
 
 /// Core streaming-mute loop — separated from I/O so it can be tested directly.
 ///
@@ -2685,7 +2704,13 @@ pub(crate) async fn drain_tokens_with_mute<W: std::io::Write + Send>(
     newline: bool,
 ) -> String {
     let mut text = String::new();
-    let mut pending: Vec<String> = Vec::new();
+    // A byte buffer, NOT a list of tokens. An anchor routinely straddles a token
+    // boundary — a real model emits a few characters at a time, so `<tool_call>`
+    // almost never arrives whole — and the scan has to be able to hold back the
+    // tail of one token while releasing its head. This buffered by token and
+    // released a whole token at a time, which discarded the start of any anchor
+    // that shared a token with visible text, so muting silently did nothing.
+    let mut pending = String::new();
     let mut muted = start_muted;
 
     while let Some(token) = rx.recv().await {
@@ -2700,62 +2725,34 @@ pub(crate) async fn drain_tokens_with_mute<W: std::io::Write + Send>(
             continue;
         }
 
-        pending.push(token);
+        pending.push_str(&token);
 
-        loop {
-            if pending.is_empty() { break; }
-            let pending_text: String = pending.join("");
-
+        while !pending.is_empty() {
             if muted {
                 // Scanning for region_stop to exit muted mode.
-                let stop_hit = region_stop.iter()
-                    .filter_map(|s| pending_text.find(s.as_str()).map(|pos| (pos, s.len())))
-                    .min_by_key(|&(pos, _)| pos);
-
-                if let Some((pos, len)) = stop_hit {
-                    let after = pending_text[pos + len..].to_owned();
-                    pending.clear();
-                    if !after.is_empty() { pending.push(after); }
+                if let Some((pos, len)) = first_match(region_stop, &pending) {
+                    pending.drain(..pos + len); // the stop literal is suppressed too
                     muted = false;
-                    // continue inner loop to process remainder
-                } else if region_stop.iter().any(|s| s.starts_with(pending_text.as_str())) {
-                    if pending.len() >= MUTE_BUFFER_BAILOUT { pending.remove(0); }
-                    else { break; }
-                } else {
-                    pending.remove(0); // still muted, discard oldest
+                    continue;
                 }
+                // Might still grow into a stop anchor — hold and wait.
+                if is_partial_match(region_stop, &pending) { break; }
+                pop_first_char(&mut pending); // still muted: discard
             } else {
                 // Scanning for region_start to enter muted mode.
-                let hit = region_start.iter()
-                    .filter_map(|s| {
-                        pending_text.find(s.as_str()).map(|pos| (pos, s.len()))
-                    })
-                    .min_by_key(|&(pos, _)| pos);
-
-                let is_prefix = region_start.iter()
-                    .any(|s| s.starts_with(pending_text.as_str()));
-
-                if let Some((pre_len, lit_len)) = hit {
-                    if pre_len > 0 {
-                        let _ = out.write_all(pending_text[..pre_len].as_bytes());
+                if let Some((pos, len)) = first_match(region_start, &pending) {
+                    if pos > 0 {
+                        let _ = out.write_all(pending[..pos].as_bytes());
                         let _ = out.flush();
                     }
-                    let after = pending_text[pre_len + lit_len..].to_owned();
-                    pending.clear();
-                    if !after.is_empty() { pending.push(after); }
+                    pending.drain(..pos + len);
                     muted = true;
-                    // continue inner loop
-                } else if is_prefix {
-                    if pending.len() >= MUTE_BUFFER_BAILOUT {
-                        let flush = pending.remove(0);
-                        let _ = out.write_all(flush.as_bytes());
-                        let _ = out.flush();
-                    } else {
-                        break;
-                    }
-                } else {
-                    let flush = pending.remove(0);
-                    let _ = out.write_all(flush.as_bytes());
+                    continue;
+                }
+                if is_partial_match(region_start, &pending) { break; }
+                if let Some(c) = pop_first_char(&mut pending) {
+                    let mut b = [0u8; 4];
+                    let _ = out.write_all(c.encode_utf8(&mut b).as_bytes());
                     let _ = out.flush();
                 }
             }
@@ -2766,14 +2763,9 @@ pub(crate) async fn drain_tokens_with_mute<W: std::io::Write + Send>(
     if muted {
         // Inside unclosed region — discard remaining (handles partial stop tags).
     } else {
-        let trailing: String = pending.join("");
-        if !trailing.is_empty() {
-            let is_partial = region_start.iter()
-                .any(|s| s.starts_with(trailing.as_str()));
-            if !is_partial {
-                let _ = out.write_all(trailing.as_bytes());
-                let _ = out.flush();
-            }
+        if !pending.is_empty() && !is_partial_match(region_start, &pending) {
+            let _ = out.write_all(pending.as_bytes());
+            let _ = out.flush();
         }
     }
     if newline { let _ = writeln!(out); }

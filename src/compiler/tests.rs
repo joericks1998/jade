@@ -2822,6 +2822,64 @@ mod vm {
         assert_eq!(printed, "");
     }
 
+    // The shape every other split-anchor test misses. Above, the anchor arrives
+    // as pure fragments ("<", "tool", ">") — no token mixes visible text with
+    // the start of an anchor. A real tokenizer emits word-ish pieces, so
+    // "Hello<" is completely ordinary, and that is the case that was broken:
+    // the scan buffered whole tokens and released whole tokens, so flushing
+    // "Hello<" as visible threw away the "<" the anchor needed. Muting then
+    // silently did nothing at all.
+    #[test]
+    fn test_mute_anchor_shares_a_token_with_visible_text() {
+        let (full, printed) = run_mute_region(
+            vec!["Hello<", "tool>", "secret"],
+            vec!["<tool>"],
+            vec![],
+        );
+        assert_eq!(full, "Hello<tool>secret");
+        assert_eq!(printed, "Hello", "text before the anchor prints, the anchor and after do not");
+    }
+
+    // The same failure on the way out of a muted region: the stop anchor shares
+    // a token with muted text, and the visible tail after it must survive.
+    #[test]
+    fn test_mute_stop_shares_a_token_with_muted_text() {
+        let (full, printed) = run_mute_region(
+            vec!["a<t>", "hidden</", "t>tail"],
+            vec!["<t>"],
+            vec!["</t>"],
+        );
+        assert_eq!(full, "a<t>hidden</t>tail");
+        assert_eq!(printed, "atail", "the muted region is dropped, the tail resumes");
+    }
+
+    // Both anchors straddling boundaries at once, which is the common case with
+    // small tokens — and the exact sequence a fake daemon chunking at 8 bytes
+    // produces for "ABCDEFGH<t>HIDD</t>TAIL".
+    #[test]
+    fn test_mute_both_anchors_split_across_token_boundaries() {
+        let (full, printed) = run_mute_region(
+            vec!["ABCDEFGH", "<t>HIDD<", "/t>TAIL"],
+            vec!["<t>"],
+            vec!["</t>"],
+        );
+        assert_eq!(full, "ABCDEFGH<t>HIDD</t>TAIL");
+        assert_eq!(printed, "ABCDEFGHTAIL");
+    }
+
+    // One character per token — the worst case for a buffered scan.
+    #[test]
+    fn test_mute_one_character_per_token() {
+        let (full, printed) = run_mute_region(
+            "vis<t>hid</t>end".chars().map(|c| c.to_string()).collect::<Vec<_>>()
+                .iter().map(|s| s.as_str()).collect(),
+            vec!["<t>"],
+            vec!["</t>"],
+        );
+        assert_eq!(full, "vis<t>hid</t>end");
+        assert_eq!(printed, "visend");
+    }
+
     #[test]
     fn test_mute_anchor_split_across_three_tokens() {
         // "<", "tool", ">" reassembled by buffering → anchor matched, region entered.
