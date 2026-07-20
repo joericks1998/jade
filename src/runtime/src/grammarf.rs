@@ -1,12 +1,15 @@
-//! `Grammar` runtime object + grammar-constrained prompt deref for the AOT path.
+//! The `Grammar` value — shared by both engines.
 //!
-//! A `Grammar` value (`Grammar.new(pattern, anchor?, stop?)`) is a heap object
-//! carrying a GBNF pattern and optional anchor/stop tokens. It only ever flows
-//! from `Grammar.new` to a `PromptDeref` (`?p |> g`). Codegen builds it with
-//! [`jrt_grammar_new`] and runs the constrained inference with
-//! [`jrt_prompt_grammar_obj`], which converts the pattern to GBNF (matching the
-//! VM's `gbnf::grammar_from_pattern`) and calls the C inference entry
-//! `jrt_prompt_grammar_ex`.
+//! A `Grammar` (`Grammar.new(pattern, anchor?, stop?)`) carries a GBNF pattern
+//! and optional anchor/stop tokens. [`GrammarObj`] is the one representation:
+//! AOT holds it as a tagged heap pointer built by [`jrt_grammar_new`], the VM
+//! holds the same struct behind an `Arc` as `VmValue::Grammar`.
+//!
+//! It flows from `Grammar.new` to either a `PromptDeref` (`?p |> g`) or a
+//! `stream(..., mute_on=[g])`. Every consumer obtains its GBNF from
+//! [`GrammarObj::to_gbnf`], so the pattern-vs-complete-grammar decision is made
+//! exactly once. AOT runs the constrained inference through
+//! [`jrt_prompt_grammar_obj`] → the C entry `jrt_prompt_grammar_ex`.
 //!
 //! The object carries an [`ObjHeader`] with [`ObjKind::Grammar`] (at offset 8),
 //! so the refcount ops recognize it as a non-collection and no-op on it — like a
@@ -31,13 +34,58 @@ unsafe extern "C" {
 }
 
 /// A `Grammar` value: a GBNF/pattern plus optional anchor and stop tokens.
+///
+/// This is the **single** representation of a Jade `Grammar` in both engines.
+/// AOT holds it as a tagged heap pointer; the VM holds it behind an `Arc`
+/// (`VmValue::Grammar`). The `header` is inert in the VM's case — `Arc` does
+/// that refcounting — but keeping one type means the two engines cannot
+/// disagree about what a grammar *is*, which is the whole point of the
+/// VmValue sunset.
 #[repr(C)]
 pub struct GrammarObj {
     /// Kind = [`ObjKind::Grammar`].
     pub header: ObjHeader,
-    pattern: String,
-    anchor: Option<String>,
-    stop: Option<String>,
+    pub pattern: String,
+    pub anchor: Option<String>,
+    pub stop: Option<String>,
+}
+
+/// Wrap a bare GBNF pattern (the right-hand side of the root rule, e.g.
+/// `"yes" | "no"`) into a complete grammar.
+///
+/// The trailing whitespace allowance is required, not cosmetic: once the value
+/// is fully emitted llama.cpp needs at least one legal continuation token
+/// before it can transition to end-of-generation. Without it the sampler has an
+/// empty candidate set and crashes.
+pub fn wrap_pattern(pattern: &str) -> String {
+    format!("root ::= {} [ \\t\\n\\r]*", pattern)
+}
+
+impl GrammarObj {
+    /// Build a grammar value. `anchor`/`stop` are optional.
+    pub fn new(pattern: String, anchor: Option<String>, stop: Option<String>) -> Self {
+        GrammarObj { header: ObjHeader::new(ObjKind::Grammar, 0), pattern, anchor, stop }
+    }
+
+    /// The complete GBNF this grammar denotes.
+    ///
+    /// A pattern that already *is* a grammar (it has a `root` rule) is used
+    /// verbatim; a bare pattern is wrapped by [`wrap_pattern`].
+    ///
+    /// This is the one place that decision is made. It used to be made twice —
+    /// once in the VM's `?p |> g` path and once here — and a third consumer,
+    /// the VM's `stream(..., mute_on=[g])`, made it *not at all* and passed the
+    /// bare pattern straight to the model. The same `Grammar` value therefore
+    /// meant different things depending on which builtin received it. Routing
+    /// every consumer through this method is what makes that class of bug
+    /// unrepresentable rather than merely fixed.
+    pub fn to_gbnf(&self) -> String {
+        if self.pattern.contains("root") && self.pattern.contains("::=") {
+            self.pattern.clone()
+        } else {
+            wrap_pattern(&self.pattern)
+        }
+    }
 }
 
 /// Borrow a NUL-terminated C string as `String`; NULL → `None` (an omitted
@@ -61,12 +109,11 @@ pub extern "C" fn jrt_grammar_new(
     anchor: *const c_char,
     stop: *const c_char,
 ) -> *mut c_void {
-    let obj = GrammarObj {
-        header: ObjHeader::new(ObjKind::Grammar, 0),
-        pattern: unsafe { opt_str(pattern) }.unwrap_or_default(),
-        anchor: unsafe { opt_str(anchor) },
-        stop: unsafe { opt_str(stop) },
-    };
+    let obj = GrammarObj::new(
+        unsafe { opt_str(pattern) }.unwrap_or_default(),
+        unsafe { opt_str(anchor) },
+        unsafe { opt_str(stop) },
+    );
     crate::gc::leak_obj(obj)
 }
 
@@ -83,16 +130,7 @@ pub extern "C" fn jrt_prompt_grammar_obj(
 ) -> *mut c_char {
     let g = unsafe { &*(grammar_obj as *const GrammarObj) };
 
-    // Mirror the VM: a complete GBNF (has `root ::=`) is used as-is; a bare
-    // pattern is wrapped. Keep the wrapper byte-identical to
-    // `gbnf::grammar_from_pattern`.
-    let gbnf = if g.pattern.contains("root") && g.pattern.contains("::=") {
-        g.pattern.clone()
-    } else {
-        format!("root ::= {} [ \\t\\n\\r]*", g.pattern)
-    };
-
-    let gbnf_c = match CString::new(gbnf) {
+    let gbnf_c = match CString::new(g.to_gbnf()) {
         Ok(c) => c,
         Err(_) => return core::ptr::null_mut(), // interior NUL — malformed grammar
     };
@@ -102,4 +140,65 @@ pub extern "C" fn jrt_prompt_grammar_obj(
     let stop_ptr = stop_c.as_ref().map_or(core::ptr::null(), |c| c.as_ptr());
 
     unsafe { jrt_prompt_grammar_ex(prompt, model, gbnf_c.as_ptr(), anchor_ptr, stop_ptr) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn g(pattern: &str) -> GrammarObj {
+        GrammarObj::new(pattern.to_string(), None, None)
+    }
+
+    #[test]
+    fn a_bare_pattern_is_wrapped_into_a_root_rule() {
+        assert_eq!(g(r#""yes" | "no""#).to_gbnf(), r#"root ::= "yes" | "no" [ \t\n\r]*"#);
+    }
+
+    #[test]
+    fn a_complete_grammar_is_used_verbatim() {
+        let src = "root ::= [0-9]+\n";
+        assert_eq!(g(src).to_gbnf(), src);
+    }
+
+    // Both halves of the recognizer matter. A pattern mentioning `root` but
+    // with no rule arrow is still a bare pattern, and vice versa.
+    #[test]
+    fn root_without_an_arrow_is_still_a_bare_pattern() {
+        assert_eq!(g(r#""root""#).to_gbnf(), r#"root ::= "root" [ \t\n\r]*"#);
+    }
+
+    #[test]
+    fn an_arrow_without_root_is_still_a_bare_pattern() {
+        let out = g("a ::= b").to_gbnf();
+        assert_eq!(out, r"root ::= a ::= b [ \t\n\r]*");
+    }
+
+    // The trailing whitespace allowance is load-bearing: without a legal
+    // continuation token llama.cpp's sampler has an empty candidate set at the
+    // end of a match and crashes. Pin it so nobody "tidies" it away.
+    #[test]
+    fn wrapping_always_allows_a_trailing_whitespace_token() {
+        assert!(g("[0-9]+").to_gbnf().ends_with(r"[ \t\n\r]*"));
+    }
+
+    // The regression this collapse was built to make unrepresentable: `?p |> g`
+    // wrapped the pattern, `stream(mute_on=[g])` passed it through raw, so one
+    // Grammar meant two different things. Now there is only one accessor.
+    #[test]
+    fn every_consumer_sees_the_same_gbnf_for_one_grammar() {
+        let anchored = GrammarObj::new(
+            r#""yes" | "no""#.to_string(),
+            Some("<a>".to_string()),
+            Some("</a>".to_string()),
+        );
+        assert_eq!(anchored.to_gbnf(), g(r#""yes" | "no""#).to_gbnf());
+        assert_eq!(anchored.anchor.as_deref(), Some("<a>"));
+        assert_eq!(anchored.stop.as_deref(), Some("</a>"));
+    }
+
+    #[test]
+    fn header_is_tagged_as_a_grammar() {
+        assert_eq!(g("x").header.kind, ObjKind::Grammar as u8);
+    }
 }

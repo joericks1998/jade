@@ -6,10 +6,10 @@ use super::*;
 fn new_with_pattern_only() {
     let out = (GRAMMAR_NEW.vm_impl)(&[VmValue::Str("[0-9]+".to_string())]).unwrap();
     match out {
-        VmValue::Grammar { pattern, anchor, stop_anchor } => {
-            assert_eq!(pattern, "[0-9]+");
-            assert!(anchor.is_none());
-            assert!(stop_anchor.is_none());
+        VmValue::Grammar(g) => {
+            assert_eq!(g.pattern, "[0-9]+");
+            assert!(g.anchor.is_none());
+            assert!(g.stop.is_none());
         }
         other => panic!("expected Grammar, got {:?}", other),
     }
@@ -23,10 +23,10 @@ fn new_with_anchor() {
     ])
     .unwrap();
     match out {
-        VmValue::Grammar { pattern, anchor, stop_anchor } => {
-            assert_eq!(pattern, "word");
-            assert_eq!(anchor.as_deref(), Some("START"));
-            assert!(stop_anchor.is_none());
+        VmValue::Grammar(g) => {
+            assert_eq!(g.pattern, "word");
+            assert_eq!(g.anchor.as_deref(), Some("START"));
+            assert!(g.stop.is_none());
         }
         other => panic!("expected Grammar, got {:?}", other),
     }
@@ -41,10 +41,10 @@ fn new_with_anchor_and_stop_anchor() {
     ])
     .unwrap();
     match out {
-        VmValue::Grammar { pattern, anchor, stop_anchor } => {
-            assert_eq!(pattern, "p");
-            assert_eq!(anchor.as_deref(), Some("A"));
-            assert_eq!(stop_anchor.as_deref(), Some("Z"));
+        VmValue::Grammar(g) => {
+            assert_eq!(g.pattern, "p");
+            assert_eq!(g.anchor.as_deref(), Some("A"));
+            assert_eq!(g.stop.as_deref(), Some("Z"));
         }
         other => panic!("expected Grammar, got {:?}", other),
     }
@@ -59,9 +59,9 @@ fn nil_anchor_is_treated_as_none() {
     ])
     .unwrap();
     match out {
-        VmValue::Grammar { anchor, stop_anchor, .. } => {
-            assert!(anchor.is_none());
-            assert!(stop_anchor.is_none());
+        VmValue::Grammar(g) => {
+            assert!(g.anchor.is_none());
+            assert!(g.stop.is_none());
         }
         other => panic!("expected Grammar, got {:?}", other),
     }

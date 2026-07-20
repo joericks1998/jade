@@ -35,7 +35,9 @@ fn grammar_new(args: &[VmValue]) -> Result<VmValue> {
             span: ZERO,
         }),
     };
-    Ok(VmValue::Grammar { pattern, anchor, stop_anchor })
+    Ok(VmValue::Grammar(std::sync::Arc::new(
+        jade_runtime::grammarf::GrammarObj::new(pattern, anchor, stop_anchor),
+    )))
 }
 
 pub static GRAMMAR_NEW: BuiltinFn = BuiltinFn { name: "new", vm_impl: grammar_new };

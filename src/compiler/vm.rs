@@ -17,6 +17,7 @@ use crate::{
 };
 use jade_runtime::dynop;
 use jade_runtime::coll::{ArrayObj, DictObj, StructObj};
+use jade_runtime::grammarf::GrammarObj;
 
 // ── Token budgets (mirror eval.rs) ────────────────────────────────────────────
 
@@ -73,8 +74,13 @@ pub enum VmValue {
     Prompt(String),
     /// A user-defined GBNF pattern (RHS only, e.g. `"yes" | "no"`).
     /// Used with `?p |> grammar_var` to constrain LLM token sampling.
-    /// `anchor`: if set, grammar enforcement begins only after the model emits this string.
-    Grammar { pattern: String, anchor: Option<String>, stop_anchor: Option<String> },
+    ///
+    /// This holds the *same* [`GrammarObj`] the AOT backend allocates on its
+    /// heap — the first of the value types to be collapsed onto one shared
+    /// representation. Read its GBNF via `GrammarObj::to_gbnf()`; do not
+    /// re-derive it from `.pattern` at the use site, which is how the two
+    /// engines drifted apart in the first place.
+    Grammar(Arc<GrammarObj>),
     Dict(DictObj<VmValue>),
     /// A pure Rust-backed callable (no VM state mutation). Used for builtin
     /// core built-ins (print, len, write, input) and package functions.
@@ -151,8 +157,10 @@ impl std::fmt::Debug for VmValue {
             VmValue::BoundMethod(_) => write!(f, "<bound method>"),
             VmValue::Array(arc) => write!(f, "Array[{} elem(s)]", arc.lock().len()),
             VmValue::Prompt(s)   => write!(f, "Prompt({:?})", s),
-            VmValue::Grammar { pattern, anchor: None, .. }    => write!(f, "Grammar({:?})", pattern),
-            VmValue::Grammar { pattern, anchor: Some(a), .. } => write!(f, "Grammar({:?}, anchor={:?})", pattern, a),
+            VmValue::Grammar(g) => match &g.anchor {
+                None    => write!(f, "Grammar({:?})", g.pattern),
+                Some(a) => write!(f, "Grammar({:?}, anchor={:?})", g.pattern, a),
+            },
             VmValue::Dict(m)     => write!(f, "Dict({} key(s))", m.len()),
             VmValue::BuiltinFn(bf) => write!(f, "BuiltinFn({})", bf.name),
             VmValue::NativeBoundMethod(nbm) => write!(f, "NativeBoundMethod({})", nbm.method.name),
@@ -198,7 +206,7 @@ pub fn value_to_display(v: &VmValue) -> String {
         VmValue::BuiltinFn(bf)         => format!("<builtin {}>", bf.name),
         VmValue::NativeBoundMethod(nm) => format!("<builtin {}>", nm.method.name),
         VmValue::Prompt(_)             => "<prompt>".to_string(),
-        VmValue::Grammar { .. }        => "<grammar>".to_string(),
+        VmValue::Grammar(_)            => "<grammar>".to_string(),
         VmValue::NativeFn(_)           => "<native fn>".to_string(),
         VmValue::NativeLibFn(nfn)      => format!("<native lib fn {}>", nfn.name),
         VmValue::Future(_)             => "<future>".to_string(),
@@ -227,7 +235,7 @@ pub fn value_type_name(v: &VmValue) -> &'static str {
         VmValue::TokenStream(_) => "token stream",
         VmValue::TypeRef(_) => "type",
         VmValue::Prompt(_) => "prompt",
-        VmValue::Grammar { .. } => "grammar",
+        VmValue::Grammar(_) => "grammar",
         VmValue::Nil => "nil",
     }
 }
@@ -1438,16 +1446,8 @@ async fn execute_chunk(
                 let (grammar_override, grammar_anchor, grammar_stop) = match grammar_reg {
                     None => (None, None, None),
                     Some(r) => match get(slots, *r).clone() {
-                        VmValue::Grammar { pattern, anchor, stop_anchor } => {
-                            // `pattern` may be either:
-                            //   a) a complete GBNF (already has `root ::=` lines) — pass as-is,
-                            //   b) a simple pattern RHS (e.g. `"yes" | "no"`) — wrap with grammar_from_pattern.
-                            let gbnf = if pattern.contains("root") && pattern.contains("::=") {
-                                pattern
-                            } else {
-                                crate::compiler::gbnf::grammar_from_pattern(&pattern)
-                            };
-                            (Some(gbnf), anchor, stop_anchor)
+                        VmValue::Grammar(g) => {
+                            (Some(g.to_gbnf()), g.anchor.clone(), g.stop.clone())
                         }
                         VmValue::Nil => {
                             // Grammar expression evaluated to nil (e.g. self.grammar before it
@@ -1772,25 +1772,28 @@ async fn call_value(
                     None | Some(VmValue::Nil) => {}
                     Some(VmValue::Array(arr)) => {
                         for v in arr.lock().iter() {
-                            if let VmValue::Grammar { pattern, anchor, stop_anchor } = v {
+                            if let VmValue::Grammar(g) = v {
                                 if infer_grammar.is_none() {
-                                    infer_grammar = Some(pattern.clone());
-                                    infer_anchor = anchor.clone();
-                                    infer_stop = stop_anchor.clone();
+                                    // `to_gbnf()`, not `.pattern` — this site used to send
+                                    // the bare pattern, so `stream(?p, mute_on=[g])` and
+                                    // `?p |> g` constrained the model differently with the
+                                    // same Grammar value.
+                                    infer_grammar = Some(g.to_gbnf());
+                                    infer_anchor = g.anchor.clone();
+                                    infer_stop = g.stop.clone();
                                 }
-                                if let Some(a) = anchor {
+                                if let Some(a) = &g.anchor {
                                     if !region_start.contains(a) { region_start.push(a.clone()); }
-                                    if let Some(s) = stop_anchor {
+                                    if let Some(s) = &g.stop {
                                         if !region_stop.contains(s) { region_stop.push(s.clone()); }
                                     }
                                 } else {
                                     // No anchor → mute from the very start of generation.
                                     start_muted = true;
-                                    if let Some(s) = stop_anchor {
+                                    if let Some(s) = &g.stop {
                                         if !region_stop.contains(s) { region_stop.push(s.clone()); }
                                     }
                                 }
-                                let _ = pattern; // suppress unused warning (used via infer_grammar)
                             }
                         }
                     }

@@ -1413,9 +1413,9 @@ mod vm {
     fn test_grammar_new_returns_grammar_value() {
         let s = run_src(r#"let g = Grammar.new('"yes" | "no"')"#).unwrap();
         match s.globals.get("g").unwrap() {
-            VmValue::Grammar { pattern, anchor, .. } => {
-                assert_eq!(pattern, r#""yes" | "no""#);
-                assert_eq!(*anchor, None);
+            VmValue::Grammar(g) => {
+                assert_eq!(g.pattern, r#""yes" | "no""#);
+                assert_eq!(g.anchor, None);
             }
             v => panic!("expected Grammar, got {:?}", v),
         }
@@ -1438,9 +1438,9 @@ mod vm {
     fn test_grammar_new_with_anchor() {
         let s = run_src(r#"let g = Grammar.new('"yes" | "no"', anchor = "Answer:")"#).unwrap();
         match s.globals.get("g").unwrap() {
-            VmValue::Grammar { pattern, anchor, .. } => {
-                assert_eq!(pattern, r#""yes" | "no""#);
-                assert_eq!(anchor.as_deref(), Some("Answer:"));
+            VmValue::Grammar(g) => {
+                assert_eq!(g.pattern, r#""yes" | "no""#);
+                assert_eq!(g.anchor.as_deref(), Some("Answer:"));
             }
             v => panic!("expected Grammar, got {:?}", v),
         }
