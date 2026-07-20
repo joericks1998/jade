@@ -24,7 +24,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use crate::{
-    compiler::{tir::JadeType, type_infer::TypeContext, vm::{NativeFnId, VmValue}},
+    compiler::{tir::JadeType, type_infer::TypeContext}, vm::{NativeFnId, VmValue},
     frontend::error::{JadeError, Result, Span},
 };
 

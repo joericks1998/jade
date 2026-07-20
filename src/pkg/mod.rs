@@ -14,7 +14,7 @@
 //! The integration surface with the rest of the compiler is one function,
 //! [`dependency_libraries`]: resolved dependencies are handed back as synthetic
 //! [`crate::project::LibraryEntry`] values and unioned into the manifest's
-//! `[lib]` map. Neither the VM ([`crate::compiler::vm`]) nor the AOT import
+//! `[lib]` map. Neither the VM ([`crate::vm`]) nor the AOT import
 //! resolver ([`crate::codegen::imports`]) learns what a dependency is — they
 //! keep resolving `[lib]` entries exactly as before, so the two backends cannot
 //! drift.

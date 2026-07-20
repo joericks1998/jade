@@ -1,3 +1,15 @@
+//! The instruction set both engines consume.
+//!
+//! `compiler::emit` produces a [`Chunk`]; [`crate::vm`] interprets one and
+//! [`crate::codegen`] lowers one to LLVM. It belongs to neither engine, which is
+//! why it sits between them rather than inside either.
+//!
+//! Instructions are largely *monomorphic* — `AddInt` and `AddFloat` rather than
+//! a single `Add` — because type inference has already run. That is what lets
+//! the VM add two `i64`s without a tag dispatch and the AOT backend emit a bare
+//! LLVM `add`, and it is why the two engines share this representation but no
+//! execution code.
+
 use std::{collections::HashMap, sync::Arc};
 use parking_lot::Mutex;
 
@@ -23,7 +35,7 @@ pub struct CompiledFn {
     pub params: Vec<String>,
     /// Default values for optional parameters, parallel to `params`.
     /// `None` means the parameter is required.
-    pub defaults: Vec<Option<crate::compiler::vm::VmValue>>,
+    pub defaults: Vec<Option<crate::vm::VmValue>>,
     /// Bytecode body.
     pub chunk: Chunk,
     /// Total number of register slots needed by this function frame.
@@ -34,7 +46,7 @@ pub struct CompiledFn {
     /// Persistent module scope shared by all functions from the same imported file.
     /// `None` for top-level functions. Reads and writes to module-level variables
     /// are routed through this scope so mutations survive across calls.
-    pub module_scope: Option<Arc<Mutex<HashMap<String, crate::compiler::vm::VmValue>>>>,
+    pub module_scope: Option<Arc<Mutex<HashMap<String, crate::vm::VmValue>>>>,
 }
 
 /// A compiled code unit: top-level program or function body.
@@ -283,3 +295,6 @@ pub enum Instr {
     /// `from X use Y, Z` — load package/file at path, then bind only the listed names directly.
     ImportFrom(String, Vec<String>),
 }
+
+#[cfg(test)]
+mod tests;

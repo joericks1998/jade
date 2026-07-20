@@ -2,7 +2,7 @@
 mod tests;
 
 use crate::{
-    compiler::{tir::JadeType, type_infer::TypeContext, vm::{VmValue, value_to_display}},
+    compiler::{tir::JadeType, type_infer::TypeContext}, vm::{VmValue, value_to_display},
     frontend::error::{JadeError, Result, Span},
 };
 

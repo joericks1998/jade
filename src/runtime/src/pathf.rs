@@ -73,7 +73,7 @@ pub extern "C" fn jrt_path_basename(p: *const c_char) -> *mut c_char {
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_path_ext(p: *const c_char) -> *mut c_char {
     match ext(unsafe { cstr::borrow(p) }) {
-        Some(e) => unsafe { cstr::emit(e.as_bytes(), trust(p)) },
+        Some(e) => cstr::emit(e.as_bytes(), trust(p)),
         None => core::ptr::null_mut(),
     }
 }
@@ -84,7 +84,7 @@ pub extern "C" fn jrt_path_ext(p: *const c_char) -> *mut c_char {
 pub extern "C" fn jrt_path_join(a: *const c_char, b: *const c_char) -> *mut c_char {
     let t = trust(a) | trust(b);
     let s = join(&[unsafe { cstr::borrow(a) }, unsafe { cstr::borrow(b) }]);
-    unsafe { cstr::emit(s.as_bytes(), t) }
+    cstr::emit(s.as_bytes(), t)
 }
 
 #[unsafe(no_mangle)]
@@ -100,7 +100,7 @@ pub extern "C" fn jrt_path_stem(p: *const c_char) -> *mut c_char {
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_path_abs(p: *const c_char) -> *mut c_char {
     let s = abs(unsafe { cstr::borrow(p) }).unwrap_or_else(|_| unsafe { cstr::borrow(p) }.to_owned());
-    unsafe { cstr::emit(s.as_bytes(), trust(p)) }
+    cstr::emit(s.as_bytes(), trust(p))
 }
 
 #[unsafe(no_mangle)]

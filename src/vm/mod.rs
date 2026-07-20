@@ -1,13 +1,23 @@
+//! The bytecode VM — one of Jade's two execution engines.
+//!
+//! `jade run` interprets a compiled [`crate::bytecode::Chunk`] here; `jade build`
+//! lowers the same chunk to LLVM in [`crate::codegen`]. Neither is the reference
+//! implementation of the other: `scripts/backend-parity.sh` runs every example
+//! through both and diffs the output, because they have silently disagreed
+//! before and the language is defined by what they agree on.
+//!
+//! Value semantics live in the shared `jade-runtime` crate rather than here, so
+//! the two engines cannot drift on what a value *is*. What remains in this file
+//! is interpretation: the dispatch loop, the call protocol, and the async and
+//! prompt machinery that has no compiled counterpart.
+
 use std::{sync::Arc, collections::{HashMap, HashSet}, path::PathBuf};
 use parking_lot::Mutex;
 use tokio::task::JoinHandle;
 
 use crate::{
     builtins::{self, BuiltinFn, NativeBoundMethod, PrimType},
-    compiler::{
-        bytecode::{Chunk, CompiledFn, FStrPart, Instr, Reg},
-        emit::CompiledProgram,
-    },
+    compiler::{emit::CompiledProgram}, bytecode::{Chunk, CompiledFn, FStrPart, Instr, Reg},
     frontend::{
         ast::{BinOpKind, StructFieldDef, UnaryOpKind},
         error::{JadeError, Result, Span},
@@ -3386,3 +3396,6 @@ fn instr_max_reg(instr: &Instr) -> u32 {
 }
 
 // Tests for this module live in `src/compiler/tests.rs` (`mod vm`).
+
+#[cfg(test)]
+mod tests;

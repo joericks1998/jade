@@ -57,7 +57,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::compiler::bytecode::{Chunk, CompiledFn, Instr, Reg};
+use crate::bytecode::{Chunk, CompiledFn, Instr, Reg};
 use crate::frontend::error::Span;
 
 /// Methods that mutate their receiver in place. A call to one of these on a

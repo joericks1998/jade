@@ -44,7 +44,7 @@ pub fn args() -> Vec<String> {
 /// `env.cwd()` — the current working directory as a TRUSTED string (empty on error).
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_env_cwd() -> *mut c_char {
-    unsafe { cstr::emit(cwd().unwrap_or_default().as_bytes(), TRUSTED) }
+    cstr::emit(cwd().unwrap_or_default().as_bytes(), TRUSTED)
 }
 
 /// `env.get(name)` — the environment variable as a TAINTED string, or NULL when
@@ -55,7 +55,7 @@ pub extern "C" fn jrt_env_get(name: *const c_char) -> *mut c_char {
         return core::ptr::null_mut();
     }
     match get(unsafe { cstr::borrow(name) }) {
-        Some(v) => unsafe { cstr::emit(v.as_bytes(), TAINTED) },
+        Some(v) => cstr::emit(v.as_bytes(), TAINTED),
         None => core::ptr::null_mut(),
     }
 }
@@ -82,7 +82,7 @@ pub extern "C" fn jrt_set_args(_argc: i32, _argv: *mut *mut c_char) {}
 pub extern "C" fn jrt_env_args() -> i64 {
     let mut arr = ArrayObj::<i64>::new();
     for a in args() {
-        let s = unsafe { cstr::emit(a.as_bytes(), TRUSTED) };
+        let s = cstr::emit(a.as_bytes(), TRUSTED);
         arr.push(JadeValue::from_str_ptr(s as *const ()).bits() as i64);
     }
     JadeValue::from_ptr(crate::gc::leak_obj(arr) as *const c_void as *const ()).bits() as i64

@@ -21,7 +21,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use crate::compiler::bytecode::Instr;
+use crate::bytecode::Instr;
 
 /// A maximal straight-line run of instructions `[start, end)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,7 +156,7 @@ pub fn build(code: &[Instr]) -> Cfg {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::bytecode::Instr::*;
+    use crate::bytecode::Instr::*;
 
     // A simple `if`: cond in r0, jump-if-false over the then-block.
     //   0: LoadBool r0, true

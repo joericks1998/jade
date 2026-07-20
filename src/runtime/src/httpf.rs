@@ -26,11 +26,11 @@ thread_local! {
 }
 
 fn set_err(msg: &str) {
-    let s = unsafe { cstr::emit(msg.as_bytes(), TRUSTED) };
+    let s = cstr::emit(msg.as_bytes(), TRUSTED);
     PENDING.with(|p| {
         let old = p.replace(s);
         if !old.is_null() {
-            unsafe { string::free_str(old as *mut u8) };
+            string::free_str(old as *mut u8);
         }
     });
 }
@@ -135,7 +135,7 @@ fn read_headers(headers: *const c_void) -> Vec<(String, String)> {
 fn make_dict(status: i64, body: &str) -> W {
     let mut d = DictObj::<W>::new();
     d.insert("status", JadeValue::from_int(status).bits() as i64);
-    let body_w = unsafe { JadeValue::from_str_ptr(cstr::emit(body.as_bytes(), TAINTED) as *const ()).bits() as i64 };
+    let body_w = JadeValue::from_str_ptr(cstr::emit(body.as_bytes(), TAINTED) as *const ()).bits() as i64;
     d.insert("body", body_w);
     JadeValue::from_ptr(crate::gc::leak_obj(d) as *const c_void as *const ()).bits() as i64
 }

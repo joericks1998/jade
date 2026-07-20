@@ -64,11 +64,11 @@ thread_local! {
 /// Record `<op> '<path>': <err>` as the pending error (the VM formats the same
 /// string in `io_err`).
 fn set_err(op: &str, path: &str, err: &std::io::Error) {
-    let s = unsafe { cstr::emit(format!("{op} '{path}': {err}").as_bytes(), TRUSTED) };
+    let s = cstr::emit(format!("{op} '{path}': {err}").as_bytes(), TRUSTED);
     PENDING.with(|p| {
         let old = p.replace(s);
         if !old.is_null() {
-            unsafe { string::free_str(old as *mut u8) };
+            string::free_str(old as *mut u8);
         }
     });
 }
@@ -91,7 +91,7 @@ pub extern "C" fn jrt_fs_read_impl(path: *const c_char, trust: i32) -> *mut c_ch
     let tag = if trust != 0 { TRUSTED } else { TAINTED };
     let p = unsafe { cstr::borrow(path) };
     match read(p) {
-        Ok(s) => unsafe { cstr::emit(s.as_bytes(), tag) },
+        Ok(s) => cstr::emit(s.as_bytes(), tag),
         Err(e) => {
             set_err("read", p, &e);
             core::ptr::null_mut()

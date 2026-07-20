@@ -4,7 +4,7 @@ mod tests;
 use jade_runtime::coll::DictObj;
 
 use crate::{
-    compiler::{tir::JadeType, type_infer::TypeContext, vm::VmValue},
+    compiler::{tir::JadeType, type_infer::TypeContext}, vm::VmValue,
     frontend::error::{JadeError, Result, Span},
 };
 

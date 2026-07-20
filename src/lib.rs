@@ -26,6 +26,14 @@ pub mod cli;
 /// binaries link against (`runtime_lib/`) is built by this crate's `build.rs`.
 pub mod codegen;
 pub mod compiler;
+/// The instruction set both engines consume: the compiler emits a `Chunk`, the
+/// VM interprets it and `codegen` lowers it. It belongs to neither engine, which
+/// is why it sits between them rather than inside `compiler`.
+pub mod bytecode;
+/// Bytecode interpreter — one of the two execution engines, peer to `codegen`
+/// rather than a phase of `compiler`. `jade run` uses this; `jade build` uses
+/// `codegen`. Backend parity exists to keep the two agreeing.
+pub mod vm;
 pub mod config;
 pub mod frontend;
 pub mod llm;

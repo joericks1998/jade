@@ -1,5 +1,5 @@
 use crate::{
-    compiler::vm::VmValue,
+    vm::VmValue,
     frontend::error::{JadeError, Result, Span},
 };
 

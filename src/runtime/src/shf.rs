@@ -66,11 +66,11 @@ thread_local! {
 }
 
 fn set_err(msg: &str) {
-    let s = unsafe { cstr::emit(msg.as_bytes(), TRUSTED) };
+    let s = cstr::emit(msg.as_bytes(), TRUSTED);
     PENDING.with(|p| {
         let old = p.replace(s);
         if !old.is_null() {
-            unsafe { string::free_str(old as *mut u8) };
+            string::free_str(old as *mut u8);
         }
     });
 }
@@ -86,10 +86,10 @@ pub extern "C" fn jrt_sh_take_error() -> *mut c_char {
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_sh_exec_impl(cmd: *const c_char) -> *mut c_char {
     match exec(unsafe { cstr::borrow(cmd) }) {
-        Ok(s) => unsafe { cstr::emit(s.as_bytes(), TAINTED) },
+        Ok(s) => cstr::emit(s.as_bytes(), TAINTED),
         Err(m) => {
             set_err(&m);
-            unsafe { cstr::emit(b"", TAINTED) }
+            cstr::emit(b"", TAINTED)
         }
     }
 }

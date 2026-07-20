@@ -1,10 +1,7 @@
 use std::io::{self, BufRead, Write};
 
 use crate::{
-    compiler::{
-        emit, type_infer,
-        vm::{self, VmOpts, VmState, value_to_display},
-    },
+    compiler::{emit, type_infer}, vm::{self, VmOpts, VmState, value_to_display},
     frontend::{
         ast::{Expr, Stmt},
         error::Span,

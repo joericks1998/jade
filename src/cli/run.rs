@@ -1,6 +1,6 @@
 use std::{fs, path::Path, process};
 
-use crate::compiler::{emit, type_infer, vm};
+use crate::{compiler::{emit, type_infer}, vm};
 
 // ── Project-aware run ─────────────────────────────────────────────────────────
 

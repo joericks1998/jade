@@ -70,5 +70,5 @@ pub extern "C" fn jrt_time_sleep(secs: f64) {
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_time_local(tz: *const c_char) -> *mut c_char {
     let s = local(unsafe { cstr::borrow(tz) }).unwrap_or_default();
-    unsafe { cstr::emit(s.as_bytes(), TAINTED) }
+    cstr::emit(s.as_bytes(), TAINTED)
 }

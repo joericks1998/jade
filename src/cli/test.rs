@@ -74,7 +74,7 @@ async fn run_test_file(
     _verbose: bool,
     cfg: &crate::config::JadeConfig,
 ) -> Result<(), String> {
-    use crate::compiler::{emit, type_infer, vm};
+    use crate::{compiler::{emit, type_infer}, vm};
     let model      = &cfg.model;
     let max_retries = cfg.max_retries;
 

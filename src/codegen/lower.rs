@@ -28,8 +28,8 @@ use inkwell::module::Module;
 use inkwell::values::{AnyValue, BasicMetadataValueEnum, FloatValue, FunctionValue, IntValue, PointerValue};
 use inkwell::{AddressSpace, FloatPredicate, IntPredicate};
 
-use crate::compiler::bytecode::{Chunk, CompiledFn, FStrPart, Instr, Reg};
-use crate::compiler::vm::VmValue;
+use crate::bytecode::{Chunk, CompiledFn, FStrPart, Instr, Reg};
+use crate::vm::VmValue;
 use crate::frontend::ast::{BinOpKind, Expr, StructFieldDef, UnaryOpKind};
 
 use super::cfg;
@@ -4079,7 +4079,7 @@ fn lower_instr<'ctx>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::bytecode::Instr::*;
+    use crate::bytecode::Instr::*;
 
     fn ir_of(code: &[Instr], n_slots: u32) -> String {
         let context = Context::create();

@@ -1,6 +1,6 @@
 use jade_runtime::coll::DictObj;
 use crate::{
-    compiler::{tir::JadeType, type_infer::TypeContext, vm::{NativeFnId, VmValue}},
+    compiler::{tir::JadeType, type_infer::TypeContext}, vm::{NativeFnId, VmValue},
     frontend::error::{Result, Span},
 };
 
