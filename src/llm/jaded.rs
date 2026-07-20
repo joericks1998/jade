@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use crate::frontend::error::{JadeError, Result, Span};
 use super::{InferenceBackend, InferenceRequest, InferenceResponse};
 
-fn jade_sock_path() -> String {
+pub(crate) fn sock_path() -> String {
     // `JADE_LLM_SOCK` overrides the default location (point at a custom daemon,
     // or isolate a test from the user's real `~/.jade/llm.sock`).
     if let Ok(s) = std::env::var("JADE_LLM_SOCK") {
@@ -27,7 +27,7 @@ pub struct JadedBackend {
 impl JadedBackend {
     pub fn new() -> Self {
         Self {
-            sock_path: jade_sock_path(),
+            sock_path: sock_path(),
             reported_model: Arc::new(Mutex::new(None)),
         }
     }

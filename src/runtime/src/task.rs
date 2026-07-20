@@ -428,13 +428,40 @@ pub unsafe fn join_all(futs: &[*mut FutureObj]) -> Result<Vec<i64>, TaskError> {
     }
 }
 
+/// Release one reference to a future, reclaiming it if that was the last.
+///
+/// **This is how a holder lets go of a future** — not [`destroy`], which
+/// assumes the count already reached zero. A future has two owners: whoever
+/// holds the handle, and the running task, which writes the result into it.
+/// Freeing on the handle's say-so alone frees it out from under a worker that
+/// has completed but not yet released its own reference, and the worker's
+/// `decref` then writes into reclaimed memory — which glibc reports as a
+/// corrupted heap, far from the cause.
+///
+/// # Safety
+/// `fut` must point at a live [`FutureObj`] the caller holds a reference to,
+/// and must not be used afterwards.
+pub unsafe fn release(fut: *mut FutureObj) {
+    if unsafe { (*fut).header.decref() } {
+        unsafe { destroy(fut) };
+    }
+}
+
 /// Reclaim a future whose refcount reached zero. Called from the collector's
-/// `ObjKind::Future` arm, never directly.
+/// `ObjKind::Future` arm and from [`release`], never directly — use [`release`].
 ///
 /// # Safety
 /// `fut` must be a live, `rc == 0` [`FutureObj`] from [`spawn`], unreferenced
 /// afterwards.
 pub unsafe fn destroy(fut: *mut FutureObj) {
+    // The precondition was documented and nothing checked it, so callers broke
+    // it and the damage surfaced as heap corruption in an unrelated allocation.
+    debug_assert_eq!(
+        unsafe { (*fut).header.rc() },
+        0,
+        "destroy on a future with live references — use release(); a worker may \
+         still be writing its result into this allocation"
+    );
     // A future is not a collection: its result is a single word, not a Vec of
     // children, so there is no cascade. The result word may itself be a
     // collection reference, and dropping an un-awaited future drops that
@@ -653,7 +680,10 @@ unsafe fn report(
 /// `fut` must be live and unreferenced afterwards.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn jrt_future_free(fut: *mut FutureObj) {
-    unsafe { destroy(fut) };
+    // Release, not destroy: the running task holds its own reference until it
+    // has written the result, so freeing on the handle's word alone is a
+    // use-after-free whenever the worker has not finished releasing.
+    unsafe { release(fut) };
 }
 
 #[cfg(test)]
@@ -702,7 +732,7 @@ mod tests {
         let _g = exclusive();
         let f = spawn(double, vec![21]);
         assert_eq!(unsafe { await_one(f) }, Ok(42));
-        unsafe { destroy(f) };
+        unsafe { release(f) };
     }
 
     #[test]
@@ -715,7 +745,7 @@ mod tests {
             Err(TaskError::DoubleAwait),
             "a future resolves once and is consumed once, matching the VM"
         );
-        unsafe { destroy(f) };
+        unsafe { release(f) };
     }
 
     #[test]
@@ -724,7 +754,7 @@ mod tests {
         let futs: Vec<_> = [1i64, 2, 3].iter().map(|&n| spawn(double, vec![n])).collect();
         assert_eq!(unsafe { join_all(&futs) }, Ok(vec![2, 4, 6]));
         for f in futs {
-            unsafe { destroy(f) };
+            unsafe { release(f) };
         }
     }
 
@@ -741,7 +771,7 @@ mod tests {
         }
         assert_eq!(ECHO_CALLS.load(Ordering::Relaxed), N);
         for f in futs {
-            unsafe { destroy(f) };
+            unsafe { release(f) };
         }
     }
 
@@ -763,7 +793,7 @@ mod tests {
             "200 tasks produced {workers} threads — the pool is not bounding anything"
         );
         for f in futs {
-            unsafe { destroy(f) };
+            unsafe { release(f) };
         }
     }
 
@@ -781,7 +811,7 @@ mod tests {
         let peak = PEAK.load(Ordering::SeqCst);
         assert!(peak > 1, "tasks ran one at a time — the pool is not concurrent");
         for f in futs {
-            unsafe { destroy(f) };
+            unsafe { release(f) };
         }
     }
 
@@ -797,7 +827,7 @@ mod tests {
         let n = unsafe { *args };
         let inner = spawn(double, vec![n]);
         let r = unsafe { await_one(inner) }.expect("inner task must resolve");
-        unsafe { destroy(inner) };
+        unsafe { release(inner) };
         r
     }
 
@@ -817,7 +847,7 @@ mod tests {
                 sum += unsafe { await_one(f) }.expect("outer task must resolve");
             }
             for f in futs {
-                unsafe { destroy(f) };
+                unsafe { release(f) };
             }
             let _ = tx.send(sum);
         });
@@ -833,14 +863,50 @@ mod tests {
         }
     }
 
+    /// Releasing the last reference reclaims the future and records the free.
+    ///
+    /// Tested without a task, so it is a statement about the accounting alone:
+    /// `spawn` is what gives a future a second owner, and the point here is that
+    /// the count moves when the *last* holder lets go.
     #[test]
-    fn destroying_a_future_records_the_free() {
+    fn releasing_the_last_reference_records_the_free() {
         let _g = exclusive();
+        // `exclusive()` orders the task tests against each other; the live count
+        // is global to the whole binary, so this also needs the counter lock.
+        let _c = crate::gc::test_support::lock_counter();
+        let before = gc::jrt_heap_live_count();
+        let fut = gc::leak_obj(FutureObj::new()) as *mut FutureObj;
+        assert_eq!(gc::jrt_heap_live_count(), before + 1, "leak_obj must be instrumented");
+        unsafe { release(fut) }; // sole reference
+        assert_eq!(gc::jrt_heap_live_count(), before, "release at zero must free");
+    }
+
+    /// A spawned future that is awaited and released does not leak.
+    ///
+    /// The wait is not padding. A future has two owners, and the worker releases
+    /// *its* reference after writing the result — so when `await_one` returns,
+    /// the last release may still be a few instructions away on another thread.
+    /// Asserting immediately is a race the test thread usually loses; asserting
+    /// after a bounded wait still fails if the free never happens, which is the
+    /// thing worth catching.
+    #[test]
+    fn an_awaited_future_does_not_leak() {
+        let _g = exclusive();
+        let _c = crate::gc::test_support::lock_counter();
         let before = gc::jrt_heap_live_count();
         let f = spawn(double, vec![5]);
         assert_eq!(gc::jrt_heap_live_count(), before + 1, "spawn must be instrumented");
-        let _ = unsafe { await_one(f) };
-        unsafe { destroy(f) };
-        assert_eq!(gc::jrt_heap_live_count(), before, "destroy must record the free");
+        assert_eq!(unsafe { await_one(f) }.unwrap(), 10);
+        unsafe { release(f) };
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while gc::jrt_heap_live_count() != before && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            gc::jrt_heap_live_count(),
+            before,
+            "the future was never reclaimed — one of its two owners did not release"
+        );
     }
 }

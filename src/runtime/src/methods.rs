@@ -147,6 +147,15 @@ mod tests {
     use super::*;
     use std::ffi::CString;
 
+    // Every test below allocates through `gc::leak_obj`, which bumps the
+    // process-global live count. Cargo runs the crate's tests on many threads in
+    // one process, so an unlocked allocation here races every count assertion
+    // elsewhere in the binary — see `gc::test_support::lock_counter`.
+    fn counted() -> std::sync::MutexGuard<'static, ()> {
+        crate::gc::test_support::lock_counter()
+    }
+
+
     extern "C" fn dummy(_: i64) -> i64 {
         0
     }
@@ -168,6 +177,7 @@ mod tests {
 
     #[test]
     fn binding_captures_the_implementation_and_the_receiver() {
+        let _c = counted();
         register("BM_greeter", "greet");
         let recv = struct_word("BM_greeter");
         let b = bind(recv, "greet");
@@ -181,6 +191,7 @@ mod tests {
     // plain function value, so its position is load-bearing, not incidental.
     #[test]
     fn the_kind_byte_sits_at_offset_eight() {
+        let _c = counted();
         register("BM_kind", "m");
         let b = bind(struct_word("BM_kind"), "m");
         let kind = unsafe { *((b as *const u8).add(8)) };
@@ -189,6 +200,7 @@ mod tests {
 
     #[test]
     fn the_receiver_sits_at_offset_sixteen() {
+        let _c = counted();
         register("BM_off", "m");
         let recv = struct_word("BM_off");
         let b = bind(recv, "m");
@@ -198,6 +210,7 @@ mod tests {
 
     #[test]
     fn an_unknown_method_does_not_bind() {
+        let _c = counted();
         register("BM_known", "yes");
         assert!(bind(struct_word("BM_known"), "no").is_null());
     }
@@ -206,6 +219,7 @@ mod tests {
     // bind — that would call an implementation with the wrong `self`.
     #[test]
     fn a_method_of_a_different_type_does_not_bind() {
+        let _c = counted();
         register("BM_dog", "bark");
         register("BM_cat", "meow");
         assert!(bind(struct_word("BM_cat"), "bark").is_null());
@@ -213,6 +227,7 @@ mod tests {
 
     #[test]
     fn a_non_struct_receiver_does_not_bind() {
+        let _c = counted();
         register("BM_ns", "m");
         assert!(bind(JadeValue::from_int(7).bits() as i64, "m").is_null());
         assert!(bind(crate::value::NIL.bits() as i64, "m").is_null());

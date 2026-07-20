@@ -297,6 +297,18 @@ pub(crate) mod test_support {
 
     /// Acquire the counter lock (ignoring poison from an unrelated failed test —
     /// a poisoned lock still serializes correctly).
+    ///
+    /// **Any test that allocates through [`super::leak_obj`] must hold this**,
+    /// not only the ones that assert on the count. The live count is
+    /// process-global and cargo runs the whole crate's tests on many threads in
+    /// one process, so an unlocked allocation anywhere in the binary makes every
+    /// count assertion elsewhere a race. That is not theoretical: it turned up
+    /// as `destroying_a_future_records_the_free` failing by exactly one, roughly
+    /// once in twenty-five runs, from allocations in unrelated modules.
+    ///
+    /// A module with its own serialization (`task`'s `TEST_LOCK`) still needs
+    /// this one as well — that lock orders those tests against each other, not
+    /// against the rest of the binary.
     pub fn lock_counter() -> MutexGuard<'static, ()> {
         LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }

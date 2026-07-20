@@ -127,11 +127,18 @@ pub fn build_backend(
 
 /// Select the inference backend automatically.
 ///
-/// Priority: `$HOME/.jade/llm.sock` (inference daemon) → API key from `~/.jade/config.toml`.
-/// Returns `None` if neither is available.
+/// Priority: the daemon socket (`JADE_LLM_SOCK`, else `$HOME/.jade/llm.sock`) →
+/// API key from `~/.jade/config.toml`. Returns `None` if neither is available.
+///
+/// The socket path comes from [`jaded::sock_path`], the same function the client
+/// connects through. It used to be spelled out again here, so `JADE_LLM_SOCK`
+/// was honoured when *connecting* but not when deciding whether a daemon
+/// existed at all: pointing the VM at a custom socket left it reporting "no
+/// inference backend available" while the compiled path talked to that socket
+/// happily. On a developer machine with a real `~/.jade/llm.sock` lying around
+/// the mistake is invisible.
 pub fn select_backend(config: &crate::config::JadeConfig) -> Option<Arc<dyn InferenceBackend>> {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_owned());
-    if std::path::Path::new(&format!("{home}/.jade/llm.sock")).exists() {
+    if std::path::Path::new(&jaded::sock_path()).exists() {
         return Some(Arc::new(jaded::JadedBackend::new()));
     }
     config.api_key.as_ref()

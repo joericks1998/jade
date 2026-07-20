@@ -364,6 +364,15 @@ mod tests {
     use super::*;
     use std::ffi::CString;
 
+    // Every test below allocates through `gc::leak_obj`, which bumps the
+    // process-global live count. Cargo runs the crate's tests on many threads in
+    // one process, so an unlocked allocation here races every count assertion
+    // elsewhere in the binary — see `gc::test_support::lock_counter`.
+    fn counted() -> std::sync::MutexGuard<'static, ()> {
+        crate::gc::test_support::lock_counter()
+    }
+
+
     // ── the shared rule ──────────────────────────────────────────────────────
     //
     // These exercise `coerce_fields` directly, with a trivial element type, so
@@ -385,12 +394,14 @@ mod tests {
     // compiled path used to fail on all of it.
     #[test]
     fn json_is_extracted_from_surrounding_prose() {
+        let _c = counted();
         let got = run(r#"Sure! Here you go: {"a": 1} — hope that helps"#, &[spec("a", None)]);
         assert_eq!(got.unwrap(), vec![("a".to_string(), 1)]);
     }
 
     #[test]
     fn json_is_extracted_from_a_markdown_fence() {
+        let _c = counted();
         let got = run("```json\n{\"a\": 1}\n```", &[spec("a", None)]);
         assert_eq!(got.unwrap(), vec![("a".to_string(), 1)]);
     }
@@ -399,12 +410,14 @@ mod tests {
     // re-prompting over: unquoted keys and thousands separators.
     #[test]
     fn common_malformations_are_repaired() {
+        let _c = counted();
         assert_eq!(run(r#"{a: 1}"#, &[spec("a", None)]).unwrap(), vec![("a".to_string(), 1)]);
         assert_eq!(run(r#"{"a": 1,000}"#, &[spec("a", None)]).unwrap(), vec![("a".to_string(), 1000)]);
     }
 
     #[test]
     fn fields_come_back_in_declaration_order() {
+        let _c = counted();
         let got = run(r#"{"c": 3, "a": 1, "b": 2}"#,
                       &[spec("a", None), spec("b", None), spec("c", None)]).unwrap();
         let names: Vec<&str> = got.iter().map(|(n, _)| n.as_str()).collect();
@@ -413,6 +426,7 @@ mod tests {
 
     #[test]
     fn an_omitted_optional_field_takes_its_default() {
+        let _c = counted();
         let got = run(r#"{"a": 1}"#, &[spec("a", None), spec("b", Some(7))]).unwrap();
         assert_eq!(got, vec![("a".to_string(), 1), ("b".to_string(), 7)]);
     }
@@ -421,6 +435,7 @@ mod tests {
     // distinguishable rather than collapsing into one "bad reply".
     #[test]
     fn each_failure_is_distinguishable() {
+        let _c = counted();
         assert!(matches!(run("no json here", &[spec("a", None)]), Err(CoerceError::NotJson(_))));
         assert_eq!(run("[1, 2]", &[spec("a", None)]).unwrap_err(), CoerceError::NotObject);
         assert_eq!(
@@ -437,6 +452,7 @@ mod tests {
     // not the reply.
     #[test]
     fn undeclared_keys_are_dropped() {
+        let _c = counted();
         let got = run(r#"{"a": 1, "stowaway": 2}"#, &[spec("a", None)]).unwrap();
         assert_eq!(got.len(), 1);
     }
@@ -469,6 +485,7 @@ mod tests {
 
     #[test]
     fn fields_are_set_in_declaration_order_not_reply_order() {
+        let _c = counted();
         declare("C_order", &[("a", None), ("b", None), ("c", None)]);
         let s = coerce(r#"{"c": 3, "a": 1, "b": 2}"#, "C_order").unwrap();
         let names: Vec<&str> = s.fields().iter().map(|(n, _)| n.as_str()).collect();
@@ -480,6 +497,7 @@ mod tests {
     // that declares one. It takes its declared default, like a literal.
     #[test]
     fn an_omitted_optional_field_takes_its_declared_default() {
+        let _c = counted();
         declare("C_default", &[("name", None), ("population", Some(int_word(7)))]);
         let s = coerce(r#"{"name": "Kyoto"}"#, "C_default").unwrap();
         assert_eq!(s.get_field("population"), Some(&int_word(7)));
@@ -489,6 +507,7 @@ mod tests {
     // what drives the caller's retry, so it must not be filled with nil.
     #[test]
     fn an_omitted_required_field_fails_so_the_caller_can_retry() {
+        let _c = counted();
         declare("C_required", &[("name", None), ("country", None)]);
         assert!(coerce(r#"{"name": "Kyoto"}"#, "C_required").is_none());
     }
@@ -498,6 +517,7 @@ mod tests {
     // than being inferred from the word.
     #[test]
     fn an_optional_field_defaulting_to_nil_is_still_optional() {
+        let _c = counted();
         declare("C_nildefault", &[("a", Some(NIL_BITS as W))]);
         let s = coerce("{}", "C_nildefault").unwrap();
         assert_eq!(s.get_field("a"), Some(&(NIL_BITS as W)));
@@ -505,6 +525,7 @@ mod tests {
 
     #[test]
     fn a_reply_that_is_not_an_object_fails() {
+        let _c = counted();
         declare("C_shape", &[("a", None)]);
         assert!(coerce("[1, 2, 3]", "C_shape").is_none());
         assert!(coerce("\"just a string\"", "C_shape").is_none());
@@ -513,6 +534,7 @@ mod tests {
 
     #[test]
     fn keys_the_type_does_not_declare_are_dropped() {
+        let _c = counted();
         declare("C_extra", &[("kept", None)]);
         let s = coerce(r#"{"kept": 1, "stowaway": 2}"#, "C_extra").unwrap();
         assert_eq!(s.fields().len(), 1);
@@ -521,6 +543,7 @@ mod tests {
 
     #[test]
     fn an_unregistered_type_fails() {
+        let _c = counted();
         assert!(coerce("{}", "C_never_declared").is_none());
     }
 }
