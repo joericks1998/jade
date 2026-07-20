@@ -1805,6 +1805,63 @@ fn resolve_user_calls(
 /// runtime query against the same state the inference entries maintain.
 ///
 /// Returns `None` for any other name, so ordinary globals are untouched.
+/// Materialize a struct field's declared default as a tagged word in the
+/// startup prologue, where there is no `Lowerer` — only a context, module and
+/// builder.
+///
+/// Ints, bools and nil are pure constants. A float or string default has to be
+/// heap-allocated, so it is built by a runtime call emitted into the prologue;
+/// that runs once before user code, alongside the rest of the registration.
+fn default_word_const<'ctx>(
+    context: &'ctx Context,
+    module: &Module<'ctx>,
+    b: &inkwell::builder::Builder<'ctx>,
+    v: &VmValue,
+) -> Result<IntValue<'ctx>, String> {
+    let i64_ty = context.i64_type();
+    let ptr_ty = context.ptr_type(AddressSpace::default());
+    Ok(match v {
+        VmValue::Int(n) => i64_ty.const_int((n.wrapping_shl(1)) as u64, false),
+        VmValue::Bool(x) => i64_ty.const_int(if *x { TRUE } else { FALSE }, false),
+        VmValue::Nil => i64_ty.const_int(NIL, false),
+        VmValue::Float(f) => {
+            let bf = module.get_function("jrt_box_float").unwrap_or_else(|| {
+                module.add_function(
+                    "jrt_box_float",
+                    i64_ty.fn_type(&[context.f64_type().into()], false),
+                    None,
+                )
+            });
+            b.build_call(bf, &[context.f64_type().const_float(*f).into()], "dfl")
+                .map_err(|e| e.to_string())?
+                .as_any_value_enum()
+                .into_int_value()
+        }
+        VmValue::Str(sv) => {
+            let dup = module.get_function("jrt_str_dup").unwrap_or_else(|| {
+                module.add_function(
+                    "jrt_str_dup",
+                    ptr_ty.fn_type(&[ptr_ty.into(), context.i8_type().into()], false),
+                    None,
+                )
+            });
+            let g = b
+                .build_global_string_ptr(sv, "dstr")
+                .map_err(|e| e.to_string())?
+                .as_pointer_value();
+            let raw = b
+                .build_call(dup, &[g.into(), context.i8_type().const_int(TRUSTED, false).into()], "dsw")
+                .map_err(|e| e.to_string())?
+                .as_any_value_enum()
+                .into_pointer_value();
+            let iv = b.build_ptr_to_int(raw, i64_ty, "dsi").map_err(|e| e.to_string())?;
+            b.build_or(iv, i64_ty.const_int(TAG_STR, false), "dstag")
+                .map_err(|e| e.to_string())?
+        }
+        other => return Err(format!("lower.rs: unsupported struct field default {other:?}")),
+    })
+}
+
 fn emit_session_var<'ctx>(
     low: &Lowerer<'_, 'ctx>,
     name: &str,
@@ -2760,6 +2817,54 @@ pub fn lower_program<'ctx>(
         }
     }
 
+    // Emit the type -> field table a struct-typed prompt deref coerces against,
+    // in declaration order, in the same startup prologue as the method
+    // registry. A field with a compile-time default is marked as such, since
+    // "omitted optional" and "omitted required" behave differently: one is
+    // filled, the other re-prompts.
+    if !fnctx.struct_field_names.is_empty() {
+        let ptr_ty = context.ptr_type(AddressSpace::default());
+        let i64_ty2 = context.i64_type();
+        let i32_ty2 = context.i32_type();
+        let void_ty = context.void_type();
+        let reg_field = module.get_function("jrt_struct_field").unwrap_or_else(|| {
+            module.add_function(
+                "jrt_struct_field",
+                void_ty.fn_type(
+                    &[ptr_ty.into(), ptr_ty.into(), i64_ty2.into(), i32_ty2.into()],
+                    false,
+                ),
+                None,
+            )
+        });
+        let entry = top_fn.get_first_basic_block().ok_or("lower.rs: jade_toplevel has no entry block")?;
+        let rb = context.create_builder();
+        match entry.get_first_instruction() {
+            Some(first) => rb.position_before(&first),
+            None => rb.position_at_end(entry),
+        }
+        let mut types: Vec<(&String, &Vec<String>)> = fnctx.struct_field_names.iter().collect();
+        types.sort_by(|a, b| a.0.cmp(b.0)); // deterministic IR
+        for (tn, fields) in types {
+            let tcstr = rb.build_global_string_ptr(tn, "sftype").map_err(|e| e.to_string())?.as_pointer_value();
+            let defaults = fnctx.struct_defaults.get(tn);
+            for f in fields {
+                let fcstr = rb.build_global_string_ptr(f, "sffield").map_err(|e| e.to_string())?.as_pointer_value();
+                let dv = defaults.and_then(|ds| ds.iter().find(|(n, _)| n == f)).map(|(_, v)| v);
+                let (word, has) = match dv {
+                    Some(v) => (default_word_const(context, module, &rb, v)?, 1u64),
+                    None => (i64_ty2.const_int(NIL, false), 0u64),
+                };
+                rb.build_call(
+                    reg_field,
+                    &[tcstr.into(), fcstr.into(), word.into(), i32_ty2.const_int(has, false).into()],
+                    "",
+                )
+                .map_err(|e| e.to_string())?;
+            }
+        }
+    }
+
     // Recover source-level names for the lowered functions, so `--lib` can
     // export `add` rather than `jf_7`.
     let named = fnctx
@@ -3482,6 +3587,31 @@ fn lower_instr<'ctx>(
                     .map_err(e)?
                     .as_any_value_enum()
                     .into_pointer_value()
+            } else if let Some(t) = output_type.as_deref().filter(|t| fnctx.struct_field_names.contains_key(*t)) {
+                // A struct output type coerces the reply into a struct. This
+                // returns a tagged *word*, not a string, so it bypasses the
+                // tag_str + coerce tail below entirely. Without it the C
+                // validator waved the raw reply through and the deref produced
+                // a string, which then failed on any field access.
+                let i32_ty = low.ctx.i32_type();
+                let f = low.runtime_fn(
+                    "jrt_prompt_struct",
+                    i64_ty.fn_type(&[ptrt.into(), ptrt.into(), ptrt.into(), i32_ty.into()], false),
+                );
+                let tname = low.cstr(t);
+                let retries_fn = low.runtime_fn("jrt_max_retries", i32_ty.fn_type(&[], false));
+                let retries = b
+                    .build_call(retries_fn, &[], "maxretries")
+                    .map_err(e)?
+                    .as_any_value_enum()
+                    .into_int_value();
+                let w = b
+                    .build_call(f, &[prompt_ptr.into(), model.into(), tname.into(), retries.into()], "prompts")
+                    .map_err(e)?
+                    .as_any_value_enum()
+                    .into_int_value();
+                low.store(*d, w);
+                return Ok(false);
             } else if let Some(t) = output_type.as_deref() {
                 // ..._checked, not the bare jrt_prompt_typed: that returns NULL
                 // when the retries run out, and tagging NULL as a string

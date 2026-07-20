@@ -360,6 +360,52 @@ char* jrt_prompt_typed(const char* prompt, const char* model,
     return NULL;
 }
 
+/* Struct-typed prompt deref: `?p |> City`.
+ *
+ * Mirrors jrt_prompt_typed's shape — ask, validate, re-ask with a correction —
+ * but validation means "did it coerce into a City", which lives in the shared
+ * runtime (jade-runtime, src/coercef.rs) beside the field table so the rule is
+ * written once for both engines.
+ *
+ * Previously this path did not exist: infer_valid_type returns "valid" for any
+ * type name it does not recognise, so a struct-typed deref accepted the raw
+ * reply and produced a *string*. Field access on it then failed with "value has
+ * no fields" while the VM had built a real struct.
+ *
+ * Returns a tagged struct word; raises when the retries are exhausted. */
+int64_t jrt_prompt_struct(const char* prompt, const char* model,
+                          const char* type_name, int max_retries) {
+    char* resp = jrt_prompt(prompt, model);
+    if (resp) {
+        int64_t out = jrt_coerce_struct(resp, type_name);
+        jrt_str_free(resp);
+        if (out != JRT_NIL) return out;
+    }
+
+    size_t cpcap = strlen(type_name) * 2 + 160;
+    for (int attempt = 0; attempt < max_retries; attempt++) {
+        char* correction = jrt_str_new(cpcap, JRT_TRUSTED);
+        int n = snprintf(correction, cpcap,
+            "Reply with only a JSON object for struct %s, nothing else. "
+            "Previous response was not valid.", type_name);
+        if (n < 0) { jrt_str_free(correction); break; }
+
+        char* retry_resp = jrt_prompt(correction, model);
+        jrt_str_free(correction);
+        if (!retry_resp) continue;
+        int64_t out = jrt_coerce_struct(retry_resp, type_name);
+        jrt_str_free(retry_resp);
+        if (out != JRT_NIL) return out;
+    }
+
+    char msg[160];
+    snprintf(msg, sizeof msg,
+             "prompt '<prompt>' failed to produce a valid typed value after %d attempt(s)",
+             max_retries + 1);
+    jade_exc_throw_typed(jrt_box_str(jrt_str_dup(msg, JRT_TRUSTED)), NULL);
+    return JRT_NIL; /* unreachable (the throw longjmps) */
+}
+
 /* Raising wrapper around jrt_prompt_typed.
  *
  * jrt_prompt_typed returns NULL once it runs out of retries. Codegen used to

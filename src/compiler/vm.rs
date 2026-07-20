@@ -2526,7 +2526,11 @@ fn vm_coerce_struct(
         type_name, vm_field_summary(def)
     ))?;
 
-    let mut fields: HashMap<String, VmValue> = HashMap::new();
+    // A Vec, not a HashMap: field order is the struct's declaration order, and
+    // iterating a HashMap made it depend on hash iteration order instead. That
+    // is currently unobservable (a struct renders as `<struct>` in both
+    // engines) but it is non-determinism sitting one display change away.
+    let mut fields: Vec<(String, VmValue)> = Vec::new();
     for field_def in def {
         match field_def {
             StructFieldDef::Required(name) => {
@@ -2540,16 +2544,28 @@ fn vm_coerce_struct(
                      Respond with a corrected JSON object for struct '{}'.",
                     name, e, type_name
                 ))?;
-                fields.insert(name.clone(), val);
+                fields.push((name.clone(), val));
             }
-            StructFieldDef::Let { name, .. } => {
-                if let Some(raw_val) = obj.get(name.as_str()) {
-                    let val = json_to_vm_value(raw_val).map_err(|e| format!(
-                        "Field '{}' is invalid: {}. \
-                         Respond with a corrected JSON object for struct '{}'.",
-                        name, e, type_name
-                    ))?;
-                    fields.insert(name.clone(), val);
+            StructFieldDef::Let { name, default } => {
+                // An optional field the model omitted falls back to its declared
+                // default, exactly as a struct literal does. It used to be left
+                // out of the struct altogether, so `c.population` raised "no
+                // field 'population'" on a value whose type declares one.
+                match obj.get(name.as_str()) {
+                    Some(raw_val) => {
+                        let val = json_to_vm_value(raw_val).map_err(|e| format!(
+                            "Field '{}' is invalid: {}. \
+                             Respond with a corrected JSON object for struct '{}'.",
+                            name, e, type_name
+                        ))?;
+                        fields.push((name.clone(), val));
+                    }
+                    None => {
+                        fields.push((
+                            name.clone(),
+                            eval_literal_default(default).unwrap_or(VmValue::Nil),
+                        ));
+                    }
                 }
             }
             StructFieldDef::Prompt { name, .. } => {
@@ -2557,7 +2573,7 @@ fn vm_coerce_struct(
                     let s = raw_val.as_str().ok_or_else(|| format!(
                         "Prompt field '{}' must be a string value.", name
                     ))?;
-                    fields.insert(name.clone(), VmValue::Prompt(s.to_string()));
+                    fields.push((name.clone(), VmValue::Prompt(s.to_string())));
                 }
             }
         }

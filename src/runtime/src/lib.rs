@@ -62,6 +62,7 @@
 // where the remaining lints earn their keep.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+pub mod coercef;
 pub mod coll;
 pub mod dynop;
 pub mod envf;
