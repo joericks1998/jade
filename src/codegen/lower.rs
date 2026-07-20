@@ -1346,6 +1346,15 @@ enum CallKind {
     /// this — they devirtualize to `jrt_*_any` via the builtin path. Lowers to
     /// the `jrt_type_call` forwarder, which raises for anything else.
     TypeCall { type_name: String, arg: Reg },
+    /// `stream(?p)` / `stream(?p, mute_on=[g])` — streaming inference that
+    /// prints tokens as they arrive and evaluates to the full response.
+    ///
+    /// `prompt` is the *un-dereferenced* prompt register: the producing
+    /// `PromptDeref` is elided, because letting it run would infer twice (once
+    /// for the deref, once for the stream) and print the response twice. That
+    /// is the same hazard the non-streaming `?p` lowering documents, arrived at
+    /// from the other direction.
+    StreamCall { prompt: Reg, grammar: Option<Reg> },
     /// A stdlib module-namespace call `module.method(args)` (`fs.read`, `path.ext`,
     /// …) resolved statically by name to a runtime symbol. Only layout-safe methods
     /// (string/scalar I/O — no legacy-layout collections) are lowered; the rest
@@ -1405,7 +1414,17 @@ fn resolve_user_calls(
     // a devirtualized method call. Their field is a method (not a data field), so
     // lowering them would raise "undefined field" — the method dispatch replaces
     // them, so `lower_body` skips these opcodes entirely.
+    //
+    // Also carries `PromptDeref`s subsumed by a `stream()` call; the name is
+    // historical, the set is just "instruction indices `lower_body` must skip".
     let mut skip_getfields: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    // reg holding an *unconstrained* `?p` result → (the prompt reg, the deref's
+    // instruction index). Only `stream()` consumes this: it needs the prompt
+    // itself, not an already-inferred response.
+    let mut reg_promptderef: HashMap<Reg, (Reg, usize)> = HashMap::new();
+    // reg holding an array built from a literal → its element regs, so
+    // `mute_on=[g]` can be resolved to the single grammar it carries.
+    let mut reg_array_lit: HashMap<Reg, Vec<Reg>> = HashMap::new();
 
     for (i, instr) in code.iter().enumerate() {
         match instr {
@@ -1426,6 +1445,30 @@ fn resolve_user_calls(
                     Some(m) => { reg_getfield_module.insert(*d, (m, field.clone(), i)); }
                     None => { reg_getfield.insert(*d, (*obj, field.clone(), i)); }
                 }
+                continue;
+            }
+            Instr::PromptDeref(d, prompt, output_type, grammar) => {
+                reg_fn.remove(d);
+                reg_global.remove(d);
+                reg_getfield.remove(d);
+                reg_getfield_module.remove(d);
+                reg_array_lit.remove(d);
+                reg_promptderef.remove(d);
+                // Only an unconstrained deref can be folded into a stream: a
+                // typed or grammar-constrained one has its own inference call
+                // with different semantics.
+                if output_type.is_none() && grammar.is_none() {
+                    reg_promptderef.insert(*d, (*prompt, i));
+                }
+                continue;
+            }
+            Instr::MakeArray(d, elems) => {
+                reg_fn.remove(d);
+                reg_global.remove(d);
+                reg_getfield.remove(d);
+                reg_getfield_module.remove(d);
+                reg_promptderef.remove(d);
+                reg_array_lit.insert(*d, elems.clone());
                 continue;
             }
             Instr::LoadFn(d, idx) | Instr::MakeClosure(d, idx) => {
@@ -1558,6 +1601,23 @@ fn resolve_user_calls(
                                 && args.len() == 1;
                             if lowered {
                                 None
+                            } else if name == "stream" && args.len() == 1 {
+                                // Checked before the reserved-builtin decline
+                                // below: `stream` is reserved, and this is the
+                                // one shape of it the backend can lower.
+                                match reg_promptderef.get(&args[0]) {
+                                    Some(&(prompt, deref_idx)) => {
+                                        skip_getfields.insert(deref_idx);
+                                        Some(CallKind::StreamCall { prompt, grammar: None })
+                                    }
+                                    // `stream(x)` where x is not a fresh `?p`.
+                                    // The VM drains whatever TokenStream it is
+                                    // handed; AOT has no such value to hold, so
+                                    // this declines rather than guessing.
+                                    None => return Err(
+                                        "lower.rs: stream() requires a prompt dereference (`stream(?p)`)".into()
+                                    ),
+                                }
                             } else if RESERVED_BUILTINS.contains(&name.as_str()) {
                                 return Err(format!("lower.rs: unsupported builtin call `{name}`"));
                             } else if fnctx.struct_field_names.contains_key(name) && args.len() == 1 {
@@ -1654,6 +1714,47 @@ fn resolve_user_calls(
                     }
                     out.insert(i, CallKind::DirectNamed { uid, arg_slots });
                 } else if let Some(name) = reg_global.get(callee) {
+                    if name == "stream" {
+                        let (mut prompt_reg, mut mute_reg, mut ok) = (None, None, true);
+                        for (n, reg) in pairs {
+                            match n.as_deref() {
+                                None if prompt_reg.is_none() => prompt_reg = Some(*reg),
+                                Some("mute_on") => mute_reg = Some(*reg),
+                                _ => ok = false,
+                            }
+                        }
+                        let deref = prompt_reg.and_then(|r| reg_promptderef.get(&r).copied());
+                        let (Some((prompt, gf_idx)), true) = (deref, ok) else {
+                            return Err(
+                                "lower.rs: stream() requires a prompt dereference and an optional mute_on=".into()
+                            );
+                        };
+                        // `mute_on` is a list, but the streaming entry takes one
+                        // anchor and one stop. A single grammar maps exactly; more
+                        // than one would need mute regions the C side cannot
+                        // express, so decline rather than silently honour the
+                        // first and drop the rest.
+                        let grammar = match mute_reg {
+                            None => None,
+                            Some(r) => match reg_array_lit.get(&r).map(|v| v.as_slice()) {
+                                Some([]) => None,
+                                Some([g]) => Some(*g),
+                                Some(_) => return Err(
+                                    "lower.rs: stream() mute_on= supports one grammar".into()
+                                ),
+                                None => return Err(
+                                    "lower.rs: stream() mute_on= must be a list literal".into()
+                                ),
+                            },
+                        };
+                        skip_getfields.insert(gf_idx);
+                        out.insert(i, CallKind::StreamCall { prompt, grammar });
+                        reg_fn.remove(d);
+                        reg_global.remove(d);
+                        reg_getfield.remove(d);
+                        reg_getfield_module.remove(d);
+                        continue;
+                    }
                     if RESERVED_BUILTINS.contains(&name.as_str()) {
                         return Err(format!("lower.rs: unsupported builtin kwarg call `{name}`"));
                     }
@@ -1683,6 +1784,49 @@ fn resolve_user_calls(
 /// `jrt_method_lookup`), then indirect-call it with `self` (the receiver)
 /// prepended. Used only for genuinely-ambiguous method names (same name+arity on
 /// >1 type); exact-arity, so no default filling.
+/// Lower `stream(?p)` / `stream(?p, mute_on=[g])`.
+///
+/// `prompt` is the prompt register, NOT a dereferenced response: the producing
+/// `PromptDeref` is elided during resolution. Inferring at the deref *and* then
+/// streaming would run inference twice and print the response twice — the same
+/// double-output hazard the non-streaming `?p` lowering guards against, reached
+/// from the other side.
+///
+/// Everything else — the GBNF, the mute anchors, the trailing newline — lives
+/// behind `jrt_prompt_stream_obj` in the shared runtime, so the streaming and
+/// non-streaming paths cannot disagree about what a grammar means.
+fn emit_stream_call<'ctx>(
+    low: &Lowerer<'_, 'ctx>,
+    dest: Reg,
+    prompt: Reg,
+    grammar: Option<Reg>,
+) -> Result<(), String> {
+    let b = low.builder;
+    let ptrt = low.ptrt();
+    let model_fn = low.runtime_fn("jrt_get_model", ptrt.fn_type(&[], false));
+    let model = b
+        .build_call(model_fn, &[], "model")
+        .map_err(|e| e.to_string())?
+        .as_any_value_enum()
+        .into_pointer_value();
+    let prompt_ptr = low.untag_ptr(low.load(prompt));
+    let gobj = match grammar {
+        Some(g) => low.untag_ptr(low.load(g)),
+        None => ptrt.const_null(),
+    };
+    let f = low.runtime_fn(
+        "jrt_prompt_stream_obj",
+        ptrt.fn_type(&[ptrt.into(), ptrt.into(), ptrt.into()], false),
+    );
+    let raw = b
+        .build_call(f, &[prompt_ptr.into(), model.into(), gobj.into()], "streamed")
+        .map_err(|e| e.to_string())?
+        .as_any_value_enum()
+        .into_pointer_value();
+    low.store(dest, low.tag_str(raw));
+    Ok(())
+}
+
 fn emit_dynamic_method<'ctx>(
     low: &Lowerer<'_, 'ctx>,
     recv: Reg,
@@ -3609,6 +3753,10 @@ fn lower_instr<'ctx>(
                     low.store(*dest, ret);
                     return Ok(false);
                 }
+                Some(CallKind::StreamCall { prompt, grammar }) => {
+                    emit_stream_call(low, *dest, *prompt, *grammar)?;
+                    return Ok(false);
+                }
                 // `City(d)` — the construction and its error live in the runtime
                 // (`jrt_type_call` → `jrt_type_construct`), keyed on the type
                 // name and the field list registered at startup.
@@ -3765,6 +3913,10 @@ fn lower_instr<'ctx>(
                     .as_any_value_enum()
                     .into_int_value();
                 low.store(*dest, ret);
+                Ok(false)
+            }
+            Some(CallKind::StreamCall { prompt, grammar }) => {
+                emit_stream_call(low, *dest, *prompt, *grammar)?;
                 Ok(false)
             }
             // A keyword module call pre-resolved to a module call (fs.read trust).
@@ -4420,6 +4572,53 @@ mod tests {
         let name_at = ir.find("name").expect("field name in IR");
         let country_at = ir.find("country").expect("field name in IR");
         assert!(name_at < country_at, "fields registered in declaration order:\n{ir}");
+    }
+
+    /// `stream(?p)` must NOT also emit the non-streaming `jrt_prompt`. If the
+    /// producing PromptDeref survived, the program would run inference twice and
+    /// print the response twice — the same double-output hazard the plain `?p`
+    /// lowering is written to avoid, reached from the other direction.
+    #[test]
+    fn stream_elides_the_prompt_deref_it_consumes() {
+        let ir = ir_of(
+            &[
+                LoadStr(0, "ask".to_string()),
+                MakePrompt(1, 0),
+                PromptDeref(2, 1, None, None),
+                GetGlobal(3, "stream".to_string()),
+                Call(4, 3, vec![2]),
+                Return(Some(4)),
+            ],
+            5,
+        );
+        assert!(ir.contains("jrt_prompt_stream_obj"), "stream lowered to the streaming entry:\n{ir}");
+        assert!(
+            !ir.contains("call ptr @jrt_prompt("),
+            "the consumed PromptDeref must not also infer:\n{ir}"
+        );
+    }
+
+    /// A `stream(x)` whose argument is not a fresh `?p` has no AOT
+    /// representation (there is no TokenStream value to hold), so it must be an
+    /// honest build error rather than a guess.
+    #[test]
+    fn stream_of_a_non_deref_declines() {
+        let context = Context::create();
+        let module = context.create_module("t");
+        let err = lower_chunk(
+            &context,
+            &module,
+            "f",
+            &[
+                LoadStr(0, "x".to_string()),
+                GetGlobal(1, "stream".to_string()),
+                Call(2, 1, vec![0]),
+                Return(Some(2)),
+            ],
+            3,
+        )
+        .expect_err("stream of a non-deref should decline");
+        assert!(err.contains("stream()"), "decline names the construct: {err}");
     }
 
     #[test]

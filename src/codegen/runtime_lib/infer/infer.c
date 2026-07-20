@@ -551,3 +551,11 @@ char* jrt_get_model(void) {
     if (!m) m = "";
     return jrt_str_dup(m, JRT_TRUSTED);
 }
+
+/* Terminate a stream()'s live output. Lives here so it shares the same stdout
+ * buffering as stream_on_token above; the streaming entry point in the Rust
+ * runtime calls it once the response is complete. */
+void jrt_stream_newline(void) {
+    fputc('\n', stdout);
+    fflush(stdout);
+}

@@ -1,0 +1,17 @@
+// stream() prints tokens as they arrive and evaluates to the full response,
+// including any region the grammar muted.
+//
+// The mute region is (anchor, stop_anchor): output stays visible until the
+// model emits "<t>", is suppressed until "</t>", then becomes visible again.
+// A grammar with no anchor mutes from the very first token instead.
+//
+// This runs on both engines. Both need a live inference daemon, so it is
+// skipped by the backend-parity gate along with the rest of examples/llm.
+
+prompt p = "Reply with <t>a</t> and nothing else."
+
+let g = Grammar.new("\"a\"|\"b\"", "<t>", "</t>")
+
+// Live output above; `out` below carries the muted text too.
+let out = stream(?p, mute_on = [g])
+print(out)

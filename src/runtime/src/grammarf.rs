@@ -31,6 +31,22 @@ unsafe extern "C" {
         anchor_or_null: *const c_char,
         stop_or_null: *const c_char,
     ) -> *mut c_char;
+
+    /// The streaming counterpart: prints tokens as they arrive (honouring the
+    /// anchor/stop mute region) and returns the *full* text, muted parts
+    /// included. `start_muted` suppresses output from the first token.
+    fn jrt_prompt_stream_ex(
+        prompt: *const c_char,
+        model: *const c_char,
+        pattern_or_null: *const c_char,
+        anchor_or_null: *const c_char,
+        stop_or_null: *const c_char,
+        start_muted: i32,
+    ) -> *mut c_char;
+
+    /// Write the newline that terminates a `stream()`'s live output. In C so it
+    /// shares stdout buffering with the token callback.
+    fn jrt_stream_newline();
 }
 
 /// A `Grammar` value: a GBNF/pattern plus optional anchor and stop tokens.
@@ -142,6 +158,81 @@ pub extern "C" fn jrt_prompt_grammar_obj(
     unsafe { jrt_prompt_grammar_ex(prompt, model, gbnf_c.as_ptr(), anchor_ptr, stop_ptr) }
 }
 
+/// The constraints a Grammar contributes to a streaming request, in the shape
+/// the C streaming entry wants.
+///
+/// Split out from [`jrt_prompt_stream_grammar_obj`] so the mapping is testable
+/// without a running inference daemon — the `start_muted` rule in particular is
+/// easy to get backwards, and it is the difference between printing a muted
+/// region and hiding a visible one.
+fn stream_args(g: &GrammarObj) -> (String, Option<&str>, Option<&str>, bool) {
+    (
+        g.to_gbnf(),
+        g.anchor.as_deref(),
+        g.stop.as_deref(),
+        // No anchor means "mute from the very first token" — there is no point
+        // at which muting would begin, so it begins immediately. With an anchor,
+        // output is visible until the anchor appears. Mirrors the VM's
+        // `start_muted` in the `stream()` builtin.
+        g.anchor.is_none(),
+    )
+}
+
+/// Streaming inference: the AOT half of `stream(?p)` / `stream(?p, mute_on=[g])`.
+///
+/// Prints tokens live (suppressing the grammar's mute region, if any) and
+/// returns the complete response as a raw string, muted region included — the
+/// same contract as the VM's `stream()`, which prints through
+/// `vm_drain_token_stream_printing` and returns the full text.
+///
+/// `grammar_obj` may be NULL, meaning unconstrained and unmuted.
+///
+/// Sibling of [`jrt_prompt_grammar_obj`], and deliberately built the same way:
+/// the pattern comes from [`GrammarObj::to_gbnf`], so the constrained and
+/// streaming paths cannot disagree about what a grammar means.
+///
+/// The trailing newline is emitted here rather than by codegen because it is
+/// part of `stream()`'s contract (the VM drains with `newline = true`), and
+/// keeping it beside the token output is what stops the two engines differing
+/// by a single byte of stdout — the exact class of drift backend-parity exists
+/// to catch.
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_prompt_stream_obj(
+    prompt: *const c_char,
+    model: *const c_char,
+    grammar_obj: *const c_void,
+) -> *mut c_char {
+    let nul = core::ptr::null();
+    let (gbnf_c, anchor_c, stop_c, start_muted) = if grammar_obj.is_null() {
+        (None, None, None, false)
+    } else {
+        let g = unsafe { &*(grammar_obj as *const GrammarObj) };
+        let (gbnf, anchor, stop, muted) = stream_args(g);
+        let Ok(gbnf_c) = CString::new(gbnf) else {
+            return core::ptr::null_mut(); // interior NUL — malformed grammar
+        };
+        (
+            Some(gbnf_c),
+            anchor.and_then(|s| CString::new(s).ok()),
+            stop.and_then(|s| CString::new(s).ok()),
+            muted,
+        )
+    };
+
+    let out = unsafe {
+        jrt_prompt_stream_ex(
+            prompt,
+            model,
+            gbnf_c.as_ref().map_or(nul, |c| c.as_ptr()),
+            anchor_c.as_ref().map_or(nul, |c| c.as_ptr()),
+            stop_c.as_ref().map_or(nul, |c| c.as_ptr()),
+            start_muted as i32,
+        )
+    };
+    unsafe { jrt_stream_newline() };
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,6 +286,34 @@ mod tests {
         assert_eq!(anchored.to_gbnf(), g(r#""yes" | "no""#).to_gbnf());
         assert_eq!(anchored.anchor.as_deref(), Some("<a>"));
         assert_eq!(anchored.stop.as_deref(), Some("</a>"));
+    }
+
+    // An anchor says "stay visible until you see this", so output starts
+    // visible. No anchor means there is nothing to wait for, so muting starts
+    // immediately. Getting this backwards silently inverts what the user sees.
+    #[test]
+    fn an_anchored_grammar_starts_visible() {
+        let g = GrammarObj::new("p".into(), Some("<t>".into()), Some("</t>".into()));
+        let (_, anchor, stop, start_muted) = stream_args(&g);
+        assert_eq!(anchor, Some("<t>"));
+        assert_eq!(stop, Some("</t>"));
+        assert!(!start_muted);
+    }
+
+    #[test]
+    fn an_unanchored_grammar_starts_muted() {
+        let g = GrammarObj::new("p".into(), None, Some("</t>".into()));
+        let (_, anchor, _, start_muted) = stream_args(&g);
+        assert_eq!(anchor, None);
+        assert!(start_muted);
+    }
+
+    // The streaming path takes its pattern from the same accessor as the
+    // constrained path, so the two cannot constrain the model differently.
+    #[test]
+    fn streaming_uses_the_same_gbnf_as_constrained_inference() {
+        let g = GrammarObj::new(r#""yes" | "no""#.into(), None, None);
+        assert_eq!(stream_args(&g).0, g.to_gbnf());
     }
 
     #[test]
