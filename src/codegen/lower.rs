@@ -1062,6 +1062,14 @@ struct FnCtx<'ctx> {
     /// Struct type name → its optional fields' (name, scalar-literal default),
     /// used to fill fields a struct literal omits (the VM fills these at runtime).
     struct_defaults: HashMap<String, Vec<(String, VmValue)>>,
+    /// Struct type name → **every** declared field name, in definition order.
+    ///
+    /// Distinct from `struct_defaults`, which keeps only optional fields that
+    /// have a scalar-literal default — it is deliberately partial and cannot be
+    /// used to answer "what fields does this type have?". A first-class type
+    /// call (`City(d)`) needs the complete list, and needs it at runtime, so
+    /// this is also what gets emitted into the startup type registry.
+    struct_field_names: HashMap<String, Vec<String>>,
     /// Extend-block method NAME → its candidate implementations `(uid, required,
     /// total)`, where `required`/`total` are the arg counts (excluding `self`)
     /// the method accepts (`required` = params without a default, `total` = all
@@ -1093,6 +1101,7 @@ impl<'ctx> FnCtx<'ctx> {
             ptr2uid: HashMap::new(),
             global_fns: HashMap::new(),
             struct_defaults: HashMap::new(),
+            struct_field_names: HashMap::new(),
             method_candidates: HashMap::new(),
             user_globals: std::collections::HashSet::new(),
             refcount: false,
@@ -1272,6 +1281,12 @@ enum CallKind {
     /// `jrt_method_lookup` and called indirectly (`self` prepended). See
     /// `emit_dynamic_method`.
     MethodDynamic { recv: Reg, method: String, args: Vec<Reg> },
+    /// A first-class type call on a user struct type: `City(d)` builds a `City`
+    /// from a dict (declared fields only, missing ones nil), or passes a `City`
+    /// through unchanged. Primitive type calls (`int(x)`, `bool(x)`, …) are not
+    /// this — they devirtualize to `jrt_*_any` via the builtin path. Lowers to
+    /// the `jrt_type_call` forwarder, which raises for anything else.
+    TypeCall { type_name: String, arg: Reg },
     /// A stdlib module-namespace call `module.method(args)` (`fs.read`, `path.ext`,
     /// …) resolved statically by name to a runtime symbol. Only layout-safe methods
     /// (string/scalar I/O — no legacy-layout collections) are lowered; the rest
@@ -1486,6 +1501,13 @@ fn resolve_user_calls(
                                 None
                             } else if RESERVED_BUILTINS.contains(&name.as_str()) {
                                 return Err(format!("lower.rs: unsupported builtin call `{name}`"));
+                            } else if fnctx.struct_field_names.contains_key(name) && args.len() == 1 {
+                                // A struct type name is a callable *value* in Jade.
+                                // Without this it fell through to `Indirect`, which
+                                // loads a fn pointer from a global cell codegen never
+                                // populates for a type name — a jump through garbage
+                                // rather than an honest error.
+                                Some(CallKind::TypeCall { type_name: name.clone(), arg: args[0] })
                             } else {
                                 Some(CallKind::Indirect)
                             }
@@ -2384,6 +2406,10 @@ pub fn lower_program<'ctx>(
     }
 
     let struct_defaults = build_struct_defaults(struct_defs);
+    let struct_field_names: HashMap<String, Vec<String>> = struct_defs
+        .iter()
+        .map(|(tn, fields)| (tn.clone(), fields.iter().map(|f| f.name().to_string()).collect()))
+        .collect();
     // Every global the program assigns (SetGlobal) anywhere — a user variable that
     // shadows any reserved module name (so `name.method()` is not a module call).
     let mut user_globals = std::collections::HashSet::new();
@@ -2399,7 +2425,7 @@ pub fn lower_program<'ctx>(
         collect_setglobals(&d.chunk);
     }
     let refcount = program_collections_only(top, &defs);
-    let fnctx = FnCtx { funcs, defs, ptr2uid, global_fns, struct_defaults, method_candidates, user_globals, refcount };
+    let fnctx = FnCtx { funcs, defs, ptr2uid, global_fns, struct_defaults, struct_field_names, method_candidates, user_globals, refcount };
 
     for uid in 0..fnctx.defs.len() {
         let cf = fnctx.defs[uid].clone();
@@ -2474,6 +2500,46 @@ pub fn lower_program<'ctx>(
             let fnptr = fnctx.funcs[uid].as_global_value().as_pointer_value();
             rb.build_call(reg_fn, &[tcstr.into(), mcstr.into(), fnptr.into()], "")
                 .map_err(|e| e.to_string())?;
+        }
+    }
+
+    // Register every struct type's field list in the same prologue, so a
+    // first-class type call (`City(d)`) can build a struct by name at runtime.
+    // Registering every type is harmless; only types actually called are read.
+    // Emitted after the method registrations, so both share the entry block.
+    if !fnctx.struct_field_names.is_empty() {
+        let ptr_ty = context.ptr_type(AddressSpace::default());
+        let void_ty = context.void_type();
+        let decl = |name: &str, argc: usize| {
+            module.get_function(name).unwrap_or_else(|| {
+                let params = vec![ptr_ty.into(); argc];
+                module.add_function(name, void_ty.fn_type(&params, false), None)
+            })
+        };
+        let reg_field = decl("jrt_type_register", 2);
+        let reg_type = decl("jrt_type_declare", 1);
+        let entry = top_fn.get_first_basic_block().ok_or("lower.rs: jade_toplevel has no entry block")?;
+        let rb = context.create_builder();
+        match entry.get_first_instruction() {
+            Some(first) => rb.position_before(&first),
+            None => rb.position_at_end(entry),
+        }
+        // Deterministic emission order — the IR is compared in tests.
+        let mut types: Vec<(&String, &Vec<String>)> = fnctx.struct_field_names.iter().collect();
+        types.sort_by(|a, b| a.0.cmp(b.0));
+        for (tn, fields) in types {
+            let tcstr = rb.build_global_string_ptr(tn, "ttype").map_err(|e| e.to_string())?.as_pointer_value();
+            if fields.is_empty() {
+                // A fieldless type still has to exist in the table, or a call on
+                // it would report "unknown type" rather than constructing an
+                // empty struct.
+                rb.build_call(reg_type, &[tcstr.into()], "").map_err(|e| e.to_string())?;
+                continue;
+            }
+            for f in fields {
+                let fcstr = rb.build_global_string_ptr(f, "tfield").map_err(|e| e.to_string())?.as_pointer_value();
+                rb.build_call(reg_field, &[tcstr.into(), fcstr.into()], "").map_err(|e| e.to_string())?;
+            }
         }
     }
 
@@ -3484,6 +3550,28 @@ fn lower_instr<'ctx>(
                     low.store(*dest, ret);
                     return Ok(false);
                 }
+                // `City(d)` — the construction and its error live in the runtime
+                // (`jrt_type_call` → `jrt_type_construct`), keyed on the type
+                // name and the field list registered at startup.
+                Some(CallKind::TypeCall { type_name, arg }) => {
+                    let ptr_ty = low.ctx.ptr_type(AddressSpace::default());
+                    let i64_ty = low.ctx.i64_type();
+                    let f = low.module.get_function("jrt_type_call").unwrap_or_else(|| {
+                        low.module.add_function(
+                            "jrt_type_call",
+                            i64_ty.fn_type(&[ptr_ty.into(), i64_ty.into()], false),
+                            None,
+                        )
+                    });
+                    let tn = low.cstr(type_name);
+                    let ret = b
+                        .build_call(f, &[tn.into(), low.load(*arg).into()], "typecall")
+                        .map_err(|e| e.to_string())?
+                        .as_any_value_enum()
+                        .into_int_value();
+                    low.store(*dest, ret);
+                    return Ok(false);
+                }
                 // A unique struct method → direct call with the receiver as `self`
                 // (param 0), the explicit args next, then omitted trailing defaults.
                 Some(CallKind::MethodDirect { uid, self_reg, args: margs }) => {
@@ -4210,6 +4298,69 @@ mod tests {
         assert!(ir.contains("call i32 @strcmp"), "compares via strcmp:\n{ir}");
         assert!(ir.contains("icmp slt"), "folds strcmp result by predicate:\n{ir}");
         assert!(ir.contains("select i1"), "produces a bool word:\n{ir}");
+    }
+
+    /// A struct type name is a callable value. Before first-class types were
+    /// lowered, `City(d)` fell through to `CallKind::Indirect`, which loads a
+    /// function pointer from a global cell that codegen never assigns for a type
+    /// name — a jump through whatever happened to be there. Assert it now goes
+    /// to the runtime constructor instead.
+    #[test]
+    fn a_struct_type_call_lowers_to_the_runtime_constructor() {
+        let mut struct_defs = HashMap::new();
+        struct_defs.insert(
+            "City".to_string(),
+            vec![
+                StructFieldDef::Required("name".to_string()),
+                StructFieldDef::Required("country".to_string()),
+            ],
+        );
+        let mut top = Chunk::new("<top>");
+        top.code = vec![
+            MakeDict(0, vec![]),
+            GetGlobal(1, "City".to_string()),
+            Call(2, 1, vec![0]),
+            Halt,
+        ];
+        let context = Context::create();
+        let module = context.create_module("t");
+        lower_program(&context, &module, &top, 3, &struct_defs, &HashMap::new())
+            .expect("type call lowering");
+        module.verify().expect("module failed verification");
+        let ir = module.print_to_string().to_string();
+        assert!(ir.contains("jrt_type_call"), "type call lowered to the constructor:\n{ir}");
+        assert!(!ir.contains("%icall"), "type call must not lower as an indirect call:\n{ir}");
+    }
+
+    /// The constructor is keyed on a runtime table, so the field list has to be
+    /// registered before user code runs — and in declaration order, since that
+    /// is the order a constructed struct's fields appear in.
+    #[test]
+    fn struct_field_lists_are_registered_at_startup() {
+        let mut struct_defs = HashMap::new();
+        struct_defs.insert(
+            "City".to_string(),
+            vec![
+                StructFieldDef::Required("name".to_string()),
+                StructFieldDef::Required("country".to_string()),
+            ],
+        );
+        struct_defs.insert("Unit".to_string(), vec![]);
+        let mut top = Chunk::new("<top>");
+        top.code = vec![Halt];
+        let context = Context::create();
+        let module = context.create_module("t");
+        lower_program(&context, &module, &top, 1, &struct_defs, &HashMap::new())
+            .expect("registration lowering");
+        module.verify().expect("module failed verification");
+        let ir = module.print_to_string().to_string();
+        assert!(ir.contains("jrt_type_register"), "field registration emitted:\n{ir}");
+        // A fieldless type still needs a table entry, or calling it would report
+        // "unknown type" rather than building an empty struct.
+        assert!(ir.contains("jrt_type_declare"), "fieldless type declared:\n{ir}");
+        let name_at = ir.find("name").expect("field name in IR");
+        let country_at = ir.find("country").expect("field name in IR");
+        assert!(name_at < country_at, "fields registered in declaration order:\n{ir}");
     }
 
     #[test]

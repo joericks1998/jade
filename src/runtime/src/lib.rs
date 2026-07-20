@@ -88,6 +88,7 @@ pub mod task;
 pub mod strval;
 pub mod sys;
 pub mod timef;
+pub mod typef;
 pub mod value;
 
 pub use coll::{ArrayObj, DictObj, StructObj};

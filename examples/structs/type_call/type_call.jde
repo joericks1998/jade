@@ -1,0 +1,19 @@
+// Calling a struct type constructs a value from a dict.
+// Fields the dict omits become nil; keys the type does not declare are dropped.
+
+struct City {
+    name,
+    country,
+    let population = 0
+}
+
+let d = {"name": "Kyoto", "country": "Japan", "founded": 794}
+let c = City(d)
+
+print(c.name)
+print(c.country)
+print(c.population)
+
+// A value of the same type passes straight through.
+let same = City(c)
+print(same.name)
