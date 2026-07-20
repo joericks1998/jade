@@ -10,72 +10,68 @@ use crate::builtins::{BuiltinFn, Package};
 
 const ZERO: Span = Span { line: 0, col: 0 };
 
-fn math_floor(args: &[VmValue]) -> Result<VmValue> {
-    match &args[0] {
-        VmValue::Float(f) => Ok(VmValue::Int(f.floor() as i64)),
-        VmValue::Int(i)   => Ok(VmValue::Int(*i)),
-        _ => Err(JadeError::TypeError { message: "math.floor".to_string(), span: ZERO }),
+// Every `math.*` operation is implemented once, in `jade_runtime::mathf`. This
+// module only converts `VmValue` to and from that core's `Num` and maps its one
+// error onto Jade's `IntegerOverflow`.
+//
+// It used to be a second implementation, with the AOT copy carrying a comment
+// promising the two "mirror" each other. They did not: `math.pow(2, 64)`
+// panicked with a raw Rust overflow message here and silently printed 0 under
+// `jade build`, and neither matched `a + 1`, which raises "integer overflow".
+
+use jade_runtime::mathf::{self, MathErr, Num};
+
+/// `VmValue` → `Num`, or a `math.<op>` type error for a non-number.
+fn num_of(v: Option<&VmValue>, op: &str) -> Result<Num> {
+    match v {
+        Some(VmValue::Int(i)) => Ok(Num::Int(*i)),
+        Some(VmValue::Float(f)) => Ok(Num::Float(*f)),
+        _ => Err(JadeError::TypeError { message: format!("math.{op}"), span: ZERO }),
     }
+}
+
+fn value_of(n: Num) -> VmValue {
+    match n {
+        Num::Int(i) => VmValue::Int(i),
+        Num::Float(f) => VmValue::Float(f),
+    }
+}
+
+/// The core's only failure is overflow, which is the same condition `+`/`-`/`*`
+/// already report as `IntegerOverflow`.
+fn checked(r: std::result::Result<Num, MathErr>) -> Result<VmValue> {
+    match r {
+        Ok(n) => Ok(value_of(n)),
+        Err(MathErr::Overflow) => Err(JadeError::IntegerOverflow { span: ZERO }),
+    }
+}
+
+fn math_floor(args: &[VmValue]) -> Result<VmValue> {
+    Ok(value_of(mathf::floor(num_of(args.first(), "floor")?)))
 }
 
 fn math_ceil(args: &[VmValue]) -> Result<VmValue> {
-    match &args[0] {
-        VmValue::Float(f) => Ok(VmValue::Int(f.ceil() as i64)),
-        VmValue::Int(i)   => Ok(VmValue::Int(*i)),
-        _ => Err(JadeError::TypeError { message: "math.ceil".to_string(), span: ZERO }),
-    }
+    Ok(value_of(mathf::ceil(num_of(args.first(), "ceil")?)))
 }
 
 fn math_abs(args: &[VmValue]) -> Result<VmValue> {
-    match &args[0] {
-        VmValue::Int(i)   => Ok(VmValue::Int(i.abs())),
-        VmValue::Float(f) => Ok(VmValue::Float(f.abs())),
-        _ => Err(JadeError::TypeError { message: "math.abs".to_string(), span: ZERO }),
-    }
+    checked(mathf::abs(num_of(args.first(), "abs")?))
 }
 
 fn math_sqrt(args: &[VmValue]) -> Result<VmValue> {
-    match &args[0] {
-        VmValue::Float(f) => Ok(VmValue::Float(f.sqrt())),
-        VmValue::Int(i)   => Ok(VmValue::Float((*i as f64).sqrt())),
-        _ => Err(JadeError::TypeError { message: "math.sqrt".to_string(), span: ZERO }),
-    }
+    Ok(value_of(mathf::sqrt(num_of(args.first(), "sqrt")?)))
 }
 
 fn math_min(args: &[VmValue]) -> Result<VmValue> {
-    match (args.get(0), args.get(1)) {
-        (Some(VmValue::Int(a)), Some(VmValue::Int(b)))     => Ok(VmValue::Int(*a.min(b))),
-        (Some(VmValue::Float(a)), Some(VmValue::Float(b))) => Ok(VmValue::Float(a.min(*b))),
-        (Some(VmValue::Int(a)), Some(VmValue::Float(b)))   => Ok(VmValue::Float((*a as f64).min(*b))),
-        (Some(VmValue::Float(a)), Some(VmValue::Int(b)))   => Ok(VmValue::Float(a.min(*b as f64))),
-        _ => Err(JadeError::TypeError { message: "math.min".to_string(), span: ZERO }),
-    }
+    Ok(value_of(mathf::min(num_of(args.first(), "min")?, num_of(args.get(1), "min")?)))
 }
 
 fn math_max(args: &[VmValue]) -> Result<VmValue> {
-    match (args.get(0), args.get(1)) {
-        (Some(VmValue::Int(a)), Some(VmValue::Int(b)))     => Ok(VmValue::Int(*a.max(b))),
-        (Some(VmValue::Float(a)), Some(VmValue::Float(b))) => Ok(VmValue::Float(a.max(*b))),
-        (Some(VmValue::Int(a)), Some(VmValue::Float(b)))   => Ok(VmValue::Float((*a as f64).max(*b))),
-        (Some(VmValue::Float(a)), Some(VmValue::Int(b)))   => Ok(VmValue::Float(a.max(*b as f64))),
-        _ => Err(JadeError::TypeError { message: "math.max".to_string(), span: ZERO }),
-    }
+    Ok(value_of(mathf::max(num_of(args.first(), "max")?, num_of(args.get(1), "max")?)))
 }
 
 fn math_pow(args: &[VmValue]) -> Result<VmValue> {
-    match (args.get(0), args.get(1)) {
-        (Some(VmValue::Int(base)), Some(VmValue::Int(exp))) => {
-            if *exp >= 0 {
-                Ok(VmValue::Int(base.pow(*exp as u32)))
-            } else {
-                Ok(VmValue::Float((*base as f64).powi(*exp as i32)))
-            }
-        }
-        (Some(VmValue::Float(base)), Some(VmValue::Float(exp))) => Ok(VmValue::Float(base.powf(*exp))),
-        (Some(VmValue::Int(base)), Some(VmValue::Float(exp)))   => Ok(VmValue::Float((*base as f64).powf(*exp))),
-        (Some(VmValue::Float(base)), Some(VmValue::Int(exp)))   => Ok(VmValue::Float(base.powi(*exp as i32))),
-        _ => Err(JadeError::TypeError { message: "math.pow".to_string(), span: ZERO }),
-    }
+    checked(mathf::pow(num_of(args.first(), "pow")?, num_of(args.get(1), "pow")?))
 }
 
 static MATH_PKG_FNS: &[BuiltinFn] = &[

@@ -555,6 +555,31 @@ int jrt_snprintf_float(char* buf, size_t cap, double val) {
  * exception here, keeping the longjmp entirely on the C side. jrt_eq_any and
  * jrt_to_bool never raise, so Rust exports them directly (see ffi.rs). */
 
+/* math.abs / math.pow are overflow-checked in the shared Rust core
+ * (jade-runtime, src/mathf.rs). Rust cannot longjmp, so the core reports
+ * overflow through an out-param and these forwarders raise it here — as the
+ * same "integer overflow" the VM raises for `+`/`-`/`*`, which is what both
+ * engines previously failed to do (this one silently wrapped; the VM panicked
+ * with a raw Rust overflow message). */
+extern int64_t jrt_math_abs(int64_t w, uint32_t* err);
+extern int64_t jrt_math_pow(int64_t a, int64_t b, uint32_t* err);
+
+static void throw_msg(const char* m);
+
+int64_t jade_math_abs(int64_t w) {
+    uint32_t err = 0;
+    int64_t r = jrt_math_abs(w, &err);
+    if (err) throw_msg("integer overflow");
+    return r;
+}
+
+int64_t jade_math_pow(int64_t a, int64_t b) {
+    uint32_t err = 0;
+    int64_t r = jrt_math_pow(a, b, &err);
+    if (err) throw_msg("integer overflow");
+    return r;
+}
+
 /* Raise "<op> requires numeric operands" (matches the VM's TypeError text). */
 static void throw_num_type(const char* op) {
     char msg[64];

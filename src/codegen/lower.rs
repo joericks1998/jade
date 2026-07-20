@@ -1952,8 +1952,12 @@ fn emit_module_call<'ctx>(
     };
 
     match (module, method) {
-        ("math", "floor" | "ceil" | "abs" | "sqrt") => math_fn(&format!("jrt_math_{method}"), 1),
-        ("math", "min" | "max" | "pow") => math_fn(&format!("jrt_math_{method}"), 2),
+        // abs/pow are overflow-checked, so they go through C forwarders that
+        // raise "integer overflow"; the rest cannot fail and call Rust directly.
+        ("math", "abs") => math_fn("jade_math_abs", 1),
+        ("math", "pow") => math_fn("jade_math_pow", 2),
+        ("math", "floor" | "ceil" | "sqrt") => math_fn(&format!("jrt_math_{method}"), 1),
+        ("math", "min" | "max") => math_fn(&format!("jrt_math_{method}"), 2),
         ("path", "basename" | "ext" | "dirname" | "stem" | "abs") => {
             tag_str_or_nil(str_fn(&format!("jrt_path_{method}"), 1)?)
         }
