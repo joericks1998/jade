@@ -235,6 +235,14 @@ int64_t jrt_get_field(int64_t obj, const char* field) {
         if (jrt_kind_of(p) == JK_STRUCT) {
             int64_t out;
             if (jrt_coll_struct_get(p, field, &out)) return out;
+            /* Not a data field — try an extend method, which yields a bound
+             * method value (`let greet = person.greet`). Data fields win, which
+             * is the VM's order too (vm.rs GetField: field lookup first, then
+             * extend_methods). Method *calls* never reach here: codegen elides
+             * the producing GetField when the result is immediately called, so
+             * what arrives is exactly a method used as a value. */
+            void* bm = jrt_bind_method_new(obj, field);
+            if (bm) return jrt_box_ptr(bm);
             throw_msg("undefined field");
         }
     }

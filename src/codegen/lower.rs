@@ -48,6 +48,11 @@ const TRUSTED: u64 = 0;
 // non-collection and no-op on it, while indirect_call still reads fn_ptr at
 // offset 0. See fn_box_word.
 const OBJKIND_FN: u64 = 5;
+// ObjKind::BoundMethod (mirror jade-runtime heap.rs). Same shape as a function
+// box plus the receiver at offset 16; `indirect_call` reads the kind byte to
+// decide whether to prepend it as `self`. Built by jrt_bind_method_new, never
+// by codegen directly.
+const OBJKIND_BOUND_METHOD: u64 = 9;
 
 /// Reserved global names that resolve to a runtime builtin (not a user value),
 /// mirroring `crate::builtins::seed_globals`. A `Call` whose callee is
@@ -642,6 +647,52 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
         let box_ptr = self.untag_ptr(self.load(callee));
         let fn_ptr = b.build_load(ptrt, box_ptr, "fnld").map_err(e)?.into_pointer_value();
 
+        // A bound method (`let f = obj.greet`) is a function value carrying the
+        // receiver it will pass as `self`: {fn_ptr@0, kind@8, self@16}. It is
+        // told apart by the ObjKind byte at offset 8 rather than by a sentinel
+        // address at offset 0 (the older native-fn trick) — every TAG_PTR value
+        // must carry that kind byte anyway, so it costs nothing.
+        let kind_slot = unsafe {
+            b.build_in_bounds_gep(i64_ty, box_ptr, &[i64_ty.const_int(1, false)], "kslot").map_err(e)?
+        };
+        let kind = b.build_load(i64_ty, kind_slot, "kind").map_err(e)?.into_int_value();
+        let is_bound = b
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                kind,
+                i64_ty.const_int(OBJKIND_BOUND_METHOD as u64, false),
+                "isbm",
+            )
+            .map_err(e)?;
+        let outer_fn = b.get_insert_block().unwrap().get_parent().unwrap();
+        let bm_bb = self.ctx.append_basic_block(outer_fn, "icall_bound");
+        let plain_bb = self.ctx.append_basic_block(outer_fn, "icall_plain");
+        let bm_merge_bb = self.ctx.append_basic_block(outer_fn, "icall_bm_merge");
+        b.build_conditional_branch(is_bound, bm_bb, plain_bb).map_err(e)?;
+
+        // ── bound: load self from slot 2, prepend it, call with args+1 ──
+        b.position_at_end(bm_bb);
+        let self_slot = unsafe {
+            b.build_in_bounds_gep(i64_ty, box_ptr, &[i64_ty.const_int(2, false)], "sslot").map_err(e)?
+        };
+        let self_word = b.build_load(i64_ty, self_slot, "selfw").map_err(e)?.into_int_value();
+        let bm_arg_tys = vec![i64_ty.into(); args.len() + 1];
+        let bm_fn_ty = i64_ty.fn_type(&bm_arg_tys, false);
+        let mut bm_argv: Vec<BasicMetadataValueEnum> = Vec::with_capacity(args.len() + 1);
+        bm_argv.push(self_word.into());
+        for a in args {
+            bm_argv.push(self.load(*a).into());
+        }
+        let bm_ret = b
+            .build_indirect_call(bm_fn_ty, fn_ptr, &bm_argv, "bmcall")
+            .map_err(e)?
+            .as_any_value_enum()
+            .into_int_value();
+        b.build_unconditional_branch(bm_merge_bb).map_err(e)?;
+        let bm_end = b.get_insert_block().unwrap();
+
+        b.position_at_end(plain_bb);
+
         // Sentinel = the jrt_native_call address.
         let native_fn = self.runtime_fn(
             "jrt_native_call",
@@ -715,7 +766,15 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
         b.position_at_end(merge_bb);
         let phi = b.build_phi(i64_ty, "icall_ret").map_err(e)?;
         phi.add_incoming(&[(&nat_ret, nat_end), (&reg_ret, reg_end)]);
-        Ok(phi.as_basic_value().into_int_value())
+        let plain_ret = phi.as_basic_value().into_int_value();
+        b.build_unconditional_branch(bm_merge_bb).map_err(e)?;
+        let plain_end = b.get_insert_block().unwrap();
+
+        // ── merge the bound and plain paths ──
+        b.position_at_end(bm_merge_bb);
+        let outer_phi = b.build_phi(i64_ty, "icall_out").map_err(e)?;
+        outer_phi.add_incoming(&[(&bm_ret, bm_end), (&plain_ret, plain_end)]);
+        Ok(outer_phi.as_basic_value().into_int_value())
     }
 
     /// The module-level global cell for `name`, created (initialized to nil) on

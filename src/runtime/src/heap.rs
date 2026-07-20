@@ -55,6 +55,9 @@ pub enum ObjKind {
     Prompt = 7,
     /// A GBNF grammar value.
     Grammar = 8,
+    /// A method bound to a receiver (`let f = obj.greet`). Callable like a
+    /// function value, but carries the receiver it will pass as `self`.
+    BoundMethod = 9,
 }
 
 /// Bacon–Rajan cycle-collector color. Stored in [`ObjHeader::color`].

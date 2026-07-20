@@ -424,6 +424,10 @@ void    jrt_type_register(const char* type_name, const char* field);
 void    jrt_type_declare(const char* type_name);
 int     jrt_type_construct(const char* type_name, int64_t arg, int64_t* out);
 int64_t jrt_type_call(const char* type_name, int64_t arg);
+/* jrt_bind_method_new — bind an extend method to a receiver, yielding a
+ * callable value laid out {fn_ptr@0, ObjKind::BoundMethod@8, self@16}. NULL when
+ * the receiver's type has no such method (the caller raises). */
+void*   jrt_bind_method_new(int64_t recv_word, const char* method);
 /* jrt_get_field/jrt_set_field — struct data-field access (field is a compile-time
  * C string); raise on a missing field or a non-struct. (Method dispatch — a
  * field that is actually an extend/primitive method — is not handled here; the
