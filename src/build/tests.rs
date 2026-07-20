@@ -6,7 +6,7 @@
 use std::path::Path;
 
 use super::*;
-use crate::codegen::CompileMode;
+use crate::aot::CompileMode;
 
 fn tir(src: &str) -> TProgram {
     let tokens = crate::frontend::lexer::tokenize(src).expect("lex");

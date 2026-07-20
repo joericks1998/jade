@@ -1,5 +1,5 @@
 //! `std::http` runtime module — the AOT C-ABI surface, ported from the C leaf
-//! `runtime_lib/http/http.c`. get/post/put/delete/head over the `curl` binary
+//! `runtime_aot/http/http.c`. get/post/put/delete/head over the `curl` binary
 //! (exec'd directly, not a shell), each returning an ObjHeader dict
 //! `{ status: int, body: str(TAINTED) }`. Mirrors the VM's `http_pkg.rs` shape;
 //! response bodies are external → TAINTED.

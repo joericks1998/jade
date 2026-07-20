@@ -3,7 +3,7 @@
 //! This used to be a client for a build daemon listening on
 //! `$HOME/.jade/build.sock`, because code generation and the C runtime lived in
 //! a separate repository and keeping LLVM out of the `jade` binary was worth a
-//! socket for it. Both halves of that argument are gone: `src/codegen/` owns the
+//! socket for it. Both halves of that argument are gone: `src/aot/` owns the
 //! backend and the C runtime now, so the daemon's only remaining job was
 //! forwarding a request to a function this crate already exports.
 //!
@@ -33,15 +33,15 @@ pub enum Emit {
     CDylib { exports: Vec<String> },
 }
 
-impl From<&Emit> for crate::codegen::CompileMode {
+impl From<&Emit> for crate::aot::CompileMode {
     fn from(emit: &Emit) -> Self {
         match emit {
             Emit::CDylib { exports } => {
-                crate::codegen::CompileMode::SharedLib { exports: exports.clone() }
+                crate::aot::CompileMode::SharedLib { exports: exports.clone() }
             }
             // IR is printed rather than linked, so the mode only decides which
             // entry point gets generated — the binary shape is the right one.
-            Emit::Binary | Emit::Ir => crate::codegen::CompileMode::Binary,
+            Emit::Binary | Emit::Ir => crate::aot::CompileMode::Binary,
         }
     }
 }
@@ -51,7 +51,7 @@ impl From<&Emit> for crate::codegen::CompileMode {
 /// `source_path` anchors import resolution: imports resolve relative to the file
 /// being compiled, not the working directory.
 pub fn build(program: &TProgram, source_path: &Path, out: &Path, emit: Emit) -> Result<(), String> {
-    let ir = crate::codegen::compile_with_mode(
+    let ir = crate::aot::compile_with_mode(
         program.clone(),
         Some(source_path),
         out,

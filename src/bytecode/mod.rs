@@ -1,7 +1,7 @@
 //! The instruction set both engines consume.
 //!
 //! `compiler::emit` produces a [`Chunk`]; [`crate::vm`] interprets one and
-//! [`crate::codegen`] lowers one to LLVM. It belongs to neither engine, which is
+//! [`crate::aot`] lowers one to LLVM. It belongs to neither engine, which is
 //! why it sits between them rather than inside either.
 //!
 //! Instructions are largely *monomorphic* — `AddInt` and `AddFloat` rather than

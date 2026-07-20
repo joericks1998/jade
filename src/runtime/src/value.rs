@@ -1,7 +1,7 @@
 //! The tagged 64-bit value ABI shared by the VM and AOT binaries.
 //!
 //! This is a **byte-identical** Rust mirror of the "Tagged value ABI" section
-//! of `jade-buildd/runtime_lib/runtime.h`. Every Jade runtime value fits in 64
+//! of `jade-buildd/runtime_aot/runtime.h`. Every Jade runtime value fits in 64
 //! bits and carries its kind in the low bits, so a value read back from a
 //! type-erased slot (dict value, array element, `Unknown` param/return,
 //! exception payload) knows whether it is an int, float, bool, nil, or a heap

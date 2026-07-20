@@ -1,7 +1,7 @@
 //! The C-ABI surface for the shared heap collections (arrays, dicts, structs).
 //!
 //! These replace the C runtime's kind-tagged `JK*` objects
-//! (`runtime_lib/common.c`). The object *storage* now lives once in
+//! (`runtime_aot/common.c`). The object *storage* now lives once in
 //! [`crate::coll`] behind an [`crate::heap::ObjHeader`], and these
 //! `#[no_mangle]` shims are what the AOT backend's emitted `jrt_*` calls
 //! resolve against. `lower.rs` is unchanged — only the implementation behind the

@@ -7,7 +7,7 @@
 //!    it natively;
 //!  * **AOT-compiled binaries** (`jade build`) link it as a C-ABI `staticlib`
 //!    (`#[no_mangle] extern "C"` entry points), replacing the hand-rolled
-//!    semantics that used to live in `jade-buildd/runtime_lib/common.c`.
+//!    semantics that used to live in `jade-buildd/runtime_aot/common.c`.
 //!
 //! Historically the VM (Rust, `VmValue` + `Arc`) and the AOT backend (C,
 //! `jrt_*_any`) were two independent implementations of the same language, and

@@ -23,17 +23,22 @@ pub mod cli;
 /// AOT backend: bytecode `Chunk` → LLVM → object → linked artifact. `jade build`
 /// calls straight into this, so LLVM 18 is a build-time requirement for the
 /// toolchain (locate it with `LLVM_SYS_180_PREFIX`). The C runtime that emitted
-/// binaries link against (`runtime_lib/`) is built by this crate's `build.rs`.
-pub mod codegen;
+/// binaries link against is `src/runtime_aot/` (C), built by this crate's `build.rs`.
+pub mod aot;
 pub mod compiler;
 /// The instruction set both engines consume: the compiler emits a `Chunk`, the
-/// VM interprets it and `codegen` lowers it. It belongs to neither engine, which
+/// VM interprets it and `aot` lowers it. It belongs to neither engine, which
 /// is why it sits between them rather than inside `compiler`.
 pub mod bytecode;
-/// Bytecode interpreter — one of the two execution engines, peer to `codegen`
+/// Bytecode interpreter — one of the two execution engines, peer to `aot`
 /// rather than a phase of `compiler`. `jade run` uses this; `jade build` uses
-/// `codegen`. Backend parity exists to keep the two agreeing.
+/// `aot`. Backend parity exists to keep the two agreeing.
 pub mod vm;
+// `src/runtime_aot/` is C, not Rust, so it has no module declaration here. It
+// is the runtime linked into AOT-compiled binaries only — the exception
+// handler, the platform/concurrency shim, and the IPC and inference clients —
+// and `build.rs` compiles it to `libJadeRuntime.a`. Distinct from
+// `jade-runtime` (`src/runtime/`), which is Rust and shared by *both* engines.
 pub mod config;
 pub mod frontend;
 pub mod llm;

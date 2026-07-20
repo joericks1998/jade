@@ -8,7 +8,7 @@
 //! `jade_value_t` is C's `int64_t`; it crosses this boundary as `i64` and is
 //! reinterpreted into a [`JadeValue`] on the Rust side.
 //!
-//! As symbols move here from `runtime_lib/common.c`, the C definitions are
+//! As symbols move here from `runtime_aot/common.c`, the C definitions are
 //! deleted (their declarations stay in `runtime.h`) and the linker resolves the
 //! calls against this crate's staticlib instead.
 

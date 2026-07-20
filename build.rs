@@ -1,4 +1,4 @@
-//! Compile the C runtime (`runtime_lib/`) into `libJadeRuntime.a`.
+//! Compile the C runtime (`runtime_aot/`) into `libJadeRuntime.a`.
 //!
 //! Emitted Jade binaries link against this archive (`-lJadeRuntime`). The
 //! runtime is split into a platform-agnostic core (`common.c`) plus a swappable
@@ -27,7 +27,7 @@ fn main() {
         );
     }
 
-    let rt = PathBuf::from("src/codegen/runtime_lib");
+    let rt = PathBuf::from("src/runtime_aot");
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR");
 
     // Generate the canonical tool-call GBNF as a C string constant straight from
@@ -78,7 +78,7 @@ fn main() {
     //
     //  * release packaging can name the files instead of `find`-ing them;
     //  * an *installed* jade resolves both from one directory next to itself
-    //    (see `codegen::runtime_lib_dirs`).
+    //    (see `aot::runtime_archive_dirs`).
     //
     // `libJadeRuntime.a` is linked into every binary `jade build` emits, so it
     // is a shipped artifact of the toolchain and belongs somewhere stable —
@@ -90,7 +90,7 @@ fn main() {
         let _ = std::fs::copy(&c_archive, profile_dir.join("libJadeRuntime.a"));
     }
 
-    println!("cargo:rerun-if-changed=src/codegen/runtime_lib");
+    println!("cargo:rerun-if-changed=src/runtime_aot");
     println!("cargo:rerun-if-changed=src/runtime/src");
     println!("cargo:rerun-if-changed={}", gbnf_src.display());
 }

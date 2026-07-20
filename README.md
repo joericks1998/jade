@@ -63,7 +63,7 @@ source text
   → build/mod.rs           → codegen/           (jade build)
 ```
 
-`jade build` compiles in-process: the frontend produces TIR, then `src/codegen/` lowers it through LLVM 18 and links the result. There is no build daemon — it used to exist because codegen lived in another repository, and once that moved here its only remaining job was forwarding a request to a function this crate already exported.
+`jade build` compiles in-process: the frontend produces TIR, then `src/aot/` lowers it through LLVM 18 and links the result. There is no build daemon — it used to exist because codegen lived in another repository, and once that moved here its only remaining job was forwarding a request to a function this crate already exported.
 
 That makes **LLVM 18 a build-time requirement for the toolchain** (locate it with `LLVM_SYS_180_PREFIX`). It is linked into the binary, so a released `jade` needs nothing installed.
 

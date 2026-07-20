@@ -47,7 +47,7 @@ toml_edit = "0.22"
 bincode = "1"
 sha2 = "0.10"
 libloading = "0.8"
-# LLVM 18 backend for the AOT codegen module (src/codegen/). `jade build`
+# LLVM 18 backend for the AOT codegen module (src/aot/). `jade build`
 # compiles in-process — there is no build daemon — so this is a hard dependency
 # and LLVM 18 must be present to build the toolchain. Locate it with
 # LLVM_SYS_180_PREFIX. Running a released binary needs nothing installed.
@@ -57,5 +57,5 @@ inkwell = { version = "0.8", features = ["llvm18-1"] }
 default = []
 
 [build-dependencies]
-# Compiles the C runtime (runtime_lib/) that emitted AOT binaries link against.
+# Compiles the C runtime (runtime_aot/) that emitted AOT binaries link against.
 cc = "1"

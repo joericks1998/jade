@@ -1,6 +1,6 @@
 //! Async tasks: a bounded worker pool and the future object they resolve.
 //!
-//! This is the concurrency layer that used to live in `runtime_lib/posix.c` as
+//! This is the concurrency layer that used to live in `runtime_aot/posix.c` as
 //! one detached pthread per spawn. Two things were wrong with that. It was
 //! unbounded — Jade's advertised pattern is fan-out over N prompts, and
 //! `pthread_create` per prompt turns a large fan-out into a resource failure

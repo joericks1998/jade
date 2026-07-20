@@ -4,7 +4,7 @@
 //! not Rust's `std` allocator, so heap objects are interchangeable with the C
 //! runtime and codegen-emitted globals: a string `malloc`'d here can be
 //! `free`'d by C, and a value boxed by C can be freed here. This is what lets
-//! the shared crate replace `runtime_lib/common.c`'s allocations symbol-for-
+//! the shared crate replace `runtime_aot/common.c`'s allocations symbol-for-
 //! symbol without a mismatched-allocator hazard.
 
 unsafe extern "C" {

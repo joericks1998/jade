@@ -61,7 +61,7 @@ pub enum CompileMode {
 ///
 /// Lowered functions already take and return the tagged 64-bit word, so each
 /// wrapper only has to marshal `JadeVal` in and out — `jrt_ffi_to_tagged` /
-/// `jrt_ffi_from_tagged` in runtime_lib/native.c, the same conversions
+/// `jrt_ffi_from_tagged` in runtime_aot/native.c, the same conversions
 /// `jrt_native_call` uses in the other direction.
 #[allow(clippy::too_many_arguments)]
 fn emit_pkg_init<'ctx>(
@@ -287,7 +287,7 @@ fn emit_pkg_init<'ctx>(
 /// were never shipped and the baked paths pointed at the release runner's
 /// `target/`. Resolving relative to the executable keeps the binary and its
 /// runtime together however the user relocates them.
-fn runtime_lib_dirs() -> (String, String) {
+fn runtime_archive_dirs() -> (String, String) {
     let installed = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(|d| d.join("..").join("lib").join("jade")))
@@ -374,7 +374,7 @@ pub fn compile_with_mode(
 
     // Load every native package once, before any user code runs. The path is a
     // build-time-resolved absolute path embedded as a plain C string (dlopen'd at
-    // runtime — see imports.rs / runtime_lib/native.c). jrt_native_load raises on
+    // runtime — see imports.rs / runtime_aot/native.c). jrt_native_load raises on
     // a failed dlopen; with no handler installed here that aborts the program,
     // matching the VM's fatal-on-missing-package behavior.
     if !native_pkgs.is_empty() {
@@ -503,8 +503,8 @@ pub fn compile_with_mode(
     // a static archive, so unreferenced members aren't pulled into trivial
     // binaries — always linking is harmless and removes the whole bug class.
     // Where the two runtime archives live. Both are searched in the same order
-    // (env override → installed layout → dev tree); see `runtime_lib_dirs`.
-    let (rt_lib, rust_rt) = runtime_lib_dirs();
+    // (env override → installed layout → dev tree); see `runtime_archive_dirs`.
+    let (rt_lib, rust_rt) = runtime_archive_dirs();
     cc.arg(format!("-L{rt_lib}"));
     cc.arg("-lJadeRuntime");
     // The shared Rust runtime staticlib supplies symbols moved out of the C

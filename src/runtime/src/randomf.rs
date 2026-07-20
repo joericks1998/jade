@@ -1,5 +1,5 @@
 //! `std::random` runtime module — the AOT C-ABI surface, ported from the C leaf
-//! `runtime_lib/random/random.c`. A self-contained xoshiro256** generator
+//! `runtime_aot/random/random.c`. A self-contained xoshiro256** generator
 //! (splitmix64-seeded), the exact same algorithm/constants as the C so behavior
 //! is unchanged; the value *sequence* differs from the VM's `rand::StdRng` (an
 //! intentional divergence — only distributions/invariants are guaranteed).
