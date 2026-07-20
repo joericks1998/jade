@@ -33,7 +33,7 @@ unsafe fn str_word(bytes: &[u8], trust: u8) -> W {
 
 /// `serde_json::Value` → an ObjHeader value word. Parsed strings inherit `trust`
 /// (taint propagates from the JSON source). Mirrors the VM's `json_to_vm`.
-fn value_to_word(v: &Value, trust: u8) -> W {
+pub(crate) fn value_to_word(v: &Value, trust: u8) -> W {
     match v {
         Value::Null => NIL_BITS as i64,
         Value::Bool(b) => JadeValue::from_bool(*b).bits() as i64,

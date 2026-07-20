@@ -2333,145 +2333,6 @@ async fn apply_struct_decorators(
     Ok(v)
 }
 
-/// Strip markdown code fences that LLMs often wrap JSON in (``` or ```json).
-fn vm_extract_json(text: &str) -> String {
-    let t = text.trim();
-    let inner = t
-        .strip_prefix("```json").or_else(|| t.strip_prefix("```"))
-        .and_then(|s| s.strip_suffix("```"))
-        .map(str::trim);
-    let t = inner.unwrap_or(t);
-    // Scan forward through every `{` or `[` start position and return the first
-    // candidate that is parseable JSON (after optional normalization).
-    let bytes = t.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'{' || bytes[i] == b'[' {
-            if let Some(end) = json_find_end(&t[i..]) {
-                let candidate = &t[i..i + end];
-                if serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
-                    return candidate.to_owned();
-                }
-                // Try normalizing: quote unquoted keys, remove commas inside numbers.
-                let normalized = json_normalize(candidate);
-                if serde_json::from_str::<serde_json::Value>(&normalized).is_ok() {
-                    return normalized;
-                }
-            }
-        }
-        i += 1;
-    }
-    t.to_owned()
-}
-
-/// Quote unquoted object keys and strip thousands-separator commas from numbers.
-/// Handles the two most common model formatting mistakes: `{key: val}` and `1,000`.
-fn json_normalize(s: &str) -> String {
-    let s = json_quote_keys(s);
-    json_strip_number_commas(&s)
-}
-
-fn json_quote_keys(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 32);
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    let mut in_string = false;
-    let mut escape_next = false;
-    while i < bytes.len() {
-        if escape_next {
-            escape_next = false;
-            out.push(bytes[i] as char);
-            i += 1;
-            continue;
-        }
-        if bytes[i] == b'\\' && in_string {
-            escape_next = true;
-            out.push('\\');
-            i += 1;
-            continue;
-        }
-        if bytes[i] == b'"' {
-            in_string = !in_string;
-            out.push('"');
-            i += 1;
-            continue;
-        }
-        // Outside strings: detect unquoted key (word chars followed by ':').
-        if !in_string && (bytes[i].is_ascii_alphabetic() || bytes[i] == b'_') {
-            let start = i;
-            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
-                i += 1;
-            }
-            let word = &s[start..i];
-            // Peek past whitespace to see if ':' follows (and it's not '::').
-            let mut j = i;
-            while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') { j += 1; }
-            let is_key = j < bytes.len() && bytes[j] == b':'
-                && (j + 1 >= bytes.len() || bytes[j + 1] != b':');
-            if is_key {
-                out.push('"');
-                out.push_str(word);
-                out.push('"');
-            } else {
-                out.push_str(word);
-            }
-            continue;
-        }
-        out.push(bytes[i] as char);
-        i += 1;
-    }
-    out
-}
-
-fn json_strip_number_commas(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = String::with_capacity(s.len());
-    let mut in_string = false;
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'"' && (i == 0 || bytes[i - 1] != b'\\') {
-            in_string = !in_string;
-        }
-        // Skip comma that sits between two digits outside a string.
-        if !in_string
-            && bytes[i] == b','
-            && i > 0 && bytes[i - 1].is_ascii_digit()
-            && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit()
-        {
-            i += 1;
-            continue;
-        }
-        out.push(bytes[i] as char);
-        i += 1;
-    }
-    out
-}
-
-/// Scan `s` for the end of the first top-level JSON object or array, respecting
-/// string escapes and nesting. Returns the exclusive byte index after the closing
-/// bracket/brace, or `None` if `s` contains no top-level `{` or `[`.
-fn json_find_end(s: &str) -> Option<usize> {
-    let bytes = s.as_bytes();
-    let start = bytes.iter().position(|&b| b == b'{' || b == b'[')?;
-    let (open, close) = if bytes[start] == b'{' { (b'{', b'}') } else { (b'[', b']') };
-    let mut depth = 0usize;
-    let mut in_string = false;
-    let mut i = start;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\\' if in_string => { i += 2; }
-            b'"' => { in_string = !in_string; i += 1; }
-            b if !in_string && b == open  => { depth += 1; i += 1; }
-            b if !in_string && b == close => {
-                depth -= 1;
-                i += 1;
-                if depth == 0 { return Some(i); }
-            }
-            _ => { i += 1; }
-        }
-    }
-    None
-}
 
 /// Recursively convert a `serde_json::Value` to a `VmValue`.
 fn json_to_vm_value(json: &serde_json::Value) -> std::result::Result<VmValue, String> {
@@ -2534,76 +2395,101 @@ fn vm_coerce_struct(
     type_name: &str,
     def: &[StructFieldDef],
 ) -> std::result::Result<VmValue, String> {
-    let raw = vm_extract_json(text);
-    let json: serde_json::Value = serde_json::from_str(&raw).map_err(|e| format!(
-        "Your response could not be parsed as a {} struct: {}. \
-         Respond with a JSON object with fields: {}.",
-        type_name, e, vm_field_summary(def)
-    ))?;
-    let obj = json.as_object().ok_or_else(|| format!(
-        "Your response is not a JSON object. \
-         Respond with a JSON object for struct '{}' with fields: {}.",
-        type_name, vm_field_summary(def)
-    ))?;
+    use jade_runtime::coercef::{coerce_fields, FieldSpec};
 
-    // A Vec, not a HashMap: field order is the struct's declaration order, and
-    // iterating a HashMap made it depend on hash iteration order instead. That
-    // is currently unobservable (a struct renders as `<struct>` in both
-    // engines) but it is non-determinism sitting one display change away.
-    let mut fields: Vec<(String, VmValue)> = Vec::new();
-    for field_def in def {
-        match field_def {
+    // Optional fields carry their declared default; a `Required` field carries
+    // none, which is what makes it required. A `prompt` field is optional and
+    // has no default to fall back on, so an omitted one stays absent — it is
+    // left out of the spec entirely rather than being defaulted to nil.
+    let specs: Vec<FieldSpec<VmValue>> = def
+        .iter()
+        .filter_map(|f| match f {
             StructFieldDef::Required(name) => {
-                let raw_val = obj.get(name.as_str()).ok_or_else(|| format!(
-                    "Missing required field '{}' for struct '{}'. \
-                     Respond with a JSON object containing all required fields: {}.",
-                    name, type_name, vm_field_summary(def)
-                ))?;
-                let val = json_to_vm_value(raw_val).map_err(|e| format!(
-                    "Field '{}' is invalid: {}. \
-                     Respond with a corrected JSON object for struct '{}'.",
-                    name, e, type_name
-                ))?;
-                fields.push((name.clone(), val));
+                Some(FieldSpec { name: name.clone(), default: None })
             }
-            StructFieldDef::Let { name, default } => {
-                // An optional field the model omitted falls back to its declared
-                // default, exactly as a struct literal does. It used to be left
-                // out of the struct altogether, so `c.population` raised "no
-                // field 'population'" on a value whose type declares one.
-                match obj.get(name.as_str()) {
-                    Some(raw_val) => {
-                        let val = json_to_vm_value(raw_val).map_err(|e| format!(
-                            "Field '{}' is invalid: {}. \
-                             Respond with a corrected JSON object for struct '{}'.",
-                            name, e, type_name
-                        ))?;
-                        fields.push((name.clone(), val));
-                    }
-                    None => {
-                        fields.push((
-                            name.clone(),
-                            eval_literal_default(default).unwrap_or(VmValue::Nil),
-                        ));
-                    }
-                }
-            }
+            StructFieldDef::Let { name, default } => Some(FieldSpec {
+                name: name.clone(),
+                default: Some(eval_literal_default(default).unwrap_or(VmValue::Nil)),
+            }),
             StructFieldDef::Prompt { name, .. } => {
-                if let Some(raw_val) = obj.get(name.as_str()) {
-                    let s = raw_val.as_str().ok_or_else(|| format!(
-                        "Prompt field '{}' must be a string value.", name
-                    ))?;
-                    fields.push((name.clone(), VmValue::Prompt(s.to_string())));
+                if reply_has_field(text, name) {
+                    Some(FieldSpec { name: name.clone(), default: None })
+                } else {
+                    None
                 }
             }
+        })
+        .collect();
+
+    // The rule — extracting JSON from prose, declaration order, defaults, which
+    // failures re-prompt — is shared with the compiled path. The only thing
+    // supplied here is how a JSON value becomes a `VmValue`.
+    let is_prompt_field = |name: &str| {
+        def.iter()
+            .any(|f| matches!(f, StructFieldDef::Prompt { name: n, .. } if n == name))
+    };
+    let pairs = coerce_fields(text, &specs, |name, v| {
+        if is_prompt_field(name) {
+            return v
+                .as_str()
+                .map(|s| VmValue::Prompt(s.to_string()))
+                .ok_or_else(|| format!("Prompt field '{name}' must be a string value."));
         }
-    }
+        json_to_vm_value(v)
+    })
+    .map_err(|e| describe_coerce_error(e, type_name, def))?;
 
     let mut sobj = StructObj::<VmValue>::new(type_name);
-    for (k, v) in fields {
+    for (k, v) in pairs {
         sobj.set_field(&k, v);
     }
     Ok(VmValue::Struct(Arc::new(Mutex::new(sobj))))
+}
+
+/// Whether the reply carries `field` at all — used to keep an omitted `prompt`
+/// field absent rather than giving it a value it never declared a default for.
+fn reply_has_field(text: &str, field: &str) -> bool {
+    let raw = jade_runtime::coercef::extract_json(text);
+    serde_json::from_str::<serde_json::Value>(&raw)
+        .ok()
+        .and_then(|v| v.as_object().map(|o| o.contains_key(field)))
+        .unwrap_or(false)
+}
+
+/// Turn a coercion failure into the correction sent back to the model.
+///
+/// These strings are not user-facing diagnostics — they are the *next prompt*,
+/// so each says what was wrong and what to send instead. That is why they live
+/// here rather than in the shared rule: the compiled path re-prompts with its
+/// own fixed wording and has no struct definition to summarise.
+fn describe_coerce_error(
+    e: jade_runtime::coercef::CoerceError,
+    type_name: &str,
+    def: &[StructFieldDef],
+) -> String {
+    use jade_runtime::coercef::CoerceError as E;
+    match e {
+        E::NotJson(detail) => format!(
+            "Your response could not be parsed as a {} struct: {}. \
+             Respond with a JSON object with fields: {}.",
+            type_name, detail, vm_field_summary(def)
+        ),
+        E::NotObject => format!(
+            "Your response is not a JSON object. \
+             Respond with a JSON object for struct '{}' with fields: {}.",
+            type_name, vm_field_summary(def)
+        ),
+        E::MissingRequired(name) => format!(
+            "Missing required field '{}' for struct '{}'. \
+             Respond with a JSON object containing all required fields: {}.",
+            name, type_name, vm_field_summary(def)
+        ),
+        E::BadField { name, detail } => format!(
+            "Field '{}' is invalid: {}. \
+             Respond with a corrected JSON object for struct '{}'.",
+            name, detail, type_name
+        ),
+    }
 }
 
 /// Start a streaming inference call and return a lazy `VmValue::TokenStream`.
@@ -3006,7 +2892,7 @@ fn coerce(
             )),
         },
         "Array" | "array" => {
-            let raw = vm_extract_json(text);
+            let raw = jade_runtime::coercef::extract_json(text);
             serde_json::from_str::<serde_json::Value>(&raw)
                 .map_err(|e| format!(
                     "Your response could not be parsed as a JSON array: {}. \
@@ -3029,7 +2915,7 @@ fn coerce(
                 })
         }
         "Dict" | "dict" => {
-            let raw = vm_extract_json(text);
+            let raw = jade_runtime::coercef::extract_json(text);
             serde_json::from_str::<serde_json::Value>(&raw)
                 .map_err(|e| format!(
                     "Your response could not be parsed as a JSON object: {}. \
