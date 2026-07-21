@@ -26,13 +26,9 @@
 
 use std::io::Read;
 
-use super::InferError;
+use ovata_infer_protocol::response::tag;
 
-pub const TYPE_TOKEN: u8 = 0x01;
-pub const TYPE_DONE: u8 = 0x02;
-pub const TYPE_ERROR: u8 = 0x03;
-pub const TYPE_META: u8 = 0x04;
-pub const TYPE_JSON: u8 = 0x05;
+use super::InferError;
 
 /// Which frame arrived. The payload lands in the caller's scratch buffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,13 +41,13 @@ pub enum FrameKind {
 }
 
 impl FrameKind {
-    fn from_tag(tag: u8) -> Option<Self> {
-        match tag {
-            TYPE_TOKEN => Some(FrameKind::Token),
-            TYPE_DONE => Some(FrameKind::Done),
-            TYPE_ERROR => Some(FrameKind::Error),
-            TYPE_META => Some(FrameKind::Meta),
-            TYPE_JSON => Some(FrameKind::Json),
+    fn from_tag(byte: u8) -> Option<Self> {
+        match byte {
+            tag::TOKEN => Some(FrameKind::Token),
+            tag::DONE => Some(FrameKind::Done),
+            tag::ERROR => Some(FrameKind::Error),
+            tag::META => Some(FrameKind::Meta),
+            tag::JSON => Some(FrameKind::Json),
             _ => None,
         }
     }
@@ -104,8 +100,8 @@ mod tests {
     use super::*;
 
     /// Build one wire frame, the way the daemon's `Frame::encode` does.
-    fn encode(tag: u8, payload: &[u8]) -> Vec<u8> {
-        let mut v = vec![tag];
+    fn encode(kind: u8, payload: &[u8]) -> Vec<u8> {
+        let mut v = vec![kind];
         v.extend_from_slice(&(payload.len() as u16).to_le_bytes());
         v.extend_from_slice(payload);
         v
@@ -113,7 +109,7 @@ mod tests {
 
     #[test]
     fn reads_a_token_frame() {
-        let wire = encode(TYPE_TOKEN, b"hello");
+        let wire = encode(tag::TOKEN, b"hello");
         let mut buf = Vec::new();
         let kind = read_frame(&mut &wire[..], &mut buf).unwrap();
         assert_eq!(kind, FrameKind::Token);
@@ -123,10 +119,10 @@ mod tests {
     #[test]
     fn reads_a_stream_of_frames_in_order() {
         let mut wire = Vec::new();
-        wire.extend(encode(TYPE_META, b"qwen3"));
-        wire.extend(encode(TYPE_TOKEN, b"foo"));
-        wire.extend(encode(TYPE_TOKEN, b" bar"));
-        wire.extend(encode(TYPE_DONE, &10u64.to_le_bytes()));
+        wire.extend(encode(tag::META, b"qwen3"));
+        wire.extend(encode(tag::TOKEN, b"foo"));
+        wire.extend(encode(tag::TOKEN, b" bar"));
+        wire.extend(encode(tag::DONE, &10u64.to_le_bytes()));
 
         let mut r = &wire[..];
         let mut buf = Vec::new();
@@ -146,7 +142,7 @@ mod tests {
 
     #[test]
     fn an_empty_payload_is_a_valid_frame() {
-        let wire = encode(TYPE_TOKEN, b"");
+        let wire = encode(tag::TOKEN, b"");
         let mut buf = vec![0xAA; 16]; // scratch must be cleared, not appended to
         assert_eq!(read_frame(&mut &wire[..], &mut buf).unwrap(), FrameKind::Token);
         assert!(buf.is_empty());
@@ -154,7 +150,7 @@ mod tests {
 
     #[test]
     fn a_truncated_payload_is_a_transport_error() {
-        let mut wire = encode(TYPE_TOKEN, b"hello");
+        let mut wire = encode(tag::TOKEN, b"hello");
         wire.truncate(5); // header plus two of five payload bytes
         let mut buf = Vec::new();
         assert!(matches!(

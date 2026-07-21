@@ -17,7 +17,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Wire frame types, matching jade-protocol/src/response.rs. */
+/* Wire frame types, matching ovata-infer-protocol's response::tag. The
+ * Rust implementation of these entry points takes them from that crate;
+ * these copies exist only so C callers can name them. */
 #define JRT_FRAME_TOKEN 0x01
 #define JRT_FRAME_DONE  0x02
 #define JRT_FRAME_ERROR 0x03

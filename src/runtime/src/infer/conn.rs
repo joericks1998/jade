@@ -8,7 +8,7 @@
 //! requests on one fd would read each other's frames. Spawned Jade tasks share
 //! this connection and queue behind the lock.
 
-use std::io::{Read, Write};
+use std::io::Write;
 use std::os::unix::net::UnixStream;
 use std::sync::{Mutex, OnceLock};
 
@@ -223,6 +223,7 @@ impl Conn {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
     use std::os::unix::net::UnixListener;
 
     fn encode(tag: u8, payload: &[u8]) -> Vec<u8> {
@@ -259,10 +260,10 @@ mod tests {
     #[test]
     fn accumulates_tokens_and_records_the_model() {
         let mut wire = Vec::new();
-        wire.extend(encode(frame::TYPE_META, b"qwen3-coder"));
-        wire.extend(encode(frame::TYPE_TOKEN, b"4"));
-        wire.extend(encode(frame::TYPE_TOKEN, b"2"));
-        wire.extend(encode(frame::TYPE_DONE, &99u64.to_le_bytes()));
+        wire.extend(encode(ovata_infer_protocol::response::tag::META, b"qwen3-coder"));
+        wire.extend(encode(ovata_infer_protocol::response::tag::TOKEN, b"4"));
+        wire.extend(encode(ovata_infer_protocol::response::tag::TOKEN, b"2"));
+        wire.extend(encode(ovata_infer_protocol::response::tag::DONE, &99u64.to_le_bytes()));
         let (conn, server) = serve(wire);
 
         let resp = conn.request(br#"{"prompt":"x"}"#, Mode::Tokens, None).unwrap();
@@ -278,9 +279,9 @@ mod tests {
     #[test]
     fn on_token_fires_per_token_in_order() {
         let mut wire = Vec::new();
-        wire.extend(encode(frame::TYPE_TOKEN, b"a"));
-        wire.extend(encode(frame::TYPE_TOKEN, b"b"));
-        wire.extend(encode(frame::TYPE_DONE, &0u64.to_le_bytes()));
+        wire.extend(encode(ovata_infer_protocol::response::tag::TOKEN, b"a"));
+        wire.extend(encode(ovata_infer_protocol::response::tag::TOKEN, b"b"));
+        wire.extend(encode(ovata_infer_protocol::response::tag::DONE, &0u64.to_le_bytes()));
         let (conn, server) = serve(wire);
 
         let mut seen: Vec<String> = Vec::new();
@@ -297,10 +298,10 @@ mod tests {
     #[test]
     fn json_mode_ignores_tokens_and_token_mode_ignores_json() {
         let mut wire = Vec::new();
-        wire.extend(encode(frame::TYPE_TOKEN, b"noise"));
-        wire.extend(encode(frame::TYPE_JSON, br#"{"status":"ok"}"#));
-        wire.extend(encode(frame::TYPE_TOKEN, b"more noise"));
-        wire.extend(encode(frame::TYPE_DONE, &0u64.to_le_bytes()));
+        wire.extend(encode(ovata_infer_protocol::response::tag::TOKEN, b"noise"));
+        wire.extend(encode(ovata_infer_protocol::response::tag::JSON, br#"{"status":"ok"}"#));
+        wire.extend(encode(ovata_infer_protocol::response::tag::TOKEN, b"more noise"));
+        wire.extend(encode(ovata_infer_protocol::response::tag::DONE, &0u64.to_le_bytes()));
         let (conn, server) = serve(wire.clone());
 
         let resp = conn.request(b"{}", Mode::Json, None).unwrap();
@@ -315,7 +316,7 @@ mod tests {
 
     #[test]
     fn an_error_frame_becomes_a_daemon_error() {
-        let (conn, server) = serve(encode(frame::TYPE_ERROR, b"model not loaded"));
+        let (conn, server) = serve(encode(ovata_infer_protocol::response::tag::ERROR, b"model not loaded"));
         let err = conn.request(b"{}", Mode::Tokens, None).unwrap_err();
         assert!(matches!(err, InferError::Daemon(ref m) if m == "model not loaded"));
         server.join().unwrap();
@@ -325,7 +326,7 @@ mod tests {
     /// would otherwise read the dead connection instead of reconnecting.
     #[test]
     fn a_failed_exchange_drops_the_connection() {
-        let (conn, server) = serve(encode(frame::TYPE_ERROR, b"boom"));
+        let (conn, server) = serve(encode(ovata_infer_protocol::response::tag::ERROR, b"boom"));
         assert!(conn.request(b"{}", Mode::Tokens, None).is_err());
         assert!(
             conn.stream.lock().unwrap().is_none(),

@@ -13,9 +13,10 @@
 use std::sync::{Arc, Mutex};
 
 use jade_runtime::infer::{conn::Conn, InferError, Mode};
+use ovata_infer_protocol::InferenceRequest;
 
 use crate::frontend::error::{JadeError, Result, Span};
-use super::{InferenceBackend, InferenceRequest, InferenceResponse};
+use super::{InferenceBackend, InferenceResponse};
 
 pub(crate) fn sock_path() -> String {
     jade_runtime::infer::sock_path()
@@ -136,10 +137,7 @@ impl JadedBackend {
         span: Span,
         reported_model: Arc<Mutex<Option<String>>>,
     ) -> Result<InferenceResponse> {
-        let body = encode_request(&req).map_err(|e| JadeError::InferenceError {
-            message: format!("failed to encode inference request: {e}"),
-            span,
-        })?;
+        let body = encode_request(&req, "inference", span)?;
 
         let resp = Self::exchange(sock_path, &body, Mode::Tokens, span, None, Some(&reported_model))?;
 
@@ -159,10 +157,7 @@ impl JadedBackend {
         tx: tokio::sync::mpsc::Sender<String>,
         reported_model: Arc<Mutex<Option<String>>>,
     ) -> Result<i64> {
-        let body = encode_request(&req).map_err(|e| JadeError::InferenceError {
-            message: format!("failed to encode inference request: {e}"),
-            span,
-        })?;
+        let body = encode_request(&req, "inference", span)?;
 
         // `blocking_send` is safe here: this runs on a dedicated blocking thread
         // via spawn_blocking. A dropped receiver (cancelled caller) is ignored.
@@ -181,35 +176,32 @@ impl JadedBackend {
         Ok(resp.tokens_used as i64)
     }
 
+    /// Tokenize the prompt without generating.
     fn count_tokens_blocking(sock_path: &str, prompt: &str, span: Span) -> Result<i64> {
-        let body = control_request(serde_json::json!({
-            "prompt": prompt,
-            "model": "",
-            "max_tokens": 0u32,
-            "count_only": true,
-        }), "count_tokens", span)?;
+        let body = encode_request(&InferenceRequest {
+            prompt: prompt.to_owned(),
+            count_only: true,
+            ..Default::default()
+        }, "count_tokens", span)?;
         Ok(Self::exchange(sock_path, &body, Mode::Tokens, span, None, None)?.tokens_used as i64)
     }
 
+    /// The daemon-wide cumulative token counter, without touching the model.
     fn total_tokens_blocking(sock_path: &str, span: Span) -> Result<i64> {
-        let body = control_request(serde_json::json!({
-            "prompt": "",
-            "model": "",
-            "max_tokens": 0u32,
-            "stats_only": true,
-        }), "total_tokens", span)?;
+        let body = encode_request(&InferenceRequest {
+            stats_only: true,
+            ..Default::default()
+        }, "total_tokens", span)?;
         Ok(Self::exchange(sock_path, &body, Mode::Tokens, span, None, None)?.tokens_used as i64)
     }
 
     /// A daemon health snapshot (`health_only`), accumulated from `0x05 JSON`
     /// frames. See `design/llm-package-1.1.12.md` §2.3.
     fn health_blocking(sock_path: &str, span: Span) -> Result<serde_json::Value> {
-        let body = control_request(serde_json::json!({
-            "prompt": "",
-            "model": "",
-            "max_tokens": 0u32,
-            "health_only": true,
-        }), "health", span)?;
+        let body = encode_request(&InferenceRequest {
+            health_only: true,
+            ..Default::default()
+        }, "health", span)?;
         let resp = Self::exchange(sock_path, &body, Mode::Json, span, None, None)?;
         serde_json::from_slice(&resp.body).map_err(|e| JadeError::InferenceError {
             message: format!("daemon health response was not valid JSON: {e}"),
@@ -248,50 +240,17 @@ fn trim_partial_stop_anchor(text: &mut String, req: &InferenceRequest) {
 
 // ── Wire protocol ────────────────────────────────────────────────────────────
 
-/// Encode the JSON body of an inference request.
+/// Encode the JSON body of a request.
 ///
 /// The 4-byte length prefix is not added here — framing belongs to the
-/// transport, which adds it for every request including the control ones below.
+/// transport, which adds it for every request.
 ///
-/// Field order is stable (serde serializes in declaration order), which is what
-/// the golden tests pin.
-pub(crate) fn encode_request(req: &InferenceRequest) -> std::result::Result<Vec<u8>, serde_json::Error> {
-    #[derive(serde::Serialize)]
-    struct Wire<'a> {
-        prompt: &'a str,
-        model: &'a str,
-        max_tokens: u32,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        grammar: Option<&'a str>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        anchor: Option<&'a str>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        stop_anchor: Option<&'a str>,
-        // Always emitted (the daemon reads them with serde defaults, but being
-        // explicit keeps the wire unambiguous and the golden test meaningful).
-        keep_anchors: bool,
-        trust: u8,
-    }
-    serde_json::to_vec(&Wire {
-        prompt: &req.prompt,
-        model: &req.model,
-        max_tokens: req.max_tokens,
-        grammar: req.grammar.as_deref(),
-        anchor: req.anchor.as_deref(),
-        stop_anchor: req.stop_anchor.as_deref(),
-        keep_anchors: req.keep_anchors,
-        trust: req.trust,
-    })
-}
-
-/// Encode one of the daemon's control requests (`count_only`, `stats_only`,
-/// `health_only`).
-///
-/// These are built ad hoc because jadelang's [`InferenceRequest`] does not model
-/// those flags — the daemon's own `jade-protocol::InferenceRequest` does, and
-/// adopting it collapses these three into ordinary requests.
-fn control_request(json: serde_json::Value, what: &str, span: Span) -> Result<Vec<u8>> {
-    serde_json::to_vec(&json).map_err(|e| JadeError::InferenceError {
+/// This was a private `Wire` struct that omitted four of the daemon's fields, so
+/// the `count_only`, `stats_only`, and `health_only` requests were built as
+/// ad-hoc `json!` values that went around it. One encoder now, and it is the
+/// one the daemon itself decodes with.
+fn encode_request(req: &InferenceRequest, what: &str, span: Span) -> Result<Vec<u8>> {
+    req.encode_body().map_err(|e| JadeError::InferenceError {
         message: format!("failed to encode {what} request: {e}"),
         span,
     })

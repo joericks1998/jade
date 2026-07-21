@@ -13,37 +13,18 @@ pub mod pkg;
 #[cfg(test)]
 mod tests;
 
-/// A request sent to an inference backend.
+/// A request sent to an inference backend — the wire type itself.
 ///
-/// Mirrors the daemon's `jade-protocol::InferenceRequest` field-for-field (the
-/// socket is the contract — see `design/llm-package-1.1.12.md`). `Default` lets
-/// construction sites set only the fields they care about and lets the wire
-/// struct grow without churning every call site.
-#[derive(Clone, Default)]
-pub struct InferenceRequest {
-    pub prompt: String,
-    pub model: String,
-    pub max_tokens: u32,
-    /// GBNF grammar string for constrained decoding; `None` = unconstrained.
-    /// Passed through to the inference daemon; ignored by API-based backends.
-    pub grammar: Option<String>,
-    /// Anchor string; if set, grammar enforcement begins only after the model emits this string.
-    /// Passed through to the inference daemon; ignored by API-based backends.
-    pub anchor: Option<String>,
-    /// Stop anchor; if set, generation stops and the stop string is stripped when it appears.
-    /// Passed through to the inference daemon; ignored by API-based backends.
-    pub stop_anchor: Option<String>,
-    /// When true, the daemon makes the `stop_anchor` boundary observable in-band
-    /// (it is not stripped, and is synthesized at span close if the model retired
-    /// the grammar without emitting it) — letting a client delimit an anchored
-    /// span by pure string parsing. `false` = legacy strip behavior.
-    /// Passed through to the inference daemon; ignored by API-based backends.
-    pub keep_anchors: bool,
-    /// Prompt provenance: `0` TRUSTED (program-author-controlled), `1` TAINTED
-    /// (derived from an LLM, network, or other untrusted source). The daemon logs
-    /// it; runtime enforcement lives in the C runtime. Defaults to TRUSTED.
-    pub trust: u8,
-}
+/// This was a hand-written struct whose doc comment claimed it "mirrors the
+/// daemon's `jade-protocol::InferenceRequest` field-for-field". It did not: it
+/// was missing `count_only`, `stats_only`, `health_only`, and `rlm`, so the
+/// three operations needing those flags built their JSON ad hoc and bypassed
+/// the struct entirely — which is exactly the drift the comment denied.
+///
+/// The protocol now lives in one repository that both this language and the
+/// inference daemon depend on, so there is nothing left to keep in sync. Fields
+/// are documented on the type itself.
+pub use ovata_infer_protocol::InferenceRequest;
 
 /// A successful response from an inference backend.
 pub struct InferenceResponse {
@@ -76,7 +57,7 @@ pub trait InferenceBackend: Send + Sync {
     /// `design/llm-package-1.1.12.md` §2.3 — `{status, model, model_loaded, …}`).
     /// Backends that aren't the jade daemon synthesize a minimal `ok` snapshot.
     async fn health(&self, _span: Span) -> Result<serde_json::Value> {
-        // Same field set as the daemon's `jade-protocol::Health` so `llm.health()`
+        // Same field set as the shared `ovata_infer_protocol::Health` so `llm.health()`
         // returns a consistent dict shape regardless of backend.
         Ok(serde_json::json!({
             "status": "ok",
