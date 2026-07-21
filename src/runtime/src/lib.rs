@@ -74,6 +74,7 @@ pub mod fsf;
 pub mod gc;
 pub mod grammarf;
 pub mod heap;
+pub mod infer;
 pub mod httpf;
 pub mod jsonf;
 pub mod mathf;

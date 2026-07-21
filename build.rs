@@ -3,8 +3,9 @@
 //! Emitted Jade binaries link against this archive (`-lJadeRuntime`). The
 //! runtime is split into a platform-agnostic core (`common.c`) plus a swappable
 //! platform backend that supplies concurrency + process-exit: we build `posix.c`
-//! (the host backend) here. `infer` + `ipc` add the LLM inference path (talks to
-//! the inference daemon over a Unix socket at runtime).
+//! (the host backend) here. `infer` adds the LLM inference path; the socket
+//! transport beneath it is Rust, in `jade-runtime`'s `infer` module, shared with
+//! the VM — `ipc/` keeps only the header declaring those entry points.
 //!
 //! The archive lands in `$OUT_DIR`; we surface that directory to the daemon via
 //! the `JADE_RT_LIB_DIR` compile-time env so it can point the linker at it.
@@ -45,9 +46,7 @@ fn main() {
         .file(rt.join("native.c"))
         .file(rt.join("posix.c"))
         .file(rt.join("infer/infer.c"))
-        .file(rt.join("infer/tool_call.c"))
-        .file(rt.join("ipc/ipc.c"))
-        // Stdlib leaf modules, one folder per std:: module. Module .c files
+        .file(rt.join("infer/tool_call.c"))        // Stdlib leaf modules, one folder per std:: module. Module .c files
         // include their headers as "<mod>/<mod>.h" (resolved via -I rt), so no
         // per-folder include is added — this keeps libc's <time.h> from being
         // shadowed by time/time.h.

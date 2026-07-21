@@ -4,7 +4,13 @@
  * open for the program's lifetime. Requests are serialized by an internal
  * mutex; concurrent calls from spawned tasks are safe. Any transport-level
  * failure (connect, write, read, daemon ERROR frame) calls exit(1) with a
- * stderr message — the runtime never returns partial data. */
+ * stderr message — the runtime never returns partial data.
+ *
+ * These entry points are IMPLEMENTED IN RUST, in jade-runtime's `infer`
+ * module (linked via libjade_runtime.a), not in a sibling ipc.c. The C copy
+ * that used to live here reimplemented the same wire protocol as the VM's
+ * client, and the two had drifted — see that module's header for what
+ * differed. This header remains as the C-side declaration of the ABI. */
 
 #pragma once
 
