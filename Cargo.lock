@@ -756,8 +756,8 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "ovata-infer-protocol"
-version = "0.1.0"
-source = "git+https://github.com/joericks1998/ovata-infer-protocol?tag=v0.1.0#cd0cf9b808b8990fc25f6b4370e9f3389096e0c9"
+version = "0.2.0"
+source = "git+https://github.com/joericks1998/ovata-infer-protocol?tag=v0.2.0#3f8ca3751107ce1de95b4af4f2fd27aeafdfa8ef"
 dependencies = [
  "serde",
  "serde_json",
