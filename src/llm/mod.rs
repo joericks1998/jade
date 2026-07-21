@@ -64,7 +64,12 @@ pub trait InferenceBackend: Send + Sync {
             "model": self.reported_model_name().unwrap_or_default(),
             "model_loaded": true,
             "uptime_secs": 0,
-            "protocol_version": 0,
+            // The version this build speaks, taken from the protocol crate — the
+            // daemon fills the same field the same way. It was the literal `0`
+            // here, which is not a version any build ever spoke; it made the one
+            // field that exists to expose a version mismatch report a value that
+            // could never match anything.
+            "protocol_version": ovata_infer_protocol::PROTOCOL_VERSION,
         }))
     }
 
