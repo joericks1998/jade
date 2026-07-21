@@ -73,14 +73,36 @@ esac
 tar -xzf "$TMP_DIR/$ARCHIVE" -C "$TMP_DIR"
 chmod +x "$TMP_DIR/$BINARY"
 
-if [ -w "$INSTALL_DIR" ]; then
-  mv "$TMP_DIR/$BINARY" "$INSTALL_DIR/$BINARY"
-else
-  sudo mv "$TMP_DIR/$BINARY" "$INSTALL_DIR/$BINARY"
+# `jade build` links two runtime archives into every executable it emits, so
+# they are part of the toolchain, not optional extras. jade resolves them
+# relative to its own location — <prefix>/bin/jade looks in <prefix>/lib/jade —
+# so the two must be installed together. (Tarballs from before this layout
+# carry only the binary; the `-d` check keeps this script working with them,
+# in which case `jade build` needs JADE_RT_LIB/JADE_RUST_RT set by hand.)
+LIB_DIR="$(dirname "$INSTALL_DIR")/lib/jade"
+
+install_file() {
+  src="$1"; dest="$2"; dest_dir="$(dirname "$dest")"
+  if [ -w "$dest_dir" ] 2>/dev/null || [ ! -e "$dest_dir" ] && mkdir -p "$dest_dir" 2>/dev/null; then
+    mv "$src" "$dest"
+  else
+    sudo mkdir -p "$dest_dir"
+    sudo mv "$src" "$dest"
+  fi
+}
+
+install_file "$TMP_DIR/$BINARY" "$INSTALL_DIR/$BINARY"
+
+if [ -d "$TMP_DIR/lib" ]; then
+  for archive in "$TMP_DIR"/lib/*.a; do
+    [ -e "$archive" ] || continue
+    install_file "$archive" "$LIB_DIR/$(basename "$archive")"
+  done
 fi
 
 echo ""
 echo "jade $TAG installed to $INSTALL_DIR/$BINARY"
+[ -d "$LIB_DIR" ] && echo "runtime archives installed to $LIB_DIR"
 echo ""
 
 # Offer to configure LLM credentials.

@@ -4,7 +4,7 @@
 
 use jade_runtime::coll::DictObj;
 use super::*;
-use crate::compiler::vm::VmValue;
+use crate::vm::VmValue;
 
 // ── PrimType ──────────────────────────────────────────────────────────────────
 

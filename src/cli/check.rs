@@ -5,6 +5,18 @@ use crate::{
     frontend::{lexer, parser},
 };
 
+/// Checks that run after type inference, on both the cached and uncached paths.
+///
+/// Currently just `emit`, which is where shared-mutation-across-tasks is
+/// rejected: the mutation opcodes (`SetGlobal`/`SetIndex`/`SetField`) only exist
+/// in bytecode, because the AST's assignment expression cannot distinguish
+/// rebinding a local from writing through a reference. Emitting here keeps
+/// `jade check` an honest predictor of whether `jade run`/`jade build` will
+/// accept the file, which the `*_error.jde` fixture convention depends on.
+fn post_tir_checks(tprogram: &crate::compiler::tir::TProgram) -> Result<(), String> {
+    crate::compiler::emit::emit(tprogram.clone()).map(|_| ()).map_err(|e| e.to_string())
+}
+
 /// Run `jade check <path>`: type-check a source file without executing it.
 ///
 /// Cache strategy:
@@ -22,9 +34,17 @@ pub fn run_check(path: &str) {
 
     let hash = crate::cache::file_hash(Path::new(path));
 
-    // L2: if TIR is cached this file already passed a previous check run.
+    // L2: cached TIR means lex + parse + infer already succeeded for this exact
+    // source. It does NOT mean the file still passes: the cache key is the file
+    // hash, so an entry written before a new check existed would skip that check
+    // forever. Re-run the post-TIR checks against the cached tree rather than
+    // returning early — they are cheap next to the stages the cache saves.
     if let Some(ref h) = hash {
-        if crate::cache::read_tir_cache(h).is_some() {
+        if let Some(tprogram) = crate::cache::read_tir_cache(h) {
+            if let Err(e) = post_tir_checks(&tprogram) {
+                eprintln!("{}: {}", path, e);
+                process::exit(1);
+            }
             println!("{}: ok", path);
             return;
         }
@@ -65,6 +85,11 @@ pub fn run_check(path: &str) {
         }
     };
 
+    if let Err(e) = post_tir_checks(&tprogram) {
+        eprintln!("{}: {}", path, e);
+        process::exit(1);
+    }
+
     // Write L2 cache only on success.
     if let Some(ref h) = hash {
         crate::cache::write_tir_cache(h, path, &tprogram);
@@ -83,7 +108,8 @@ mod tests {
     fn check_source(source: &str) -> Result<(), String> {
         let tokens = lexer::tokenize(source).map_err(|e| format!("lexer error: {e}"))?;
         let program = parser::parse(tokens).map_err(|e| format!("parse error: {e}"))?;
-        type_infer::infer(program).map_err(|e| format!("{e}"))?;
+        let tprogram = type_infer::infer(program).map_err(|e| format!("{e}"))?;
+        crate::compiler::emit::emit(tprogram).map_err(|e| format!("{e}"))?;
         Ok(())
     }
 

@@ -1,14 +1,25 @@
 use crate::{
-    compiler::{tir::JadeType, type_infer::TypeContext, vm::VmValue},
+    compiler::{tir::JadeType, type_infer::TypeContext}, vm::VmValue,
     frontend::error::{JadeError, Result, Span},
 };
 
 use crate::builtins::{BuiltinFn, Package};
+use jade_runtime::trust::JStr;
 
 #[cfg(test)]
 mod tests;
 
 const ZERO: Span = Span { line: 0, col: 0 };
+
+/// The trust of a string argument, so a pure path transform can carry it
+/// through: `path.abs(tainted)` is still tainted — the characters came from the
+/// same place.
+fn str_trust(args: &[VmValue], pos: usize) -> u8 {
+    match args.get(pos) {
+        Some(VmValue::Str(s)) => s.trust(),
+        _ => jade_runtime::trust::TRUSTED,
+    }
+}
 
 fn require_str<'a>(args: &'a [VmValue], pos: usize, fn_name: &str) -> Result<&'a str> {
     match args.get(pos) {
@@ -27,7 +38,7 @@ fn path_join(args: &[VmValue]) -> Result<VmValue> {
     for i in 0..args.len() {
         segs.push(require_str(args, i, "path.join")?);
     }
-    Ok(VmValue::Str(jade_runtime::pathf::join(&segs)))
+    Ok(VmValue::Str(jade_runtime::pathf::join(&segs).into()))
 }
 
 /// `path.basename(p)` — last component of the path (filename + extension).
@@ -36,7 +47,7 @@ fn path_basename(args: &[VmValue]) -> Result<VmValue> {
         return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: ZERO });
     }
     let p = require_str(args, 0, "path.basename")?;
-    Ok(VmValue::Str(jade_runtime::pathf::basename(p)))
+    Ok(VmValue::Str(jade_runtime::pathf::basename(p).into()))
 }
 
 /// `path.dirname(p)` — parent directory. Returns `"."` for bare filenames.
@@ -45,7 +56,7 @@ fn path_dirname(args: &[VmValue]) -> Result<VmValue> {
         return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: ZERO });
     }
     let p = require_str(args, 0, "path.dirname")?;
-    Ok(VmValue::Str(jade_runtime::pathf::dirname(p)))
+    Ok(VmValue::Str(jade_runtime::pathf::dirname(p).into()))
 }
 
 /// `path.ext(p)` — file extension including the dot (e.g. `".rs"`), or nil.
@@ -55,7 +66,7 @@ fn path_ext(args: &[VmValue]) -> Result<VmValue> {
     }
     let p = require_str(args, 0, "path.ext")?;
     Ok(match jade_runtime::pathf::ext(p) {
-        Some(e) => VmValue::Str(e),
+        Some(e) => VmValue::Str(e.into()),
         None => VmValue::Nil,
     })
 }
@@ -66,7 +77,7 @@ fn path_stem(args: &[VmValue]) -> Result<VmValue> {
         return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: ZERO });
     }
     let p = require_str(args, 0, "path.stem")?;
-    Ok(VmValue::Str(jade_runtime::pathf::stem(p)))
+    Ok(VmValue::Str(jade_runtime::pathf::stem(p).into()))
 }
 
 /// `path.abs(p)` — absolute path (does not resolve symlinks, path need not exist).
@@ -75,8 +86,9 @@ fn path_abs(args: &[VmValue]) -> Result<VmValue> {
         return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: ZERO });
     }
     let p = require_str(args, 0, "path.abs")?;
+    let trust = str_trust(args, 0);
     jade_runtime::pathf::abs(p)
-        .map(VmValue::Str)
+        .map(|s| VmValue::Str(JStr::with_trust(s, trust)))
         .map_err(|e| JadeError::IoError { message: format!("path.abs: {}", e), span: ZERO })
 }
 

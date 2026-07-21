@@ -63,7 +63,7 @@ fn sleep_tiny_duration_returns_nil() {
 
 #[test]
 fn sleep_type_error() {
-    let err = time_sleep(&[VmValue::Str("x".to_string())]).unwrap_err();
+    let err = time_sleep(&[VmValue::Str("x".to_string().into())]).unwrap_err();
     assert!(matches!(err, JadeError::TypeError { .. }));
 }
 

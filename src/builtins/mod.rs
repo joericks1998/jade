@@ -9,7 +9,7 @@ use jade_runtime::coll::{ArrayObj, DictObj};
 use parking_lot::Mutex;
 
 use crate::{
-    compiler::{type_infer::TypeContext, vm::{NativeFnId, VmValue}},
+    compiler::{type_infer::TypeContext}, vm::{NativeFnId, VmValue},
     frontend::error::Result,
 };
 

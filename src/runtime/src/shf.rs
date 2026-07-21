@@ -13,7 +13,7 @@ use std::cell::Cell;
 use std::process::Command;
 
 use crate::string::{self, TAINTED, TRUSTED};
-use crate::sys::strlen;
+use crate::cstr;
 
 // ── Neutral cores (used by both engines) ──────────────────────────────────────
 
@@ -65,30 +65,12 @@ thread_local! {
     static PENDING: Cell<*mut c_char> = const { Cell::new(core::ptr::null_mut()) };
 }
 
-unsafe fn mk_str(bytes: &[u8], trust: u8) -> *mut c_char {
-    let out = string::new(bytes.len(), trust);
-    if !bytes.is_empty() {
-        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), out, bytes.len()) };
-    }
-    out as *mut c_char
-}
-
-unsafe fn cstr(p: *const c_char) -> &'static str {
-    if p.is_null() {
-        return "";
-    }
-    unsafe {
-        let n = strlen(p as *const u8);
-        core::str::from_utf8(core::slice::from_raw_parts(p as *const u8, n)).unwrap_or("")
-    }
-}
-
 fn set_err(msg: &str) {
-    let s = unsafe { mk_str(msg.as_bytes(), TRUSTED) };
+    let s = cstr::emit(msg.as_bytes(), TRUSTED);
     PENDING.with(|p| {
         let old = p.replace(s);
         if !old.is_null() {
-            unsafe { string::free_str(old as *mut u8) };
+            string::free_str(old as *mut u8);
         }
     });
 }
@@ -103,11 +85,11 @@ pub extern "C" fn jrt_sh_take_error() -> *mut c_char {
 /// error). Returns trimmed stdout as a TAINTED string; on error, "" + pending.
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_sh_exec_impl(cmd: *const c_char) -> *mut c_char {
-    match exec(unsafe { cstr(cmd) }) {
-        Ok(s) => unsafe { mk_str(s.as_bytes(), TAINTED) },
+    match exec(unsafe { cstr::borrow(cmd) }) {
+        Ok(s) => cstr::emit(s.as_bytes(), TAINTED),
         Err(m) => {
             set_err(&m);
-            unsafe { mk_str(b"", TAINTED) }
+            cstr::emit(b"", TAINTED)
         }
     }
 }
@@ -115,7 +97,7 @@ pub extern "C" fn jrt_sh_exec_impl(cmd: *const c_char) -> *mut c_char {
 /// `sh.run` core — exit code, or -1 + pending on spawn failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_sh_run_impl(cmd: *const c_char) -> i64 {
-    match run(unsafe { cstr(cmd) }) {
+    match run(unsafe { cstr::borrow(cmd) }) {
         Ok(c) => c,
         Err(m) => {
             set_err(&m);

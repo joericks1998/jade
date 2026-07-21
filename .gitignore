@@ -10,6 +10,11 @@ __pycache__/
 # ignore test text files
 *.txt
 
+# ...but an example's canned LLM script is part of the example, not scratch.
+# Without these the stand-in daemon falls back to its default reply, every typed
+# deref fails to coerce, and the parity gate fails in CI while passing locally.
+!examples/**/responses.txt
+
 */.DS_Store
 
 

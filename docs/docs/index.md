@@ -27,7 +27,7 @@ JADE_INSTALL_DIR=~/.local/bin curl -fsSL https://jadelang.org/install.sh | sh
 
 ### Windows
 
-Jade does not support Windows. The toolchain is built on Unix domain sockets — `jade build` and the `jade` inference provider both talk to local daemons that way — so there is no native Windows build.
+Jade does not support Windows. The `jade` inference provider talks to a local daemon over a Unix domain socket, native packages are loaded with `dlopen`, and the C runtime is written against POSIX — so there is no native Windows build.
 
 Use [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install) and follow the Linux instructions above.
 

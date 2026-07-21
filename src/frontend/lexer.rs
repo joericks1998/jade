@@ -84,9 +84,6 @@ pub enum TokenKind {
     LtEq,
     GtEq,
 
-    /// `->` (return type annotation in interface method signatures)
-    Arrow,
-
     // Assignment
     Equals,
 
@@ -165,7 +162,6 @@ pub fn token_kind_desc(kind: &TokenKind) -> String {
         TokenKind::Gt            => "`>`".to_string(),
         TokenKind::LtEq          => "`<=`".to_string(),
         TokenKind::GtEq          => "`>=`".to_string(),
-        TokenKind::Arrow         => "`->`".to_string(),
         TokenKind::Equals        => "`=`".to_string(),
         TokenKind::Comma         => "`,`".to_string(),
         TokenKind::Semicolon     => "`;`".to_string(),
@@ -462,7 +458,16 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
                         span: Span { line, col: start_col },
                     });
                 } else {
-                    let value: i64 = num_str.parse().map_err(|_| JadeError::LiteralOverflow {
+                    // Jade integers are 63-bit: the compiled representation
+                    // spends one bit on the value tag, and the language follows
+                    // it so both engines accept the same programs. Parsing as
+                    // i64 and then bounding gives one message for "not a
+                    // number" and "too large" alike.
+                    let value: i64 = num_str
+                        .parse()
+                        .ok()
+                        .filter(|v| jade_runtime::value::JadeValue::int_fits(*v))
+                        .ok_or(JadeError::LiteralOverflow {
                         span: Span { line, col: start_col },
                     })?;
                     tokens.push(Token {
@@ -530,15 +535,7 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
 
             // Unambiguous single-character tokens
             '+' => { tokens.push(Token { kind: TokenKind::Plus,    span: Span { line, col } }); col += 1; i += 1; }
-            '-' => {
-                if chars.get(i + 1) == Some(&'>') {
-                    tokens.push(Token { kind: TokenKind::Arrow, span: Span { line, col } });
-                    col += 2; i += 2;
-                } else {
-                    tokens.push(Token { kind: TokenKind::Minus, span: Span { line, col } });
-                    col += 1; i += 1;
-                }
-            }
+            '-' => { tokens.push(Token { kind: TokenKind::Minus,   span: Span { line, col } }); col += 1; i += 1; }
             '*' => { tokens.push(Token { kind: TokenKind::Star,    span: Span { line, col } }); col += 1; i += 1; }
             // `/` or `//` (line comment)
             '/' => {

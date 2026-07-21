@@ -1,10 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{
-    compiler::{
-        bytecode::{Chunk, CompiledFn, FStrPart, Instr, Reg},
-        tir::{JadeType, TExpr, TExprKind, TFStrPart, TProgram, TStmt, TCatchArm},
-    },
+    compiler::{tir::{JadeType, TExpr, TExprKind, TFStrPart, TProgram, TStmt, TCatchArm}}, bytecode::{Chunk, CompiledFn, FStrPart, Instr, Reg},
     frontend::{
         ast::{BinOpKind, StructFieldDef, UnaryOpKind},
         error::{Result, Span},
@@ -23,7 +20,7 @@ pub struct CompiledProgram {
     /// field-access method fallback).
     pub struct_defs: HashMap<String, Vec<StructFieldDef>>,
     /// Decorator function names registered on each struct type.
-    pub struct_decorators: HashMap<String, Vec<(String, Vec<crate::compiler::vm::VmValue>)>>,
+    pub struct_decorators: HashMap<String, Vec<(String, Vec<crate::vm::VmValue>)>>,
     /// Compiled extend-block methods: `type_name → method_name → CompiledFn`.
     pub extend_methods: HashMap<String, HashMap<String, Arc<CompiledFn>>>,
     /// `@route("field")` on extend blocks: type_name → field_name to read for routing.
@@ -35,7 +32,7 @@ pub struct CompiledProgram {
 /// Shared context threaded through the whole compilation.
 struct EmitCtx {
     struct_defs: HashMap<String, Vec<StructFieldDef>>,
-    struct_decorators: HashMap<String, Vec<(String, Vec<crate::compiler::vm::VmValue>)>>,
+    struct_decorators: HashMap<String, Vec<(String, Vec<crate::vm::VmValue>)>>,
     extend_methods: HashMap<String, HashMap<String, Arc<CompiledFn>>>,
     route_configs: HashMap<String, String>,
     /// Counter for generating unique closure names (`__closure_0__`, etc.).
@@ -128,14 +125,14 @@ const NO_SPAN: Span = Span { line: 0, col: 0 };
 fn eval_literal_expr(
     expr: &TExpr,
     span: crate::frontend::error::Span,
-) -> Result<crate::compiler::vm::VmValue> {
+) -> Result<crate::vm::VmValue> {
     use crate::compiler::tir::TExprKind;
-    use crate::compiler::vm::VmValue;
+    use crate::vm::VmValue;
     match &expr.kind {
         TExprKind::Integer(n)  => Ok(VmValue::Int(*n)),
         TExprKind::Float(f)    => Ok(VmValue::Float(*f)),
         TExprKind::Bool(b)     => Ok(VmValue::Bool(*b)),
-        TExprKind::Str(s)      => Ok(VmValue::Str(s.clone())),
+        TExprKind::Str(s)      => Ok(VmValue::Str(s.clone().into())),
         TExprKind::Identifier(s) if s == "None" || s == "nil" || s == "null" => Ok(VmValue::Nil),
         _ => Err(crate::frontend::error::JadeError::Exception {
             message: "struct decorator arguments must be literals (None, nil, null, numbers, booleans, strings)".to_string(),
@@ -205,6 +202,19 @@ pub fn emit(program: TProgram) -> Result<CompiledProgram> {
     em.chunk.emit(Instr::Halt, NO_SPAN);
 
     let n_slots = em.next_reg;
+
+    // Tasks share one heap with no lock on the payload, so a spawned function
+    // that mutates state the spawner can still reach is a data race. Reject it
+    // here rather than locking every collection or silently deep-copying task
+    // arguments; see `taskcheck` for why this is the right trade.
+    //
+    // This runs post-emit because the mutation opcodes only exist in bytecode:
+    // the AST's assignment expression does not distinguish rebinding a local
+    // from writing through a reference.
+    if let Err(v) = crate::compiler::taskcheck::check(&em.chunk, &ctx.extend_methods) {
+        return Err(crate::frontend::error::JadeError::SharedMutation { task: v.task, what: v.what, span: v.span });
+    }
+
     Ok(CompiledProgram {
         top_n_slots: n_slots,
         top: em.chunk,
@@ -573,17 +583,17 @@ fn emit_fn(
         fn_em.define_local(name);
     }
     // Compile literal defaults — non-literal defaults are unsupported for now.
-    let defaults: Vec<Option<crate::compiler::vm::VmValue>> = params.iter()
+    let defaults: Vec<Option<crate::vm::VmValue>> = params.iter()
         .map(|(_, default)| {
             match default {
                 None => Ok(None),
                 Some(expr) => match &expr.kind {
-                    crate::compiler::tir::TExprKind::Integer(n) => Ok(Some(crate::compiler::vm::VmValue::Int(*n))),
-                    crate::compiler::tir::TExprKind::Float(f)   => Ok(Some(crate::compiler::vm::VmValue::Float(*f))),
-                    crate::compiler::tir::TExprKind::Bool(b)    => Ok(Some(crate::compiler::vm::VmValue::Bool(*b))),
-                    crate::compiler::tir::TExprKind::Str(s)     => Ok(Some(crate::compiler::vm::VmValue::Str(s.clone()))),
+                    crate::compiler::tir::TExprKind::Integer(n) => Ok(Some(crate::vm::VmValue::Int(*n))),
+                    crate::compiler::tir::TExprKind::Float(f)   => Ok(Some(crate::vm::VmValue::Float(*f))),
+                    crate::compiler::tir::TExprKind::Bool(b)    => Ok(Some(crate::vm::VmValue::Bool(*b))),
+                    crate::compiler::tir::TExprKind::Str(s)     => Ok(Some(crate::vm::VmValue::Str(s.clone().into()))),
                     crate::compiler::tir::TExprKind::Identifier(s) if s == "None" || s == "nil" || s == "null" => {
-                        Ok(Some(crate::compiler::vm::VmValue::Nil))
+                        Ok(Some(crate::vm::VmValue::Nil))
                     }
                     _ => Err(crate::frontend::error::JadeError::Exception {
                         message: "default parameter values must be literals (None, nil, null, numbers, booleans, strings)".to_string(),

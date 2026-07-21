@@ -1,9 +1,10 @@
 use crate::{
-    compiler::{tir::JadeType, type_infer::TypeContext, vm::VmValue},
+    compiler::{tir::JadeType, type_infer::TypeContext}, vm::VmValue,
     frontend::error::{JadeError, Result, Span},
 };
 
 use crate::builtins::{BuiltinFn, Package};
+use jade_runtime::trust::JStr;
 
 #[cfg(test)]
 mod tests;
@@ -46,11 +47,11 @@ fn time_local(args: &[VmValue]) -> Result<VmValue> {
     }
     let tz = match &args[0] {
         VmValue::Str(s) => s.clone(),
-        VmValue::Nil    => String::new(),
+        VmValue::Nil    => String::new().into(),
         _ => return Err(JadeError::TypeError { message: "time.local: tz must be str".to_string(), span: ZERO }),
     };
     jade_runtime::timef::local(&tz)
-        .map(VmValue::Str)
+        .map(|s| VmValue::Str(JStr::tainted(s)))
         .map_err(|e| JadeError::IoError {
             message: format!("time.local: could not spawn date: {}", e),
             span: ZERO,

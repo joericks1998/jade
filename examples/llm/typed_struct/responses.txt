@@ -1,0 +1,2 @@
+# Omits both optional fields, so each falls back to its declared default.
+{"name": "Kyoto"}

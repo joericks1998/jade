@@ -37,7 +37,7 @@ jade check program.jde
 
 ## `jade build`
 
-Compile a Jade file to a native binary. The `jade` CLI runs the language frontend (lex → parse → type-infer → typed IR) and hands the typed program to the **build daemon** over a Unix socket at `$HOME/.jade/build.sock`. The daemon performs import resolution, native code generation, and linking. The build daemon must be running, and this subcommand is available on Unix only.
+Compile a Jade file to a native binary. Everything runs in-process: the language frontend (lex → parse → type-infer → typed IR), then import resolution, LLVM code generation, and linking. Unix only.
 
 ```bash
 jade build program.jde
@@ -50,10 +50,12 @@ jade build program.jde --emit ir
 | Flag | Description |
 |------|-------------|
 | `-o`, `--output <PATH>` | Output binary path. Defaults to the input filename without extension. |
-| `--emit ir` | Print the generated IR text (returned by the daemon) to stdout instead of producing a binary. |
+| `--emit ir` | Print the generated LLVM IR to stdout instead of producing a binary. |
+| `--lib` | Build a shared library exporting `jade_pkg_init` — a package other Jade projects can depend on. |
+| `--export <NAME>` | With `--lib`, bind only these functions (repeatable; default: all of them). |
 
 :::note
-Native code generation, the C runtime, and linking live in the out-of-process build daemon, not in the `jade` binary itself. If the daemon is not reachable at `$HOME/.jade/build.sock`, `jade build` reports a build error. Run `jade env` to check daemon reachability (the `build` line reports `reachable` or `not running`).
+Native code generation, the C runtime, and linking are part of the `jade` binary. Building the toolchain from source therefore needs LLVM 18 present (`LLVM_SYS_180_PREFIX`); running a released binary does not.
 :::
 
 ## `jade new` / `jade init`

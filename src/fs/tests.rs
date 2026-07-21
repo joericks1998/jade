@@ -2,7 +2,7 @@ use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 fn s(x: &str) -> VmValue {
-    VmValue::Str(x.to_string())
+    VmValue::Str(x.to_string().into())
 }
 
 // Unique path per call within the process temp dir; auto-cleaned by each test.
@@ -82,7 +82,7 @@ fn mkdir_then_list_dir() {
                 .lock()
                 .iter()
                 .map(|v| match v {
-                    VmValue::Str(s) => s.clone(),
+                    VmValue::Str(s) => s.to_string(),
                     _ => panic!("expected Str entries"),
                 })
                 .collect();

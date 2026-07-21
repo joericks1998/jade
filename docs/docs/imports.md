@@ -81,7 +81,7 @@ files = ["math.jde", "io.jde"]  # optional: allowlist of importable filenames
 A module's **file extension decides how it loads**:
 
 - `.jde` → a Jade source module.
-- `.dylib` / `.so` / `.dll` → a **native** C-ABI shared library (e.g. a Rust crate built as `cdylib`), loaded over the `jade_pkg_init` FFI and bound as a dict of functions. This replaces the old `[native]` section — Jade and native modules now live under one `[lib]` system.
+- `.dylib` / `.so` → a **native** C-ABI shared library (e.g. a Rust crate built as `cdylib`), loaded over the `jade_pkg_init` FFI and bound as a dict of functions.
 
 ```toml
 [lib.ext]
@@ -94,7 +94,7 @@ use ext::math       // -> lib/math.jde     (Jade)
 use ext::fastmath   // -> lib/fastmath.dylib (native), then fastmath.some_fn(...)
 ```
 
-Native libraries run under the interpreter only: `jade build` (the AOT/native compiler) can't link the FFI loader into a static binary, so it rejects native imports with a message pointing you at `jade run`.
+Native libraries work in both backends: the interpreter loads them with `dlopen`, and an AOT binary `dlopen`s them at startup and dispatches through `jrt_native_call`. The same `.so` serves both.
 
 Then import the module with **`::` notation** from **any** file in the project — the path is resolved against the library's directory anchored at the project root, not the importing file. The import binds to its last segment automatically (no `as` needed):
 
@@ -191,18 +191,20 @@ let b = sqrt(16.0)   // 4.0
 
 As with `use`, the string-literal form (`from "std/math" use floor`) is a compile-time error — use `::` notation.
 
-## Native Packages
+## Dependencies
 
-Native packages declared in `jade.toml` under a `[native]` section are imported by their `native/<name>` path and bound to the `alias` declared in the manifest. Unlike other file imports, native packages do not need an inline `as <name>` — the alias comes from the manifest:
+External packages are declared in `jade.toml` and imported by their bare name. See [Packages](packages) for the full workflow.
 
 ```toml
-# jade.toml
-[native]
-mylib = { path = "/path/to/libmylib.dylib", alias = "mylib" }
+[dependencies.fastmath]
+version = "1.2.0"
+url     = "https://example.com/fastmath-{platform}.so"
 ```
 
 ```jade
-use "native/mylib"   // bound as `mylib` per the manifest alias
+use fastmath
 
-let r = mylib.compute(21)
+print(fastmath.triple(14))
 ```
+
+A dependency resolves through the same `[lib]` machinery as a registered library, so it behaves identically in `jade run` and `jade build`. If a project declares both a dependency and a `[lib]` entry of the same name, the local `[lib]` wins and Jade warns. If a bare name matches both a dependency and a sibling `.jde` file, that is a hard error rather than a silent choice — rename one, or import the file explicitly with `use "name.jde" as name`.

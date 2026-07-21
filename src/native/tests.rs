@@ -55,7 +55,7 @@ fn vm_to_ffi_bool() {
 #[test]
 fn vm_to_ffi_str_pushes_cstring_and_points_at_it() {
     let mut scratch = Vec::new();
-    let v = vm_to_ffi(&VmValue::Str("hi".to_string()), &mut scratch);
+    let v = vm_to_ffi(&VmValue::Str("hi".to_string().into()), &mut scratch);
     assert_eq!(v.tag, JADE_TAG_STR);
     assert_eq!(scratch.len(), 1, "CString must be kept alive in scratch");
     // Pointer must resolve back to the original bytes.
@@ -163,7 +163,7 @@ fn roundtrip_primitives() {
 #[test]
 fn roundtrip_str() {
     let mut scratch = Vec::new();
-    let original = VmValue::Str("round".to_string());
+    let original = VmValue::Str("round".to_string().into());
     let ffi = vm_to_ffi(&original, &mut scratch);
     match ffi_to_vm(&ffi, ZERO).unwrap() {
         VmValue::Str(s) => assert_eq!(s, "round"),

@@ -1,0 +1,36 @@
+// Taint propagation: a value derived from outside the program stays untrusted.
+//
+// Jade tracks whether a string came from outside — a shell command, a file, the
+// network, an LLM, stdin. Untrusted values are refused at sinks that would
+// execute them, so a program cannot be talked into running a command it was
+// handed.
+//
+// Compiled code has always enforced this. The interpreter tracked no trust at
+// all, so the same program ran an untrusted command under `jade run` and was
+// refused under `jade build`.
+//
+// This fixture checks that deriving a new string does not launder the taint —
+// each of these was a bypass until the trust byte followed the value through.
+
+use std::sh
+
+let untrusted = sh.exec("echo hello")
+
+// Deriving does not launder: every one of these is still untrusted.
+print(untrusted.upper())
+print(untrusted.lower())
+print(untrusted.trim())
+print(untrusted.replace("h", "H"))
+print(f"interpolated: {untrusted}")
+print(untrusted[0])
+print(untrusted.split("l")[0])
+print(untrusted + " suffix")
+print("prefix " + untrusted)
+
+// Reading an untrusted value is fine — only *flowing to a sink* is refused,
+// which is why all of the above can be printed.
+print(len(untrusted))
+
+// A string built purely from source is trusted and may reach a sink.
+let trusted = "echo" + " " + "from source"
+print(sh.exec(trusted))

@@ -1,0 +1,30 @@
+// A method can be used as a value, not just called. Binding one captures the
+// receiver, so calling it later still knows its `self`.
+
+struct Counter {
+    count
+}
+
+extend Counter {
+    fn bump(self, by) {
+        self.count = self.count + by
+        return self.count
+    }
+    fn show(self) {
+        return self.count
+    }
+}
+
+let c = Counter { count: 10 }
+
+// Bind, then call later.
+let bump = c.bump
+print(bump(5))
+print(bump(1))
+
+// The binding kept the receiver, so the struct itself sees the mutations.
+print(c.count)
+
+// Data fields still win over methods of the same name.
+let show = c.show
+print(show())

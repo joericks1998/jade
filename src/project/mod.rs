@@ -14,6 +14,10 @@ mod tests;
 pub struct ProjectManifest {
     pub project: Option<ProjectSection>,
     pub scripts: Option<HashMap<String, String>>,
+    /// `[dependencies.<name>]` sections: external native packages, fetched into
+    /// the project-local `libs/` directory and pinned by `jade.lock`. See
+    /// [`DependencyEntry`].
+    pub dependencies: Option<HashMap<String, DependencyEntry>>,
     /// `[lib.<name>]` sections: register a directory and its modules as a named
     /// library so they can be imported cross-directory via `use <name>.<module>`,
     /// anchored at the project root. A module is a Jade source file (`.jde`) or a
@@ -99,8 +103,15 @@ pub fn resolve_library_import(
     import_path: &str,
     root: &Path,
 ) -> Result<Option<ResolvedLib>, String> {
-    let Some((lib_name, rest)) = import_path.split_once('/') else {
-        return Ok(None);
+    let (lib_name, rest) = match import_path.split_once('/') {
+        Some(pair) => pair,
+        // A bare path — `use fastmath`. A dependency is a single artifact with
+        // no second segment to name, so a lone name that matches a registered
+        // library resolves to the module of the same name: `fastmath` →
+        // `fastmath/fastmath`. When the name is *not* registered the `libs`
+        // lookup below returns `Ok(None)` exactly as before, so ordinary
+        // relative-file imports are unaffected.
+        None => (import_path, import_path),
     };
     let Some(entry) = libs.get(lib_name) else {
         return Ok(None);
@@ -149,6 +160,197 @@ pub fn resolve_library_import(
     // Nothing on disk — return the `.jde` candidate so the caller surfaces a
     // normal not-found error.
     Ok(Some(ResolvedLib { path: jde, kind: ImportKind::Jade }))
+}
+
+// ── Dependencies ──────────────────────────────────────────────────────────────
+
+/// Which ABI a dependency's shared library speaks.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Abi {
+    /// Exports `jade_pkg_init` directly — a Jade-authored package, or a Rust
+    /// `cdylib` written against the Jade ABI.
+    #[default]
+    Jade,
+    /// A plain C library with no knowledge of Jade. Requires a `[symbols]`
+    /// table; a generated shim supplies `jade_pkg_init` at install time.
+    C,
+}
+
+impl Abi {
+    /// The spelling used in `jade.lock`. Kept explicit rather than derived from
+    /// `Debug` so the lock format can't drift when this enum is refactored.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Abi::Jade => "jade",
+            Abi::C => "c",
+        }
+    }
+}
+
+/// One entry of a `[dependencies.<name>.symbols]` table: the C prototype of a
+/// symbol to bind, in terms of the FFI's primitive type names.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct CSymbol {
+    pub args: Vec<String>,
+    pub ret: String,
+}
+
+/// Entry in a `[dependencies.<name>]` section of `jade.toml`.
+///
+/// ```toml
+/// [dependencies.fastmath]
+/// version = "1.2.0"
+/// url     = "https://example.com/fastmath-{platform}.so"
+///
+/// [dependencies.zlib]
+/// version = "1.3.1"
+/// path    = "vendor/libz.so"
+/// abi     = "c"
+/// [dependencies.zlib.symbols.crc32]
+/// args = ["int", "str"]
+/// ret  = "int"
+/// ```
+///
+/// Exactly one of `path` or `url` names the source. A `url` may contain the
+/// `{platform}` placeholder, expanded per target (`darwin-aarch64`,
+/// `linux-x86_64`, …) when the lock is generated.
+///
+/// **Integrity lives in `jade.lock`, not here** — deliberately, following
+/// Cargo. `jade add` fetches each platform's artifact once, hashes it, and
+/// records the digests in the lock; every later install verifies against those.
+/// A `{platform}` URL could not carry a single digest in the manifest anyway.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct DependencyEntry {
+    /// Exact version. Not a range — see [`DependencyEntry::validate`].
+    pub version: Option<String>,
+    /// Path to a local `.so`/`.dylib`, relative to the project root.
+    pub path: Option<String>,
+    /// Download URL, optionally containing `{platform}`.
+    pub url: Option<String>,
+    #[serde(default)]
+    pub abi: Abi,
+    /// Required for `abi = "c"`: the symbols to bind, and their prototypes.
+    pub symbols: Option<HashMap<String, CSymbol>>,
+}
+
+/// Placeholder expanded to a platform tag when resolving a dependency `url`.
+pub const PLATFORM_PLACEHOLDER: &str = "{platform}";
+
+/// Characters that only appear in a *range* version requirement. Ranges need a
+/// registry to resolve against, and Jade deliberately has none — a dependency
+/// names one exact artifact. Rejecting these is friendlier than accepting a
+/// range and silently treating it as a literal string that matches nothing.
+const RANGE_CHARS: &[char] = &['^', '~', '*', '>', '<', '=', ',', '|'];
+
+impl DependencyEntry {
+    /// Whether this dependency's `url` is a per-platform template.
+    pub fn is_platform_template(&self) -> bool {
+        self.url.as_deref().is_some_and(|u| u.contains(PLATFORM_PLACEHOLDER))
+    }
+
+    /// Check the entry is well-formed, naming `name` in every error so the
+    /// message is actionable without the user hunting for which table is wrong.
+    pub fn validate(&self, name: &str) -> Result<(), String> {
+        match (&self.path, &self.url) {
+            (Some(_), Some(_)) => {
+                return Err(format!(
+                    "dependency '{name}' sets both 'path' and 'url' in jade.toml \
+                     (a dependency has exactly one source)"
+                ));
+            }
+            (None, None) => {
+                return Err(format!(
+                    "dependency '{name}' has no source in jade.toml \
+                     (set either 'path' or 'url')"
+                ));
+            }
+            _ => {}
+        }
+
+        // A url dependency is fetched into `libs/<name>-<version>/`, so the
+        // version is what makes that directory unique — it can't be omitted.
+        // A path dependency points at a file the user already controls.
+        if self.url.is_some() && self.version.is_none() {
+            return Err(format!(
+                "dependency '{name}' has a 'url' but no 'version' in jade.toml \
+                 (url dependencies are pinned to an exact version)"
+            ));
+        }
+
+        if let Some(version) = &self.version {
+            if version.trim().is_empty() {
+                return Err(format!("dependency '{name}' has an empty 'version' in jade.toml"));
+            }
+            if let Some(bad) = version.chars().find(|c| RANGE_CHARS.contains(c)) {
+                return Err(format!(
+                    "dependency '{name}' has version '{version}' in jade.toml, but \
+                     version ranges are not supported (found '{bad}') — Jade has no \
+                     package registry to resolve a range against, so dependencies \
+                     name one exact version, e.g. \"1.2.0\""
+                ));
+            }
+        }
+
+        match self.abi {
+            Abi::C => {
+                let empty = self.symbols.as_ref().is_none_or(|s| s.is_empty());
+                if empty {
+                    return Err(format!(
+                        "dependency '{name}' sets abi = \"c\" but declares no \
+                         [dependencies.{name}.symbols] in jade.toml — a plain C library \
+                         exports no jade_pkg_init, so Jade needs the symbol prototypes \
+                         to generate a binding shim"
+                    ));
+                }
+            }
+            Abi::Jade => {
+                if self.symbols.is_some() {
+                    return Err(format!(
+                        "dependency '{name}' declares [dependencies.{name}.symbols] but \
+                         does not set abi = \"c\" in jade.toml — a Jade-ABI package \
+                         exports jade_pkg_init and describes its own bindings"
+                    ));
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Detect a bare-name import that could mean two different things.
+///
+/// `use fastmath` resolves against registered libraries (including
+/// dependencies), but a sibling `fastmath.jde` next to the importing file would
+/// have resolved too, before bare names named libraries. Picking one silently
+/// is the kind of ambiguity that costs an afternoon, so the caller turns this
+/// into a hard error naming both candidates.
+///
+/// Only bare names are ambiguous: a slashed path is unambiguously a library
+/// reference, and a quoted string import is unambiguously a file.
+///
+/// Returns `Some(message)` when ambiguous, `None` otherwise.
+pub fn ambiguous_bare_import(
+    import_path: &str,
+    libs: &HashMap<String, LibraryEntry>,
+    source_dir: &Path,
+) -> Option<String> {
+    if import_path.contains('/') || !libs.contains_key(import_path) {
+        return None;
+    }
+
+    let sibling = source_dir.join(format!("{import_path}.jde"));
+    if !sibling.exists() {
+        return None;
+    }
+
+    Some(format!(
+        "import '{import_path}' is ambiguous: it names both a registered library \
+         (or dependency) and the file {}. Rename one, or import the file \
+         explicitly with `use \"{import_path}.jde\" as {import_path}`.",
+        sibling.display()
+    ))
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -171,7 +171,8 @@ fn libs_with(name: &str, entry: LibraryEntry) -> HashMap<String, LibraryEntry> {
 #[test]
 fn resolve_import_not_a_library_reference() {
     let libs = libs_with("utils", LibraryEntry { path: "src".into(), files: None });
-    // No slash → not a lib reference.
+    // Bare name that matches no registered library → not a lib reference, so a
+    // plain relative import still falls through to file resolution.
     assert!(matches!(
         resolve_library_import(&libs, "plainimport", Path::new("/root")),
         Ok(None)
@@ -405,4 +406,168 @@ fn find_test_files_skips_target_and_hidden_dirs() {
     let found = find_test_files(root, None);
     assert_eq!(found.len(), 1);
     assert!(found[0].ends_with("test_keep.jde"));
+}
+
+// ── Bare-name library imports (`use fastmath`) ────────────────────────────────
+
+#[test]
+fn bare_import_resolves_registered_library() {
+    // A dependency is a single artifact with no second path segment, so a bare
+    // name that matches a registered library resolves to the module of the
+    // same name.
+    let libs = libs_with(
+        "fastmath",
+        LibraryEntry { path: "libs/fastmath-1.0.0".into(), files: Some(vec!["fastmath.so".into()]) },
+    );
+    let resolved = resolve_library_import(&libs, "fastmath", Path::new("/root"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(resolved.kind, ImportKind::Native);
+    assert_eq!(resolved.path, PathBuf::from("/root/libs/fastmath-1.0.0/fastmath.so"));
+}
+
+#[test]
+fn bare_import_still_honours_the_allowlist() {
+    // Registered, but the bare name is not among its files → hard error, the
+    // same as for a slashed import.
+    let libs = libs_with(
+        "fastmath",
+        LibraryEntry { path: "libs".into(), files: Some(vec!["other.so".into()]) },
+    );
+    let err = resolve_library_import(&libs, "fastmath", Path::new("/root")).unwrap_err();
+    assert!(err.contains("fastmath"), "error should name the module: {err}");
+}
+
+#[test]
+fn slashed_imports_are_unaffected_by_bare_name_support() {
+    let libs = libs_with(
+        "utils",
+        LibraryEntry { path: "src/utils".into(), files: Some(vec!["math.jde".into()]) },
+    );
+    let resolved = resolve_library_import(&libs, "utils/math", Path::new("/root"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(resolved.path, PathBuf::from("/root/src/utils/math.jde"));
+}
+
+// ── [dependencies] parsing ────────────────────────────────────────────────────
+
+#[test]
+fn parse_dependencies_section() {
+    let m = parse(
+        r#"
+        [project]
+        name = "app"
+
+        [dependencies.fastmath]
+        version = "1.2.0"
+        url = "https://example.com/fastmath-{platform}.so"
+
+        [dependencies.zlib]
+        version = "1.3.1"
+        path = "vendor/libz.so"
+        abi = "c"
+
+        [dependencies.zlib.symbols.crc32]
+        args = ["int", "str"]
+        ret = "int"
+        "#,
+    );
+    let deps = m.dependencies.expect("dependencies parsed");
+    assert_eq!(deps.len(), 2);
+
+    let fastmath = &deps["fastmath"];
+    assert_eq!(fastmath.abi, Abi::Jade, "abi defaults to jade");
+    assert!(fastmath.is_platform_template());
+    assert!(fastmath.validate("fastmath").is_ok());
+
+    let zlib = &deps["zlib"];
+    assert_eq!(zlib.abi, Abi::C);
+    assert!(!zlib.is_platform_template());
+    assert_eq!(zlib.symbols.as_ref().unwrap()["crc32"].ret, "int");
+    assert!(zlib.validate("zlib").is_ok());
+}
+
+#[test]
+fn manifest_without_dependencies_still_parses() {
+    // Backward compatibility: every existing jade.toml predates this section.
+    let m = parse("[project]\nname = \"app\"\n");
+    assert!(m.dependencies.is_none());
+}
+
+// ── DependencyEntry::validate ─────────────────────────────────────────────────
+
+fn dep(toml_src: &str) -> DependencyEntry {
+    toml::from_str::<DependencyEntry>(toml_src).expect("valid dependency toml")
+}
+
+#[test]
+fn validate_rejects_both_path_and_url() {
+    let d = dep("version = \"1.0.0\"\npath = \"a.so\"\nurl = \"https://x/a.so\"\n");
+    let err = d.validate("dup").unwrap_err();
+    assert!(err.contains("dup"), "error should name the dependency: {err}");
+    assert!(err.contains("exactly one source"), "unexpected message: {err}");
+}
+
+#[test]
+fn validate_rejects_no_source() {
+    let err = dep("version = \"1.0.0\"\n").validate("orphan").unwrap_err();
+    assert!(err.contains("orphan"));
+    assert!(err.contains("'path' or 'url'"), "unexpected message: {err}");
+}
+
+#[test]
+fn validate_rejects_url_without_version() {
+    let err = dep("url = \"https://x/a.so\"\n").validate("unpinned").unwrap_err();
+    assert!(err.contains("unpinned"));
+    assert!(err.contains("version"), "unexpected message: {err}");
+}
+
+#[test]
+fn validate_allows_path_without_version() {
+    // A local artifact is whatever the user points at; there is nothing to pin.
+    assert!(dep("path = \"vendor/a.so\"\n").validate("local").is_ok());
+}
+
+#[test]
+fn validate_rejects_version_ranges() {
+    // Ranges need a registry to resolve against, and Jade has none.
+    for range in ["^1.2", "~1.2.0", "1.*", ">=1.0", "1.0, <2.0"] {
+        let d = dep(&format!("version = \"{range}\"\nurl = \"https://x/a.so\"\n"));
+        let err = d
+            .validate("ranged")
+            .expect_err(&format!("range {range:?} should be rejected"));
+        assert!(err.contains("ranges are not supported"), "unexpected message: {err}");
+        assert!(err.contains("ranged"), "error should name the dependency: {err}");
+    }
+}
+
+#[test]
+fn validate_accepts_an_exact_version() {
+    assert!(dep("version = \"1.2.0\"\nurl = \"https://x/a.so\"\n").validate("ok").is_ok());
+}
+
+#[test]
+fn validate_rejects_empty_version() {
+    let err = dep("version = \"\"\nurl = \"https://x/a.so\"\n").validate("blank").unwrap_err();
+    assert!(err.contains("empty"), "unexpected message: {err}");
+}
+
+#[test]
+fn validate_rejects_c_abi_without_symbols() {
+    let d = dep("version = \"1.0.0\"\npath = \"libz.so\"\nabi = \"c\"\n");
+    let err = d.validate("zlib").unwrap_err();
+    assert!(err.contains("zlib"));
+    assert!(err.contains("symbols"), "unexpected message: {err}");
+}
+
+#[test]
+fn validate_rejects_symbols_without_c_abi() {
+    // Declaring symbols but leaving abi = "jade" means the shim is never
+    // generated and the symbols silently do nothing — catch it at parse time.
+    let d = dep(
+        "version = \"1.0.0\"\npath = \"a.so\"\n[symbols.foo]\nargs = []\nret = \"int\"\n",
+    );
+    let err = d.validate("mismatch").unwrap_err();
+    assert!(err.contains("abi = \"c\""), "unexpected message: {err}");
 }

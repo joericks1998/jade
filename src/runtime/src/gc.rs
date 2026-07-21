@@ -166,7 +166,13 @@ pub extern "C" fn jrt_rc_replace(old: i64, new: i64) {
 #[inline]
 unsafe fn is_collection(p: *const c_void) -> bool {
     let k = unsafe { (*(p as *const ObjHeader)).kind };
-    k == ObjKind::Array as u8 || k == ObjKind::Dict as u8 || k == ObjKind::Struct as u8
+    k == ObjKind::Array as u8
+        || k == ObjKind::Dict as u8
+        || k == ObjKind::Struct as u8
+        // A future is not a container, but it is header-carrying and owns a
+        // heap allocation, so it is refcounted on exactly the same terms. Its
+        // destructor arm in `free_obj` reclaims it without a child cascade.
+        || k == ObjKind::Future as u8
 }
 
 /// Increment the strong count of the collection a `TAG_PTR` word points at. A
@@ -249,9 +255,17 @@ pub(crate) unsafe fn free_obj(ptr: *mut c_void) {
             unsafe { decref_word(*v) };
         }
         drop(b);
+    } else if kind == ObjKind::Future as u8 {
+        // A future is header-carrying but not a collection: its payload is a
+        // single result word, not a Vec of children, so there is no cascade to
+        // run. `task::destroy` reclaims the box and records the free itself,
+        // because the allocation is a `FutureObj` (lock + condvar) rather than
+        // one of the `*Obj<W>` shapes above.
+        unsafe { crate::task::destroy(ptr as *mut crate::task::FutureObj) };
+        return;
     } else {
-        // Float/Str/Fn/Future/etc.: no child cascade defined here. The collector
-        // only frees collections (the precondition), so this arm is unreached in
+        // Float/Str/Fn/etc.: no child cascade defined here. The collector only
+        // frees collections (the precondition), so this arm is unreached in
         // practice; leaving the allocation is safe (a leak, not corruption).
         return;
     }
@@ -283,6 +297,18 @@ pub(crate) mod test_support {
 
     /// Acquire the counter lock (ignoring poison from an unrelated failed test —
     /// a poisoned lock still serializes correctly).
+    ///
+    /// **Any test that allocates through [`super::leak_obj`] must hold this**,
+    /// not only the ones that assert on the count. The live count is
+    /// process-global and cargo runs the whole crate's tests on many threads in
+    /// one process, so an unlocked allocation anywhere in the binary makes every
+    /// count assertion elsewhere a race. That is not theoretical: it turned up
+    /// as `destroying_a_future_records_the_free` failing by exactly one, roughly
+    /// once in twenty-five runs, from allocations in unrelated modules.
+    ///
+    /// A module with its own serialization (`task`'s `TEST_LOCK`) still needs
+    /// this one as well — that lock orders those tests against each other, not
+    /// against the rest of the binary.
     pub fn lock_counter() -> MutexGuard<'static, ()> {
         LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }

@@ -216,7 +216,7 @@ fn shuffle_arity_error() {
 
 #[test]
 fn seed_type_error() {
-    let err = random_seed(&[VmValue::Str("x".to_string())]).unwrap_err();
+    let err = random_seed(&[VmValue::Str("x".to_string().into())]).unwrap_err();
     assert!(matches!(err, JadeError::TypeError { .. }));
 }
 

@@ -396,7 +396,7 @@ mod openai {
 mod pkg {
     use crate::llm::pkg::{llm_vm_dict_value, LLM_PKG};
     use crate::compiler::type_infer::TypeContext;
-    use crate::compiler::vm::{NativeFnId, VmValue};
+    use crate::vm::{NativeFnId, VmValue};
 
     #[test]
     fn package_descriptor_names() {

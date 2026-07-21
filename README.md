@@ -60,19 +60,17 @@ source text
   → compiler/type_infer.rs → TProgram (TIR)
   → compiler/emit.rs       → CompiledProgram (bytecode)
   → compiler/vm.rs         → execution          (jade run)
-  → build/mod.rs           → build daemon       (jade build)
+  → build/mod.rs           → codegen/           (jade build)
 ```
 
-One thing that surprises people: **the `jade` binary never generates native code.** `jade build` runs the frontend here, then ships the TIR over `$HOME/.jade/build.sock`, and the daemon does the rest.
+`jade build` compiles in-process: the frontend produces TIR, then `src/aot/` lowers it through LLVM 18 and links the result. There is no build daemon — it used to exist because codegen lived in another repository, and once that moved here its only remaining job was forwarding a request to a function this crate already exported.
 
-The LLVM backend itself does live here, in `src/codegen/` — but behind the off-by-default `codegen` feature, because it's the daemon that calls it. That keeps LLVM 18 out of the way for everyone else:
+That makes **LLVM 18 a build-time requirement for the toolchain** (locate it with `LLVM_SYS_180_PREFIX`). It is linked into the binary, so a released `jade` needs nothing installed.
 
 ```sh
-cargo build                      # no LLVM needed — this is what CI and releases run
-cargo test --features codegen    # needs LLVM 18 (LLVM_SYS_180_PREFIX)
+cargo build    # needs LLVM 18
+cargo test     # needs LLVM 18
 ```
-
-If you touch `src/codegen/`, run the second one — a plain `cargo test` compiles none of it.
 
 ---
 

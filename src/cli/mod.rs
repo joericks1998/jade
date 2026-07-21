@@ -6,6 +6,7 @@ pub mod env;
 pub mod fmt;
 pub mod model;
 pub mod new;
+pub mod pkg;
 pub mod repl;
 pub mod run;
 pub mod test;

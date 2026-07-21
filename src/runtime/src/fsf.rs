@@ -11,7 +11,7 @@ use std::cell::Cell;
 use std::io::Write as _;
 
 use crate::string::{self, TAINTED, TRUSTED};
-use crate::sys::strlen;
+use crate::cstr;
 
 // ── Neutral cores (used by both engines) ──────────────────────────────────────
 
@@ -61,32 +61,14 @@ thread_local! {
     static PENDING: Cell<*mut c_char> = const { Cell::new(core::ptr::null_mut()) };
 }
 
-unsafe fn mk_str(bytes: &[u8], trust: u8) -> *mut c_char {
-    let out = string::new(bytes.len(), trust);
-    if !bytes.is_empty() {
-        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), out, bytes.len()) };
-    }
-    out as *mut c_char
-}
-
-unsafe fn cstr(p: *const c_char) -> &'static str {
-    if p.is_null() {
-        return "";
-    }
-    unsafe {
-        let n = strlen(p as *const u8);
-        core::str::from_utf8(core::slice::from_raw_parts(p as *const u8, n)).unwrap_or("")
-    }
-}
-
 /// Record `<op> '<path>': <err>` as the pending error (the VM formats the same
 /// string in `io_err`).
 fn set_err(op: &str, path: &str, err: &std::io::Error) {
-    let s = unsafe { mk_str(format!("{op} '{path}': {err}").as_bytes(), TRUSTED) };
+    let s = cstr::emit(format!("{op} '{path}': {err}").as_bytes(), TRUSTED);
     PENDING.with(|p| {
         let old = p.replace(s);
         if !old.is_null() {
-            unsafe { string::free_str(old as *mut u8) };
+            string::free_str(old as *mut u8);
         }
     });
 }
@@ -100,16 +82,16 @@ pub extern "C" fn jrt_fs_take_error() -> *mut c_char {
 /// `fs.exists(path)` — never raises.
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_fs_exists(path: *const c_char) -> i32 {
-    i32::from(exists(unsafe { cstr(path) }))
+    i32::from(exists(unsafe { cstr::borrow(path) }))
 }
 
 /// `fs.read(path, trust)` core (the forwarder handles the tainted-path refusal).
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_fs_read_impl(path: *const c_char, trust: i32) -> *mut c_char {
     let tag = if trust != 0 { TRUSTED } else { TAINTED };
-    let p = unsafe { cstr(path) };
+    let p = unsafe { cstr::borrow(path) };
     match read(p) {
-        Ok(s) => unsafe { mk_str(s.as_bytes(), tag) },
+        Ok(s) => cstr::emit(s.as_bytes(), tag),
         Err(e) => {
             set_err("read", p, &e);
             core::ptr::null_mut()
@@ -119,23 +101,23 @@ pub extern "C" fn jrt_fs_read_impl(path: *const c_char, trust: i32) -> *mut c_ch
 
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_fs_write_impl(path: *const c_char, content: *const c_char) {
-    let p = unsafe { cstr(path) };
-    if let Err(e) = write(p, unsafe { cstr(content) }) {
+    let p = unsafe { cstr::borrow(path) };
+    if let Err(e) = write(p, unsafe { cstr::borrow(content) }) {
         set_err("write", p, &e);
     }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_fs_append_impl(path: *const c_char, content: *const c_char) {
-    let p = unsafe { cstr(path) };
-    if let Err(e) = append(p, unsafe { cstr(content) }) {
+    let p = unsafe { cstr::borrow(path) };
+    if let Err(e) = append(p, unsafe { cstr::borrow(content) }) {
         set_err("append", p, &e);
     }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_fs_delete_impl(path: *const c_char) {
-    let p = unsafe { cstr(path) };
+    let p = unsafe { cstr::borrow(path) };
     if let Err(e) = delete(p) {
         set_err("delete", p, &e);
     }
@@ -143,7 +125,7 @@ pub extern "C" fn jrt_fs_delete_impl(path: *const c_char) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_fs_mkdir_impl(path: *const c_char) {
-    let p = unsafe { cstr(path) };
+    let p = unsafe { cstr::borrow(path) };
     if let Err(e) = mkdir(p) {
         set_err("mkdir", p, &e);
     }

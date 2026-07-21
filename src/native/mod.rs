@@ -6,7 +6,7 @@ use std::{
 };
 
 use crate::{
-    compiler::vm::VmValue,
+    vm::VmValue,
     frontend::error::{JadeError, Result, Span},
 };
 
@@ -233,7 +233,7 @@ pub fn ffi_to_vm(val: &JadeVal, span: Span) -> Result<VmValue> {
                     .to_string_lossy()
                     .into_owned()
             };
-            Ok(VmValue::Str(s))
+            Ok(VmValue::Str(s.into()))
         }
         JADE_TAG_ERROR => {
             let msg = unsafe {

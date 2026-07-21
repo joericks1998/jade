@@ -117,6 +117,11 @@ pub enum JadeError {
     /// `use "path"` could not find the referenced file.
     ImportNotFound { path: String, span: Span },
 
+    /// A spawned function mutates state its spawner can still reach. Tasks run
+    /// concurrently on a shared heap with no lock on collection payloads, so
+    /// this is a data race; see `compiler::taskcheck`.
+    SharedMutation { task: String, what: String, span: Span },
+
     /// `use "path"` would create a cycle: `a` imports `b` which imports `a`.
     CircularImport { path: String, span: Span },
 
@@ -223,6 +228,13 @@ impl std::fmt::Display for JadeError {
             }
             JadeError::ImportNotFound { path, span } =>
                 write!(f, "[{}:{}] cannot find import '{}': file not found", span.line, span.col, path),
+            JadeError::SharedMutation { task, what, span } => write!(
+                f,
+                "[{}:{}] async function '{}' {}\n  \
+                 tasks run concurrently on a shared heap, so this is a data race\n  \
+                 help: pass the value in as a parameter and return the result instead",
+                span.line, span.col, task, what
+            ),
             JadeError::CircularImport { path, span } =>
                 write!(f, "[{}:{}] circular import detected: '{}' is already being imported", span.line, span.col, path),
             JadeError::Exception { message, span } =>

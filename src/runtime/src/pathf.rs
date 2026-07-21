@@ -7,8 +7,8 @@
 use core::ffi::c_char;
 use std::path::{Path, PathBuf};
 
-use crate::string::{self, trust_of};
-use crate::sys::strlen;
+use crate::string::trust_of;
+use crate::cstr;
 
 // ── Neutral cores (std::path; used by both engines) ───────────────────────────
 
@@ -61,37 +61,19 @@ pub fn is_abs(p: &str) -> bool {
 
 // ── AOT C-ABI wrappers (apply trust; the cores are trust-agnostic) ────────────
 
-unsafe fn mk_str(bytes: &[u8], trust: u8) -> *mut c_char {
-    let out = string::new(bytes.len(), trust);
-    if !bytes.is_empty() {
-        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), out, bytes.len()) };
-    }
-    out as *mut c_char
-}
-
-unsafe fn cstr(p: *const c_char) -> &'static str {
-    if p.is_null() {
-        return "";
-    }
-    unsafe {
-        let n = strlen(p as *const u8);
-        core::str::from_utf8(core::slice::from_raw_parts(p as *const u8, n)).unwrap_or("")
-    }
-}
-
 fn trust(p: *const c_char) -> u8 {
     trust_of(p as *const u8)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_path_basename(p: *const c_char) -> *mut c_char {
-    unsafe { mk_str(basename(cstr(p)).as_bytes(), trust(p)) }
+    unsafe { cstr::emit(basename(cstr::borrow(p)).as_bytes(), trust(p)) }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_path_ext(p: *const c_char) -> *mut c_char {
-    match ext(unsafe { cstr(p) }) {
-        Some(e) => unsafe { mk_str(e.as_bytes(), trust(p)) },
+    match ext(unsafe { cstr::borrow(p) }) {
+        Some(e) => cstr::emit(e.as_bytes(), trust(p)),
         None => core::ptr::null_mut(),
     }
 }
@@ -101,27 +83,27 @@ pub extern "C" fn jrt_path_ext(p: *const c_char) -> *mut c_char {
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_path_join(a: *const c_char, b: *const c_char) -> *mut c_char {
     let t = trust(a) | trust(b);
-    let s = join(&[unsafe { cstr(a) }, unsafe { cstr(b) }]);
-    unsafe { mk_str(s.as_bytes(), t) }
+    let s = join(&[unsafe { cstr::borrow(a) }, unsafe { cstr::borrow(b) }]);
+    cstr::emit(s.as_bytes(), t)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_path_dirname(p: *const c_char) -> *mut c_char {
-    unsafe { mk_str(dirname(cstr(p)).as_bytes(), trust(p)) }
+    unsafe { cstr::emit(dirname(cstr::borrow(p)).as_bytes(), trust(p)) }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_path_stem(p: *const c_char) -> *mut c_char {
-    unsafe { mk_str(stem(cstr(p)).as_bytes(), trust(p)) }
+    unsafe { cstr::emit(stem(cstr::borrow(p)).as_bytes(), trust(p)) }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_path_abs(p: *const c_char) -> *mut c_char {
-    let s = abs(unsafe { cstr(p) }).unwrap_or_else(|_| unsafe { cstr(p) }.to_owned());
-    unsafe { mk_str(s.as_bytes(), trust(p)) }
+    let s = abs(unsafe { cstr::borrow(p) }).unwrap_or_else(|_| unsafe { cstr::borrow(p) }.to_owned());
+    cstr::emit(s.as_bytes(), trust(p))
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_path_is_abs(p: *const c_char) -> i32 {
-    i32::from(is_abs(unsafe { cstr(p) }))
+    i32::from(is_abs(unsafe { cstr::borrow(p) }))
 }

@@ -22,18 +22,10 @@ use crate::value::{JadeValue, NIL_BITS};
 
 type W = i64;
 
-/// A tagged string word holding `bytes` with the given trust.
-unsafe fn str_word(bytes: &[u8], trust: u8) -> W {
-    let out = string::new(bytes.len(), trust);
-    if !bytes.is_empty() {
-        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), out, bytes.len()) };
-    }
-    JadeValue::from_str_ptr(out as *const ()).bits() as i64
-}
 
 /// `serde_json::Value` → an ObjHeader value word. Parsed strings inherit `trust`
 /// (taint propagates from the JSON source). Mirrors the VM's `json_to_vm`.
-fn value_to_word(v: &Value, trust: u8) -> W {
+pub(crate) fn value_to_word(v: &Value, trust: u8) -> W {
     match v {
         Value::Null => NIL_BITS as i64,
         Value::Bool(b) => JadeValue::from_bool(*b).bits() as i64,
@@ -44,7 +36,7 @@ fn value_to_word(v: &Value, trust: u8) -> W {
                 box_float(n.as_f64().unwrap_or(0.0)).bits() as i64
             }
         }
-        Value::String(s) => unsafe { str_word(s.as_bytes(), trust) },
+        Value::String(s) => JadeValue::from_str_ptr(crate::cstr::emit_str(s, trust) as *const ()).bits() as W,
         Value::Array(a) => {
             let mut arr = ArrayObj::<W>::new();
             for e in a {

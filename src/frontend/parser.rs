@@ -379,12 +379,6 @@ impl Parser {
         // Parameter list
         let params = self.parse_param_list()?;
 
-        // Optional `-> type` return annotation — parsed and discarded at tree-walk stage.
-        if self.peek().kind == TokenKind::Arrow {
-            self.advance(); // consume `->`
-            self.expect_ident("return type")?; // consume type name
-        }
-
         // Body block
         self.fn_depth += 1;
         let body = self.parse_block()?;
@@ -425,12 +419,6 @@ impl Parser {
         };
 
         let params = self.parse_param_list()?;
-
-        // Optional `-> type` return annotation
-        if self.peek().kind == TokenKind::Arrow {
-            self.advance();
-            self.expect_ident("return type")?;
-        }
 
         self.fn_depth += 1;
         self.async_fn_depth += 1;
@@ -858,14 +846,7 @@ impl Parser {
                 }
             }
             self.expect(&TokenKind::RParen)?;
-            // Optional `-> type`
-            let return_type = if self.peek().kind == TokenKind::Arrow {
-                self.advance(); // consume `->`
-                Some(self.expect_ident("return type")?)
-            } else {
-                None
-            };
-            methods.push(InterfaceMethod { name: method_name, params, return_type, span: method_span });
+            methods.push(InterfaceMethod { name: method_name, params, span: method_span });
         }
         self.expect(&TokenKind::RBrace)?;
         Ok(Stmt::InterfaceDef { name, methods, span })

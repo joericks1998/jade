@@ -19,6 +19,8 @@ mod lexer {
         assert_eq!(kinds("42"), vec![TokenKind::Integer(42), TokenKind::Semicolon, TokenKind::Eof]);
     }
 
+    // The literal is a float to tokenize, not an approximation of pi.
+    #[allow(clippy::approx_constant)]
     #[test]
     fn test_float_literal() {
         assert_eq!(kinds("3.14"), vec![TokenKind::Float(3.14), TokenKind::Semicolon, TokenKind::Eof]);
@@ -296,8 +298,10 @@ mod lexer {
     }
 
     #[test]
-    fn test_tokenize_arrow() {
-        assert_eq!(kinds("->"), vec![TokenKind::Arrow, TokenKind::Eof]);
+    fn test_arrow_is_not_a_token() {
+        // Return type annotations were removed; `->` has no special meaning and
+        // lexes as the two characters it is made of.
+        assert_eq!(kinds("->"), vec![TokenKind::Minus, TokenKind::Gt, TokenKind::Eof]);
     }
 
     #[test]
@@ -314,14 +318,6 @@ mod lexer {
         );
     }
 
-    #[test]
-    fn test_tokenize_arrow_vs_minus() {
-        // `-` alone stays Minus; only `->` becomes Arrow
-        assert_eq!(
-            kinds("- ->"),
-            vec![TokenKind::Minus, TokenKind::Arrow, TokenKind::Eof]
-        );
-    }
 
     #[test]
     fn test_tokenize_dot() {
@@ -1084,22 +1080,17 @@ mod parser {
 
     #[test]
     fn test_parse_interface_def() {
-        let p = parse_src("interface Displayable {\n    fn to_str(self) -> str\n}");
+        let p = parse_src("interface Displayable {\n    fn to_str(self)\n}");
         let Stmt::InterfaceDef { name, methods, .. } = &p.stmts[0] else { panic!() };
         assert_eq!(name, "Displayable");
         assert_eq!(methods.len(), 1);
         assert_eq!(methods[0].name, "to_str");
         assert_eq!(methods[0].params, vec!["self"]);
-        assert_eq!(methods[0].return_type.as_deref(), Some("str"));
     }
 
     #[test]
-    fn test_parse_interface_def_no_return_type() {
-        let p = parse_src("interface Runnable {\n    fn run(self)\n}");
-        let Stmt::InterfaceDef { name, methods, .. } = &p.stmts[0] else { panic!() };
-        assert_eq!(name, "Runnable");
-        assert_eq!(methods[0].name, "run");
-        assert!(methods[0].return_type.is_none());
+    fn test_interface_method_rejects_return_annotation() {
+        parse_src_err("interface Displayable {\n    fn to_str(self) -> str\n}");
     }
 
     #[test]
@@ -1120,11 +1111,13 @@ mod parser {
     }
 
     #[test]
-    fn test_parse_fn_with_return_type() {
-        let p = parse_src("fn greet(name) -> str {\n    return \"hi\"\n}");
-        let Stmt::FnDef { name, params, .. } = &p.stmts[0] else { panic!() };
-        assert_eq!(name, "greet");
-        assert_eq!(params[0].0, "name");
+    fn test_fn_rejects_return_annotation() {
+        parse_src_err("fn greet(name) -> str {\n    return \"hi\"\n}");
+    }
+
+    #[test]
+    fn test_async_fn_rejects_return_annotation() {
+        parse_src_err("async fn greet(name) -> str {\n    return \"hi\"\n}");
     }
 
     // ── LLM / prompt ────────────────────────────────────────────────────────
@@ -1659,12 +1652,10 @@ mod ast {
         let m = InterfaceMethod {
             name: "to_str".into(),
             params: vec!["self".into()],
-            return_type: Some("str".into()),
             span: span(),
         };
         assert_eq!(m.name, "to_str");
         assert_eq!(m.params, vec!["self".to_string()]);
-        assert_eq!(m.return_type.as_deref(), Some("str"));
     }
 
     // ── Clone / Debug derives ────────────────────────────────────────────────

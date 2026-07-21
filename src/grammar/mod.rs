@@ -1,5 +1,5 @@
 use crate::{
-    compiler::vm::VmValue,
+    vm::VmValue,
     frontend::error::{JadeError, Result, Span},
 };
 
@@ -35,7 +35,13 @@ fn grammar_new(args: &[VmValue]) -> Result<VmValue> {
             span: ZERO,
         }),
     };
-    Ok(VmValue::Grammar { pattern, anchor, stop_anchor })
+    Ok(VmValue::Grammar(std::sync::Arc::new(
+        jade_runtime::grammarf::GrammarObj::new(
+            pattern.to_string(),
+            anchor.map(|a| a.into_string()),
+            stop_anchor.map(|s| s.into_string()),
+        ),
+    )))
 }
 
 pub static GRAMMAR_NEW: BuiltinFn = BuiltinFn { name: "new", vm_impl: grammar_new };

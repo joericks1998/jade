@@ -26,6 +26,8 @@
 //! collector's trial-deletion pass are wired in later stages; nothing
 //! constructs an `ObjHeader` yet.
 
+use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
+
 /// Runtime kind of a heap object. Stored in [`ObjHeader::kind`].
 ///
 /// This is the *object* kind for heap-allocated payloads. It is distinct from
@@ -53,6 +55,9 @@ pub enum ObjKind {
     Prompt = 7,
     /// A GBNF grammar value.
     Grammar = 8,
+    /// A method bound to a receiver (`let f = obj.greet`). Callable like a
+    /// function value, but carries the receiver it will pass as `self`.
+    BoundMethod = 9,
 }
 
 /// Bacon–Rajan cycle-collector color. Stored in [`ObjHeader::color`].
@@ -84,20 +89,39 @@ pub mod flags {
 ///
 /// 16 bytes, 8-aligned. Fields are ordered for a compact, ABI-stable layout the
 /// C runtime can `#include` a matching `struct` for.
+///
+/// ## Why the mutable fields are atomic
+///
+/// `jrt_spawn` hands a task's arguments — which include live `TAG_PTR`
+/// collection pointers — to a real OS worker thread, and the heap is shared
+/// rather than copied (matching the VM, where `Arc<Mutex<ArrayObj>>` passed
+/// into a task is genuinely aliased). So two threads can reach the same header
+/// concurrently. With a plain `u32` counter that is a lost update, then a
+/// premature free, then a use-after-free — and the failure is invisible to the
+/// stdout-diffing parity gate that guards everything else in this codebase.
+///
+/// `rc`, `color`, and `flags` are therefore atomic. `kind` is immutable after
+/// construction and `len` is only touched under exclusive access to the
+/// payload, so both stay plain. All three atomics are `repr(transparent)` over
+/// their integer types, so the 16-byte C-ABI layout is unchanged — `runtime.h`
+/// and codegen's offset-8 `ObjKind` read both still hold.
+///
+/// Note this makes the *header* sound, not the payload: `ArrayObj::data` is
+/// still an unsynchronized `Vec` on the AOT path.
 #[derive(Debug)]
 #[repr(C, align(8))]
 pub struct ObjHeader {
     /// Strong reference count. Reaches zero → object is destroyed and freed.
-    pub rc: u32,
+    pub rc: AtomicU32,
     /// Element/field count; meaning is kind-dependent (array length, struct
     /// field count, string byte length). `0` for kinds that don't need it.
     pub len: u32,
     /// Which kind of object follows this header (an [`ObjKind`]).
     pub kind: u8,
     /// Cycle-collector color (a [`Color`]).
-    pub color: u8,
+    pub color: AtomicU8,
     /// Bitset of [`flags`].
-    pub flags: u8,
+    pub flags: AtomicU8,
     /// Reserved to keep the header 8-aligned and give the collector room to
     /// grow (e.g. a generation byte) without an ABI break.
     pub _reserved: u8,
@@ -110,11 +134,11 @@ impl ObjHeader {
     #[inline]
     pub const fn new(kind: ObjKind, len: u32) -> Self {
         ObjHeader {
-            rc: 1,
+            rc: AtomicU32::new(1),
             len,
             kind: kind as u8,
-            color: Color::Black as u8,
-            flags: 0,
+            color: AtomicU8::new(Color::Black as u8),
+            flags: AtomicU8::new(0),
             _reserved: 0,
             _reserved2: 0,
         }
@@ -122,10 +146,16 @@ impl ObjHeader {
 
     /// Increment the strong count. A new reference to a live object also means
     /// it cannot currently be garbage, so it is recolored `Black`.
+    ///
+    /// Takes `&self`: increfs are the one header operation that genuinely races
+    /// (two tasks aliasing the same array), and requiring `&mut` would be a lie
+    /// about exclusivity. `Relaxed` suffices — an incref publishes nothing, it
+    /// only has to not be lost, and the caller already holds a live reference
+    /// that establishes the necessary happens-before.
     #[inline]
-    pub fn incref(&mut self) {
-        self.rc += 1;
-        self.color = Color::Black as u8;
+    pub fn incref(&self) {
+        self.rc.fetch_add(1, Ordering::Relaxed);
+        self.color.store(Color::Black as u8, Ordering::Relaxed);
     }
 
     /// Decrement the strong count. Returns `true` when it reaches zero (the
@@ -134,19 +164,42 @@ impl ObjHeader {
     /// the caller is responsible for buffering it as a `Purple` root (guarded
     /// by [`flags::BUFFERED`]).
     ///
+    /// The `Release` on the decrement and the `Acquire` fence before returning
+    /// `true` are the standard `Arc` discipline: every thread's writes to the
+    /// payload must be visible to whichever thread ends up running the
+    /// destructor. Without the fence, the destructor could read a stale payload
+    /// and free the wrong child pointers.
+    ///
     /// Debug-asserts against decref of an already-dead object.
     #[inline]
     #[must_use = "a true result means the object must be destroyed and freed"]
-    pub fn decref(&mut self) -> bool {
-        debug_assert!(self.rc > 0, "decref on object with rc == 0 (double free)");
-        self.rc -= 1;
-        self.rc == 0
+    pub fn decref(&self) -> bool {
+        let prev = self.rc.fetch_sub(1, Ordering::Release);
+        debug_assert!(prev > 0, "decref on object with rc == 0 (double free)");
+        if prev == 1 {
+            core::sync::atomic::fence(Ordering::Acquire);
+            return true;
+        }
+        false
+    }
+
+    /// The current strong count. For tests and the heap instrument only —
+    /// a load is a snapshot and is stale the instant it returns.
+    #[inline]
+    pub fn rc(&self) -> u32 {
+        self.rc.load(Ordering::Relaxed)
+    }
+
+    /// The current cycle-collector color.
+    #[inline]
+    pub fn color(&self) -> u8 {
+        self.color.load(Ordering::Relaxed)
     }
 
     /// Whether this object is currently buffered as a candidate root.
     #[inline]
     pub fn is_buffered(&self) -> bool {
-        self.flags & flags::BUFFERED != 0
+        self.flags.load(Ordering::Relaxed) & flags::BUFFERED != 0
     }
 }
 
@@ -164,16 +217,16 @@ mod tests {
     #[test]
     fn new_header_is_live_and_black() {
         let h = ObjHeader::new(ObjKind::Array, 3);
-        assert_eq!(h.rc, 1);
+        assert_eq!(h.rc(), 1);
         assert_eq!(h.len, 3);
         assert_eq!(h.kind, ObjKind::Array as u8);
-        assert_eq!(h.color, Color::Black as u8);
+        assert_eq!(h.color(), Color::Black as u8);
         assert!(!h.is_buffered());
     }
 
     #[test]
     fn incref_decref_reaches_zero() {
-        let mut h = ObjHeader::new(ObjKind::Dict, 0);
+        let h = ObjHeader::new(ObjKind::Dict, 0);
         h.incref(); // rc = 2
         assert!(!h.decref()); // rc = 1
         assert!(h.decref()); // rc = 0 → destroy
@@ -181,9 +234,34 @@ mod tests {
 
     #[test]
     fn incref_recolors_black() {
-        let mut h = ObjHeader::new(ObjKind::Struct, 1);
-        h.color = Color::Purple as u8;
+        let h = ObjHeader::new(ObjKind::Struct, 1);
+        h.color.store(Color::Purple as u8, Ordering::Relaxed);
         h.incref();
-        assert_eq!(h.color, Color::Black as u8);
+        assert_eq!(h.color(), Color::Black as u8);
+    }
+
+    /// The reason `rc` is atomic. With a plain `u32` this loses updates and the
+    /// final count lands below the true one — which in production means a
+    /// premature free while another task still holds the object.
+    #[test]
+    fn incref_decref_is_race_free_across_threads() {
+        const THREADS: usize = 8;
+        const ITERS: usize = 20_000;
+
+        let h = ObjHeader::new(ObjKind::Array, 0);
+        std::thread::scope(|s| {
+            for _ in 0..THREADS {
+                s.spawn(|| {
+                    for _ in 0..ITERS {
+                        h.incref();
+                        assert!(!h.decref(), "count must never reach zero: rc starts at 1");
+                    }
+                });
+            }
+        });
+
+        // Every incref was matched by a decref, so the initial reference is all
+        // that remains. A non-atomic counter fails this well below 1.
+        assert_eq!(h.rc(), 1);
     }
 }

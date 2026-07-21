@@ -1,0 +1,81 @@
+// Array and dict edge cases, printed rather than merely computed.
+//
+// Both engines share one collection implementation (jade-runtime's coll.rs,
+// generic over the element word type), so these should agree by construction.
+// This fixture is what turns "should" into "does".
+
+// ── empty collections ────────────────────────────────────────────────────────
+let empty_a = []
+let empty_d = {}
+print(len(empty_a))
+print(len(empty_d))
+print(empty_a)
+print(empty_d)
+
+// ── arrays ───────────────────────────────────────────────────────────────────
+let a = [1, 2, 3]
+print(len(a))
+print(a[0])
+print(a[2])
+print(a)
+
+// mutation is visible through every alias — arrays are references
+let alias = a
+alias[0] = 99
+print(a[0])
+
+// (Arrays are homogeneous — a mixed literal is a type error, so there is
+// nothing to compare there.)
+
+// nested
+let nested = [[1, 2], [3]]
+print(len(nested))
+print(len(nested[0]))
+print(nested[1][0])
+print(nested)
+
+// ── dicts ────────────────────────────────────────────────────────────────────
+let d = {"a": 1, "b": 2}
+print(len(d))
+print(d["a"])
+print(d)
+
+// Rendering sorts keys — it is not insertion order. Both engines do this, so
+// it is a property of the language rather than a divergence, but it is worth
+// pinning: it means dict output is stable regardless of how it was built.
+let ordered = {"z": 1, "m": 2, "a": 3}
+print(ordered)
+
+// Overwriting a key updates in place; adding one grows the dict. Neither
+// changes the rendered order, since that is sorted.
+let over = {"x": 1, "y": 2}
+over["x"] = 100
+print(over)
+print(len(over))
+over["z"] = 3
+print(over)
+
+// nested and heterogeneous values
+let deep = {"list": [1, 2], "map": {"inner": "v"}, "n": 1.5, "flag": false}
+print(deep["list"][1])
+print(deep["map"]["inner"])
+print(deep)
+
+// Note string *values* render unquoted while *keys* are quoted, so a dict of
+// strings reads as {"k": v}. Both engines agree; pinned here so a change to
+// either one is caught.
+let strvals = {"k": "a string"}
+print(strvals)
+print(["a", "b"])
+
+// ── empty-string and unicode keys ────────────────────────────────────────────
+let odd = {"": 1, "é": 2}
+print(odd[""])
+print(odd["é"])
+print(odd)
+
+// ── structs render opaquely on both engines ──────────────────────────────────
+struct P { x, y }
+let p = P { x: 1, y: 2 }
+print(p)
+print(p.x)

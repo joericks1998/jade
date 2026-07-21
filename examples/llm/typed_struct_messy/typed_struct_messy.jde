@@ -1,0 +1,21 @@
+// Struct coercion tolerates the replies models actually give.
+//
+// A model rarely returns bare JSON. It wraps it in prose, fences it in
+// markdown, or forgets to quote its keys. Coercion extracts the JSON from
+// whatever surrounds it before parsing.
+//
+// This was the interpreter's behaviour only. Compiled code parsed the reply
+// verbatim, so every one of these failed there and re-prompted until it ran out
+// of retries — while the same program worked under `jade run`. The extraction
+// is now written once and shared.
+
+struct City {
+    name,
+    let population = 7
+}
+
+prompt p = "Describe a city as JSON."
+let c = ?p |> City
+
+print(c.name)
+print(c.population)

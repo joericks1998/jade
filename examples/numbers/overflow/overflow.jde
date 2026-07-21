@@ -1,0 +1,28 @@
+// Integer arithmetic is overflow-checked, and both engines agree.
+//
+// Compiled code used to emit a bare machine add/sub/mul and keep whatever came
+// out, so an overflowing computation silently produced a wrong number under
+// `jade build` while `jade run` raised. Nothing caught it: no example used an
+// integer large enough, so the backend-parity gate never compared the two.
+
+// Ordinary arithmetic is unaffected.
+print(2 + 3)
+print(10 * 10)
+print(100 - 250)
+print(-7)
+// → 5
+// → 100
+// → -150
+// → -7
+
+// Overflow is an error, not a wrapped value. `try`/`catch` sees it like any
+// other runtime error.
+let big = 3037000500
+
+try {
+    let square = big * big
+    print(square)
+} catch e {
+    print("overflow caught")
+}
+// → overflow caught

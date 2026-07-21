@@ -4,11 +4,12 @@ mod tests;
 use jade_runtime::coll::DictObj;
 
 use crate::{
-    compiler::{tir::JadeType, type_infer::TypeContext, vm::VmValue},
+    compiler::{tir::JadeType, type_infer::TypeContext}, vm::VmValue,
     frontend::error::{JadeError, Result, Span},
 };
 
 use crate::builtins::{BuiltinFn, Package, make_array};
+use jade_runtime::trust::JStr;
 
 const ZERO: Span = Span { line: 0, col: 0 };
 
@@ -20,7 +21,7 @@ fn json_to_vm(val: serde_json::Value) -> VmValue {
             if let Some(i) = n.as_i64() { VmValue::Int(i) }
             else { VmValue::Float(n.as_f64().unwrap_or(0.0)) }
         }
-        serde_json::Value::String(s) => VmValue::Str(s),
+        serde_json::Value::String(s) => VmValue::Str(s.into()),
         serde_json::Value::Array(arr) => {
             make_array(arr.into_iter().map(json_to_vm).collect())
         }
@@ -40,7 +41,7 @@ fn vm_to_json(val: &VmValue) -> serde_json::Value {
         VmValue::Float(f) => serde_json::Number::from_f64(*f)
             .map(serde_json::Value::Number)
             .unwrap_or(serde_json::Value::Null),
-        VmValue::Str(s)   => serde_json::Value::String(s.clone()),
+        VmValue::Str(s)   => serde_json::Value::String(s.to_string()),
         VmValue::Array(arc) => {
             let guard = arc.lock();
             serde_json::Value::Array(guard.iter().map(vm_to_json).collect())
@@ -76,7 +77,7 @@ fn json_stringify(args: &[VmValue]) -> Result<VmValue> {
     }
     let j = vm_to_json(&args[0]);
     serde_json::to_string(&j)
-        .map(VmValue::Str)
+        .map(|s| VmValue::Str(JStr::trusted(s)))
         .map_err(|e| JadeError::IoError { message: format!("json.stringify: {}", e), span: ZERO })
 }
 
@@ -86,7 +87,7 @@ fn json_stringify_pretty(args: &[VmValue]) -> Result<VmValue> {
     }
     let j = vm_to_json(&args[0]);
     serde_json::to_string_pretty(&j)
-        .map(VmValue::Str)
+        .map(|s| VmValue::Str(JStr::trusted(s)))
         .map_err(|e| JadeError::IoError { message: format!("json.stringify_pretty: {}", e), span: ZERO })
 }
 

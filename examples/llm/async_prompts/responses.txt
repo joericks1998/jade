@@ -1,0 +1,7 @@
+# One response for every prompt in this file, deliberately.
+#
+# Async prompts complete in whatever order the tasks are scheduled, so a script
+# of *different* responses would bind them to prompts non-deterministically and
+# make this example flap. A single response that satisfies every deref in the
+# file — including the `|> bool` one at the end — is order-independent.
+true

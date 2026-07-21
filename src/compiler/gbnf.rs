@@ -16,11 +16,11 @@ pub fn tool_call_grammar() -> &'static str {
 /// Wrap a user-supplied GBNF pattern (RHS only) into a complete grammar.
 ///
 /// `pattern` is the right-hand side of the root rule, e.g. `"yes" | "no"`.
-/// Trailing whitespace allowance is appended so llama.cpp can find a valid
-/// continuation token after the pattern is fully consumed.
-pub fn grammar_from_pattern(pattern: &str) -> String {
-    format!("root ::= {} [ \\t\\n\\r]*", pattern)
-}
+///
+/// The implementation lives in the shared runtime so the VM and the AOT backend
+/// cannot wrap patterns differently. This re-export exists because the wrapper
+/// is also used for auto-generated grammars below, which are compiler-side.
+pub use jade_runtime::grammarf::wrap_pattern as grammar_from_pattern;
 
 /// Build a prefix grammar that pins the first emitted token to `open` (the
 /// structure's opening bracket) and then permits any continuation. `rest`

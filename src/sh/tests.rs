@@ -1,7 +1,7 @@
 use super::*;
 
 fn s(x: &str) -> VmValue {
-    VmValue::Str(x.to_string())
+    VmValue::Str(x.to_string().into())
 }
 
 // ---- exec ----
@@ -98,4 +98,49 @@ fn output_type_error() {
 fn output_arity_error() {
     let err = sh_output(&[]).unwrap_err();
     assert!(matches!(err, JadeError::ArityMismatch { expected: 1, got: 0, .. }));
+}
+
+use jade_runtime::trust::JStr;
+
+// ── trust model ──────────────────────────────────────────────────────────────
+//
+// Compiled code has refused tainted strings at code-execution sinks from the
+// start. The interpreter tracked no trust at all, so the same program ran an
+// untrusted command under `jade run` and was refused under `jade build`.
+
+#[test]
+fn exec_refuses_a_tainted_command() {
+    let err = sh_exec(&[VmValue::Str(JStr::tainted("echo hi"))])
+        .expect_err("a tainted command must be refused");
+    let msg = err.to_string();
+    assert!(msg.contains("refused tainted string in sh.exec(cmd)"), "got: {msg}");
+    assert!(msg.contains("code-execution sink"), "got: {msg}");
+}
+
+#[test]
+fn run_refuses_a_tainted_command() {
+    let err = sh_run(&[VmValue::Str(JStr::tainted("true"))])
+        .expect_err("a tainted command must be refused");
+    assert!(err.to_string().contains("sh.run(cmd)"));
+}
+
+#[test]
+fn exec_accepts_a_trusted_command() {
+    match sh_exec(&[VmValue::Str(JStr::trusted("echo hi"))])
+        .expect("a command built from source is allowed")
+    {
+        VmValue::Str(s) => assert_eq!(s.as_str(), "hi"),
+        other => panic!("expected Str, got {other:?}"),
+    }
+}
+
+// The output of a shell command came from outside the program, so it is
+// tainted — which is what makes feeding it back in a refusal rather than a
+// silent re-execution.
+#[test]
+fn exec_output_is_tainted() {
+    match sh_exec(&[VmValue::Str(JStr::trusted("echo hi"))]).unwrap() {
+        VmValue::Str(s) => assert!(s.is_tainted(), "sh.exec output must be tainted"),
+        other => panic!("expected Str, got {other:?}"),
+    }
 }

@@ -69,9 +69,24 @@ fn as_num(v: JadeValue) -> Option<f64> {
 /// Re-encode a core [`Outcome`] into a tagged value (boxing floats, doing the
 /// string concat for `+`).
 #[inline]
+/// Tag an integer result, or report overflow.
+///
+/// `dynop` checks its arithmetic against i64, but a tagged word only holds 63
+/// bits — one goes to the tag. So a result could pass `checked_add` and still
+/// not survive `from_int`: `(2^62 - 1) + 1` fits an i64 and does not fit a word,
+/// and used to come back as a large negative number. Same class of bug as
+/// `print(9223372036854775807)` compiling to `-1`.
+///
+/// Reporting it as `Overflow` puts it under the error the language already
+/// raises when arithmetic leaves the representable range.
+#[inline]
+fn int_result(v: i64) -> OpResult {
+    JadeValue::try_from_int(v).ok_or(DynErr::Overflow)
+}
+
 fn finish(out: Outcome, a: JadeValue, b: JadeValue) -> OpResult {
     match out {
-        Outcome::Int(v) => Ok(JadeValue::from_int(v)),
+        Outcome::Int(v) => int_result(v),
         Outcome::Float(v) => Ok(box_float(v)),
         Outcome::Concat => {
             let p = crate::string::concat(a.as_ptr() as *const u8, b.as_ptr() as *const u8);
@@ -104,7 +119,7 @@ pub fn rem(a: JadeValue, b: JadeValue) -> OpResult {
 
 pub fn neg(a: JadeValue) -> OpResult {
     match dynop::neg(kind(a)) {
-        Outcome::Int(v) => Ok(JadeValue::from_int(v)),
+        Outcome::Int(v) => int_result(v),
         Outcome::Float(v) => Ok(box_float(v)),
         Outcome::Err(e) => Err(e),
         _ => unreachable!("neg yields int/float/err"),

@@ -1,11 +1,10 @@
 use std::process;
 
-/// `jade build <file.jde>` — compile to a native binary via the build daemon.
+/// `jade build <file.jde>` — compile to a native binary.
 ///
-/// This repo runs the frontend (lex → parse → type-infer → TIR); the typed
-/// program is then handed to the build daemon over `$HOME/.jade/build.sock`,
-/// which performs import resolution, code generation, and linking.
-pub fn run_build(path: &str, output: Option<&str>, emit_ir: bool) {
+/// Runs the whole pipeline in-process: lex → parse → type-infer → TIR, then
+/// import resolution, LLVM code generation, and linking.
+pub fn run_build(path: &str, output: Option<&str>, emit_ir: bool, lib: bool, exports: &[String]) {
     {
         use std::path::{Path, PathBuf};
 
@@ -40,19 +39,28 @@ pub fn run_build(path: &str, output: Option<&str>, emit_ir: bool) {
             }
         };
 
-        // Absolute source path so the daemon resolves imports relative to it.
+        // Absolute source path so imports resolve relative to it, not the CWD.
         let abs_source = std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
 
-        // Output path: default to the input filename without its extension.
+        // Output path: default to the input filename without its extension —
+        // plus the platform's shared-library extension when building a package,
+        // since `use <name>` resolves by stem and the loader needs a real
+        // .dylib/.so.
         let out = match output {
             Some(o) => PathBuf::from(o),
             None => {
                 let src = Path::new(path);
                 let stem = src.file_stem().unwrap_or(src.as_os_str());
-                src.parent().unwrap_or(Path::new(".")).join(stem)
+                let name = if lib {
+                    let ext = if cfg!(target_os = "macos") { "dylib" } else { "so" };
+                    PathBuf::from(format!("{}.{ext}", stem.to_string_lossy()))
+                } else {
+                    PathBuf::from(stem)
+                };
+                src.parent().unwrap_or(Path::new(".")).join(name)
             }
         };
-        // Make the output path absolute so the daemon writes where the user expects.
+        // Make the output path absolute so the artifact lands where the user expects.
         let abs_out = if out.is_absolute() {
             out.clone()
         } else {
@@ -61,7 +69,15 @@ pub fn run_build(path: &str, output: Option<&str>, emit_ir: bool) {
                 .unwrap_or_else(|_| out.clone())
         };
 
-        if let Err(e) = crate::build::build(&tprogram, &abs_source, &abs_out, emit_ir) {
+        let emit = if emit_ir {
+            crate::build::Emit::Ir
+        } else if lib {
+            crate::build::Emit::CDylib { exports: exports.to_vec() }
+        } else {
+            crate::build::Emit::Binary
+        };
+
+        if let Err(e) = crate::build::build(&tprogram, &abs_source, &abs_out, emit) {
             eprintln!("{path}: build error: {e}");
             process::exit(1);
         }

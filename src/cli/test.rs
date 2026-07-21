@@ -74,7 +74,7 @@ async fn run_test_file(
     _verbose: bool,
     cfg: &crate::config::JadeConfig,
 ) -> Result<(), String> {
-    use crate::compiler::{emit, type_infer, vm};
+    use crate::{compiler::{emit, type_infer}, vm};
     let model      = &cfg.model;
     let max_retries = cfg.max_retries;
 
@@ -128,12 +128,19 @@ async fn run_test_file(
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
         .unwrap_or_else(|| std::path::PathBuf::from("."));
 
-    // Honor registered [lib] libraries so test files can import them too.
+    // Honor registered [lib] libraries and locked dependencies so test files
+    // can import them too.
     let project_root = crate::project::find_project_root();
     let libraries = project_root
         .as_ref()
-        .and_then(|root| crate::project::load_project(root).ok())
-        .and_then(|m| m.lib)
+        .and_then(|root| {
+            let manifest = crate::project::load_project(root).ok()?;
+            if let Err(e) = crate::pkg::ensure_ready(root, &manifest) {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+            Some(crate::pkg::resolved_libraries(root, &manifest))
+        })
         .unwrap_or_default();
 
     let opts = vm::VmOpts {

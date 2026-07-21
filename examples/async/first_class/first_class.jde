@@ -1,0 +1,40 @@
+// Futures are ordinary values.
+//
+// A future can be stored in a collection, passed to a function, and printed,
+// exactly like an int or an array. It is not a special form that only `await`
+// understands.
+
+async fn work(n) {
+    return n * 2
+}
+
+// Stored in an array, awaited later and out of order.
+let fs = [work(1), work(2), work(3)]
+print(await fs[2])
+print(await fs[0])
+print(await fs[1])
+// → 6
+// → 2
+// → 4
+
+
+// Printed. A future renders opaquely — it has no meaningful text form, but it
+// is a value, so printing it is not an error.
+let f = work(21)
+print(f)
+// → <future>
+print(await f)
+// → 42
+
+
+// Passed into and returned from an ordinary (non-async) function.
+fn pick(a, b, first) {
+    if first {
+        return a
+    }
+    return b
+}
+
+let chosen = pick(work(10), work(20), false)
+print(await chosen)
+// → 40

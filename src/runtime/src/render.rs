@@ -89,7 +89,7 @@ pub fn render_word(word: i64) -> String {
         return format_float(crate::float::unbox_float(v));
     }
     if v.is_str() {
-        return unsafe { cstr_to_string(v.as_ptr() as *const u8) };
+        return unsafe { crate::cstr::to_string(v.as_ptr() as *const core::ffi::c_char) };
     }
     // Non-string heap pointer: dispatch on the object's kind.
     debug_assert!(v.is_ptr());
@@ -110,26 +110,13 @@ pub fn render_word(word: i64) -> String {
     } else if kind == ObjKind::Struct as u8 {
         // The VM renders any struct opaquely as `<struct>` (no field walk).
         "<struct>".to_string()
+    } else if kind == ObjKind::Future as u8 {
+        // Matches the VM (`VmValue::Future` renders as `<future>`); the parity
+        // gate diffs stdout, so this string is a contract, not a cosmetic.
+        "<future>".to_string()
     } else {
-        // A boxed fn/future/etc. — the pre-existing "ObjKind gap" placeholder.
+        // A boxed fn/etc. — the pre-existing "ObjKind gap" placeholder.
         "<object>".to_string()
-    }
-}
-
-/// Read a NUL-terminated (tagged) string's bytes into a `String` (lossy on
-/// invalid UTF-8, which Jade strings never are). NULL → empty.
-///
-/// # Safety
-/// `p` is null or a readable NUL-terminated buffer.
-#[inline]
-unsafe fn cstr_to_string(p: *const u8) -> String {
-    if p.is_null() {
-        return String::new();
-    }
-    unsafe {
-        let n = crate::sys::strlen(p);
-        let bytes = core::slice::from_raw_parts(p, n);
-        String::from_utf8_lossy(bytes).into_owned()
     }
 }
 

@@ -15,7 +15,7 @@ fn strs(v: &VmValue) -> Vec<String> {
             .lock()
             .iter()
             .map(|e| match e {
-                VmValue::Str(s) => s.clone(),
+                VmValue::Str(s) => s.to_string(),
                 _ => panic!("not a str"),
             })
             .collect(),
