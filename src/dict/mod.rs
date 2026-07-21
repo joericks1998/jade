@@ -104,6 +104,7 @@ pub static DICT_PKG: Package = Package {
     import_name: "std/dict",
     global_name: "dict",
     fns: DICT_PKG_FNS,
+    natives: &[],
     register_types: register_dict_pkg_types,
 };
 

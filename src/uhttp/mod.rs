@@ -471,24 +471,17 @@ fn register_uhttp_pkg_types(ctx: &mut TypeContext) {
     ctx.define("uhttp".to_string(), JadeType::Unknown);
 }
 
+/// The five request functions are pure; `stream` invokes a Jade handler and so
+/// must dispatch through the VM.
+static UHTTP_PKG_NATIVES: &[(&str, NativeFnId)] = &[("stream", NativeFnId::UhttpStream)];
+
 pub static UHTTP_PKG: Package = Package {
     import_name: "std/uhttp",
     global_name: "uhttp",
     fns: UHTTP_PKG_FNS,
+    natives: UHTTP_PKG_NATIVES,
     register_types: register_uhttp_pkg_types,
 };
-
-/// Override for `Package::vm_dict_value`: the five request functions are pure
-/// `BuiltinFn`s, but `stream` is state-mutating (it invokes a Jade handler), so
-/// it is injected as `NativeFn(NativeFnId::UhttpStream)` and dispatched in the VM.
-pub fn uhttp_vm_dict_value() -> VmValue {
-    let mut map = DictObj::new();
-    for f in UHTTP_PKG_FNS {
-        map.insert(f.name.to_string(), VmValue::BuiltinFn(*f));
-    }
-    map.insert("stream".to_string(), VmValue::NativeFn(NativeFnId::UhttpStream));
-    VmValue::Dict(map)
-}
 
 #[cfg(test)]
 mod tests;

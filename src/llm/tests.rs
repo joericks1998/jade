@@ -394,7 +394,7 @@ mod openai {
 
 // ── pkg (LLM_PKG descriptor + NativeFnId mapping) ─────────────────────────────
 mod pkg {
-    use crate::llm::pkg::{llm_vm_dict_value, LLM_PKG};
+    use crate::llm::pkg::LLM_PKG;
     use crate::compiler::type_infer::TypeContext;
     use crate::vm::{NativeFnId, VmValue};
 
@@ -404,24 +404,12 @@ mod pkg {
         assert_eq!(LLM_PKG.global_name, "llm");
     }
 
+    /// Every `llm.*` function is stateful, so the package carries no pure fns.
+    /// A stray entry here would be a `BuiltinFn` shadowed by its native at
+    /// dispatch — dead weight that reads like a real implementation.
     #[test]
-    fn fns_slice_has_all_expected_names() {
-        let names: Vec<&str> = LLM_PKG.fns.iter().map(|f| f.name).collect();
-        for expected in [
-            "set_max_tokens",
-            "count_tokens",
-            "total_tokens",
-            "keep_anchors",
-            "model",
-            "profile",
-            "find_tool_call",
-            "find_tool_calls",
-            "tool_grammar",
-            "health",
-        ] {
-            assert!(names.contains(&expected), "missing fn: {expected}");
-        }
-        assert_eq!(LLM_PKG.fns.len(), 10, "exactly ten fns registered");
+    fn package_declares_no_pure_fns() {
+        assert!(LLM_PKG.fns.is_empty(), "llm has no pure functions");
     }
 
     #[test]
@@ -434,7 +422,7 @@ mod pkg {
 
     #[test]
     fn vm_dict_value_maps_every_fn_to_its_native_id() {
-        let dict = llm_vm_dict_value();
+        let dict = LLM_PKG.vm_dict_value();
         let map = match dict {
             VmValue::Dict(m) => m,
             other => panic!("expected Dict, got {other:?}"),
@@ -461,17 +449,4 @@ mod pkg {
         }
     }
 
-    #[test]
-    fn vm_dict_value_matches_fns_slice_names() {
-        // The VM dict and the descriptor's fns slice must agree on the name set,
-        // or type-inference and runtime dispatch would diverge.
-        let dict = llm_vm_dict_value();
-        let map = match dict {
-            VmValue::Dict(m) => m,
-            other => panic!("expected Dict, got {other:?}"),
-        };
-        for f in LLM_PKG.fns {
-            assert!(map.contains_key(f.name), "vm dict missing {}", f.name);
-        }
-    }
 }

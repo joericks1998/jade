@@ -181,6 +181,7 @@ pub static STRING_PKG: Package = Package {
     import_name: "std/string",
     global_name: "string",
     fns: STRING_PKG_FNS,
+    natives: &[],
     register_types: register_string_pkg_types,
 };
 

@@ -115,5 +115,6 @@ pub static RANDOM_PKG: Package = Package {
     import_name: "std/random",
     global_name: "random",
     fns: RANDOM_PKG_FNS,
+    natives: &[],
     register_types: register_random_pkg_types,
 };

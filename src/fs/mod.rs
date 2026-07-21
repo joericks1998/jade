@@ -131,5 +131,6 @@ pub static FS_PKG: Package = Package {
     import_name: "std/fs",
     global_name: "fs",
     fns: FS_PKG_FNS,
+    natives: &[],
     register_types: register_fs_pkg_types,
 };

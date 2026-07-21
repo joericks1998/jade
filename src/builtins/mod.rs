@@ -95,16 +95,39 @@ pub struct Package {
     pub import_name: &'static str,
     pub global_name: &'static str,
     pub fns: &'static [BuiltinFn],
+    /// Functions the VM dispatches by id because they touch `VmState` — the
+    /// token budget, the inference backend, the loaded model profile — and so
+    /// cannot be expressed as a pure [`BuiltinFn`].
+    ///
+    /// Three packages needed these (`llm`, `std/array`, `std/uhttp`) and each
+    /// grew its own `*_vm_dict_value()` override, hand-listed in the VM's
+    /// `package_dict_value`. `llm` fared worst: with every one of its ten
+    /// functions stateful, it declared each one *three* times — a
+    /// `unreachable!()` stub, an entry in its `fns` table, and the real id in
+    /// the override — so adding a function meant editing three lists and
+    /// getting a runtime panic if you missed one.
+    ///
+    /// Listing the ids here instead makes that the package's own business. A
+    /// package with no stateful functions passes `&[]`.
+    pub natives: &'static [(&'static str, NativeFnId)],
     /// Register type information into the type checker when this package is imported.
     pub register_types: fn(ctx: &mut TypeContext),
 }
 
 impl Package {
     /// Build the VmValue::Dict for this package's functions.
+    ///
+    /// Natives are inserted after the pure functions, so a name appearing in
+    /// both resolves to the stateful implementation. `std/array` relies on
+    /// that: `map`/`filter` have pure entries used for their signatures but
+    /// must dispatch through the VM to call a Jade function per element.
     pub fn vm_dict_value(&self) -> VmValue {
         let mut map = DictObj::new();
         for f in self.fns {
             map.insert(f.name.to_string(), VmValue::BuiltinFn(*f));
+        }
+        for (name, id) in self.natives {
+            map.insert((*name).to_string(), VmValue::NativeFn(id.clone()));
         }
         VmValue::Dict(map)
     }

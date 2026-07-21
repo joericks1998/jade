@@ -254,7 +254,7 @@ fn pkg_descriptor() {
 
 #[test]
 fn vm_dict_value_injects_stream_native() {
-    match uhttp_vm_dict_value() {
+    match UHTTP_PKG.vm_dict_value() {
         VmValue::Dict(map) => {
             assert!(map.contains_key("get"));
             match map.get("stream") {

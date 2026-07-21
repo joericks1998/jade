@@ -73,5 +73,6 @@ pub static TIME_PKG: Package = Package {
     import_name: "std/time",
     global_name: "time",
     fns: TIME_PKG_FNS,
+    natives: &[],
     register_types: register_time_pkg_types,
 };

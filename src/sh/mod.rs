@@ -94,5 +94,6 @@ pub static SH_PKG: Package = Package {
     import_name: "std/sh",
     global_name: "sh",
     fns: SH_PKG_FNS,
+    natives: &[],
     register_types: register_sh_pkg_types,
 };

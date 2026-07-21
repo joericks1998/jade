@@ -105,5 +105,6 @@ pub static JSON_PKG: Package = Package {
     import_name: "std/json",
     global_name: "json",
     fns: JSON_PKG_FNS,
+    natives: &[],
     register_types: register_json_pkg_types,
 };

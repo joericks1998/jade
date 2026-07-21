@@ -1,8 +1,6 @@
 #[cfg(test)]
 mod tests;
 
-use jade_runtime::coll::DictObj;
-
 use crate::{
     compiler::{tir::JadeType, type_infer::TypeContext}, vm::{NativeFnId, VmValue},
     frontend::error::{JadeError, Result, Span},
@@ -90,9 +88,9 @@ pub fn find_array_method(name: &str) -> Option<BuiltinFn> {
 
 // array.map / array.filter call a user function per element, which needs the VM
 // call context (VmState + async). They are dispatched through
-// NativeFnId::ArrayMap / ArrayFilter in the VM; array_vm_dict_value() injects
-// those variants. These BuiltinFn stubs exist only so the package table still
-// lists the names — they are never invoked.
+// NativeFnId::ArrayMap / ArrayFilter, listed in ARRAY_PKG_NATIVES, which shadow
+// these entries in the package dict. These BuiltinFn stubs exist only so the
+// package table still lists the names — they are never invoked.
 fn pkg_map(_args: &[VmValue]) -> Result<VmValue> {
     unreachable!("array.map is handled by NativeFnId::ArrayMap dispatch in the VM")
 }
@@ -138,24 +136,21 @@ fn register_array_pkg_types(ctx: &mut TypeContext) {
     ctx.define("array".to_string(), JadeType::Unknown);
 }
 
+/// `map`/`filter` run a Jade function per element, so they dispatch through the
+/// VM; the pure entries in `ARRAY_PKG_FNS` are shadowed by these (natives are
+/// inserted last). `sort`/`reverse` need no VM state and stay pure.
+static ARRAY_PKG_NATIVES: &[(&str, NativeFnId)] = &[
+    ("map",    NativeFnId::ArrayMap),
+    ("filter", NativeFnId::ArrayFilter),
+];
+
 pub static ARRAY_PKG: Package = Package {
     import_name: "std/array",
     global_name: "array",
     fns: ARRAY_PKG_FNS,
+    natives: ARRAY_PKG_NATIVES,
     register_types: register_array_pkg_types,
 };
-
-/// Override of `Package::vm_dict_value` for the array package: `map`/`filter`
-/// bind to their `NativeFn` variants (which can run a Jade function per element),
-/// while `sort`/`reverse` stay pure BuiltinFns. Mirrors `llm_vm_dict_value`.
-pub fn array_vm_dict_value() -> VmValue {
-    let mut map = DictObj::new();
-    map.insert("map".to_string(),     VmValue::NativeFn(NativeFnId::ArrayMap));
-    map.insert("filter".to_string(),  VmValue::NativeFn(NativeFnId::ArrayFilter));
-    map.insert("sort".to_string(),    VmValue::BuiltinFn(BuiltinFn { name: "sort",    vm_impl: pkg_sort }));
-    map.insert("reverse".to_string(), VmValue::BuiltinFn(BuiltinFn { name: "reverse", vm_impl: pkg_reverse }));
-    VmValue::Dict(map)
-}
 
 // ── Type checker primitive method registration ────────────────────────────────
 

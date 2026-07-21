@@ -73,5 +73,6 @@ pub static ENV_PKG: Package = Package {
     import_name: "std/env",
     global_name: "env",
     fns: ENV_PKG_FNS,
+    natives: &[],
     register_types: register_env_pkg_types,
 };

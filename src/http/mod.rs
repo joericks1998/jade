@@ -129,6 +129,7 @@ pub static HTTP_PKG: Package = Package {
     import_name: "std/http",
     global_name: "http",
     fns: HTTP_PKG_FNS,
+    natives: &[],
     register_types: register_http_pkg_types,
 };
 

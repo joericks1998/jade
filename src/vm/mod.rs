@@ -1654,19 +1654,13 @@ fn resolve_named_args(
     }
 }
 
-/// Build the VM dict value for an imported stdlib package. Most packages use the
-/// generic `vm_dict_value`; `llm`, `std/array`, and (on unix) `std/uhttp` override
-/// it to inject state-mutating `NativeFn` entries the generic path can't express.
+/// Build the VM dict value for an imported stdlib package.
+///
+/// This used to name `llm`, `std/array`, and `std/uhttp` by string and call a
+/// bespoke override for each — so a package's own stateful functions were
+/// registered here, in the VM, rather than beside the package. They now travel
+/// in `Package::natives` and `vm_dict_value` handles them uniformly.
 fn package_dict_value(pkg: &builtins::Package) -> VmValue {
-    if pkg.import_name == "llm" {
-        return crate::llm::pkg::llm_vm_dict_value();
-    }
-    if pkg.import_name == "std/array" {
-        return crate::array::array_vm_dict_value();
-    }
-    if pkg.import_name == "std/uhttp" {
-        return crate::uhttp::uhttp_vm_dict_value();
-    }
     pkg.vm_dict_value()
 }
 

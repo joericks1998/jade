@@ -92,5 +92,6 @@ pub static MATH_PKG: Package = Package {
     import_name: "std/math",
     global_name: "math",
     fns: MATH_PKG_FNS,
+    natives: &[],
     register_types: register_math_pkg_types,
 };
