@@ -162,11 +162,10 @@ mod jaded {
     // drift from the documented protocol (design/llm-package-1.1.12.md) fails CI.
     // The daemon mirrors these field names with serde(default); what this pins is
     // field ORDER and the presence of `keep_anchors` / `trust`.
-
-    fn split_prefix(buf: &[u8]) -> (u32, &[u8]) {
-        let len = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
-        (len, &buf[4..])
-    }
+    //
+    // The 4-byte length prefix is not checked here: framing moved to the shared
+    // transport, which adds it for every request. `jade_runtime::infer::conn`
+    // covers it, against a real socket rather than a slice.
 
     #[test]
     fn encode_minimal_request_golden() {
@@ -176,11 +175,9 @@ mod jaded {
             max_tokens: 10,
             ..Default::default()
         };
-        let buf = encode_request(&req).unwrap();
-        let (len, json) = split_prefix(&buf);
-        assert_eq!(len as usize, json.len(), "length prefix must match payload");
+        let json = encode_request(&req).unwrap();
         assert_eq!(
-            std::str::from_utf8(json).unwrap(),
+            std::str::from_utf8(&json).unwrap(),
             r#"{"prompt":"hi","model":"m","max_tokens":10,"keep_anchors":false,"trust":0}"#,
         );
     }
@@ -200,11 +197,9 @@ mod jaded {
             keep_anchors: true,
             trust: 1,
         };
-        let buf = encode_request(&req).unwrap();
-        let (len, json) = split_prefix(&buf);
-        assert_eq!(len as usize, json.len());
+        let json = encode_request(&req).unwrap();
         assert_eq!(
-            std::str::from_utf8(json).unwrap(),
+            std::str::from_utf8(&json).unwrap(),
             r#"{"prompt":"p","model":"Qwen3-Coder-30B","max_tokens":64,"grammar":"root ::= \"{\" [^}]* \"}\"","anchor":"<tool_call>","stop_anchor":"</tool_call>","keep_anchors":true,"trust":1}"#,
         );
     }

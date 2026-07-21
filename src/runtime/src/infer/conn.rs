@@ -83,6 +83,23 @@ pub fn shared() -> &'static Conn {
 }
 
 impl Conn {
+    /// A connection to `path`, not opened until the first request.
+    ///
+    /// Compiled binaries use [`shared`] — one connection for the process,
+    /// requests queued behind its lock. The VM builds one of these per request
+    /// instead, because it runs `async` prompts concurrently and a single
+    /// serialized connection would turn those back into a sequence. That is a
+    /// difference in connection *policy*, which each engine picks; the framing
+    /// and accumulation below are the same either way, and those were what had
+    /// drifted.
+    pub fn new(path: impl Into<String>) -> Self {
+        Conn {
+            stream: Mutex::new(None),
+            reported_model: Mutex::new(String::new()),
+            path: path.into(),
+        }
+    }
+
     pub fn reported_model(&self) -> String {
         self.reported_model.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
@@ -235,11 +252,7 @@ mod tests {
             req
         });
 
-        let conn = Conn {
-            stream: Mutex::new(None),
-            reported_model: Mutex::new(String::new()),
-            path: path.to_string_lossy().into_owned(),
-        };
+        let conn = Conn::new(path.to_string_lossy().into_owned());
         (conn, handle)
     }
 
@@ -323,11 +336,7 @@ mod tests {
 
     #[test]
     fn connect_failure_names_the_path() {
-        let conn = Conn {
-            stream: Mutex::new(None),
-            reported_model: Mutex::new(String::new()),
-            path: "/nonexistent/jade-test.sock".to_owned(),
-        };
+        let conn = Conn::new("/nonexistent/jade-test.sock");
         match conn.request(b"{}", Mode::Tokens, None) {
             Err(InferError::Connect { path, .. }) => {
                 assert_eq!(path, "/nonexistent/jade-test.sock")

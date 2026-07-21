@@ -34,7 +34,7 @@ pub mod conn;
 pub mod frame;
 mod ffi;
 
-pub use conn::{sock_path, Mode, Response};
+pub use conn::{sock_path, Conn, Mode, Response};
 
 /// Why an exchange with the daemon failed.
 ///
