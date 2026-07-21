@@ -1,0 +1,2 @@
+# Prose around the JSON — the normal case, not an edge one.
+Sure! Here you go: {"name": "Kyoto"}

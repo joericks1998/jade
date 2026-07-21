@@ -1,0 +1,2 @@
+# `?p |> int` needs a parseable integer. The whole file uses one prompt.
+42
