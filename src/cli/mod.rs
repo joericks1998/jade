@@ -1,10 +1,8 @@
 pub mod build;
 pub mod cache;
 pub mod check;
-pub mod configure;
 pub mod env;
 pub mod fmt;
-pub mod model;
 pub mod new;
 pub mod pkg;
 pub mod repl;

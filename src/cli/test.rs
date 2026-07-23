@@ -75,7 +75,6 @@ async fn run_test_file(
     cfg: &crate::config::JadeConfig,
 ) -> Result<(), String> {
     use crate::{compiler::{emit, type_infer}, vm};
-    let model      = &cfg.model;
     let max_retries = cfg.max_retries;
 
     let source = std::fs::read_to_string(path)
@@ -118,9 +117,8 @@ async fn run_test_file(
     let compiled = emit::emit(tprogram)
         .map_err(|e| format!("compile error: {}", e))?;
 
-    // Use select_backend so the jade-tree socket is preferred over API keys,
-    // matching the behaviour of `jade run`.
-    let backend = crate::llm::select_backend(cfg);
+    // Connect to the inference daemon if it's running, same as `jade run`.
+    let backend = crate::llm::select_backend();
 
     let source_dir = path
         .canonicalize()
@@ -145,7 +143,8 @@ async fn run_test_file(
 
     let opts = vm::VmOpts {
         backend,
-        default_model: model.clone(),
+        // Daemon owns the model; starts empty, settable via `llm.use_model(...)`.
+        default_model: String::new(),
         max_retries,
         source_dir,
         project_root,

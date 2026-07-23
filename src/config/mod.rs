@@ -1,23 +1,21 @@
 use serde::{Deserialize, Serialize};
 
-/// Resolved configuration for a Jade run — combines all config layers.
+/// Resolved configuration for a Jade run.
+///
+/// Provider, model, API key, and parallelism used to live here to feed the
+/// in-language OpenAI/Anthropic backends. Those backends moved into the
+/// inference daemon, which now owns all provider configuration (its own
+/// `jaded` config + an eventual setup CLI). What remains is `max_retries`, a
+/// language concern: how many times a typed dereference re-asks on a parse miss.
 #[derive(Debug, Clone)]
 pub struct JadeConfig {
-    pub provider: String,
-    pub model: String,
-    pub api_key: Option<String>,
     pub max_retries: usize,
-    pub max_parallel: Option<usize>,
 }
 
 impl Default for JadeConfig {
     fn default() -> Self {
         JadeConfig {
-            provider: "anthropic".to_string(),
-            model: "claude-haiku-4-5-20251001".to_string(),
-            api_key: None,
             max_retries: 3,
-            max_parallel: None,
         }
     }
 }
@@ -30,21 +28,19 @@ pub struct TomlConfig {
     pub model: Option<ModelSection>,
 }
 
+/// The `[model]` section of `jade.toml` / `~/.jade/config.toml`.
+///
+/// Only `max_retries` is still read. The provider/model/key fields are gone from
+/// the language — the daemon owns them — but the section name and any unknown
+/// keys are tolerated so an existing `jade.toml` written by an older `jade
+/// configure` still loads without error.
 #[derive(Deserialize, Serialize, Default, Clone)]
 pub struct ModelSection {
-    pub provider: Option<String>,
-    pub model: Option<String>,
-    pub api_key: Option<String>,
     pub max_retries: Option<usize>,
-    pub max_parallel: Option<usize>,
 }
 
 fn apply_model_section(cfg: &mut JadeConfig, m: &ModelSection) {
-    if let Some(p) = &m.provider    { cfg.provider     = p.clone(); }
-    if let Some(m) = &m.model       { cfg.model        = m.clone(); }
-    if let Some(k) = &m.api_key     { cfg.api_key      = Some(k.clone()); }
-    if let Some(r) = m.max_retries  { cfg.max_retries  = r; }
-    if let Some(n) = m.max_parallel { cfg.max_parallel = Some(n); }
+    if let Some(r) = m.max_retries { cfg.max_retries = r; }
 }
 
 // ── Global config path ───────────────────────────────────────────────────────
@@ -73,9 +69,6 @@ pub fn write_global_config(section: &ModelSection) -> Result<(), String> {
         .unwrap_or_default();
 
     let mut merged = existing.model.unwrap_or_default();
-    if let Some(p) = &section.provider   { merged.provider    = Some(p.clone()); }
-    if let Some(m) = &section.model      { merged.model       = Some(m.clone()); }
-    if let Some(k) = &section.api_key    { merged.api_key     = Some(k.clone()); }
     if let Some(r) = section.max_retries { merged.max_retries = Some(r); }
     existing.model = Some(merged);
 
@@ -92,8 +85,7 @@ pub fn write_global_config(section: &ModelSection) -> Result<(), String> {
 /// 1. Built-in defaults
 /// 2. `~/.jade/config.toml` (global user config)
 /// 3. `./jade.toml [model]` (project-level override)
-/// 4. Environment variables (`JADE_PROVIDER`, `JADE_MODEL`, `JADE_API_KEY`,
-///    `JADE_MAX_RETRIES`)
+/// 4. Environment variables (`JADE_MAX_RETRIES`)
 pub fn load_config() -> JadeConfig {
     let mut cfg = JadeConfig::default();
 
@@ -127,14 +119,8 @@ pub fn load_config() -> JadeConfig {
     }
 
     // Layer 4: environment variables (highest priority)
-    if let Ok(p) = std::env::var("JADE_PROVIDER")   { cfg.provider = p; }
-    if let Ok(m) = std::env::var("JADE_MODEL")       { cfg.model = m; }
-    if let Ok(k) = std::env::var("JADE_API_KEY")     { cfg.api_key = Some(k); }
     if let Ok(r) = std::env::var("JADE_MAX_RETRIES") {
         if let Ok(n) = r.parse::<usize>() { cfg.max_retries = n; }
-    }
-    if let Ok(p) = std::env::var("JADE_MAX_PARALLEL") {
-        if let Ok(n) = p.parse::<usize>() { cfg.max_parallel = Some(n); }
     }
 
     cfg

@@ -14,8 +14,7 @@ use crate::{
 /// Uses the VM backend so that `jade repl` and `jade run` share the same
 /// execution semantics. Globals persist across snippets via `VmState`.
 pub async fn run_repl(_verbose: bool) {
-    let cfg = crate::config::load_config();
-    let backend = crate::llm::select_backend(&cfg);
+    let backend = crate::llm::select_backend();
 
     let opts = VmOpts {
         backend,

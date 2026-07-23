@@ -55,9 +55,6 @@ enum Commands {
         export: Vec<String>,
     },
 
-    /// Interactively configure the LLM provider and model
-    Configure,
-
     /// Create a new Jade project in a new directory
     New {
         /// Project name (also used as the directory name)
@@ -112,12 +109,6 @@ enum Commands {
     Cache {
         #[command(subcommand)]
         subcommand: CacheCommands,
-    },
-
-    /// Manage LLM model configuration
-    Model {
-        #[command(subcommand)]
-        subcommand: ModelCommands,
     },
 
     /// Manage project dependencies (jade.toml / jade.lock / libs/)
@@ -189,17 +180,6 @@ enum PkgCommands {
     List,
 }
 
-#[derive(Subcommand)]
-enum ModelCommands {
-    /// List known LLM models by provider
-    List,
-    /// Set the default model (writes to ~/.jade/config.toml)
-    Use {
-        /// Model spec in the form <provider>/<model-name>
-        spec: String,
-    },
-}
-
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
@@ -241,11 +221,6 @@ async fn run_cli() {
             cli::build::run_build(&file, output.as_deref(), emit_ir, lib, &export);
         }
 
-        // ── configure ────────────────────────────────────────────────────────
-        Commands::Configure => {
-            cli::configure::run_configure();
-        }
-
         // ── new ──────────────────────────────────────────────────────────────
         Commands::New { name, template } => {
             cli::new::run_new(&name, &template);
@@ -282,12 +257,6 @@ async fn run_cli() {
             CacheCommands::Clean { older_than, dry_run } => {
                 cli::cache::run_cache_clean(older_than, dry_run);
             }
-        },
-
-        // ── model ─────────────────────────────────────────────────────────────
-        Commands::Model { subcommand } => match subcommand {
-            ModelCommands::List => cli::model::run_model_list(),
-            ModelCommands::Use { spec } => cli::model::run_model_use(&spec),
         },
 
         // ── upgrade ───────────────────────────────────────────────────────────

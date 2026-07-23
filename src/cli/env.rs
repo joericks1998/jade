@@ -15,12 +15,6 @@ pub fn run_env(json: bool) {
     let global_path = crate::config::global_config_path();
     let global_path_str = global_path.display().to_string();
 
-    let api_key_status = match &cfg.api_key {
-        Some(_) if std::env::var("JADE_API_KEY").is_ok() => "set (via JADE_API_KEY env)",
-        Some(_) => "set (via config file)",
-        None => "not set",
-    };
-
     // Config source
     let config_source = if global_path.exists() {
         global_path_str.clone()
@@ -71,9 +65,6 @@ pub fn run_env(json: bool) {
             "platform":     platform,
             "config": {
                 "source":      config_source,
-                "provider":    cfg.provider,
-                "model":       cfg.model,
-                "api_key":     api_key_status,
                 "max_retries": cfg.max_retries,
             },
             "cache": {
@@ -94,9 +85,6 @@ pub fn run_env(json: bool) {
         println!();
         println!("config:");
         println!("  source       {}", config_source);
-        println!("  provider     {}", cfg.provider);
-        println!("  model        {}", cfg.model);
-        println!("  api key      {}", api_key_status);
         println!("  max retries  {}", cfg.max_retries);
         println!();
         println!("cache ({}):", cache_root);
