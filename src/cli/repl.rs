@@ -116,7 +116,7 @@ async fn eval_snippet_vm(src: &str, state: &mut VmState) -> Result<Option<String
     if capture {
         if let Some(Stmt::Expr(expr)) = program.stmts.pop() {
             program.stmts.push(Stmt::Let {
-                name: "__repl_result__".to_string(),
+                name: vm::REPL_CAPTURE.to_string(),
                 value: expr,
                 span: Span { line: 0, col: 0 },
             });
@@ -133,16 +133,15 @@ async fn eval_snippet_vm(src: &str, state: &mut VmState) -> Result<Option<String
 
     vm::run_incremental(compiled, state).await.map_err(|e| e.to_string())?;
 
+    let captured = state.repl_capture.take();
     if capture && !is_prompt_deref {
-        if let Some(val) = state.globals.remove("__repl_result__") {
+        if let Some(val) = captured {
             let display = match &val {
                 vm::VmValue::Str(s) => format!("{:?}", s),
                 other => value_to_display(other),
             };
             return Ok(Some(display));
         }
-    } else if capture {
-        state.globals.remove("__repl_result__");
     }
 
     Ok(None)

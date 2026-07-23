@@ -396,10 +396,11 @@ fn test_vm_repl_result_capture_and_remove() {
     let src = "1 + 1";
     let tokens = lexer::tokenize(src).expect("lex");
     let mut program = parser::parse(tokens).expect("parse");
-    // Wrap the bare expression in a let binding named __repl_result__
+    // Wrap the bare trailing expression the way the REPL does, so its value is
+    // routed into `repl_capture` (out-of-band, never a global).
     if let Some(Stmt::Expr(expr)) = program.stmts.pop() {
         program.stmts.push(Stmt::Let {
-            name: "__repl_result__".to_string(),
+            name: crate::vm::REPL_CAPTURE.to_string(),
             value: expr,
             span: Span { line: 0, col: 0 },
         });
@@ -413,11 +414,9 @@ fn test_vm_repl_result_capture_and_remove() {
         .expect("tokio")
         .block_on(run_incremental(compiled, &mut state))
         .expect("run_incremental");
-    // read it
-    assert!(matches!(state.globals.get("__repl_result__"), Some(VmValue::Int(2))));
-    // remove it
-    state.globals.remove("__repl_result__");
-    assert!(state.globals.get("__repl_result__").is_none());
+    // Captured out-of-band, and never leaked into the global namespace.
+    assert!(matches!(state.repl_capture, Some(VmValue::Int(2))));
+    assert!(state.globals.get(crate::vm::REPL_CAPTURE).is_none());
 }
 
 // ── arithmetic (ported from eval.rs) ─────────────────────────────────────

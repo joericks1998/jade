@@ -42,6 +42,12 @@ const RETRY_MAX_TOKENS_COMPLEX: u32 = 512;
 /// so both engines give up after the same number of attempts.
 pub(crate) const TYPED_DEREF_RETRIES: usize = 15;
 
+/// Internal sentinel the REPL assigns a bare trailing expression to so it can
+/// echo the value. Not a valid Jade identifier (leading NUL), so it can never
+/// collide with a user global, and it is routed into `VmState.repl_capture`
+/// rather than the global namespace. Replaces the old `__repl_result__` global.
+pub(crate) const REPL_CAPTURE: &str = "\u{0}repl";
+
 // ── Runtime value ─────────────────────────────────────────────────────────────
 
 /// A value at VM runtime.
@@ -293,6 +299,10 @@ pub struct VmState {
     pub inference_backend: Option<std::sync::Arc<dyn llm::InferenceBackend>>,
     pub token_count: i64,
     pub max_tokens: u32,
+    /// REPL only: the value of the last bare trailing expression, captured
+    /// out-of-band (see [`REPL_CAPTURE`]) so the REPL can echo it without a
+    /// global. `None` outside the REPL and after each snippet is read.
+    pub repl_capture: Option<VmValue>,
     /// Sticky session control: when true, prompt requests ask the daemon to make
     /// tool-span boundaries observable in-band (`keep_anchors` on the wire). Set
     /// from Jade via `llm.keep_anchors(b)`.
@@ -334,6 +344,7 @@ impl VmState {
             inference_backend: None,
             token_count: 0,
             max_tokens: DEFAULT_MAX_TOKENS,
+            repl_capture: None,
             keep_anchors: false,
             default_model: String::new(),
             prompt_cache: HashMap::new(),
@@ -392,6 +403,7 @@ impl VmState {
             inference_backend: self.inference_backend.clone(),
             token_count: 0,
             max_tokens: self.max_tokens,
+            repl_capture: None,
             keep_anchors: self.keep_anchors,
             default_model: self.default_model.clone(),
             prompt_cache: self.prompt_cache.clone(),
@@ -990,19 +1002,24 @@ async fn execute_chunk(
             }
             Instr::SetGlobal(name, s) => {
                 let v = vm_try!(vm_maybe_drain(get(slots, *s).clone(), state, span).await);
-                let wrote_to_scope = if let Some(sc) = &state.active_module_scope {
-                    let mut locked = sc.lock();
-                    if locked.contains_key(name) {
-                        locked.insert(name.clone(), v.clone());
-                        true
+                if name == REPL_CAPTURE {
+                    // REPL echo capture — never enters the global namespace.
+                    state.repl_capture = Some(v);
+                } else {
+                    let wrote_to_scope = if let Some(sc) = &state.active_module_scope {
+                        let mut locked = sc.lock();
+                        if locked.contains_key(name) {
+                            locked.insert(name.clone(), v.clone());
+                            true
+                        } else {
+                            false
+                        }
                     } else {
                         false
+                    };
+                    if !wrote_to_scope {
+                        state.globals.insert(name.clone(), v);
                     }
-                } else {
-                    false
-                };
-                if !wrote_to_scope {
-                    state.globals.insert(name.clone(), v);
                 }
             }
             Instr::GetLocal(d, slot) => {
@@ -1370,11 +1387,11 @@ async fn execute_chunk(
                             vm_err!(JadeError::NotAStruct { span });
                         }
                     }
-                    // Dunder attributes on function values: fn.__name__, fn.__params__
+                    // A function is an object: fn.name, fn.params.
                     VmValue::Fn(ref cf) => {
                         let v = match field.as_str() {
-                            "__name__" => VmValue::Str(cf.chunk.name.clone().into()),
-                            "__params__" => {
+                            "name" => VmValue::Str(cf.chunk.name.clone().into()),
+                            "params" => {
                                 let arr: Vec<VmValue> = cf.params.iter()
                                     .map(|p| VmValue::Str(p.clone().into()))
                                     .collect();
