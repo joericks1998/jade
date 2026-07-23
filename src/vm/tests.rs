@@ -3438,14 +3438,6 @@ fn test_llm_model_returns_active_model() {
 }
 
 #[test]
-fn test_llm_tool_grammar_is_the_canonical_gbnf() {
-    let state = run_with_model("use llm\nlet g = llm.tool_grammar()", "Qwen3-Coder-30B");
-    let g = get_str(&state, "g");
-    assert!(g.contains("\"name\"") && g.contains("arguments"), "must be the tool-call grammar");
-    assert_eq!(g, crate::compiler::gbnf::TOOL_CALL_GBNF);
-}
-
-#[test]
 fn test_llm_health_returns_snapshot_dict() {
     // The mock backend uses the trait default health(): a minimal ok snapshot.
     let state = run_with_model(

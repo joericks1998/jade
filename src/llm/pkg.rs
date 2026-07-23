@@ -27,7 +27,6 @@ static LLM_NATIVES: &[(&str, NativeFnId)] = &[
     ("keep_anchors",    NativeFnId::LlmKeepAnchors),
     ("model",           NativeFnId::LlmModel),
     ("health",          NativeFnId::LlmHealth),
-    ("tool_grammar",    NativeFnId::LlmToolGrammar),
 ];
 
 fn register_llm_types(ctx: &mut TypeContext) {

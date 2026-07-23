@@ -1,17 +1,11 @@
 use std::collections::HashMap;
 use crate::frontend::ast::StructFieldDef;
 
-/// Canonical GBNF for the JSON body of a Jade tool call. Kept as a checked-in
-/// `.gbnf` file (`grammars/tool_call.gbnf`) and compiled in here so it ships with
-/// the binary and is covered by tests. The model-specific delimiters that wrap
-/// this body come from the active model profile (`src/llm/model_profile.rs`), not
-/// from the grammar — so this body grammar is reusable across models.
-pub const TOOL_CALL_GBNF: &str = include_str!("../../grammars/tool_call.gbnf");
-
-/// The canonical tool-call body grammar (see [`TOOL_CALL_GBNF`]).
-pub fn tool_call_grammar() -> &'static str {
-    TOOL_CALL_GBNF
-}
+// The canonical tool-call body GBNF used to live here (`TOOL_CALL_GBNF` +
+// `tool_call_grammar()`, backing `llm.tool_grammar()`). Both are gone: tool-call
+// shapes are model-specific and now ship with each model's profile, and callers
+// that want a grammar constraint build one with the `Grammar` type. What remains
+// here is `grammar_for` — the compiler-side generator for typed dereferences.
 
 /// Wrap a user-supplied GBNF pattern (RHS only) into a complete grammar.
 ///

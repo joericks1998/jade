@@ -5,8 +5,8 @@
 //! rather than within it.
 
 pub mod emit;
-pub mod gbnf;
 pub mod taskcheck;
+pub mod gbnf;
 pub mod tir;
 pub mod type_infer;
 

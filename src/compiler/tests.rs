@@ -483,26 +483,6 @@ mod gbnf {
             assert_ne!(g.trim(), "root ::= \"{\"", "grammar must not be anchor-only");
         }
 
-        #[test]
-        fn tool_call_gbnf_is_present_and_well_formed() {
-            let g = tool_call_grammar();
-            assert!(!g.trim().is_empty(), "tool_call.gbnf must ship non-empty");
-            assert!(g.contains("\"name\""), "must constrain the name member");
-            assert!(g.contains("arguments"), "must constrain the arguments member");
-
-            // Collect defined rule names (LHS of every `name ::= …` line).
-            let defined: std::collections::HashSet<&str> = g
-                .lines()
-                .filter_map(|l| l.split_once("::="))
-                .map(|(lhs, _)| lhs.trim())
-                .collect();
-            assert!(defined.contains("root"), "must define the root start rule");
-            // No dangling nonterminals — every rule the grammar relies on is defined.
-            // Rule set mirrors the live, unit-tested tool-call grammar.
-            for rule in ["pair", "val", "obj", "arr", "str", "num", "ws"] {
-                assert!(defined.contains(rule), "rule `{rule}` is referenced but not defined");
-            }
-        }
 }
 
 // ─── NEW TESTS ──────────────────────────────────────────────────────────────

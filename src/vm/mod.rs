@@ -49,7 +49,6 @@ pub enum NativeFnId {
     LlmTotalTokens,
     LlmKeepAnchors,
     LlmModel,
-    LlmToolGrammar,
     LlmHealth,
     Print,
     Stream,
@@ -2015,15 +2014,6 @@ async fn call_value(
                 // The active model — set from the daemon's Meta frame after the
                 // first inference, else the configured default (may be empty).
                 Ok(VmValue::Str(state.default_model.clone().into()))
-            }
-            NativeFnId::LlmToolGrammar => {
-                if !args.is_empty() {
-                    return Err(JadeError::ArityMismatch { expected: 0, got: args.len(), span });
-                }
-                // The canonical tool-call body grammar (grammars/tool_call.gbnf),
-                // compiled in. Pair with the profile delimiters for a full
-                // anchored grammar via Grammar.new(g, open, close).
-                Ok(VmValue::Str(crate::compiler::gbnf::TOOL_CALL_GBNF.to_owned().into()))
             }
             NativeFnId::LlmHealth => {
                 if !args.is_empty() {

@@ -122,7 +122,6 @@ fn chunk_module_supported(module: &str, method: &str, argc: usize) -> bool {
         ("random", "float") => argc == 0,
         ("llm", "count_tokens") => argc == 1,
         ("llm", "total_tokens") => argc == 0,
-        ("llm", "tool_grammar") => argc == 0,
         ("llm", "model") => argc == 0,
         ("llm", "set_max_tokens" | "keep_anchors") => argc == 1,
         ("llm", "health") => argc == 0,
@@ -2465,7 +2464,6 @@ fn emit_module_call<'ctx>(
         }
         ("llm", "count_tokens") => int_fn("jrt_count_tokens", 1),
         ("llm", "total_tokens") => int_fn("jrt_total_tokens", 0),
-        ("llm", "tool_grammar") => Ok(low.tag_str(str_fn("jrt_tool_grammar", 0)?)),
         ("llm", "model") => Ok(low.tag_str(str_fn("jrt_get_model", 0)?)),
         ("llm", "keep_anchors") => {
             // (bool word) -> void. Extract bit4 (the bool payload) as an i32.

@@ -156,7 +156,6 @@ mod pkg {
             ("keep_anchors", NativeFnId::LlmKeepAnchors),
             ("model", NativeFnId::LlmModel),
             ("health", NativeFnId::LlmHealth),
-            ("tool_grammar", NativeFnId::LlmToolGrammar),
         ];
         assert_eq!(map.len(), expected.len(), "dict maps exactly the stateful llm fns");
         for (name, id) in expected {

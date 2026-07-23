@@ -70,7 +70,7 @@ void jrt_print_any(int64_t val, const char* suffix) {
     /* Print a type-erased value to stdout, then `suffix`. Used by print() for
      * statically-Unknown args. Strings are written directly (unbounded) — unlike
      * routing through jrt_snprintf_any + a fixed scratch buffer, which truncates
-     * a long Unknown string (e.g. llm.tool_grammar()). Scalars/objects are short,
+     * a long Unknown string (e.g. a large llm reply). Scalars/objects are short,
      * so they format into a small buffer via the shared jrt_snprintf_any. */
     jade_value_t v = (jade_value_t)val;
     if (jrt_is_str(v)) {

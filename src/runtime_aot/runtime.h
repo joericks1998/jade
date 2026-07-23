@@ -325,10 +325,6 @@ int64_t jrt_total_tokens(void);
  * JRT_NIL if the daemon sent no parseable JSON.                              */
 jade_value_t jrt_llm_health(void);
 
-/* llm.tool_grammar() — the canonical tool-call body GBNF (compiled in from
- * jadelang/grammars/tool_call.gbnf), as a TRUSTED heap string.               */
-char*   jrt_tool_grammar(void);
-
 /* Tool-call PARSING (find_tool_call / find_tool_calls) and model-profile
  * introspection (profile) left the runtime: that logic now ships with each
  * model's profile as a Jade package, so there are no jrt_llm_find_tool_call*
