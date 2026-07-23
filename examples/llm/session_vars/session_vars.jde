@@ -1,8 +1,0 @@
-// Session variables: __tokens__, __model__, __max_retries__
-
-prompt p = "Say: hi"
-let response = ?p
-
-print(__model__)
-print(__max_retries__)
-print(__tokens__)

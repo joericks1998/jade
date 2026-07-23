@@ -17,9 +17,6 @@ pub async fn run_test(pattern: Option<&str>, verbose: bool) {
         return;
     }
 
-    // Fix 4: load config once here rather than once per test file.
-    let cfg = crate::config::load_config();
-
     println!("running {} test{}", files.len(), if files.len() == 1 { "" } else { "s" });
 
     let mut passed = 0usize;
@@ -36,7 +33,7 @@ pub async fn run_test(pattern: Option<&str>, verbose: bool) {
         print!("  {} ... ", name);
 
         // Fix 5: pass &Path directly instead of converting to an owned String.
-        match run_test_file(file, verbose, &cfg).await {
+        match run_test_file(file, verbose).await {
             Ok(()) => {
                 println!("ok");
                 passed += 1;
@@ -65,17 +62,13 @@ pub async fn run_test(pattern: Option<&str>, verbose: bool) {
 
 /// Run a single test file.  Returns `Ok(())` on clean exit, `Err(msg)` on any error.
 ///
-/// Fix 4/5: accepts `&Path` directly (no intermediate `String` allocation) and
-/// receives pre-loaded config so `load_config` is not called per file.
-/// Uses `select_backend` (same as `jade run`) so the jade-tree socket is tried
-/// first, matching the inference path that regular `jade run` uses.
+/// Uses `select_backend` (same as `jade run`) so the daemon socket drives
+/// inference, matching the path that regular `jade run` uses.
 async fn run_test_file(
     path: &std::path::Path,
     _verbose: bool,
-    cfg: &crate::config::JadeConfig,
 ) -> Result<(), String> {
     use crate::{compiler::{emit, type_infer}, vm};
-    let max_retries = cfg.max_retries;
 
     let source = std::fs::read_to_string(path)
         .map_err(|e| format!("could not read file: {}", e))?;
@@ -145,7 +138,6 @@ async fn run_test_file(
         backend,
         // Daemon owns the model; starts empty, settable via `llm.use_model(...)`.
         default_model: String::new(),
-        max_retries,
         source_dir,
         project_root,
         libraries,

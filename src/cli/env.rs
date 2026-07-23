@@ -10,18 +10,6 @@ pub fn run_env(json: bool) {
     // Platform
     let platform = format!("{} {}", std::env::consts::OS, std::env::consts::ARCH);
 
-    // Config
-    let cfg = crate::config::load_config();
-    let global_path = crate::config::global_config_path();
-    let global_path_str = global_path.display().to_string();
-
-    // Config source
-    let config_source = if global_path.exists() {
-        global_path_str.clone()
-    } else {
-        "defaults only".to_string()
-    };
-
     // Cache stats
     let cache_entries = crate::cache::list_entries();
     let entry_count = cache_entries.len();
@@ -63,10 +51,6 @@ pub fn run_env(json: bool) {
             "jade_version": version,
             "binary":       binary,
             "platform":     platform,
-            "config": {
-                "source":      config_source,
-                "max_retries": cfg.max_retries,
-            },
             "cache": {
                 "path":    cache_root,
                 "entries": entry_count,
@@ -82,10 +66,6 @@ pub fn run_env(json: bool) {
         println!("jade {}", version);
         println!("  binary    {}", binary);
         println!("  platform  {}", platform);
-        println!();
-        println!("config:");
-        println!("  source       {}", config_source);
-        println!("  max retries  {}", cfg.max_retries);
         println!();
         println!("cache ({}):", cache_root);
         println!("  entries  {}", entry_count);

@@ -114,43 +114,11 @@ static int g_max_tokens = JADE_INFER_MAX_TOKENS;
 
 void jrt_llm_set_max_tokens(int64_t n) { if (n > 0) g_max_tokens = (int)n; }
 
-/* Retry budget for a typed deref (`?p |> int`), matching the VM.
- *
- * The VM reads this from jade.toml (src/config, default 3). A compiled binary
- * cannot read jade.toml — it is a standalone executable that may run anywhere —
- * so it takes JADE_MAX_RETRIES and otherwise uses the same default. This was
- * hard-coded 15 in codegen, so a typed deref gave up after 16 attempts in a
- * compiled program and 4 in the VM: the same program, different behaviour, and
- * `jade.toml` silently ignored by `jade build`.
- *
- * Resolved once and cached; getenv is not thread-safe against setenv and this
- * is read from spawned tasks. */
-#define JADE_DEFAULT_MAX_RETRIES 3
-static int g_max_retries = -1;
-
-int jrt_max_retries(void) {
-    if (g_max_retries < 0) {
-        int v = JADE_DEFAULT_MAX_RETRIES;
-        const char* over = getenv("JADE_MAX_RETRIES");
-        if (over && *over) {
-            char* end = NULL;
-            long n = strtol(over, &end, 10);
-            if (end && *end == '\0' && n >= 0 && n <= 1000) v = (int)n;
-        }
-        g_max_retries = v;
-    }
-    return g_max_retries;
-}
-
-/* Cumulative tokens billed to this process, the AOT half of `__tokens__`.
- *
- * Counted locally, exactly as the VM accumulates `VmState.token_count`, rather
- * than asking the daemon: jrt_total_tokens() reports the daemon's own session
- * total, which is a different number whenever more than one program has talked
- * to it. Every inference entry adds its DONE frame's count here. */
-static uint64_t g_session_tokens = 0;
-
-int64_t jrt_session_tokens(void) { return (int64_t)g_session_tokens; }
+/* The typed-deref retry budget is now a fixed compile-time constant materialized
+ * directly in codegen (crate::vm::TYPED_DEREF_RETRIES), shared by both engines.
+ * It used to be a configurable value read here via jrt_max_retries(); that, like
+ * the `__max_retries__` / `__tokens__` session globals it fed, was removed when
+ * provider configuration moved to the daemon. */
 
 static void build_request(const infer_req_t* req, infer_buf_t* out) {
     buf_init(out);
@@ -211,7 +179,7 @@ char* jrt_prompt(const char* prompt, const char* model) {
     size_t resp_len = 0;
     uint64_t used = 0;
     jrt_ipc_request(json.data, json.len, &resp, &resp_len, &used);
-    g_session_tokens += used;
+    (void)used;
     free(json.data);
     if (!resp) return NULL;
     /* jaded is a TRUSTED transformer: it propagates the prompt's trust to its
@@ -564,7 +532,7 @@ char* jrt_prompt_stream_ex(const char* prompt, const char* model,
     uint64_t used = 0;
     jrt_ipc_request_streaming(json.data, json.len, stream_on_token, &st,
                               &daemon_resp, NULL, &used);
-    g_session_tokens += used;
+    (void)used;
     free(json.data);
     free(daemon_resp);
 
@@ -655,18 +623,9 @@ jade_value_t jrt_llm_health(void) {
 
 /* ── Model name resolution (env-derived, TRUSTED) ─────────────────────── */
 
-/* `__model__`: the model the daemon says it is serving, not the one we asked
- * for. Distinct from jrt_get_model below, which supplies the *request's* model
- * — the VM draws the same distinction (default_model for requests, the Meta
- * frame for __model__). Falls back to the requested model before any inference
- * has happened, so the variable is never misleadingly empty. */
-char* jrt_session_model(void) {
-    const char* reported = jrt_reported_model();
-    if (reported && *reported) return jrt_str_dup(reported, JRT_TRUSTED);
-    const char* m = getenv("JADE_MODEL");
-    return jrt_str_dup(m ? m : "", JRT_TRUSTED);
-}
-
+/* jrt_get_model supplies the *request's* model (what we ask the daemon for).
+ * The daemon-reported model is available separately via jrt_reported_model();
+ * the `__model__` session global that used to surface it was removed. */
 char* jrt_get_model(void) {
     const char* m = getenv("JADE_MODEL");
     if (!m) m = "";

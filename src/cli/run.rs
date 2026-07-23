@@ -135,8 +135,7 @@ pub async fn run_file(path: &str, verbose: bool) {
         }
     };
 
-    // Load config (retry budget) and connect to the inference daemon, if running.
-    let cfg = crate::config::load_config();
+    // Connect to the inference daemon, if it's running.
     let backend = crate::llm::select_backend();
     let source_dir = Path::new(path)
         .canonicalize()
@@ -167,7 +166,6 @@ pub async fn run_file(path: &str, verbose: bool) {
         // starts empty (the daemon reports the live model) and can still be set
         // per-run via `llm.use_model(...)`.
         default_model: String::new(),
-        max_retries: cfg.max_retries,
         source_dir,
         project_root,
         libraries,

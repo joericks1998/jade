@@ -1383,11 +1383,10 @@ fn test_vm_typed_deref_overflow() {
 
 #[test]
 fn test_vm_tokens_incremented_after_deref() {
+    // token_count is the surviving state (the `__tokens__` session global that
+    // mirrored it was removed). llm.total_tokens() reads the same field.
     let s = run_src_with_mock("prompt p = \"hi\"\nlet x = ?p", vec!["hello"]).unwrap();
-    match s.globals.get("__tokens__").unwrap() {
-        VmValue::Int(n) => assert!(*n > 0),
-        v => panic!("expected Int, got {:?}", v),
-    }
+    assert!(s.token_count > 0);
 }
 
 #[test]

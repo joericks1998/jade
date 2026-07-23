@@ -39,7 +39,6 @@ pub mod vm;
 // handler, the platform/concurrency shim, and the IPC and inference clients —
 // and `build.rs` compiles it to `libJadeRuntime.a`. Distinct from
 // `jade-runtime` (`src/runtime/`), which is Rust and shared by *both* engines.
-pub mod config;
 pub mod frontend;
 pub mod llm;
 pub mod native;

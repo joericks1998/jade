@@ -35,6 +35,12 @@ use jade_runtime::trust::JStr;
 const DEFAULT_MAX_TOKENS: u32 = 4096;
 const RETRY_MAX_TOKENS: u32 = 64;
 const RETRY_MAX_TOKENS_COMPLEX: u32 = 512;
+/// How many times a typed dereference (`?p |> Type`) re-asks the model when the
+/// reply doesn't coerce to the target type. Fixed: it used to be a configurable
+/// `max_retries` exposed as the `__max_retries__` session global, both removed
+/// when provider configuration moved to the daemon. Shared with the AOT backend
+/// so both engines give up after the same number of attempts.
+pub(crate) const TYPED_DEREF_RETRIES: usize = 15;
 
 // ── Runtime value ─────────────────────────────────────────────────────────────
 
@@ -286,7 +292,6 @@ pub struct VmState {
     /// Optional LLM inference backend.
     pub inference_backend: Option<std::sync::Arc<dyn llm::InferenceBackend>>,
     pub token_count: i64,
-    pub max_retries: usize,
     pub max_tokens: u32,
     /// Sticky session control: when true, prompt requests ask the daemon to make
     /// tool-span boundaries observable in-band (`keep_anchors` on the wire). Set
@@ -318,10 +323,6 @@ pub struct VmState {
 impl VmState {
     fn new() -> Self {
         let mut globals = HashMap::new();
-        globals.insert("__tokens__".to_string(), VmValue::Int(0));
-        globals.insert("__model__".to_string(), VmValue::Str(String::new().into()));
-        globals.insert("__max_retries__".to_string(), VmValue::Int(15));
-        globals.insert("__retry_log__".to_string(), VmValue::Array(Arc::new(Mutex::new(ArrayObj::from_vec(vec![])))));
         builtins::seed_globals(&mut globals);
         VmState {
             raised_exception: None,
@@ -332,7 +333,6 @@ impl VmState {
             route_configs: HashMap::new(),
             inference_backend: None,
             token_count: 0,
-            max_retries: 15,
             max_tokens: DEFAULT_MAX_TOKENS,
             keep_anchors: false,
             default_model: String::new(),
@@ -347,23 +347,15 @@ impl VmState {
         }
     }
 
-    fn set_session(&mut self, name: &str, value: VmValue) {
-        self.globals.insert(name.to_string(), value);
-    }
-
-    /// Apply `VmOpts` fields onto this state and seed the session globals.
+    /// Apply `VmOpts` fields onto this state.
     ///
-    /// Extracted to avoid duplicating the same 6-line block in `run` and
-    /// `new_for_repl`.
+    /// Extracted to avoid duplicating the same block in `run` and `new_for_repl`.
     fn apply_opts(&mut self, opts: VmOpts) {
         self.inference_backend = opts.backend;
-        self.max_retries = opts.max_retries;
-        self.default_model = opts.default_model.clone();
+        self.default_model = opts.default_model;
         self.source_dir = opts.source_dir;
         self.project_root = opts.project_root;
         self.libraries = opts.libraries;
-        self.set_session("__model__", VmValue::Str(opts.default_model.into()));
-        self.set_session("__max_retries__", VmValue::Int(opts.max_retries as i64));
         #[cfg(test)]
         { self.test_stdout = opts.test_stdout; }
     }
@@ -399,7 +391,6 @@ impl VmState {
             route_configs: self.route_configs.clone(),
             inference_backend: self.inference_backend.clone(),
             token_count: 0,
-            max_retries: self.max_retries,
             max_tokens: self.max_tokens,
             keep_anchors: self.keep_anchors,
             default_model: self.default_model.clone(),
@@ -419,7 +410,6 @@ impl VmState {
 pub struct VmOpts {
     pub backend: Option<std::sync::Arc<dyn llm::InferenceBackend>>,
     pub default_model: String,
-    pub max_retries: usize,
     /// Directory of the source file being run — used to resolve relative `use` paths.
     /// Defaults to the current working directory when running in-memory (tests, REPL).
     pub source_dir: PathBuf,
@@ -437,7 +427,6 @@ impl Default for VmOpts {
         VmOpts {
             backend: None,
             default_model: String::new(),
-            max_retries: 15,
             source_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             project_root: None,
             libraries: HashMap::new(),
@@ -716,7 +705,6 @@ async fn execute_chunk(
                         sub_state.project_root = state.project_root.clone();
                         sub_state.libraries = state.libraries.clone();
                         sub_state.inference_backend = state.inference_backend.clone();
-                        sub_state.max_retries = state.max_retries;
                         sub_state.max_tokens = state.max_tokens;
                         sub_state.default_model = state.default_model.clone();
 
@@ -900,7 +888,6 @@ async fn execute_chunk(
                         sub_state.project_root = state.project_root.clone();
                         sub_state.libraries = state.libraries.clone();
                         sub_state.inference_backend = state.inference_backend.clone();
-                        sub_state.max_retries = state.max_retries;
                         sub_state.max_tokens = state.max_tokens;
                         sub_state.default_model = state.default_model.clone();
                         let r = Box::pin(run_with_state(compiled, &mut sub_state)).await;
@@ -1557,7 +1544,6 @@ async fn execute_chunk(
                         }
                         let (value, child_tokens) = vm_try!(task_result);
                         state.token_count += child_tokens;
-                        state.globals.insert("__tokens__".to_string(), VmValue::Int(state.token_count));
                         set(slots, *dest, value);
                     }
                     _ => { vm_err!(JadeError::NotAFuture { span }); }
@@ -1590,7 +1576,6 @@ async fn execute_chunk(
                     state.token_count += child_tokens;
                     results.push(value);
                 }
-                state.globals.insert("__tokens__".to_string(), VmValue::Int(state.token_count));
                 set(slots, *dest, VmValue::Array(Arc::new(Mutex::new(ArrayObj::from_vec(results)))));
             }
         }
@@ -2153,13 +2138,10 @@ async fn vm_prompt_deref(
     }, span).await?;
 
     if let Some(name) = backend.reported_model_name() {
-        state.default_model = name.clone();
-        state.globals.insert("__model__".to_string(), VmValue::Str(name.into()));
+        state.default_model = name;
     }
 
     state.token_count += initial_resp.tokens_used;
-    let tc = state.token_count;
-    state.globals.insert("__tokens__".to_string(), VmValue::Int(tc));
 
     let Some(type_name) = output_type else {
         state.prompt_cache.insert(cache_key, initial_resp.text.clone());
@@ -2167,7 +2149,7 @@ async fn vm_prompt_deref(
     };
 
     // Typed deref: retry loop — send the raw error string directly to the model.
-    let max_retries = state.max_retries;
+    let max_retries = TYPED_DEREF_RETRIES;
     let mut current = initial_resp.text;
     let struct_defs = state.struct_defs.clone();
 
@@ -2177,21 +2159,13 @@ async fn vm_prompt_deref(
         RETRY_MAX_TOKENS_COMPLEX
     };
 
-    for attempt in 0..max_retries {
+    for _ in 0..max_retries {
         match coerce(current.trim(), type_name, &struct_defs) {
             Ok(v) => {
                 state.prompt_cache.insert(cache_key, current);
                 return apply_struct_decorators(v, type_name, state, span).await;
             }
             Err(correction) => {
-                let entry = VmValue::Str(format!(
-                    "attempt {}: response={:?} hint={:?}",
-                    attempt + 1, current.trim(), correction
-                ).into());
-                if let Some(VmValue::Array(arc)) = state.globals.get("__retry_log__") {
-                    arc.lock().push(entry);
-                }
-
                 let retry = backend.infer(llm::InferenceRequest {
                     prompt: correction.clone(),
                     model: state.default_model.clone(),
@@ -2458,12 +2432,9 @@ async fn vm_drain_token_stream(
         match h.await {
             Ok(Ok(tokens)) => {
                 state.token_count += tokens;
-                let tc = state.token_count;
-                state.globals.insert("__tokens__".to_string(), VmValue::Int(tc));
                 if let Some(backend) = &state.inference_backend {
                     if let Some(name) = backend.reported_model_name() {
-                        state.default_model = name.clone();
-                        state.globals.insert("__model__".to_string(), VmValue::Str(name.into()));
+                        state.default_model = name;
                     }
                 }
             }
@@ -2653,12 +2624,9 @@ async fn vm_drain_token_stream_printing(
         match h.await {
             Ok(Ok(tokens)) => {
                 state.token_count += tokens;
-                let tc = state.token_count;
-                state.globals.insert("__tokens__".to_string(), VmValue::Int(tc));
                 if let Some(backend) = &state.inference_backend {
                     if let Some(name) = backend.reported_model_name() {
-                        state.default_model = name.clone();
-                        state.globals.insert("__model__".to_string(), VmValue::Str(name.into()));
+                        state.default_model = name;
                     }
                 }
             }

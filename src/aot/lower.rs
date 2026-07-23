@@ -1860,50 +1860,6 @@ fn default_word_const<'ctx>(
     })
 }
 
-fn emit_session_var<'ctx>(
-    low: &Lowerer<'_, 'ctx>,
-    name: &str,
-) -> Result<Option<IntValue<'ctx>>, String> {
-    let b = low.builder;
-    let i64_ty = low.i64t();
-    let e = |x: inkwell::builder::BuilderError| x.to_string();
-    let v = match name {
-        "__model__" => {
-            // jrt_session_model, not jrt_get_model: `__model__` is what the
-            // daemon reported serving, not what we asked it for.
-            let f = low.runtime_fn("jrt_session_model", low.ptrt().fn_type(&[], false));
-            let raw = b
-                .build_call(f, &[], "sessmodel")
-                .map_err(e)?
-                .as_any_value_enum()
-                .into_pointer_value();
-            low.tag_str(raw)
-        }
-        "__tokens__" => {
-            let f = low.runtime_fn("jrt_session_tokens", i64_ty.fn_type(&[], false));
-            let n = b
-                .build_call(f, &[], "sesstokens")
-                .map_err(e)?
-                .as_any_value_enum()
-                .into_int_value();
-            low.tag_int(n)
-        }
-        "__max_retries__" => {
-            let i32_ty = low.ctx.i32_type();
-            let f = low.runtime_fn("jrt_max_retries", i32_ty.fn_type(&[], false));
-            let n32 = b
-                .build_call(f, &[], "sessretries")
-                .map_err(e)?
-                .as_any_value_enum()
-                .into_int_value();
-            let n = b.build_int_s_extend(n32, i64_ty, "retries64").map_err(e)?;
-            low.tag_int(n)
-        }
-        _ => return Ok(None),
-    };
-    Ok(Some(v))
-}
-
 fn emit_stream_call<'ctx>(
     low: &Lowerer<'_, 'ctx>,
     dest: Reg,
@@ -3090,13 +3046,6 @@ fn lower_instr<'ctx>(
             // NativeCall and this materialized value is dead-code-eliminated.)
             let v = if let Some((pkgid, fname)) = parse_native_ref(name) {
                 emit_native_fn_value(low, pkgid, fname)?
-            } else if let Some(v) = emit_session_var(low, name)? {
-                // The `__model__` / `__tokens__` / `__max_retries__` session
-                // variables are ordinary globals the VM rewrites after each
-                // inference. Nothing writes them in a compiled program, so they
-                // read back nil — silently, which is the worst answer. They are
-                // runtime queries here instead.
-                v
             } else {
                 let g = low.global_slot(name);
                 b.build_load(i64_ty, g, "gld").map_err(|e| e.to_string())?.into_int_value()
@@ -3584,12 +3533,7 @@ fn lower_instr<'ctx>(
                     i64_ty.fn_type(&[ptrt.into(), ptrt.into(), ptrt.into(), i32_ty.into()], false),
                 );
                 let tname = low.cstr(t);
-                let retries_fn = low.runtime_fn("jrt_max_retries", i32_ty.fn_type(&[], false));
-                let retries = b
-                    .build_call(retries_fn, &[], "maxretries")
-                    .map_err(e)?
-                    .as_any_value_enum()
-                    .into_int_value();
+                let retries = i32_ty.const_int(crate::vm::TYPED_DEREF_RETRIES as u64, false);
                 let w = b
                     .build_call(f, &[prompt_ptr.into(), model.into(), tname.into(), retries.into()], "prompts")
                     .map_err(e)?
@@ -3606,16 +3550,10 @@ fn lower_instr<'ctx>(
                     ptrt.fn_type(&[ptrt.into(), ptrt.into(), ptrt.into(), i32_ty.into()], false),
                 );
                 let tname = low.cstr(t);
-                // Retry budget is a runtime value so `jade.toml`'s max_retries
-                // (default 3) reaches a compiled binary the same way it reaches
-                // the VM. It used to be hard-coded 15 here, so the two engines
-                // gave up after different numbers of attempts.
-                let retries_fn = low.runtime_fn("jrt_max_retries", i32_ty.fn_type(&[], false));
-                let retries = b
-                    .build_call(retries_fn, &[], "maxretries")
-                    .map_err(e)?
-                    .as_any_value_enum()
-                    .into_int_value();
+                // Fixed retry budget, shared with the VM (crate::vm::TYPED_DEREF_RETRIES)
+                // so both engines give up after the same number of attempts. It used
+                // to be a config-injected runtime value read via jrt_max_retries.
+                let retries = i32_ty.const_int(crate::vm::TYPED_DEREF_RETRIES as u64, false);
                 b.build_call(
                     f,
                     &[prompt_ptr.into(), model.into(), tname.into(), retries.into()],

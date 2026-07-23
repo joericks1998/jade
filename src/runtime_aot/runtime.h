@@ -269,21 +269,16 @@ char*   jrt_prompt_grammar_ex(const char* prompt, const char* model,
  * - `anchor` strings enter muted mode when matched (anchor itself suppressed).
  * - `stop` strings exit muted mode when matched (stop itself suppressed).
  * Returns the full collected text (muted+visible). Caller frees. NULL on error. */
-/* Session state mirroring the VM's `__max_retries__` / `__tokens__` globals.
- * jrt_max_retries reads JADE_MAX_RETRIES (default 3, matching jade.toml's
- * default); jrt_session_tokens is this process's cumulative token count. */
 /* Struct-typed prompt deref (`?p |> City`): ask, coerce, re-ask on failure,
  * raise when the retries run out. jrt_struct_field builds the type -> field
  * table it coerces against (emitted once at startup, in declaration order);
- * jrt_coerce_struct is the non-raising builder in the shared Rust runtime. */
+ * jrt_coerce_struct is the non-raising builder in the shared Rust runtime.
+ * `max_retries` is the fixed budget codegen passes in (crate::vm::TYPED_DEREF_RETRIES). */
 void    jrt_struct_field(const char* type_name, const char* field,
                          int64_t default_word, int has_default);
 int64_t jrt_coerce_struct(const char* json, const char* type_name);
 int64_t jrt_prompt_struct(const char* prompt, const char* model,
                           const char* type_name, int max_retries);
-char*   jrt_session_model(void);
-int     jrt_max_retries(void);
-int64_t jrt_session_tokens(void);
 
 /* jrt_prompt_typed_checked — jrt_prompt_typed, but raises a catchable Jade
  * error instead of returning NULL when the retries are exhausted. Codegen calls
