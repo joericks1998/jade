@@ -5,35 +5,24 @@
 // Fixture-first: this documents the intended Jade-facing API. Contract:
 // design/llm-package-1.1.12.md.
 //
-// Phase 1 surfaces (all resolve at runtime through VmState.inference_backend):
-//   1. model profile     llm.model(), llm.profile()        (introspection)
+// Surfaces the language still owns (all resolve at runtime through the daemon):
+//   1. active model      llm.model()                        (introspection)
 //   2. protocol controls llm.set_max_tokens(n), llm.keep_anchors(b)
 //   3. token & stats      llm.count_tokens(s), llm.total_tokens()
-//   4. daemon lifecycle   llm.health()                      (new wire op)
+//   4. daemon lifecycle   llm.health()                      (wire op)
 //
-// Tool-call streaming (ToolStreamParser → content/tool_call events) is phase 2.
+// Tool-call PARSING and per-model profiles are no longer language builtins —
+// they are model-specific, so they ship with each model as a Jade profile
+// package. A program imports the profile for the model it targets and calls,
+// e.g., `profile.find_tool_call(reply)`. See the model's own profile package.
 
 use llm
 
 
-// ── 1. Model profile (read-only introspection) ───────────────────────────────
-// The profile is selected by the model the daemon reports in its Meta frame and
-// loaded from the jade-model-profile crate (per-model token vocabulary).
+// ── 1. Active model (read-only introspection) ────────────────────────────────
+// The name the daemon reports in its Meta frame after the first inference.
 
 print(llm.model())            // → "Qwen3-Coder-30B"
-
-let prof = llm.profile()
-print(prof.tool_call.open)    // → "<tool>"
-print(prof.tool_call.close)   // → "</tool>"
-
-// Search an LLM response for a tool call delimited per this model's profile.
-// Returns { name, args } (args = verbatim JSON body), or nil if none present.
-let reply = ?prompt "What's the weather in SF? Use a tool."
-let call = llm.find_tool_call(reply)
-if call != nil {
-    print(call.name)          // → e.g. "get_weather"
-    print(call.args)          // → e.g. {"tool_name": "get_weather", "city": "SF"}
-}
 
 
 // ── 2. Protocol controls (sticky VM session state) ───────────────────────────
