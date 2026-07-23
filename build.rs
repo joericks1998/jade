@@ -46,7 +46,7 @@ fn main() {
         .file(rt.join("native.c"))
         .file(rt.join("posix.c"))
         .file(rt.join("infer/infer.c"))
-        .file(rt.join("infer/tool_call.c"))        // Stdlib leaf modules, one folder per std:: module. Module .c files
+        .file(rt.join("infer/grammar.c"))          // Stdlib leaf modules, one folder per std:: module. Module .c files
         // include their headers as "<mod>/<mod>.h" (resolved via -I rt), so no
         // per-folder include is added — this keeps libc's <time.h> from being
         // shadowed by time/time.h.

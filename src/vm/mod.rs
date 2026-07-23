@@ -49,9 +49,6 @@ pub enum NativeFnId {
     LlmTotalTokens,
     LlmKeepAnchors,
     LlmModel,
-    LlmProfile,
-    LlmFindToolCall,
-    LlmFindToolCalls,
     LlmToolGrammar,
     LlmHealth,
     Print,
@@ -2019,66 +2016,6 @@ async fn call_value(
                 // first inference, else the configured default (may be empty).
                 Ok(VmValue::Str(state.default_model.clone().into()))
             }
-            NativeFnId::LlmProfile => {
-                if !args.is_empty() {
-                    return Err(JadeError::ArityMismatch { expected: 0, got: args.len(), span });
-                }
-                // Look up this model's token/tool vocabulary. nil when unknown.
-                match llm::model_profile::select(&state.default_model) {
-                    Some(p) => Ok(model_profile_to_vm(p)),
-                    None => Ok(VmValue::Nil),
-                }
-            }
-            NativeFnId::LlmFindToolCall => {
-                if args.len() != 1 {
-                    return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span });
-                }
-                match &args[0] {
-                    VmValue::Str(text) => {
-                        // Search the model's output for a tool call delimited per
-                        // the active model's profile. nil when no profile is known
-                        // for the model, or no tool call is present.
-                        let found = llm::model_profile::select(&state.default_model)
-                            .and_then(|p| p.find_tool_call(text));
-                        match found {
-                            Some(tc) => Ok(VmValue::Dict(DictObj::from_iter([
-                                ("name".to_string(), VmValue::Str(tc.name.into())),
-                                ("args".to_string(), VmValue::Str(tc.args.into())),
-                            ]))),
-                            None => Ok(VmValue::Nil),
-                        }
-                    }
-                    ref other => Err(JadeError::TypeError {
-                        message: format!("llm.find_tool_call() requires str, got {}", value_type_name(other)),
-                        span,
-                    }),
-                }
-            }
-            NativeFnId::LlmFindToolCalls => {
-                if args.len() != 1 {
-                    return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span });
-                }
-                match &args[0] {
-                    VmValue::Str(text) => {
-                        // Every tool call in the text, in order, per the active
-                        // model's profile delimiters. Empty array when none.
-                        let calls = llm::model_profile::select(&state.default_model)
-                            .map(|p| p.find_all_tool_calls(text))
-                            .unwrap_or_default();
-                        let items = calls.into_iter().map(|tc| {
-                            VmValue::Dict(DictObj::from_iter([
-                                ("name".to_string(), VmValue::Str(tc.name.into())),
-                                ("args".to_string(), VmValue::Str(tc.args.into())),
-                            ]))
-                        }).collect::<Vec<_>>();
-                        Ok(VmValue::Array(Arc::new(Mutex::new(ArrayObj::from_vec(items)))))
-                    }
-                    ref other => Err(JadeError::TypeError {
-                        message: format!("llm.find_tool_calls() requires str, got {}", value_type_name(other)),
-                        span,
-                    }),
-                }
-            }
             NativeFnId::LlmToolGrammar => {
                 if !args.is_empty() {
                     return Err(JadeError::ArityMismatch { expected: 0, got: args.len(), span });
@@ -2360,28 +2297,6 @@ fn json_to_vm_value(json: &serde_json::Value) -> std::result::Result<VmValue, St
             .collect::<std::result::Result<DictObj<VmValue>, String>>()
             .map(VmValue::Dict),
     }
-}
-
-/// Convert a model profile into the dict shape `llm.profile()` returns:
-/// `{ model, tool_call: { open, close, name_field }, spans: [ { tag, open, close } ] }`.
-fn model_profile_to_vm(p: &llm::model_profile::ModelProfile) -> VmValue {
-    let tool_call = DictObj::from_iter([
-        ("open".to_string(), VmValue::Str(p.tool_call.open.to_string().into())),
-        ("close".to_string(), VmValue::Str(p.tool_call.close.to_string().into())),
-        ("name_field".to_string(), VmValue::Str(p.tool_call.name_field.to_string().into())),
-    ]);
-    let spans = p.spans.iter().map(|s| {
-        VmValue::Dict(DictObj::from_iter([
-            ("tag".to_string(), VmValue::Str(s.tag.to_string().into())),
-            ("open".to_string(), VmValue::Str(s.open.to_string().into())),
-            ("close".to_string(), VmValue::Str(s.close.to_string().into())),
-        ]))
-    }).collect::<Vec<_>>();
-    VmValue::Dict(DictObj::from_iter([
-        ("model".to_string(), VmValue::Str(p.model.to_string().into())),
-        ("tool_call".to_string(), VmValue::Dict(tool_call)),
-        ("spans".to_string(), VmValue::Array(Arc::new(Mutex::new(ArrayObj::from_vec(spans))))),
-    ]))
 }
 
 /// Summarise struct field names and optionality for LLM error messages.

@@ -26,10 +26,7 @@ static LLM_NATIVES: &[(&str, NativeFnId)] = &[
     ("total_tokens",    NativeFnId::LlmTotalTokens),
     ("keep_anchors",    NativeFnId::LlmKeepAnchors),
     ("model",           NativeFnId::LlmModel),
-    ("profile",         NativeFnId::LlmProfile),
     ("health",          NativeFnId::LlmHealth),
-    ("find_tool_call",  NativeFnId::LlmFindToolCall),
-    ("find_tool_calls", NativeFnId::LlmFindToolCalls),
     ("tool_grammar",    NativeFnId::LlmToolGrammar),
 ];
 

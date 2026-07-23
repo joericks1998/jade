@@ -3,10 +3,6 @@ use std::sync::Arc;
 use crate::frontend::error::{Result, Span};
 
 pub mod jaded;
-// TODO(stage-b): model_profile moves out of the runtime entirely — the per-model
-// tool-call vocabulary becomes a Jade package shipped with each model/provider.
-// Still here because the VM natives and AOT lowering reference it.
-pub mod model_profile;
 /// The `use llm` built-in package (`LLM_PKG`) — registered in `crate::builtins`,
 /// but housed here beside the inference client it wraps.
 pub mod pkg;

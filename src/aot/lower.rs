@@ -125,8 +125,7 @@ fn chunk_module_supported(module: &str, method: &str, argc: usize) -> bool {
         ("llm", "tool_grammar") => argc == 0,
         ("llm", "model") => argc == 0,
         ("llm", "set_max_tokens" | "keep_anchors") => argc == 1,
-        ("llm", "profile" | "health") => argc == 0,
-        ("llm", "find_tool_call" | "find_tool_calls") => argc == 1,
+        ("llm", "health") => argc == 0,
         ("dict", "merge") => argc == 2,
         ("json", "parse" | "stringify" | "stringify_pretty") => argc == 1,
         ("Grammar", "new") => (1..=3).contains(&argc), // pattern[, anchor[, stop]]
@@ -2486,21 +2485,9 @@ fn emit_module_call<'ctx>(
             Ok(nil)
         }
         // These return already-tagged ObjHeader value words (dict/array or nil).
-        ("llm", "profile") => {
-            let f = low.runtime_fn("jrt_llm_profile", i64_ty.fn_type(&[], false));
-            Ok(b.build_call(f, &[], "profile").map_err(err)?.as_any_value_enum().into_int_value())
-        }
         ("llm", "health") => {
             let f = low.runtime_fn("jrt_llm_health", i64_ty.fn_type(&[], false));
             Ok(b.build_call(f, &[], "health").map_err(err)?.as_any_value_enum().into_int_value())
-        }
-        ("llm", "find_tool_call") => {
-            let f = low.runtime_fn("jrt_llm_find_tool_call", i64_ty.fn_type(&[ptrt.into()], false));
-            Ok(b.build_call(f, &[strp(0).into()], "ftc").map_err(err)?.as_any_value_enum().into_int_value())
-        }
-        ("llm", "find_tool_calls") => {
-            let f = low.runtime_fn("jrt_llm_find_tool_calls", i64_ty.fn_type(&[ptrt.into()], false));
-            Ok(b.build_call(f, &[strp(0).into()], "ftcs").map_err(err)?.as_any_value_enum().into_int_value())
         }
         ("env", "args") => {
             // () -> already-tagged array word (TRUSTED strings).

@@ -329,17 +329,10 @@ jade_value_t jrt_llm_health(void);
  * jadelang/grammars/tool_call.gbnf), as a TRUSTED heap string.               */
 char*   jrt_tool_grammar(void);
 
-/* llm.find_tool_call(text) — first tool call in `text` per the active model's
- * profile, as a tagged {name, args} dict, or JRT_NIL when none/no profile.   */
-jade_value_t jrt_llm_find_tool_call(const char* text);
-
-/* llm.find_tool_calls(text) — every tool call in `text`, in order, as a tagged
- * array of {name, args} dicts (empty array when none/no profile).            */
-jade_value_t jrt_llm_find_tool_calls(const char* text);
-
-/* llm.profile() — the active model's profile as a tagged dict
- * { model, tool_call:{open,close,name_field}, spans:[…] }, or JRT_NIL.       */
-jade_value_t jrt_llm_profile(void);
+/* Tool-call PARSING (find_tool_call / find_tool_calls) and model-profile
+ * introspection (profile) left the runtime: that logic now ships with each
+ * model's profile as a Jade package, so there are no jrt_llm_find_tool_call*
+ * / jrt_llm_profile entry points here anymore.                               */
 
 /* ── String methods ───────────────────────────────────────────────── */
 /* jrt_str_contains — 1 if needle found in haystack, else 0.         */

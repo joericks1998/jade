@@ -3389,8 +3389,8 @@ fn test_prompt_deref_outside_stream_passes_no_constraints() {
 
 // ── llm package: protocol controls / profile / health (1.1.12) ───────────────
 
-/// Run with a MockBackend and an explicit active model, so `llm.profile()` /
-/// `llm.model()` resolve against the model-profile table.
+/// Run with a MockBackend and an explicit active model, so `llm.model()`
+/// reports it.
 fn run_with_model(src: &str, model: &str) -> VmState {
     let tokens = lexer::tokenize(src).expect("lex failed");
     let program = parser::parse(tokens).expect("parse failed");
@@ -3435,56 +3435,6 @@ fn test_llm_keep_anchors_defaults_false() {
 fn test_llm_model_returns_active_model() {
     let state = run_with_model("use llm\nlet m = llm.model()", "Qwen3-Coder-30B");
     assert_eq!(get_str(&state, "m"), "Qwen3-Coder-30B");
-}
-
-#[test]
-fn test_llm_profile_returns_tool_format() {
-    // `llm.profile()` resolves the model's token/tool vocabulary into a dict.
-    let state = run_with_model(
-        "use llm\nlet p = llm.profile()\nlet open = p.tool_call.open\nlet close = p.tool_call.close\nlet nf = p.tool_call.name_field",
-        "Qwen3-Coder-30B",
-    );
-    assert_eq!(get_str(&state, "open"), "<tool_call>");
-    assert_eq!(get_str(&state, "close"), "</tool_call>");
-    assert_eq!(get_str(&state, "nf"), "name");
-}
-
-#[test]
-fn test_llm_profile_unknown_model_is_nil() {
-    let state = run_with_model("use llm\nlet p = llm.profile()", "some-unknown-model");
-    assert!(matches!(state.globals.get("p"), Some(VmValue::Nil)));
-}
-
-#[test]
-fn test_llm_find_tool_call_matches_profile() {
-    // `llm.find_tool_call(text)` finds a tool call delimited per the active
-    // model's profile and returns { name, args }.
-    let state = run_with_model(
-        "use llm\nlet r = \"Let me check. <tool_call>{\\\"name\\\": \\\"get_weather\\\", \\\"arguments\\\": {\\\"city\\\": \\\"SF\\\"}}</tool_call>\"\nlet tc = llm.find_tool_call(r)\nlet name = tc.name\nlet args = tc.args",
-        "Qwen3-Coder-30B",
-    );
-    assert_eq!(get_str(&state, "name"), "get_weather");
-    assert_eq!(get_str(&state, "args"), r#"{"name": "get_weather", "arguments": {"city": "SF"}}"#);
-}
-
-#[test]
-fn test_llm_find_tool_call_none_is_nil() {
-    let state = run_with_model(
-        "use llm\nlet tc = llm.find_tool_call(\"plain reply, no tool call\")",
-        "Qwen3-Coder-30B",
-    );
-    assert!(matches!(state.globals.get("tc"), Some(VmValue::Nil)));
-}
-
-#[test]
-fn test_llm_find_tool_calls_returns_all() {
-    let state = run_with_model(
-        "use llm\nlet r = \"<tool_call>{\\\"name\\\":\\\"a\\\",\\\"arguments\\\":{}}</tool_call> mid <tool_call>{\\\"name\\\":\\\"b\\\",\\\"arguments\\\":{}}</tool_call>\"\nlet cs = llm.find_tool_calls(r)\nlet n = cs.len()\nlet first = cs[0].name\nlet second = cs[1].name",
-        "Qwen3-Coder-30B",
-    );
-    assert_eq!(get_int(&state, "n"), 2);
-    assert_eq!(get_str(&state, "first"), "a");
-    assert_eq!(get_str(&state, "second"), "b");
 }
 
 #[test]
