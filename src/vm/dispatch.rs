@@ -654,9 +654,21 @@ pub(crate) async fn execute_chunk(
 
             // ── Calls ─────────────────────────────────────────────────────────
             Instr::Call(dest, callee_reg, arg_regs) => {
-                let callee = get(slots, *callee_reg).clone();
                 let args: Vec<VmValue> = arg_regs.iter().map(|&r| get(slots, r).clone()).collect();
-                let result = vm_try!(call_value(callee, args, state, span).await);
+                // Common case — calling a plain function value: borrow the
+                // `Arc<CompiledFn>` in the slot instead of cloning the whole
+                // `VmValue`. `call_fn` only needs `&CompiledFn`, so this skips an
+                // atomic refcount bump+drop on every call (the dominant remaining
+                // cost for call-heavy code once hashing is cheap). The slot borrow
+                // is released before the result is stored back below.
+                let result = match get(slots, *callee_reg) {
+                    VmValue::Fn(cf) => call_fn(cf, args, state, span).await,
+                    _ => {
+                        let callee = get(slots, *callee_reg).clone();
+                        call_value(callee, args, state, span).await
+                    }
+                };
+                let result = vm_try!(result);
                 set(slots, *dest, result);
             }
             Instr::CallNamed(dest, callee_reg, arg_pairs) => {
