@@ -19,3 +19,10 @@ crate-type = ["rlib", "staticlib"]
 [dependencies]
 ovata-infer-protocol = { git = "https://github.com/joericks1998/ovata-infer-protocol", tag = "v0.3.0" }
 serde_json = "1"
+# Pooling global allocator for the Rust heap path (collection object boxes +
+# their Vec/HashMap, which are Box-allocated and Box-freed entirely on the Rust
+# side). mimalloc grabs large OS arenas and recycles per-thread free lists, so
+# the frequent small allocations Jade makes for arrays/dicts/structs amortize
+# into pointer bumps instead of a syscall-backed malloc each time. The
+# `sys::malloc`/`free` string path is untouched, so no cross-allocator free.
+mimalloc = { version = "0.1", default-features = false }

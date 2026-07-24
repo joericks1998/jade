@@ -62,6 +62,17 @@
 // where the remaining lints earn their keep.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+// Route every Rust-side heap allocation (collection object boxes and their
+// `Vec`/`HashMap` payloads, all Box-allocated and Box-freed within Rust) through
+// mimalloc's pooling allocator. Declared once here so it applies to both engines:
+// the `jade` binary that links this crate as an rlib (the VM) and the AOT
+// staticlib linked into compiled binaries. The `sys::malloc`/`free` path used
+// for strings and C-interchangeable objects is a *separate* allocator and is
+// deliberately left on the system allocator — nothing crosses between them, so
+// there is no mismatched-free hazard.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 pub mod coercef;
 pub mod coll;
 pub mod cstr;
