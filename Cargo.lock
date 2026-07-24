@@ -634,6 +634,7 @@ dependencies = [
  "ovata-infer-protocol",
  "parking_lot",
  "reqwest",
+ "rustc-hash",
  "serde",
  "serde_json",
  "sha2",

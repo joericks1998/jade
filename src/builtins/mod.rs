@@ -183,8 +183,9 @@ pub fn is_package_global_name(name: &str) -> bool {
     PACKAGES.iter().any(|p| p.global_name == name)
 }
 
-/// Pre-seed `globals` with all core built-in functions.
-pub fn seed_globals(globals: &mut HashMap<String, VmValue>) {
+/// Pre-seed `globals` with all core built-in functions. Generic over the map's
+/// hasher so the VM can seed a fast-hashed `globals` (see `VmState::globals`).
+pub fn seed_globals<S: std::hash::BuildHasher>(globals: &mut HashMap<String, VmValue, S>) {
     for f in CORE_BUILTINS {
         globals.insert(f.name.to_string(), VmValue::BuiltinFn(*f));
     }

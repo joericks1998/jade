@@ -37,6 +37,11 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"
 async-trait = "0.1"
 async-recursion = "1"
 parking_lot = "0.12"
+# Fast, non-cryptographic hasher for the VM's hot maps (globals, method/struct
+# tables). Variable names are short internal keys, not attacker-controlled hash
+# inputs, so the default SipHash's DoS resistance buys nothing and costs ~10% of
+# interpreter time in call-heavy code — FxHash is several times faster on them.
+rustc-hash = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"

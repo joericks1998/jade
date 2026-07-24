@@ -16,8 +16,11 @@ pub struct VmState {
     /// The value most recently raised by `Instr::Raise` that propagated past its
     /// frame's handler stack. Consumed by the nearest enclosing `SetupHandler`.
     pub raised_exception: Option<VmValue>,
-    /// All top-level (global) bindings after execution.
-    pub globals: HashMap<String, VmValue>,
+    /// All top-level (global) bindings after execution. Uses `FxHashMap` — the
+    /// interpreter hashes a variable name on every `GetGlobal`, and these are
+    /// short internal keys, so the default SipHash's cost isn't worth its DoS
+    /// resistance here.
+    pub globals: rustc_hash::FxHashMap<String, VmValue>,
     /// Extend-block method tables: `type_name → method_name → fn`.
     pub extend_methods: HashMap<String, HashMap<String, Arc<CompiledFn>>>,
     /// Struct field definitions (needed for struct instantiation validation).
@@ -56,7 +59,7 @@ pub struct VmState {
 
 impl VmState {
     pub(crate) fn new() -> Self {
-        let mut globals = HashMap::new();
+        let mut globals = rustc_hash::FxHashMap::default();
         builtins::seed_globals(&mut globals);
         VmState {
             raised_exception: None,
