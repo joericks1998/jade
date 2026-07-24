@@ -1,0 +1,1253 @@
+//! The interpreter dispatch loop.
+//!
+//! [`execute_chunk`] runs a compiled [`Chunk`] against a register frame: it
+//! decodes each `Instr`, drives control flow (jumps, calls, the exception
+//! handler stack), and delegates value work to the shared runtime and to the
+//! other `vm` submodules (`call`, `coerce`, `ops`, `llm_prompt`). The register
+//! slot accessors it relies on live at the bottom of the file.
+
+use super::*;
+
+/// Execute `chunk` with the provided register frame.  Returns `Some(value)` if
+/// a `Return` instruction was executed, `None` if execution ended normally.
+pub(crate) async fn execute_chunk(
+    chunk: &Chunk,
+    slots: &mut Vec<VmValue>,
+    state: &mut VmState,
+) -> Result<Option<VmValue>> {
+    // Ensure the slots vector is large enough for this chunk's registers.
+    // (Top-level slots are pre-allocated by `run`; function frames are sized
+    // by `call_fn`; this is a safety net for edge cases.)
+    let needed = chunk.code.iter().fold(0u32, |acc, instr| acc.max(instr_max_reg(instr)));
+    if slots.len() <= needed as usize {
+        slots.resize(needed as usize + 1, VmValue::Nil);
+    }
+
+    // Instruction pointer — must be declared before the macros that assign to it.
+    let mut ip: usize = 0;
+
+    // Active exception handler frames: (caught_reg, handler_ip).
+    // SetupHandler pushes; PopHandler pops; Raise/errors dispatch to the top frame.
+    let mut handlers: Vec<(Reg, usize)> = Vec::new();
+
+    // Dispatch `err` to the top handler frame, or propagate it up the call stack.
+    // Used inline — written as a named closure so every error site stays readable.
+    // Returns the error to propagate (None means handler was invoked; continue the loop).
+    macro_rules! vm_err {
+        ($err:expr) => {{
+            let __err: JadeError = $err;
+            if let Some((__caught, __handler_ip)) = handlers.pop() {
+                let __raised = match __err {
+                    JadeError::Exception { .. } => state.raised_exception.take()
+                        .unwrap_or_else(|| VmValue::Str("unknown exception".to_string().into())),
+                    ref __e => make_vm_runtime_error(__e.to_string()),
+                };
+                set(slots, __caught, __raised);
+                ip = __handler_ip;
+                continue;
+            } else {
+                return Err(__err);
+            }
+        }};
+    }
+
+    // Like `expr?` but dispatches to an exception handler when one is active.
+    macro_rules! vm_try {
+        ($expr:expr) => {
+            match $expr {
+                Ok(__v) => __v,
+                Err(__e) => { vm_err!(__e); }
+            }
+        };
+    }
+
+    loop {
+        if ip >= chunk.code.len() {
+            break;
+        }
+        let instr = &chunk.code[ip];
+        let span  = chunk.spans[ip];
+        ip += 1;
+
+        match instr {
+            Instr::Halt => break,
+
+            // ── Imports ───────────────────────────────────────────────────────
+            Instr::ImportFile(path, namespace) => {
+                // ── Built-in packages ───────────────────────────────────────
+                // stdlib packages always bind under their own global_name; namespace param ignored.
+                if let Some(pkg) = builtins::find_package(path) {
+                    let val = package_dict_value(pkg);
+                    state.globals.insert(pkg.global_name.to_string(), val);
+                    continue;
+                }
+
+                // ── Native library modules ──────────────────────────────────
+                // A `[lib]` module whose file is a .dylib/.so/.dll is loaded over
+                // the C ABI and bound (as a dict of functions) under its module name.
+                let abs_path = match resolve_user_import(state, path, span)? {
+                    ResolvedImport::Native(lib_path) => {
+                        let fns = crate::native::load_native_package(&lib_path, span)?;
+                        state.globals.insert(namespace.clone(), VmValue::Dict(fns.into_iter().collect()));
+                        continue;
+                    }
+                    ResolvedImport::File(p) => p,
+                };
+
+                // ── User .jde files — namespaced ────────────────────────────
+                let canon = abs_path.canonicalize().map_err(|_| JadeError::ImportNotFound {
+                    path: path.clone(),
+                    span,
+                })?;
+
+                if state.import_stack.contains(&canon) {
+                    return Err(JadeError::CircularImport {
+                        path: path.clone(),
+                        span,
+                    });
+                }
+
+                state.import_stack.insert(canon.clone());
+
+                let sub_source_dir = canon.parent()
+                    .unwrap_or_else(|| std::path::Path::new("."))
+                    .to_path_buf();
+
+                let compile_result: Result<crate::compiler::emit::CompiledProgram> = (|| {
+                    let source = std::fs::read_to_string(&canon).map_err(|_| {
+                        JadeError::ImportNotFound { path: path.clone(), span }
+                    })?;
+
+                    let canon_str = canon.to_string_lossy().into_owned();
+                    let hash = crate::cache::file_hash(&canon);
+
+                    let cached_ast = hash.as_ref().and_then(|h| crate::cache::read_ast_cache(h));
+                    let program = match cached_ast {
+                        Some(p) => p,
+                        None => {
+                            let tokens = crate::frontend::lexer::tokenize(&source)?;
+                            let p = crate::frontend::parser::parse(tokens)?;
+                            if let Some(ref h) = hash {
+                                crate::cache::write_ast_cache(h, &canon_str, &p);
+                            }
+                            p
+                        }
+                    };
+
+                    let tprogram = if let Some(ref h) = hash {
+                        match crate::cache::read_tir_cache(h) {
+                            Some(tp) => tp,
+                            None => {
+                                let tp = crate::compiler::type_infer::infer(program)?;
+                                crate::cache::write_tir_cache(h, &canon_str, &tp);
+                                tp
+                            }
+                        }
+                    } else {
+                        crate::compiler::type_infer::infer(program)?
+                    };
+
+                    crate::compiler::emit::emit(tprogram)
+                })();
+
+                let result: Result<()> = match compile_result {
+                    Ok(mut compiled) => {
+                        // Stamp source file on all compiled functions so runtime
+                        // errors inside module functions attribute to the correct file.
+                        let file_label = canon.to_string_lossy().into_owned();
+                        stamp_source_file(&mut compiled.top, &file_label);
+                        for methods in compiled.extend_methods.values_mut() {
+                            for cf_arc in methods.values_mut() {
+                                let cf = Arc::make_mut(cf_arc);
+                                if cf.source_file.is_empty() {
+                                    cf.source_file = file_label.clone();
+                                }
+                                stamp_source_file(&mut cf.chunk, &file_label);
+                            }
+                        }
+                        // Run the imported file in an isolated sub-state so its
+                        // top-level bindings don't bleed into the parent namespace.
+                        let mut sub_state = VmState::new();
+                        // Capture keys already present so we can filter them out later.
+                        let initial_keys: std::collections::HashSet<String> =
+                            sub_state.globals.keys().cloned().collect();
+                        // Propagate runtime config from parent.
+                        sub_state.source_dir = sub_source_dir;
+                        sub_state.import_stack = state.import_stack.clone();
+                        sub_state.project_root = state.project_root.clone();
+                        sub_state.libraries = state.libraries.clone();
+                        sub_state.inference_backend = state.inference_backend.clone();
+
+                        let r = Box::pin(run_with_state(compiled, &mut sub_state)).await;
+                        if r.is_ok() {
+                            // Collect user-defined globals (exclude builtins and internal keys).
+                            let mut module_globals: HashMap<String, VmValue> = sub_state
+                                .globals
+                                .drain()
+                                .filter(|(k, _)| !initial_keys.contains(k))
+                                .collect();
+                            // Stdlib packages imported by the module (e.g. `use std::fs`) must
+                            // be promoted to the parent globals so that module functions can
+                            // resolve them via GetGlobal when called in the parent context.
+                            // They are NOT included in the module dict (they're not exports).
+                            let pkg_keys: Vec<String> = module_globals
+                                .keys()
+                                .filter(|k| builtins::is_package_global_name(k))
+                                .cloned()
+                                .collect();
+                            for k in pkg_keys {
+                                if let Some(v) = module_globals.remove(&k) {
+                                    state.globals.entry(k).or_insert(v);
+                                }
+                            }
+                            // Create a persistent module scope shared by all functions from
+                            // this file. Populated with user-defined module-level values so
+                            // that reads and writes inside module functions are stable across
+                            // calls. Functions in the scope are stored as Fn (not stamped) —
+                            // they inherit the active scope via call_fn's save/restore logic.
+                            let module_scope: Arc<Mutex<HashMap<String, VmValue>>> =
+                                Arc::new(Mutex::new(module_globals.clone()));
+                            // Stamp all Fn values in the exported dict with the module scope.
+                            for v in module_globals.values_mut() {
+                                if let VmValue::Fn(cf) = v {
+                                    let cf_mut = Arc::make_mut(cf);
+                                    cf_mut.module_scope = Some(Arc::clone(&module_scope));
+                                }
+                            }
+                            // Qualify any TypeRef values so coercion calls resolve correctly.
+                            for v in module_globals.values_mut() {
+                                if let VmValue::TypeRef(t) = v {
+                                    *t = format!("{}.{}", namespace, t);
+                                }
+                            }
+                            state.globals.insert(namespace.clone(), VmValue::Dict(module_globals.into_iter().collect()));
+
+                            // Merge struct_defs under both the namespaced and the
+                            // bare key.
+                            //
+                            // Two lookup conventions meet here. `TypeRef` coercion
+                            // resolves through the qualified name (stamped just
+                            // above), but every instance-side lookup uses the name
+                            // carried on the instance itself — and that is always
+                            // bare, because `infer_expr` normalizes `lib.Cfg` to
+                            // `Cfg` (type_infer.rs:971) so that literals written
+                            // outside the module agree with the ones written inside
+                            // it. Registering only the qualified key left
+                            // `MakeStruct` unable to find field defaults and
+                            // `GetField` unable to find extend methods for any
+                            // imported struct.
+                            //
+                            // Bare keys never overwrite: the importing file's own
+                            // definitions are merged before its imports execute, so
+                            // a local type of the same name keeps priority and two
+                            // modules exporting the same name resolve to the first
+                            // imported rather than the last.
+                            for (k, v) in sub_state.struct_defs.drain() {
+                                state.struct_defs.entry(k.clone()).or_insert_with(|| v.clone());
+                                state.struct_defs.insert(format!("{}.{}", namespace, k), v);
+                            }
+                            // Merge extend_methods prefixed with the namespace.
+                            // Stamp module_scope on each method so they can resolve
+                            // module-level variables when called from the parent context.
+                            for (type_name, mut methods) in sub_state.extend_methods.drain() {
+                                for cf_arc in methods.values_mut() {
+                                    let cf = Arc::make_mut(cf_arc);
+                                    if cf.module_scope.is_none() {
+                                        cf.module_scope = Some(Arc::clone(&module_scope));
+                                    }
+                                }
+                                for (m_name, m_fn) in &methods {
+                                    state.extend_methods
+                                        .entry(type_name.clone())
+                                        .or_default()
+                                        .entry(m_name.clone())
+                                        .or_insert_with(|| Arc::clone(m_fn));
+                                }
+                                state.extend_methods
+                                    .entry(format!("{}.{}", namespace, type_name))
+                                    .or_default()
+                                    .extend(methods);
+                            }
+                            // Merge struct_decorators prefixed with the namespace.
+                            for (type_name, decs) in sub_state.struct_decorators.drain() {
+                                if !state.struct_decorators.contains_key(&type_name) {
+                                    state.struct_decorators
+                                        .insert(type_name.clone(), decs.clone());
+                                }
+                                state.struct_decorators
+                                    .entry(format!("{}.{}", namespace, type_name))
+                                    .or_default()
+                                    .extend(decs);
+                            }
+                        }
+                        r.map_err(|e| JadeError::InFile {
+                            file: path.clone(),
+                            cause: Box::new(e),
+                        })
+                    }
+                    Err(e) => Err(JadeError::InFile {
+                        file: path.clone(),
+                        cause: Box::new(e),
+                    }),
+                };
+
+                state.import_stack.remove(&canon);
+                result?;
+            }
+
+            Instr::ImportFrom(path, names) => {
+                if let Some(pkg) = builtins::find_package(path) {
+                    // Build the package dict, then extract only the requested names.
+                    let dict = package_dict_value(pkg);
+                    if let VmValue::Dict(map) = dict {
+                        for name in names {
+                            if let Some(val) = map.get(name) {
+                                state.globals.insert(name.clone(), val.clone());
+                            }
+                        }
+                    }
+                    continue;
+                }
+
+                // Native library: load over the C ABI and bind the requested
+                // function names directly.
+                let abs_path = match resolve_user_import(state, path, span)? {
+                    ResolvedImport::Native(lib_path) => {
+                        let fns = crate::native::load_native_package(&lib_path, span)?;
+                        for name in names {
+                            if let Some(val) = fns.get(name) {
+                                state.globals.insert(name.clone(), val.clone());
+                            }
+                        }
+                        continue;
+                    }
+                    ResolvedImport::File(p) => p,
+                };
+
+                // File import: run in an isolated sub-state, then bind only the
+                // requested names directly into the parent namespace.
+                let canon = abs_path.canonicalize().map_err(|_| JadeError::ImportNotFound {
+                    path: path.clone(),
+                    span,
+                })?;
+                if state.import_stack.contains(&canon) {
+                    return Err(JadeError::CircularImport { path: path.clone(), span });
+                }
+                state.import_stack.insert(canon.clone());
+                let sub_source_dir = canon.parent()
+                    .unwrap_or_else(|| std::path::Path::new("."))
+                    .to_path_buf();
+                let compile_result: Result<crate::compiler::emit::CompiledProgram> = (|| {
+                    let source = std::fs::read_to_string(&canon).map_err(|_| {
+                        JadeError::ImportNotFound { path: path.clone(), span }
+                    })?;
+                    let tokens = crate::frontend::lexer::tokenize(&source)?;
+                    let p = crate::frontend::parser::parse(tokens)?;
+                    let tp = crate::compiler::type_infer::infer(p)?;
+                    crate::compiler::emit::emit(tp)
+                })();
+                let result: Result<()> = match compile_result {
+                    Ok(mut compiled) => {
+                        let file_label = canon.to_string_lossy().into_owned();
+                        stamp_source_file(&mut compiled.top, &file_label);
+                        let mut sub_state = VmState::new();
+                        sub_state.source_dir = sub_source_dir;
+                        sub_state.import_stack = state.import_stack.clone();
+                        sub_state.project_root = state.project_root.clone();
+                        sub_state.libraries = state.libraries.clone();
+                        sub_state.inference_backend = state.inference_backend.clone();
+                        let r = Box::pin(run_with_state(compiled, &mut sub_state)).await;
+                        if r.is_ok() {
+                            // Promote stdlib package imports from the module so that
+                            // imported functions can resolve them via GetGlobal.
+                            for (k, v) in sub_state.globals.iter() {
+                                if builtins::is_package_global_name(k) {
+                                    state.globals.entry(k.clone()).or_insert_with(|| v.clone());
+                                }
+                            }
+                            // Build the persistent module scope for from-imports.
+                            let initial_keys: std::collections::HashSet<String> =
+                                VmState::new().globals.keys().cloned().collect();
+                            let scope_map: HashMap<String, VmValue> = sub_state.globals.iter()
+                                .filter(|(k, _)| !initial_keys.contains(*k) && !builtins::is_package_global_name(k))
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect();
+                            let module_scope: Arc<Mutex<HashMap<String, VmValue>>> =
+                                Arc::new(Mutex::new(scope_map));
+                            for name in names {
+                                let val = sub_state.globals.remove(name);
+                                let val = val.map(|v| match v {
+                                    VmValue::Fn(mut cf) => {
+                                        Arc::make_mut(&mut cf).module_scope = Some(Arc::clone(&module_scope));
+                                        VmValue::Fn(cf)
+                                    }
+                                    other => other,
+                                });
+                                if let Some(val) = val {
+                                    state.globals.insert(name.clone(), val);
+                                }
+                                // If the requested name is a struct type, also import its def.
+                                if let Some(def) = sub_state.struct_defs.remove(name) {
+                                    state.struct_defs.insert(name.clone(), def);
+                                }
+                                if let Some(mut methods) = sub_state.extend_methods.remove(name) {
+                                    for cf_arc in methods.values_mut() {
+                                        let cf = Arc::make_mut(cf_arc);
+                                        if cf.module_scope.is_none() {
+                                            cf.module_scope = Some(Arc::clone(&module_scope));
+                                        }
+                                    }
+                                    state.extend_methods
+                                        .entry(name.clone())
+                                        .or_default()
+                                        .extend(methods);
+                                }
+                            }
+                        }
+                        r.map_err(|e| JadeError::InFile {
+                            file: path.clone(),
+                            cause: Box::new(e),
+                        })
+                    }
+                    Err(e) => Err(JadeError::InFile {
+                        file: path.clone(),
+                        cause: Box::new(e),
+                    }),
+                };
+                state.import_stack.remove(&canon);
+                result?;
+            }
+
+            // ── Loads ─────────────────────────────────────────────────────────
+            Instr::LoadInt(d, v)   => set(slots, *d, VmValue::Int(*v)),
+            Instr::LoadFloat(d, v) => set(slots, *d, VmValue::Float(*v)),
+            Instr::LoadBool(d, v)  => set(slots, *d, VmValue::Bool(*v)),
+            Instr::LoadStr(d, s)   => set(slots, *d, VmValue::Str(s.clone().into())),
+            Instr::LoadNil(d)      => set(slots, *d, VmValue::Nil),
+            Instr::LoadFn(d, idx)  => {
+                let cf = Arc::clone(&chunk.fn_defs[*idx]);
+                set(slots, *d, VmValue::Fn(cf));
+            }
+            Instr::MakeClosure(d, idx) => {
+                let cf = Arc::clone(&chunk.fn_defs[*idx]);
+                let mut captured: HashMap<String, VmValue> = state.globals.iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                if let Some(sc) = &state.active_module_scope {
+                    for (k, v) in sc.lock().iter() {
+                        captured.entry(k.clone()).or_insert_with(|| v.clone());
+                    }
+                }
+                set(slots, *d, VmValue::Closure(cf, Arc::new(captured)));
+            }
+            Instr::Move(d, s) => {
+                let v = get(slots, *s).clone();
+                set(slots, *d, v);
+            }
+
+            // ── Variables ─────────────────────────────────────────────────────
+            Instr::GetGlobal(d, name) => {
+                let v = state.active_module_scope.as_ref()
+                    .and_then(|sc| sc.lock().get(name).cloned())
+                    .or_else(|| state.globals.get(name).cloned())
+                    .ok_or_else(|| JadeError::UndefinedVariable { name: name.clone(), span })?;
+                set(slots, *d, v);
+            }
+            Instr::SetGlobal(name, s) => {
+                let v = vm_try!(vm_maybe_drain(get(slots, *s).clone(), state, span).await);
+                if name == REPL_CAPTURE {
+                    // REPL echo capture — never enters the global namespace.
+                    state.repl_capture = Some(v);
+                } else {
+                    let wrote_to_scope = if let Some(sc) = &state.active_module_scope {
+                        let mut locked = sc.lock();
+                        if locked.contains_key(name) {
+                            locked.insert(name.clone(), v.clone());
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    if !wrote_to_scope {
+                        state.globals.insert(name.clone(), v);
+                    }
+                }
+            }
+            Instr::GetLocal(d, slot) => {
+                let v = slots.get(*slot as usize)
+                    .cloned()
+                    .unwrap_or(VmValue::Nil);
+                set(slots, *d, v);
+            }
+            Instr::SetLocal(slot, s) => {
+                let v = vm_try!(vm_maybe_drain(get(slots, *s).clone(), state, span).await);
+                ensure_slot(slots, *slot);
+                slots[*slot as usize] = v;
+            }
+
+            // ── Integer arithmetic (63-bit; see `int_ok`) ─────────────────────
+            Instr::AddInt(d, l, r) => {
+                let (a, b) = vm_try!(int2(slots, *l, *r, span));
+                set(slots, *d, vm_try!(int_ok(a.checked_add(b), span)));
+            }
+            Instr::SubInt(d, l, r) => {
+                let (a, b) = vm_try!(int2(slots, *l, *r, span));
+                set(slots, *d, vm_try!(int_ok(a.checked_sub(b), span)));
+            }
+            Instr::MulInt(d, l, r) => {
+                let (a, b) = vm_try!(int2(slots, *l, *r, span));
+                set(slots, *d, vm_try!(int_ok(a.checked_mul(b), span)));
+            }
+            Instr::DivInt(d, l, r) => {
+                let (a, b) = vm_try!(int2(slots, *l, *r, span));
+                if b == 0 { vm_err!(JadeError::DivisionByZero { span }); }
+                set(slots, *d, VmValue::Int(a / b));
+            }
+            Instr::ModInt(d, l, r) => {
+                let (a, b) = vm_try!(int2(slots, *l, *r, span));
+                if b == 0 { vm_err!(JadeError::RemainderByZero { span }); }
+                set(slots, *d, VmValue::Int(a % b));
+            }
+            Instr::NegInt(d, s) => {
+                let a = vm_try!(get_int(slots, *s, span));
+                // Plain `-a` panicked in a debug build at the range edge.
+                set(slots, *d, vm_try!(int_ok(a.checked_neg(), span)));
+            }
+
+            // ── Float arithmetic ──────────────────────────────────────────────
+            Instr::AddFloat(d, l, r) => {
+                let (a, b) = vm_try!(flt2(slots, *l, *r, span));
+                set(slots, *d, VmValue::Float(a + b));
+            }
+            Instr::SubFloat(d, l, r) => {
+                let (a, b) = vm_try!(flt2(slots, *l, *r, span));
+                set(slots, *d, VmValue::Float(a - b));
+            }
+            Instr::MulFloat(d, l, r) => {
+                let (a, b) = vm_try!(flt2(slots, *l, *r, span));
+                set(slots, *d, VmValue::Float(a * b));
+            }
+            Instr::DivFloat(d, l, r) => {
+                let (a, b) = vm_try!(flt2(slots, *l, *r, span));
+                if b == 0.0 { vm_err!(JadeError::DivisionByZero { span }); }
+                set(slots, *d, VmValue::Float(a / b));
+            }
+            Instr::NegFloat(d, s) => {
+                let a = vm_try!(get_flt(slots, *s, span));
+                set(slots, *d, VmValue::Float(-a));
+            }
+            Instr::IntToFloat(d, s) => {
+                let a = vm_try!(get_int(slots, *s, span));
+                set(slots, *d, VmValue::Float(a as f64));
+            }
+            Instr::ConcatStr(d, l, r) => {
+                let a = vm_try!(get_jstr(slots, *l, span));
+                let b = vm_try!(get_jstr(slots, *r, span));
+                let trust = jade_runtime::trust::combine(a.trust(), b.trust());
+                set(slots, *d, VmValue::Str(JStr::with_trust(
+                    format!("{}{}", a.as_str(), b.as_str()),
+                    trust,
+                )));
+            }
+
+            // ── Bitwise ───────────────────────────────────────────────────────
+            Instr::BitAnd(d, l, r) => { let (a,b)=vm_try!(int2(slots,*l,*r,span)); set(slots,*d,VmValue::Int(a&b)); }
+            Instr::BitOr(d, l, r)  => { let (a,b)=vm_try!(int2(slots,*l,*r,span)); set(slots,*d,VmValue::Int(a|b)); }
+            Instr::BitXor(d, l, r) => { let (a,b)=vm_try!(int2(slots,*l,*r,span)); set(slots,*d,VmValue::Int(a^b)); }
+            Instr::BitNot(d, s)    => { let a=vm_try!(get_int(slots,*s,span)); set(slots,*d,VmValue::Int(!a)); }
+            Instr::Shl(d, l, r)    => {
+                let (a, b) = vm_try!(int2(slots, *l, *r, span));
+                if b < 0 || b >= 64 { vm_err!(JadeError::InvalidShift { amount: b, span }); }
+                set(slots, *d, VmValue::Int(a << b as u32));
+            }
+            Instr::Shr(d, l, r)    => {
+                let (a, b) = vm_try!(int2(slots, *l, *r, span));
+                if b < 0 || b >= 64 { vm_err!(JadeError::InvalidShift { amount: b, span }); }
+                set(slots, *d, VmValue::Int(a >> b as u32));
+            }
+
+            // ── Logical ───────────────────────────────────────────────────────
+            Instr::Not(d, s) => {
+                let b = vm_try!(get_bool(slots, *s, span));
+                set(slots, *d, VmValue::Bool(!b));
+            }
+
+            // ── Dynamic fallbacks ─────────────────────────────────────────────
+            Instr::BinOp(d, op, l, r) => {
+                let lv = get(slots, *l).clone();
+                let rv = get(slots, *r).clone();
+                let result = vm_try!(eval_binop_dynamic(op, lv, rv, span));
+                set(slots, *d, result);
+            }
+            Instr::UnaryOp(d, op, s) => {
+                let v = get(slots, *s).clone();
+                let result = vm_try!(eval_unaryop_dynamic(op, v, span));
+                set(slots, *d, result);
+            }
+
+            // ── Typed comparisons — int ───────────────────────────────────────
+            Instr::CmpEqInt(d,l,r) => { let (a,b)=vm_try!(int2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(a==b)); }
+            Instr::CmpNeInt(d,l,r) => { let (a,b)=vm_try!(int2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(a!=b)); }
+            Instr::CmpLtInt(d,l,r) => { let (a,b)=vm_try!(int2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(a<b));  }
+            Instr::CmpGtInt(d,l,r) => { let (a,b)=vm_try!(int2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(a>b));  }
+            Instr::CmpLeInt(d,l,r) => { let (a,b)=vm_try!(int2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(a<=b)); }
+            Instr::CmpGeInt(d,l,r) => { let (a,b)=vm_try!(int2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(a>=b)); }
+
+            // ── Typed comparisons — float ─────────────────────────────────────
+            Instr::CmpEqFloat(d,l,r) => { let (a,b)=vm_try!(flt2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(a==b)); }
+            Instr::CmpNeFloat(d,l,r) => { let (a,b)=vm_try!(flt2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(a!=b)); }
+            Instr::CmpLtFloat(d,l,r) => { let (a,b)=vm_try!(flt2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(a<b));  }
+            Instr::CmpGtFloat(d,l,r) => { let (a,b)=vm_try!(flt2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(a>b));  }
+            Instr::CmpLeFloat(d,l,r) => { let (a,b)=vm_try!(flt2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(a<=b)); }
+            Instr::CmpGeFloat(d,l,r) => { let (a,b)=vm_try!(flt2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(a>=b)); }
+
+            // ── Typed comparisons — mixed ─────────────────────────────────────
+            Instr::CmpLtIntFloat(d,l,r) => { let a=vm_try!(get_int(slots,*l,span)) as f64; let b=vm_try!(get_flt(slots,*r,span)); set(slots,*d,VmValue::Bool(a<b));  }
+            Instr::CmpGtIntFloat(d,l,r) => { let a=vm_try!(get_int(slots,*l,span)) as f64; let b=vm_try!(get_flt(slots,*r,span)); set(slots,*d,VmValue::Bool(a>b));  }
+            Instr::CmpLeIntFloat(d,l,r) => { let a=vm_try!(get_int(slots,*l,span)) as f64; let b=vm_try!(get_flt(slots,*r,span)); set(slots,*d,VmValue::Bool(a<=b)); }
+            Instr::CmpGeIntFloat(d,l,r) => { let a=vm_try!(get_int(slots,*l,span)) as f64; let b=vm_try!(get_flt(slots,*r,span)); set(slots,*d,VmValue::Bool(a>=b)); }
+            Instr::CmpLtFloatInt(d,l,r) => { let a=vm_try!(get_flt(slots,*l,span)); let b=vm_try!(get_int(slots,*r,span)) as f64; set(slots,*d,VmValue::Bool(a<b));  }
+            Instr::CmpGtFloatInt(d,l,r) => { let a=vm_try!(get_flt(slots,*l,span)); let b=vm_try!(get_int(slots,*r,span)) as f64; set(slots,*d,VmValue::Bool(a>b));  }
+            Instr::CmpLeFloatInt(d,l,r) => { let a=vm_try!(get_flt(slots,*l,span)); let b=vm_try!(get_int(slots,*r,span)) as f64; set(slots,*d,VmValue::Bool(a<=b)); }
+            Instr::CmpGeFloatInt(d,l,r) => { let a=vm_try!(get_flt(slots,*l,span)); let b=vm_try!(get_int(slots,*r,span)) as f64; set(slots,*d,VmValue::Bool(a>=b)); }
+
+            // ── Typed comparisons — bool ──────────────────────────────────────
+            Instr::CmpEqBool(d,l,r) => { let (a,b)=vm_try!(bool2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(a==b)); }
+            Instr::CmpNeBool(d,l,r) => { let (a,b)=vm_try!(bool2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(a!=b)); }
+            Instr::CmpLtBool(d,l,r) => { let (a,b)=vm_try!(bool2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(!a&&b)); }
+            Instr::CmpGtBool(d,l,r) => { let (a,b)=vm_try!(bool2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(a&&!b)); }
+            Instr::CmpLeBool(d,l,r) => { let (a,b)=vm_try!(bool2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(a==b||(!a&&b))); }
+            Instr::CmpGeBool(d,l,r) => { let (a,b)=vm_try!(bool2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(a==b||(a&&!b))); }
+
+            // ── Typed comparisons — str ───────────────────────────────────────
+            Instr::CmpEqStr(d,l,r) => { let (a,b)=vm_try!(str2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(a==b)); }
+            Instr::CmpNeStr(d,l,r) => { let (a,b)=vm_try!(str2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(a!=b)); }
+            Instr::CmpLtStr(d,l,r) => { let (a,b)=vm_try!(str2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(a<b));  }
+            Instr::CmpGtStr(d,l,r) => { let (a,b)=vm_try!(str2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(a>b));  }
+            Instr::CmpLeStr(d,l,r) => { let (a,b)=vm_try!(str2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(a<=b)); }
+            Instr::CmpGeStr(d,l,r) => { let (a,b)=vm_try!(str2(slots,*l,*r,span)); set(slots,*d,VmValue::Bool(a>=b)); }
+
+            // ── Dynamic comparisons ───────────────────────────────────────────
+            Instr::CmpEq(d,l,r) => { let v=vm_try!(cmp_dynamic(slots,*l,*r,"==",span)); set(slots,*d,v); }
+            Instr::CmpNe(d,l,r) => { let v=vm_try!(cmp_dynamic(slots,*l,*r,"!=",span)); set(slots,*d,v); }
+            Instr::CmpLt(d,l,r) => { let v=vm_try!(cmp_dynamic(slots,*l,*r,"<", span)); set(slots,*d,v); }
+            Instr::CmpGt(d,l,r) => { let v=vm_try!(cmp_dynamic(slots,*l,*r,">", span)); set(slots,*d,v); }
+            Instr::CmpLe(d,l,r) => { let v=vm_try!(cmp_dynamic(slots,*l,*r,"<=",span)); set(slots,*d,v); }
+            Instr::CmpGe(d,l,r) => { let v=vm_try!(cmp_dynamic(slots,*l,*r,">=",span)); set(slots,*d,v); }
+
+            // ── Control flow ──────────────────────────────────────────────────
+            Instr::Jump(offset) => {
+                ip = (ip as i64 + *offset as i64) as usize;
+            }
+            Instr::JumpIfFalse(cond, offset) => {
+                if let VmValue::Bool(false) = get(slots, *cond) {
+                    ip = (ip as i64 + *offset as i64) as usize;
+                }
+            }
+            Instr::JumpIfTrue(cond, offset) => {
+                if let VmValue::Bool(true) = get(slots, *cond) {
+                    ip = (ip as i64 + *offset as i64) as usize;
+                }
+            }
+
+            // ── Calls ─────────────────────────────────────────────────────────
+            Instr::Call(dest, callee_reg, arg_regs) => {
+                let callee = get(slots, *callee_reg).clone();
+                let args: Vec<VmValue> = arg_regs.iter().map(|&r| get(slots, r).clone()).collect();
+                let result = vm_try!(call_value(callee, args, state, span).await);
+                set(slots, *dest, result);
+            }
+            Instr::CallNamed(dest, callee_reg, arg_pairs) => {
+                let callee = get(slots, *callee_reg).clone();
+                let mut positional: Vec<VmValue> = Vec::new();
+                let mut named: Vec<(String, VmValue)> = Vec::new();
+                for (name_opt, reg) in arg_pairs {
+                    let val = get(slots, *reg).clone();
+                    match name_opt {
+                        None    => positional.push(val),
+                        Some(n) => named.push((n.clone(), val)),
+                    }
+                }
+                let args = vm_try!(resolve_named_args(&callee, positional, named, span));
+                let result = vm_try!(call_value(callee, args, state, span).await);
+                set(slots, *dest, result);
+            }
+            Instr::Return(opt_reg) => {
+                let v = match opt_reg {
+                    Some(r) => get(slots, *r).clone(),
+                    None    => VmValue::Nil,
+                };
+                return Ok(Some(v));
+            }
+
+            // ── Collections ───────────────────────────────────────────────────
+            Instr::MakeArray(dest, elem_regs) => {
+                let elems: Vec<VmValue> = elem_regs.iter().map(|&r| get(slots, r).clone()).collect();
+                set(slots, *dest, VmValue::Array(Arc::new(Mutex::new(ArrayObj::from_vec(elems)))));
+            }
+            Instr::MakeDict(dest, pairs) => {
+                let mut map = DictObj::new();
+                for &(kr, vr) in pairs {
+                    let key_val = get(slots, kr).clone();
+                    let key = match key_val {
+                        VmValue::Str(s) => s,
+                        ref other => { vm_err!(JadeError::TypeError { message: format!("dict key must be str, got {}", value_type_name(other)), span }); }
+                    };
+                    let val = get(slots, vr).clone();
+                    map.insert(key.into_string(), val);
+                }
+                set(slots, *dest, VmValue::Dict(map));
+            }
+            Instr::GetIndex(dest, obj_reg, idx_reg) => {
+                let obj = get(slots, *obj_reg).clone();
+                let idx = get(slots, *idx_reg).clone();
+                let result = vm_try!(vm_index(obj, idx, span));
+                set(slots, *dest, result);
+            }
+            Instr::SetIndex(obj_reg, idx_reg, val_reg) => {
+                let idx = get(slots, *idx_reg).clone();
+                let val = get(slots, *val_reg).clone();
+                // Clone the object first to avoid holding a mutable borrow on slots
+                // (needed because vm_err! may re-borrow slots via `set`).
+                let obj = get(slots, *obj_reg).clone();
+                match obj {
+                    VmValue::Array(arc) => {
+                        let i = match idx { VmValue::Int(n) => n, ref other => { vm_err!(JadeError::TypeError { message: format!("array index must be int, got {}", value_type_name(other)), span }); } };
+                        let len = arc.lock().len();
+                        if i < 0 || i as usize >= len { vm_err!(JadeError::IndexOutOfBounds { index: i, len, span }); }
+                        arc.lock()[i as usize] = val;
+                    }
+                    VmValue::Dict(mut m) => {
+                        let k = match idx { VmValue::Str(s) => s, ref other => { vm_err!(JadeError::TypeError { message: format!("dict index must be str, got {}", value_type_name(other)), span }); } };
+                        m.insert(k.into_string(), val);
+                        slots[*obj_reg as usize] = VmValue::Dict(m);
+                    }
+                    ref other => { vm_err!(JadeError::TypeError { message: format!("value of type {} is not indexable", value_type_name(other)), span }); }
+                }
+            }
+
+            // ── Struct ────────────────────────────────────────────────────────
+            Instr::MakeStruct(dest, type_name, field_specs) => {
+                let mut sobj = StructObj::<VmValue>::new(type_name);
+                for (fname, freg, is_prompt) in field_specs {
+                    let mut val = get(slots, *freg).clone();
+                    if *is_prompt {
+                        val = match val {
+                            VmValue::Str(text) => VmValue::Prompt(text.to_string()),
+                            other => other, // already Prompt, or wrong type caught at type-check
+                        };
+                    }
+                    sobj.set_field(fname, val);
+                }
+                // Fill in defaults for any fields omitted from the literal.
+                // Needed when the struct type was unknown at compile time (imported type).
+                if let Some(def_fields) = state.struct_defs.get(type_name.as_str()).cloned() {
+                    for def_field in &def_fields {
+                        match def_field {
+                            StructFieldDef::Let { name, default } => {
+                                if sobj.get_field(name).is_none() {
+                                    if let Some(v) = eval_literal_default(default) {
+                                        sobj.set_field(name, v);
+                                    }
+                                }
+                            }
+                            StructFieldDef::Prompt { name, default } => {
+                                if sobj.get_field(name).is_none() {
+                                    if let Some(v) = eval_literal_default(default) {
+                                        let v = match v {
+                                            VmValue::Str(s) => VmValue::Prompt(s.to_string()),
+                                            other => other,
+                                        };
+                                        sobj.set_field(name, v);
+                                    }
+                                }
+                            }
+                            StructFieldDef::Required(_) => {}
+                        }
+                    }
+                }
+                let mut result = VmValue::Struct(Arc::new(Mutex::new(sobj)));
+                // Call struct decorators: dec(instance, arg1, ...) for each @dec.
+                let decs = state.struct_decorators.get(type_name).cloned().unwrap_or_default();
+                for (dec_name, dec_args) in decs {
+                    if let Some(dec_fn) = resolve_decorator_fn(&dec_name, state) {
+                        let mut call_args = vec![result];
+                        call_args.extend(dec_args);
+                        result = call_value(dec_fn, call_args, state, span).await?;
+                    }
+                }
+                set(slots, *dest, result);
+            }
+            Instr::GetField(dest, obj_reg, field) => {
+                let obj = get(slots, *obj_reg).clone();
+                match obj {
+                    VmValue::Struct(rc) => {
+                        let (type_name, field_val) = {
+                            let guard = rc.lock();
+                            (guard.type_name().to_string(), guard.get_field(field.as_str()).cloned())
+                        };
+                        if let Some(v) = field_val {
+                            set(slots, *dest, v);
+                        } else if let Some(methods) = state.extend_methods.get(&type_name) {
+                            if let Some(mfn) = methods.get(field.as_str()) {
+                                set(slots, *dest, VmValue::BoundMethod(Arc::new(VmBoundMethod {
+                                    receiver: rc,
+                                    method: Arc::clone(mfn),
+                                })));
+                            } else {
+                                vm_err!(JadeError::UndefinedField { type_name, field: field.clone(), span });
+                            }
+                        } else {
+                            vm_err!(JadeError::UndefinedField { type_name, field: field.clone(), span });
+                        }
+                    }
+                    // Dict: check HashMap entries first (package namespaces), then primitive methods.
+                    VmValue::Dict(ref map) => {
+                        if let Some(v) = map.get(field.as_str()) {
+                            set(slots, *dest, v.clone());
+                        } else if let Some(method) = builtins::find_primitive_method(PrimType::Dict, field) {
+                            set(slots, *dest, VmValue::NativeBoundMethod(Arc::new(NativeBoundMethod {
+                                receiver: obj.clone(),
+                                method,
+                            })));
+                        } else {
+                            vm_err!(JadeError::UndefinedField {
+                                type_name: "dict".to_string(),
+                                field: field.clone(),
+                                span,
+                            });
+                        }
+                    }
+                    // Primitive method dispatch for str/array/int/float.
+                    ref prim @ (VmValue::Str(_) | VmValue::Array(_)
+                               | VmValue::Int(_) | VmValue::Float(_)) => {
+                        if let Some(ty) = PrimType::from_value(prim) {
+                            if let Some(method) = builtins::find_primitive_method(ty, field) {
+                                set(slots, *dest, VmValue::NativeBoundMethod(Arc::new(NativeBoundMethod {
+                                    receiver: prim.clone(),
+                                    method,
+                                })));
+                            } else {
+                                vm_err!(JadeError::UndefinedField {
+                                    type_name: ty.type_name().to_string(),
+                                    field: field.clone(),
+                                    span,
+                                });
+                            }
+                        } else {
+                            vm_err!(JadeError::NotAStruct { span });
+                        }
+                    }
+                    // A function is an object: fn.name, fn.params.
+                    VmValue::Fn(ref cf) => {
+                        let v = match field.as_str() {
+                            "name" => VmValue::Str(cf.chunk.name.clone().into()),
+                            "params" => {
+                                let arr: Vec<VmValue> = cf.params.iter()
+                                    .map(|p| VmValue::Str(p.clone().into()))
+                                    .collect();
+                                VmValue::Array(Arc::new(Mutex::new(ArrayObj::from_vec(arr))))
+                            }
+                            _ => vm_err!(JadeError::UndefinedField {
+                                type_name: "fn".to_string(),
+                                field: field.clone(),
+                                span,
+                            }),
+                        };
+                        set(slots, *dest, v);
+                    }
+                    _ => { vm_err!(JadeError::NotAStruct { span }); }
+                }
+            }
+            Instr::SetField(obj_reg, field, val_reg) => {
+                let val = get(slots, *val_reg).clone();
+                let obj = get(slots, *obj_reg).clone();
+                match obj {
+                    VmValue::Struct(rc) => {
+                        let error_type_name = {
+                            let guard = rc.lock();
+                            if guard.get_field(field.as_str()).is_some() {
+                                None
+                            } else {
+                                Some(guard.type_name().to_string())
+                            }
+                        };
+                        if let Some(type_name) = error_type_name {
+                            vm_err!(JadeError::UndefinedField {
+                                type_name,
+                                field: field.clone(),
+                                span,
+                            });
+                        }
+                        rc.lock().set_field(field, val);
+                    }
+                    _ => { vm_err!(JadeError::NotAStruct { span }); }
+                }
+            }
+
+            // ── FStr ──────────────────────────────────────────────────────────
+            Instr::BuildFStr(dest, parts) => {
+                // Literal segments come from source and are trusted; an
+                // interpolated value contributes its own trust. The result is as
+                // untrustworthy as the least trustworthy thing in it — otherwise
+                // f"{tainted}" would launder taint exactly as `"" + tainted` did.
+                let mut result = String::new();
+                let mut trust = jade_runtime::trust::TRUSTED;
+                for part in parts {
+                    match part {
+                        FStrPart::Literal(s) => result.push_str(s),
+                        FStrPart::Reg(r) => {
+                            let v = get(slots, *r);
+                            if let VmValue::Str(s) = v {
+                                trust = jade_runtime::trust::combine(trust, s.trust());
+                            }
+                            result.push_str(&value_to_display(v));
+                        }
+                    }
+                }
+                set(slots, *dest, VmValue::Str(JStr::with_trust(result, trust)));
+            }
+
+            // ── Prompt ────────────────────────────────────────────────────────
+            Instr::MakePrompt(dest, text_reg) => {
+                let text = match get(slots, *text_reg).clone() {
+                    VmValue::Str(s) => s,
+                    _ => { vm_err!(JadeError::TypeError {
+                        message: "prompt declaration requires a string body".to_string(),
+                        span,
+                    }); }
+                };
+                set(slots, *dest, VmValue::Prompt(text.to_string()));
+            }
+            Instr::PromptDeref(dest, prompt_reg, output_type, grammar_reg) => {
+                let text = match get(slots, *prompt_reg).clone() {
+                    VmValue::Prompt(t) => t,
+                    _ => { vm_err!(JadeError::NotAPrompt { name: "<expr>".to_string(), span }); }
+                };
+                let (grammar_override, grammar_anchor, grammar_stop) = match grammar_reg {
+                    None => (None, None, None),
+                    Some(r) => match get(slots, *r).clone() {
+                        VmValue::Grammar(g) => {
+                            (Some(g.to_gbnf()), g.anchor.clone(), g.stop.clone())
+                        }
+                        VmValue::Nil => {
+                            // Grammar expression evaluated to nil (e.g. self.grammar before it
+                            // was set).  Fall through to unconstrained streaming inference.
+                            (None, None, None)
+                        }
+                        other => vm_err!(JadeError::TypeError {
+                            message: format!(
+                                "|> constraint must be a Grammar value or type name, got {}",
+                                value_type_name(&other)
+                            ),
+                            span,
+                        }),
+                    },
+                };
+                let result = if output_type.is_none() && grammar_override.is_none() {
+                    vm_try!(vm_prompt_deref_stream(text, state, span).await)
+                } else {
+                    vm_try!(vm_prompt_deref(text, output_type.as_deref(), grammar_override, grammar_anchor, grammar_stop, state, span).await)
+                };
+                set(slots, *dest, result);
+            }
+
+            // ── Exception handling ────────────────────────────────────────────
+            Instr::Raise(val_reg) => {
+                let raised = get(slots, *val_reg).clone();
+                if let Some((caught_reg, handler_ip)) = handlers.pop() {
+                    set(slots, caught_reg, raised);
+                    ip = handler_ip;
+                } else {
+                    let message = value_to_display(&raised);
+                    state.raised_exception = Some(raised);
+                    return Err(JadeError::Exception { message, span });
+                }
+            }
+
+            Instr::SetupHandler(caught_reg, offset) => {
+                // ip has already been incremented past this instruction.
+                let handler_ip = (ip as i64 + *offset as i64) as usize;
+                handlers.push((*caught_reg, handler_ip));
+            }
+
+            Instr::PopHandler => {
+                handlers.pop();
+            }
+
+            Instr::GetTypeName(dest, src) => {
+                let name = match get(slots, *src) {
+                    VmValue::Struct(rc) => rc.lock().type_name().to_string(),
+                    _ => String::new(),
+                };
+                set(slots, *dest, VmValue::Str(name.into()));
+            }
+
+            // ── Async ─────────────────────────────────────────────────────────
+            Instr::Spawn(dest, callee_reg, arg_regs) => {
+                let callee = get(slots, *callee_reg).clone();
+                let args: Vec<VmValue> = arg_regs.iter().map(|&r| get(slots, r).clone()).collect();
+                let child_state = state.new_for_spawn();
+                let handle = tokio::spawn(call_value_standalone(callee, args, child_state, span));
+                set(slots, *dest, VmValue::Future(Arc::new(JadeFuture {
+                    handle: Mutex::new(Some(handle)),
+                })));
+            }
+            Instr::Await(dest, future_reg) => {
+                let fut_val = get(slots, *future_reg).clone();
+                match fut_val {
+                    VmValue::Future(jade_fut) => {
+                        // SAFETY: .take() consumes the JoinHandle as an owned value before
+                        // reaching .await, so the MutexGuard is dropped synchronously here —
+                        // std::sync::MutexGuard is never held across an await point.
+                        let handle = vm_try!(jade_fut.handle.lock().take()
+                            .ok_or(JadeError::DoubleAwait { span }));
+                        let join_result = handle.await;
+                        let (task_result, child_raised) = vm_try!(join_result.map_err(|e| JadeError::AsyncPanic {
+                            message: e.to_string(),
+                            span,
+                        }));
+                        if let Some(v) = child_raised {
+                            state.raised_exception = Some(v);
+                        }
+                        let value = vm_try!(task_result);
+                        set(slots, *dest, value);
+                    }
+                    _ => { vm_err!(JadeError::NotAFuture { span }); }
+                }
+            }
+            Instr::Join(dest, future_regs) => {
+                let mut handles = Vec::with_capacity(future_regs.len());
+                for &r in future_regs {
+                    match get(slots, r).clone() {
+                        VmValue::Future(jade_fut) => {
+                            // SAFETY: same as Instr::Await — .take() is synchronous.
+                            let handle = vm_try!(jade_fut.handle.lock().take()
+                                .ok_or(JadeError::DoubleAwait { span }));
+                            handles.push(handle);
+                        }
+                        _ => { vm_err!(JadeError::NotAFuture { span }); }
+                    }
+                }
+                let mut results = Vec::with_capacity(handles.len());
+                for handle in handles {
+                    let join_result = handle.await;
+                    let (task_result, child_raised) = vm_try!(join_result.map_err(|e| JadeError::AsyncPanic {
+                        message: e.to_string(),
+                        span,
+                    }));
+                    if let Some(v) = child_raised {
+                        state.raised_exception = Some(v);
+                    }
+                    let value = vm_try!(task_result);
+                    results.push(value);
+                }
+                set(slots, *dest, VmValue::Array(Arc::new(Mutex::new(ArrayObj::from_vec(results)))));
+            }
+        }
+    }
+    Ok(None)
+}
+
+#[inline]
+pub(crate) fn get(slots: &[VmValue], r: Reg) -> &VmValue {
+    // Registers outside the allocated range are treated as Nil; safe
+    // because we size frames conservatively in execute_chunk.
+    slots.get(r as usize).unwrap_or(&VmValue::Nil)
+}
+
+#[inline]
+pub(crate) fn set(slots: &mut Vec<VmValue>, r: Reg, v: VmValue) {
+    ensure_slot(slots, r);
+    slots[r as usize] = v;
+}
+
+#[inline]
+pub(crate) fn ensure_slot(slots: &mut Vec<VmValue>, r: Reg) {
+    if r as usize >= slots.len() {
+        slots.resize(r as usize + 1, VmValue::Nil);
+    }
+}
+
+pub(crate) fn get_int(slots: &[VmValue], r: Reg, span: Span) -> Result<i64> {
+    match get(slots, r) {
+        VmValue::Int(i) => Ok(*i),
+        _ => Err(JadeError::TypeError { message: "expected int".to_string(), span }),
+    }
+}
+
+pub(crate) fn get_flt(slots: &[VmValue], r: Reg, span: Span) -> Result<f64> {
+    match get(slots, r) {
+        VmValue::Float(f) => Ok(*f),
+        _ => Err(JadeError::TypeError { message: "expected float".to_string(), span }),
+    }
+}
+
+pub(crate) fn get_bool(slots: &[VmValue], r: Reg, span: Span) -> Result<bool> {
+    match get(slots, r) {
+        VmValue::Bool(b) => Ok(*b),
+        _ => Err(JadeError::TypeError { message: "expected bool".to_string(), span }),
+    }
+}
+
+pub(crate) fn get_str(slots: &[VmValue], r: Reg, span: Span) -> Result<String> {
+    match get(slots, r) {
+        VmValue::Str(s) => Ok(s.to_string()),
+        _ => Err(JadeError::TypeError { message: "expected str".to_string(), span }),
+    }
+}
+
+/// Read a string slot **with its trust**.
+///
+/// Prefer this over [`get_str`] anywhere the result is used to build another
+/// Jade string. `get_str` hands back a bare `String`, and converting that back
+/// into a value marks it trusted — which is exactly how `"" + tainted` laundered
+/// taint and let an untrusted command reach `sh.exec`.
+pub(crate) fn get_jstr(slots: &[VmValue], r: Reg, span: Span) -> Result<JStr> {
+    match get(slots, r) {
+        VmValue::Str(s) => Ok(s.clone()),
+        _ => Err(JadeError::TypeError { message: "expected str".to_string(), span }),
+    }
+}
+
+/// Borrow a string slot by reference.  Use this instead of `get_str` when the
+/// caller only needs to read the string (e.g. for comparisons) and does not
+/// need an owned `String`.  Avoids a heap allocation per comparison.
+pub(crate) fn get_str_ref<'a>(slots: &'a [VmValue], r: Reg, span: Span) -> Result<&'a str> {
+    match get(slots, r) {
+        VmValue::Str(s) => Ok(s.as_str()),
+        _ => Err(JadeError::TypeError { message: "expected str".to_string(), span }),
+    }
+}
+
+pub(crate) fn int2(slots: &[VmValue], l: Reg, r: Reg, span: Span) -> Result<(i64, i64)> {
+    Ok((get_int(slots, l, span)?, get_int(slots, r, span)?))
+}
+
+pub(crate) fn flt2(slots: &[VmValue], l: Reg, r: Reg, span: Span) -> Result<(f64, f64)> {
+    Ok((get_flt(slots, l, span)?, get_flt(slots, r, span)?))
+}
+
+pub(crate) fn bool2(slots: &[VmValue], l: Reg, r: Reg, span: Span) -> Result<(bool, bool)> {
+    Ok((get_bool(slots, l, span)?, get_bool(slots, r, span)?))
+}
+
+/// Borrow both string slots for comparison.  Returns `(&str, &str)` to avoid
+/// cloning both `String`s when only an equality or ordering check is needed.
+pub(crate) fn str2<'a>(slots: &'a [VmValue], l: Reg, r: Reg, span: Span) -> Result<(&'a str, &'a str)> {
+    Ok((get_str_ref(slots, l, span)?, get_str_ref(slots, r, span)?))
+}
+
+/// Walk an instruction and return the highest register index it references.
+/// Used to size the slots vec defensively in `execute_chunk`.
+/// Evaluate a struct field default expression if it is a simple literal.
+/// Returns None for non-literal defaults (they stay unset and will cause a
+/// runtime error if accessed — the same behaviour as before this fix).
+pub(crate) fn eval_literal_default(expr: &crate::frontend::ast::Expr) -> Option<VmValue> {
+    use crate::frontend::ast::Expr;
+    match expr {
+        Expr::Str { value, .. }     => Some(VmValue::Str(value.clone().into())),
+        Expr::Integer { value, .. } => Some(VmValue::Int(*value)),
+        Expr::Float { value, .. }   => Some(VmValue::Float(*value)),
+        Expr::Bool { value, .. }    => Some(VmValue::Bool(*value)),
+        Expr::Identifier { name, .. } if name == "nil" || name == "None" || name == "null" => Some(VmValue::Nil),
+        Expr::Array { elements, .. } if elements.is_empty() =>
+            Some(VmValue::Array(Arc::new(Mutex::new(ArrayObj::from_vec(vec![]))))),
+        Expr::Dict { entries, .. } if entries.is_empty() =>
+            Some(VmValue::Dict(DictObj::new())),
+        _ => None,
+    }
+}
+
+pub(crate) fn instr_max_reg(instr: &Instr) -> u32 {
+    match instr {
+        Instr::LoadInt(d,_)|Instr::LoadFloat(d,_)|Instr::LoadBool(d,_)
+        |Instr::LoadStr(d,_)|Instr::LoadNil(d)|Instr::LoadFn(d,_)
+        |Instr::MakeClosure(d,_) => *d,
+        Instr::GetLocal(d,_)|Instr::GetGlobal(d,_) => *d,
+        Instr::Move(d,s)|Instr::NegInt(d,s)|Instr::NegFloat(d,s)
+        |Instr::IntToFloat(d,s)|Instr::BitNot(d,s)|Instr::Not(d,s)
+        |Instr::MakePrompt(d,s)
+        |Instr::UnaryOp(d,_,s)
+        |Instr::PromptDeref(d,s,_,None) => (*d).max(*s),
+        Instr::PromptDeref(d,s,_,Some(g)) => (*d).max(*s).max(*g),
+        Instr::SetGlobal(_,s)|Instr::SetLocal(_,s) => *s,
+        Instr::AddInt(d,l,r)|Instr::SubInt(d,l,r)|Instr::MulInt(d,l,r)
+        |Instr::DivInt(d,l,r)|Instr::ModInt(d,l,r)
+        |Instr::AddFloat(d,l,r)|Instr::SubFloat(d,l,r)
+        |Instr::MulFloat(d,l,r)|Instr::DivFloat(d,l,r)
+        |Instr::ConcatStr(d,l,r)
+        |Instr::BitAnd(d,l,r)|Instr::BitOr(d,l,r)|Instr::BitXor(d,l,r)
+        |Instr::Shl(d,l,r)|Instr::Shr(d,l,r)
+        |Instr::CmpEqInt(d,l,r)|Instr::CmpNeInt(d,l,r)|Instr::CmpLtInt(d,l,r)
+        |Instr::CmpGtInt(d,l,r)|Instr::CmpLeInt(d,l,r)|Instr::CmpGeInt(d,l,r)
+        |Instr::CmpEqFloat(d,l,r)|Instr::CmpNeFloat(d,l,r)|Instr::CmpLtFloat(d,l,r)
+        |Instr::CmpGtFloat(d,l,r)|Instr::CmpLeFloat(d,l,r)|Instr::CmpGeFloat(d,l,r)
+        |Instr::CmpLtIntFloat(d,l,r)|Instr::CmpGtIntFloat(d,l,r)
+        |Instr::CmpLeIntFloat(d,l,r)|Instr::CmpGeIntFloat(d,l,r)
+        |Instr::CmpLtFloatInt(d,l,r)|Instr::CmpGtFloatInt(d,l,r)
+        |Instr::CmpLeFloatInt(d,l,r)|Instr::CmpGeFloatInt(d,l,r)
+        |Instr::CmpEqBool(d,l,r)|Instr::CmpNeBool(d,l,r)|Instr::CmpLtBool(d,l,r)
+        |Instr::CmpGtBool(d,l,r)|Instr::CmpLeBool(d,l,r)|Instr::CmpGeBool(d,l,r)
+        |Instr::CmpEqStr(d,l,r)|Instr::CmpNeStr(d,l,r)|Instr::CmpLtStr(d,l,r)
+        |Instr::CmpGtStr(d,l,r)|Instr::CmpLeStr(d,l,r)|Instr::CmpGeStr(d,l,r)
+        |Instr::CmpEq(d,l,r)|Instr::CmpNe(d,l,r)|Instr::CmpLt(d,l,r)
+        |Instr::CmpGt(d,l,r)|Instr::CmpLe(d,l,r)|Instr::CmpGe(d,l,r)
+        |Instr::BinOp(d,_,l,r)
+        |Instr::GetIndex(d,l,r) => (*d).max(*l).max(*r),
+        Instr::GetField(d,o,_) => (*d).max(*o),
+        Instr::SetIndex(o,i,v) => (*o).max(*i).max(*v),
+        Instr::SetField(o,_,v) => (*o).max(*v),
+        Instr::JumpIfFalse(c,_)|Instr::JumpIfTrue(c,_) => *c,
+        Instr::Jump(_)|Instr::Halt|Instr::Return(None)
+        |Instr::ImportFile(_,_)|Instr::ImportFrom(_,_) => 0,
+        Instr::Return(Some(r)) => *r,
+        Instr::Call(d,c,args) => {
+            let mut m = (*d).max(*c);
+            for &a in args { m = m.max(a); }
+            m
+        }
+        Instr::MakeArray(d, regs) => {
+            let mut m = *d;
+            for &r in regs { m = m.max(r); }
+            m
+        }
+        Instr::MakeDict(d, pairs) => {
+            let mut m = *d;
+            for &(k,v) in pairs { m = m.max(k).max(v); }
+            m
+        }
+        Instr::MakeStruct(d,_,fields) => {
+            let mut m = *d;
+            for (_,r,_) in fields { m = m.max(*r); }
+            m
+        }
+        Instr::BuildFStr(d, parts) => {
+            let mut m = *d;
+            for p in parts { if let FStrPart::Reg(r) = p { m = m.max(*r); } }
+            m
+        }
+        Instr::Raise(r)            => *r,
+        Instr::SetupHandler(r, _)  => *r,
+        Instr::PopHandler          => 0,
+        Instr::GetTypeName(d, s)   => (*d).max(*s),
+        Instr::Spawn(d, c, args) => {
+            let mut m = (*d).max(*c);
+            for &a in args { m = m.max(a); }
+            m
+        }
+        Instr::Await(d, s) => (*d).max(*s),
+        Instr::Join(d, regs) => {
+            let mut m = *d;
+            for &r in regs { m = m.max(r); }
+            m
+        }
+        Instr::CallNamed(d, c, pairs) => {
+            let mut m = (*d).max(*c);
+            for (_, r) in pairs { m = m.max(*r); }
+            m
+        }
+    }
+}
