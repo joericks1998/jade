@@ -11,6 +11,7 @@ use std::path::Path;
 use inkwell::{
     context::Context,
     module::Module,
+    passes::PassBuilderOptions,
     targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine},
     values::AnyValue,
     AddressSpace, OptimizationLevel,
@@ -467,6 +468,17 @@ pub fn compile_with_mode(
             CodeModel::Default,
         )
         .ok_or("failed to create LLVM target machine")?;
+
+    // Run the mid-level optimization pipeline before codegen. `write_to_file`
+    // only runs the target machine's *codegen* passes — it does NOT run the
+    // target-independent IR passes (mem2reg, SROA, instcombine, inlining, GVN).
+    // Without this the lowered IR keeps every register as a stack `alloca` with a
+    // load/store on each access, so a tight recursive function like `fib` is
+    // memory-bound rather than register-bound. `default<O2>` promotes those to
+    // SSA and cleans up the redundancy the chunk→IR translation emits.
+    module
+        .run_passes("default<O2>", &machine, PassBuilderOptions::create())
+        .map_err(|e| e.to_string())?;
 
     let obj_path = output_path.with_extension("o");
     machine

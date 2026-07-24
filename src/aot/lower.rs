@@ -532,13 +532,50 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
 
     // ── Reference counting (B4.2; all no-ops unless `self.refcount`) ──────────
 
+    /// An `i1` that is true when `w` is a **heap** word — a pointer (dict/array/
+    /// struct/fn/future), a boxed float, or a string, i.e. tag ∈ {1,3,5}. Ints
+    /// (low bit 0) and immediates (nil/bool, tag 7) are non-heap and never need
+    /// refcounting. Equivalent to `runtime::value::is_heap`: odd **and** tag ≠ 7.
+    ///
+    /// This is the cheap inline test the refcount ops branch on, so a plain
+    /// integer program (e.g. recursive `fib`, whose `Unknown`-typed values are
+    /// ints at runtime) skips the runtime call entirely instead of paying a
+    /// function call that no-ops inside the callee.
+    fn is_heap(&self, w: IntValue<'ctx>) -> IntValue<'ctx> {
+        let b = self.builder;
+        let one = self.i64t().const_int(1, false);
+        let seven = self.i64t().const_int(7, false);
+        let low1 = b.build_and(w, one, "rc_low1").unwrap();
+        let is_odd = b.build_int_compare(IntPredicate::NE, low1, self.i64t().const_zero(), "rc_odd").unwrap();
+        let low3 = b.build_and(w, seven, "rc_low3").unwrap();
+        let not_imm = b.build_int_compare(IntPredicate::NE, low3, seven, "rc_nonimm").unwrap();
+        b.build_and(is_odd, not_imm, "rc_isheap").unwrap()
+    }
+
+    /// Run `emit_call` only when `w` is a heap word; otherwise fall straight
+    /// through. Replaces an unconditional refcount call with a predicted-not-taken
+    /// inline branch for the common non-heap (int/bool/nil) case.
+    fn if_heap(&self, w: IntValue<'ctx>, emit_call: impl FnOnce()) {
+        let func = self.builder.get_insert_block().unwrap().get_parent().unwrap();
+        let heap_bb = self.ctx.append_basic_block(func, "rc_heap");
+        let cont_bb = self.ctx.append_basic_block(func, "rc_cont");
+        let cond = self.is_heap(w);
+        self.builder.build_conditional_branch(cond, heap_bb, cont_bb).unwrap();
+        self.builder.position_at_end(heap_bb);
+        emit_call();
+        self.builder.build_unconditional_branch(cont_bb).unwrap();
+        self.builder.position_at_end(cont_bb);
+    }
+
     /// Emit `jrt_incref(w)` — retain a reference. No-op on non-collection words.
     fn incref(&self, w: IntValue<'ctx>) {
         if !self.refcount {
             return;
         }
-        let f = self.runtime_fn("jrt_incref", self.ctx.void_type().fn_type(&[self.i64t().into()], false));
-        self.builder.build_call(f, &[w.into()], "").unwrap();
+        self.if_heap(w, || {
+            let f = self.runtime_fn("jrt_incref", self.ctx.void_type().fn_type(&[self.i64t().into()], false));
+            self.builder.build_call(f, &[w.into()], "").unwrap();
+        });
     }
 
     /// Emit `jrt_decref(w)` — release a reference (frees at zero, cascading).
@@ -546,8 +583,10 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
         if !self.refcount {
             return;
         }
-        let f = self.runtime_fn("jrt_decref", self.ctx.void_type().fn_type(&[self.i64t().into()], false));
-        self.builder.build_call(f, &[w.into()], "").unwrap();
+        self.if_heap(w, || {
+            let f = self.runtime_fn("jrt_decref", self.ctx.void_type().fn_type(&[self.i64t().into()], false));
+            self.builder.build_call(f, &[w.into()], "").unwrap();
+        });
     }
 
     /// Retain a value that is a *borrowed* read of an existing reference (a
@@ -570,11 +609,24 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
             .build_load(self.i64t(), self.slots[i], "rcold")
             .unwrap()
             .into_int_value();
+        // `jrt_rc_replace` decrefs `old` and increfs `new`; both no-op unless the
+        // word is heap. Skip the call when *neither* is heap (the common case for
+        // scalar slots) with an inline guard — `is_heap(old) || is_heap(new)`.
+        let old_heap = self.is_heap(old);
+        let new_heap = self.is_heap(new);
+        let either = self.builder.build_or(old_heap, new_heap, "rc_either").unwrap();
+        let func = self.builder.get_insert_block().unwrap().get_parent().unwrap();
+        let heap_bb = self.ctx.append_basic_block(func, "rcrep_heap");
+        let cont_bb = self.ctx.append_basic_block(func, "rcrep_cont");
+        self.builder.build_conditional_branch(either, heap_bb, cont_bb).unwrap();
+        self.builder.position_at_end(heap_bb);
         let f = self.runtime_fn(
             "jrt_rc_replace",
             self.ctx.void_type().fn_type(&[self.i64t().into(), self.i64t().into()], false),
         );
         self.builder.build_call(f, &[old.into(), new.into()], "").unwrap();
+        self.builder.build_unconditional_branch(cont_bb).unwrap();
+        self.builder.position_at_end(cont_bb);
     }
 
     /// Release every local slot's owned reference — the function's scope-exit
@@ -905,6 +957,59 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
             .into_int_value()
     }
 
+    /// Like [`any2`], but with an inline **both-int fast path**: when both operand
+    /// words are tagged ints (low bit 0), compute the result with native checked
+    /// i128 arithmetic (identical to `AddInt`/`SubInt`/`MulInt`, so overflow still
+    /// raises exactly as the VM does) instead of calling the runtime. Anything
+    /// else falls through to `jrt_<name>` unchanged. `slow_name` must be one of
+    /// `jrt_add_any` / `jrt_sub_any` / `jrt_mul_any`.
+    ///
+    /// This is what makes untyped integer code (recursive `fib`, whose params are
+    /// `Unknown`) run on native adds/subs rather than a tag-dispatching call.
+    fn any2_int_fast(&self, slow_name: &str, l: Reg, r: Reg) -> Result<IntValue<'ctx>, String> {
+        let b = self.builder;
+        let e = |x: inkwell::builder::BuilderError| x.to_string();
+        let lw = self.load(l);
+        let rw = self.load(r);
+        let func = b.get_insert_block().unwrap().get_parent().unwrap();
+        let fast_bb = self.ctx.append_basic_block(func, "arith_fast");
+        let slow_bb = self.ctx.append_basic_block(func, "arith_slow");
+        let merge_bb = self.ctx.append_basic_block(func, "arith_merge");
+
+        // both int  ⇔  (lw | rw) & 1 == 0  (an int is the only tag with bit0 == 0).
+        let orw = b.build_or(lw, rw, "arith_or").map_err(e)?;
+        let low1 = b.build_and(orw, self.i64t().const_int(1, false), "arith_low1").map_err(e)?;
+        let both_int = b.build_int_compare(IntPredicate::EQ, low1, self.i64t().const_zero(), "arith_bothint").map_err(e)?;
+        b.build_conditional_branch(both_int, fast_bb, slow_bb).map_err(e)?;
+
+        // Fast: native checked arithmetic on the untagged operands.
+        b.position_at_end(fast_bb);
+        let wa = self.widen(self.untag_int(lw))?;
+        let wc = self.widen(self.untag_int(rw))?;
+        let s = match slow_name {
+            "jrt_add_any" => b.build_int_add(wa, wc, "faddi").map_err(e)?,
+            "jrt_sub_any" => b.build_int_sub(wa, wc, "fsubi").map_err(e)?,
+            "jrt_mul_any" => b.build_int_mul(wa, wc, "fmuli").map_err(e)?,
+            other => return Err(format!("any2_int_fast: unsupported op {other}")),
+        };
+        let fast_res = self.checked_int_result(s, "fint")?; // splits on overflow, ends at ok block
+        let fast_end = b.get_insert_block().unwrap();
+        b.build_unconditional_branch(merge_bb).map_err(e)?;
+
+        // Slow: the tag-dispatching runtime helper (handles float/str/mixed/error).
+        b.position_at_end(slow_bb);
+        let f = self.runtime_fn(slow_name, self.i64t().fn_type(&[self.i64t().into(), self.i64t().into()], false));
+        let slow_res = b.build_call(f, &[lw.into(), rw.into()], "any2slow").map_err(e)?
+            .as_any_value_enum().into_int_value();
+        let slow_end = b.get_insert_block().unwrap();
+        b.build_unconditional_branch(merge_bb).map_err(e)?;
+
+        b.position_at_end(merge_bb);
+        let phi = b.build_phi(self.i64t(), "arith_res").map_err(e)?;
+        phi.add_incoming(&[(&fast_res, fast_end), (&slow_res, slow_end)]);
+        Ok(phi.as_basic_value().into_int_value())
+    }
+
     /// `jrt_eq_any(i64, i64) -> i32` (1 when equal).
     fn eq_any(&self, l: Reg, r: Reg) -> IntValue<'ctx> {
         let f = self.runtime_fn(
@@ -918,17 +1023,46 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
             .into_int_value()
     }
 
-    /// `jrt_cmp_any(i64, i64) -> i32` (three-way: -1 / 0 / 1).
+    /// `jrt_cmp_any(i64, i64) -> i32` (three-way: -1 / 0 / 1), with an inline
+    /// both-int fast path: untag and compare natively, folding to `(a>c)-(a<c)`,
+    /// instead of a runtime call. Non-int operands fall through to `jrt_cmp_any`.
     fn cmp_any(&self, l: Reg, r: Reg) -> IntValue<'ctx> {
-        let f = self.runtime_fn(
-            "jrt_cmp_any",
-            self.ctx.i32_type().fn_type(&[self.i64t().into(), self.i64t().into()], false),
-        );
-        self.builder
-            .build_call(f, &[self.load(l).into(), self.load(r).into()], "cmpany")
-            .unwrap()
-            .as_any_value_enum()
-            .into_int_value()
+        let b = self.builder;
+        let i32t = self.ctx.i32_type();
+        let lw = self.load(l);
+        let rw = self.load(r);
+        let func = b.get_insert_block().unwrap().get_parent().unwrap();
+        let fast_bb = self.ctx.append_basic_block(func, "cmp_fast");
+        let slow_bb = self.ctx.append_basic_block(func, "cmp_slow");
+        let merge_bb = self.ctx.append_basic_block(func, "cmp_merge");
+
+        let orw = b.build_or(lw, rw, "cmp_or").unwrap();
+        let low1 = b.build_and(orw, self.i64t().const_int(1, false), "cmp_low1").unwrap();
+        let both_int = b.build_int_compare(IntPredicate::EQ, low1, self.i64t().const_zero(), "cmp_bothint").unwrap();
+        b.build_conditional_branch(both_int, fast_bb, slow_bb).unwrap();
+
+        // Fast: native three-way `(a > c) - (a < c)` on untagged ints → i32.
+        b.position_at_end(fast_bb);
+        let a = self.untag_int(lw);
+        let c = self.untag_int(rw);
+        let gt = b.build_int_compare(IntPredicate::SGT, a, c, "cmp_gt").unwrap();
+        let lt = b.build_int_compare(IntPredicate::SLT, a, c, "cmp_lt").unwrap();
+        let gt_i = b.build_int_z_extend(gt, i32t, "cmp_gti").unwrap();
+        let lt_i = b.build_int_z_extend(lt, i32t, "cmp_lti").unwrap();
+        let fast_res = b.build_int_sub(gt_i, lt_i, "cmp_three").unwrap();
+        b.build_unconditional_branch(merge_bb).unwrap();
+
+        // Slow: tag-dispatching runtime comparison (float/str/mixed/nil ordering).
+        b.position_at_end(slow_bb);
+        let f = self.runtime_fn("jrt_cmp_any", i32t.fn_type(&[self.i64t().into(), self.i64t().into()], false));
+        let slow_res = b.build_call(f, &[lw.into(), rw.into()], "cmpany").unwrap()
+            .as_any_value_enum().into_int_value();
+        b.build_unconditional_branch(merge_bb).unwrap();
+
+        b.position_at_end(merge_bb);
+        let phi = b.build_phi(i32t, "cmp_res").unwrap();
+        phi.add_incoming(&[(&fast_res, fast_bb), (&slow_res, slow_bb)]);
+        phi.as_basic_value().into_int_value()
     }
 
     /// `jrt_neg_any(i64) -> i64` (tagged result).
@@ -3179,9 +3313,9 @@ fn lower_instr<'ctx>(
         BinOp(d, op, l, r) => {
             use BinOpKind::*;
             match op {
-                Add => low.store(*d, low.any2("jrt_add_any", *l, *r)),
-                Sub => low.store(*d, low.any2("jrt_sub_any", *l, *r)),
-                Mul => low.store(*d, low.any2("jrt_mul_any", *l, *r)),
+                Add => { let v = low.any2_int_fast("jrt_add_any", *l, *r)?; low.store(*d, v); }
+                Sub => { let v = low.any2_int_fast("jrt_sub_any", *l, *r)?; low.store(*d, v); }
+                Mul => { let v = low.any2_int_fast("jrt_mul_any", *l, *r)?; low.store(*d, v); }
                 Div => low.store(*d, low.any2("jrt_div_any", *l, *r)),
                 Mod => low.store(*d, low.any2("jrt_mod_any", *l, *r)),
                 // Bitwise/shift are int-only: untag, native op, re-tag.
