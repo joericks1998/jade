@@ -14,9 +14,14 @@ ARCH=$(uname -m)
 case "$OS" in
   Darwin)
     case "$ARCH" in
-      arm64)  ARCHIVE="jade-macos-arm64.tar.gz" ;;
-      x86_64) ARCHIVE="jade-macos-x86_64.tar.gz" ;;
-      *)      ARCHIVE="jade-macos-universal.tar.gz" ;;
+      arm64) ARCHIVE="jade-macos-arm64.tar.gz" ;;
+      *)
+        echo "Unsupported macOS architecture: $ARCH"
+        echo "Jade ships an Apple Silicon (arm64) build only; Intel macOS is not supported."
+        echo "On an Intel Mac, run the arm64 build under Rosetta 2, or build from source:"
+        echo "  https://github.com/$REPO"
+        exit 1
+        ;;
     esac
     ;;
   Linux)

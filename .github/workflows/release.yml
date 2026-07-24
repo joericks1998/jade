@@ -32,14 +32,15 @@ jobs:
             archive: jade-linux-x86_64.tar.gz
             binary: jade
 
+          # macOS ships arm64 only. Intel (x86_64) was dropped: the release
+          # binary links LLVM 18 in-process, and cross-compiling x86_64 on the
+          # arm64 `macos-latest` runner links arm64 Homebrew LLVM, which the
+          # x86_64 linker rejects (unresolved __Unwind_* from rust_eh_personality).
+          # GitHub is retiring its Intel runners, so a native x86_64 build is not
+          # a durable option either. Intel Mac users build from source or use Rosetta.
           - os: macos-latest
             target: aarch64-apple-darwin
             archive: jade-macos-arm64.tar.gz
-            binary: jade
-
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            archive: jade-macos-x86_64.tar.gz
             binary: jade
 
     steps:
@@ -92,43 +93,9 @@ jobs:
           name: ${{ matrix.archive }}
           path: ${{ matrix.archive }}
 
-  universal-macos:
-    name: macOS universal binary
-    needs: build
-    runs-on: macos-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: jade-macos-arm64.tar.gz
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: jade-macos-x86_64.tar.gz
-
-      # `tar -O` concatenated the whole archive to stdout, which worked only
-      # while the tarball held exactly one file. It now carries lib/*.a too, so
-      # unpack into directories and lipo each artifact — the static archives
-      # have to be universal as well, or `jade build` on one arch would link a
-      # runtime built for the other.
-      - name: Create universal binary
-        run: |
-          mkdir -p arm64 x86_64 dist/lib
-          tar -xzf jade-macos-arm64.tar.gz -C arm64
-          tar -xzf jade-macos-x86_64.tar.gz -C x86_64
-          lipo -create -output dist/jade arm64/jade x86_64/jade
-          for a in libJadeRuntime.a libjade_runtime.a; do
-            lipo -create -output "dist/lib/$a" "arm64/lib/$a" "x86_64/lib/$a"
-          done
-          tar -czf jade-macos-universal.tar.gz -C dist .
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: jade-macos-universal.tar.gz
-          path: jade-macos-universal.tar.gz
-
   release:
     name: Publish release
-    needs: [build, universal-macos]
+    needs: [build]
     runs-on: ubuntu-latest
     env:
       TAG: ${{ github.event.client_payload.tag || github.event.inputs.tag || github.ref_name }}
@@ -155,9 +122,7 @@ jobs:
         run: |
           sha256sum \
             jade-linux-x86_64.tar.gz \
-            jade-macos-arm64.tar.gz \
-            jade-macos-x86_64.tar.gz \
-            jade-macos-universal.tar.gz > checksums.txt
+            jade-macos-arm64.tar.gz > checksums.txt
           cat checksums.txt
 
       - name: Create release and upload assets
@@ -170,6 +135,4 @@ jobs:
           files: |
             jade-linux-x86_64.tar.gz
             jade-macos-arm64.tar.gz
-            jade-macos-x86_64.tar.gz
-            jade-macos-universal.tar.gz
             checksums.txt
