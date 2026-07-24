@@ -4,7 +4,7 @@ title: LLM Integration
 sidebar_label: LLM Integration
 ---
 
-Jade is built around first-class LLM access. A `prompt` declaration names a prompt string; the `?` operator sends it to the configured model and returns the response. The `|>` pipe suffix coerces the response to a typed Jade value, with automatic retry on failure.
+Jade is built around first-class LLM access. A `prompt` declaration names a prompt string; the `?` operator sends it to the inference daemon and returns the response. The `|>` pipe suffix coerces the response to a typed Jade value.
 
 ## Declaring a Prompt
 
@@ -23,7 +23,7 @@ prompt p = question
 
 ## Untyped Dereference — `?p`
 
-Prefixing a prompt variable with `?` sends the prompt to the configured model and returns the raw response as a `str`.
+Prefixing a prompt variable with `?` sends the prompt to the inference daemon and returns the raw response as a `str`.
 
 ```jade
 prompt p = "Say exactly: Hello from Jade!"
@@ -31,14 +31,15 @@ let response = ?p
 print(response)
 ```
 
-Each `?` dereference appends a user turn and the model's reply to the shared **conversation history** for this program run. Subsequent dereferences see the full prior context, so prompts can naturally build on each other.
+Each `?` dereference is an **independent, stateless request** — the language sends only that prompt, with no conversation history. Carrying context between calls is the program's job: build the prior turns into the prompt string yourself.
 
 ```jade
-prompt p1 = "My name is Alice."
-prompt p2 = "What is my name?"
+prompt p1 = "My name is Alice. What is 2 + 2?"
+let _ = ?p1
 
-let _ = ?p1          // establishes context
-let name = ?p2       // model sees p1 exchange, should reply "Alice"
+// p2 does NOT see p1 — include the context you need in the prompt itself.
+prompt p2 = "My name is Alice. What is my name?"
+let name = ?p2       // "Alice"
 print(name)
 ```
 
@@ -117,53 +118,28 @@ print(n)
 
 ## Configuration
 
-Jade reads LLM settings from `jade.toml` in the working directory. Environment variables override file values.
+There is no LLM configuration in the language — no `jade.toml` model section, no
+provider keys, no `jade configure`. The **inference daemon owns all of it**: the
+provider, the model, API keys, the token budget, and any retry policy. You
+configure those on the daemon, not here.
 
-### `jade.toml` format
-
-```toml
-[model]
-provider    = "anthropic"          # or "openai"
-model       = "claude-haiku-4-5-20251001"
-api_key     = "sk-..."             # optional — prefer the env var
-```
-
-### Environment variables
+The language reaches the daemon over a Unix socket, and that socket is the entire
+contract. Its path is `$JADE_LLM_SOCK` if set, otherwise `$HOME/.jade/llm.sock`.
+If no daemon is listening there, a `?` dereference fails with a "cannot connect
+to inference daemon" error.
 
 | Variable | Purpose |
 |----------|---------|
-| `JADE_API_KEY` | API key (overrides `api_key` in jade.toml) |
-| `JADE_PROVIDER` | `anthropic` or `openai` |
-| `JADE_MODEL` | Model name string |
+| `JADE_LLM_SOCK` | Path to the daemon's Unix socket (default `$HOME/.jade/llm.sock`) |
 
-### Interactive setup
+## No `llm` package
 
-Run `jade configure` to launch the interactive wizard. It prompts for provider, model, API key, and max retries, then writes `jade.toml` in the current directory.
-
-```bash
-jade configure
-```
-
-:::warning
-**Security:** storing `api_key` in `jade.toml` saves it in plaintext. Prefer setting `JADE_API_KEY` in your shell environment and omitting the key from the file.
-:::
-
-### Supported providers
-
-| Provider string | API used | Default model |
-|----------------|----------|---------------|
-| `anthropic` (default) | Anthropic Messages API | `claude-haiku-4-5-20251001` |
-| `openai` | OpenAI Chat Completions | `gpt-4o-mini` |
-| `jade-os` | Jade OS on-device kernel backend | set by device configuration |
-
-## The `llm` package moved to the daemon
-
-There is no `use llm` package in the language anymore. Everything it used to
-expose — model selection and introspection, the token budget and token
-accounting, anchor handling, retry policy, daemon health, model profiles, and
-tool-call parsing — is now owned by the inference daemon. The model-specific
-pieces (profiles, tool-call parsing) ship with each model as **Jade packages on
-the daemon side**; the rest is daemon configuration.
+There is no `use llm` package in the language. Everything it used to expose —
+model selection and introspection, the token budget and token accounting, anchor
+handling, retry policy, daemon health, model profiles, and tool-call parsing — is
+owned by the inference daemon now. The model-specific pieces (profiles, tool-call
+parsing) ship with each model as **Jade packages on the daemon side**; the rest
+is daemon configuration.
 
 The language keeps only the inference *syntax*: declaring a prompt and
 dereferencing it (`?p`, `?p |> Type`), with grammar constraints via
@@ -200,10 +176,10 @@ See [Async / Await](async) for the full reference.
 
 | Error | Cause |
 |-------|-------|
-| `MissingApiKey` | `?p` was evaluated but no API key was configured |
+| `MissingApiKey` | `?p` was evaluated but no inference daemon was reachable (start it; socket at `$HOME/.jade/llm.sock`, override with `JADE_LLM_SOCK`) |
 | `NotAPrompt` | `?x` where `x` is not a `prompt` binding |
-| `PromptOverflow` | Typed dereference exhausted all retries without producing a valid value |
-| `InferenceError` | HTTP or API error from the provider (non-2xx response, network failure, etc.) |
+| `PromptOverflow` | Typed dereference produced a reply that didn't coerce to the target type (single-shot — the daemon owns any retry policy) |
+| `InferenceError` | Transport error talking to the daemon (connection failure, malformed frame, etc.) |
 | `StreamingWithType` | `?p |> Type` used directly inside `print()` — assign to a variable first |
 | `NotAFuture` | `await` applied to a non-Future value |
 | `DoubleAwait` | The same Future was awaited more than once |

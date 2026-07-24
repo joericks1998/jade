@@ -125,7 +125,7 @@ jade fmt src/ --check
 
 ## `jade env`
 
-Show the Jade environment: version, config file location, cache directory, and project info.
+Show the Jade environment: version, binary path, platform, cache stats, and project info.
 
 ```bash
 jade env
@@ -173,29 +173,30 @@ jade cache clean --dry-run
 | `--older-than <DAYS>` | Also remove entries older than this many days. |
 | `--dry-run` | Show what would be removed without deleting. |
 
-## `jade model`
+## `jade pkg`
 
-Manage LLM model configuration.
+Manage project dependencies declared in `[dependencies]` of `jade.toml` and pinned by `jade.lock`. Dependencies are prebuilt native shared libraries installed into a project-local `libs/`; `jade run` and `jade test` install anything missing automatically.
 
 ```bash
-jade model list
-jade model use anthropic/claude-3-5-sonnet
+jade pkg add fastmath --url https://example.com/fastmath-{platform}.so
+jade pkg add mathlib --path ../mathlib
+jade pkg install                 # install everything in the lock
+jade pkg list
 ```
 
 ### Subcommands
 
 | Subcommand | Description |
 |------------|-------------|
-| `list` | List known LLM models by provider. |
-| `use <provider/model>` | Set the default model, writing to `~/.jade/config.toml`. |
+| `add <name>` | Add a dependency from `--url` or `--path` (with `--version`; `--c-abi` for a plain C library). |
+| `remove <name>` | Remove a dependency from `jade.toml` and `jade.lock`. |
+| `install` | Install all locked dependencies (`--locked` fails if the lock is out of date). |
+| `update [name]` | Re-resolve and update a dependency (or all of them). |
+| `list` | List declared dependencies and their resolved versions. |
 
-## `jade configure`
-
-Run the interactive configuration wizard to set up an LLM backend. Stores provider, model, and API key in `~/.jade/config.toml`. The `JADE_API_KEY` environment variable can also be used to supply a key at runtime.
-
-```bash
-jade configure
-```
+:::note
+There is no LLM configuration command. The inference daemon owns the provider, model, and API keys — the language only needs the daemon listening on its socket (`$HOME/.jade/llm.sock`, override with `JADE_LLM_SOCK`). See [LLM Integration](llm).
+:::
 
 ## Backward-Compatible File Execution
 

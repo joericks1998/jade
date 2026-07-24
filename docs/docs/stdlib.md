@@ -35,7 +35,6 @@ Standard-library packages must be imported with `::` notation. The string-litera
 | `use std::env` | `env` | Environment variables and process info |
 | `use std::path` | `path` | Path manipulation |
 | `use std::random` | `random` | Random number generation |
-| `use llm` | `llm` | LLM runtime configuration |
 
 ---
 
