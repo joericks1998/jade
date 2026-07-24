@@ -108,11 +108,13 @@ pub enum JadeError {
     /// Type checker: an array literal contains elements of different concrete types.
     HeterogeneousArray { first: String, got: String, span: Span },
 
-    /// `use "path"` for a file import is missing the required `as alias` clause.
-    MissingImportAlias { path: String, span: Span },
+    /// `use "path"` used the removed quoted-string import form. Imports name a
+    /// module (`use utils`, `use sub::helper`, `use std::math`), never a file path.
+    QuotedImport { path: String, span: Span },
 
-    /// `use "std/pkg"` used string syntax for a stdlib package — dot notation is required.
-    StdlibStringImport { path: String, span: Span },
+    /// `use foo as bar` used the removed `as` alias. An import binds its module's
+    /// last path segment automatically (`use sub::helper` binds `helper`).
+    ImportAlias { span: Span },
 
     /// `use "path"` could not find the referenced file.
     ImportNotFound { path: String, span: Span },
@@ -219,12 +221,12 @@ impl std::fmt::Display for JadeError {
                 write!(f, "[{}:{}] type mismatch: expected {}, got {}", span.line, span.col, expected, got),
             JadeError::HeterogeneousArray { first, got, span } =>
                 write!(f, "[{}:{}] heterogeneous array: first element is {}, found {}", span.line, span.col, first, got),
-            JadeError::MissingImportAlias { path, span } =>
-                write!(f, "[{}:{}] file import '{}' requires an alias: write `use \"{}\" as <name>`", span.line, span.col, path, path),
-            JadeError::StdlibStringImport { path, span } => {
-                let dot = path.replace('/', ".");
-                write!(f, "[{}:{}] stdlib package '{}' must be imported with dot notation: `use {}`", span.line, span.col, path, dot)
+            JadeError::QuotedImport { path, span } => {
+                let dotted = path.trim_end_matches(".jde").replace('/', "::");
+                write!(f, "[{}:{}] quoted file imports were removed. Import by module name with `::` notation: `use {}` (a sibling `.jde` file, a subdir with `sub::name`, a stdlib package like `std::math`, or a registered `[lib]`/dependency).", span.line, span.col, dotted)
             }
+            JadeError::ImportAlias { span } =>
+                write!(f, "[{}:{}] the `as` import alias was removed; an import binds its module's last path segment automatically (`use sub::helper` binds `helper`).", span.line, span.col),
             JadeError::ImportNotFound { path, span } =>
                 write!(f, "[{}:{}] cannot find import '{}': file not found", span.line, span.col, path),
             JadeError::SharedMutation { task, what, span } => write!(

@@ -1794,11 +1794,11 @@ fn test_nil_eq_eq_struct_via_unknown_param() {
 /// closures capturing the module scope.
 #[test]
 fn test_import_module_let_binding_visible_in_fn() {
-    let dir = std::env::temp_dir();
-    let mod_path = dir.join("jade_test_mod_let.jde");
+    let dir = std::env::temp_dir().join("jade_test_mod_let_d");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mod_path = dir.join("m.jde");
     std::fs::write(&mod_path, "let _PREFIX = \"hi \"\nfn greet(name) {\n return _PREFIX + name\n}\n").unwrap();
-    let mod_str = mod_path.to_str().unwrap();
-    let src = format!("use \"{mod_str}\" as m\nlet v = m.greet(\"jade\")");
+    let src = "use m\nlet v = m.greet(\"jade\")".to_string();
 
     let tokens = crate::frontend::lexer::tokenize(&src).expect("lex");
     let program = crate::frontend::parser::parse(tokens).expect("parse");
@@ -1821,13 +1821,11 @@ fn test_import_module_let_binding_visible_in_fn() {
 /// module scope, not the parent globals.
 #[test]
 fn test_import_module_mutable_state() {
-    let dir = std::env::temp_dir();
-    let mod_path = dir.join("jade_test_mod_mut.jde");
+    let dir = std::env::temp_dir().join("jade_test_mod_mut_d");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mod_path = dir.join("c.jde");
     std::fs::write(&mod_path, "let count = 0\nfn inc() { count = count + 1 }\nfn get() { return count }\n").unwrap();
-    let mod_str = mod_path.to_str().unwrap();
-    let src = format!(
-        "use \"{mod_str}\" as c\nc.inc()\nc.inc()\nc.inc()\nlet v = c.get()"
-    );
+    let src = "use c\nc.inc()\nc.inc()\nc.inc()\nlet v = c.get()".to_string();
 
     let tokens = crate::frontend::lexer::tokenize(&src).expect("lex");
     let program = crate::frontend::parser::parse(tokens).expect("parse");
@@ -1850,15 +1848,15 @@ fn test_import_module_mutable_state() {
 /// parent globals rather than buried inside the module dict.
 #[test]
 fn test_import_module_stdlib_promotion() {
-    let dir = std::env::temp_dir();
-    let mod_path = dir.join("jade_test_stdlib_promo_mod.jde");
-    let txt_path = dir.join("jade_test_stdlib_promo_out.txt");
+    let dir = std::env::temp_dir().join("jade_test_stdlib_promo_d");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mod_path = dir.join("io.jde");
+    let txt_path = dir.join("out.txt");
     std::fs::write(&mod_path, "use std::fs\nfn write_file(p, s) {\n fs.write(p, s)\n}\n").unwrap();
 
-    let mod_str = mod_path.to_str().unwrap();
     let txt_str = txt_path.to_str().unwrap();
     let src = format!(
-        "use \"{mod_str}\" as io\nio.write_file(\"{txt_str}\", \"ok\")\nlet v = true"
+        "use io\nio.write_file(\"{txt_str}\", \"ok\")\nlet v = true"
     );
 
     let tokens = crate::frontend::lexer::tokenize(&src).expect("lex");
@@ -1879,17 +1877,21 @@ fn test_import_module_stdlib_promotion() {
 
     let _ = std::fs::remove_file(&mod_path);
     let _ = std::fs::remove_file(&txt_path);
+    let _ = std::fs::remove_dir(&dir);
 }
 
 // ── imported struct metadata ──────────────────────────────────────────────
 
-/// Compile and run `main_src` with `mod_src` written to `<tmp>/<stem>.jde`,
-/// importable as `m`. Returns the final VM state.
+/// Compile and run `main_body` with `mod_src` written as the module `m` (a
+/// sibling `m.jde`), importable via `use m`. Each test gets its own directory
+/// (keyed by `stem`) so the fixed module name can't collide with sibling tests
+/// in the shared temp dir. Returns the final VM state.
 fn run_with_module(stem: &str, mod_src: &str, main_body: &str) -> VmState {
-    let dir = std::env::temp_dir();
-    let mod_path = dir.join(format!("{stem}.jde"));
+    let dir = std::env::temp_dir().join(format!("{stem}_d"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mod_path = dir.join("m.jde");
     std::fs::write(&mod_path, mod_src).unwrap();
-    let src = format!("use \"{}\" as m\n{main_body}", mod_path.to_str().unwrap());
+    let src = format!("use m\n{main_body}");
 
     let tokens = crate::frontend::lexer::tokenize(&src).expect("lex");
     let program = crate::frontend::parser::parse(tokens).expect("parse");
@@ -1904,6 +1906,7 @@ fn run_with_module(stem: &str, mod_src: &str, main_body: &str) -> VmState {
         .expect("vm run");
 
     let _ = std::fs::remove_file(&mod_path);
+    let _ = std::fs::remove_dir(&dir);
     s
 }
 

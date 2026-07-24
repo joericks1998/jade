@@ -303,26 +303,41 @@ mod type_infer {
     // ── Imports ───────────────────────────────────────────────────────────────
 
     #[test]
-    fn test_infer_file_import_without_alias_is_error() {
+    fn test_infer_quoted_file_import_is_error() {
+        // Quoted file imports were removed — use a bare/`::` module name instead.
         let err = infer_err(r#"use "my_lib.jde""#);
-        assert!(matches!(err, JadeError::MissingImportAlias { .. }));
+        assert!(matches!(err, JadeError::QuotedImport { .. }));
     }
 
     #[test]
-    fn test_infer_stdlib_import_without_alias_is_ok() {
+    fn test_infer_bare_module_import_is_ok() {
+        // A sibling `.jde` file is imported by bare module name; resolution is
+        // deferred to run/build, so type-check accepts it.
+        infer_ok("use my_lib");
+        infer_ok("use sub::helper");
+    }
+
+    #[test]
+    fn test_infer_import_alias_is_error() {
+        let err = infer_err("use my_lib as m");
+        assert!(matches!(err, JadeError::ImportAlias { .. }));
+    }
+
+    #[test]
+    fn test_infer_stdlib_import_is_ok() {
         infer_ok("use std::math");
     }
 
     #[test]
-    fn test_infer_stdlib_string_import_is_error() {
+    fn test_infer_quoted_stdlib_import_is_error() {
         let err = infer_err(r#"use "std/math""#);
-        assert!(matches!(err, JadeError::StdlibStringImport { .. }));
+        assert!(matches!(err, JadeError::QuotedImport { .. }));
     }
 
     #[test]
-    fn test_infer_from_use_string_stdlib_is_error() {
+    fn test_infer_from_use_quoted_is_error() {
         let err = infer_err(r#"from "std/math" use floor"#);
-        assert!(matches!(err, JadeError::StdlibStringImport { .. }));
+        assert!(matches!(err, JadeError::QuotedImport { .. }));
     }
 
     #[test]

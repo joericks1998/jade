@@ -17,7 +17,7 @@ let n = random.int(1, 100)
 ```
 
 :::warning
-Standard-library packages must be imported with `::` notation. The string-literal form — `use "std/json"` — is **rejected at compile time** (`StdlibStringImport`). Quoted paths are reserved for file imports, which require an `as <name>` alias. See [Imports](imports).
+Every import uses `::` notation (or a bare name) that names a module — there are no quoted file paths and no `as` alias. `use "std/json"` and `use "lib.jde" as lib` are **rejected at compile time** (`QuotedImport` / `ImportAlias`). See [Imports](imports).
 :::
 
 | Import | Global name | Description |

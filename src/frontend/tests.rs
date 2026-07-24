@@ -1825,22 +1825,20 @@ mod error {
     }
 
     #[test]
-    fn test_display_stdlib_string_import_dots_the_path() {
-        // The Display impl rewrites `/` to `.` when suggesting the fix.
-        let e = JadeError::StdlibStringImport { path: "std/math".into(), span: span(1, 1) };
-        assert_eq!(
-            e.to_string(),
-            "[1:1] stdlib package 'std/math' must be imported with dot notation: `use std.math`"
-        );
+    fn test_display_quoted_import_suggests_colon_notation() {
+        // The Display impl strips `.jde` and rewrites `/` to `::` in the suggestion.
+        let e = JadeError::QuotedImport { path: "lib/helper.jde".into(), span: span(1, 1) };
+        assert!(e.to_string().starts_with(
+            "[1:1] quoted file imports were removed. Import by module name with `::` notation: `use lib::helper`"
+        ), "got: {}", e);
     }
 
     #[test]
-    fn test_display_missing_import_alias_repeats_path() {
-        let e = JadeError::MissingImportAlias { path: "lib.jde".into(), span: span(1, 1) };
-        assert_eq!(
-            e.to_string(),
-            "[1:1] file import 'lib.jde' requires an alias: write `use \"lib.jde\" as <name>`"
-        );
+    fn test_display_import_alias_removed() {
+        let e = JadeError::ImportAlias { span: span(1, 1) };
+        assert!(e.to_string().starts_with(
+            "[1:1] the `as` import alias was removed"
+        ), "got: {}", e);
     }
 
     #[test]

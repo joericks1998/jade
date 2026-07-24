@@ -442,7 +442,14 @@ fn resolve_user_import(state: &VmState, path: &str, span: Span) -> Result<Resolv
             Err(message) => return Err(JadeError::IoError { message, span }),
         }
     }
-    Ok(ResolvedImport::File(state.source_dir.join(path)))
+    // Not a registered library: resolve relative to the importing file. `path` is
+    // a module stem (`utils`, `sub/helper`) — probe `<path>.jde`, then a native
+    // library, mirroring an allowlist-free `[lib]` directory.
+    let r = crate::project::resolve_relative_import(&state.source_dir, path);
+    Ok(match r.kind {
+        crate::project::ImportKind::Native => ResolvedImport::Native(r.path),
+        crate::project::ImportKind::Jade => ResolvedImport::File(r.path),
+    })
 }
 
 // ── Public entry point ────────────────────────────────────────────────────────

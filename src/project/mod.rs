@@ -162,6 +162,32 @@ pub fn resolve_library_import(
     Ok(Some(ResolvedLib { path: jde, kind: ImportKind::Jade }))
 }
 
+/// Resolve a bare/`::` import that is **not** a registered library to a file
+/// relative to the importing file's `dir`. `import_path` is a module stem (no
+/// extension), optionally with `/`-separated subdirectories (`sub/helper`).
+///
+/// This is the fallback that makes `use utils` load `./utils.jde` and
+/// `use sub::helper` load `./sub/helper.jde` — the same probe order
+/// `resolve_library_import` uses without an allowlist: a `.jde` source module
+/// first, then a native library. A parent path (`..`) is not expressible in
+/// `::` notation, so cross-directory imports go through `[lib]` instead.
+///
+/// Always returns a candidate; a missing file surfaces as a normal not-found
+/// error at the read site (mirroring `resolve_library_import`).
+pub fn resolve_relative_import(dir: &Path, import_path: &str) -> ResolvedLib {
+    let jde = dir.join(format!("{import_path}.jde"));
+    if jde.exists() {
+        return ResolvedLib { path: jde, kind: ImportKind::Jade };
+    }
+    for suffix in ["dylib", "so", "dll"] {
+        let cand = dir.join(format!("{import_path}.{suffix}"));
+        if cand.exists() {
+            return ResolvedLib { path: cand, kind: ImportKind::Native };
+        }
+    }
+    ResolvedLib { path: jde, kind: ImportKind::Jade }
+}
+
 // ── Dependencies ──────────────────────────────────────────────────────────────
 
 /// Which ABI a dependency's shared library speaks.

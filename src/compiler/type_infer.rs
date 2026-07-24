@@ -741,29 +741,31 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
 
         Stmt::Use { path, as_name, path_is_string, span } => {
             ctx.has_imports = true;
-            if let Some(pkg) = builtins::find_package(path) {
-                if *path_is_string {
-                    return Err(JadeError::StdlibStringImport { path: path.clone(), span: *span });
-                }
-                (pkg.register_types)(ctx);
-            } else if *path_is_string && as_name.is_none() {
-                // Only raw string-path file imports require an alias. `::`
-                // imports (`use utils::math`) name a registered [lib] library (or a
-                // stdlib package) and bind the last path segment automatically.
-                return Err(JadeError::MissingImportAlias { path: path.clone(), span: *span });
+            // One unified import form: `::` notation (or a bare name) that names a
+            // module — a stdlib package, a sibling `.jde` file, a subdir module
+            // (`sub::name`), or a registered `[lib]`/dependency. Quoted file paths
+            // and the `as` alias were removed.
+            if *path_is_string {
+                return Err(JadeError::QuotedImport { path: path.clone(), span: *span });
             }
-            Ok(TStmt::Use { path: path.clone(), as_name: as_name.clone(), path_is_string: *path_is_string, span: *span })
+            if as_name.is_some() {
+                return Err(JadeError::ImportAlias { span: *span });
+            }
+            if let Some(pkg) = builtins::find_package(path) {
+                (pkg.register_types)(ctx);
+            }
+            Ok(TStmt::Use { path: path.clone(), as_name: None, path_is_string: false, span: *span })
         }
 
         Stmt::FromUse { path, names, path_is_string, span } => {
             ctx.has_imports = true;
+            if *path_is_string {
+                return Err(JadeError::QuotedImport { path: path.clone(), span: *span });
+            }
             if let Some(pkg) = builtins::find_package(path) {
-                if *path_is_string {
-                    return Err(JadeError::StdlibStringImport { path: path.clone(), span: *span });
-                }
                 (pkg.register_types)(ctx);
             }
-            Ok(TStmt::FromUse { path: path.clone(), names: names.clone(), path_is_string: *path_is_string, span: *span })
+            Ok(TStmt::FromUse { path: path.clone(), names: names.clone(), path_is_string: false, span: *span })
         }
 
         // ── Exception handling ────────────────────────────────────────────────

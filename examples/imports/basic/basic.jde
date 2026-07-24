@@ -1,4 +1,6 @@
-use "../math_lib/math_lib.jde" as math_lib
+// Import a sibling `.jde` file by its module name — `math_lib` loads
+// `./math_lib.jde` and binds under `math_lib`. No quotes, no alias.
+use math_lib
 
 let x = math_lib.add(2, 3)
 let y = math_lib.mul(4, 5)

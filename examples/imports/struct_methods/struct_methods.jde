@@ -3,7 +3,7 @@
 // written qualified at the literal (`shapes.Point`) but is the same type the
 // module's own code sees.
 
-use "../shapes_lib/shapes_lib.jde" as shapes
+use shapes
 
 let p = shapes.Point { x: 3, y: 4 }
 print(p.to_str())

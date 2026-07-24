@@ -349,12 +349,20 @@ fn resolve_use(reg: &Registry, dir: &Path, path: &str) -> Result<Resolved, Strin
     if let Some(message) = crate::project::ambiguous_bare_import(path, &reg.libraries, dir) {
         return Err(message);
     }
+    // Not a registered library: resolve relative to the importing file. `path` is
+    // a module stem (`utils`, `sub/helper`), so probe `<path>.jde` then a native
+    // library — the same order as an allowlist-free `[lib]`, and identical to the
+    // VM's `resolve_user_import`, so the two backends can't diverge.
+    let relative = || {
+        let r = crate::project::resolve_relative_import(dir, path);
+        (r.path, r.kind == crate::project::ImportKind::Native)
+    };
     let (target, is_native) = match &reg.lib_root {
         Some(root) => match crate::project::resolve_library_import(&reg.libraries, path, root)? {
             Some(r) => (r.path, r.kind == crate::project::ImportKind::Native),
-            None => (dir.join(path), false),
+            None => relative(),
         },
-        None => (dir.join(path), false),
+        None => relative(),
     };
     let canon = target
         .canonicalize()

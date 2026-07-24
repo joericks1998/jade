@@ -4,25 +4,25 @@ title: Imports
 sidebar_label: Imports
 ---
 
-Jade's `use` statement loads another `.jde` file or a standard-library package and makes its definitions available in the importing file. There are two import forms with different syntax:
-
-- **File imports** use a quoted path and **require an alias**: `use "lib.jde" as lib`.
-- **Package imports** (standard library) use **`::` notation**: `use std::math`.
-
-## File Imports
+Jade's `use` statement loads another `.jde` file or a standard-library package and makes its definitions available in the importing file. There is **one import form**: a `use` statement names a **module** with `::` notation (or a bare name), and the import binds under the module's last path segment. There are no quoted file paths and no `as` alias.
 
 ```jade
-use "<path>" as <name>
+use utils          // a sibling ./utils.jde        → binds `utils`
+use sub::helper    // ./sub/helper.jde             → binds `helper`
+use std::math      // a standard-library package   → binds `math`
+use mylib::shapes  // a registered [lib] module     → binds `shapes`
+use fastmath       // an installed dependency        → binds `fastmath`
 ```
 
-- `<path>` — a relative path to another `.jde` file, resolved relative to the directory of the importing file.
-- `<name>` — the alias the imported module is bound to. The alias is **required**; a bare `use "lib.jde"` without `as <name>` is a compile-time error (`MissingImportAlias`).
 - The `use` statement must appear at the top level (not inside a function body).
-- The imported file is executed once; its definitions are reachable through the alias.
+- The imported file is executed once; its definitions are reachable through the bound name.
+- The bound name is always the **last segment** of the path (`sub::helper` → `helper`). To bind a different name, rename the file.
 
-## Basic Example
+## Local files by name
 
-**math_lib.jde** — the library:
+A bare name resolves to a **sibling `.jde` file**; a `::` path descends into subdirectories. Resolution is always relative to the directory of the *importing* file.
+
+**math_lib.jde** — a sibling of the importer:
 
 ```jade
 fn add(a, b) { return a + b }
@@ -32,36 +32,29 @@ fn mul(a, b) { return a * b }
 **main.jde** — the importer:
 
 ```jade
-use "math_lib.jde" as math_lib
+use math_lib
 
 let x = math_lib.add(2, 3)   // 5
 let y = math_lib.mul(4, 5)   // 20
 ```
 
-After the `use` statement executes, the imported module's functions are reachable through the alias (`math_lib.add`, `math_lib.mul`). They can be called, passed as values, or stored in variables.
-
-## Path Resolution
-
-Paths in `use` are resolved relative to the directory containing the *importing* file, not the directory from which `jade` was invoked.
-
 ```jade
-// If your project layout is:
-//   project/
-//     main.jde
-//     lib/
-//       utils.jde
+// project/
+//   main.jde
+//   lib/
+//     utils.jde
 
 // Inside main.jde:
-use "lib/utils.jde" as utils
+use lib::utils      // -> ./lib/utils.jde, binds `utils`
 ```
 
 :::note
-Absolute paths are not supported. Always use paths relative to the importing file's location.
+`::` descends into subdirectories only. A **parent** or cross-directory import (`../shared/util.jde`) is not expressible as a module path — register those directories as a **`[lib]`** (below), which anchors resolution at the project root. Absolute paths are never supported.
 :::
 
 ## Library Imports (`[lib]`)
 
-Relative paths get awkward across a deep project tree (`use "../../shared/util.jde"`). To import a module from anywhere in a project, register a **library** in `jade.toml`: a named directory, optionally with an allowlist of its modules.
+Bare/`::` names only reach *down* from the importing file, so sharing a module across a deep tree (a `src/utils/` used from several directories) isn't expressible as a plain module path. To import a module from anywhere in a project, register a **library** in `jade.toml`: a named directory, optionally with an allowlist of its modules.
 
 ```toml
 # jade.toml
@@ -105,31 +98,30 @@ print(math.square(5))        // binds as `math` (the last segment)
 
 Rules:
 
-- **`::` notation names a module** — a stdlib package (`use std::math`) or a registered library (`use utils::math`). It binds the last segment and needs no alias. **String notation names a file path** (`use "lib/helper.jde" as h`) and still requires an alias.
+- A `use` path is a **library reference** when its first segment names a registered library; otherwise it resolves as a relative module (sibling file / subdirectory). Both bind the last segment — no alias.
 - With a `files` allowlist, importing an unlisted module is a hard error in both `jade run` and `jade build`. Without one, a missing file is a normal not-found error.
-- `::` notation is treated as a library reference only when its first segment names a registered library; plain relative file imports (string form) keep working unchanged.
 - Library resolution is identical in the VM and the native (AOT) build.
 
 ## What Gets Imported
 
-The imported module's top-level functions, variables, and struct definitions are reachable through the alias (`<alias>.<name>`). The imported file runs to completion before execution of the importing file continues past the `use` statement.
+The imported module's top-level functions, variables, and struct definitions are reachable through the bound name (`<name>.<member>`). The imported file runs to completion before execution of the importing file continues past the `use` statement.
 
-| Exported from `lib.jde` (imported `as lib`) | Available after `use` |
+| Exported from `mathlib.jde` (`use mathlib`) | Available after `use` |
 |----------------------------------------------|-----------------------|
-| `fn add(a, b) { … }` | `lib.add(2, 3)` works |
-| `let PI = 3.14159` | `lib.PI` is in scope |
-| `struct Point { x, y }` | `lib.Point { x: 1, y: 2 }` works |
+| `fn add(a, b) { … }` | `mathlib.add(2, 3)` works |
+| `let PI = 3.14159` | `mathlib.PI` is in scope |
+| `struct Point { x, y }` | `mathlib.Point { x: 1, y: 2 }` works |
 
 ## Multiple Imports
 
-A file may contain multiple `use` statements. Each is processed in order; each file import must have its own alias.
+A file may contain multiple `use` statements, processed in order.
 
 ```jade
-use "math_lib.jde" as m
-use "string_lib.jde" as s
+use mathlib
+use stringlib
 
-let n = m.add(1, 2)
-let greeting = s.concat("hello", " world")
+let n = mathlib.add(1, 2)
+let greeting = stringlib.concat("hello", " world")
 ```
 
 ## No Re-export
@@ -157,7 +149,7 @@ let roll = random.int(1, 6)
 Importing a package binds it as a global variable named after the package (`math`, `json`, `path`, etc.). The table below lists all available packages.
 
 :::warning
-The string-literal form for stdlib packages — `use "std/math"` — is **rejected at compile time** (`StdlibStringImport`). Always use `::` notation: `use std::math`. Quoted paths are reserved for file imports, which require an alias.
+Quoted-string imports of any kind — `use "std/math"`, `use "lib.jde" as lib` — are **rejected at compile time** (`QuotedImport`), as is the `as` alias (`ImportAlias`). Always name a module with `::` notation: `use std::math`, `use utils`.
 :::
 
 | Import | Global | Summary |
@@ -209,4 +201,4 @@ use fastmath
 print(fastmath.triple(14))
 ```
 
-A dependency resolves through the same `[lib]` machinery as a registered library, so it behaves identically in `jade run` and `jade build`. If a project declares both a dependency and a `[lib]` entry of the same name, the local `[lib]` wins and Jade warns. If a bare name matches both a dependency and a sibling `.jde` file, that is a hard error rather than a silent choice — rename one, or import the file explicitly with `use "name.jde" as name`.
+A dependency resolves through the same `[lib]` machinery as a registered library, so it behaves identically in `jade run` and `jade build`. If a project declares both a dependency and a `[lib]` entry of the same name, the local `[lib]` wins and Jade warns. If a bare name matches both a dependency and a sibling `.jde` file, that is a hard error rather than a silent choice — rename one of them.
