@@ -1,6 +1,6 @@
 [package]
 name = "jade"
-version = "1.1.19"
+version = "1.1.21"
 edition = "2024"
 description = "A language for LLMs"
 license = "MIT"
@@ -30,7 +30,7 @@ default-members = [".", "src/runtime"]
 
 [dependencies]
 jade-runtime = { path = "src/runtime" }
-ovata-infer-protocol = { git = "https://github.com/joericks1998/ovata-infer-protocol", tag = "v0.2.0" }
+ovata-infer-protocol = { git = "https://github.com/joericks1998/ovata-infer-protocol", tag = "v0.3.0" }
 clap = { version = "4", features = ["derive"] }
 reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
