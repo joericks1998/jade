@@ -120,11 +120,6 @@ fn chunk_module_supported(module: &str, method: &str, argc: usize) -> bool {
         ("random", "int") => argc == 2,
         ("random", "seed") => argc == 1,
         ("random", "float") => argc == 0,
-        ("llm", "count_tokens") => argc == 1,
-        ("llm", "total_tokens") => argc == 0,
-        ("llm", "model") => argc == 0,
-        ("llm", "set_max_tokens" | "keep_anchors") => argc == 1,
-        ("llm", "health") => argc == 0,
         ("dict", "merge") => argc == 2,
         ("json", "parse" | "stringify" | "stringify_pretty") => argc == 1,
         ("Grammar", "new") => (1..=3).contains(&argc), // pattern[, anchor[, stop]]
@@ -1793,16 +1788,6 @@ fn resolve_user_calls(
 /// Everything else — the GBNF, the mute anchors, the trailing newline — lives
 /// behind `jrt_prompt_stream_obj` in the shared runtime, so the streaming and
 /// non-streaming paths cannot disagree about what a grammar means.
-/// The LLM session variables, which the VM maintains as globals it rewrites
-/// after every inference: `__model__` (the model the daemon reported),
-/// `__tokens__` (cumulative tokens billed this run) and `__max_retries__` (the
-/// typed-deref retry budget).
-///
-/// A compiled program has no such writer, so these read back as nil — the same
-/// silent-wrong-answer shape as the old `City(d)` miscompile. Each becomes a
-/// runtime query against the same state the inference entries maintain.
-///
-/// Returns `None` for any other name, so ordinary globals are untouched.
 /// Materialize a struct field's declared default as a tagged word in the
 /// startup prologue, where there is no `Lowerer` — only a context, module and
 /// builder.
@@ -1868,12 +1853,9 @@ fn emit_stream_call<'ctx>(
 ) -> Result<(), String> {
     let b = low.builder;
     let ptrt = low.ptrt();
-    let model_fn = low.runtime_fn("jrt_get_model", ptrt.fn_type(&[], false));
-    let model = b
-        .build_call(model_fn, &[], "model")
-        .map_err(|e| e.to_string())?
-        .as_any_value_enum()
-        .into_pointer_value();
+    // The daemon owns model selection now: send an empty model, and it uses its
+    // configured/loaded model. (The `llm.model()` introspection was removed.)
+    let model = low.cstr("");
     let prompt_ptr = low.untag_ptr(low.load(prompt));
     let gobj = match grammar {
         Some(g) => low.untag_ptr(low.load(g)),
@@ -2418,31 +2400,7 @@ fn emit_module_call<'ctx>(
             let boxf = low.runtime_fn("jrt_box_float", i64_ty.fn_type(&[f64_ty.into()], false));
             Ok(b.build_call(boxf, &[d.into()], "boxf").map_err(err)?.as_any_value_enum().into_int_value())
         }
-        ("llm", "count_tokens") => int_fn("jrt_count_tokens", 1),
-        ("llm", "total_tokens") => int_fn("jrt_total_tokens", 0),
-        ("llm", "model") => Ok(low.tag_str(str_fn("jrt_get_model", 0)?)),
-        ("llm", "keep_anchors") => {
-            // (bool word) -> void. Extract bit4 (the bool payload) as an i32.
-            let w = low.load(args[0]);
-            let sh = b.build_right_shift(w, i64_ty.const_int(4, false), false, "ksh").map_err(err)?;
-            let bit = b.build_and(sh, i64_ty.const_int(1, false), "kbit").map_err(err)?;
-            let on = b.build_int_truncate(bit, i32_ty, "k32").map_err(err)?;
-            let f = low.runtime_fn("jrt_llm_keep_anchors", void_ty.fn_type(&[i32_ty.into()], false));
-            b.build_call(f, &[on.into()], "").map_err(err)?;
-            Ok(nil)
-        }
-        ("llm", "set_max_tokens") => {
-            // (int word) -> void. Untag to a raw i64.
-            let n = low.untag_int(low.load(args[0]));
-            let f = low.runtime_fn("jrt_llm_set_max_tokens", void_ty.fn_type(&[i64_ty.into()], false));
-            b.build_call(f, &[n.into()], "").map_err(err)?;
-            Ok(nil)
-        }
         // These return already-tagged ObjHeader value words (dict/array or nil).
-        ("llm", "health") => {
-            let f = low.runtime_fn("jrt_llm_health", i64_ty.fn_type(&[], false));
-            Ok(b.build_call(f, &[], "health").map_err(err)?.as_any_value_enum().into_int_value())
-        }
         ("env", "args") => {
             // () -> already-tagged array word (TRUSTED strings).
             let f = low.runtime_fn("jrt_env_args", i64_ty.fn_type(&[], false));
@@ -3500,15 +3458,15 @@ fn lower_instr<'ctx>(
         // (the VM streams tokens live, the AOT prints them in one go — same bytes).
         // The jrt_prompt* helpers already return a tagged, trust-propagated string
         // (a trusted prompt yields a trusted response), so the result is tag_str'd
-        // directly — no re-dup, no forced taint. model via jrt_get_model.
+        // directly — no re-dup, no forced taint. The model is sent empty (the
+        // daemon owns model selection).
         PromptDeref(d, prompt_reg, output_type, grammar_reg) => {
             let ptrt = low.ptrt();
-            let i32_ty = low.ctx.i32_type();
             let e = |x: inkwell::builder::BuilderError| x.to_string();
 
             let prompt_ptr = low.untag_ptr(low.load(*prompt_reg));
-            let model_fn = low.runtime_fn("jrt_get_model", ptrt.fn_type(&[], false));
-            let model = b.build_call(model_fn, &[], "model").map_err(e)?.as_any_value_enum().into_pointer_value();
+            // Empty model: the daemon owns model selection (see emit_stream_call).
+            let model = low.cstr("");
 
             let raw = if let Some(gr) = grammar_reg {
                 // Grammar-constrained: pass the Grammar object pointer.
@@ -3527,15 +3485,13 @@ fn lower_instr<'ctx>(
                 // tag_str + coerce tail below entirely. Without it the C
                 // validator waved the raw reply through and the deref produced
                 // a string, which then failed on any field access.
-                let i32_ty = low.ctx.i32_type();
                 let f = low.runtime_fn(
                     "jrt_prompt_struct",
-                    i64_ty.fn_type(&[ptrt.into(), ptrt.into(), ptrt.into(), i32_ty.into()], false),
+                    i64_ty.fn_type(&[ptrt.into(), ptrt.into(), ptrt.into()], false),
                 );
                 let tname = low.cstr(t);
-                let retries = i32_ty.const_int(crate::vm::TYPED_DEREF_RETRIES as u64, false);
                 let w = b
-                    .build_call(f, &[prompt_ptr.into(), model.into(), tname.into(), retries.into()], "prompts")
+                    .build_call(f, &[prompt_ptr.into(), model.into(), tname.into()], "prompts")
                     .map_err(e)?
                     .as_any_value_enum()
                     .into_int_value();
@@ -3543,20 +3499,16 @@ fn lower_instr<'ctx>(
                 return Ok(false);
             } else if let Some(t) = output_type.as_deref() {
                 // ..._checked, not the bare jrt_prompt_typed: that returns NULL
-                // when the retries run out, and tagging NULL as a string
+                // when the reply doesn't coerce, and tagging NULL as a string
                 // segfaulted the program where the VM reported a clean error.
                 let f = low.runtime_fn(
                     "jrt_prompt_typed_checked",
-                    ptrt.fn_type(&[ptrt.into(), ptrt.into(), ptrt.into(), i32_ty.into()], false),
+                    ptrt.fn_type(&[ptrt.into(), ptrt.into(), ptrt.into()], false),
                 );
                 let tname = low.cstr(t);
-                // Fixed retry budget, shared with the VM (crate::vm::TYPED_DEREF_RETRIES)
-                // so both engines give up after the same number of attempts. It used
-                // to be a config-injected runtime value read via jrt_max_retries.
-                let retries = i32_ty.const_int(crate::vm::TYPED_DEREF_RETRIES as u64, false);
                 b.build_call(
                     f,
-                    &[prompt_ptr.into(), model.into(), tname.into(), retries.into()],
+                    &[prompt_ptr.into(), model.into(), tname.into()],
                     "promptt",
                 )
                 .map_err(e)?
@@ -3572,7 +3524,8 @@ fn lower_instr<'ctx>(
 
             let str_word = low.tag_str(raw);
 
-            // Coerce the typed variants (retry guaranteed a parseable response).
+            // Coerce the typed variants (the C helper already raised if the
+            // reply didn't parse, so a value here is coercible).
             let result = match output_type.as_deref() {
                 Some(ty @ ("int" | "float" | "bool")) => {
                     let name = match ty {

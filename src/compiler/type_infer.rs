@@ -208,7 +208,6 @@ fn pkg_call_return_type(module: &str, method: &str) -> Option<JadeType> {
         ("fs",   "read")    => Some(JadeType::Str),
         ("fs",   "exists")  => Some(JadeType::Bool),
         ("http", "get")     => Some(JadeType::Dict),
-        ("llm",  "count_tokens") => Some(JadeType::Int),
         ("json", "stringify") => Some(JadeType::Str),
         ("json", "stringify_pretty") => Some(JadeType::Str),
         ("time", "now")     => Some(JadeType::Int),

@@ -1,7 +1,6 @@
 //! The native built-in registry: shared types (`BuiltinFn`, `Package`,
 //! `PrimType`), the `PACKAGES` table, and `seed_globals`. Each package is a
-//! flat top-level module (`crate::array`, `crate::math`, …); the `llm` package
-//! lives with the inference backend at `crate::llm::pkg`.
+//! flat top-level module (`crate::array`, `crate::math`, …).
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -14,10 +13,8 @@ use crate::{
 };
 
 // The built-in packages are flat top-level modules; pull them into scope so the
-// registry can refer to them by bare name. `llm` is the one exception — its
-// package lives beside the inference backend at `crate::llm::pkg`.
+// registry can refer to them by bare name.
 use crate::{array, core, dict, env, fs, grammar, http, json, math, path, random, sh, string, time};
-use crate::llm::pkg as llm;
 use crate::uhttp;
 
 // ── BuiltinFn ─────────────────────────────────────────────────────────────────
@@ -146,7 +143,6 @@ static CORE_BUILTINS: &[BuiltinFn] = &[
 
 /// All stdlib packages (available via `use "..."`).
 static PACKAGES: &[&Package] = &[
-    &llm::LLM_PKG,
     &string::STRING_PKG,
     &math::MATH_PKG,
     &array::ARRAY_PKG,

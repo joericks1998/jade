@@ -245,12 +245,12 @@ const char* jade_exc_type(void);         /* thrown struct type name, or NULL */
 char*   jrt_prompt(const char* prompt, const char* model);
 
 /* Like jrt_prompt but retries (up to max_retries times) using a folded
- * correction prompt until the response parses as type_name.
+ * Single-shot: grammar-constrained sampling already shapes the reply.
  * type_name: "int" | "float" | "bool" | "str"
- * Returns heap-allocated string parseable as type_name, or NULL on
- * exhaustion.  Caller must free.                                */
+ * Returns heap-allocated string parseable as type_name, or NULL if the
+ * reply doesn't parse.  Caller must free.                       */
 char*   jrt_prompt_typed(const char* prompt, const char* model,
-                         const char* type_name, int max_retries);
+                         const char* type_name);
 
 /* Like jrt_prompt but constrains sampling with a GBNF grammar string.
  * Returns heap-allocated response string.  Caller must free.   */
@@ -269,31 +269,26 @@ char*   jrt_prompt_grammar_ex(const char* prompt, const char* model,
  * - `anchor` strings enter muted mode when matched (anchor itself suppressed).
  * - `stop` strings exit muted mode when matched (stop itself suppressed).
  * Returns the full collected text (muted+visible). Caller frees. NULL on error. */
-/* Struct-typed prompt deref (`?p |> City`): ask, coerce, re-ask on failure,
- * raise when the retries run out. jrt_struct_field builds the type -> field
- * table it coerces against (emitted once at startup, in declaration order);
- * jrt_coerce_struct is the non-raising builder in the shared Rust runtime.
- * `max_retries` is the fixed budget codegen passes in (crate::vm::TYPED_DEREF_RETRIES). */
+/* Struct-typed prompt deref (`?p |> City`): ask, coerce, raise on failure.
+ * jrt_struct_field builds the type -> field table it coerces against (emitted
+ * once at startup, in declaration order); jrt_coerce_struct is the non-raising
+ * builder in the shared Rust runtime. Single-shot, like the VM. */
 void    jrt_struct_field(const char* type_name, const char* field,
                          int64_t default_word, int has_default);
 int64_t jrt_coerce_struct(const char* json, const char* type_name);
 int64_t jrt_prompt_struct(const char* prompt, const char* model,
-                          const char* type_name, int max_retries);
+                          const char* type_name);
 
 /* jrt_prompt_typed_checked — jrt_prompt_typed, but raises a catchable Jade
- * error instead of returning NULL when the retries are exhausted. Codegen calls
+ * error instead of returning NULL when the reply doesn't coerce. Codegen calls
  * this; tagging a NULL as a string crashed the program. */
 char*   jrt_prompt_typed_checked(const char* prompt, const char* model,
-                                 const char* type_name, int max_retries);
+                                 const char* type_name);
 char*   jrt_prompt_stream_ex(const char* prompt, const char* model,
                               const char* pattern_or_null,
                               const char* anchor_or_null,
                               const char* stop_or_null,
                               int start_muted);
-
-/* Resolve the active model name. Reads $JADE_MODEL; returns heap copy or
- * empty string if unset. Caller must free. */
-char*   jrt_get_model(void);
 
 /* Grammar objects (jade-runtime, src/grammarf.rs). Grammar.new(pattern[,anchor
  * [,stop]]) -> a Grammar object (ObjKind::Grammar; NULL optional args => None).
@@ -302,28 +297,10 @@ char*   jrt_get_model(void);
 void*   jrt_grammar_new(const char* pattern, const char* anchor, const char* stop);
 char*   jrt_prompt_grammar_obj(const char* prompt, const char* model, const void* grammar_obj);
 
-/* llm.keep_anchors(b) — sticky session flag: when set, prompt requests ask the
- * daemon to make tool-span boundaries observable in-band (keep_anchors on the
- * wire). Mirrors the VM's VmState.keep_anchors.                              */
-void    jrt_llm_keep_anchors(int on);
-
-/* llm.set_max_tokens(n) — sticky per-run token budget for prompt/count requests
- * (positive only; ignored otherwise). Mirrors the VM's VmState.max_tokens.    */
-void    jrt_llm_set_max_tokens(int64_t n);
-
-/* llm.total_tokens() — cumulative session token count via a `stats_only`
- * request (the DONE frame carries the running total). Mirrors the VM.        */
-int64_t jrt_total_tokens(void);
-
-/* llm.health() — daemon health snapshot via a `health_only` request whose
- * 0x05 JSON frames are accumulated and parsed. Returns a tagged dict, or
- * JRT_NIL if the daemon sent no parseable JSON.                              */
-jade_value_t jrt_llm_health(void);
-
-/* Tool-call PARSING (find_tool_call / find_tool_calls) and model-profile
- * introspection (profile) left the runtime: that logic now ships with each
- * model's profile as a Jade package, so there are no jrt_llm_find_tool_call*
- * / jrt_llm_profile entry points here anymore.                               */
+/* The whole `use llm` package left the language — health, model, keep_anchors,
+ * token counting, tool-call parsing, and model profiles all moved to the daemon
+ * (shipped as Jade packages there). Prompts (`?p`, `?p |> Type`) remain the only
+ * inference surface, so there are no jrt_llm_* entry points here anymore.      */
 
 /* ── String methods ───────────────────────────────────────────────── */
 /* jrt_str_contains — 1 if needle found in haystack, else 0.         */
@@ -468,10 +445,6 @@ char*   jrt_json_stringify_chunk(jade_value_t word, int pretty);
 /* jrt_bool_of_str — parse a string to a bool, matching the VM's bool():
  * case-insensitive "false" or "" → 0, any other string → 1. */
 int32_t jrt_bool_of_str(const char* s);
-
-/* ── LLM ──────────────────────────────────────────────────────────── */
-/* jrt_count_tokens — ask jade-tree to count tokens; returns count.    */
-int64_t jrt_count_tokens(const char* str);
 
 /* ── Internal: shared taint gate ──────────────────────────────────── */
 /* Refuse a tainted string at a code-execution / IO sink (process exit on

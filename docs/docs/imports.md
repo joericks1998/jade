@@ -174,9 +174,11 @@ The string-literal form for stdlib packages — `use "std/math"` — is **reject
 | `use std::env` | `env` | `get`, `set`, `args`, `cwd` |
 | `use std::path` | `path` | `join`, `basename`, `dirname`, `ext`, `stem`, `abs`, `is_abs` |
 | `use std::random` | `random` | `int`, `float`, `choice`, `shuffle`, `seed` |
-| `use llm` | `llm` | `set_max_tokens`, `count_tokens`, `total_tokens` |
 
 See the [Standard Library](stdlib) reference for full API documentation.
+
+There is no `llm` import — running inference is language syntax (`?p`,
+`?p |> Type`), not a package. See [LLM Integration](llm).
 
 ## Selective Imports (`from … use`)
 

@@ -120,7 +120,7 @@ pub extern "C" fn jrt_ipc_request_streaming(
 }
 
 /// [`jrt_ipc_request`] but accumulating `0x05 JSON` frames instead of tokens.
-/// Used by structured operations such as `llm.health()`.
+/// The transport entry point for structured (`Mode::Json`) daemon operations.
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_ipc_request_json(
     req_json: *const c_void,

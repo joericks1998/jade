@@ -10,8 +10,6 @@
 //! process, but the VM runs `async` prompts concurrently and a single
 //! serialized connection would turn those back into a sequence.
 
-use std::sync::{Arc, Mutex};
-
 use jade_runtime::infer::{conn::Conn, InferError, Mode};
 use ovata_infer_protocol::InferenceRequest;
 
@@ -33,14 +31,12 @@ fn to_jade_error(e: InferError, span: Span) -> JadeError {
 
 pub struct JadedBackend {
     sock_path: String,
-    reported_model: Arc<Mutex<Option<String>>>,
 }
 
 impl JadedBackend {
     pub fn new() -> Self {
         Self {
             sock_path: sock_path(),
-            reported_model: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -49,9 +45,8 @@ impl JadedBackend {
 impl InferenceBackend for JadedBackend {
     async fn infer(&self, req: InferenceRequest, span: Span) -> Result<InferenceResponse> {
         let sock_path = self.sock_path.clone();
-        let reported_model = Arc::clone(&self.reported_model);
         tokio::task::spawn_blocking(move || {
-            Self::infer_blocking(&sock_path, req, span, reported_model)
+            Self::infer_blocking(&sock_path, req, span)
         })
         .await
         .map_err(|e| JadeError::InferenceError {
@@ -64,82 +59,37 @@ impl InferenceBackend for JadedBackend {
         &self,
         req: InferenceRequest,
         span: Span,
-    ) -> Result<(tokio::sync::mpsc::Receiver<String>, tokio::task::JoinHandle<Result<i64>>)> {
+    ) -> Result<(tokio::sync::mpsc::Receiver<String>, tokio::task::JoinHandle<Result<()>>)> {
         let sock_path = self.sock_path.clone();
-        let reported_model = Arc::clone(&self.reported_model);
         let (tx, rx) = tokio::sync::mpsc::channel(64);
         let handle = tokio::task::spawn_blocking(move || {
-            Self::infer_blocking_stream(&sock_path, req, span, tx, reported_model)
+            Self::infer_blocking_stream(&sock_path, req, span, tx)
         });
         Ok((rx, handle))
-    }
-
-    fn reported_model_name(&self) -> Option<String> {
-        self.reported_model.lock().unwrap().clone()
-    }
-
-    async fn count_tokens(&self, prompt: &str, span: Span) -> Result<i64> {
-        let sock_path = self.sock_path.clone();
-        let prompt = prompt.to_owned();
-        tokio::task::spawn_blocking(move || Self::count_tokens_blocking(&sock_path, &prompt, span))
-            .await
-            .map_err(|e| JadeError::InferenceError {
-                message: format!("spawn_blocking panic: {e}"),
-                span,
-            })?
-    }
-
-    async fn total_tokens(&self, span: Span) -> Result<i64> {
-        let sock_path = self.sock_path.clone();
-        tokio::task::spawn_blocking(move || Self::total_tokens_blocking(&sock_path, span))
-            .await
-            .map_err(|e| JadeError::InferenceError {
-                message: format!("spawn_blocking panic: {e}"),
-                span,
-            })?
-    }
-
-    async fn health(&self, span: Span) -> Result<serde_json::Value> {
-        let sock_path = self.sock_path.clone();
-        tokio::task::spawn_blocking(move || Self::health_blocking(&sock_path, span))
-            .await
-            .map_err(|e| JadeError::InferenceError {
-                message: format!("spawn_blocking panic: {e}"),
-                span,
-            })?
     }
 }
 
 impl JadedBackend {
-    /// Run one exchange, recording the model the daemon reported.
+    /// Run one exchange over a fresh connection.
     fn exchange(
         sock_path: &str,
         body: &[u8],
         mode: Mode,
         span: Span,
         on_token: Option<&mut dyn FnMut(&[u8])>,
-        reported_model: Option<&Arc<Mutex<Option<String>>>>,
     ) -> Result<jade_runtime::infer::Response> {
         let conn = Conn::new(sock_path);
-        let resp = conn.request(body, mode, on_token).map_err(|e| to_jade_error(e, span))?;
-        if let Some(slot) = reported_model {
-            let model = conn.reported_model();
-            if !model.is_empty() {
-                *slot.lock().unwrap() = Some(model);
-            }
-        }
-        Ok(resp)
+        conn.request(body, mode, on_token).map_err(|e| to_jade_error(e, span))
     }
 
     fn infer_blocking(
         sock_path: &str,
         req: InferenceRequest,
         span: Span,
-        reported_model: Arc<Mutex<Option<String>>>,
     ) -> Result<InferenceResponse> {
         let body = encode_request(&req, "inference", span)?;
 
-        let resp = Self::exchange(sock_path, &body, Mode::Tokens, span, None, Some(&reported_model))?;
+        let resp = Self::exchange(sock_path, &body, Mode::Tokens, span, None)?;
 
         let mut text = String::from_utf8(resp.body).map_err(|_| JadeError::InferenceError {
             message: "the daemon sent invalid UTF-8 in a token frame".to_owned(),
@@ -147,7 +97,7 @@ impl JadedBackend {
         })?;
         trim_partial_stop_anchor(&mut text, &req);
 
-        Ok(InferenceResponse { text, tokens_used: resp.tokens_used as i64 })
+        Ok(InferenceResponse { text })
     }
 
     fn infer_blocking_stream(
@@ -155,8 +105,7 @@ impl JadedBackend {
         req: InferenceRequest,
         span: Span,
         tx: tokio::sync::mpsc::Sender<String>,
-        reported_model: Arc<Mutex<Option<String>>>,
-    ) -> Result<i64> {
+    ) -> Result<()> {
         let body = encode_request(&req, "inference", span)?;
 
         // `blocking_send` is safe here: this runs on a dedicated blocking thread
@@ -165,48 +114,14 @@ impl JadedBackend {
             let _ = tx.blocking_send(String::from_utf8_lossy(token).into_owned());
         };
 
-        let resp = Self::exchange(
+        Self::exchange(
             sock_path,
             &body,
             Mode::Tokens,
             span,
             Some(&mut forward),
-            Some(&reported_model),
         )?;
-        Ok(resp.tokens_used as i64)
-    }
-
-    /// Tokenize the prompt without generating.
-    fn count_tokens_blocking(sock_path: &str, prompt: &str, span: Span) -> Result<i64> {
-        let body = encode_request(&InferenceRequest {
-            prompt: prompt.to_owned(),
-            count_only: true,
-            ..Default::default()
-        }, "count_tokens", span)?;
-        Ok(Self::exchange(sock_path, &body, Mode::Tokens, span, None, None)?.tokens_used as i64)
-    }
-
-    /// The daemon-wide cumulative token counter, without touching the model.
-    fn total_tokens_blocking(sock_path: &str, span: Span) -> Result<i64> {
-        let body = encode_request(&InferenceRequest {
-            stats_only: true,
-            ..Default::default()
-        }, "total_tokens", span)?;
-        Ok(Self::exchange(sock_path, &body, Mode::Tokens, span, None, None)?.tokens_used as i64)
-    }
-
-    /// A daemon health snapshot (`health_only`), accumulated from `0x05 JSON`
-    /// frames. See `design/llm-package-1.1.12.md` §2.3.
-    fn health_blocking(sock_path: &str, span: Span) -> Result<serde_json::Value> {
-        let body = encode_request(&InferenceRequest {
-            health_only: true,
-            ..Default::default()
-        }, "health", span)?;
-        let resp = Self::exchange(sock_path, &body, Mode::Json, span, None, None)?;
-        serde_json::from_slice(&resp.body).map_err(|e| JadeError::InferenceError {
-            message: format!("daemon health response was not valid JSON: {e}"),
-            span,
-        })
+        Ok(())
     }
 }
 

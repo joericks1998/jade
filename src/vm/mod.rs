@@ -30,18 +30,6 @@ use jade_runtime::coll::{ArrayObj, DictObj, StructObj};
 use jade_runtime::grammarf::GrammarObj;
 use jade_runtime::trust::JStr;
 
-// ── Token budgets (mirror eval.rs) ────────────────────────────────────────────
-
-const DEFAULT_MAX_TOKENS: u32 = 4096;
-const RETRY_MAX_TOKENS: u32 = 64;
-const RETRY_MAX_TOKENS_COMPLEX: u32 = 512;
-/// How many times a typed dereference (`?p |> Type`) re-asks the model when the
-/// reply doesn't coerce to the target type. Fixed: it used to be a configurable
-/// `max_retries` exposed as the `__max_retries__` session global, both removed
-/// when provider configuration moved to the daemon. Shared with the AOT backend
-/// so both engines give up after the same number of attempts.
-pub(crate) const TYPED_DEREF_RETRIES: usize = 15;
-
 /// Internal sentinel the REPL assigns a bare trailing expression to so it can
 /// echo the value. Not a valid Jade identifier (leading NUL), so it can never
 /// collide with a user global, and it is routed into `VmState.repl_capture`
@@ -56,12 +44,6 @@ pub(crate) const REPL_CAPTURE: &str = "\u{0}repl";
 /// Adding a new package method = adding a variant here + a match arm in `call_value`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum NativeFnId {
-    LlmSetMaxTokens,
-    LlmCountTokens,
-    LlmTotalTokens,
-    LlmKeepAnchors,
-    LlmModel,
-    LlmHealth,
     Print,
     Stream,
     Route,
@@ -110,7 +92,7 @@ pub enum VmValue {
     BuiltinFn(BuiltinFn),
     /// A BuiltinFn pre-loaded with its receiver for primitive method dispatch.
     NativeBoundMethod(Arc<NativeBoundMethod>),
-    /// A Rust-backed callable returned by a built-in module (e.g. `llm.set_max_tokens`).
+    /// A Rust-backed callable returned by a built-in module (e.g. `array.map`).
     NativeFn(NativeFnId),
     /// A function loaded from a native shared library registered as a `[lib]`
     /// module whose file is a `.dylib`/`.so`/`.dll`.
@@ -125,10 +107,10 @@ pub enum VmValue {
     Nil,
 }
 
-/// Task result type: (value, token_delta, raised_exception).
-/// The third element carries the raised exception value so that parent tasks can
-/// re-raise it with the correct type (struct/string) rather than losing it.
-type TaskOutput = std::result::Result<(VmValue, i64), JadeError>;
+/// Task result type. Paired with a raised-exception slot in [`TaskBundle`] so a
+/// parent task can re-raise the child's exception value with the correct type
+/// (struct/string) rather than losing it.
+type TaskOutput = std::result::Result<VmValue, JadeError>;
 type TaskBundle = (TaskOutput, Option<VmValue>);
 
 /// A handle to a spawned async task.  `Arc<JadeFuture>` is `Send + Sync` because
@@ -142,7 +124,7 @@ pub struct JadeFuture {
 /// enforces single-drain semantics — taking `None` on a second drain is an error.
 pub struct JadeTokenStream {
     pub rx: Mutex<Option<tokio::sync::mpsc::Receiver<String>>>,
-    pub tokens_handle: Mutex<Option<JoinHandle<Result<i64>>>>,
+    pub tokens_handle: Mutex<Option<JoinHandle<Result<()>>>>,
     pub prompt_key: (String, Option<String>),
     /// Set when `?p` creates the stream lazily. Inference starts on first drain
     /// so callers (e.g. `stream()`) can inject grammar constraints first.
@@ -297,17 +279,10 @@ pub struct VmState {
     pub route_configs: HashMap<String, String>,
     /// Optional LLM inference backend.
     pub inference_backend: Option<std::sync::Arc<dyn llm::InferenceBackend>>,
-    pub token_count: i64,
-    pub max_tokens: u32,
     /// REPL only: the value of the last bare trailing expression, captured
     /// out-of-band (see [`REPL_CAPTURE`]) so the REPL can echo it without a
     /// global. `None` outside the REPL and after each snippet is read.
     pub repl_capture: Option<VmValue>,
-    /// Sticky session control: when true, prompt requests ask the daemon to make
-    /// tool-span boundaries observable in-band (`keep_anchors` on the wire). Set
-    /// from Jade via `llm.keep_anchors(b)`.
-    pub keep_anchors: bool,
-    pub default_model: String,
     /// Memoisation cache: maps `(prompt_text, output_type)` → the raw response
     /// text that produced a successful result. Mirrors the same cache in `Env`.
     pub prompt_cache: HashMap<(String, Option<String>), String>,
@@ -342,11 +317,7 @@ impl VmState {
             struct_decorators: HashMap::new(),
             route_configs: HashMap::new(),
             inference_backend: None,
-            token_count: 0,
-            max_tokens: DEFAULT_MAX_TOKENS,
             repl_capture: None,
-            keep_anchors: false,
-            default_model: String::new(),
             prompt_cache: HashMap::new(),
             source_dir: PathBuf::new(),
             import_stack: HashSet::new(),
@@ -363,7 +334,6 @@ impl VmState {
     /// Extracted to avoid duplicating the same block in `run` and `new_for_repl`.
     fn apply_opts(&mut self, opts: VmOpts) {
         self.inference_backend = opts.backend;
-        self.default_model = opts.default_model;
         self.source_dir = opts.source_dir;
         self.project_root = opts.project_root;
         self.libraries = opts.libraries;
@@ -390,8 +360,7 @@ impl VmState {
     ///
     /// Globals, struct_defs, and extend_methods are cloned (value snapshot).
     /// The inference backend is Arc-cloned so both tasks share the same connection pool.
-    /// Mutations inside the spawned task do NOT propagate back, except token counts:
-    /// the child starts at 0 and returns its delta, which the parent accumulates on Await/Join.
+    /// Mutations inside the spawned task do NOT propagate back to the parent.
     pub fn new_for_spawn(&self) -> Self {
         VmState {
             raised_exception: None,
@@ -401,11 +370,7 @@ impl VmState {
             struct_decorators: self.struct_decorators.clone(),
             route_configs: self.route_configs.clone(),
             inference_backend: self.inference_backend.clone(),
-            token_count: 0,
-            max_tokens: self.max_tokens,
             repl_capture: None,
-            keep_anchors: self.keep_anchors,
-            default_model: self.default_model.clone(),
             prompt_cache: self.prompt_cache.clone(),
             source_dir: self.source_dir.clone(),
             import_stack: HashSet::new(),
@@ -421,7 +386,6 @@ impl VmState {
 /// Options for an `vm::run` invocation.
 pub struct VmOpts {
     pub backend: Option<std::sync::Arc<dyn llm::InferenceBackend>>,
-    pub default_model: String,
     /// Directory of the source file being run — used to resolve relative `use` paths.
     /// Defaults to the current working directory when running in-memory (tests, REPL).
     pub source_dir: PathBuf,
@@ -438,7 +402,6 @@ impl Default for VmOpts {
     fn default() -> Self {
         VmOpts {
             backend: None,
-            default_model: String::new(),
             source_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             project_root: None,
             libraries: HashMap::new(),
@@ -717,8 +680,6 @@ async fn execute_chunk(
                         sub_state.project_root = state.project_root.clone();
                         sub_state.libraries = state.libraries.clone();
                         sub_state.inference_backend = state.inference_backend.clone();
-                        sub_state.max_tokens = state.max_tokens;
-                        sub_state.default_model = state.default_model.clone();
 
                         let r = Box::pin(run_with_state(compiled, &mut sub_state)).await;
                         if r.is_ok() {
@@ -821,8 +782,6 @@ async fn execute_chunk(
                                     .or_default()
                                     .extend(decs);
                             }
-                            // Propagate LLM token usage back to parent.
-                            state.token_count += sub_state.token_count;
                         }
                         r.map_err(|e| JadeError::InFile {
                             file: path.clone(),
@@ -900,8 +859,6 @@ async fn execute_chunk(
                         sub_state.project_root = state.project_root.clone();
                         sub_state.libraries = state.libraries.clone();
                         sub_state.inference_backend = state.inference_backend.clone();
-                        sub_state.max_tokens = state.max_tokens;
-                        sub_state.default_model = state.default_model.clone();
                         let r = Box::pin(run_with_state(compiled, &mut sub_state)).await;
                         if r.is_ok() {
                             // Promote stdlib package imports from the module so that
@@ -949,7 +906,6 @@ async fn execute_chunk(
                                         .extend(methods);
                                 }
                             }
-                            state.token_count += sub_state.token_count;
                         }
                         r.map_err(|e| JadeError::InFile {
                             file: path.clone(),
@@ -1559,8 +1515,7 @@ async fn execute_chunk(
                         if let Some(v) = child_raised {
                             state.raised_exception = Some(v);
                         }
-                        let (value, child_tokens) = vm_try!(task_result);
-                        state.token_count += child_tokens;
+                        let value = vm_try!(task_result);
                         set(slots, *dest, value);
                     }
                     _ => { vm_err!(JadeError::NotAFuture { span }); }
@@ -1589,8 +1544,7 @@ async fn execute_chunk(
                     if let Some(v) = child_raised {
                         state.raised_exception = Some(v);
                     }
-                    let (value, child_tokens) = vm_try!(task_result);
-                    state.token_count += child_tokens;
+                    let value = vm_try!(task_result);
                     results.push(value);
                 }
                 set(slots, *dest, VmValue::Array(Arc::new(Mutex::new(ArrayObj::from_vec(results)))));
@@ -1704,44 +1658,6 @@ async fn call_value(
             (nbm.method.vm_impl)(&full_args).map_err(|e| patch_builtin_span(e, span))
         }
         VmValue::NativeFn(nf) => match nf {
-            NativeFnId::LlmSetMaxTokens => {
-                if args.len() != 1 {
-                    return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span });
-                }
-                match &args[0] {
-                    VmValue::Int(n) if *n > 0 => {
-                        state.max_tokens = *n as u32;
-                        Ok(VmValue::Nil)
-                    }
-                    ref other => Err(JadeError::TypeError { message: format!("llm.set_max_tokens() requires a positive int, got {}", value_type_name(other)), span }),
-                }
-            }
-            NativeFnId::LlmCountTokens => {
-                if args.len() != 1 {
-                    return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span });
-                }
-                match &args[0] {
-                    VmValue::Str(text) => {
-                        let backend = state.inference_backend.as_ref()
-                            .ok_or_else(|| JadeError::MissingApiKey { span })?;
-                        let n = backend.count_tokens(text, span).await?;
-                        Ok(VmValue::Int(n))
-                    }
-                    ref other => Err(JadeError::TypeError {
-                        message: format!("llm.count_tokens() requires str, got {}", value_type_name(other)),
-                        span,
-                    }),
-                }
-            }
-            NativeFnId::LlmTotalTokens => {
-                if !args.is_empty() {
-                    return Err(JadeError::ArityMismatch { expected: 0, got: args.len(), span });
-                }
-                let backend = state.inference_backend.as_ref()
-                    .ok_or_else(|| JadeError::MissingApiKey { span })?;
-                let n = backend.total_tokens(span).await?;
-                Ok(VmValue::Int(n))
-            }
             NativeFnId::Print => {
                 if args.is_empty() || args.len() > 2 {
                     return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span });
@@ -1835,11 +1751,9 @@ async fn call_value(
                                     .ok_or(JadeError::MissingApiKey { span })?.clone();
                                 let (rx, handle) = backend.infer_stream(llm::InferenceRequest {
                                     prompt: prompt_text,
-                                    model: state.default_model.clone(),
-                                    max_tokens: state.max_tokens,
                                     grammar: infer_grammar,
                                     anchor: infer_anchor,
-                                    stop_anchor: infer_stop, keep_anchors: state.keep_anchors, ..Default::default()
+                                    stop_anchor: infer_stop, ..Default::default()
                                 }, span).await?;
                                 *ts.rx.lock() = Some(rx);
                                 *ts.tokens_handle.lock() = Some(handle);
@@ -1994,41 +1908,6 @@ async fn call_value(
                 }
                 Ok(VmValue::Int(status))
             }
-            NativeFnId::LlmKeepAnchors => {
-                if args.len() != 1 {
-                    return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span });
-                }
-                match &args[0] {
-                    VmValue::Bool(b) => {
-                        state.keep_anchors = *b;
-                        Ok(VmValue::Nil)
-                    }
-                    ref other => Err(JadeError::TypeError {
-                        message: format!("llm.keep_anchors() requires a bool, got {}", value_type_name(other)),
-                        span,
-                    }),
-                }
-            }
-            NativeFnId::LlmModel => {
-                if !args.is_empty() {
-                    return Err(JadeError::ArityMismatch { expected: 0, got: args.len(), span });
-                }
-                // The active model — set from the daemon's Meta frame after the
-                // first inference, else the configured default (may be empty).
-                Ok(VmValue::Str(state.default_model.clone().into()))
-            }
-            NativeFnId::LlmHealth => {
-                if !args.is_empty() {
-                    return Err(JadeError::ArityMismatch { expected: 0, got: args.len(), span });
-                }
-                let backend = state.inference_backend.as_ref()
-                    .ok_or_else(|| JadeError::MissingApiKey { span })?;
-                let snapshot = backend.health(span).await?;
-                json_to_vm_value(&snapshot).map_err(|e| JadeError::InferenceError {
-                    message: format!("daemon health snapshot could not be read: {e}"),
-                    span,
-                })
-            }
         },
         VmValue::TypeRef(type_name) => {
             if args.len() != 1 {
@@ -2053,7 +1932,7 @@ async fn call_value_standalone(
 ) -> TaskBundle {
     let result = call_value(callee, args, &mut state, span).await;
     let raised = state.raised_exception.take();
-    (result.map(|v| (v, state.token_count)), raised)
+    (result, raised)
 }
 
 #[async_recursion::async_recursion]
@@ -2147,61 +2026,27 @@ async fn vm_prompt_deref(
     // Conversational memory is the JadeLang program's responsibility.
     let initial_resp = backend.infer(llm::InferenceRequest {
         prompt: prompt_text.clone(),
-        model: state.default_model.clone(),
-        max_tokens: state.max_tokens,
         grammar: grammar.clone(),
         anchor: grammar_anchor.clone(),
-        stop_anchor: grammar_stop.clone(), keep_anchors: state.keep_anchors, ..Default::default()
+        stop_anchor: grammar_stop.clone(), ..Default::default()
     }, span).await?;
-
-    if let Some(name) = backend.reported_model_name() {
-        state.default_model = name;
-    }
-
-    state.token_count += initial_resp.tokens_used;
 
     let Some(type_name) = output_type else {
         state.prompt_cache.insert(cache_key, initial_resp.text.clone());
         return Ok(VmValue::Str(initial_resp.text.into()));
     };
 
-    // Typed deref: retry loop — send the raw error string directly to the model.
-    let max_retries = TYPED_DEREF_RETRIES;
-    let mut current = initial_resp.text;
+    // Single-shot coercion. Grammar-constrained sampling already forces the reply
+    // into a shape the target type accepts, so a failure here is a genuine
+    // mismatch to surface, not something to re-ask for — the daemon owns any
+    // retry policy now.
     let struct_defs = state.struct_defs.clone();
-
-    let retry_max_tokens = if matches!(type_name, "int" | "float" | "bool" | "str") {
-        RETRY_MAX_TOKENS
-    } else {
-        RETRY_MAX_TOKENS_COMPLEX
-    };
-
-    for _ in 0..max_retries {
-        match coerce(current.trim(), type_name, &struct_defs) {
-            Ok(v) => {
-                state.prompt_cache.insert(cache_key, current);
-                return apply_struct_decorators(v, type_name, state, span).await;
-            }
-            Err(correction) => {
-                let retry = backend.infer(llm::InferenceRequest {
-                    prompt: correction.clone(),
-                    model: state.default_model.clone(),
-                    max_tokens: retry_max_tokens,
-                    grammar: grammar.clone(),
-                    anchor: grammar_anchor.clone(),
-                    stop_anchor: grammar_stop.clone(), keep_anchors: state.keep_anchors, ..Default::default()
-                }, span).await?;
-                current = retry.text;
-            }
-        }
-    }
-
-    match coerce(current.trim(), type_name, &struct_defs) {
+    match coerce(initial_resp.text.trim(), type_name, &struct_defs) {
         Ok(v) => {
-            state.prompt_cache.insert(cache_key, current);
+            state.prompt_cache.insert(cache_key, initial_resp.text);
             apply_struct_decorators(v, type_name, state, span).await
         }
-        Err(_) => Err(JadeError::PromptOverflow { name: "<prompt>".to_string(), attempts: max_retries + 1, span }),
+        Err(_) => Err(JadeError::PromptOverflow { name: "<prompt>".to_string(), attempts: 1, span }),
     }
 }
 
@@ -2416,7 +2261,7 @@ async fn vm_prompt_deref_stream(
     })))
 }
 
-/// Drain a `TokenStream` silently into a `VmValue::Str`, updating token count and cache.
+/// Drain a `TokenStream` silently into a `VmValue::Str`, updating the cache.
 async fn vm_drain_token_stream(
     ts: Arc<JadeTokenStream>,
     state: &mut VmState,
@@ -2430,9 +2275,7 @@ async fn vm_drain_token_stream(
                 .ok_or(JadeError::MissingApiKey { span })?.clone();
             let (rx, handle) = backend.infer_stream(llm::InferenceRequest {
                 prompt: prompt_text,
-                model: state.default_model.clone(),
-                max_tokens: state.max_tokens,
-                grammar: None, anchor: None, stop_anchor: None, keep_anchors: state.keep_anchors, ..Default::default()
+                grammar: None, anchor: None, stop_anchor: None, ..Default::default()
             }, span).await?;
             *ts.rx.lock() = Some(rx);
             *ts.tokens_handle.lock() = Some(handle);
@@ -2447,14 +2290,7 @@ async fn vm_drain_token_stream(
     let h_opt = ts.tokens_handle.lock().take();
     if let Some(h) = h_opt {
         match h.await {
-            Ok(Ok(tokens)) => {
-                state.token_count += tokens;
-                if let Some(backend) = &state.inference_backend {
-                    if let Some(name) = backend.reported_model_name() {
-                        state.default_model = name;
-                    }
-                }
-            }
+            Ok(Ok(())) => {}
             Ok(Err(e)) => return Err(e),
             Err(e) => return Err(JadeError::AsyncPanic {
                 message: format!("token stream task panicked: {e}"),
@@ -2615,9 +2451,7 @@ async fn vm_drain_token_stream_printing(
                 .ok_or(JadeError::MissingApiKey { span })?.clone();
             let (rx, handle) = backend.infer_stream(llm::InferenceRequest {
                 prompt: prompt_text,
-                model: state.default_model.clone(),
-                max_tokens: state.max_tokens,
-                grammar: None, anchor: None, stop_anchor: None, keep_anchors: state.keep_anchors, ..Default::default()
+                grammar: None, anchor: None, stop_anchor: None, ..Default::default()
             }, span).await?;
             *ts.rx.lock() = Some(rx);
             *ts.tokens_handle.lock() = Some(handle);
@@ -2639,14 +2473,7 @@ async fn vm_drain_token_stream_printing(
     let h_opt = ts.tokens_handle.lock().take();
     if let Some(h) = h_opt {
         match h.await {
-            Ok(Ok(tokens)) => {
-                state.token_count += tokens;
-                if let Some(backend) = &state.inference_backend {
-                    if let Some(name) = backend.reported_model_name() {
-                        state.default_model = name;
-                    }
-                }
-            }
+            Ok(Ok(())) => {}
             Ok(Err(e)) => return Err(e),
             Err(e) => return Err(JadeError::AsyncPanic {
                 message: format!("token stream task panicked: {e}"),

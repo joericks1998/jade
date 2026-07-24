@@ -87,8 +87,6 @@ Jade's async model follows a simple rule: calling an `async fn` starts the work;
 - **Concurrent phase** — the caller continues executing (starting more async calls, computing other values) while the async bodies run in the background.
 - **Await phase** — `await future` suspends the caller until that specific task finishes and returns its value.
 
-Token accounting is performed per-task: each async task tracks the tokens it consumes and adds them to `__tokens__` when the task completes.
-
 :::warning
 **REPL limitation:** The tree-walk evaluator used by the interactive REPL does not run a Tokio runtime. Async functions execute synchronously in that context, and a warning is printed to stderr. Use `jade run` for true concurrent execution.
 :::
@@ -126,7 +124,7 @@ let n = count_words("The quick brown fox")
 print(await n)   // integer word count
 ```
 
-Typed dereference (`|> int`, `|> bool`, etc.) works inside async functions. Retry logic applies per-task.
+Typed dereference (`|> int`, `|> bool`, etc.) works inside async functions.
 
 ### Passing futures to functions
 
@@ -145,29 +143,6 @@ fn print_result(future) {
 let f = get("What year did WWII end?")
 print_result(f)
 ```
-
-## Token Accounting
-
-Each async task accumulates the tokens it uses during inference and adds them to the global `__tokens__` counter when the task finishes. This means `__tokens__` reflects the running total across all completed tasks, both synchronous and async.
-
-```jade
-async fn ask(q) {
-    prompt p = q
-    return await ?p
-}
-
-let a = ask("hi")
-let b = ask("hello")
-
-let _ = await a
-let _ = await b
-
-print(__tokens__)   // total tokens from both tasks
-```
-
-:::note
-If you read `__tokens__` before awaiting a task, that task's tokens are not yet included. Always await all tasks before reading the final token count.
-:::
 
 ## Error Reference
 

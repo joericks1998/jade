@@ -162,10 +162,6 @@ pub async fn run_file(path: &str, verbose: bool) {
 
     let opts = vm::VmOpts {
         backend,
-        // The daemon owns the model; the language no longer configures one. It
-        // starts empty (the daemon reports the live model) and can still be set
-        // per-run via `llm.use_model(...)`.
-        default_model: String::new(),
         source_dir,
         project_root,
         libraries,

@@ -113,57 +113,6 @@ mod jaded {
     }
 }
 
-// ── pkg (LLM_PKG descriptor + NativeFnId mapping) ─────────────────────────────
-mod pkg {
-    use crate::llm::pkg::LLM_PKG;
-    use crate::compiler::type_infer::TypeContext;
-    use crate::vm::{NativeFnId, VmValue};
-
-    #[test]
-    fn package_descriptor_names() {
-        assert_eq!(LLM_PKG.import_name, "llm");
-        assert_eq!(LLM_PKG.global_name, "llm");
-    }
-
-    /// Every `llm.*` function is stateful, so the package carries no pure fns.
-    /// A stray entry here would be a `BuiltinFn` shadowed by its native at
-    /// dispatch — dead weight that reads like a real implementation.
-    #[test]
-    fn package_declares_no_pure_fns() {
-        assert!(LLM_PKG.fns.is_empty(), "llm has no pure functions");
-    }
-
-    #[test]
-    fn register_types_defines_llm_without_panicking() {
-        // No public read path on TypeContext; assert the registration runs and
-        // seeds the `llm` binding without error (smoke coverage of the fn ptr).
-        let mut ctx = TypeContext::new();
-        (LLM_PKG.register_types)(&mut ctx);
-    }
-
-    #[test]
-    fn vm_dict_value_maps_every_fn_to_its_native_id() {
-        let dict = LLM_PKG.vm_dict_value();
-        let map = match dict {
-            VmValue::Dict(m) => m,
-            other => panic!("expected Dict, got {other:?}"),
-        };
-
-        let expected = [
-            ("set_max_tokens", NativeFnId::LlmSetMaxTokens),
-            ("count_tokens", NativeFnId::LlmCountTokens),
-            ("total_tokens", NativeFnId::LlmTotalTokens),
-            ("keep_anchors", NativeFnId::LlmKeepAnchors),
-            ("model", NativeFnId::LlmModel),
-            ("health", NativeFnId::LlmHealth),
-        ];
-        assert_eq!(map.len(), expected.len(), "dict maps exactly the stateful llm fns");
-        for (name, id) in expected {
-            match map.get(name) {
-                Some(VmValue::NativeFn(got)) => assert_eq!(*got, id, "wrong NativeFnId for {name}"),
-                other => panic!("entry {name} was not a NativeFn: {other:?}"),
-            }
-        }
-    }
-
-}
+// The `use llm` package was removed entirely — its features moved to the daemon
+// as Jade packages. Prompts (`?p`, `?p |> Type`) remain the only inference
+// surface, so there is no package descriptor left to test here.

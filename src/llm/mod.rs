@@ -3,9 +3,6 @@ use std::sync::Arc;
 use crate::frontend::error::{Result, Span};
 
 pub mod jaded;
-/// The `use llm` built-in package (`LLM_PKG`) — registered in `crate::builtins`,
-/// but housed here beside the inference client it wraps.
-pub mod pkg;
 
 #[cfg(test)]
 mod tests;
@@ -20,7 +17,6 @@ pub use ovata_infer_protocol::InferenceRequest;
 /// A successful response from the inference daemon.
 pub struct InferenceResponse {
     pub text: String,
-    pub tokens_used: i64,
 }
 
 /// Interface to an inference provider.
@@ -34,50 +30,19 @@ pub struct InferenceResponse {
 pub trait InferenceBackend: Send + Sync {
     async fn infer(&self, req: InferenceRequest, span: Span) -> Result<InferenceResponse>;
 
-    /// Returns the model name reported by the daemon after inference, if available.
-    fn reported_model_name(&self) -> Option<String> { None }
-
-    /// Count the tokens in `prompt` without running generation.
-    /// Falls back to character-count estimate when the daemon can't answer.
-    async fn count_tokens(&self, prompt: &str, _span: Span) -> Result<i64> {
-        Ok((prompt.len() / 4) as i64)
-    }
-
-    /// Return the daemon-wide cumulative token counter.
-    async fn total_tokens(&self, _span: Span) -> Result<i64> {
-        Ok(0)
-    }
-
-    /// Return a daemon health snapshot as a JSON object (see
-    /// `design/llm-package-1.1.12.md` §2.3 — `{status, model, model_loaded, …}`).
-    async fn health(&self, _span: Span) -> Result<serde_json::Value> {
-        // Same field set as the shared `ovata_infer_protocol::Health` so
-        // `llm.health()` returns a consistent dict shape.
-        Ok(serde_json::json!({
-            "status": "ok",
-            "model": self.reported_model_name().unwrap_or_default(),
-            "model_loaded": true,
-            "uptime_secs": 0,
-            // The wire version this build speaks, taken from the protocol crate —
-            // the daemon fills the same field the same way.
-            "protocol_version": ovata_infer_protocol::PROTOCOL_VERSION,
-        }))
-    }
-
     /// Stream tokens as they arrive. Returns a channel receiver and a join handle
-    /// that resolves to `tokens_used` when the stream is exhausted.
+    /// that resolves when the stream is exhausted (carrying any transport error).
     /// Default: calls `infer` and sends the full response as one token.
     async fn infer_stream(
         &self,
         req: InferenceRequest,
         span: Span,
-    ) -> Result<(tokio::sync::mpsc::Receiver<String>, tokio::task::JoinHandle<Result<i64>>)> {
+    ) -> Result<(tokio::sync::mpsc::Receiver<String>, tokio::task::JoinHandle<Result<()>>)> {
         let resp = self.infer(req, span).await?;
         let (tx, rx) = tokio::sync::mpsc::channel(1);
-        let tokens = resp.tokens_used;
         let handle = tokio::spawn(async move {
             let _ = tx.send(resp.text).await;
-            Ok(tokens)
+            Ok(())
         });
         Ok((rx, handle))
     }
@@ -156,6 +121,6 @@ impl InferenceBackend for MockBackend {
         self.captured.lock().unwrap().push(req.clone());
         let text = self.responses.lock().unwrap().pop_front()
             .unwrap_or_else(|| Self::mock_response(&req.prompt));
-        Ok(InferenceResponse { text, tokens_used: 10_i64 })
+        Ok(InferenceResponse { text })
     }
 }

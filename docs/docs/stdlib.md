@@ -591,25 +591,15 @@ print(deck)
 
 ---
 
-## `llm` (LLM configuration)
+## LLM inference
+
+There is no `llm` package. Running inference is language *syntax*, not a package:
+declare a prompt and dereference it (`?p`, `?p |> Type`). Everything a program
+used to reach for through `use llm` — the model, token budget/accounting, anchor
+handling, retries, health, model profiles, and tool-call parsing — is owned by
+the inference daemon now. See [LLM Integration](llm).
 
 ```jade
-use llm
-```
-
-The `llm` package exposes runtime controls for LLM inference. See [LLM Integration](llm) for the full reference on prompts, typed dereferences, and configuration.
-
-| Function | Returns | Description |
-|----------|---------|-------------|
-| `llm.set_max_tokens(n)` | `nil` | Cap model responses at `n` tokens for all subsequent `?` calls |
-| `llm.count_tokens(text)` | `int` | Token count of `text` under the active model's tokenizer |
-| `llm.total_tokens()` | `int` | Total tokens consumed by LLM inference so far this run |
-
-```jade
-use llm
-
-llm.set_max_tokens(128)
-
 prompt p = "Write a one-sentence summary of Jade."
 let summary = ?p
 print(summary)

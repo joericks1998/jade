@@ -1381,26 +1381,21 @@ fn test_vm_typed_deref_overflow() {
 }
 
 #[test]
-fn test_vm_tokens_incremented_after_deref() {
-    // token_count is the surviving state (the `__tokens__` session global that
-    // mirrored it was removed). llm.total_tokens() reads the same field.
-    let s = run_src_with_mock("prompt p = \"hi\"\nlet x = ?p", vec!["hello"]).unwrap();
-    assert!(s.token_count > 0);
-}
-
-#[test]
 fn test_vm_untyped_deref_returns_str() {
     let s = run_src_with_mock("prompt p = \"test\"\nlet x = ?p", vec!["result"]).unwrap();
     assert_eq!(get_str(&s, "x"), "result");
 }
 
 #[test]
-fn test_vm_typed_deref_retry_succeeds_on_second_attempt() {
-    let s = run_src_with_mock(
+fn test_vm_typed_deref_is_single_shot() {
+    // A typed deref no longer re-asks: the first non-coercing reply raises
+    // PromptOverflow rather than triggering a correction round. (The daemon owns
+    // any retry policy now; grammar-constrained sampling shapes the reply.)
+    let err = run_src_with_mock(
         "prompt p = \"number?\"\nlet n = ?p |> int",
         vec!["not a number", "42"],
-    ).unwrap();
-    assert_eq!(get_int(&s, "n"), 42);
+    ).err().expect("expected error");
+    assert!(matches!(err, JadeError::PromptOverflow { attempts: 1, .. }));
 }
 
 // ── Grammar ──────────────────────────────────────────────────────────────
@@ -3385,43 +3380,13 @@ fn test_prompt_deref_outside_stream_passes_no_constraints() {
     assert_eq!(captured[0].stop_anchor, None);
 }
 
-// ── llm package: protocol controls / profile / health (1.1.12) ───────────────
-
-/// Run with a MockBackend and an explicit active model, so `llm.model()`
-/// reports it.
-fn run_with_model(src: &str, model: &str) -> VmState {
-    let tokens = lexer::tokenize(src).expect("lex failed");
-    let program = parser::parse(tokens).expect("parse failed");
-    let tprogram = type_infer::infer(program).expect("type inference failed");
-    let compiled = emit::emit(tprogram).expect("emit failed");
-    let opts = VmOpts {
-        backend: Some(std::sync::Arc::new(crate::llm::MockBackend::new(vec!["hi"]))),
-        default_model: model.to_string(),
-        #[cfg(test)]
-        test_stdout: None,
-        ..VmOpts::default()
-    };
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime")
-        .block_on(run(compiled, opts))
-        .expect("run failed")
-}
+// ── inference request shape (the `use llm` package was removed) ──────────────
 
 #[test]
-fn test_llm_keep_anchors_reaches_request() {
-    // `llm.keep_anchors(true)` is sticky session state → every later request
-    // carries keep_anchors=true on the wire.
-    let backend = std::sync::Arc::new(crate::llm::MockBackend::new(vec!["hi"]));
-    let src = "use llm\nllm.keep_anchors(true)\nprompt p = \"test\"\nlet x = ?p";
-    run_src_with_shared_backend(src, std::sync::Arc::clone(&backend)).unwrap();
-    let captured = backend.captured.lock().unwrap();
-    assert!(captured[0].keep_anchors, "keep_anchors must reach the request");
-}
-
-#[test]
-fn test_llm_keep_anchors_defaults_false() {
+fn test_llm_requests_send_keep_anchors_false() {
+    // The language no longer toggles keep_anchors (llm.keep_anchors was removed),
+    // so every request carries keep_anchors=false on the wire — the daemon owns
+    // anchor handling now.
     let backend = std::sync::Arc::new(crate::llm::MockBackend::new(vec!["hi"]));
     let src = "prompt p = \"test\"\nlet x = ?p";
     run_src_with_shared_backend(src, std::sync::Arc::clone(&backend)).unwrap();
@@ -3430,18 +3395,12 @@ fn test_llm_keep_anchors_defaults_false() {
 }
 
 #[test]
-fn test_llm_model_returns_active_model() {
-    let state = run_with_model("use llm\nlet m = llm.model()", "Qwen3-Coder-30B");
-    assert_eq!(get_str(&state, "m"), "Qwen3-Coder-30B");
-}
-
-#[test]
-fn test_llm_health_returns_snapshot_dict() {
-    // The mock backend uses the trait default health(): a minimal ok snapshot.
-    let state = run_with_model(
-        "use llm\nlet h = llm.health()\nlet s = h.status\nlet loaded = h.model_loaded",
-        "Qwen3-Coder-30B",
-    );
-    assert_eq!(get_str(&state, "s"), "ok");
-    assert!(get_bool(&state, "loaded"));
+fn test_llm_requests_send_empty_model() {
+    // The language no longer tracks a model (llm.model was removed); it sends an
+    // empty model so the daemon picks its configured/loaded one.
+    let backend = std::sync::Arc::new(crate::llm::MockBackend::new(vec!["hi"]));
+    let src = "prompt p = \"test\"\nlet x = ?p";
+    run_src_with_shared_backend(src, std::sync::Arc::clone(&backend)).unwrap();
+    let captured = backend.captured.lock().unwrap();
+    assert!(captured[0].model.is_empty(), "model must be empty on the wire");
 }

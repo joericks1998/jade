@@ -15,8 +15,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define JADE_INFER_MAX_TOKENS 1024
-
 /* ── Growable byte buffer for JSON serialization ──────────────────────── */
 
 typedef struct {
@@ -93,32 +91,18 @@ typedef struct {
     const char* anchor;          /* nullable */
     const char* stop_anchor;     /* nullable */
     int         max_tokens;      /* required */
-    int         count_only;      /* boolean */
-    int         stats_only;      /* boolean (total_tokens stats request) */
-    int         keep_anchors;    /* boolean — make tool-span boundaries in-band */
     uint8_t     trust;           /* JRT_TRUSTED or JRT_TAINTED */
 } infer_req_t;
 
-/* Sticky session control, set from Jade via `llm.keep_anchors(b)`. Mirrors the
- * VM's `VmState.keep_anchors`: every prompt request reads this flag. Single-
- * threaded-set / many-read; a plain int is fine (writes are word-atomic on the
- * platforms we target, and Jade sets it from program code, not spawned tasks). */
-static int g_keep_anchors = 0;
-
-void jrt_llm_keep_anchors(int on) { g_keep_anchors = on ? 1 : 0; }
-
-/* Sticky per-run token budget, set from Jade via `llm.set_max_tokens(n)`.
- * Mirrors the VM's `VmState.max_tokens`: every prompt/count request reads it.
- * Defaults to the compiled-in JADE_INFER_MAX_TOKENS until overridden. */
-static int g_max_tokens = JADE_INFER_MAX_TOKENS;
-
-void jrt_llm_set_max_tokens(int64_t n) { if (n > 0) g_max_tokens = (int)n; }
-
-/* The typed-deref retry budget is now a fixed compile-time constant materialized
- * directly in codegen (crate::vm::TYPED_DEREF_RETRIES), shared by both engines.
- * It used to be a configurable value read here via jrt_max_retries(); that, like
- * the `__max_retries__` / `__tokens__` session globals it fed, was removed when
- * provider configuration moved to the daemon. */
+/* The daemon owns inference config now, so several request fields are no longer
+ * driven by the language and are emitted as fixed defaults:
+ *   - max_tokens = 0     — no client-imposed cap; the daemon picks the budget.
+ *   - model = ""         — the daemon uses its configured/loaded model.
+ *   - keep_anchors=false — the daemon's default anchor handling.
+ * Each used to be a Jade-visible knob (`llm.set_max_tokens`, `llm.model`,
+ * `llm.keep_anchors`) or session global (`__max_retries__`, `__model__`); they
+ * moved to the daemon along with provider config. Typed derefs are also single-
+ * shot — grammar-constrained sampling shapes the reply — so no retry budget. */
 
 static void build_request(const infer_req_t* req, infer_buf_t* out) {
     buf_init(out);
@@ -145,17 +129,11 @@ static void build_request(const infer_req_t* req, infer_buf_t* out) {
         buf_puts(out, ",\"stop_anchor\":");
         buf_put_json_str(out, req->stop_anchor);
     }
-    if (req->count_only) {
-        buf_puts(out, ",\"count_only\":true");
-    }
-    if (req->stats_only) {
-        buf_puts(out, ",\"stats_only\":true");
-    }
     /* keep_anchors + trust are always emitted, matching jadelang's
-     * encode_request (jade_os.rs) — the daemon reads them with serde defaults,
-     * but being explicit keeps the wire unambiguous. */
-    buf_puts(out, ",\"keep_anchors\":");
-    buf_puts(out, req->keep_anchors ? "true" : "false");
+     * encode_request — the daemon reads them with serde defaults, but being
+     * explicit keeps the wire unambiguous. keep_anchors is always false now
+     * (the language no longer toggles it). */
+    buf_puts(out, ",\"keep_anchors\":false");
     buf_puts(out, ",\"trust\":");
     buf_putd(out, (int)req->trust);
 
@@ -168,8 +146,7 @@ char* jrt_prompt(const char* prompt, const char* model) {
     infer_req_t req = {
         .prompt = prompt,
         .model = model ? model : "",
-        .max_tokens = g_max_tokens,
-        .keep_anchors = g_keep_anchors,
+        .max_tokens = 0, /* daemon owns the budget */
         .trust = jrt_trust_of(prompt),
     };
     infer_buf_t json;
@@ -198,8 +175,7 @@ char* jrt_prompt_grammar(const char* prompt, const char* model, const char* gram
         .prompt = prompt,
         .model = model ? model : "",
         .grammar = grammar,
-        .max_tokens = g_max_tokens,
-        .keep_anchors = g_keep_anchors,
+        .max_tokens = 0, /* daemon owns the budget */
         .trust = jrt_trust_of(prompt),
     };
     infer_buf_t json;
@@ -231,8 +207,7 @@ char* jrt_prompt_grammar_ex(const char* prompt, const char* model,
         .grammar = pattern,
         .anchor = anchor_or_null,
         .stop_anchor = stop_or_null,
-        .max_tokens = g_max_tokens,
-        .keep_anchors = g_keep_anchors,
+        .max_tokens = 0, /* daemon owns the budget */
         .trust = jrt_trust_of(prompt),
     };
     infer_buf_t json;
@@ -288,11 +263,14 @@ static int infer_valid_type(const char* resp, const char* type_name, char* tbuf,
 }
 
 char* jrt_prompt_typed(const char* prompt, const char* model,
-                       const char* type_name, int max_retries) {
+                       const char* type_name) {
     /* `str` keeps the model's taint; numeric/bool types validate out
      * shell-injection vectors so the result is structurally TRUSTED. */
     uint8_t result_trust = (strcmp(type_name, "str") == 0) ? JRT_TAINTED : JRT_TRUSTED;
 
+    /* Single-shot: grammar-constrained sampling already forces the reply into a
+     * shape the target type accepts, so a validation failure here is a genuine
+     * mismatch to surface, not something to re-ask for. NULL on failure. */
     char* resp = jrt_prompt(prompt, model);
     if (!resp) return NULL;
 
@@ -303,28 +281,6 @@ char* jrt_prompt_typed(const char* prompt, const char* model,
         return out;
     }
     jrt_str_free(resp);
-
-    /* Build the correction prompt as a tagged TRUSTED string — it's a
-     * runtime-controlled construct, not user input. */
-    size_t cpcap = strlen(type_name) * 2 + 128;
-    for (int attempt = 0; attempt < max_retries; attempt++) {
-        char* correction = jrt_str_new(cpcap, JRT_TRUSTED);
-        int n = snprintf(correction, cpcap,
-            "Reply with only a valid %s value, nothing else. Previous response was not valid.",
-            type_name);
-        if (n < 0) { jrt_str_free(correction); return NULL; }
-
-        char* retry_resp = jrt_prompt(correction, model);
-        jrt_str_free(correction);
-        if (!retry_resp) return NULL;
-
-        if (infer_valid_type(retry_resp, type_name, tbuf, sizeof(tbuf))) {
-            char* out = jrt_str_dup(tbuf, result_trust);
-            jrt_str_free(retry_resp);
-            return out;
-        }
-        jrt_str_free(retry_resp);
-    }
     return NULL;
 }
 
@@ -340,9 +296,10 @@ char* jrt_prompt_typed(const char* prompt, const char* model,
  * reply and produced a *string*. Field access on it then failed with "value has
  * no fields" while the VM had built a real struct.
  *
- * Returns a tagged struct word; raises when the retries are exhausted. */
+ * Single-shot (grammar-constrained sampling already shapes the reply): returns a
+ * tagged struct word, or raises when the reply doesn't coerce. */
 int64_t jrt_prompt_struct(const char* prompt, const char* model,
-                          const char* type_name, int max_retries) {
+                          const char* type_name) {
     char* resp = jrt_prompt(prompt, model);
     if (resp) {
         int64_t out = jrt_coerce_struct(resp, type_name);
@@ -350,47 +307,28 @@ int64_t jrt_prompt_struct(const char* prompt, const char* model,
         if (out != JRT_NIL) return out;
     }
 
-    size_t cpcap = strlen(type_name) * 2 + 160;
-    for (int attempt = 0; attempt < max_retries; attempt++) {
-        char* correction = jrt_str_new(cpcap, JRT_TRUSTED);
-        int n = snprintf(correction, cpcap,
-            "Reply with only a JSON object for struct %s, nothing else. "
-            "Previous response was not valid.", type_name);
-        if (n < 0) { jrt_str_free(correction); break; }
-
-        char* retry_resp = jrt_prompt(correction, model);
-        jrt_str_free(correction);
-        if (!retry_resp) continue;
-        int64_t out = jrt_coerce_struct(retry_resp, type_name);
-        jrt_str_free(retry_resp);
-        if (out != JRT_NIL) return out;
-    }
-
     char msg[160];
     snprintf(msg, sizeof msg,
-             "prompt '<prompt>' failed to produce a valid typed value after %d attempt(s)",
-             max_retries + 1);
+             "prompt '<prompt>' failed to produce a valid typed value after 1 attempt(s)");
     jade_exc_throw_typed(jrt_box_str(jrt_str_dup(msg, JRT_TRUSTED)), NULL);
     return JRT_NIL; /* unreachable (the throw longjmps) */
 }
 
 /* Raising wrapper around jrt_prompt_typed.
  *
- * jrt_prompt_typed returns NULL once it runs out of retries. Codegen used to
+ * jrt_prompt_typed returns NULL when the reply doesn't coerce. Codegen used to
  * tag that NULL as a string and carry on, so a prompt that never produced a
  * coercible value segfaulted the compiled program while the VM reported a
  * clean error. The message matches JadeError::PromptOverflow, minus the source
- * span the AOT does not carry at runtime.
- *
- * `attempts` counts the first try plus the retries, as the VM does. */
+ * span the AOT does not carry at runtime. A typed deref is single-shot, so the
+ * count is always 1 — matching the VM. */
 char* jrt_prompt_typed_checked(const char* prompt, const char* model,
-                               const char* type_name, int max_retries) {
-    char* out = jrt_prompt_typed(prompt, model, type_name, max_retries);
+                               const char* type_name) {
+    char* out = jrt_prompt_typed(prompt, model, type_name);
     if (out) return out;
     char msg[160];
     snprintf(msg, sizeof msg,
-             "prompt '<prompt>' failed to produce a valid typed value after %d attempt(s)",
-             max_retries + 1);
+             "prompt '<prompt>' failed to produce a valid typed value after 1 attempt(s)");
     jade_exc_throw_typed(jrt_box_str(jrt_str_dup(msg, JRT_TRUSTED)), NULL);
     return NULL; /* unreachable (the throw longjmps) */
 }
@@ -505,8 +443,7 @@ char* jrt_prompt_stream_ex(const char* prompt, const char* model,
         .grammar = pattern_or_null,
         .anchor = anchor_or_null,
         .stop_anchor = stop_or_null,
-        .max_tokens = g_max_tokens,
-        .keep_anchors = g_keep_anchors,
+        .max_tokens = 0, /* daemon owns the budget */
         /* Tell the daemon the prompt's actual taint (a tainted prompt must not
          * be reported as trusted), matching the non-streaming jrt_prompt* paths. */
         .trust = jrt_trust_of(prompt),
@@ -548,88 +485,6 @@ char* jrt_prompt_stream_ex(const char* prompt, const char* model,
     if (st.rlen > 0) memcpy(tagged, st.rbuf, st.rlen);
     free(st.rbuf);
     return tagged;
-}
-
-/* ── Token count (count_only request) ─────────────────────────────────── */
-
-int64_t jrt_count_tokens(const char* str) {
-    if (!str) return 0;
-    infer_req_t req = {
-        .prompt = str,
-        .model = "",
-        .max_tokens = 0,
-        .count_only = 1,
-        .trust = jrt_trust_of(str),  /* report the input's real taint */
-    };
-    infer_buf_t json;
-    build_request(&req, &json);
-
-    char* resp = NULL;
-    uint64_t tokens_used = 0;
-    jrt_ipc_request(json.data, json.len, &resp, NULL, &tokens_used);
-    free(json.data);
-    free(resp);
-    return (int64_t)tokens_used;
-}
-
-/* ── Cumulative token count (stats_only request) ──────────────────────────
- * Mirrors the VM's llm.total_tokens (total_tokens_blocking in jade_os.rs): a
- * `stats_only` request whose DONE frame carries the session's running total. */
-int64_t jrt_total_tokens(void) {
-    infer_req_t req = {
-        .prompt = "",
-        .model = "",
-        .max_tokens = 0,
-        .stats_only = 1,
-        .trust = JRT_TRUSTED,
-    };
-    infer_buf_t json;
-    build_request(&req, &json);
-
-    char* resp = NULL;
-    uint64_t tokens_used = 0;
-    jrt_ipc_request(json.data, json.len, &resp, NULL, &tokens_used);
-    free(json.data);
-    free(resp);
-    return (int64_t)tokens_used;
-}
-
-/* ── Daemon health snapshot (health_only request) ─────────────────────────
- * Mirrors the VM's llm.health (health_blocking in jade_os.rs): a `health_only`
- * request whose 0x05 JSON frames carry the snapshot object, parsed into a dict.
- * Returns a tagged dict value, or JRT_NIL if the daemon sent no parseable JSON. */
-jade_value_t jrt_llm_health(void) {
-    /* Minimal request; the daemon ignores prompt/model for health_only. The
-     * shared build_request adds keep_anchors/trust which the daemon defaults. */
-    infer_buf_t json;
-    buf_init(&json);
-    buf_puts(&json, "{\"prompt\":\"\",\"model\":\"\",\"max_tokens\":0,\"health_only\":true}");
-
-    char* resp = NULL;
-    jrt_ipc_request_json(json.data, json.len, &resp, NULL);
-    free(json.data);
-    if (!resp) return JRT_NIL;
-
-    /* resp is a plain malloc'd buffer of accumulated JSON text (0x05 frames).
-     * jrt_json_parse_chunk reads a trust byte at s[-1], so wrap resp in a
-     * tagged TAINTED string (external daemon data) before parsing. Returns a
-     * tagged ObjHeader value word directly (dict, or JRT_NIL on parse error). */
-    char* tagged = jrt_str_dup(resp, JRT_TAINTED);
-    free(resp);
-    jade_value_t v = jrt_json_parse_chunk(tagged);
-    jrt_str_free(tagged);
-    return v;
-}
-
-/* ── Model name resolution (env-derived, TRUSTED) ─────────────────────── */
-
-/* jrt_get_model supplies the *request's* model (what we ask the daemon for).
- * The daemon-reported model is available separately via jrt_reported_model();
- * the `__model__` session global that used to surface it was removed. */
-char* jrt_get_model(void) {
-    const char* m = getenv("JADE_MODEL");
-    if (!m) m = "";
-    return jrt_str_dup(m, JRT_TRUSTED);
 }
 
 /* Terminate a stream()'s live output. Lives here so it shares the same stdout

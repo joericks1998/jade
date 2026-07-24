@@ -104,7 +104,6 @@ fn seed_globals_does_not_register_arbitrary_names() {
 fn find_package_by_import_path() {
     // Every registered package resolves by its `use` import name.
     let expected = [
-        ("llm", "llm"),
         ("std/string", "string"),
         ("std/math", "math"),
         ("std/array", "array"),
@@ -142,7 +141,6 @@ fn is_package_global_name_matches_globals() {
     assert!(is_package_global_name("string"));
     assert!(is_package_global_name("math"));
     assert!(is_package_global_name("json"));
-    assert!(is_package_global_name("llm"));
     assert!(!is_package_global_name("std/string")); // that's the import name
     assert!(!is_package_global_name("not_a_package"));
 }

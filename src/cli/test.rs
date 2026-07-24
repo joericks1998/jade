@@ -136,8 +136,6 @@ async fn run_test_file(
 
     let opts = vm::VmOpts {
         backend,
-        // Daemon owns the model; starts empty, settable via `llm.use_model(...)`.
-        default_model: String::new(),
         source_dir,
         project_root,
         libraries,
