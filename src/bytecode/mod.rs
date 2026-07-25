@@ -237,6 +237,18 @@ pub enum Instr {
 
     // ── Collections ────────────────────────────────────────────────────────
     MakeArray(Reg, Vec<Reg>),
+    /// Like `MakeArray`, but the compiler's escape analysis proved this array
+    /// does not escape its region, so the AOT backend allocates it in the
+    /// per-frame bump arena (and skips refcounting it). The VM treats it exactly
+    /// as `MakeArray` — arena vs heap is an AOT implementation detail, invisible
+    /// in output, so backend parity holds.
+    MakeArrayArena(Reg, Vec<Reg>),
+    /// Snapshot the arena cursor into `dest` (an i64 token). AOT-only effect;
+    /// a no-op that yields 0 in the VM.
+    ArenaMark(Reg),
+    /// Reset the arena to the token in `reg`, freeing everything arena-allocated
+    /// since the matching `ArenaMark`. AOT-only effect; a no-op in the VM.
+    ArenaReset(Reg),
     /// (dest, [(key_reg, val_reg), …])
     MakeDict(Reg, Vec<(Reg, Reg)>),
     /// dest ← obj_reg[idx_reg]

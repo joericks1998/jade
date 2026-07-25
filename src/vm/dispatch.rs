@@ -695,10 +695,18 @@ pub(crate) async fn execute_chunk(
             }
 
             // ── Collections ───────────────────────────────────────────────────
-            Instr::MakeArray(dest, elem_regs) => {
+            Instr::MakeArray(dest, elem_regs) | Instr::MakeArrayArena(dest, elem_regs) => {
+                // Arena vs heap is an AOT-only distinction; the VM always builds a
+                // reference-counted heap array, so the two lower identically here.
                 let elems: Vec<VmValue> = elem_regs.iter().map(|&r| get(slots, r).clone()).collect();
                 set(slots, *dest, VmValue::Array(Arc::new(Mutex::new(ArrayObj::from_vec(elems)))));
             }
+            // Arena bookkeeping is a no-op in the VM (it manages lifetime via Arc):
+            // `ArenaMark` yields a dummy token, `ArenaReset` does nothing.
+            Instr::ArenaMark(dest) => {
+                set(slots, *dest, VmValue::Int(0));
+            }
+            Instr::ArenaReset(_) => {}
             Instr::MakeDict(dest, pairs) => {
                 let mut map = DictObj::new();
                 for &(kr, vr) in pairs {
@@ -1221,11 +1229,13 @@ pub(crate) fn instr_max_reg(instr: &Instr) -> u32 {
             for &a in args { m = m.max(a); }
             m
         }
-        Instr::MakeArray(d, regs) => {
+        Instr::MakeArray(d, regs) | Instr::MakeArrayArena(d, regs) => {
             let mut m = *d;
             for &r in regs { m = m.max(r); }
             m
         }
+        Instr::ArenaMark(d) => *d,
+        Instr::ArenaReset(r) => *r,
         Instr::MakeDict(d, pairs) => {
             let mut m = *d;
             for &(k,v) in pairs { m = m.max(k).max(v); }

@@ -1150,13 +1150,14 @@ fn dest_reg(instr: &Instr) -> Option<Reg> {
         | CmpGeStr(d, ..) | CmpEq(d, ..) | CmpNe(d, ..) | CmpLt(d, ..) | CmpGt(d, ..)
         | CmpLe(d, ..) | CmpGe(d, ..) => Some(*d),
         Call(d, _, _) | CallNamed(d, _, _) | Spawn(d, _, _) | Join(d, _) | MakeArray(d, _)
-        | MakeDict(d, _) | MakeStruct(d, _, _) | BuildFStr(d, _) => Some(*d),
+        | MakeArrayArena(d, _) | ArenaMark(d) | MakeDict(d, _) | MakeStruct(d, _, _)
+        | BuildFStr(d, _) => Some(*d),
         // Handler binds its caught register (in the landing block).
         SetupHandler(r, _) => Some(*r),
         // Pure stores / control flow / no-reg-dest.
         SetGlobal(..) | SetLocal(..) | SetIndex(..) | SetField(..) | Jump(_)
         | JumpIfFalse(..) | JumpIfTrue(..) | Return(_) | Halt | Raise(_) | PopHandler
-        | ImportFile(..) | ImportFrom(..) => None,
+        | ArenaReset(_) | ImportFile(..) | ImportFrom(..) => None,
     }
 }
 
