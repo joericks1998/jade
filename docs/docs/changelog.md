@@ -4,7 +4,7 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
-## Unreleased
+## v1.1.23
 
 - **Performance.** Several backend/runtime optimizations with no language-visible change:
   - **AOT scalar specialization.** The native backend treated every value as a tagged word, so integer-only code (recursive `fib`, whose parameters are untyped) paid a runtime call per operation. Added the LLVM `-O2` pipeline, inlined an `is_heap` guard around reference-count ops so ints/bools/nil skip the runtime call, and inlined an int fast-path into dynamic `add`/`sub`/`mul` and compare. `fib(40)` compiled: **17.0s → 2.3s (7.4×)**, and native now beats Python where it was 2× slower. Overflow still raises exactly as the VM does.
@@ -12,8 +12,17 @@ sidebar_label: Changelog
   - **VM: FxHash globals.** Hash the interpreter's `globals` map with `FxHash` instead of SipHash — variable names are short internal keys, not attacker-controlled inputs. `fib(34)` under `jade run`: ~25% faster.
   - **VM: borrow the callee.** `Call` now borrows the `Arc<CompiledFn>` out of its slot for plain-function calls instead of cloning the whole value, avoiding an atomic refcount bump+drop per call (~10% more).
   - Internal: `src/vm/mod.rs` was split from a 3119-line monolith into focused modules (`dispatch`, `call`, `coerce`, `llm_prompt`, `ops`, `value`, `state`, `chunk`, `async_tasks`, `exceptions`).
+
+## v1.1.22
+
 - **Unified module imports; removed quoted file imports and the `as` alias (breaking).** There is now one import form: a `use` statement names a **module** with `::` notation (or a bare name) and binds its last path segment. A bare name resolves to a **sibling `.jde` file** (`use utils` → `./utils.jde`), a `::` path descends into subdirectories (`use sub::helper` → `./sub/helper.jde`), and the first segment naming a registered `[lib]` or an installed dependency resolves that instead. The quoted-path form (`use "lib.jde" as lib`) and the `as` alias are rejected at compile time (`QuotedImport` / `ImportAlias`) with a message pointing at the new syntax. Parent/cross-directory imports (`../`) are no longer expressible as a module path — register those directories as a `[lib]`, which anchors resolution at the project root. Resolution is identical in the VM and the AOT build.
+
+## v1.1.21
+
 - **Moved all remaining inference config to the daemon; the language is a pure wire-protocol client.** It no longer counts tokens (`llm.count_tokens`, `llm.total_tokens`, and the `token_count` state are gone), no longer caps generation length (`llm.set_max_tokens` is gone; requests send `max_tokens: 0`, so the daemon owns the budget), no longer tracks or selects a model (`llm.model()` is gone; requests send an empty `model`, so the daemon uses its configured/loaded one), no longer toggles anchor visibility (`llm.keep_anchors` is gone; requests send `keep_anchors: false`), and no longer re-asks the model on a coercion miss. A typed dereference (`?p |> Type`) is now single-shot — grammar-constrained sampling already forces the reply into the target shape — and raises `PromptOverflow` immediately if it doesn't coerce, in both the VM and the AOT engine. **The `use llm` package is removed entirely** — its remaining function, `llm.health()`, and the earlier `llm.model`/`keep_anchors`/`set_max_tokens`/`count_tokens`/`total_tokens`/`profile`/`find_tool_call`/`find_tool_calls`/`tool_grammar` are all gone. Running inference is language syntax now (`?p`, `?p |> Type`); the model-specific pieces ship with each model as Jade packages on the daemon side. The `JADE_MAX_RETRIES` env var and `max_retries` `jade.toml` key are removed
+
+## v1.1.20
+
 - **Dropped Windows support.** Jade is now macOS and Linux only. The toolchain is built on Unix domain sockets — `jade build` talks to the build daemon and the `jade` inference provider talks to the LLM daemon that way — so a Windows build was only ever the language with its interesting half stubbed out. Building for a non-Unix target now fails immediately with an explanatory error rather than producing a degraded binary. The `jade-windows-x86_64.zip` release artifact is no longer published; on Windows, use WSL2
 - **Removed the build daemon.** `jade build` now compiles in-process. The daemon existed to keep LLVM out of the `jade` binary while code generation lived in a separate repository; once `src/aot/` and the C runtime moved here, its only remaining job was forwarding a request to a function this crate already exported — and a daemon built from an older commit could resolve imports differently from the CLI calling it, silently. LLVM 18 is now a build-time requirement for the toolchain (`LLVM_SYS_180_PREFIX`); running a released binary needs nothing installed. The `codegen` Cargo feature is gone, and `jade env` no longer reports daemon reachability
 - Linux releases are now **glibc** (`x86_64-unknown-linux-gnu`) rather than musl: LLVM's prebuilt distributions are glibc-based, so a static musl build would mean sourcing or building a musl LLVM
