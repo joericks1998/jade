@@ -78,6 +78,7 @@
 // without being scoped to host binaries only — a larger change than the perf
 // justified. If reintroduced, it MUST NOT be declared in this shared crate.
 
+pub mod arena;
 pub mod coercef;
 pub mod coll;
 pub mod cstr;
