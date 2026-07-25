@@ -4,6 +4,10 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.1.26
+
+- **Fixed `jade upgrade` — it never worked.** It pointed at a nonexistent repo (`joericks1998/jade-os`, which 404s, so it silently reported "no releases published yet"), looked for a wrongly-named asset (`jade-<pkg-platform-tag>` like `jade-darwin-aarch64`, not the published `jade-macos-arm64.tar.gz`), and would have written the downloaded tarball straight to the binary path without extracting it. It now targets the real repo, matches the published archive name (`macos-arm64`/`linux-x86_64`), and extracts + installs the binary **plus** the runtime archives (`libJadeRuntime.a`/`libjade_runtime.a`) and bundled providers into `<prefix>/lib/jade/`, mirroring the installer, with an atomic binary replace. Note: any jade older than this still carries the broken `upgrade`, so reinstall once via `jadelang.org/install.sh` to reach a version whose `jade upgrade` works.
+
 ## v1.1.25
 
 - **Provider-package `?p` now works in AOT-compiled binaries, not just the VM.** A provider is a compiled Jade `--lib` package (dovata's `anthropic`/`openai`) that exposes `infer(request) -> [Frame]` / `configure(opts)` and does its own HTTP to the vendor API. `jade run` already drove these; now a `jade build` binary does too — the C runtime loads the active provider through the existing native-package machinery (`jrt_native_load`/`jrt_native_call`, reusing the v1.1.24 dict/array FFI marshalling), calls `configure` with the stored credential, calls `infer({prompt})`, and folds the returned frame dicts into the response text. Each prompt path routes to the provider when one is active, else the daemon. An `Error` frame (e.g. a cloud auth failure) raises a catchable Jade error in both engines. Verified end-to-end on VM and AOT against the live Anthropic API. (The earlier `ovata_provider_*` cdylib ABI the language briefly targeted is gone — that ABI is the daemon's; the language hosts providers as Jade packages.)
