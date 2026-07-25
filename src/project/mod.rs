@@ -373,8 +373,7 @@ pub fn ambiguous_bare_import(
 
     Some(format!(
         "import '{import_path}' is ambiguous: it names both a registered library \
-         (or dependency) and the file {}. Rename one, or import the file \
-         explicitly with `use \"{import_path}.jde\" as {import_path}`.",
+         (or dependency) and the sibling file {}. Rename one of them.",
         sibling.display()
     ))
 }
