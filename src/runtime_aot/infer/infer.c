@@ -8,7 +8,6 @@
 #include "runtime.h"
 #include "infer.h"
 #include "ipc.h"
-#include "provider.h"
 
 #include <ctype.h>
 #include <stdint.h>
@@ -141,29 +140,126 @@ static void build_request(const infer_req_t* req, infer_buf_t* out) {
     buf_putc(out, '}');
 }
 
-/* ── Inference transport dispatch ─────────────────────────────────────────
+/* ── Provider-package drive (the daemon-free path) ─────────────────────────
  *
- * Every prompt path goes through these instead of calling the daemon directly.
- * When an active provider package is installed, a compiled binary drives it
- * in-process (no daemon, no special hardware); otherwise it falls back to the
- * jade-tree daemon over its socket. The two backends share request/response
- * shapes, so this is a pure routing decision. */
+ * When a provider package is installed in the active slot, `?p` drives it in
+ * process instead of the daemon. A provider is a compiled Jade `--lib` (dovata's
+ * anthropic/openai) exposing `infer(request) -> [Frame]` and, usually,
+ * `configure(opts)` — the same contract the VM drives. We load it through the
+ * native-package machinery (jrt_native_*), configure it with the stored
+ * credential, call `infer({prompt})`, and fold the returned frame dicts
+ * ({"type":"Token"|"Done"|"Error",…}) into the response text. A bad shape or an
+ * `Error` frame raises a catchable Jade error — like the VM, so a compiled `?p`
+ * inside a `try` can catch it. */
 
-static void infer_request(const void* json, size_t len,
-                          char** resp, size_t* resp_len, uint64_t* used) {
-    if (jrt_provider_available())
-        jrt_provider_request(json, len, resp, resp_len, used);
-    else
-        jrt_ipc_request(json, len, resp, resp_len, used);
+static void* g_provider = NULL; /* cached handle for the active provider package */
+
+/* Raise a catchable Jade error (TRUSTED message). Does not return. The message is
+ * copied, so a pointer into a soon-freed value is safe to pass. */
+static void provider_raise(const char* msg) {
+    jade_exc_throw_typed(jrt_box_str(jrt_str_dup(msg, JRT_TRUSTED)), NULL);
 }
 
-static void infer_request_streaming(const void* json, size_t len,
-                                    jrt_token_cb on_token, void* user,
-                                    char** resp, size_t* resp_len, uint64_t* used) {
-    if (jrt_provider_available())
-        jrt_provider_request_streaming(json, len, on_token, user, resp, resp_len, used);
-    else
-        jrt_ipc_request_streaming(json, len, on_token, user, resp, resp_len, used);
+/* Load the active provider package (once) and configure it with the stored
+ * credential. jrt_native_load raises on failure. */
+static void* provider_handle(void) {
+    if (g_provider) return g_provider;
+    char* path = jrt_provider_active_lib_path();
+    if (!path) provider_raise("no active inference provider");
+    void* h = jrt_native_load(path); /* raises on dlopen / missing jade_pkg_init */
+    free(path);
+
+    char* cfg = jrt_provider_active_config();
+    if (cfg && cfg[0] && jrt_native_has(h, "configure")) {
+        char* s = jrt_str_dup(cfg, JRT_TRUSTED); /* jrt_json_parse_chunk wants a tagged string */
+        jade_value_t config = jrt_json_parse_chunk(s);
+        jrt_str_free(s);
+        jrt_native_call(h, "configure", &config, 1);
+    }
+    free(cfg);
+    g_provider = h;
+    return h;
+}
+
+/* Build the `infer` request dict from the prompt request. */
+static jade_value_t provider_request(const infer_req_t* req) {
+    void* d = jrt_kdict_new();
+    jrt_kdict_set(d, (int64_t)jrt_box_str(jrt_str_dup("prompt", JRT_TRUSTED)),
+                     (int64_t)jrt_box_str(jrt_str_dup(req->prompt ? req->prompt : "", req->trust)));
+    if (req->model && req->model[0])
+        jrt_kdict_set(d, (int64_t)jrt_box_str(jrt_str_dup("model", JRT_TRUSTED)),
+                         (int64_t)jrt_box_str(jrt_str_dup(req->model, JRT_TRUSTED)));
+    if (req->grammar)
+        jrt_kdict_set(d, (int64_t)jrt_box_str(jrt_str_dup("grammar", JRT_TRUSTED)),
+                         (int64_t)jrt_box_str(jrt_str_dup(req->grammar, JRT_TRUSTED)));
+    return jrt_box_ptr(d);
+}
+
+/* Drive the active provider for one request; return the accumulated response text
+ * (malloc'd, *out_len bytes), or raise on an `Error` frame. */
+static char* provider_infer_text(const infer_req_t* req, size_t* out_len) {
+    void* h = provider_handle();
+    jade_value_t request = provider_request(req);
+    jade_value_t frames = jrt_native_call(h, "infer", &request, 1);
+
+    if (!jrt_is_ptr(frames) || jrt_kind_of(jrt_unbox_ptr(frames)) != JK_ARRAY)
+        provider_raise("provider `infer` did not return a frame array");
+    void* arr = jrt_unbox_ptr(frames);
+    int64_t n = jrt_coll_array_len(arr);
+
+    size_t cap = 256, len = 0;
+    char* text = (char*)malloc(cap);
+    if (!text) jade_rt_fatal("jade: out of memory");
+    text[0] = 0;
+
+    for (int64_t i = 0; i < n; i++) {
+        jade_value_t fr = (jade_value_t)jrt_coll_array_get(arr, i);
+        if (!jrt_is_ptr(fr) || jrt_kind_of(jrt_unbox_ptr(fr)) != JK_DICT) continue;
+        void* fd = jrt_unbox_ptr(fr);
+
+        int64_t tyw = (int64_t)JRT_NIL;
+        if (!jrt_coll_dict_get(fd, "type", &tyw) || !jrt_is_str((jade_value_t)tyw)) continue;
+        const char* ty = (const char*)jrt_unbox_ptr((jade_value_t)tyw);
+
+        if (strcmp(ty, "Token") == 0) {
+            int64_t txw = (int64_t)JRT_NIL;
+            if (jrt_coll_dict_get(fd, "text", &txw) && jrt_is_str((jade_value_t)txw)) {
+                const char* t = (const char*)jrt_unbox_ptr((jade_value_t)txw);
+                size_t tl = strlen(t);
+                if (len + tl + 1 > cap) {
+                    while (len + tl + 1 > cap) cap *= 2;
+                    char* nt = (char*)realloc(text, cap);
+                    if (!nt) { free(text); jade_rt_fatal("jade: out of memory"); }
+                    text = nt;
+                }
+                memcpy(text + len, t, tl);
+                len += tl;
+                text[len] = 0;
+            }
+        } else if (strcmp(ty, "Error") == 0) {
+            int64_t mw = (int64_t)JRT_NIL;
+            const char* m = (jrt_coll_dict_get(fd, "message", &mw) && jrt_is_str((jade_value_t)mw))
+                          ? (const char*)jrt_unbox_ptr((jade_value_t)mw) : "provider error";
+            free(text);
+            provider_raise(m); /* does not return */
+        }
+        /* Done / Json carry no plain text — ignore. */
+    }
+
+    *out_len = len;
+    return text;
+}
+
+/* provider_infer_text, tagged with the prompt's trust (a provider is a trusted
+ * transformer: a trusted prompt yields a trusted response, a tainted one a
+ * tainted response — same rule as the daemon path). */
+static char* provider_tagged(const infer_req_t* req) {
+    size_t len = 0;
+    char* text = provider_infer_text(req, &len);
+    char* tagged = jrt_str_new(len, req->trust);
+    if (len > 0) memcpy(tagged, text, len);
+    free(text);
+    return tagged;
 }
 
 /* ── Public prompt functions ──────────────────────────────────────────── */
@@ -175,13 +271,15 @@ char* jrt_prompt(const char* prompt, const char* model) {
         .max_tokens = 0, /* daemon owns the budget */
         .trust = jrt_trust_of(prompt),
     };
+    if (jrt_provider_available()) return provider_tagged(&req);
+
     infer_buf_t json;
     build_request(&req, &json);
 
     char* resp = NULL;
     size_t resp_len = 0;
     uint64_t used = 0;
-    infer_request(json.data, json.len, &resp, &resp_len, &used);
+    jrt_ipc_request(json.data, json.len, &resp, &resp_len, &used);
     (void)used;
     free(json.data);
     if (!resp) return NULL;
@@ -204,12 +302,14 @@ char* jrt_prompt_grammar(const char* prompt, const char* model, const char* gram
         .max_tokens = 0, /* daemon owns the budget */
         .trust = jrt_trust_of(prompt),
     };
+    if (jrt_provider_available()) return provider_tagged(&req);
+
     infer_buf_t json;
     build_request(&req, &json);
 
     char* resp = NULL;
     size_t resp_len = 0;
-    infer_request(json.data, json.len, &resp, &resp_len, NULL);
+    jrt_ipc_request(json.data, json.len, &resp, &resp_len, NULL);
     free(json.data);
     if (!resp) return NULL;
     /* jaded is a TRUSTED transformer: it propagates the prompt's trust to its
@@ -236,12 +336,14 @@ char* jrt_prompt_grammar_ex(const char* prompt, const char* model,
         .max_tokens = 0, /* daemon owns the budget */
         .trust = jrt_trust_of(prompt),
     };
+    if (jrt_provider_available()) return provider_tagged(&req);
+
     infer_buf_t json;
     build_request(&req, &json);
 
     char* resp = NULL;
     size_t resp_len = 0;
-    infer_request(json.data, json.len, &resp, &resp_len, NULL);
+    jrt_ipc_request(json.data, json.len, &resp, &resp_len, NULL);
     free(json.data);
     if (!resp) return NULL;
     /* jaded is a TRUSTED transformer: it propagates the prompt's trust to its
@@ -474,6 +576,19 @@ char* jrt_prompt_stream_ex(const char* prompt, const char* model,
          * be reported as trusted), matching the non-streaming jrt_prompt* paths. */
         .trust = jrt_trust_of(prompt),
     };
+
+    /* A provider package returns the whole response at once (no token stream), so
+     * emit it in one write rather than incrementally. */
+    if (jrt_provider_available()) {
+        size_t plen = 0;
+        char* ptext = provider_infer_text(&req, &plen);
+        if (!start_muted && plen > 0) { fwrite(ptext, 1, plen, stdout); fflush(stdout); }
+        char* ptagged = jrt_str_new(plen, req.trust);
+        if (plen > 0) memcpy(ptagged, ptext, plen);
+        free(ptext);
+        return ptagged;
+    }
+
     infer_buf_t json;
     build_request(&req, &json);
 
@@ -493,8 +608,8 @@ char* jrt_prompt_stream_ex(const char* prompt, const char* model,
 
     char* daemon_resp = NULL;
     uint64_t used = 0;
-    infer_request_streaming(json.data, json.len, stream_on_token, &st,
-                            &daemon_resp, NULL, &used);
+    jrt_ipc_request_streaming(json.data, json.len, stream_on_token, &st,
+                              &daemon_resp, NULL, &used);
     (void)used;
     free(json.data);
     free(daemon_resp);

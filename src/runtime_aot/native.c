@@ -80,6 +80,12 @@ static JadeNativeFnPtr native_lookup(JadePkgHandle* h, const char* name) {
     return NULL;
 }
 
+/* Whether a loaded package exports `name` — lets a caller probe for an optional
+ * binding (e.g. a provider's `configure`) without a call that would raise. */
+int jrt_native_has(void* handle, const char* name) {
+    return handle && native_lookup((JadePkgHandle*)handle, name) != NULL ? 1 : 0;
+}
+
 /* libc strdup for a container-owned string (process-shared allocator, so the
  * peer runtime can free it). */
 static const char* ffi_strdup(const char* s) {

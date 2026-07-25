@@ -653,3 +653,15 @@ void         jrt_ffi_from_tagged(jade_value_t v, JadeVal* out);
 
 jade_value_t jrt_native_call(void* handle, const char* fn_name,
                              const jade_value_t* args, int64_t argc);
+
+/* Nonzero if a loaded package exports `name` — probe for an optional binding
+ * (e.g. a provider package's `configure`) without a raising call. */
+int jrt_native_has(void* handle, const char* name);
+
+/* Active inference-provider slot (implemented in jade-runtime's `provider`
+ * module). `jrt_provider_available` is nonzero when a provider package is
+ * installed; the path/config accessors return malloc'd NUL-terminated strings the
+ * caller frees (or NULL). See runtime_aot/infer/provider.h. */
+int   jrt_provider_available(void);
+char* jrt_provider_active_lib_path(void);
+char* jrt_provider_active_config(void);
