@@ -106,11 +106,12 @@ async fn eval_snippet_vm(src: &str, state: &mut VmState) -> Result<Option<String
     // Detect a bare expression as the last statement.
     let capture = matches!(program.stmts.last(), Some(Stmt::Expr(_)));
 
-    // PromptDeref (`?p`) streams tokens live to stdout; suppress echoing the
-    // result string since the output already appeared during inference.
-    let is_prompt_deref = capture && matches!(
+    // Some expressions print their own output as they evaluate — a bare `?p`
+    // (streams tokens live) and `stream(...)` (prints as it generates). Don't
+    // echo their result on top of what they already wrote.
+    let suppress_echo = capture && matches!(
         program.stmts.last(),
-        Some(Stmt::Expr(Expr::PromptDeref { .. }))
+        Some(Stmt::Expr(e)) if prints_own_output(e)
     );
 
     if capture {
@@ -134,18 +135,35 @@ async fn eval_snippet_vm(src: &str, state: &mut VmState) -> Result<Option<String
     vm::run_incremental(compiled, state).await.map_err(|e| e.to_string())?;
 
     let captured = state.repl_capture.take();
-    if capture && !is_prompt_deref {
+    if capture && !suppress_echo {
         if let Some(val) = captured {
-            // Echo strings quoted (REPL convention), but Debug the *contents* —
-            // `{:?}` on the JStr itself would print its struct form
-            // (`JStr { text: …, trust: 0 }`) into user output.
-            let display = match &val {
-                vm::VmValue::Str(s) => format!("{:?}", s.as_str()),
-                other => value_to_display(other),
-            };
-            return Ok(Some(display));
+            // Don't echo a void result — e.g. `print(...)` returns nil, and
+            // echoing "nil" after its output is noise.
+            if !matches!(val, vm::VmValue::Nil) {
+                // Echo strings quoted (REPL convention), but Debug the *contents* —
+                // `{:?}` on the JStr itself would print its struct form
+                // (`JStr { text: …, trust: 0 }`) into user output.
+                let display = match &val {
+                    vm::VmValue::Str(s) => format!("{:?}", s.as_str()),
+                    other => value_to_display(other),
+                };
+                return Ok(Some(display));
+            }
         }
     }
 
     Ok(None)
+}
+
+/// Whether an expression prints to stdout on its own as it evaluates, so the
+/// REPL should not also echo its result: a bare `?p` (streams tokens live) or a
+/// `stream(...)` call (prints as it generates).
+fn prints_own_output(expr: &Expr) -> bool {
+    match expr {
+        Expr::PromptDeref { .. } => true,
+        Expr::Call { callee, .. } => {
+            matches!(callee.as_ref(), Expr::Identifier { name, .. } if name == "stream")
+        }
+        _ => false,
+    }
 }

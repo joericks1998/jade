@@ -4,6 +4,10 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.1.28
+
+- **REPL stops echoing redundant/void output.** An expression that prints as it evaluates — a bare `?p` (already suppressed) and now `stream(...)` — no longer has its result echoed again after the live output. And a void result is no longer echoed: `print("hi")` used to print `hi` then a stray `nil`; bare `nil` and any nil-returning call now display nothing.
+
 ## v1.1.27
 
 - **Fixed a REPL defect: a string result printed its internal representation.** In the REPL, a bare expression evaluating to a string echoed the Rust struct `JStr { text: "…", trust: 0 }` instead of the string — most visibly with `stream(?p)`, but any bare string result was affected. It now echoes the string quoted (e.g. `"hey there!"`), Debugging the string contents rather than the internal tagged-string struct.
