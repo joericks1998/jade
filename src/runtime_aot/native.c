@@ -80,11 +80,24 @@ static JadeNativeFnPtr native_lookup(JadePkgHandle* h, const char* name) {
     return NULL;
 }
 
+/* libc strdup for a container-owned string (process-shared allocator, so the
+ * peer runtime can free it). */
+static const char* ffi_strdup(const char* s) {
+    if (!s) s = "";
+    size_t n = strlen(s) + 1;
+    char* p = (char*)malloc(n);
+    if (!p) jade_rt_fatal("jade: out of memory");
+    memcpy(p, s, n);
+    return p;
+}
+
 /* Marshal a tagged jade_value_t into a JadeVal for the native ABI. Matches
- * native.rs::vm_to_ffi: primitives convert directly; everything else is nil. For
- * strings we hand over the NUL-terminated data pointer (non-owning — the native
- * fn must copy if it needs to retain). */
-static JadeVal to_ffi(jade_value_t v) {
+ * native.rs::vm_to_ffi: primitives convert directly; arrays/dicts are deep-copied
+ * into libc-owned JadeArr/JadeMap trees; structs and other heap kinds become nil.
+ * `owned_str` is set for container elements (their strings are copied so the tree
+ * owns them) and clear at the top level (strings are handed over non-owning — the
+ * native fn copies if it needs to retain). */
+static JadeVal to_ffi_val(jade_value_t v, int owned_str) {
     JadeVal out = {0};
     if (jrt_is_int(v)) {
         out.tag = JADE_FFI_INT;
@@ -96,8 +109,48 @@ static JadeVal to_ffi(jade_value_t v) {
         out.tag = JADE_FFI_BOOL;
         out.data.as_bool = (uint8_t)jrt_unbox_bool(v);
     } else if (jrt_is_str(v)) {
+        const char* s = (const char*)jrt_unbox_ptr(v);
         out.tag = JADE_FFI_STR;
-        out.data.as_str = (const char*)jrt_unbox_ptr(v);
+        out.data.as_str = owned_str ? ffi_strdup(s) : s;
+    } else if (jrt_is_ptr(v)) {
+        void* p = jrt_unbox_ptr(v);
+        int64_t kind = jrt_kind_of(p);
+        if (kind == JK_ARRAY) {
+            int64_t n = jrt_coll_array_len(p);
+            JadeArr* a = (JadeArr*)malloc(sizeof(JadeArr));
+            if (!a) jade_rt_fatal("jade: out of memory");
+            a->len = (size_t)n;
+            a->items = n ? (JadeVal*)malloc((size_t)n * sizeof(JadeVal)) : NULL;
+            if (n && !a->items) jade_rt_fatal("jade: out of memory");
+            for (int64_t i = 0; i < n; i++)
+                a->items[i] = to_ffi_val(jrt_coll_array_get(p, i), 1);
+            out.tag = JADE_FFI_ARRAY;
+            out.data.as_arr = a;
+        } else if (kind == JK_DICT) {
+            /* No dict iterator is exported, so read entries through the sorted
+             * key array. It is a fresh runtime allocation left to the arena — a
+             * native-bearing program is not reference-counted, so its collections
+             * live until process exit either way. */
+            void* keys = jrt_coll_dict_keys(p);
+            int64_t n = jrt_coll_array_len(keys);
+            JadeMap* m = (JadeMap*)malloc(sizeof(JadeMap));
+            if (!m) jade_rt_fatal("jade: out of memory");
+            m->len  = (size_t)n;
+            m->keys = n ? (const char**)malloc((size_t)n * sizeof(char*)) : NULL;
+            m->vals = n ? (JadeVal*)malloc((size_t)n * sizeof(JadeVal)) : NULL;
+            if (n && (!m->keys || !m->vals)) jade_rt_fatal("jade: out of memory");
+            for (int64_t i = 0; i < n; i++) {
+                const char* ks = (const char*)jrt_unbox_ptr(jrt_coll_array_get(keys, i));
+                int64_t val = (int64_t)JRT_NIL;
+                jrt_coll_dict_get(p, ks, &val);
+                m->keys[i] = ffi_strdup(ks);
+                m->vals[i] = to_ffi_val((jade_value_t)val, 1);
+            }
+            out.tag = JADE_FFI_DICT;
+            out.data.as_dict = m;
+        } else {
+            out.tag = JADE_FFI_NIL;  /* struct / other heap kind */
+        }
     } else {
         out.tag = JADE_FFI_NIL;
         out.data.as_nil = 0;
@@ -105,9 +158,12 @@ static JadeVal to_ffi(jade_value_t v) {
     return out;
 }
 
+static JadeVal to_ffi(jade_value_t v) { return to_ffi_val(v, 0); }
+
 /* Marshal a JadeVal returned by a native fn back to a tagged jade_value_t.
  * Matches native.rs::ffi_to_vm: output strings are copied into TAINTED tagged
- * strings (native output is external input). JADE_FFI_ERROR raises. */
+ * strings (native output is external input); arrays/dicts are rebuilt as
+ * kind-tagged collections. JADE_FFI_ERROR raises. */
 static jade_value_t from_ffi(const JadeVal* v) {
     switch (v->tag) {
         case JADE_FFI_NIL:   return JRT_NIL;
@@ -117,6 +173,25 @@ static jade_value_t from_ffi(const JadeVal* v) {
         case JADE_FFI_STR:
             return jrt_box_str(jrt_str_dup(v->data.as_str ? v->data.as_str : "",
                                            JRT_TAINTED));
+        case JADE_FFI_ARRAY: {
+            const JadeArr* a = v->data.as_arr;
+            void* arr = jrt_karr_new();
+            if (a)
+                for (size_t i = 0; i < a->len; i++)
+                    jrt_karr_push(arr, from_ffi(&a->items[i]));
+            return jrt_box_ptr(arr);
+        }
+        case JADE_FFI_DICT: {
+            const JadeMap* m = v->data.as_dict;
+            void* d = jrt_kdict_new();
+            if (m)
+                for (size_t i = 0; i < m->len; i++) {
+                    jade_value_t kw = jrt_box_str(
+                        jrt_str_dup(m->keys[i] ? m->keys[i] : "", JRT_TAINTED));
+                    jrt_kdict_set(d, kw, from_ffi(&m->vals[i]));
+                }
+            return jrt_box_ptr(d);
+        }
         case JADE_FFI_ERROR:
             native_raise("%s", v->data.as_str ? v->data.as_str : "native error");
             return JRT_NIL;  /* unreachable */
@@ -124,6 +199,48 @@ static jade_value_t from_ffi(const JadeVal* v) {
             native_raise("native function returned an unknown value tag", NULL);
             return JRT_NIL;  /* unreachable */
     }
+}
+
+/* Recursively free a container-owned JadeVal node (its owned string, or its
+ * nested arrays/dicts). Reached only through a container root; a container's
+ * string elements are libc-owned (ffi_strdup), so they are freed here. */
+static void ffi_free_node(JadeVal* v) {
+    switch (v->tag) {
+        case JADE_FFI_STR:
+        case JADE_FFI_ERROR:
+            free((void*)v->data.as_str);
+            break;
+        case JADE_FFI_ARRAY: {
+            JadeArr* a = v->data.as_arr;
+            if (a) {
+                for (size_t i = 0; i < a->len; i++) ffi_free_node(&a->items[i]);
+                free(a->items);
+                free(a);
+            }
+            break;
+        }
+        case JADE_FFI_DICT: {
+            JadeMap* m = v->data.as_dict;
+            if (m) {
+                for (size_t i = 0; i < m->len; i++) {
+                    free((void*)m->keys[i]);
+                    ffi_free_node(&m->vals[i]);
+                }
+                free((void*)m->keys);
+                free(m->vals);
+                free(m);
+            }
+            break;
+        }
+        default:
+            break;  /* scalar: nothing owned */
+    }
+}
+
+void jade_ffi_free(JadeVal* v) {
+    /* Only container roots own heap; top-level scalars (incl. non-owning strings)
+     * are left untouched, so this is safe to call on any JadeVal. */
+    if (v->tag == JADE_FFI_ARRAY || v->tag == JADE_FFI_DICT) ffi_free_node(v);
 }
 
 jade_value_t jrt_native_call(void* handle, const char* fn_name,
@@ -148,6 +265,8 @@ jade_value_t jrt_native_call(void* handle, const char* fn_name,
     out.tag = JADE_FFI_NIL;
     int status = fn((size_t)argc, argv, &out);
 
+    /* The call has returned; release the marshalled argument trees. */
+    for (int64_t i = 0; i < argc; i++) jade_ffi_free(&argv[i]);
     if (argv != inline_buf) free(argv);
 
     if (status != 0) {
@@ -157,7 +276,9 @@ jade_value_t jrt_native_call(void* handle, const char* fn_name,
         native_raise("native function '%s' returned a non-zero status", fn_name);
     }
 
-    return from_ffi(&out);
+    jade_value_t result = from_ffi(&out);
+    jade_ffi_free(&out);  /* release a container return tree (no-op for scalars) */
+    return result;
 }
 
 /* ── Exported marshalling, for Jade-authored packages (`jade build --lib`) ──

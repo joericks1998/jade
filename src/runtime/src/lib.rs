@@ -62,16 +62,21 @@
 // where the remaining lints earn their keep.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
-// Route every Rust-side heap allocation (collection object boxes and their
-// `Vec`/`HashMap` payloads, all Box-allocated and Box-freed within Rust) through
-// mimalloc's pooling allocator. Declared once here so it applies to both engines:
-// the `jade` binary that links this crate as an rlib (the VM) and the AOT
-// staticlib linked into compiled binaries. The `sys::malloc`/`free` path used
-// for strings and C-interchangeable objects is a *separate* allocator and is
-// deliberately left on the system allocator — nothing crosses between them, so
-// there is no mismatched-free hazard.
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+// No `#[global_allocator]` here — the default system allocator is used.
+//
+// This crate is linked into three kinds of output: the `jade` VM binary (rlib),
+// every AOT-compiled program (staticlib), and every native package a program
+// loads (`jade build --lib` produces a `.dylib` that also statically links this
+// crate for its `jrt_*` marshalling symbols). A `#[global_allocator]` declared
+// here lands in ALL of them, so a process that dlopen's a package holds two
+// copies of the allocator with duplicate `__rust_alloc`/`__rust_dealloc` symbols
+// that interpose across the boundary — the host allocates and the package frees
+// through different heaps (and vice versa). That corrupts the heap (dict/array
+// FFI results came back as zeroed memory) and deadlocked tokio's blocking-pool
+// teardown in the allocator's cross-thread reclaim. mimalloc lived here for its
+// ~2x win on alloc-heavy code, but it cannot coexist with the native-package ABI
+// without being scoped to host binaries only — a larger change than the perf
+// justified. If reintroduced, it MUST NOT be declared in this shared crate.
 
 pub mod coercef;
 pub mod coll;

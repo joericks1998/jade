@@ -546,15 +546,33 @@ char*   jrt_readline(const char* prompt);
  *
  * The FFI value type (JadeVal) is a 16-byte tagged union that MUST byte-match
  * `JadeVal` in jadelang/src/native.rs so the same .dylib serves both the VM and
- * AOT. Its tags (0..5) are an independent ABI, distinct from the jade_value_t
- * low-bit tags above. Marshalling supports the same primitives as the VM's
- * vm_to_ffi/ffi_to_vm; non-primitive args become nil. */
+ * AOT. Its tags (0..7) are an independent ABI, distinct from the jade_value_t
+ * low-bit tags above. Scalars convert directly; arrays and dicts are deep-copied
+ * into nested JadeArr/JadeMap trees (see below). Structs and other heap kinds
+ * become nil. */
 #define JADE_FFI_NIL   0
 #define JADE_FFI_INT   1
 #define JADE_FFI_FLOAT 2
 #define JADE_FFI_BOOL  3
 #define JADE_FFI_STR   4   /* null-terminated UTF-8 (non-owning pointer) */
 #define JADE_FFI_ERROR 5   /* like STR, but the string is an error message */
+#define JADE_FFI_ARRAY 6   /* data.as_arr  -> JadeArr  (deep-copied, owned) */
+#define JADE_FFI_DICT  7   /* data.as_dict -> JadeMap  (deep-copied, owned) */
+
+/* Nested container payloads for JADE_FFI_ARRAY / JADE_FFI_DICT.
+ *
+ * A collection cannot cross the boundary by pointer: the process holds two
+ * `jade-runtime` instances (the VM binary and each dlopen'd package), each with
+ * its own mimalloc, so a word owned by one runtime must never be freed by the
+ * other. Instead a collection is *deep-copied* into a tree whose every node — the
+ * JadeArr/JadeMap header, its element arrays, and any strings *inside* a
+ * container — is allocated with libc malloc/strdup. libc's allocator is shared
+ * process-wide (mimalloc is a Rust #[global_allocator], it does not override the
+ * C malloc), so either side can release the whole tree with `jade_ffi_free`.
+ * Top-level scalar strings keep the non-owning contract. Cyclic collections are
+ * not supported (the copy would not terminate). */
+typedef struct JadeArr JadeArr;
+typedef struct JadeMap JadeMap;
 
 typedef union {
     int64_t     as_int;
@@ -562,6 +580,8 @@ typedef union {
     uint8_t     as_bool;
     const char* as_str;
     uint64_t    as_nil;
+    JadeArr*    as_arr;
+    JadeMap*    as_dict;
 } JadeValData;
 
 typedef struct {
@@ -569,6 +589,16 @@ typedef struct {
     uint8_t     _pad[7];
     JadeValData data;
 } JadeVal;
+
+struct JadeArr { JadeVal* items; size_t len; };
+struct JadeMap { const char** keys; JadeVal* vals; size_t len; };
+
+/* Release a JadeVal tree built by the marshaller (`to_ffi`/`jrt_ffi_from_tagged`
+ * / the VM's vm_to_ffi). Frees only the libc-owned parts — JadeArr/JadeMap nodes,
+ * their element arrays, and copied strings inside a container — so it is a no-op
+ * on scalars and safe to call on any JadeVal. The consumer of a native call frees
+ * both the argument trees it built and a container return value with it. */
+void jade_ffi_free(JadeVal* v);
 
 typedef int (*JadeNativeFnPtr)(size_t argc, const JadeVal* argv, JadeVal* out);
 

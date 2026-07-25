@@ -188,20 +188,11 @@ fn main() {
     // macros panic and dump a Rust backtrace over ordinary shell usage.
     jade::stdio::install_broken_pipe_hook();
 
-    let rt = tokio::runtime::Builder::new_multi_thread()
+    tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .expect("tokio runtime");
-    rt.block_on(run_cli());
-
-    // Leak the runtime rather than drop it. A dlopen'd native package (`.so`
-    // built by `jade build --lib`) links its own copy of `jade-runtime`, which
-    // includes its own mimalloc global allocator — so the process ends up with
-    // two mimalloc instances. tokio's blocking-pool teardown then frees through
-    // mimalloc and deadlocks in its cross-thread arena collection
-    // (`_mi_arenas_page_unabandon`). We're about to exit anyway, so skipping the
-    // runtime's Drop costs nothing and avoids the hang.
-    std::mem::forget(rt);
+        .expect("tokio runtime")
+        .block_on(run_cli());
 }
 
 async fn run_cli() {

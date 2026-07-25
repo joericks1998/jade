@@ -68,12 +68,21 @@ fn vm_to_ffi_str_pushes_cstring_and_points_at_it() {
 }
 
 #[test]
-fn vm_to_ffi_non_primitive_becomes_nil() {
+fn vm_to_ffi_unsupported_kind_becomes_nil() {
     let mut scratch = Vec::new();
-    // A Dict is non-primitive — native fns can't consume it.
-    let v = vm_to_ffi(&VmValue::Dict(DictObj::new()), &mut scratch);
+    // A prompt has no ABI representation — native fns can't consume it. (Dicts
+    // and arrays, which used to fall here too, now marshal — see the round-trips.)
+    let v = vm_to_ffi(&VmValue::Prompt("p".to_string()), &mut scratch);
     assert_eq!(v.tag, JADE_TAG_NIL);
     assert!(scratch.is_empty());
+}
+
+#[test]
+fn vm_to_ffi_dict_tag() {
+    let mut scratch = Vec::new();
+    let v = vm_to_ffi(&VmValue::Dict(DictObj::new()), &mut scratch);
+    assert_eq!(v.tag, JADE_TAG_DICT);
+    unsafe { ffi_free(&v) };
 }
 
 // ── ffi_to_vm ─────────────────────────────────────────────────────────────
@@ -172,8 +181,56 @@ fn roundtrip_str() {
 }
 
 #[test]
+fn roundtrip_dict() {
+    let mut d = DictObj::new();
+    d.insert("a".to_string(), VmValue::Int(1));
+    d.insert("b".to_string(), VmValue::Str("x".to_string().into()));
+    let original = VmValue::Dict(d);
+
+    let mut scratch = Vec::new();
+    let ffi = vm_to_ffi(&original, &mut scratch);
+    assert_eq!(ffi.tag, JADE_TAG_DICT);
+    let back = ffi_to_vm(&ffi, ZERO).unwrap();
+    unsafe { ffi_free(&ffi) };
+
+    match back {
+        VmValue::Dict(d) => {
+            assert_eq!(d.len(), 2);
+            assert!(matches!(d.get("a"), Some(VmValue::Int(1))));
+            match d.get("b") {
+                Some(VmValue::Str(s)) => assert_eq!(s, "x"),
+                other => panic!("got {:?}", other),
+            }
+        }
+        other => panic!("got {:?}", other),
+    }
+}
+
+#[test]
+fn roundtrip_array_nested() {
+    let mut inner = DictObj::new();
+    inner.insert("k".to_string(), VmValue::Int(9));
+    let original = make_array(vec![
+        VmValue::Int(1),
+        VmValue::Str("two".to_string().into()),
+        VmValue::Dict(inner),
+    ]);
+
+    let mut scratch = Vec::new();
+    let ffi = vm_to_ffi(&original, &mut scratch);
+    assert_eq!(ffi.tag, JADE_TAG_ARRAY);
+    let back = ffi_to_vm(&ffi, ZERO).unwrap();
+    unsafe { ffi_free(&ffi) };
+
+    assert_eq!(crate::vm::value_to_display(&back), "[1, two, {\"k\": 9}]");
+}
+
+#[test]
 fn tag_constants_are_distinct() {
-    let tags = [JADE_TAG_NIL, JADE_TAG_INT, JADE_TAG_FLOAT, JADE_TAG_BOOL, JADE_TAG_STR, JADE_TAG_ERROR];
+    let tags = [
+        JADE_TAG_NIL, JADE_TAG_INT, JADE_TAG_FLOAT, JADE_TAG_BOOL,
+        JADE_TAG_STR, JADE_TAG_ERROR, JADE_TAG_ARRAY, JADE_TAG_DICT,
+    ];
     for i in 0..tags.len() {
         for j in (i + 1)..tags.len() {
             assert_ne!(tags[i], tags[j]);
