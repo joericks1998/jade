@@ -428,6 +428,40 @@ jade_value_t jrt_http_head(const char* url, void* headers) {
     return r;
 }
 
+/* uhttp.* forwarders: same contract as http.* — the Rust impls (jade-runtime
+ * src/uhttpf.rs) record a pending error on transport failure (connect/timeout/
+ * malformed response) instead of throwing; throw it here. A 4xx/5xx is a normal
+ * status, not an error. */
+static void uhttp_throw_pending(void) {
+    char* e = jrt_uhttp_take_error();
+    if (e) jade_exc_throw_typed(jrt_box_str(e), NULL);
+}
+jade_value_t jrt_uhttp_get(const char* url, void* headers) {
+    jade_value_t r = (jade_value_t)jrt_uhttp_get_impl(url, headers);
+    uhttp_throw_pending();
+    return r;
+}
+jade_value_t jrt_uhttp_post(const char* url, const char* body, void* headers) {
+    jade_value_t r = (jade_value_t)jrt_uhttp_post_impl(url, body, headers);
+    uhttp_throw_pending();
+    return r;
+}
+jade_value_t jrt_uhttp_put(const char* url, const char* body, void* headers) {
+    jade_value_t r = (jade_value_t)jrt_uhttp_put_impl(url, body, headers);
+    uhttp_throw_pending();
+    return r;
+}
+jade_value_t jrt_uhttp_delete(const char* url, void* headers) {
+    jade_value_t r = (jade_value_t)jrt_uhttp_delete_impl(url, headers);
+    uhttp_throw_pending();
+    return r;
+}
+jade_value_t jrt_uhttp_head(const char* url, void* headers) {
+    jade_value_t r = (jade_value_t)jrt_uhttp_head_impl(url, headers);
+    uhttp_throw_pending();
+    return r;
+}
+
 /* sh.exec/run forwarders: refuse a tainted command (a code-execution sink), call
  * the Rust impl (jade-runtime src/shf.rs), then throw any pending error it
  * recorded — sh.exec raises on a non-zero exit, run/exec on a spawn failure. */

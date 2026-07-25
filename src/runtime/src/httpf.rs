@@ -113,7 +113,7 @@ pub fn request(
 // ── AOT C-ABI wrappers ────────────────────────────────────────────────────────
 
 /// A tagged-string word's bytes as `&str` (non-string → "").
-fn header_val(word: W) -> &'static str {
+pub(crate) fn header_val(word: W) -> &'static str {
     let v = JadeValue::from_bits(word as u64);
     if v.is_str() {
         unsafe { cstr::borrow(v.as_ptr() as *const c_char) }
@@ -123,7 +123,7 @@ fn header_val(word: W) -> &'static str {
 }
 
 /// Read the AOT ObjHeader header-dict into `(name, value)` pairs.
-fn read_headers(headers: *const c_void) -> Vec<(String, String)> {
+pub(crate) fn read_headers(headers: *const c_void) -> Vec<(String, String)> {
     if headers.is_null() {
         return Vec::new();
     }
@@ -132,7 +132,7 @@ fn read_headers(headers: *const c_void) -> Vec<(String, String)> {
 }
 
 /// Build the result dict `{ status, body: TAINTED }` as a tagged pointer word.
-fn make_dict(status: i64, body: &str) -> W {
+pub(crate) fn make_dict(status: i64, body: &str) -> W {
     let mut d = DictObj::<W>::new();
     d.insert("status", JadeValue::from_int(status).bits() as i64);
     let body_w = JadeValue::from_str_ptr(cstr::emit(body.as_bytes(), TAINTED) as *const ()).bits() as i64;

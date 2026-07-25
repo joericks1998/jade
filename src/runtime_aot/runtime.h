@@ -473,6 +473,23 @@ jade_value_t jrt_http_put(const char* url, const char* body, void* headers);
 jade_value_t jrt_http_delete(const char* url, void* headers);
 jade_value_t jrt_http_head(const char* url, void* headers);
 
+/* uhttp (std::uhttp) — HTTP/1.1 over a Unix domain socket (jade-runtime,
+ * src/uhttpf.rs). Same shape as http: each verb returns an ObjHeader dict
+ * { status, body:TAINTED }; only transport failure raises (impls record a
+ * pending error, the C forwarders below throw it). The url is a pseudo-URL
+ * `unix://<socket-path>:<request-path>`. */
+int64_t      jrt_uhttp_get_impl(const char* url, void* headers);
+int64_t      jrt_uhttp_post_impl(const char* url, const char* body, void* headers);
+int64_t      jrt_uhttp_put_impl(const char* url, const char* body, void* headers);
+int64_t      jrt_uhttp_delete_impl(const char* url, void* headers);
+int64_t      jrt_uhttp_head_impl(const char* url, void* headers);
+char*        jrt_uhttp_take_error(void);
+jade_value_t jrt_uhttp_get(const char* url, void* headers);
+jade_value_t jrt_uhttp_post(const char* url, const char* body, void* headers);
+jade_value_t jrt_uhttp_put(const char* url, const char* body, void* headers);
+jade_value_t jrt_uhttp_delete(const char* url, void* headers);
+jade_value_t jrt_uhttp_head(const char* url, void* headers);
+
 /* sh (std::sh) is implemented in Rust now (jade-runtime, src/shf.rs). exec/run
  * refuse tainted input (a code-execution sink) — that check + throw stays in the
  * C forwarders (common.c); the impls never raise. */

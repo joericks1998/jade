@@ -110,6 +110,7 @@ pub mod strval;
 pub mod sys;
 pub mod timef;
 pub mod trust;
+pub mod uhttpf;
 pub mod value;
 
 pub use coll::{ArrayObj, DictObj, StructObj};

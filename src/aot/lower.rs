@@ -84,8 +84,8 @@ fn parse_native_ref(name: &str) -> Option<(u32, &str)> {
 fn is_stdlib_module(name: &str) -> bool {
     matches!(
         name,
-        "math" | "json" | "llm" | "path" | "time" | "env" | "fs" | "random" | "http" | "sh"
-            | "dict" | "array" | "string" | "Grammar"
+        "math" | "json" | "llm" | "path" | "time" | "env" | "fs" | "random" | "http" | "uhttp"
+            | "sh" | "dict" | "array" | "string" | "Grammar"
     )
 }
 
@@ -116,6 +116,8 @@ fn chunk_module_supported(module: &str, method: &str, argc: usize) -> bool {
         ("time", "local") => argc == 1,
         ("http", "get" | "delete" | "head") => argc == 1 || argc == 2,
         ("http", "post" | "put") => argc == 2 || argc == 3,
+        ("uhttp", "get" | "delete" | "head") => argc == 1 || argc == 2,
+        ("uhttp", "post" | "put") => argc == 2 || argc == 3,
         ("array", "map" | "filter") => argc == 2,
         ("random", "int") => argc == 2,
         ("random", "seed") => argc == 1,
@@ -2556,6 +2558,18 @@ fn emit_module_call<'ctx>(
             let f = low.runtime_fn(&format!("jrt_http_{method}"), i64_ty.fn_type(&[ptrt.into(), ptrt.into(), ptrt.into()], false));
             let headers = if args.len() >= 3 { strp(2) } else { ptrt.const_null() };
             Ok(b.build_call(f, &[strp(0).into(), strp(1).into(), headers.into()], "http").map_err(err)?.as_any_value_enum().into_int_value())
+        }
+        ("uhttp", "get" | "delete" | "head") => {
+            // (unix-url, [headers]) -> already-tagged { status, body } dict word.
+            let f = low.runtime_fn(&format!("jrt_uhttp_{method}"), i64_ty.fn_type(&[ptrt.into(), ptrt.into()], false));
+            let headers = if args.len() >= 2 { strp(1) } else { ptrt.const_null() };
+            Ok(b.build_call(f, &[strp(0).into(), headers.into()], "uhttp").map_err(err)?.as_any_value_enum().into_int_value())
+        }
+        ("uhttp", "post" | "put") => {
+            // (unix-url, body, [headers]) -> tagged { status, body } dict word.
+            let f = low.runtime_fn(&format!("jrt_uhttp_{method}"), i64_ty.fn_type(&[ptrt.into(), ptrt.into(), ptrt.into()], false));
+            let headers = if args.len() >= 3 { strp(2) } else { ptrt.const_null() };
+            Ok(b.build_call(f, &[strp(0).into(), strp(1).into(), headers.into()], "uhttp").map_err(err)?.as_any_value_enum().into_int_value())
         }
         ("dict", "merge") => {
             // (d1, d2) -> new dict word (tagged ptr).
