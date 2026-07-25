@@ -4354,7 +4354,7 @@ mod tests {
         let add_fn = Arc::new(CompiledFn {
             params: vec!["a".to_string(), "b".to_string()],
             defaults: vec![None, None],
-            chunk: Chunk { name: "add".into(), code: body, spans: vec![], fn_defs: vec![], arena_slots: vec![] },
+            chunk: Chunk { name: "add".into(), code: body, spans: vec![], fn_defs: vec![] },
             n_slots: 3,
             source_file: String::new(),
             module_scope: None,
@@ -4399,7 +4399,7 @@ mod tests {
         let greet = Arc::new(CompiledFn {
             params: vec!["n".to_string()],
             defaults: vec![Some(VmValue::Int(5))],
-            chunk: Chunk { name: "greet".into(), code: body, spans: vec![], fn_defs: vec![], arena_slots: vec![] },
+            chunk: Chunk { name: "greet".into(), code: body, spans: vec![], fn_defs: vec![] },
             n_slots: 2,
             source_file: String::new(),
             module_scope: None,
@@ -4430,7 +4430,7 @@ mod tests {
         let f = Arc::new(CompiledFn {
             params: vec![],
             defaults: vec![],
-            chunk: Chunk { name: "f".into(), code: vec![Return(None)], spans: vec![], fn_defs: vec![], arena_slots: vec![] },
+            chunk: Chunk { name: "f".into(), code: vec![Return(None)], spans: vec![], fn_defs: vec![] },
             n_slots: 0,
             source_file: String::new(),
             module_scope: None,
@@ -4452,7 +4452,7 @@ mod tests {
         let f = Arc::new(CompiledFn {
             params: vec!["a".into(), "b".into(), "c".into()],
             defaults: vec![None, None, None],
-            chunk: Chunk { name: "f".into(), code: vec![GetLocal(3, 0), Return(Some(3))], spans: vec![], fn_defs: vec![], arena_slots: vec![] },
+            chunk: Chunk { name: "f".into(), code: vec![GetLocal(3, 0), Return(Some(3))], spans: vec![], fn_defs: vec![] },
             n_slots: 4,
             source_file: String::new(),
             module_scope: None,
@@ -4488,7 +4488,7 @@ mod tests {
         let apply = Arc::new(CompiledFn {
             params: vec!["f".into(), "x".into()],
             defaults: vec![None, None],
-            chunk: Chunk { name: "apply".into(), code: apply_body, spans: vec![], fn_defs: vec![], arena_slots: vec![] },
+            chunk: Chunk { name: "apply".into(), code: apply_body, spans: vec![], fn_defs: vec![] },
             n_slots: 5,
             source_file: String::new(),
             module_scope: None,
@@ -4583,7 +4583,7 @@ mod tests {
         let f = Arc::new(CompiledFn {
             params: vec!["x".into()],
             defaults: vec![None],
-            chunk: Chunk { name: "f".into(), code: vec![GetLocal(1, 0), Return(Some(1))], spans: vec![], fn_defs: vec![], arena_slots: vec![] },
+            chunk: Chunk { name: "f".into(), code: vec![GetLocal(1, 0), Return(Some(1))], spans: vec![], fn_defs: vec![] },
             n_slots: 2,
             source_file: String::new(),
             module_scope: None,

@@ -63,9 +63,6 @@ struct Emitter {
     /// mark token: `ArenaReset(tok)` is emitted before every return so arena
     /// memory is reclaimed on exit (not left to balloon across calls).
     arena_fn_tok: Option<Reg>,
-    /// Extra no-decref slots discovered during body emission (loop mark tokens),
-    /// folded into `chunk.arena_slots` at the end of `emit_fn`.
-    arena_extra_slots: Vec<Reg>,
 }
 
 impl Emitter {
@@ -76,7 +73,6 @@ impl Emitter {
             locals: None,
             arena_eligible: std::collections::HashSet::new(),
             arena_fn_tok: None,
-            arena_extra_slots: Vec::new(),
         }
     }
 
@@ -87,7 +83,6 @@ impl Emitter {
             locals: Some(HashMap::new()),
             arena_eligible: std::collections::HashSet::new(),
             arena_fn_tok: None,
-            arena_extra_slots: Vec::new(),
         }
     }
 
@@ -123,7 +118,6 @@ impl Emitter {
         self.arena_fn_tok?;
         let tok = self.alloc_reg();
         self.chunk.emit(Instr::ArenaMark(tok), span);
-        self.arena_extra_slots.push(tok);
         Some(tok)
     }
 
@@ -643,15 +637,12 @@ fn emit_fn(
         fn_em.define_local(name);
     }
     // Open the function-scope arena region: a mark at entry, reset before every
-    // return (below), so arena memory is reclaimed on exit. The token register is
-    // recorded in `arena_slots` too — its bit pattern can resemble a heap pointer,
-    // so the AOT must not decref it at scope exit.
-    let mut arena_tok_slots: Vec<u32> = Vec::new();
+    // return (below), so arena memory is reclaimed on exit. The mark token is an
+    // even (int-like) word, so the AOT's scope-exit decref no-ops on its register.
     if !arena_plan.is_empty() {
         let tok = fn_em.alloc_reg();
         fn_em.chunk.emit(Instr::ArenaMark(tok), span);
         fn_em.arena_fn_tok = Some(tok);
-        arena_tok_slots.push(tok);
     }
     // Compile literal defaults — non-literal defaults are unsupported for now.
     let defaults: Vec<Option<crate::vm::VmValue>> = params.iter()
@@ -707,17 +698,6 @@ fn emit_fn(
         }
         fn_em.chunk.emit(Instr::Return(None), NO_SPAN);
     }
-
-    // Record the slots the AOT must neither decref at scope exit nor refcount on
-    // store: the arena-array locals and the mark-token registers.
-    let mut arena_slots = arena_tok_slots;
-    arena_slots.extend(fn_em.arena_extra_slots.iter().copied());
-    for v in &arena_plan.arena_vars {
-        if let Some(slot) = fn_em.lookup_local(v) {
-            arena_slots.push(slot);
-        }
-    }
-    fn_em.chunk.arena_slots = arena_slots;
 
     let n_slots = fn_em.next_reg;
     Ok(CompiledFn { params: param_names, defaults, chunk: fn_em.chunk, n_slots, source_file: String::new(), module_scope: None })
