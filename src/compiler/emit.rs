@@ -59,6 +59,13 @@ struct Emitter {
     /// proved non-escaping; the emitter lowers these to `MakeArrayArena`. Empty
     /// for the top level (its `let`s are globals, which escape by nature).
     arena_eligible: std::collections::HashSet<(usize, usize)>,
+    /// When this function uses the arena, the register holding its function-scope
+    /// mark token: `ArenaReset(tok)` is emitted before every return so arena
+    /// memory is reclaimed on exit (not left to balloon across calls).
+    arena_fn_tok: Option<Reg>,
+    /// Extra no-decref slots discovered during body emission (loop mark tokens),
+    /// folded into `chunk.arena_slots` at the end of `emit_fn`.
+    arena_extra_slots: Vec<Reg>,
 }
 
 impl Emitter {
@@ -68,6 +75,8 @@ impl Emitter {
             next_reg: 0,
             locals: None,
             arena_eligible: std::collections::HashSet::new(),
+            arena_fn_tok: None,
+            arena_extra_slots: Vec::new(),
         }
     }
 
@@ -77,6 +86,8 @@ impl Emitter {
             next_reg: 0,
             locals: Some(HashMap::new()),
             arena_eligible: std::collections::HashSet::new(),
+            arena_fn_tok: None,
+            arena_extra_slots: Vec::new(),
         }
     }
 
@@ -102,6 +113,18 @@ impl Emitter {
 
     fn in_fn(&self) -> bool {
         self.locals.is_some()
+    }
+
+    /// Open a per-iteration arena region inside a loop body — only when this
+    /// function uses the arena (else the mark/reset would be pure overhead).
+    /// Emits `ArenaMark` and returns the token register; the caller emits the
+    /// matching `ArenaReset` at the bottom of the loop body.
+    fn arena_loop_open(&mut self, span: Span) -> Option<Reg> {
+        self.arena_fn_tok?;
+        let tok = self.alloc_reg();
+        self.chunk.emit(Instr::ArenaMark(tok), span);
+        self.arena_extra_slots.push(tok);
+        Some(tok)
     }
 
     /// Emit instructions to load `name` into a fresh register. Returns the reg.
@@ -298,15 +321,18 @@ fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
         }
 
         TStmt::Return { value, span } => {
-            match value {
-                Some(expr) => {
-                    let src = emit_expr(&expr, em, ctx)?;
-                    em.chunk.emit(Instr::Return(Some(src)), span);
-                }
-                None => {
-                    em.chunk.emit(Instr::Return(None), span);
-                }
+            // Evaluate the return value first, then reset the function's arena
+            // region (freeing any arena memory) before returning. The value must
+            // never be arena-allocated (the escape analysis guarantees a returned
+            // array is not arena), so resetting before the return cannot free it.
+            let ret = match value {
+                Some(expr) => Some(emit_expr(&expr, em, ctx)?),
+                None => None,
+            };
+            if let Some(tok) = em.arena_fn_tok {
+                em.chunk.emit(Instr::ArenaReset(tok), span);
             }
+            em.chunk.emit(Instr::Return(ret), span);
         }
 
         TStmt::If { condition, then_body, else_body, span } => {
@@ -334,8 +360,18 @@ fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
             let cond = emit_expr(&condition, em, ctx)?;
             let jump_exit = em.chunk.emit(Instr::JumpIfFalse(cond, 0), span);
 
+            // Per-iteration arena region: any arena array built in the body is
+            // reclaimed at the bottom of each iteration, so a hot loop reuses the
+            // same arena memory instead of accumulating it. Only in functions that
+            // use the arena at all (else the mark/reset would be pure overhead).
+            let loop_tok = em.arena_loop_open(span);
+
             for s in body {
                 emit_stmt(s, em, ctx)?;
+            }
+
+            if let Some(t) = loop_tok {
+                em.chunk.emit(Instr::ArenaReset(t), span);
             }
 
             // Back-jump: offset = loop_start − (current + 1)
@@ -380,6 +416,7 @@ fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
             }
 
             // ── Loop body ──────────────────────────────────────────────────────
+            let loop_tok = em.arena_loop_open(span);
             for s in body {
                 emit_stmt(s, em, ctx)?;
             }
@@ -390,6 +427,10 @@ fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
             let next_idx = em.alloc_reg();
             em.chunk.emit(Instr::AddInt(next_idx, idx_reg, one_reg), span);
             em.chunk.emit(Instr::Move(idx_reg, next_idx), span);
+
+            if let Some(t) = loop_tok {
+                em.chunk.emit(Instr::ArenaReset(t), span);
+            }
 
             // Back-jump and patch exit.
             let back = loop_start as i32 - (em.chunk.len() as i32 + 1);
@@ -594,11 +635,23 @@ fn emit_fn(
     // Decide which array literals in this function may be arena-allocated (AOT
     // only; the VM ignores the distinction). Runs on the typed body before it is
     // consumed by emission.
-    fn_em.arena_eligible = crate::compiler::escape::analyze(&body).eligible;
+    let arena_plan = crate::compiler::escape::analyze(&body);
+    fn_em.arena_eligible = arena_plan.eligible.clone();
     // Allocate slots for parameters first (slots 0..params.len()).
     let param_names: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
     for name in &param_names {
         fn_em.define_local(name);
+    }
+    // Open the function-scope arena region: a mark at entry, reset before every
+    // return (below), so arena memory is reclaimed on exit. The token register is
+    // recorded in `arena_slots` too — its bit pattern can resemble a heap pointer,
+    // so the AOT must not decref it at scope exit.
+    let mut arena_tok_slots: Vec<u32> = Vec::new();
+    if !arena_plan.is_empty() {
+        let tok = fn_em.alloc_reg();
+        fn_em.chunk.emit(Instr::ArenaMark(tok), span);
+        fn_em.arena_fn_tok = Some(tok);
+        arena_tok_slots.push(tok);
     }
     // Compile literal defaults — non-literal defaults are unsupported for now.
     let defaults: Vec<Option<crate::vm::VmValue>> = params.iter()
@@ -643,11 +696,28 @@ fn emit_fn(
 
     if let Some(expr) = implicit_ret {
         let src = emit_expr(&expr, &mut fn_em, ctx)?;
+        if let Some(tok) = fn_em.arena_fn_tok {
+            fn_em.chunk.emit(Instr::ArenaReset(tok), span);
+        }
         fn_em.chunk.emit(Instr::Return(Some(src)), span);
     } else if !already_terminated {
         // Implicit nil return if execution falls off the end of the function.
+        if let Some(tok) = fn_em.arena_fn_tok {
+            fn_em.chunk.emit(Instr::ArenaReset(tok), NO_SPAN);
+        }
         fn_em.chunk.emit(Instr::Return(None), NO_SPAN);
     }
+
+    // Record the slots the AOT must neither decref at scope exit nor refcount on
+    // store: the arena-array locals and the mark-token registers.
+    let mut arena_slots = arena_tok_slots;
+    arena_slots.extend(fn_em.arena_extra_slots.iter().copied());
+    for v in &arena_plan.arena_vars {
+        if let Some(slot) = fn_em.lookup_local(v) {
+            arena_slots.push(slot);
+        }
+    }
+    fn_em.chunk.arena_slots = arena_slots;
 
     let n_slots = fn_em.next_reg;
     Ok(CompiledFn { params: param_names, defaults, chunk: fn_em.chunk, n_slots, source_file: String::new(), module_scope: None })

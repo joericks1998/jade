@@ -60,6 +60,12 @@ pub struct Chunk {
     pub spans: Vec<Span>,
     /// Function literals embedded in this chunk (referred to by `LoadFn`).
     pub fn_defs: Vec<Arc<CompiledFn>>,
+    /// Local slots that only ever hold arena-allocated arrays (from
+    /// `MakeArrayArena`). The AOT backend must NOT decref these at scope exit and
+    /// must store into them without refcounting — an arena pointer's memory is
+    /// bulk-freed by `ArenaReset`, so touching it via the collector is a
+    /// use-after-free. Empty unless the escape analysis found arena arrays.
+    pub arena_slots: Vec<u32>,
 }
 
 impl Chunk {
@@ -69,6 +75,7 @@ impl Chunk {
             code: Vec::new(),
             spans: Vec::new(),
             fn_defs: Vec::new(),
+            arena_slots: Vec::new(),
         }
     }
 
