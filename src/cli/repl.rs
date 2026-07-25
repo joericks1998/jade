@@ -136,8 +136,11 @@ async fn eval_snippet_vm(src: &str, state: &mut VmState) -> Result<Option<String
     let captured = state.repl_capture.take();
     if capture && !is_prompt_deref {
         if let Some(val) = captured {
+            // Echo strings quoted (REPL convention), but Debug the *contents* —
+            // `{:?}` on the JStr itself would print its struct form
+            // (`JStr { text: …, trust: 0 }`) into user output.
             let display = match &val {
-                vm::VmValue::Str(s) => format!("{:?}", s),
+                vm::VmValue::Str(s) => format!("{:?}", s.as_str()),
                 other => value_to_display(other),
             };
             return Ok(Some(display));

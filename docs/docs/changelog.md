@@ -4,6 +4,10 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.1.27
+
+- **Fixed a REPL defect: a string result printed its internal representation.** In the REPL, a bare expression evaluating to a string echoed the Rust struct `JStr { text: "…", trust: 0 }` instead of the string — most visibly with `stream(?p)`, but any bare string result was affected. It now echoes the string quoted (e.g. `"hey there!"`), Debugging the string contents rather than the internal tagged-string struct.
+
 ## v1.1.26
 
 - **Fixed `jade upgrade` — it never worked.** It pointed at a nonexistent repo (`joericks1998/jade-os`, which 404s, so it silently reported "no releases published yet"), looked for a wrongly-named asset (`jade-<pkg-platform-tag>` like `jade-darwin-aarch64`, not the published `jade-macos-arm64.tar.gz`), and would have written the downloaded tarball straight to the binary path without extracting it. It now targets the real repo, matches the published archive name (`macos-arm64`/`linux-x86_64`), and extracts + installs the binary **plus** the runtime archives (`libJadeRuntime.a`/`libjade_runtime.a`) and bundled providers into `<prefix>/lib/jade/`, mirroring the installer, with an atomic binary replace. Note: any jade older than this still carries the broken `upgrade`, so reinstall once via `jadelang.org/install.sh` to reach a version whose `jade upgrade` works.
