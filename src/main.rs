@@ -130,6 +130,32 @@ enum Commands {
     #[command(subcommand)]
     Pkg(PkgCommands),
 
+    /// Register an inference provider and its API key (global, per-user)
+    ///
+    /// Providers ship with jade; this records which one `?p` uses and stores its
+    /// key under ~/.jade. With no PROVIDER it lists installed providers and
+    /// prompts interactively.
+    Register {
+        /// Provider to register (e.g. anthropic, openai); omit for interactive
+        provider: Option<String>,
+        /// API key to store (omit to be prompted). For CI, prefer the
+        /// <PROVIDER>_API_KEY env var over passing a secret on the command line.
+        #[arg(long, value_name = "KEY")]
+        key: Option<String>,
+        /// List installed providers and the active selection, then exit
+        #[arg(long)]
+        list: bool,
+        /// Remove the provider's stored credential instead of setting one
+        #[arg(long)]
+        remove: bool,
+    },
+
+    /// Select which registered provider `?p` uses (global, per-user)
+    Use {
+        /// Provider name (must be installed)
+        provider: String,
+    },
+
     /// Upgrade jade to the latest release
     Upgrade,
 
@@ -287,6 +313,14 @@ async fn run_cli() {
             PkgCommands::Update { name } => cli::pkg::run_update(name.as_deref()),
             PkgCommands::List => cli::pkg::run_list(),
         },
+
+        // ── provider registry ────────────────────────────────────────────────
+        Commands::Register { provider, key, list, remove } => {
+            cli::register::run_register(provider.as_deref(), key.as_deref(), list, remove);
+        }
+        Commands::Use { provider } => {
+            cli::register::run_use(&provider);
+        }
 
         Commands::Upgrade => {
             cli::upgrade::run_upgrade().await;

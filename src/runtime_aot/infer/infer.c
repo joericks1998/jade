@@ -8,6 +8,7 @@
 #include "runtime.h"
 #include "infer.h"
 #include "ipc.h"
+#include "provider.h"
 
 #include <ctype.h>
 #include <stdint.h>
@@ -140,6 +141,31 @@ static void build_request(const infer_req_t* req, infer_buf_t* out) {
     buf_putc(out, '}');
 }
 
+/* ── Inference transport dispatch ─────────────────────────────────────────
+ *
+ * Every prompt path goes through these instead of calling the daemon directly.
+ * When an active provider package is installed, a compiled binary drives it
+ * in-process (no daemon, no special hardware); otherwise it falls back to the
+ * jade-tree daemon over its socket. The two backends share request/response
+ * shapes, so this is a pure routing decision. */
+
+static void infer_request(const void* json, size_t len,
+                          char** resp, size_t* resp_len, uint64_t* used) {
+    if (jrt_provider_available())
+        jrt_provider_request(json, len, resp, resp_len, used);
+    else
+        jrt_ipc_request(json, len, resp, resp_len, used);
+}
+
+static void infer_request_streaming(const void* json, size_t len,
+                                    jrt_token_cb on_token, void* user,
+                                    char** resp, size_t* resp_len, uint64_t* used) {
+    if (jrt_provider_available())
+        jrt_provider_request_streaming(json, len, on_token, user, resp, resp_len, used);
+    else
+        jrt_ipc_request_streaming(json, len, on_token, user, resp, resp_len, used);
+}
+
 /* ── Public prompt functions ──────────────────────────────────────────── */
 
 char* jrt_prompt(const char* prompt, const char* model) {
@@ -155,7 +181,7 @@ char* jrt_prompt(const char* prompt, const char* model) {
     char* resp = NULL;
     size_t resp_len = 0;
     uint64_t used = 0;
-    jrt_ipc_request(json.data, json.len, &resp, &resp_len, &used);
+    infer_request(json.data, json.len, &resp, &resp_len, &used);
     (void)used;
     free(json.data);
     if (!resp) return NULL;
@@ -183,7 +209,7 @@ char* jrt_prompt_grammar(const char* prompt, const char* model, const char* gram
 
     char* resp = NULL;
     size_t resp_len = 0;
-    jrt_ipc_request(json.data, json.len, &resp, &resp_len, NULL);
+    infer_request(json.data, json.len, &resp, &resp_len, NULL);
     free(json.data);
     if (!resp) return NULL;
     /* jaded is a TRUSTED transformer: it propagates the prompt's trust to its
@@ -215,7 +241,7 @@ char* jrt_prompt_grammar_ex(const char* prompt, const char* model,
 
     char* resp = NULL;
     size_t resp_len = 0;
-    jrt_ipc_request(json.data, json.len, &resp, &resp_len, NULL);
+    infer_request(json.data, json.len, &resp, &resp_len, NULL);
     free(json.data);
     if (!resp) return NULL;
     /* jaded is a TRUSTED transformer: it propagates the prompt's trust to its
@@ -467,8 +493,8 @@ char* jrt_prompt_stream_ex(const char* prompt, const char* model,
 
     char* daemon_resp = NULL;
     uint64_t used = 0;
-    jrt_ipc_request_streaming(json.data, json.len, stream_on_token, &st,
-                              &daemon_resp, NULL, &used);
+    infer_request_streaming(json.data, json.len, stream_on_token, &st,
+                            &daemon_resp, NULL, &used);
     (void)used;
     free(json.data);
     free(daemon_resp);

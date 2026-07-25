@@ -199,7 +199,7 @@ pub(crate) async fn call_value(
                             let lazy = ts.lazy_prompt.lock().take();
                             if let Some(prompt_text) = lazy {
                                 let backend = state.inference_backend.as_ref()
-                                    .ok_or(JadeError::MissingApiKey { span })?.clone();
+                                    .ok_or(JadeError::NoInferenceBackend { span })?.clone();
                                 let (rx, handle) = backend.infer_stream(llm::InferenceRequest {
                                     prompt: prompt_text,
                                     grammar: infer_grammar,

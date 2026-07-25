@@ -77,8 +77,9 @@ pub enum JadeError {
     /// LLM inference call failed (network error, HTTP error, or unexpected API response).
     InferenceError { message: String, span: Span },
 
-    /// No API key or backend is configured when a `?` dereference is attempted.
-    MissingApiKey { span: Span },
+    /// No inference backend is available when a `?` dereference is attempted:
+    /// no provider package is configured and no local daemon is running.
+    NoInferenceBackend { span: Span },
 
     /// `?` applied to a variable that holds a non-prompt value.
     NotAPrompt { name: String, span: Span },
@@ -200,8 +201,9 @@ impl std::fmt::Display for JadeError {
                 write!(f, "[{}:{}] type '{}' does not implement interface '{}': missing method '{}'", span.line, span.col, type_name, interface_name, method),
             JadeError::InferenceError { message, span } =>
                 write!(f, "[{}:{}] inference error: {}", span.line, span.col, message),
-            JadeError::MissingApiKey { span } =>
-                write!(f, "[{}:{}] no inference backend available — start the inference \
+            JadeError::NoInferenceBackend { span } =>
+                write!(f, "[{}:{}] no inference backend available — run `jade register` to \
+                    choose a provider and set your API key, or start the local inference \
                     daemon (socket at $HOME/.jade/llm.sock; override with JADE_LLM_SOCK)", span.line, span.col),
             JadeError::NotAPrompt { name, span } =>
                 write!(f, "[{}:{}] '{}' is not a prompt variable", span.line, span.col, name),

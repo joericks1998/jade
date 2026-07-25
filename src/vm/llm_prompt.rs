@@ -33,7 +33,7 @@ pub(crate) async fn vm_prompt_deref(
 
     // Clone the Arc so we don't hold a borrow of state across .await points.
     let backend = state.inference_backend.as_ref()
-        .ok_or(JadeError::MissingApiKey { span })?
+        .ok_or(JadeError::NoInferenceBackend { span })?
         .clone();
 
     // Grammar priority: user-supplied override > auto-generated from output type.
@@ -84,9 +84,9 @@ pub(crate) async fn vm_prompt_deref_stream(
     }
     // Return a lazy stream. Inference starts on first drain so callers
     // (e.g. stream() with mute_on=) can inject grammar constraints first.
-    // MissingApiKey is checked here eagerly so the error site is ?p, not drain.
+    // NoInferenceBackend is checked here eagerly so the error site is ?p, not drain.
     state.inference_backend.as_ref()
-        .ok_or(JadeError::MissingApiKey { span })?;
+        .ok_or(JadeError::NoInferenceBackend { span })?;
     Ok(VmValue::TokenStream(Arc::new(JadeTokenStream {
         rx: Mutex::new(None),
         tokens_handle: Mutex::new(None),
@@ -106,7 +106,7 @@ pub(crate) async fn vm_drain_token_stream(
         let lazy = ts.lazy_prompt.lock().take();
         if let Some(prompt_text) = lazy {
             let backend = state.inference_backend.as_ref()
-                .ok_or(JadeError::MissingApiKey { span })?.clone();
+                .ok_or(JadeError::NoInferenceBackend { span })?.clone();
             let (rx, handle) = backend.infer_stream(llm::InferenceRequest {
                 prompt: prompt_text,
                 grammar: None, anchor: None, stop_anchor: None, ..Default::default()
@@ -282,7 +282,7 @@ pub(crate) async fn vm_drain_token_stream_printing(
         let lazy = ts.lazy_prompt.lock().take();
         if let Some(prompt_text) = lazy {
             let backend = state.inference_backend.as_ref()
-                .ok_or(JadeError::MissingApiKey { span })?.clone();
+                .ok_or(JadeError::NoInferenceBackend { span })?.clone();
             let (rx, handle) = backend.infer_stream(llm::InferenceRequest {
                 prompt: prompt_text,
                 grammar: None, anchor: None, stop_anchor: None, ..Default::default()

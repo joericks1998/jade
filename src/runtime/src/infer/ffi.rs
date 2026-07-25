@@ -35,7 +35,7 @@ fn fatal(e: InferError) -> ! {
 /// `malloc` and not a Rust allocation because `infer.c` releases these with
 /// `free()`. Mixing allocators here would be a heap corruption that only shows
 /// up under load.
-fn to_c_buffer(bytes: &[u8]) -> *mut c_char {
+pub(crate) fn to_c_buffer(bytes: &[u8]) -> *mut c_char {
     let p = unsafe { sys::malloc(bytes.len() + 1) };
     if p.is_null() {
         sys::oom();

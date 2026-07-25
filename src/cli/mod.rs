@@ -5,6 +5,7 @@ pub mod env;
 pub mod fmt;
 pub mod new;
 pub mod pkg;
+pub mod register;
 pub mod repl;
 pub mod run;
 pub mod test;

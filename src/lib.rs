@@ -54,6 +54,7 @@ pub mod llm;
 pub mod native;
 pub mod pkg;
 pub mod project;
+pub mod providers;
 pub mod stdio;
 
 // Native built-in packages (the `std/*` + core intrinsic registry).

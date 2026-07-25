@@ -1289,7 +1289,7 @@ fn test_vm_interface_undefined_error() {
 #[test]
 fn test_vm_prompt_deref_no_backend_returns_error() {
     let err = try_run_src("prompt p = \"hi\"\nlet x = ?p").err().expect("expected error");
-    assert!(matches!(err, JadeError::MissingApiKey { .. }));
+    assert!(matches!(err, JadeError::NoInferenceBackend { .. }));
 }
 
 #[test]
@@ -1304,7 +1304,7 @@ fn test_vm_prompt_deref_field_access_no_backend() {
     let err = try_run_src(
         "struct Agent {\n  prompt system = \"helpful\"\n}\nlet a = Agent {}\nlet r = a.(?system)"
     ).err().expect("expected error");
-    assert!(matches!(err, JadeError::MissingApiKey { .. }));
+    assert!(matches!(err, JadeError::NoInferenceBackend { .. }));
 }
 
 #[test]

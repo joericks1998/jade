@@ -32,7 +32,7 @@
 
 pub mod conn;
 pub mod frame;
-mod ffi;
+pub(crate) mod ffi;
 
 pub use conn::{sock_path, Conn, Mode, Response};
 

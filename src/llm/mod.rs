@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::frontend::error::{Result, Span};
 
 pub mod jaded;
+pub mod provider_backend;
 
 #[cfg(test)]
 mod tests;
@@ -48,16 +49,22 @@ pub trait InferenceBackend: Send + Sync {
     }
 }
 
-/// Select the inference backend.
+/// Select the inference backend, in priority order:
 ///
-/// There is one: the inference daemon. It is available when its socket exists
-/// (`JADE_LLM_SOCK`, else `$HOME/.jade/llm.sock`). Returns `None` when no daemon
-/// is running — the daemon owns all providers and their configuration now, so
-/// there is no API-key fallback to reach for.
+/// 1. **A configured provider package** — cloud inference (Anthropic/OpenAI) with
+///    no daemon and no special hardware. Active when `~/.jade/config.toml` names a
+///    provider whose `.so` is installed (see [`crate::providers`]). This is the
+///    default door for most machines, which is why it comes first.
+/// 2. **The local inference daemon** — the optional upgrade, available when its
+///    socket exists (`JADE_LLM_SOCK`, else `$HOME/.jade/llm.sock`).
 ///
-/// The socket path comes from [`jaded::sock_path`], the same function the client
-/// connects through, so the existence check and the connection agree.
+/// Returns `None` when neither is present; `?p` then raises
+/// [`JadeError::NoInferenceBackend`](crate::frontend::error::JadeError), whose
+/// message points at `jade register`.
 pub fn select_backend() -> Option<Arc<dyn InferenceBackend>> {
+    if let Some(backend) = provider_backend::ProviderPackageBackend::from_registry() {
+        return Some(Arc::new(backend));
+    }
     if std::path::Path::new(&jaded::sock_path()).exists() {
         return Some(Arc::new(jaded::JadedBackend::new()));
     }
