@@ -37,11 +37,20 @@ pub mod ffi;
 #[cfg(test)]
 mod tests;
 
-/// The dynamic-library extension for provider packages on this platform.
+/// The canonical dynamic-library extension for provider packages on this
+/// platform, used when the CLI names files it creates. Discovery is more lenient
+/// (see [`is_provider_lib`]): providers actually ship as `.so` on every platform.
 #[cfg(target_os = "macos")]
 pub const LIB_EXT: &str = "dylib";
 #[cfg(not(target_os = "macos"))]
 pub const LIB_EXT: &str = "so";
+
+/// Whether `path` looks like a loadable provider library. Providers are
+/// distributed as `.so` on every platform (macOS `dlopen` ignores the
+/// extension), so both `.so` and a hand-placed `.dylib` are accepted.
+pub fn is_provider_lib(path: &Path) -> bool {
+    matches!(path.extension().and_then(|e| e.to_str()), Some("so") | Some("dylib"))
+}
 
 // ── active-slot paths ─────────────────────────────────────────────────────────
 
@@ -69,7 +78,7 @@ pub fn active_lib_path() -> Option<PathBuf> {
         .ok()?
         .flatten()
         .map(|e| e.path())
-        .find(|p| p.extension().and_then(|e| e.to_str()) == Some(LIB_EXT))
+        .find(|p| is_provider_lib(p))
 }
 
 /// The opaque credential blob the active provider is built from

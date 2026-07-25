@@ -31,6 +31,10 @@ jobs:
             target: x86_64-unknown-linux-gnu
             archive: jade-linux-x86_64.tar.gz
             binary: jade
+            # Provider `.so`s on `providers-latest` are named `<name>-<platform>.so`,
+            # where <platform> is the pkg-fetcher tag (fetch::platform_tag), NOT the
+            # archive's `linux-x86_64` label — they happen to match here but not on macOS.
+            provider_platform: linux-x86_64
 
           # macOS ships arm64 only. Intel (x86_64) was dropped: the release
           # binary links LLVM 18 in-process, and cross-compiling x86_64 on the
@@ -42,6 +46,7 @@ jobs:
             target: aarch64-apple-darwin
             archive: jade-macos-arm64.tar.gz
             binary: jade
+            provider_platform: darwin-aarch64
 
     steps:
       - uses: actions/checkout@v4
@@ -79,6 +84,32 @@ jobs:
       # -lJadeRuntime", because the paths baked in at compile time point into
       # this runner's target/ directory. Layout is `jade` + `lib/*.a`, which
       # install.sh unpacks to <prefix>/bin and <prefix>/lib/jade.
+      # Bundle the provider packages so a fresh install ships them and `jade
+      # register` finds them under <prefix>/lib/jade/providers/. The `.so`s are
+      # built by the dovata repo and staged on this repo's `providers-latest`
+      # release; we pull this platform's set and strip the `-<platform>` suffix
+      # so the file stem is the provider name. Idempotent — skips cleanly until
+      # the first publish creates the release (same guard as deploy-docs.yml).
+      - name: Bundle provider packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p dist/lib/providers
+          if gh release view providers-latest >/dev/null 2>&1; then
+            tmp="$(mktemp -d)"
+            gh release download providers-latest --dir "$tmp" \
+              --pattern "*-${{ matrix.provider_platform }}.so" || true
+            for f in "$tmp"/*-${{ matrix.provider_platform }}.so; do
+              [ -e "$f" ] || continue
+              base="$(basename "$f")"
+              name="${base%-${{ matrix.provider_platform }}.so}"
+              cp "$f" "dist/lib/providers/$name.so"
+            done
+            echo "Bundled providers:"; ls -l dist/lib/providers/ || true
+          else
+            echo "::notice::no providers-latest release yet — shipping without bundled providers"
+          fi
+
       - name: Package
         run: |
           mkdir -p dist/lib

@@ -3,8 +3,8 @@
 //! NOT unit-tested here; see the module-level note below for what is skipped.
 //!
 //! `tests.rs` is a SIBLING of the subcommand submodules, so only `pub` /
-//! `pub(crate)` items are reachable — private helpers (e.g. `upgrade::platform_tag`,
-//! `model::KNOWN_MODELS`, `configure::read_line`) are not testable from here.
+//! `pub(crate)` items are reachable — private helpers (e.g. `upgrade::platform_tag`)
+//! are not testable from here.
 
 // ── format_bytes (cli/mod.rs, pub(crate)) ─────────────────────────────────────
 

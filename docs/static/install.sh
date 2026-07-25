@@ -105,28 +105,38 @@ if [ -d "$TMP_DIR/lib" ]; then
   done
 fi
 
+# Bundled inference providers (anthropic/openai .so's). They live under
+# <prefix>/lib/jade/providers/ where `jade register` discovers them.
+if [ -d "$TMP_DIR/lib/providers" ]; then
+  for so in "$TMP_DIR"/lib/providers/*; do
+    [ -e "$so" ] || continue
+    install_file "$so" "$LIB_DIR/providers/$(basename "$so")"
+  done
+fi
+
 echo ""
 echo "jade $TAG installed to $INSTALL_DIR/$BINARY"
 [ -d "$LIB_DIR" ] && echo "runtime archives installed to $LIB_DIR"
 echo ""
 
-# Offer to configure LLM credentials.
-# When running via curl | sh, stdin is the pipe — read from /dev/tty instead
-# so the prompt reaches the actual terminal.
+# Set up an inference provider. Providers ship with jade; `jade register` picks
+# one and stores your API key. When running via curl | sh, stdin is the pipe —
+# read from /dev/tty so the prompt reaches the actual terminal.
 if [ -e /dev/tty ]; then
-  printf "Configure your LLM provider (Anthropic / OpenAI) now? [y/N] "
+  printf "Set up an inference provider (Anthropic / OpenAI) now? [Y/n] "
   read -r REPLY < /dev/tty
   case "$REPLY" in
-    [yY]*)
-      echo ""
-      "$INSTALL_DIR/$BINARY" configure < /dev/tty
+    [nN]*)
+      echo "Skipped. Run 'jade register' any time to choose a provider and set your API key."
       ;;
     *)
-      echo "Skipped. Run 'jade configure' any time to set up your LLM provider."
+      echo ""
+      # Don't fail the install if registration is cancelled or no provider shipped.
+      "$INSTALL_DIR/$BINARY" register < /dev/tty || true
       ;;
   esac
 else
-  echo "Run 'jade configure' to set up your LLM provider (Anthropic / OpenAI)."
+  echo "Run 'jade register' to choose an inference provider and set your API key."
 fi
 
 echo ""

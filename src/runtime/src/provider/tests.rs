@@ -152,3 +152,20 @@ fn active_slot_resolves_the_single_so_and_config() {
 
     restore_env("JADE_PROVIDER_ACTIVE", prev);
 }
+
+#[test]
+fn a_dot_so_is_discovered_even_where_lib_ext_is_dylib() {
+    // Providers ship as `.so` on every platform; discovery must find one in the
+    // slot regardless of this platform's canonical LIB_EXT.
+    let _guard = ENV_LOCK.lock().unwrap();
+    let dir = TmpDir::new("so-active");
+    let prev = std::env::var("JADE_PROVIDER_ACTIVE").ok();
+    set_env("JADE_PROVIDER_ACTIVE", dir.0.to_str().unwrap());
+
+    let lib = dir.0.join("anthropic.so");
+    std::fs::write(&lib, b"").unwrap();
+    assert!(is_active());
+    assert_eq!(active_lib_path().as_deref(), Some(lib.as_path()));
+
+    restore_env("JADE_PROVIDER_ACTIVE", prev);
+}

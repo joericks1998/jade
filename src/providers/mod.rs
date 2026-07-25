@@ -21,7 +21,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use jade_runtime::provider::{active_dir, jade_home, LIB_EXT};
+use jade_runtime::provider::{active_dir, is_provider_lib, jade_home};
 
 /// Extra directory to search for provider `.so`s (dev/testing), highest priority.
 const ENV_PROVIDERS_DIR: &str = "JADE_PROVIDERS_DIR";
@@ -80,7 +80,7 @@ pub fn installed() -> Vec<InstalledProvider> {
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some(LIB_EXT) {
+            if !is_provider_lib(&path) {
                 continue;
             }
             let Some(name) = path.file_stem().and_then(|s| s.to_str()) else { continue };
@@ -119,10 +119,13 @@ pub fn activate(name: &str) -> Result<(), String> {
 
     let map_io = |e: io::Error| format!("activating '{name}': {e}");
 
+    // Preserve the source library's extension (providers ship as `.so`).
+    let ext = src.extension().and_then(|e| e.to_str()).unwrap_or("so").to_owned();
+
     // Ensure a pool copy exists (the persistent installed set).
     let pool = pool_dir();
     std::fs::create_dir_all(&pool).map_err(map_io)?;
-    let pooled = pool.join(format!("{name}.{LIB_EXT}"));
+    let pooled = pool.join(format!("{name}.{ext}"));
     if src != pooled {
         std::fs::copy(&src, &pooled).map_err(map_io)?;
     }
@@ -132,7 +135,7 @@ pub fn activate(name: &str) -> Result<(), String> {
     let active = active_dir();
     clear_active().map_err(map_io)?;
     std::fs::create_dir_all(&active).map_err(map_io)?;
-    std::fs::copy(&pooled, active.join(format!("{name}.{LIB_EXT}"))).map_err(map_io)?;
+    std::fs::copy(&pooled, active.join(format!("{name}.{ext}"))).map_err(map_io)?;
 
     // Materialize the credential from the stored file (a key passed as an env var
     // and never stored stays off disk — the provider reads it itself at runtime).
@@ -160,9 +163,8 @@ fn clear_active() -> io::Result<()> {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        let is_lib = path.extension().and_then(|e| e.to_str()) == Some(LIB_EXT);
         let is_config = path.file_name().and_then(|n| n.to_str()) == Some("config.json");
-        if is_lib || is_config {
+        if is_provider_lib(&path) || is_config {
             std::fs::remove_file(&path)?;
         }
     }
