@@ -28,6 +28,21 @@ jobs:
         working-directory: docs
       - run: npm run build
         working-directory: docs
+      # The anthropic/openai provider .so packages are built by the dovata repo and
+      # staged on this repo's `providers-latest` release. Serve them at the site root
+      # so `jade pkg add --url 'https://www.jadelang.org/<name>-{platform}.so'` works.
+      # Idempotent: skips cleanly until the first publish creates the release.
+      - name: Inject provider packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view providers-latest >/dev/null 2>&1; then
+            gh release download providers-latest --dir docs/build \
+              --pattern '*.so' --pattern 'checksums.txt' --clobber
+            echo "Injected provider packages:"; ls -l docs/build/*.so || true
+          else
+            echo "::notice::no providers-latest release yet — skipping provider injection"
+          fi
       - uses: actions/upload-pages-artifact@v3
         with:
           path: docs/build
