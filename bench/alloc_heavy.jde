@@ -1,0 +1,22 @@
+// Allocation-stress benchmark. Unlike heavy.jde / extreme.jde (pure recursion,
+// which is arithmetic + call frames), every iteration here builds and discards
+// short-lived collections and strings — the pattern the pooling allocator
+// targets. Used with `--features alloc-profile` (Phase 0) to size the pool.
+
+fn work(n) {
+    let acc = 0
+    let i = 0
+    while i < n {
+        // A small dict with a nested array value.
+        let d = {"id": i, "name": "item", "tags": [i, i + 1, i + 2]}
+        // A fresh string per iteration (concatenation allocates).
+        let label = d["name"] + "-" + "row"
+        // A standalone array.
+        let arr = [d["id"], d["id"] + 1, d["id"] + 2, d["id"] + 3]
+        acc = acc + arr[0] + d["id"]
+        i = i + 1
+    }
+    return acc
+}
+
+print(work(100000))

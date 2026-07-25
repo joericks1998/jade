@@ -16,6 +16,11 @@ compile_error!(
      Windows is not a supported target; on Windows, build inside WSL2."
 );
 
+/// Phase-0 allocation profiler (feature `alloc-profile`). Host-only; see the
+/// module docs. The `#[global_allocator]` itself is declared in `main.rs`.
+#[cfg(feature = "alloc-profile")]
+pub mod alloc_profile;
+
 pub mod build;
 pub mod builtins;
 pub mod cache;

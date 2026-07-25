@@ -2,6 +2,13 @@ use jade::cli;
 
 use clap::{Parser, Subcommand};
 
+// Phase-0 allocation profiler (feature `alloc-profile`). Declared HERE, in the
+// binary — never in `jade-runtime` — so it applies only to the `jade` process
+// and can never be linked into a dlopen'd package (the mistake mimalloc made).
+#[cfg(feature = "alloc-profile")]
+#[global_allocator]
+static ALLOC: jade::alloc_profile::ProfilingAlloc = jade::alloc_profile::ProfilingAlloc;
+
 // ── CLI definition ────────────────────────────────────────────────────────────
 
 #[derive(Parser)]
@@ -193,6 +200,11 @@ fn main() {
         .build()
         .expect("tokio runtime")
         .block_on(run_cli());
+
+    #[cfg(feature = "alloc-profile")]
+    if std::env::var_os("JADE_ALLOC_PROFILE").is_some() {
+        eprint!("{}", jade::alloc_profile::report());
+    }
 }
 
 async fn run_cli() {
