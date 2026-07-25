@@ -138,9 +138,7 @@ enum Commands {
     Register {
         /// Provider to register (e.g. anthropic, openai); omit for interactive
         provider: Option<String>,
-        /// API key to store (omit to be prompted). For CI, prefer the
-        /// <PROVIDER>_API_KEY env var over passing a secret on the command line.
-        #[arg(long, value_name = "KEY")]
+        /// API key to store (omit to be prompted). e.g. `jade register anthropic sk-ant-…`
         key: Option<String>,
         /// List installed providers and the active selection, then exit
         #[arg(long)]

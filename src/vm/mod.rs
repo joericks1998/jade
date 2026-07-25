@@ -42,7 +42,7 @@ mod chunk;
 mod exceptions;
 mod call;
 mod llm_prompt;
-mod coerce;
+pub(crate) mod coerce;
 mod dispatch;
 pub use value::*;
 pub use state::*;
