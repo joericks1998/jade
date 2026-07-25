@@ -117,24 +117,27 @@ fi
 echo ""
 echo "jade $TAG installed to $INSTALL_DIR/$BINARY"
 [ -d "$LIB_DIR" ] && echo "runtime archives installed to $LIB_DIR"
+
+# Warn if a *different* jade is earlier in PATH — it would shadow the one we just
+# installed, so `jade` keeps running the old binary and the install looks like it
+# did nothing. (This is exactly the trap a ~/.local/bin/jade sets ahead of
+# /usr/local/bin.)
+RESOLVED=$(command -v jade 2>/dev/null || true)
+if [ -n "$RESOLVED" ] && [ "$RESOLVED" != "$INSTALL_DIR/$BINARY" ]; then
+  echo ""
+  echo "Warning: another 'jade' is earlier in your PATH and will shadow this install:"
+  echo "           $RESOLVED"
+  echo "         Remove it (rm '$RESOLVED') or re-run with JADE_INSTALL_DIR=$(dirname "$RESOLVED")."
+fi
 echo ""
 
-# Set up an inference provider. Providers ship with jade; `jade register` picks
-# one and stores your API key. When running via curl | sh, stdin is the pipe —
-# read from /dev/tty so the prompt reaches the actual terminal.
+# First-run setup: choose an inference provider and set your API key. This is part
+# of install so it isn't a separate step — `jade register` is interactive (lists
+# the bundled providers, prompts for a key, and lets you skip). curl | sh makes
+# stdin the pipe, so read from /dev/tty; a non-interactive install just prints how
+# to run it later. Never fail the install on a skipped/cancelled registration.
 if [ -e /dev/tty ]; then
-  printf "Set up an inference provider (Anthropic / OpenAI) now? [Y/n] "
-  read -r REPLY < /dev/tty
-  case "$REPLY" in
-    [nN]*)
-      echo "Skipped. Run 'jade register' any time to choose a provider and set your API key."
-      ;;
-    *)
-      echo ""
-      # Don't fail the install if registration is cancelled or no provider shipped.
-      "$INSTALL_DIR/$BINARY" register < /dev/tty || true
-      ;;
-  esac
+  "$INSTALL_DIR/$BINARY" register < /dev/tty || true
 else
   echo "Run 'jade register' to choose an inference provider and set your API key."
 fi
