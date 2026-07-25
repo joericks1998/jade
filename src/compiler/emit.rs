@@ -55,15 +55,29 @@ struct Emitter {
     /// `None` = top-level code: `let` → globals.
     /// `Some` = function body: `let` → frame slots.
     locals: Option<HashMap<String, u32>>,
+    /// Source positions `(line, col)` of array literals the escape analysis
+    /// proved non-escaping; the emitter lowers these to `MakeArrayArena`. Empty
+    /// for the top level (its `let`s are globals, which escape by nature).
+    arena_eligible: std::collections::HashSet<(usize, usize)>,
 }
 
 impl Emitter {
     fn new_top() -> Self {
-        Emitter { chunk: Chunk::new("<top>"), next_reg: 0, locals: None }
+        Emitter {
+            chunk: Chunk::new("<top>"),
+            next_reg: 0,
+            locals: None,
+            arena_eligible: std::collections::HashSet::new(),
+        }
     }
 
     fn new_fn(name: &str) -> Self {
-        Emitter { chunk: Chunk::new(name), next_reg: 0, locals: Some(HashMap::new()) }
+        Emitter {
+            chunk: Chunk::new(name),
+            next_reg: 0,
+            locals: Some(HashMap::new()),
+            arena_eligible: std::collections::HashSet::new(),
+        }
     }
 
     fn alloc_reg(&mut self) -> Reg {
@@ -577,6 +591,10 @@ fn emit_fn(
     ctx: &mut EmitCtx,
 ) -> Result<CompiledFn> {
     let mut fn_em = Emitter::new_fn(name);
+    // Decide which array literals in this function may be arena-allocated (AOT
+    // only; the VM ignores the distinction). Runs on the typed body before it is
+    // consumed by emission.
+    fn_em.arena_eligible = crate::compiler::escape::analyze(&body).eligible;
     // Allocate slots for parameters first (slots 0..params.len()).
     let param_names: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
     for name in &param_names {
@@ -688,7 +706,14 @@ fn emit_expr(expr: &TExpr, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<Reg> {
                 regs.push(emit_expr(e, em, ctx)?);
             }
             let dest = em.alloc_reg();
-            em.chunk.emit(Instr::MakeArray(dest, regs), span);
+            // A literal the escape analysis cleared is lowered to MakeArrayArena so
+            // the AOT backend can arena-allocate it; the VM treats it as MakeArray.
+            let instr = if em.arena_eligible.contains(&(span.line, span.col)) {
+                Instr::MakeArrayArena(dest, regs)
+            } else {
+                Instr::MakeArray(dest, regs)
+            };
+            em.chunk.emit(instr, span);
             Ok(dest)
         }
 

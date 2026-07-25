@@ -1587,7 +1587,10 @@ fn resolve_user_calls(
                 }
                 continue;
             }
-            Instr::MakeArray(d, elems) => {
+            Instr::MakeArray(d, elems) | Instr::MakeArrayArena(d, elems) => {
+                // 5b: MakeArrayArena is tracked and materialized exactly like a
+                // heap MakeArray, so parity holds. Increment 5c switches the arena
+                // case to `jrt_karr_new_arena` + region reset.
                 reg_fn.remove(d);
                 reg_global.remove(d);
                 reg_getfield.remove(d);
@@ -3418,7 +3421,10 @@ fn lower_instr<'ctx>(
         // the object's tag/kind in the runtime (string/array; dict is a later
         // sub-brick). len/print/str/f-strings are already collection-aware via
         // jrt_len_unknown / jrt_render_any.
-        MakeArray(d, regs) => {
+        // 5b: MakeArrayArena still allocates on the heap, identically to MakeArray,
+        // so backend parity holds. 5c switches the arena case to
+        // jrt_karr_new_arena / jrt_karr_push_arena (no retain; freed by reset).
+        MakeArray(d, regs) | MakeArrayArena(d, regs) => {
             let new_f = low.runtime_fn("jrt_karr_new", low.ptrt().fn_type(&[], false));
             let arr = b
                 .build_call(new_f, &[], "karr")
@@ -3436,6 +3442,14 @@ fn lower_instr<'ctx>(
             low.store(*d, low.tag_ptr(arr));
             Ok(false)
         }
+        // 5b: arena bookkeeping is inert while MakeArrayArena is still heap.
+        // ArenaMark yields 0 into its token register (matching the VM); ArenaReset
+        // does nothing. 5c makes these jrt_arena_mark / jrt_arena_reset.
+        ArenaMark(d) => {
+            low.store(*d, i64_ty.const_int(0, false));
+            Ok(false)
+        }
+        ArenaReset(_) => Ok(false),
         GetIndex(d, obj, idx) => {
             let f = low.runtime_fn(
                 "jrt_val_index",
