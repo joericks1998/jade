@@ -21,6 +21,11 @@ compile_error!(
 #[cfg(feature = "alloc-profile")]
 pub mod alloc_profile;
 
+/// Phase-1 segregated free-list allocator. Installed as the `jade` binary's
+/// global allocator in `main.rs` — host-only, never in `jade-runtime`, so it
+/// cannot reach a dlopen'd package the way mimalloc did.
+pub mod pool_alloc;
+
 pub mod build;
 pub mod builtins;
 pub mod cache;

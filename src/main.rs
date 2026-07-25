@@ -2,9 +2,15 @@ use jade::cli;
 
 use clap::{Parser, Subcommand};
 
-// Phase-0 allocation profiler (feature `alloc-profile`). Declared HERE, in the
-// binary — never in `jade-runtime` — so it applies only to the `jade` process
-// and can never be linked into a dlopen'd package (the mistake mimalloc made).
+// The `jade` binary's global allocator. Declared HERE, in the binary — never in
+// `jade-runtime` — so it applies only to the `jade` process and can never be
+// linked into a dlopen'd package (the mistake mimalloc made). Normally the
+// Phase-1 segregated free-list pool; the `alloc-profile` feature swaps in the
+// measuring allocator instead.
+#[cfg(not(feature = "alloc-profile"))]
+#[global_allocator]
+static ALLOC: jade::pool_alloc::PoolAlloc = jade::pool_alloc::PoolAlloc;
+
 #[cfg(feature = "alloc-profile")]
 #[global_allocator]
 static ALLOC: jade::alloc_profile::ProfilingAlloc = jade::alloc_profile::ProfilingAlloc;
