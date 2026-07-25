@@ -214,7 +214,8 @@ pub extern "C" fn jrt_incref(word: W) {
     if v.is_ptr() {
         let p = v.as_ptr() as *mut c_void;
         unsafe {
-            if is_collection(p) {
+            // Arena objects are not reference-counted (freed only by ArenaReset).
+            if is_collection(p) && !(*(p as *const ObjHeader)).is_arena() {
                 (*(p as *mut ObjHeader)).incref();
             }
         }
@@ -248,6 +249,11 @@ unsafe fn decref_word(word: W) {
     // Skip header-carrying non-collections (a fn-box, kind Fn): they are not
     // refcounted and their allocation is not a collection payload.
     if !unsafe { is_collection(p) } {
+        return;
+    }
+    // Arena objects are not reference-counted — they are freed only by ArenaReset,
+    // so a decref must never touch (or free) them.
+    if unsafe { (*(p as *const ObjHeader)).is_arena() } {
         return;
     }
     if unsafe { (*(p as *mut ObjHeader)).decref() } {

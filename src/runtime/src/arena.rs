@@ -198,12 +198,17 @@ unsafe impl Allocator for ArenaAlloc {
 impl Mark {
     #[inline]
     fn to_token(self) -> i64 {
-        debug_assert!(self.pos < (1 << 32) && self.cur < (1 << 31), "arena mark out of token range");
-        ((self.cur as i64) << 32) | (self.pos as i64)
+        debug_assert!(self.pos < (1 << 32) && self.cur < (1 << 30), "arena mark out of token range");
+        // Shift left 1 so the token is even (low bit 0). Codegen stores the token
+        // in an ordinary refcounted register; an even value reads as an int, so
+        // the incref/decref emitted around that register no-op on it (a `TAG_PTR`
+        // pattern would send the collector chasing a bogus object).
+        (((self.cur as i64) << 32) | (self.pos as i64)) << 1
     }
     #[inline]
     fn from_token(v: i64) -> Self {
-        Mark { cur: (v >> 32) as usize, pos: (v & 0xFFFF_FFFF) as usize }
+        let packed = v >> 1;
+        Mark { cur: (packed >> 32) as usize, pos: (packed & 0xFFFF_FFFF) as usize }
     }
 }
 
@@ -256,12 +261,16 @@ const _: () = {
 
 /// Move `obj` into a fresh arena block and return it type-erased. The header
 /// leads with an `align(8)` `ObjHeader`, so the pointer is `TAG_PTR`-taggable.
+/// The header is marked [`flags::ARENA`](crate::heap::flags::ARENA) so the
+/// refcount ops no-op on it and the collector never frees it — only `reset` does.
 #[inline]
 unsafe fn arena_box<T>(obj: T) -> *mut c_void {
     let p = ARENA.with(|a| unsafe {
         (*a.get()).bump(core::mem::size_of::<T>().max(1), core::mem::align_of::<T>())
     }) as *mut T;
     unsafe { p.write(obj) };
+    // Every arena object leads with an ObjHeader at offset 0.
+    unsafe { (*(p as *const crate::heap::ObjHeader)).set_arena() };
     p as *mut c_void
 }
 

@@ -83,6 +83,13 @@ pub mod flags {
     /// The object is already buffered in the collector's candidate-root set,
     /// so a further decref must not enqueue it again.
     pub const BUFFERED: u8 = 1 << 0;
+    /// The object lives in a bump arena (`jade_runtime::arena`): it is NOT
+    /// reference-counted — `jrt_incref`/`jrt_decref` no-op on it — and is
+    /// reclaimed only in bulk by `ArenaReset`, never by the collector's
+    /// `free_obj`. This is what lets an arena pointer flow through refcounted
+    /// registers safely: every rc op on it is a no-op, so it can never be freed
+    /// out from under a live reference.
+    pub const ARENA: u8 = 1 << 1;
 }
 
 /// The common header prefixing every reference-typed Jade heap object.
@@ -156,6 +163,18 @@ impl ObjHeader {
     pub fn incref(&self) {
         self.rc.fetch_add(1, Ordering::Relaxed);
         self.color.store(Color::Black as u8, Ordering::Relaxed);
+    }
+
+    /// Whether this object is arena-allocated (see [`flags::ARENA`]).
+    #[inline]
+    pub fn is_arena(&self) -> bool {
+        self.flags.load(Ordering::Relaxed) & flags::ARENA != 0
+    }
+
+    /// Mark this object as arena-allocated so the refcount ops no-op on it.
+    #[inline]
+    pub fn set_arena(&self) {
+        self.flags.fetch_or(flags::ARENA, Ordering::Relaxed);
     }
 
     /// Decrement the strong count. Returns `true` when it reaches zero (the

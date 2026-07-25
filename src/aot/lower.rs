@@ -3421,18 +3421,24 @@ fn lower_instr<'ctx>(
         // the object's tag/kind in the runtime (string/array; dict is a later
         // sub-brick). len/print/str/f-strings are already collection-aware via
         // jrt_len_unknown / jrt_render_any.
-        // 5b: MakeArrayArena still allocates on the heap, identically to MakeArray,
-        // so backend parity holds. 5c switches the arena case to
-        // jrt_karr_new_arena / jrt_karr_push_arena (no retain; freed by reset).
+        // A heap array (kind-tagged, reference-counted) OR — for MakeArrayArena —
+        // an arena array (marked ARENA by the constructor, so incref/decref no-op
+        // on it and only ArenaReset frees it). The arena constructor stores
+        // elements without a retain; that is sound because the escape analysis
+        // only marks arrays of immediate scalars, which carry no heap ownership.
         MakeArray(d, regs) | MakeArrayArena(d, regs) => {
-            let new_f = low.runtime_fn("jrt_karr_new", low.ptrt().fn_type(&[], false));
+            let (new_name, push_name) = match instr {
+                MakeArrayArena(..) => ("jrt_karr_new_arena", "jrt_karr_push_arena"),
+                _ => ("jrt_karr_new", "jrt_karr_push"),
+            };
+            let new_f = low.runtime_fn(new_name, low.ptrt().fn_type(&[], false));
             let arr = b
                 .build_call(new_f, &[], "karr")
                 .map_err(|e| e.to_string())?
                 .as_any_value_enum()
                 .into_pointer_value();
             let push_f = low.runtime_fn(
-                "jrt_karr_push",
+                push_name,
                 low.ctx.void_type().fn_type(&[low.ptrt().into(), i64_ty.into()], false),
             );
             for r in regs {
@@ -3442,14 +3448,26 @@ fn lower_instr<'ctx>(
             low.store(*d, low.tag_ptr(arr));
             Ok(false)
         }
-        // 5b: arena bookkeeping is inert while MakeArrayArena is still heap.
-        // ArenaMark yields 0 into its token register (matching the VM); ArenaReset
-        // does nothing. 5c makes these jrt_arena_mark / jrt_arena_reset.
+        // Open/close a per-region arena scope. The mark token is an even (int-like)
+        // word, so the refcount ops around its register no-op on it.
         ArenaMark(d) => {
-            low.store(*d, i64_ty.const_int(0, false));
+            let f = low.runtime_fn("jrt_arena_mark", i64_ty.fn_type(&[], false));
+            let tok = b
+                .build_call(f, &[], "arena_mark")
+                .map_err(|e| e.to_string())?
+                .as_any_value_enum()
+                .into_int_value();
+            low.store(*d, tok);
             Ok(false)
         }
-        ArenaReset(_) => Ok(false),
+        ArenaReset(r) => {
+            let f = low.runtime_fn(
+                "jrt_arena_reset",
+                low.ctx.void_type().fn_type(&[i64_ty.into()], false),
+            );
+            b.build_call(f, &[low.load(*r).into()], "").map_err(|e| e.to_string())?;
+            Ok(false)
+        }
         GetIndex(d, obj, idx) => {
             let f = low.runtime_fn(
                 "jrt_val_index",
