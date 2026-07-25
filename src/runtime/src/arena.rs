@@ -167,6 +167,112 @@ unsafe impl Allocator for ArenaAlloc {
     }
 }
 
+// ── C-ABI surface for codegen ─────────────────────────────────────────────────
+//
+// A `Mark` is (chunk index, byte offset). The offset is < CHUNK (64 KiB) and the
+// chunk index is tiny, so both pack losslessly into one `i64` token that codegen
+// stashes in a slot and hands back to `reset` at the region's end (works across
+// early returns — each exit resets to its own region's mark).
+
+impl Mark {
+    #[inline]
+    fn to_token(self) -> i64 {
+        ((self.cur as i64) << 32) | (self.pos as i64)
+    }
+    #[inline]
+    fn from_token(v: i64) -> Self {
+        Mark { cur: (v >> 32) as usize, pos: (v & 0xFFFF_FFFF) as usize }
+    }
+}
+
+/// Snapshot the arena cursor as a token (codegen emits this at region entry).
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_arena_mark() -> i64 {
+    mark().to_token()
+}
+
+/// Reset the arena to a token from [`jrt_arena_mark`] (region exit).
+///
+/// # Safety
+/// No arena pointer handed out after the corresponding `mark` may be read after
+/// this call — the compiler's escape analysis is responsible for that.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jrt_arena_reset(token: i64) {
+    unsafe { reset(Mark::from_token(token)) };
+}
+
+// ── Arena collection constructors ─────────────────────────────────────────────
+//
+// Mirror `ffi_coll`'s heap constructors, but the object header AND its backing
+// store live in the arena (via `ArenaAlloc`), and elements are stored WITHOUT a
+// retain: arena collections are non-escaping and never refcounted, so `reset`
+// frees the whole tree at once with no per-element decref. The compiler must only
+// place scalar or other-arena words in them (no owned heap-collection references),
+// which the escape analysis guarantees.
+
+use crate::coll::{ArrayObj, DictObj, StructObj};
+use crate::cstr;
+use crate::value::JadeValue;
+use core::ffi::{c_char, c_void};
+
+/// The AOT element word type (a tagged [`JadeValue`]).
+type W = i64;
+
+/// Move `obj` into a fresh arena block and return it type-erased. The header
+/// leads with an `align(8)` `ObjHeader`, so the pointer is `TAG_PTR`-taggable.
+#[inline]
+unsafe fn arena_box<T>(obj: T) -> *mut c_void {
+    let p = ARENA.with(|a| unsafe {
+        (*a.get()).bump(core::mem::size_of::<T>().max(1), core::mem::align_of::<T>())
+    }) as *mut T;
+    unsafe { p.write(obj) };
+    p as *mut c_void
+}
+
+/// `jrt_karr_new` for the arena: an empty arena-backed array.
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_karr_new_arena() -> *mut c_void {
+    unsafe { arena_box(ArrayObj::<W, ArenaAlloc>::new_in(ArenaAlloc)) }
+}
+
+/// `jrt_karr_push` for the arena: append `val` with no retain.
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_karr_push_arena(arr: *mut c_void, val: W) {
+    unsafe { (*(arr as *mut ArrayObj<W, ArenaAlloc>)).push(val) };
+}
+
+/// `jrt_kdict_new` for the arena: an empty arena-backed dict.
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_kdict_new_arena() -> *mut c_void {
+    unsafe { arena_box(DictObj::<W, ArenaAlloc>::new_in(ArenaAlloc)) }
+}
+
+/// `jrt_kdict_set` for the arena: `key_word` is a tagged string (bytes copied
+/// into the key `String`), `val` stored with no retain.
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_kdict_set_arena(dict: *mut c_void, key_word: W, val: W) {
+    unsafe {
+        let key_ptr = JadeValue::from_bits(key_word as u64).as_ptr() as *const c_char;
+        (*(dict as *mut DictObj<W, ArenaAlloc>)).set(cstr::borrow(key_ptr), val);
+    }
+}
+
+/// `jrt_kstruct_new` for the arena.
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_kstruct_new_arena(type_name: *const c_char) -> *mut c_void {
+    let name = unsafe { cstr::borrow(type_name) };
+    unsafe { arena_box(StructObj::<W, ArenaAlloc>::new_in(name, ArenaAlloc)) }
+}
+
+/// `jrt_kstruct_set` for the arena: set `field` to `val` with no retain.
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_kstruct_set_arena(s: *mut c_void, field: *const c_char, val: W) {
+    unsafe {
+        let f = cstr::borrow(field);
+        (*(s as *mut StructObj<W, ArenaAlloc>)).set_field(f, val);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,6 +297,64 @@ mod tests {
         let after = mark();
         assert_eq!(after.cur, start.cur);
         assert_eq!(after.pos, start.pos, "reset must roll the cursor back");
+    }
+
+    fn int_word(i: i64) -> W {
+        JadeValue::from_int(i).bits() as i64
+    }
+
+    /// A tagged, NUL-terminated string word for use as a dict key.
+    unsafe fn str_word(s: &[u8]) -> W {
+        let p = crate::string::new(s.len(), crate::string::TRUSTED);
+        unsafe { core::ptr::copy_nonoverlapping(s.as_ptr(), p, s.len()) };
+        JadeValue::from_str_ptr(p as *const ()).bits() as i64
+    }
+
+    #[test]
+    fn arena_array_reads_through_standard_accessors() {
+        use crate::ffi_coll::{jrt_coll_array_get, jrt_coll_array_len, jrt_kind_of};
+        use crate::heap::ObjKind;
+        let m = mark();
+        let a = jrt_karr_new_arena();
+        jrt_karr_push_arena(a, int_word(10));
+        jrt_karr_push_arena(a, int_word(20));
+        jrt_karr_push_arena(a, int_word(30));
+        // The array lives in the arena but is byte-compatible with the heap form,
+        // so the ordinary C accessors read it with no special-casing.
+        assert_eq!(jrt_kind_of(a), ObjKind::Array as i64);
+        assert_eq!(jrt_coll_array_len(a), 3);
+        assert_eq!(jrt_coll_array_get(a, 0), int_word(10));
+        assert_eq!(jrt_coll_array_get(a, 2), int_word(30));
+        unsafe { reset(m) };
+    }
+
+    #[test]
+    fn arena_dict_reads_through_standard_accessors() {
+        use crate::ffi_coll::{jrt_coll_dict_get, jrt_kind_of};
+        use crate::heap::ObjKind;
+        let m = mark();
+        let d = jrt_kdict_new_arena();
+        unsafe {
+            jrt_kdict_set_arena(d, str_word(b"id"), int_word(7));
+            jrt_kdict_set_arena(d, str_word(b"n"), int_word(42));
+        }
+        assert_eq!(jrt_kind_of(d), ObjKind::Dict as i64);
+        let mut out: W = 0;
+        assert_eq!(jrt_coll_dict_get(d, b"id\0".as_ptr() as *const c_char, &mut out), 1);
+        assert_eq!(out, int_word(7));
+        assert_eq!(jrt_coll_dict_get(d, b"n\0".as_ptr() as *const c_char, &mut out), 1);
+        assert_eq!(out, int_word(42));
+        assert_eq!(jrt_coll_dict_get(d, b"x\0".as_ptr() as *const c_char, &mut out), 0);
+        unsafe { reset(m) };
+    }
+
+    #[test]
+    fn mark_token_roundtrips() {
+        let m = mark();
+        let t = m.to_token();
+        let back = Mark::from_token(t);
+        assert_eq!(back.cur, m.cur);
+        assert_eq!(back.pos, m.pos);
     }
 
     #[test]
