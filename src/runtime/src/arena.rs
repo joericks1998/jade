@@ -28,9 +28,20 @@
 //! mark at or before the allocation. The compiler is responsible for ensuring no
 //! arena pointer is read after its region's `reset`; a violation is a
 //! use-after-free the arena cannot detect. Arena operations are **not
-//! reentrant** — `bump`/`mark`/`reset` never call back into the arena (a new
-//! chunk comes from the system allocator, which does not), so the `UnsafeCell`
-//! access below is sound.
+//! reentrant**, which is what makes the `UnsafeCell` access below sound: while a
+//! transient `&mut ArenaState` is live, nothing must re-enter an arena op on this
+//! thread. The only allocation reachable from `bump` is `self.chunks.push` (a std
+//! `Vec` on the **global** allocator) and `sys_alloc` — so the load-bearing
+//! invariant is precisely that **the process's global allocator never reads
+//! `ARENA`**. That holds today because `PoolAlloc` → `jade_runtime::pool` touches
+//! only its own free-lists; do NOT make the global allocator (or an alloc-error
+//! hook) arena-aware, or `chunks.push` re-entering `bump` becomes aliasing UB.
+//!
+//! `reset` runs no destructors — it only moves the cursor — so anything with a
+//! non-arena `Drop` obligation placed in an arena collection (notably a
+//! `DictObj`'s `String` keys, which allocate globally) leaks until process exit.
+//! Arena arrays of scalars have no such payload; that is why the codegen targets
+//! them first.
 
 use core::cell::UnsafeCell;
 use core::ptr::NonNull;
@@ -77,11 +88,18 @@ impl ArenaState {
         loop {
             let chunk = &self.chunks[self.cur];
             let base = chunk.ptr as usize;
+            // Round the cursor up to `align`, then work in offsets and derive the
+            // result from `chunk.ptr` so the returned pointer keeps the chunk's
+            // provenance (sound under strict provenance; no int→ptr cast).
             let aligned = (base + self.pos + align - 1) & !(align - 1);
-            let end = aligned + size;
-            if end <= base + chunk.cap {
-                self.pos = end - base;
-                return aligned as *mut u8;
+            let offset = aligned - base;
+            let end = offset + size;
+            if end <= chunk.cap {
+                self.pos = end;
+                // SAFETY: `offset <= end <= cap`, so `ptr.add(offset)` is in-bounds
+                // of the chunk; `base` is 16-aligned and `align` divides the
+                // rounded offset, so the result has `align` alignment.
+                return unsafe { chunk.ptr.add(offset) };
             }
             // Does not fit: advance to the next existing chunk, or allocate one.
             if self.cur + 1 < self.chunks.len() {
@@ -169,14 +187,18 @@ unsafe impl Allocator for ArenaAlloc {
 
 // ── C-ABI surface for codegen ─────────────────────────────────────────────────
 //
-// A `Mark` is (chunk index, byte offset). The offset is < CHUNK (64 KiB) and the
-// chunk index is tiny, so both pack losslessly into one `i64` token that codegen
-// stashes in a slot and hands back to `reset` at the region's end (works across
-// early returns — each exit resets to its own region's mark).
+// A `Mark` is (chunk index, byte offset). `pos` is the offset within its chunk,
+// whose cap is `CHUNK.max(size + align)` — so `pos` can exceed CHUNK for an
+// oversized allocation; the real losslessness bound is `pos < 2^32` (a single
+// arena allocation must not reach 4 GiB) and `cur < 2^31`. Both hold for any real
+// workload, so the pair packs into one `i64` token that codegen stashes in a slot
+// and hands back to `reset` at the region's end (correct across early returns —
+// each exit resets to its own region's mark).
 
 impl Mark {
     #[inline]
     fn to_token(self) -> i64 {
+        debug_assert!(self.pos < (1 << 32) && self.cur < (1 << 31), "arena mark out of token range");
         ((self.cur as i64) << 32) | (self.pos as i64)
     }
     #[inline]
@@ -213,10 +235,24 @@ pub unsafe extern "C" fn jrt_arena_reset(token: i64) {
 use crate::coll::{ArrayObj, DictObj, StructObj};
 use crate::cstr;
 use crate::value::JadeValue;
+use allocator_api2::alloc::Global;
 use core::ffi::{c_char, c_void};
 
 /// The AOT element word type (a tagged [`JadeValue`]).
 type W = i64;
+
+// The whole scheme rests on an arena-backed collection being byte-identical to
+// its heap form, so the ordinary `*const ArrayObj<W, Global>` accessors read it.
+// That holds only if the ZST allocator adds no bytes — assert it at compile time
+// so a future `allocator_api2` layout change fails the build instead of silently
+// mis-reading memory.
+const _: () = {
+    use core::mem::{align_of, size_of};
+    assert!(size_of::<ArrayObj<W, ArenaAlloc>>() == size_of::<ArrayObj<W, Global>>());
+    assert!(align_of::<ArrayObj<W, ArenaAlloc>>() == align_of::<ArrayObj<W, Global>>());
+    assert!(size_of::<DictObj<W, ArenaAlloc>>() == size_of::<DictObj<W, Global>>());
+    assert!(size_of::<StructObj<W, ArenaAlloc>>() == size_of::<StructObj<W, Global>>());
+};
 
 /// Move `obj` into a fresh arena block and return it type-erased. The header
 /// leads with an `align(8)` `ObjHeader`, so the pointer is `TAG_PTR`-taggable.
