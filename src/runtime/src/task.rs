@@ -465,9 +465,9 @@ pub unsafe fn destroy(fut: *mut FutureObj) {
     // A future is not a collection: its result is a single word, not a Vec of
     // children, so there is no cascade. The result word may itself be a
     // collection reference, and dropping an un-awaited future drops that
-    // reference with it.
-    drop(unsafe { Box::from_raw(fut) });
-    gc::record_free();
+    // reference with it. `free_leaked` drops the `FutureObj` and returns its block
+    // to the pool `leak_obj` took it from (and records the free).
+    unsafe { gc::free_leaked(fut) };
 }
 
 // ── AOT C-ABI surface ────────────────────────────────────────────────────────

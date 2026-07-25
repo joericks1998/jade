@@ -51,7 +51,37 @@ static LIVE_OBJECTS: AtomicI64 = AtomicI64::new(0);
 #[inline]
 pub fn leak_obj<T>(obj: T) -> *mut c_void {
     LIVE_OBJECTS.fetch_add(1, Ordering::Relaxed);
-    Box::into_raw(Box::new(obj)) as *mut c_void
+    // Phase 1b: allocate the object's block from the shared pool rather than the
+    // global `Box`, so the AOT path (which has no global-allocator override)
+    // pools its collection headers. `free_leaked` returns the block to the same
+    // pool; the object's own `Vec`/`String` fields keep using the global
+    // allocator (the pool in the VM, the system allocator in an AOT binary), and
+    // free through it when the object is dropped — each side stays self-consistent.
+    let size = core::mem::size_of::<T>().max(1);
+    let align = core::mem::align_of::<T>();
+    let p = crate::pool::alloc(size, align) as *mut T;
+    if p.is_null() {
+        crate::sys::oom();
+    }
+    // SAFETY: `p` is a fresh, correctly-aligned, uninitialized block for one `T`.
+    unsafe { p.write(obj) };
+    p as *mut c_void
+}
+
+/// Reclaim a `T` that [`leak_obj`] allocated: drop it in place, return its block
+/// to the pool it came from, and record the free. The exact mirror of `leak_obj`
+/// — keeping allocation and reclamation on the same allocator is what makes the
+/// pool routing safe.
+///
+/// # Safety
+/// `ptr` came from `leak_obj::<T>`, has `rc == 0`, and is not referenced again.
+#[inline]
+pub(crate) unsafe fn free_leaked<T>(ptr: *mut T) {
+    unsafe { core::ptr::drop_in_place(ptr) };
+    let size = core::mem::size_of::<T>().max(1);
+    let align = core::mem::align_of::<T>();
+    unsafe { crate::pool::dealloc(ptr as *mut u8, size, align) };
+    record_free();
 }
 
 /// Record that one heap object was reclaimed (the destructor calls this right
@@ -237,39 +267,40 @@ pub(crate) unsafe fn free_obj(ptr: *mut c_void) {
     // Reclaim the box (freeing its `Vec`), decref'ing children first. Reading the
     // children through the reconstructed box before `drop` is sound: nothing else
     // references it (rc == 0), and each child points at a *different* object.
+    // Cascade a decref to the children (read through a shared ref while the object
+    // is still live), then reclaim the payload via `free_leaked` — which drops it
+    // (freeing its `Vec`) and returns the header block to the pool `leak_obj` took
+    // it from. Reading children before the drop is sound: rc == 0, so nothing else
+    // references this object, and each child points at a *different* object.
     if kind == ObjKind::Array as u8 {
-        let b = unsafe { Box::from_raw(ptr as *mut ArrayObj<W>) };
-        for &child in b.as_slice() {
+        let a = unsafe { &*(ptr as *const ArrayObj<W>) };
+        for &child in a.as_slice() {
             unsafe { decref_word(child) };
         }
-        drop(b);
+        unsafe { free_leaked(ptr as *mut ArrayObj<W>) };
     } else if kind == ObjKind::Dict as u8 {
-        let b = unsafe { Box::from_raw(ptr as *mut DictObj<W>) };
-        for (_, v) in b.entries() {
+        let d = unsafe { &*(ptr as *const DictObj<W>) };
+        for (_, v) in d.entries() {
             unsafe { decref_word(*v) };
         }
-        drop(b);
+        unsafe { free_leaked(ptr as *mut DictObj<W>) };
     } else if kind == ObjKind::Struct as u8 {
-        let b = unsafe { Box::from_raw(ptr as *mut StructObj<W>) };
-        for (_, v) in b.fields() {
+        let s = unsafe { &*(ptr as *const StructObj<W>) };
+        for (_, v) in s.fields() {
             unsafe { decref_word(*v) };
         }
-        drop(b);
+        unsafe { free_leaked(ptr as *mut StructObj<W>) };
     } else if kind == ObjKind::Future as u8 {
         // A future is header-carrying but not a collection: its payload is a
         // single result word, not a Vec of children, so there is no cascade to
-        // run. `task::destroy` reclaims the box and records the free itself,
+        // run. `task::destroy` reclaims the block and records the free itself,
         // because the allocation is a `FutureObj` (lock + condvar) rather than
         // one of the `*Obj<W>` shapes above.
         unsafe { crate::task::destroy(ptr as *mut crate::task::FutureObj) };
-        return;
-    } else {
-        // Float/Str/Fn/etc.: no child cascade defined here. The collector only
-        // frees collections (the precondition), so this arm is unreached in
-        // practice; leaving the allocation is safe (a leak, not corruption).
-        return;
     }
-    record_free();
+    // Float/Str/Fn/etc.: no child cascade defined here. The collector only frees
+    // collections (the precondition), so that case is unreached in practice;
+    // leaving the allocation is safe (a leak, not corruption).
 }
 
 /// Print the live heap-object count to stderr **iff** `JADE_HEAP_REPORT` is set in

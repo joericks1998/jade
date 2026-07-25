@@ -98,6 +98,7 @@ pub mod methods;
 pub mod num;
 pub mod ops;
 pub mod pathf;
+pub mod pool;
 pub mod randomf;
 pub mod render;
 pub mod shf;
