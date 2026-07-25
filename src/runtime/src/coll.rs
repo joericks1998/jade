@@ -24,6 +24,19 @@
 //! So [`DictObj::value_copy`] reproduces the VM's clone-on-mutation dict
 //! semantics identically under either instantiation, with no per-engine code.
 //!
+//! ## Backing allocator
+//!
+//! Each payload is *also* generic over an **allocator** `A` (defaulting to the
+//! global allocator [`Global`]). The backing store is an
+//! [`allocator_api2::vec::Vec`], which — because [`ArenaAlloc`] is zero-sized —
+//! is layout-identical to a `Vec<T>`. This lets a collection the compiler proves
+//! does not escape live in a per-frame bump arena
+//! ([`crate::arena::ArenaAlloc`]) while staying byte-compatible with the heap
+//! form, so the C-ABI accessors (`jrt_coll_*`) read either without change. The
+//! default `Global` case behaves exactly as a plain `Vec<T>` did.
+//!
+//! [`ArenaAlloc`]: crate::arena::ArenaAlloc
+//!
 //! ## Layout
 //!
 //! Every payload is `#[repr(C)]` with an [`ObjHeader`] at offset 0, so the AOT
@@ -39,23 +52,28 @@
 //! the C runtime's plain `char*` keys neither carry nor compare key trust.
 
 use crate::heap::{ObjHeader, ObjKind};
+use allocator_api2::alloc::{Allocator, Global};
+use allocator_api2::vec::Vec as AVec;
 
 // ── Array ───────────────────────────────────────────────────────────────────
 
 /// A growable, **reference-semantic** array (mutations are visible to all
 /// aliases). Mirrors the VM's `Arc<Mutex<Vec<VmValue>>>` and the C `JKArray`.
+///
+/// Generic over the backing allocator `A` (defaults to [`Global`]); an
+/// arena-backed instance is built with [`ArrayObj::new_in`].
 #[repr(C)]
-pub struct ArrayObj<T> {
+pub struct ArrayObj<T, A: Allocator = Global> {
     /// Kind = [`ObjKind::Array`]; `len` tracks `data.len()`.
     pub header: ObjHeader,
-    data: Vec<T>,
+    data: AVec<T, A>,
 }
 
-impl<T: Clone> ArrayObj<T> {
-    /// A fresh empty array.
+impl<T: Clone, A: Allocator> ArrayObj<T, A> {
+    /// A fresh empty array backed by `alloc`.
     #[inline]
-    pub fn new() -> Self {
-        ArrayObj { header: ObjHeader::new(ObjKind::Array, 0), data: Vec::new() }
+    pub fn new_in(alloc: A) -> Self {
+        ArrayObj { header: ObjHeader::new(ObjKind::Array, 0), data: AVec::new_in(alloc) }
     }
 
     /// Append an element (grows in place; reference semantics).
@@ -118,20 +136,27 @@ impl<T: Clone> ArrayObj<T> {
     }
 }
 
-impl<T: Clone> ArrayObj<T> {
-    /// Build an array from an existing `Vec` (the VM's construction path). The
-    /// header length is synced once; subsequent `DerefMut` mutations do not
-    /// re-sync it (see the `Deref` note), which is fine because only the AOT
-    /// side reads `header.len`, and AOT arrays are built through `push`.
+impl<T: Clone> ArrayObj<T, Global> {
+    /// A fresh empty array (heap-allocated).
     #[inline]
-    pub fn from_vec(data: Vec<T>) -> Self {
-        let mut a = ArrayObj { header: ObjHeader::new(ObjKind::Array, 0), data };
+    pub fn new() -> Self {
+        ArrayObj { header: ObjHeader::new(ObjKind::Array, 0), data: AVec::new() }
+    }
+
+    /// Build an array from an existing (heap) `Vec` (the VM's construction
+    /// path). The header length is synced once; subsequent `DerefMut` mutations
+    /// do not re-sync it (see the `Deref` note), which is fine because only the
+    /// AOT side reads `header.len`, and AOT arrays are built through `push`.
+    #[inline]
+    pub fn from_vec(data: std::vec::Vec<T>) -> Self {
+        let mut a =
+            ArrayObj { header: ObjHeader::new(ObjKind::Array, 0), data: data.into_iter().collect() };
         a.sync_len();
         a
     }
 }
 
-impl<T: Clone> Default for ArrayObj<T> {
+impl<T: Clone> Default for ArrayObj<T, Global> {
     fn default() -> Self {
         Self::new()
     }
@@ -144,17 +169,17 @@ impl<T: Clone> Default for ArrayObj<T> {
 /// field is an AOT-only fast path (`jrt_coll_len`) and VM arrays never reach it.
 /// `ArrayObj` deliberately does not implement `Clone`, so `guard.clone()` resolves
 /// to `Vec::clone` here — matching the pre-migration `Arc<Mutex<Vec>>` behavior.
-impl<T> core::ops::Deref for ArrayObj<T> {
-    type Target = Vec<T>;
+impl<T, A: Allocator> core::ops::Deref for ArrayObj<T, A> {
+    type Target = AVec<T, A>;
     #[inline]
-    fn deref(&self) -> &Vec<T> {
+    fn deref(&self) -> &AVec<T, A> {
         &self.data
     }
 }
 
-impl<T> core::ops::DerefMut for ArrayObj<T> {
+impl<T, A: Allocator> core::ops::DerefMut for ArrayObj<T, A> {
     #[inline]
-    fn deref_mut(&mut self) -> &mut Vec<T> {
+    fn deref_mut(&mut self) -> &mut AVec<T, A> {
         &mut self.data
     }
 }
@@ -170,18 +195,21 @@ impl<T> core::ops::DerefMut for ArrayObj<T> {
 /// small, and preserving insertion order keeps `value_copy` output stable
 /// (rendering sorts keys separately). Keys are unique; setting an existing key
 /// updates in place.
+///
+/// Generic over the backing allocator `A` (defaults to [`Global`]); an
+/// arena-backed instance is built with [`DictObj::new_in`].
 #[repr(C)]
-pub struct DictObj<T> {
+pub struct DictObj<T, A: Allocator = Global> {
     /// Kind = [`ObjKind::Dict`]; `len` tracks the entry count.
     pub header: ObjHeader,
-    slots: Vec<(String, T)>,
+    slots: AVec<(String, T), A>,
 }
 
-impl<T: Clone> DictObj<T> {
-    /// A fresh empty dict.
+impl<T: Clone, A: Allocator> DictObj<T, A> {
+    /// A fresh empty dict backed by `alloc`.
     #[inline]
-    pub fn new() -> Self {
-        DictObj { header: ObjHeader::new(ObjKind::Dict, 0), slots: Vec::new() }
+    pub fn new_in(alloc: A) -> Self {
+        DictObj { header: ObjHeader::new(ObjKind::Dict, 0), slots: AVec::new_in(alloc) }
     }
 
     /// Number of entries.
@@ -234,8 +262,12 @@ impl<T: Clone> DictObj<T> {
     /// free independently, values are `Clone`d (sharing pointees). This is the
     /// VM's clone-on-mutation semantics — the caller rebinds the variable to the
     /// returned dict, leaving aliases of the original untouched.
-    pub fn value_copy(&self) -> Self {
-        let slots: Vec<(String, T)> =
+    ///
+    /// The copy is always [`Global`]-allocated regardless of `A`: a value-copy
+    /// escapes by definition (the caller rebinds it and it outlives the current
+    /// region), so it must not stay in an arena.
+    pub fn value_copy(&self) -> DictObj<T, Global> {
+        let slots: AVec<(String, T), Global> =
             self.slots.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         let mut d = DictObj { header: ObjHeader::new(ObjKind::Dict, 0), slots };
         d.sync_len();
@@ -296,7 +328,15 @@ impl<T: Clone> DictObj<T> {
     }
 }
 
-impl<T: Clone> Default for DictObj<T> {
+impl<T: Clone> DictObj<T, Global> {
+    /// A fresh empty dict (heap-allocated).
+    #[inline]
+    pub fn new() -> Self {
+        DictObj { header: ObjHeader::new(ObjKind::Dict, 0), slots: AVec::new() }
+    }
+}
+
+impl<T: Clone> Default for DictObj<T, Global> {
     fn default() -> Self {
         Self::new()
     }
@@ -306,14 +346,17 @@ impl<T: Clone> Default for DictObj<T> {
 /// relies on (a dict assignment / mutation must not alias the source). Values are
 /// `Clone`d, so `Arc`-backed elements stay shared, matching the former
 /// `HashMap<String, VmValue>` clone.
-impl<T: Clone> Clone for DictObj<T> {
+///
+/// Only heap ([`Global`]) dicts are `Clone` — a clone escapes, so it must not be
+/// arena-backed; see [`value_copy`](DictObj::value_copy).
+impl<T: Clone> Clone for DictObj<T, Global> {
     #[inline]
     fn clone(&self) -> Self {
         self.value_copy()
     }
 }
 
-impl<T: Clone> FromIterator<(String, T)> for DictObj<T> {
+impl<T: Clone> FromIterator<(String, T)> for DictObj<T, Global> {
     fn from_iter<I: IntoIterator<Item = (String, T)>>(iter: I) -> Self {
         let mut d = DictObj::new();
         for (k, v) in iter {
@@ -328,22 +371,25 @@ impl<T: Clone> FromIterator<(String, T)> for DictObj<T> {
 /// A named struct instance: a type name plus **reference-semantic** named
 /// fields (field assignment mutates in place). Mirrors the VM's
 /// `Arc<Mutex<VmStruct>>` and the C `JKStruct`.
+///
+/// Generic over the backing allocator `A` (defaults to [`Global`]); an
+/// arena-backed instance is built with [`StructObj::new_in`].
 #[repr(C)]
-pub struct StructObj<T> {
+pub struct StructObj<T, A: Allocator = Global> {
     /// Kind = [`ObjKind::Struct`]; `len` tracks the field count.
     pub header: ObjHeader,
     type_name: String,
-    fields: Vec<(String, T)>,
+    fields: AVec<(String, T), A>,
 }
 
-impl<T: Clone> StructObj<T> {
-    /// A fresh struct of the given type with no fields yet.
+impl<T: Clone, A: Allocator> StructObj<T, A> {
+    /// A fresh struct of the given type with no fields yet, backed by `alloc`.
     #[inline]
-    pub fn new(type_name: &str) -> Self {
+    pub fn new_in(type_name: &str, alloc: A) -> Self {
         StructObj {
             header: ObjHeader::new(ObjKind::Struct, 0),
             type_name: type_name.to_owned(),
-            fields: Vec::new(),
+            fields: AVec::new_in(alloc),
         }
     }
 
@@ -391,6 +437,18 @@ impl<T: Clone> StructObj<T> {
     #[inline]
     fn sync_len(&mut self) {
         self.header.len = self.fields.len() as u32;
+    }
+}
+
+impl<T: Clone> StructObj<T, Global> {
+    /// A fresh struct of the given type with no fields yet (heap-allocated).
+    #[inline]
+    pub fn new(type_name: &str) -> Self {
+        StructObj {
+            header: ObjHeader::new(ObjKind::Struct, 0),
+            type_name: type_name.to_owned(),
+            fields: AVec::new(),
+        }
     }
 }
 

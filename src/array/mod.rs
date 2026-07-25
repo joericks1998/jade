@@ -103,7 +103,7 @@ fn pkg_sort(args: &[VmValue]) -> Result<VmValue> {
     match &args[0] {
         VmValue::Array(arc) => {
             let guard = arc.lock();
-            let mut v: Vec<VmValue> = guard.clone();
+            let mut v: Vec<VmValue> = guard.as_slice().to_vec();
             drop(guard);
             v.sort_by(|a, b| vm_cmp_for_sort(a, b));
             Ok(make_array(v))
@@ -116,7 +116,7 @@ fn pkg_reverse(args: &[VmValue]) -> Result<VmValue> {
     match &args[0] {
         VmValue::Array(arc) => {
             let guard = arc.lock();
-            let mut v: Vec<VmValue> = guard.clone();
+            let mut v: Vec<VmValue> = guard.as_slice().to_vec();
             drop(guard);
             v.reverse();
             Ok(make_array(v))
