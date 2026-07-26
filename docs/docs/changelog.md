@@ -4,6 +4,10 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.1.29
+
+- **Contributor documentation: a README in every major directory.** No language-visible change. Each major subtree of the repo now carries a `README.md` explaining what it is, why it was built that way, what each file does, and which other parts of the tree depend on it — the compiler pipeline (`frontend`, `compiler`, `bytecode`, `vm`, `aot`, `build`), both runtimes (`runtime`, `runtime_aot`), the language surface (`builtins`, `native`), the LLM path (`llm`, `providers`), the project tooling (`cli`, `project`, `pkg`, `cache`), and the non-code trees (`examples`, `scripts`, `bench`, `docs`, `design`). The root `README.md` is unchanged and remains the entry point for people working on the compiler.
+
 ## v1.1.28
 
 - **REPL stops echoing redundant/void output.** An expression that prints as it evaluates — a bare `?p` (already suppressed) and now `stream(...)` — no longer has its result echoed again after the live output. And a void result is no longer echoed: `print("hi")` used to print `hi` then a stray `nil`; bare `nil` and any nil-returning call now display nothing.
