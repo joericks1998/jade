@@ -62,7 +62,7 @@ inkwell = { version = "0.8", features = ["llvm18-1"] }
 [features]
 default = []
 # Phase-0 allocation profiler: replaces the `jade` binary's global allocator with
-# a size-class-histogram wrapper (src/alloc_profile.rs). Measurement only, never
+# a size-class-histogram wrapper (src/alloc/profile.rs). Measurement only, never
 # a release build. Declared in the binary, never in jade-runtime, so it cannot
 # reach a dlopen'd package.
 alloc-profile = []

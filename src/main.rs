@@ -9,11 +9,11 @@ use clap::{Parser, Subcommand};
 // measuring allocator instead.
 #[cfg(not(feature = "alloc-profile"))]
 #[global_allocator]
-static ALLOC: jade::pool_alloc::PoolAlloc = jade::pool_alloc::PoolAlloc;
+static ALLOC: jade::alloc::pool::PoolAlloc = jade::alloc::pool::PoolAlloc;
 
 #[cfg(feature = "alloc-profile")]
 #[global_allocator]
-static ALLOC: jade::alloc_profile::ProfilingAlloc = jade::alloc_profile::ProfilingAlloc;
+static ALLOC: jade::alloc::profile::ProfilingAlloc = jade::alloc::profile::ProfilingAlloc;
 
 // ── CLI definition ────────────────────────────────────────────────────────────
 
@@ -233,7 +233,7 @@ fn main() {
 
     #[cfg(feature = "alloc-profile")]
     if std::env::var_os("JADE_ALLOC_PROFILE").is_some() {
-        eprint!("{}", jade::alloc_profile::report());
+        eprint!("{}", jade::alloc::profile::report());
     }
 }
 
