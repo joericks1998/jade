@@ -1,0 +1,53 @@
+# `src/aot/` — the LLVM ahead-of-time backend
+
+## What this subtree is
+
+The other execution engine. `jade build` runs the same frontend and compiler as `jade run`, then lowers the resulting bytecode `Chunk` through LLVM 18 into an object file and links it into a native binary or shared library.
+
+```
+Chunk → cfg (basic blocks) → lower (LLVM IR) → object → link
+```
+
+It is a peer of `src/vm/`, not a phase of `src/compiler/`. Both consume the same `Chunk`, and the language is defined by where they agree.
+
+## Why it was built
+
+Compiling in-process is a recent and deliberate change. Code generation used to live in a separate repository behind a build daemon on `$HOME/.jade/build.sock`, which had a nasty failure mode: a daemon built from an older commit resolved imports differently from the CLI calling it, and stayed silent until the two disagreed. Now there is one resolver, one code path, one version.
+
+The cost is that **building the toolchain needs LLVM 18 present** (point `LLVM_SYS_180_PREFIX` at it). *Running* a released `jade` needs nothing installed — LLVM is linked in, not loaded.
+
+Two design choices are worth knowing before you edit:
+
+*Tagged register slots.* Every bytecode register becomes an `alloca i64` holding a tagged value word — the same ABI the runtime uses. Instructions load a slot, untag to a native value, compute, re-tag, and store. This is simpler than tracking a static type per register (the emitter reuses slots across types), and LLVM's `mem2reg` and `instcombine` promote the allocas to SSA and fold the `untag(tag(x))` round-trips away, so the tag arithmetic is mostly free after optimization.
+
+*Probe before emit.* `compile()` lowers the whole program into a throwaway module first. If lowering fails partway — an unsupported opcode after some functions and globals were already emitted — only the throwaway module is polluted. The real module is touched only once the whole program is known to lower cleanly.
+
+## What each file does
+
+- **`mod.rs`** — the public entry point. Sets up the LLVM context and target machine, runs the probe, emits a thin `main()`, writes the object file, and drives the linker. `CompileMode` selects a binary or a `jade_pkg_init`-exporting shared library.
+- **`cfg.rs`** — control-flow-graph reconstruction. `emit.rs` produces a flat `Vec<Instr>` with PC-relative jumps; LLVM needs basic blocks with explicit edges. This file computes block boundaries and edges and holds no LLVM state at all, so it is unit-testable in isolation.
+- **`lower.rs`** — the bulk of the backend: one LLVM IR translation per opcode, plus the calls into `jade-runtime`'s `jrt_*` C-ABI surface for anything that needs the heap, collections, strings, tasks, or inference.
+- **`imports.rs`** — import resolution and module namespacing. The VM gives every imported file its own namespace; LLVM has no runtime namespaces, so this file mangles imported symbols to keep two modules that both define `greet` distinct. **The VM is the source of truth for what a namespace means** — read this file's header before changing import behavior.
+- **`tests.rs`** — backend tests.
+
+## Who uses it
+
+*Depends on:* `compiler/` for the `TProgram` and `emit`, `bytecode/` for the instruction set, `project/` for library resolution, `inkwell` for LLVM, and the two runtimes it links against — `jade-runtime` (Rust, `src/runtime/`) and `libJadeRuntime.a` (C, `src/runtime_aot/`, built by `build.rs`).
+
+*Used by:* `src/build/`, which is the thin layer `cli/build.rs` calls.
+
+## Gotchas
+
+**An opcode this backend cannot lower is a hard build error.** There is no legacy fallback, so any new instruction added in `compiler/emit.rs` must be lowered here too.
+
+The linker line is `-L target/<profile> -ljade_runtime`, which only works because `jade-runtime` is a *workspace member* named in `default-members` — Cargo only uplifts a build artifact to `target/<profile>/` when the crate is a requested top-level target. The root `Cargo.toml` has the full explanation. Do not demote it back to a plain path dependency.
+
+## Building and testing
+
+```sh
+export LLVM_SYS_180_PREFIX=/opt/homebrew/opt/llvm@18   # or your install
+cargo test aot::
+./target/debug/jade build examples/arithmatic/arithmetic/arithmetic.jde -o /tmp/a && /tmp/a
+./target/debug/jade build file.jde --emit-ir           # inspect the IR
+./scripts/backend-parity.sh                            # diff against the VM
+```

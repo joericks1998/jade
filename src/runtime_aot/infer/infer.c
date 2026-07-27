@@ -1,13 +1,14 @@
-/* infer.c — inference request construction and prompt deref.
+/* infer.c — prompt deref for compiled binaries.
  *
- * Owns the structured JSON request builder and all jrt_prompt_* entry points.
- * Dispatches through ipc for transport — never touches a socket
- * directly. Target-independent: the same file is linked into every platform
- * backend variant. */
+ * Owns every jrt_prompt_* entry point. Each one drives the installed provider
+ * package in process, through the native-package machinery (jrt_native_*), so
+ * this file has no transport of its own: no socket, no JSON request builder, no
+ * framing. Those existed to reach the inference daemon and went with it.
+ * Target-independent: the same file is linked into every platform backend
+ * variant. */
 
 #include "runtime.h"
 #include "infer.h"
-#include "ipc.h"
 
 #include <ctype.h>
 #include <stdint.h>
@@ -15,74 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ── Growable byte buffer for JSON serialization ──────────────────────── */
-
-typedef struct {
-    char*  data;
-    size_t len;
-    size_t cap;
-} infer_buf_t;
-
-static void buf_init(infer_buf_t* b) {
-    b->cap  = 256;
-    b->len  = 0;
-    b->data = malloc(b->cap);
-    if (!b->data) { fprintf(stderr, "jade: oom (infer_buf)\n"); exit(1); }
-}
-
-static void buf_reserve(infer_buf_t* b, size_t extra) {
-    if (b->len + extra + 1 <= b->cap) return;
-    while (b->len + extra + 1 > b->cap) {
-        b->cap *= 2;
-    }
-    char* nd = realloc(b->data, b->cap);
-    if (!nd) { fprintf(stderr, "jade: oom (infer_buf grow)\n"); exit(1); }
-    b->data = nd;
-}
-
-static void buf_putc(infer_buf_t* b, char c) {
-    buf_reserve(b, 1);
-    b->data[b->len++] = c;
-}
-
-static void buf_puts(infer_buf_t* b, const char* s) {
-    size_t n = strlen(s);
-    buf_reserve(b, n);
-    memcpy(b->data + b->len, s, n);
-    b->len += n;
-}
-
-static void buf_putd(infer_buf_t* b, int n) {
-    char tmp[32];
-    int w = snprintf(tmp, sizeof(tmp), "%d", n);
-    if (w > 0) { buf_reserve(b, (size_t)w); memcpy(b->data + b->len, tmp, (size_t)w); b->len += (size_t)w; }
-}
-
-/* Emit a JSON string literal with proper escaping. NULL → null literal. */
-static void buf_put_json_str(infer_buf_t* b, const char* s) {
-    if (!s) { buf_puts(b, "null"); return; }
-    buf_putc(b, '"');
-    for (const unsigned char* p = (const unsigned char*)s; *p; p++) {
-        switch (*p) {
-        case '"':  buf_putc(b, '\\'); buf_putc(b, '"'); break;
-        case '\\': buf_putc(b, '\\'); buf_putc(b, '\\'); break;
-        case '\n': buf_putc(b, '\\'); buf_putc(b, 'n'); break;
-        case '\r': buf_putc(b, '\\'); buf_putc(b, 'r'); break;
-        case '\t': buf_putc(b, '\\'); buf_putc(b, 't'); break;
-        default:
-            if (*p < 0x20) {
-                char esc[8];
-                int w = snprintf(esc, sizeof(esc), "\\u%04x", (unsigned)*p);
-                if (w > 0) { buf_reserve(b, (size_t)w); memcpy(b->data + b->len, esc, (size_t)w); b->len += (size_t)w; }
-            } else {
-                buf_putc(b, (char)*p);
-            }
-        }
-    }
-    buf_putc(b, '"');
-}
-
-/* ── Structured request builder ───────────────────────────────────────── */
+/* ── The request a prompt deref makes ─────────────────────────────────── */
 
 typedef struct {
     const char* prompt;          /* required */
@@ -90,67 +24,23 @@ typedef struct {
     const char* grammar;         /* nullable */
     const char* anchor;          /* nullable */
     const char* stop_anchor;     /* nullable */
-    int         max_tokens;      /* required */
     uint8_t     trust;           /* JRT_TRUSTED or JRT_TAINTED */
 } infer_req_t;
 
-/* The daemon owns inference config now, so several request fields are no longer
- * driven by the language and are emitted as fixed defaults:
- *   - max_tokens = 0     — no client-imposed cap; the daemon picks the budget.
- *   - model = ""         — the daemon uses its configured/loaded model.
- *   - keep_anchors=false — the daemon's default anchor handling.
- * Each used to be a Jade-visible knob (`llm.set_max_tokens`, `llm.model`,
- * `llm.keep_anchors`) or session global (`__max_retries__`, `__model__`); they
- * moved to the daemon along with provider config. Typed derefs are also single-
- * shot — grammar-constrained sampling shapes the reply — so no retry budget. */
-
-static void build_request(const infer_req_t* req, infer_buf_t* out) {
-    buf_init(out);
-    buf_putc(out, '{');
-
-    buf_puts(out, "\"prompt\":");
-    buf_put_json_str(out, req->prompt ? req->prompt : "");
-
-    buf_puts(out, ",\"model\":");
-    buf_put_json_str(out, req->model ? req->model : "");
-
-    buf_puts(out, ",\"max_tokens\":");
-    buf_putd(out, req->max_tokens);
-
-    if (req->grammar) {
-        buf_puts(out, ",\"grammar\":");
-        buf_put_json_str(out, req->grammar);
-    }
-    if (req->anchor) {
-        buf_puts(out, ",\"anchor\":");
-        buf_put_json_str(out, req->anchor);
-    }
-    if (req->stop_anchor) {
-        buf_puts(out, ",\"stop_anchor\":");
-        buf_put_json_str(out, req->stop_anchor);
-    }
-    /* keep_anchors + trust are always emitted, matching jadelang's
-     * encode_request — the daemon reads them with serde defaults, but being
-     * explicit keeps the wire unambiguous. keep_anchors is always false now
-     * (the language no longer toggles it). */
-    buf_puts(out, ",\"keep_anchors\":false");
-    buf_puts(out, ",\"trust\":");
-    buf_putd(out, (int)req->trust);
-
-    buf_putc(out, '}');
-}
-
-/* ── Provider-package drive (the daemon-free path) ─────────────────────────
+/* ── Provider-package drive ────────────────────────────────────────────────
  *
- * When a provider package is installed in the active slot, `?p` drives it in
- * process instead of the daemon. A provider is a compiled Jade `--lib` (dovata's
- * anthropic/openai) exposing `infer(request) -> [Frame]` and, usually,
- * `configure(opts)` — the same contract the VM drives. We load it through the
- * native-package machinery (jrt_native_*), configure it with the stored
- * credential, call `infer({prompt})`, and fold the returned frame dicts
+ * `?p` drives the provider package installed in the active slot, in process. A
+ * provider is a compiled Jade `--lib` (dovata's anthropic/openai) exposing
+ * `infer(request) -> [Frame]` and, usually, `configure(opts)` — the same
+ * contract the VM drives. We load it through the native-package machinery
+ * (jrt_native_*), configure it with the stored credential, call
+ * `infer({prompt})`, and fold the returned frame dicts
  * ({"type":"Token"|"Done"|"Error",…}) into the response text. A bad shape or an
  * `Error` frame raises a catchable Jade error — like the VM, so a compiled `?p`
- * inside a `try` can catch it. */
+ * inside a `try` can catch it.
+ *
+ * This used to be one of two paths, chosen per request against the daemon on
+ * `$HOME/.jade/llm.sock`. It is the only one now. */
 
 static void* g_provider = NULL; /* cached handle for the active provider package */
 
@@ -165,7 +55,7 @@ static void provider_raise(const char* msg) {
 static void* provider_handle(void) {
     if (g_provider) return g_provider;
     char* path = jrt_provider_active_lib_path();
-    if (!path) provider_raise("no active inference provider");
+    if (!path) provider_raise("no inference backend available — run `jade register` to choose a provider and set your API key");
     void* h = jrt_native_load(path); /* raises on dlopen / missing jade_pkg_init */
     free(path);
 
@@ -189,9 +79,19 @@ static jade_value_t provider_request(const infer_req_t* req) {
     if (req->model && req->model[0])
         jrt_kdict_set(d, (int64_t)jrt_box_str(jrt_str_dup("model", JRT_TRUSTED)),
                          (int64_t)jrt_box_str(jrt_str_dup(req->model, JRT_TRUSTED)));
+    /* grammar + its anchors are one feature: the anchors bound the span the
+     * grammar constrains, so sending the pattern alone would silently drop half
+     * of an explicit Grammar.new(pattern, anchor, stop). Same keys as the VM's
+     * request_value, so a package sees one request shape from both engines. */
     if (req->grammar)
         jrt_kdict_set(d, (int64_t)jrt_box_str(jrt_str_dup("grammar", JRT_TRUSTED)),
                          (int64_t)jrt_box_str(jrt_str_dup(req->grammar, JRT_TRUSTED)));
+    if (req->anchor)
+        jrt_kdict_set(d, (int64_t)jrt_box_str(jrt_str_dup("anchor", JRT_TRUSTED)),
+                         (int64_t)jrt_box_str(jrt_str_dup(req->anchor, JRT_TRUSTED)));
+    if (req->stop_anchor)
+        jrt_kdict_set(d, (int64_t)jrt_box_str(jrt_str_dup("stop_anchor", JRT_TRUSTED)),
+                         (int64_t)jrt_box_str(jrt_str_dup(req->stop_anchor, JRT_TRUSTED)));
     return jrt_box_ptr(d);
 }
 
@@ -264,34 +164,22 @@ static char* provider_tagged(const infer_req_t* req) {
 
 /* ── Public prompt functions ──────────────────────────────────────────── */
 
+/* Each of these built a JSON body and handed it to the daemon when no provider
+ * was installed. That branch is gone, so they are now the same call with a
+ * different request shape.
+ *
+ * The response carries the *prompt's* trust rather than minting taint: a
+ * provider is a trusted transformer, so a trusted prompt yields a trusted
+ * response (may flow to sinks) and a tainted one (say, built from fetched data)
+ * yields a tainted response (refused at sinks). */
+
 char* jrt_prompt(const char* prompt, const char* model) {
     infer_req_t req = {
         .prompt = prompt,
         .model = model ? model : "",
-        .max_tokens = 0, /* daemon owns the budget */
         .trust = jrt_trust_of(prompt),
     };
-    if (jrt_provider_available()) return provider_tagged(&req);
-
-    infer_buf_t json;
-    build_request(&req, &json);
-
-    char* resp = NULL;
-    size_t resp_len = 0;
-    uint64_t used = 0;
-    jrt_ipc_request(json.data, json.len, &resp, &resp_len, &used);
-    (void)used;
-    free(json.data);
-    if (!resp) return NULL;
-    /* jaded is a TRUSTED transformer: it propagates the prompt's trust to its
-     * output rather than minting taint. A trusted prompt yields a trusted
-     * response (may flow to sinks); a tainted prompt (e.g. built from fetched
-     * data) yields a tainted response (refused at sinks). The AOT runtime only
-     * ever talks to the local daemon, so this propagation is the whole rule. */
-    char* tagged = jrt_str_new(resp_len, req.trust);
-    if (resp_len > 0) memcpy(tagged, resp, resp_len);
-    free(resp);
-    return tagged;
+    return provider_tagged(&req);
 }
 
 char* jrt_prompt_grammar(const char* prompt, const char* model, const char* grammar) {
@@ -299,28 +187,9 @@ char* jrt_prompt_grammar(const char* prompt, const char* model, const char* gram
         .prompt = prompt,
         .model = model ? model : "",
         .grammar = grammar,
-        .max_tokens = 0, /* daemon owns the budget */
         .trust = jrt_trust_of(prompt),
     };
-    if (jrt_provider_available()) return provider_tagged(&req);
-
-    infer_buf_t json;
-    build_request(&req, &json);
-
-    char* resp = NULL;
-    size_t resp_len = 0;
-    jrt_ipc_request(json.data, json.len, &resp, &resp_len, NULL);
-    free(json.data);
-    if (!resp) return NULL;
-    /* jaded is a TRUSTED transformer: it propagates the prompt's trust to its
-     * output rather than minting taint. A trusted prompt yields a trusted
-     * response (may flow to sinks); a tainted prompt (e.g. built from fetched
-     * data) yields a tainted response (refused at sinks). The AOT runtime only
-     * ever talks to the local daemon, so this propagation is the whole rule. */
-    char* tagged = jrt_str_new(resp_len, req.trust);
-    if (resp_len > 0) memcpy(tagged, resp, resp_len);
-    free(resp);
-    return tagged;
+    return provider_tagged(&req);
 }
 
 char* jrt_prompt_grammar_ex(const char* prompt, const char* model,
@@ -333,28 +202,9 @@ char* jrt_prompt_grammar_ex(const char* prompt, const char* model,
         .grammar = pattern,
         .anchor = anchor_or_null,
         .stop_anchor = stop_or_null,
-        .max_tokens = 0, /* daemon owns the budget */
         .trust = jrt_trust_of(prompt),
     };
-    if (jrt_provider_available()) return provider_tagged(&req);
-
-    infer_buf_t json;
-    build_request(&req, &json);
-
-    char* resp = NULL;
-    size_t resp_len = 0;
-    jrt_ipc_request(json.data, json.len, &resp, &resp_len, NULL);
-    free(json.data);
-    if (!resp) return NULL;
-    /* jaded is a TRUSTED transformer: it propagates the prompt's trust to its
-     * output rather than minting taint. A trusted prompt yields a trusted
-     * response (may flow to sinks); a tainted prompt (e.g. built from fetched
-     * data) yields a tainted response (refused at sinks). The AOT runtime only
-     * ever talks to the local daemon, so this propagation is the whole rule. */
-    char* tagged = jrt_str_new(resp_len, req.trust);
-    if (resp_len > 0) memcpy(tagged, resp, resp_len);
-    free(resp);
-    return tagged;
+    return provider_tagged(&req);
 }
 
 /* ── jrt_prompt_typed: retry until response parses as the requested type ── */
@@ -571,26 +421,14 @@ char* jrt_prompt_stream_ex(const char* prompt, const char* model,
         .grammar = pattern_or_null,
         .anchor = anchor_or_null,
         .stop_anchor = stop_or_null,
-        .max_tokens = 0, /* daemon owns the budget */
-        /* Tell the daemon the prompt's actual taint (a tainted prompt must not
-         * be reported as trusted), matching the non-streaming jrt_prompt* paths. */
         .trust = jrt_trust_of(prompt),
     };
 
-    /* A provider package returns the whole response at once (no token stream), so
-     * emit it in one write rather than incrementally. */
-    if (jrt_provider_available()) {
-        size_t plen = 0;
-        char* ptext = provider_infer_text(&req, &plen);
-        if (!start_muted && plen > 0) { fwrite(ptext, 1, plen, stdout); fflush(stdout); }
-        char* ptagged = jrt_str_new(plen, req.trust);
-        if (plen > 0) memcpy(ptagged, ptext, plen);
-        free(ptext);
-        return ptagged;
-    }
-
-    infer_buf_t json;
-    build_request(&req, &json);
+    /* Ask first, then set up the stream state. A provider raises on an `Error`
+     * frame, and that throw longjmps past every free() below — so nothing is
+     * allocated until the call that can throw has returned. */
+    size_t plen = 0;
+    char* ptext = provider_infer_text(&req, &plen);
 
     stream_state_t st = {0};
     st.rcap = 4096;
@@ -598,7 +436,7 @@ char* jrt_prompt_stream_ex(const char* prompt, const char* model,
     st.pcap = 256;
     st.pbuf = malloc(st.pcap);
     if (!st.rbuf || !st.pbuf) {
-        free(json.data); free(st.rbuf); free(st.pbuf);
+        free(ptext); free(st.rbuf); free(st.pbuf);
         fprintf(stderr, "jade: oom (stream init)\n");
         exit(1);
     }
@@ -606,13 +444,14 @@ char* jrt_prompt_stream_ex(const char* prompt, const char* model,
     st.anchor = anchor_or_null;
     st.stop = stop_or_null;
 
-    char* daemon_resp = NULL;
-    uint64_t used = 0;
-    jrt_ipc_request_streaming(json.data, json.len, stream_on_token, &st,
-                              &daemon_resp, NULL, &used);
-    (void)used;
-    free(json.data);
-    free(daemon_resp);
+    /* A provider returns the whole reply at once rather than a token stream, so
+     * this is one call where the daemon made many. It still goes through the
+     * same muting scanner: the VM runs its provider replies through its own
+     * scanner too, and skipping it here would print an anchored region the VM
+     * suppresses — a parity gap this path used to have, back when it wrote the
+     * reply straight to stdout. */
+    if (plen > 0) stream_on_token(ptext, plen, &st);
+    free(ptext);
 
     if (!st.muted && st.plen > 0 && !mute_is_prefix(st.pbuf, st.plen, st.anchor)) {
         fwrite(st.pbuf, 1, st.plen, stdout);
@@ -620,8 +459,6 @@ char* jrt_prompt_stream_ex(const char* prompt, const char* model,
     }
     free(st.pbuf);
 
-    /* Tag the accumulated text with the prompt's trust (jaded propagates, it
-     * doesn't mint taint — see jrt_prompt). */
     char* tagged = jrt_str_new(st.rlen, req.trust);
     if (st.rlen > 0) memcpy(tagged, st.rbuf, st.rlen);
     free(st.rbuf);

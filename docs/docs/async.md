@@ -152,7 +152,7 @@ print_result(f)
 | `DoubleAwait` | The same future was awaited more than once — a future is consumed on first await |
 | `AsyncPanic` | A spawned async task panicked internally; the panic message and source span are captured and reported |
 | `PromptOverflow` | Inside an async task, a typed dereference produced a reply that didn't coerce to the target type — same as in synchronous code |
-| `InferenceError` | Transport error talking to the daemon inside an async task — propagated to the awaiting call site |
+| `InferenceError` | The inference provider failed inside an async task — propagated to the awaiting call site |
 
 ## Related Pages
 

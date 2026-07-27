@@ -1,6 +1,6 @@
 [package]
 name = "jade"
-version = "1.1.28"
+version = "1.1.30"
 edition = "2024"
 description = "A language for LLMs"
 license = "MIT"
@@ -30,7 +30,6 @@ default-members = [".", "src/runtime"]
 
 [dependencies]
 jade-runtime = { path = "src/runtime" }
-ovata-infer-protocol = { git = "https://github.com/joericks1998/ovata-infer-protocol", tag = "v0.3.0" }
 clap = { version = "4", features = ["derive"] }
 reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
@@ -62,7 +61,7 @@ inkwell = { version = "0.8", features = ["llvm18-1"] }
 [features]
 default = []
 # Phase-0 allocation profiler: replaces the `jade` binary's global allocator with
-# a size-class-histogram wrapper (src/alloc_profile.rs). Measurement only, never
+# a size-class-histogram wrapper (src/alloc/profile.rs). Measurement only, never
 # a release build. Declared in the binary, never in jade-runtime, so it cannot
 # reach a dlopen'd package.
 alloc-profile = []

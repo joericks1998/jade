@@ -35,7 +35,8 @@ pub fn is_provider_lib(path: &Path) -> bool {
     matches!(path.extension().and_then(|e| e.to_str()), Some("so") | Some("dylib"))
 }
 
-/// `$HOME/.jade` — the per-user Jade home, the same base the daemon socket uses.
+/// `$HOME/.jade` — the per-user Jade home, shared with the package cache and
+/// the credential store.
 pub fn jade_home() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_owned());
     PathBuf::from(home).join(".jade")
@@ -43,7 +44,8 @@ pub fn jade_home() -> PathBuf {
 
 /// The active-provider slot dir, `$HOME/.jade/provider/active/`. The CLI keeps
 /// exactly one provider `.so` here. `JADE_PROVIDER_ACTIVE` overrides the whole
-/// path (dev/testing), the same shape as `JADE_LLM_SOCK`.
+/// path (dev/testing), which is what lets the parity gate point both engines at
+/// a stand-in provider.
 pub fn active_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("JADE_PROVIDER_ACTIVE") {
         if !dir.is_empty() {

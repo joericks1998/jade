@@ -4,9 +4,9 @@
 //! type-infer → TIR), the bytecode VM, the AOT LLVM backend, and the package
 //! manager. The `jade` binary (`src/main.rs`) is a thin CLI on top of this.
 
-// Jade is Unix-only. The `jade` inference provider talks to the LLM daemon over
-// a Unix domain socket, native packages are loaded with dlopen, and the C
-// runtime is written against POSIX — so a Windows build could only ever be a
+// Jade is Unix-only. Native packages — the inference provider among them — are
+// loaded with dlopen, `std/uhttp` speaks HTTP over a Unix domain socket, and the
+// C runtime is written against POSIX — so a Windows build could only ever be a
 // language subset with the interesting half stubbed out. Failing here is clearer
 // than shipping that: a build error names the constraint, a silently degraded
 // binary doesn't.
@@ -16,15 +16,12 @@ compile_error!(
      Windows is not a supported target; on Windows, build inside WSL2."
 );
 
-/// Phase-0 allocation profiler (feature `alloc-profile`). Host-only; see the
-/// module docs. The `#[global_allocator]` itself is declared in `main.rs`.
-#[cfg(feature = "alloc-profile")]
-pub mod alloc_profile;
-
-/// Phase-1 segregated free-list allocator. Installed as the `jade` binary's
-/// global allocator in `main.rs` — host-only, never in `jade-runtime`, so it
-/// cannot reach a dlopen'd package the way mimalloc did.
-pub mod pool_alloc;
+/// The `jade` binary's global allocators: the Phase-1 segregated free-list pool
+/// (`alloc::pool`) and the Phase-0 profiler behind `--features alloc-profile`
+/// (`alloc::profile`). Host-only — the `#[global_allocator]` declarations
+/// themselves live in `main.rs`, never in `jade-runtime`, so neither can reach a
+/// dlopen'd package the way mimalloc did.
+pub mod alloc;
 
 pub mod build;
 pub mod builtins;

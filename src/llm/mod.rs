@@ -2,31 +2,44 @@ use std::sync::Arc;
 
 use crate::frontend::error::{Result, Span};
 
-pub mod jaded;
 pub mod provider_backend;
 
 #[cfg(test)]
 mod tests;
 
-/// A request sent to the inference daemon — the wire type itself.
+/// Everything the language asks of an inference call.
 ///
-/// The protocol lives in one repository (`ovata-infer-protocol`) that both this
-/// language and the inference daemon depend on, so there is nothing to keep in
-/// sync. Fields are documented on the type itself.
-pub use ovata_infer_protocol::InferenceRequest;
+/// This used to be `ovata_infer_protocol::InferenceRequest`, a wire type shared
+/// with the inference daemon and serialized onto a Unix socket. Inference is an
+/// in-process call into a provider package now, so there is no wire and no
+/// shared struct: what remains is the four things a Jade program can actually
+/// express. The daemon-era fields are gone with the daemon — `model`,
+/// `max_tokens`, `keep_anchors`, and `trust` were already pinned to fixed
+/// defaults, the `count_only`/`stats_only`/`health_only` controls lost their
+/// callers when the `llm` package was removed, and `rlm` was never set at all.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct InferenceRequest {
+    /// The prompt text to complete.
+    pub prompt: String,
+    /// A GBNF grammar constraining the reply, from a typed dereference
+    /// (`?p |> Type`) or an explicit `Grammar.new`.
+    pub grammar: Option<String>,
+    /// Opens the constrained span; output before it is passed through.
+    pub anchor: Option<String>,
+    /// Closes the constrained span.
+    pub stop_anchor: Option<String>,
+}
 
-/// A successful response from the inference daemon.
+/// A successful response from an inference provider.
 pub struct InferenceResponse {
     pub text: String,
 }
 
 /// Interface to an inference provider.
 ///
-/// The language speaks to exactly one provider — the inference daemon, over a
-/// Unix socket (see [`jaded::JadedBackend`]). The OpenAI and Anthropic HTTP
-/// backends that used to live here moved into the daemon: all providers now sit
-/// behind the daemon, and the language is a pure wire-protocol client. The trait
-/// remains as the seam the test [`MockBackend`] implements.
+/// There is one real implementation, [`provider_backend::ProviderPackageBackend`],
+/// which drives the installed provider package in-process. The trait remains as
+/// the seam the test [`MockBackend`] implements.
 #[async_trait::async_trait]
 pub trait InferenceBackend: Send + Sync {
     async fn infer(&self, req: InferenceRequest, span: Span) -> Result<InferenceResponse>;
@@ -49,26 +62,20 @@ pub trait InferenceBackend: Send + Sync {
     }
 }
 
-/// Select the inference backend, in priority order:
+/// Select the inference backend: the provider package installed in the active
+/// slot (`$HOME/.jade/provider/active/`), loaded in-process.
 ///
-/// 1. **A configured provider package** — cloud inference (Anthropic/OpenAI) with
-///    no daemon and no special hardware. Active when `~/.jade/config.toml` names a
-///    provider whose `.so` is installed (see [`crate::providers`]). This is the
-///    default door for most machines, which is why it comes first.
-/// 2. **The local inference daemon** — the optional upgrade, available when its
-///    socket exists (`JADE_LLM_SOCK`, else `$HOME/.jade/llm.sock`).
+/// This was a two-step fallback — provider package, else the local inference
+/// daemon over a Unix socket. The socket is gone: a provider package is a linked
+/// library the engine calls directly, so the daemon was a second way to do the
+/// same thing with a serialization boundary in the middle.
 ///
-/// Returns `None` when neither is present; `?p` then raises
+/// Returns `None` when no provider is installed; `?p` then raises
 /// [`JadeError::NoInferenceBackend`](crate::frontend::error::JadeError), whose
 /// message points at `jade register`.
 pub fn select_backend() -> Option<Arc<dyn InferenceBackend>> {
-    if let Some(backend) = provider_backend::ProviderPackageBackend::from_registry() {
-        return Some(Arc::new(backend));
-    }
-    if std::path::Path::new(&jaded::sock_path()).exists() {
-        return Some(Arc::new(jaded::JadedBackend::new()));
-    }
-    None
+    provider_backend::ProviderPackageBackend::from_registry()
+        .map(|b| Arc::new(b) as Arc<dyn InferenceBackend>)
 }
 
 // ── Mock backend (test builds only) ──────────────────────────────────────────

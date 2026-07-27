@@ -1,8 +1,9 @@
-/* infer.h — inference request builders and high-level prompt API.
+/* infer.h — the high-level prompt API.
  *
- * All LLM-facing entry points live here. They construct InferenceRequest
- * JSON payloads (matching ovata-infer-protocol) and dispatch them through
- * ipc.h, which owns the persistent socket. */
+ * All LLM-facing entry points live here. Each builds a request dict and calls
+ * the installed provider package in process, through native.c. The JSON request
+ * payloads and the ipc.h socket they used to travel on are gone with the
+ * inference daemon. */
 
 #pragma once
 
