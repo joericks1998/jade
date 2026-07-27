@@ -1,6 +1,7 @@
 //! ProviderPackageBackend — the VM's inference backend that drives an installed
 //! provider *package*: a compiled Jade `--lib` (e.g. dovata's `anthropic`/`openai`)
-//! that speaks HTTP to the vendor's API itself. This is the daemon-free cloud path.
+//! that speaks HTTP to the vendor's API itself. Since the inference daemon and its
+//! Unix socket were removed, this is the only way the VM reaches a model.
 //!
 //! A provider package conforms to dovata's model-profile shape (see
 //! `anthropic.jde`): it exports `infer(request) -> [Frame]` and, optionally,
@@ -11,18 +12,19 @@
 //! — into the response text. The package does the HTTP; the language never learns
 //! a vendor detail.
 //!
-//! Only plain `?p` is supported against a remote provider: constrained decoding
-//! (`?p |> Type`, which sends a `grammar`) and `rlm` are rejected by the package
-//! with an `Error` frame, since a cloud API can't enforce a GBNF grammar.
+//! Constrained decoding rides the same path: a typed dereference (`?p |> Type`)
+//! or an explicit `Grammar.new` puts `grammar`/`anchor`/`stop_anchor` in the
+//! request dict, and enforcing them is the package's job. A package that cannot
+//! honour a grammar says so with an `Error` frame, which surfaces as a catchable
+//! Jade error rather than an unconstrained reply.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use jade_runtime::coll::DictObj;
-use ovata_infer_protocol::InferenceRequest;
 
-use super::{InferenceBackend, InferenceResponse};
+use super::{InferenceBackend, InferenceRequest, InferenceResponse};
 use crate::frontend::error::{JadeError, Result, Span};
 use crate::native::{load_native_package, NativeLibFn};
 use crate::vm::VmValue;
@@ -87,23 +89,24 @@ fn config_value(config_json: &[u8], span: Span) -> Result<VmValue> {
     crate::vm::coerce::json_to_vm_value(&v).map_err(|e| err(format!("provider config: {e}"), span))
 }
 
-/// Build the `infer` request dict from the wire request. Only the fields a remote
-/// profile reads are sent; `grammar`/`rlm` are forwarded so the package can reject
-/// them explicitly rather than silently ignoring the constraint.
-fn request_value(req: &InferenceRequest) -> VmValue {
+/// Build the `infer` request dict the package receives.
+///
+/// A key is present only when the language has something to say, so a package
+/// can tell "no grammar" from "an empty grammar" by absence. `anchor` and
+/// `stop_anchor` ride along with `grammar` — they are one feature (the anchors
+/// bound the span the grammar constrains), and sending the grammar without them
+/// would silently drop half of an explicit `Grammar.new(pattern, anchor, stop)`.
+pub(super) fn request_value(req: &InferenceRequest) -> VmValue {
     let mut d: DictObj<VmValue> = DictObj::new();
     d.insert("prompt", VmValue::Str(req.prompt.clone().into()));
-    if !req.model.is_empty() {
-        d.insert("model", VmValue::Str(req.model.clone().into()));
-    }
-    if req.max_tokens > 0 {
-        d.insert("max_tokens", VmValue::Int(req.max_tokens as i64));
-    }
     if let Some(g) = &req.grammar {
         d.insert("grammar", VmValue::Str(g.clone().into()));
     }
-    if req.rlm {
-        d.insert("rlm", VmValue::Bool(true));
+    if let Some(a) = &req.anchor {
+        d.insert("anchor", VmValue::Str(a.clone().into()));
+    }
+    if let Some(s) = &req.stop_anchor {
+        d.insert("stop_anchor", VmValue::Str(s.clone().into()));
     }
     VmValue::Dict(d)
 }

@@ -17,7 +17,6 @@ crate-type = ["rlib", "staticlib"]
 # It is already a transitive dep of `jade run`, and is pure-Rust/std. (Revisit if a
 # no-std embedded/kernel-target AOT build ever needs it gone.)
 [dependencies]
-ovata-infer-protocol = { git = "https://github.com/joericks1998/ovata-infer-protocol", tag = "v0.3.0" }
 serde_json = "1"
 # Stable shim for the unstable `allocator_api`, so a collection's backing store
 # can be placed in a per-frame bump arena (`arena.rs`) for non-escaping values

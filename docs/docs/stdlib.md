@@ -596,7 +596,7 @@ There is no `llm` package. Running inference is language *syntax*, not a package
 declare a prompt and dereference it (`?p`, `?p |> Type`). Everything a program
 used to reach for through `use llm` — the model, token budget/accounting, anchor
 handling, retries, health, model profiles, and tool-call parsing — is owned by
-the inference daemon now. See [LLM Integration](llm).
+the provider package now. See [LLM Integration](llm).
 
 ```jade
 prompt p = "Write a one-sentence summary of Jade."

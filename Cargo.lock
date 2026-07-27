@@ -627,7 +627,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "jade"
-version = "1.1.29"
+version = "1.1.30"
 dependencies = [
  "async-recursion",
  "async-trait",
@@ -637,7 +637,6 @@ dependencies = [
  "inkwell",
  "jade-runtime",
  "libloading",
- "ovata-infer-protocol",
  "parking_lot",
  "reqwest",
  "rustc-hash",
@@ -654,7 +653,6 @@ name = "jade-runtime"
 version = "0.1.0"
 dependencies = [
  "allocator-api2",
- "ovata-infer-protocol",
  "serde_json",
 ]
 
@@ -761,15 +759,6 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
-
-[[package]]
-name = "ovata-infer-protocol"
-version = "0.3.0"
-source = "git+https://github.com/joericks1998/ovata-infer-protocol?tag=v0.3.0#4a570e993e61fcecd799f627d0a67904fe4068fa"
-dependencies = [
- "serde",
- "serde_json",
-]
 
 [[package]]
 name = "parking_lot"

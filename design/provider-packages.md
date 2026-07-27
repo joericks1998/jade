@@ -1,14 +1,21 @@
-# Provider packages — cloud inference without a daemon
+# Provider packages — how the language reaches a model
 
-Status: shipped. VM path in v1.1.24; AOT path in v1.1.25.
+Status: shipped. VM path in v1.1.24; AOT path in v1.1.25. Sole path since v1.1.30,
+when the inference daemon and its socket were removed.
 
 ## Why
 
 The `1.1.21` daemon split made the language a pure wire-protocol client to the
 private `jade-tree` daemon and deleted every language-side way to say "just use my
-Anthropic key." That gated the language on local-model hardware. This restores a
+Anthropic key." That gated the language on local-model hardware. This restored a
 cloud path any machine can run, **without teaching the public language anything
 about Anthropic or OpenAI.**
+
+For four releases both paths existed and `?p` chose between them. They were two
+ways to do one thing, and the daemon was the one with a serialization boundary in
+the middle: a linked package is a function call, a daemon is a socket, a wire
+format, a framing layer, and a second process to keep running. v1.1.30 removed
+the daemon path — see *What the daemon removal changed* below.
 
 ## What a provider is
 
@@ -16,9 +23,11 @@ A provider is a **compiled Jade `--lib` package** (built in dovata: `anthropic`,
 `openai`, plus local profiles like `qwen3-coder-30b`). It does its own HTTP to the
 vendor API and exposes two Jade functions:
 
-- **`infer(request) -> [Frame]`** — `request` is a dict (`{prompt, model?,
-  max_tokens?, grammar?, rlm?}`); returns an **array of frame dicts**. Success →
-  `[Token?, Json?(tool_calls), Done]`; failure → `[Error]`.
+- **`infer(request) -> [Frame]`** — `request` is a dict
+  (`{prompt, grammar?, anchor?, stop_anchor?}`); returns an **array of frame
+  dicts**. Success → `[Token?, Json?(tool_calls), Done]`; failure → `[Error]`.
+  A key is present only when the language has something to say, so a package can
+  tell "no grammar" from "an empty grammar" by absence.
 - **`configure(opts)`** — sets runtime-mutable params (api_key, model, temperature,
   tools, system, …). Optional; the package can also read its own env var.
 - **Frames are Jade dicts**, not wire bytes: `{"type":"Token","text":…}`,
@@ -50,7 +59,7 @@ Also discovered from where the toolchain ships them
 (`<prefix>/lib/jade/providers/`, bundled from dovata's `providers-latest`) and
 `JADE_PROVIDERS_DIR` (dev). `JADE_PROVIDER_ACTIVE` overrides the active-slot dir.
 The slot is under `$HOME`, not beside the `jade` binary, because a compiled Jade
-program is its own binary and can only find `$HOME` (like the daemon socket).
+program is its own binary and can only find `$HOME`.
 
 Discovery accepts both `.so` and `.dylib` — providers ship as `.so` on every
 platform and `dlopen` ignores the extension.
@@ -63,13 +72,13 @@ An `InferenceBackend` that, on first prompt, loads the active package via
 `NativeLibFn::call` and decodes the `[Frame]` array. `configure`/`infer` cross the
 package boundary through the v1.1.24 native-FFI dict/array marshalling
 (`vm_to_ffi`/`ffi_to_vm`, deep-copied via a process-shared allocator).
-`select_backend()` resolves **provider package → daemon socket → none**; the last
-raises `NoInferenceBackend`, pointing at `jade register`.
+`select_backend()` resolves **provider package → none**; the second raises
+`NoInferenceBackend`, pointing at `jade register`.
 
 ## AOT — `runtime_aot/infer/infer.c`
 
-Every `jrt_prompt*` routes through a one-branch check: *active provider? drive it :
-daemon.* The provider drive is pure C reusing the existing native-package path —
+Every `jrt_prompt*` drives the provider. This is pure C reusing the existing
+native-package path —
 `jrt_native_load` the active `.so` (path/config from jade-runtime's
 `jrt_provider_active_lib_path`/`_config`), `jrt_native_call(handle,"configure",…)`
 once, `jrt_native_call(handle,"infer",…)`, then walk the returned frame-dict array
@@ -77,9 +86,13 @@ with `jrt_coll_*`, accumulating `Token` text and raising a catchable Jade error 
 `Error`. Same `jrt_native_call` marshalling as the VM, so no second decoder. The
 request/config dicts are built with `jrt_kdict_*` + `jrt_json_parse_chunk`.
 
-Only plain `?p` is supported remotely — `grammar` (typed `?p |> Type`) and `rlm`
-are rejected by the package with an `Error` frame, since a cloud API can't enforce
-a GBNF grammar.
+Constrained decoding rides the same path: `grammar`, `anchor`, and `stop_anchor`
+go in the request dict and enforcing them is the package's job. They travel
+together — the anchors bound the span the grammar constrains, so sending the
+pattern alone would silently drop half of an explicit
+`Grammar.new(pattern, anchor, stop)`. A package that cannot honour a grammar
+returns an `Error` frame, which is a catchable Jade error rather than an
+unconstrained reply.
 
 ## CLI — `src/providers/` + `jade register` / `jade use`
 
@@ -112,12 +125,35 @@ Both engines, end-to-end, against the **real published `anthropic.so`**:
 | `jade build` → binary (AOT) | completion | catchable `HTTP 401` (genuine Anthropic `request_id`) |
 
 `register`→`configure(api_key)`→`infer`→live HTTPS→frame decode confirmed; the
-no-provider case falls back to the daemon in both engines.
+no-provider case raises `NoInferenceBackend` in both engines.
+
+## What the daemon removal changed (v1.1.30)
+
+Deleted: `jade-runtime`'s `infer/` module (the socket client, framing, and its C
+entry points), `src/llm/jaded.rs`, `runtime_aot/ipc/`, the hand-rolled JSON
+request builder in `infer.c`, the `ovata-infer-protocol` dependency in both
+crates, and `JADE_LLM_SOCK`.
+
+`InferenceRequest` stopped being a wire type and became four fields —
+`prompt`, `grammar`, `anchor`, `stop_anchor`. The rest went with the wire:
+`model`, `max_tokens`, `keep_anchors`, and `trust` were already pinned to fixed
+defaults, `count_only`/`stats_only`/`health_only` lost their callers when the
+`llm` package was removed, and `rlm` was never set by the language at all.
+
+Two behaviours moved rather than disappeared. Grammar enforcement is now the
+package's, which is why the packages had to accept `grammar` before this could
+land. And the AOT streaming path now runs a provider's reply through the same
+anchor-muting scanner the VM uses — it previously wrote provider replies straight
+to stdout, so an anchored region the VM suppressed was printed by a compiled
+binary.
+
+The parity gate changed with it: `scripts/fake-jaded.py`, a stand-in daemon on a
+socket, became `scripts/fake-provider.jde`, a stand-in package built with
+`jade build --lib` into a throwaway slot. It exercises the path a released binary
+actually takes.
 
 ## Known limits
 
-- **Typed deref / grammar / rlm** are unsupported remotely (the package returns an
-  `Error` frame).
 - **Interactive key entry echoes** (no `rpassword` dep; env-var path is secret-free).
 - **A compiled `?p` binary** depends on the active provider `.so` + config being
   present on the target machine.

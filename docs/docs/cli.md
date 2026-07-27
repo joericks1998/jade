@@ -123,6 +123,28 @@ jade fmt src/ --check
 |------|-------------|
 | `--check` | Exit with code 1 if any file would be changed (useful for CI). |
 
+## `jade register` / `jade use`
+
+Choose the inference provider that `?p` calls, and store its API key. Both are global and per-user, kept under `~/.jade` — not per project.
+
+```bash
+jade register                    # list installed providers, pick one, enter a key
+jade register anthropic sk-...   # or name the provider and key outright
+jade register --list             # show what is installed and which is active
+jade register --remove anthropic # forget a stored key
+
+jade use openai                  # switch providers without re-entering a key
+```
+
+Providers ship with Jade, so there is usually nothing to install first. Until you register one, a `?` dereference fails with "no inference backend available".
+
+### Flags
+
+| Flag | Description |
+|------|-------------|
+| `--list` | List installed providers and the active selection, then exit. |
+| `--remove` | Remove the provider's stored credential instead of setting one. |
+
 ## `jade env`
 
 Show the Jade environment: version, binary path, platform, cache stats, and project info.
@@ -195,7 +217,7 @@ jade pkg list
 | `list` | List declared dependencies and their resolved versions. |
 
 :::note
-There is no LLM configuration command. The inference daemon owns the provider, model, and API keys — the language only needs the daemon listening on its socket (`$HOME/.jade/llm.sock`, override with `JADE_LLM_SOCK`). See [LLM Integration](llm).
+LLM configuration lives in a provider package, not in the language. `jade register` installs one and stores your API key, `jade use` switches between installed providers, and `jade env` shows which is active. See [LLM Integration](llm).
 :::
 
 ## Backward-Compatible File Execution

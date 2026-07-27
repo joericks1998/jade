@@ -12,7 +12,7 @@ Because it is C, it has no module declaration in `src/lib.rs`.
 
 The runtime is a platform-agnostic core plus a swappable platform backend. `common.c` is shared verbatim; the backend supplies only two things — the concurrency layer (`jade_spawn`/`await`/`join`) and the process-exit primitive `jade_rt_exit`. `posix.c` is the host backend for macOS and Linux; another target could supply its own without touching the core.
 
-The trend over time has been *shrinking*. Symbols keep moving out of `common.c` into `jade-runtime` so both engines share one implementation, with the C declaration left behind in `runtime.h` and the linker resolving it against the Rust staticlib. `ipc/` is the clearest example: the whole socket transport is now Rust, and only the header declaring the ABI remains.
+The trend over time has been *shrinking*. Symbols keep moving out of `common.c` into `jade-runtime` so both engines share one implementation, with the C declaration left behind in `runtime.h` and the linker resolving it against the Rust staticlib. `ipc/` went further than that and disappeared: it held the socket transport to the inference daemon, which moved to Rust and then, in v1.1.30, was removed outright when inference became an in-process call into a provider package.
 
 ## What each file does
 
@@ -20,8 +20,7 @@ The trend over time has been *shrinking*. Symbols keep moving out of `common.c` 
 - **`common.c`** — the platform-agnostic core: fatal errors, the `setjmp`-based exception machinery, and whatever value operations have not yet migrated to Rust.
 - **`posix.c`** — the host backend. pthreads-based concurrency, `dlopen`/`dlsym`, and `exit`. Guarded by `#ifndef __JADE_KERNEL__`.
 - **`native.c`** — native (C-ABI) package support: the registry, `jade_pkg_init` invocation, and value marshalling. It mirrors `src/native/mod.rs`'s `load_native_package` / `vm_to_ffi` / `ffi_to_vm` so one `.dylib` serves both `jade run` and `jade build`. The `dlopen` primitives themselves are backend hooks.
-- **`infer/infer.c`**, **`infer/infer.h`** — the structured JSON inference request builder and every `jrt_prompt_*` entry point. Dispatches through `ipc` for transport and never touches a socket directly.
-- **`ipc/ipc.h`** — declares the persistent-connection ABI. **There is no `ipc.c`.** The entry points are implemented in Rust, in `jade-runtime`'s `infer` module.
+- **`infer/infer.c`**, **`infer/infer.h`** — every `jrt_prompt_*` entry point. Each builds a request dict and drives the installed provider package through `native.c`, so this file has no transport of its own.
 
 ## Who uses it
 

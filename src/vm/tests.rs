@@ -3300,7 +3300,7 @@ let reply = stream(?p, mute_on=[g])"#,
     assert_eq!(printed, "\n");
 }
 
-// ── Constrained lazy inference: stop_anchor reaches jade-tree ────────────────
+// ── Constrained lazy inference: stop_anchor reaches the backend ──────────────
 //
 // These tests verify that when `stream(?p, mute_on=[g])` is called with a
 // Grammar that has a stop_anchor, the inference request sent to the backend
@@ -3383,27 +3383,8 @@ fn test_prompt_deref_outside_stream_passes_no_constraints() {
     assert_eq!(captured[0].stop_anchor, None);
 }
 
-// ── inference request shape (the `use llm` package was removed) ──────────────
-
-#[test]
-fn test_llm_requests_send_keep_anchors_false() {
-    // The language no longer toggles keep_anchors (llm.keep_anchors was removed),
-    // so every request carries keep_anchors=false on the wire — the daemon owns
-    // anchor handling now.
-    let backend = std::sync::Arc::new(crate::llm::MockBackend::new(vec!["hi"]));
-    let src = "prompt p = \"test\"\nlet x = ?p";
-    run_src_with_shared_backend(src, std::sync::Arc::clone(&backend)).unwrap();
-    let captured = backend.captured.lock().unwrap();
-    assert!(!captured[0].keep_anchors);
-}
-
-#[test]
-fn test_llm_requests_send_empty_model() {
-    // The language no longer tracks a model (llm.model was removed); it sends an
-    // empty model so the daemon picks its configured/loaded one.
-    let backend = std::sync::Arc::new(crate::llm::MockBackend::new(vec!["hi"]));
-    let src = "prompt p = \"test\"\nlet x = ?p";
-    run_src_with_shared_backend(src, std::sync::Arc::clone(&backend)).unwrap();
-    let captured = backend.captured.lock().unwrap();
-    assert!(captured[0].model.is_empty(), "model must be empty on the wire");
-}
+// Two tests here asserted that every request carried `keep_anchors: false` and an
+// empty `model` — the language had stopped setting either, but the wire type still
+// had the fields, so nothing stopped a caller from filling them back in. Both
+// fields are gone from `InferenceRequest` now, along with the socket that needed
+// them, so the type says what the tests used to check.

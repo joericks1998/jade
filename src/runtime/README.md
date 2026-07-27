@@ -41,8 +41,7 @@ It is intentionally dependency-free and LLVM-free, so it builds everywhere `jade
 **Concurrency and I/O**
 
 - `task.rs` — a bounded worker pool and the future object tasks resolve. Replaces the one-detached-pthread-per-spawn model that made large fan-outs a resource failure instead of a queue.
-- `infer/` — the inference daemon client, one implementation for both engines (`conn.rs` transport, `frame.rs` framing, `ffi.rs` the C surface). This used to exist twice, in two languages, and had already drifted on frame handling, UTF-8 validation, connection reuse, and size ceilings.
-- `provider/` — resolves the *active provider slot* under `$HOME/.jade/provider/active/`. It only resolves the slot; loading and driving the provider package is the engines' job.
+- `provider/` — resolves the *active provider slot* under `$HOME/.jade/provider/active/`. It only resolves the slot; loading and driving the provider package is the engines' job. This replaced an `infer/` module holding a Unix-socket client for the inference daemon — inference is an in-process package call now, so there is no transport left to share.
 - `uhttpf/`, `httpf.rs` — HTTP over a Unix socket and over TCP.
 
 **Standard-library cores** — `mathf.rs`, `strf.rs`, `fsf.rs`, `pathf.rs`, `envf.rs`, `shf.rs`, `jsonf.rs`, `randomf.rs`, `timef.rs`, `grammarf.rs`. Each holds the shared implementation behind a `std/*` package; the thin `VmValue` marshalling lives in the matching top-level module (`src/math/`, `src/string/`, …).

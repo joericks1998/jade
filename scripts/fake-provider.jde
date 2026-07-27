@@ -1,0 +1,39 @@
+// fake-provider.jde — a stand-in inference provider for the parity gate.
+//
+// Built with `jade build --lib` and dropped into an active provider slot that
+// JADE_PROVIDER_ACTIVE points at, so both engines load it exactly the way they
+// load a real provider. It answers every prompt with the same canned reply, which
+// is what makes examples/llm deterministic on both backends.
+//
+// This replaces scripts/fake-jaded.py, a stand-in *daemon* that served the same
+// canned replies over a Unix socket. The socket is gone, so a stub has to be a
+// package now — which is the better test anyway: it exercises the real path a
+// released binary takes rather than one that no longer exists.
+//
+// The reply comes from JADE_FAKE_REPLY. A provider normally reads its config
+// through `configure(opts)`, but an env var works identically under `jade run`
+// and a compiled binary and needs no config.json staged beside the library.
+
+use std::env
+
+// One prompt, one reply, no state. Every fixture in examples/llm uses a single
+// response for the whole file — async derefs finish in scheduling order, so a
+// script of *different* replies would bind them to prompts non-deterministically
+// and make the example flap.
+fn infer(request) {
+    let reply = env.get("JADE_FAKE_REPLY")
+    if reply == nil {
+        return [{"type": "Error", "message": "JADE_FAKE_REPLY is not set"}]
+    }
+    return [
+        {"type": "Token", "text": reply},
+        {"type": "Done"}
+    ]
+}
+
+// Accepted and ignored. The engines only call this when a config.json is staged,
+// which the parity harness does not do, but a provider that lacks it entirely is
+// an unusual shape to be testing against.
+fn configure(opts) {
+    return nil
+}

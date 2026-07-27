@@ -203,8 +203,7 @@ impl std::fmt::Display for JadeError {
                 write!(f, "[{}:{}] inference error: {}", span.line, span.col, message),
             JadeError::NoInferenceBackend { span } =>
                 write!(f, "[{}:{}] no inference backend available — run `jade register` to \
-                    choose a provider and set your API key, or start the local inference \
-                    daemon (socket at $HOME/.jade/llm.sock; override with JADE_LLM_SOCK)", span.line, span.col),
+                    choose a provider and set your API key", span.line, span.col),
             JadeError::NotAPrompt { name, span } =>
                 write!(f, "[{}:{}] '{}' is not a prompt variable", span.line, span.col, name),
             JadeError::PromptOverflow { name, attempts, span } =>

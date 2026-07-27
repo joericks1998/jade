@@ -91,7 +91,6 @@ pub mod fsf;
 pub mod gc;
 pub mod grammarf;
 pub mod heap;
-pub mod infer;
 pub mod httpf;
 pub mod jsonf;
 pub mod mathf;
@@ -118,9 +117,10 @@ pub use coll::{ArrayObj, DictObj, StructObj};
 pub use heap::{Color, ObjHeader, ObjKind};
 pub use value::{JadeValue, FALSE, NIL, TRUE};
 
-/// ABI version of this runtime. Bumped when the shared value/heap ABI changes
-/// so a mismatched AOT binary and daemon can be detected. Exposed over the C
-/// ABI so AOT-linked binaries can assert compatibility.
+/// ABI version of this runtime. Bumped when the shared value/heap ABI changes,
+/// so an AOT binary and a native package built against different runtimes can
+/// be detected. Exposed over the C ABI so AOT-linked binaries can assert
+/// compatibility.
 pub const RUNTIME_ABI_VERSION: u32 = 1;
 
 /// C-ABI accessor for [`RUNTIME_ABI_VERSION`]. Also serves as a trivial

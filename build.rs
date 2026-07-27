@@ -3,12 +3,13 @@
 //! Emitted Jade binaries link against this archive (`-lJadeRuntime`). The
 //! runtime is split into a platform-agnostic core (`common.c`) plus a swappable
 //! platform backend that supplies concurrency + process-exit: we build `posix.c`
-//! (the host backend) here. `infer` adds the LLM inference path; the socket
-//! transport beneath it is Rust, in `jade-runtime`'s `infer` module, shared with
-//! the VM — `ipc/` keeps only the header declaring those entry points.
+//! (the host backend) here. `infer` adds the LLM inference path, which drives the
+//! installed provider package through `native.c` — it used to sit on an `ipc/`
+//! socket transport to the inference daemon, and that whole layer is gone.
 //!
-//! The archive lands in `$OUT_DIR`; we surface that directory to the daemon via
-//! the `JADE_RT_LIB_DIR` compile-time env so it can point the linker at it.
+//! The archive lands in `$OUT_DIR`; we surface that directory to the build
+//! driver via the `JADE_RT_LIB_DIR` compile-time env so it can point the linker
+//! at it.
 
 use std::path::PathBuf;
 
@@ -42,7 +43,6 @@ fn main() {
         // shadowed by time/time.h.
         .include(&rt)
         .include(rt.join("infer"))
-        .include(rt.join("ipc"))
         .warnings(false)
         .compile("JadeRuntime"); // → $OUT_DIR/libJadeRuntime.a
 

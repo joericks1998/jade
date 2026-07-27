@@ -12,7 +12,7 @@ Most of Jade's rationale lives in module headers, and that is the right home for
 
 ## What each file does
 
-- **`provider-packages.md`** — cloud inference without a daemon. Shipped: VM path in v1.1.24, AOT path in v1.1.25. Explains what a provider package is (a compiled Jade `--lib` exporting `infer(request) -> [Frame]` and optionally `configure(opts)`), why the language contains no vendor names at all, and how the active slot works. Read it before touching `src/providers/`, `src/llm/provider_backend.rs`, or `jade_runtime::provider`.
+- **`provider-packages.md`** — how the language reaches a model. Shipped: VM path in v1.1.24, AOT path in v1.1.25; the sole path since v1.1.30, when the inference daemon and its socket were removed. Explains what a provider package is (a compiled Jade `--lib` exporting `infer(request) -> [Frame]` and optionally `configure(opts)`), why the language contains no vendor names at all, and how the active slot works. Read it before touching `src/providers/`, `src/llm/provider_backend.rs`, or `jade_runtime::provider`.
 
 ## Who uses it
 

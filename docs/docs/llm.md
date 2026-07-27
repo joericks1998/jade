@@ -4,7 +4,7 @@ title: LLM Integration
 sidebar_label: LLM Integration
 ---
 
-Jade is built around first-class LLM access. A `prompt` declaration names a prompt string; the `?` operator sends it to the inference daemon and returns the response. The `|>` pipe suffix coerces the response to a typed Jade value.
+Jade is built around first-class LLM access. A `prompt` declaration names a prompt string; the `?` operator sends it to your inference provider and returns the response. The `|>` pipe suffix coerces the response to a typed Jade value.
 
 ## Declaring a Prompt
 
@@ -23,7 +23,7 @@ prompt p = question
 
 ## Untyped Dereference — `?p`
 
-Prefixing a prompt variable with `?` sends the prompt to the inference daemon and returns the raw response as a `str`.
+Prefixing a prompt variable with `?` sends the prompt to your provider and returns the raw response as a `str`.
 
 ```jade
 prompt p = "Say exactly: Hello from Jade!"
@@ -108,7 +108,7 @@ it applies to `system`, so it's rejected in favor of the two forms above. So is
 A typed dereference is single-shot: grammar-constrained sampling already forces
 the model's reply into a shape the target type accepts. If the reply still can't
 be coerced, Jade raises a `PromptOverflow` runtime error naming the prompt
-variable. The language does not re-ask — any retry policy is the daemon's to own.
+variable. The language does not re-ask — any retry policy is the provider's to own.
 
 ```jade
 prompt p = "Pick a lucky number."
@@ -119,32 +119,38 @@ print(n)
 ## Configuration
 
 There is no LLM configuration in the language — no `jade.toml` model section, no
-provider keys, no `jade configure`. The **inference daemon owns all of it**: the
-provider, the model, API keys, the token budget, and any retry policy. You
-configure those on the daemon, not here.
+provider keys in your source. A **provider package** owns all of it: which
+vendor, which model, the API key, the token budget, and any retry policy.
 
-The language reaches the daemon over a Unix socket, and that socket is the entire
-contract. Its path is `$JADE_LLM_SOCK` if set, otherwise `$HOME/.jade/llm.sock`.
-If no daemon is listening there, a `?` dereference fails with a "cannot connect
-to inference daemon" error.
+Install one and set your key with `jade register`:
+
+```sh
+jade register                    # pick from what is installed, then enter a key
+jade register anthropic sk-...   # or name the provider and key outright
+jade use openai                  # switch without re-entering a key
+jade env                         # what is active, and what is installed
+```
+
+A provider is an ordinary compiled Jade package that does its own HTTP to the
+vendor. Jade loads whichever one is in the active slot, hands it the prompt, and
+reads back the reply — it never learns a vendor name. Until one is registered, a
+`?` dereference fails with "no inference backend available".
 
 | Variable | Purpose |
 |----------|---------|
-| `JADE_LLM_SOCK` | Path to the daemon's Unix socket (default `$HOME/.jade/llm.sock`) |
+| `JADE_PROVIDER_ACTIVE` | Directory holding the active provider (default `$HOME/.jade/provider/active`) |
 
 ## No `llm` package
 
 There is no `use llm` package in the language. Everything it used to expose —
 model selection and introspection, the token budget and token accounting, anchor
-handling, retry policy, daemon health, model profiles, and tool-call parsing — is
-owned by the inference daemon now. The model-specific pieces (profiles, tool-call
-parsing) ship with each model as **Jade packages on the daemon side**; the rest
-is daemon configuration.
+handling, retry policy, backend health, model profiles, and tool-call parsing —
+belongs to the provider package now.
 
 The language keeps only the inference *syntax*: declaring a prompt and
 dereferencing it (`?p`, `?p |> Type`), with grammar constraints via
-`?p |> grammar`. It builds a request, sends it over the socket, and reads the
-reply — nothing else.
+`?p |> grammar`. It builds a request, calls the provider, and reads the reply —
+nothing else.
 
 ## Async Inference
 
@@ -176,10 +182,10 @@ See [Async / Await](async) for the full reference.
 
 | Error | Cause |
 |-------|-------|
-| `MissingApiKey` | `?p` was evaluated but no inference daemon was reachable (start it; socket at `$HOME/.jade/llm.sock`, override with `JADE_LLM_SOCK`) |
+| `NoInferenceBackend` | `?p` was evaluated with no provider installed — run `jade register` |
 | `NotAPrompt` | `?x` where `x` is not a `prompt` binding |
-| `PromptOverflow` | Typed dereference produced a reply that didn't coerce to the target type (single-shot — the daemon owns any retry policy) |
-| `InferenceError` | Transport error talking to the daemon (connection failure, malformed frame, etc.) |
+| `PromptOverflow` | Typed dereference produced a reply that didn't coerce to the target type (single-shot — the provider owns any retry policy) |
+| `InferenceError` | The provider reported a failure (a bad API key, a rate limit, a grammar it cannot enforce) |
 | `StreamingWithType` | `?p |> Type` used directly inside `print()` — assign to a variable first |
 | `NotAFuture` | `await` applied to a non-Future value |
 | `DoubleAwait` | The same Future was awaited more than once |
