@@ -237,3 +237,87 @@ fn tag_constants_are_distinct() {
         }
     }
 }
+
+// ── Struct round-trip ─────────────────────────────────────────────────────
+//
+// A struct is a dict that also carries its type name. The name is the reason it
+// crosses as its own tag rather than as a dict: a receiver can refuse a struct
+// that is not the type it expects, where a dict with the wrong keys reads as a
+// set of nils and fails silently. These check both halves of that — the fields
+// survive in declaration order, and the name survives with them.
+
+fn sample_struct() -> VmValue {
+    let mut obj = StructObj::<VmValue>::new("InferRequest");
+    obj.set_field("input", VmValue::Str("hi".into()));
+    obj.set_field("grammar", VmValue::Nil);
+    obj.set_field("anchor", VmValue::Str("<tool>".into()));
+    VmValue::Struct(Arc::new(Mutex::new(obj)))
+}
+
+#[test]
+fn vm_to_ffi_struct_carries_type_name_and_fields_in_order() {
+    let mut scratch = Vec::new();
+    let v = vm_to_ffi(&sample_struct(), &mut scratch);
+    assert_eq!(v.tag, JADE_TAG_STRUCT);
+
+    let st = unsafe { &*v.data.as_struct };
+    let name = unsafe { CStr::from_ptr(st.type_name as *const c_char) };
+    assert_eq!(name.to_str().unwrap(), "InferRequest");
+    assert_eq!(st.len, 3);
+
+    let keys: Vec<String> = (0..st.len)
+        .map(|i| unsafe {
+            CStr::from_ptr(*st.keys.add(i) as *const c_char).to_string_lossy().into_owned()
+        })
+        .collect();
+    assert_eq!(keys, ["input", "grammar", "anchor"], "declaration order, not sorted");
+
+    unsafe { ffi_free(&v) };
+}
+
+#[test]
+fn struct_survives_a_round_trip() {
+    let mut scratch = Vec::new();
+    let v = vm_to_ffi(&sample_struct(), &mut scratch);
+    let back = ffi_to_vm(&v, ZERO).expect("struct should convert back");
+    unsafe { ffi_free(&v) };
+
+    let VmValue::Struct(arc) = back else { panic!("expected a struct back") };
+    let guard = arc.lock();
+    assert_eq!(guard.type_name(), "InferRequest");
+    let fields: Vec<&String> = guard.fields().iter().map(|(k, _)| k).collect();
+    assert_eq!(fields, ["input", "grammar", "anchor"]);
+    assert!(matches!(guard.get_field("input"), Some(VmValue::Str(s)) if s.as_str() == "hi"));
+    assert!(matches!(guard.get_field("grammar"), Some(VmValue::Nil)));
+}
+
+/// A struct nested inside a dict has to be deep-copied and freed like any other
+/// container node — a leak or double-free here only shows up under load.
+#[test]
+fn a_struct_nested_in_a_dict_round_trips() {
+    let mut d: DictObj<VmValue> = DictObj::new();
+    d.insert("req", sample_struct());
+    let mut scratch = Vec::new();
+    let v = vm_to_ffi(&VmValue::Dict(d), &mut scratch);
+    let back = ffi_to_vm(&v, ZERO).expect("dict should convert back");
+    unsafe { ffi_free(&v) };
+
+    let VmValue::Dict(out) = back else { panic!("expected a dict back") };
+    let Some(VmValue::Struct(arc)) = out.get("req") else { panic!("nested struct lost") };
+    assert_eq!(arc.lock().type_name(), "InferRequest");
+}
+
+/// An empty struct still carries its name — the name is what a receiver checks,
+/// so it must survive even when there is nothing else to copy.
+#[test]
+fn an_empty_struct_keeps_its_type_name() {
+    let obj = StructObj::<VmValue>::new("Marker");
+    let mut scratch = Vec::new();
+    let v = vm_to_ffi(&VmValue::Struct(Arc::new(Mutex::new(obj))), &mut scratch);
+    let back = ffi_to_vm(&v, ZERO).expect("empty struct should convert back");
+    unsafe { ffi_free(&v) };
+
+    let VmValue::Struct(arc) = back else { panic!("expected a struct back") };
+    assert_eq!(arc.lock().type_name(), "Marker");
+    assert_eq!(arc.lock().len(), 0);
+}

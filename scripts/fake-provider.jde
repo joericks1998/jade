@@ -13,7 +13,13 @@
 // The reply comes from JADE_FAKE_REPLY. A provider normally reads its config
 // through `configure(opts)`, but an env var works identically under `jade run`
 // and a compiled binary and needs no config.json staged beside the library.
+//
+// `request` arrives as an `InferRequest` — the struct declared in the shared
+// definition below, which dovata's real providers are written against too. This
+// stub reads `request.input` the same way they do, so the gate exercises the
+// actual contract rather than a stand-in for it.
 
+use ovata::infer
 use std::env
 
 // One prompt, one reply, no state. Every fixture in examples/llm uses a single
@@ -21,6 +27,13 @@ use std::env
 // script of *different* replies would bind them to prompts non-deterministically
 // and make the example flap.
 fn infer(request) {
+    // Read the field a real provider reads. Raising on nil is what makes a
+    // rename in the shared definition fail the parity gate — a stub that merely
+    // ignored the request would keep passing while every real provider broke.
+    let input = request.input
+    if input == nil || input == "" {
+        return [{"type": "Error", "message": "InferRequest.input was empty"}]
+    }
     let reply = env.get("JADE_FAKE_REPLY")
     if reply == nil {
         return [{"type": "Error", "message": "JADE_FAKE_REPLY is not set"}]

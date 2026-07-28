@@ -11,7 +11,12 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      # `submodules` is required, not tidiness: protocol/ holds the shared
+      # InferRequest definition. Without it the tripwire test cannot read the
+      # file and the parity gate cannot build its stub provider.
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable

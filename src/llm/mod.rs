@@ -30,6 +30,20 @@ pub struct InferenceRequest {
     pub stop_anchor: Option<String>,
 }
 
+/// The struct type a provider's `infer` receives, and its fields in declaration
+/// order.
+///
+/// These name the shared definition in `protocol/jade/infer.jde`,
+/// which dovata's provider packages are written against. Nothing in the compiler
+/// can `use` a `.jde` file, so this is a hand-written copy — kept honest by the
+/// tripwire in `tests.rs`, which parses that file and fails on any difference.
+///
+/// Both emitters read this list: [`provider_backend::request_value`] here, and
+/// `provider_request` in `runtime_aot/infer/infer.c`. The C side cannot see a
+/// Rust constant, so the tripwire checks its source text too.
+pub const REQUEST_TYPE: &str = "InferRequest";
+pub const REQUEST_FIELDS: [&str; 4] = ["input", "grammar", "anchor", "stop_anchor"];
+
 /// A successful response from an inference provider.
 pub struct InferenceResponse {
     pub text: String,

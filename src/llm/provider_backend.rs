@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use jade_runtime::coll::DictObj;
+use jade_runtime::coll::StructObj;
 
 use super::{InferenceBackend, InferenceRequest, InferenceResponse};
 use crate::frontend::error::{JadeError, Result, Span};
@@ -89,26 +89,26 @@ fn config_value(config_json: &[u8], span: Span) -> Result<VmValue> {
     crate::vm::coerce::json_to_vm_value(&v).map_err(|e| err(format!("provider config: {e}"), span))
 }
 
-/// Build the `infer` request dict the package receives.
+/// Build the `InferRequest` the package receives.
 ///
-/// A key is present only when the language has something to say, so a package
-/// can tell "no grammar" from "an empty grammar" by absence. `anchor` and
-/// `stop_anchor` ride along with `grammar` — they are one feature (the anchors
-/// bound the span the grammar constrains), and sending the grammar without them
-/// would silently drop half of an explicit `Grammar.new(pattern, anchor, stop)`.
+/// Every field is always present; an unset one is `nil`. That is the difference
+/// from the dict this used to be — a struct has a fixed shape and a type name,
+/// so a package can tell an `InferRequest` from something that merely has the
+/// right keys, and the receiver of a renamed field gets a type mismatch instead
+/// of a silent nil. The definition is
+/// `protocol/jade/infer.jde`; [`super::REQUEST_FIELDS`] is
+/// the compiler's copy of it, tripwired in `llm/tests.rs`.
 pub(super) fn request_value(req: &InferenceRequest) -> VmValue {
-    let mut d: DictObj<VmValue> = DictObj::new();
-    d.insert("prompt", VmValue::Str(req.prompt.clone().into()));
-    if let Some(g) = &req.grammar {
-        d.insert("grammar", VmValue::Str(g.clone().into()));
-    }
-    if let Some(a) = &req.anchor {
-        d.insert("anchor", VmValue::Str(a.clone().into()));
-    }
-    if let Some(s) = &req.stop_anchor {
-        d.insert("stop_anchor", VmValue::Str(s.clone().into()));
-    }
-    VmValue::Dict(d)
+    let opt = |v: &Option<String>| match v {
+        Some(s) => VmValue::Str(s.clone().into()),
+        None => VmValue::Nil,
+    };
+    let mut obj = StructObj::<VmValue>::new(super::REQUEST_TYPE);
+    obj.set_field(super::REQUEST_FIELDS[0], VmValue::Str(req.prompt.clone().into()));
+    obj.set_field(super::REQUEST_FIELDS[1], opt(&req.grammar));
+    obj.set_field(super::REQUEST_FIELDS[2], opt(&req.anchor));
+    obj.set_field(super::REQUEST_FIELDS[3], opt(&req.stop_anchor));
+    VmValue::Struct(Arc::new(parking_lot::Mutex::new(obj)))
 }
 
 /// Decode the `[Frame]` array the package returns into response text. Success is

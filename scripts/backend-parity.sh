@@ -37,6 +37,9 @@ trap 'rm -rf "$WORK"' EXIT
 
 # Build the stand-in provider once and install it as the active one. A slot holds
 # exactly one library, and discovery takes whatever is in it, so the name is free.
+# The stub imports the shared protocol definition through the [lib] entry in
+# scripts/jade.toml, so this also proves that route works — it is how a real
+# provider project reaches the same file.
 mkdir -p "$SLOT"
 if ! provider_err="$("$JADE" build "$FAKE_PROVIDER" --lib -o "$SLOT/fake.so" 2>&1)"; then
   echo "failed to build the stand-in provider:" >&2

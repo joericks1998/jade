@@ -71,28 +71,31 @@ static void* provider_handle(void) {
     return h;
 }
 
-/* Build the `infer` request dict from the prompt request. */
+/* Build the `InferRequest` the package receives.
+ *
+ * Every field is always set; an unset one is nil. The type name is what makes
+ * this a contract rather than a convention — a package can tell an InferRequest
+ * from anything else that happens to have the same keys. The definition lives in
+ * protocol/jade/infer.jde; these names are the compiler's
+ * copy of it, checked against that file by the tripwire in src/llm/tests.rs,
+ * which also asserts this function names every one of them. Keep it in step with
+ * request_value in src/llm/provider_backend.rs — the two engines must hand the
+ * same package the same shape. */
+
+/* Set one field to a string, or to nil when the pointer is NULL. */
+static void req_set(void* st, const char* field, const char* val, uint8_t trust) {
+    jrt_kstruct_set(st, field,
+                    val ? (int64_t)jrt_box_str(jrt_str_dup(val, trust))
+                        : (int64_t)JRT_NIL);
+}
+
 static jade_value_t provider_request(const infer_req_t* req) {
-    void* d = jrt_kdict_new();
-    jrt_kdict_set(d, (int64_t)jrt_box_str(jrt_str_dup("prompt", JRT_TRUSTED)),
-                     (int64_t)jrt_box_str(jrt_str_dup(req->prompt ? req->prompt : "", req->trust)));
-    if (req->model && req->model[0])
-        jrt_kdict_set(d, (int64_t)jrt_box_str(jrt_str_dup("model", JRT_TRUSTED)),
-                         (int64_t)jrt_box_str(jrt_str_dup(req->model, JRT_TRUSTED)));
-    /* grammar + its anchors are one feature: the anchors bound the span the
-     * grammar constrains, so sending the pattern alone would silently drop half
-     * of an explicit Grammar.new(pattern, anchor, stop). Same keys as the VM's
-     * request_value, so a package sees one request shape from both engines. */
-    if (req->grammar)
-        jrt_kdict_set(d, (int64_t)jrt_box_str(jrt_str_dup("grammar", JRT_TRUSTED)),
-                         (int64_t)jrt_box_str(jrt_str_dup(req->grammar, JRT_TRUSTED)));
-    if (req->anchor)
-        jrt_kdict_set(d, (int64_t)jrt_box_str(jrt_str_dup("anchor", JRT_TRUSTED)),
-                         (int64_t)jrt_box_str(jrt_str_dup(req->anchor, JRT_TRUSTED)));
-    if (req->stop_anchor)
-        jrt_kdict_set(d, (int64_t)jrt_box_str(jrt_str_dup("stop_anchor", JRT_TRUSTED)),
-                         (int64_t)jrt_box_str(jrt_str_dup(req->stop_anchor, JRT_TRUSTED)));
-    return jrt_box_ptr(d);
+    void* st = jrt_kstruct_new("InferRequest");
+    req_set(st, "input",       req->prompt ? req->prompt : "", req->trust);
+    req_set(st, "grammar",     req->grammar,     JRT_TRUSTED);
+    req_set(st, "anchor",      req->anchor,      JRT_TRUSTED);
+    req_set(st, "stop_anchor", req->stop_anchor, JRT_TRUSTED);
+    return jrt_box_ptr(st);
 }
 
 /* Drive the active provider for one request; return the accumulated response text

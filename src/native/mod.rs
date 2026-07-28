@@ -5,11 +5,11 @@ use std::{
     sync::Arc,
 };
 
-use jade_runtime::coll::DictObj;
+use jade_runtime::coll::{DictObj, StructObj};
 
 use crate::{
     builtins::make_array,
-    vm::VmValue,
+    vm::{Mutex, VmValue},
     frontend::error::{JadeError, Result, Span},
 };
 
@@ -38,6 +38,13 @@ pub const JADE_TAG_ERROR: u8 = 5;
 pub const JADE_TAG_ARRAY: u8 = 6;
 /// `data.as_dict` → a deep-copied [`JadeMap`] tree (libc-owned).
 pub const JADE_TAG_DICT:  u8 = 7;
+/// `data.as_struct` → a deep-copied [`JadeStruct`] tree (libc-owned).
+///
+/// A struct is a dict that also carries its type name. The name is what makes a
+/// typed contract enforceable across the boundary: a receiver can refuse a
+/// struct that is not the type it expects, where a bare dict with the wrong keys
+/// reads as a set of nils and fails silently.
+pub const JADE_TAG_STRUCT: u8 = 8;
 
 // ── Value type ────────────────────────────────────────────────────────────────
 
@@ -52,6 +59,7 @@ pub union JadeValData {
     pub as_nil:   u64,
     pub as_arr:   *mut JadeArr,
     pub as_dict:  *mut JadeMap,
+    pub as_struct: *mut JadeStruct,
 }
 
 #[repr(C)]
@@ -77,6 +85,17 @@ pub struct JadeArr {
 
 #[repr(C)]
 pub struct JadeMap {
+    pub keys: *mut *const u8,
+    pub vals: *mut JadeVal,
+    pub len:  usize,
+}
+
+/// A [`JadeMap`] plus the struct's type name, in declaration order. Same
+/// ownership rules: every node is libc heap, released by [`ffi_free`].
+#[repr(C)]
+pub struct JadeStruct {
+    /// Null-terminated UTF-8, libc-owned.
+    pub type_name: *const u8,
     pub keys: *mut *const u8,
     pub vals: *mut JadeVal,
     pub len:  usize,
@@ -320,8 +339,30 @@ fn vm_to_ffi_owned(val: &VmValue) -> JadeVal {
             unsafe { m.write(JadeMap { keys, vals, len: n }) };
             JadeVal { tag: JADE_TAG_DICT, _pad: [0; 7], data: JadeValData { as_dict: m } }
         }
-        // Structs and other kinds have no ABI representation — native fns can't
-        // consume them.
+        VmValue::Struct(arc) => {
+            let guard = arc.lock();
+            let n = guard.len();
+            let keys = unsafe { ffi_alloc::<*const u8>(n) };
+            let vals = unsafe { ffi_alloc::<JadeVal>(n) };
+            for (i, (k, v)) in guard.fields().iter().enumerate() {
+                unsafe {
+                    keys.add(i).write(ffi_strdup(k));
+                    vals.add(i).write(vm_to_ffi_owned(v));
+                }
+            }
+            let st = unsafe { ffi_alloc::<JadeStruct>(1) };
+            unsafe {
+                st.write(JadeStruct {
+                    type_name: ffi_strdup(guard.type_name()),
+                    keys,
+                    vals,
+                    len: n,
+                })
+            };
+            JadeVal { tag: JADE_TAG_STRUCT, _pad: [0; 7], data: JadeValData { as_struct: st } }
+        }
+        // Remaining kinds (functions, futures, prompts) have no ABI
+        // representation — native fns can't consume them.
         _ => JadeVal::nil(),
     }
 }
@@ -386,6 +427,26 @@ pub fn ffi_to_vm(val: &JadeVal, span: Span) -> Result<VmValue> {
             }
             Ok(VmValue::Dict(d))
         }
+        JADE_TAG_STRUCT => {
+            let st = unsafe { val.data.as_struct };
+            if st.is_null() {
+                return Ok(VmValue::Nil);
+            }
+            let (type_name, keys, vals, len) =
+                unsafe { ((*st).type_name, (*st).keys, (*st).vals, (*st).len) };
+            let name = unsafe {
+                CStr::from_ptr(type_name as *const c_char).to_string_lossy().into_owned()
+            };
+            let mut obj = StructObj::new(&name);
+            for i in 0..len {
+                let key = unsafe {
+                    CStr::from_ptr(*keys.add(i) as *const c_char).to_string_lossy().into_owned()
+                };
+                let value = ffi_to_vm(unsafe { &*vals.add(i) }, span)?;
+                obj.set_field(&key, value);
+            }
+            Ok(VmValue::Struct(Arc::new(Mutex::new(obj))))
+        }
         JADE_TAG_ERROR => {
             let msg = unsafe {
                 CStr::from_ptr(val.data.as_str as *const c_char)
@@ -437,6 +498,25 @@ unsafe fn ffi_free_node(v: &JadeVal) {
                 }
             }
         }
+        JADE_TAG_STRUCT => {
+            let st = unsafe { v.data.as_struct };
+            if !st.is_null() {
+                let (name, keys, vals, len) =
+                    unsafe { ((*st).type_name, (*st).keys, (*st).vals, (*st).len) };
+                for i in 0..len {
+                    unsafe {
+                        free(*keys.add(i) as *mut c_void);
+                        ffi_free_node(&*vals.add(i));
+                    }
+                }
+                unsafe {
+                    free(name as *mut c_void);
+                    free(keys as *mut c_void);
+                    free(vals as *mut c_void);
+                    free(st as *mut c_void);
+                }
+            }
+        }
         _ => {} // scalar: nothing owned
     }
 }
@@ -445,7 +525,7 @@ unsafe fn ffi_free_node(v: &JadeVal) {
 /// scalars (including top-level non-owning strings) are left untouched, so this
 /// is safe to call on any `JadeVal`.
 pub unsafe fn ffi_free(v: &JadeVal) {
-    if v.tag == JADE_TAG_ARRAY || v.tag == JADE_TAG_DICT {
+    if matches!(v.tag, JADE_TAG_ARRAY | JADE_TAG_DICT | JADE_TAG_STRUCT) {
         unsafe { ffi_free_node(v) };
     }
 }
