@@ -1,0 +1,10 @@
+// A module in a directory the importing file cannot name with a `use` path — it
+// is reached only through the [lib.shared] entry in the jade.toml above.
+
+struct Distance {
+    let meters = 0
+}
+
+fn feet(d) {
+    return d.meters * 3
+}

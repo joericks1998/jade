@@ -1,0 +1,15 @@
+# Makes this example directory its own project root, which is the whole point of
+# the fixture: a `use` path cannot climb directories, so reaching a `.jde` outside
+# the importing file's own directory goes through a [lib] entry — and a [lib] is
+# only found by way of a jade.toml with a [project] section.
+#
+# This is also the parity gate's only fixture that lives in a project of its own.
+# The gate runs every example from the repo root, so before v1.1.31 this file
+# resolved under `jade build` and not under `jade run`: the VM looked for the
+# project root beside the *shell*, the AOT beside the *source file*. Nothing else
+# in examples/ could see that, because nothing else had a root of its own.
+[project]
+name = "project-lib-example"
+
+[lib.shared]
+path = "shared"

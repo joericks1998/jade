@@ -12,6 +12,7 @@ Most of Jade's rationale lives in module headers, and that is the right home for
 
 ## What each file does
 
+- **`mixed-type-containers.md`** — why an array literal cannot hold two types, and why the inference response wants one that can. Not built. The note exists because the workaround (build the array with `push`, or fall back to dicts and lose the type name) is a footnote in three unrelated files, and because the second option means the language accepts a shape it can check *less* well than the one it cannot express. Read it before adding a sum type or a heterogeneous list.
 - **`provider-packages.md`** — how the language reaches a model. Shipped: VM path in v1.1.24, AOT path in v1.1.25; the sole path since v1.1.30, when the inference daemon and its socket were removed. Explains what a provider package is (a compiled Jade `--lib` exporting `infer(request) -> [Frame]` and optionally `configure(opts)`), why the language contains no vendor names at all, and how the active slot works. Read it before touching `src/providers/`, `src/llm/provider_backend.rs`, or `jade_runtime::provider`.
 
 ## Who uses it

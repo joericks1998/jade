@@ -120,8 +120,9 @@ async fn run_test_file(
         .unwrap_or_else(|| std::path::PathBuf::from("."));
 
     // Honor registered [lib] libraries and locked dependencies so test files
-    // can import them too.
-    let project_root = crate::project::find_project_root();
+    // can import them too. Resolved from the test file's own directory, same rule
+    // as `jade run` and `jade build`: a file belongs to the project it sits in.
+    let project_root = crate::project::find_project_root_from(&source_dir);
     let libraries = project_root
         .as_ref()
         .and_then(|root| {

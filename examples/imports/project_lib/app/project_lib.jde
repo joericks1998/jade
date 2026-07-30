@@ -1,0 +1,19 @@
+// Importing across directories, through a [lib] registered in jade.toml.
+//
+// A `use` path is module notation, not a file path: `..` is not expressible, so
+// `../shared/units.jde` cannot be named from here at all. Registering `shared` as
+// `[lib.shared]` gives that directory a module name, and `use shared::units` then
+// resolves. This file sits in `app/` precisely so the target is out of relative
+// reach — a sibling `shared/` would resolve as a plain path and never exercise the
+// [lib] at all.
+//
+// The project root that supplies the [lib] is found by walking up from *this
+// file*, not from wherever the shell happens to be — so this runs the same way
+// from the repo root as from its own directory, and `jade run` agrees with
+// `jade build`.
+
+use shared::units
+
+let d = units.Distance { meters: 4 }
+print(d.meters)
+print(units.feet(d))
