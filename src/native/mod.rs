@@ -286,6 +286,33 @@ unsafe fn ffi_strdup(s: &str) -> *const u8 {
     p
 }
 
+/// The name a struct crosses the ABI under: its source name, with any
+/// import-mangling suffix removed.
+///
+/// `aot/imports.rs` renames a module-global `Foo` to `Foo$2` when flattening
+/// imports, so two imported modules can each declare one. That number is a
+/// property of the importing program's module graph, not of the type, so it means
+/// nothing on the other side of an FFI call. Without stripping it, a provider
+/// package built with `use ovata::infer` hands back a frame named `Token$0` and
+/// the caller does not recognise its own protocol.
+///
+/// `$` cannot appear in a Jade identifier, so a trailing `$<digits>` is always the
+/// mangling and never part of a name someone wrote. `runtime_aot/native.c` strips
+/// the same thing on its side of the boundary.
+pub fn abi_type_name(name: &str) -> &str {
+    match name.rsplit_once('$') {
+        // A non-empty base is required: stripping would otherwise turn a name that
+        // is *only* a suffix into an empty type name, which is worse than leaving
+        // the odd input alone.
+        Some((base, id))
+            if !base.is_empty() && !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            base
+        }
+        _ => name,
+    }
+}
+
 /// Marshal a `VmValue` into a `JadeVal` whose every owned part is libc heap:
 /// strings are copied (via [`ffi_strdup`]) and arrays/dicts build nested trees,
 /// so the whole thing is releasable with [`ffi_free`]. Used for container
@@ -353,7 +380,7 @@ fn vm_to_ffi_owned(val: &VmValue) -> JadeVal {
             let st = unsafe { ffi_alloc::<JadeStruct>(1) };
             unsafe {
                 st.write(JadeStruct {
-                    type_name: ffi_strdup(guard.type_name()),
+                    type_name: ffi_strdup(abi_type_name(guard.type_name())),
                     keys,
                     vals,
                     len: n,

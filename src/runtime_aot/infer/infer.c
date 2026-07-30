@@ -33,11 +33,10 @@ typedef struct {
  * provider is a compiled Jade `--lib` (dovata's anthropic/openai) exposing
  * `infer(request) -> [Frame]` and, usually, `configure(opts)` — the same
  * contract the VM drives. We load it through the native-package machinery
- * (jrt_native_*), configure it with the stored credential, call
- * `infer({prompt})`, and fold the returned frame dicts
- * ({"type":"Token"|"Done"|"Error",…}) into the response text. A bad shape or an
- * `Error` frame raises a catchable Jade error — like the VM, so a compiled `?p`
- * inside a `try` can catch it.
+ * (jrt_native_*), configure it with the stored credential, call `infer` with an
+ * InferRequest, and fold the frames it returns into the response text. A bad
+ * shape or an `Error` frame raises a catchable Jade error — like the VM, so a
+ * compiled `?p` inside a `try` can catch it.
  *
  * This used to be one of two paths, chosen per request against the daemon on
  * `$HOME/.jade/llm.sock`. It is the only one now. */
@@ -76,7 +75,7 @@ static void* provider_handle(void) {
  * Every field is always set; an unset one is nil. The type name is what makes
  * this a contract rather than a convention — a package can tell an InferRequest
  * from anything else that happens to have the same keys. The definition lives in
- * protocol/jade/infer.jde; these names are the compiler's
+ * src/protocol/jade/infer.jde; these names are the compiler's
  * copy of it, checked against that file by the tripwire in src/llm/tests.rs,
  * which also asserts this function names every one of them. Keep it in step with
  * request_value in src/llm/provider_backend.rs — the two engines must hand the
@@ -98,15 +97,45 @@ static jade_value_t provider_request(const infer_req_t* req) {
     return jrt_box_ptr(st);
 }
 
+/* ── Reading one response frame ────────────────────────────────────────────
+ *
+ * A frame arrives one of two ways, and both are the same frame:
+ *
+ *     Token { text: "hi" }              the struct form — its TYPE NAME is the tag
+ *     {"type": "Token", "text": "hi"}   the dict form — the tag is under "type"
+ *
+ * The names below are the compiler's copy of the shared definition in
+ * src/protocol/jade/infer.jde, and the tripwire in src/llm/tests.rs checks this
+ * file's text against it. Keep them in step with decode_frames in
+ * src/llm/provider_backend.rs — the two engines must read the same package the
+ * same way.
+ *
+ * Anything not named here raises. Skipping what we cannot read is what let a
+ * renamed key or a miscased tag come back as an empty reply, with nothing
+ * reported at any layer. */
+
+#define FRAME_EXPECTED "Token, Done, Error, Meta, Json"
+
+/* One frame's payload field, whichever form the frame took. Returns the field's
+ * word through *out and 1 on success, 0 when the frame has no such field. */
+static int frame_field(void* obj, int64_t kind, const char* name, int64_t* out) {
+    *out = (int64_t)JRT_NIL;
+    if (kind == JK_STRUCT) return jrt_coll_struct_get(obj, name, out) != 0;
+    return jrt_coll_dict_get(obj, name, out) != 0;
+}
+
 /* Drive the active provider for one request; return the accumulated response text
- * (malloc'd, *out_len bytes), or raise on an `Error` frame. */
+ * (malloc'd, *out_len bytes), or raise on an `Error` frame or an unreadable one.
+ *
+ * Every raise below frees `text` first: provider_raise longjmps, so nothing
+ * allocated here would be released otherwise. */
 static char* provider_infer_text(const infer_req_t* req, size_t* out_len) {
     void* h = provider_handle();
     jade_value_t request = provider_request(req);
     jade_value_t frames = jrt_native_call(h, "infer", &request, 1);
 
     if (!jrt_is_ptr(frames) || jrt_kind_of(jrt_unbox_ptr(frames)) != JK_ARRAY)
-        provider_raise("provider `infer` did not return a frame array");
+        provider_raise("provider `infer` did not return an array of frames");
     void* arr = jrt_unbox_ptr(frames);
     int64_t n = jrt_coll_array_len(arr);
 
@@ -115,38 +144,88 @@ static char* provider_infer_text(const infer_req_t* req, size_t* out_len) {
     if (!text) jade_rt_fatal("jade: out of memory");
     text[0] = 0;
 
+    char msg[256];
+
     for (int64_t i = 0; i < n; i++) {
         jade_value_t fr = (jade_value_t)jrt_coll_array_get(arr, i);
-        if (!jrt_is_ptr(fr) || jrt_kind_of(jrt_unbox_ptr(fr)) != JK_DICT) continue;
+        int64_t kind = jrt_is_ptr(fr) ? jrt_kind_of(jrt_unbox_ptr(fr)) : -1;
+        if (kind != JK_DICT && kind != JK_STRUCT) {
+            free(text);
+            snprintf(msg, sizeof msg,
+                     "provider `infer` returned an unreadable frame at index %lld: expected one "
+                     "of " FRAME_EXPECTED ", as a struct or as a dict with a \"type\" key",
+                     (long long)i);
+            provider_raise(msg); /* does not return */
+        }
         void* fd = jrt_unbox_ptr(fr);
 
-        int64_t tyw = (int64_t)JRT_NIL;
-        if (!jrt_coll_dict_get(fd, "type", &tyw) || !jrt_is_str((jade_value_t)tyw)) continue;
-        const char* ty = (const char*)jrt_unbox_ptr((jade_value_t)tyw);
+        /* The tag: a struct's type name, or a dict's "type" value. jrt_get_type_name
+         * hands back a fresh tagged string, so it is freed before leaving the arm. */
+        char* owned_ty = NULL;
+        const char* ty = NULL;
+        if (kind == JK_STRUCT) {
+            owned_ty = jrt_get_type_name((int64_t)fr);
+            ty = owned_ty;
+        } else {
+            int64_t tyw = (int64_t)JRT_NIL;
+            if (jrt_coll_dict_get(fd, "type", &tyw) && jrt_is_str((jade_value_t)tyw))
+                ty = (const char*)jrt_unbox_ptr((jade_value_t)tyw);
+        }
+        if (!ty || !ty[0]) {
+            if (owned_ty) jrt_str_free(owned_ty);
+            free(text);
+            snprintf(msg, sizeof msg,
+                     "provider `infer` returned a frame at index %lld with no readable type; "
+                     "expected one of " FRAME_EXPECTED,
+                     (long long)i);
+            provider_raise(msg); /* does not return */
+        }
 
         if (strcmp(ty, "Token") == 0) {
             int64_t txw = (int64_t)JRT_NIL;
-            if (jrt_coll_dict_get(fd, "text", &txw) && jrt_is_str((jade_value_t)txw)) {
-                const char* t = (const char*)jrt_unbox_ptr((jade_value_t)txw);
-                size_t tl = strlen(t);
-                if (len + tl + 1 > cap) {
-                    while (len + tl + 1 > cap) cap *= 2;
-                    char* nt = (char*)realloc(text, cap);
-                    if (!nt) { free(text); jade_rt_fatal("jade: out of memory"); }
-                    text = nt;
-                }
-                memcpy(text + len, t, tl);
-                len += tl;
-                text[len] = 0;
+            if (!frame_field(fd, kind, "text", &txw) || !jrt_is_str((jade_value_t)txw)) {
+                if (owned_ty) jrt_str_free(owned_ty);
+                free(text);
+                snprintf(msg, sizeof msg,
+                         "provider `infer` returned a Token frame at index %lld whose `text` is "
+                         "missing or not a string",
+                         (long long)i);
+                provider_raise(msg); /* does not return */
             }
+            const char* t = (const char*)jrt_unbox_ptr((jade_value_t)txw);
+            size_t tl = strlen(t);
+            if (len + tl + 1 > cap) {
+                while (len + tl + 1 > cap) cap *= 2;
+                char* nt = (char*)realloc(text, cap);
+                if (!nt) { free(text); jade_rt_fatal("jade: out of memory"); }
+                text = nt;
+            }
+            memcpy(text + len, t, tl);
+            len += tl;
+            text[len] = 0;
         } else if (strcmp(ty, "Error") == 0) {
             int64_t mw = (int64_t)JRT_NIL;
-            const char* m = (jrt_coll_dict_get(fd, "message", &mw) && jrt_is_str((jade_value_t)mw))
+            const char* m = (frame_field(fd, kind, "message", &mw) && jrt_is_str((jade_value_t)mw))
                           ? (const char*)jrt_unbox_ptr((jade_value_t)mw) : "provider error";
+            /* `m` points into the frame, which outlives this call; provider_raise
+             * copies it. Passed through rather than into `msg` so a long provider
+             * message is not truncated. */
+            if (owned_ty) jrt_str_free(owned_ty);
             free(text);
             provider_raise(m); /* does not return */
+        } else if (strcmp(ty, "Done") != 0 && strcmp(ty, "Meta") != 0
+                   && strcmp(ty, "Json") != 0) {
+            snprintf(msg, sizeof msg,
+                     "provider `infer` returned an unknown frame type `%s` at index %lld; "
+                     "expected one of " FRAME_EXPECTED,
+                     ty, (long long)i);
+            if (owned_ty) jrt_str_free(owned_ty);
+            free(text);
+            provider_raise(msg); /* does not return */
         }
-        /* Done / Json carry no plain text — ignore. */
+        /* Done / Meta / Json carry no plain text. */
+
+        if (owned_ty) jrt_str_free(owned_ty);
     }
 
     *out_len = len;

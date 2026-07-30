@@ -6,4 +6,4 @@
 name = "parity-stubs"
 
 [lib.ovata]
-path = "../protocol/jade"
+path = "../src/protocol/jade"

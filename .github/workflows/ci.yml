@@ -11,9 +11,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      # `submodules` is required, not tidiness: protocol/ holds the shared
-      # InferRequest definition. Without it the tripwire test cannot read the
-      # file and the parity gate cannot build its stub provider.
+      # `submodules` is required, not tidiness: src/protocol/ holds the shared
+      # InferRequest and response-frame definitions. Without it the tripwire tests
+      # cannot read the file and the parity gate cannot build its stub provider.
       - uses: actions/checkout@v4
         with:
           submodules: recursive

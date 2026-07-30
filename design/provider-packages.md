@@ -23,22 +23,41 @@ A provider is a **compiled Jade `--lib` package** (built in dovata: `anthropic`,
 `openai`, plus local profiles like `qwen3-coder-30b`). It does its own HTTP to the
 vendor API and exposes two Jade functions:
 
-- **`infer(request) -> [Frame]`** — `request` is a dict
-  (`{prompt, grammar?, anchor?, stop_anchor?}`); returns an **array of frame
-  dicts**. Success → `[Token?, Json?(tool_calls), Done]`; failure → `[Error]`.
-  A key is present only when the language has something to say, so a package can
-  tell "no grammar" from "an empty grammar" by absence.
+- **`infer(request) -> [Frame]`** — `request` is an `InferRequest` struct
+  (`input`, `grammar`, `anchor`, `stop_anchor`); returns an **array of frames**.
+  Success → `Token*` then `Done`, with an optional leading `Meta` and any `Json`
+  (tool calls); failure → a single `Error`. Every request field is always present,
+  `nil` when the language has nothing to say.
 - **`configure(opts)`** — sets runtime-mutable params (api_key, model, temperature,
   tools, system, …). Optional; the package can also read its own env var.
-- **Frames are Jade dicts**, not wire bytes: `{"type":"Token","text":…}`,
-  `{"type":"Done","tokens_used":…}`, `{"type":"Error","message":…}`,
-  `{"type":"Json","json":…}`.
 
-The language loads it through the **native-package machinery** (the same
+Both shapes are declared once, outside this repo, in the `ovata-infer-protocol`
+submodule at `src/protocol/jade/infer.jde`. A package registers `jade/` as a
+`[lib]` and `use ovata::infer`, so it reads and returns those definitions rather
+than copies of them. The compiler keeps a hand-written copy of the names, tripwired
+against that file in `src/llm/tests.rs`.
+
+A frame may be written two ways, and the language accepts either:
+
+```jade
+Token { text: "hi" }              // the struct form — its type name is the tag
+{"type": "Token", "text": "hi"}   // the dict form — the tag is under "type"
+```
+
+Anything else **raises**. The decoder used to skip what it could not read, so a
+provider that renamed `text` or wrote `"token"` lowercase produced an empty reply
+with no error at any layer — the model appearing to have said nothing.
+
+One wrinkle with the struct form: a Jade array literal must be homogeneous, so
+`[Token {…}, Done {…}]` is a type error. Build the array with `push`. The dict form
+has no such restriction, since every dict is one type.
+
+The language loads a package through the **native-package machinery** (the same
 `jade_pkg_init` C-ABI that `jade build --lib` emits and `jade pkg add --c-abi`
-consumes), calls `configure` with the stored credential, calls `infer({prompt})`,
-and decodes the frame array into the response text. It is provider-blind: it loads
-whatever single package is in the active slot and never learns a vendor detail.
+consumes), calls `configure` with the stored credential, calls `infer` with an
+`InferRequest`, and folds the frames into the response text. It is provider-blind:
+it loads whatever single package is in the active slot and never learns a vendor
+detail.
 
 Note: this is **not** `ovata-infer-protocol`'s `Provider` cdylib ABI. That ABI
 (`ovata_provider_*`) is what the *daemon* hosts; the language briefly targeted it
@@ -68,12 +87,19 @@ platform and `dlopen` ignores the extension.
 
 An `InferenceBackend` that, on first prompt, loads the active package via
 `crate::native::load_native_package`, calls `configure(config_dict)` (from
-`active/config.json`), then per prompt calls `infer(request_dict)` via
-`NativeLibFn::call` and decodes the `[Frame]` array. `configure`/`infer` cross the
-package boundary through the v1.1.24 native-FFI dict/array marshalling
-(`vm_to_ffi`/`ffi_to_vm`, deep-copied via a process-shared allocator).
-`select_backend()` resolves **provider package → none**; the second raises
-`NoInferenceBackend`, pointing at `jade register`.
+`active/config.json`), then per prompt builds an `InferRequest` in `request_value`,
+calls `infer` via `NativeLibFn::call`, and folds the returned frames in
+`decode_frames`. `configure`/`infer` cross the package boundary through the native
+FFI (`vm_to_ffi`/`ffi_to_vm`, deep-copied via a process-shared allocator), which
+carries structs as of v1.1.31. `select_backend()` resolves **provider package →
+none**; the second raises `NoInferenceBackend`, pointing at `jade register`.
+
+A struct crosses the boundary under its *source* name. `aot/imports.rs` renames an
+imported module-global `Foo` to `Foo$2` while flattening imports, and that name is
+baked into the compiled library — so `native::abi_type_name` strips the suffix on
+the way out, and `ffi_strdup_abi_type` does the same in `runtime_aot/native.c`.
+Without it, a provider built with `use ovata::infer` returns frames named `Token$0`
+and the caller does not recognise its own protocol.
 
 ## AOT — `runtime_aot/infer/infer.c`
 
@@ -81,13 +107,14 @@ Every `jrt_prompt*` drives the provider. This is pure C reusing the existing
 native-package path —
 `jrt_native_load` the active `.so` (path/config from jade-runtime's
 `jrt_provider_active_lib_path`/`_config`), `jrt_native_call(handle,"configure",…)`
-once, `jrt_native_call(handle,"infer",…)`, then walk the returned frame-dict array
-with `jrt_coll_*`, accumulating `Token` text and raising a catchable Jade error on
-`Error`. Same `jrt_native_call` marshalling as the VM, so no second decoder. The
-request/config dicts are built with `jrt_kdict_*` + `jrt_json_parse_chunk`.
+once, `jrt_native_call(handle,"infer",…)`, then walk the returned frame array with
+`jrt_coll_*`, accumulating `Token` text and raising a catchable Jade error on
+`Error` or on any frame it cannot read. Same `jrt_native_call` marshalling as the
+VM, so no second decoder. The request is built with `jrt_kstruct_*`, the config
+with `jrt_json_parse_chunk`.
 
 Constrained decoding rides the same path: `grammar`, `anchor`, and `stop_anchor`
-go in the request dict and enforcing them is the package's job. They travel
+are request fields and enforcing them is the package's job. They travel
 together — the anchors bound the span the grammar constrains, so sending the
 pattern alone would silently drop half of an explicit
 `Grammar.new(pattern, anchor, stop)`. A package that cannot honour a grammar

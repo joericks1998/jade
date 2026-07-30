@@ -321,3 +321,41 @@ fn an_empty_struct_keeps_its_type_name() {
     assert_eq!(arc.lock().type_name(), "Marker");
     assert_eq!(arc.lock().len(), 0);
 }
+
+// ── The ABI name of a struct ─────────────────────────────────────────────────
+
+/// A struct crosses the boundary under its *source* name.
+///
+/// `aot/imports.rs` renames an imported module-global `Foo` to `Foo$2`, and that
+/// name ends up in the compiled library. The number describes the importing
+/// program's module graph, so it is meaningless to the other side of the call: a
+/// provider package built with `use ovata::infer` returned frames named `Token$0`,
+/// and the caller rejected them as an unknown frame type.
+#[test]
+fn the_import_mangling_suffix_is_stripped_at_the_boundary() {
+    assert_eq!(super::abi_type_name("Token$0"), "Token");
+    assert_eq!(super::abi_type_name("InferRequest$12"), "InferRequest");
+}
+
+/// Only a trailing `$<digits>` is mangling. Nothing else is touched, and a name
+/// with no suffix is returned as-is.
+#[test]
+fn a_name_without_the_mangling_suffix_is_untouched() {
+    for name in ["Token", "Token$", "Token$a", "Token$1a", "$0", ""] {
+        assert_eq!(super::abi_type_name(name), name, "rewrote `{name}`");
+    }
+}
+
+/// End to end: a mangled struct arrives under the name the receiver knows.
+#[test]
+fn a_mangled_struct_round_trips_under_its_source_name() {
+    let mut obj = StructObj::<VmValue>::new("Token$0");
+    obj.set_field("text", VmValue::Str("hi".to_string().into()));
+    let mut scratch = Vec::new();
+    let v = vm_to_ffi(&VmValue::Struct(Arc::new(Mutex::new(obj))), &mut scratch);
+    let back = ffi_to_vm(&v, ZERO).expect("struct should convert back");
+    unsafe { ffi_free(&v) };
+
+    let VmValue::Struct(arc) = back else { panic!("expected a struct back") };
+    assert_eq!(arc.lock().type_name(), "Token", "the caller must see the protocol name");
+}

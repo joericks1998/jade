@@ -6,15 +6,19 @@
 //! A provider package conforms to dovata's model-profile shape (see
 //! `anthropic.jde`): it exports `infer(request) -> [Frame]` and, optionally,
 //! `configure(opts)`. We load it through the native-package machinery, hand it the
-//! stored config via `configure` (the API key, etc.), then call `infer({prompt})`
-//! and decode the returned array of frame dicts —
-//! `{"type":"Token","text":…}` / `{"type":"Done",…}` / `{"type":"Error","message":…}`
-//! — into the response text. The package does the HTTP; the language never learns
-//! a vendor detail.
+//! stored config via `configure` (the API key, etc.), then call `infer` with an
+//! `InferRequest` and fold the frames it returns into the response text. The
+//! package does the HTTP; the language never learns a vendor detail.
+//!
+//! Both shapes are declared once, outside this repo, in
+//! `src/protocol/jade/infer.jde` — the request as `InferRequest`, the reply as
+//! the `Token`/`Done`/`Error`/`Meta`/`Json` frames. A frame may be written as a
+//! struct (whose type name is the frame name) or as a dict carrying that name
+//! under `"type"`; [`decode_frames`] reads either and raises on anything else.
 //!
 //! Constrained decoding rides the same path: a typed dereference (`?p |> Type`)
-//! or an explicit `Grammar.new` puts `grammar`/`anchor`/`stop_anchor` in the
-//! request dict, and enforcing them is the package's job. A package that cannot
+//! or an explicit `Grammar.new` fills the request's `grammar`/`anchor`/
+//! `stop_anchor`, and enforcing them is the package's job. A package that cannot
 //! honour a grammar says so with an `Error` frame, which surfaces as a catchable
 //! Jade error rather than an unconstrained reply.
 
@@ -96,7 +100,7 @@ fn config_value(config_json: &[u8], span: Span) -> Result<VmValue> {
 /// so a package can tell an `InferRequest` from something that merely has the
 /// right keys, and the receiver of a renamed field gets a type mismatch instead
 /// of a silent nil. The definition is
-/// `protocol/jade/infer.jde`; [`super::REQUEST_FIELDS`] is
+/// `src/protocol/jade/infer.jde`; [`super::REQUEST_FIELDS`] is
 /// the compiler's copy of it, tripwired in `llm/tests.rs`.
 pub(super) fn request_value(req: &InferenceRequest) -> VmValue {
     let opt = |v: &Option<String>| match v {
@@ -111,37 +115,99 @@ pub(super) fn request_value(req: &InferenceRequest) -> VmValue {
     VmValue::Struct(Arc::new(parking_lot::Mutex::new(obj)))
 }
 
+/// One frame's name: a struct's type name, or a dict's `"type"` value. `None`
+/// when the value is neither, or is a dict whose tag is missing or not a string.
+fn frame_type(frame: &VmValue) -> Option<String> {
+    match frame {
+        VmValue::Struct(arc) => Some(arc.lock().type_name().to_owned()),
+        VmValue::Dict(d) => match d.get(super::FRAME_TAG_KEY) {
+            Some(VmValue::Str(s)) => Some(s.as_str().to_owned()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// One frame's payload field, whichever form the frame took.
+fn frame_field(frame: &VmValue, name: &str) -> Option<VmValue> {
+    match frame {
+        VmValue::Struct(arc) => arc.lock().get_field(name).cloned(),
+        VmValue::Dict(d) => d.get(name).cloned(),
+        _ => None,
+    }
+}
+
 /// Decode the `[Frame]` array the package returns into response text. Success is
-/// `Token*` (plus an optional `Json` tool-call frame and a `Done`); a failure is a
-/// single `Error` frame, which we surface as a catchable inference error.
-fn decode_frames(result: VmValue, span: Span) -> Result<String> {
+/// `Token*` (plus any of `Done`/`Meta`/`Json`, which carry no plain text); a
+/// failure is a single `Error` frame, which we surface as a catchable inference
+/// error.
+///
+/// Strict in both directions. A frame that is not one of
+/// [`super::FRAME_TYPES`](super::FRAME_TYPES), or a `Token` without string text,
+/// raises rather than being skipped: an unreadable frame means the provider and
+/// the language disagree about the response shape, and quietly dropping it turns
+/// that into a reply the model never gave. `?p` sits inside a `try` like any
+/// other call, so the program can still handle it.
+pub(super) fn decode_frames(result: VmValue, span: Span) -> Result<String> {
     let VmValue::Array(arr) = result else {
-        return Err(err("provider `infer` did not return a frame array", span));
+        return Err(err(
+            format!(
+                "provider `infer` returned {}, not an array of frames",
+                crate::vm::value::value_type_name(&result)
+            ),
+            span,
+        ));
     };
     let arr = arr.lock();
+    let expected = super::FRAME_TYPES.join(", ");
     let mut text = String::new();
-    for frame in arr.as_slice() {
-        let VmValue::Dict(d) = frame else { continue };
-        let ty = match d.get("type") {
-            Some(VmValue::Str(s)) => s.as_str().to_owned(),
-            _ => continue,
+    for (i, frame) in arr.as_slice().iter().enumerate() {
+        let Some(ty) = frame_type(frame) else {
+            return Err(err(
+                format!(
+                    "provider `infer` returned an unreadable frame at index {i}: expected one \
+                     of {expected}, as a struct or as a dict with a `\"{}\"` key, but got {}",
+                    super::FRAME_TAG_KEY,
+                    crate::vm::value::value_type_name(frame)
+                ),
+                span,
+            ));
         };
         match ty.as_str() {
-            "Token" => {
-                if let Some(VmValue::Str(t)) = d.get("text") {
-                    text.push_str(t.as_str());
+            super::FRAME_TOKEN => match frame_field(frame, super::FRAME_TOKEN_TEXT) {
+                Some(VmValue::Str(t)) => text.push_str(t.as_str()),
+                other => {
+                    return Err(err(
+                        format!(
+                            "provider `infer` returned a {} frame at index {i} whose `{}` is {}, \
+                             not a string",
+                            super::FRAME_TOKEN,
+                            super::FRAME_TOKEN_TEXT,
+                            other.as_ref().map_or("missing", crate::vm::value::value_type_name)
+                        ),
+                        span,
+                    ))
                 }
-            }
-            "Error" => {
-                let msg = match d.get("message") {
+            },
+            super::FRAME_ERROR => {
+                let msg = match frame_field(frame, super::FRAME_ERROR_MESSAGE) {
                     Some(VmValue::Str(m)) => m.as_str().to_owned(),
                     _ => "provider returned an error".to_owned(),
                 };
                 return Err(err(msg, span));
             }
-            // `Done` carries only the token count; `Json` carries tool calls —
-            // neither contributes to the plain-text response.
-            _ => {}
+            // Carry no plain text: `Done` is the token count, `Meta` names the
+            // provider, `Json` is an out-of-band payload such as a tool call.
+            super::FRAME_DONE | super::FRAME_META | super::FRAME_JSON => {}
+            other => {
+                return Err(err(
+                    format!(
+                        "provider `infer` returned an unknown frame type `{other}` at index {i}; \
+                         expected one of {expected}"
+                    ),
+                    span,
+                ))
+            }
         }
     }
     Ok(text)

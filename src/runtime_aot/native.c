@@ -97,6 +97,31 @@ static const char* ffi_strdup(const char* s) {
     return p;
 }
 
+/* Copy a struct's type name into the libc heap under the name it crosses the ABI
+ * with: its source name, minus any trailing "$<digits>" import-mangling suffix.
+ *
+ * aot/imports.rs renames a module-global `Foo` to `Foo$2` when it flattens
+ * imports, so two imported modules can each declare one. That number describes
+ * the importing program's module graph, not the type, so it means nothing on the
+ * other side of an FFI call: a provider package built with `use ovata::infer`
+ * would hand back a frame named `Token$0` and the caller would not recognise its
+ * own protocol. `$` is not legal in a Jade identifier, so the suffix is never part
+ * of a name someone wrote. abi_type_name in src/native/mod.rs strips the same
+ * thing on the Rust side of the boundary. */
+static const char* ffi_strdup_abi_type(const char* name) {
+    if (!name) name = "";
+    size_t n = strlen(name), cut = n, i = n;
+    while (i > 0 && name[i - 1] >= '0' && name[i - 1] <= '9') i--;
+    /* At least one digit, after a '$', with something before it: stripping a name
+     * that is only a suffix would leave an empty type name. */
+    if (i < n && i > 1 && name[i - 1] == '$') cut = i - 1;
+    char* p = (char*)malloc(cut + 1);
+    if (!p) jade_rt_fatal("jade: out of memory");
+    memcpy(p, name, cut);
+    p[cut] = 0;
+    return p;
+}
+
 /* Marshal a tagged jade_value_t into a JadeVal for the native ABI. Matches
  * native.rs::vm_to_ffi: primitives convert directly; arrays/dicts are deep-copied
  * into libc-owned JadeArr/JadeMap trees; structs and other heap kinds become nil.
@@ -168,8 +193,11 @@ static JadeVal to_ffi_val(jade_value_t v, int owned_str) {
             st->vals = n ? (JadeVal*)malloc((size_t)n * sizeof(JadeVal)) : NULL;
             if (n && (!st->keys || !st->vals)) jade_rt_fatal("jade: out of memory");
             /* jrt_get_type_name returns a fresh tagged string (NUL-terminated);
-             * copy it into the libc heap the rest of the tree lives in. */
-            st->type_name = ffi_strdup(jrt_get_type_name(v));
+             * copy it into the libc heap the rest of the tree lives in, and free
+             * the original — it is owned by this call, not by the value. */
+            char* tn = jrt_get_type_name(v);
+            st->type_name = ffi_strdup_abi_type(tn);
+            jrt_str_free(tn);
             for (int64_t i = 0; i < n; i++) {
                 const char* ks = (const char*)jrt_unbox_ptr(jrt_coll_array_get(keys, i));
                 int64_t val = (int64_t)JRT_NIL;

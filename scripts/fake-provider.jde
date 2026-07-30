@@ -14,10 +14,12 @@
 // through `configure(opts)`, but an env var works identically under `jade run`
 // and a compiled binary and needs no config.json staged beside the library.
 //
-// `request` arrives as an `InferRequest` — the struct declared in the shared
-// definition below, which dovata's real providers are written against too. This
-// stub reads `request.input` the same way they do, so the gate exercises the
-// actual contract rather than a stand-in for it.
+// Both directions use the shared definition: `request` arrives as an
+// `InferRequest`, and the reply is built from the `Token`/`Done`/`Error` structs
+// declared alongside it. dovata's real providers are written against the same
+// file, so the gate exercises the actual contract rather than a stand-in for it.
+// Returning structs also covers the typed response path on both engines — a dict
+// carrying the same names under `"type"` is still accepted.
 
 use ovata::infer
 use std::env
@@ -32,16 +34,20 @@ fn infer(request) {
     // ignored the request would keep passing while every real provider broke.
     let input = request.input
     if input == nil || input == "" {
-        return [{"type": "Error", "message": "InferRequest.input was empty"}]
+        return [infer.Error { message: "InferRequest.input was empty" }]
     }
     let reply = env.get("JADE_FAKE_REPLY")
     if reply == nil {
-        return [{"type": "Error", "message": "JADE_FAKE_REPLY is not set"}]
+        return [infer.Error { message: "JADE_FAKE_REPLY is not set" }]
     }
-    return [
-        {"type": "Token", "text": reply},
-        {"type": "Done"}
-    ]
+    // Built with push rather than as one literal: an array literal must be
+    // homogeneous, and `[Token {...}, Done {...}]` is two struct types, so the
+    // literal is a type error. Frames written as dicts have no such problem —
+    // every dict is one type — which is why the dict form stays supported.
+    let frames = []
+    frames.push(infer.Token { text: reply })
+    frames.push(infer.Done { tokens_used: 1 })
+    return frames
 }
 
 // Accepted and ignored. The engines only call this when a config.json is staged,
