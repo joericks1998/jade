@@ -1,0 +1,3 @@
+[submodule "protocol"]
+	path = src/protocol
+	url = https://github.com/joericks1998/ovata-infer-protocol.git

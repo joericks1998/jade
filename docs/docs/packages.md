@@ -125,6 +125,8 @@ Publish the result wherever you like (GitHub Releases is the natural home), one 
 
 ## The FFI's limits
 
-The native ABI carries `int`, `float`, `bool`, `str`, and `nil`. **Arrays, dicts, and structs do not cross the boundary** — they arrive as `nil`. This applies to both directions and to both kinds of package.
+The native ABI carries `int`, `float`, `bool`, `str`, `nil`, and — since v1.1.31 — arrays, dicts, and structs, in both directions. A struct crosses with its type name attached, so the receiving side can tell a `Config` from anything else shaped like one.
+
+What still does not cross: **functions and futures**, which arrive as `nil`. A package API cannot take a callback.
 
 In practice, package APIs are scalar-and-string shaped. Widening the ABI is the natural next step for the package ecosystem, and it is the one change here that would be difficult to make after packages are widely published.

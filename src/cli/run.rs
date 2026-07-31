@@ -145,7 +145,13 @@ pub async fn run_file(path: &str, verbose: bool) {
 
     // Registered [lib] libraries from jade.toml plus any locked dependencies,
     // which reach import resolution as synthetic [lib] entries.
-    let project_root = crate::project::find_project_root();
+    //
+    // Resolved from the source file's directory, not the current one. Which
+    // project a file belongs to is a property of the file — `jade build` has
+    // always read it that way (`aot/imports.rs`), and reading it from the CWD here
+    // meant the two engines disagreed: from a repo root, `jade build sub/x.jde`
+    // resolved a `[lib]` import that `jade run sub/x.jde` could not find.
+    let project_root = crate::project::find_project_root_from(&source_dir);
     let libraries = project_root
         .as_ref()
         .and_then(|root| {

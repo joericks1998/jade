@@ -30,6 +30,48 @@ pub struct InferenceRequest {
     pub stop_anchor: Option<String>,
 }
 
+/// The struct type a provider's `infer` receives, and its fields in declaration
+/// order.
+///
+/// These name the shared definition in `src/protocol/jade/infer.jde`,
+/// which dovata's provider packages are written against. Nothing in the compiler
+/// can `use` a `.jde` file, so this is a hand-written copy — kept honest by the
+/// tripwire in `tests.rs`, which parses that file and fails on any difference.
+///
+/// Both emitters read this list: [`provider_backend::request_value`] here, and
+/// `provider_request` in `runtime_aot/infer/infer.c`. The C side cannot see a
+/// Rust constant, so the tripwire checks its source text too.
+pub const REQUEST_TYPE: &str = "InferRequest";
+pub const REQUEST_FIELDS: [&str; 4] = ["input", "grammar", "anchor", "stop_anchor"];
+
+/// The frames a provider's `infer` may return, and the two fields the language
+/// reads out of them.
+///
+/// Same arrangement as the request: the shared definition declares these, the
+/// tripwire in `tests.rs` checks this copy against it, and both engines decode
+/// against the copy. A frame arrives either as a struct — whose *type name* is
+/// the frame name — or as a dict carrying that name under [`FRAME_TAG_KEY`].
+///
+/// Anything else raises. Skipping unrecognised frames is what let a renamed key
+/// or a miscased tag read as an empty reply, with no error at any layer.
+pub const FRAME_TOKEN: &str = "Token";
+pub const FRAME_DONE: &str = "Done";
+pub const FRAME_ERROR: &str = "Error";
+pub const FRAME_META: &str = "Meta";
+pub const FRAME_JSON: &str = "Json";
+
+/// Every frame name, in the order the shared definition declares them.
+pub const FRAME_TYPES: [&str; 5] =
+    [FRAME_TOKEN, FRAME_DONE, FRAME_ERROR, FRAME_META, FRAME_JSON];
+
+/// The dict form's tag key. A struct form has no equivalent — its type name is
+/// the tag.
+pub const FRAME_TAG_KEY: &str = "type";
+/// `Token`'s payload: the generated text.
+pub const FRAME_TOKEN_TEXT: &str = "text";
+/// `Error`'s payload: why inference failed.
+pub const FRAME_ERROR_MESSAGE: &str = "message";
+
 /// A successful response from an inference provider.
 pub struct InferenceResponse {
     pub text: String,

@@ -386,6 +386,11 @@ void*   jrt_coll_dict_copy(void* p);
  * strings, sorted ascending (matches the VM's dict.keys). */
 void*   jrt_coll_dict_keys(void* p);
 int32_t jrt_coll_struct_get(void* p, const char* field, int64_t* out);
+/* jrt_coll_struct_keys — the struct's field names in DECLARATION order as a
+ * kind-tagged string array (dict keys come back sorted; struct fields do not,
+ * so a package sees them the way the shared definition writes them). The FFI
+ * marshaller walks this to copy a struct across the boundary. */
+void*   jrt_coll_struct_keys(void* p);
 /* jrt_karr_new/push — build a kind-tagged array (elements are tagged words). */
 void*   jrt_karr_new(void);
 void    jrt_karr_push(void* arr, int64_t val);
@@ -563,10 +568,10 @@ char*   jrt_readline(const char* prompt);
  *
  * The FFI value type (JadeVal) is a 16-byte tagged union that MUST byte-match
  * `JadeVal` in jadelang/src/native.rs so the same .dylib serves both the VM and
- * AOT. Its tags (0..7) are an independent ABI, distinct from the jade_value_t
- * low-bit tags above. Scalars convert directly; arrays and dicts are deep-copied
- * into nested JadeArr/JadeMap trees (see below). Structs and other heap kinds
- * become nil. */
+ * AOT. Its tags (0..8) are an independent ABI, distinct from the jade_value_t
+ * low-bit tags above. Scalars convert directly; arrays, dicts, and structs are
+ * deep-copied into nested JadeArr/JadeMap/JadeStruct trees (see below).
+ * Remaining heap kinds (functions, futures, prompts) become nil. */
 #define JADE_FFI_NIL   0
 #define JADE_FFI_INT   1
 #define JADE_FFI_FLOAT 2
@@ -575,6 +580,7 @@ char*   jrt_readline(const char* prompt);
 #define JADE_FFI_ERROR 5   /* like STR, but the string is an error message */
 #define JADE_FFI_ARRAY 6   /* data.as_arr  -> JadeArr  (deep-copied, owned) */
 #define JADE_FFI_DICT  7   /* data.as_dict -> JadeMap  (deep-copied, owned) */
+#define JADE_FFI_STRUCT 8  /* data.as_struct -> JadeStruct (deep-copied, owned) */
 
 /* Nested container payloads for JADE_FFI_ARRAY / JADE_FFI_DICT.
  *
@@ -590,6 +596,7 @@ char*   jrt_readline(const char* prompt);
  * not supported (the copy would not terminate). */
 typedef struct JadeArr JadeArr;
 typedef struct JadeMap JadeMap;
+typedef struct JadeStruct JadeStruct;
 
 typedef union {
     int64_t     as_int;
@@ -599,6 +606,7 @@ typedef union {
     uint64_t    as_nil;
     JadeArr*    as_arr;
     JadeMap*    as_dict;
+    JadeStruct* as_struct;
 } JadeValData;
 
 typedef struct {
@@ -610,8 +618,21 @@ typedef struct {
 struct JadeArr { JadeVal* items; size_t len; };
 struct JadeMap { const char** keys; JadeVal* vals; size_t len; };
 
+/* A JadeMap plus the struct's type name, fields in declaration order. The name
+ * is what makes a typed contract enforceable across the boundary: a receiver can
+ * refuse a struct that is not the type it expects, where a bare dict with the
+ * wrong keys reads as a set of nils and fails silently. Same ownership rules as
+ * JadeMap — every node libc-owned, released by jade_ffi_free. */
+struct JadeStruct {
+    const char*  type_name;
+    const char** keys;
+    JadeVal*     vals;
+    size_t       len;
+};
+
 /* Release a JadeVal tree built by the marshaller (`to_ffi`/`jrt_ffi_from_tagged`
- * / the VM's vm_to_ffi). Frees only the libc-owned parts — JadeArr/JadeMap nodes,
+ * / the VM's vm_to_ffi). Frees only the libc-owned parts — JadeArr/JadeMap/
+ * JadeStruct nodes,
  * their element arrays, and copied strings inside a container — so it is a no-op
  * on scalars and safe to call on any JadeVal. The consumer of a native call frees
  * both the argument trees it built and a container return value with it. */

@@ -1,6 +1,6 @@
 [package]
 name = "jade"
-version = "1.1.30"
+version = "1.1.31"
 edition = "2024"
 description = "A language for LLMs"
 license = "MIT"
@@ -27,6 +27,11 @@ license = "MIT"
 [workspace]
 members = ["src/runtime"]
 default-members = [".", "src/runtime"]
+# `src/protocol` is the ovata-infer-protocol submodule. This repo uses only its
+# `jade/infer.jde`, never its Rust crate — that dependency went with the daemon in
+# v1.1.30 — so it stays out of the workspace. Excluded rather than ignored, so
+# running cargo inside the submodule does not pick up this workspace.
+exclude = ["src/protocol"]
 
 [dependencies]
 jade-runtime = { path = "src/runtime" }

@@ -370,6 +370,26 @@ pub extern "C" fn jrt_kstruct_set(s: *mut c_void, field: *const c_char, val: W) 
     unsafe { (*(s as *mut StructObj<W>)).set_field(cstr::borrow(field), val) }
 }
 
+/// The struct's field names, in declaration order, as a kind-tagged array of
+/// strings (leaked; see module docs).
+///
+/// Mirrors [`jrt_coll_dict_keys`], with one deliberate difference: dict keys come
+/// back sorted, and these do not. A struct's order is its declaration order, and
+/// the FFI marshaller copies fields in that order so a package sees them the way
+/// the shared definition writes them.
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_coll_struct_keys(s: *const c_void) -> *mut c_void {
+    unsafe {
+        let st = &*(s as *const StructObj<W>);
+        let mut arr = ArrayObj::<W>::new();
+        for (k, _) in st.fields() {
+            let p = tagged_string(k.as_bytes(), string::TRUSTED);
+            arr.push(JadeValue::from_str_ptr(p as *const ()).bits() as i64);
+        }
+        crate::gc::leak_obj(arr)
+    }
+}
+
 /// Read field `field` (a C string). On hit writes to `*out`, returns `1`; miss
 /// returns `0`.
 #[unsafe(no_mangle)]

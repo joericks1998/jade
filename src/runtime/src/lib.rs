@@ -121,7 +121,7 @@ pub use value::{JadeValue, FALSE, NIL, TRUE};
 /// so an AOT binary and a native package built against different runtimes can
 /// be detected. Exposed over the C ABI so AOT-linked binaries can assert
 /// compatibility.
-pub const RUNTIME_ABI_VERSION: u32 = 1;
+pub const RUNTIME_ABI_VERSION: u32 = 2;
 
 /// C-ABI accessor for [`RUNTIME_ABI_VERSION`]. Also serves as a trivial
 /// exported symbol proving the `staticlib` links.
