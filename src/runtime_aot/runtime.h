@@ -115,6 +115,12 @@ int          jrt_core_eq_total(jade_value_t a, jade_value_t b);
 const char*  jrt_core_type_name(jade_value_t v);
 double       jrt_core_to_double(jade_value_t v, uint32_t* err);
 
+/* jrt_abi_version — the value ABI this runtime speaks. Compared at load against a
+ * native package's own version (jade_pkg_abi_version, or jrt_abi_version re-exported
+ * by one that links the runtime), so an incompatible package is refused by name
+ * instead of failing somewhere inside a call. */
+uint32_t     jrt_abi_version(void);
+
 /* ── Tagged string ABI ────────────────────────────────────────────────
  *
  * Every JadeLang-visible string carries a trust tag in the byte at offset -1

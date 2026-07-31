@@ -46,6 +46,35 @@ fn an_empty_export_list_exports_every_function() {
     assert!(out.contains(r#""jade_export$triple""#), "triple not exported:\n{out}");
 }
 
+/// Every package carries the value ABI it was built against, so a host can refuse
+/// one it cannot talk to.
+///
+/// The symbol is emitted rather than borrowed from the linked runtime because the
+/// linker drops `jrt_abi_version` from a package that never calls it. Losing this
+/// test would mean losing the check silently: a package with no version symbol is
+/// *allowed* to load, since that is how a plain C shim looks.
+#[test]
+fn a_shared_library_declares_the_abi_it_was_built_against() {
+    let out = ir(LIB, CompileMode::SharedLib { exports: vec![] });
+    assert!(
+        out.contains("@jade_pkg_abi_version"),
+        "a package must declare its value ABI:\n{out}"
+    );
+    assert!(
+        out.contains(&format!("ret i32 {}", jade_runtime::RUNTIME_ABI_VERSION)),
+        "the declared ABI must be this runtime's ({}):\n{out}",
+        jade_runtime::RUNTIME_ABI_VERSION
+    );
+}
+
+/// A binary has no package ABI to declare — the symbol is part of the package
+/// surface, not of every emitted object.
+#[test]
+fn a_binary_declares_no_package_abi() {
+    let out = ir(LIB, CompileMode::Binary);
+    assert!(!out.contains("@jade_pkg_abi_version"), "binaries should not carry it:\n{out}");
+}
+
 #[test]
 fn an_export_list_narrows_the_bindings() {
     let out = ir(LIB, CompileMode::SharedLib { exports: vec!["add".to_string()] });

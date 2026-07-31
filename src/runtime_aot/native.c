@@ -38,6 +38,36 @@ void* jrt_native_load(const char* path) {
         native_raise("could not load native library '%s'", path);
     }
 
+    /* Refuse a package built against a value ABI this runtime cannot talk to.
+     *
+     * Mirrors check_package_abi in src/native/mod.rs: prefer
+     * jade_pkg_abi_version, which `jade build --lib` emits into every package;
+     * fall back to jrt_abi_version, which packages published before that symbol
+     * existed re-export from the runtime they link. Neither present means the
+     * library does not link the Jade runtime at all — a plain C library wrapped
+     * by `jade pkg add --c-abi`, with no value ABI to disagree about.
+     *
+     * Without this, a provider built before v1.1.31 — when the inference request
+     * became a struct it cannot read — failed with "native function returned an
+     * unknown value tag" from inside the call, naming neither the version nor the
+     * fix. */
+    uint32_t (*abi)(void) = (uint32_t (*)(void))jade_dlsym(lib, "jade_pkg_abi_version");
+    if (!abi) abi = (uint32_t (*)(void))jade_dlsym(lib, "jrt_abi_version");
+    if (abi) {
+        uint32_t theirs = abi();
+        uint32_t ours = jrt_abi_version();
+        if (theirs != ours) {
+            native_raise(
+                theirs < ours
+                    ? "native package '%s' speaks an older value ABI than this Jade. Rebuild it "
+                      "with this toolchain, or reinstall the providers that ship with your Jade "
+                      "release."
+                    : "native package '%s' speaks a newer value ABI than this Jade. Upgrade with "
+                      "`jade upgrade`.",
+                path);
+        }
+    }
+
     JadePkgInitFn init = (JadePkgInitFn)jade_dlsym(lib, "jade_pkg_init");
     if (!init) {
         native_raise("native library '%s' missing `jade_pkg_init` symbol", path);
