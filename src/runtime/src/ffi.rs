@@ -143,6 +143,48 @@ pub extern "C" fn jrt_core_eq(a: i64, b: i64, err: *mut u32) -> i32 {
     }
 }
 
+/// Membership equality (`1`/`0`). Never raises: operands of different kinds are
+/// not equal. See [`ops::eq_total`] for why this is not [`jrt_core_eq`].
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_core_eq_total(a: i64, b: i64) -> i32 {
+    ops::eq_total(JadeValue::from_bits(a as u64), JadeValue::from_bits(b as u64)) as i32
+}
+
+/// The name of a value's type, as a static NUL-terminated string the caller must
+/// not free.
+///
+/// The spellings are the VM's `value_type_name`, so an error message built in C
+/// reads the same as the one the interpreter would have printed. Kinds a tagged
+/// word cannot distinguish (a closure from a plain fn, say) are not reachable
+/// here — this exists for scalar operand errors.
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_core_type_name(v: i64) -> *const core::ffi::c_char {
+    let val = JadeValue::from_bits(v as u64);
+    let name: &str = if val.is_int() {
+        "int\0"
+    } else if val.is_float() {
+        "float\0"
+    } else if val.is_bool() {
+        "bool\0"
+    } else if val.is_str() {
+        "str\0"
+    } else if val.is_nil() {
+        "nil\0"
+    } else if val.is_ptr() {
+        let kind = unsafe { (*(val.as_ptr() as *const crate::heap::ObjHeader)).kind };
+        match kind {
+            k if k == crate::heap::ObjKind::Array as u8 => "array\0",
+            k if k == crate::heap::ObjKind::Dict as u8 => "dict\0",
+            k if k == crate::heap::ObjKind::Struct as u8 => "struct\0",
+            k if k == crate::heap::ObjKind::Prompt as u8 => "prompt\0",
+            _ => "value\0",
+        }
+    } else {
+        "value\0"
+    };
+    name.as_ptr() as *const core::ffi::c_char
+}
+
 /// Truthiness (`1`/`0`). Never raises. Was `common.c jrt_to_bool`.
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_to_bool(v: i64) -> i32 {

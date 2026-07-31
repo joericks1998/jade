@@ -78,6 +78,9 @@ jade_value_t jrt_mod_any(jade_value_t a, jade_value_t b);
 jade_value_t jrt_pow_any(jade_value_t a, jade_value_t b);
 jade_value_t jrt_neg_any(jade_value_t a);
 int          jrt_cmp_any(jade_value_t a, jade_value_t b);
+/* jrt_cmp_any_op — as jrt_cmp_any, but `op` names the source operator ("'<'")
+ * so a cross-kind failure reads like the VM's message. */
+int          jrt_cmp_any_op(jade_value_t a, jade_value_t b, const char* op);
 double       jrt_any_to_double(jade_value_t v);
 int          jrt_to_bool(jade_value_t v);
 
@@ -101,7 +104,22 @@ jade_value_t jrt_core_pow(jade_value_t a, jade_value_t b, uint32_t* err);
 jade_value_t jrt_core_neg(jade_value_t a, uint32_t* err);
 int          jrt_core_cmp(jade_value_t a, jade_value_t b, uint32_t* err);
 int          jrt_core_eq(jade_value_t a, jade_value_t b, uint32_t* err);
+/* jrt_core_eq_total — equality for *membership*, which never raises: operands of
+ * different kinds are not equal. jrt_core_eq is the `==` operator and is strict
+ * across kinds by design; `arr.contains(x)` needs to walk past elements of other
+ * kinds rather than raise on them. */
+int          jrt_core_eq_total(jade_value_t a, jade_value_t b);
+/* jrt_core_type_name — a value's type name ("int", "str", "array", …), spelled
+ * exactly as the VM's value_type_name spells it, so an error built here reads
+ * like the interpreter's. Static storage: do not free. */
+const char*  jrt_core_type_name(jade_value_t v);
 double       jrt_core_to_double(jade_value_t v, uint32_t* err);
+
+/* jrt_abi_version — the value ABI this runtime speaks. Compared at load against a
+ * native package's own version (jade_pkg_abi_version, or jrt_abi_version re-exported
+ * by one that links the runtime), so an incompatible package is refused by name
+ * instead of failing somewhere inside a call. */
+uint32_t     jrt_abi_version(void);
 
 /* ── Tagged string ABI ────────────────────────────────────────────────
  *
@@ -340,6 +358,21 @@ int64_t jrt_bool_any(int64_t val);
 #define JK_ARRAY  2
 #define JK_DICT   3
 #define JK_STRUCT 4
+#define JK_PROMPT 7
+
+/* ── Prompt values ────────────────────────────────────────────────────────
+ *
+ * A prompt is its own kind, not the bare string it wraps: `?p` dereferences it,
+ * it type-names as "prompt", and it prints as <prompt> — all of which the VM
+ * already did. Codegen boxes with jrt_prompt_new at MakePrompt and unwraps with
+ * jrt_prompt_text wherever the text itself is needed (the inference entry points
+ * below still take a plain char*). */
+/* jrt_prompt_new — box a tagged string word as a prompt. Returns the raw pointer
+ * (codegen tags it); the prompt takes a reference to the text. */
+void*   jrt_prompt_new(int64_t text);
+/* jrt_prompt_text — the tagged string word inside a prompt, borrowed. A value
+ * that is not a prompt is returned unchanged, so the unwrap is harmless. */
+int64_t jrt_prompt_text(int64_t v);
 /* jrt_kind_of — ObjKind byte of a kind-tagged object pointer (from its header). */
 int64_t jrt_kind_of(void* p);
 /* jrt_coll_len — element/field count from the object header (O(1)); the Chunk

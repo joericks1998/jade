@@ -40,6 +40,8 @@ Two design choices are worth knowing before you edit:
 
 **An opcode this backend cannot lower is a hard build error.** There is no legacy fallback, so any new instruction added in `compiler/emit.rs` must be lowered here too.
 
+**A value that only ever seems to flow one way still needs a representation.** `MakePrompt` used to store a prompt as the bare string it wraps, reasoning that a prompt only ever reaches `PromptDeref`. It does not — a prompt can be printed, held in a collection, stored in a struct field, passed, or returned — so a compiled binary showed a prompt's text where the VM showed `<prompt>`, and `MakeStruct` had to refuse prompt fields outright. The fix was to give it a real kind (`jade_runtime::promptf`), which also meant an arm in `gc::is_collection` and one in `gc::free_obj`; without the first it leaked one object per prompt. Anything new that reaches a `TAG_PTR` word needs the same three.
+
 The linker line is `-L target/<profile> -ljade_runtime`, which only works because `jade-runtime` is a *workspace member* named in `default-members` — Cargo only uplifts a build artifact to `target/<profile>/` when the crate is a requested top-level target. The root `Cargo.toml` has the full explanation. Do not demote it back to a plain path dependency.
 
 ## Building and testing
@@ -49,5 +51,5 @@ export LLVM_SYS_180_PREFIX=/opt/homebrew/opt/llvm@18   # or your install
 cargo test aot::
 ./target/debug/jade build examples/arithmatic/arithmetic/arithmetic.jde -o /tmp/a && /tmp/a
 ./target/debug/jade build file.jde --emit-ir           # inspect the IR
-./scripts/backend-parity.sh                            # diff against the VM
+./src/scripts/backend-parity.sh                            # diff against the VM
 ```

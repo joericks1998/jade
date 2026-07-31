@@ -79,7 +79,7 @@ jobs:
       # caught by hand, because no automated check ever ran a program both
       # ways. See the script header for the skip list.
       #
-      # This covers examples/llm too: the script builds scripts/fake-provider.jde
+      # This covers examples/llm too: the script builds src/scripts/fake-provider.jde
       # as a stand-in inference provider answering with a canned reply, so the
       # LLM paths are deterministic rather than skipped. Pointing the gate at
       # them turned up a VM muting bug and an AOT segfault immediately, so they
@@ -87,7 +87,7 @@ jobs:
       - name: Backend parity
         env:
           LLVM_SYS_180_PREFIX: /usr/lib/llvm-18
-        run: ./scripts/backend-parity.sh
+        run: ./src/scripts/backend-parity.sh
 
   tag-release:
     name: Tag release

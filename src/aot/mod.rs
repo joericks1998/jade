@@ -205,6 +205,36 @@ fn emit_pkg_init<'ctx>(
     table.set_initializer(&binding_ty.const_array(&entries));
     table.set_constant(true);
 
+    // ── uint32_t jade_pkg_abi_version(void) ───────────────────────────────
+    //
+    // The value ABI this package was built against, so a host can refuse one it
+    // cannot talk to instead of failing somewhere inside the call.
+    //
+    // It is emitted rather than borrowed from the linked runtime because the
+    // linker drops `jrt_abi_version` from a package that never calls it — the
+    // packages published before this existed happen to keep the symbol, newer
+    // ones do not, so it cannot be relied on either way. A function whose whole
+    // body is `return <constant>` is always there.
+    //
+    // Why it matters: v1.1.31 started sending the inference request as a struct
+    // (`JADE_TAG_STRUCT`). A provider built before that cannot read the tag, and
+    // the failure surfaced as "native function returned an unknown value tag"
+    // from deep inside the call, with nothing naming the real problem.
+    {
+        let abi_fn = module.add_function(
+            "jade_pkg_abi_version",
+            i32_ty.fn_type(&[], false),
+            None,
+        );
+        let abi_entry = context.append_basic_block(abi_fn, "entry");
+        builder.position_at_end(abi_entry);
+        builder
+            .build_return(Some(
+                &i32_ty.const_int(jade_runtime::RUNTIME_ABI_VERSION as u64, false),
+            ))
+            .map_err(|e| e.to_string())?;
+    }
+
     // ── int jade_pkg_init(JadeNativePkg* out) ─────────────────────────────
     let pkg_init = module.add_function(
         "jade_pkg_init",

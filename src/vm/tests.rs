@@ -1579,16 +1579,29 @@ fn test_vm_struct_prompt_field_override() {
     }
 }
 
+// A prompt field holds text to send to a model, so a non-string value in one is
+// rejected — whether it comes from the field's default or from an override at the
+// literal. Both are caught in `type_infer`, before any bytecode runs, as
+// `PromptFieldNotStr`.
+//
+// These were `#[ignore]`d as "the VM does not yet validate this, the treewalk
+// did". It does now; the checks landed in the type checker, which covers both
+// engines rather than just this one, and the attributes outlived the gap.
+
 #[test]
-#[ignore = "VM does not yet validate that prompt struct fields must be strings (treewalk did)"]
 fn test_vm_struct_prompt_field_non_string_error() {
-    assert!(try_run_src("struct Bad {\n  prompt sys = 42\n}\nlet b = Bad {}").is_err());
+    let Err(err) = try_run_src("struct Bad {\n  prompt sys = 42\n}\nlet b = Bad {}") else {
+        panic!("a non-string prompt field default must be rejected");
+    };
+    assert!(matches!(err, JadeError::PromptFieldNotStr { .. }), "got {err:?}");
 }
 
 #[test]
-#[ignore = "VM does not yet validate that prompt struct field overrides must be strings"]
 fn test_vm_struct_prompt_field_override_non_string_error() {
-    assert!(try_run_src("struct Agent {\n  prompt system = \"ok\"\n}\nlet a = Agent { system: 99 }").is_err());
+    let Err(err) = try_run_src("struct Agent {\n  prompt system = \"ok\"\n}\nlet a = Agent { system: 99 }") else {
+        panic!("a non-string prompt field override must be rejected");
+    };
+    assert!(matches!(err, JadeError::PromptFieldNotStr { .. }), "got {err:?}");
 }
 
 #[test]

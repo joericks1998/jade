@@ -29,6 +29,11 @@ The one subtle rule is **who owns which buffer**. For input arguments, Jade owns
 
 ## Gotchas
 
+**A package declares the value ABI it was built against, and an incompatible one is refused at load.** `jade build --lib` emits `jade_pkg_abi_version` into every package; the loader compares it with `jade_runtime::RUNTIME_ABI_VERSION` and falls back to a re-exported `jrt_abi_version` for packages published before that symbol existed. Neither present means the library does not link the Jade runtime at all — a C shim from `jade pkg add --c-abi` — which has no value ABI to disagree about and loads as before.
+
+The check exists because the version was there and nobody read it. `RUNTIME_ABI_VERSION` went 1 → 2 when structs started crossing the boundary in v1.1.31, and every published provider was built against 1. The result was `native function returned an unknown value tag` raised from inside the call, naming neither the version nor the fix — on both engines, for every fresh install. `src/runtime_aot/native.c` carries the same check, and the two messages must stay in step.
+
+
 Any change to marshalling has to land in `runtime_aot/native.c` at the same time. The tag constants are duplicated in `runtime.h`.
 
 `JADE_TAG_ERROR` is a string tag whose payload is an error message — a package signals failure by returning it, not by any out-of-band mechanism.

@@ -183,6 +183,61 @@ impl NativeLibFn {
 
 /// Load a native package from a shared library and return its exported functions
 /// as a `HashMap<name, VmValue::NativeLibFn>`.
+/// Refuse a package built against a value ABI this runtime cannot talk to.
+///
+/// Two symbols are consulted, in order:
+///
+///  * `jade_pkg_abi_version` — emitted into every package `jade build --lib`
+///    produces (see [`crate::aot`]). Authoritative.
+///  * `jrt_abi_version` — the runtime's own accessor. A package that links
+///    `jade-runtime` may re-export it, which is how packages published before
+///    the first symbol existed can still be checked.
+///
+/// Neither present means the package does not link the Jade runtime at all — a
+/// plain C library wrapped by `jade pkg add --c-abi`, which has no value ABI to
+/// disagree about. Those load, as they always have.
+///
+/// This exists because nothing checked [`jade_runtime::RUNTIME_ABI_VERSION`]
+/// despite its whole purpose being detection: when v1.1.31 began sending the
+/// inference request as a struct, every published provider — built against
+/// ABI 1 — failed with `native function returned an unknown value tag` from
+/// inside the call, naming neither the version nor the fix.
+fn check_package_abi(
+    lib: &libloading::Library,
+    lib_path: &Path,
+    span: Span,
+) -> Result<()> {
+    let read = |sym: &[u8]| -> Option<u32> {
+        let f: libloading::Symbol<unsafe extern "C" fn() -> u32> =
+            unsafe { lib.get(sym) }.ok()?;
+        Some(unsafe { f() })
+    };
+
+    let Some(theirs) = read(b"jade_pkg_abi_version\0").or_else(|| read(b"jrt_abi_version\0"))
+    else {
+        return Ok(());
+    };
+
+    let ours = jade_runtime::RUNTIME_ABI_VERSION;
+    if theirs == ours {
+        return Ok(());
+    }
+
+    let advice = if theirs < ours {
+        "It was built against an older Jade. Rebuild it with this toolchain, or \
+         reinstall the providers that ship with your Jade release."
+    } else {
+        "It was built against a newer Jade than this one. Upgrade with `jade upgrade`."
+    };
+    Err(JadeError::IoError {
+        message: format!(
+            "native package '{}' speaks value ABI {theirs}, but this Jade speaks {ours}. {advice}",
+            lib_path.display()
+        ),
+        span,
+    })
+}
+
 pub fn load_native_package(
     lib_path: &Path,
     span: Span,
@@ -199,6 +254,8 @@ pub fn load_native_package(
     })?;
 
     let lib = Arc::new(lib);
+
+    check_package_abi(&lib, lib_path, span)?;
 
     let init_fn: libloading::Symbol<unsafe extern "C" fn(*mut JadeNativePkg) -> i32> =
         unsafe { lib.get(b"jade_pkg_init\0") }.map_err(|e| JadeError::IoError {

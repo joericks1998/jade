@@ -355,7 +355,14 @@ int32_t jrt_in_any(int64_t needle, int64_t haystack) {
         if (kind == JK_ARRAY) {
             int64_t n = jrt_coll_array_len(p);
             for (int64_t i = 0; i < n; i++) {
-                if (jrt_eq_any((uint64_t)jrt_coll_array_get(p, i), (uint64_t)needle)) return 1;
+                /* jrt_core_eq_total, not jrt_eq_any: membership asks whether any
+                 * element *is* the needle, and an element of another kind answers
+                 * "no" rather than raising. jrt_eq_any is the `==` operator, which
+                 * is strict across kinds by design — using it here made
+                 * `[1, "a"].contains("a")` raise in a compiled binary while the VM
+                 * answered true. Mixed arrays were unwritable until v1.1.32, so
+                 * nothing reached it. */
+                if (jrt_core_eq_total((int64_t)jrt_coll_array_get(p, i), (int64_t)needle)) return 1;
             }
             return 0;
         }
@@ -629,6 +636,22 @@ static void throw_num_type(const char* op) {
     jade_exc_throw_typed(jrt_box_str(jrt_str_dup(msg, JRT_TRUSTED)), NULL);
 }
 
+/* Raise "'<op>' cannot compare <a> and <b>", the VM's wording for a comparison
+ * across kinds (see map_dynop_err in src/vm/ops.rs).
+ *
+ * Comparisons used to share throw_num_type with arithmetic, so `1 == "x"` in a
+ * compiled binary reported "'==' requires numeric operands" — misleading, since
+ * the problem is that the kinds differ, not that they are non-numeric, and
+ * divergent from what the VM says about the same program. Mixed arrays made this
+ * easy to hit, so the two now agree apart from the source span, which a compiled
+ * binary does not carry. */
+static void throw_cmp_type(const char* op, jade_value_t a, jade_value_t b) {
+    char msg[128];
+    snprintf(msg, sizeof msg, "%s cannot compare %s and %s",
+             op, jrt_core_type_name((int64_t)a), jrt_core_type_name((int64_t)b));
+    jade_exc_throw_typed(jrt_box_str(jrt_str_dup(msg, JRT_TRUSTED)), NULL);
+}
+
 static void throw_msg(const char* m) {
     jade_exc_throw_typed(jrt_box_str(jrt_str_dup(m, JRT_TRUSTED)), NULL);
 }
@@ -697,20 +720,30 @@ jade_value_t jrt_neg_any(jade_value_t a) {
     return r;
 }
 
-int jrt_cmp_any(jade_value_t a, jade_value_t b) {
+/* Three-way ordering. `op` is the source operator ("'<'", "'>='", …) so a failure
+ * names it the way the VM does; codegen passes it per call site. */
+int jrt_cmp_any_op(jade_value_t a, jade_value_t b, const char* op) {
     uint32_t err = JRT_OP_OK;
     int c = jrt_core_cmp(a, b, &err);
-    if (err) throw_op_err(err, "comparison");
+    if (err == JRT_OP_TYPE) throw_cmp_type(op, a, b);
+    else if (err) throw_op_err(err, op);
     return c;
 }
 
-/* Dynamic ==/!=. Now VM-strict: cross-kind operands (e.g. int vs float) raise a
+int jrt_cmp_any(jade_value_t a, jade_value_t b) {
+    return jrt_cmp_any_op(a, b, "comparison");
+}
+
+/* Dynamic ==/!=. VM-strict: cross-kind operands (e.g. int vs float) raise a
  * catchable TypeError instead of silently comparing. codegen calls this for
- * both == and != (negating the result), so both raise on a kind mismatch. */
+ * both == and != (negating the result), so both raise on a kind mismatch.
+ *
+ * Membership does not come through here — see jrt_core_eq_total. */
 int jrt_eq_any(uint64_t a, uint64_t b) {
     uint32_t err = JRT_OP_OK;
     int r = jrt_core_eq((jade_value_t)a, (jade_value_t)b, &err);
-    if (err) throw_op_err(err, "'=='");
+    if (err == JRT_OP_TYPE) throw_cmp_type("'=='", (jade_value_t)a, (jade_value_t)b);
+    else if (err) throw_op_err(err, "'=='");
     return r;
 }
 

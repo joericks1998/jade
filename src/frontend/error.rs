@@ -106,9 +106,6 @@ pub enum JadeError {
     /// Type checker: an operator or construct received incompatible types.
     TypeMismatch { expected: String, got: String, span: Span },
 
-    /// Type checker: an array literal contains elements of different concrete types.
-    HeterogeneousArray { first: String, got: String, span: Span },
-
     /// `use "path"` used the removed quoted-string import form. Imports name a
     /// module (`use utils`, `use sub::helper`, `use std::math`), never a file path.
     QuotedImport { path: String, span: Span },
@@ -220,8 +217,6 @@ impl std::fmt::Display for JadeError {
                 write!(f, "[{}:{}] field '{}' is specified more than once in struct literal", span.line, span.col, field),
             JadeError::TypeMismatch { expected, got, span } =>
                 write!(f, "[{}:{}] type mismatch: expected {}, got {}", span.line, span.col, expected, got),
-            JadeError::HeterogeneousArray { first, got, span } =>
-                write!(f, "[{}:{}] heterogeneous array: first element is {}, found {}", span.line, span.col, first, got),
             JadeError::QuotedImport { path, span } => {
                 let dotted = path.trim_end_matches(".jde").replace('/', "::");
                 write!(f, "[{}:{}] quoted file imports were removed. Import by module name with `::` notation: `use {}` (a sibling `.jde` file, a subdir with `sub::name`, a stdlib package like `std::math`, or a registered `[lib]`/dependency).", span.line, span.col, dotted)

@@ -114,6 +114,12 @@ pub fn render_word(word: i64) -> String {
         // Matches the VM (`VmValue::Future` renders as `<future>`); the parity
         // gate diffs stdout, so this string is a contract, not a cosmetic.
         "<future>".to_string()
+    } else if kind == ObjKind::Prompt as u8 {
+        // Matches the VM (`VmValue::Prompt` renders as `<prompt>`). A prompt is
+        // opaque on purpose: it is a type you dereference, not text you read. The
+        // AOT used to hold a prompt as its bare string, so `print(p)` printed the
+        // prompt's text here and `<prompt>` under `jade run`.
+        "<prompt>".to_string()
     } else {
         // A boxed fn/etc. — the pre-existing "ObjKind gap" placeholder.
         "<object>".to_string()

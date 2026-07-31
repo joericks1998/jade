@@ -4,7 +4,7 @@
 
 One of Jade's two execution engines. `jade run` compiles a program to a `Chunk` and interprets it here. `jade build` lowers the same chunk to LLVM in `src/aot/`.
 
-Neither engine is the reference implementation of the other. `scripts/backend-parity.sh` runs every example through both and diffs the output, because they have silently disagreed before and the language is defined by what they agree on.
+Neither engine is the reference implementation of the other. `src/scripts/backend-parity.sh` runs every example through both and diffs the output, because they have silently disagreed before and the language is defined by what they agree on.
 
 ## Why it is shaped this way
 
@@ -25,7 +25,7 @@ The file was once a monolith and has been split incrementally. `mod.rs` re-expor
 - **`coerce.rs`** — turning model replies and values into typed Jade values, plus calling a type as a constructor (`City(dict)`, `int("3")`), struct decorators, and the JSON-to-`VmValue` bridge.
 - **`llm_prompt.rs`** — prompt dereference. `?p` and `?p |> Type` lower to `vm_prompt_deref`: send the request, optionally constrain sampling with a grammar, coerce the reply, retry on failure. Also drains live token streams, with optional anchor-based muting.
 - **`async_tasks.rs`** — the `JadeFuture` and token-stream handle types, and the task body a spawned task runs on its own `VmState`. The `spawn`/`await`/`join` opcodes themselves are dispatched inline in `dispatch.rs` because they manipulate register slots.
-- **`ops.rs`** — dynamic (runtime-typed) operators, for when inference could not specialize. Decisions route through `jade_runtime::dynop` so the two engines cannot diverge; what is owned here is the VM-specific set — bitwise and shift, `in`, indexing, unary.
+- **`ops.rs`** — dynamic (runtime-typed) operators, for when inference could not specialize. Decisions route through `jade_runtime::dynop` so the two engines cannot diverge; what is owned here is the VM-specific set — bitwise and shift, `in`, indexing, unary. `vm_scalar_eq` is membership equality, which answers `false` across kinds where `==` raises; its AOT counterpart is `jrt_core_eq_total`.
 - **`exceptions.rs`** — shaping a built-in error into a catchable Jade value. The `try`/`catch`/`raise` control flow itself is inline in `dispatch.rs`.
 - **`tests.rs`** — the largest test file in the repo. Helpers: `run_src(src)` runs the whole pipeline, `run_src_with_mock(src, responses)` stubs the inference backend, `run_src_with_stdout_capture` checks printed output.
 
@@ -47,5 +47,5 @@ Adding a stateful package function means adding a `NativeFnId` variant in `value
 
 ```sh
 cargo test vm::
-./scripts/backend-parity.sh    # run every example on both engines and diff
+./src/scripts/backend-parity.sh    # run every example on both engines and diff
 ```

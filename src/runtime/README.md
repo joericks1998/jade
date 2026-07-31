@@ -32,7 +32,8 @@ It is intentionally dependency-free and LLVM-free, so it builds everywhere `jade
 - `string.rs` — the tagged-string allocator. Every Jade string carries a trust byte at offset `-1`; strings use an 8-byte header so data pointers stay 8-aligned.
 - `strval.rs` — bounded string compare and truthiness for the dynamic ops.
 - `dynop.rs` — the single decision core for dynamic (tag-erased) binary operations and negation. This is the divergence-prone center; it returns errors as values.
-- `ops.rs`, `num.rs`, `float.rs` — arithmetic support: integer pow, boxed floats.
+- `promptf.rs` — `PromptObj`, a prompt value on the AOT heap: a header plus the tagged string it wraps. Unlike `GrammarObj` this is not shared with the VM, which has `VmValue::Prompt`; it exists so the AOT has the same distinction. Before it, `MakePrompt` stored the bare string, so a compiled binary printed a prompt's text where `jade run` printed `<prompt>`, and struct prompt fields could not be lowered at all.
+- `ops.rs`, `num.rs`, `float.rs` — arithmetic support: integer pow, boxed floats. `ops::eq` is the strict `==`, which rejects a comparison across kinds; `ops::eq_total` is the one membership uses, where a cross-kind pair answers "not equal" rather than raising. Both engines read the second for `arr.contains(x)` — they disagreed about it until mixed arrays made the case reachable in v1.1.32.
 - `render.rs` — the one value-display implementation. `format_float` produces the shortest round-tripping decimal.
 - `coercef.rs` — coercing an LLM reply into a struct, plus the type-to-fields table the compiled path needs.
 - `trust.rs` — the taint model. A string from a shell command, file, network, LLM, or stdin is tainted; anything derived only from source literals is trusted. Tainted values are refused at sinks that would execute or fetch them. `JStr` is the VM-side tagged string type.

@@ -71,12 +71,24 @@ pub(crate) fn map_dynop_err(e: dynop::DynErr, op: &BinOpKind, l: &VmValue, r: &V
         D::DivZero  => JadeError::DivisionByZero { span },
         D::RemZero  => JadeError::RemainderByZero { span },
         D::Type => {
+            // Both halves are spelled with the operator's *symbol*, matching what
+            // a compiled binary says (`throw_num_type` / `throw_cmp_type` in
+            // runtime_aot/common.c). Arithmetic used to interpolate the Rust enum
+            // variant here, so `1 + "x"` reported `Add requires numeric operands`
+            // under `jade run` and `'+' requires numeric operands` from the same
+            // program built — a leaked internal name and a divergence at once.
+            let sym = match op {
+                Add => "+", Sub => "-", Mul => "*", Div => "/", Mod => "%",
+                Eq => "==", Ne => "!=", Lt => "<", Gt => ">", Le => "<=", Ge => ">=",
+                _ => "?",
+            };
             let message = match op {
-                Add | Sub | Mul | Div | Mod => format!("{:?} requires numeric operands", op),
-                _ => {
-                    let sym = match op { Eq => "==", Ne => "!=", Lt => "<", Gt => ">", Le => "<=", Ge => ">=", _ => "?" };
-                    format!("'{}' cannot compare {} and {}", sym, value_type_name(l), value_type_name(r))
-                }
+                Add | Sub | Mul | Div | Mod => format!("'{sym}' requires numeric operands"),
+                _ => format!(
+                    "'{sym}' cannot compare {} and {}",
+                    value_type_name(l),
+                    value_type_name(r)
+                ),
             };
             JadeError::TypeError { message, span }
         }
@@ -144,13 +156,28 @@ pub(crate) fn eval_binop_dynamic(op: &BinOpKind, l: VmValue, r: VmValue, span: S
     }
 }
 
+/// Equality for *membership*, which never raises: values of different kinds are
+/// simply not equal.
+///
+/// Decided by the same shared core as `==` (`dynop::binop(Op::Eq, …)`), with the
+/// error case answered `false` instead of raised. `==` is strict across kinds on
+/// purpose — `1 == "x"` is a TypeError — but `arr.contains(x)` cannot ask which
+/// elements match without walking past the ones that do not.
+///
+/// The AOT half is `jrt_core_eq_total`, reached from `jrt_in_any`. Keep the two
+/// answering alike: until v1.1.32 this returned `false` where a compiled binary
+/// raised, and mixed arrays were unwritable, so nothing caught it.
 pub(crate) fn vm_scalar_eq(a: &VmValue, b: &VmValue) -> bool {
-    match (a, b) {
-        (VmValue::Int(x),   VmValue::Int(y))   => x == y,
-        (VmValue::Float(x), VmValue::Float(y)) => x == y,
-        (VmValue::Bool(x),  VmValue::Bool(y))  => x == y,
-        (VmValue::Str(x),   VmValue::Str(y))   => x == y,
-        (VmValue::Nil,      VmValue::Nil)      => true,
+    match dynop::binop(dynop::Op::Eq, vm_kind(a), vm_kind(b)) {
+        dynop::Outcome::Bool(v) => v,
+        // Two strings: the core defers the byte comparison to the caller, since
+        // it holds no string representation of its own.
+        dynop::Outcome::StrRel => match (a, b) {
+            (VmValue::Str(x), VmValue::Str(y)) => x == y,
+            _ => false,
+        },
+        // Different kinds, or a kind the core does not compare (`Other` — arrays,
+        // structs, functions). Not equal, and not an error.
         _ => false,
     }
 }

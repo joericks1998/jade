@@ -31,7 +31,7 @@ The package manager reuses that mechanism rather than adding a parallel one. Res
 
 ## Gotchas
 
-Any change to resolution behavior must be checked on both engines. `./scripts/backend-parity.sh` covers `examples/imports/`.
+Any change to resolution behavior must be checked on both engines. `./src/scripts/backend-parity.sh` covers `examples/imports/`.
 
 `[scripts]` entries are shell strings run by `jade run <name>`; they are not Jade code.
 

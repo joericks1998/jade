@@ -9,7 +9,7 @@
 # Each was invisible because nothing ever ran the same program both ways and
 # compared. This does that.
 #
-# Inference is made deterministic by scripts/fake-provider.jde, a stand-in
+# Inference is made deterministic by src/scripts/fake-provider.jde, a stand-in
 # provider package answering every prompt with one canned reply. It is built once
 # with `jade build --lib` and installed into a throwaway provider slot that
 # JADE_PROVIDER_ACTIVE points at, so both engines load it the same way a released
@@ -23,7 +23,7 @@
 # the top. The provider is stateless — one reply, however many prompts — so
 # there is nothing to reset between runs.
 #
-# Usage: scripts/backend-parity.sh [path-to-jade-binary]
+# Usage: src/scripts/backend-parity.sh [path-to-jade-binary]
 
 set -uo pipefail
 
@@ -38,7 +38,7 @@ trap 'rm -rf "$WORK"' EXIT
 # Build the stand-in provider once and install it as the active one. A slot holds
 # exactly one library, and discovery takes whatever is in it, so the name is free.
 # The stub imports the shared protocol definition through the [lib] entry in
-# scripts/jade.toml, so this also proves that route works — it is how a real
+# src/scripts/jade.toml, so this also proves that route works — it is how a real
 # provider project reaches the same file.
 mkdir -p "$SLOT"
 if ! provider_err="$("$JADE" build "$FAKE_PROVIDER" --lib -o "$SLOT/fake.so" 2>&1)"; then
@@ -75,10 +75,6 @@ skip_reason() {
     # backends by design, which `jade check` in CI already asserts.
     *_error.jde)
       echo "intentional-error fixture" ;;
-    # Known AOT lowering gap: prompt struct fields are unsupported in lower.rs.
-    # Remove this entry when that lands.
-    examples/structs/prompt_fields/*)
-      echo "AOT gap: prompt struct fields unsupported" ;;
     *) echo "" ;;
   esac
 }

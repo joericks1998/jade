@@ -163,6 +163,24 @@ pub fn eq(a: JadeValue, b: JadeValue) -> Result<i32, DynErr> {
     }
 }
 
+/// Equality for *membership*, which never raises: operands of different kinds
+/// are simply not equal.
+///
+/// [`eq`] is the `==` operator and is deliberately strict — `1 == "x"` is a
+/// TypeError, and so is `2 == 2.0`, because silently comparing across kinds hides
+/// bugs. Membership is a different question. `arr.contains(x)` asks whether any
+/// element *is* `x`, and an element of another kind answers that with "no", not
+/// with an error: you cannot ask which elements match without walking past the
+/// ones that do not.
+///
+/// The distinction only became reachable when mixed arrays became expressible in
+/// v1.1.32. Before then the two engines disagreed and nothing noticed — the VM
+/// answered `true`/`false` here while a compiled binary raised
+/// `'==' requires numeric operands` on the first element of another kind.
+pub fn eq_total(a: JadeValue, b: JadeValue) -> bool {
+    matches!(eq(a, b), Ok(1))
+}
+
 // ── math.* helpers (builtins, kept permissive) ─────────────────────────────
 
 pub fn pow(a: JadeValue, b: JadeValue) -> OpResult {
@@ -262,5 +280,38 @@ mod tests {
         assert_eq!(to_bool(i(5)), 1);
         assert_eq!(to_bool(crate::value::NIL), 0);
         assert_eq!(to_bool(box_float(0.0)), 0);
+    }
+
+    /// Membership equality answers where `==` raises. `arr.contains(x)` has to
+    /// walk past elements of other kinds, so a cross-kind pair is "not equal"
+    /// rather than an error.
+    #[test]
+    fn eq_total_answers_false_where_eq_raises() {
+        // Same kind: identical to `eq`.
+        assert!(eq_total(i(2), i(2)));
+        assert!(!eq_total(i(2), i(3)));
+        assert!(eq_total(crate::value::NIL, crate::value::NIL));
+
+        // Cross-kind: `eq` errors, `eq_total` says "not equal" and never raises.
+        for (a, b) in [
+            (i(1), JadeValue::from_bool(true)),
+            (i(1), box_float(1.0)),
+        ] {
+            assert_eq!(eq(a, b), Err(DynErr::Type), "expected `==` to reject");
+            assert!(!eq_total(a, b), "membership must answer, not raise");
+        }
+
+        // `nil` against another kind is already answerable rather than an error,
+        // so the two agree there — `eq_total` only diverges where `eq` rejects.
+        assert_eq!(eq(crate::value::NIL, i(0)), Ok(0));
+        assert!(!eq_total(crate::value::NIL, i(0)));
+    }
+
+    /// Kind-strict, not value-coercing: `1` is not `1.0` here either, matching
+    /// `1 == 1.0` being a type error rather than true.
+    #[test]
+    fn eq_total_does_not_coerce_numerics() {
+        assert!(!eq_total(i(1), box_float(1.0)));
+        assert!(eq_total(box_float(1.0), box_float(1.0)));
     }
 }

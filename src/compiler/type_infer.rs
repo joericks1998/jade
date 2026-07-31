@@ -1207,30 +1207,43 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
 
             let telems: Vec<TExpr> = elements.iter().map(|e| infer_expr(e, ctx)).collect::<Result<_>>()?;
 
-            // Use the first concrete element type; fall back to Unknown for
-            // heterogeneous arrays (arrays are untyped at runtime).
-            let elem_ty = telems.iter()
-                .find(|t| t.ty != JadeType::Unknown)
-                .map(|t| t.ty.clone())
-                .unwrap_or(JadeType::Unknown);
-
-            // If elements have mixed concrete types, emit an error.
-            let array_elem_ty = if elem_ty != JadeType::Unknown {
-                if let Some(mismatch) = telems.iter().find(|t| t.ty != JadeType::Unknown && t.ty != elem_ty) {
-                    return Err(JadeError::HeterogeneousArray {
-                        first: jade_type_name(&elem_ty).to_string(),
-                        got: jade_type_name(&mismatch.ty).to_string(),
-                        span: *span,
-                    });
+            // The element type is the one every concrete element agrees on, and
+            // `Unknown` when they do not. A mixed literal is not an error: arrays
+            // are untyped at runtime, and every consumer of the element type —
+            // `arr[i]`, `for x in arr` — already falls back to `Unknown`, which
+            // reaches the dynamic opcodes both engines have carried all along.
+            //
+            // This used to reject a mixed literal outright, which was inconsistent
+            // three ways: dicts widen rather than error under the same conditions,
+            // `push` built the same array with no complaint, and the rule was
+            // stricter than the language's own arithmetic (`[1, 2.0]` was refused
+            // while `1 + 2.0` is fine).
+            //
+            // Mixed numerics widen like anything else rather than promoting to
+            // float. Typing `arr[0]` as float while the slot holds a tagged int
+            // would send AOT codegen down a specialized path for a value that is
+            // not that type — worse than a pessimistic `Unknown`.
+            let mut elem_ty = JadeType::Unknown;
+            for t in &telems {
+                if t.ty == JadeType::Unknown {
+                    continue;
                 }
-                elem_ty
-            } else {
-                elem_ty
-            };
+                match &elem_ty {
+                    JadeType::Unknown => elem_ty = t.ty.clone(),
+                    known if *known == t.ty => {}
+                    // Two concrete element types that disagree: the array is
+                    // heterogeneous, and nothing more precise than `Unknown` is
+                    // true of every element.
+                    _ => {
+                        elem_ty = JadeType::Unknown;
+                        break;
+                    }
+                }
+            }
 
             Ok(TExpr {
                 kind: TExprKind::Array { elements: telems },
-                ty: JadeType::Array(Box::new(array_elem_ty)),
+                ty: JadeType::Array(Box::new(elem_ty)),
                 span: *span,
             })
         }
