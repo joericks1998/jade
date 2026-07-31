@@ -27,6 +27,7 @@ Credentials are backed up per provider rather than only stored in the active slo
 
 - **`mod.rs`** — pool and credential path helpers (`pool_dir`, `credential_path`, `bundled_provider_dir`), discovery across the three search locations, and the add / select / configure operations that write the active slot.
 - **`tests.rs`** — registry tests.
+- **`design.md`** — a design note rather than code: what a provider package is, the `$HOME/.jade` layout, how both engines drive one, and how providers are built and distributed. It spans this directory, `src/llm/`, `src/runtime_aot/infer/`, and `jade_runtime::provider`, so it lives here rather than in any one of them.
 
 ## Who uses it
 
@@ -47,4 +48,4 @@ cargo test providers::
 JADE_PROVIDERS_DIR=/path/to/built/providers ./target/debug/jade register
 ```
 
-Background on what a provider package is and why the design is shaped this way: `design/provider-packages.md`.
+Background on what a provider package is and why the design is shaped this way: `design.md`, beside this file.

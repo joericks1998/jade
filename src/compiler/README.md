@@ -25,6 +25,7 @@ Type inference exists so the instruction set can be *monomorphic*. Because the c
 - **`escape.rs`** — type-aware escape analysis for arena allocation. Decides which array literals can live in the per-frame bump arena instead of the refcounted heap. Deliberately narrow: it marks a literal eligible only when it can *prove* non-escape, because being wrong here is a use-after-free.
 - **`gbnf.rs`** — builds GBNF sampling grammars for typed prompt dereferences (`?p |> int`). The pattern-wrapping implementation itself lives in `jade_runtime::grammarf` so the VM and the AOT backend cannot wrap grammars differently.
 - **`mod.rs`**, **`tests.rs`** — module declarations and the pass tests.
+- **`design.md`** — a design note rather than code: why an array literal may hold two types, and what is still missing. Mixed arrays shipped in v1.1.32; a named sum type, which would let the compiler reject a value no protocol declares, has not. Read it before adding one.
 
 ## Who uses it
 
