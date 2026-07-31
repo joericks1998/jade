@@ -18,6 +18,13 @@ __pycache__/
 */.DS_Store
 
 
+# npm never runs at the repo root — the only Node project is docs/, which has its
+# own .gitignore. A stray `npm install` here once left an empty package-lock.json
+# behind that locked nothing and made the root look like a JS project; this stops
+# the next one leaving anything at all.
+node_modules/
+/package-lock.json
+
 # Added by cargo
 
 /target
