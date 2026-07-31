@@ -352,6 +352,21 @@ int64_t jrt_bool_any(int64_t val);
 #define JK_ARRAY  2
 #define JK_DICT   3
 #define JK_STRUCT 4
+#define JK_PROMPT 7
+
+/* ── Prompt values ────────────────────────────────────────────────────────
+ *
+ * A prompt is its own kind, not the bare string it wraps: `?p` dereferences it,
+ * it type-names as "prompt", and it prints as <prompt> — all of which the VM
+ * already did. Codegen boxes with jrt_prompt_new at MakePrompt and unwraps with
+ * jrt_prompt_text wherever the text itself is needed (the inference entry points
+ * below still take a plain char*). */
+/* jrt_prompt_new — box a tagged string word as a prompt. Returns the raw pointer
+ * (codegen tags it); the prompt takes a reference to the text. */
+void*   jrt_prompt_new(int64_t text);
+/* jrt_prompt_text — the tagged string word inside a prompt, borrowed. A value
+ * that is not a prompt is returned unchanged, so the unwrap is harmless. */
+int64_t jrt_prompt_text(int64_t v);
 /* jrt_kind_of — ObjKind byte of a kind-tagged object pointer (from its header). */
 int64_t jrt_kind_of(void* p);
 /* jrt_coll_len — element/field count from the object header (O(1)); the Chunk

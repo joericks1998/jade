@@ -176,6 +176,7 @@ pub extern "C" fn jrt_core_type_name(v: i64) -> *const core::ffi::c_char {
             k if k == crate::heap::ObjKind::Array as u8 => "array\0",
             k if k == crate::heap::ObjKind::Dict as u8 => "dict\0",
             k if k == crate::heap::ObjKind::Struct as u8 => "struct\0",
+            k if k == crate::heap::ObjKind::Prompt as u8 => "prompt\0",
             _ => "value\0",
         }
     } else {

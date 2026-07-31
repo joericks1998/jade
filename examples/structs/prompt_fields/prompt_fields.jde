@@ -1,5 +1,14 @@
-// Prompt fields inside structs — store Value::Prompt, dereferenceable with ?
-// Requires JADE_API_KEY or jade.toml configured for actual ? usage
+// Prompt fields inside structs — a `prompt` field holds a prompt value, not the
+// string it wraps, and is dereferenceable with `?`.
+//
+// The dereferences below are commented out because they need a provider; the
+// reads are not, and they are the point. A prompt prints as `<prompt>` rather
+// than its text, the way a future prints as `<future>` — it is a type you
+// dereference, not text you read. Printing that is what makes this file a parity
+// fixture: a compiled binary used to hold a prompt as its bare string, so it
+// printed the text where the VM printed `<prompt>`, and could not store one in a
+// struct field at all. The file was excluded from the parity gate for that
+// reason until v1.1.32.
 
 struct Agent {
     let name = "Assistant"
@@ -8,18 +17,23 @@ struct Agent {
 
 let a = Agent {}
 let n = a.name
-// n == "Assistant"
+print(n)          // Assistant
 let s = a.system
-// s is Value::Prompt("You are a helpful assistant")
+print(s)          // <prompt>
 
 let a2 = Agent { name: "Claude" }
-let s2 = a2.system
-// s2 is Value::Prompt("You are a helpful assistant") — default
+print(a2.name)    // Claude
+print(a2.system)  // <prompt> — the default, since only `name` was given
 
-// Override the prompt field with a custom string (gets wrapped as Value::Prompt)
+// Override the prompt field with a custom string (it is wrapped as a prompt).
 let a3 = Agent { system: "You are a coding assistant" }
-let s3 = a3.system
-// s3 is Value::Prompt("You are a coding assistant")
+print(a3.system)  // <prompt>
+
+// A prompt is a value like any other: it goes in a collection, comes back out,
+// and keeps its type.
+let held = [a.system, a3.system]
+print(len(held))
+print(held)       // [<prompt>, <prompt>]
 
 // Dereference a prompt field directly (requires API key). Two forms, same
 // operation — `~>` is the terser spelling, the way C's `p->x` beats `(*p).x`:

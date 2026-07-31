@@ -99,6 +99,7 @@ pub mod num;
 pub mod ops;
 pub mod pathf;
 pub mod pool;
+pub mod promptf;
 pub mod provider;
 pub mod randomf;
 pub mod render;

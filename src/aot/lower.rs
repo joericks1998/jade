@@ -251,6 +251,24 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
             .unwrap()
     }
 
+    /// The prompt text inside slot `r`, as a raw `char*` for the inference entry
+    /// points, which take plain C strings.
+    ///
+    /// A prompt is a heap object wrapping its tagged string (`promptf.rs`), so the
+    /// text has to be unwrapped rather than untagged directly. `jrt_prompt_text`
+    /// returns a non-prompt value unchanged, so this stays correct on a path where
+    /// the type checker guarantees a prompt but codegen cannot see one.
+    fn prompt_text_ptr(&self, r: Reg) -> PointerValue<'ctx> {
+        let f = self.runtime_fn("jrt_prompt_text", self.i64t().fn_type(&[self.i64t().into()], false));
+        let text = self
+            .builder
+            .build_call(f, &[self.load(r).into()], "ptext")
+            .unwrap()
+            .as_any_value_enum()
+            .into_int_value();
+        self.untag_ptr(text)
+    }
+
     /// A plain NUL-terminated C string global (for compile-time struct type/field
     /// names passed to the runtime — not a tagged Jade string).
     fn cstr(&self, s: &str) -> PointerValue<'ctx> {
@@ -1257,7 +1275,7 @@ struct FnCtx<'ctx> {
     global_fns: HashMap<String, usize>,
     /// Struct type name → its optional fields' (name, scalar-literal default),
     /// used to fill fields a struct literal omits (the VM fills these at runtime).
-    struct_defaults: HashMap<String, Vec<(String, VmValue)>>,
+    struct_defaults: HashMap<String, Vec<(String, VmValue, bool)>>,
     /// Every declared struct type name.
     ///
     /// Used to recognise a *call* on a type name, which is an error worth
@@ -2003,7 +2021,8 @@ fn emit_stream_call<'ctx>(
     // The daemon owns model selection now: send an empty model, and it uses its
     // configured/loaded model. (The `llm.model()` introspection was removed.)
     let model = low.cstr("");
-    let prompt_ptr = low.untag_ptr(low.load(prompt));
+    // Unwrap: the slot holds a prompt object, not the bare string it wraps.
+    let prompt_ptr = low.prompt_text_ptr(prompt);
     let gobj = match grammar {
         Some(g) => low.untag_ptr(low.load(g)),
         None => ptrt.const_null(),
@@ -2643,17 +2662,23 @@ fn eval_scalar_default(e: &Expr) -> Option<VmValue> {
 /// non-literal defaults (e.g. `let xs = []`) are skipped — a literal that omits
 /// such a field would leave it unset, but those appear on method-bearing structs
 /// (declined). Mirrors what the VM fills at `MakeStruct` time.
+/// Per type, the scalar defaults for fields a literal may omit, each flagged with
+/// whether it is a `prompt` field — a prompt default is boxed as a prompt value
+/// rather than stored as the bare string, matching what the VM does.
 fn build_struct_defaults(
     struct_defs: &HashMap<String, Vec<StructFieldDef>>,
-) -> HashMap<String, Vec<(String, VmValue)>> {
+) -> HashMap<String, Vec<(String, VmValue, bool)>> {
     let mut out = HashMap::new();
     for (tn, fields) in struct_defs {
         let mut ds = Vec::new();
         for f in fields {
-            if let StructFieldDef::Let { name, default } = f {
-                if let Some(v) = eval_scalar_default(default) {
-                    ds.push((name.clone(), v));
-                }
+            let (name, default, is_prompt) = match f {
+                StructFieldDef::Let { name, default } => (name, default, false),
+                StructFieldDef::Prompt { name, default } => (name, default, true),
+                StructFieldDef::Required(_) => continue,
+            };
+            if let Some(v) = eval_scalar_default(default) {
+                ds.push((name.clone(), v, is_prompt));
             }
         }
         if !ds.is_empty() {
@@ -2908,7 +2933,11 @@ pub fn lower_program<'ctx>(
             let defaults = fnctx.struct_defaults.get(tn);
             for f in fields {
                 let fcstr = rb.build_global_string_ptr(f, "sffield").map_err(|e| e.to_string())?.as_pointer_value();
-                let dv = defaults.and_then(|ds| ds.iter().find(|(n, _)| n == f)).map(|(_, v)| v);
+                // The prompt flag is not consulted here: this registry feeds
+                // struct *coercion* (`?p |> City`), which stores the default word
+                // as-is on both engines. Boxing only happens where a literal is
+                // built, which is `MakeStruct` above.
+                let dv = defaults.and_then(|ds| ds.iter().find(|(n, _, _)| n == f)).map(|(_, v, _)| v);
                 let (word, has) = match dv {
                     Some(v) => (default_word_const(context, module, &rb, v)?, 1u64),
                     None => (i64_ty2.const_int(NIL, false), 0u64),
@@ -3551,9 +3580,6 @@ fn lower_instr<'ctx>(
         // fills these at runtime). GetField/SetField are data-field access on a
         // struct (a missing field / non-struct raises).
         MakeStruct(d, type_name, field_specs) => {
-            if field_specs.iter().any(|(_, _, is_prompt)| *is_prompt) {
-                return Err("lower.rs: prompt struct fields are unsupported".into());
-            }
             let new_f = low.runtime_fn("jrt_kstruct_new", low.ptrt().fn_type(&[low.ptrt().into()], false));
             let tn = low.cstr(type_name);
             let s = b
@@ -3565,16 +3591,36 @@ fn lower_instr<'ctx>(
                 "jrt_kstruct_set",
                 low.ctx.void_type().fn_type(&[low.ptrt().into(), low.ptrt().into(), i64_ty.into()], false),
             );
-            for (fname, freg, _) in field_specs {
-                let v = low.load(*freg);
+            // A `prompt` field holds a prompt value, not the string it wraps —
+            // the same wrapping the VM does on this opcode. Without it a compiled
+            // binary would read a plain string back out of `a.system`.
+            let box_prompt = |w: IntValue<'ctx>| -> Result<IntValue<'ctx>, String> {
+                let f =
+                    low.runtime_fn("jrt_prompt_new", low.ptrt().fn_type(&[i64_ty.into()], false));
+                let p = b
+                    .build_call(f, &[w.into()], "fieldprompt")
+                    .map_err(|e| e.to_string())?
+                    .as_any_value_enum()
+                    .into_pointer_value();
+                Ok(low.tag_ptr(p))
+            };
+
+            for (fname, freg, is_prompt) in field_specs {
+                let mut v = low.load(*freg);
+                if *is_prompt {
+                    v = box_prompt(v)?;
+                }
                 b.build_call(set_f, &[s.into(), low.cstr(fname).into(), v.into()], "")
                     .map_err(|e| e.to_string())?;
             }
             // Fill omitted optional fields from their scalar defaults.
             if let Some(defaults) = fnctx.struct_defaults.get(type_name) {
-                for (fname, dv) in defaults {
+                for (fname, dv, is_prompt) in defaults {
                     if field_specs.iter().all(|(n, _, _)| n != fname) {
-                        let w = low.default_word(dv)?;
+                        let mut w = low.default_word(dv)?;
+                        if *is_prompt {
+                            w = box_prompt(w)?;
+                        }
                         b.build_call(set_f, &[s.into(), low.cstr(fname).into(), w.into()], "")
                             .map_err(|e| e.to_string())?;
                     }
@@ -3625,10 +3671,21 @@ fn lower_instr<'ctx>(
         }
 
         // ── LLM prompts ───────────────────────────────────────────────────
-        // A prompt value is its underlying string, deferred until PromptDeref.
-        // (No distinct heap kind: the prompt only ever flows to PromptDeref.)
+        // A prompt is its own heap kind (`ObjKind::Prompt`), wrapping the tagged
+        // string it will send. It used to be *stored as* that string, on the
+        // reasoning that a prompt only ever flows to `PromptDeref`. It does not:
+        // it can be printed, put in a struct field, passed, or returned, and at
+        // each of those a compiled binary saw a string where the VM saw a prompt.
+        // `print(p)` was the visible half — `<prompt>` under `jade run`, the raw
+        // text once built — and `MakeStruct` refusing prompt fields was the other.
         MakePrompt(d, text) => {
-            low.store(*d, low.load(*text));
+            let f = low.runtime_fn("jrt_prompt_new", low.ptrt().fn_type(&[i64_ty.into()], false));
+            let p = b
+                .build_call(f, &[low.load(*text).into()], "promptnew")
+                .map_err(|e| e.to_string())?
+                .as_any_value_enum()
+                .into_pointer_value();
+            low.store(*d, low.tag_ptr(p));
             Ok(false)
         }
         // Run inference on the prompt string, dispatching like the VM:
@@ -3652,7 +3709,7 @@ fn lower_instr<'ctx>(
             let ptrt = low.ptrt();
             let e = |x: inkwell::builder::BuilderError| x.to_string();
 
-            let prompt_ptr = low.untag_ptr(low.load(*prompt_reg));
+            let prompt_ptr = low.prompt_text_ptr(*prompt_reg);
             // Empty model: the daemon owns model selection (see emit_stream_call).
             let model = low.cstr("");
 

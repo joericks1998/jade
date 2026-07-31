@@ -203,6 +203,10 @@ unsafe fn is_collection(p: *const c_void) -> bool {
         // heap allocation, so it is refcounted on exactly the same terms. Its
         // destructor arm in `free_obj` reclaims it without a child cascade.
         || k == ObjKind::Future as u8
+        // A prompt is the same shape of thing: header-carrying, owning one child
+        // word (its text). Omitting it here would leak one object per prompt
+        // value, which is what a `while` loop building a prompt used to do.
+        || k == ObjKind::Prompt as u8
 }
 
 /// Increment the strong count of the collection a `TAG_PTR` word points at. A
@@ -296,6 +300,12 @@ pub(crate) unsafe fn free_obj(ptr: *mut c_void) {
             unsafe { decref_word(*v) };
         }
         unsafe { free_leaked(ptr as *mut StructObj<W>) };
+    } else if kind == ObjKind::Prompt as u8 {
+        // One owned child — the tagged string holding the prompt's text — so the
+        // cascade is a single decref rather than a walk.
+        let p = unsafe { &*(ptr as *const crate::promptf::PromptObj) };
+        unsafe { decref_word(p.text) };
+        unsafe { free_leaked(ptr as *mut crate::promptf::PromptObj) };
     } else if kind == ObjKind::Future as u8 {
         // A future is header-carrying but not a collection: its payload is a
         // single result word, not a Vec of children, so there is no cascade to

@@ -75,10 +75,6 @@ skip_reason() {
     # backends by design, which `jade check` in CI already asserts.
     *_error.jde)
       echo "intentional-error fixture" ;;
-    # Known AOT lowering gap: prompt struct fields are unsupported in lower.rs.
-    # Remove this entry when that lands.
-    examples/structs/prompt_fields/*)
-      echo "AOT gap: prompt struct fields unsupported" ;;
     *) echo "" ;;
   esac
 }
