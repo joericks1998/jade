@@ -6,13 +6,15 @@ The Docusaurus site published at [jadelang.org](https://jadelang.org). It is the
 
 The site also serves two things that are not documentation. `static/install.sh` is what `curl -fsSL https://jadelang.org/install.sh | sh` fetches, and the deploy workflow injects the prebuilt provider `.so` packages into the site root so `jade pkg add --url 'https://www.jadelang.org/<name>-{platform}.so'` resolves.
 
+`static/install.sh` is the **only** copy of the installer. An identical one sat at the repository root until v1.1.32, kept in step by hand and served by nothing — so an edit that reached one and not the other would have changed what the docs promised without changing what users got. Edit it here.
+
 ## What each part does
 
 - **`docs/`** — the content, one Markdown file per topic: `index`, `quickstart`, `cli`, `variables`, `types`, `expressions`, `operators`, `control-flow`, `functions`, `structs`, `exceptions`, `async`, `imports`, `llm`, `packages`, `stdlib`, `changelog`.
 - **`docusaurus.config.js`** — site configuration.
 - **`sidebars.js`** — navigation order.
 - **`src/css/`** — theme overrides.
-- **`static/`** — served verbatim. `CNAME` (the custom domain), `install.sh` (the install one-liner), `extras/`.
+- **`static/`** — served verbatim. `CNAME` (the custom domain), `install.sh` (the install one-liner, and the only copy of it), `extras/`.
 - **`plugins/llms-txt.js`** — generates an `llms.txt` so models can read the docs.
 - **`build/`, `.docusaurus/`, `node_modules/`** — generated. Never edit these.
 
