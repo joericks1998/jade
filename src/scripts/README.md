@@ -1,8 +1,10 @@
-# `scripts/` — development and CI gates
+# `src/scripts/` — development and CI gates
 
 ## What this subtree is
 
 Two files, and they solve one problem between them: proving that Jade's two execution engines agree.
+
+It lives under `src/` for tidiness rather than because it is source — nothing here is compiled into the crate. `jade.toml` makes the directory a Jade project root so the stub provider can reach the protocol submodule through a `[lib]` entry, which means the path in it is relative to *this* directory: `../protocol/jade` is `src/protocol/jade`.
 
 ## Why they exist
 
@@ -21,19 +23,19 @@ This used to be `fake-jaded.py`, a stand-in *daemon* serving canned responses ov
 
 *Used by:* `.github/workflows/ci.yml` runs `backend-parity.sh` as a required step on every pull request. Run it locally before opening one.
 
-*Depends on:* a built `jade` binary (defaults to `./target/debug/jade`) and the fixtures in `examples/`. Building the stand-in provider means the gate needs a working `jade build`, so an AOT regression fails here before it fails an example.
+*Depends on:* a built `jade` binary (defaults to `./target/debug/jade`), the fixtures in `examples/`, and the `src/protocol` submodule the stub imports. Both paths are relative to the current directory, so run it from the repository root. Building the stand-in provider means the gate needs a working `jade build`, so an AOT regression fails here before it fails an example.
 
 ## Running them
 
 ```sh
 cargo build
-./scripts/backend-parity.sh                    # uses ./target/debug/jade
-./scripts/backend-parity.sh /path/to/jade      # or a specific binary
+./src/scripts/backend-parity.sh                    # uses ./target/debug/jade
+./src/scripts/backend-parity.sh /path/to/jade      # or a specific binary
 ```
 
 To drive a Jade program against a canned reply by hand:
 
 ```sh
-mkdir -p /tmp/slot && jade build scripts/fake-provider.jde --lib -o /tmp/slot/fake.so
+mkdir -p /tmp/slot && jade build src/scripts/fake-provider.jde --lib -o /tmp/slot/fake.so
 JADE_PROVIDER_ACTIVE=/tmp/slot JADE_FAKE_REPLY="hello" jade run your.jde
 ```

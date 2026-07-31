@@ -35,11 +35,11 @@ Both directions are declared once, outside this repo, in the `ovata-infer-protoc
 
 This is the *VM's* half only. Compiled binaries load and drive the same package through `runtime_aot/infer/` and the C runtime's `jrt_native_*`. A change to inference behavior usually needs both, and the two must agree on the shapes in each direction: `request_value`/`provider_request` build the request, `decode_frames`/`provider_infer_text` read the reply. The tripwire in `tests.rs` reads `infer.c`'s source text, since a Rust constant cannot reach C.
 
-`JADE_PROVIDER_ACTIVE` overrides the slot directory, which is what lets `scripts/fake-provider.jde` make the LLM examples deterministic and parity-testable.
+`JADE_PROVIDER_ACTIVE` overrides the slot directory, which is what lets `src/scripts/fake-provider.jde` make the LLM examples deterministic and parity-testable.
 
 ## Building and testing
 
 ```sh
 cargo test llm::
-./scripts/backend-parity.sh    # covers examples/llm via the stand-in provider
+./src/scripts/backend-parity.sh    # covers examples/llm via the stand-in provider
 ```

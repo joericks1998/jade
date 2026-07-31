@@ -19,13 +19,13 @@ One directory per language area, each with a subdirectory per case:
 
 `arithmatic/` (arithmetic, bitwise, unary) · `arrays/` · `assignment/` · `async/` · `closures/` · `collections/` · `control_flow/` · `dicts/` · `exceptions/` · `for_loop/` · `fs/` · `functions/` · `http/` · `imports/` · `interfaces/` · `llm/` · `llvm/` · `numbers/` · `pipe/` · `strings/` · `structs/` · `trust/` · `uhttp/`
 
-`llm/` is worth calling out. Those fixtures do real prompt dereferences, and they are still deterministic in CI because `scripts/backend-parity.sh` installs `scripts/fake-provider.jde` as a stand-in inference provider answering with a canned reply. An example supplies its own reply as a `responses.txt` beside the `.jde`; without one it gets the default. Pointing the parity gate at these turned up a VM muting bug and an AOT segfault immediately.
+`llm/` is worth calling out. Those fixtures do real prompt dereferences, and they are still deterministic in CI because `src/scripts/backend-parity.sh` installs `src/scripts/fake-provider.jde` as a stand-in inference provider answering with a canned reply. An example supplies its own reply as a `responses.txt` beside the `.jde`; without one it gets the default. Pointing the parity gate at these turned up a VM muting bug and an AOT segfault immediately.
 
 `imports/project_lib/` is the other odd one: it carries its own `jade.toml`, making it a project inside the fixture tree. That is deliberate. The gate runs every example from the repo root, so a fixture whose imports depend on *its own* project root is the only way to catch the two engines disagreeing about where that root is — which they did until v1.1.31, the VM reading it from the shell's directory and the AOT from the source file's. Its importing file sits under `app/` so the target directory is out of relative-path reach and the `[lib]` entry is genuinely exercised.
 
 ## Who uses it
 
-*Used by:* `.github/workflows/ci.yml` runs `jade check` over every fixture. `scripts/backend-parity.sh` runs each one on the VM and the AOT backend and diffs stdout. The `docs/` site draws on several of them for its examples.
+*Used by:* `.github/workflows/ci.yml` runs `jade check` over every fixture. `src/scripts/backend-parity.sh` runs each one on the VM and the AOT backend and diffs stdout. The `docs/` site draws on several of them for its examples.
 
 *Depends on:* only the `jade` binary. Fixtures never import from the Rust tree.
 
@@ -40,5 +40,5 @@ The parity script maintains a skip list for examples that cannot run identically
 ```sh
 ./target/debug/jade check examples/structs/prompt_fields/prompt_fields.jde
 ./target/debug/jade run   examples/strings/fstrings/fstrings.jde
-./scripts/backend-parity.sh
+./src/scripts/backend-parity.sh
 ```

@@ -51,5 +51,5 @@ export LLVM_SYS_180_PREFIX=/opt/homebrew/opt/llvm@18   # or your install
 cargo test aot::
 ./target/debug/jade build examples/arithmatic/arithmetic/arithmetic.jde -o /tmp/a && /tmp/a
 ./target/debug/jade build file.jde --emit-ir           # inspect the IR
-./scripts/backend-parity.sh                            # diff against the VM
+./src/scripts/backend-parity.sh                            # diff against the VM
 ```

@@ -2,7 +2,7 @@
 //!
 //! `jade run` interprets a compiled [`crate::bytecode::Chunk`] here; `jade build`
 //! lowers the same chunk to LLVM in [`crate::aot`]. Neither is the reference
-//! implementation of the other: `scripts/backend-parity.sh` runs every example
+//! implementation of the other: `src/scripts/backend-parity.sh` runs every example
 //! through both and diffs the output, because they have silently disagreed
 //! before and the language is defined by what they agree on.
 //!

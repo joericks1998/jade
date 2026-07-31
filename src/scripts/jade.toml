@@ -1,0 +1,12 @@
+# Makes this directory a project root purely so fake-provider.jde can import the
+# shared protocol definition. A `use` path cannot climb directories (`..` is not
+# expressible in `::` notation), so a cross-directory import goes through [lib] —
+# which is exactly the route a real provider project uses to reach the same file.
+#
+# The path is relative to this file, so `../protocol/jade` is `src/protocol/jade`,
+# the ovata-infer-protocol submodule.
+[project]
+name = "parity-stubs"
+
+[lib.ovata]
+path = "../protocol/jade"

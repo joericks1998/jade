@@ -8,7 +8,7 @@ It is small on purpose — types and a little jump-patching helper, no execution
 
 ## Why it lives here rather than inside an engine
 
-It belongs to neither engine, which is why it sits between them. Putting the instruction set inside `vm/` would make the interpreter the reference implementation and the AOT backend a follower; the language is instead defined by what the two agree on, and `scripts/backend-parity.sh` checks that agreement on every example.
+It belongs to neither engine, which is why it sits between them. Putting the instruction set inside `vm/` would make the interpreter the reference implementation and the AOT backend a follower; the language is instead defined by what the two agree on, and `src/scripts/backend-parity.sh` checks that agreement on every example.
 
 The instructions are largely *monomorphic* — `AddInt` and `AddFloat` rather than one `Add` — because type inference has already run by the time anything gets here. That single decision is why the VM can add two `i64`s without a tag dispatch and the AOT backend can emit a bare LLVM `add`, and it is why the two engines share this representation but no execution code.
 

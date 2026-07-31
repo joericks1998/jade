@@ -4,7 +4,7 @@
 
 One of Jade's two execution engines. `jade run` compiles a program to a `Chunk` and interprets it here. `jade build` lowers the same chunk to LLVM in `src/aot/`.
 
-Neither engine is the reference implementation of the other. `scripts/backend-parity.sh` runs every example through both and diffs the output, because they have silently disagreed before and the language is defined by what they agree on.
+Neither engine is the reference implementation of the other. `src/scripts/backend-parity.sh` runs every example through both and diffs the output, because they have silently disagreed before and the language is defined by what they agree on.
 
 ## Why it is shaped this way
 
@@ -47,5 +47,5 @@ Adding a stateful package function means adding a `NativeFnId` variant in `value
 
 ```sh
 cargo test vm::
-./scripts/backend-parity.sh    # run every example on both engines and diff
+./src/scripts/backend-parity.sh    # run every example on both engines and diff
 ```

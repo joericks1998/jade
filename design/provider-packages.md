@@ -175,7 +175,7 @@ to stdout, so an anchored region the VM suppressed was printed by a compiled
 binary.
 
 The parity gate changed with it: `scripts/fake-jaded.py`, a stand-in daemon on a
-socket, became `scripts/fake-provider.jde`, a stand-in package built with
+socket, became `src/scripts/fake-provider.jde`, a stand-in package built with
 `jade build --lib` into a throwaway slot. It exercises the path a released binary
 actually takes.
 
