@@ -1028,7 +1028,9 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
     /// `jrt_cmp_any(i64, i64) -> i32` (three-way: -1 / 0 / 1), with an inline
     /// both-int fast path: untag and compare natively, folding to `(a>c)-(a<c)`,
     /// instead of a runtime call. Non-int operands fall through to `jrt_cmp_any`.
-    fn cmp_any(&self, l: Reg, r: Reg) -> IntValue<'ctx> {
+    /// `op` is the source operator (`"'<'"`), passed through so a cross-kind
+    /// failure names it the way the VM does rather than saying "comparison".
+    fn cmp_any(&self, l: Reg, r: Reg, op: &str) -> IntValue<'ctx> {
         let b = self.builder;
         let i32t = self.ctx.i32_type();
         let lw = self.load(l);
@@ -1056,8 +1058,13 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
 
         // Slow: tag-dispatching runtime comparison (float/str/mixed/nil ordering).
         b.position_at_end(slow_bb);
-        let f = self.runtime_fn("jrt_cmp_any", i32t.fn_type(&[self.i64t().into(), self.i64t().into()], false));
-        let slow_res = b.build_call(f, &[lw.into(), rw.into()], "cmpany").unwrap()
+        let ptrt = self.ctx.ptr_type(inkwell::AddressSpace::default());
+        let f = self.runtime_fn(
+            "jrt_cmp_any_op",
+            i32t.fn_type(&[self.i64t().into(), self.i64t().into(), ptrt.into()], false),
+        );
+        let op_str = self.cstr(op);
+        let slow_res = b.build_call(f, &[lw.into(), rw.into(), op_str.into()], "cmpany").unwrap()
             .as_any_value_enum().into_int_value();
         b.build_unconditional_branch(merge_bb).unwrap();
 
@@ -3382,10 +3389,10 @@ fn lower_instr<'ctx>(
         // Dynamic equality/ordering → bool word (mirror expr.rs emit_binop_any).
         CmpEq(d, l, r) => { let e = low.eq_any(*l, *r); low.store(*d, low.i32cmp_word(e, IntPredicate::NE)); Ok(false) }
         CmpNe(d, l, r) => { let e = low.eq_any(*l, *r); low.store(*d, low.i32cmp_word(e, IntPredicate::EQ)); Ok(false) }
-        CmpLt(d, l, r) => { let c = low.cmp_any(*l, *r); low.store(*d, low.i32cmp_word(c, IntPredicate::SLT)); Ok(false) }
-        CmpGt(d, l, r) => { let c = low.cmp_any(*l, *r); low.store(*d, low.i32cmp_word(c, IntPredicate::SGT)); Ok(false) }
-        CmpLe(d, l, r) => { let c = low.cmp_any(*l, *r); low.store(*d, low.i32cmp_word(c, IntPredicate::SLE)); Ok(false) }
-        CmpGe(d, l, r) => { let c = low.cmp_any(*l, *r); low.store(*d, low.i32cmp_word(c, IntPredicate::SGE)); Ok(false) }
+        CmpLt(d, l, r) => { let c = low.cmp_any(*l, *r, "'<'"); low.store(*d, low.i32cmp_word(c, IntPredicate::SLT)); Ok(false) }
+        CmpGt(d, l, r) => { let c = low.cmp_any(*l, *r, "'>'"); low.store(*d, low.i32cmp_word(c, IntPredicate::SGT)); Ok(false) }
+        CmpLe(d, l, r) => { let c = low.cmp_any(*l, *r, "'<='"); low.store(*d, low.i32cmp_word(c, IntPredicate::SLE)); Ok(false) }
+        CmpGe(d, l, r) => { let c = low.cmp_any(*l, *r, "'>='"); low.store(*d, low.i32cmp_word(c, IntPredicate::SGE)); Ok(false) }
 
         // ── Strings (pre-tagged literal globals; runtime concat/compare) ──
         LoadStr(d, s) => {

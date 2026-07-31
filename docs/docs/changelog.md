@@ -4,6 +4,15 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.1.32
+
+- **An array literal may hold values of different types.** `[1, "two"]` and `[Token { text: "hi" }, Done { count: 2 }]` are now legal. The element type is whatever every element agrees on, and unknown when they differ — the same rule a dict's value type has always used. Nothing changed at runtime, because arrays were never typed there: the check was a frontend gate over machinery both engines already had, which is why building the same array with `push` had always worked. Mixed numerics widen rather than promoting, so `[1, 2.0]` has an unknown element type instead of a float one; typing `a[0]` as float while it holds an int would send compiled code down a specialized path for a value that is not that type.
+- **What that costs you is compile-time errors, not correctness.** With a mixed array the compiler knows nothing specific about `arr[i]`, so `mixed[0] + mixed[1]` is checked when it runs rather than when it compiles. A uniform array still carries its element type and is checked as before.
+- **Fixed: `contains` on a mixed array answered in the VM and raised in a compiled binary.** Membership was using the `==` operator, which rejects a comparison across types by design. But `arr.contains(x)` cannot ask which elements match without walking past the ones that do not, so an element of another type answers `false` rather than raising. Both engines now share one rule for it. `1` and `1.0` remain different values, matching `1 == 1.0` being an error.
+- **Fixed: a compiled binary described a cross-type comparison wrongly.** `1 == "x"` reported `'==' requires numeric operands` — misleading, since the trouble is that the types differ, not that they are non-numeric — where `jade run` named both types. Both now say `'==' cannot compare int and str`, for every comparison operator.
+- **Fixed: `jade run` leaked a Rust name into arithmetic type errors.** `1 + "x"` reported `Add requires numeric operands`, naming an internal enum variant, where the same program compiled said `'+' requires numeric operands`. Both now use the operator symbol.
+- **Removed `JadeError::HeterogeneousArray`**, which nothing can raise any more.
+
 ## v1.1.31
 
 - **Structs now cross the native package boundary, carrying their type name.** The FFI carried `nil`, `int`, `float`, `bool`, `str`, arrays, and dicts; a struct became `nil`. It is now a tag of its own — a dict plus the struct's type name, fields in declaration order — mirrored byte for byte in the VM's marshaller and the C runtime's. The type name is the point: a dict with the wrong keys reads as a set of nils and fails silently, so two programs sharing a dict share a convention, while two sharing a struct share a type the receiver can check. Functions and futures still do not cross. `RUNTIME_ABI_VERSION` is 2.

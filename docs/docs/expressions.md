@@ -154,6 +154,23 @@ let mixed = [1, 2.0, true, "hello"]
 
 Elements are accessed with `arr[i]` (zero-based). Elements can be assigned with `arr[i] = expr`. Arrays have reference semantics — assigning an array creates an alias that shares the same backing store.
 
+When every element is the same type, the compiler knows the element type and can check what you do with `arr[i]`. When they differ it knows nothing more specific, and operations on elements are checked as the program runs instead. So a mixed array costs you compile-time errors, not correctness:
+
+```jade
+let mixed = [1, "two"]
+print(mixed[0] + mixed[1])   // runs, then fails: '+' requires numeric operands
+```
+
+`arr.contains(x)` is the one place where a type mismatch is not an error. Membership asks whether any element *is* `x`, and an element of another type answers that with `false`:
+
+```jade
+let mixed = [1, "two", true]
+print(mixed.contains("two"))   // true
+print(mixed.contains(9))       // false — not an error
+```
+
+That is deliberately different from `==`, which rejects a comparison across types rather than quietly answering it. Note that `1` and `1.0` are different values to both.
+
 ## Pipe Operator
 
 The `|>` operator passes the left-hand value as the first argument to the right-hand function. Pipes chain left-to-right.

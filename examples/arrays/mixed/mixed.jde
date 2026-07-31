@@ -1,0 +1,61 @@
+// An array literal may hold values of different types.
+//
+// The element type is whatever every element agrees on, and `Unknown` when they
+// do not — the same rule dicts have always used for their values. Nothing about
+// the array changes at runtime; arrays were never typed there, which is why
+// building one with `push` worked long before the literal was allowed.
+//
+// This file is a parity fixture as much as a demonstration. Making mixed
+// literals writable made a set of dynamic operations reachable that no example
+// had exercised, and the first one checked turned out to disagree between the
+// engines: `contains` answered in the VM and raised in a compiled binary.
+
+let mixed = [1, 2.0, true, "hello", nil]
+
+print(len(mixed))
+print(mixed)
+print(mixed[0])
+print(mixed[3])
+
+for v in mixed {
+    print(v)
+}
+
+// Membership walks past elements of other kinds rather than raising on them. It
+// is a different question from `==`, which is strict across kinds by design.
+print(mixed.contains("hello"))
+print(mixed.contains(true))
+print(mixed.contains("absent"))
+
+// Kind-strict even here: 1 and 1.0 are not the same value, matching `1 == 1.0`
+// being a type error rather than true.
+print(mixed.contains(1))
+print(mixed.contains(1.0))
+
+// Mutating operations do not care about element types either.
+mixed.push([1, 2])
+print(len(mixed))
+print(mixed.pop())
+mixed.reverse()
+print(mixed)
+
+// Sorting a mixed array compares any cross-kind pair equal, so comparable runs
+// order and the rest keep their positions. Both engines share that rule.
+let nums = [3, 1.5, 2]
+nums.sort()
+print(nums)
+
+// Nesting, and a homogeneous array inside a mixed one.
+let nested = [[1, 2], "between", [3]]
+print(nested)
+print(nested[0][1])
+
+// An array of structs of different types — the case the inference protocol
+// wanted, where a reply is Token* followed by Done.
+struct Token { let text = "" }
+struct Done  { let count = 0 }
+
+let frames = [Token { text: "hi" }, Token { text: " there" }, Done { count: 2 }]
+print(len(frames))
+print(frames[0].text)
+print(frames[2].count)

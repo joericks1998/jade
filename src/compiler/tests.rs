@@ -207,9 +207,39 @@ mod type_infer {
 
     #[test]
     fn test_infer_heterogeneous_array_widens_to_unknown() {
-        // Heterogeneous arrays are now a type error.
-        let err = infer_err(r#"let a = [1, "hello"]"#);
-        assert!(matches!(err, crate::frontend::error::JadeError::HeterogeneousArray { .. }));
+        // Nothing more precise than `Unknown` is true of every element, so that
+        // is the element type — not an error. It was one until v1.1.32, which is
+        // why this test's name outlived two opposite assertions.
+        let tp = infer_ok(r#"let a = [1, "hello"]"#);
+        let TStmt::Let { value, .. } = &tp.stmts[0] else { panic!() };
+        assert_eq!(value.ty, JadeType::Array(Box::new(JadeType::Unknown)));
+    }
+
+    /// Uniform elements still give a concrete element type — widening is the
+    /// fallback, not the rule. Losing this would pessimize every typed array.
+    #[test]
+    fn test_infer_homogeneous_array_keeps_its_element_type() {
+        let tp = infer_ok(r#"let a = ["x", "y"]"#);
+        let TStmt::Let { value, .. } = &tp.stmts[0] else { panic!() };
+        assert_eq!(value.ty, JadeType::Array(Box::new(JadeType::Str)));
+    }
+
+    /// Mixed numerics widen rather than promoting to float. Typing `a[0]` as
+    /// float while the slot holds a tagged int would send AOT codegen down a
+    /// specialized path for a value that is not that type.
+    #[test]
+    fn test_infer_mixed_numeric_array_widens_rather_than_promoting() {
+        let tp = infer_ok("let a = [1, 2.0]");
+        let TStmt::Let { value, .. } = &tp.stmts[0] else { panic!() };
+        assert_eq!(value.ty, JadeType::Array(Box::new(JadeType::Unknown)));
+    }
+
+    /// An element the checker cannot type does not itself make the array mixed.
+    #[test]
+    fn test_infer_array_ignores_unknown_elements_when_widening() {
+        let tp = infer_ok("fn f() { return 1 }\nlet a = [1, f(), 3]");
+        let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!() };
+        assert_eq!(value.ty, JadeType::Array(Box::new(JadeType::Int)));
     }
 
     // ── Control flow ──────────────────────────────────────────────────────────
