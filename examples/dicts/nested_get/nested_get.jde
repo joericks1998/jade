@@ -1,0 +1,42 @@
+// A module-level dict of dicts, read repeatedly through dict.get().
+//
+// Regression fixture. `jrt_coll_dict_get` hands back the value word *borrowed*
+// (the dict keeps owning it), and the AOT `get` arm stored it without retaining
+// — so every call dropped the entry's count by one. Reads two and three below
+// came back correct, the fourth double-freed the inner dict, and later reads
+// raised "key not found" off freed memory. `jade run` was always correct, so
+// only running both engines caught it.
+
+let TABLE = {
+  "a": {"host": "one", "port": 1},
+  "b": {"host": "two", "port": 2},
+}
+
+fn host_of(name) {
+  let entry = TABLE.get(name)
+  return entry["host"]
+}
+
+// Far more reads than owners: with the retain missing this is well past a free.
+print(host_of("a"))    // one
+print(host_of("b"))    // two
+print(host_of("a"))    // one
+print(host_of("b"))    // two
+print(host_of("a"))    // one
+print(host_of("b"))    // two
+
+// The table itself must survive all of it intact.
+print(len(TABLE))      // 2
+
+// A miss still answers nil rather than raising, and retaining nil is a no-op.
+print(TABLE.get("nope"))   // nil
+
+// has() shares the lookup but returns a bool, so it owns nothing.
+print(TABLE.has("a"))      // true
+print(TABLE.has("nope"))   // false
+
+// The borrowed entry is a real dict, still mutable as a value copy.
+let copy = TABLE.get("a")
+copy["host"] = "changed"
+print(copy["host"])            // changed
+print(TABLE.get("a")["host"])  // one  (the table is unchanged)

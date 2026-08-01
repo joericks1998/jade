@@ -224,6 +224,176 @@ pub fn request(
     }
 }
 
+// ── Streaming reads ───────────────────────────────────────────────────────────
+//
+// A streaming endpoint holds the connection open and emits lines until it (or
+// the caller) decides to stop, so it cannot use `request` above — that reads to
+// EOF and returns one body.
+//
+// This lives here, in the shared crate, rather than beside the VM. It used to be
+// VM-only on the reasoning that streaming "calls back into Jade, so it cannot be
+// a pure AOT symbol". That is not what stops it: `array.map` already calls a
+// Jade function from a compiled binary (a function value's box holds the raw
+// pointer at offset 0). What actually differs is *who drives the loop*, so the
+// split here is pull-based — this type only ever yields the next line, and each
+// engine drives it the way that suits it. The VM pumps it from a worker thread
+// into its async channel; the AOT C forwarder drives it inline and calls the
+// handler directly.
+
+/// A blocking, incremental reader over a streaming uhttp response.
+///
+/// Deliberately no read timeout: a streaming endpoint may sit idle between
+/// events for arbitrarily long, and a timeout would end the stream mid-life.
+/// The write timeout still bounds the request itself.
+pub struct Stream {
+    reader: std::io::BufReader<UnixStream>,
+    status: i64,
+    chunked: bool,
+    /// Bytes of a line seen so far, still waiting for its `\n`.
+    line_buf: Vec<u8>,
+    /// Complete lines decoded from the last read but not yet handed out.
+    pending: std::collections::VecDeque<String>,
+    done: bool,
+}
+
+impl Stream {
+    /// Connect, send the request, and read the status line and headers. Returns
+    /// once the body is ready to read, so `status` is known before any line.
+    pub fn open(url: &str, headers: &[(String, String)]) -> Result<Self, String> {
+        use std::io::BufRead;
+
+        let (sock_path, req_path) = parse_unix_url(url)?;
+        let stream = UnixStream::connect(&sock_path).map_err(|e| e.to_string())?;
+        stream.set_write_timeout(Some(TIMEOUT)).map_err(|e| e.to_string())?;
+        let mut writer = stream.try_clone().map_err(|e| e.to_string())?;
+        let mut reader = std::io::BufReader::new(stream);
+
+        let mut req = format!("GET {} HTTP/1.1\r\n", req_path);
+        req.push_str("Host: localhost\r\n");
+        for (k, v) in headers {
+            req.push_str(&format!("{}: {}\r\n", k, v));
+        }
+        req.push_str("\r\n");
+        writer.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
+        writer.flush().map_err(|e| e.to_string())?;
+
+        let mut status_line = String::new();
+        reader.read_line(&mut status_line).map_err(|e| e.to_string())?;
+        let status: i64 = status_line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|c| c.parse().ok())
+            .ok_or_else(|| format!("malformed status line: {}", status_line.trim()))?;
+
+        let mut chunked = false;
+        loop {
+            let mut header = String::new();
+            let n = reader.read_line(&mut header).map_err(|e| e.to_string())?;
+            if n == 0 {
+                break; // premature EOF; the body loop will see it too
+            }
+            let header = header.trim_end();
+            if header.is_empty() {
+                break;
+            }
+            if let Some((name, value)) = header.split_once(':') {
+                if name.trim().eq_ignore_ascii_case("transfer-encoding")
+                    && value.to_ascii_lowercase().contains("chunked")
+                {
+                    chunked = true;
+                }
+            }
+        }
+
+        Ok(Stream {
+            reader,
+            status,
+            chunked,
+            line_buf: Vec::new(),
+            pending: std::collections::VecDeque::new(),
+            done: false,
+        })
+    }
+
+    /// The HTTP status, known as soon as `open` returns.
+    pub fn status(&self) -> i64 {
+        self.status
+    }
+
+    /// The next body line (newline- and CR-stripped), or `None` at end of
+    /// stream. Blocks until a line is available.
+    pub fn next_line(&mut self) -> Result<Option<String>, String> {
+        loop {
+            if let Some(line) = self.pending.pop_front() {
+                return Ok(Some(line));
+            }
+            if self.done {
+                // Flush a trailing partial line (body not newline-terminated).
+                if self.line_buf.is_empty() {
+                    return Ok(None);
+                }
+                let line = core::mem::take(&mut self.line_buf);
+                return Ok(Some(String::from_utf8_lossy(&line).into_owned()));
+            }
+            self.fill()?;
+        }
+    }
+
+    /// Read one more piece of the body and split it into `pending`.
+    fn fill(&mut self) -> Result<(), String> {
+        use std::io::BufRead;
+
+        if self.chunked {
+            let mut size_line = String::new();
+            let n = self.reader.read_line(&mut size_line).map_err(|e| e.to_string())?;
+            if n == 0 {
+                self.done = true;
+                return Ok(());
+            }
+            let size_str = size_line.trim().split(';').next().unwrap_or("").trim();
+            if size_str.is_empty() {
+                return Ok(()); // the CRLF between chunks
+            }
+            let size = usize::from_str_radix(size_str, 16)
+                .map_err(|_| format!("malformed chunk size: {size_str}"))?;
+            if size == 0 {
+                self.done = true;
+                return Ok(());
+            }
+            let mut chunk = vec![0u8; size];
+            self.reader.read_exact(&mut chunk).map_err(|e| e.to_string())?;
+            let mut crlf = [0u8; 2]; // trailing CRLF after chunk data
+            let _ = self.reader.read_exact(&mut crlf);
+            self.feed(&chunk);
+        } else {
+            let mut buf = [0u8; 8192];
+            let n = self.reader.read(&mut buf).map_err(|e| e.to_string())?;
+            if n == 0 {
+                self.done = true;
+                return Ok(());
+            }
+            self.feed(&buf[..n]);
+        }
+        Ok(())
+    }
+
+    /// Split `data` on `\n`, queueing each complete line. Partial trailing bytes
+    /// stay in `line_buf` for the next read.
+    fn feed(&mut self, data: &[u8]) {
+        for &b in data {
+            if b == b'\n' {
+                let mut line = core::mem::take(&mut self.line_buf);
+                if line.last() == Some(&b'\r') {
+                    line.pop();
+                }
+                self.pending.push_back(String::from_utf8_lossy(&line).into_owned());
+            } else {
+                self.line_buf.push(b);
+            }
+        }
+    }
+}
+
 // ── AOT C-ABI wrappers ────────────────────────────────────────────────────────
 
 thread_local! {
@@ -281,6 +451,73 @@ pub extern "C" fn jrt_uhttp_delete_impl(url: *const c_char, headers: *const c_vo
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_uhttp_head_impl(url: *const c_char, headers: *const c_void) -> W {
     request_aot("HEAD", url, None, headers)
+}
+
+// ── Streaming, for the compiled path ──────────────────────────────────────────
+//
+// A pull-shaped handle rather than one call taking a callback: the driver loop
+// lives in C (`jrt_uhttp_stream` in common.c), which is what calls the Jade
+// handler. Keeping the callback on that side means no function pointer has to
+// cross back into Rust, and no `longjmp` from a raising handler can unwind
+// through a Rust frame — the same constraint that makes the request path record
+// a pending error instead of throwing.
+
+/// Open a stream. Returns an opaque handle, or null with a pending error set.
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_uhttp_stream_open(url: *const c_char, headers: *const c_void) -> *mut c_void {
+    match Stream::open(unsafe { cstr::borrow(url) }, &read_headers(headers)) {
+        Ok(s) => Box::into_raw(Box::new(s)) as *mut c_void,
+        Err(m) => {
+            set_err(&format!("uhttp stream: {m}"));
+            core::ptr::null_mut()
+        }
+    }
+}
+
+/// The stream's HTTP status.
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_uhttp_stream_status(h: *mut c_void) -> i64 {
+    if h.is_null() {
+        return 0;
+    }
+    unsafe { (*(h as *const Stream)).status() }
+}
+
+/// The next line as a tagged TAINTED string word in `*out`.
+///
+/// Returns 1 on a line, 0 at end of stream, -1 on a read failure (with a pending
+/// error set). A body line is external input, so it is TAINTED exactly like a
+/// response body from the request path.
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_uhttp_stream_next(h: *mut c_void, out: *mut W) -> i32 {
+    if h.is_null() || out.is_null() {
+        return 0;
+    }
+    let s = unsafe { &mut *(h as *mut Stream) };
+    match s.next_line() {
+        Ok(Some(line)) => {
+            let w = crate::JadeValue::from_str_ptr(
+                cstr::emit(line.as_bytes(), crate::string::TAINTED) as *const ()
+            )
+            .bits() as i64;
+            unsafe { *out = w };
+            1
+        }
+        Ok(None) => 0,
+        Err(m) => {
+            set_err(&format!("uhttp stream: {m}"));
+            -1
+        }
+    }
+}
+
+/// Close the stream and free the handle. Dropping the `UnixStream` closes the
+/// socket, which is how an early stop tells the server to stop sending.
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_uhttp_stream_close(h: *mut c_void) {
+    if !h.is_null() {
+        drop(unsafe { Box::from_raw(h as *mut Stream) });
+    }
 }
 
 #[cfg(test)]

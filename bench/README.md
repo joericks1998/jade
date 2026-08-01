@@ -25,7 +25,9 @@ Performance work here has been driven by measurement rather than guesswork. The 
 - `bench.py` — quick runs.
 - `bench_full.py` — the full suite across all three backends (Jade VM, Jade native, CPython), producing the table in `RESULTS.md`.
 
-**`RESULTS.md`** — a recorded snapshot with its platform and versions. Note the warning at the top: the "Jade LLVM" column dates from v1.0.9, before native compilation moved out to a build daemon and back in-process again, so those timings no longer describe the current build path. It is kept for historical comparison, not as a current claim.
+**`RESULTS.md`** — recorded runs, newest first, each under its own dated header with the platform and versions that produced it. Two are in there: a 1.1.33 run on an M4, which is the first measurement of the current in-process build path, and the original 1.0.9 snapshot. The 1.0.9 "Jade LLVM" column predates native compilation moving out to a build daemon and back again, so it is history rather than a baseline — do not read a difference against it as a regression.
+
+The 1.1.33 run is where the allocation work shows up: the VM went from 9.93x slower than Python on sort to 1.09x faster, a ~13x speedup, while every other VM timing held steady. That is the pool allocator and escape analysis landing exactly where `alloc_heavy.jde` predicted they would.
 
 ## Who uses it
 

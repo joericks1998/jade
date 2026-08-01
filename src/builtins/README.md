@@ -36,7 +36,7 @@ Each is a sibling top-level module with a `mod.rs` and a `tests.rs`. Most are th
 | `src/random/` | `std/random` | |
 | `src/sh/` | `std/sh` | Refuses tainted command strings. |
 | `src/http/` | `std/http` | TCP HTTP; returns `{status, body}`. |
-| `src/uhttp/` | `std/uhttp` | Same API over a Unix socket, addressed as `unix://<sock>:<path>`. `uhttp.stream` is stateful. |
+| `src/uhttp/` | `std/uhttp` | Same API over a Unix socket, addressed as `unix://<sock>:<path>`. `uhttp.stream` is stateful; its reader is shared (`jade_runtime::uhttpf::Stream`) and it compiles on both engines. |
 | `src/grammar/` | *(global)* | `Grammar.new(pattern)` — GBNF sampling constraints for typed prompt derefs. |
 | `src/stdio/` | *(internal)* | Not a Jade package. Stdout writes that survive a closed pipe, so `jade run app.jde \| head -3` does not panic. |
 
@@ -51,10 +51,12 @@ Each is a sibling top-level module with a `mod.rs` and a `tests.rs`. Most are th
 1. Write the `BuiltinFn` constant in the package's `mod.rs`.
 2. Add it to that package's `fns` slice, or to `CORE_BUILTINS` for a global.
 3. Add its type in the package's `register_types`.
+4. **Lower it in `aot/lower.rs`, in the same change.** Steps 1–3 only teach the VM. A builtin the interpreter has and the AOT backend does not is not a half-finished feature, it is the two engines disagreeing about what the language is — and the program does not find out until `jade build`, after it was written and tested under `jade run`. A module function goes in `chunk_module_supported` + `emit_module_call`; a bare global goes in `LOWERABLE_BUILTINS` and the `call_builtins` dispatch. If it needs shared logic, put that in `jade-runtime` so both engines call one implementation rather than two that can drift.
+5. **Write an `examples/` fixture that exercises it**, so `src/scripts/backend-parity.sh` runs it on both engines. This is the step that makes 4 self-enforcing: a builtin no fixture touches looks fine to every test in the repo, which is exactly how `write` and `uhttp.stream` stayed interpreter-only until v1.1.34.
 
 Adding a whole package also needs `pub mod <name>;` in `src/lib.rs`, a `use crate::<name>;` here, and an entry in `PACKAGES`.
 
-If the function needs `VmState`, give it a `NativeFnId` variant in `vm/value.rs`, a match arm in `vm/call.rs`, and an entry in the package's `natives` list instead.
+If the function needs `VmState`, give it a `NativeFnId` variant in `vm/value.rs`, a match arm in `vm/call.rs`, and an entry in the package's `natives` list instead. Needing `VmState` does **not** excuse step 4 — `uhttp.stream` is a `NativeFnId` and compiles. A runtime helper can call a Jade function value directly (its box holds the raw pointer at offset 0, as `jrt_coll_array_map` does), so "it calls back into Jade" is not a reason a builtin cannot be compiled.
 
 ## Building and testing
 

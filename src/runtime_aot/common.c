@@ -88,6 +88,19 @@ void jrt_print_any(int64_t val, const char* suffix) {
     if (suffix) fputs(suffix, stdout);
 }
 
+/* jrt_write_any — the `write(x)` builtin: `print` with no newline, flushed.
+ *
+ * The flush is the whole point and is not optional. `write` exists for output
+ * that has no trailing newline (a progress counter, a prompt the user types
+ * after), and stdout to a terminal is line-buffered — without the flush the
+ * bytes sit in the buffer until something later emits a newline, so the text
+ * appears late or, at exit, out of order. The VM's `write` flushes for the same
+ * reason (stdio::write_str_flush); this is the compiled half of that. */
+void jrt_write_any(int64_t val) {
+    jrt_print_any(val, NULL);
+    fflush(stdout);
+}
+
 /* ── Dynamic conversion builtins int()/float()/bool() (Chunk backend) ──────
  * Mirror the VM's `coerce_builtin` (vm.rs) EXACTLY on the tagged runtime kind.
  * int()/float() raise a catchable error on a non-numeric string or a
@@ -341,6 +354,80 @@ int64_t jrt_val_set_index(int64_t obj, int64_t idx, int64_t val) {
  * VM's value_to_display uses, so AOT and VM output are byte-identical. It returns
  * a plain system-malloc'd buffer this file's callers still free() as before. */
 
+/* ── Primitive-method receiver guard ──────────────────────────────────────
+ *
+ * The name of a primitive method does NOT prove the receiver's kind. The Chunk
+ * backend used to assume it did — `chunk_val_method_supported` picked the arm
+ * from the method name alone and then untagged the receiver straight to a
+ * pointer — so `v.keys()` on a string dereferenced a char* as a DictObj and
+ * `v.upper()` on an int dereferenced a small integer. The frontend cannot close
+ * this: with an untyped parameter (`fn f(v) { v.keys() }`) the receiver's kind
+ * is only known at runtime, which is exactly why the VM checks there and raises
+ * UndefinedField. This is that check, for the compiled path.
+ *
+ * It must be a raise and not an abort: the idiomatic Jade type test is
+ * `try { v.keys(); return true } catch e { return false }`, and a `catch` can
+ * only see a thrown value. A segfault, or a Rust-side panic in a `no_mangle`
+ * function, unwinds nothing and takes the process down. */
+static const char* value_kind_name(jade_value_t v) {
+    /* Order matters: jrt_is_int tests bit0 only, so it must come after the
+     * tagged kinds whose low bits also clear it. */
+    if (jrt_is_nil(v))   return "nil";
+    if (jrt_is_bool(v))  return "bool";
+    if (jrt_is_str(v))   return "str";
+    if (jrt_is_float(v)) return "float";
+    if (jrt_is_int(v))   return "int";
+    if (jrt_is_ptr(v)) {
+        void* p = jrt_unbox_ptr(v);
+        if (!p) return "nil";
+        switch (jrt_kind_of(p)) {
+            case JK_ARRAY:  return "array";
+            case JK_DICT:   return "dict";
+            case JK_PROMPT: return "prompt";
+            case JK_STRUCT: {
+                /* A fresh tagged string; leaked deliberately — this path raises
+                 * and the message borrows the bytes. */
+                char* n = jrt_get_type_name((int64_t)v);
+                return (n && *n) ? n : "struct";
+            }
+            default: return "value";
+        }
+    }
+    return "value";
+}
+
+/* Which JRT_WANT_* bit `v` satisfies (0 for a kind no primitive method takes). */
+static int32_t value_want_bit(jade_value_t v) {
+    if (jrt_is_str(v)) return JRT_WANT_STR;
+    if (jrt_is_ptr(v)) {
+        void* p = jrt_unbox_ptr(v);
+        if (!p) return 0;
+        if (jrt_kind_of(p) == JK_ARRAY) return JRT_WANT_ARRAY;
+        if (jrt_kind_of(p) == JK_DICT)  return JRT_WANT_DICT;
+    }
+    return 0;
+}
+
+void jrt_require_kind(int64_t recv, int32_t want, const char* method) {
+    jade_value_t v = (jade_value_t)recv;
+    if (value_want_bit(v) & want) return;
+    char msg[256];
+    snprintf(msg, sizeof msg, "struct '%s' has no field '%s'",
+             value_kind_name(v), method ? method : "");
+    throw_msg(msg);
+}
+
+/* The same hazard one level in: a str method's arguments are untagged to char*
+ * too, so `"abc".starts_with(42)` would read a small integer as a string. The
+ * VM reports a bad argument differently from a bad receiver ("type error:
+ * str.starts_with", not "has no field"), so this raises that wording. */
+void jrt_require_str_arg(int64_t val, const char* method) {
+    if (jrt_is_str((jade_value_t)val)) return;
+    char msg[128];
+    snprintf(msg, sizeof msg, "type error: str.%s", method ? method : "");
+    throw_msg(msg);
+}
+
 int32_t jrt_in_any(int64_t needle, int64_t haystack) {
     jade_value_t h = (jade_value_t)haystack;
     if (jrt_is_str(h)) {
@@ -407,7 +494,7 @@ int64_t jrt_random_choice_chunk(int64_t arr_word) {
  * A 4xx/5xx is a normal status, not an error. */
 static void http_throw_pending(void) {
     char* e = jrt_http_take_error();
-    if (e) jade_exc_throw_typed(jrt_box_str(e), NULL);
+    if (e) { jrt_throw_io(e); jrt_str_free(e); }
 }
 jade_value_t jrt_http_get(const char* url, void* headers) {
     jade_value_t r = (jade_value_t)jrt_http_get_impl(url, headers);
@@ -441,7 +528,48 @@ jade_value_t jrt_http_head(const char* url, void* headers) {
  * status, not an error. */
 static void uhttp_throw_pending(void) {
     char* e = jrt_uhttp_take_error();
-    if (e) jade_exc_throw_typed(jrt_box_str(e), NULL);
+    if (e) { jrt_throw_io(e); jrt_str_free(e); }
+}
+
+/* uhttp.stream(url, handler[, headers]) -> status.
+ *
+ * The driver loop lives here rather than in Rust because it calls back into
+ * Jade: a function value's box holds the raw function pointer at offset 0, the
+ * same convention jrt_coll_array_map uses. Keeping the call on this side also
+ * keeps a raising handler's longjmp from unwinding through a Rust frame, which
+ * is undefined behavior — the reason every other uhttp entry point records a
+ * pending error instead of throwing.
+ *
+ * A handler returning `false` stops the stream early; closing the handle drops
+ * the socket, which is how the server learns to stop sending. Matches the VM
+ * (vm/call.rs, NativeFnId::UhttpStream), including returning the status even
+ * when the handler stopped it early. */
+int64_t jrt_uhttp_stream(const char* url, int64_t fn_word, void* headers) {
+    void* h = jrt_uhttp_stream_open(url, headers);
+    if (!h) {
+        uhttp_throw_pending();     /* open failed → the pending error is set */
+        return 0;
+    }
+    void** box = (void**)jrt_unbox_ptr((jade_value_t)fn_word);
+    int64_t (*fn)(int64_t) = (int64_t (*)(int64_t))(*box);
+    int64_t status = jrt_uhttp_stream_status(h);
+
+    for (;;) {
+        int64_t line = 0;
+        int32_t r = jrt_uhttp_stream_next(h, &line);
+        if (r == 0) break;                       /* end of stream */
+        if (r < 0) {                             /* read failure */
+            jrt_uhttp_stream_close(h);
+            uhttp_throw_pending();
+            return status;
+        }
+        /* Only an explicit `false` stops the stream. Any other return — nil from
+         * a handler that just prints, a number, a string — keeps it running, so
+         * a handler need not end in a boolean. */
+        if ((jade_value_t)fn(line) == JRT_FALSE) break;
+    }
+    jrt_uhttp_stream_close(h);
+    return status;
 }
 jade_value_t jrt_uhttp_get(const char* url, void* headers) {
     jade_value_t r = (jade_value_t)jrt_uhttp_get_impl(url, headers);
@@ -476,14 +604,14 @@ char* jrt_sh_exec(const char* cmd) {
     jrt_refuse_if_tainted(cmd, "sh.exec(cmd)");
     char* r = jrt_sh_exec_impl(cmd);
     char* e = jrt_sh_take_error();
-    if (e) jade_exc_throw_typed(jrt_box_str(e), NULL);
+    if (e) { jrt_throw_io(e); jrt_str_free(e); }
     return r;
 }
 int64_t jrt_sh_run(const char* cmd) {
     jrt_refuse_if_tainted(cmd, "sh.run(cmd)");
     int64_t r = jrt_sh_run_impl(cmd);
     char* e = jrt_sh_take_error();
-    if (e) jade_exc_throw_typed(jrt_box_str(e), NULL);
+    if (e) { jrt_throw_io(e); jrt_str_free(e); }
     return r;
 }
 
@@ -493,7 +621,7 @@ int64_t jrt_sh_run(const char* cmd) {
  * path first (it is a read sink). */
 static void fs_throw_pending(void) {
     char* e = jrt_fs_take_error();
-    if (e) jade_exc_throw_typed(jrt_box_str(e), NULL);
+    if (e) { jrt_throw_io(e); jrt_str_free(e); }
 }
 char* jrt_fs_read(const char* path, int32_t trust) {
     if (!trust) jrt_refuse_if_tainted(path, "fs.read(path)");
@@ -515,7 +643,7 @@ int64_t jrt_random_int(int64_t lo, int64_t hi) {
         char m[96];
         snprintf(m, sizeof m, "random.int: min (%lld) > max (%lld)",
                  (long long)lo, (long long)hi);
-        jade_exc_throw_typed(jrt_box_str(jrt_str_dup(m, JRT_TRUSTED)), NULL);
+        throw_msg(m);
     }
     return jrt_random_draw(lo, hi);
 }
@@ -633,7 +761,7 @@ int64_t jade_math_pow(int64_t a, int64_t b) {
 static void throw_num_type(const char* op) {
     char msg[64];
     snprintf(msg, sizeof msg, "%s requires numeric operands", op);
-    jade_exc_throw_typed(jrt_box_str(jrt_str_dup(msg, JRT_TRUSTED)), NULL);
+    throw_msg(msg);
 }
 
 /* Raise "'<op>' cannot compare <a> and <b>", the VM's wording for a comparison
@@ -649,11 +777,47 @@ static void throw_cmp_type(const char* op, jade_value_t a, jade_value_t b) {
     char msg[128];
     snprintf(msg, sizeof msg, "%s cannot compare %s and %s",
              op, jrt_core_type_name((int64_t)a), jrt_core_type_name((int64_t)b));
-    jade_exc_throw_typed(jrt_box_str(jrt_str_dup(msg, JRT_TRUSTED)), NULL);
+    throw_msg(msg);
 }
 
+/* Raise a runtime failure as the VM raises one: a `RuntimeError` struct with a
+ * single `message` field, thrown under that type name.
+ *
+ * The VM funnels every non-`Exception` error through `make_vm_runtime_error`
+ * (vm/exceptions.rs), so `catch e` binds a struct and `e.message` is the text.
+ * This side threw the bare string instead, so the same `try` saw a str under
+ * `jade build` and a struct under `jade run`: `e.message` raised compiled, and
+ * `catch RuntimeError e` never matched at all. Any program that inspected a
+ * caught error rather than just reporting it behaved differently once compiled.
+ *
+ * The message still carries no `[line:col]` prefix — compiled code has no span
+ * at runtime — which is the one part of the text that stays different. Every
+ * other raise here already omitted it, so nothing regresses; the wording after
+ * the prefix now matches, including the `I/O error: ` that the VM's IoError
+ * display adds (see `jrt_throw_io`). */
 static void throw_msg(const char* m) {
-    jade_exc_throw_typed(jrt_box_str(jrt_str_dup(m, JRT_TRUSTED)), NULL);
+    void* e = jrt_kstruct_new("RuntimeError");
+    jrt_kstruct_set(e, "message", jrt_box_str(jrt_str_dup(m, JRT_TRUSTED)));
+    jade_exc_throw_typed((int64_t)jrt_box_ptr(e), "RuntimeError");
+}
+
+/* The same wrapper, reachable from codegen. `Lowerer::throw` raises a bare value
+ * because that is right for a user's `raise x` — the value thrown is the value
+ * written. But codegen also raises its *own* failures (a zero divisor, integer
+ * overflow), and those are runtime errors like any other, so they go through
+ * here rather than arriving as a str the VM would have delivered as a struct. */
+void jrt_throw_runtime(const char* msg) {
+    throw_msg(msg);
+}
+
+/* An I/O failure, matching the VM's `IoError` display: the same `I/O error: `
+ * prefix ahead of the detail, then wrapped as a RuntimeError like everything
+ * else. Used by the fs/http/uhttp/sh forwarders, whose Rust halves record a
+ * pending error rather than throwing (a longjmp must not cross a Rust frame). */
+void jrt_throw_io(const char* detail) {
+    char msg[1024];
+    snprintf(msg, sizeof msg, "I/O error: %s", detail ? detail : "");
+    throw_msg(msg);
 }
 
 /* Translate a jrt_core_* error code into the matching raise (no-op on OK). */
@@ -765,6 +929,35 @@ void jade_exc_push_frame(void* jmpbuf) {
 
 void jade_exc_pop(void) { if (exc_depth > 0) exc_depth--; }
 
+/* ── Per-frame scoping of the handler stack ───────────────────────────────
+ *
+ * `jade_exc_pop` only runs where codegen emits `PopHandler`, which the emitter
+ * places on the try body's normal fall-through exit. A `return` inside a `try`
+ * does not take that exit:
+ *
+ *     fn is_dict(v) { try { v.keys(); return true } catch e { return false } }
+ *
+ * so the frame stayed on the stack while the C frame holding its `jmp_buf`
+ * disappeared with the return. A later `raise` then longjmp'd into a dead stack
+ * frame — a segfault inside `_longjmp` when the buffer was clearly garbage, an
+ * infinite spin when the stale bytes happened to look like a valid jump target,
+ * and a spurious error when it landed in the wrong live handler. Which one you
+ * got depended on what had run since, which is what made it look like heap
+ * corruption rather than a leaked handler.
+ *
+ * The VM never had this: its `handlers` vec is a local of the dispatch call
+ * frame (vm/dispatch.rs), so a function's handlers die with it. These two give
+ * the compiled path the same scoping — codegen snapshots the depth on entry and
+ * restores it on every return, so a leaked frame cannot outlive its function. */
+int32_t jade_exc_depth(void) { return (int32_t)exc_depth; }
+
+void jade_exc_restore(int32_t depth) {
+    /* Only ever unwinds. A restore that would *raise* the depth means a frame
+     * was popped that this function did not push, which must not resurrect a
+     * dead buffer. */
+    if (depth >= 0 && depth < exc_depth) exc_depth = depth;
+}
+
 /* Throw with an explicit static type name. `type` is the struct type name for
  * `raise SomeStruct {...}`, or NULL for primitives/strings. The catch site
  * compares this stored name against `catch <Type>` arms instead of blindly
@@ -779,6 +972,25 @@ void jade_exc_throw_typed(int64_t value, const char* type) {
             snprintf(buf, sizeof buf, "jade: %s",
                      (const char*)jrt_unbox_ptr((jade_value_t)value));
             jade_rt_fatal(buf);
+        }
+        /* A raised struct carrying a `message` field reports that message. Every
+         * runtime failure is now a `RuntimeError` struct rather than a bare
+         * string, and without this an uncaught one degraded from
+         * "jade: division by zero" to "jade: uncaught RuntimeError" — the type
+         * name, and none of the information. Any struct with a str `message`
+         * qualifies, so a user's own `raise MyError { message: … }` reads the
+         * same way. */
+        if (jrt_is_ptr((jade_value_t)value)) {
+            void* p = jrt_unbox_ptr((jade_value_t)value);
+            if (p && jrt_kind_of(p) == JK_STRUCT) {
+                int64_t m = 0;
+                if (jrt_coll_struct_get(p, "message", &m) && jrt_is_str((jade_value_t)m)) {
+                    char buf[1056];
+                    snprintf(buf, sizeof buf, "jade: %s",
+                             (const char*)jrt_unbox_ptr((jade_value_t)m));
+                    jade_rt_fatal(buf);
+                }
+            }
         }
         if (type) {
             char buf[256];

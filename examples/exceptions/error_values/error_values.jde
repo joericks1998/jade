@@ -1,0 +1,87 @@
+// A caught runtime error is a `RuntimeError` struct with a `message` field,
+// on both engines.
+//
+// Regression fixture. The VM funnels every non-user error through
+// `make_vm_runtime_error`, so `catch e` binds a struct. The compiled backend
+// raised the bare message string instead, so the same `try` saw a str under
+// `jade build` and a struct under `jade run`: `e.message` raised compiled, and
+// `catch RuntimeError e` never matched at all. A program that only reported the
+// error looked fine; one that inspected it broke when you shipped it.
+//
+// The one part that stays different is the `[line:col]` prefix the VM puts in
+// the message — compiled code has no span at runtime. So this fixture asserts
+// the *shape* and the type, and checks the message by substring rather than
+// equality. Everything here has to hold identically on both engines.
+
+fn divzero() {
+  let a = 1
+  let b = 0
+  return a / b
+}
+
+fn bad_method() {
+  let v = 42
+  return v.upper()
+}
+
+fn overflow() {
+  let big = 4611686018427387903
+  return big + big
+}
+
+// A typed catch has to match, which is what proves the raised value carries the
+// type name and not just the fields.
+fn kind_of(f) {
+  try {
+    f()
+    return "no raise"
+  } catch RuntimeError e {
+    return "RuntimeError"
+  } catch e {
+    return "untyped"
+  }
+}
+
+print(kind_of(divzero))      // RuntimeError
+print(kind_of(bad_method))   // RuntimeError
+print(kind_of(overflow))     // RuntimeError
+
+// The message field is readable, and carries the same wording on both engines.
+fn message_of(f) {
+  try {
+    f()
+    return ""
+  } catch e {
+    return e.message
+  }
+}
+
+print(message_of(divzero).contains("division by zero"))            // true
+print(message_of(bad_method).contains("has no field 'upper'"))     // true
+print(message_of(overflow).contains("integer overflow"))           // true
+
+// A user's `raise x` is NOT wrapped: the value thrown is the value written, so
+// a raised string stays a string and a raised struct keeps its own type.
+struct MyError {
+  message
+}
+
+try {
+  raise "just a string"
+} catch e {
+  print(e)                   // just a string
+}
+
+try {
+  raise MyError { message: "mine" }
+} catch MyError e {
+  print(f"MyError: {e.message}")   // MyError: mine
+} catch e {
+  print("wrong arm")
+}
+
+// `RuntimeError` is the runtime's own type, not a declarable one — user code
+// catches it but does not construct it, so there is no `raise RuntimeError`
+// case here to test.
+
+print("done")

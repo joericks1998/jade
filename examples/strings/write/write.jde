@@ -1,0 +1,44 @@
+// write(x) — print with no trailing newline.
+//
+// The counterpart to print(): same rendering, no newline, and flushed so the
+// bytes actually appear. The flush is why it exists — a partial line sitting in
+// a line-buffered stdout shows up late, or out of order at exit.
+//
+// Regression fixture. This built under `jade run` and failed at `jade build`
+// with "unsupported builtin call `write`" until v1.1.34, so a program using it
+// only found out at packaging time.
+
+// Building a line piece by piece.
+write("a")
+write("b")
+write("c")
+print("")            // just the newline
+
+// Every value kind renders exactly as print() renders it.
+write(42)
+write(" ")
+write(1.5)
+write(" ")
+write(true)
+write(" ")
+write(nil)
+write(" ")
+write([1, 2])
+write(" ")
+write({"k": "v"})
+print("")
+
+// A progress bar: the case the flush is for.
+fn bar(n) {
+  let i = 0
+  while i < n {
+    write("#")
+    i = i + 1
+  }
+  print("")
+}
+bar(8)
+
+// write() returns nil, like print().
+let r = write("")
+print(r)             // nil
