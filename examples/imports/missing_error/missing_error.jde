@@ -1,0 +1,9 @@
+// `jade check` must reject an import that names nothing.
+//
+// Until v1.1.33 this file reported `ok` and then failed at run time with
+// "cannot find import", because import resolution was not a compile stage:
+// the VM resolved a `use` when the Import opcode executed, long after check
+// had finished. A checker that passes files which cannot load is not a gate.
+use totally_made_up_module
+
+print(totally_made_up_module.anything())

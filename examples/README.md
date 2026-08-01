@@ -21,6 +21,8 @@ One directory per language area, each with a subdirectory per case:
 
 `llm/` is worth calling out. Those fixtures do real prompt dereferences, and they are still deterministic in CI because `src/scripts/backend-parity.sh` installs `src/scripts/fake-provider.jde` as a stand-in inference provider answering with a canned reply. An example supplies its own reply as a `responses.txt` beside the `.jde`; without one it gets the default. Pointing the parity gate at these turned up a VM muting bug and an AOT segfault immediately.
 
+`imports/missing_error/` names a module that does not exist. It is the fixture for the gap v1.1.33 closed: `jade check` used to accept it and let it fail at run time instead, because import resolution was not a compile stage. The `*_error` convention it follows now covers imports, since the harness in `cli/check.rs` checks a fixture *by path* rather than by source text — a `use` cannot be resolved without knowing which file asked for it.
+
 `imports/project_lib/` is the other odd one: it carries its own `jade.toml`, making it a project inside the fixture tree. That is deliberate. The gate runs every example from the repo root, so a fixture whose imports depend on *its own* project root is the only way to catch the two engines disagreeing about where that root is — which they did until v1.1.31, the VM reading it from the shell's directory and the AOT from the source file's. Its importing file sits under `app/` so the target directory is out of relative-path reach and the `[lib]` entry is genuinely exercised.
 
 ## Who uses it

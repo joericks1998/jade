@@ -571,3 +571,136 @@ fn validate_rejects_symbols_without_c_abi() {
     let err = d.validate("mismatch").unwrap_err();
     assert!(err.contains("abi = \"c\""), "unexpected message: {err}");
 }
+
+// ── Import resolution and the check-time graph walk ───────────────────────────
+//
+// These cover the gap v1.1.33 closed: `jade check` used to accept a `use` naming
+// a module that does not exist, because import resolution happened when the VM
+// executed the Import opcode rather than at compile time.
+
+/// Parse a source string and hand back its import paths, the way
+/// `walk_imports`'s caller does.
+fn paths_of(source: &str) -> Vec<(String, crate::frontend::error::Span)> {
+    let tokens = crate::frontend::lexer::tokenize(source).expect("lex");
+    let program = crate::frontend::parser::parse(tokens).expect("parse");
+    program_import_paths(&program)
+}
+
+/// An import context anchored at `dir` with no project and no registered libs —
+/// the plain "file sitting next to another file" case.
+fn bare_ctx(dir: &Path) -> (HashMap<String, LibraryEntry>, PathBuf) {
+    (HashMap::new(), dir.to_path_buf())
+}
+
+#[test]
+fn a_use_naming_nothing_is_rejected() {
+    let tmp = TempDir::new("missing_import");
+    let (libs, dir) = bare_ctx(tmp.path());
+    let ctx = ImportContext { libraries: &libs, project_root: None, source_dir: dir };
+
+    let err = walk_imports(&paths_of("use totally_made_up_module\n"), &ctx).unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("cannot find import"), "unexpected message: {msg}");
+    assert!(msg.contains("totally_made_up_module"), "message should name it: {msg}");
+}
+
+#[test]
+fn a_use_naming_a_sibling_file_resolves() {
+    let tmp = TempDir::new("sibling_import");
+    std::fs::write(tmp.path().join("helper.jde"), "fn hi() { return 1 }\n").unwrap();
+    let (libs, dir) = bare_ctx(tmp.path());
+    let ctx = ImportContext { libraries: &libs, project_root: None, source_dir: dir };
+
+    assert!(walk_imports(&paths_of("use helper\n"), &ctx).is_ok());
+}
+
+#[test]
+fn a_builtin_package_resolves_without_touching_disk() {
+    // `std::math` is compiled in; an empty directory must not change the answer.
+    let tmp = TempDir::new("builtin_import");
+    let (libs, dir) = bare_ctx(tmp.path());
+    let ctx = ImportContext { libraries: &libs, project_root: None, source_dir: dir };
+
+    assert_eq!(resolve_import(&ctx, "std/math").unwrap(), ImportTarget::Builtin);
+    assert!(walk_imports(&paths_of("use std::math\n"), &ctx).is_ok());
+}
+
+#[test]
+fn an_invented_std_package_is_rejected() {
+    // `std::` is not a blanket escape hatch — a package that is not compiled in
+    // falls through to file resolution and must fail like any other name.
+    let tmp = TempDir::new("fake_std");
+    let (libs, dir) = bare_ctx(tmp.path());
+    let ctx = ImportContext { libraries: &libs, project_root: None, source_dir: dir };
+
+    assert!(walk_imports(&paths_of("use std::totally_fake\n"), &ctx).is_err());
+}
+
+#[test]
+fn from_use_is_walked_too() {
+    let tmp = TempDir::new("from_use");
+    let (libs, dir) = bare_ctx(tmp.path());
+    let ctx = ImportContext { libraries: &libs, project_root: None, source_dir: dir };
+
+    assert!(walk_imports(&paths_of("from nowhere use thing\n"), &ctx).is_err());
+}
+
+#[test]
+fn a_broken_import_one_level_down_is_found() {
+    // The walk is transitive: a module that itself imports nothing real breaks
+    // the program that imports it, so check must say so.
+    let tmp = TempDir::new("transitive");
+    std::fs::write(tmp.path().join("mid.jde"), "use also_missing\n").unwrap();
+    let (libs, dir) = bare_ctx(tmp.path());
+    let ctx = ImportContext { libraries: &libs, project_root: None, source_dir: dir };
+
+    let err = walk_imports(&paths_of("use mid\n"), &ctx).unwrap_err();
+    assert!(err.to_string().contains("also_missing"), "unexpected: {err}");
+}
+
+#[test]
+fn an_imported_module_resolves_against_its_own_directory() {
+    // `app.jde` imports `sub/mid.jde`, which imports `leaf`. `leaf.jde` sits
+    // beside *mid*, not beside app — so a walk that kept using the importer's
+    // directory would wrongly call this missing.
+    let tmp = TempDir::new("own_dir");
+    std::fs::create_dir_all(tmp.path().join("sub")).unwrap();
+    std::fs::write(tmp.path().join("sub/mid.jde"), "use leaf\n").unwrap();
+    std::fs::write(tmp.path().join("sub/leaf.jde"), "fn hi() { return 1 }\n").unwrap();
+    let (libs, dir) = bare_ctx(tmp.path());
+    let ctx = ImportContext { libraries: &libs, project_root: None, source_dir: dir };
+
+    assert!(walk_imports(&paths_of("use sub::mid\n"), &ctx).is_ok());
+}
+
+#[test]
+fn a_circular_import_terminates() {
+    // Two modules importing each other must not recurse forever. Whether a cycle
+    // should be a check-time error is a separate question; this pins that the
+    // walk stops.
+    let tmp = TempDir::new("cycle");
+    std::fs::write(tmp.path().join("a.jde"), "use b\n").unwrap();
+    std::fs::write(tmp.path().join("b.jde"), "use a\n").unwrap();
+    let (libs, dir) = bare_ctx(tmp.path());
+    let ctx = ImportContext { libraries: &libs, project_root: None, source_dir: dir };
+
+    assert!(walk_imports(&paths_of("use a\n"), &ctx).is_ok());
+}
+
+#[test]
+fn a_native_module_is_checked_for_existence_but_not_loaded() {
+    // An empty file with a library extension is not a loadable package. The walk
+    // must still accept it: opening it would run its initializer, and `check`
+    // does not execute the program it is checking.
+    let tmp = TempDir::new("native_import");
+    let ext = if cfg!(target_os = "macos") { "dylib" } else { "so" };
+    std::fs::write(tmp.path().join(format!("fastmath.{ext}")), b"").unwrap();
+    let (libs, dir) = bare_ctx(tmp.path());
+    let ctx = ImportContext { libraries: &libs, project_root: None, source_dir: dir };
+
+    assert!(matches!(
+        resolve_import(&ctx, "fastmath").unwrap(),
+        ImportTarget::Native(_)
+    ));
+    assert!(walk_imports(&paths_of("use fastmath\n"), &ctx).is_ok());
+}

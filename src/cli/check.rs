@@ -7,14 +7,75 @@ use crate::{
 
 /// Checks that run after type inference, on both the cached and uncached paths.
 ///
-/// Currently just `emit`, which is where shared-mutation-across-tasks is
-/// rejected: the mutation opcodes (`SetGlobal`/`SetIndex`/`SetField`) only exist
-/// in bytecode, because the AST's assignment expression cannot distinguish
-/// rebinding a local from writing through a reference. Emitting here keeps
-/// `jade check` an honest predictor of whether `jade run`/`jade build` will
-/// accept the file, which the `*_error.jde` fixture convention depends on.
-fn post_tir_checks(tprogram: &crate::compiler::tir::TProgram) -> Result<(), String> {
-    crate::compiler::emit::emit(tprogram.clone()).map(|_| ()).map_err(|e| e.to_string())
+/// Two of them. `emit` is where shared-mutation-across-tasks is rejected: the
+/// mutation opcodes (`SetGlobal`/`SetIndex`/`SetField`) only exist in bytecode,
+/// because the AST's assignment expression cannot distinguish rebinding a local
+/// from writing through a reference. And the import walk confirms every `use`
+/// names something that exists.
+///
+/// Both are here so `jade check` is an honest predictor of whether `jade run` /
+/// `jade build` will accept the file, which the `*_error.jde` fixture convention
+/// depends on. The import walk was missing until v1.1.33, and its absence made
+/// that claim false for any file with an import: `use totally_made_up_module`
+/// reported `ok` and then failed at run time.
+fn post_tir_checks(
+    tprogram: &crate::compiler::tir::TProgram,
+    path: &str,
+) -> Result<(), String> {
+    crate::compiler::emit::emit(tprogram.clone()).map_err(|e| e.to_string())?;
+    check_imports(tprogram, path)
+}
+
+/// Resolve every import reachable from this file, without loading any of them.
+///
+/// The project context is read from the *source file's* directory rather than
+/// the current one, matching `jade run` and `jade build`: which project a file
+/// belongs to is a property of the file. Reading it from the CWD is the bug
+/// v1.1.31 fixed for the other two commands.
+///
+/// Unlike `jade run`, this does not call `pkg::ensure_ready` — checking a file
+/// should not reach the network to fetch dependencies. A project whose `libs/`
+/// has not been populated yet will therefore report its dependency imports as
+/// unresolved, which is accurate: they cannot be loaded until `jade install`
+/// runs.
+fn check_imports(tprogram: &crate::compiler::tir::TProgram, path: &str) -> Result<(), String> {
+    use crate::compiler::tir::TStmt;
+
+    let paths: Vec<_> = tprogram
+        .stmts
+        .iter()
+        .filter_map(|s| match s {
+            TStmt::Use { path, span, .. } | TStmt::FromUse { path, span, .. } => {
+                Some((path.clone(), span.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    if paths.is_empty() {
+        return Ok(());
+    }
+
+    let source_dir = Path::new(path)
+        .canonicalize()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+    let project_root = crate::project::find_project_root_from(&source_dir);
+    let libraries = project_root
+        .as_ref()
+        .and_then(|root| {
+            let manifest = crate::project::load_project(root).ok()?;
+            Some(crate::pkg::resolved_libraries(root, &manifest))
+        })
+        .unwrap_or_default();
+
+    let ctx = crate::project::ImportContext {
+        libraries: &libraries,
+        project_root: project_root.as_deref(),
+        source_dir,
+    };
+    crate::project::walk_imports(&paths, &ctx).map_err(|e| e.to_string())
 }
 
 /// Run `jade check <path>`: type-check a source file without executing it.
@@ -41,7 +102,7 @@ pub fn run_check(path: &str) {
     // returning early — they are cheap next to the stages the cache saves.
     if let Some(ref h) = hash {
         if let Some(tprogram) = crate::cache::read_tir_cache(h) {
-            if let Err(e) = post_tir_checks(&tprogram) {
+            if let Err(e) = post_tir_checks(&tprogram, path) {
                 eprintln!("{}: {}", path, e);
                 process::exit(1);
             }
@@ -85,7 +146,7 @@ pub fn run_check(path: &str) {
         }
     };
 
-    if let Err(e) = post_tir_checks(&tprogram) {
+    if let Err(e) = post_tir_checks(&tprogram, path) {
         eprintln!("{}: {}", path, e);
         process::exit(1);
     }
@@ -102,15 +163,21 @@ pub fn run_check(path: &str) {
 mod tests {
     use super::*;
 
-    /// Type-check a source string through the same stages as `run_check`, minus
-    /// the caching and the `process::exit` calls.  Deliberately cache-free so the
-    /// result depends only on the source.
-    fn check_source(source: &str) -> Result<(), String> {
-        let tokens = lexer::tokenize(source).map_err(|e| format!("lexer error: {e}"))?;
+    /// Check a file through the same stages as `run_check`, minus the caching and
+    /// the `process::exit` calls. Deliberately cache-free so the result depends
+    /// only on what is on disk.
+    ///
+    /// Takes a path rather than a source string because the import walk needs
+    /// one: which file a `use` resolves to depends on the importing file's
+    /// directory and project root. Passing source text alone is what let a
+    /// fixture with a broken import look fine here.
+    fn check_file(path: &Path) -> Result<(), String> {
+        let source = fs::read_to_string(path).map_err(|e| format!("unreadable: {e}"))?;
+        let tokens = lexer::tokenize(&source).map_err(|e| format!("lexer error: {e}"))?;
         let program = parser::parse(tokens).map_err(|e| format!("parse error: {e}"))?;
         let tprogram = type_infer::infer(program).map_err(|e| format!("{e}"))?;
-        crate::compiler::emit::emit(tprogram).map_err(|e| format!("{e}"))?;
-        Ok(())
+        crate::compiler::emit::emit(tprogram.clone()).map_err(|e| format!("{e}"))?;
+        check_imports(&tprogram, &path.to_string_lossy())
     }
 
     /// Every `.jde` file under `examples/`, sorted for deterministic output.
@@ -161,19 +228,12 @@ mod tests {
                 .unwrap_or(path)
                 .display()
                 .to_string();
-            let source = match fs::read_to_string(path) {
-                Ok(s) => s,
-                Err(e) => {
-                    problems.push(format!("{rel}: unreadable: {e}"));
-                    continue;
-                }
-            };
-            match (check_source(&source), expects_failure(path)) {
+            match (check_file(path), expects_failure(path)) {
                 // Expected outcomes.
                 (Ok(()), false) | (Err(_), true) => {}
                 (Err(e), false) => problems.push(format!("{rel}: expected ok, got {e}")),
                 (Ok(()), true) => problems.push(format!(
-                    "{rel}: named '*_error' but type-checked cleanly — \
+                    "{rel}: named '*_error' but check accepted it — \
                      rename it or make it genuinely invalid"
                 )),
             }

@@ -15,32 +15,30 @@ pub(crate) enum ResolvedImport {
     File(PathBuf),
 }
 
+/// Resolve a `use` path against the running VM's project context.
+///
+/// A thin adapter over [`crate::project::resolve_import`], which is also what
+/// `jade check` walks the import graph with. Sharing the function is the point:
+/// a `use` that check accepts and the VM then cannot find is precisely the bug
+/// this indirection prevents.
+///
+/// The stdlib case never reaches here — `Instr::ImportFile` binds a built-in
+/// package before calling this — so a `Builtin` target is unreachable in
+/// practice and is mapped to a not-found rather than given a variant of its own.
 pub(crate) fn resolve_user_import(state: &VmState, path: &str, span: Span) -> Result<ResolvedImport> {
-    if let Some(root) = &state.project_root {
-        if let Some(message) =
-            crate::project::ambiguous_bare_import(path, &state.libraries, &state.source_dir)
-        {
-            return Err(JadeError::IoError { message, span });
+    let ctx = crate::project::ImportContext {
+        libraries: &state.libraries,
+        project_root: state.project_root.as_deref(),
+        source_dir: state.source_dir.clone(),
+    };
+    match crate::project::resolve_import(&ctx, path) {
+        Ok(crate::project::ImportTarget::Native(p)) => Ok(ResolvedImport::Native(p)),
+        Ok(crate::project::ImportTarget::Jade(p)) => Ok(ResolvedImport::File(p)),
+        Ok(crate::project::ImportTarget::Builtin) => {
+            Err(JadeError::ImportNotFound { path: path.to_string(), span })
         }
-        match crate::project::resolve_library_import(&state.libraries, path, root) {
-            Ok(Some(r)) => {
-                return Ok(match r.kind {
-                    crate::project::ImportKind::Native => ResolvedImport::Native(r.path),
-                    crate::project::ImportKind::Jade => ResolvedImport::File(r.path),
-                });
-            }
-            Ok(None) => {}
-            Err(message) => return Err(JadeError::IoError { message, span }),
-        }
+        Err(message) => Err(JadeError::IoError { message, span }),
     }
-    // Not a registered library: resolve relative to the importing file. `path` is
-    // a module stem (`utils`, `sub/helper`) — probe `<path>.jde`, then a native
-    // library, mirroring an allowlist-free `[lib]` directory.
-    let r = crate::project::resolve_relative_import(&state.source_dir, path);
-    Ok(match r.kind {
-        crate::project::ImportKind::Native => ResolvedImport::Native(r.path),
-        crate::project::ImportKind::Jade => ResolvedImport::File(r.path),
-    })
 }
 
 /// Execute a compiled program and return the populated global state.
