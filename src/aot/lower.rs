@@ -54,6 +54,12 @@ const OBJKIND_FN: u64 = 5;
 // by codegen directly.
 const OBJKIND_BOUND_METHOD: u64 = 9;
 
+// Receiver kinds a primitive method accepts, passed to `jrt_require_kind` as a
+// bitmask. Mirror the JRT_WANT_* macros in runtime_aot/runtime.h.
+const WANT_STR: u64 = 0x1;
+const WANT_ARRAY: u64 = 0x2;
+const WANT_DICT: u64 = 0x4;
+
 /// Reserved global names that resolve to a runtime builtin (not a user value),
 /// mirroring `crate::builtins::seed_globals`. A `Call` whose callee is
 /// `GetGlobal(<one of these>)` and which this backend does not itself lower is a
@@ -118,6 +124,7 @@ fn chunk_module_supported(module: &str, method: &str, argc: usize) -> bool {
         ("http", "post" | "put") => argc == 2 || argc == 3,
         ("uhttp", "get" | "delete" | "head") => argc == 1 || argc == 2,
         ("uhttp", "post" | "put") => argc == 2 || argc == 3,
+        ("uhttp", "stream") => argc == 2 || argc == 3, // url, handler[, headers]
         ("array", "map" | "filter") => argc == 2,
         ("random", "int") => argc == 2,
         ("random", "seed") => argc == 1,
@@ -173,6 +180,11 @@ struct Lowerer<'a, 'ctx> {
     /// hold references the *caller* owns (borrowed), so scope-exit release covers
     /// only the locals (`n_params..`).
     n_params: usize,
+    /// Slot holding the exception-handler depth on entry, for functions that
+    /// contain a `try`. Every return restores it, so a handler frame cannot
+    /// outlive the stack frame holding its `jmp_buf` — see `emit_exc_restore`.
+    /// `None` when the function has no handler and its depth cannot change.
+    exc_depth_slot: Option<PointerValue<'ctx>>,
 }
 
 impl<'a, 'ctx> Lowerer<'a, 'ctx> {
@@ -330,6 +342,28 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
         Ok(())
     }
 
+    /// Raise one of codegen's *own* failures (a zero divisor, integer overflow)
+    /// as a `RuntimeError` struct, the way the VM delivers every runtime error.
+    ///
+    /// Distinct from `throw`, which raises a value verbatim — correct for a
+    /// user's `raise x`, where the thrown value is whatever they wrote, and
+    /// wrong for an error the runtime itself produced. Raising those as bare
+    /// strings meant `catch e` bound a str compiled and a struct interpreted,
+    /// so `e.message` and `catch RuntimeError e` both broke under `jade build`.
+    ///
+    /// Noreturn, like `throw`: the block is closed with `unreachable`.
+    fn throw_runtime(&self, msg: &str) -> Result<(), String> {
+        let f = self.runtime_fn(
+            "jrt_throw_runtime",
+            self.ctx.void_type().fn_type(&[self.ptrt().into()], false),
+        );
+        self.builder
+            .build_call(f, &[self.cstr(msg).into()], "")
+            .map_err(|e| e.to_string())?;
+        self.builder.build_unreachable().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     /// Declare (once) `setjmp(ptr) -> i32` with the `returns_twice` attribute —
     /// without it LLVM may hoist code across the call and miscompile the second
     /// (longjmp) return.
@@ -349,6 +383,30 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
         let f = self
             .runtime_fn("jade_exc_push_frame", self.ctx.void_type().fn_type(&[self.ptrt().into()], false));
         self.builder.build_call(f, &[buf.into()], "").unwrap();
+    }
+
+    /// Restore the handler depth captured in the prologue. Emitted on every
+    /// return from a function containing a `try`.
+    ///
+    /// The emitter only emits `PopHandler` on the try body's normal fall-through
+    /// exit, so `try { …; return x } catch e { … }` returned with its frame
+    /// still on the stack while the `jmp_buf` it points at died with the frame.
+    /// The next `raise` then longjmp'd into dead stack. This is the AOT analogue
+    /// of the VM keeping its `handlers` vec per call frame.
+    fn emit_exc_restore(&self) -> Result<(), String> {
+        let Some(slot) = self.exc_depth_slot else { return Ok(()) };
+        let i32_ty = self.ctx.i32_type();
+        let saved = self
+            .builder
+            .build_load(i32_ty, slot, "exc_saved")
+            .map_err(|e| e.to_string())?
+            .into_int_value();
+        let f = self.runtime_fn(
+            "jade_exc_restore",
+            self.ctx.void_type().fn_type(&[i32_ty.into()], false),
+        );
+        self.builder.build_call(f, &[saved.into()], "").map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     fn pop_frame(&self) {
@@ -387,6 +445,15 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
         Ok(())
     }
 
+    /// `write(x)`: the same render as `print`, with no newline and a flush.
+    fn write_value(&self, val: IntValue<'ctx>, dest: Reg) -> Result<(), String> {
+        let f = self
+            .runtime_fn("jrt_write_any", self.ctx.void_type().fn_type(&[self.i64t().into()], false));
+        self.builder.build_call(f, &[val.into()], "").map_err(|e| e.to_string())?;
+        self.store(dest, self.i64t().const_int(NIL, false));
+        Ok(())
+    }
+
     /// Integer divide (`is_mod == false`) or modulo, with the VM's catchable
     /// zero-divisor behavior: LLVM `sdiv`/`srem` by 0 is UB (traps on arm64),
     /// so we branch on a zero divisor and `raise` a "division/modulo by zero"
@@ -410,8 +477,7 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
             .map_err(|e| e.to_string())?;
 
         self.builder.position_at_end(throw_bb);
-        let msg = self.str_literal_word(if is_mod { "modulo by zero" } else { "division by zero" })?;
-        self.throw(msg)?;
+        self.throw_runtime(if is_mod { "modulo by zero" } else { "division by zero" })?;
 
         self.builder.position_at_end(ok_bb);
         let res = if is_mod {
@@ -469,8 +535,7 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
             .map_err(|e| e.to_string())?;
 
         self.builder.position_at_end(throw_bb);
-        let msg = self.str_literal_word("integer overflow")?;
-        self.throw(msg)?;
+        self.throw_runtime("integer overflow")?;
 
         self.builder.position_at_end(ok_bb);
         let narrowed = self
@@ -615,6 +680,49 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
     /// already owned and must NOT be routed through here.
     fn retain(&self, w: IntValue<'ctx>) {
         self.incref(w);
+    }
+
+    /// Guard a primitive method call's receiver: emit `jrt_require_kind`, which
+    /// raises unless `recv` is one of the `WANT_*` kinds `want` names.
+    ///
+    /// This has to be a runtime check. `chunk_val_method_supported` picks the
+    /// arm from the method *name*, and a name does not prove a kind — the
+    /// receiver of `fn f(v) { v.keys() }` is only known once `f` is called.
+    /// Without the guard the arm untagged the word to a pointer regardless and
+    /// dereferenced it as the kind it assumed, which is a segfault on a scalar
+    /// receiver and a silent wrong answer on the wrong collection.
+    ///
+    /// `jrt_require_kind` returns normally on a match, so callers keep emitting
+    /// into the same block — unlike `throw`, this needs no block surgery.
+    fn require_kind(&self, recv: IntValue<'ctx>, want: u64, method: &str) -> Result<(), String> {
+        let i32_ty = self.ctx.i32_type();
+        let f = self.runtime_fn(
+            "jrt_require_kind",
+            self.ctx
+                .void_type()
+                .fn_type(&[self.i64t().into(), i32_ty.into(), self.ptrt().into()], false),
+        );
+        self.builder
+            .build_call(
+                f,
+                &[recv.into(), i32_ty.const_int(want, false).into(), self.cstr(method).into()],
+                "",
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Guard a str method's argument (`jrt_require_str_arg`), which is untagged
+    /// to a `char*` exactly like the receiver and needs the same check.
+    fn require_str_arg(&self, val: IntValue<'ctx>, method: &str) -> Result<(), String> {
+        let f = self.runtime_fn(
+            "jrt_require_str_arg",
+            self.ctx.void_type().fn_type(&[self.i64t().into(), self.ptrt().into()], false),
+        );
+        self.builder
+            .build_call(f, &[val.into(), self.cstr(method).into()], "")
+            .map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     /// Before slot `i` is overwritten with `new`, release whatever reference it
@@ -1147,7 +1255,7 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
 /// `GetGlobal(name)` + `Call`). A name here is only trusted when the program
 /// never `SetGlobal`s it (so the global still holds the builtin, not a user
 /// value). Grows as more builtins are supported.
-const LOWERABLE_BUILTINS: &[&str] = &["print", "str", "int", "float", "bool", "len"];
+const LOWERABLE_BUILTINS: &[&str] = &["print", "write", "str", "int", "float", "bool", "len"];
 
 /// The single register an instruction writes, or `None` for pure
 /// stores/control-flow. Used to invalidate builtin tracking when a register is
@@ -1226,7 +1334,7 @@ fn resolve_builtin_calls(code: &[Instr]) -> HashMap<usize, BuiltinCall> {
                 if let Some(&b) = reg_builtin.get(callee) {
                     // Only resolve arities this backend lowers; others fall back.
                     let ok = match b {
-                        "print" | "str" | "int" | "float" | "bool" | "len" => args.len() == 1,
+                        "print" | "write" | "str" | "int" | "float" | "bool" | "len" => args.len() == 1,
                         _ => false,
                     };
                     if ok {
@@ -1752,7 +1860,7 @@ fn resolve_user_calls(
                             Some(CallKind::NativeCall { pkgid, fname: fname.to_string(), args: args.clone() })
                         } else {
                             let lowered = LOWERABLE_BUILTINS.contains(&name.as_str())
-                                && matches!(name.as_str(), "print" | "str" | "int" | "float" | "bool" | "len")
+                                && matches!(name.as_str(), "print" | "write" | "str" | "int" | "float" | "bool" | "len")
                                 && args.len() == 1;
                             if lowered {
                                 None
@@ -2229,6 +2337,14 @@ fn emit_str_method<'ctx>(
     let ptrt = low.ptrt();
     let i32_ty = low.ctx.i32_type();
     let err = |e: inkwell::builder::BuilderError| e.to_string();
+
+    // Every arm here untags the receiver *and* its arguments to `char*`, so all
+    // of them need a str. Guard before `sp` is applied to anything.
+    low.require_kind(low.load(recv), WANT_STR, method)?;
+    for a in args {
+        low.require_str_arg(low.load(*a), method)?;
+    }
+
     let sp = |r: Reg| low.untag_ptr(low.load(r));
 
     match method {
@@ -2299,6 +2415,17 @@ fn emit_val_method<'ctx>(
     let i32_ty = low.ctx.i32_type();
     let void_ty = low.ctx.void_type();
     let err = |e: inkwell::builder::BuilderError| e.to_string();
+
+    // Guard the receiver before anything dereferences it. `len` and `contains`
+    // are absent on purpose: they hand the whole tagged word to `jrt_len_chunk`
+    // / `jrt_in_any`, which dispatch on the tag themselves and are already safe
+    // on a scalar. Every other arm untags to a pointer and trusts the kind.
+    match method {
+        "push" | "pop" | "sort" | "reverse" => low.require_kind(low.load(recv), WANT_ARRAY, method)?,
+        "keys" | "values" | "has" | "get" => low.require_kind(low.load(recv), WANT_DICT, method)?,
+        _ => {}
+    }
+
     let recv_p = low.untag_ptr(low.load(recv));
     let nil = i64_ty.const_int(NIL, false);
 
@@ -2371,7 +2498,17 @@ fn emit_val_method<'ctx>(
             } else {
                 // get: found ? *out : nil.
                 let val = b.build_load(i64_ty, out, "getval").map_err(err)?.into_int_value();
-                Ok(b.build_select(bit, val, nil, "getornil").map_err(err)?.into_int_value())
+                let res = b.build_select(bit, val, nil, "getornil").map_err(err)?.into_int_value();
+                // `jrt_coll_dict_get` writes the value word out **borrowed** —
+                // the dict still owns it — so the destination slot becomes a
+                // second owner and the count must rise. `GetIndex` retains for
+                // exactly this reason; `get` did not, so each call decremented
+                // the entry on scope exit and a nested `TABLE.get(k)["f"]` read
+                // correct values twice, then double-freed the inner collection
+                // and raised "key not found" off the freed memory. Retaining
+                // nil is a no-op, so the not-found arm needs no special case.
+                low.retain(res);
+                Ok(res)
             }
         }
         _ => Err(format!("lower.rs: emit_val_method: unhandled {method}")),
@@ -2596,6 +2733,23 @@ fn emit_module_call<'ctx>(
             let f = low.runtime_fn(&format!("jrt_uhttp_{method}"), i64_ty.fn_type(&[ptrt.into(), ptrt.into(), ptrt.into()], false));
             let headers = if args.len() >= 3 { strp(2) } else { ptrt.const_null() };
             Ok(b.build_call(f, &[strp(0).into(), strp(1).into(), headers.into()], "uhttp").map_err(err)?.as_any_value_enum().into_int_value())
+        }
+        ("uhttp", "stream") => {
+            // (unix-url, handler fn word, [headers]) -> status as a tagged int.
+            // The handler is passed as its whole tagged word, not a data pointer:
+            // the C driver reads the raw function pointer out of the box itself,
+            // the way `array.map` does.
+            let f = low.runtime_fn(
+                "jrt_uhttp_stream",
+                i64_ty.fn_type(&[ptrt.into(), i64_ty.into(), ptrt.into()], false),
+            );
+            let headers = if args.len() >= 3 { strp(2) } else { ptrt.const_null() };
+            let status = b
+                .build_call(f, &[strp(0).into(), low.load(args[1]).into(), headers.into()], "ustream")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_int_value();
+            Ok(low.tag_int(status))
         }
         ("dict", "merge") => {
             // (d1, d2) -> new dict word (tagged ptr).
@@ -3039,6 +3193,27 @@ fn lower_body<'ctx>(
             handler_bufs.insert(idx, buf);
         }
     }
+    // Snapshot the handler depth for a function that opens one, so every return
+    // can unwind back to it. A function with no `try` never pushes a frame, and
+    // (with this restore in place) no callee leaks one, so its depth on exit
+    // already equals its depth on entry — it needs neither the call nor the slot.
+    let exc_depth_slot = if handler_bufs.is_empty() {
+        None
+    } else {
+        let i32_ty = context.i32_type();
+        let f = match module.get_function("jade_exc_depth") {
+            Some(f) => f,
+            None => module.add_function("jade_exc_depth", i32_ty.fn_type(&[], false), None),
+        };
+        let d = builder
+            .build_call(f, &[], "exc_depth0")
+            .map_err(|e| e.to_string())?
+            .as_any_value_enum()
+            .into_int_value();
+        let slot = builder.build_alloca(i32_ty, "exc_depth_entry").map_err(|e| e.to_string())?;
+        builder.build_store(slot, d).map_err(|e| e.to_string())?;
+        Some(slot)
+    };
 
     // One LLVM block per reconstructed basic block; entry branches to the first.
     let graph = cfg::build(code);
@@ -3062,6 +3237,7 @@ fn lower_body<'ctx>(
         slots: &slots,
         refcount: fnctx.refcount,
         n_params,
+        exc_depth_slot,
     };
     let call_builtins = resolve_builtin_calls(code);
     let (user_calls, skip_getfields) = resolve_user_calls(code, fn_defs, fnctx)?;
@@ -3100,6 +3276,7 @@ fn lower_body<'ctx>(
                     // Implicit `return nil` (function ran off the end): release
                     // the local slots first, matching an explicit `Return`.
                     low.emit_scope_exit();
+                    low.emit_exc_restore()?;
                     builder
                         .build_return(Some(&i64_ty.const_int(NIL, false)))
                         .map_err(|e| e.to_string())?;
@@ -3987,6 +4164,9 @@ fn lower_instr<'ctx>(
             // move rather than a free of a value the caller now holds.
             low.incref(v);
             low.emit_scope_exit();
+            // Drop any handler this function opened but did not fall out of —
+            // `return` inside a `try` skips the emitter's PopHandler.
+            low.emit_exc_restore()?;
             b.build_return(Some(&v)).map_err(|e| e.to_string())?;
             Ok(true)
         }
@@ -3994,6 +4174,7 @@ fn lower_instr<'ctx>(
         // chunk-function ends by returning nil.
         Halt => {
             low.emit_scope_exit();
+            low.emit_exc_restore()?;
             b.build_return(Some(&i64_ty.const_int(NIL, false)))
                 .map_err(|e| e.to_string())?;
             Ok(true)
@@ -4105,6 +4286,13 @@ fn lower_instr<'ctx>(
                     low.print_value(arg, *dest)?;
                     Ok(false)
                 }
+                // write(x) → print with no newline, flushed. Same renderer as
+                // print, so the two agree on how a value looks.
+                Some(bc) if bc.name == "write" => {
+                    let arg = low.load(bc.args[0]);
+                    low.write_value(arg, *dest)?;
+                    Ok(false)
+                }
                 // str(x) → tagged string via jrt_str_of_any (VM-faithful
                 // value_to_display for scalars/strings; an object arg renders the
                 // runtime's placeholder, but such programs construct the object
@@ -4212,6 +4400,113 @@ mod tests {
         module.print_to_string().to_string()
     }
 
+    /// `ir_of` with reference counting on. `lower_chunk` builds an empty `FnCtx`,
+    /// where `refcount` is false and every rc op is a no-op, so a retain is
+    /// invisible in its IR — this is the path that shows one.
+    fn ir_of_rc(code: &[Instr], n_slots: u32) -> String {
+        let context = Context::create();
+        let module = context.create_module("t");
+        let function = module.add_function("f", context.i64_type().fn_type(&[], false), None);
+        let mut ctx = FnCtx::empty();
+        ctx.refcount = true;
+        lower_body(&context, &module, function, code, &[], n_slots, 0, &ctx)
+            .expect("lowering failed");
+        module.verify().expect("module failed LLVM verification");
+        module.print_to_string().to_string()
+    }
+
+    #[test]
+    fn dict_get_retains_the_borrowed_value() {
+        // r1 = TABLE.get(r0) — the value word comes back borrowed (the dict
+        // still owns it), so the destination must take its own reference. It
+        // did not, so a nested `TABLE.get(k)["f"]` read correct values twice,
+        // then double-freed the inner dict.
+        let ir = ir_of_rc(
+            &[
+                MakeDict(0, vec![]),
+                LoadStr(1, "k".to_string()),
+                GetField(2, 0, "get".to_string()),
+                Call(3, 2, vec![1]),
+                Return(Some(3)),
+            ],
+            4,
+        );
+        assert!(ir.contains("jrt_coll_dict_get"), "get lowered to the runtime lookup:\n{ir}");
+        assert!(ir.contains("jrt_incref"), "the borrowed value word is retained:\n{ir}");
+    }
+
+    #[test]
+    fn dict_method_guards_its_receiver() {
+        // A method name does not prove the receiver's kind, so `keys` has to
+        // check before untagging to a DictObj*. Without this, `"str".keys()`
+        // dereferenced a char* as a dict and killed the process.
+        let ir = ir_of(
+            &[
+                MakeDict(0, vec![]),
+                GetField(1, 0, "keys".to_string()),
+                Call(2, 1, vec![]),
+                Return(Some(2)),
+            ],
+            3,
+        );
+        assert!(ir.contains("jrt_require_kind"), "the receiver is kind-checked:\n{ir}");
+        assert!(ir.contains("jrt_coll_dict_keys"), "then the real call:\n{ir}");
+    }
+
+    #[test]
+    fn array_method_guards_its_receiver() {
+        let ir = ir_of(
+            &[
+                MakeArray(0, vec![]),
+                LoadInt(1, 1),
+                GetField(2, 0, "push".to_string()),
+                Call(3, 2, vec![1]),
+                Return(Some(3)),
+            ],
+            4,
+        );
+        assert!(ir.contains("jrt_require_kind"), "the receiver is kind-checked:\n{ir}");
+        assert!(ir.contains("jrt_karr_push"), "then the real call:\n{ir}");
+    }
+
+    #[test]
+    fn str_method_guards_receiver_and_arguments() {
+        // Both the receiver and the argument are untagged to char*, so both
+        // need the check — and a bad argument reports as an argument type
+        // error, not as a missing field.
+        let ir = ir_of(
+            &[
+                LoadStr(0, "abc".to_string()),
+                LoadStr(1, "a".to_string()),
+                GetField(2, 0, "starts_with".to_string()),
+                Call(3, 2, vec![1]),
+                Return(Some(3)),
+            ],
+            4,
+        );
+        assert!(ir.contains("jrt_require_kind"), "the receiver is kind-checked:\n{ir}");
+        assert!(ir.contains("jrt_require_str_arg"), "the argument is checked too:\n{ir}");
+        assert!(ir.contains("jrt_str_starts_with"), "then the real call:\n{ir}");
+    }
+
+    #[test]
+    fn runtime_dispatched_methods_are_not_guarded() {
+        // `len` and `contains` hand the whole tagged word to jrt_len_chunk /
+        // jrt_in_any, which dispatch on the tag themselves and are safe on a
+        // scalar. Guarding them would raise on receivers the VM accepts.
+        let ir = ir_of(
+            &[
+                LoadStr(0, "abc".to_string()),
+                GetField(1, 0, "len".to_string()),
+                Call(2, 1, vec![]),
+                Return(Some(2)),
+            ],
+            3,
+        );
+        assert!(ir.contains("jrt_len_chunk"), "len goes to the tag dispatcher:\n{ir}");
+        assert!(!ir.contains("jrt_require_kind"), "and is not kind-guarded:\n{ir}");
+    }
+
     #[test]
     fn arithmetic_lowers_to_add_and_ret() {
         // r2 = r0 + r1 ; return r2   with r0=2, r1=3
@@ -4305,7 +4600,10 @@ mod tests {
         );
         assert!(ir.contains("sdiv"), "native signed div:\n{ir}");
         assert!(ir.contains("divzero_throw"), "a throw block guards the divisor:\n{ir}");
-        assert!(ir.contains("jade_exc_throw_typed"), "raises on zero divisor:\n{ir}");
+        // Via jrt_throw_runtime, not a bare throw: codegen's own failures are
+        // runtime errors and must reach `catch` as the VM's `RuntimeError`
+        // struct, so `e.message` and `catch RuntimeError e` work compiled.
+        assert!(ir.contains("jrt_throw_runtime"), "raises on zero divisor:\n{ir}");
         assert!(ir.contains("unreachable"), "throw path is noreturn:\n{ir}");
     }
 
@@ -4349,6 +4647,28 @@ mod tests {
         assert!(ir.contains("jade_exc_pop"), "clean exit pops frame:\n{ir}");
         assert!(ir.contains("jade_exc_value"), "landing binds the caught value:\n{ir}");
         assert!(ir.contains("exc_landing"), "distinct landing block:\n{ir}");
+    }
+
+    #[test]
+    fn a_function_with_a_handler_scopes_it_to_the_frame() {
+        // SetupHandler ; Return — the return leaves the try WITHOUT reaching
+        // PopHandler, so the depth captured on entry has to be restored or the
+        // frame outlives the stack that holds its jmp_buf.
+        let ir = ir_of(
+            &[SetupHandler(1, 2), LoadInt(0, 1), Return(Some(0)), Halt],
+            2,
+        );
+        assert!(ir.contains("jade_exc_depth"), "entry snapshots the depth:\n{ir}");
+        assert!(ir.contains("jade_exc_restore"), "return unwinds to it:\n{ir}");
+    }
+
+    #[test]
+    fn a_function_without_a_handler_pays_nothing() {
+        // No try → the function cannot push a frame, so it needs neither the
+        // prologue call nor the restore.
+        let ir = ir_of(&[LoadInt(0, 1), Return(Some(0))], 1);
+        assert!(!ir.contains("jade_exc_depth"), "no snapshot without a try:\n{ir}");
+        assert!(!ir.contains("jade_exc_restore"), "no restore without a try:\n{ir}");
     }
 
     #[test]
@@ -4822,6 +5142,45 @@ mod tests {
             3,
         );
         assert!(ir2.contains("jrt_bool_any"), "bool() lowered:\n{ir2}");
+    }
+
+    #[test]
+    fn write_builtin_lowers_to_the_flushing_writer() {
+        // write("x") → jrt_write_any (print with no newline, flushed). Until
+        // v1.1.34 this declined and the whole build failed, so a program using
+        // `write` ran under the VM and could not be compiled at all.
+        let ir = ir_of(
+            &[
+                GetGlobal(0, "write".to_string()),
+                LoadStr(1, "x".to_string()),
+                Call(2, 0, vec![1]),
+                Return(Some(2)),
+            ],
+            3,
+        );
+        assert!(ir.contains("jrt_write_any"), "write lowered:\n{ir}");
+        // print is a separate symbol — write must not silently become print,
+        // which would add a newline the program did not ask for.
+        assert!(!ir.contains("jrt_print_any"), "write is not print:\n{ir}");
+    }
+
+    #[test]
+    fn uhttp_stream_lowers_with_the_handler_as_a_value() {
+        // uhttp.stream(url, handler) → jrt_uhttp_stream(url, fn word, headers).
+        // The handler is passed as its whole tagged word, since the C driver
+        // reads the function pointer out of the box the way array.map does.
+        let ir = ir_of(
+            &[
+                GetGlobal(0, "uhttp".to_string()),
+                GetField(1, 0, "stream".to_string()),
+                LoadStr(2, "unix:///tmp/s.sock:/events".to_string()),
+                LoadStr(3, "handler-placeholder".to_string()),
+                Call(4, 1, vec![2, 3]),
+                Return(Some(4)),
+            ],
+            5,
+        );
+        assert!(ir.contains("jrt_uhttp_stream"), "stream lowered:\n{ir}");
     }
 
     #[test]

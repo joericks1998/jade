@@ -183,6 +183,9 @@ int     jrt_snprintf_any(char* buf, size_t cap, int64_t val);
  * scratch buffer), so a long Unknown-typed string isn't truncated. Used by
  * print() for statically-Unknown args. */
 void    jrt_print_any(int64_t val, const char* suffix);
+/* jrt_write_any — `write(x)`: print with no newline, then flush. The flush
+ * matches the VM; unflushed no-newline output sits in a line-buffered stdout. */
+void    jrt_write_any(int64_t val);
 
 /* Format a Jade float into buf (snprintf semantics) the way the VM displays
  * it: the shortest decimal that round-trips to the same double, with a
@@ -251,8 +254,24 @@ void jade_future_free(jade_future_t future);
  * after and branches: 0 → try body, nonzero → catch body.      */
 void    jade_exc_push_frame(void* jmpbuf);
 void    jade_exc_pop(void);
+/* jade_exc_depth / jade_exc_restore — scope the handler stack to a call frame.
+ * Codegen snapshots the depth in each function's prologue and restores it on
+ * every return, so a `try` exited by `return` (which skips the emitter's
+ * PopHandler) cannot leave a frame pointing at a dead jmp_buf. Restore only
+ * ever unwinds; it never raises the depth. */
+int32_t jade_exc_depth(void);
+void    jade_exc_restore(int32_t depth);
 void    jade_exc_throw(int64_t value);   /* longjmps to top frame or exits */
 void    jade_exc_throw_typed(int64_t value, const char* type); /* type = struct name or NULL */
+/* jrt_throw_io — raise an I/O failure the way the VM does: a `RuntimeError`
+ * struct whose `message` is "I/O error: <detail>". The fs/http/uhttp/sh
+ * forwarders use it, since their Rust halves record a pending error instead of
+ * throwing. Takes ownership of nothing; the caller frees `detail`. */
+void    jrt_throw_io(const char* detail);
+/* jrt_throw_runtime — raise codegen's own failures (zero divisor, overflow) as
+ * the same `RuntimeError` struct. A user's `raise x` does NOT come through here:
+ * that throws x itself, which is what the VM does too. */
+void    jrt_throw_runtime(const char* msg);
 int64_t jade_exc_value(void);
 const char* jade_exc_type(void);         /* thrown struct type name, or NULL */
 
@@ -359,6 +378,22 @@ int64_t jrt_bool_any(int64_t val);
 #define JK_DICT   3
 #define JK_STRUCT 4
 #define JK_PROMPT 7
+
+/* jrt_require_kind — the receiver guard the Chunk backend emits ahead of a
+ * primitive method call (`recv.push(x)`, `recv.keys()`, `recv.upper()`, …).
+ * `want` is a bitmask of the kinds that method accepts; a receiver outside it
+ * RAISES the VM's "struct '<kind>' has no field '<method>'" rather than being
+ * untagged and dereferenced as a kind it is not. Returns normally on a match.
+ * A method name never proves its receiver's kind — see common.c for why the
+ * frontend cannot settle this and the VM checks at runtime too. */
+#define JRT_WANT_STR   0x1
+#define JRT_WANT_ARRAY 0x2
+#define JRT_WANT_DICT  0x4
+void    jrt_require_kind(int64_t recv, int32_t want, const char* method);
+/* jrt_require_str_arg — the same guard for a str method's *argument*, which is
+ * untagged to a char* just like the receiver. Raises the VM's argument wording
+ * ("type error: str.<method>") rather than the has-no-field wording. */
+void    jrt_require_str_arg(int64_t val, const char* method);
 
 /* ── Prompt values ────────────────────────────────────────────────────────
  *
@@ -527,6 +562,18 @@ jade_value_t jrt_uhttp_post(const char* url, const char* body, void* headers);
 jade_value_t jrt_uhttp_put(const char* url, const char* body, void* headers);
 jade_value_t jrt_uhttp_delete(const char* url, void* headers);
 jade_value_t jrt_uhttp_head(const char* url, void* headers);
+
+/* uhttp.stream — a streaming read over a Unix socket, one Jade handler call per
+ * body line. The handle API is Rust (jade-runtime, src/uhttpf.rs `Stream`); the
+ * driver loop that calls the handler is jrt_uhttp_stream in common.c, because
+ * the call goes back into Jade and a raising handler must not longjmp through a
+ * Rust frame. `_next` returns 1 on a line (writing a tagged TAINTED string word
+ * to *out), 0 at end of stream, -1 on failure with a pending error set. */
+void*   jrt_uhttp_stream_open(const char* url, void* headers);
+int64_t jrt_uhttp_stream_status(void* h);
+int32_t jrt_uhttp_stream_next(void* h, int64_t* out);
+void    jrt_uhttp_stream_close(void* h);
+int64_t jrt_uhttp_stream(const char* url, int64_t fn_word, void* headers);
 
 /* sh (std::sh) is implemented in Rust now (jade-runtime, src/shf.rs). exec/run
  * refuse tainted input (a code-execution sink) — that check + throw stays in the

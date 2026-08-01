@@ -39,6 +39,12 @@ The transport tree for arrays and dicts crossing the FFI is **libc-heap**, delib
 
 Any change to the tagged value layout has three homes: `runtime.h`, `jade-runtime`'s `value.rs`, and the tag arithmetic in `aot/lower.rs`.
 
+The exception stack (`exc_stack` / `exc_depth` in `common.c`) is `_Thread_local` and **nothing unwinds it automatically**. A `longjmp` needs its `jmp_buf` to live in a stack frame that has not returned, so the depth is scoped by codegen: `jade_exc_depth` in a function's prologue, `jade_exc_restore` on each of its return paths. `jade_exc_restore` only ever lowers the depth — raising it would resurrect a buffer whose frame is gone. If you add a path out of a lowered function, it needs the restore too.
+
+**A raise has to produce the value the VM would produce, not just the right text.** Every non-user error in the interpreter is a `RuntimeError` struct with a `message` field (`vm/exceptions.rs`), so `catch e` binds a struct and `catch RuntimeError e` matches. Raising the bare message string here meant the same `try` saw a str compiled and a struct interpreted — `e.message` raised, and a typed catch quietly never fired. `throw_msg` builds the struct now, and everything that raises goes through it: `jrt_throw_io` adds the interpreter's `I/O error: ` prefix for the fs/http/uhttp/sh forwarders, and `jrt_throw_runtime` is the entry point for codegen's own failures (zero divisor, overflow). A user's `raise x` deliberately does *not* pass through any of them — that throws the value written, as the VM does. The `[line:col]` prefix is the one part that stays absent, because compiled code has no span at runtime.
+
+`jrt_require_kind` and `jrt_require_str_arg` exist because a primitive method's *name* does not establish its receiver's kind; the compiled path calls them before untagging a receiver it did not statically type. They raise through `throw_msg`, deliberately, so a Jade `catch` can see the failure — the common type test is a method call wrapped in `try`.
+
 ## Building
 
 `build.rs` compiles this automatically as part of `cargo build`. It also enforces the Unix-only constraint first, before `cc` runs, so a Windows target fails with a clear message rather than a missing-POSIX-header error.

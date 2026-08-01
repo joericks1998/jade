@@ -43,7 +43,7 @@ It is intentionally dependency-free and LLVM-free, so it builds everywhere `jade
 
 - `task.rs` — a bounded worker pool and the future object tasks resolve. Replaces the one-detached-pthread-per-spawn model that made large fan-outs a resource failure instead of a queue.
 - `provider/` — resolves the *active provider slot* under `$HOME/.jade/provider/active/`. It only resolves the slot; loading and driving the provider package is the engines' job. This replaced an `infer/` module holding a Unix-socket client for the inference daemon — inference is an in-process package call now, so there is no transport left to share.
-- `uhttpf/`, `httpf.rs` — HTTP over a Unix socket and over TCP.
+- `uhttpf/`, `httpf.rs` — HTTP over a Unix socket and over TCP. `uhttpf` also holds `Stream`, the reader behind `uhttp.stream`: it connects, parses the status and headers, and yields one body line at a time across chunked or raw framing. It is deliberately *pull*-shaped rather than callback-shaped, because the two engines drive it differently — the VM pumps it from a worker thread into a tokio channel, while the compiled path drives it inline from `jrt_uhttp_stream` in `runtime_aot/common.c`, which is what calls the Jade handler. Keeping the handler call on the C side matters: a handler that raises does a `longjmp`, and that must not unwind through a Rust frame.
 
 **Standard-library cores** — `mathf.rs`, `strf.rs`, `fsf.rs`, `pathf.rs`, `envf.rs`, `shf.rs`, `jsonf.rs`, `randomf.rs`, `timef.rs`, `grammarf.rs`. Each holds the shared implementation behind a `std/*` package; the thin `VmValue` marshalling lives in the matching top-level module (`src/math/`, `src/string/`, …).
 
