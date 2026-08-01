@@ -11,7 +11,7 @@ Keeping `main.rs` to argument parsing means the commands are ordinary library fu
 ## What each file does
 
 - **`run.rs`** — `jade run`. With no argument it finds the project root and runs the entry file; a `.jde` argument runs that file; anything else is looked up as a named script in `jade.toml`'s `[scripts]`.
-- **`check.rs`** — `jade check`. Type-checks without executing. It deliberately runs `emit` as well as inference, because shared-mutation-across-tasks is rejected at emit time — running it keeps `check` an honest predictor of whether `run` and `build` will succeed.
+- **`check.rs`** — `jade check`. Type-checks without executing. It deliberately runs two things past inference, both so `check` stays an honest predictor of whether `run` and `build` will succeed: `emit`, because shared-mutation-across-tasks is rejected at emit time; and `project::walk_imports`, because import resolution is not a compile stage — the VM resolves a `use` when the Import opcode runs, so before v1.1.33 `use totally_made_up_module` reported `ok` and then failed at run time. Unlike `run`, the import walk does not call `pkg::ensure_ready`: checking a file should not reach the network to fetch dependencies.
 - **`build.rs`** — `jade build`. Runs the whole pipeline in-process: lex, parse, infer, resolve imports, generate LLVM IR, link. Also handles `--emit-ir` and `--lib`.
 - **`repl.rs`** — `jade repl`. Uses the VM so the REPL and `jade run` share one implementation. A bare trailing expression is assigned to an internal capture slot (a name starting with NUL, so it can never collide with a user global) and echoed.
 - **`test.rs`** — `jade test`. Discovers `test_*.jde` and `*_test.jde` under the project root, optionally filtered by a pattern.

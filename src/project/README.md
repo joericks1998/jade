@@ -21,13 +21,17 @@ The package manager reuses that mechanism rather than adding a parallel one. Res
   - `resolve_relative_import` — a sibling-file import.
   - `ambiguous_bare_import` — detects a bare name that could mean two things, so the error names the ambiguity instead of silently picking one.
   - `find_test_files` — discovers `test_*.jde` and `*_test.jde` for `jade test`.
-- **`tests.rs`** — resolution tests.
+- **`imports.rs`** — one answer to "what does this `use` name?", plus the check-time graph walk:
+  - `resolve_import` — the single resolver, built on the three primitives above. Returns an `ImportTarget`: a built-in `std::*` package, a native shared library, or a Jade source file. `vm/chunk.rs` reaches it through a thin adapter, so a `use` that `check` accepts and the VM then cannot find is a shape the code cannot express.
+  - `walk_imports` — resolves every import reachable from a file, following Jade modules transitively, and returns the first unresolvable one with its span. It loads nothing: a native module is checked for existence but never `dlopen`ed, since opening one runs its initializer and `check` must not execute the program it is checking.
+  - `program_import_paths` — the `use` / `from ... use` paths of a parsed program.
+- **`tests.rs`** — resolution tests, and the import-walk tests covering missing modules, transitive breakage, cycles, and per-module directory resolution.
 
 ## Who uses it
 
-*Depends on:* `serde` and `toml` only. It is deliberately near the bottom of the stack.
+*Depends on:* `serde` and `toml`, plus `frontend/` and `builtins/` for the import walk — it needs the lexer and parser to find a module's own imports, and the built-in package list to know which names are compiled in. `mod.rs` on its own stays at the bottom of the stack.
 
-*Used by:* `vm/chunk.rs` (runtime import resolution), `aot/imports.rs` (compile-time import resolution), `pkg/` (contributes `LibraryEntry` values), and most of `cli/` — `run`, `test`, `build`, `env`, and `pkg` all start by finding the project root.
+*Used by:* `vm/chunk.rs` (runtime import resolution), `aot/imports.rs` (compile-time import resolution), `cli/check.rs` (the import walk), `pkg/` (contributes `LibraryEntry` values), and most of `cli/` — `run`, `test`, `build`, `env`, and `pkg` all start by finding the project root.
 
 ## Gotchas
 

@@ -5,8 +5,13 @@ use std::{
 
 use serde::Deserialize;
 
+mod imports;
 #[cfg(test)]
 mod tests;
+
+pub use imports::{
+    ImportContext, ImportTarget, program_import_paths, resolve_import, walk_imports,
+};
 
 // ── Manifest types ────────────────────────────────────────────────────────────
 
