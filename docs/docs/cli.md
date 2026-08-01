@@ -123,6 +123,17 @@ jade fmt src/ --check
 |------|-------------|
 | `--check` | Exit with code 1 if any file would be changed (useful for CI). |
 
+### What it changes
+
+Indentation and trailing whitespace, and nothing else. Four spaces per block. Three or more blank lines in a row become two, and the file ends in exactly one newline. Operator spacing, line length, and where you break a long expression are left as you wrote them.
+
+Two kinds of line keep the exact whitespace they came with:
+
+- **Inside a triple-quoted string.** That indentation is part of the text, so changing it would change what your program prints.
+- **A wrapped expression** — the continuation lines of an argument list, an array, or a struct literal. Where a `{` sits decides which case you are in: one that ends the line opens a block, so `let cfg = {` indents what follows, while `Result { name: name,` leaves your alignment alone.
+
+Formatting only moves whitespace, so the result has to lex to the same tokens as what you wrote. `jade fmt` checks that before writing and leaves the file alone if they differ. A file that does not lex at all is skipped rather than reported, so formatting while you are mid-edit is safe.
+
 ## `jade register` / `jade use`
 
 Choose the inference provider that `?p` calls, and store its API key. Both are global and per-user, kept under `~/.jade` — not per project.

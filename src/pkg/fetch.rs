@@ -103,7 +103,7 @@ pub fn platform_tag() -> Option<&'static str> {
 
 /// Every platform a dependency may publish an artifact for.
 ///
-/// `jade add` walks this list to expand a `{platform}` URL template, so a lock
+/// `jade pkg add` walks this list to expand a `{platform}` URL template, so a lock
 /// generated on one machine still describes the others. Kept in sync with
 /// [`platform_tag`] — a tag that platform_tag can return but which is absent
 /// here would be unresolvable at install time.

@@ -17,14 +17,13 @@ Keeping `main.rs` to argument parsing means the commands are ordinary library fu
 - **`test.rs`** — `jade test`. Discovers `test_*.jde` and `*_test.jde` under the project root, optionally filtered by a pattern.
 - **`fmt.rs`** — `jade fmt`. Works on source *text*, line-based, not on the token stream — the lexer strips comments, so a reprint would lose them. Limited by design: it fixes indentation and trailing whitespace but does not normalize operator spacing. `--check` exits 1 if anything would change.
 - **`new.rs`** — `jade new` and `jade init`. Scaffolds a project directory from the `basic` or `llm` template.
-- **`pkg.rs`** — `jade add` / `remove` / `install` / `update` / `list`. The manifest is the source of truth and `jade.lock` is derived from it; with no registry to query, "update" means reconciling the lock with the manifest, not discovering a newer version.
+- **`pkg.rs`** — `jade pkg add` / `remove` / `install` / `update` / `list`. The manifest is the source of truth and `jade.lock` is derived from it; with no registry to query, "update" means reconciling the lock with the manifest, not discovering a newer version.
 - **`register.rs`** — `jade register` and `jade use`. Picks which inference provider `?p` uses and stores its API key under `~/.jade`, machine-wide. `install.sh` runs `jade register` interactively after an install, so this is often a new user's very first `jade` command — it stays chatty and forgiving.
 - **`env.rs`** — `jade env`. Version, binary path, platform, cache stats, project info. `--json` for scripting.
 - **`cache.rs`** — `jade cache info` / `clean`.
 - **`upgrade.rs`** — `jade upgrade`. Updates the toolchain itself from GitHub Releases. Distinct from `jade update`, which is about project dependencies.
 - **`mod.rs`** — module declarations plus `format_bytes`.
-- **`help.rs`** — currently empty.
-- **`tests.rs`** — CLI tests.
+- **`tests.rs`** — CLI tests. See "Building and testing" below for what is and is not covered.
 
 ## Who uses it
 
@@ -36,7 +35,9 @@ Keeping `main.rs` to argument parsing means the commands are ordinary library fu
 
 Commands exit the process directly on user error (`process::exit(1)`) with a message on stderr, rather than propagating a `Result` to `main`. Match that when adding one.
 
-`jade upgrade` and `jade update` are easy to confuse in help text and in commit messages. Upgrade is the toolchain; update is the project's dependencies.
+`jade upgrade` and `jade update` are easy to confuse in help text and in commit messages. Upgrade is the toolchain; update is the project's dependencies. Note also that the package commands are nested: `jade pkg add`, not `jade add`.
+
+**`jade fmt` reads source text, and the text has more in it than the token stream does.** The lexer throws away comments, so the formatter cannot work from tokens without losing them — which means it re-implements the parts of lexing that affect layout, and every one of them has bitten. Its scanner has to know about `//` comments, both quote characters, triple-quoted strings that span lines, and escapes, because a `{` it misreads shifts every line after it. Three separate versions of this bug shipped before v1.1.35, the worst of them reindenting the *inside* of a multi-line string and silently changing what the program printed. Two things guard it now: `run_fmt` re-lexes its own output and refuses to write a file whose tokens changed, and CI holds `examples/` formatted so the formatter meets 70-odd real files on every push.
 
 ## Building and testing
 
@@ -44,3 +45,7 @@ Commands exit the process directly on user error (`process::exit(1)`) with a mes
 cargo test cli::
 ./target/debug/jade env      # quickest smoke test that the binary is wired up
 ```
+
+A subcommand handler is not testable in process — every one ends in `process::exit`, and several read stdin, reach the network, or write under `~/.jade`. So `tests.rs` covers the decision each command makes *before* it touches the world: `fmt`'s formatting, `build`'s default output path, `upgrade`'s archive name for this platform, `run -v`'s value rendering, `new`'s scaffolding. Extract a pure helper when you add a command, or it will not be covered by anything.
+
+Two rules make the tests safe under `cargo test`'s parallelism: no `std::env::set_var`, and no changing the working directory. Anything needing the filesystem uses the `TempDir` helper at the top of `tests.rs`, which gives each test a uniquely named directory and removes it on drop.

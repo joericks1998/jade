@@ -12,21 +12,21 @@
 // a value's type, and a process that segfaults cannot be caught by anything.
 
 fn is_dict(v) {
-  try {
-    v.keys()
-    return true
-  } catch e {
-    return false
-  }
+    try {
+        v.keys()
+        return true
+    } catch e {
+        return false
+    }
 }
 
 fn is_array(v) {
-  try {
-    v.push(1)
-    return true
-  } catch e {
-    return false
-  }
+    try {
+        v.push(1)
+        return true
+    } catch e {
+        return false
+    }
 }
 
 print(is_dict({"x": 1}))   // true
@@ -44,11 +44,11 @@ print(is_array(42))        // false
 
 // A str method on a non-str raises the same way.
 fn upper_or_bust(v) {
-  try {
-    return v.upper()
-  } catch e {
-    return "raised"
-  }
+    try {
+        return v.upper()
+    } catch e {
+        return "raised"
+    }
 }
 
 print(upper_or_bust("ok"))   // OK
@@ -58,11 +58,11 @@ print(upper_or_bust([1]))    // raised
 // A str method's *argument* is untagged to a char* too, so it needs the same
 // check — and reports as an argument type error, not a missing field.
 fn starts(hay, needle) {
-  try {
-    return hay.starts_with(needle)
-  } catch e {
-    return "raised"
-  }
+    try {
+        return hay.starts_with(needle)
+    } catch e {
+        return "raised"
+    }
 }
 
 print(starts("abc", "a"))   // true

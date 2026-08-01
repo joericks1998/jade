@@ -21,68 +21,68 @@
 // found the right frame and looked fine.
 
 fn returns_from_try() {
-  try {
-    return "returned out of the try"
-  } catch e {
-    return "caught"
-  }
+    try {
+        return "returned out of the try"
+    } catch e {
+        return "caught"
+    }
 }
 
 fn returns_from_catch() {
-  try {
-    raise "inner"
-  } catch e {
-    return "returned out of the catch"
-  }
+    try {
+        raise "inner"
+    } catch e {
+        return "returned out of the catch"
+    }
 }
 
 try {
-  print(returns_from_try())      // returned out of the try
-  print(returns_from_catch())    // returned out of the catch
-  raise "boom"
+    print(returns_from_try())      // returned out of the try
+    print(returns_from_catch())    // returned out of the catch
+    raise "boom"
 } catch e {
-  print(f"caught: {e}")          // caught: boom
+    print(f"caught: {e}")          // caught: boom
 }
 
 // Many leaks, then the same test — the handler stack is bounded, so a leak per
 // call would also eventually overflow it outright.
 fn leak(i) {
-  try {
-    return i
-  } catch e {
-    return -1
-  }
+    try {
+        return i
+    } catch e {
+        return -1
+    }
 }
 
 try {
-  let i = 0
-  while i < 200 {
-    leak(i)
-    i = i + 1
-  }
-  raise "after many"
+    let i = 0
+    while i < 200 {
+        leak(i)
+        i = i + 1
+    }
+    raise "after many"
 } catch e {
-  print(f"caught: {e}")          // caught: after many
+    print(f"caught: {e}")          // caught: after many
 }
 
 // Nested try, returning from the inner one: both frames must come off.
 fn nested() {
-  try {
     try {
-      return "from the inner try"
-    } catch inner {
-      return "inner caught"
+        try {
+            return "from the inner try"
+        } catch inner {
+            return "inner caught"
+        }
+    } catch outer {
+        return "outer caught"
     }
-  } catch outer {
-    return "outer caught"
-  }
 }
 
 try {
-  print(nested())                // from the inner try
-  raise "still fine"
+    print(nested())                // from the inner try
+    raise "still fine"
 } catch e {
-  print(f"caught: {e}")          // caught: still fine
+    print(f"caught: {e}")          // caught: still fine
 }
 
 print("done")

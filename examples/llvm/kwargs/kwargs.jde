@@ -1,5 +1,5 @@
 fn sub(a, b) {
-  return a - b
+    return a - b
 }
 let r = sub(b = 1, a = 10)
 print(r)

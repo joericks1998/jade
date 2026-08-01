@@ -22,7 +22,7 @@ A dependency names **where it lives** — a URL or a local path — rather than 
 
 - **No transitive resolution.** A `.so` carries no manifest, so Jade cannot discover that one package needs another. `jade.lock` is a flat list. A package with its own dependencies must say so in its documentation.
 - **No version ranges.** With no index to resolve `^1.2` against, a dependency names one exact version. `version = "^1.2"` is rejected at parse time rather than silently treated as a literal.
-- **`jade update` reconciles, it does not discover.** It re-resolves the lock against the manifest and re-fetches. To move to a new version, edit `jade.toml` (or re-run `jade pkg add` with a new `--version`).
+- **`jade pkg update` reconciles, it does not discover.** It re-resolves the lock against the manifest and re-fetches. To move to a new version, edit `jade.toml` (or re-run `jade pkg add` with a new `--version`).
 
 ## Commands
 

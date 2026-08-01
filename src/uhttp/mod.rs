@@ -30,10 +30,6 @@ use crate::builtins::{BuiltinFn, Package};
 
 const ZERO: Span = Span { line: 0, col: 0 };
 
-fn uhttp_err(detail: &str) -> JadeError {
-    JadeError::IoError { message: format!("uhttp: {}", detail), span: ZERO }
-}
-
 /// A streaming failure. Named `uhttp stream:` rather than the bare `uhttp:`,
 /// matching the request path's `uhttp GET:` / `uhttp POST:` and the compiled
 /// backend's wording for the same failure (`jrt_uhttp_stream` in

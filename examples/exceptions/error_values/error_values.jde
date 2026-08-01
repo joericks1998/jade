@@ -14,32 +14,32 @@
 // equality. Everything here has to hold identically on both engines.
 
 fn divzero() {
-  let a = 1
-  let b = 0
-  return a / b
+    let a = 1
+    let b = 0
+    return a / b
 }
 
 fn bad_method() {
-  let v = 42
-  return v.upper()
+    let v = 42
+    return v.upper()
 }
 
 fn overflow() {
-  let big = 4611686018427387903
-  return big + big
+    let big = 4611686018427387903
+    return big + big
 }
 
 // A typed catch has to match, which is what proves the raised value carries the
 // type name and not just the fields.
 fn kind_of(f) {
-  try {
-    f()
-    return "no raise"
-  } catch RuntimeError e {
-    return "RuntimeError"
-  } catch e {
-    return "untyped"
-  }
+    try {
+        f()
+        return "no raise"
+    } catch RuntimeError e {
+        return "RuntimeError"
+    } catch e {
+        return "untyped"
+    }
 }
 
 print(kind_of(divzero))      // RuntimeError
@@ -48,12 +48,12 @@ print(kind_of(overflow))     // RuntimeError
 
 // The message field is readable, and carries the same wording on both engines.
 fn message_of(f) {
-  try {
-    f()
-    return ""
-  } catch e {
-    return e.message
-  }
+    try {
+        f()
+        return ""
+    } catch e {
+        return e.message
+    }
 }
 
 print(message_of(divzero).contains("division by zero"))            // true
@@ -63,21 +63,21 @@ print(message_of(overflow).contains("integer overflow"))           // true
 // A user's `raise x` is NOT wrapped: the value thrown is the value written, so
 // a raised string stays a string and a raised struct keeps its own type.
 struct MyError {
-  message
+    message
 }
 
 try {
-  raise "just a string"
+    raise "just a string"
 } catch e {
-  print(e)                   // just a string
+    print(e)                   // just a string
 }
 
 try {
-  raise MyError { message: "mine" }
+    raise MyError { message: "mine" }
 } catch MyError e {
-  print(f"MyError: {e.message}")   // MyError: mine
+    print(f"MyError: {e.message}")   // MyError: mine
 } catch e {
-  print("wrong arm")
+    print("wrong arm")
 }
 
 // `RuntimeError` is the runtime's own type, not a declarable one — user code

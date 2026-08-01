@@ -8,13 +8,13 @@
 // only running both engines caught it.
 
 let TABLE = {
-  "a": {"host": "one", "port": 1},
-  "b": {"host": "two", "port": 2},
+    "a": {"host": "one", "port": 1},
+    "b": {"host": "two", "port": 2},
 }
 
 fn host_of(name) {
-  let entry = TABLE.get(name)
-  return entry["host"]
+    let entry = TABLE.get(name)
+    return entry["host"]
 }
 
 // Far more reads than owners: with the retain missing this is well past a free.

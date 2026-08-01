@@ -74,6 +74,14 @@ jobs:
           done < <(find examples -name '*.jde' | sort)
           exit $status
 
+      # `jade fmt` is the one command nothing else in CI exercises, and it
+      # rotted unnoticed until it was reindenting the inside of multi-line
+      # strings — changing what a program printed, in place, on a tree nobody
+      # ran it over. Holding the fixture suite formatted keeps the formatter
+      # honest against 70-odd real files on every push.
+      - name: Check formatting
+        run: ./target/debug/jade fmt --check examples
+
       # Runs every example on both the VM and the AOT backend and diffs the
       # output. The two paths have silently diverged three times; each was
       # caught by hand, because no automated check ever ran a program both

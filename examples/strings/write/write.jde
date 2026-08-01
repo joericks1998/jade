@@ -30,12 +30,12 @@ print("")
 
 // A progress bar: the case the flush is for.
 fn bar(n) {
-  let i = 0
-  while i < n {
-    write("#")
-    i = i + 1
-  }
-  print("")
+    let i = 0
+    while i < n {
+        write("#")
+        i = i + 1
+    }
+    print("")
 }
 bar(8)
 

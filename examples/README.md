@@ -13,6 +13,8 @@ Two rules, both enforced by CI:
 - `<name>.jde` must **pass** `jade check`.
 - `<name>_error.jde` must **fail** `jade check`. These document programs the language deliberately rejects, so one that quietly starts passing is a CI failure too.
 
+A third rule applies to the whole tree: it stays formatted, and CI runs `jade fmt --check examples` to hold it there. That is as much a test of the formatter as of the fixtures. `jade fmt` is the one command nothing else here exercises, and it rotted badly enough by v1.1.34 to be reindenting the inside of multi-line strings — changing what a program printed, in place. Run `jade fmt examples` before committing a new fixture. Four spaces per level.
+
 ## What is in here
 
 One directory per language area, each with a subdirectory per case:
@@ -31,7 +33,7 @@ Three fixtures exist to pin the AOT memory bugs fixed in v1.1.34, and each one *
 
 ## Who uses it
 
-*Used by:* `.github/workflows/ci.yml` runs `jade check` over every fixture. `src/scripts/backend-parity.sh` runs each one on the VM and the AOT backend and diffs stdout. The `docs/` site draws on several of them for its examples.
+*Used by:* `.github/workflows/ci.yml` runs `jade check` over every fixture, and `jade fmt --check` over the tree. `src/scripts/backend-parity.sh` runs each one on the VM and the AOT backend and diffs stdout. The `docs/` site draws on several of them for its examples.
 
 *Depends on:* only the `jade` binary. Fixtures never import from the Rust tree.
 

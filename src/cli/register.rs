@@ -189,7 +189,7 @@ fn activate_or_exit(name: &str) {
     }
 }
 
-fn join_names(installed: &[providers::InstalledProvider]) -> String {
+pub(crate) fn join_names(installed: &[providers::InstalledProvider]) -> String {
     if installed.is_empty() {
         return "none".to_string();
     }

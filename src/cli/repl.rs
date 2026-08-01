@@ -158,7 +158,7 @@ async fn eval_snippet_vm(src: &str, state: &mut VmState) -> Result<Option<String
 /// Whether an expression prints to stdout on its own as it evaluates, so the
 /// REPL should not also echo its result: a bare `?p` (streams tokens live) or a
 /// `stream(...)` call (prints as it generates).
-fn prints_own_output(expr: &Expr) -> bool {
+pub(crate) fn prints_own_output(expr: &Expr) -> bool {
     match expr {
         Expr::PromptDeref { .. } => true,
         Expr::Call { callee, .. } => {

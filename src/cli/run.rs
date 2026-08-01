@@ -188,53 +188,68 @@ pub async fn run_file(path: &str, verbose: bool) {
         let mut pairs: Vec<(&String, &vm::VmValue)> = state.global_entries().collect();
         pairs.sort_by_key(|(name, _)| name.as_str());
         for (name, val) in pairs {
-            match val {
-                vm::VmValue::Int(i)   => println!("{} = {}", name, i),
-                vm::VmValue::Float(f) => {
-                    let s = format!("{}", f);
-                    if s.chars().all(|c| c.is_ascii_digit() || c == '-') {
-                        println!("{} = {}.0", name, s);
-                    } else {
-                        println!("{} = {}", name, s);
-                    }
-                }
-                vm::VmValue::Bool(b)  => println!("{} = {}", name, b),
-                vm::VmValue::Str(s)   => println!("{} = \"{}\"", name, s),
-                vm::VmValue::Fn(_) | vm::VmValue::Closure(_, _) => println!("{} = <fn>", name),
-                vm::VmValue::Struct(rc) => {
-                    let inst = rc.lock();
-                    print!("{} = {} {{", name, inst.type_name());
-                    let mut fields: Vec<_> = inst.fields().iter().collect();
-                    fields.sort_by_key(|(k, _): &&(String, _)| k.as_str());
-                    let mut first = true;
-                    for (k, v) in fields {
-                        if !first { print!(", "); }
-                        match v {
-                            vm::VmValue::Int(i)   => print!("{}: {}", k, i),
-                            vm::VmValue::Float(f) => print!("{}: {}", k, f),
-                            vm::VmValue::Bool(b)  => print!("{}: {}", k, b),
-                            vm::VmValue::Str(s)   => print!("{}: \"{}\"", k, s),
-                            _                     => print!("{}: ...", k),
-                        }
-                        first = false;
-                    }
-                    println!(" }}");
-                }
-                vm::VmValue::Array(arc) => {
-                    let guard = arc.lock();
-                    let parts: Vec<String> = guard.iter().map(vm::value_to_display).collect();
-                    println!("{} = [{}]", name, parts.join(", "));
-                }
-                vm::VmValue::BoundMethod(_) => println!("{} = <bound method>", name),
-                vm::VmValue::Prompt(_)      => println!("{} = <prompt>", name),
-                vm::VmValue::Dict(_) => println!("{} = {}", name, vm::value_to_display(val)),
-                vm::VmValue::NativeFn(_) | vm::VmValue::BuiltinFn(_) | vm::VmValue::NativeBoundMethod(_) | vm::VmValue::NativeLibFn(_) => {} // not shown
-                vm::VmValue::Future(_)      => println!("{} = <future>", name),
-                vm::VmValue::TokenStream(_) => println!("{} = <token stream>", name),
-                vm::VmValue::Grammar { .. }  => {} // not shown
-                vm::VmValue::TypeRef(_)     => {} // not shown
-                vm::VmValue::Nil            => {} // not shown
+            if let Some(line) = format_global(name, val) {
+                println!("{line}");
             }
         }
     }
+}
+
+/// One `name = value` line of the `jade run -v` global dump, or `None` for a
+/// value the dump does not show.
+///
+/// The hidden kinds are the ones a user never wrote: the built-in and native
+/// function slots that every program starts with, plus internal machinery
+/// (grammars, type references) and `nil`.  Listing those would bury the
+/// program's own globals, which is the only reason to pass `-v` at all.
+pub(crate) fn format_global(name: &str, val: &vm::VmValue) -> Option<String> {
+    let line = match val {
+        vm::VmValue::Int(i) => format!("{name} = {i}"),
+        vm::VmValue::Float(f) => {
+            let s = format!("{f}");
+            // `1.0` formats as `1`, which would read as an int in the dump.
+            if s.chars().all(|c| c.is_ascii_digit() || c == '-') {
+                format!("{name} = {s}.0")
+            } else {
+                format!("{name} = {s}")
+            }
+        }
+        vm::VmValue::Bool(b) => format!("{name} = {b}"),
+        vm::VmValue::Str(s) => format!("{name} = \"{s}\""),
+        vm::VmValue::Fn(_) | vm::VmValue::Closure(_, _) => format!("{name} = <fn>"),
+        vm::VmValue::Struct(rc) => {
+            let inst = rc.lock();
+            let mut fields: Vec<_> = inst.fields().iter().collect();
+            fields.sort_by_key(|(k, _): &&(String, _)| k.as_str());
+            let parts: Vec<String> = fields
+                .iter()
+                .map(|(k, v)| match v {
+                    vm::VmValue::Int(i) => format!("{k}: {i}"),
+                    vm::VmValue::Float(f) => format!("{k}: {f}"),
+                    vm::VmValue::Bool(b) => format!("{k}: {b}"),
+                    vm::VmValue::Str(s) => format!("{k}: \"{s}\""),
+                    _ => format!("{k}: ..."),
+                })
+                .collect();
+            format!("{name} = {} {{{} }}", inst.type_name(), parts.join(", "))
+        }
+        vm::VmValue::Array(arc) => {
+            let guard = arc.lock();
+            let parts: Vec<String> = guard.iter().map(vm::value_to_display).collect();
+            format!("{name} = [{}]", parts.join(", "))
+        }
+        vm::VmValue::BoundMethod(_) => format!("{name} = <bound method>"),
+        vm::VmValue::Prompt(_) => format!("{name} = <prompt>"),
+        vm::VmValue::Dict(_) => format!("{name} = {}", vm::value_to_display(val)),
+        vm::VmValue::Future(_) => format!("{name} = <future>"),
+        vm::VmValue::TokenStream(_) => format!("{name} = <token stream>"),
+        vm::VmValue::NativeFn(_)
+        | vm::VmValue::BuiltinFn(_)
+        | vm::VmValue::NativeBoundMethod(_)
+        | vm::VmValue::NativeLibFn(_)
+        | vm::VmValue::Grammar { .. }
+        | vm::VmValue::TypeRef(_)
+        | vm::VmValue::Nil => return None,
+    };
+    Some(line)
 }

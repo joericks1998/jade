@@ -1112,19 +1112,12 @@ pub(crate) fn get_bool(slots: &[VmValue], r: Reg, span: Span) -> Result<bool> {
     }
 }
 
-pub(crate) fn get_str(slots: &[VmValue], r: Reg, span: Span) -> Result<String> {
-    match get(slots, r) {
-        VmValue::Str(s) => Ok(s.to_string()),
-        _ => Err(JadeError::TypeError { message: "expected str".to_string(), span }),
-    }
-}
-
 /// Read a string slot **with its trust**.
 ///
-/// Prefer this over [`get_str`] anywhere the result is used to build another
-/// Jade string. `get_str` hands back a bare `String`, and converting that back
-/// into a value marks it trusted — which is exactly how `"" + tainted` laundered
-/// taint and let an untrusted command reach `sh.exec`.
+/// Use this anywhere the result is used to build another Jade string. Reading a
+/// slot as a bare `String` and converting it back into a value marks it trusted
+/// — which is exactly how `"" + tainted` laundered taint and let an untrusted
+/// command reach `sh.exec`.
 pub(crate) fn get_jstr(slots: &[VmValue], r: Reg, span: Span) -> Result<JStr> {
     match get(slots, r) {
         VmValue::Str(s) => Ok(s.clone()),
@@ -1132,9 +1125,9 @@ pub(crate) fn get_jstr(slots: &[VmValue], r: Reg, span: Span) -> Result<JStr> {
     }
 }
 
-/// Borrow a string slot by reference.  Use this instead of `get_str` when the
-/// caller only needs to read the string (e.g. for comparisons) and does not
-/// need an owned `String`.  Avoids a heap allocation per comparison.
+/// Borrow a string slot by reference.  Use this when the caller only needs to
+/// read the string (e.g. for comparisons) and does not need an owned `String`.
+/// Avoids a heap allocation per comparison.
 pub(crate) fn get_str_ref<'a>(slots: &'a [VmValue], r: Reg, span: Span) -> Result<&'a str> {
     match get(slots, r) {
         VmValue::Str(s) => Ok(s.as_str()),

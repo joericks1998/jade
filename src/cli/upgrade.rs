@@ -19,7 +19,7 @@ struct GhAsset {
 /// `release.yml` actually publishes (`jade-macos-arm64.tar.gz`,
 /// `jade-linux-x86_64.tar.gz`) — which are NOT the `pkg::fetch::platform_tag`
 /// values (`darwin-aarch64`/`linux-x86_64`); only these two are built.
-fn archive_label() -> Option<&'static str> {
+pub(crate) fn archive_label() -> Option<&'static str> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("macos", "aarch64") => Some("macos-arm64"),
         ("linux", "x86_64") => Some("linux-x86_64"),
