@@ -76,6 +76,38 @@ Every artifact is verified against its SHA-256 in `jade.lock` on **every** insta
 
 Checksums live in the lock, not the manifest: `jade pkg add` computes them on first fetch, exactly as Cargo does.
 
+## Local `path` dependencies
+
+A `path` dependency points at a file you build, so it is the one source that legitimately changes while the lock stays correct. It is treated differently for that reason: **the source file is re-hashed on every install and every run**, and if it has changed, the lock is re-pinned and the new artifact copied into `libs/`.
+
+```
+$ jade run main.jde
+note: re-pinned engine (local source changed)
+```
+
+A URL dependency is never re-pinned. It either serves the bytes the lock names or it does not, and quietly re-pinning it would defeat the point of having a lock. Moving a URL dependency to different bytes is what `jade pkg update` is for.
+
+`jade pkg list` marks a local dependency whose source has moved ahead of its pin:
+
+```
+engine 1.0.0  [jade]  installed (local source changed — run `jade pkg install`)
+```
+
+Under `--locked` the same drift is an error rather than a fixup, because a rebuilt library means the committed lock is stale:
+
+```
+$ jade pkg install --locked
+error: dependency 'engine': the local source has changed since jade.lock was written
+  locked 462fc9e8…
+  on disk f2d2eb23…
+--locked forbids rewriting the lock. Run `jade pkg install` and commit jade.lock,
+or rebuild the source to match.
+```
+
+:::note
+Before v1.1.35 a rebuilt local dependency was ignored: installing compared `libs/` against the lock, found a match, and kept loading the copy taken when the dependency was added. Only re-running `jade pkg add` picked up the new build.
+:::
+
 ## Committing
 
 Commit `jade.lock`. Do not commit `libs/` — `jade new` adds it to `.gitignore`. The lock is what travels; the binaries are rebuilt from it.

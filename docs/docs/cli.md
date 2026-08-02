@@ -48,7 +48,7 @@ jade build --lib                          # build the [package] in jade.toml
 
 Every module the file `use`s is compiled into the same artifact, so a program or a package can span as many files as it likes.
 
-With no file, `--lib` builds the project's `[package]` section — its entry, its exports, and its artifact name all come from `jade.toml`. See [Packages](./packages.md#declaring-the-package-in-jadetoml).
+With no file, `--lib` builds the project's `[package]` section — its entry, its exports, and its artifact name all come from `jade.toml`. See [Packages](packages#declaring-the-package-in-jadetoml).
 
 ### Flags
 
@@ -228,9 +228,9 @@ jade pkg list
 |------------|-------------|
 | `add <name>` | Add a dependency from `--url` or `--path` (with `--version`; `--c-abi` for a plain C library). |
 | `remove <name>` | Remove a dependency from `jade.toml` and `jade.lock`. |
-| `install` | Install all locked dependencies (`--locked` fails if the lock is out of date). |
+| `install` | Install all locked dependencies. Re-pins any local `path` dependency whose source has been rebuilt. `--locked` refuses to change the lock, failing instead if it is out of date. |
 | `update [name]` | Re-resolve and update a dependency (or all of them). |
-| `list` | List declared dependencies and their resolved versions. |
+| `list` | List declared dependencies, whether they are installed here, and whether a local source has changed since it was pinned. |
 
 :::note
 LLM configuration lives in a provider package, not in the language. `jade register` installs one and stores your API key, `jade use` switches between installed providers, and `jade env` shows which is active. See [LLM Integration](llm).
