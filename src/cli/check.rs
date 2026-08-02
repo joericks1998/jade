@@ -36,7 +36,7 @@ fn post_tir_checks(
 /// Unlike `jade run`, this does not call `pkg::ensure_ready` — checking a file
 /// should not reach the network to fetch dependencies. A project whose `libs/`
 /// has not been populated yet will therefore report its dependency imports as
-/// unresolved, which is accurate: they cannot be loaded until `jade install`
+/// unresolved, which is accurate: they cannot be loaded until `jade pkg install`
 /// runs.
 fn check_imports(tprogram: &crate::compiler::tir::TProgram, path: &str) -> Result<(), String> {
     use crate::compiler::tir::TStmt;

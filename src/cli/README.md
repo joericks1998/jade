@@ -12,16 +12,16 @@ Keeping `main.rs` to argument parsing means the commands are ordinary library fu
 
 - **`run.rs`** — `jade run`. With no argument it finds the project root and runs the entry file; a `.jde` argument runs that file; anything else is looked up as a named script in `jade.toml`'s `[scripts]`.
 - **`check.rs`** — `jade check`. Type-checks without executing. It deliberately runs two things past inference, both so `check` stays an honest predictor of whether `run` and `build` will succeed: `emit`, because shared-mutation-across-tasks is rejected at emit time; and `project::walk_imports`, because import resolution is not a compile stage — the VM resolves a `use` when the Import opcode runs, so before v1.1.33 `use totally_made_up_module` reported `ok` and then failed at run time. Unlike `run`, the import walk does not call `pkg::ensure_ready`: checking a file should not reach the network to fetch dependencies.
-- **`build.rs`** — `jade build`. Runs the whole pipeline in-process: lex, parse, infer, resolve imports, generate LLVM IR, link. Also handles `--emit-ir` and `--lib`.
+- **`build.rs`** — `jade build`. Runs the whole pipeline in-process: lex, parse, infer, resolve imports, generate LLVM IR, link. Also handles `--emit-ir` and `--lib`. Calls `pkg::ensure_ready` before resolving imports, exactly as `run` does — without it the two engines disagreed about what a dependency is, `build` linking against whatever `libs/` was last left holding while `run` installed first.
 - **`repl.rs`** — `jade repl`. Uses the VM so the REPL and `jade run` share one implementation. A bare trailing expression is assigned to an internal capture slot (a name starting with NUL, so it can never collide with a user global) and echoed.
 - **`test.rs`** — `jade test`. Discovers `test_*.jde` and `*_test.jde` under the project root, optionally filtered by a pattern.
 - **`fmt.rs`** — `jade fmt`. Works on source *text*, line-based, not on the token stream — the lexer strips comments, so a reprint would lose them. Limited by design: it fixes indentation and trailing whitespace but does not normalize operator spacing. `--check` exits 1 if anything would change.
 - **`new.rs`** — `jade new` and `jade init`. Scaffolds a project directory from the `basic` or `llm` template.
-- **`pkg.rs`** — `jade pkg add` / `remove` / `install` / `update` / `list`. The manifest is the source of truth and `jade.lock` is derived from it; with no registry to query, "update" means reconciling the lock with the manifest, not discovering a newer version.
+- **`pkg.rs`** — `jade pkg add` / `remove` / `install` / `update` / `list`. The manifest is the source of truth and `jade.lock` is derived from it; with no registry to query, "update" means reconciling the lock with the manifest, not discovering a newer version. `install` re-hashes local `path` dependencies before installing, since those point at files the user rebuilds; `--locked` reports that drift as an error instead.
 - **`register.rs`** — `jade register` and `jade use`. Picks which inference provider `?p` uses and stores its API key under `~/.jade`, machine-wide. `install.sh` runs `jade register` interactively after an install, so this is often a new user's very first `jade` command — it stays chatty and forgiving.
 - **`env.rs`** — `jade env`. Version, binary path, platform, cache stats, project info. `--json` for scripting.
 - **`cache.rs`** — `jade cache info` / `clean`.
-- **`upgrade.rs`** — `jade upgrade`. Updates the toolchain itself from GitHub Releases. Distinct from `jade update`, which is about project dependencies.
+- **`upgrade.rs`** — `jade upgrade`. Updates the toolchain itself from GitHub Releases. Distinct from `jade pkg update`, which is about project dependencies.
 - **`mod.rs`** — module declarations plus `format_bytes`.
 - **`tests.rs`** — CLI tests. See "Building and testing" below for what is and is not covered.
 
@@ -35,7 +35,9 @@ Keeping `main.rs` to argument parsing means the commands are ordinary library fu
 
 Commands exit the process directly on user error (`process::exit(1)`) with a message on stderr, rather than propagating a `Result` to `main`. Match that when adding one.
 
-`jade upgrade` and `jade update` are easy to confuse in help text and in commit messages. Upgrade is the toolchain; update is the project's dependencies. Note also that the package commands are nested: `jade pkg add`, not `jade add`.
+`jade upgrade` and `jade pkg update` are easy to confuse in help text and in commit messages. Upgrade is the toolchain; update is the project's dependencies.
+
+**The package commands are nested — `jade pkg add`, never `jade add`.** This is not a style note. Before v1.1.35 every message that told a user how to recover named the unnested form, so the first thing a project with `[dependencies]` and no lock printed was an instruction to run a command that does not exist. Anything user-facing that names one of `add`, `remove`, `install`, `update`, or `list` needs the `pkg` in it, and that includes strings in `pkg/`, not just this directory.
 
 **`jade fmt` reads source text, and the text has more in it than the token stream does.** The lexer throws away comments, so the formatter cannot work from tokens without losing them — which means it re-implements the parts of lexing that affect layout, and every one of them has bitten. Its scanner has to know about `//` comments, both quote characters, triple-quoted strings that span lines, and escapes, because a `{` it misreads shifts every line after it. Three separate versions of this bug shipped before v1.1.35, the worst of them reindenting the *inside* of a multi-line string and silently changing what the program printed. Two things guard it now: `run_fmt` re-lexes its own output and refuses to write a file whose tokens changed, and CI holds `examples/` formatted so the formatter meets 70-odd real files on every push.
 

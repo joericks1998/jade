@@ -1,6 +1,6 @@
 //! Format-preserving edits to a project's `jade.toml`.
 //!
-//! `jade add` and `jade remove` rewrite a file the user wrote by hand, so they
+//! `jade pkg add` and `jade pkg remove` rewrite a file the user wrote by hand, so they
 //! go through `toml_edit` rather than a parse-and-reserialize round-trip: the
 //! latter would silently discard every comment and all the original layout.
 
@@ -32,7 +32,7 @@ pub enum Source<'a> {
 
 /// Add or replace `[dependencies.<name>]`.
 ///
-/// Replacing rather than merging is deliberate: `jade add` states the whole
+/// Replacing rather than merging is deliberate: `jade pkg add` states the whole
 /// intent of one dependency, and a half-merged entry (an old `url` beside a new
 /// `path`) would fail validation in a way the user did not ask for.
 pub fn add_dependency(

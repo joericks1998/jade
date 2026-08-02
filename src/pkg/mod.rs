@@ -247,7 +247,7 @@ pub fn materialize(root: &Path, lock: &Lockfile, fetcher: &dyn Fetcher) -> Resul
             return Err(format!(
                 "dependency '{}': checksum mismatch for {}\n  expected {}\n  actual   {}\n\
                  The artifact does not match jade.lock — it may have been replaced upstream. \
-                 Re-run `jade update {}` if the change is expected.",
+                 Re-run `jade pkg update {}` if the change is expected.",
                 pkg.name, artifact.file, artifact.sha256, actual, pkg.name
             ));
         }
@@ -294,7 +294,7 @@ fn select_artifact<'a>(
 /// Recover the original local path from a `path+…` lock source.
 fn local_source_path(root: &Path, pkg: &LockedPackage) -> Result<PathBuf, String> {
     pkg.source
-        .strip_prefix("path+")
+        .strip_prefix(lock::PATH_SOURCE)
         .map(|rel| root.join(rel))
         .ok_or_else(|| {
             format!(
@@ -302,6 +302,112 @@ fn local_source_path(root: &Path, pkg: &LockedPackage) -> Result<PathBuf, String
                 pkg.name, pkg.source
             )
         })
+}
+
+// ── Local sources ─────────────────────────────────────────────────────────────
+//
+// A `path` dependency points at a file the user builds, and rebuilds. Every
+// other kind of dependency is immutable at its source — a URL either serves the
+// bytes the lock pins or it does not — so for those the pin written at `jade pkg
+// add` stays true forever. A local path is the one source that legitimately
+// changes under a lock that is otherwise still correct, and nothing below
+// `resolve` ever re-reads it. That is what let a rebuilt library keep running as
+// the copy it was on the day it was added.
+
+/// Whether a locked package came from a `path` dependency.
+fn is_local(pkg: &LockedPackage) -> bool {
+    pkg.source.starts_with(lock::PATH_SOURCE)
+}
+
+/// Current SHA-256 of a local dependency's source file.
+///
+/// `None` when the file cannot be read. That is not treated as an error
+/// anywhere: a source that has moved away or been deleted leaves the existing
+/// pin standing, which keeps a project whose `libs/` is already populated
+/// working exactly as it did before.
+fn local_source_digest(root: &Path, pkg: &LockedPackage) -> Option<String> {
+    let src = local_source_path(root, pkg).ok()?;
+    std::fs::read(&src).ok().map(|b| fetch::sha256_hex(&b))
+}
+
+/// Re-pin every local `path` dependency against its source on disk, returning
+/// the names whose digest moved.
+///
+/// The caller writes the lock back. Splitting it that way keeps the decision
+/// about *whether the lock may change* with the command: `jade pkg install`
+/// rewrites it, `--locked` refuses to (see [`verify_local_unchanged`]).
+pub fn refresh_local(root: &Path, lock: &mut Lockfile) -> Vec<String> {
+    let mut changed = Vec::new();
+
+    for pkg in &mut lock.packages {
+        if !is_local(pkg) {
+            continue;
+        }
+        let Some(digest) = local_source_digest(root, pkg) else {
+            continue;
+        };
+
+        // Only the artifacts actually copied from the local file. A path
+        // dependency carries no other kind, but keying off `url` rather than
+        // assuming a single entry keeps this honest if that ever changes.
+        let mut moved = false;
+        for artifact in pkg.artifacts.values_mut() {
+            if artifact.url.is_none() && artifact.sha256 != digest {
+                artifact.sha256 = digest.clone();
+                moved = true;
+            }
+        }
+
+        if moved {
+            changed.push(pkg.name.clone());
+        }
+    }
+
+    changed
+}
+
+/// Whether a local dependency's source has changed since it was pinned.
+///
+/// The read-only question behind [`refresh_local`], for reporting. Anything not
+/// local, and any source that cannot be read, answers `false` — there is no
+/// drift to report without a file to compare against.
+pub fn local_drift(root: &Path, pkg: &LockedPackage) -> bool {
+    if !is_local(pkg) {
+        return false;
+    }
+    let Some(digest) = local_source_digest(root, pkg) else {
+        return false;
+    };
+    pkg.artifacts.values().any(|a| a.url.is_none() && a.sha256 != digest)
+}
+
+/// Fail if a local `path` dependency no longer matches its pin.
+///
+/// The `--locked` half of [`refresh_local`]. In CI a moved source means the
+/// committed lock is stale, and installing the old digest anyway is precisely
+/// the silent-wrong-binary outcome that mode exists to prevent.
+pub fn verify_local_unchanged(root: &Path, lock: &Lockfile) -> Result<(), String> {
+    for pkg in &lock.packages {
+        if !is_local(pkg) {
+            continue;
+        }
+        let Some(digest) = local_source_digest(root, pkg) else {
+            continue;
+        };
+        let Some(artifact) = pkg.artifacts.values().find(|a| a.url.is_none()) else {
+            continue;
+        };
+        if artifact.sha256 != digest {
+            return Err(format!(
+                "dependency '{}': the local source has changed since jade.lock was written\n  \
+                 locked {}\n  on disk {}\n\
+                 --locked forbids rewriting the lock. Run `jade pkg install` and commit \
+                 jade.lock, or rebuild the source to match.",
+                pkg.name, artifact.sha256, digest
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Write via a temp file and rename, so an interrupted install never leaves a
@@ -374,9 +480,12 @@ pub fn build_c_shims(root: &Path, lock: &Lockfile, manifest: &ProjectManifest) -
         let source = cshim::generate(&pkg.name, symbols)?;
 
         // Skip the compile when nothing changed — reinstalls are common and cc
-        // is not cheap.
+        // is not cheap. "Nothing changed" means both the declared symbols and
+        // the library being bound: a rebuilt artifact may no longer export what
+        // the existing shim was linked against, so an out-of-date shim has to be
+        // relinked even though its source is identical.
         let unchanged = std::fs::read_to_string(&shim_c).is_ok_and(|s| s == source);
-        if unchanged && shim_out.exists() {
+        if unchanged && is_newer(&shim_out, &dir.join(&artifact.file)) {
             continue;
         }
 
@@ -387,6 +496,19 @@ pub fn build_c_shims(root: &Path, lock: &Lockfile, manifest: &ProjectManifest) -
     }
 
     Ok(())
+}
+
+/// Whether `out` is at least as new as `input`.
+///
+/// Answers `false` when either timestamp is unreadable — including when `out`
+/// does not exist at all — so every uncertain case falls through to a rebuild
+/// rather than to a stale artifact.
+fn is_newer(out: &Path, input: &Path) -> bool {
+    let stamp = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    match (stamp(out), stamp(input)) {
+        (Some(o), Some(i)) => o >= i,
+        _ => false,
+    }
 }
 
 /// Link the shim against the target library.
@@ -533,7 +655,7 @@ pub fn verify_in_sync(manifest: &ProjectManifest, lock: &Lockfile) -> Result<(),
     if !stale.is_empty() {
         msg.push_str(&format!("\n  locked but not in jade.toml: {}", stale.join(", ")));
     }
-    msg.push_str("\nRun `jade install` to update the lock.");
+    msg.push_str("\nRun `jade pkg install` to update the lock.");
     Err(msg)
 }
 
@@ -581,13 +703,27 @@ pub fn ensure_ready(root: &Path, manifest: &ProjectManifest) -> Result<(), Strin
         return Ok(());
     }
 
-    let lock = lock::read(root)?.ok_or_else(|| {
+    let mut lock = lock::read(root)?.ok_or_else(|| {
         "jade.toml declares [dependencies] but there is no jade.lock — \
-         run `jade install` to resolve and pin them"
+         run `jade pkg install` to resolve and pin them"
             .to_string()
     })?;
 
     verify_in_sync(manifest, &lock)?;
+
+    // Pick up a rebuilt local dependency before installing, so `jade run` uses
+    // the library as it is now rather than as it was when it was added.
+    let changed = refresh_local(root, &mut lock);
+    if !changed.is_empty() {
+        eprintln!("note: re-pinned {} (local source changed)", changed.join(", "));
+        // A read-only checkout is not a reason to refuse to run: the refreshed
+        // digest lives in memory and the correct bytes still get installed. The
+        // lock is just left for the next writable run to update.
+        if let Err(e) = lock::write(root, &lock) {
+            eprintln!("warning: could not update jade.lock ({e})");
+        }
+    }
+
     materialize(root, &lock, &fetch::HttpFetcher::new())?;
     build_c_shims(root, &lock, manifest)
 }
@@ -598,7 +734,7 @@ pub fn ensure_ready(root: &Path, manifest: &ProjectManifest) -> Result<(), Strin
 /// This is what the CLI and the AOT resolver hand to import resolution in place
 /// of a bare `manifest.lib`. A missing or unreadable `jade.lock` degrades to
 /// just the manifest's entries rather than failing — this runs on the import
-/// path, and the actionable diagnostics belong to `jade install`.
+/// path, and the actionable diagnostics belong to `jade pkg install`.
 ///
 /// **A manifest `[lib]` wins over a dependency of the same name**, so a project
 /// can always shadow something it depends on. The shadow is reported, because

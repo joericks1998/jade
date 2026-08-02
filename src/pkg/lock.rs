@@ -112,9 +112,12 @@ impl LockedPackage {
     }
 }
 
+/// Prefix marking a lock `source` as a local file rather than a URL.
+pub const PATH_SOURCE: &str = "path+";
+
 /// Tag a local path as a lock `source`.
 pub fn source_path(path: &str) -> String {
-    format!("path+{path}")
+    format!("{PATH_SOURCE}{path}")
 }
 
 /// Tag a URL as a lock `source`.
@@ -130,7 +133,7 @@ pub fn path(root: &Path) -> PathBuf {
 /// Read `<root>/jade.lock`.
 ///
 /// Returns `Ok(None)` when the file does not exist — a project with no
-/// dependencies never needs one, and `jade install` writes it on first use. A
+/// dependencies never needs one, and `jade pkg install` writes it on first use. A
 /// malformed or future-versioned lock is an error rather than a silent reset,
 /// since discarding a lock would defeat the point of having one.
 pub fn read(root: &Path) -> Result<Option<Lockfile>, String> {
@@ -147,7 +150,7 @@ pub fn read(root: &Path) -> Result<Option<Lockfile>, String> {
     if lock.version != LOCK_VERSION {
         return Err(format!(
             "{} has lock format version {} but this jade understands version {} \
-             — delete it and re-run `jade install` to regenerate",
+             — delete it and re-run `jade pkg install` to regenerate",
             file.display(),
             lock.version,
             LOCK_VERSION

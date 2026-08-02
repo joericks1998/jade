@@ -371,6 +371,125 @@ fn materialize_leaves_no_temp_file_behind() {
     assert!(leftovers.is_empty(), "temp files must be renamed, not left in libs/");
 }
 
+// ── Local sources that change ─────────────────────────────────────────────────
+//
+// A `path` dependency points at a file the user rebuilds. The lock pins what it
+// hashed to when it was added, and materialize is satisfied by anything in
+// `libs/` matching that pin — so without the refresh below, a rebuilt library
+// keeps loading as the copy it was on the day it was added, with no warning.
+
+/// A project with one local dependency, resolved, locked and installed.
+fn installed_local(tag: &str, bytes: &[u8]) -> (TempDir, ProjectManifest, Lockfile) {
+    let tmp = TempDir::new(tag);
+    std::fs::create_dir_all(tmp.path().join("vendor")).unwrap();
+    std::fs::write(tmp.path().join("vendor/libengine.so"), bytes).unwrap();
+
+    let m = manifest(
+        "[project]\nname = \"app\"\n[dependencies.engine]\nversion = \"1.0.0\"\n\
+         path = \"vendor/libengine.so\"\n",
+    );
+    let lock = resolve(tmp.path(), &m, &MockFetcher::new()).unwrap();
+    lock::write(tmp.path(), &lock).unwrap();
+    materialize(tmp.path(), &lock, &MockFetcher::new()).unwrap();
+
+    (tmp, m, lock)
+}
+
+#[test]
+fn a_rebuilt_local_dependency_is_re_pinned() {
+    let (tmp, _m, mut lock) = installed_local("localrebuild", b"old engine");
+    std::fs::write(tmp.path().join("vendor/libengine.so"), b"new engine").unwrap();
+
+    let changed = refresh_local(tmp.path(), &mut lock);
+
+    assert_eq!(changed, vec!["engine".to_string()], "the rebuild must be reported");
+    assert_eq!(
+        lock.packages[0].artifacts[ANY_PLATFORM].sha256,
+        fetch::sha256_hex(b"new engine"),
+        "the lock must pin the source as it is now"
+    );
+}
+
+#[test]
+fn a_rebuilt_local_dependency_is_reinstalled() {
+    // The whole bug in one test: rebuild the library, install again, and the
+    // new bytes must be what sits in libs/.
+    let (tmp, _m, mut lock) = installed_local("localreinstall", b"old engine");
+    let installed = tmp.path().join("libs/engine-1.0.0/engine.so");
+    assert_eq!(std::fs::read(&installed).unwrap(), b"old engine");
+
+    std::fs::write(tmp.path().join("vendor/libengine.so"), b"new engine").unwrap();
+    refresh_local(tmp.path(), &mut lock);
+    materialize(tmp.path(), &lock, &MockFetcher::new()).unwrap();
+
+    assert_eq!(
+        std::fs::read(&installed).unwrap(),
+        b"new engine",
+        "installing after a rebuild must replace the copy in libs/"
+    );
+}
+
+#[test]
+fn an_unchanged_local_dependency_is_left_alone() {
+    let (tmp, _m, mut lock) = installed_local("localstable", b"engine");
+    let before = lock.clone();
+
+    assert!(refresh_local(tmp.path(), &mut lock).is_empty(), "nothing changed");
+    assert_eq!(lock, before, "an untouched source must not rewrite the lock");
+}
+
+#[test]
+fn a_remote_dependency_is_never_re_pinned() {
+    // Only a local path is mutable at its source. A URL either serves what the
+    // lock pins or it does not, and re-pinning it would defeat the lock.
+    let tmp = TempDir::new("remotepin");
+    let (mut lock, _) = one_remote_package(b"tok bytes");
+    let before = lock.clone();
+
+    assert!(refresh_local(tmp.path(), &mut lock).is_empty());
+    assert_eq!(lock, before);
+}
+
+#[test]
+fn a_local_source_that_disappeared_keeps_its_pin() {
+    // libs/ still holds a verified copy, so a source that has moved away is no
+    // reason to stop working — the pin just stands until it comes back.
+    let (tmp, _m, mut lock) = installed_local("localgone", b"engine");
+    std::fs::remove_file(tmp.path().join("vendor/libengine.so")).unwrap();
+    let before = lock.clone();
+
+    assert!(refresh_local(tmp.path(), &mut lock).is_empty());
+    assert_eq!(lock, before);
+    materialize(tmp.path(), &lock, &MockFetcher::new())
+        .expect("an already-installed dependency must still materialize");
+}
+
+#[test]
+fn local_drift_reports_a_rebuilt_source() {
+    let (tmp, _m, lock) = installed_local("localdrift", b"old engine");
+    assert!(!local_drift(tmp.path(), &lock.packages[0]));
+
+    std::fs::write(tmp.path().join("vendor/libengine.so"), b"new engine").unwrap();
+    assert!(local_drift(tmp.path(), &lock.packages[0]), "a rebuild is drift");
+}
+
+#[test]
+fn locked_mode_rejects_a_rebuilt_local_dependency() {
+    // The CI half: --locked must not quietly fix up the lock, and must not
+    // install the stale digest either.
+    let (tmp, _m, lock) = installed_local("localci", b"old engine");
+    assert!(verify_local_unchanged(tmp.path(), &lock).is_ok());
+
+    std::fs::write(tmp.path().join("vendor/libengine.so"), b"new engine").unwrap();
+
+    let err = verify_local_unchanged(tmp.path(), &lock).unwrap_err();
+    assert!(err.contains("engine"), "error should name the dependency: {err}");
+    assert!(err.contains("has changed"), "unexpected message: {err}");
+    assert!(err.contains(&fetch::sha256_hex(b"old engine")), "should show the pin");
+    assert!(err.contains(&fetch::sha256_hex(b"new engine")), "should show what is on disk");
+    assert!(err.contains("jade pkg install"), "error should say how to recover: {err}");
+}
+
 // ── verify_in_sync ────────────────────────────────────────────────────────────
 
 #[test]
@@ -393,7 +512,7 @@ fn verify_in_sync_reports_a_manifest_only_dependency() {
 
     assert!(err.contains("not locked"), "unexpected message: {err}");
     assert!(err.contains("new"), "error should name the dependency: {err}");
-    assert!(err.contains("jade install"), "error should say how to recover: {err}");
+    assert!(err.contains("jade pkg install"), "error should say how to recover: {err}");
 }
 
 #[test]
@@ -543,7 +662,7 @@ fn resolved_libraries_without_a_lock_is_just_the_manifest() {
 
 #[test]
 fn resolved_libraries_survives_a_corrupt_lock() {
-    // The import path degrades to the manifest; `jade install` is where a bad
+    // The import path degrades to the manifest; `jade pkg install` is where a bad
     // lock produces a real error.
     let tmp = TempDir::new("badlock");
     std::fs::write(lock::path(tmp.path()), "not toml {{{").unwrap();
@@ -757,4 +876,56 @@ fn a_shim_rebuild_is_skipped_when_nothing_changed() {
     let second = std::fs::metadata(&shim).unwrap().modified().unwrap();
 
     assert_eq!(first, second, "an unchanged shim must not be recompiled");
+}
+
+/// The same plain C library, rebuilt with a different body.
+const PLAIN_C_REBUILT: &str = r#"
+#include <stdint.h>
+int64_t square(int64_t x) { return x * x + 1; }
+"#;
+
+#[test]
+fn a_shim_is_relinked_when_its_library_is_rebuilt() {
+    // The shim's own source is identical either way — it is generated from the
+    // declared symbols, which did not change. What changed is the library it
+    // links against, so skipping on source alone would leave the shim bound to
+    // the previous build.
+    if !have_cc() {
+        eprintln!("skipping: no C compiler");
+        return;
+    }
+    let tmp = TempDir::new("shimrelink");
+    let built = compile_lib(tmp.path(), "plain", PLAIN_C_SOURCE);
+    let rel = built.file_name().unwrap().to_str().unwrap().to_string();
+
+    let m = manifest(&format!(
+        "[project]\nname = \"app\"\n[dependencies.plain]\nversion = \"1.0.0\"\npath = \"{rel}\"\n\
+         abi = \"c\"\n[dependencies.plain.symbols.square]\nargs = [\"int\"]\nret = \"int\"\n"
+    ));
+    let mut lock = resolve(tmp.path(), &m, &MockFetcher::new()).unwrap();
+    materialize(tmp.path(), &lock, &MockFetcher::new()).unwrap();
+    build_c_shims(tmp.path(), &lock, &m).unwrap();
+
+    let shim = tmp.path().join(LIBS_DIR).join("plain-1.0.0").join(shim_filename("plain"));
+    let first = std::fs::metadata(&shim).unwrap().modified().unwrap();
+
+    // Rebuild the library, then install the way `jade pkg install` now does.
+    compile_lib(tmp.path(), "plain", PLAIN_C_REBUILT);
+    assert_eq!(refresh_local(tmp.path(), &mut lock), vec!["plain".to_string()]);
+    lock::write(tmp.path(), &lock).unwrap();
+    materialize(tmp.path(), &lock, &MockFetcher::new()).unwrap();
+    build_c_shims(tmp.path(), &lock, &m).unwrap();
+
+    let second = std::fs::metadata(&shim).unwrap().modified().unwrap();
+    assert!(second > first, "a shim older than its library must be relinked");
+
+    // And it still loads, against the new build.
+    let span = crate::frontend::error::Span { line: 0, col: 0 };
+    let libs = resolved_libraries(tmp.path(), &m);
+    let resolved = crate::project::resolve_library_import(&libs, "plain", tmp.path())
+        .unwrap()
+        .expect("c dependency resolves as a bare import");
+    let pkg = crate::native::load_native_package(&resolved.path, span)
+        .expect("the relinked shim must dlopen");
+    assert!(pkg.contains_key("square"));
 }

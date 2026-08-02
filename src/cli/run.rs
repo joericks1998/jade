@@ -157,7 +157,7 @@ pub async fn run_file(path: &str, verbose: bool) {
         .and_then(|root| {
             let manifest = crate::project::load_project(root).ok()?;
             // Fetch anything jade.lock pins but libs/ is missing, so a fresh
-            // clone runs without a separate `jade install` step.
+            // clone runs without a separate `jade pkg install` step.
             if let Err(e) = crate::pkg::ensure_ready(root, &manifest) {
                 eprintln!("error: {e}");
                 std::process::exit(1);

@@ -1,9 +1,9 @@
-//! `jade add` / `remove` / `install` / `update` / `list`.
+//! `jade pkg add` / `remove` / `install` / `update` / `list`.
 //!
 //! The manifest is the source of truth and `jade.lock` is derived from it.
 //! There is no registry to query, so "update" means *reconcile the lock with
 //! the manifest*, not *discover a newer version* — bumping a version is an edit
-//! to `jade.toml` (by hand, or via `jade add <name>` again).
+//! to `jade.toml` (by hand, or via `jade pkg add <name>` again).
 
 use std::path::PathBuf;
 
@@ -48,7 +48,7 @@ fn relock_and_install(root: &std::path::Path, manifest: &ProjectManifest) {
 
 // ── add ───────────────────────────────────────────────────────────────────────
 
-/// `jade add <name> --path <p> | --url <u> [--version <v>] [--abi c]`
+/// `jade pkg add <name> --path <p> | --url <u> [--version <v>] [--abi c]`
 pub fn run_add(name: &str, path: Option<&str>, url: Option<&str>, version: Option<&str>, c_abi: bool) {
     let root = root_or_exit();
 
@@ -60,7 +60,7 @@ pub fn run_add(name: &str, path: Option<&str>, url: Option<&str>, version: Optio
             std::process::exit(1);
         }
         (None, None) => {
-            eprintln!("error: `jade add {name}` needs a source: --path <file> or --url <url>");
+            eprintln!("error: `jade pkg add {name}` needs a source: --path <file> or --url <url>");
             eprintln!("       there is no package registry, so a dependency names where it lives");
             std::process::exit(1);
         }
@@ -72,7 +72,7 @@ pub fn run_add(name: &str, path: Option<&str>, url: Option<&str>, version: Optio
         // per-symbol prototype list. Write the entry, then point at the file.
         eprintln!(
             "note: add a [dependencies.{name}.symbols] table to jade.toml describing the C \
-             symbols to bind, then run `jade install`"
+             symbols to bind, then run `jade pkg install`"
         );
     }
 
@@ -93,7 +93,7 @@ pub fn run_add(name: &str, path: Option<&str>, url: Option<&str>, version: Optio
 
 // ── remove ────────────────────────────────────────────────────────────────────
 
-/// `jade remove <name>` — drop it from the manifest, the lock, and `libs/`.
+/// `jade pkg remove <name>` — drop it from the manifest, the lock, and `libs/`.
 pub fn run_remove(name: &str) {
     let root = root_or_exit();
 
@@ -129,7 +129,7 @@ pub fn run_remove(name: &str) {
 
 // ── install ───────────────────────────────────────────────────────────────────
 
-/// `jade install [--locked]`
+/// `jade pkg install [--locked]`
 ///
 /// Without `--locked`, resolves anything the lock is missing and writes it.
 /// With `--locked`, refuses to change the lock — the CI mode, where a manifest
@@ -151,15 +151,25 @@ pub fn run_install(locked: bool) {
             fail("--locked was given but there is no jade.lock")
         });
         pkg::verify_in_sync(&manifest, &lock).unwrap_or_else(|e| fail(e));
+        // A rebuilt local dependency is a stale lock, and this mode is where a
+        // stale lock has to be an error rather than a fixup.
+        pkg::verify_local_unchanged(&root, &lock).unwrap_or_else(|e| fail(e));
         pkg::materialize(&root, &lock, &HttpFetcher::new()).unwrap_or_else(|e| fail(e));
         pkg::build_c_shims(&root, &lock, &manifest).unwrap_or_else(|e| fail(e));
         println!("installed {} dependencies from jade.lock", lock.packages.len());
         return;
     }
 
-    // An in-sync lock is authoritative: reuse it so `jade install` does not
-    // re-fetch every artifact just to recompute digests it already has.
-    if let Some(lock) = existing.filter(|l| pkg::verify_in_sync(&manifest, l).is_ok()) {
+    // An in-sync lock is authoritative for anything with a URL: reuse it so
+    // `jade pkg install` does not re-fetch every artifact just to recompute
+    // digests it already has. A local `path` dependency is the exception — its
+    // source is a file the user rebuilds, so it gets re-hashed every time.
+    if let Some(mut lock) = existing.filter(|l| pkg::verify_in_sync(&manifest, l).is_ok()) {
+        let changed = pkg::refresh_local(&root, &mut lock);
+        if !changed.is_empty() {
+            lock::write(&root, &lock).unwrap_or_else(|e| fail(e));
+            println!("re-pinned {} (local source changed)", changed.join(", "));
+        }
         pkg::materialize(&root, &lock, &HttpFetcher::new()).unwrap_or_else(|e| fail(e));
         pkg::build_c_shims(&root, &lock, &manifest).unwrap_or_else(|e| fail(e));
         println!("installed {} dependencies", lock.packages.len());
@@ -173,11 +183,11 @@ pub fn run_install(locked: bool) {
 
 // ── update ────────────────────────────────────────────────────────────────────
 
-/// `jade update [name]` — re-resolve against the manifest and rewrite the lock.
+/// `jade pkg update [name]` — re-resolve against the manifest and rewrite the lock.
 ///
 /// This re-fetches to pick up an artifact republished at the same URL. It
 /// cannot find a *newer version*: with no registry there is nothing to ask, so
-/// moving to 2.0.0 means editing `jade.toml` (or `jade add <name> --version`).
+/// moving to 2.0.0 means editing `jade.toml` (or `jade pkg add <name> --version`).
 pub fn run_update(name: Option<&str>) {
     let root = root_or_exit();
     let manifest = load_or_exit(&root);
@@ -199,7 +209,7 @@ pub fn run_update(name: Option<&str>) {
 
 // ── list ──────────────────────────────────────────────────────────────────────
 
-/// `jade list` — what is locked, and whether it is installed here.
+/// `jade pkg list` — what is locked, and whether it is installed here.
 pub fn run_list() {
     let root = root_or_exit();
 
@@ -221,7 +231,13 @@ pub fn run_list() {
             .or_else(|| p.artifacts.get(pkg::ANY_PLATFORM));
 
         let status = match here {
-            Some(a) if dir.join(&a.file).exists() => "installed",
+            // A local dependency whose source has been rebuilt is installed but
+            // out of date, and saying only "installed" is how that goes
+            // unnoticed. The next `jade pkg install` or `jade run` re-pins it.
+            Some(a) if dir.join(&a.file).exists() => match pkg::local_drift(&root, p) {
+                true => "installed (local source changed — run `jade pkg install`)",
+                false => "installed",
+            },
             Some(_) => "not installed",
             None => "unavailable on this platform",
         };

@@ -64,6 +64,22 @@ pub fn run_build(path: &str, output: Option<&str>, emit_ir: bool, lib: bool, exp
         // Absolute source path so imports resolve relative to it, not the CWD.
         let abs_source = std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
 
+        // Install the project's dependencies before resolving imports, exactly
+        // as `jade run` does. Without this the two engines disagree on what a
+        // dependency *is*: `run` picks up a rebuilt local library while `build`
+        // silently links whatever `libs/` was last left holding, and a fresh
+        // clone builds against nothing at all. The project is found from the
+        // source file's directory because that is how `aot/imports.rs` finds it.
+        if let Some(root) = abs_source
+            .parent()
+            .and_then(crate::project::find_project_root_from)
+            && let Ok(manifest) = crate::project::load_project(&root)
+            && let Err(e) = crate::pkg::ensure_ready(&root, &manifest)
+        {
+            eprintln!("error: {e}");
+            process::exit(1);
+        }
+
         let out = output_path(path, output, lib);
         // Make the output path absolute so the artifact lands where the user expects.
         let abs_out = if out.is_absolute() {

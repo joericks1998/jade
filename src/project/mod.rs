@@ -248,7 +248,7 @@ pub struct CSymbol {
 /// `linux-x86_64`, …) when the lock is generated.
 ///
 /// **Integrity lives in `jade.lock`, not here** — deliberately, following
-/// Cargo. `jade add` fetches each platform's artifact once, hashes it, and
+/// Cargo. `jade pkg add` fetches each platform's artifact once, hashes it, and
 /// records the digests in the lock; every later install verifies against those.
 /// A `{platform}` URL could not carry a single digest in the manifest anyway.
 #[derive(Debug, Clone, Deserialize, Default)]

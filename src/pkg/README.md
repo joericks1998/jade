@@ -16,11 +16,13 @@ That choice has a consequence worth stating plainly: a `.so` carries no manifest
 
 The second decision is that the lock records an artifact **for every platform**, not just the current one. Unlike Cargo, which locks portable source, a lock naming one artifact would only be valid on the machine that generated it — a macOS developer would commit a lock that Linux CI could not install, and with no registry to ask, could not even *verify*.
 
+The third is that a local `path` dependency is **re-hashed on every install**, while a URL dependency is not. A path points at a file the user builds and rebuilds; it is the one source that legitimately changes underneath a lock that is otherwise still correct. A URL is the opposite — it either serves the bytes the lock pins or it does not, and quietly re-pinning it would defeat the point of having a lock. So `refresh_local` runs before every `materialize`, and `verify_local_unchanged` is its `--locked` counterpart, turning the same drift into a CI failure rather than a fixup.
+
 The integration surface with the rest of the compiler is one function, `dependency_libraries`. Resolved dependencies come back as synthetic `project::LibraryEntry` values and get unioned into the manifest's `[lib]` map, so neither the VM nor the AOT import resolver ever learns what a dependency is. Both keep resolving `[lib]` entries exactly as before, which is how the two backends are kept from drifting on imports.
 
 ## What each file does
 
-- **`mod.rs`** — resolution and materialization. `dependency_libraries` is the one public seam into the rest of the compiler. Also defines `LIBS_DIR` (`libs/`, gitignored — `jade.lock` is what travels) and `ANY_PLATFORM`, the artifact key for a URL with no `{platform}` placeholder.
+- **`mod.rs`** — resolution and materialization. `dependency_libraries` is the one public seam into the rest of the compiler. Also holds the local-source group (`refresh_local`, `verify_local_unchanged`, `local_drift`) described above, and defines `LIBS_DIR` (`libs/`, gitignored — `jade.lock` is what travels) and `ANY_PLATFORM`, the artifact key for a URL with no `{platform}` placeholder.
 - **`lock.rs`** — the `jade.lock` format: `LockedPackage`, `LockedArtifact`, digests per platform. Meant to be committed.
 - **`fetch.rs`** — artifact acquisition and integrity, behind a `Fetcher` trait. Everything in this module takes a `&dyn Fetcher` rather than calling out directly, so the whole package manager is testable offline against a map of canned responses.
 - **`manifest.rs`** — format-preserving edits to `jade.toml` via `toml_edit`. `jade pkg add` and `jade pkg remove` rewrite a file a person wrote by hand; a parse-and-reserialize round-trip would silently discard every comment and all the original layout.
@@ -38,6 +40,8 @@ The integration surface with the rest of the compiler is one function, `dependen
 `cshim.rs` cannot bind a C function that takes a struct pointer. That is a real limit, but it is the same limit the ABI imposes on any Jade package, not one this shim invents.
 
 Tests must never hit the network — use the `Fetcher` trait.
+
+**A present artifact is not a current artifact.** `materialize` compares `libs/` against the *lock*, so anything that changes the true source without changing the lock is invisible to it. That is exactly how a rebuilt `path` dependency used to keep running as the copy it was when it was added. `refresh_local` closes it for local sources; any future source kind that is mutable in place needs the same treatment, and adding one without it reintroduces the same silent staleness.
 
 ## Building and testing
 

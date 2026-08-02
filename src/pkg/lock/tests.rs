@@ -155,7 +155,7 @@ fn future_lock_version_is_rejected() {
         err.contains(&(LOCK_VERSION + 1).to_string()),
         "error should name the version it found: {err}"
     );
-    assert!(err.contains("jade install"), "error should say how to recover: {err}");
+    assert!(err.contains("jade pkg install"), "error should say how to recover: {err}");
 }
 
 #[test]
