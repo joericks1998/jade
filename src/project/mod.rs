@@ -10,7 +10,8 @@ mod imports;
 mod tests;
 
 pub use imports::{
-    ImportContext, ImportTarget, program_import_paths, resolve_import, walk_imports,
+    ImportContext, ImportTarget, program_import_paths, reachable_jade_modules, resolve_import,
+    walk_imports,
 };
 
 // ── Manifest types ────────────────────────────────────────────────────────────
@@ -29,6 +30,139 @@ pub struct ProjectManifest {
     /// native C-ABI shared library (`.dylib` / `.so` / `.dll`) — the file
     /// extension decides. See [`resolve_library_import`].
     pub lib: Option<HashMap<String, LibraryEntry>>,
+    /// `[package]` section: this project *is* a Jade package, and
+    /// `jade build --lib` should read what it is made of from here rather than
+    /// from command-line flags. See [`PackageSection`].
+    pub package: Option<PackageSection>,
+}
+
+/// The `[package]` section of `jade.toml` — a project that builds itself into a
+/// shared library other projects can depend on.
+///
+/// ```toml
+/// [package]
+/// name    = "mathlib"
+/// version = "1.2.0"
+/// entry   = "mathlib.jde"                              # optional
+/// sources = ["geometry.jde", "text.jde", "mathlib.jde"]  # optional
+/// exports = ["area", "shout", "version"]               # optional
+/// ```
+///
+/// ## Why `sources` when the imports already say
+///
+/// The backend finds a package's files by following `use` from `entry`, so the
+/// build works without this list. What the list buys is the two errors the
+/// import graph cannot raise on its own: a file you meant to ship but forgot to
+/// import (it silently vanishes from the package), and a file that got pulled in
+/// without you deciding to ship it. Declaring the set makes both a build failure
+/// naming the file, and makes `jade.toml` an honest inventory of the package.
+///
+/// It is optional. Omit it and the import graph is taken at its word.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PackageSection {
+    /// Package name. Also the artifact's stem, and the name consumers import.
+    pub name: String,
+    /// Version of the package. A label recorded for the publisher's benefit —
+    /// there is no registry to resolve it against.
+    pub version: Option<String>,
+    /// Entry module, whose top-level functions form the package's API. Defaults
+    /// to `<name>.jde`.
+    pub entry: Option<String>,
+    /// Every `.jde` file the package is made of, relative to the project root.
+    /// Checked against what the entry actually imports; see above.
+    #[serde(default)]
+    pub sources: Option<Vec<String>>,
+    /// Functions to bind. Omit to export all of the entry module's.
+    #[serde(default)]
+    pub exports: Option<Vec<String>>,
+}
+
+impl PackageSection {
+    /// The entry module, defaulting to `<name>.jde`.
+    pub fn entry_file(&self) -> String {
+        self.entry.clone().unwrap_or_else(|| format!("{}.jde", self.name))
+    }
+
+    /// The artifact this package builds to, using the host's shared-library
+    /// extension. Named after the package because `use <name>` resolves by stem.
+    pub fn artifact_file(&self) -> String {
+        let ext = if cfg!(target_os = "macos") { "dylib" } else { "so" };
+        format!("{}.{ext}", self.name)
+    }
+
+    /// Check the section is well-formed, naming the offending value in every
+    /// error — a manifest is hand-written, so "which line do I fix" has to be
+    /// answerable from the message alone.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.name.trim().is_empty() {
+            return Err("[package] in jade.toml has an empty 'name'".to_string());
+        }
+        // The name becomes a filename and an import name, so the characters an
+        // identifier allows are exactly the characters that work here.
+        if !self.name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return Err(format!(
+                "[package] name '{}' in jade.toml is not a usable package name \
+                 (letters, digits and underscores only — it becomes both a filename \
+                 and the name `use {}` binds)",
+                self.name, self.name
+            ));
+        }
+
+        let entry = self.entry_file();
+        if !entry.ends_with(".jde") {
+            return Err(format!(
+                "[package] entry '{entry}' in jade.toml is not a Jade source file \
+                 (expected a .jde file)"
+            ));
+        }
+
+        if let Some(sources) = &self.sources {
+            if sources.is_empty() {
+                return Err(
+                    "[package] sources in jade.toml is empty — omit it entirely to \
+                     take the import graph at its word"
+                        .to_string(),
+                );
+            }
+            for s in sources {
+                if !s.ends_with(".jde") {
+                    return Err(format!(
+                        "[package] source '{s}' in jade.toml is not a Jade source file \
+                         (expected a .jde file). A native library is a dependency, \
+                         not a source — declare it under [dependencies]"
+                    ));
+                }
+            }
+            // The entry is part of the package it heads. Requiring it to be
+            // listed keeps `sources` readable as the complete inventory rather
+            // than as "the other files".
+            if !sources.iter().any(|s| s == &entry) {
+                return Err(format!(
+                    "[package] sources in jade.toml does not list the entry module \
+                     '{entry}'; sources is the package's complete file list, so the \
+                     entry belongs in it"
+                ));
+            }
+            let mut seen = std::collections::HashSet::new();
+            for s in sources {
+                if !seen.insert(s) {
+                    return Err(format!(
+                        "[package] sources in jade.toml lists '{s}' more than once"
+                    ));
+                }
+            }
+        }
+
+        if self.exports.as_ref().is_some_and(|e| e.is_empty()) {
+            return Err(
+                "[package] exports in jade.toml is empty, which would build a \
+                 package binding nothing — omit it to export every function"
+                    .to_string(),
+            );
+        }
+
+        Ok(())
+    }
 }
 
 /// Entry in a `[lib.<name>]` section of `jade.toml`.

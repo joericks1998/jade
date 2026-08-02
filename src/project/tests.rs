@@ -704,3 +704,164 @@ fn a_native_module_is_checked_for_existence_but_not_loaded() {
     ));
     assert!(walk_imports(&paths_of("use fastmath\n"), &ctx).is_ok());
 }
+
+// ── [package] ─────────────────────────────────────────────────────────────────
+//
+// A package's shape is declared in jade.toml so it is a property of the project
+// rather than of the command line somebody remembered to type. These pin the
+// two things that makes worth having: sensible defaults, and errors that name
+// the value to fix.
+
+fn package(src: &str) -> crate::project::PackageSection {
+    let m: ProjectManifest = toml::from_str(src).expect("valid manifest toml");
+    m.package.expect("a [package] section")
+}
+
+#[test]
+fn a_package_entry_defaults_to_its_own_name() {
+    let p = package("[package]\nname = \"mathlib\"\n");
+    assert_eq!(p.entry_file(), "mathlib.jde");
+    assert!(p.validate().is_ok());
+}
+
+#[test]
+fn a_package_entry_can_be_named_explicitly() {
+    let p = package("[package]\nname = \"mathlib\"\nentry = \"src/api.jde\"\n");
+    assert_eq!(p.entry_file(), "src/api.jde");
+    assert!(p.validate().is_ok());
+}
+
+#[test]
+fn a_package_artifact_takes_the_platform_extension() {
+    // `use <name>` resolves a package by stem, so the artifact has to be a real
+    // shared library named after the package.
+    let p = package("[package]\nname = \"mathlib\"\n");
+    let expected = if cfg!(target_os = "macos") { "mathlib.dylib" } else { "mathlib.so" };
+    assert_eq!(p.artifact_file(), expected);
+}
+
+#[test]
+fn a_package_name_that_is_not_an_identifier_is_rejected() {
+    // The name becomes a filename *and* the name `use` binds, so a hyphen would
+    // produce a package that cannot be imported under the name it was built as.
+    let err = package("[package]\nname = \"my-lib\"\n").validate().unwrap_err();
+    assert!(err.contains("my-lib"), "error should name the value: {err}");
+    assert!(err.contains("use my-lib"), "error should say why it matters: {err}");
+
+    assert!(package("[package]\nname = \"my_lib2\"\n").validate().is_ok());
+}
+
+#[test]
+fn a_package_entry_must_be_a_jade_file() {
+    let err = package("[package]\nname = \"m\"\nentry = \"m.dylib\"\n").validate().unwrap_err();
+    assert!(err.contains("m.dylib"), "error should name the file: {err}");
+    assert!(err.contains(".jde"), "error should say what is expected: {err}");
+}
+
+#[test]
+fn package_sources_must_list_the_entry() {
+    // sources reads as the package's complete inventory, so the entry belongs in
+    // it — otherwise the list means "the other files", which nothing says.
+    let err = package(
+        "[package]\nname = \"mathlib\"\nsources = [\"helper.jde\"]\n",
+    )
+    .validate()
+    .unwrap_err();
+    assert!(err.contains("mathlib.jde"), "error should name the entry: {err}");
+
+    assert!(
+        package("[package]\nname = \"mathlib\"\nsources = [\"helper.jde\", \"mathlib.jde\"]\n")
+            .validate()
+            .is_ok()
+    );
+}
+
+#[test]
+fn package_sources_reject_a_non_jade_file() {
+    let err = package(
+        "[package]\nname = \"m\"\nsources = [\"m.jde\", \"libz.so\"]\n",
+    )
+    .validate()
+    .unwrap_err();
+    assert!(err.contains("libz.so"), "error should name the file: {err}");
+    assert!(err.contains("[dependencies]"), "error should point at the right home: {err}");
+}
+
+#[test]
+fn package_sources_reject_a_duplicate() {
+    let err = package(
+        "[package]\nname = \"m\"\nsources = [\"m.jde\", \"a.jde\", \"a.jde\"]\n",
+    )
+    .validate()
+    .unwrap_err();
+    assert!(err.contains("a.jde"), "error should name the duplicate: {err}");
+}
+
+#[test]
+fn empty_package_lists_are_rejected_rather_than_silently_meaning_nothing() {
+    // `sources = []` and `exports = []` each read as "I meant something" while
+    // doing the opposite of the sensible default. Omitting them is the way to
+    // ask for the default, so an empty list is a mistake worth reporting.
+    let err = package("[package]\nname = \"m\"\nsources = []\n").validate().unwrap_err();
+    assert!(err.contains("omit it"), "error should say what to do instead: {err}");
+
+    let err = package("[package]\nname = \"m\"\nexports = []\n").validate().unwrap_err();
+    assert!(err.contains("binding nothing"), "error should say what it would build: {err}");
+}
+
+#[test]
+fn a_manifest_without_a_package_section_has_none() {
+    let m: ProjectManifest =
+        toml::from_str("[project]\nname = \"app\"\n").expect("valid manifest toml");
+    assert!(m.package.is_none(), "[package] is opt-in");
+}
+
+// ── reachable_jade_modules ────────────────────────────────────────────────────
+
+#[test]
+fn reachable_modules_follows_imports_transitively() {
+    // What `jade build --lib` checks a package's declared sources against.
+    let tmp = TempDir::new("reachable");
+    std::fs::write(tmp.path().join("entry.jde"), "use mid\n").unwrap();
+    std::fs::write(tmp.path().join("mid.jde"), "use leaf\n").unwrap();
+    std::fs::write(tmp.path().join("leaf.jde"), "fn f() { return 1 }\n").unwrap();
+    let (libs, dir) = bare_ctx(tmp.path());
+    let ctx = ImportContext { libraries: &libs, project_root: None, source_dir: dir };
+
+    let reached = crate::project::reachable_jade_modules(&paths_of("use mid\n"), &ctx).unwrap();
+
+    let names: std::collections::HashSet<String> = reached
+        .iter()
+        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .collect();
+    assert!(names.contains("mid.jde"), "a direct import: {names:?}");
+    assert!(names.contains("leaf.jde"), "a transitive import: {names:?}");
+    assert!(!names.contains("entry.jde"), "the root of the walk is not something it reached");
+}
+
+#[test]
+fn reachable_modules_excludes_a_file_nothing_imports() {
+    // The case `sources` exists to catch: a file sitting in the directory that
+    // no `use` reaches would not be in the artifact.
+    let tmp = TempDir::new("reachorphan");
+    std::fs::write(tmp.path().join("used.jde"), "fn f() { return 1 }\n").unwrap();
+    std::fs::write(tmp.path().join("orphan.jde"), "fn g() { return 2 }\n").unwrap();
+    let (libs, dir) = bare_ctx(tmp.path());
+    let ctx = ImportContext { libraries: &libs, project_root: None, source_dir: dir };
+
+    let reached = crate::project::reachable_jade_modules(&paths_of("use used\n"), &ctx).unwrap();
+    assert_eq!(reached.len(), 1);
+    assert!(reached.iter().next().unwrap().ends_with("used.jde"));
+}
+
+#[test]
+fn reachable_modules_terminates_on_a_cycle() {
+    let tmp = TempDir::new("reachcycle");
+    std::fs::write(tmp.path().join("a.jde"), "use b\n").unwrap();
+    std::fs::write(tmp.path().join("b.jde"), "use a\n").unwrap();
+    let (libs, dir) = bare_ctx(tmp.path());
+    let ctx = ImportContext { libraries: &libs, project_root: None, source_dir: dir };
+
+    let reached = crate::project::reachable_jade_modules(&paths_of("use a\n"), &ctx).unwrap();
+    assert_eq!(reached.len(), 2, "both files, visited once each");
+}

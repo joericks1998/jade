@@ -639,3 +639,81 @@ mod new {
         }
     }
 }
+
+// ── build::compare_sources ────────────────────────────────────────────────────
+//
+// The decision behind `[package] sources`: does the declared file list match
+// what the entry actually imports. Both mismatches are things the import graph
+// cannot report on its own — a declared file nothing reaches never lands in the
+// artifact, and a reached file nobody declared ships without being decided on.
+
+mod package_sources {
+    use crate::cli::build::compare_sources;
+    use std::collections::HashSet;
+    use std::path::{Path, PathBuf};
+
+    /// Declared names and reached names, both relative to the same fake root.
+    /// Paths that do not exist canonicalize to themselves, which is exactly the
+    /// comparison being tested.
+    fn check(declared: &[&str], reached: &[&str]) -> Result<(), String> {
+        let root = Path::new("/proj");
+        let declared: Vec<String> = declared.iter().map(|s| s.to_string()).collect();
+        let reached: HashSet<PathBuf> = reached.iter().map(|s| root.join(s)).collect();
+        compare_sources(root, &declared, &reached, "mathlib.jde")
+    }
+
+    #[test]
+    fn a_matching_list_passes() {
+        assert!(check(&["mathlib.jde", "geometry.jde"], &["mathlib.jde", "geometry.jde"]).is_ok());
+    }
+
+    #[test]
+    fn order_does_not_matter() {
+        // sources is an inventory, not a build order — the import graph decides
+        // what compiles when.
+        assert!(check(&["geometry.jde", "mathlib.jde"], &["mathlib.jde", "geometry.jde"]).is_ok());
+    }
+
+    #[test]
+    fn a_declared_file_nothing_imports_is_reported() {
+        let err = check(&["mathlib.jde", "orphan.jde"], &["mathlib.jde"]).unwrap_err();
+        assert!(err.contains("orphan.jde"), "error should name the file: {err}");
+        assert!(err.contains("declared but never imported"), "unexpected message: {err}");
+        assert!(err.contains("mathlib.jde"), "error should name the entry it walked from: {err}");
+    }
+
+    #[test]
+    fn an_imported_file_nobody_declared_is_reported() {
+        let err = check(&["mathlib.jde"], &["mathlib.jde", "text.jde"]).unwrap_err();
+        assert!(err.contains("text.jde"), "error should name the file: {err}");
+        assert!(err.contains("imported but not declared"), "unexpected message: {err}");
+        assert!(err.contains("add them to sources"), "error should say how to fix it: {err}");
+    }
+
+    #[test]
+    fn both_directions_are_reported_at_once() {
+        // Editing a manifest by hand should not become a sequence of one-error
+        // builds, the same reasoning as pkg::verify_in_sync.
+        let err = check(&["mathlib.jde", "orphan.jde"], &["mathlib.jde", "text.jde"]).unwrap_err();
+        assert!(err.contains("orphan.jde"), "should report the declared-only file: {err}");
+        assert!(err.contains("text.jde"), "should report the reached-only file: {err}");
+    }
+
+    #[test]
+    fn a_nested_source_is_named_the_way_the_manifest_writes_it() {
+        // Reached paths are absolute; the error has to echo them back
+        // project-relative or the user cannot find them in jade.toml.
+        let err = check(&["mathlib.jde"], &["mathlib.jde", "internal/helper.jde"]).unwrap_err();
+        assert!(
+            err.contains("internal/helper.jde"),
+            "should render relative to the project root: {err}"
+        );
+        assert!(!err.contains("/proj/"), "should not leak the absolute path: {err}");
+    }
+
+    #[test]
+    fn every_mismatch_is_listed_not_just_the_first() {
+        let err = check(&["mathlib.jde", "a.jde", "b.jde"], &["mathlib.jde"]).unwrap_err();
+        assert!(err.contains("a.jde") && err.contains("b.jde"), "both should appear: {err}");
+    }
+}

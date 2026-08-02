@@ -123,6 +123,67 @@ Jade has no `pub` keyword — every top-level function is public — so the defa
 
 Publish the result wherever you like (GitHub Releases is the natural home), one build per platform, named so a `{platform}` URL finds them. Consumers then `jade pkg add` it like any other dependency.
 
+### A package of several files
+
+A package is not limited to one file. Every module the entry `use`s is compiled into the same artifact, each in its own namespace, so a package can be organized like any other program:
+
+```jade
+// mathlib.jde — the entry module
+use geometry
+use text
+
+fn area(w, h) { return geometry.area(w, h) }
+fn shout(s) { return text.shout(s) }
+```
+
+**The entry module is the package's API.** Only its top-level functions become bindings; everything the imported modules define stays internal, which is why `area` above is a one-line forwarder. That is the same rule as a single-file package, and it means adding a helper to `geometry.jde` never silently widens what consumers can call.
+
+### Declaring the package in `jade.toml`
+
+Rather than passing the entry and the exports on the command line every time, a package can describe itself:
+
+```toml
+[package]
+name    = "mathlib"
+version = "1.2.0"
+entry   = "mathlib.jde"                                # optional; defaults to <name>.jde
+sources = ["geometry.jde", "text.jde", "mathlib.jde"]  # optional
+exports = ["area", "shout", "version"]                 # optional; defaults to all
+```
+
+Then, from anywhere in the project:
+
+```sh
+jade build --lib          # -> mathlib.dylib, exporting the three named functions
+```
+
+`name` becomes the artifact's filename and the name consumers `use`, so it has to be a usable identifier — letters, digits, and underscores.
+
+`sources` is optional, and it is the reason to write a `[package]` at all rather than a shell alias. The build finds a package's files by following `use` from the entry, so the list is not what makes the build work. What it buys is the two errors the import graph cannot raise on its own:
+
+- a file you meant to ship but forgot to import, which would silently vanish from the artifact;
+- a file that got pulled in without you deciding to ship it.
+
+Either one fails the build, naming the file:
+
+```
+error: [package] sources in jade.toml does not match what the package imports
+  declared but never imported: orphan.jde
+    nothing reaches these from 'mathlib.jde', so they would not be in the artifact
+```
+
+Omit `sources` and the import graph is taken at its word.
+
+:::note
+`[package]` describes a project that **is** a package. `[dependencies]` describes packages a project **uses**. A project can have both: a package that depends on another package.
+:::
+
+Nothing changes for consumers. The artifact is an ordinary Jade package, added and locked exactly as before:
+
+```sh
+jade pkg add mathlib --url 'https://example.com/mathlib-{platform}.so' --version 1.2.0
+```
+
 ## The FFI's limits
 
 The native ABI carries `int`, `float`, `bool`, `str`, `nil`, and — since v1.1.31 — arrays, dicts, and structs, in both directions. A struct crosses with its type name attached, so the receiving side can tell a `Config` from anything else shaped like one.

@@ -43,16 +43,21 @@ Compile a Jade file to a native binary. Everything runs in-process: the language
 jade build program.jde
 jade build program.jde --output mybin
 jade build program.jde --emit ir
+jade build --lib                          # build the [package] in jade.toml
 ```
+
+Every module the file `use`s is compiled into the same artifact, so a program or a package can span as many files as it likes.
+
+With no file, `--lib` builds the project's `[package]` section — its entry, its exports, and its artifact name all come from `jade.toml`. See [Packages](./packages.md#declaring-the-package-in-jadetoml).
 
 ### Flags
 
 | Flag | Description |
 |------|-------------|
-| `-o`, `--output <PATH>` | Output binary path. Defaults to the input filename without extension. |
+| `-o`, `--output <PATH>` | Output binary path. Defaults to the input filename without extension, or the package name for a `[package]` build. |
 | `--emit ir` | Print the generated LLVM IR to stdout instead of producing a binary. |
 | `--lib` | Build a shared library exporting `jade_pkg_init` — a package other Jade projects can depend on. |
-| `--export <NAME>` | With `--lib`, bind only these functions (repeatable; default: all of them). |
+| `--export <NAME>` | With `--lib`, bind only these functions (repeatable; default: all of them). Overrides `[package].exports` when both are given. |
 
 :::note
 Native code generation, the C runtime, and linking are part of the `jade` binary. Building the toolchain from source therefore needs LLVM 18 present (`LLVM_SYS_180_PREFIX`); running a released binary does not.

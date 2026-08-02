@@ -52,8 +52,8 @@ enum Commands {
 
     /// Compile a Jade file to a native binary
     Build {
-        /// Source file to compile
-        file: String,
+        /// Source file to compile (omit with --lib to build the [package] in jade.toml)
+        file: Option<String>,
         /// Output binary path (default: input filename without extension)
         #[arg(short, long, value_name = "PATH")]
         output: Option<String>,
@@ -260,7 +260,7 @@ async fn run_cli() {
         // ── build ─────────────────────────────────────────────────────────────
         Commands::Build { file, output, emit, lib, export } => {
             let emit_ir = emit.as_deref() == Some("ir");
-            cli::build::run_build(&file, output.as_deref(), emit_ir, lib, &export);
+            cli::build::run_build(file.as_deref(), output.as_deref(), emit_ir, lib, &export);
         }
 
         // ── new ──────────────────────────────────────────────────────────────
