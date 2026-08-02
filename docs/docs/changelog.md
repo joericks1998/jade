@@ -4,6 +4,14 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.1.36
+
+- **A package can now describe itself in `jade.toml`.** A new `[package]` section names the entry module, the files the package is made of, and the functions it exports, so `jade build --lib` reads a package's shape from the manifest instead of from flags somebody had to remember to type. `jade build --lib` with no file argument builds it.
+- **Multi-file packages already worked; what was missing was saying so.** Every module the entry `use`s has always been compiled into the same artifact, each in its own namespace. The entry module is the API — only its top-level functions become bindings — which is unchanged, and is what keeps adding a helper to an internal module from silently widening what consumers can call.
+- **`sources` is checked against what the entry actually imports.** The build finds a package's files by following `use`, so the list is not what makes it work. What it catches is the pair of mistakes the import graph cannot report on its own: a file you meant to ship but forgot to import, which would vanish from the artifact, and a file pulled in without you deciding to ship it. Either fails the build naming the file. Omit `sources` and the import graph is taken at its word.
+- **Nothing changes for consumers.** The artifact is an ordinary Jade package, added and locked exactly as before.
+- **The docs caught up with v1.1.35.** Local `path` dependencies get their own section in the packages guide — the re-pinning, the `jade pkg list` drift status, and the `--locked` error — which until now existed only in this changelog. The imports guide gains the rule that a dependency binds one name to one artifact however many files built it, since that is the thing most likely to be assumed otherwise now that a package can span files.
+
 ## v1.1.35
 
 - **Fixed: rebuilding a local dependency did nothing, and nothing said so.** A `path` dependency was hashed once, by `jade pkg add`, and `jade.lock` held that digest forever. Installing checked `libs/` against the lock, found a match, and stopped — so the copy taken on the day you added the library kept loading no matter how many times you rebuilt the real one. `jade pkg install` did not help; only re-running `jade pkg add` did. There was no warning and no checksum complaint, because from the lock's point of view nothing was wrong.

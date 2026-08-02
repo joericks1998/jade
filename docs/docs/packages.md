@@ -76,6 +76,38 @@ Every artifact is verified against its SHA-256 in `jade.lock` on **every** insta
 
 Checksums live in the lock, not the manifest: `jade pkg add` computes them on first fetch, exactly as Cargo does.
 
+## Local `path` dependencies
+
+A `path` dependency points at a file you build, so it is the one source that legitimately changes while the lock stays correct. It is treated differently for that reason: **the source file is re-hashed on every install and every run**, and if it has changed, the lock is re-pinned and the new artifact copied into `libs/`.
+
+```
+$ jade run main.jde
+note: re-pinned engine (local source changed)
+```
+
+A URL dependency is never re-pinned. It either serves the bytes the lock names or it does not, and quietly re-pinning it would defeat the point of having a lock. Moving a URL dependency to different bytes is what `jade pkg update` is for.
+
+`jade pkg list` marks a local dependency whose source has moved ahead of its pin:
+
+```
+engine 1.0.0  [jade]  installed (local source changed — run `jade pkg install`)
+```
+
+Under `--locked` the same drift is an error rather than a fixup, because a rebuilt library means the committed lock is stale:
+
+```
+$ jade pkg install --locked
+error: dependency 'engine': the local source has changed since jade.lock was written
+  locked 462fc9e8…
+  on disk f2d2eb23…
+--locked forbids rewriting the lock. Run `jade pkg install` and commit jade.lock,
+or rebuild the source to match.
+```
+
+:::note
+Before v1.1.35 a rebuilt local dependency was ignored: installing compared `libs/` against the lock, found a match, and kept loading the copy taken when the dependency was added. Only re-running `jade pkg add` picked up the new build.
+:::
+
 ## Committing
 
 Commit `jade.lock`. Do not commit `libs/` — `jade new` adds it to `.gitignore`. The lock is what travels; the binaries are rebuilt from it.
@@ -122,6 +154,67 @@ jade build mathlib.jde --lib --export add  # bind only `add`
 Jade has no `pub` keyword — every top-level function is public — so the default is to export all of them. `--export` narrows that.
 
 Publish the result wherever you like (GitHub Releases is the natural home), one build per platform, named so a `{platform}` URL finds them. Consumers then `jade pkg add` it like any other dependency.
+
+### A package of several files
+
+A package is not limited to one file. Every module the entry `use`s is compiled into the same artifact, each in its own namespace, so a package can be organized like any other program:
+
+```jade
+// mathlib.jde — the entry module
+use geometry
+use text
+
+fn area(w, h) { return geometry.area(w, h) }
+fn shout(s) { return text.shout(s) }
+```
+
+**The entry module is the package's API.** Only its top-level functions become bindings; everything the imported modules define stays internal, which is why `area` above is a one-line forwarder. That is the same rule as a single-file package, and it means adding a helper to `geometry.jde` never silently widens what consumers can call.
+
+### Declaring the package in `jade.toml`
+
+Rather than passing the entry and the exports on the command line every time, a package can describe itself:
+
+```toml
+[package]
+name    = "mathlib"
+version = "1.2.0"
+entry   = "mathlib.jde"                                # optional; defaults to <name>.jde
+sources = ["geometry.jde", "text.jde", "mathlib.jde"]  # optional
+exports = ["area", "shout", "version"]                 # optional; defaults to all
+```
+
+Then, from anywhere in the project:
+
+```sh
+jade build --lib          # -> mathlib.dylib, exporting the three named functions
+```
+
+`name` becomes the artifact's filename and the name consumers `use`, so it has to be a usable identifier — letters, digits, and underscores.
+
+`sources` is optional, and it is the reason to write a `[package]` at all rather than a shell alias. The build finds a package's files by following `use` from the entry, so the list is not what makes the build work. What it buys is the two errors the import graph cannot raise on its own:
+
+- a file you meant to ship but forgot to import, which would silently vanish from the artifact;
+- a file that got pulled in without you deciding to ship it.
+
+Either one fails the build, naming the file:
+
+```
+error: [package] sources in jade.toml does not match what the package imports
+  declared but never imported: orphan.jde
+    nothing reaches these from 'mathlib.jde', so they would not be in the artifact
+```
+
+Omit `sources` and the import graph is taken at its word.
+
+:::note
+`[package]` describes a project that **is** a package. `[dependencies]` describes packages a project **uses**. A project can have both: a package that depends on another package.
+:::
+
+Nothing changes for consumers. The artifact is an ordinary Jade package, added and locked exactly as before:
+
+```sh
+jade pkg add mathlib --url 'https://example.com/mathlib-{platform}.so' --version 1.2.0
+```
 
 ## The FFI's limits
 

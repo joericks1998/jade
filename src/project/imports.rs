@@ -134,8 +134,27 @@ pub fn program_import_paths(program: &Program) -> Vec<(String, Span)> {
 /// front is a separate question from whether the files exist, so the walk simply
 /// stops rather than recursing forever.
 pub fn walk_imports(paths: &[(String, Span)], ctx: &ImportContext) -> Result<(), JadeError> {
+    reachable_jade_modules(paths, ctx).map(|_| ())
+}
+
+/// The same walk, keeping the set it visits: every Jade module reachable from
+/// `paths`, canonicalized.
+///
+/// The walk has always built this set to guard against cycles and then thrown it
+/// away. `jade build --lib` needs it to check a package's declared `sources`
+/// against the files actually pulled in, and asking the *frontend* rather than
+/// the LLVM backend keeps that check off the compile path — the answer is a
+/// property of the import graph, not of code generation.
+///
+/// The entry file itself is not included: it is the root of the walk, not
+/// something the walk reached. Callers that want the whole package add it.
+pub fn reachable_jade_modules(
+    paths: &[(String, Span)],
+    ctx: &ImportContext,
+) -> Result<HashSet<PathBuf>, JadeError> {
     let mut seen = HashSet::new();
-    walk(paths, ctx, &mut seen)
+    walk(paths, ctx, &mut seen)?;
+    Ok(seen)
 }
 
 fn walk(

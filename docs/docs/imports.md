@@ -128,6 +128,17 @@ let greeting = stringlib.concat("hello", " world")
 
 Imports are not re-exported. If `a.jde` uses `b.jde`, a third file that uses `a.jde` does *not* automatically get access to what `b.jde` defined. Each file must import the libraries it needs directly.
 
+The same rule decides what a **package** exposes. A package built from several files compiles all of them into one artifact, but only the entry module's own top-level functions become bindings — everything its imports defined stays internal. To publish one, forward it:
+
+```jade
+// mathlib.jde — the entry module, and therefore the package's API
+use geometry
+
+fn area(w, h) { return geometry.area(w, h) }
+```
+
+Which means adding a helper to `geometry.jde` never quietly widens what consumers of `mathlib` can call. See [Packages](packages#a-package-of-several-files).
+
 ---
 
 ## Standard Library Packages
@@ -202,3 +213,5 @@ print(fastmath.triple(14))
 ```
 
 A dependency resolves through the same `[lib]` machinery as a registered library, so it behaves identically in `jade run` and `jade build`. If a project declares both a dependency and a `[lib]` entry of the same name, the local `[lib]` wins and Jade warns. If a bare name matches both a dependency and a sibling `.jde` file, that is a hard error rather than a silent choice — rename one of them.
+
+A dependency is always **one name binding one artifact**, however many files went into building it. `use fastmath` reaches the package's exported functions and nothing else; there is no `fastmath::submodule`, because the package's internal structure did not survive compilation. That is the difference between a dependency and a `[lib]`: a `[lib]` registers a *directory* whose modules you address individually, while a package is a single compiled unit.
