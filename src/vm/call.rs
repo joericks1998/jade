@@ -414,6 +414,16 @@ pub(crate) async fn call_fn(
     if let Some(scope) = &cf.module_scope {
         state.active_module_scope = Some(Arc::clone(scope));
     }
+    // A generator runs its body to completion into a fresh buffer and hands the
+    // buffer back instead of the body's value. This is the "a stream is a
+    // buffer" model in one place: nothing is lazy, nothing is one-shot, and the
+    // caller can read the result as many times as it likes.
+    //
+    // The buffer is pushed *before* the body runs and popped after, so a
+    // generator that calls another generator keeps their yields separate.
+    if cf.is_generator {
+        state.yield_stack.push(Arc::new(Mutex::new(Vec::new())));
+    }
     let result = execute_chunk(&cf.chunk, &mut frame, state).await
         .map_err(|e| {
             if cf.source_file.is_empty() || matches!(e, JadeError::InFile { .. }) {
@@ -423,6 +433,13 @@ pub(crate) async fn call_fn(
             }
         });
     state.active_module_scope = saved_scope;
+    if cf.is_generator {
+        // Pop even on the error path, or a raise inside a generator would leave
+        // its buffer on the stack and the next `yield` anywhere would land in it.
+        let buf = state.yield_stack.pop();
+        result?;
+        return Ok(VmValue::Stream(buf.unwrap_or_default()));
+    }
     Ok(result?.unwrap_or(VmValue::Nil))
 }
 

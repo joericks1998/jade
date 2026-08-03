@@ -532,3 +532,47 @@ mod tests {
         assert_eq!(s.get_field("z"), None);
     }
 }
+
+
+// ── Generator buffers ─────────────────────────────────────────────────────────
+//
+// A `yield`ing function fills a buffer and hands it back; a stream *is* that
+// buffer. The buffer is an ordinary array, so `len`, indexing, `for`, and
+// printing over a stream reuse everything arrays already do.
+//
+// A stack rather than a single slot, because a generator can call another
+// generator and each `yield` must land in its own function's buffer. Mirrors
+// `VmState::yield_stack` in the interpreter.
+
+use core::cell::RefCell;
+
+thread_local! {
+    static YIELD_STACK: RefCell<Vec<*mut core::ffi::c_void>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Begin a generator frame.
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_yield_push() {
+    let arr = crate::ffi_coll::jrt_karr_new();
+    YIELD_STACK.with(|s| s.borrow_mut().push(arr));
+}
+
+/// Append one yielded value to the innermost generator's buffer.
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_yield_append(val: i64) {
+    YIELD_STACK.with(|s| {
+        if let Some(&arr) = s.borrow().last() {
+            crate::ffi_coll::jrt_karr_push(arr, val);
+        }
+    });
+}
+
+/// End the innermost generator frame, returning its buffer as a tagged array.
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_yield_pop() -> i64 {
+    YIELD_STACK.with(|s| match s.borrow_mut().pop() {
+        Some(arr) => crate::value::JadeValue::from_ptr(arr as *const ()).bits() as i64,
+        // Unreachable from source: a generator always pushes before its body.
+        None => crate::value::NIL_BITS as i64,
+    })
+}

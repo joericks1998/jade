@@ -212,6 +212,7 @@ impl Parser {
             TokenKind::Fn     => self.parse_fn_with_decorators(vec![]),
             TokenKind::Async  => self.parse_async_fn_with_decorators(vec![]),
             TokenKind::Return => self.parse_return(),
+            TokenKind::Yield  => self.parse_yield(),
             TokenKind::If     => self.parse_if(),
             TokenKind::While  => self.parse_while(),
             TokenKind::For    => self.parse_for(),
@@ -427,6 +428,19 @@ impl Parser {
     }
 
     /// Parse `return <expr> ;` or `return ;`
+    /// `yield expr`. Rejected at the top level for the same reason `return` is:
+    /// there is no function whose stream the value would join.
+    fn parse_yield(&mut self) -> Result<Stmt> {
+        let span = self.peek().span;
+        if self.fn_depth == 0 {
+            return Err(JadeError::YieldOutsideFunction { span });
+        }
+        self.advance(); // consume `yield`
+        let value = self.parse_pipe()?;
+        self.consume_semicolon()?;
+        Ok(Stmt::Yield { value, span })
+    }
+
     fn parse_return(&mut self) -> Result<Stmt> {
         let span = self.peek().span;
 

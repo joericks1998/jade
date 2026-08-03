@@ -1,0 +1,67 @@
+// yield — a function that produces a sequence instead of a value.
+//
+// A function whose body contains a `yield` returns a *stream*: the body runs to
+// completion filling a buffer, and the caller gets the buffer. That is the
+// whole model. A stream is a buffer, not a one-shot channel, which is why
+// reading one twice below gives the same values twice and why there is no
+// "already consumed" error to learn.
+
+fn doubles(n) {
+    let i = 0
+    while i < n {
+        yield i * 2
+        i = i + 1
+    }
+}
+
+let s = doubles(4)
+
+// A stream answers len and indexes, because a buffer does.
+print(len(s))
+print(s[0])
+print(s[3])
+
+// Iterating twice gives the same values twice.
+for x in s {
+    print(x)
+}
+for x in s {
+    print(x)
+}
+
+// Printing one shows its contents.
+print(s)
+
+// A bare `return` stops a generator early. It carries no value — a function
+// that yields produces a stream, so returning a value as well would ask it to
+// be two things at once, and that is a compile error.
+fn upto(limit) {
+    let i = 0
+    while true {
+        if i >= limit {
+            return
+        }
+        yield i
+        i = i + 1
+    }
+}
+
+print(upto(3))
+
+// Yields of different types widen to a mixed stream rather than failing, the
+// same rule a mixed array literal follows.
+fn mixed() {
+    yield 1
+    yield "two"
+}
+
+print(mixed())
+
+// A generator calling a generator keeps their yields apart.
+fn outer() {
+    yield 0
+    let inner = doubles(2)
+    yield len(inner)
+}
+
+print(outer())

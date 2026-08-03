@@ -84,6 +84,18 @@ pub enum Stmt {
     },
 
     /// `return expr` or bare `return`
+    /// `yield expr` — append a value to the stream this function produces.
+    ///
+    /// A function whose body contains a `yield` returns a `stream` rather than
+    /// its declared value: the body runs to completion filling a buffer, and
+    /// the caller reads the buffer. That is the whole model — a stream *is* a
+    /// buffer, not a one-shot channel — so reading one twice gives the same
+    /// values twice, and there is no rule about what a second read means.
+    Yield {
+        value: Expr,
+        span: Span,
+    },
+
     Return {
         value: Option<Expr>,
         #[allow(dead_code)] // reserved for future error reporting

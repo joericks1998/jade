@@ -666,6 +666,7 @@ impl Renamer {
                     self.rename_expr(e);
                 }
             }
+            TStmt::Yield { value, .. } => self.rename_expr(value),
             TStmt::If { condition, then_body, else_body, .. } => {
                 self.rename_expr(condition);
                 self.block(then_body);

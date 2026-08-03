@@ -13,6 +13,12 @@ use super::*;
 pub(crate) const REPL_CAPTURE: &str = "\u{0}repl";
 
 pub struct VmState {
+    /// Buffers of the generators currently running, innermost last.
+    ///
+    /// A stack rather than a single slot because a generator can call another
+    /// generator: each `yield` must land in its own function's buffer, not in
+    /// whichever one happened to start first.
+    pub yield_stack: Vec<std::sync::Arc<parking_lot::Mutex<Vec<VmValue>>>>,
     /// The value most recently raised by `Instr::Raise` that propagated past its
     /// frame's handler stack. Consumed by the nearest enclosing `SetupHandler`.
     pub raised_exception: Option<VmValue>,
@@ -62,6 +68,7 @@ impl VmState {
         let mut globals = rustc_hash::FxHashMap::default();
         builtins::seed_globals(&mut globals);
         VmState {
+            yield_stack: Vec::new(),
             raised_exception: None,
             globals,
             extend_methods: HashMap::new(),
@@ -115,6 +122,7 @@ impl VmState {
     /// Mutations inside the spawned task do NOT propagate back to the parent.
     pub fn new_for_spawn(&self) -> Self {
         VmState {
+            yield_stack: Vec::new(),
             raised_exception: None,
             globals: self.globals.clone(),
             extend_methods: self.extend_methods.clone(),

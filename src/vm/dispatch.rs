@@ -941,6 +941,16 @@ pub(crate) async fn execute_chunk(
                 };
                 set(slots, *dest, VmValue::Prompt(text.to_string()));
             }
+            Instr::Yield(src) => {
+                let v = get(slots, *src).clone();
+                match state.yield_stack.last() {
+                    Some(buf) => buf.lock().push(v),
+                    // Unreachable from source: the parser rejects a top-level
+                    // `yield`, and every generator pushes a buffer before its
+                    // body runs.
+                    None => { vm_err!(JadeError::YieldOutsideFunction { span }); }
+                }
+            }
             Instr::PromptDeref(dest, prompt_reg, output_type, grammar_reg) => {
                 let text = match get(slots, *prompt_reg).clone() {
                     VmValue::Prompt(t) => t,
@@ -1180,6 +1190,7 @@ pub(crate) fn instr_max_reg(instr: &Instr) -> u32 {
         |Instr::LoadStr(d,_)|Instr::LoadNil(d)|Instr::LoadFn(d,_)
         |Instr::MakeClosure(d,_) => *d,
         Instr::GetLocal(d,_)|Instr::GetGlobal(d,_) => *d,
+        Instr::Yield(s) => *s,
         Instr::Move(d,s)|Instr::NegInt(d,s)|Instr::NegFloat(d,s)
         |Instr::IntToFloat(d,s)|Instr::BitNot(d,s)|Instr::Not(d,s)
         |Instr::MakePrompt(d,s)

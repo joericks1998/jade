@@ -111,6 +111,10 @@ struct Lowerer<'a, 'ctx> {
     /// outlive the stack frame holding its `jmp_buf` — see `emit_exc_restore`.
     /// `None` when the function has no handler and its depth cannot change.
     exc_depth_slot: Option<PointerValue<'ctx>>,
+    /// Whether this function is a `yield`ing stream producer. When true a
+    /// `Return` discards the body's value and hands back the generator's buffer
+    /// instead — that is what makes calling a generator give you a stream.
+    pub(super) is_generator: bool,
 }
 
 impl<'a, 'ctx> Lowerer<'a, 'ctx> {
@@ -502,11 +506,12 @@ pub fn lower_program<'ctx>(
             cf.n_slots,
             cf.params.len(),
             &fnctx,
+            cf.is_generator,
         )?;
     }
 
     let top_fn = module.add_function("jade_toplevel", i64_ty.fn_type(&[], false), None);
-    lower_body(context, module, top_fn, &top.code, &top.fn_defs, top_n_slots, 0, &fnctx)?;
+    lower_body(context, module, top_fn, &top.code, &top.fn_defs, top_n_slots, 0, &fnctx, false)?;
 
     // Turn on runtime reference counting for a collections-only program, once, at
     // the very start of `jade_toplevel` (before any collection is allocated). This
@@ -641,7 +646,7 @@ pub fn lower_chunk<'ctx>(
     n_slots: u32,
 ) -> Result<FunctionValue<'ctx>, String> {
     let function = module.add_function(name, context.i64_type().fn_type(&[], false), None);
-    lower_body(context, module, function, code, &[], n_slots, 0, &FnCtx::empty())?;
+    lower_body(context, module, function, code, &[], n_slots, 0, &FnCtx::empty(), false)?;
     Ok(function)
 }
 
@@ -657,6 +662,7 @@ fn lower_body<'ctx>(
     n_slots: u32,
     n_params: usize,
     fnctx: &FnCtx<'ctx>,
+    is_generator: bool,
 ) -> Result<(), String> {
     let i64_ty = context.i64_type();
     let builder = context.create_builder();
@@ -683,6 +689,17 @@ fn lower_body<'ctx>(
             builder.build_store(*s, nil).map_err(|e| e.to_string())?;
         }
     }
+    // A generator opens its buffer before the body runs, and every `Return`
+    // path closes it and hands the buffer back instead of the body's value.
+    // The buffer is an ordinary array, so `len`, indexing, `for`, and printing
+    // over a stream reuse what arrays already do.
+    if is_generator {
+        let f = module.get_function("jrt_yield_push").unwrap_or_else(|| {
+            module.add_function("jrt_yield_push", context.void_type().fn_type(&[], false), None)
+        });
+        builder.build_call(f, &[], "").map_err(|e| e.to_string())?;
+    }
+
     // Copy incoming parameters into slots 0..n_params (params are the first
     // locals; see `emit_fn`). Callers fill any omitted defaults, so every
     // parameter slot receives an argument.
@@ -744,6 +761,7 @@ fn lower_body<'ctx>(
         .map_err(|e| e.to_string())?;
 
     let low = Lowerer {
+        is_generator,
         ctx: context,
         module,
         builder: &builder,

@@ -513,6 +513,11 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
             let tbody = check_stmts(body, ctx)?;
             ctx.pop_scope();
 
+            if infer_yield_type(&tbody).is_some()
+                && let Some(rspan) = body_returns_a_value(&tbody)
+            {
+                return Err(JadeError::YieldAndReturn { span: rspan });
+            }
             let ret_ty = infer_return_type(&tbody);
             ctx.define(name.clone(), JadeType::Fn {
                 params: vec![JadeType::Unknown; params.len()],
@@ -545,6 +550,11 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
             let tbody = check_stmts(body, ctx)?;
             ctx.pop_scope();
 
+            if infer_yield_type(&tbody).is_some()
+                && let Some(rspan) = body_returns_a_value(&tbody)
+            {
+                return Err(JadeError::YieldAndReturn { span: rspan });
+            }
             let ret_ty = infer_return_type(&tbody);
             ctx.define(name.clone(), JadeType::AsyncFn {
                 params: vec![JadeType::Unknown; params.len()],
@@ -567,6 +577,11 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
                 decorators: tdecorators,
                 span: *span,
             })
+        }
+
+        Stmt::Yield { value, span } => {
+            let tval = infer_expr(value, ctx)?;
+            Ok(TStmt::Yield { value: tval, span: *span })
         }
 
         Stmt::Return { value, span } => {
@@ -617,6 +632,7 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
                 // in character units, so this needs no new lowering.
                 JadeType::Str         => JadeType::Char,
                 JadeType::Bytes       => JadeType::Int,
+                JadeType::Stream(e)   => *e.clone(),
                 JadeType::Unknown     => JadeType::Unknown,
                 other => return Err(JadeError::TypeError {
                     message: format!("cannot iterate over {}", jade_type_name(other)),
@@ -1190,6 +1206,7 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
                 JadeType::Str            => JadeType::Char,
                 // An octet, not a char: a byte is not a Unicode scalar.
                 JadeType::Bytes          => JadeType::Int,
+                JadeType::Stream(e)      => *e.clone(),
                 JadeType::Unknown        => JadeType::Unknown,
                 other => return Err(JadeError::TypeMismatch {
                     expected: "array, dict, or str".to_string(),
@@ -1286,6 +1303,11 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
             // Infer the return type from the body (like named fns) so callers know
             // a closure returns e.g. a Str — without it the AOT backend treats the
             // uniform i64 result as an integer and prints a string as a pointer.
+            if infer_yield_type(&tbody).is_some()
+                && let Some(rspan) = body_returns_a_value(&tbody)
+            {
+                return Err(JadeError::YieldAndReturn { span: rspan });
+            }
             let ret_ty = infer_return_type(&tbody);
             Ok(TExpr {
                 kind: TExprKind::Closure { params: params.clone(), body: tbody, captures },
@@ -1693,7 +1715,74 @@ fn infer_decorators(
 
 /// Scan `stmts` for `Return` nodes to infer the function's return type.
 /// Does not recurse into nested `FnDef` bodies (those are separate functions).
+/// The element type a body yields, or `None` if it never yields.
+///
+/// Joins the yielded types the same way a mixed array literal is joined:
+/// disagreement widens to `Unknown` rather than being an error, so a generator
+/// producing a mix stays usable. Does not descend into a nested function — a
+/// closure that yields is its own producer.
+fn infer_yield_type(stmts: &[TStmt]) -> Option<JadeType> {
+    let mut found: Option<JadeType> = None;
+    let mut join = |t: JadeType| {
+        found = Some(match found.take() {
+            None => t,
+            Some(prev) if prev == t => prev,
+            Some(_) => JadeType::Unknown,
+        });
+    };
+    for stmt in stmts {
+        match stmt {
+            TStmt::Yield { value, .. } => join(value.ty.clone()),
+            TStmt::If { then_body, else_body, .. } => {
+                if let Some(t) = infer_yield_type(then_body) { join(t); }
+                if let Some(eb) = else_body
+                    && let Some(t) = infer_yield_type(eb) { join(t); }
+            }
+            TStmt::While { body, .. } | TStmt::For { body, .. } => {
+                if let Some(t) = infer_yield_type(body) { join(t); }
+            }
+            TStmt::TryCatch { body, arms, .. } => {
+                if let Some(t) = infer_yield_type(body) { join(t); }
+                for arm in arms {
+                    if let Some(t) = infer_yield_type(&arm.body) { join(t); }
+                }
+            }
+            TStmt::FnDef { .. } | TStmt::AsyncFnDef { .. } => {}
+            _ => {}
+        }
+    }
+    found
+}
+
+/// Whether a body has a `return` carrying a value, at any depth in this
+/// function. A bare `return` is fine in a generator — it stops early — but a
+/// value-returning one asks the function to be two things at once.
+fn body_returns_a_value(stmts: &[TStmt]) -> Option<Span> {
+    for stmt in stmts {
+        let found = match stmt {
+            TStmt::Return { value: Some(_), span } => Some(*span),
+            TStmt::If { then_body, else_body, .. } => body_returns_a_value(then_body)
+                .or_else(|| else_body.as_deref().and_then(body_returns_a_value)),
+            TStmt::While { body, .. } | TStmt::For { body, .. } => body_returns_a_value(body),
+            TStmt::TryCatch { body, arms, .. } => body_returns_a_value(body)
+                .or_else(|| arms.iter().find_map(|a| body_returns_a_value(&a.body))),
+            TStmt::FnDef { .. } | TStmt::AsyncFnDef { .. } => None,
+            _ => None,
+        };
+        if found.is_some() {
+            return found;
+        }
+    }
+    None
+}
+
 fn infer_return_type(stmts: &[TStmt]) -> JadeType {
+    // A body that yields produces a stream, whatever else it does. Checked
+    // first so a `return` inside a generator (an early stop, carrying no value)
+    // does not make the function look like it returns nil.
+    if let Some(elem) = infer_yield_type(stmts) {
+        return JadeType::Stream(Box::new(elem));
+    }
     for stmt in stmts {
         match stmt {
             TStmt::Return { value: Some(texpr), .. } => return texpr.ty.clone(),
@@ -1756,6 +1845,9 @@ fn collect_captures_in_stmts(
             TStmt::Let { name, value, .. } => {
                 collect_captures_in_expr(value, locals, captures, seen, ctx);
                 locals.insert(name.clone());
+            }
+            TStmt::Yield { value, .. } => {
+                collect_captures_in_expr(value, locals, captures, seen, ctx);
             }
             TStmt::Assign { value, .. } => {
                 collect_captures_in_expr(value, locals, captures, seen, ctx);
@@ -1934,6 +2026,7 @@ pub fn jade_type_name(ty: &JadeType) -> String {
         JadeType::Bool         => "bool".to_string(),
         JadeType::Char         => "char".to_string(),
         JadeType::Bytes        => "bytes".to_string(),
+        JadeType::Stream(elem) => format!("stream<{}>", jade_type_name(elem)),
         JadeType::Str          => "str".to_string(),
         JadeType::Nil          => "nil".to_string(),
         JadeType::Prompt       => "prompt".to_string(),

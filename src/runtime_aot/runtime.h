@@ -517,6 +517,19 @@ void*   jrt_coll_struct_keys(void* p);
 /* jrt_karr_new/push — build a kind-tagged array (elements are tagged words). */
 void*   jrt_karr_new(void);
 void    jrt_karr_push(void* arr, int64_t val);
+
+/* ── Generator buffers ────────────────────────────────────────────────────
+ * A `yield`ing function fills a buffer and returns it; a stream *is* that
+ * buffer, which is why reading one twice gives the same values twice. The
+ * buffer is an ordinary kind-tagged array, so len/index/for/print over a
+ * stream need no new code at all.
+ *
+ * A stack, not a slot: a generator may call another generator, and each
+ * `yield` has to land in its own function's buffer. Mirrors `VmState::
+ * yield_stack` in the interpreter. */
+void    jrt_yield_push(void);           /* begin a generator frame */
+void    jrt_yield_append(int64_t val);  /* one `yield` */
+int64_t jrt_yield_pop(void);            /* end it; returns the tagged array */
 /* jrt_kdict_new/set — build a kind-tagged dict (string keys, tagged values).
  * jrt_kdict_set takes the key as a tagged-string word (copied). */
 void*   jrt_kdict_new(void);

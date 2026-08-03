@@ -47,6 +47,13 @@ pub struct CompiledFn {
     /// `None` for top-level functions. Reads and writes to module-level variables
     /// are routed through this scope so mutations survive across calls.
     pub module_scope: Option<Arc<Mutex<HashMap<String, crate::vm::VmValue>>>>,
+    /// Whether the body contains a `yield`, making this a stream producer.
+    ///
+    /// Calling one runs the body to completion into a buffer and returns the
+    /// buffer, rather than returning the body's value. That is the "a stream is
+    /// a buffer" model: everything produced is retained, so reading the result
+    /// twice gives the same values twice.
+    pub is_generator: bool,
 }
 
 /// A compiled code unit: top-level program or function body.
@@ -272,6 +279,8 @@ pub enum Instr {
     /// (dest, prompt_reg, output_type, grammar_reg)
     /// grammar_reg holds a VmValue::Grammar for user-supplied GBNF pattern.
     PromptDeref(Reg, Reg, Option<String>, Option<Reg>),
+    /// Append a value to the stream the running generator is filling.
+    Yield(Reg),
 
     // ── Exception handling ─────────────────────────────────────────────────
     /// Raise the value in `val` as an exception. If a handler frame is active,

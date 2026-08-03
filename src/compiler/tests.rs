@@ -621,6 +621,55 @@ mod type_infer {
         assert_eq!(value.ty, JadeType::Char);
     }
 
+    // ── yield / streams ───────────────────────────────────────────────────────
+
+    #[test]
+    fn a_function_that_yields_returns_a_stream() {
+        let tp = infer_ok("fn g() {\n    yield 1\n}\nlet s = g()");
+        let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!("expected Let") };
+        assert_eq!(value.ty, JadeType::Stream(Box::new(JadeType::Int)));
+    }
+
+    /// A `yield` anywhere in the body counts, not just at the top level.
+    #[test]
+    fn a_yield_inside_a_loop_still_makes_a_generator() {
+        let tp = infer_ok("fn g(n) {\n    while n > 0 {\n        yield n\n    }\n}\nlet s = g(3)");
+        let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!("expected Let") };
+        assert!(matches!(value.ty, JadeType::Stream(_)), "got {:?}", value.ty);
+    }
+
+    /// The same widening rule a mixed array literal follows: disagreement is not
+    /// an error, it just stops being specific.
+    #[test]
+    fn yielded_types_that_disagree_widen_to_unknown() {
+        let tp = infer_ok("fn g() {\n    yield 1\n    yield \"two\"\n}\nlet s = g()");
+        let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!("expected Let") };
+        assert_eq!(value.ty, JadeType::Stream(Box::new(JadeType::Unknown)));
+    }
+
+    #[test]
+    fn iterating_a_stream_binds_its_element_type() {
+        let tp = infer_ok("fn g() {\n    yield 1\n}\nfor x in g() {\n    let y = x\n}");
+        let TStmt::For { body, .. } = &tp.stmts[1] else { panic!("expected For") };
+        let TStmt::Let { value, .. } = &body[0] else { panic!("expected Let in body") };
+        assert_eq!(value.ty, JadeType::Int);
+    }
+
+    /// A generator produces a stream, so returning a value as well asks it to be
+    /// two things. A *bare* return is fine — it stops the generator early.
+    #[test]
+    fn a_generator_cannot_also_return_a_value() {
+        let err = infer_err("fn g() {\n    yield 1\n    return 2\n}");
+        assert!(matches!(err, JadeError::YieldAndReturn { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn a_generator_may_return_bare_to_stop_early() {
+        let tp = infer_ok("fn g(n) {\n    yield 1\n    if n > 0 {\n        return\n    }\n    yield 2\n}\nlet s = g(0)");
+        let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!("expected Let") };
+        assert!(matches!(value.ty, JadeType::Stream(_)), "got {:?}", value.ty);
+    }
+
     #[test]
     fn a_user_function_stage_beats_a_grammar_variable_of_the_same_name() {
         let tp = infer_ok(

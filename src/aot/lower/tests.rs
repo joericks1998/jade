@@ -22,7 +22,7 @@ fn ir_of_rc(code: &[Instr], n_slots: u32) -> String {
     let function = module.add_function("f", context.i64_type().fn_type(&[], false), None);
     let mut ctx = FnCtx::empty();
     ctx.refcount = true;
-    lower_body(&context, &module, function, code, &[], n_slots, 0, &ctx)
+    lower_body(&context, &module, function, code, &[], n_slots, 0, &ctx, false)
         .expect("lowering failed");
     module.verify().expect("module failed LLVM verification");
     module.print_to_string().to_string()
@@ -369,6 +369,7 @@ fn add_program() -> Chunk {
         n_slots: 3,
         source_file: String::new(),
         module_scope: None,
+        is_generator: false,
     });
     // top:  LoadFn r0 add ; SetGlobal add r0 ;
     //       GetGlobal r1 add ; LoadInt r2 2 ; LoadInt r3 3 ;
@@ -414,6 +415,7 @@ fn call_with_omitted_default_is_filled_at_the_call_site() {
         n_slots: 2,
         source_file: String::new(),
         module_scope: None,
+        is_generator: false,
     });
     let mut top = Chunk::new("<top>");
     top.fn_defs.push(greet);
@@ -445,6 +447,7 @@ fn function_value_is_first_class_and_returnable() {
         n_slots: 0,
         source_file: String::new(),
         module_scope: None,
+        is_generator: false,
     });
     let mut top = Chunk::new("<top>");
     top.fn_defs.push(f);
@@ -467,6 +470,7 @@ fn keyword_call_reorders_args_to_parameter_order() {
         n_slots: 4,
         source_file: String::new(),
         module_scope: None,
+        is_generator: false,
     });
     let mut top = Chunk::new("<top>");
     top.fn_defs.push(f);
@@ -503,6 +507,7 @@ fn higher_order_call_lowers_to_indirect_call() {
         n_slots: 5,
         source_file: String::new(),
         module_scope: None,
+        is_generator: false,
     });
     let mut top = Chunk::new("<top>");
     top.fn_defs.push(apply);
@@ -598,6 +603,7 @@ fn async_spawn_await_lower_to_runtime() {
         n_slots: 2,
         source_file: String::new(),
         module_scope: None,
+        is_generator: false,
     });
     let mut top = Chunk::new("<top>");
     top.fn_defs.push(f);

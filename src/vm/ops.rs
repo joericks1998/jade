@@ -314,6 +314,16 @@ pub(crate) fn vm_index(obj: VmValue, idx: VmValue, span: Span) -> Result<VmValue
                 Ok(VmValue::Int(b.as_slice()[i as usize] as i64))
             }
         }
+        // A stream indexes like the buffer it is.
+        (VmValue::Stream(buf), VmValue::Int(i)) => {
+            let guard = buf.lock();
+            let len = guard.len();
+            if i < 0 || i as usize >= len {
+                Err(JadeError::IndexOutOfBounds { index: i, len, span })
+            } else {
+                Ok(guard[i as usize].clone())
+            }
+        }
         (VmValue::Array(arc), VmValue::Int(i)) => {
             let guard = arc.lock();
             let len = guard.len();

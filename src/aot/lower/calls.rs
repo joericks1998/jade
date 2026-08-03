@@ -17,6 +17,8 @@ pub(super) const LOWERABLE_BUILTINS: &[&str] = &["print", "write", "str", "int",
 pub(super) fn dest_reg(instr: &Instr) -> Option<Reg> {
     use Instr::*;
     match instr {
+        // A yield writes to the generator's buffer and produces no register.
+        Instr::Yield(_) => None,
         LoadInt(d, _) | LoadFloat(d, _) | LoadBool(d, _) | LoadStr(d, _) | LoadNil(d)
         | LoadFn(d, _) | MakeClosure(d, _) | GetLocal(d, _) | GetGlobal(d, _) => Some(*d),
         Move(d, _) | NegInt(d, _) | NegFloat(d, _) | IntToFloat(d, _) | BitNot(d, _)

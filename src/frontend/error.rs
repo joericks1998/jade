@@ -44,6 +44,13 @@ pub enum JadeError {
     /// `return` used outside of a function body.
     ReturnOutsideFunction { span: Span },
 
+    /// `yield` outside any function body.
+    YieldOutsideFunction { span: Span },
+
+    /// A function body mixes `yield` with a value-returning `return`. It cannot
+    /// be both a stream producer and a plain function.
+    YieldAndReturn { span: Span },
+
     /// `fn` definition found inside another function body.
     NestedFunction { span: Span },
 
@@ -174,6 +181,10 @@ impl std::fmt::Display for JadeError {
                 write!(f, "[{}:{}] wrong number of arguments: expected {}, got {}", span.line, span.col, expected, got),
             JadeError::NotCallable { span } =>
                 write!(f, "[{}:{}] value is not callable", span.line, span.col),
+            JadeError::YieldOutsideFunction { span } =>
+                write!(f, "[{}:{}] 'yield' outside a function — it appends to the stream a function produces, so there must be one", span.line, span.col),
+            JadeError::YieldAndReturn { span } =>
+                write!(f, "[{}:{}] a function that yields cannot also return a value — it produces a stream, not a single value (a bare 'return' to stop early is fine)", span.line, span.col),
             JadeError::ReturnOutsideFunction { span } =>
                 write!(f, "[{}:{}] 'return' used outside of a function", span.line, span.col),
             JadeError::NestedFunction { span } =>

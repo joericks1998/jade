@@ -870,10 +870,34 @@ pub(super) fn lower_instr<'ctx>(
                 .map_err(|e| e.to_string())?;
             Ok(true)
         }
+        Yield(src) => {
+            let f = low.runtime_fn(
+                "jrt_yield_append",
+                low.ctx.void_type().fn_type(&[i64_ty.into()], false),
+            );
+            let v = low.load(*src);
+            // The buffer takes a reference: the slot it came from is released
+            // at scope exit, and the caller reads the value long after.
+            low.incref(v);
+            b.build_call(f, &[v.into()], "").map_err(|e| e.to_string())?;
+            Ok(false)
+        }
         Return(opt) => {
-            let v = match opt {
-                Some(r) => low.load(*r),
-                None => i64_ty.const_int(NIL, false),
+            // A generator's return value is its buffer, never the body's value.
+            // Closing the frame here rather than at one exit point covers every
+            // return path — an explicit `return`, the implicit one at the end,
+            // and a `return` inside a `try`.
+            let v = if low.is_generator {
+                let f = low.runtime_fn("jrt_yield_pop", i64_ty.fn_type(&[], false));
+                b.build_call(f, &[], "ypop")
+                    .map_err(|e| e.to_string())?
+                    .as_any_value_enum()
+                    .into_int_value()
+            } else {
+                match opt {
+                    Some(r) => low.load(*r),
+                    None => i64_ty.const_int(NIL, false),
+                }
             };
             // Transfer the returned reference to the caller: retain it, then the
             // scope-exit release (which decrefs the source slot) nets an ownership

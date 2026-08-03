@@ -77,6 +77,12 @@ pub enum VmValue {
     Future(Arc<JadeFuture>),
     /// A lazy token stream from an untyped prompt dereference.
     TokenStream(Arc<JadeTokenStream>),
+    /// A buffered sequence produced by a `yield`ing function.
+    ///
+    /// A stream *is* a buffer: everything produced is retained, so reading it
+    /// twice gives the same values twice. There is no one-shot rule to
+    /// remember and no "already drained" error to hit.
+    Stream(Arc<Mutex<Vec<VmValue>>>),
     /// A first-class type value. Callable with one argument for coercion/construction:
     /// `int("3")` → 3, `City(dict)` → City struct, etc.
     TypeRef(String),
@@ -117,6 +123,7 @@ impl std::fmt::Debug for VmValue {
             VmValue::NativeLibFn(nfn) => write!(f, "NativeLibFn({})", nfn.name),
             VmValue::Future(_)       => write!(f, "Future"),
             VmValue::TokenStream(_)  => write!(f, "TokenStream"),
+            VmValue::Stream(b)       => write!(f, "Stream[{} item(s)]", b.lock().len()),
             VmValue::TypeRef(t)      => write!(f, "TypeRef({})", t),
             VmValue::Nil             => write!(f, "Nil"),
         }
@@ -158,6 +165,10 @@ pub fn value_to_display(v: &VmValue) -> String {
         VmValue::NativeLibFn(nfn)      => format!("<native lib fn {}>", nfn.name),
         VmValue::Future(_)             => "<future>".to_string(),
         VmValue::TokenStream(_)        => "<token stream>".to_string(),
+        VmValue::Stream(b) => {
+            let parts: Vec<String> = b.lock().iter().map(value_to_display).collect();
+            jade_runtime::render::render_array(&parts)
+        }
         VmValue::Char(c)               => c.ch().to_string(),
         VmValue::Bytes(b)              => jade_runtime::render::render_bytes(b.as_slice()),
         VmValue::TypeRef(t)            => format!("<type {}>", t),
@@ -184,6 +195,7 @@ pub fn value_type_name(v: &VmValue) -> &'static str {
         VmValue::NativeLibFn(_) => "native fn",
         VmValue::Future(_) => "future",
         VmValue::TokenStream(_) => "token stream",
+        VmValue::Stream(_) => "stream",
         VmValue::TypeRef(_) => "type",
         VmValue::Prompt(_) => "prompt",
         VmValue::Grammar(_) => "grammar",

@@ -4,6 +4,15 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.2.3
+
+- **`yield` makes streaming an ordinary language feature.** A function whose body contains a `yield` returns a *stream* instead of a value: the body runs to completion filling a buffer, and the caller reads the buffer. `len`, indexing, `for`, and `print` all work on one.
+- **A stream is a buffer, not a one-shot channel.** Everything it produced is retained, so reading it twice gives the same values twice. That is the whole model, and it is what removes a category of rules rather than adding them: there is no "already consumed" state, no replay semantics to define, and no error to hit on a second read.
+- **A bare `return` stops a generator early; `return x` is a compile error.** A function that yields produces a stream, so returning a value as well would ask it to be two things at once.
+- **Yields of different types widen rather than failing**, the same rule a mixed array literal follows.
+- **A stream is an ordinary array in a compiled binary**, so `len`, indexing, iteration, and rendering reuse everything arrays already do rather than growing a parallel implementation.
+- **`CACHE_FORMAT_VERSION` is 6.** The 1.2.x releases added variants in the middle of serde-serialized enums (`JadeType::Char`, `Bytes`, `Stream`; `Stmt::Yield`), which renumbers every variant after them. A cache written by an earlier 1.2.x build deserializes into the *wrong* types rather than failing loudly — it showed up as an imported struct losing its field defaults. Clear your cache with `jade cache clean` if you built from a 1.2.x branch before this.
+
 ## v1.2.2
 
 - **`bytes` is a real type.** A counted sequence of raw octets, deliberately not a string. A Jade string is UTF-8 and NUL-terminated, so a blob with a zero byte in it would be truncated there and one that is not valid UTF-8 would be corrupted by anything assuming text — `fs.read` goes through a UTF-8 decode and cannot read a PNG at all. Conversion is explicit in both directions with `str.encode()` and `bytes.decode()`, and decoding invalid UTF-8 raises and names the offset rather than substituting replacement characters.

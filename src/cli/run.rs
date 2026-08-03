@@ -216,6 +216,7 @@ pub(crate) fn format_global(name: &str, val: &vm::VmValue) -> Option<String> {
         }
         vm::VmValue::Bool(b) => format!("{name} = {b}"),
         vm::VmValue::Char(c) => format!("{name} = '{c}'"),
+        vm::VmValue::Stream(_) => format!("{name} = <stream>"),
         vm::VmValue::Bytes(b) => format!("{name} = {}", jade_runtime::render::render_bytes(b.as_slice())),
         vm::VmValue::Str(s) => format!("{name} = \"{s}\""),
         vm::VmValue::Fn(_) | vm::VmValue::Closure(_, _) => format!("{name} = <fn>"),

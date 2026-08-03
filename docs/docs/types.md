@@ -4,7 +4,7 @@ title: Types
 sidebar_label: Types
 ---
 
-Jade has eleven runtime value types.
+Jade has twelve runtime value types.
 
 | Type | Description | Status |
 |------|-------------|--------|
@@ -13,6 +13,7 @@ Jade has eleven runtime value types.
 | `bool` | Boolean `true` or `false` | Implemented |
 | `char` | A single Unicode scalar; what indexing or iterating a string yields | Implemented |
 | `bytes` | A counted sequence of raw octets; binary data that is not text | Implemented |
+| `stream` | A buffered sequence produced by a `yield`ing function | Implemented |
 | `fn` | First-class function value | Implemented |
 | `struct` | User-defined record type with named fields | Implemented |
 | `str` | UTF-8 string with indexing and concatenation | Implemented |
@@ -90,6 +91,32 @@ Indexing gives an `int` in 0..=255 rather than a `char`. A byte is not a Unicode
 `print(b)` renders an escaped `b"…"` form rather than dumping raw octets to your terminal, since a blob can contain control characters or an escape sequence. Use `decode()` when the bytes really are text.
 
 Bytes carry a trust byte like strings do, so `fs.read_bytes(p).decode()` is refused by `sh.exec` exactly as `fs.read(p)` is.
+
+## Stream
+
+A function whose body contains a `yield` returns a **stream** rather than a value. The body runs to completion filling a buffer, and the caller gets the buffer.
+
+```jade
+fn doubles(n) {
+    let i = 0
+    while i < n {
+        yield i * 2
+        i = i + 1
+    }
+}
+
+let s = doubles(4)
+print(len(s))     // 4
+print(s[0])       // 0
+for x in s { print(x) }
+for x in s { print(x) }   // the same values again
+```
+
+A stream *is* a buffer, not a one-shot channel. Everything it produced is retained, so reading it twice gives the same values twice and there is no "already consumed" state to reason about. `len` and indexing work for the same reason.
+
+A bare `return` stops a generator early. `return x` is a compile error: a function that yields produces a stream, so returning a value too would ask it to be two things at once.
+
+Yields of different types widen to a mixed stream rather than failing, the same rule a mixed array literal follows.
 
 ## Nil
 

@@ -32,6 +32,7 @@ fn native_len(args: &[VmValue]) -> Result<VmValue> {
         // string produced a one-character string.
         VmValue::Char(_)  => 1,
         VmValue::Bytes(b) => b.len() as i64,
+        VmValue::Stream(b) => b.lock().len() as i64,
         VmValue::Array(a) => a.lock().len() as i64,
         VmValue::Dict(d)  => d.len() as i64,
         _ => return Err(JadeError::TypeError { message: "len".to_string(), span: Span { line: 0, col: 0 } }),

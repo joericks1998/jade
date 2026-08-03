@@ -42,6 +42,7 @@ pub enum TokenKind {
     Catch,
     Async,
     Await,
+    Yield,
     From,
     As,
 
@@ -136,6 +137,7 @@ pub fn token_kind_desc(kind: &TokenKind) -> String {
         TokenKind::Catch         => "`catch`".to_string(),
         TokenKind::Async         => "`async`".to_string(),
         TokenKind::Await         => "`await`".to_string(),
+        TokenKind::Yield         => "`yield`".to_string(),
         TokenKind::From          => "`from`".to_string(),
         TokenKind::As            => "`as`".to_string(),
         TokenKind::Question      => "`?`".to_string(),
@@ -506,6 +508,7 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
                     "catch"     => TokenKind::Catch,
                     "async"     => TokenKind::Async,
                     "await"     => TokenKind::Await,
+                    "yield"     => TokenKind::Yield,
                     "from"      => TokenKind::From,
                     "as"        => TokenKind::As,
                     "true"      => TokenKind::True,
