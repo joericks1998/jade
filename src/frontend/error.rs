@@ -44,6 +44,13 @@ pub enum JadeError {
     /// `return` used outside of a function body.
     ReturnOutsideFunction { span: Span },
 
+    /// `yield` outside any function body.
+    YieldOutsideFunction { span: Span },
+
+    /// A function body mixes `yield` with a value-returning `return`. It cannot
+    /// be both a stream producer and a plain function.
+    YieldAndReturn { span: Span },
+
     /// `fn` definition found inside another function body.
     NestedFunction { span: Span },
 
@@ -87,8 +94,8 @@ pub enum JadeError {
     /// Typed dereference `?p |> Type` exhausted its retry budget without producing a valid value.
     PromptOverflow { name: String, attempts: usize, span: Span },
 
-    /// `?p |> Type` was used inside `print(...)` where streaming output is expected.
-    StreamingWithType { span: Span },
+    /// The right side of `|>` is neither callable, a type name, nor a Grammar.
+    InvalidPipeStage { got: String, span: Span },
 
     /// Prefix `?` was applied to a field access (`?obj.field`).  Prefix `?` is for
     /// bare prompts only; dereferencing a prompt held in a field uses a postfix form.
@@ -135,8 +142,6 @@ pub enum JadeError {
     /// The same Future was awaited more than once.
     DoubleAwait { span: Span },
 
-    /// A TokenStream was drained more than once.
-    DoubleStreamDrain { span: Span },
 
     /// A spawned async task panicked (tokio JoinError).
     AsyncPanic { message: String, span: Span },
@@ -174,6 +179,10 @@ impl std::fmt::Display for JadeError {
                 write!(f, "[{}:{}] wrong number of arguments: expected {}, got {}", span.line, span.col, expected, got),
             JadeError::NotCallable { span } =>
                 write!(f, "[{}:{}] value is not callable", span.line, span.col),
+            JadeError::YieldOutsideFunction { span } =>
+                write!(f, "[{}:{}] 'yield' outside a function — it appends to the stream a function produces, so there must be one", span.line, span.col),
+            JadeError::YieldAndReturn { span } =>
+                write!(f, "[{}:{}] a function that yields cannot also return a value — it produces a stream, not a single value (a bare 'return' to stop early is fine)", span.line, span.col),
             JadeError::ReturnOutsideFunction { span } =>
                 write!(f, "[{}:{}] 'return' used outside of a function", span.line, span.col),
             JadeError::NestedFunction { span } =>
@@ -205,8 +214,8 @@ impl std::fmt::Display for JadeError {
                 write!(f, "[{}:{}] '{}' is not a prompt variable", span.line, span.col, name),
             JadeError::PromptOverflow { name, attempts, span } =>
                 write!(f, "[{}:{}] prompt '{}' failed to produce a valid typed value after {} attempt(s)", span.line, span.col, name, attempts),
-            JadeError::StreamingWithType { span } =>
-                write!(f, "[{}:{}] typed dereference '?p |> Type' cannot be used inside print() — assign to a variable first", span.line, span.col),
+            JadeError::InvalidPipeStage { got, span } =>
+                write!(f, "[{}:{}] '|>' needs a function, a type name, or a Grammar on its right; got {}", span.line, span.col, got),
             JadeError::PrefixDerefOnField { field, span } =>
                 write!(f, "[{}:{}] prefix '?' cannot be applied to a field — write 'obj.(?{})' or 'obj~>{}' instead", span.line, span.col, field, field),
             JadeError::KeyNotFound { key, span } =>
@@ -240,8 +249,6 @@ impl std::fmt::Display for JadeError {
                 write!(f, "[{}:{}] 'await' applied to a non-Future value", span.line, span.col),
             JadeError::DoubleAwait { span } =>
                 write!(f, "[{}:{}] cannot await the same Future more than once", span.line, span.col),
-            JadeError::DoubleStreamDrain { span } =>
-                write!(f, "[{}:{}] cannot drain the same token stream more than once", span.line, span.col),
             JadeError::AsyncPanic { message, span } =>
                 write!(f, "[{}:{}] async task panicked: {}", span.line, span.col, message),
             JadeError::IoError { message, span } =>

@@ -98,6 +98,11 @@ pub extern "C" fn jrt_coll_len(p: *const c_void) -> i64 {
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_len_chunk(word: i64) -> i64 {
     let v = JadeValue::from_bits(word as u64);
+    // A character has length 1, matching what `len` answered back when indexing
+    // a string produced a one-character string.
+    if v.is_char() {
+        return 1;
+    }
     if v.is_str() {
         let p = v.as_ptr() as *const u8;
         if p.is_null() {

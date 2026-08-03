@@ -12,7 +12,6 @@ use super::*;
 #[derive(Clone, Debug, PartialEq)]
 pub enum NativeFnId {
     Print,
-    Stream,
     Route,
     /// `array.map(arr, fn)` / `array.filter(arr, fn)` — need VmState + async to
     /// call the user function per element, so they dispatch here rather than as
@@ -31,6 +30,15 @@ pub enum VmValue {
     Int(i64),
     Float(f64),
     Bool(bool),
+    /// A single Unicode scalar. Immediate, like `Int`/`Bool` — indexing or
+    /// iterating a string yields these, so a scan allocates nothing. Carries a
+    /// trust byte for the same reason `Str` does: a character of a tainted
+    /// string is still tainted.
+    Char(jade_runtime::trust::JChar),
+    /// A binary blob. Distinct from `Str`: Jade strings are UTF-8 and
+    /// NUL-terminated and arbitrary bytes are neither, so conversion is
+    /// explicit in both directions. Shares `BytesObj` with the AOT heap.
+    Bytes(Arc<jade_runtime::bytesf::BytesObj>),
     /// A string plus where it came from. The trust byte is the same one
     /// compiled code keeps in the string header — the interpreter tracked no
     /// trust at all, so `sh.exec(sh.exec("..."))` ran under `jade run` and was
@@ -68,6 +76,12 @@ pub enum VmValue {
     Future(Arc<JadeFuture>),
     /// A lazy token stream from an untyped prompt dereference.
     TokenStream(Arc<JadeTokenStream>),
+    /// A buffered sequence produced by a `yield`ing function.
+    ///
+    /// A stream *is* a buffer: everything produced is retained, so reading it
+    /// twice gives the same values twice. There is no one-shot rule to
+    /// remember and no "already drained" error to hit.
+    Stream(Arc<Mutex<Vec<VmValue>>>),
     /// A first-class type value. Callable with one argument for coercion/construction:
     /// `int("3")` → 3, `City(dict)` → City struct, etc.
     TypeRef(String),
@@ -85,6 +99,8 @@ impl std::fmt::Debug for VmValue {
             VmValue::Int(i)   => write!(f, "Int({})", i),
             VmValue::Float(v) => write!(f, "Float({})", v),
             VmValue::Bool(b)  => write!(f, "Bool({})", b),
+            VmValue::Char(c)  => write!(f, "Char({:?})", c.ch()),
+            VmValue::Bytes(b) => write!(f, "Bytes[{} byte(s)]", b.len()),
             VmValue::Str(s)   => write!(f, "Str({:?})", s),
             VmValue::Fn(cf)   => write!(f, "Fn({})", cf.params.join(", ")),
             VmValue::Closure(cf, _) => write!(f, "Closure({})", cf.params.join(", ")),
@@ -106,6 +122,7 @@ impl std::fmt::Debug for VmValue {
             VmValue::NativeLibFn(nfn) => write!(f, "NativeLibFn({})", nfn.name),
             VmValue::Future(_)       => write!(f, "Future"),
             VmValue::TokenStream(_)  => write!(f, "TokenStream"),
+            VmValue::Stream(b)       => write!(f, "Stream[{} item(s)]", b.lock().len()),
             VmValue::TypeRef(t)      => write!(f, "TypeRef({})", t),
             VmValue::Nil             => write!(f, "Nil"),
         }
@@ -147,6 +164,12 @@ pub fn value_to_display(v: &VmValue) -> String {
         VmValue::NativeLibFn(nfn)      => format!("<native lib fn {}>", nfn.name),
         VmValue::Future(_)             => "<future>".to_string(),
         VmValue::TokenStream(_)        => "<token stream>".to_string(),
+        VmValue::Stream(b) => {
+            let parts: Vec<String> = b.lock().iter().map(value_to_display).collect();
+            jade_runtime::render::render_array(&parts)
+        }
+        VmValue::Char(c)               => c.ch().to_string(),
+        VmValue::Bytes(b)              => jade_runtime::render::render_bytes(b.as_slice()),
         VmValue::TypeRef(t)            => format!("<type {}>", t),
         VmValue::Nil                   => "nil".to_string(),
     }
@@ -158,6 +181,8 @@ pub fn value_type_name(v: &VmValue) -> &'static str {
         VmValue::Int(_) => "int",
         VmValue::Float(_) => "float",
         VmValue::Bool(_) => "bool",
+        VmValue::Char(_) => "char",
+        VmValue::Bytes(_) => "bytes",
         VmValue::Str(_) => "str",
         VmValue::Array(_) => "array",
         VmValue::Dict(_) => "dict",
@@ -169,6 +194,7 @@ pub fn value_type_name(v: &VmValue) -> &'static str {
         VmValue::NativeLibFn(_) => "native fn",
         VmValue::Future(_) => "future",
         VmValue::TokenStream(_) => "token stream",
+        VmValue::Stream(_) => "stream",
         VmValue::TypeRef(_) => "type",
         VmValue::Prompt(_) => "prompt",
         VmValue::Grammar(_) => "grammar",

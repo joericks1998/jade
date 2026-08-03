@@ -187,3 +187,10 @@ When the right-hand side is a call expression, the left value is inserted as the
 fn add(a, b) { return a + b }
 let r = 5 |> add(3)           // add(5, 3) → 8
 ```
+
+A prompt dereference pipes like any other value. A type name as a stage constrains what the model generates and coerces the reply; a function stage after it receives the coerced value. See [Operators](operators#what-a-stage-can-be) for the full rule.
+
+```jade
+prompt p = "What is 21 + 21? Respond with only the number."
+let n = ?p |> int |> double   // 84
+```

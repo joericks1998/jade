@@ -1029,11 +1029,18 @@ mod parser {
         assert_eq!(field, "x");
     }
 
+    /// A stage that cannot be applied is rejected, but no longer by the parser.
+    /// It used to match on the shape of the right-hand side, so the message
+    /// talked about tokens ("expected function or call"). The stage now survives
+    /// into the AST and type inference rejects it, which lets the error name
+    /// what the stage actually turned out to be. See the `pipe_stage` tests in
+    /// `compiler/tests.rs` for the rejection itself.
     #[test]
-    fn test_parse_pipe_invalid_rhs_is_error() {
-        // `|>` requires a function name or call on the right, not a raw expression
+    fn test_parse_pipe_invalid_rhs_parses_and_defers_to_inference() {
         let tokens = lexer::tokenize("5 |> (1 + 2)").unwrap();
-        assert!(parse(tokens).is_err());
+        let p = parse(tokens).expect("parses; inference rejects it");
+        let Stmt::Expr(expr) = &p.stmts[0] else { panic!("expected an expression stmt") };
+        assert!(matches!(expr, Expr::Pipe { .. }));
     }
 
     // ── arrays ───────────────────────────────────────────────────────────────
@@ -1138,13 +1145,19 @@ mod parser {
         assert!(constraint.is_none());
     }
 
+    /// The type stage is a pipe over the dereference, not a field on it. What it
+    /// *means* is unchanged — inference still folds it back in as an
+    /// `output_type` — but that decision now happens where the names are known.
     #[test]
     fn test_parse_prompt_deref_typed_int() {
         let p = parse_src("let x = ?p |> int");
-        let Stmt::Let { value: Expr::PromptDeref { expr, constraint, .. }, .. } = &p.stmts[0]
-            else { panic!("expected Let with PromptDeref") };
+        let Stmt::Let { value: Expr::Pipe { value, stage, .. }, .. } = &p.stmts[0]
+            else { panic!("expected Let with Pipe") };
+        let Expr::PromptDeref { expr, constraint, .. } = value.as_ref()
+            else { panic!("expected the piped value to be a PromptDeref") };
         assert!(matches!(expr.as_ref(), Expr::Identifier { name, .. } if name == "p"));
-        assert!(matches!(constraint.as_deref(), Some(Expr::Identifier { name, .. }) if name == "int"));
+        assert!(constraint.is_none(), "the parser no longer sets a constraint");
+        assert!(matches!(stage.as_ref(), Expr::Identifier { name, .. } if name == "int"));
     }
 
     #[test]
@@ -1231,14 +1244,20 @@ mod parser {
         }
     }
 
+    /// A postfix deref takes its stage the same way a prefix one does: the `|>`
+    /// sits outside the parens, so `parse_pipe` reads it and both spellings
+    /// produce the identical `Pipe` over a `PromptDeref`.
     #[test]
     fn test_parse_postfix_deref_typed() {
         for src in ["let x = obj.(?field) |> int", "let x = obj~>field |> int"] {
             let p = parse_src(src);
-            let Stmt::Let { value: Expr::PromptDeref { expr, constraint, .. }, .. } = &p.stmts[0]
-                else { panic!("expected Let with PromptDeref for {src}") };
+            let Stmt::Let { value: Expr::Pipe { value, stage, .. }, .. } = &p.stmts[0]
+                else { panic!("expected Let with Pipe for {src}") };
+            let Expr::PromptDeref { expr, constraint, .. } = value.as_ref()
+                else { panic!("expected a PromptDeref for {src}") };
             assert!(matches!(expr.as_ref(), Expr::FieldAccess { field, .. } if field == "field"));
-            assert!(matches!(constraint.as_deref(), Some(Expr::Identifier { name, .. }) if name == "int"));
+            assert!(constraint.is_none(), "the parser no longer sets a constraint");
+            assert!(matches!(stage.as_ref(), Expr::Identifier { name, .. } if name == "int"));
         }
     }
 
@@ -1263,20 +1282,43 @@ mod parser {
         assert!(matches!(value, Expr::BinOp { op: BinOpKind::Gt, .. }));
     }
 
+    /// Until v1.2.0 these three were parse errors (`StreamingWithType`): the
+    /// parser tracked whether it sat inside a `print(…)` call and refused a
+    /// typed dereference there. The grammar was context-sensitive as a result —
+    /// the same expression was legal or illegal depending on the name of the
+    /// call around it. Streaming is now decided by what `print` receives, not by
+    /// what the parser can see, so all three parse.
     #[test]
-    fn test_parse_postfix_streaming_prohibition() {
-        for src in ["print(obj.(?p) |> int)", "print(obj~>p |> int)"] {
+    fn a_typed_deref_inside_print_now_parses() {
+        for src in ["print(?p |> int)", "print(obj.(?p) |> int)", "print(obj~>p |> int)"] {
             let tokens = lexer::tokenize(src).expect("lex");
-            let err = parse(tokens).unwrap_err();
-            assert!(matches!(err, JadeError::StreamingWithType { .. }), "no error for {src}");
+            assert!(parse(tokens).is_ok(), "should parse: {src}");
         }
     }
 
+    /// `|>` has exactly one parse path now, so a stage after a dereference is an
+    /// ordinary `Expr::Pipe` and not a `PromptDeref.constraint`. This is what
+    /// makes chaining possible: the old deref arm read its stage with
+    /// `parse_or`, specifically so a second `|>` could not follow.
     #[test]
-    fn test_parse_streaming_prohibition() {
-        let tokens = lexer::tokenize("print(?p |> int)").expect("lex");
-        let err = parse(tokens).unwrap_err();
-        assert!(matches!(err, JadeError::StreamingWithType { .. }));
+    fn a_deref_stage_parses_as_a_pipe_not_a_constraint() {
+        let p = parse_src("let x = ?p |> int");
+        let Stmt::Let { value, .. } = &p.stmts[0] else { panic!("expected Let") };
+        let Expr::Pipe { value: piped, .. } = value else { panic!("expected Pipe, got {value:?}") };
+        assert!(matches!(
+            piped.as_ref(),
+            Expr::PromptDeref { constraint: None, .. }
+        ));
+    }
+
+    #[test]
+    fn a_deref_chains_left_to_right() {
+        let p = parse_src("let x = ?p |> int |> double");
+        let Stmt::Let { value, .. } = &p.stmts[0] else { panic!("expected Let") };
+        // Outer stage is `double`; its value is the `?p |> int` pipe.
+        let Expr::Pipe { value: inner, stage, .. } = value else { panic!("expected Pipe") };
+        assert!(matches!(stage.as_ref(), Expr::Identifier { name, .. } if name == "double"));
+        assert!(matches!(inner.as_ref(), Expr::Pipe { .. }), "left-associative");
     }
 
     // ── dict literal tests ────────────────────────────────────────────────────

@@ -13,11 +13,19 @@
 //!   low3 == 0b001 (1)  -> heap POINTER, non-string (dict/array/struct/fn/future)
 //!   low3 == 0b011 (3)  -> BOXED FLOAT pointer (untag, then load the f64)
 //!   low3 == 0b101 (5)  -> heap STRING pointer
-//!   low3 == 0b111 (7)  -> IMMEDIATE: nil or bool, disambiguated by bit3:
-//!                           low4 == 0b0111 ( 7) -> NIL
+//!   low3 == 0b111 (7)  -> IMMEDIATE: nil, char or bool, split on bit3:
+//!                           low4 == 0b0111 ( 7) -> nil/char, split on bit4:
+//!                             low5 == 0b00111 ( 7) -> NIL
+//!                             low5 == 0b10111 (23) -> CHAR, scalar in bits 5..
 //!                           low4 == 0b1111 (15) -> BOOL, value in bit4
 //!                                                  (false=15, true=31)
 //! ```
+//!
+//! `char` claims bit 4 of the nil branch, which was the only unused immediate
+//! space left in the word. That is why [`JadeValue::is_nil`] tests five bits and
+//! not four: before v1.2.1 *any* word ending `0b0111` was nil regardless of what
+//! sat above it, so a char would have read as nil. A Unicode scalar needs 21
+//! bits and there are 59 above the tag, so the payload is never tight.
 //!
 //! All three heap kinds (ptr/float/str) untag with `& !7`. Heap allocations
 //! are >= 8-byte aligned, so the low 3 bits of a real pointer are always 0 and
@@ -42,6 +50,18 @@ pub const TAG_IMM: u64 = 7;
 
 /// Bit pattern for `nil` (`0b00111`). Mirrors `JRT_NIL`.
 pub const NIL_BITS: u64 = 0x07;
+/// Tag for a char immediate (`0b10111`); the scalar sits in bits 5.. .
+/// Mirrors `JRT_CHAR_TAG`.
+pub const CHAR_TAG: u64 = 0x17;
+/// Mask selecting the five bits that distinguish nil from char.
+pub const CHAR_MASK: u64 = 0x1f;
+/// Bits the char scalar is shifted by.
+pub const CHAR_SHIFT: u32 = 5;
+/// Taint flag for a char immediate. A char taken from a tainted string is still
+/// tainted, and a char has no header to keep a trust byte in the way a string
+/// does, so the flag rides in bit 63 — clear of the 21-bit scalar and the tag.
+/// Mirrors `JRT_CHAR_TAINT`.
+pub const CHAR_TAINT: u64 = 1 << 63;
 /// Bit pattern for `false` (`0b01111`). Mirrors `JRT_FALSE`.
 pub const FALSE_BITS: u64 = 0x0F;
 /// Bit pattern for `true` (`0b11111`). Mirrors `JRT_TRUE`.
@@ -104,9 +124,16 @@ impl JadeValue {
     pub const fn is_str(self) -> bool {
         self.tag() == TAG_STR
     }
+    /// Five bits, not four. `char` lives in bit 4 of this branch, so a four-bit
+    /// test would report every char as nil — and would do so only in whichever
+    /// engine was checked first, since the C macro is a separate copy.
     #[inline]
     pub const fn is_nil(self) -> bool {
-        self.0 & 0xf == 0x7
+        self.0 & CHAR_MASK == NIL_BITS
+    }
+    #[inline]
+    pub const fn is_char(self) -> bool {
+        self.0 & CHAR_MASK == CHAR_TAG
     }
     #[inline]
     pub const fn is_bool(self) -> bool {
@@ -173,6 +200,35 @@ impl JadeValue {
         (self.0 >> 4) & 1 != 0
     }
 
+    /// Tag a Unicode scalar as a char immediate.
+    #[inline]
+    pub const fn from_char(c: char) -> Self {
+        JadeValue(((c as u32 as u64) << CHAR_SHIFT) | CHAR_TAG)
+    }
+    /// Tag a Unicode scalar together with a trust byte.
+    #[inline]
+    pub const fn from_char_trust(c: char, trust: u8) -> Self {
+        let taint = if trust != 0 { CHAR_TAINT } else { 0 };
+        JadeValue((((c as u32 as u64) << CHAR_SHIFT) | CHAR_TAG) | taint)
+    }
+    /// Untag a char. Returns `None` if the payload is not a Unicode scalar,
+    /// which can only happen for a word that was never a char.
+    #[inline]
+    pub fn as_char(self) -> Option<char> {
+        char::from_u32(((self.0 & !CHAR_TAINT) >> CHAR_SHIFT) as u32)
+    }
+    /// The trust byte a char is carrying.
+    #[inline]
+    pub const fn char_trust(self) -> u8 {
+        if self.0 & CHAR_TAINT != 0 { 1 } else { 0 }
+    }
+    /// The comparable part of a char word: scalar plus tag, taint excluded.
+    /// Trust is provenance, not identity.
+    #[inline]
+    pub const fn char_bits(self) -> u64 {
+        self.0 & !CHAR_TAINT
+    }
+
     // ── Heap pointer box/unbox (mirror jrt_box_ptr/str, jrt_unbox_ptr) ──────
 
     /// Tag a non-string heap pointer. The pointer must be 8-byte aligned.
@@ -199,6 +255,11 @@ impl core::fmt::Debug for JadeValue {
             write!(f, "JadeValue::Int({})", self.as_int())
         } else if self.is_nil() {
             write!(f, "JadeValue::Nil")
+        } else if self.is_char() {
+            match self.as_char() {
+                Some(c) => write!(f, "JadeValue::Char({c:?})"),
+                None => write!(f, "JadeValue::Char(<invalid>)"),
+            }
         } else if self.is_bool() {
             write!(f, "JadeValue::Bool({})", self.as_bool())
         } else if self.is_float() {
@@ -266,6 +327,38 @@ mod tests {
         assert_eq!(TAG_FLOAT, 3);
         assert_eq!(TAG_STR, 5);
         assert_eq!(TAG_IMM, 7);
+        assert_eq!(CHAR_TAG, 0x17);
+        assert_eq!(CHAR_MASK, 0x1f);
+        assert_eq!(CHAR_SHIFT, 5);
+    }
+
+    #[test]
+    fn char_round_trips_across_the_scalar_range() {
+        for c in ['a', 'Z', '0', ' ', '\n', 'é', '中', '\u{10FFFF}', '\u{0}'] {
+            let v = JadeValue::from_char(c);
+            assert!(v.is_char(), "{c:?} should tag as a char");
+            assert_eq!(v.as_char(), Some(c), "{c:?} should round trip");
+        }
+    }
+
+    /// The whole risk of putting `char` in the immediate space. `is_nil` was a
+    /// four-bit mask, so every char would have answered yes to it. If this ever
+    /// fails, a char prints as `nil` — and, because the C macro is a separate
+    /// copy of the same rule, possibly in only one of the two engines.
+    #[test]
+    fn nil_is_not_a_char_and_a_char_is_not_nil() {
+        assert!(NIL.is_nil());
+        assert!(!NIL.is_char());
+        for c in ['a', '\u{0}', '\u{10FFFF}'] {
+            let v = JadeValue::from_char(c);
+            assert!(!v.is_nil(), "{c:?} must not read as nil");
+            assert!(!v.is_bool(), "{c:?} must not read as bool");
+            assert!(!v.is_int(), "{c:?} must not read as int");
+            assert!(!v.is_heap(), "{c:?} must not read as a heap pointer");
+        }
+        // The two bool immediates sit in the other half of the branch.
+        assert!(!TRUE.is_char() && !FALSE.is_char());
+        assert!(!TRUE.is_nil() && !FALSE.is_nil());
     }
 
     #[test]

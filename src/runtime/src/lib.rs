@@ -79,6 +79,7 @@
 // justified. If reintroduced, it MUST NOT be declared in this shared crate.
 
 pub mod arena;
+pub mod bytesf;
 pub mod coercef;
 pub mod coll;
 pub mod cstr;
@@ -122,7 +123,9 @@ pub use value::{JadeValue, FALSE, NIL, TRUE};
 /// so an AOT binary and a native package built against different runtimes can
 /// be detected. Exposed over the C ABI so AOT-linked binaries can assert
 /// compatibility.
-pub const RUNTIME_ABI_VERSION: u32 = 2;
+/// v3 (1.2.2): `JADE_TAG_BYTES`. A package built against v2 has no arm for it,
+/// so it must be rebuilt rather than handed a tag it will read as garbage.
+pub const RUNTIME_ABI_VERSION: u32 = 3;
 
 /// C-ABI accessor for [`RUNTIME_ABI_VERSION`]. Also serves as a trivial
 /// exported symbol proving the `staticlib` links.

@@ -197,6 +197,70 @@ impl JStr {
     }
 }
 
+// ── JChar ─────────────────────────────────────────────────────────────────────
+
+/// A Unicode scalar carrying a trust byte, the char analogue of [`JStr`].
+///
+/// A char exists mostly because it comes *out* of a string, and a character of
+/// a tainted string is exactly as untrustworthy as the string was. Without the
+/// trust byte here, `tainted[0] + "x"` would produce a clean string and a loop
+/// rebuilding a string character by character would launder it silently — the
+/// kind of hole that passes every test, since the trust fixtures only ever
+/// exercise whole strings.
+///
+/// In a compiled binary the same flag rides in bit 63 of the char immediate,
+/// clear of the 21-bit scalar in bits 5.. and clear of the tag in the low five.
+#[derive(Debug, Clone, Copy)]
+pub struct JChar {
+    ch: char,
+    trust: u8,
+}
+
+impl PartialEq for JChar {
+    /// Trust is provenance, not identity: two spellings of the same character
+    /// are the same character whatever they were derived from.
+    fn eq(&self, other: &Self) -> bool {
+        self.ch == other.ch
+    }
+}
+impl Eq for JChar {}
+impl PartialOrd for JChar {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for JChar {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.ch.cmp(&other.ch)
+    }
+}
+
+impl JChar {
+    /// A char from program source.
+    pub fn trusted(ch: char) -> Self {
+        JChar { ch, trust: TRUSTED }
+    }
+    /// A char carrying an explicit trust byte, for propagating an existing one.
+    pub fn with_trust(ch: char, trust: u8) -> Self {
+        JChar { ch, trust }
+    }
+    pub fn ch(&self) -> char {
+        self.ch
+    }
+    pub fn trust(&self) -> u8 {
+        self.trust
+    }
+    pub fn is_tainted(&self) -> bool {
+        is_tainted(self.trust)
+    }
+}
+
+impl core::fmt::Display for JChar {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}", self.ch)
+    }
+}
+
 impl core::ops::Deref for JStr {
     type Target = str;
     fn deref(&self) -> &str {

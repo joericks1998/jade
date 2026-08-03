@@ -460,6 +460,227 @@ mod type_infer {
         let TStmt::Let { value, .. } = &tp.stmts[2] else { panic!() };
         assert_eq!(value.ty, JadeType::Unknown);
     }
+
+    // ── Pipe stages ───────────────────────────────────────────────────────────
+    //
+    // `|>` reaches inference as an `Expr::Pipe` carrying an unclassified stage.
+    // These pin which of the three meanings each stage shape takes, because the
+    // choice is the language rule and it is not visible in the syntax.
+
+    use crate::compiler::tir::TExprKind;
+
+    /// The stage folds back into the dereference as an `output_type`, which is
+    /// what makes `grammar_for` constrain sampling. If this regressed to an
+    /// ordinary call the program would still compile and still coerce — the
+    /// model would simply generate unconstrained, which is exactly the kind of
+    /// failure that shows up as a flaky reply rather than an error.
+    #[test]
+    fn a_type_name_stage_on_a_deref_becomes_an_output_type() {
+        let tp = infer_ok("prompt p = \"x\"\nlet n = ?p |> int");
+        let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!("expected Let") };
+        let TExprKind::PromptDeref { output_type, grammar_expr, .. } = &value.kind
+            else { panic!("expected PromptDeref, got {:?}", value.kind) };
+        assert_eq!(output_type.as_deref(), Some("int"));
+        assert!(grammar_expr.is_none());
+        assert_eq!(value.ty, JadeType::Int);
+    }
+
+    /// A struct registers itself as a callable constructor under its own name,
+    /// so by type alone it is indistinguishable from a function. Checking the
+    /// function rule first turned `?p |> City` into `City(?p)`.
+    #[test]
+    fn a_struct_name_stage_on_a_deref_is_a_type_not_a_call() {
+        let tp = infer_ok("struct City { name }\nprompt p = \"x\"\nlet c = ?p |> City");
+        let TStmt::Let { value, .. } = &tp.stmts[2] else { panic!("expected Let") };
+        let TExprKind::PromptDeref { output_type, .. } = &value.kind
+            else { panic!("expected PromptDeref, got {:?}", value.kind) };
+        assert_eq!(output_type.as_deref(), Some("City"));
+        // `parse_type_name` maps only the builtin keywords, so a struct-typed
+        // dereference is statically `Unknown` and its fields are checked at run
+        // time. That predates v1.2.0 and is deliberately unchanged here: this
+        // patch moves *where* a stage is classified, not what a stage means.
+        assert_eq!(value.ty, JadeType::Unknown);
+    }
+
+    #[test]
+    fn a_grammar_stage_on_a_deref_becomes_a_grammar_expr() {
+        let tp = infer_ok(
+            "let g = Grammar.new('\"yes\" | \"no\"')\nprompt p = \"x\"\nlet r = ?p |> g",
+        );
+        let TStmt::Let { value, .. } = &tp.stmts[2] else { panic!("expected Let") };
+        let TExprKind::PromptDeref { output_type, grammar_expr, .. } = &value.kind
+            else { panic!("expected PromptDeref, got {:?}", value.kind) };
+        assert!(output_type.is_none());
+        assert!(grammar_expr.is_some());
+        assert_eq!(value.ty, JadeType::Str);
+    }
+
+    /// The chain that was unwritable before v1.2.0. The first stage folds in and
+    /// constrains generation; the second is an ordinary call that receives the
+    /// coerced int rather than the raw reply text.
+    #[test]
+    fn a_function_stage_after_a_typed_deref_receives_the_coerced_value() {
+        let tp = infer_ok(
+            "fn double(x) { return x * 2 }\nprompt p = \"x\"\nlet n = ?p |> int |> double",
+        );
+        let TStmt::Let { value, .. } = &tp.stmts[2] else { panic!("expected Let") };
+        let TExprKind::Call { args, .. } = &value.kind
+            else { panic!("expected the outer stage to be a Call, got {:?}", value.kind) };
+        assert_eq!(args.len(), 1, "the piped value is the sole argument");
+        assert_eq!(args[0].ty, JadeType::Int, "double() receives an int, not the reply text");
+    }
+
+    /// A function stage on a plain value is the pipe the language always had.
+    #[test]
+    fn a_function_stage_on_an_ordinary_value_is_a_call() {
+        let tp = infer_ok("fn double(x) { return x * 2 }\nlet n = 5 |> double");
+        let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!("expected Let") };
+        let TExprKind::Call { args, .. } = &value.kind else { panic!("expected Call") };
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0].ty, JadeType::Int);
+    }
+
+    /// The piped value goes in front of the stage's own arguments.
+    #[test]
+    fn a_call_stage_takes_the_piped_value_as_its_first_argument() {
+        let tp = infer_ok("fn add(a, b) { return a + b }\nlet n = 5 |> add(3)");
+        let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!("expected Let") };
+        let TExprKind::Call { args, .. } = &value.kind else { panic!("expected Call") };
+        assert_eq!(args.len(), 2);
+    }
+
+    #[test]
+    fn a_non_callable_stage_is_an_error() {
+        for src in ["let x = 5 |> 3", "let x = 5 |> \"nope\"", "let n = 1\nlet x = 5 |> n"] {
+            assert!(
+                matches!(infer_err(src), JadeError::InvalidPipeStage { .. }),
+                "expected InvalidPipeStage for {src}",
+            );
+        }
+    }
+
+    /// A user function beats anything else it collides with, which is the rule
+    /// for every name that is not a builtin keyword or a declared struct.
+    // ── char ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn indexing_a_string_infers_char() {
+        let tp = infer_ok("let s = \"hi\"\nlet c = s[0]");
+        let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!("expected Let") };
+        assert_eq!(value.ty, JadeType::Char);
+    }
+
+    #[test]
+    fn iterating_a_string_binds_a_char() {
+        // The loop variable's type shows up on a use of it inside the body.
+        let tp = infer_ok("for c in \"hi\" {\n    let x = c\n}");
+        let TStmt::For { body, .. } = &tp.stmts[0] else { panic!("expected For") };
+        let TStmt::Let { value, .. } = &body[0] else { panic!("expected Let in body") };
+        assert_eq!(value.ty, JadeType::Char);
+    }
+
+    /// The documented exception to "`==` refuses to compare across types". It
+    /// exists because `s[i]` began yielding a char: without it every
+    /// `if s[0] == "a"` already written would have become a type error.
+    #[test]
+    fn a_char_compares_with_a_str_in_both_orders() {
+        for src in [
+            "let s = \"hi\"\nlet b = s[0] == \"h\"",
+            "let s = \"hi\"\nlet b = \"h\" == s[0]",
+            "let s = \"hi\"\nlet b = s[0] < s[1]",
+        ] {
+            let tp = infer_ok(src);
+            let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!("expected Let") };
+            assert_eq!(value.ty, JadeType::Bool, "for {src}");
+        }
+    }
+
+    #[test]
+    fn concatenating_a_char_with_a_str_yields_a_str() {
+        for src in [
+            "let s = \"hi\"\nlet r = s[0] + \"x\"",
+            "let s = \"hi\"\nlet r = \"x\" + s[0]",
+            "let s = \"hi\"\nlet r = s[0] + s[1]",
+        ] {
+            let tp = infer_ok(src);
+            let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!("expected Let") };
+            assert_eq!(value.ty, JadeType::Str, "for {src}");
+        }
+    }
+
+    /// `char` is a builtin type keyword, so it constrains a dereference rather
+    /// than applying the `char()` constructor to the raw reply. Without the
+    /// grammar the model generates freely and the coercion then fails.
+    #[test]
+    fn a_char_stage_on_a_deref_constrains_rather_than_converts() {
+        let tp = infer_ok("prompt p = \"x\"\nlet c = ?p |> char");
+        let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!("expected Let") };
+        let TExprKind::PromptDeref { output_type, .. } = &value.kind
+            else { panic!("expected PromptDeref, got {:?}", value.kind) };
+        assert_eq!(output_type.as_deref(), Some("char"));
+        assert_eq!(value.ty, JadeType::Char);
+    }
+
+    // ── yield / streams ───────────────────────────────────────────────────────
+
+    #[test]
+    fn a_function_that_yields_returns_a_stream() {
+        let tp = infer_ok("fn g() {\n    yield 1\n}\nlet s = g()");
+        let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!("expected Let") };
+        assert_eq!(value.ty, JadeType::Stream(Box::new(JadeType::Int)));
+    }
+
+    /// A `yield` anywhere in the body counts, not just at the top level.
+    #[test]
+    fn a_yield_inside_a_loop_still_makes_a_generator() {
+        let tp = infer_ok("fn g(n) {\n    while n > 0 {\n        yield n\n    }\n}\nlet s = g(3)");
+        let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!("expected Let") };
+        assert!(matches!(value.ty, JadeType::Stream(_)), "got {:?}", value.ty);
+    }
+
+    /// The same widening rule a mixed array literal follows: disagreement is not
+    /// an error, it just stops being specific.
+    #[test]
+    fn yielded_types_that_disagree_widen_to_unknown() {
+        let tp = infer_ok("fn g() {\n    yield 1\n    yield \"two\"\n}\nlet s = g()");
+        let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!("expected Let") };
+        assert_eq!(value.ty, JadeType::Stream(Box::new(JadeType::Unknown)));
+    }
+
+    #[test]
+    fn iterating_a_stream_binds_its_element_type() {
+        let tp = infer_ok("fn g() {\n    yield 1\n}\nfor x in g() {\n    let y = x\n}");
+        let TStmt::For { body, .. } = &tp.stmts[1] else { panic!("expected For") };
+        let TStmt::Let { value, .. } = &body[0] else { panic!("expected Let in body") };
+        assert_eq!(value.ty, JadeType::Int);
+    }
+
+    /// A generator produces a stream, so returning a value as well asks it to be
+    /// two things. A *bare* return is fine — it stops the generator early.
+    #[test]
+    fn a_generator_cannot_also_return_a_value() {
+        let err = infer_err("fn g() {\n    yield 1\n    return 2\n}");
+        assert!(matches!(err, JadeError::YieldAndReturn { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn a_generator_may_return_bare_to_stop_early() {
+        let tp = infer_ok("fn g(n) {\n    yield 1\n    if n > 0 {\n        return\n    }\n    yield 2\n}\nlet s = g(0)");
+        let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!("expected Let") };
+        assert!(matches!(value.ty, JadeType::Stream(_)), "got {:?}", value.ty);
+    }
+
+    #[test]
+    fn a_user_function_stage_beats_a_grammar_variable_of_the_same_name() {
+        let tp = infer_ok(
+            "fn shout(s) { return s }\nprompt p = \"x\"\nlet r = ?p |> shout",
+        );
+        let TStmt::Let { value, .. } = &tp.stmts[2] else { panic!("expected Let") };
+        assert!(
+            matches!(value.kind, TExprKind::Call { .. }),
+            "a function stage applies, it does not constrain: {:?}", value.kind,
+        );
+    }
 }
 
 mod gbnf {

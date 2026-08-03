@@ -237,6 +237,10 @@ fn scan_stmt(st: &TStmt, name: &str, ok: &mut usize, bad: &mut usize) {
                 scan_expr(v, name, ok, bad);
             }
         }
+        // A yielded value outlives the frame that produced it — it lands in the
+        // stream's buffer and the caller reads it later — so it must not be
+        // arena-allocated, exactly like a returned one.
+        TStmt::Yield { value, .. } => scan_expr(value, name, ok, bad),
         TStmt::If { condition, then_body, else_body, .. } => {
             scan_expr(condition, name, ok, bad);
             for s in then_body {
@@ -327,6 +331,7 @@ fn stmt_contains_await(st: &TStmt) -> bool {
         TStmt::Let { value, .. } | TStmt::Assign { value, .. } => expr_contains_await(value),
         TStmt::Expr(e) => expr_contains_await(e),
         TStmt::Return { value, .. } => value.as_ref().is_some_and(expr_contains_await),
+        TStmt::Yield { value, .. } => expr_contains_await(value),
         TStmt::If { condition, then_body, else_body, .. } => {
             expr_contains_await(condition)
                 || stmts_contain_await(then_body)

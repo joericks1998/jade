@@ -1,0 +1,12 @@
+// `?p |> char` — constrain the reply to exactly one character.
+//
+// `char` is a builtin type keyword, so it constrains generation with a grammar
+// rather than converting afterwards. That matters: `char` is also a callable
+// constructor, and if the stage resolved to the function the model would
+// generate unconstrained and the conversion would then fail on a whole
+// sentence. The grammar is the valuable half.
+
+prompt p = "Reply with a single letter."
+let c = ?p |> char
+print(c)
+print(c == "a")

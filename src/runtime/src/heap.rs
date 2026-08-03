@@ -58,6 +58,9 @@ pub enum ObjKind {
     /// A method bound to a receiver (`let f = obj.greet`). Callable like a
     /// function value, but carries the receiver it will pass as `self`.
     BoundMethod = 9,
+    /// A binary blob. Owns a `Vec<u8>`, not tagged words, so its `free_obj`
+    /// arm reclaims without a child cascade.
+    Bytes = 10,
 }
 
 /// Bacon–Rajan cycle-collector color. Stored in [`ObjHeader::color`].

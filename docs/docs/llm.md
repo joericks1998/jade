@@ -68,8 +68,47 @@ if result {
 }
 ```
 
+### Chaining past the type
+
+A type stage is one stage of an ordinary pipe, so anything may follow it. The type constrains how the model *generates*, and the next stage receives the coerced value:
+
+```jade
+fn double(x) { return x * 2 }
+
+prompt p = "What is 21 + 21? Respond with only the number."
+let n = ?p |> int |> double   // 84
+```
+
+Order matters, and it is the useful kind of ordering. `?p |> int |> double` constrains the reply to an integer and hands `double` a real int. `?p |> double` has no type to build a grammar from, so the model generates freely and `double` receives the raw reply text.
+
 :::note
-`?p |> type` must be assigned to a variable — it cannot appear directly inside `print()`. Use `let n = ?p |> int` then `print(n)`.
+Before v1.2.0 neither of these was expressible. `|>` after `?p` had a separate parse path that read only a single constraint, so a chain could not form, and a typed dereference inside `print(...)` was rejected outright. Both now work: `print(?p |> int)` prints the coerced int, and `print(?p)` still streams tokens live.
+:::
+
+## Constraining with a Grammar
+
+A `Grammar` value as a `|>` stage sends its GBNF with the request and leaves the reply a stream. Printing that stream shows tokens as they arrive; reading it as a value gives the full text.
+
+```jade
+let g = Grammar.new("\"yes\" | \"no\"")
+prompt p = "yes or no?"
+
+print(?p |> g)        // live, constrained output
+let answer = ?p |> g  // the text
+```
+
+A grammar may also carry an *anchor* and a *stop*, which mark a region of the reply to suppress from live output while keeping it in the value. That is how a tool call or a chain-of-thought span is hidden from the user without being lost to the program:
+
+```jade
+let g = Grammar.new("\"a\"|\"b\"", "<t>", "</t>")
+print(?p |> g)        // everything between <t> and </t> is suppressed
+let full = ?p |> g    // ... but it is still here
+```
+
+A grammar with no anchor suppresses from the first token, since the whole reply is then structured output.
+
+:::note
+This used to be a builtin: `stream(?p, mute_on = [g])`. It existed only because a grammar-constrained dereference collapsed into a blocking call, leaving no stream to print. As of v1.2.4 it does not, so the pipe covers both and `stream()` is gone.
 :::
 
 ## Dereferencing a Prompt in a Field
@@ -186,7 +225,7 @@ See [Async / Await](async) for the full reference.
 | `NotAPrompt` | `?x` where `x` is not a `prompt` binding |
 | `PromptOverflow` | Typed dereference produced a reply that didn't coerce to the target type (single-shot — the provider owns any retry policy) |
 | `InferenceError` | The provider reported a failure (a bad API key, a rate limit, a grammar it cannot enforce) |
-| `StreamingWithType` | `?p |> Type` used directly inside `print()` — assign to a variable first |
+| `InvalidPipeStage` | The right side of `\|>` is not a function, a type name, or a Grammar (replaced `StreamingWithType` in v1.2.0) |
 | `NotAFuture` | `await` applied to a non-Future value |
 | `DoubleAwait` | The same Future was awaited more than once |
 | `AsyncPanic` | A spawned async task panicked; the message and span are captured from the task |

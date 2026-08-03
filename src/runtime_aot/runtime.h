@@ -17,9 +17,17 @@ typedef int64_t jade_value_t;
  *   low3 == 0b011 (3)  -> BOXED FLOAT pointer (untag, then load the double)
  *   low3 == 0b101 (5)  -> heap STRING pointer
  *   low3 == 0b111 (7)  -> IMMEDIATE: nil or bool, disambiguated by bit3:
- *                           low4 == 0b0111 ( 7) -> NIL
+ *                           low4 == 0b0111 ( 7) -> nil/char, split on bit4:
+ *                             low5 == 0b00111 ( 7) -> NIL
+ *                             low5 == 0b10111 (23) -> CHAR, scalar in bits 5..
  *                           low4 == 0b1111 (15) -> BOOL, value in bit4
  *                                                  (false=15, true=31)
+ *
+ * `char` claims bit 4 of the nil branch, the only unused immediate space left.
+ * That is why jrt_is_nil tests five bits and not four: before v1.2.1 any word
+ * ending 0b0111 was nil whatever sat above it, so a char would have read as
+ * nil. This macro and jade-runtime's `JadeValue::is_nil` are two copies of one
+ * rule — change them together or a char prints as nil in exactly one engine.
  *
  * Strings get their own tag (separate from other heap objects) so the runtime
  * can tell a string from a dict/array/struct without a per-object kind header:
@@ -36,17 +44,27 @@ typedef int64_t jade_value_t;
 #define JRT_TAG_PTR    ((uint64_t)1)   /* non-string heap object */
 #define JRT_TAG_FLOAT  ((uint64_t)3)
 #define JRT_TAG_STR    ((uint64_t)5)   /* heap string */
-#define JRT_TAG_IMM    ((uint64_t)7)   /* nil or bool */
+#define JRT_TAG_IMM    ((uint64_t)7)   /* nil, char or bool */
 #define JRT_NIL        ((jade_value_t)0x07)  /* 0b00111 */
 #define JRT_FALSE      ((jade_value_t)0x0F)  /* 0b01111 */
 #define JRT_TRUE       ((jade_value_t)0x1F)  /* 0b11111 */
+#define JRT_CHAR_TAG   ((uint64_t)0x17)      /* 0b10111, scalar in bits 5.. */
+#define JRT_CHAR_MASK  ((uint64_t)0x1f)
+#define JRT_CHAR_SHIFT 5
+/* A char taken from a tainted string is still tainted, and a char has no
+ * header to keep a trust byte in the way a string does. Bit 63 is clear of the
+ * 21-bit scalar and of the tag, so the flag rides there. Mirrors the `trust`
+ * field on jade-runtime's `JChar`. */
+#define JRT_CHAR_TAINT ((uint64_t)1 << 63)
 
 #define jrt_tag(v)        ((uint64_t)(v) & JRT_TAG_MASK)
 #define jrt_is_int(v)     (((uint64_t)(v) & 1u) == 0)
 #define jrt_is_ptr(v)     (jrt_tag(v) == JRT_TAG_PTR)
 #define jrt_is_float(v)   (jrt_tag(v) == JRT_TAG_FLOAT)
 #define jrt_is_str(v)     (jrt_tag(v) == JRT_TAG_STR)
-#define jrt_is_nil(v)     (((uint64_t)(v) & 0xfu) == 0x7u)  /* low4 == 0b0111 */
+/* Five bits: bit4 separates nil from char. See the layout note above. */
+#define jrt_is_nil(v)     (((uint64_t)(v) & JRT_CHAR_MASK) == 0x7u)
+#define jrt_is_char(v)    (((uint64_t)(v) & JRT_CHAR_MASK) == JRT_CHAR_TAG)
 #define jrt_is_bool(v)    (((uint64_t)(v) & 0xfu) == 0xfu)  /* low4 == 0b1111 */
 /* Any heap pointer kind (non-string ptr, boxed float, or string): all untag
  * with `& ~7`. Used to decide whether a value can be dereferenced as a ptr. */
@@ -56,6 +74,15 @@ typedef int64_t jade_value_t;
 #define jrt_unbox_int(v)  ((int64_t)(v) >> 1)
 #define jrt_box_bool(b)   ((jade_value_t)((((uint64_t)((b)!=0)) << 4) | 0xfu))
 #define jrt_unbox_bool(v) ((int)(((uint64_t)(v) >> 4) & 1u))
+#define jrt_box_char(c)   ((jade_value_t)(((uint64_t)(uint32_t)(c) << JRT_CHAR_SHIFT) | JRT_CHAR_TAG))
+/* Masks the taint flag off before shifting, so the scalar is what comes back. */
+#define jrt_unbox_char(v) ((uint32_t)((((uint64_t)(v)) & ~JRT_CHAR_TAINT) >> JRT_CHAR_SHIFT))
+#define jrt_box_char_trust(c, t) \
+    ((jade_value_t)((uint64_t)jrt_box_char(c) | ((t) ? JRT_CHAR_TAINT : (uint64_t)0)))
+#define jrt_char_trust(v) ((uint8_t)((((uint64_t)(v)) & JRT_CHAR_TAINT) ? 1u : 0u))
+/* The comparable part of a char word: scalar plus tag, taint excluded. Trust is
+ * provenance, not identity — two spellings of 'a' are the same character. */
+#define jrt_char_bits(v)  (((uint64_t)(v)) & ~JRT_CHAR_TAINT)
 #define jrt_box_ptr(p)    ((jade_value_t)((uintptr_t)(p) | JRT_TAG_PTR))
 #define jrt_box_str(p)    ((jade_value_t)((uintptr_t)(p) | JRT_TAG_STR))
 #define jrt_unbox_ptr(v)  ((void*)((uintptr_t)(v) & ~(uintptr_t)7))
@@ -362,6 +389,33 @@ char* jrt_str_of_any(int64_t val);
  * int()/float() raise a catchable error on a non-numeric string; bool() never
  * raises. All take and return tagged value words. */
 int64_t jrt_int_any(int64_t val);
+int64_t jrt_char_any(int64_t val);
+
+/* ── bytes ────────────────────────────────────────────────────────────────
+ * A binary blob (ObjKind::Bytes). The Rust side owns the representation
+ * (jade-runtime, src/bytesf.rs); these are the entry points codegen calls.
+ * `decode` can fail on invalid UTF-8, so it reports through the pending-error
+ * channel and jk_bytes_decode below turns that into a catchable raise — a Jade
+ * raise is a longjmp and must not unwind through a Rust frame. */
+void*    jrt_bytes_new(const unsigned char* src, size_t len, unsigned char trust);
+int64_t  jrt_bytes_len(const void* p);
+int64_t  jrt_bytes_get(const void* p, int64_t i);
+const unsigned char* jrt_bytes_data(const void* p);
+unsigned char jrt_bytes_trust(const void* p);
+void*    jrt_bytes_encode(const unsigned char* s);
+char*    jrt_bytes_decode(const void* p);
+void*    jrt_bytes_slice(const void* p, int64_t s, int64_t e);
+char*    jrt_bytes_take_error(void);
+/* Raising wrappers used by codegen. */
+int64_t  jk_bytes_decode(int64_t recv);
+/* fs byte I/O. Mirrors jrt_fs_read/write/append but over blobs: `read` goes
+ * through read_to_string and so cannot read a PNG at all. The content is
+ * TAINTED for the same reason fs.read's is — it comes from outside. */
+int64_t  jk_fs_read_bytes(const char* path, int32_t trust);
+void     jk_fs_write_bytes(const char* path, int64_t blob);
+void     jk_fs_append_bytes(const char* path, int64_t blob);
+int64_t  jk_fs_read_stdin_bytes(void);
+void     jk_fs_write_stdout_bytes(int64_t blob);
 int64_t jrt_float_any(int64_t val);
 int64_t jrt_bool_any(int64_t val);
 
@@ -377,6 +431,7 @@ int64_t jrt_bool_any(int64_t val);
 #define JK_ARRAY  2
 #define JK_DICT   3
 #define JK_STRUCT 4
+#define JK_BYTES  10
 #define JK_PROMPT 7
 
 /* jrt_require_kind — the receiver guard the Chunk backend emits ahead of a
@@ -462,6 +517,19 @@ void*   jrt_coll_struct_keys(void* p);
 /* jrt_karr_new/push — build a kind-tagged array (elements are tagged words). */
 void*   jrt_karr_new(void);
 void    jrt_karr_push(void* arr, int64_t val);
+
+/* ── Generator buffers ────────────────────────────────────────────────────
+ * A `yield`ing function fills a buffer and returns it; a stream *is* that
+ * buffer, which is why reading one twice gives the same values twice. The
+ * buffer is an ordinary kind-tagged array, so len/index/for/print over a
+ * stream need no new code at all.
+ *
+ * A stack, not a slot: a generator may call another generator, and each
+ * `yield` has to land in its own function's buffer. Mirrors `VmState::
+ * yield_stack` in the interpreter. */
+void    jrt_yield_push(void);           /* begin a generator frame */
+void    jrt_yield_append(int64_t val);  /* one `yield` */
+int64_t jrt_yield_pop(void);            /* end it; returns the tagged array */
 /* jrt_kdict_new/set — build a kind-tagged dict (string keys, tagged values).
  * jrt_kdict_set takes the key as a tagged-string word (copied). */
 void*   jrt_kdict_new(void);
@@ -591,6 +659,11 @@ int64_t jrt_sh_run(const char* cmd);    /* forwarder: refuse-if-tainted + impl +
 int32_t jrt_fs_exists(const char* path);
 char*   jrt_fs_take_error(void);            /* drain pending error, or NULL */
 char*   jrt_fs_read_impl(const char* path, int32_t trust);
+void*   jrt_fs_read_bytes_impl(const char* path, int32_t trust);
+void    jrt_fs_write_bytes_impl(const char* path, const unsigned char* data, size_t len);
+void    jrt_fs_append_bytes_impl(const char* path, const unsigned char* data, size_t len);
+void*   jrt_fs_read_stdin_bytes_impl(void);
+void    jrt_fs_write_stdout_bytes_impl(const unsigned char* data, size_t len);
 void    jrt_fs_write_impl(const char* path, const char* content);
 void    jrt_fs_append_impl(const char* path, const char* content);
 void    jrt_fs_delete_impl(const char* path);
@@ -661,6 +734,11 @@ char*   jrt_readline(const char* prompt);
 #define JADE_FFI_ARRAY 6   /* data.as_arr  -> JadeArr  (deep-copied, owned) */
 #define JADE_FFI_DICT  7   /* data.as_dict -> JadeMap  (deep-copied, owned) */
 #define JADE_FFI_STRUCT 8  /* data.as_struct -> JadeStruct (deep-copied, owned) */
+/* data.as_bytes -> JadeBytes (copied, owned). Counted rather than riding on
+ * JADE_FFI_STR, because a blob may contain NUL bytes and need not be valid
+ * UTF-8: a char* would truncate one and corrupt the other. Added in v1.2.2,
+ * which is why the runtime ABI version moved to 3. */
+#define JADE_FFI_BYTES 9
 
 /* Nested container payloads for JADE_FFI_ARRAY / JADE_FFI_DICT.
  *
@@ -677,6 +755,7 @@ char*   jrt_readline(const char* prompt);
 typedef struct JadeArr JadeArr;
 typedef struct JadeMap JadeMap;
 typedef struct JadeStruct JadeStruct;
+typedef struct JadeBytes JadeBytes;
 
 typedef union {
     int64_t     as_int;
@@ -687,6 +766,7 @@ typedef union {
     JadeArr*    as_arr;
     JadeMap*    as_dict;
     JadeStruct* as_struct;
+    JadeBytes*  as_bytes;
 } JadeValData;
 
 typedef struct {
@@ -696,6 +776,7 @@ typedef struct {
 } JadeVal;
 
 struct JadeArr { JadeVal* items; size_t len; };
+struct JadeBytes { unsigned char* data; size_t len; };
 struct JadeMap { const char** keys; JadeVal* vals; size_t len; };
 
 /* A JadeMap plus the struct's type name, fields in declaration order. The name

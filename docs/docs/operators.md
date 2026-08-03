@@ -77,6 +77,30 @@ let r = 5 |> add(3)          // add(5, 3) = 8
 let x = (2 + 3) |> double   // 10
 ```
 
+### What a stage can be
+
+A stage is the thing to the right of a `|>`. There are three kinds, and which one applies depends on what the name refers to, not on where the `|>` appears:
+
+| Stage | Meaning |
+|-------|---------|
+| A function | Applied to the value, which becomes its first argument |
+| A type name | On a prompt dereference, constrains generation with a grammar and coerces the reply; elsewhere it is the ordinary type constructor, so `x \|> int` is `int(x)` |
+| A `Grammar` value | Constrains sampling on a prompt dereference |
+
+Only one rule needs remembering when names collide. A builtin type keyword is always a type, because `?p |> int` has to keep constraining the model. Everything else prefers a function.
+
+```jade
+prompt p = "What is 21 + 21? Respond with only the number."
+
+let n = ?p |> int |> double   // constrain, coerce, then apply
+let g = Grammar.new('"yes" | "no"')
+let a = ?p |> g               // constrain sampling with a grammar
+```
+
+:::note
+Until v1.2.0 this was really two operators sharing a spelling. `|>` after a prompt dereference was read by a different parse rule that accepted exactly one constraint and could not chain, and a typed dereference was banned inside `print(...)`. Both restrictions are gone, and a stage that is none of the three above is now an `InvalidPipeStage` type error naming what it found rather than a parse error talking about tokens.
+:::
+
 Pipes are left-associative and have lower precedence than all other operators, so the entire expression to the left of `|>` is fully evaluated before being passed to the function on the right.
 
 ## Precedence

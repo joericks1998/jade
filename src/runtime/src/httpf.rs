@@ -59,12 +59,30 @@ fn curl_reason(code: i32) -> &'static str {
 /// parse the `\nJADE_STATUS:<code>` trailer → `Ok((status, body))`. `Err` (a full
 /// message) only on a transport failure (curl exit ≠ 0); a 4xx/5xx is a normal
 /// status. The VM maps `Err` to `IoError`; the AOT wrappers record it as pending.
+/// Text-bodied request. The reply is decoded lossily, so a binary body comes
+/// back mangled — use [`request_bytes`] for anything that is not text.
 pub fn request(
     method: &str,
     url: &str,
     body: Option<&str>,
     headers: &[(String, String)],
 ) -> Result<(i64, String), String> {
+    request_bytes(method, url, body.map(|b| b.as_bytes()), headers)
+        .map(|(status, bytes)| (status, String::from_utf8_lossy(&bytes).into_owned()))
+}
+
+/// Byte-bodied request: the reply is handed back as raw octets.
+///
+/// This is the real implementation; [`request`] is a lossy view of it. Splitting
+/// them this way means there is one place that spawns curl and one place that
+/// parses the status trailer, so the text and byte paths cannot disagree about
+/// either.
+pub fn request_bytes(
+    method: &str,
+    url: &str,
+    body: Option<&[u8]>,
+    headers: &[(String, String)],
+) -> Result<(i64, Vec<u8>), String> {
     let is_head = method == "HEAD";
     let mut cmd = Command::new("curl");
     cmd.arg("-sS");
@@ -86,7 +104,7 @@ pub fn request(
         .spawn()
         .map_err(|_| format!("http {method} '{url}': {} (curl exit 127)", curl_reason(127)))?;
     if let (Some(b), Some(mut stdin)) = (body, child.stdin.take()) {
-        let _ = stdin.write_all(b.as_bytes()); // dropping stdin closes it
+        let _ = stdin.write_all(b); // dropping stdin closes it
     }
     let out = child
         .wait_with_output()
@@ -107,7 +125,7 @@ pub fn request(
         }
         None => (&buf[..], 0),
     };
-    Ok((status, String::from_utf8_lossy(body_bytes).into_owned()))
+    Ok((status, body_bytes.to_vec()))
 }
 
 // ── AOT C-ABI wrappers ────────────────────────────────────────────────────────

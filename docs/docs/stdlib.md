@@ -212,6 +212,11 @@ use std::fs
 | Function | Returns | Description |
 |----------|---------|-------------|
 | `fs.read(path)` | `str` | Read entire file as a string |
+| `fs.read_bytes(path)` | `bytes` | The file as raw octets. Unlike `read`, works on binary. Tainted. |
+| `fs.write_bytes(path, b)` | `nil` | Write raw octets, truncating |
+| `fs.append_bytes(path, b)` | `nil` | Append raw octets |
+| `fs.read_stdin_bytes()` | `bytes` | All of stdin as raw octets. Tainted. |
+| `fs.write_stdout_bytes(b)` | `nil` | Raw octets to stdout, flushed |
 | `fs.write(path, content)` | `nil` | Write string to file, creating or overwriting |
 | `fs.append(path, content)` | `nil` | Append string to file (creates if absent) |
 | `fs.exists(path)` | `bool` | True if path exists (file or directory) |
@@ -287,6 +292,8 @@ An optional `headers` dict may be passed as the last argument to any function. K
 | Function | Description |
 |----------|-------------|
 | `http.get(url, headers?)` | HTTP GET |
+| `http.get_bytes(url, headers?)` | HTTP GET with an undecoded body (`.body` is `bytes`) |
+| `http.post_bytes(url, body, headers?)` | HTTP POST sending raw octets |
 | `http.post(url, body, headers?)` | HTTP POST with string body |
 | `http.put(url, body, headers?)` | HTTP PUT with string body |
 | `http.delete(url, headers?)` | HTTP DELETE |

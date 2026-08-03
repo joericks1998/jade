@@ -26,7 +26,7 @@ Two design choices are worth knowing before you edit:
 
 - **`mod.rs`** — the public entry point. Sets up the LLVM context and target machine, runs the probe, emits a thin `main()`, writes the object file, and drives the linker. `CompileMode` selects a binary or a `jade_pkg_init`-exporting shared library.
 - **`cfg.rs`** — control-flow-graph reconstruction. `emit.rs` produces a flat `Vec<Instr>` with PC-relative jumps; LLVM needs basic blocks with explicit edges. This file computes block boundaries and edges and holds no LLVM state at all, so it is unit-testable in isolation.
-- **`lower.rs`** — the bulk of the backend: one LLVM IR translation per opcode, plus the calls into `jade-runtime`'s `jrt_*` C-ABI surface for anything that needs the heap, collections, strings, tasks, or inference.
+- **[`lower/`](lower/README.md)** — the bulk of the backend: one LLVM IR translation per opcode, plus the calls into `jade-runtime`'s `jrt_*` C-ABI surface for anything that needs the heap, collections, strings, tasks, or inference. Split by concern across eleven files (`abi`, `arith`, `strings`, `rc`, `exc`, `calls`, `builtins`, `llm`, `instr`); read that directory's README before adding a lowering.
 - **`imports.rs`** — import resolution and module namespacing. The VM gives every imported file its own namespace; LLVM has no runtime namespaces, so this file mangles imported symbols to keep two modules that both define `greet` distinct. **The VM is the source of truth for what a namespace means** — read this file's header before changing import behavior.
 - **`tests.rs`** — backend tests.
 

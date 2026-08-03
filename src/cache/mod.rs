@@ -18,7 +18,15 @@ pub const JADE_VERSION: &str = env!("CARGO_PKG_VERSION");
 ///     TExprKind::Await, and Instr::Spawn/Await/Join — all serde-serialized.
 /// v4: Expr::PromptDeref gained a `style` field recording whether the source
 ///     spelled it `?p`, `x.(?f)`, or `x~>f`.
-pub const CACHE_FORMAT_VERSION: u32 = 4;
+/// v5: `|>` survives parsing as `Expr::Pipe` instead of being desugared into
+///     `Expr::Call` or stored on `PromptDeref.constraint`. A v4 cache holds the
+///     old shape, which infers to the same thing but cannot express a chain.
+/// v6: the 1.2.x types. `JadeType` gained `Char` (1.2.1), `Bytes` (1.2.2), and
+///     `Stream` (1.2.3); `Stmt`/`TStmt` gained `Yield`. Adding a variant in the
+///     middle of a serde enum renumbers every variant after it, so a v5 cache
+///     deserializes into the *wrong* types rather than failing loudly — which
+///     showed up as an imported struct losing its field defaults.
+pub const CACHE_FORMAT_VERSION: u32 = 6;
 
 // ── Internal types ────────────────────────────────────────────────────────────
 

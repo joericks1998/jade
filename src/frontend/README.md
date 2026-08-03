@@ -22,6 +22,8 @@ Two ideas shape the code.
 
 A third choice worth knowing before you add syntax: *prefer desugaring*. If new syntax can be rewritten in the parser into an AST node that already exists, the rest of the pipeline never learns about it. The `~>` operator is the model — it is a parser-level rewrite to the prompt-dereference node, so type inference, the emitter, and both backends were untouched.
 
+*But desugar only what the parser can actually decide.* `|>` is the counter-example, and it is worth reading before you reach for the rule above. The parser used to rewrite `x |> f` straight into a call, which meant deciding that `f` was a function — a question about what a name refers to, which the parser cannot answer. So a second rule grew for `?p |> int`, where the stage is a type rather than a function, and a `Parser::in_print_call` flag grew on top of that to ban the combination the two rules could not express together. One operator, two parse paths, and a grammar whose legality depended on the name of the enclosing call. In v1.2.0 `|>` became an ordinary `Expr::Pipe` node and `compiler::type_infer::infer_pipe` classifies the stage, which deleted both extra paths and the flag. If a rewrite needs to know what a name *means*, it is not a desugaring.
+
 ## What each file does
 
 - **`lexer.rs`** — source text to `Vec<Token>`. Handles Jade's string forms (plain, single-quoted, triple-quoted, f-strings), numeric literals with overflow detection, and the prompt-related sigils. It *strips comments*, which is why `cli/fmt.rs` formats source text directly rather than reprinting the token stream.

@@ -223,6 +223,6 @@ fn purge_predicate_filters() {
 
 #[test]
 fn cache_format_version_is_stable() {
-    assert_eq!(CACHE_FORMAT_VERSION, 4);
+    assert_eq!(CACHE_FORMAT_VERSION, 6);
     assert!(!JADE_VERSION.is_empty());
 }

@@ -106,6 +106,7 @@ fn intern_fn_returns_sequential_indices() {
         n_slots: 0,
         source_file: String::new(),
         module_scope: None,
+        is_generator: false,
     });
     let a = c.intern_fn(mk("a"));
     let b = c.intern_fn(mk("b"));

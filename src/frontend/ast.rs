@@ -84,6 +84,18 @@ pub enum Stmt {
     },
 
     /// `return expr` or bare `return`
+    /// `yield expr` — append a value to the stream this function produces.
+    ///
+    /// A function whose body contains a `yield` returns a `stream` rather than
+    /// its declared value: the body runs to completion filling a buffer, and
+    /// the caller reads the buffer. That is the whole model — a stream *is* a
+    /// buffer, not a one-shot channel — so reading one twice gives the same
+    /// values twice, and there is no rule about what a second read means.
+    Yield {
+        value: Expr,
+        span: Span,
+    },
+
     Return {
         value: Option<Expr>,
         #[allow(dead_code)] // reserved for future error reporting
@@ -358,6 +370,30 @@ pub enum Expr {
     /// `await expr`
     Await {
         expr: Box<Expr>,
+        span: Span,
+    },
+
+    /// `value |> stage` — one pipe stage.
+    ///
+    /// The parser builds this for every `|>` and decides nothing about what the
+    /// stage means; `compiler::type_infer::infer_pipe` classifies it. A stage is
+    /// one of three things:
+    ///
+    /// - a **type name**, which on a prompt dereference constrains sampling with
+    ///   a generated grammar and coerces the reply (`?p |> int`), and on any
+    ///   other value is the ordinary type constructor (`x |> int` is `int(x)`);
+    /// - a **Grammar value**, which constrains sampling (`?p |> gram`);
+    /// - anything **callable**, which is applied with the piped value inserted
+    ///   as the first argument (`5 |> double`, `5 |> add(3)`).
+    ///
+    /// Keeping the stage un-desugared is what lets a single `|>` mean all three.
+    /// Until v1.2.0 the parser rewrote `value |> f` straight into `Expr::Call`
+    /// and a *separate* parse path stored the stage on `PromptDeref.constraint`,
+    /// so which rule applied was decided by surrounding syntax before anything
+    /// knew what the names referred to. See `PromptDeref`.
+    Pipe {
+        value: Box<Expr>,
+        stage: Box<Expr>,
         span: Span,
     },
 }

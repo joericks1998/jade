@@ -4,6 +4,47 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.2.4
+
+- **`?p` is a buffered stream, like every other stream.** Reading one twice gives the same text twice. Until now the receiver was taken on first drain and a second read raised `DoubleStreamDrain`, so printing a dereference and then using the same value was an error rather than the obvious thing. That error is gone.
+- **`stream()` is gone.** It existed only because a grammar-constrained dereference used to collapse into a blocking call, leaving no stream to print. It does not any more: `?p |> g` sends the grammar with the request and keeps the reply a stream, so `print(?p |> g)` streams live with the grammar's muted region suppressed, and reading it as a value gives the full text including that region. One operator covers what took a builtin and a keyword argument.
+- **The mute spec rides on the stream.** `print` no longer has to be told what to suppress — the anchors come from the Grammar the `|>` stage named. There is now one place that builds a `?p` request, where before there were three that had already drifted: one sent a Grammar's bare pattern where another sent the wrapped GBNF, so the same Grammar constrained the model differently depending on how it was reached.
+
+## v1.2.3
+
+- **`yield` makes streaming an ordinary language feature.** A function whose body contains a `yield` returns a *stream* instead of a value: the body runs to completion filling a buffer, and the caller reads the buffer. `len`, indexing, `for`, and `print` all work on one.
+- **A stream is a buffer, not a one-shot channel.** Everything it produced is retained, so reading it twice gives the same values twice. That is the whole model, and it is what removes a category of rules rather than adding them: there is no "already consumed" state, no replay semantics to define, and no error to hit on a second read.
+- **A bare `return` stops a generator early; `return x` is a compile error.** A function that yields produces a stream, so returning a value as well would ask it to be two things at once.
+- **Yields of different types widen rather than failing**, the same rule a mixed array literal follows.
+- **A stream is an ordinary array in a compiled binary**, so `len`, indexing, iteration, and rendering reuse everything arrays already do rather than growing a parallel implementation.
+- **`CACHE_FORMAT_VERSION` is 6.** The 1.2.x releases added variants in the middle of serde-serialized enums (`JadeType::Char`, `Bytes`, `Stream`; `Stmt::Yield`), which renumbers every variant after them. A cache written by an earlier 1.2.x build deserializes into the *wrong* types rather than failing loudly — it showed up as an imported struct losing its field defaults. Clear your cache with `jade cache clean` if you built from a 1.2.x branch before this.
+
+## v1.2.2
+
+- **`bytes` is a real type.** A counted sequence of raw octets, deliberately not a string. A Jade string is UTF-8 and NUL-terminated, so a blob with a zero byte in it would be truncated there and one that is not valid UTF-8 would be corrupted by anything assuming text — `fs.read` goes through a UTF-8 decode and cannot read a PNG at all. Conversion is explicit in both directions with `str.encode()` and `bytes.decode()`, and decoding invalid UTF-8 raises and names the offset rather than substituting replacement characters.
+- **Indexing a blob gives an `int` in 0..=255, not a `char`.** A byte is not a Unicode scalar, and making `b[0]` look like `s[0]` would hide that the two differ on any non-ASCII input.
+- **Byte I/O across files, HTTP, and the standard streams.** `fs.read_bytes` / `write_bytes` / `append_bytes`, `fs.read_stdin_bytes` / `write_stdout_bytes` so a program can sit in a binary pipeline, and `http.get_bytes` / `post_bytes` for a body that is not text.
+- **A blob carries a trust byte, and that is the point of the design.** `fs.read_bytes` returns tainted data and the taint survives `.decode()`, so `fs.read_bytes(p).decode()` is refused by `sh.exec` exactly as `fs.read(p)` is. Without it, encoding and decoding would have been a laundering route straight through the trust model — and an invisible one, since every fixture in `examples/trust/` used whole strings.
+- **Fixed: a refused tainted value killed a compiled program instead of raising.** The interpreter raises a catchable exception; the compiled runtime printed to stderr and exited. So `try { sh.exec(x) } catch e { … }` ran the handler under `jade run` and terminated the process when built. The compiled path now raises, matching the interpreter.
+- **The native ABI carries bytes, so `RUNTIME_ABI_VERSION` is 3.** Bytes could not ride on the existing string tag, which is a NUL-terminated `char*`. **Every installed provider package must be rebuilt** — if `?p` stops working after upgrading, reinstall your providers.
+
+## v1.2.1
+
+- **`char` is a real type.** Indexing a string, iterating one, `char("x")`, and `?p |> char` all produce a single Unicode scalar rather than a one-character string. It is an *immediate*, riding inside the tagged value word next to `int`, `bool`, and `nil`, so scanning a string now allocates nothing where it used to allocate once per character.
+- **Strings iterate.** `for c in s` was a type error until now; it binds a char per step and counts characters, so a four-character string with a two-byte character in it gives four steps and not five.
+- **Breaking: `s[0]` is a char, not a `str`.** A char compares equal to the one-character string spelling it, orders against strings, and concatenates with them in either direction, so `if s[0] == "a"` keeps meaning what it meant. That is a deliberate exception to Jade's "no cross-type comparison" rule and it is now written down in the types reference rather than being folklore.
+- **A char taken from a tainted string is still tainted.** The trust byte lives in a string's header, and a char has no header — so it rides in bit 63 of the value word in a compiled binary and in a field on `JChar` in the interpreter. Without it, a loop rebuilding a string character by character would have laundered it silently past `sh.exec`, and nothing in the trust fixtures would have caught it.
+- **The tagged-value layout gained its first new immediate.** `char` claims bit 4 of the nil branch, the only unused immediate space left in the word. `is_nil` therefore tests five bits rather than four: before this, *any* word ending `0b0111` was nil whatever sat above it, so a char would have read as `nil`. The Rust and C copies of that test are two spellings of one rule and moved together.
+
+## v1.2.0
+
+- **`|>` is one operator again.** It was two, sharing a spelling. An ordinary pipe (`5 |> double`) was desugared by the parser into a call; a pipe after a prompt dereference (`?p |> int`) was read by a *different* rule that stored the stage on the dereference. Which one applied depended on surrounding syntax, decided before anything knew what the names meant. Now every `|>` parses the same way and the type checker decides what the stage is, which is where that decision belongs — a stage is a type, a Grammar, or a function, and only the checker knows which.
+- **A dereference chains.** `?p |> int |> double` constrains the model to an integer, coerces the reply, and hands `double` a real int. This was previously unwritable: the dereference rule read its stage with a parser that stopped at the first `|>`, specifically so a chain could not form.
+- **A typed dereference works inside `print()`.** `print(?p |> int)` was a compile error — the parser tracked whether it was inside a `print(...)` call and rejected the program with "assign to a variable first". Streaming is decided by what `print` receives, not by what the parser can see, so `print(?p |> int)` prints the coerced int and `print(?p)` still streams tokens live.
+- **Fixed: a function on the right of `|>` after a dereference was silently treated as a grammar.** `?p |> parse(x)` did not fail. Inference fell back to "anything of unknown type is a Grammar value", so a user function was handed to the sampler as a sampling constraint. It now applies, like the pipe it looks like.
+- **A bad stage is a type error naming what it found.** `5 |> 3` reported "expected function or call on right side of `|>`, got expression", because a parser matching on shape can only talk about shapes. The new `InvalidPipeStage` says it got an int. `StreamingWithType` is gone.
+- **Two rules decide a name that could be more than one thing.** A builtin type keyword is always a type — `int` is also a callable constructor, so without this `?p |> int` would generate unconstrained and then fail to coerce, and the grammar is the valuable half of a typed dereference. A declared struct is always a type, for the same reason. Everything else prefers a function.
+
 ## v1.1.36
 
 - **A package can now describe itself in `jade.toml`.** A new `[package]` section names the entry module, the files the package is made of, and the functions it exports, so `jade build --lib` reads a package's shape from the manifest instead of from flags somebody had to remember to type. `jade build --lib` with no file argument builds it.

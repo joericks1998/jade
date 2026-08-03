@@ -1,17 +1,27 @@
-// stream() prints tokens as they arrive and evaluates to the full response,
-// including any region the grammar muted.
+// A grammar stage constrains generation and leaves the reply a stream.
 //
-// The mute region is (anchor, stop_anchor): output stays visible until the
-// model emits "<t>", is suppressed until "</t>", then becomes visible again.
-// A grammar with no anchor mutes from the very first token instead.
+// `?p |> g` sends `g`'s grammar with the request and carries its anchors along
+// with the resulting stream. Printing that stream shows tokens as they arrive
+// with the muted region suppressed; reading it as a value gives the full text,
+// muted span included.
 //
-// This runs on both engines. Both need a live inference daemon, so it is
-// skipped by the backend-parity gate along with the rest of examples/llm.
+// The mute region is (anchor, stop): output stays visible until the model emits
+// "<t>", is suppressed until "</t>", then becomes visible again. A grammar with
+// no anchor mutes from the very first token instead, since the whole reply is
+// then structured output.
+//
+// This used to be spelled `stream(?p, mute_on = [g])`. That builtin is gone as
+// of v1.2.4: it existed only because a grammar-constrained dereference used to
+// collapse into a blocking call, leaving no stream to print. It does not any
+// more, so one operator covers both.
 
 prompt p = "Reply with <t>a</t> and nothing else."
 
 let g = Grammar.new("\"a\"|\"b\"", "<t>", "</t>")
 
-// Live output above; `out` below carries the muted text too.
-let out = stream(?p, mute_on = [g])
-print(out)
+// Live output, with the region between the anchors suppressed.
+print(?p |> g)
+
+// The same dereference read as a value carries the muted text too.
+let out = ?p |> g
+print(len(out) > 0)

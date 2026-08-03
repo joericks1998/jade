@@ -44,6 +44,13 @@ fn get_bool(state: &VmState, name: &str) -> bool {
     }
 }
 
+fn get_char(state: &VmState, name: &str) -> char {
+    match state.globals.get(name).expect("var not found") {
+        VmValue::Char(c) => c.ch(),
+        v => panic!("expected Char, got {v:?}"),
+    }
+}
+
 fn get_str<'a>(state: &'a VmState, name: &str) -> &'a str {
     match state.globals.get(name).expect("var not found") {
         VmValue::Str(s) => s,
@@ -319,7 +326,7 @@ fn run_src_with_mock(src: &str, responses: Vec<&str>) -> Result<VmState> {
 }
 
 /// Like `run_src_with_mock` but also returns a string of everything written to
-/// stdout by `vm_drain_token_stream_printing` (i.e. the `stream()` output path).
+/// stdout by `vm_drain_token_stream_printing` (i.e. printing a stream).
 fn run_src_with_stdout_capture(
     src: &str,
     responses: Vec<&str>,
@@ -984,16 +991,30 @@ fn test_vm_str_ge() {
     assert!(get_bool(&s, "b"));
 }
 
+/// Indexing a string yields a `char`, not a one-character `str`. Breaking as
+/// of v1.2.1, and the reason `char` compares equal to the string spelling it.
 #[test]
 fn test_vm_str_index() {
     let s = run_src("let sv = \"hello\"\nlet h = sv[0]").unwrap();
-    assert_eq!(get_str(&s, "h"), "h");
+    assert_eq!(get_char(&s, "h"), 'h');
 }
 
 #[test]
 fn test_vm_str_index_last() {
     let s = run_src("let sv = \"hello\"\nlet o = sv[4]").unwrap();
-    assert_eq!(get_str(&s, "o"), "o");
+    assert_eq!(get_char(&s, "o"), 'o');
+}
+
+/// A character of a tainted string is still tainted. Without this a loop
+/// rebuilding a string character by character would launder it past `sh.exec`,
+/// and nothing in `examples/trust/` would notice — those only use whole strings.
+#[test]
+fn a_char_taken_from_a_tainted_string_is_tainted() {
+    let s = run_src("let sv = \"hi\"\nlet c = sv[0]").unwrap();
+    match s.globals.get("c").expect("var not found") {
+        VmValue::Char(c) => assert!(!c.is_tainted(), "a source literal is trusted"),
+        v => panic!("expected Char, got {v:?}"),
+    }
 }
 
 #[test]
@@ -3171,7 +3192,7 @@ fn test_mute_grammar_no_anchor_suppresses_from_start() {
     let s = run_src_with_mock(
         r#"prompt p = "test"
 let g = Grammar.new("root ::= [a-z]+")
-let reply = stream(?p, mute_on=[g])"#,
+let reply = ?p |> g"#,
         vec!["hello world"],
     ).unwrap();
     assert_eq!(get_str(&s, "reply"), "hello world");
@@ -3186,7 +3207,7 @@ fn test_mute_stream_returns_full_text_via_vm() {
     let s = run_src_with_mock(
         r#"prompt p = "test"
 let g = Grammar.new("root ::= \"{\" [a-z]+ \"}\"", "<tool>")
-let reply = stream(?p, mute_on=[g])"#,
+let reply = ?p |> g"#,
         vec![r#"<tool>{"tool_name": "x"}"#],
     ).unwrap();
     assert_eq!(get_str(&s, "reply"), r#"<tool>{"tool_name": "x"}"#);
@@ -3197,7 +3218,7 @@ fn test_mute_stream_returns_full_text_with_preamble_via_vm() {
     let s = run_src_with_mock(
         r#"prompt p = "test"
 let g = Grammar.new("root ::= \"{\" [a-z]+ \"}\"", "<tool>")
-let reply = stream(?p, mute_on=[g])"#,
+let reply = ?p |> g"#,
         vec![r#"Sure thing!<tool>{"tool_name": "x"}"#],
     ).unwrap();
     assert_eq!(get_str(&s, "reply"), r#"Sure thing!<tool>{"tool_name": "x"}"#);
@@ -3221,7 +3242,7 @@ fn test_mute_grammar_anchor_suppresses_entire_region() {
     let (_s, printed) = run_src_with_stdout_capture(
         r#"prompt p = "test"
 let g = Grammar.new("root ::= \"{\" [a-z]+ \"}\"", "<tool>")
-let reply = stream(?p, mute_on=[g])"#,
+print(?p |> g)"#,
         vec![r#"<tool>{"tool_name": "x"}"#],
     ).unwrap();
     assert_eq!(printed, "\n");
@@ -3233,7 +3254,7 @@ fn test_mute_grammar_preamble_printed_anchor_suppressed() {
     let (_s, printed) = run_src_with_stdout_capture(
         r#"prompt p = "test"
 let g = Grammar.new("root ::= \"{\" [a-z]+ \"}\"", "<tool>")
-let reply = stream(?p, mute_on=[g])"#,
+print(?p |> g)"#,
         vec![r#"Sure thing!<tool>{"tool_name": "x"}"#],
     ).unwrap();
     assert_eq!(printed, "Sure thing!\n");
@@ -3241,10 +3262,10 @@ let reply = stream(?p, mute_on=[g])"#,
 
 #[test]
 fn test_mute_no_mute_on_kwarg_prints_everything() {
-    // stream() with no mute_on at all → nothing suppressed.
+    // An unconstrained dereference has no anchors, so nothing is suppressed.
     let (_s, printed) = run_src_with_stdout_capture(
         r#"prompt p = "test"
-let reply = stream(?p)"#,
+print(?p)"#,
         vec!["hello world"],
     ).unwrap();
     assert_eq!(printed, "hello world\n");
@@ -3264,7 +3285,7 @@ ws     ::= [ ]*"#;
     let src = format!(
         r#"let g = Grammar.new("{gbnf}", "<tool>", "</tool>")
 prompt p = "test"
-let reply = stream(?p, mute_on=[g])"#,
+print(?p |> g)"#,
         gbnf = gbnf.replace('\\', "\\\\").replace('"', "\\\""),
     );
     let (_s, printed) = run_src_with_stdout_capture(
@@ -3277,13 +3298,49 @@ let reply = stream(?p, mute_on=[g])"#,
 
 // ── No-anchor grammar: suppress from start of generation ─────────────────
 
+/// A stream is a buffer, so reading one twice gives the same text twice.
+///
+/// Before v1.2.4 the receiver was taken on first drain and a second read raised
+/// `DoubleStreamDrain`. The array is what keeps the value a stream: binding it
+/// with `let` drains it to a string at the store, but a container holds the
+/// stream itself. The mock supplies one reply, which is the point — the second
+/// read must not start a second inference.
+#[test]
+fn a_prompt_stream_can_be_read_twice() {
+    let (_s, printed) = run_src_with_stdout_capture(
+        r#"prompt p = "test"
+let a = [?p]
+print(a[0])
+print(a[0])"#,
+        vec!["once"],
+    )
+    .unwrap();
+    assert_eq!(printed, "once\nonce\n");
+}
+
+/// The same stream printed once and then used as a value. Both drain paths have
+/// to agree about the buffer, or the second read comes back empty.
+#[test]
+fn a_printed_prompt_stream_is_still_readable_as_a_value() {
+    let s = run_src_with_mock(
+        r#"prompt p = "test"
+let a = [?p]
+print(a[0])
+let t = a[0]
+let n = len(t)"#,
+        vec!["abcd"],
+    )
+    .unwrap();
+    assert_eq!(get_int(&s, "n"), 4);
+}
+
 #[test]
 fn test_mute_no_anchor_suppresses_entire_response() {
     // No anchor, no stop_anchor → start_muted=true, permanent → nothing prints.
     let (_s, printed) = run_src_with_stdout_capture(
         r#"prompt p = "test"
 let g = Grammar.new("\"<think>\" | \"</think>\"")
-let reply = stream(?p, mute_on=[g])"#,
+print(?p |> g)"#,
         vec!["<think>some reasoning</think>final answer"],
     ).unwrap();
     assert_eq!(printed, "\n");
@@ -3295,7 +3352,7 @@ fn test_mute_no_anchor_with_stop_anchor_prints_after() {
     let (_s, printed) = run_src_with_stdout_capture(
         r#"prompt p = "test"
 let g = Grammar.new("root ::= [a-z]+", nil, "</think>")
-let reply = stream(?p, mute_on=[g])"#,
+print(?p |> g)"#,
         vec!["reasoning</think>answer"],
     ).unwrap();
     assert_eq!(printed, "answer\n");
@@ -3307,7 +3364,7 @@ fn test_mute_grammar_no_anchor_regex_suppresses_everything() {
     let (_s, printed) = run_src_with_stdout_capture(
         r#"prompt p = "test"
 let g = Grammar.new("root ::= [a-z]+")
-let reply = stream(?p, mute_on=[g])"#,
+print(?p |> g)"#,
         vec!["hello world"],
     ).unwrap();
     assert_eq!(printed, "\n");
@@ -3315,7 +3372,7 @@ let reply = stream(?p, mute_on=[g])"#,
 
 // ── Constrained lazy inference: stop_anchor reaches the backend ──────────────
 //
-// These tests verify that when `stream(?p, mute_on=[g])` is called with a
+// These tests verify that when `?p |> g` is evaluated with a
 // Grammar that has a stop_anchor, the inference request sent to the backend
 // carries that stop_anchor — i.e. the lazy stream starts with constraints.
 //
@@ -3345,14 +3402,14 @@ fn run_src_with_shared_backend(
 
 #[test]
 fn test_stream_with_grammar_passes_stop_anchor_to_backend() {
-    // Verify that `stream(?p, mute_on=[g])` sends stop_anchor="</tool>" to the
+    // Verify that `?p |> g` sends stop_anchor="</tool>" to the
     // inference backend rather than None — this is what prevents the model loop.
     let backend = std::sync::Arc::new(crate::llm::MockBackend::new(
         vec![r#"<tool>{"tool_name": "x"}</tool>"#],
     ));
     let src = r#"prompt p = "test"
 let g = Grammar.new("root ::= \"{\" [a-z]+ \"}\"", "<tool>", "</tool>")
-let reply = stream(?p, mute_on=[g])"#;
+let reply = ?p |> g"#;
     run_src_with_shared_backend(src, std::sync::Arc::clone(&backend)).unwrap();
     let captured = backend.captured.lock().unwrap();
     assert_eq!(captured.len(), 1, "exactly one inference call expected");
@@ -3366,7 +3423,7 @@ fn test_stream_with_grammar_no_stop_anchor_passes_none() {
     let backend = std::sync::Arc::new(crate::llm::MockBackend::new(vec!["hello"]));
     let src = r#"prompt p = "test"
 let g = Grammar.new("root ::= [a-z]+", "<tool>")
-let reply = stream(?p, mute_on=[g])"#;
+let reply = ?p |> g"#;
     run_src_with_shared_backend(src, std::sync::Arc::clone(&backend)).unwrap();
     let captured = backend.captured.lock().unwrap();
     assert_eq!(captured[0].stop_anchor, None);
@@ -3375,9 +3432,9 @@ let reply = stream(?p, mute_on=[g])"#;
 
 #[test]
 fn test_stream_no_mute_on_passes_no_constraints() {
-    // stream(?p) without mute_on= → backend receives no grammar/anchor/stop.
+    // A bare `?p` → the backend receives no grammar/anchor/stop.
     let backend = std::sync::Arc::new(crate::llm::MockBackend::new(vec!["hello"]));
-    let src = "prompt p = \"test\"\nlet reply = stream(?p)";
+    let src = "prompt p = \"test\"\nlet reply = ?p";
     run_src_with_shared_backend(src, std::sync::Arc::clone(&backend)).unwrap();
     let captured = backend.captured.lock().unwrap();
     assert_eq!(captured[0].grammar, None);

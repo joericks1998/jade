@@ -7,6 +7,9 @@
 
 use super::*;
 
+/// Resolve a possibly-dotted decorator name to a callable VmValue.
+/// "tools.on_fail" → GetGlobal("tools") → GetMethod("on_fail") as BoundMethod.
+/// Mirrors what the function-decorator emitter does with bytecode at compile time.
 pub(crate) fn resolve_decorator_fn(dec_name: &str, state: &VmState) -> Option<VmValue> {
     if let Some(dot) = dec_name.find('.') {
         let base_name = &dec_name[..dot];
@@ -191,9 +194,9 @@ pub(crate) fn describe_coerce_error(
     }
 }
 
-/// Start a streaming inference call and return a lazy `VmValue::TokenStream`.
-/// Cache hits short-circuit to `VmValue::Str` — drain logic handles both transparently.
-
+/// Call a type as a constructor: `int("3")`, `char("x")`, `str(v)`.
+///
+/// A *struct* type is deliberately not callable — see the arm at the bottom.
 pub(crate) fn vm_type_call(
     type_name: String,
     arg: VmValue,
@@ -243,10 +246,29 @@ pub(crate) fn vm_type_call(
             // Rendering a tainted string does not make it trustworthy.
             let trust = match &arg {
                 VmValue::Str(s) => s.trust(),
+                VmValue::Char(c) => c.trust(),
                 _ => jade_runtime::trust::TRUSTED,
             };
             Ok(VmValue::Str(JStr::with_trust(value_to_display(&arg), trust)))
         }
+        "char" => match arg {
+            VmValue::Char(c) => Ok(VmValue::Char(c)),
+            // Exactly one character, so the conversion cannot silently drop
+            // input. A multi-character string is a mistake worth reporting.
+            VmValue::Str(s) => {
+                let mut it = s.chars();
+                match (it.next(), it.next()) {
+                    (Some(c), None) => Ok(VmValue::Char(
+                        jade_runtime::trust::JChar::with_trust(c, s.trust()),
+                    )),
+                    _ => err(format!(
+                        "char(): expected a string of exactly one character, got {:?}",
+                        s.as_str()
+                    )),
+                }
+            }
+            other => err(format!("char(): cannot convert {} to char", value_to_display(&other))),
+        },
         "func" => match arg {
             VmValue::Str(name) => state.globals.get(name.as_str()).cloned().ok_or_else(|| {
                 JadeError::Exception {
@@ -303,6 +325,17 @@ pub(crate) fn coerce(
             text
         )),
         "str" => Ok(VmValue::Str(text.to_string().into())),
+        "char" => {
+            let mut it = text.chars();
+            match (it.next(), it.next()) {
+                (Some(c), None) => Ok(VmValue::Char(jade_runtime::trust::JChar::trusted(c))),
+                _ => Err(format!(
+                    "Your response {:?} was not a single character. \
+                     Respond with exactly one character.",
+                    text
+                )),
+            }
+        }
         "bool" => match text.to_lowercase().as_str() {
             "true"  => Ok(VmValue::Bool(true)),
             "false" => Ok(VmValue::Bool(false)),

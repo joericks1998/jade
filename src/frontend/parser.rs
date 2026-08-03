@@ -15,9 +15,6 @@ struct Parser {
     /// literal. Set to false while parsing `if`/`while` conditions so that
     /// `while running { … }` does not try to read `running {…}` as a struct.
     struct_literal_allowed: bool,
-    /// Set to true while parsing the argument list of a `print(…)` call.
-    /// Used to detect the forbidden `?p |> Type` inside print.
-    in_print_call: bool,
 }
 
 /// Public entry point. Builds a Parser and drives it to produce a Program.
@@ -27,7 +24,7 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program> {
             span: Span { line: 1, col: 1 },
         });
     }
-    let mut parser = Parser { tokens, pos: 0, fn_depth: 0, async_fn_depth: 0, struct_literal_allowed: true, in_print_call: false };
+    let mut parser = Parser { tokens, pos: 0, fn_depth: 0, async_fn_depth: 0, struct_literal_allowed: true };
     parser.parse_program()
 }
 
@@ -215,6 +212,7 @@ impl Parser {
             TokenKind::Fn     => self.parse_fn_with_decorators(vec![]),
             TokenKind::Async  => self.parse_async_fn_with_decorators(vec![]),
             TokenKind::Return => self.parse_return(),
+            TokenKind::Yield  => self.parse_yield(),
             TokenKind::If     => self.parse_if(),
             TokenKind::While  => self.parse_while(),
             TokenKind::For    => self.parse_for(),
@@ -430,6 +428,19 @@ impl Parser {
     }
 
     /// Parse `return <expr> ;` or `return ;`
+    /// `yield expr`. Rejected at the top level for the same reason `return` is:
+    /// there is no function whose stream the value would join.
+    fn parse_yield(&mut self) -> Result<Stmt> {
+        let span = self.peek().span;
+        if self.fn_depth == 0 {
+            return Err(JadeError::YieldOutsideFunction { span });
+        }
+        self.advance(); // consume `yield`
+        let value = self.parse_pipe()?;
+        self.consume_semicolon()?;
+        Ok(Stmt::Yield { value, span })
+    }
+
     fn parse_return(&mut self) -> Result<Stmt> {
         let span = self.peek().span;
 
@@ -963,6 +974,7 @@ impl Parser {
             Expr::Dict         { span, .. } => *span,
             Expr::Closure      { span, .. } => *span,
             Expr::Await        { span, .. } => *span,
+            Expr::Pipe         { span, .. } => *span,
         }
     }
 
@@ -980,49 +992,31 @@ impl Parser {
             fn_depth,
             async_fn_depth: 0,
             struct_literal_allowed: true,
-            in_print_call: false,
         };
         sub.parse_pipe()
     }
 
-    /// Lowest precedence: `|>` (pipe).
-    /// `val |> f`       → `f(val)`
-    /// `val |> f(a, b)` → `f(val, a, b)` (lhs inserted as first argument)
-    /// Left-associative: `a |> f |> g` = `g(f(a))`.
+    /// Lowest precedence: `|>` (pipe). Left-associative, so `a |> f |> g` is
+    /// `g(f(a))` and a prompt dereference chains like anything else.
+    ///
+    /// This is the **only** place `|>` is consumed. It builds an `Expr::Pipe`
+    /// per stage and decides nothing else: whether a stage is a type, a Grammar,
+    /// or a function is a question about what its name refers to, which the
+    /// parser cannot answer. `compiler::type_infer::infer_pipe` does.
+    ///
+    /// Two things used to happen here that no longer do. The stage was desugared
+    /// straight into `Expr::Call` by matching on its shape, which made a stage
+    /// that was not an identifier, call, or field access a *syntax* error
+    /// phrased in terms of tokens. And `?p |> …` was parsed somewhere else
+    /// entirely — see `parse_primary`'s `Question` arm — so the same operator
+    /// had two parse paths and two meanings.
     fn parse_pipe(&mut self) -> Result<Expr> {
         let mut left = self.parse_or()?;
-        loop {
-            if self.peek().kind != TokenKind::PipeGt {
-                break;
-            }
+        while self.peek().kind == TokenKind::PipeGt {
             let span = Self::expr_span(&left);
             self.advance(); // consume `|>`
-            let right = self.parse_or()?;
-            let rhs_span = Self::expr_span(&right);
-            left = match right {
-                Expr::Identifier { name, span: id_span } => Expr::Call {
-                    callee: Box::new(Expr::Identifier { name, span: id_span }),
-                    args: vec![left],
-                    kwargs: vec![],
-                    span,
-                },
-                Expr::Call { callee, mut args, kwargs, span: call_span } => {
-                    args.insert(0, left);
-                    Expr::Call { callee, args, kwargs, span: call_span }
-                }
-                // `val |> obj.method` → `obj.method(val)` (bound method reference)
-                Expr::FieldAccess { object, field, span: fa_span } => Expr::Call {
-                    callee: Box::new(Expr::FieldAccess { object, field, span: fa_span }),
-                    args: vec![left],
-                    kwargs: vec![],
-                    span,
-                },
-                _ => return Err(JadeError::UnexpectedToken {
-                    expected: "function or call on right side of |>".to_string(),
-                    got: "expression".to_string(),
-                    span: rhs_span,
-                }),
-            };
+            let stage = self.parse_or()?;
+            left = Expr::Pipe { value: Box::new(left), stage: Box::new(stage), span };
         }
         Ok(left)
     }
@@ -1301,9 +1295,13 @@ impl Parser {
     /// Parse a primary expression, then handle any trailing `.field` or `(args)` postfix.
     /// This naturally chains: `p.method(arg)` → FieldAccess then Call.
     /// Finish a postfix prompt dereference (`obj.(?field)` / `obj~>field`) after
-    /// the operator and its `?` have been consumed.  Reads the field name, closes
-    /// the parenthesis for the `.(?…)` form, then takes an optional `|> constraint`
-    /// (which sits outside the parens: `obj.(?p) |> int`).
+    /// the operator and its `?` have been consumed.  Reads the field name and
+    /// closes the parenthesis for the `.(?…)` form.
+    ///
+    /// A trailing `|> …` is deliberately *not* read here. It sits outside the
+    /// parens (`obj.(?p) |> int`), so `parse_pipe` picks it up as an ordinary
+    /// stage over this expression, and a postfix deref pipes exactly like a
+    /// prefix one.
     fn finish_postfix_deref(
         &mut self,
         object: Expr,
@@ -1315,16 +1313,7 @@ impl Parser {
             self.expect(&TokenKind::RParen)?;
         }
         let target = Expr::FieldAccess { object: Box::new(object), field, span };
-        let constraint = if self.peek().kind == TokenKind::PipeGt {
-            if self.in_print_call {
-                return Err(JadeError::StreamingWithType { span });
-            }
-            self.advance(); // consume `|>`
-            Some(Box::new(self.parse_or()?))
-        } else {
-            None
-        };
-        Ok(Expr::PromptDeref { expr: Box::new(target), constraint, style, span })
+        Ok(Expr::PromptDeref { expr: Box::new(target), constraint: None, style, span })
     }
 
     fn parse_call(&mut self) -> Result<Expr> {
@@ -1332,16 +1321,6 @@ impl Parser {
         loop {
             if self.peek().kind == TokenKind::LParen {
                 let span = Self::expr_span(&expr);
-
-                // Track whether we're inside `print(…)` to detect the forbidden
-                // `?p |> Type` streaming pattern.
-                let was_in_print_call = self.in_print_call;
-                if let Expr::Identifier { ref name, .. } = expr {
-                    if name == "print" {
-                        self.in_print_call = true;
-                    }
-                }
-
                 self.advance(); // consume `(`
                 let mut args = Vec::new();
                 let mut kwargs = Vec::new();
@@ -1372,7 +1351,6 @@ impl Parser {
                     }
                 }
                 self.expect(&TokenKind::RParen)?;
-                self.in_print_call = was_in_print_call;
                 expr = Expr::Call { callee: Box::new(expr), args, kwargs, span };
             } else if self.peek().kind == TokenKind::Dot
                 && self.peek_ahead(1).kind == TokenKind::LParen
@@ -1500,21 +1478,13 @@ impl Parser {
                         span: *fspan,
                     });
                 }
-                // Optional `|> constraint` — either a type name or a Grammar expression.
-                // Type inference resolves which it is at compile time.
-                let constraint = if self.peek().kind == TokenKind::PipeGt {
-                    if self.in_print_call {
-                        return Err(JadeError::StreamingWithType { span });
-                    }
-                    self.advance(); // consume `|>`
-                    // Use parse_or (not parse_pipe) so nested |> chains don't nest here.
-                    Some(Box::new(self.parse_or()?))
-                } else {
-                    None
-                };
+                // A trailing `|> …` is left for `parse_pipe`. This arm used to
+                // take it with `parse_or` — never `parse_pipe` — precisely so a
+                // chain could not form, which is why `?p |> int |> double` was
+                // unwritable before v1.2.0.
                 Ok(Expr::PromptDeref {
                     expr: Box::new(expr),
-                    constraint,
+                    constraint: None,
                     style: DerefStyle::Prefix,
                     span,
                 })

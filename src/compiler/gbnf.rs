@@ -53,6 +53,12 @@ pub fn grammar_for(
         "bool" => Some(
             r#"root ::= ("true" | "false") [ \t\n\r]*"#.to_owned()
         ),
+        // One character. `.` in GBNF is any byte, which would let a multi-byte
+        // sequence through as several characters, so the class is spelled out:
+        // one ASCII byte, or a well-formed 2/3/4-byte UTF-8 sequence.
+        "char" => Some(
+            r#"root ::= ([^\x00-\x1f] | [\xc2-\xdf] [\x80-\xbf] | [\xe0-\xef] [\x80-\xbf] [\x80-\xbf] | [\xf0-\xf4] [\x80-\xbf] [\x80-\xbf] [\x80-\xbf]) [ \t\n\r]*"#.to_owned()
+        ),
         "str" => None,
         // Prefix grammar: force the opening `[` as the first token, then let the
         // model generate the rest freely (`rest ::= [^\x00]*` matches anything).

@@ -666,6 +666,7 @@ impl Renamer {
                     self.rename_expr(e);
                 }
             }
+            TStmt::Yield { value, .. } => self.rename_expr(value),
             TStmt::If { condition, then_body, else_body, .. } => {
                 self.rename_expr(condition);
                 self.block(then_body);
@@ -944,6 +945,13 @@ impl Renamer {
                 }
             }
             Expr::Await { expr, .. } => self.rename_ast_expr(expr),
+            // A pipe stage is an ordinary expression — an imported function is a
+            // legitimate stage (`x |> mathlib.double`), so it needs namespacing
+            // exactly as the piped value does.
+            Expr::Pipe { value, stage, .. } => {
+                self.rename_ast_expr(value);
+                self.rename_ast_expr(stage);
+            }
             // Known gap: closure bodies inside a default are not walked (see module doc).
             Expr::Closure { .. } => {}
             Expr::Integer { .. }

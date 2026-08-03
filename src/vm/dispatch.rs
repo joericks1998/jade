@@ -841,7 +841,7 @@ pub(crate) async fn execute_chunk(
                         }
                     }
                     // Primitive method dispatch for str/array/int/float.
-                    ref prim @ (VmValue::Str(_) | VmValue::Array(_)
+                    ref prim @ (VmValue::Str(_) | VmValue::Array(_) | VmValue::Bytes(_)
                                | VmValue::Int(_) | VmValue::Float(_)) => {
                         if let Some(ty) = PrimType::from_value(prim) {
                             if let Some(method) = builtins::find_primitive_method(ty, field) {
@@ -941,22 +941,29 @@ pub(crate) async fn execute_chunk(
                 };
                 set(slots, *dest, VmValue::Prompt(text.to_string()));
             }
+            Instr::Yield(src) => {
+                let v = get(slots, *src).clone();
+                match state.yield_stack.last() {
+                    Some(buf) => buf.lock().push(v),
+                    // Unreachable from source: the parser rejects a top-level
+                    // `yield`, and every generator pushes a buffer before its
+                    // body runs.
+                    None => { vm_err!(JadeError::YieldOutsideFunction { span }); }
+                }
+            }
             Instr::PromptDeref(dest, prompt_reg, output_type, grammar_reg) => {
                 let text = match get(slots, *prompt_reg).clone() {
                     VmValue::Prompt(t) => t,
                     _ => { vm_err!(JadeError::NotAPrompt { name: "<expr>".to_string(), span }); }
                 };
-                let (grammar_override, grammar_anchor, grammar_stop) = match grammar_reg {
-                    None => (None, None, None),
+                let grammar = match grammar_reg {
+                    None => None,
                     Some(r) => match get(slots, *r).clone() {
-                        VmValue::Grammar(g) => {
-                            (Some(g.to_gbnf()), g.anchor.clone(), g.stop.clone())
-                        }
-                        VmValue::Nil => {
-                            // Grammar expression evaluated to nil (e.g. self.grammar before it
-                            // was set).  Fall through to unconstrained streaming inference.
-                            (None, None, None)
-                        }
+                        VmValue::Grammar(g) => Some(g),
+                        // A grammar expression that evaluated to nil (e.g.
+                        // `self.grammar` before it was set) means no constraint,
+                        // not an error.
+                        VmValue::Nil => None,
                         other => vm_err!(JadeError::TypeError {
                             message: format!(
                                 "|> constraint must be a Grammar value or type name, got {}",
@@ -966,10 +973,25 @@ pub(crate) async fn execute_chunk(
                         }),
                     },
                 };
-                let result = if output_type.is_none() && grammar_override.is_none() {
-                    vm_try!(vm_prompt_deref_stream(text, state, span).await)
-                } else {
-                    vm_try!(vm_prompt_deref(text, output_type.as_deref(), grammar_override, grammar_anchor, grammar_stop, state, span).await)
+                // Only a *type* stage collapses the stream, because a coerced
+                // value cannot exist until generation finishes. A grammar stage
+                // constrains how the reply is produced and leaves it a stream,
+                // which is what replaced `stream(?p, mute_on=[g])`: printing it
+                // streams live and mutes, reading it gives the full text.
+                let result = match output_type.as_deref() {
+                    None => vm_try!(vm_prompt_deref_stream(
+                        text,
+                        grammar.as_deref(),
+                        state,
+                        span
+                    )),
+                    Some(ty) => {
+                        let (gbnf, anchor, stop) = match &grammar {
+                            Some(g) => (Some(g.to_gbnf()), g.anchor.clone(), g.stop.clone()),
+                            None => (None, None, None),
+                        };
+                        vm_try!(vm_prompt_deref(text, Some(ty), gbnf, anchor, stop, state, span).await)
+                    }
                 };
                 set(slots, *dest, result);
             }
@@ -1180,6 +1202,7 @@ pub(crate) fn instr_max_reg(instr: &Instr) -> u32 {
         |Instr::LoadStr(d,_)|Instr::LoadNil(d)|Instr::LoadFn(d,_)
         |Instr::MakeClosure(d,_) => *d,
         Instr::GetLocal(d,_)|Instr::GetGlobal(d,_) => *d,
+        Instr::Yield(s) => *s,
         Instr::Move(d,s)|Instr::NegInt(d,s)|Instr::NegFloat(d,s)
         |Instr::IntToFloat(d,s)|Instr::BitNot(d,s)|Instr::Not(d,s)
         |Instr::MakePrompt(d,s)

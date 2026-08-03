@@ -18,6 +18,16 @@ pub enum JadeType {
     Int,
     Float,
     Bool,
+    /// A single Unicode scalar; the element type of a string.
+    Char,
+    /// A binary blob. Not a string: indexing yields an int in 0..=255.
+    Bytes,
+    /// A buffered sequence produced by a `yield`ing function, or by `?p`.
+    ///
+    /// A stream is a *buffer*, not a one-shot channel: everything it produced
+    /// is retained, so reading it twice gives the same values twice. That is
+    /// what lets `print(s)` stream tokens live and still leave `s` readable.
+    Stream(Box<JadeType>),
     Str,
     Nil,
     Prompt,
@@ -158,6 +168,11 @@ pub enum TStmt {
     },
     Return {
         value: Option<TExpr>,
+        span: Span,
+    },
+    /// `yield expr` — append to the stream this function produces.
+    Yield {
+        value: TExpr,
         span: Span,
     },
     If {

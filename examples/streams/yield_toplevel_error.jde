@@ -1,0 +1,7 @@
+// `yield` needs a function whose stream the value would join.
+//
+// Rejected for the same reason a top-level `return` is: there is nothing for
+// the value to be part of. `jade check` fails this file, which is what the
+// `_error` suffix asserts.
+
+yield 1

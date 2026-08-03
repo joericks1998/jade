@@ -314,6 +314,11 @@ fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
             }
         }
 
+        TStmt::Yield { value, span } => {
+            let r = emit_expr(&value, em, ctx)?;
+            em.chunk.emit(Instr::Yield(r), span);
+        }
+
         TStmt::Return { value, span } => {
             // Evaluate the return value first, then reset the function's arena
             // region (freeing any arena memory) before returning. The value must
@@ -666,6 +671,11 @@ fn emit_fn(
         })
         .collect::<Result<_>>()?;
 
+    // A body containing a `yield` anywhere produces a stream rather than a
+    // value. Detected before the body is consumed below, and recursively:
+    // `yield` inside an `if` or a loop still makes the function a producer.
+    let is_generator = body_yields(&body);
+
     // If the body already ends with an explicit terminator (return or raise),
     // we must not append a second Return(None) after it — that would be dead
     // code.  Check *before* the pop below so we see the original last stmt.
@@ -700,7 +710,25 @@ fn emit_fn(
     }
 
     let n_slots = fn_em.next_reg;
-    Ok(CompiledFn { params: param_names, defaults, chunk: fn_em.chunk, n_slots, source_file: String::new(), module_scope: None })
+    Ok(CompiledFn { params: param_names, defaults, chunk: fn_em.chunk, n_slots, source_file: String::new(), module_scope: None, is_generator })
+}
+
+/// Whether a body contains a `yield` at any depth inside this function.
+///
+/// Does not descend into a nested closure: a closure that yields is its own
+/// producer, and its `yield`s belong to its stream, not the enclosing one.
+fn body_yields(body: &[TStmt]) -> bool {
+    body.iter().any(|s| match s {
+        TStmt::Yield { .. } => true,
+        TStmt::If { then_body, else_body, .. } => {
+            body_yields(then_body) || else_body.as_deref().is_some_and(body_yields)
+        }
+        TStmt::While { body, .. } | TStmt::For { body, .. } => body_yields(body),
+        TStmt::TryCatch { body, arms, .. } => {
+            body_yields(body) || arms.iter().any(|a| body_yields(&a.body))
+        }
+        _ => false,
+    })
 }
 
 // ── Expression emission ───────────────────────────────────────────────────────

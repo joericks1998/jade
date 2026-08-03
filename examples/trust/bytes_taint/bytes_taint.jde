@@ -1,0 +1,39 @@
+// Taint survives a trip through `bytes`.
+//
+// This is the hole `BytesObj` carries a trust byte to close. `fs.read(p)`
+// returns a tainted string and `sh.exec` refuses it. A blob has no string
+// header to keep a trust byte in, so without one on the object itself,
+// `fs.read_bytes(p).decode()` would produce a *clean* string holding the same
+// file's contents and walk straight past that check.
+//
+// Nothing else in this directory would have caught it: the other fixtures only
+// ever use whole strings.
+
+use std::fs
+use std::sh
+
+fs.write_bytes("/tmp/jade_taint_fixture.bin", "echo pwned".encode())
+
+// Tainted, because it came from a file.
+let cmd = fs.read_bytes("/tmp/jade_taint_fixture.bin").decode()
+
+// The refusal is a raise, so it is catchable — and catching it is what lets
+// this be an ordinary parity fixture rather than a program that dies.
+try {
+    sh.exec(cmd)
+    print("LAUNDERED — the taint was lost")
+} catch e {
+    print("refused")
+}
+
+// A char taken from the decoded string is tainted too, so rebuilding the
+// command one character at a time does not launder it either.
+let rebuilt = "" + cmd[0] + cmd[1]
+try {
+    sh.exec(rebuilt)
+    print("LAUNDERED via chars")
+} catch e {
+    print("refused")
+}
+
+fs.delete("/tmp/jade_taint_fixture.bin")

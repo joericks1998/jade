@@ -66,9 +66,6 @@ fn as_num(v: JadeValue) -> Option<f64> {
     }
 }
 
-/// Re-encode a core [`Outcome`] into a tagged value (boxing floats, doing the
-/// string concat for `+`).
-#[inline]
 /// Tag an integer result, or report overflow.
 ///
 /// `dynop` checks its arithmetic against i64, but a tagged word only holds 63
@@ -84,6 +81,8 @@ fn int_result(v: i64) -> OpResult {
     JadeValue::try_from_int(v).ok_or(DynErr::Overflow)
 }
 
+/// Re-encode a core [`Outcome`] into a tagged value (boxing floats, doing the
+/// string concat for `+`).
 fn finish(out: Outcome, a: JadeValue, b: JadeValue) -> OpResult {
     match out {
         Outcome::Int(v) => int_result(v),
@@ -99,9 +98,57 @@ fn finish(out: Outcome, a: JadeValue, b: JadeValue) -> OpResult {
     }
 }
 
+// ── char ───────────────────────────────────────────────────────────────────
+//
+// A char behaves as the one-character string spelling it, so `s[0] == "a"` kept
+// working when indexing began yielding a char in v1.2.1. The core `dynop` sees
+// only scalar kinds and string *markers*, and a char has no string bytes to
+// point at, so these three entry points materialize one first. The temporary
+// carries the char's trust and is freed before returning; without the trust the
+// model would be escaped by `tainted[0] + ""`.
+
+/// Build a temporary Jade string holding one char. Caller frees it.
+fn char_temp(v: JadeValue) -> *mut u8 {
+    let c = v.as_char().unwrap_or('\u{0}');
+    let mut buf = [0u8; 4];
+    let s = c.encode_utf8(&mut buf);
+    let p = crate::string::new(s.len(), v.char_trust());
+    unsafe {
+        core::ptr::copy_nonoverlapping(s.as_ptr(), p, s.len());
+    }
+    p
+}
+
+/// Run `f` with both operands as strings, materializing either char operand.
+fn with_char_as_str<T>(a: JadeValue, b: JadeValue, f: impl FnOnce(JadeValue, JadeValue) -> T) -> T {
+    let (ta, tb) = (
+        a.is_char().then(|| char_temp(a)),
+        b.is_char().then(|| char_temp(b)),
+    );
+    let av = ta.map_or(a, |p| JadeValue::from_str_ptr(p as *const ()));
+    let bv = tb.map_or(b, |p| JadeValue::from_str_ptr(p as *const ()));
+    let out = f(av, bv);
+    if let Some(p) = ta {
+        crate::string::free_str(p);
+    }
+    if let Some(p) = tb {
+        crate::string::free_str(p);
+    }
+    out
+}
+
+/// Whether either operand is a char, and so needs the string treatment.
+#[inline]
+fn either_char(a: JadeValue, b: JadeValue) -> bool {
+    a.is_char() || b.is_char()
+}
+
 // ── Arithmetic (delegate to the shared core) ───────────────────────────────
 
 pub fn add(a: JadeValue, b: JadeValue) -> OpResult {
+    if either_char(a, b) {
+        return with_char_as_str(a, b, |x, y| finish(dynop::binop(Op::Add, kind(x), kind(y)), x, y));
+    }
     finish(dynop::binop(Op::Add, kind(a), kind(b)), a, b)
 }
 pub fn sub(a: JadeValue, b: JadeValue) -> OpResult {
@@ -131,6 +178,18 @@ pub fn neg(a: JadeValue) -> OpResult {
 /// ordering match the VM; strings are byte-compared here (the core only marks
 /// them). Errors ([`DynErr::Type`]) on non-orderable kinds.
 pub fn cmp(a: JadeValue, b: JadeValue) -> Result<i32, DynErr> {
+    if either_char(a, b) {
+        // Two chars order by scalar, which matches ordering their UTF-8
+        // spellings, so this needs no allocation.
+        if a.is_char() && b.is_char() {
+            return Ok(match a.as_char().cmp(&b.as_char()) {
+                core::cmp::Ordering::Less => -1,
+                core::cmp::Ordering::Equal => 0,
+                core::cmp::Ordering::Greater => 1,
+            });
+        }
+        return with_char_as_str(a, b, cmp);
+    }
     let (ka, kb) = (kind(a), kind(b));
     if ka == Kind::Str && kb == Kind::Str {
         return Ok(unsafe {
@@ -153,6 +212,13 @@ pub fn cmp(a: JadeValue, b: JadeValue) -> Result<i32, DynErr> {
 /// Equality (`1`/`0`), VM-strict. Errors ([`DynErr::Type`]) on cross-kind
 /// operands (e.g. `2 == 2.0`, `1 == "x"`) — codegen negates the result for `!=`.
 pub fn eq(a: JadeValue, b: JadeValue) -> Result<i32, DynErr> {
+    if either_char(a, b) {
+        // Trust is provenance, not identity: compare the scalar and tag only.
+        if a.is_char() && b.is_char() {
+            return Ok((a.char_bits() == b.char_bits()) as i32);
+        }
+        return with_char_as_str(a, b, eq);
+    }
     match dynop::binop(Op::Eq, kind(a), kind(b)) {
         Outcome::Bool(v) => Ok(v as i32),
         Outcome::StrRel => Ok(unsafe {

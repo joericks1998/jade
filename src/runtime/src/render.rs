@@ -44,6 +44,30 @@ pub fn render_array(parts: &[String]) -> String {
     format!("[{}]", parts.join(", "))
 }
 
+/// Render a binary blob as `b"…"` with non-printable octets escaped.
+///
+/// Printing raw bytes to a terminal is a bad default: a blob can contain
+/// control characters, an escape sequence that reconfigures the terminal, or a
+/// lone 0xFF that is not valid UTF-8 at all. So `print(b)` shows an escaped,
+/// unambiguous form. Use `decode()` when the bytes really are text and you want
+/// to see it.
+pub fn render_bytes(data: &[u8]) -> String {
+    let mut out = String::from("b\"");
+    for &c in data {
+        match c {
+            b'\\' => out.push_str("\\\\"),
+            b'"' => out.push_str("\\\""),
+            b'\n' => out.push_str("\\n"),
+            b'\r' => out.push_str("\\r"),
+            b'\t' => out.push_str("\\t"),
+            0x20..=0x7e => out.push(c as char),
+            _ => out.push_str(&format!("\\x{c:02x}")),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// Frame already-rendered dict entries as `{"k": v, ...}` with keys sorted
 /// ascending and quoted Rust-`{:?}`-style. `entries` is `(key, rendered_value)`;
 /// it is sorted in place by key. Matches the VM (`sort_by_key(k)` +
@@ -85,6 +109,11 @@ pub fn render_word(word: i64) -> String {
     if v.is_nil() {
         return "nil".to_string();
     }
+    // Must come before the heap checks and after `is_nil`: a char is an
+    // immediate sharing the nil branch of the tag space.
+    if v.is_char() {
+        return v.as_char().map(String::from).unwrap_or_default();
+    }
     if v.is_float() {
         return format_float(crate::float::unbox_float(v));
     }
@@ -95,6 +124,10 @@ pub fn render_word(word: i64) -> String {
     debug_assert!(v.is_ptr());
     let p = v.as_ptr();
     let kind = unsafe { (*(p as *const ObjHeader)).kind };
+    if kind == ObjKind::Bytes as u8 {
+        let b = unsafe { &*(p as *const crate::bytesf::BytesObj) };
+        return render_bytes(b.as_slice());
+    }
     if kind == ObjKind::Array as u8 {
         let a = unsafe { &*(p as *const ArrayObj<i64>) };
         let parts: Vec<String> = a.as_slice().iter().map(|w| render_word(*w)).collect();

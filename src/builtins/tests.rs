@@ -62,7 +62,7 @@ fn seed_globals_registers_core_builtins() {
 fn seed_globals_registers_native_dispatched_globals() {
     let g = seeded();
     // print / stream / route dispatch through NativeFnId, not BuiltinFn.
-    for name in ["print", "stream", "route"] {
+    for name in ["print", "route"] {
         match g.get(name) {
             Some(VmValue::NativeFn(_)) => {}
             other => panic!("expected NativeFn for {name}, got {other:?}"),

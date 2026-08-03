@@ -44,6 +44,64 @@ fn make_response(status: u16, body: String) -> VmValue {
     VmValue::Dict(map)
 }
 
+/// A response whose body is raw octets rather than decoded text.
+///
+/// The body is *tainted*: it came off the network. Same shape as
+/// [`make_response`] so a caller can read `.status` either way.
+fn make_bytes_response(status: u16, body: Vec<u8>) -> VmValue {
+    let mut map = DictObj::new();
+    map.insert("status".to_string(), VmValue::Int(status as i64));
+    map.insert(
+        "body".to_string(),
+        VmValue::Bytes(std::sync::Arc::new(jade_runtime::bytesf::BytesObj::new(
+            body,
+            jade_runtime::trust::TAINTED,
+        ))),
+    );
+    VmValue::Dict(map)
+}
+
+/// `http.get_bytes(url[, headers])` — a response whose body is not decoded.
+///
+/// `http.get` runs the reply through a lossy UTF-8 decode, which silently
+/// mangles a PNG or a gzip stream. This is the one to reach for when the body
+/// is not text.
+fn http_get_bytes(args: &[VmValue]) -> Result<VmValue> {
+    if args.is_empty() || args.len() > 2 {
+        return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: ZERO });
+    }
+    let url = require_str_owned(args, 0, "http.get_bytes")?;
+    let headers = extract_headers(args.get(1))?;
+    jade_runtime::httpf::request_bytes("GET", &url, None, &headers)
+        .map(|(status, body)| make_bytes_response(status as u16, body))
+        .map_err(|message| JadeError::IoError { message, span: ZERO })
+}
+
+/// `http.post_bytes(url, body[, headers])` — send raw octets.
+fn http_post_bytes(args: &[VmValue]) -> Result<VmValue> {
+    if args.len() < 2 || args.len() > 3 {
+        return Err(JadeError::ArityMismatch { expected: 2, got: args.len(), span: ZERO });
+    }
+    let url = require_str_owned(args, 0, "http.post_bytes")?;
+    let body = match args.get(1) {
+        Some(VmValue::Bytes(b)) => b.as_slice().to_vec(),
+        Some(other) => {
+            return Err(JadeError::TypeError {
+                message: format!(
+                    "http.post_bytes expects bytes, got {}",
+                    crate::vm::value_type_name(other)
+                ),
+                span: ZERO,
+            })
+        }
+        None => return Err(JadeError::ArityMismatch { expected: 2, got: args.len(), span: ZERO }),
+    };
+    let headers = extract_headers(args.get(2))?;
+    jade_runtime::httpf::request_bytes("POST", &url, Some(&body), &headers)
+        .map(|(status, b)| make_bytes_response(status as u16, b))
+        .map_err(|message| JadeError::IoError { message, span: ZERO })
+}
+
 enum HttpMethod {
     Get,
     Post(String),
@@ -114,7 +172,9 @@ fn http_head(args: &[VmValue]) -> Result<VmValue> {
 }
 
 static HTTP_PKG_FNS: &[BuiltinFn] = &[
-    BuiltinFn { name: "get",    vm_impl: http_get },
+    BuiltinFn { name: "get",        vm_impl: http_get },
+    BuiltinFn { name: "get_bytes",  vm_impl: http_get_bytes },
+    BuiltinFn { name: "post_bytes", vm_impl: http_post_bytes },
     BuiltinFn { name: "post",   vm_impl: http_post },
     BuiltinFn { name: "put",    vm_impl: http_put },
     BuiltinFn { name: "delete", vm_impl: http_delete },

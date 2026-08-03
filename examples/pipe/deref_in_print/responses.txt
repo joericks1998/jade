@@ -1,0 +1,2 @@
+# `|> int` needs a parseable integer; the bare `?p` prints the same reply.
+7

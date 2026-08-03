@@ -207,6 +207,10 @@ unsafe fn is_collection(p: *const c_void) -> bool {
         // word (its text). Omitting it here would leak one object per prompt
         // value, which is what a `while` loop building a prompt used to do.
         || k == ObjKind::Prompt as u8
+        // Bytes owns a heap allocation and so is refcounted on the same terms.
+        // Its payload is octets rather than tagged words, so its `free_obj` arm
+        // reclaims without a cascade — see the note there.
+        || k == ObjKind::Bytes as u8
 }
 
 /// Increment the strong count of the collection a `TAG_PTR` word points at. A
@@ -306,6 +310,12 @@ pub(crate) unsafe fn free_obj(ptr: *mut c_void) {
         let p = unsafe { &*(ptr as *const crate::promptf::PromptObj) };
         unsafe { decref_word(p.text) };
         unsafe { free_leaked(ptr as *mut crate::promptf::PromptObj) };
+    } else if kind == ObjKind::Bytes as u8 {
+        // No cascade. The payload is a `Vec<u8>`, not child words, so this must
+        // NOT walk and decref the way the Array arm does — doing that would
+        // read octets as tagged pointers. The opposite mistake, omitting the
+        // arm entirely, leaks one object per blob.
+        unsafe { free_leaked(ptr as *mut crate::bytesf::BytesObj) };
     } else if kind == ObjKind::Future as u8 {
         // A future is header-carrying but not a collection: its payload is a
         // single result word, not a Vec of children, so there is no cascade to
