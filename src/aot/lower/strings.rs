@@ -28,6 +28,18 @@ pub(super) fn emit_str_method<'ctx>(
     let sp = |r: Reg| low.untag_ptr(low.load(r));
 
     match method {
+        // `s.encode()` — the UTF-8 octets as a bytes value. The trust byte at
+        // `[-1]` of the string travels with them, so a tainted string encodes
+        // to a tainted blob and `decode` gives a tainted string back.
+        "encode" => {
+            let f = low.runtime_fn("jrt_bytes_encode", ptrt.fn_type(&[ptrt.into()], false));
+            let p = b
+                .build_call(f, &[sp(recv).into()], "enc")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_pointer_value();
+            Ok(low.tag_ptr(p))
+        }
         "trim" | "upper" | "lower" => {
             let f = low.runtime_fn(&format!("jrt_str_{method}"), ptrt.fn_type(&[ptrt.into()], false));
             let r = b

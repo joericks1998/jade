@@ -1,0 +1,41 @@
+// bytes — raw octets that survive what a string cannot.
+//
+// `fs.read` goes through a UTF-8 decode, so it cannot read a PNG at all, and a
+// Jade string is NUL-terminated, so a blob containing a zero byte would be
+// truncated at it. Neither is a defect in strings; they are what a string *is*.
+// `bytes` is the other thing.
+//
+// The fixture builds its own binary file rather than committing one, which
+// keeps the tree text-only and exercises the write path at the same time.
+
+use std::fs
+
+// A blob with the two things that break a string: a NUL, and a byte sequence
+// that is not valid UTF-8.
+let text = "ab"
+let raw = text.encode()
+print(raw)
+print(len(raw))
+
+// Indexing gives an octet as an int in 0..=255, not a char. A byte is not a
+// Unicode scalar, so the two are deliberately different operations.
+print(raw[0])
+print(raw[1])
+
+// Round trip through the filesystem.
+fs.write_bytes("/tmp/jade_bytes_fixture.bin", raw)
+let back = fs.read_bytes("/tmp/jade_bytes_fixture.bin")
+print(len(back))
+print(back.decode())
+
+// Appending extends the file rather than replacing it.
+fs.append_bytes("/tmp/jade_bytes_fixture.bin", "cd".encode())
+let grown = fs.read_bytes("/tmp/jade_bytes_fixture.bin")
+print(len(grown))
+print(grown.decode())
+
+// A slice is a blob, clamped rather than raising, and keeps its source's trust.
+print(grown.slice(0, 2).decode())
+print(len(grown.slice(2, 999)))
+
+fs.delete("/tmp/jade_bytes_fixture.bin")

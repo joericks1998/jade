@@ -376,6 +376,15 @@ int64_t jrt_val_index(int64_t obj, int64_t idx) {
     if (jrt_is_ptr(v)) {
         void* p = jrt_unbox_ptr(v);
         int64_t kind = jrt_kind_of(p);
+        if (kind == JK_BYTES) {
+            /* An octet is an int in 0..=255, not a char: a byte is not a
+             * Unicode scalar, and making b[0] look like s[0] would hide that
+             * they differ on any non-ASCII input. */
+            if (!jrt_is_int((jade_value_t)idx)) throw_msg("bytes index must be int");
+            int64_t r = jrt_bytes_get(p, jrt_unbox_int((jade_value_t)idx));
+            if (r < 0) throw_msg("bytes index out of bounds");
+            return jrt_box_int(r);
+        }
         if (kind == JK_ARRAY) {
             if (!jrt_is_int((jade_value_t)idx)) throw_msg("array index must be int");
             int64_t i = jrt_unbox_int((jade_value_t)idx);
@@ -701,6 +710,48 @@ char* jrt_fs_read(const char* path, int32_t trust) {
     fs_throw_pending();
     return r;
 }
+/* `b.decode()` — raise on invalid UTF-8 rather than substituting replacement
+ * characters. Same pending-error shape as the fs wrappers above: the Rust side
+ * cannot longjmp, so it records and returns NULL and the throw happens here. */
+int64_t jk_bytes_decode(int64_t recv) {
+    void* p = jrt_unbox_ptr((jade_value_t)recv);
+    char* s = jrt_bytes_decode(p);
+    if (!s) {
+        char* e = jrt_bytes_take_error();
+        if (e) { jrt_throw_io(e); jrt_str_free(e); }
+        throw_msg("bytes.decode(): not valid UTF-8");
+    }
+    return (int64_t)jrt_box_str(s);
+}
+
+int64_t jk_fs_read_bytes(const char* path, int32_t trust) {
+    if (!trust) jrt_refuse_if_tainted(path, "fs.read_bytes(path)");
+    void* p = jrt_fs_read_bytes_impl(path, trust);
+    fs_throw_pending();
+    return (int64_t)jrt_box_ptr(p);
+}
+void jk_fs_write_bytes(const char* path, int64_t blob) {
+    const void* b = jrt_unbox_ptr((jade_value_t)blob);
+    jrt_fs_write_bytes_impl(path, jrt_bytes_data(b), (size_t)jrt_bytes_len(b));
+    fs_throw_pending();
+}
+void jk_fs_append_bytes(const char* path, int64_t blob) {
+    const void* b = jrt_unbox_ptr((jade_value_t)blob);
+    jrt_fs_append_bytes_impl(path, jrt_bytes_data(b), (size_t)jrt_bytes_len(b));
+    fs_throw_pending();
+}
+
+int64_t jk_fs_read_stdin_bytes(void) {
+    void* p = jrt_fs_read_stdin_bytes_impl();
+    fs_throw_pending();
+    return (int64_t)jrt_box_ptr(p);
+}
+void jk_fs_write_stdout_bytes(int64_t blob) {
+    const void* b = jrt_unbox_ptr((jade_value_t)blob);
+    jrt_fs_write_stdout_bytes_impl(jrt_bytes_data(b), (size_t)jrt_bytes_len(b));
+    fs_throw_pending();
+}
+
 void jrt_fs_write(const char* path, const char* content)  { jrt_fs_write_impl(path, content);  fs_throw_pending(); }
 void jrt_fs_append(const char* path, const char* content) { jrt_fs_append_impl(path, content); fs_throw_pending(); }
 void jrt_fs_delete(const char* path)                      { jrt_fs_delete_impl(path);          fs_throw_pending(); }
@@ -1180,14 +1231,25 @@ int32_t jrt_bool_of_str(const char* s) {
 
 /* Refuse tainted strings at code-execution / IO sinks. Shared by the fs/ and
  * sh/ runtime modules (declared in runtime.h); lives in the always-linked core. */
+/* Refuse a tainted value at a code-execution sink.
+ *
+ * This *raises* rather than exiting. It used to fprintf and jade_rt_exit(1),
+ * which meant the same program was catchable under `jade run` — the VM raises a
+ * normal exception — and fatal when built. A `try { sh.exec(x) } catch e { … }`
+ * therefore ran the handler in one engine and killed the process in the other.
+ * The VM is the reference for what the language does, so this follows it.
+ *
+ * The message is byte-identical to `jade_runtime::trust::refusal_message`, with
+ * no "jade: " prefix, because the parity gate diffs output. */
 void jrt_refuse_if_tainted(const char* arg, const char* sink_name) {
     if (jrt_trust_of(arg) != JRT_TRUSTED) {
-        fprintf(stderr,
-            "jade: refused tainted string in %s — value derived from an "
+        char msg[256];
+        snprintf(msg, sizeof msg,
+            "refused tainted string in %s — value derived from an "
             "untrusted source (LLM, network, file, stdin) and cannot flow "
-            "to a code-execution sink\n",
+            "to a code-execution sink",
             sink_name);
-        jade_rt_exit(1);
+        throw_msg(msg);
     }
 }
 

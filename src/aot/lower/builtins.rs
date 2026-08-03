@@ -54,6 +54,10 @@ pub(super) fn chunk_module_supported(module: &str, method: &str, argc: usize) ->
         ("fs", "read") => argc == 1 || argc == 2, // read(path) or read(path, trust)
         ("fs", "exists" | "delete" | "mkdir") => argc == 1,
         ("fs", "write" | "append") => argc == 2,
+        ("fs", "read_bytes") => argc == 1 || argc == 2,
+        ("fs", "write_bytes" | "append_bytes") => argc == 2,
+        ("fs", "read_stdin_bytes") => argc == 0,
+        ("fs", "write_stdout_bytes") => argc == 1,
         ("fs", "list_dir") => argc == 1,
         ("sh", "exec" | "run" | "output") => argc == 1,
         ("random", "choice" | "shuffle") => argc == 1,
@@ -86,7 +90,7 @@ pub(super) fn chunk_module_supported(module: &str, method: &str, argc: usize) ->
 /// `contains` (also a dict method) and `split` (returns a collection) are excluded.
 pub(super) fn chunk_str_method_supported(method: &str, argc: usize) -> bool {
     match method {
-        "trim" | "upper" | "lower" => argc == 0,
+        "trim" | "upper" | "lower" | "encode" => argc == 0,
         "starts_with" | "ends_with" => argc == 1,
         "replace" => argc == 2,
         "split" => argc == 1,
@@ -104,7 +108,9 @@ pub(super) fn chunk_val_method_supported(method: &str, argc: usize) -> bool {
         "keys" | "values" => argc == 0,            // dict
         "has" | "get" => argc == 1,                // dict
         "contains" => argc == 1,                   // str / array (runtime-dispatched)
-        "len" => argc == 0,                        // str / array / dict (runtime-dispatched)
+        "len" => argc == 0,                        // str / array / dict / bytes (runtime-dispatched)
+        "decode" => argc == 0,                     // bytes
+        "slice" => argc == 2,                      // bytes
         _ => false,
     }
 }
@@ -322,6 +328,33 @@ pub(super) fn emit_val_method<'ctx>(
     let nil = i64_ty.const_int(NIL, false);
 
     match method {
+        // ── bytes ─────────────────────────────────────────────────────────
+        // Both untag the receiver to a BytesObj pointer. `decode` goes through
+        // the raising C wrapper rather than the Rust entry point directly: a
+        // Jade raise is a longjmp and must not unwind through a Rust frame.
+        "decode" => {
+            let f = low.runtime_fn("jk_bytes_decode", i64_ty.fn_type(&[i64_ty.into()], false));
+            let r = b
+                .build_call(f, &[low.load(recv).into()], "dec")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_int_value();
+            Ok(r)
+        }
+        "slice" => {
+            let f = low.runtime_fn(
+                "jrt_bytes_slice",
+                ptrt.fn_type(&[ptrt.into(), i64_ty.into(), i64_ty.into()], false),
+            );
+            let s = low.untag_int(low.load(args[0]));
+            let e = low.untag_int(low.load(args[1]));
+            let p = b
+                .build_call(f, &[recv_p.into(), s.into(), e.into()], "slice")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_pointer_value();
+            Ok(low.tag_ptr(p))
+        }
         "push" => {
             let f = low.runtime_fn("jrt_karr_push", void_ty.fn_type(&[ptrt.into(), i64_ty.into()], false));
             b.build_call(f, &[recv_p.into(), low.load(args[0]).into()], "").map_err(err)?;
@@ -525,6 +558,43 @@ pub(super) fn emit_module_call<'ctx>(
                 .as_any_value_enum()
                 .into_pointer_value();
             Ok(low.tag_str(r))
+        }
+        ("fs", "read_bytes") => {
+            // Same shape as fs.read: a `trust=<bool>` second argument passes the
+            // bool's bit4 through, and the content is TAINTED without it.
+            let f = low.runtime_fn("jk_fs_read_bytes", i64_ty.fn_type(&[ptrt.into(), i32_ty.into()], false));
+            let trust = if args.len() == 2 {
+                let w = low.load(args[1]);
+                let sh = b.build_right_shift(w, i64_ty.const_int(4, false), false, "tsh").map_err(err)?;
+                let bit = b.build_and(sh, i64_ty.const_int(1, false), "tbit").map_err(err)?;
+                b.build_int_truncate(bit, i32_ty, "t32").map_err(err)?
+            } else {
+                i32_ty.const_zero()
+            };
+            let r = b
+                .build_call(f, &[strp(0).into(), trust.into()], "readb")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_int_value();
+            Ok(r)
+        }
+        ("fs", "write_bytes" | "append_bytes") => {
+            let fname = if method == "write_bytes" { "jk_fs_write_bytes" } else { "jk_fs_append_bytes" };
+            let f = low.runtime_fn(fname, void_ty.fn_type(&[ptrt.into(), i64_ty.into()], false));
+            b.build_call(f, &[strp(0).into(), low.load(args[1]).into()], "")
+                .map_err(err)?;
+            Ok(i64_ty.const_int(NIL, false))
+        }
+        ("fs", "read_stdin_bytes") => {
+            let f = low.runtime_fn("jk_fs_read_stdin_bytes", i64_ty.fn_type(&[], false));
+            let r = b.build_call(f, &[], "stdinb").map_err(err)?
+                .as_any_value_enum().into_int_value();
+            Ok(r)
+        }
+        ("fs", "write_stdout_bytes") => {
+            let f = low.runtime_fn("jk_fs_write_stdout_bytes", void_ty.fn_type(&[i64_ty.into()], false));
+            b.build_call(f, &[low.load(args[0]).into()], "").map_err(err)?;
+            Ok(i64_ty.const_int(NIL, false))
         }
         ("fs", "exists") => bool_ptr_fn("jrt_fs_exists"),
         ("fs", "write") => void_ptr_fn("jrt_fs_write", 2),

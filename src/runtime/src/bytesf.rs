@@ -149,6 +149,82 @@ pub unsafe extern "C" fn jrt_bytes_trust(p: *const c_void) -> u8 {
     unsafe { (*(p as *const BytesObj)).trust }
 }
 
+// ── AOT operations ────────────────────────────────────────────────────────────
+//
+// `decode` can fail, and a Jade raise is a `longjmp` that must not unwind
+// through a Rust frame. So these use the same pending-error channel `fsf` does:
+// the Rust side records a message and returns a sentinel, and the C forwarder
+// in `common.c` turns that into a catchable exception.
+
+use core::cell::Cell;
+use core::ffi::c_char;
+
+thread_local! {
+    static PENDING: Cell<*mut c_char> = const { Cell::new(core::ptr::null_mut()) };
+}
+
+fn set_err(msg: String) {
+    let s = crate::cstr::emit(msg.as_bytes(), TRUSTED);
+    PENDING.with(|p| {
+        let old = p.replace(s);
+        if !old.is_null() {
+            crate::string::free_str(old as *mut u8);
+        }
+    });
+}
+
+/// Drain the pending bytes error (a tagged string the caller owns), or null.
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_bytes_take_error() -> *mut c_char {
+    PENDING.with(|p| p.replace(core::ptr::null_mut()))
+}
+
+/// `s.encode()` — the UTF-8 octets of a tagged string, as a bytes value.
+/// The string's trust travels with the octets.
+///
+/// # Safety
+/// `s` must be a live NUL-terminated Jade string with a trust byte at `[-1]`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jrt_bytes_encode(s: *const u8) -> *mut c_void {
+    if s.is_null() {
+        return crate::gc::leak_obj(BytesObj::trusted(Vec::new()));
+    }
+    let trust = crate::string::trust_of(s);
+    let data = unsafe { crate::cstr::borrow_bytes(s as *const c_char) }.to_vec();
+    crate::gc::leak_obj(BytesObj::new(data, trust))
+}
+
+/// `b.decode()` — the octets as UTF-8 text. Returns null and records a pending
+/// error on invalid UTF-8; reporting beats substituting replacement characters,
+/// because a caller that assumed the bytes were text needs to hear otherwise.
+///
+/// # Safety
+/// `p` must point at a live [`BytesObj`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jrt_bytes_decode(p: *const c_void) -> *mut c_char {
+    let b = unsafe { &*(p as *const BytesObj) };
+    match core::str::from_utf8(&b.data) {
+        Ok(s) => crate::cstr::emit(s.as_bytes(), b.trust),
+        Err(e) => {
+            set_err(format!("bytes.decode(): not valid UTF-8 at byte {}", e.valid_up_to()));
+            core::ptr::null_mut()
+        }
+    }
+}
+
+/// `b.slice(start, end)` — a sub-blob, `end` exclusive, both clamped.
+///
+/// # Safety
+/// `p` must point at a live [`BytesObj`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jrt_bytes_slice(p: *const c_void, s: i64, e: i64) -> *mut c_void {
+    let b = unsafe { &*(p as *const BytesObj) };
+    let len = b.data.len() as i64;
+    let start = s.clamp(0, len) as usize;
+    let end = e.clamp(start as i64, len) as usize;
+    crate::gc::leak_obj(BytesObj::new(b.data[start..end].to_vec(), b.trust))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

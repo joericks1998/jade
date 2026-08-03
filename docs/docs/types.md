@@ -4,7 +4,7 @@ title: Types
 sidebar_label: Types
 ---
 
-Jade has ten runtime value types.
+Jade has eleven runtime value types.
 
 | Type | Description | Status |
 |------|-------------|--------|
@@ -12,6 +12,7 @@ Jade has ten runtime value types.
 | `float` | 64-bit floating point (`f64`) | Implemented |
 | `bool` | Boolean `true` or `false` | Implemented |
 | `char` | A single Unicode scalar; what indexing or iterating a string yields | Implemented |
+| `bytes` | A counted sequence of raw octets; binary data that is not text | Implemented |
 | `fn` | First-class function value | Implemented |
 | `struct` | User-defined record type with named fields | Implemented |
 | `str` | UTF-8 string with indexing and concatenation | Implemented |
@@ -64,6 +65,31 @@ let first = "hello"[0]
 `len` of a char is 1, matching what it answered when indexing produced a one-character string.
 
 A char taken from a tainted string stays tainted, so a loop that rebuilds a string character by character cannot quietly launder it past `sh.exec`.
+
+## Bytes
+
+A `bytes` value is a counted sequence of raw octets. It is deliberately not a string, and the reason is worth stating: a Jade string is UTF-8 and NUL-terminated, so a blob containing a zero byte would be truncated at it and one that is not valid UTF-8 would be corrupted by anything that assumed text. `fs.read` goes through a UTF-8 decode and cannot read a PNG at all.
+
+Conversion is explicit in both directions, never implicit:
+
+```jade
+use std::fs
+
+let raw = "hi".encode()      // str -> bytes, UTF-8
+print(raw)                    // b"hi"
+print(len(raw))               // 2
+print(raw[0])                 // 104 — an octet is an int, not a char
+print(raw.decode())           // bytes -> str, raises on invalid UTF-8
+
+fs.write_bytes("out.bin", raw)
+let back = fs.read_bytes("out.bin")
+```
+
+Indexing gives an `int` in 0..=255 rather than a `char`. A byte is not a Unicode scalar, and making `b[0]` look like `s[0]` would hide that the two differ on any non-ASCII input.
+
+`print(b)` renders an escaped `b"…"` form rather than dumping raw octets to your terminal, since a blob can contain control characters or an escape sequence. Use `decode()` when the bytes really are text.
+
+Bytes carry a trust byte like strings do, so `fs.read_bytes(p).decode()` is refused by `sh.exec` exactly as `fs.read(p)` is.
 
 ## Nil
 

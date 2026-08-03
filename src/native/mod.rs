@@ -45,6 +45,16 @@ pub const JADE_TAG_DICT:  u8 = 7;
 /// struct that is not the type it expects, where a bare dict with the wrong keys
 /// reads as a set of nils and fails silently.
 pub const JADE_TAG_STRUCT: u8 = 8;
+/// `data.as_bytes` → a libc-owned [`JadeBytes`] copy of a binary blob.
+///
+/// Bytes cannot ride on [`JADE_TAG_STR`]: that is a NUL-terminated `char*`, so
+/// a blob containing a NUL would be truncated at it and one that is not valid
+/// UTF-8 would be corrupted by anything on the far side that assumed text. A
+/// counted buffer is the only representation that survives the trip.
+///
+/// Added in v1.2.2, which is why [`jade_runtime::RUNTIME_ABI_VERSION`] moved to
+/// 3: a package built against ABI 2 has no arm for this tag.
+pub const JADE_TAG_BYTES: u8 = 9;
 
 // ── Value type ────────────────────────────────────────────────────────────────
 
@@ -60,6 +70,7 @@ pub union JadeValData {
     pub as_arr:   *mut JadeArr,
     pub as_dict:  *mut JadeMap,
     pub as_struct: *mut JadeStruct,
+    pub as_bytes: *mut JadeBytes,
 }
 
 #[repr(C)]
@@ -99,6 +110,15 @@ pub struct JadeStruct {
     pub keys: *mut *const u8,
     pub vals: *mut JadeVal,
     pub len:  usize,
+}
+
+/// A counted binary buffer. Same ownership rules as [`JadeArr`]: libc heap,
+/// released by [`ffi_free`]. Counted rather than NUL-terminated because a blob
+/// may contain NUL bytes and is not required to be valid UTF-8.
+#[repr(C)]
+pub struct JadeBytes {
+    pub data: *mut u8,
+    pub len: usize,
 }
 
 impl JadeVal {
@@ -445,6 +465,30 @@ fn vm_to_ffi_owned(val: &VmValue) -> JadeVal {
             };
             JadeVal { tag: JADE_TAG_STRUCT, _pad: [0; 7], data: JadeValData { as_struct: st } }
         }
+        VmValue::Bytes(b) => {
+            // Counted, and copied into libc heap: the far side may free it, and
+            // this process holds two mimalloc instances that must not free each
+            // other's allocations. Same rule as JadeArr/JadeMap above.
+            let src = b.as_slice();
+            let n = src.len();
+            let data = unsafe { malloc(n.max(1)) } as *mut u8;
+            if data.is_null() {
+                std::alloc::handle_alloc_error(
+                    std::alloc::Layout::from_size_align(n.max(1), 1).expect("ffi layout"),
+                );
+            }
+            if n > 0 {
+                unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), data, n) };
+            }
+            let bx = unsafe { malloc(std::mem::size_of::<JadeBytes>()) } as *mut JadeBytes;
+            if bx.is_null() {
+                std::alloc::handle_alloc_error(
+                    std::alloc::Layout::new::<JadeBytes>(),
+                );
+            }
+            unsafe { std::ptr::write(bx, JadeBytes { data, len: n }) };
+            JadeVal { tag: JADE_TAG_BYTES, _pad: [0; 7], data: JadeValData { as_bytes: bx } }
+        }
         // Remaining kinds (functions, futures, prompts) have no ABI
         // representation — native fns can't consume them.
         _ => JadeVal::nil(),
@@ -511,6 +555,23 @@ pub fn ffi_to_vm(val: &JadeVal, span: Span) -> Result<VmValue> {
             }
             Ok(VmValue::Dict(d))
         }
+        JADE_TAG_BYTES => {
+            let bp = unsafe { val.data.as_bytes };
+            if bp.is_null() {
+                return Ok(VmValue::Nil);
+            }
+            let (data, len) = unsafe { ((*bp).data, (*bp).len) };
+            let slice = if data.is_null() || len == 0 {
+                Vec::new()
+            } else {
+                unsafe { core::slice::from_raw_parts(data, len) }.to_vec()
+            };
+            // Data from a native package is from outside the program, exactly
+            // as a file read is.
+            Ok(VmValue::Bytes(std::sync::Arc::new(
+                jade_runtime::bytesf::BytesObj::new(slice, jade_runtime::trust::TAINTED),
+            )))
+        }
         JADE_TAG_STRUCT => {
             let st = unsafe { val.data.as_struct };
             if st.is_null() {
@@ -552,6 +613,15 @@ pub fn ffi_to_vm(val: &JadeVal, span: Span) -> Result<VmValue> {
 unsafe fn ffi_free_node(v: &JadeVal) {
     match v.tag {
         JADE_TAG_STR | JADE_TAG_ERROR => unsafe { free(v.data.as_str as *mut c_void) },
+        JADE_TAG_BYTES => {
+            let bp = unsafe { v.data.as_bytes };
+            if !bp.is_null() {
+                unsafe {
+                    free((*bp).data as *mut c_void);
+                    free(bp as *mut c_void);
+                }
+            }
+        }
         JADE_TAG_ARRAY => {
             let a = unsafe { v.data.as_arr };
             if !a.is_null() {
@@ -609,7 +679,7 @@ unsafe fn ffi_free_node(v: &JadeVal) {
 /// scalars (including top-level non-owning strings) are left untouched, so this
 /// is safe to call on any `JadeVal`.
 pub unsafe fn ffi_free(v: &JadeVal) {
-    if matches!(v.tag, JADE_TAG_ARRAY | JADE_TAG_DICT | JADE_TAG_STRUCT) {
+    if matches!(v.tag, JADE_TAG_ARRAY | JADE_TAG_DICT | JADE_TAG_STRUCT | JADE_TAG_BYTES) {
         unsafe { ffi_free_node(v) };
     }
 }

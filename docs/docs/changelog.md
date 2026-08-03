@@ -4,6 +4,15 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.2.2
+
+- **`bytes` is a real type.** A counted sequence of raw octets, deliberately not a string. A Jade string is UTF-8 and NUL-terminated, so a blob with a zero byte in it would be truncated there and one that is not valid UTF-8 would be corrupted by anything assuming text — `fs.read` goes through a UTF-8 decode and cannot read a PNG at all. Conversion is explicit in both directions with `str.encode()` and `bytes.decode()`, and decoding invalid UTF-8 raises and names the offset rather than substituting replacement characters.
+- **Indexing a blob gives an `int` in 0..=255, not a `char`.** A byte is not a Unicode scalar, and making `b[0]` look like `s[0]` would hide that the two differ on any non-ASCII input.
+- **Byte I/O across files, HTTP, and the standard streams.** `fs.read_bytes` / `write_bytes` / `append_bytes`, `fs.read_stdin_bytes` / `write_stdout_bytes` so a program can sit in a binary pipeline, and `http.get_bytes` / `post_bytes` for a body that is not text.
+- **A blob carries a trust byte, and that is the point of the design.** `fs.read_bytes` returns tainted data and the taint survives `.decode()`, so `fs.read_bytes(p).decode()` is refused by `sh.exec` exactly as `fs.read(p)` is. Without it, encoding and decoding would have been a laundering route straight through the trust model — and an invisible one, since every fixture in `examples/trust/` used whole strings.
+- **Fixed: a refused tainted value killed a compiled program instead of raising.** The interpreter raises a catchable exception; the compiled runtime printed to stderr and exited. So `try { sh.exec(x) } catch e { … }` ran the handler under `jade run` and terminated the process when built. The compiled path now raises, matching the interpreter.
+- **The native ABI carries bytes, so `RUNTIME_ABI_VERSION` is 3.** Bytes could not ride on the existing string tag, which is a NUL-terminated `char*`. **Every installed provider package must be rebuilt** — if `?p` stops working after upgrading, reinstall your providers.
+
 ## v1.2.1
 
 - **`char` is a real type.** Indexing a string, iterating one, `char("x")`, and `?p |> char` all produce a single Unicode scalar rather than a one-character string. It is an *immediate*, riding inside the tagged value word next to `int`, `bool`, and `nil`, so scanning a string now allocates nothing where it used to allocate once per character.
