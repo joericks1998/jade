@@ -1321,88 +1321,203 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
         // ── LLM prompt dereference ────────────────────────────────────────────
 
         Expr::PromptDeref { expr, constraint, span, style: _ } => {
-            let texpr = infer_expr(expr, ctx)?;
-            if texpr.ty != JadeType::Prompt && texpr.ty != JadeType::Unknown {
-                return Err(JadeError::TypeMismatch {
-                    expected: "prompt".to_string(),
-                    got: jade_type_name(&texpr.ty),
-                    span: *span,
-                });
-            }
-
-            // Resolve the |> constraint: Grammar value → grammar_expr; type name string → output_type.
-            //
-            // Resolution order:
-            // 1. Try `extract_type_name(c)` first.  If it yields a known built-in type keyword
-            //    ("int", "float", "bool", "str", "array", "dict") or an uppercase struct name,
-            //    use it directly as `output_type` — do NOT call `infer_expr`, which would fail
-            //    with "undefined variable" for bare identifiers like `array` and `dict` that are
-            //    valid type targets but are not in-scope variables.
-            // 2. Otherwise call `infer_expr(c)`:
-            //    a. If the result type is Grammar → grammar_expr path.
-            //    b. If the result type is Unknown (e.g. `self.grammar` field on a struct whose
-            //       field type is not statically tracked) → treat as a runtime Grammar value
-            //       and emit it as grammar_expr.  This avoids the retry-loop that firing
-            //       `output_type = Some("self.grammar")` would cause at runtime.
-            //    c. Otherwise → error.
-            let (output_type, grammar_texpr, result_ty) = match constraint {
-                None => (None, None, JadeType::Str),
-                Some(c) => {
-                    if let Some(name) = extract_type_name(c) {
-                        let is_builtin = matches!(
-                            name.as_str(),
-                            "int" | "float" | "bool" | "str" | "nil" | "null"
-                            | "array" | "Array"
-                            | "dict"  | "Dict"
-                        );
-                        let is_struct_name = name.chars().next()
-                            .map(|ch| ch.is_uppercase())
-                            .unwrap_or(false);
-                        if is_builtin || is_struct_name {
-                            // Known type keyword or struct name — use directly.
-                            let ty = parse_type_name(&name);
-                            (Some(name), None, ty)
-                        } else {
-                            // Might be a Grammar variable (e.g. `gram`) or a field path
-                            // (e.g. `self.grammar`).  Infer it to determine which.
-                            let tc = infer_expr(c, ctx)?;
-                            if tc.ty == JadeType::Grammar {
-                                // Statically known Grammar value.
-                                (None, Some(Box::new(tc)), JadeType::Str)
-                            } else {
-                                // Unknown type (common for struct fields) — treat as a
-                                // runtime Grammar expression rather than a coerce type name.
-                                // This is the correct path for `?p |> self.grammar`.
-                                (None, Some(Box::new(tc)), JadeType::Str)
-                            }
-                        }
-                    } else {
-                        // Not an identifier / dotted path (e.g. a call expression).
-                        // Infer normally.
-                        let tc = infer_expr(c, ctx)?;
-                        if tc.ty == JadeType::Grammar || tc.ty == JadeType::Unknown {
-                            (None, Some(Box::new(tc)), JadeType::Str)
-                        } else {
-                            return Err(JadeError::TypeMismatch {
-                                expected: "type name or Grammar value after |>".to_string(),
-                                got: jade_type_name(&tc.ty),
-                                span: *span,
-                            });
-                        }
-                    }
-                }
-            };
-
-            Ok(TExpr {
-                kind: TExprKind::PromptDeref {
-                    expr: Box::new(texpr),
-                    output_type,
-                    grammar_expr: grammar_texpr,
-                },
-                ty: result_ty,
-                span: *span,
-            })
+            infer_deref(expr, constraint.as_deref(), *span, ctx)
         }
+
+        // ── Pipe ──────────────────────────────────────────────────────────────
+
+        Expr::Pipe { value, stage, span } => infer_pipe(value, stage, *span, ctx),
+    }
+}
+
+/// Lower a prompt dereference, with an optional constraint already classified.
+///
+/// `constraint` is always `None` from the parser as of v1.2.0 — `infer_pipe`
+/// supplies one when a `|>` stage turns out to name a type or a Grammar. The
+/// parameter survives because a cached AST written by an older toolchain can
+/// still carry one.
+fn infer_deref(
+    expr: &Expr,
+    constraint: Option<&Expr>,
+    span: Span,
+    ctx: &mut TypeContext,
+) -> Result<TExpr> {
+    let texpr = infer_expr(expr, ctx)?;
+    if texpr.ty != JadeType::Prompt && texpr.ty != JadeType::Unknown {
+        return Err(JadeError::TypeMismatch {
+            expected: "prompt".to_string(),
+            got: jade_type_name(&texpr.ty),
+            span,
+        });
+    }
+    let (output_type, grammar_expr, ty) = match constraint {
+        None => (None, None, JadeType::Str),
+        Some(c) => match classify_deref_stage(c, ctx)? {
+            Some(DerefStage::Type(name)) => {
+                let ty = parse_type_name(&name);
+                (Some(name), None, ty)
+            }
+            Some(DerefStage::Grammar(g)) => (None, Some(g), JadeType::Str),
+            // A cached AST could carry a stage that is neither; treat it as a
+            // runtime Grammar, which is what pre-v1.2.0 inference did.
+            None => (None, Some(Box::new(infer_expr(c, ctx)?)), JadeType::Str),
+        },
+    };
+    Ok(TExpr {
+        kind: TExprKind::PromptDeref { expr: Box::new(texpr), output_type, grammar_expr },
+        ty,
+        span,
+    })
+}
+
+/// What a `|>` stage means when the piped value is a prompt dereference.
+enum DerefStage {
+    /// A type name: generate a grammar from it and coerce the reply.
+    Type(String),
+    /// A Grammar value: constrain sampling with it directly.
+    Grammar(Box<TExpr>),
+}
+
+/// Decide whether `stage` constrains a dereference or is an ordinary function
+/// applied to its result. `None` means the latter.
+///
+/// The order of these checks is the language rule, so it is worth stating:
+///
+/// 1. **A builtin type keyword always wins.** `int`, `str` and friends are also
+///    registered as callables in `core::register_types`, so without this they
+///    would classify as functions and `?p |> int` would stop constraining the
+///    model — it would generate freely, reply "the answer is 42", and fail to
+///    coerce. The grammar is the valuable half of a typed dereference.
+/// 2. **A declared struct is a type.** This has to be checked *before* the
+///    function test below, because a struct registers itself as a callable
+///    constructor under its own name (see the `StructDef` arm), so by type
+///    alone every struct looks like a function. Reaching the function test
+///    first turned `?p |> City` into `City(?p)`.
+/// 3. **A user function beats anything else it collides with.**
+/// 4. **An uppercase name is a struct type**, even one this pass has not seen —
+///    an imported struct is not in `struct_defs` here.
+/// 5. **A name of unknown type is a Grammar.** This is the `?p |> self.grammar`
+///    case: a struct field's type is not tracked statically, and firing the
+///    coercion path on the literal string "self.grammar" would fail at runtime.
+/// 6. **Anything else applies.** A call stage is ordinary pipe application, so
+///    `?p |> f(a)` is `f(?p, a)`. Binding a grammar to a name first — which is
+///    what every use in the tree already does — keeps case 5 available.
+fn classify_deref_stage(stage: &Expr, ctx: &mut TypeContext) -> Result<Option<DerefStage>> {
+    let Some(name) = extract_type_name(stage) else {
+        return Ok(None);
+    };
+    if is_builtin_type_name(&name) || ctx.struct_defs.contains_key(&name) {
+        return Ok(Some(DerefStage::Type(name)));
+    }
+    if matches!(ctx.get(&name), Some(JadeType::Fn { .. }) | Some(JadeType::AsyncFn { .. })) {
+        return Ok(None);
+    }
+    if name.chars().next().is_some_and(char::is_uppercase) {
+        return Ok(Some(DerefStage::Type(name)));
+    }
+    let t = infer_expr(stage, ctx)?;
+    match t.ty {
+        JadeType::Fn { .. } | JadeType::AsyncFn { .. } => Ok(None),
+        _ => Ok(Some(DerefStage::Grammar(Box::new(t)))),
+    }
+}
+
+/// Type keywords that name a coercion target for a dereference. `nil`/`null`
+/// are here because `parse_type_name` accepts them, not because constraining a
+/// reply to nil is useful.
+fn is_builtin_type_name(name: &str) -> bool {
+    matches!(
+        name,
+        "int" | "float" | "bool" | "str" | "nil" | "null"
+        | "array" | "Array" | "dict" | "Dict"
+    )
+}
+
+/// Lower `value |> stage`.
+///
+/// Two outcomes. If `value` is an unconstrained dereference and `stage` names a
+/// type or a Grammar, the stage folds into the dereference and constrains how
+/// the reply is *generated*. Otherwise the stage is applied to the value, with
+/// the value inserted as the first argument — `5 |> add(3)` is `add(5, 3)`.
+///
+/// Doing this here rather than in the parser is what lets one operator carry
+/// both meanings: which one applies depends on what a name refers to, and only
+/// the type checker knows that. It is also what makes `?p |> int |> double`
+/// expressible, since the first stage folds in and the second sees a real int.
+fn infer_pipe(value: &Expr, stage: &Expr, span: Span, ctx: &mut TypeContext) -> Result<TExpr> {
+    if let Expr::PromptDeref { expr, constraint: None, span: dspan, .. } = value
+        && let Some(kind) = classify_deref_stage(stage, ctx)?
+    {
+        let texpr = infer_expr(expr, ctx)?;
+        if texpr.ty != JadeType::Prompt && texpr.ty != JadeType::Unknown {
+            return Err(JadeError::TypeMismatch {
+                expected: "prompt".to_string(),
+                got: jade_type_name(&texpr.ty),
+                span: *dspan,
+            });
+        }
+        let (output_type, grammar_expr, ty) = match kind {
+            DerefStage::Type(name) => {
+                let ty = parse_type_name(&name);
+                (Some(name), None, ty)
+            }
+            DerefStage::Grammar(g) => (None, Some(g), JadeType::Str),
+        };
+        return Ok(TExpr {
+            kind: TExprKind::PromptDeref { expr: Box::new(texpr), output_type, grammar_expr },
+            ty,
+            span: *dspan,
+        });
+    }
+
+    // Reject a stage that plainly cannot be applied, so the message names what
+    // it found rather than letting the call path report a mismatched callee.
+    if let Some(got) = uncallable_stage(stage, ctx) {
+        return Err(JadeError::InvalidPipeStage { got, span });
+    }
+
+    // Application. A call stage keeps its own arguments and its own span, so
+    // `5 |> add(3)` reports errors against `add(3)`, not against the pipe.
+    let call = match stage {
+        Expr::Call { callee, args, kwargs, span: cspan } => {
+            let mut args = args.clone();
+            args.insert(0, value.clone());
+            Expr::Call {
+                callee: callee.clone(),
+                args,
+                kwargs: kwargs.clone(),
+                span: *cspan,
+            }
+        }
+        other => Expr::Call {
+            callee: Box::new(other.clone()),
+            args: vec![value.clone()],
+            kwargs: vec![],
+            span,
+        },
+    };
+    infer_expr(&call, ctx)
+}
+
+/// Describe a pipe stage that is certainly not applicable, or `None` if it
+/// might be. Conservative: an unknown type is allowed through, because an
+/// imported function has no static type here.
+fn uncallable_stage(stage: &Expr, ctx: &mut TypeContext) -> Option<String> {
+    let describe = |t: &JadeType| match t {
+        JadeType::Fn { .. } | JadeType::AsyncFn { .. } | JadeType::Unknown => None,
+        other => Some(jade_type_name(other).to_string()),
+    };
+    match stage {
+        Expr::Integer { .. } => Some("int".to_string()),
+        Expr::Float { .. } => Some("float".to_string()),
+        Expr::Bool { .. } => Some("bool".to_string()),
+        Expr::Str { .. } | Expr::FStr { .. } => Some("str".to_string()),
+        Expr::Array { .. } => Some("array".to_string()),
+        Expr::Dict { .. } => Some("dict".to_string()),
+        Expr::Identifier { name, .. } if !is_builtin_type_name(name) => {
+            ctx.get(name).as_ref().and_then(describe)
+        }
+        _ => None,
     }
 }
 
@@ -1854,7 +1969,8 @@ fn expr_span(e: &Expr) -> Span {
         | Expr::StructLiteral { span, .. } | Expr::FieldAccess { span, .. }
         | Expr::Index { span, .. } | Expr::Array { span, .. } | Expr::FStr { span, .. }
         | Expr::PromptLiteral { span, .. } | Expr::PromptDeref { span, .. }
-        | Expr::Dict { span, .. } | Expr::Closure { span, .. } | Expr::Await { span, .. } => *span,
+        | Expr::Dict { span, .. } | Expr::Closure { span, .. } | Expr::Await { span, .. }
+        | Expr::Pipe { span, .. } => *span,
     }
 }
 

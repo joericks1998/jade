@@ -1,0 +1,3 @@
+# Both derefs in this file share one prompt, so one reply covers them.
+# `|> int` needs a parseable integer.
+21

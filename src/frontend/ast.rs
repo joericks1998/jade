@@ -360,6 +360,30 @@ pub enum Expr {
         expr: Box<Expr>,
         span: Span,
     },
+
+    /// `value |> stage` — one pipe stage.
+    ///
+    /// The parser builds this for every `|>` and decides nothing about what the
+    /// stage means; `compiler::type_infer::infer_pipe` classifies it. A stage is
+    /// one of three things:
+    ///
+    /// - a **type name**, which on a prompt dereference constrains sampling with
+    ///   a generated grammar and coerces the reply (`?p |> int`), and on any
+    ///   other value is the ordinary type constructor (`x |> int` is `int(x)`);
+    /// - a **Grammar value**, which constrains sampling (`?p |> gram`);
+    /// - anything **callable**, which is applied with the piped value inserted
+    ///   as the first argument (`5 |> double`, `5 |> add(3)`).
+    ///
+    /// Keeping the stage un-desugared is what lets a single `|>` mean all three.
+    /// Until v1.2.0 the parser rewrote `value |> f` straight into `Expr::Call`
+    /// and a *separate* parse path stored the stage on `PromptDeref.constraint`,
+    /// so which rule applied was decided by surrounding syntax before anything
+    /// knew what the names referred to. See `PromptDeref`.
+    Pipe {
+        value: Box<Expr>,
+        stage: Box<Expr>,
+        span: Span,
+    },
 }
 
 /// All binary operators Jade supports.

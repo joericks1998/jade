@@ -18,7 +18,10 @@ pub const JADE_VERSION: &str = env!("CARGO_PKG_VERSION");
 ///     TExprKind::Await, and Instr::Spawn/Await/Join — all serde-serialized.
 /// v4: Expr::PromptDeref gained a `style` field recording whether the source
 ///     spelled it `?p`, `x.(?f)`, or `x~>f`.
-pub const CACHE_FORMAT_VERSION: u32 = 4;
+/// v5: `|>` survives parsing as `Expr::Pipe` instead of being desugared into
+///     `Expr::Call` or stored on `PromptDeref.constraint`. A v4 cache holds the
+///     old shape, which infers to the same thing but cannot express a chain.
+pub const CACHE_FORMAT_VERSION: u32 = 5;
 
 // ── Internal types ────────────────────────────────────────────────────────────
 

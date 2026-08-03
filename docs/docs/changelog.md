@@ -4,6 +4,15 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.2.0
+
+- **`|>` is one operator again.** It was two, sharing a spelling. An ordinary pipe (`5 |> double`) was desugared by the parser into a call; a pipe after a prompt dereference (`?p |> int`) was read by a *different* rule that stored the stage on the dereference. Which one applied depended on surrounding syntax, decided before anything knew what the names meant. Now every `|>` parses the same way and the type checker decides what the stage is, which is where that decision belongs — a stage is a type, a Grammar, or a function, and only the checker knows which.
+- **A dereference chains.** `?p |> int |> double` constrains the model to an integer, coerces the reply, and hands `double` a real int. This was previously unwritable: the dereference rule read its stage with a parser that stopped at the first `|>`, specifically so a chain could not form.
+- **A typed dereference works inside `print()`.** `print(?p |> int)` was a compile error — the parser tracked whether it was inside a `print(...)` call and rejected the program with "assign to a variable first". Streaming is decided by what `print` receives, not by what the parser can see, so `print(?p |> int)` prints the coerced int and `print(?p)` still streams tokens live.
+- **Fixed: a function on the right of `|>` after a dereference was silently treated as a grammar.** `?p |> parse(x)` did not fail. Inference fell back to "anything of unknown type is a Grammar value", so a user function was handed to the sampler as a sampling constraint. It now applies, like the pipe it looks like.
+- **A bad stage is a type error naming what it found.** `5 |> 3` reported "expected function or call on right side of `|>`, got expression", because a parser matching on shape can only talk about shapes. The new `InvalidPipeStage` says it got an int. `StreamingWithType` is gone.
+- **Two rules decide a name that could be more than one thing.** A builtin type keyword is always a type — `int` is also a callable constructor, so without this `?p |> int` would generate unconstrained and then fail to coerce, and the grammar is the valuable half of a typed dereference. A declared struct is always a type, for the same reason. Everything else prefers a function.
+
 ## v1.1.36
 
 - **A package can now describe itself in `jade.toml`.** A new `[package]` section names the entry module, the files the package is made of, and the functions it exports, so `jade build --lib` reads a package's shape from the manifest instead of from flags somebody had to remember to type. `jade build --lib` with no file argument builds it.

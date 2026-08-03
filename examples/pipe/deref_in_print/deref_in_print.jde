@@ -1,0 +1,21 @@
+// A typed dereference inside print().
+//
+// This program was a compile error until v1.2.0. The parser tracked whether it
+// was inside a `print(...)` call and rejected `?p |> Type` there outright, with
+// "typed dereference cannot be used inside print() — assign to a variable
+// first". That made the grammar context-sensitive: the same expression was
+// legal or illegal depending on the name of the call it sat in.
+//
+// The rule it was protecting is real. A bare `?p` streams tokens as they
+// arrive, and a typed deref cannot, because the value does not exist until
+// generation finishes and coercion runs. But that is a difference in *when*
+// print receives its argument, not a reason to reject the program. print now
+// takes either and does the right thing with each.
+
+prompt p = "What is 3 + 4? Respond with only the number."
+
+// Not streamed: the int arrives complete, then prints.
+print(?p |> int)
+
+// Still streamed, exactly as before: no type stage, so tokens appear live.
+print(?p)

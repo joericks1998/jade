@@ -1,0 +1,29 @@
+// A prompt dereference is an ordinary pipe stage.
+//
+// Before v1.2.0 `|>` after `?p` meant only "coerce to this type", and a chain
+// was impossible: the parser took the constraint with `parse_or`, specifically
+// so a second `|>` could not follow. So the type stage and the function stage
+// were two different operators wearing the same spelling.
+//
+// Now there is one rule. A type stage still constrains sampling and coerces —
+// that part is unchanged, and it has to be, because the grammar is what stops
+// the model replying "the answer is 42". A function stage applies to whatever
+// the stage before it produced.
+
+fn double(x) {
+    return x * 2
+}
+
+fn describe(n) {
+    return f"got {n}"
+}
+
+prompt p = "What is 21 + 21? Respond with only the number."
+
+// Type stage, then function stage: the model is constrained to an integer,
+// the reply is coerced, and `double` receives a real int rather than a string.
+let n = ?p |> int |> double
+print(n)
+
+// Chains keep going, left to right.
+print(?p |> int |> double |> describe)
