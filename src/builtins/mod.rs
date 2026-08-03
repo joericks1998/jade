@@ -14,7 +14,7 @@ use crate::{
 
 // The built-in packages are flat top-level modules; pull them into scope so the
 // registry can refer to them by bare name.
-use crate::{array, core, dict, env, fs, grammar, http, json, math, path, random, sh, string, time};
+use crate::{array, bytes, core, dict, env, fs, grammar, http, json, math, path, random, sh, string, time};
 use crate::uhttp;
 
 // ── BuiltinFn ─────────────────────────────────────────────────────────────────
@@ -53,6 +53,7 @@ pub struct NativeBoundMethod {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PrimType {
     Str,
+    Bytes,
     Array,
     Dict,
     Int,
@@ -63,6 +64,7 @@ impl PrimType {
     pub fn from_value(v: &VmValue) -> Option<Self> {
         match v {
             VmValue::Str(_)   => Some(PrimType::Str),
+            VmValue::Bytes(_) => Some(PrimType::Bytes),
             VmValue::Array(_) => Some(PrimType::Array),
             VmValue::Dict(_)  => Some(PrimType::Dict),
             VmValue::Int(_)   => Some(PrimType::Int),
@@ -74,6 +76,7 @@ impl PrimType {
     pub fn type_name(self) -> &'static str {
         match self {
             PrimType::Str   => "str",
+            PrimType::Bytes => "bytes",
             PrimType::Array => "array",
             PrimType::Dict  => "dict",
             PrimType::Int   => "int",
@@ -163,6 +166,7 @@ static PACKAGES: &[&Package] = &[
 pub fn find_primitive_method(ty: PrimType, method: &str) -> Option<BuiltinFn> {
     match ty {
         PrimType::Str   => string::find_str_method(method),
+        PrimType::Bytes => bytes::find_bytes_method(method),
         PrimType::Array => array::find_array_method(method),
         PrimType::Dict  => dict::find_dict_method(method),
         PrimType::Int   => None,
@@ -212,6 +216,7 @@ pub fn register_core_types(ctx: &mut TypeContext) {
 /// Register primitive method type information into the type checker.
 pub fn register_primitive_method_types(ctx: &mut TypeContext) {
     string::register_str_method_types(ctx);
+    bytes::register_bytes_method_types(ctx);
     array::register_array_method_types(ctx);
     dict::register_dict_method_types(ctx);
 }

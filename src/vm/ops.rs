@@ -303,6 +303,17 @@ pub(crate) fn vm_index(obj: VmValue, idx: VmValue, span: Span) -> Result<VmValue
                 )))
             }
         }
+        // An octet is an int, not a char. A byte is not a Unicode scalar, and
+        // making `b[0]` look like `s[0]` would hide that they differ on any
+        // non-ASCII input.
+        (VmValue::Bytes(b), VmValue::Int(i)) => {
+            let len = b.len();
+            if i < 0 || i as usize >= len {
+                Err(JadeError::IndexOutOfBounds { index: i, len, span })
+            } else {
+                Ok(VmValue::Int(b.as_slice()[i as usize] as i64))
+            }
+        }
         (VmValue::Array(arc), VmValue::Int(i)) => {
             let guard = arc.lock();
             let len = guard.len();

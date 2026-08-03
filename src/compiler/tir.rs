@@ -20,6 +20,8 @@ pub enum JadeType {
     Bool,
     /// A single Unicode scalar; the element type of a string.
     Char,
+    /// A binary blob. Not a string: indexing yields an int in 0..=255.
+    Bytes,
     Str,
     Nil,
     Prompt,

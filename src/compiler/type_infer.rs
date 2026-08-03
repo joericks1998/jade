@@ -616,6 +616,7 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
                 // against `len` plus an index, and both already work on strings
                 // in character units, so this needs no new lowering.
                 JadeType::Str         => JadeType::Char,
+                JadeType::Bytes       => JadeType::Int,
                 JadeType::Unknown     => JadeType::Unknown,
                 other => return Err(JadeError::TypeError {
                     message: format!("cannot iterate over {}", jade_type_name(other)),
@@ -1187,6 +1188,8 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
                 // Breaking as of v1.2.1; `char` compares equal to the string
                 // spelling it so that `s[0] == "a"` keeps its meaning.
                 JadeType::Str            => JadeType::Char,
+                // An octet, not a char: a byte is not a Unicode scalar.
+                JadeType::Bytes          => JadeType::Int,
                 JadeType::Unknown        => JadeType::Unknown,
                 other => return Err(JadeError::TypeMismatch {
                     expected: "array, dict, or str".to_string(),
@@ -1930,6 +1933,7 @@ pub fn jade_type_name(ty: &JadeType) -> String {
         JadeType::Float        => "float".to_string(),
         JadeType::Bool         => "bool".to_string(),
         JadeType::Char         => "char".to_string(),
+        JadeType::Bytes        => "bytes".to_string(),
         JadeType::Str          => "str".to_string(),
         JadeType::Nil          => "nil".to_string(),
         JadeType::Prompt       => "prompt".to_string(),

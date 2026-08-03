@@ -841,7 +841,7 @@ pub(crate) async fn execute_chunk(
                         }
                     }
                     // Primitive method dispatch for str/array/int/float.
-                    ref prim @ (VmValue::Str(_) | VmValue::Array(_)
+                    ref prim @ (VmValue::Str(_) | VmValue::Array(_) | VmValue::Bytes(_)
                                | VmValue::Int(_) | VmValue::Float(_)) => {
                         if let Some(ty) = PrimType::from_value(prim) {
                             if let Some(method) = builtins::find_primitive_method(ty, field) {

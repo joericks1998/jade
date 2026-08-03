@@ -82,7 +82,22 @@ fn str_ends_with(args: &[VmValue]) -> Result<VmValue> {
     }
 }
 
+/// `s.encode()` — the UTF-8 octets of a string, as `bytes`.
+///
+/// Explicit, never implicit: a string and a blob are different types and
+/// converting between them can lose information in one direction, so the
+/// program says when it means to. The trust byte travels with the octets.
+fn str_encode(args: &[VmValue]) -> Result<VmValue> {
+    match &args[0] {
+        VmValue::Str(s) => Ok(VmValue::Bytes(std::sync::Arc::new(
+            jade_runtime::bytesf::BytesObj::new(s.as_bytes().to_vec(), s.trust()),
+        ))),
+        _ => Err(JadeError::TypeError { message: "str.encode".to_string(), span: ZERO }),
+    }
+}
+
 static STR_METHODS: &[BuiltinFn] = &[
+    BuiltinFn { name: "encode",      vm_impl: str_encode },
     BuiltinFn { name: "len",         vm_impl: str_len },
     BuiltinFn { name: "upper",       vm_impl: str_upper },
     BuiltinFn { name: "lower",       vm_impl: str_lower },
@@ -203,6 +218,7 @@ pub fn register_str_method_types(ctx: &mut TypeContext) {
         ("replace",     JadeType::Fn { params: vec![JadeType::Str, JadeType::Str], ret: ret_str() }),
         ("starts_with", JadeType::Fn { params: vec![JadeType::Str], ret: ret_bool() }),
         ("ends_with",   JadeType::Fn { params: vec![JadeType::Str], ret: ret_bool() }),
+        ("encode",      JadeType::Fn { params: vec![], ret: Box::new(JadeType::Bytes) }),
     ];
     for (name, ty) in methods {
         ctx.define_primitive_method("str", name, ty.clone());

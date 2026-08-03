@@ -25,6 +25,27 @@ pub fn write(path: &str, content: &str) -> std::io::Result<()> {
     std::fs::write(path, content)
 }
 
+/// Read `path` as raw octets.
+///
+/// The byte-oriented twin of [`read`]. `read` goes through
+/// `read_to_string`, which rejects anything that is not valid UTF-8 — so
+/// reading a PNG or a gzip stream needs this, not that.
+pub fn read_bytes(path: &str) -> std::io::Result<Vec<u8>> {
+    std::fs::read(path)
+}
+
+/// Write raw octets to `path`, truncating.
+pub fn write_bytes(path: &str, data: &[u8]) -> std::io::Result<()> {
+    std::fs::write(path, data)
+}
+
+/// Append raw octets to `path`, creating it if absent.
+pub fn append_bytes(path: &str, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+    f.write_all(data)
+}
+
 /// Append `content` to `path` (create if absent).
 pub fn append(path: &str, content: &str) -> std::io::Result<()> {
     let mut f = std::fs::OpenOptions::new().append(true).create(true).open(path)?;

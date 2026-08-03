@@ -36,6 +36,10 @@ pub enum VmValue {
     /// trust byte for the same reason `Str` does: a character of a tainted
     /// string is still tainted.
     Char(jade_runtime::trust::JChar),
+    /// A binary blob. Distinct from `Str`: Jade strings are UTF-8 and
+    /// NUL-terminated and arbitrary bytes are neither, so conversion is
+    /// explicit in both directions. Shares `BytesObj` with the AOT heap.
+    Bytes(Arc<jade_runtime::bytesf::BytesObj>),
     /// A string plus where it came from. The trust byte is the same one
     /// compiled code keeps in the string header — the interpreter tracked no
     /// trust at all, so `sh.exec(sh.exec("..."))` ran under `jade run` and was
@@ -91,6 +95,7 @@ impl std::fmt::Debug for VmValue {
             VmValue::Float(v) => write!(f, "Float({})", v),
             VmValue::Bool(b)  => write!(f, "Bool({})", b),
             VmValue::Char(c)  => write!(f, "Char({:?})", c.ch()),
+            VmValue::Bytes(b) => write!(f, "Bytes[{} byte(s)]", b.len()),
             VmValue::Str(s)   => write!(f, "Str({:?})", s),
             VmValue::Fn(cf)   => write!(f, "Fn({})", cf.params.join(", ")),
             VmValue::Closure(cf, _) => write!(f, "Closure({})", cf.params.join(", ")),
@@ -154,6 +159,7 @@ pub fn value_to_display(v: &VmValue) -> String {
         VmValue::Future(_)             => "<future>".to_string(),
         VmValue::TokenStream(_)        => "<token stream>".to_string(),
         VmValue::Char(c)               => c.ch().to_string(),
+        VmValue::Bytes(b)              => jade_runtime::render::render_bytes(b.as_slice()),
         VmValue::TypeRef(t)            => format!("<type {}>", t),
         VmValue::Nil                   => "nil".to_string(),
     }
@@ -166,6 +172,7 @@ pub fn value_type_name(v: &VmValue) -> &'static str {
         VmValue::Float(_) => "float",
         VmValue::Bool(_) => "bool",
         VmValue::Char(_) => "char",
+        VmValue::Bytes(_) => "bytes",
         VmValue::Str(_) => "str",
         VmValue::Array(_) => "array",
         VmValue::Dict(_) => "dict",
