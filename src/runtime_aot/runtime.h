@@ -613,6 +613,18 @@ jade_value_t jrt_http_post(const char* url, const char* body, void* headers);
 jade_value_t jrt_http_put(const char* url, const char* body, void* headers);
 jade_value_t jrt_http_delete(const char* url, void* headers);
 jade_value_t jrt_http_head(const char* url, void* headers);
+/* The Jade type name of any tagged word ("int", "bytes", "struct", …), as a
+ * static literal the caller must not free. The VM's value_type_name answers the
+ * same question about a VmValue; this keeps one table for both. */
+const char*  jrt_type_name_of(int64_t word);
+
+/* Byte-bodied pair. `.body` is a JK_BYTES blob rather than a string, so a reply
+ * that is not text survives; `post_bytes` takes its body as a whole tagged word
+ * so a non-bytes argument is reported instead of dereferenced. */
+int64_t      jrt_http_get_bytes_impl(const char* url, void* headers);
+int64_t      jrt_http_post_bytes_impl(const char* url, int64_t body, void* headers);
+jade_value_t jrt_http_get_bytes(const char* url, void* headers);
+jade_value_t jrt_http_post_bytes(const char* url, int64_t body, void* headers);
 
 /* uhttp (std::uhttp) — HTTP/1.1 over a Unix domain socket (jade-runtime,
  * src/uhttpf.rs). Same shape as http: each verb returns an ObjHeader dict
@@ -630,6 +642,12 @@ jade_value_t jrt_uhttp_post(const char* url, const char* body, void* headers);
 jade_value_t jrt_uhttp_put(const char* url, const char* body, void* headers);
 jade_value_t jrt_uhttp_delete(const char* url, void* headers);
 jade_value_t jrt_uhttp_head(const char* url, void* headers);
+/* Byte-bodied pair, mirroring http's. A daemon that answers with audio or an
+ * image needs these; jrt_uhttp_get decodes the reply lossily and mangles both. */
+int64_t      jrt_uhttp_get_bytes_impl(const char* url, void* headers);
+int64_t      jrt_uhttp_post_bytes_impl(const char* url, int64_t body, void* headers);
+jade_value_t jrt_uhttp_get_bytes(const char* url, void* headers);
+jade_value_t jrt_uhttp_post_bytes(const char* url, int64_t body, void* headers);
 
 /* uhttp.stream — a streaming read over a Unix socket, one Jade handler call per
  * body line. The handle API is Rust (jade-runtime, src/uhttpf.rs `Stream`); the

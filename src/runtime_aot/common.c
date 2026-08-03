@@ -597,6 +597,29 @@ jade_value_t jrt_http_delete(const char* url, void* headers) {
     http_throw_pending();
     return r;
 }
+/* A wrong-typed body is a *type* error, not an I/O one — the request never
+ * happens. So it is checked and thrown here rather than routed through the
+ * pending-error channel, which prefixes "I/O error: ". The sentence matches the
+ * VM's (`src/uhttp/mod.rs`, `src/http/mod.rs`) minus the source span a compiled
+ * binary does not carry, the way throw_cmp_type already handles comparisons. */
+static void require_bytes_body(int64_t body, const char* fn) {
+    jade_value_t v = (jade_value_t)body;
+    if (jrt_is_ptr(v) && jrt_kind_of(jrt_unbox_ptr(v)) == JK_BYTES) return;
+    char msg[160];
+    snprintf(msg, sizeof msg, "%s expects bytes, got %s", fn, jrt_type_name_of(body));
+    throw_msg(msg);
+}
+jade_value_t jrt_http_get_bytes(const char* url, void* headers) {
+    jade_value_t r = (jade_value_t)jrt_http_get_bytes_impl(url, headers);
+    http_throw_pending();
+    return r;
+}
+jade_value_t jrt_http_post_bytes(const char* url, int64_t body, void* headers) {
+    require_bytes_body(body, "http.post_bytes");
+    jade_value_t r = (jade_value_t)jrt_http_post_bytes_impl(url, body, headers);
+    http_throw_pending();
+    return r;
+}
 jade_value_t jrt_http_head(const char* url, void* headers) {
     jade_value_t r = (jade_value_t)jrt_http_head_impl(url, headers);
     http_throw_pending();
@@ -674,6 +697,17 @@ jade_value_t jrt_uhttp_delete(const char* url, void* headers) {
 }
 jade_value_t jrt_uhttp_head(const char* url, void* headers) {
     jade_value_t r = (jade_value_t)jrt_uhttp_head_impl(url, headers);
+    uhttp_throw_pending();
+    return r;
+}
+jade_value_t jrt_uhttp_get_bytes(const char* url, void* headers) {
+    jade_value_t r = (jade_value_t)jrt_uhttp_get_bytes_impl(url, headers);
+    uhttp_throw_pending();
+    return r;
+}
+jade_value_t jrt_uhttp_post_bytes(const char* url, int64_t body, void* headers) {
+    require_bytes_body(body, "uhttp.post_bytes");
+    jade_value_t r = (jade_value_t)jrt_uhttp_post_bytes_impl(url, body, headers);
     uhttp_throw_pending();
     return r;
 }

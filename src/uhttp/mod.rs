@@ -73,12 +73,37 @@ fn make_response(status: i64, body: String) -> VmValue {
     VmValue::Dict(map)
 }
 
+/// The same dict with an undecoded `bytes` body.
+///
+/// TAINTED for the reason the string body is: it came off a socket. Same shape
+/// as [`make_response`], so `.status` reads identically either way.
+fn make_bytes_response(status: i64, body: Vec<u8>) -> VmValue {
+    let mut map = DictObj::new();
+    map.insert("status".to_string(), VmValue::Int(status));
+    map.insert(
+        "body".to_string(),
+        VmValue::Bytes(std::sync::Arc::new(jade_runtime::bytesf::BytesObj::new(
+            body,
+            jade_runtime::trust::TAINTED,
+        ))),
+    );
+    VmValue::Dict(map)
+}
+
 /// Run one request through the shared `uhttpf` core, mapping its `(status, body)`
 /// into a `{status, body}` dict and its transport failure into an `IoError`.
 fn execute(url: &str, method: &str, body: Option<&str>, headers: Vec<(String, String)>) -> Result<VmValue> {
     uhttpf::request(method, url, body, &headers)
         .map(|(status, body)| make_response(status, body))
         // Message shape matches the AOT path's `set_err` ("uhttp <METHOD>: <detail>").
+        .map_err(|message| JadeError::IoError { message: format!("uhttp {method}: {message}"), span: ZERO })
+}
+
+/// [`execute`] for the byte-bodied pair. Same core, same error wording — only
+/// the body's type differs.
+fn execute_bytes(url: &str, method: &str, body: Option<&[u8]>, headers: Vec<(String, String)>) -> Result<VmValue> {
+    uhttpf::request_bytes(method, url, body, &headers)
+        .map(|(status, body)| make_bytes_response(status, body))
         .map_err(|message| JadeError::IoError { message: format!("uhttp {method}: {message}"), span: ZERO })
 }
 
@@ -99,6 +124,43 @@ fn uhttp_post(args: &[VmValue]) -> Result<VmValue> {
     let body = require_str_owned(args, 1, "uhttp.post")?;
     let headers = extract_headers(args.get(2))?;
     execute(&url, "POST", Some(&body), headers)
+}
+
+/// `uhttp.get_bytes(url[, headers])` — a response whose body is not decoded.
+///
+/// `uhttp.get` runs the reply through a lossy UTF-8 decode, which mangles a WAV
+/// frame or a PNG as surely over a Unix socket as over TCP. This is the one to
+/// reach for when a daemon answers with something that is not text.
+fn uhttp_get_bytes(args: &[VmValue]) -> Result<VmValue> {
+    if args.is_empty() || args.len() > 2 {
+        return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: ZERO });
+    }
+    let url = require_str_owned(args, 0, "uhttp.get_bytes")?;
+    let headers = extract_headers(args.get(1))?;
+    execute_bytes(&url, "GET", None, headers)
+}
+
+/// `uhttp.post_bytes(url, body[, headers])` — send raw octets.
+fn uhttp_post_bytes(args: &[VmValue]) -> Result<VmValue> {
+    if args.len() < 2 || args.len() > 3 {
+        return Err(JadeError::ArityMismatch { expected: 2, got: args.len(), span: ZERO });
+    }
+    let url = require_str_owned(args, 0, "uhttp.post_bytes")?;
+    let body = match args.get(1) {
+        Some(VmValue::Bytes(b)) => b.as_slice().to_vec(),
+        Some(other) => {
+            return Err(JadeError::TypeError {
+                message: format!(
+                    "uhttp.post_bytes expects bytes, got {}",
+                    crate::vm::value_type_name(other)
+                ),
+                span: ZERO,
+            })
+        }
+        None => return Err(JadeError::ArityMismatch { expected: 2, got: args.len(), span: ZERO }),
+    };
+    let headers = extract_headers(args.get(2))?;
+    execute_bytes(&url, "POST", Some(&body), headers)
 }
 
 fn uhttp_put(args: &[VmValue]) -> Result<VmValue> {
@@ -198,11 +260,13 @@ pub fn open_stream(url: &str, headers: Vec<(String, String)>) -> Result<mpsc::Re
 
 
 static UHTTP_PKG_FNS: &[BuiltinFn] = &[
-    BuiltinFn { name: "get",    vm_impl: uhttp_get },
-    BuiltinFn { name: "post",   vm_impl: uhttp_post },
-    BuiltinFn { name: "put",    vm_impl: uhttp_put },
-    BuiltinFn { name: "delete", vm_impl: uhttp_delete },
-    BuiltinFn { name: "head",   vm_impl: uhttp_head },
+    BuiltinFn { name: "get",        vm_impl: uhttp_get },
+    BuiltinFn { name: "post",       vm_impl: uhttp_post },
+    BuiltinFn { name: "put",        vm_impl: uhttp_put },
+    BuiltinFn { name: "delete",     vm_impl: uhttp_delete },
+    BuiltinFn { name: "head",       vm_impl: uhttp_head },
+    BuiltinFn { name: "get_bytes",  vm_impl: uhttp_get_bytes },
+    BuiltinFn { name: "post_bytes", vm_impl: uhttp_post_bytes },
 ];
 
 fn register_uhttp_pkg_types(ctx: &mut TypeContext) {

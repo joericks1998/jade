@@ -56,6 +56,40 @@ fn uhttp_get_bad_url_scheme_returns_ioerror() {
     }
 }
 
+// ── the byte-bodied pair ──────────────────────────────────────────────────
+
+#[test]
+fn uhttp_post_bytes_rejects_a_string_body() {
+    // A str body is the mistake worth naming: `uhttp.post` takes one, so the
+    // two spellings differ by exactly this argument. The message says which
+    // type arrived rather than only which was wanted.
+    let args = [
+        VmValue::Str("unix:///tmp/x.sock:/p".to_string().into()),
+        VmValue::Str("not bytes".to_string().into()),
+    ];
+    match uhttp_post_bytes(&args).unwrap_err() {
+        JadeError::TypeError { message, .. } => {
+            assert!(message.contains("expects bytes"), "{message}");
+            assert!(message.contains("str"), "names what arrived: {message}");
+        }
+        other => panic!("expected TypeError, got {:?}", other),
+    }
+}
+
+#[test]
+fn uhttp_bytes_pair_validates_arity_and_url() {
+    assert!(matches!(uhttp_get_bytes(&[]).unwrap_err(), JadeError::ArityMismatch { .. }));
+    let one = [VmValue::Str("u".to_string().into())];
+    assert!(matches!(uhttp_post_bytes(&one).unwrap_err(), JadeError::ArityMismatch { .. }));
+
+    // Url parse fails before any socket connect, as on the text path.
+    let bad = [VmValue::Str("not-a-unix-url".to_string().into())];
+    match uhttp_get_bytes(&bad).unwrap_err() {
+        JadeError::IoError { message, .. } => assert!(message.contains("unix://")),
+        other => panic!("expected IoError, got {:?}", other),
+    }
+}
+
 #[test]
 fn open_stream_bad_url_errors_synchronously() {
     assert!(open_stream("bogus", vec![]).is_err());
@@ -68,7 +102,7 @@ fn pkg_descriptor() {
     assert_eq!(UHTTP_PKG.import_name, "std/uhttp");
     assert_eq!(UHTTP_PKG.global_name, "uhttp");
     let names: Vec<&str> = UHTTP_PKG.fns.iter().map(|f| f.name).collect();
-    for verb in ["get", "post", "put", "delete", "head"] {
+    for verb in ["get", "post", "put", "delete", "head", "get_bytes", "post_bytes"] {
         assert!(names.contains(&verb), "missing {verb}");
     }
 }

@@ -289,6 +289,12 @@ All HTTP functions return a `dict` with two keys:
 
 An optional `headers` dict may be passed as the last argument to any function. Keys and values must be strings.
 
+:::caution A `str` body is not safe for binary
+A `str` is UTF-8 and NUL-terminated, so a response body read as text loses two things: an invalid UTF-8 sequence becomes `�`, and **everything from the first NUL byte onward is dropped**. An image, an audio frame, or a gzip stream hits both.
+
+Use `get_bytes` / `post_bytes` for those. `.body` is then a `bytes` value, which holds any octet. Both spellings exist on `std::http` and `std::uhttp`, and both work under `jade run` and `jade build` as of v1.2.5.
+:::
+
 | Function | Description |
 |----------|-------------|
 | `http.get(url, headers?)` | HTTP GET |
@@ -343,6 +349,8 @@ The socket path runs up to the **first** `:` after the `unix://` scheme; everyth
 | Function | Description |
 |----------|-------------|
 | `uhttp.get(url, headers?)` | HTTP GET |
+| `uhttp.get_bytes(url, headers?)` | HTTP GET with an undecoded body (`.body` is `bytes`) |
+| `uhttp.post_bytes(url, body, headers?)` | HTTP POST sending raw octets |
 | `uhttp.post(url, body, headers?)` | HTTP POST with string body |
 | `uhttp.put(url, body, headers?)` | HTTP PUT with string body |
 | `uhttp.delete(url, headers?)` | HTTP DELETE |

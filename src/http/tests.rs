@@ -155,9 +155,27 @@ fn pkg_descriptor_lists_all_verbs() {
     assert_eq!(HTTP_PKG.import_name, "std/http");
     assert_eq!(HTTP_PKG.global_name, "http");
     let names: Vec<&str> = HTTP_PKG.fns.iter().map(|f| f.name).collect();
-    for verb in ["get", "post", "put", "delete", "head"] {
+    for verb in ["get", "post", "put", "delete", "head", "get_bytes", "post_bytes"] {
         assert!(names.contains(&verb), "missing {verb}");
     }
+}
+
+/// `std::uhttp` grew the byte pair a release after `std::http` did, and the gap
+/// was invisible because nothing compared the two tables. This does.
+#[test]
+fn http_and_uhttp_expose_the_same_functions() {
+    use crate::uhttp::UHTTP_PKG;
+    let mut mine: Vec<&str> = HTTP_PKG.fns.iter().map(|f| f.name).collect();
+    let mut theirs: Vec<&str> = UHTTP_PKG
+        .fns
+        .iter()
+        .map(|f| f.name)
+        // `stream` is uhttp-only: a TCP streaming read has no caller yet.
+        .chain(UHTTP_PKG.natives.iter().map(|(n, _)| *n).filter(|n| *n != "stream"))
+        .collect();
+    mine.sort_unstable();
+    theirs.sort_unstable();
+    assert_eq!(mine, theirs, "the two HTTP packages must offer the same surface");
 }
 
 #[test]

@@ -23,7 +23,7 @@ use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
 use crate::cstr;
-use crate::httpf::{make_dict, read_headers};
+use crate::httpf::{body_text, bytes_arg, make_bytes_dict, make_dict, read_headers, word_type_name};
 use crate::string::{self, TRUSTED};
 
 type W = i64;
@@ -60,11 +60,15 @@ pub fn parse_unix_url(url: &str) -> Result<(String, String), String> {
     }
 }
 
-/// Parse a raw HTTP/1.1 response into `(status, body)`.
+/// Parse a raw HTTP/1.1 response into `(status, body)`, body undecoded.
 ///
 /// `is_head` suppresses the body (a HEAD response carries none even when it
 /// advertises a `Content-Length`).
-pub fn parse_response(raw: &[u8], is_head: bool) -> Result<(i64, String), String> {
+///
+/// This is the real parse; [`parse_response`] is a lossy view of it. Framing —
+/// `Content-Length`, chunked, read-to-EOF — is decided on octets and never on
+/// text, so a binary body is framed exactly as a textual one is.
+pub fn parse_response_bytes(raw: &[u8], is_head: bool) -> Result<(i64, Vec<u8>), String> {
     let sep = find_subsequence(raw, b"\r\n\r\n")
         .ok_or_else(|| "malformed response: no header terminator".to_string())?;
     let head = String::from_utf8_lossy(&raw[..sep]);
@@ -79,7 +83,7 @@ pub fn parse_response(raw: &[u8], is_head: bool) -> Result<(i64, String), String
         .ok_or_else(|| format!("malformed status line: {status_line}"))?;
 
     if is_head {
-        return Ok((status, String::new()));
+        return Ok((status, Vec::new()));
     }
 
     // Collect the headers we care about for framing (case-insensitive names).
@@ -107,7 +111,14 @@ pub fn parse_response(raw: &[u8], is_head: bool) -> Result<(i64, String), String
         body_bytes.to_vec()
     };
 
-    Ok((status, String::from_utf8_lossy(&body).into_owned()))
+    Ok((status, body))
+}
+
+/// [`parse_response_bytes`] with the body as text, via [`body_text`] — so this
+/// is what a program reading `.body` off `uhttp.get` actually gets, rather than
+/// a second, more forgiving notion of the same decode.
+pub fn parse_response(raw: &[u8], is_head: bool) -> Result<(i64, String), String> {
+    parse_response_bytes(raw, is_head).map(|(status, body)| (status, body_text(&body)))
 }
 
 /// Decode a `Transfer-Encoding: chunked` body.
@@ -178,13 +189,30 @@ pub fn request(
     body: Option<&str>,
     headers: &[(String, String)],
 ) -> Result<(i64, String), String> {
+    request_bytes(method, url, body.map(str::as_bytes), headers)
+        .map(|(status, body)| (status, body_text(&body)))
+}
+
+/// Byte-bodied request: the body is sent as raw octets and the reply is handed
+/// back undecoded.
+///
+/// This is the real implementation; [`request`] is a lossy view of it, exactly
+/// as in [`crate::httpf`]. The request is framed as bytes throughout — the head
+/// is built as text and then committed to a byte buffer the body is appended to,
+/// so a payload containing a NUL or an invalid UTF-8 sequence goes out intact.
+pub fn request_bytes(
+    method: &str,
+    url: &str,
+    body: Option<&[u8]>,
+    headers: &[(String, String)],
+) -> Result<(i64, Vec<u8>), String> {
     let (sock_path, req_path) = parse_unix_url(url)?;
     let is_head = method == "HEAD";
     let method = method.to_string();
-    let body = body.map(str::to_string);
+    let body = body.map(<[u8]>::to_vec);
     let headers = headers.to_vec();
 
-    let joined = std::thread::spawn(move || -> Result<(i64, String), String> {
+    let joined = std::thread::spawn(move || -> Result<(i64, Vec<u8>), String> {
         let mut stream = UnixStream::connect(&sock_path).map_err(|e| e.to_string())?;
         stream.set_read_timeout(Some(TIMEOUT)).map_err(|e| e.to_string())?;
         stream.set_write_timeout(Some(TIMEOUT)).map_err(|e| e.to_string())?;
@@ -197,16 +225,17 @@ pub fn request(
             req.push_str(&format!("{}: {}\r\n", k, v));
         }
         if verb_has_body(&method) {
-            let len = body.as_deref().map_or(0, str::len);
+            let len = body.as_deref().map_or(0, <[u8]>::len);
             req.push_str(&format!("Content-Length: {}\r\n", len));
         }
         req.push_str("\r\n");
+        let mut wire = req.into_bytes();
         if verb_has_body(&method) {
             if let Some(b) = body.as_deref() {
-                req.push_str(b);
+                wire.extend_from_slice(b);
             }
         }
-        stream.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
+        stream.write_all(&wire).map_err(|e| e.to_string())?;
         stream.flush().map_err(|e| e.to_string())?;
 
         // ── response ─────────────────────────────────────────────────────
@@ -214,7 +243,7 @@ pub fn request(
         // response, so read-to-EOF yields the full message.
         let mut raw = Vec::new();
         stream.read_to_end(&mut raw).map_err(|e| e.to_string())?;
-        parse_response(&raw, is_head)
+        parse_response_bytes(&raw, is_head)
     })
     .join();
 
@@ -451,6 +480,42 @@ pub extern "C" fn jrt_uhttp_delete_impl(url: *const c_char, headers: *const c_vo
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_uhttp_head_impl(url: *const c_char, headers: *const c_void) -> W {
     request_aot("HEAD", url, None, headers)
+}
+
+// ── Byte-bodied requests ──────────────────────────────────────────────────────
+//
+// The `std::http` shape, over a Unix socket. A daemon that answers with audio,
+// an image, or a gzip stream is the case these exist for: `uhttp.get` decodes
+// the reply lossily, which mangles all three.
+
+/// Run `request_bytes`, building the byte-bodied dict; on transport failure,
+/// record the pending error and return `{ status: 0, body: <empty> }`.
+fn request_bytes_aot(method: &str, url: *const c_char, body: Option<&[u8]>, headers: *const c_void) -> W {
+    match request_bytes(method, unsafe { cstr::borrow(url) }, body, &read_headers(headers)) {
+        Ok((status, body)) => make_bytes_dict(status, &body),
+        Err(m) => {
+            set_err(&format!("uhttp {method}: {m}"));
+            make_bytes_dict(0, &[])
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_uhttp_get_bytes_impl(url: *const c_char, headers: *const c_void) -> W {
+    request_bytes_aot("GET", url, None, headers)
+}
+
+/// `body` is the argument's whole tagged word, so a non-`bytes` value is
+/// reported rather than dereferenced. See [`crate::httpf::bytes_arg`].
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_uhttp_post_bytes_impl(url: *const c_char, body: W, headers: *const c_void) -> W {
+    match bytes_arg(body) {
+        Some(b) => request_bytes_aot("POST", url, Some(b), headers),
+        None => {
+            set_err(&format!("uhttp.post_bytes expects bytes, got {}", word_type_name(body)));
+            make_bytes_dict(0, &[])
+        }
+    }
 }
 
 // ── Streaming, for the compiled path ──────────────────────────────────────────

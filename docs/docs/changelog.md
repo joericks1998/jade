@@ -4,6 +4,13 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.2.5
+
+- **Fixed: `http.get_bytes` and `post_bytes` could not be compiled.** They shipped in v1.2.2 as interpreter-only functions, with no lowering and no `jrt_*` symbol. So a program using a byte body passed `jade check`, ran under `jade run`, and failed at `jade build` with "unsupported module call" — the one place a missing builtin surfaces last, when you try to ship. Both now work on both engines.
+- **`std::uhttp` gained the same pair.** `uhttp.get_bytes` and `uhttp.post_bytes`, matching `std::http` exactly. Without them a daemon on a Unix socket could not answer with audio, an image, or a compressed stream: `uhttp.get` runs every reply through a lossy UTF-8 decode. A test now compares the two packages' function tables, since what made this gap easy to miss was that nothing did.
+- **Fixed: a text body containing a NUL disagreed between the engines.** A Jade string is NUL-terminated, so a compiled binary truncated `.body` at the first zero byte while the interpreter kept going. The same program reported 8 characters run and 4 built. Both now stop at the NUL, and the rule lives once in the shared runtime rather than falling out of whichever path you took. Use `get_bytes` for a body that is not text — that is what it is for.
+- **A wrong-typed body is reported, not dereferenced.** `post_bytes(url, "text")` names what it got on both engines instead of reading a string as a heap object.
+
 ## v1.2.4
 
 - **`?p` is a buffered stream, like every other stream.** Reading one twice gives the same text twice. Until now the receiver was taken on first drain and a second read raised `DoubleStreamDrain`, so printing a dereference and then using the same value was an error rather than the obvious thing. That error is gone.

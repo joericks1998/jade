@@ -803,6 +803,40 @@ fn uhttp_stream_lowers_with_the_handler_as_a_value() {
 }
 
 #[test]
+fn the_byte_bodied_http_pair_lowers_on_both_modules() {
+    // Until v1.2.5 these had no lowering at all: `jade check` accepted them and
+    // `jade build` refused with "unsupported module call", so a program using a
+    // byte body only discovered it could not ship at packaging time. Assert the
+    // symbols by name, on both modules, so that cannot come back quietly.
+    for module in ["http", "uhttp"] {
+        let get = ir_of(
+            &[
+                GetGlobal(0, module.to_string()),
+                GetField(1, 0, "get_bytes".to_string()),
+                LoadStr(2, "u".to_string()),
+                Call(3, 1, vec![2]),
+                Return(Some(3)),
+            ],
+            4,
+        );
+        assert!(get.contains(&format!("jrt_{module}_get_bytes")), "{module}.get_bytes:\n{get}");
+
+        let post = ir_of(
+            &[
+                GetGlobal(0, module.to_string()),
+                GetField(1, 0, "post_bytes".to_string()),
+                LoadStr(2, "u".to_string()),
+                LoadStr(3, "body-placeholder".to_string()),
+                Call(4, 1, vec![2, 3]),
+                Return(Some(4)),
+            ],
+            5,
+        );
+        assert!(post.contains(&format!("jrt_{module}_post_bytes")), "{module}.post_bytes:\n{post}");
+    }
+}
+
+#[test]
 fn str_builtin_devirtualizes_to_str_of_any() {
     // GetGlobal str ; LoadInt r1,42 ; Call r2 = str(r1) ; Return r2
     let ir = ir_of(
