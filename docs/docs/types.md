@@ -114,6 +114,8 @@ for x in s { print(x) }   // the same values again
 
 A stream *is* a buffer, not a one-shot channel. Everything it produced is retained, so reading it twice gives the same values twice and there is no "already consumed" state to reason about. `len` and indexing work for the same reason.
 
+A prompt dereference is a stream too. `?p` produces one lazily, so `print(?p)` shows tokens as they arrive, and the same value can be read again afterwards.
+
 A bare `return` stops a generator early. `return x` is a compile error: a function that yields produces a stream, so returning a value too would ask it to be two things at once.
 
 Yields of different types widen to a mixed stream rather than failing, the same rule a mixed array literal follows.

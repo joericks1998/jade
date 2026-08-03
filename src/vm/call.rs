@@ -127,7 +127,12 @@ pub(crate) async fn call_value(
                 };
                 match val {
                     VmValue::TokenStream(ts) => {
-                        vm_drain_token_stream_printing(ts, state, span, end == "\n", false, &[], &[]).await?;
+                        // The mute spec rides on the stream, put there by a
+                        // `?p |> g` stage. `print` no longer needs to be told.
+                        let (sm, rs, rp) =
+                            (ts.start_muted, ts.region_start.clone(), ts.region_stop.clone());
+                        vm_drain_token_stream_printing(ts, state, span, end == "\n", sm, &rs, &rp)
+                            .await?;
                         if end != "\n" && !end.is_empty() {
                             crate::stdio::write_str_flush(&end);
                         }
@@ -137,91 +142,6 @@ pub(crate) async fn call_value(
                     }
                 }
                 Ok(VmValue::Nil)
-            }
-            NativeFnId::Stream => {
-                if args.is_empty() {
-                    return Err(JadeError::ArityMismatch { expected: 1, got: 0, span });
-                }
-                let mut iter = args.into_iter();
-                let val = iter.next().unwrap();
-                // Build VM-side mute spec AND daemon inference constraints.
-                //
-                // Mute semantics:
-                //   No anchor  → start muted immediately (from first token).
-                //   Anchor     → enter muted mode when anchor string appears.
-                //   Stop_anchor → exit muted mode when stop string appears.
-                //   No stop_anchor → stay muted until end of stream.
-                let mut start_muted = false;
-                let mut region_start: Vec<String> = Vec::new();
-                let mut region_stop: Vec<String> = Vec::new();
-                let mut infer_grammar: Option<String> = None;
-                let mut infer_anchor: Option<String> = None;
-                let mut infer_stop: Option<String> = None;
-                match iter.next() {
-                    None | Some(VmValue::Nil) => {}
-                    Some(VmValue::Array(arr)) => {
-                        for v in arr.lock().iter() {
-                            if let VmValue::Grammar(g) = v {
-                                if infer_grammar.is_none() {
-                                    // `to_gbnf()`, not `.pattern` — this site used to send
-                                    // the bare pattern, so `stream(?p, mute_on=[g])` and
-                                    // `?p |> g` constrained the model differently with the
-                                    // same Grammar value.
-                                    infer_grammar = Some(g.to_gbnf());
-                                    infer_anchor = g.anchor.clone();
-                                    infer_stop = g.stop.clone();
-                                }
-                                if let Some(a) = &g.anchor {
-                                    if !region_start.contains(a) { region_start.push(a.clone()); }
-                                    if let Some(s) = &g.stop {
-                                        if !region_stop.contains(s) { region_stop.push(s.clone()); }
-                                    }
-                                } else {
-                                    // No anchor → mute from the very start of generation.
-                                    start_muted = true;
-                                    if let Some(s) = &g.stop {
-                                        if !region_stop.contains(s) { region_stop.push(s.clone()); }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Some(other) => return Err(JadeError::TypeError {
-                        message: format!("stream() mute_on= must be an array of grammars, got {}", value_type_name(&other)),
-                        span,
-                    }),
-                };
-                match val {
-                    VmValue::TokenStream(ts) => {
-                        // Start lazy inference with grammar constraints so jade-tree
-                        // receives stop_anchor and stops before the model can loop.
-                        {
-                            let lazy = ts.lazy_prompt.lock().take();
-                            if let Some(prompt_text) = lazy {
-                                let backend = state.inference_backend.as_ref()
-                                    .ok_or(JadeError::NoInferenceBackend { span })?.clone();
-                                let (rx, handle) = backend.infer_stream(llm::InferenceRequest {
-                                    prompt: prompt_text,
-                                    grammar: infer_grammar,
-                                    anchor: infer_anchor,
-                                    stop_anchor: infer_stop, ..Default::default()
-                                }, span).await?;
-                                *ts.rx.lock() = Some(rx);
-                                *ts.tokens_handle.lock() = Some(handle);
-                            }
-                        }
-                        let text = vm_drain_token_stream_printing(
-                            ts, state, span, true,
-                            start_muted, &region_start, &region_stop,
-                        ).await?;
-                        Ok(VmValue::Str(text.into()))
-                    }
-                    other => {
-                        let s = value_to_display(&other);
-                        crate::stdio::write_str_flush(&format!("{s}\n"));
-                        Ok(VmValue::Str(s.into()))
-                    }
-                }
             }
             NativeFnId::Route => {
                 if args.is_empty() || args.len() > 2 {

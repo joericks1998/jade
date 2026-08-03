@@ -12,7 +12,6 @@ use super::*;
 #[derive(Clone, Debug, PartialEq)]
 pub enum NativeFnId {
     Print,
-    Stream,
     Route,
     /// `array.map(arr, fn)` / `array.filter(arr, fn)` — need VmState + async to
     /// call the user function per element, so they dispatch here rather than as

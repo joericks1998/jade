@@ -69,28 +69,28 @@ pub(crate) async fn vm_prompt_deref(
     }
 }
 
-/// Start a streaming inference call and return a lazy `VmValue::TokenStream`.
-/// Cache hits short-circuit to `VmValue::Str` — drain logic handles both
-/// transparently.
-pub(crate) async fn vm_prompt_deref_stream(
+/// Build the lazy stream an unconstrained or grammar-constrained `?p` produces.
+///
+/// A cache hit short-circuits to a `Str`; every drain path accepts either, so
+/// callers do not branch on it.
+///
+/// The backend is checked *here* rather than at the drain, so a program with no
+/// provider installed reports the error at the `?p` that needs one instead of
+/// wherever the value happened to be consumed.
+pub(crate) fn vm_prompt_deref_stream(
     prompt_text: String,
-    state: &mut VmState,
+    grammar: Option<&jade_runtime::grammarf::GrammarObj>,
+    state: &VmState,
     span: Span,
 ) -> Result<VmValue> {
     let cache_key = (prompt_text.clone(), None::<String>);
     if let Some(cached) = state.prompt_cache.get(&cache_key).cloned() {
         return Ok(VmValue::Str(cached.into()));
     }
-    // Return a lazy stream. Inference starts on first drain so callers
-    // (e.g. stream() with mute_on=) can inject grammar constraints first.
-    // NoInferenceBackend is checked here eagerly so the error site is ?p, not drain.
-    state.inference_backend.as_ref()
-        .ok_or(JadeError::NoInferenceBackend { span })?;
-    Ok(VmValue::TokenStream(Arc::new(JadeTokenStream {
-        rx: Mutex::new(None),
-        tokens_handle: Mutex::new(None),
-        prompt_key: (prompt_text.clone(), None),
-        lazy_prompt: Mutex::new(Some(prompt_text)),
+    state.inference_backend.as_ref().ok_or(JadeError::NoInferenceBackend { span })?;
+    Ok(VmValue::TokenStream(Arc::new(match grammar {
+        Some(g) => JadeTokenStream::constrained(prompt_text, g),
+        None => JadeTokenStream::lazy(prompt_text),
     })))
 }
 
@@ -100,22 +100,17 @@ pub(crate) async fn vm_drain_token_stream(
     state: &mut VmState,
     span: Span,
 ) -> Result<VmValue> {
-    // Start lazy inference (no constraints) if ?p hasn't been started yet.
-    {
-        let lazy = ts.lazy_prompt.lock().take();
-        if let Some(prompt_text) = lazy {
-            let backend = state.inference_backend.as_ref()
-                .ok_or(JadeError::NoInferenceBackend { span })?.clone();
-            let (rx, handle) = backend.infer_stream(llm::InferenceRequest {
-                prompt: prompt_text,
-                grammar: None, anchor: None, stop_anchor: None, ..Default::default()
-            }, span).await?;
-            *ts.rx.lock() = Some(rx);
-            *ts.tokens_handle.lock() = Some(handle);
-        }
+    // Already drained? A stream is a buffer, so hand back what it holds.
+    if let Some(t) = ts.text.lock().clone() {
+        return Ok(VmValue::Str(t.into()));
     }
+    start_inference(&ts, state, span).await?;
     let rx_opt = ts.rx.lock().take();
-    let mut rx = rx_opt.ok_or(JadeError::DoubleStreamDrain { span })?;
+    let Some(mut rx) = rx_opt else {
+        // Racing readers of the same stream: the other one is mid-drain. Its
+        // result lands in `text`, which the check above will find next time.
+        return Ok(VmValue::Str(String::new().into()));
+    };
     let mut text = String::new();
     while let Some(token) = rx.recv().await {
         text.push_str(&token);
@@ -132,7 +127,45 @@ pub(crate) async fn vm_drain_token_stream(
         }
     }
     state.prompt_cache.insert(ts.prompt_key.clone(), text.clone());
+    *ts.text.lock() = Some(text.clone());
     Ok(VmValue::Str(text.into()))
+}
+
+/// Start the inference behind a lazy stream, applying the constraints the
+/// stream carries. Idempotent: a stream whose inference already started has no
+/// `lazy_prompt` left to take.
+///
+/// This is the single place a `?p` request is built. It used to exist three
+/// times — once per drain path plus once in `stream()` — and the copies drifted:
+/// one sent a Grammar's bare pattern where another sent the wrapped GBNF, so the
+/// same Grammar constrained the model differently depending on how it was used.
+async fn start_inference(
+    ts: &Arc<JadeTokenStream>,
+    state: &mut VmState,
+    span: Span,
+) -> Result<()> {
+    let lazy = ts.lazy_prompt.lock().take();
+    let Some(prompt_text) = lazy else { return Ok(()) };
+    let backend = state
+        .inference_backend
+        .as_ref()
+        .ok_or(JadeError::NoInferenceBackend { span })?
+        .clone();
+    let (rx, handle) = backend
+        .infer_stream(
+            llm::InferenceRequest {
+                prompt: prompt_text,
+                grammar: ts.grammar.clone(),
+                anchor: ts.region_start.first().cloned(),
+                stop_anchor: ts.region_stop.first().cloned(),
+                ..Default::default()
+            },
+            span,
+        )
+        .await?;
+    *ts.rx.lock() = Some(rx);
+    *ts.tokens_handle.lock() = Some(handle);
+    Ok(())
 }
 
 /// Find the earliest occurrence of any needle in `hay`, as `(offset, len)`.
@@ -275,23 +308,29 @@ pub(crate) async fn vm_drain_token_stream_printing(
     region_start: &[String],
     region_stop: &[String],
 ) -> Result<String> {
-    // Fallback lazy start with no constraints (for print(?p) and similar paths).
-    // If stream() already started inference with grammar constraints, this is a no-op.
-    {
-        let lazy = ts.lazy_prompt.lock().take();
-        if let Some(prompt_text) = lazy {
-            let backend = state.inference_backend.as_ref()
-                .ok_or(JadeError::NoInferenceBackend { span })?.clone();
-            let (rx, handle) = backend.infer_stream(llm::InferenceRequest {
-                prompt: prompt_text,
-                grammar: None, anchor: None, stop_anchor: None, ..Default::default()
-            }, span).await?;
-            *ts.rx.lock() = Some(rx);
-            *ts.tokens_handle.lock() = Some(handle);
+    // Already drained? Print what the buffer holds — with the muted span
+    // suppressed, so printing a stream twice looks the same both times.
+    if let Some(t) = ts.text.lock().clone() {
+        let mut shown = apply_mute(&t, start_muted, region_start, region_stop);
+        if newline {
+            shown.push('\n');
         }
+        // Routed the same way the live loop routes its output, so a test that
+        // captures stdout sees a replayed stream too.
+        #[cfg(test)]
+        if let Some(buf) = &state.test_stdout {
+            use std::io::Write;
+            let _ = std::sync::Arc::clone(buf).lock().unwrap().write_all(shown.as_bytes());
+            return Ok(t);
+        }
+        crate::stdio::write_str_flush(&shown);
+        return Ok(t);
     }
+    start_inference(&ts, state, span).await?;
     let rx_opt = ts.rx.lock().take();
-    let mut rx = rx_opt.ok_or(JadeError::DoubleStreamDrain { span })?;
+    let Some(mut rx) = rx_opt else {
+        return Ok(String::new());
+    };
 
     #[cfg(test)]
     let text = if let Some(buf) = &state.test_stdout {
@@ -315,7 +354,47 @@ pub(crate) async fn vm_drain_token_stream_printing(
         }
     }
     state.prompt_cache.insert(ts.prompt_key.clone(), text.clone());
+    *ts.text.lock() = Some(text.clone());
     Ok(text)
+}
+
+/// Apply a mute spec to already-complete text.
+///
+/// The live path suppresses tokens as they arrive; this is the same rule over a
+/// buffer, for a stream that was already drained. Both have to agree, or
+/// printing a stream twice would show different things.
+pub(crate) fn apply_mute(
+    text: &str,
+    start_muted: bool,
+    region_start: &[String],
+    region_stop: &[String],
+) -> String {
+    if !start_muted && region_start.is_empty() {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    let mut rest = text;
+    let mut muted = start_muted;
+    loop {
+        let needles: &[String] = if muted { region_stop } else { region_start };
+        match first_match(needles, rest) {
+            Some((pos, len)) => {
+                if !muted {
+                    out.push_str(&rest[..pos]);
+                }
+                // The matching anchor is suppressed either way, matching the
+                // live loop: an anchor is a marker, not content.
+                rest = &rest[pos + len..];
+                muted = !muted;
+            }
+            None => {
+                if !muted {
+                    out.push_str(rest);
+                }
+                return out;
+            }
+        }
+    }
 }
 
 /// Drain a `TokenStream` to `Str` if the value is one; pass everything else through.

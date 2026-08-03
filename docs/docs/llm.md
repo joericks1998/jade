@@ -85,6 +85,32 @@ Order matters, and it is the useful kind of ordering. `?p |> int |> double` cons
 Before v1.2.0 neither of these was expressible. `|>` after `?p` had a separate parse path that read only a single constraint, so a chain could not form, and a typed dereference inside `print(...)` was rejected outright. Both now work: `print(?p |> int)` prints the coerced int, and `print(?p)` still streams tokens live.
 :::
 
+## Constraining with a Grammar
+
+A `Grammar` value as a `|>` stage sends its GBNF with the request and leaves the reply a stream. Printing that stream shows tokens as they arrive; reading it as a value gives the full text.
+
+```jade
+let g = Grammar.new("\"yes\" | \"no\"")
+prompt p = "yes or no?"
+
+print(?p |> g)        // live, constrained output
+let answer = ?p |> g  // the text
+```
+
+A grammar may also carry an *anchor* and a *stop*, which mark a region of the reply to suppress from live output while keeping it in the value. That is how a tool call or a chain-of-thought span is hidden from the user without being lost to the program:
+
+```jade
+let g = Grammar.new("\"a\"|\"b\"", "<t>", "</t>")
+print(?p |> g)        // everything between <t> and </t> is suppressed
+let full = ?p |> g    // ... but it is still here
+```
+
+A grammar with no anchor suppresses from the first token, since the whole reply is then structured output.
+
+:::note
+This used to be a builtin: `stream(?p, mute_on = [g])`. It existed only because a grammar-constrained dereference collapsed into a blocking call, leaving no stream to print. As of v1.2.4 it does not, so the pipe covers both and `stream()` is gone.
+:::
+
 ## Dereferencing a Prompt in a Field
 
 Prefix `?` is for bare prompts. A prompt held in a struct field uses one of two

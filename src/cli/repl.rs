@@ -157,13 +157,14 @@ async fn eval_snippet_vm(src: &str, state: &mut VmState) -> Result<Option<String
 
 /// Whether an expression prints to stdout on its own as it evaluates, so the
 /// REPL should not also echo its result: a bare `?p` (streams tokens live) or a
-/// `stream(...)` call (prints as it generates).
+/// a dereference behind a `|>` stage (`?p |> g` still streams).
 pub(crate) fn prints_own_output(expr: &Expr) -> bool {
     match expr {
         Expr::PromptDeref { .. } => true,
-        Expr::Call { callee, .. } => {
-            matches!(callee.as_ref(), Expr::Identifier { name, .. } if name == "stream")
-        }
+        // A grammar stage constrains generation and leaves the value a stream,
+        // so it still prints as it goes. A *type* stage collapses it, so the
+        // result is an ordinary value the REPL should echo.
+        Expr::Pipe { value, .. } => prints_own_output(value),
         _ => false,
     }
 }

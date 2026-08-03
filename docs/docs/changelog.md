@@ -4,6 +4,12 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.2.4
+
+- **`?p` is a buffered stream, like every other stream.** Reading one twice gives the same text twice. Until now the receiver was taken on first drain and a second read raised `DoubleStreamDrain`, so printing a dereference and then using the same value was an error rather than the obvious thing. That error is gone.
+- **`stream()` is gone.** It existed only because a grammar-constrained dereference used to collapse into a blocking call, leaving no stream to print. It does not any more: `?p |> g` sends the grammar with the request and keeps the reply a stream, so `print(?p |> g)` streams live with the grammar's muted region suppressed, and reading it as a value gives the full text including that region. One operator covers what took a builtin and a keyword argument.
+- **The mute spec rides on the stream.** `print` no longer has to be told what to suppress — the anchors come from the Grammar the `|>` stage named. There is now one place that builds a `?p` request, where before there were three that had already drifted: one sent a Grammar's bare pattern where another sent the wrapped GBNF, so the same Grammar constrained the model differently depending on how it was reached.
+
 ## v1.2.3
 
 - **`yield` makes streaming an ordinary language feature.** A function whose body contains a `yield` returns a *stream* instead of a value: the body runs to completion filling a buffer, and the caller reads the buffer. `len`, indexing, `for`, and `print` all work on one.

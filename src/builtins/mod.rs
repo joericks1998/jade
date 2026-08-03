@@ -196,7 +196,6 @@ pub fn seed_globals<S: std::hash::BuildHasher>(globals: &mut HashMap<String, VmV
     // `print` and `stream` need async VmState access to drain TokenStreams,
     // so they dispatch through NativeFnId rather than the pure BuiltinFn path.
     globals.insert("print".to_string(),  VmValue::NativeFn(NativeFnId::Print));
-    globals.insert("stream".to_string(), VmValue::NativeFn(NativeFnId::Stream));
     globals.insert("route".to_string(),  VmValue::NativeFn(NativeFnId::Route));
     // Primitive type constructors: callable with one arg like Python's int(), str(), etc.
     for name in &["int", "float", "bool", "str", "char", "func"] {

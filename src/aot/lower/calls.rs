@@ -331,7 +331,7 @@ pub(super) fn resolve_user_calls(
     // reg holding an *unconstrained* `?p` result → (the prompt reg, the deref's
     // instruction index). Only `stream()` consumes this: it needs the prompt
     // itself, not an already-inferred response.
-    let mut reg_promptderef: HashMap<Reg, (Reg, usize)> = HashMap::new();
+    let mut reg_promptderef: HashMap<Reg, (Reg, usize, Option<Reg>)> = HashMap::new();
     // reg holding an array built from a literal → its element regs, so
     // `mute_on=[g]` can be resolved to the single grammar it carries.
     let mut reg_array_lit: HashMap<Reg, Vec<Reg>> = HashMap::new();
@@ -364,11 +364,12 @@ pub(super) fn resolve_user_calls(
                 reg_getfield_module.remove(d);
                 reg_array_lit.remove(d);
                 reg_promptderef.remove(d);
-                // Only an unconstrained deref can be folded into a stream: a
-                // typed or grammar-constrained one has its own inference call
-                // with different semantics.
-                if output_type.is_none() && grammar.is_none() {
-                    reg_promptderef.insert(*d, (*prompt, i));
+                // An unconstrained or grammar-constrained deref is still a
+                // stream, so printing it can be fused into one live streaming
+                // call. A *typed* one is not: coercion cannot happen until
+                // generation finishes, so it has its own blocking call.
+                if output_type.is_none() {
+                    reg_promptderef.insert(*d, (*prompt, i, *grammar));
                 }
                 continue;
             }
@@ -509,28 +510,33 @@ pub(super) fn resolve_user_calls(
                         if let Some((pkgid, fname)) = parse_native_ref(name) {
                             Some(CallKind::NativeCall { pkgid, fname: fname.to_string(), args: args.clone() })
                         } else {
+                            // `print(?p)` / `print(?p |> g)` fuse into one live
+                            // streaming call. That is where muting lives now
+                            // that `stream(?p, mute_on=[g])` is gone: the mute
+                            // anchors ride on the Grammar the stage names.
+                            //
+                            // Fusing also avoids printing twice. The deref on
+                            // its own returns text without emitting anything, so
+                            // if the streaming call ran at the deref *and* print
+                            // printed the result, `let r = ?p; print(r)` would
+                            // show the response twice.
+                            if name == "print"
+                                && args.len() == 1
+                                && let Some(&(prompt, deref_idx, gram)) = reg_promptderef.get(&args[0])
+                            {
+                                skip_getfields.insert(deref_idx);
+                                out.insert(i, CallKind::StreamCall { prompt, grammar: gram });
+                                reg_fn.remove(d);
+                                reg_global.remove(d);
+                                reg_getfield.remove(d);
+                                reg_getfield_module.remove(d);
+                                continue;
+                            }
                             let lowered = LOWERABLE_BUILTINS.contains(&name.as_str())
                                 && matches!(name.as_str(), "print" | "write" | "str" | "int" | "float" | "bool" | "char" | "len")
                                 && args.len() == 1;
                             if lowered {
                                 None
-                            } else if name == "stream" && args.len() == 1 {
-                                // Checked before the reserved-builtin decline
-                                // below: `stream` is reserved, and this is the
-                                // one shape of it the backend can lower.
-                                match reg_promptderef.get(&args[0]) {
-                                    Some(&(prompt, deref_idx)) => {
-                                        skip_getfields.insert(deref_idx);
-                                        Some(CallKind::StreamCall { prompt, grammar: None })
-                                    }
-                                    // `stream(x)` where x is not a fresh `?p`.
-                                    // The VM drains whatever TokenStream it is
-                                    // handed; AOT has no such value to hold, so
-                                    // this declines rather than guessing.
-                                    None => return Err(
-                                        "lower.rs: stream() requires a prompt dereference (`stream(?p)`)".into()
-                                    ),
-                                }
                             } else if RESERVED_BUILTINS.contains(&name.as_str()) {
                                 return Err(format!("lower.rs: unsupported builtin call `{name}`"));
                             } else if fnctx.struct_field_names.contains_key(name) {
@@ -630,47 +636,6 @@ pub(super) fn resolve_user_calls(
                     }
                     out.insert(i, CallKind::DirectNamed { uid, arg_slots });
                 } else if let Some(name) = reg_global.get(callee) {
-                    if name == "stream" {
-                        let (mut prompt_reg, mut mute_reg, mut ok) = (None, None, true);
-                        for (n, reg) in pairs {
-                            match n.as_deref() {
-                                None if prompt_reg.is_none() => prompt_reg = Some(*reg),
-                                Some("mute_on") => mute_reg = Some(*reg),
-                                _ => ok = false,
-                            }
-                        }
-                        let deref = prompt_reg.and_then(|r| reg_promptderef.get(&r).copied());
-                        let (Some((prompt, gf_idx)), true) = (deref, ok) else {
-                            return Err(
-                                "lower.rs: stream() requires a prompt dereference and an optional mute_on=".into()
-                            );
-                        };
-                        // `mute_on` is a list, but the streaming entry takes one
-                        // anchor and one stop. A single grammar maps exactly; more
-                        // than one would need mute regions the C side cannot
-                        // express, so decline rather than silently honour the
-                        // first and drop the rest.
-                        let grammar = match mute_reg {
-                            None => None,
-                            Some(r) => match reg_array_lit.get(&r).map(|v| v.as_slice()) {
-                                Some([]) => None,
-                                Some([g]) => Some(*g),
-                                Some(_) => return Err(
-                                    "lower.rs: stream() mute_on= supports one grammar".into()
-                                ),
-                                None => return Err(
-                                    "lower.rs: stream() mute_on= must be a list literal".into()
-                                ),
-                            },
-                        };
-                        skip_getfields.insert(gf_idx);
-                        out.insert(i, CallKind::StreamCall { prompt, grammar });
-                        reg_fn.remove(d);
-                        reg_global.remove(d);
-                        reg_getfield.remove(d);
-                        reg_getfield_module.remove(d);
-                        continue;
-                    }
                     if RESERVED_BUILTINS.contains(&name.as_str()) {
                         return Err(format!("lower.rs: unsupported builtin kwarg call `{name}`"));
                     }

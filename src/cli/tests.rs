@@ -520,10 +520,23 @@ mod repl {
         Expr::Call { callee: Box::new(callee), args: Vec::new(), kwargs: Vec::new(), span: span() }
     }
 
+    /// A dereference prints as it generates, and a `|>` stage over one still
+    /// does — the REPL must not echo the result too, or every token appears
+    /// twice. `stream(...)` used to be the other case; it no longer exists.
     #[test]
-    fn a_stream_call_prints_as_it_generates() {
-        // The REPL must not echo the result too, or every token appears twice.
-        assert!(prints_own_output(&call(ident("stream"))));
+    fn a_deref_prints_as_it_generates() {
+        let deref = Expr::PromptDeref {
+            expr: Box::new(ident("p")),
+            constraint: None,
+            style: crate::frontend::ast::DerefStyle::Prefix,
+            span: span(),
+        };
+        assert!(prints_own_output(&deref));
+        assert!(prints_own_output(&Expr::Pipe {
+            value: Box::new(deref),
+            stage: Box::new(ident("g")),
+            span: span(),
+        }));
     }
 
     #[test]

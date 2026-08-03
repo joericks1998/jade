@@ -84,10 +84,6 @@ pub fn register_types(ctx: &mut TypeContext) {
         params: vec![JadeType::Unknown],
         ret: Box::new(JadeType::Nil),
     });
-    ctx.define("stream".to_string(), JadeType::Fn {
-        params: vec![JadeType::Unknown],
-        ret: Box::new(JadeType::Str),
-    });
     ctx.define("route".to_string(), JadeType::Fn {
         params: vec![JadeType::Unknown, JadeType::Unknown],
         ret: Box::new(JadeType::Unknown),

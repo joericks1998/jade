@@ -956,17 +956,14 @@ pub(crate) async fn execute_chunk(
                     VmValue::Prompt(t) => t,
                     _ => { vm_err!(JadeError::NotAPrompt { name: "<expr>".to_string(), span }); }
                 };
-                let (grammar_override, grammar_anchor, grammar_stop) = match grammar_reg {
-                    None => (None, None, None),
+                let grammar = match grammar_reg {
+                    None => None,
                     Some(r) => match get(slots, *r).clone() {
-                        VmValue::Grammar(g) => {
-                            (Some(g.to_gbnf()), g.anchor.clone(), g.stop.clone())
-                        }
-                        VmValue::Nil => {
-                            // Grammar expression evaluated to nil (e.g. self.grammar before it
-                            // was set).  Fall through to unconstrained streaming inference.
-                            (None, None, None)
-                        }
+                        VmValue::Grammar(g) => Some(g),
+                        // A grammar expression that evaluated to nil (e.g.
+                        // `self.grammar` before it was set) means no constraint,
+                        // not an error.
+                        VmValue::Nil => None,
                         other => vm_err!(JadeError::TypeError {
                             message: format!(
                                 "|> constraint must be a Grammar value or type name, got {}",
@@ -976,10 +973,25 @@ pub(crate) async fn execute_chunk(
                         }),
                     },
                 };
-                let result = if output_type.is_none() && grammar_override.is_none() {
-                    vm_try!(vm_prompt_deref_stream(text, state, span).await)
-                } else {
-                    vm_try!(vm_prompt_deref(text, output_type.as_deref(), grammar_override, grammar_anchor, grammar_stop, state, span).await)
+                // Only a *type* stage collapses the stream, because a coerced
+                // value cannot exist until generation finishes. A grammar stage
+                // constrains how the reply is produced and leaves it a stream,
+                // which is what replaced `stream(?p, mute_on=[g])`: printing it
+                // streams live and mutes, reading it gives the full text.
+                let result = match output_type.as_deref() {
+                    None => vm_try!(vm_prompt_deref_stream(
+                        text,
+                        grammar.as_deref(),
+                        state,
+                        span
+                    )),
+                    Some(ty) => {
+                        let (gbnf, anchor, stop) = match &grammar {
+                            Some(g) => (Some(g.to_gbnf()), g.anchor.clone(), g.stop.clone()),
+                            None => (None, None, None),
+                        };
+                        vm_try!(vm_prompt_deref(text, Some(ty), gbnf, anchor, stop, state, span).await)
+                    }
                 };
                 set(slots, *dest, result);
             }

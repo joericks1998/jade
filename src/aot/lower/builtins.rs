@@ -12,7 +12,7 @@ use super::*;
 /// is tracked as a known function and takes precedence over this check.)
 pub(super) const RESERVED_BUILTINS: &[&str] = &[
     // core + native + type-constructor globals
-    "write", "len", "input", "print", "stream", "route", "int", "float", "bool", "str", "char", "func",
+    "write", "len", "input", "print", "route", "int", "float", "bool", "str", "char", "func",
     "Grammar",
     // stdlib package globals (accessed via `use`; a bare call is invalid, but
     // reserving them keeps a stray Call from mis-lowering to an indirect call)
