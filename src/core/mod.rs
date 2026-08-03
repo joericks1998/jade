@@ -28,6 +28,9 @@ fn native_len(args: &[VmValue]) -> Result<VmValue> {
     }
     let n = match &args[0] {
         VmValue::Str(s)   => s.chars().count() as i64,
+        // A character has length 1, the same answer `len` gave when indexing a
+        // string produced a one-character string.
+        VmValue::Char(_)  => 1,
         VmValue::Array(a) => a.lock().len() as i64,
         VmValue::Dict(d)  => d.len() as i64,
         _ => return Err(JadeError::TypeError { message: "len".to_string(), span: Span { line: 0, col: 0 } }),
@@ -88,7 +91,7 @@ pub fn register_types(ctx: &mut TypeContext) {
         ret: Box::new(JadeType::Unknown),
     });
     // Primitive type constructors
-    for name in &["int", "float", "bool", "str", "func"] {
+    for name in &["int", "float", "bool", "str", "char", "func"] {
         ctx.define(name.to_string(), JadeType::Fn {
             params: vec![JadeType::Unknown],
             ret: Box::new(JadeType::Unknown),

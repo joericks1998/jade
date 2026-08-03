@@ -85,6 +85,11 @@ pub fn render_word(word: i64) -> String {
     if v.is_nil() {
         return "nil".to_string();
     }
+    // Must come before the heap checks and after `is_nil`: a char is an
+    // immediate sharing the nil branch of the tag space.
+    if v.is_char() {
+        return v.as_char().map(String::from).unwrap_or_default();
+    }
     if v.is_float() {
         return format_float(crate::float::unbox_float(v));
     }

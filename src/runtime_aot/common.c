@@ -63,6 +63,30 @@ int jrt_snprintf_any(char* buf, size_t cap, int64_t val) {
     if (jrt_is_float(v)) return jrt_snprintf_float(buf, cap, jrt_unbox_float(v));
     if (jrt_is_bool(v))  return snprintf(buf, cap, "%s", jrt_unbox_bool(v) ? "true" : "false");
     if (jrt_is_nil(v))   return snprintf(buf, cap, "nil");
+    if (jrt_is_char(v)) {
+        /* Re-encode the scalar as UTF-8. Must sit after jrt_is_nil: a char is
+         * an immediate sharing the nil branch of the tag space. */
+        uint32_t cp = jrt_unbox_char(v);
+        char u[5];
+        int n = 0;
+        if (cp < 0x80) {
+            u[n++] = (char)cp;
+        } else if (cp < 0x800) {
+            u[n++] = (char)(0xC0 | (cp >> 6));
+            u[n++] = (char)(0x80 | (cp & 0x3F));
+        } else if (cp < 0x10000) {
+            u[n++] = (char)(0xE0 | (cp >> 12));
+            u[n++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+            u[n++] = (char)(0x80 | (cp & 0x3F));
+        } else {
+            u[n++] = (char)(0xF0 | (cp >> 18));
+            u[n++] = (char)(0x80 | ((cp >> 12) & 0x3F));
+            u[n++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+            u[n++] = (char)(0x80 | (cp & 0x3F));
+        }
+        u[n] = '\0';
+        return snprintf(buf, cap, "%s", u);
+    }
     return snprintf(buf, cap, "<object>");  /* non-string heap pointer */
 }
 
@@ -151,6 +175,42 @@ int64_t jrt_int_any(int64_t val) {
         throw_msg(msg);
     }
     throw_msg("int(): cannot convert value to int");
+    return JRT_NIL; /* unreachable (throw_msg longjmps) */
+}
+
+/* char(x) — mirrors the VM's `vm_type_call` "char" arm exactly. Accepts a char
+ * unchanged, or a string of exactly one character; anything else raises. The
+ * one-character rule means the conversion can never silently drop input, and
+ * the string's trust byte moves into the char word. */
+int64_t jrt_char_any(int64_t val) {
+    jade_value_t v = (jade_value_t)val;
+    if (jrt_is_char(v)) return val;
+    if (jrt_is_str(v)) {
+        const char* s = (const char*)jrt_unbox_ptr(v);
+        unsigned char c = (unsigned char)s[0];
+        if (c) {
+            int step = (c >= 0xF0) ? 4 : (c >= 0xE0) ? 3 : (c >= 0xC0) ? 2 : 1;
+            /* Exactly one character: the sequence must end the string. */
+            if (s[step] == '\0') {
+                uint32_t cp;
+                switch (step) {
+                    case 1: cp = (uint32_t)(c & 0x7F); break;
+                    case 2: cp = (uint32_t)(c & 0x1F); break;
+                    case 3: cp = (uint32_t)(c & 0x0F); break;
+                    default: cp = (uint32_t)(c & 0x07); break;
+                }
+                for (int k = 1; k < step; k++) {
+                    cp = (cp << 6) | (uint32_t)((unsigned char)s[k] & 0x3F);
+                }
+                return (int64_t)jrt_box_char_trust(cp, jrt_trust_of(s));
+            }
+        }
+        char msg[128];
+        snprintf(msg, sizeof msg,
+                 "char(): expected a string of exactly one character, got \"%s\"", s);
+        throw_msg(msg);
+    }
+    throw_msg("char(): cannot convert value to char");
     return JRT_NIL; /* unreachable (throw_msg longjmps) */
 }
 
@@ -272,8 +332,13 @@ void jrt_set_field(int64_t obj, const char* field, int64_t val) {
     throw_msg("value does not support field assignment");
 }
 
-/* i-th UTF-8 codepoint of a tagged string as a fresh tagged string (VM char
- * indexing), preserving the source's trust byte; raises on out-of-range. */
+/* i-th UTF-8 codepoint of a tagged string as a char immediate, preserving the
+ * source's trust; raises on out-of-range.
+ *
+ * Returned a fresh one-character string until v1.2.1, which allocated once per
+ * character of every string scan. A char is an immediate, so this now allocates
+ * nothing. The trust byte moves from the string header into bit 63 of the word,
+ * because a character of a tainted string is still tainted. */
 static int64_t jk_str_index(int64_t obj, int64_t idx) {
     if (!jrt_is_int((jade_value_t)idx)) throw_msg("string index must be int");
     int64_t i = jrt_unbox_int((jade_value_t)idx);
@@ -285,11 +350,18 @@ static int64_t jk_str_index(int64_t obj, int64_t idx) {
         unsigned char c = (unsigned char)*p;
         int step = (c >= 0xF0) ? 4 : (c >= 0xE0) ? 3 : (c >= 0xC0) ? 2 : 1;
         if (n == i) {
-            uint8_t trust = jrt_trust_of(s);
-            char* out = jrt_str_new(step, trust);
-            memcpy(out, p, (size_t)step);
-            out[step] = '\0';
-            return (int64_t)jrt_box_str(out);
+            /* Decode the UTF-8 sequence to a scalar. */
+            uint32_t cp;
+            switch (step) {
+                case 1: cp = (uint32_t)(c & 0x7F); break;
+                case 2: cp = (uint32_t)(c & 0x1F); break;
+                case 3: cp = (uint32_t)(c & 0x0F); break;
+                default: cp = (uint32_t)(c & 0x07); break;
+            }
+            for (int k = 1; k < step; k++) {
+                cp = (cp << 6) | (uint32_t)((unsigned char)p[k] & 0x3F);
+            }
+            return (int64_t)jrt_box_char_trust(cp, jrt_trust_of(s));
         }
         p += step;
         n++;

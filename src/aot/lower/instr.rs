@@ -1020,10 +1020,11 @@ pub(super) fn lower_instr<'ctx>(
                 }
                 // int(x)/float(x)/bool(x) → tag-dispatching runtime conversions
                 // (VM-faithful; int/float raise a catchable error on bad input).
-                Some(bc) if matches!(bc.name, "int" | "float" | "bool") => {
+                Some(bc) if matches!(bc.name, "int" | "float" | "bool" | "char") => {
                     let fname = match bc.name {
                         "int" => "jrt_int_any",
                         "float" => "jrt_float_any",
+                        "char" => "jrt_char_any",
                         _ => "jrt_bool_any",
                     };
                     let f = low.runtime_fn(fname, i64_ty.fn_type(&[i64_ty.into()], false));

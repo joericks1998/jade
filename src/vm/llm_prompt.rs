@@ -69,10 +69,9 @@ pub(crate) async fn vm_prompt_deref(
     }
 }
 
-/// Resolve a possibly-dotted decorator name to a callable VmValue.
-/// "tools.on_fail" → GetGlobal("tools") → GetMethod("on_fail") as BoundMethod.
-/// Mirrors what the function-decorator emitter does with bytecode at compile time.
-
+/// Start a streaming inference call and return a lazy `VmValue::TokenStream`.
+/// Cache hits short-circuit to `VmValue::Str` — drain logic handles both
+/// transparently.
 pub(crate) async fn vm_prompt_deref_stream(
     prompt_text: String,
     state: &mut VmState,

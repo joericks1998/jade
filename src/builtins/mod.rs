@@ -195,7 +195,7 @@ pub fn seed_globals<S: std::hash::BuildHasher>(globals: &mut HashMap<String, VmV
     globals.insert("stream".to_string(), VmValue::NativeFn(NativeFnId::Stream));
     globals.insert("route".to_string(),  VmValue::NativeFn(NativeFnId::Route));
     // Primitive type constructors: callable with one arg like Python's int(), str(), etc.
-    for name in &["int", "float", "bool", "str", "func"] {
+    for name in &["int", "float", "bool", "str", "char", "func"] {
         globals.insert(name.to_string(), VmValue::TypeRef(name.to_string()));
     }
     // Grammar global: Grammar.new(pattern) → VmValue::Grammar(pattern)

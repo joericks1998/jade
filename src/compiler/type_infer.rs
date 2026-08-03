@@ -612,6 +612,10 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
             let titerable = infer_expr(iterable, ctx)?;
             let elem_ty = match &titerable.ty {
                 JadeType::Array(elem) => *elem.clone(),
+                // A string iterates by character. `for` lowers to a counter
+                // against `len` plus an index, and both already work on strings
+                // in character units, so this needs no new lowering.
+                JadeType::Str         => JadeType::Char,
                 JadeType::Unknown     => JadeType::Unknown,
                 other => return Err(JadeError::TypeError {
                     message: format!("cannot iterate over {}", jade_type_name(other)),
@@ -1179,7 +1183,10 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
                     }
                     _ => JadeType::Unknown,
                 },
-                JadeType::Str            => JadeType::Str,
+                // Indexing a string yields a char, not a one-character string.
+                // Breaking as of v1.2.1; `char` compares equal to the string
+                // spelling it so that `s[0] == "a"` keeps its meaning.
+                JadeType::Str            => JadeType::Char,
                 JadeType::Unknown        => JadeType::Unknown,
                 other => return Err(JadeError::TypeMismatch {
                     expected: "array, dict, or str".to_string(),
@@ -1428,7 +1435,7 @@ fn classify_deref_stage(stage: &Expr, ctx: &mut TypeContext) -> Result<Option<De
 fn is_builtin_type_name(name: &str) -> bool {
     matches!(
         name,
-        "int" | "float" | "bool" | "str" | "nil" | "null"
+        "int" | "float" | "bool" | "char" | "str" | "nil" | "null"
         | "array" | "Array" | "dict" | "Dict"
     )
 }
@@ -1547,12 +1554,25 @@ fn infer_binop(op: &BinOpKind, lty: &JadeType, rty: &JadeType, span: Span) -> Re
         return Ok(Unknown);
     }
 
+    // A char stands for the one-character string spelling it, so the two
+    // compare and concatenate freely. This is the documented exception to
+    // "`==` refuses to compare across types", and it exists because `s[i]`
+    // began yielding a char in v1.2.1: without it, every `if s[0] == "a"`
+    // already written would have become a type error.
+    if matches!(op, Eq | Ne | Lt | Gt | Le | Ge)
+        && matches!((lty, rty), (Char, Str) | (Str, Char) | (Char, Char))
+    {
+        return Ok(Bool);
+    }
+
     match op {
         Add => match (lty, rty) {
             (Int,   Int)               => Ok(Int),
             (Float, Float)             => Ok(Float),
             (Int,   Float) | (Float, Int) => Ok(Float),
             (Str,   Str)               => Ok(Str),
+            // Concatenation with a char yields a string, in either order.
+            (Char, Str) | (Str, Char) | (Char, Char) => Ok(Str),
             _ => Err(JadeError::TypeMismatch {
                 expected: "int, float, or str on both sides of +".to_string(),
                 got: format!("{} + {}", jade_type_name(lty), jade_type_name(rty)),
@@ -1909,6 +1929,7 @@ pub fn jade_type_name(ty: &JadeType) -> String {
         JadeType::Int          => "int".to_string(),
         JadeType::Float        => "float".to_string(),
         JadeType::Bool         => "bool".to_string(),
+        JadeType::Char         => "char".to_string(),
         JadeType::Str          => "str".to_string(),
         JadeType::Nil          => "nil".to_string(),
         JadeType::Prompt       => "prompt".to_string(),
@@ -1928,6 +1949,7 @@ fn parse_type_name(s: &str) -> JadeType {
         "int"   => JadeType::Int,
         "float" => JadeType::Float,
         "bool"  => JadeType::Bool,
+        "char"  => JadeType::Char,
         "str"   => JadeType::Str,
         "nil"   => JadeType::Nil,
         "null"  => JadeType::Nil,

@@ -124,8 +124,58 @@ pub(crate) fn finish_dynop(out: dynop::Outcome, op: &BinOpKind, l: VmValue, r: V
     }
 }
 
+/// Spell a char as the one-character string it stands for, keeping its trust.
+fn char_to_str(c: &jade_runtime::trust::JChar) -> VmValue {
+    VmValue::Str(JStr::with_trust(c.ch().to_string(), c.trust()))
+}
+
+/// Apply a comparison to two chars without allocating.
+fn char_rel(op: &BinOpKind, a: char, b: char) -> Option<bool> {
+    use BinOpKind::*;
+    Some(match op {
+        Eq => a == b,
+        Ne => a != b,
+        Lt => a < b,
+        Gt => a > b,
+        Le => a <= b,
+        Ge => a >= b,
+        _ => return None,
+    })
+}
+
 pub(crate) fn eval_binop_dynamic(op: &BinOpKind, l: VmValue, r: VmValue, span: Span) -> Result<VmValue> {
     use BinOpKind::*;
+
+    // ── char ──────────────────────────────────────────────────────────────
+    //
+    // A char behaves as the one-character string spelling it. That is a
+    // deliberate exception to the "no cross-type comparison" rule: indexing a
+    // string yields a char as of v1.2.1, so without it every existing
+    // `if s[0] == "a"` would have silently changed meaning.
+    //
+    // Two chars compare on their scalars directly. Comparing scalars and
+    // comparing their UTF-8 spellings give the same answer, and a scan loop
+    // testing `c == "x"` should not allocate once per character.
+    match (&l, &r) {
+        (VmValue::Char(a), VmValue::Char(b)) => {
+            if let Some(v) = char_rel(op, a.ch(), b.ch()) {
+                return Ok(VmValue::Bool(v));
+            }
+        }
+        (VmValue::Char(a), VmValue::Str(_)) => {
+            return eval_binop_dynamic(op, char_to_str(a), r, span);
+        }
+        (VmValue::Str(_), VmValue::Char(b)) => {
+            return eval_binop_dynamic(op, l, char_to_str(b), span);
+        }
+        _ => {}
+    }
+    // Concatenation still has to build a string, so it takes the slow path.
+    if matches!(op, Add) && matches!((&l, &r), (VmValue::Char(_), VmValue::Char(_))) {
+        let (VmValue::Char(a), VmValue::Char(b)) = (&l, &r) else { unreachable!() };
+        return eval_binop_dynamic(op, char_to_str(a), char_to_str(b), span);
+    }
+
     // Arithmetic + comparison are decided by the shared `dynop` core, so the VM
     // and AOT cannot diverge on overflow/bool/cross-kind rules.
     if let Some(dop) = binop_to_dynop(op) {
@@ -231,8 +281,10 @@ pub(crate) fn cmp_dynamic(slots: &[VmValue], l: Reg, r: Reg, op: &str, span: Spa
         "<=" => BinOpKind::Le, ">=" => BinOpKind::Ge,
         _ => unreachable!("cmp_dynamic op: {op}"),
     };
-    let out = dynop::binop(binop_to_dynop(&bop).unwrap(), vm_kind(&lv), vm_kind(&rv));
-    finish_dynop(out, &bop, lv, rv, span)
+    // Delegate rather than repeat the dynop call: this path used to be a fourth
+    // copy of the comparison rules, and `char` would have had to be taught to
+    // each one separately.
+    eval_binop_dynamic(&bop, lv, rv, span)
 }
 
 pub(crate) fn vm_index(obj: VmValue, idx: VmValue, span: Span) -> Result<VmValue> {
@@ -243,8 +295,12 @@ pub(crate) fn vm_index(obj: VmValue, idx: VmValue, span: Span) -> Result<VmValue
             if i < 0 || i as usize >= len {
                 Err(JadeError::IndexOutOfBounds { index: i, len, span })
             } else {
-                // A character of a tainted string is still tainted.
-                Ok(VmValue::Str(s.derive(chars[i as usize].to_string())))
+                // A character of a tainted string is still tainted, which is
+                // why `JChar` carries a trust byte at all.
+                Ok(VmValue::Char(jade_runtime::trust::JChar::with_trust(
+                    chars[i as usize],
+                    s.trust(),
+                )))
             }
         }
         (VmValue::Array(arc), VmValue::Int(i)) => {

@@ -18,6 +18,8 @@ pub enum JadeType {
     Int,
     Float,
     Bool,
+    /// A single Unicode scalar; the element type of a string.
+    Char,
     Str,
     Nil,
     Prompt,

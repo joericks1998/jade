@@ -44,6 +44,13 @@ fn get_bool(state: &VmState, name: &str) -> bool {
     }
 }
 
+fn get_char(state: &VmState, name: &str) -> char {
+    match state.globals.get(name).expect("var not found") {
+        VmValue::Char(c) => c.ch(),
+        v => panic!("expected Char, got {v:?}"),
+    }
+}
+
 fn get_str<'a>(state: &'a VmState, name: &str) -> &'a str {
     match state.globals.get(name).expect("var not found") {
         VmValue::Str(s) => s,
@@ -984,16 +991,30 @@ fn test_vm_str_ge() {
     assert!(get_bool(&s, "b"));
 }
 
+/// Indexing a string yields a `char`, not a one-character `str`. Breaking as
+/// of v1.2.1, and the reason `char` compares equal to the string spelling it.
 #[test]
 fn test_vm_str_index() {
     let s = run_src("let sv = \"hello\"\nlet h = sv[0]").unwrap();
-    assert_eq!(get_str(&s, "h"), "h");
+    assert_eq!(get_char(&s, "h"), 'h');
 }
 
 #[test]
 fn test_vm_str_index_last() {
     let s = run_src("let sv = \"hello\"\nlet o = sv[4]").unwrap();
-    assert_eq!(get_str(&s, "o"), "o");
+    assert_eq!(get_char(&s, "o"), 'o');
+}
+
+/// A character of a tainted string is still tainted. Without this a loop
+/// rebuilding a string character by character would launder it past `sh.exec`,
+/// and nothing in `examples/trust/` would notice — those only use whole strings.
+#[test]
+fn a_char_taken_from_a_tainted_string_is_tainted() {
+    let s = run_src("let sv = \"hi\"\nlet c = sv[0]").unwrap();
+    match s.globals.get("c").expect("var not found") {
+        VmValue::Char(c) => assert!(!c.is_tainted(), "a source literal is trusted"),
+        v => panic!("expected Char, got {v:?}"),
+    }
 }
 
 #[test]

@@ -561,6 +561,66 @@ mod type_infer {
 
     /// A user function beats anything else it collides with, which is the rule
     /// for every name that is not a builtin keyword or a declared struct.
+    // ── char ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn indexing_a_string_infers_char() {
+        let tp = infer_ok("let s = \"hi\"\nlet c = s[0]");
+        let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!("expected Let") };
+        assert_eq!(value.ty, JadeType::Char);
+    }
+
+    #[test]
+    fn iterating_a_string_binds_a_char() {
+        // The loop variable's type shows up on a use of it inside the body.
+        let tp = infer_ok("for c in \"hi\" {\n    let x = c\n}");
+        let TStmt::For { body, .. } = &tp.stmts[0] else { panic!("expected For") };
+        let TStmt::Let { value, .. } = &body[0] else { panic!("expected Let in body") };
+        assert_eq!(value.ty, JadeType::Char);
+    }
+
+    /// The documented exception to "`==` refuses to compare across types". It
+    /// exists because `s[i]` began yielding a char: without it every
+    /// `if s[0] == "a"` already written would have become a type error.
+    #[test]
+    fn a_char_compares_with_a_str_in_both_orders() {
+        for src in [
+            "let s = \"hi\"\nlet b = s[0] == \"h\"",
+            "let s = \"hi\"\nlet b = \"h\" == s[0]",
+            "let s = \"hi\"\nlet b = s[0] < s[1]",
+        ] {
+            let tp = infer_ok(src);
+            let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!("expected Let") };
+            assert_eq!(value.ty, JadeType::Bool, "for {src}");
+        }
+    }
+
+    #[test]
+    fn concatenating_a_char_with_a_str_yields_a_str() {
+        for src in [
+            "let s = \"hi\"\nlet r = s[0] + \"x\"",
+            "let s = \"hi\"\nlet r = \"x\" + s[0]",
+            "let s = \"hi\"\nlet r = s[0] + s[1]",
+        ] {
+            let tp = infer_ok(src);
+            let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!("expected Let") };
+            assert_eq!(value.ty, JadeType::Str, "for {src}");
+        }
+    }
+
+    /// `char` is a builtin type keyword, so it constrains a dereference rather
+    /// than applying the `char()` constructor to the raw reply. Without the
+    /// grammar the model generates freely and the coercion then fails.
+    #[test]
+    fn a_char_stage_on_a_deref_constrains_rather_than_converts() {
+        let tp = infer_ok("prompt p = \"x\"\nlet c = ?p |> char");
+        let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!("expected Let") };
+        let TExprKind::PromptDeref { output_type, .. } = &value.kind
+            else { panic!("expected PromptDeref, got {:?}", value.kind) };
+        assert_eq!(output_type.as_deref(), Some("char"));
+        assert_eq!(value.ty, JadeType::Char);
+    }
+
     #[test]
     fn a_user_function_stage_beats_a_grammar_variable_of_the_same_name() {
         let tp = infer_ok(

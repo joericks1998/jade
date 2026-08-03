@@ -8,7 +8,7 @@ use super::*;
 /// `GetGlobal(name)` + `Call`). A name here is only trusted when the program
 /// never `SetGlobal`s it (so the global still holds the builtin, not a user
 /// value). Grows as more builtins are supported.
-pub(super) const LOWERABLE_BUILTINS: &[&str] = &["print", "write", "str", "int", "float", "bool", "len"];
+pub(super) const LOWERABLE_BUILTINS: &[&str] = &["print", "write", "str", "int", "float", "bool", "char", "len"];
 
 /// The single register an instruction writes, or `None` for pure
 /// stores/control-flow. Used to invalidate builtin tracking when a register is
@@ -87,7 +87,7 @@ pub(super) fn resolve_builtin_calls(code: &[Instr]) -> HashMap<usize, BuiltinCal
                 if let Some(&b) = reg_builtin.get(callee) {
                     // Only resolve arities this backend lowers; others fall back.
                     let ok = match b {
-                        "print" | "write" | "str" | "int" | "float" | "bool" | "len" => args.len() == 1,
+                        "print" | "write" | "str" | "int" | "float" | "bool" | "char" | "len" => args.len() == 1,
                         _ => false,
                     };
                     if ok {
@@ -508,7 +508,7 @@ pub(super) fn resolve_user_calls(
                             Some(CallKind::NativeCall { pkgid, fname: fname.to_string(), args: args.clone() })
                         } else {
                             let lowered = LOWERABLE_BUILTINS.contains(&name.as_str())
-                                && matches!(name.as_str(), "print" | "write" | "str" | "int" | "float" | "bool" | "len")
+                                && matches!(name.as_str(), "print" | "write" | "str" | "int" | "float" | "bool" | "char" | "len")
                                 && args.len() == 1;
                             if lowered {
                                 None

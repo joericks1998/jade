@@ -31,6 +31,11 @@ pub enum VmValue {
     Int(i64),
     Float(f64),
     Bool(bool),
+    /// A single Unicode scalar. Immediate, like `Int`/`Bool` — indexing or
+    /// iterating a string yields these, so a scan allocates nothing. Carries a
+    /// trust byte for the same reason `Str` does: a character of a tainted
+    /// string is still tainted.
+    Char(jade_runtime::trust::JChar),
     /// A string plus where it came from. The trust byte is the same one
     /// compiled code keeps in the string header — the interpreter tracked no
     /// trust at all, so `sh.exec(sh.exec("..."))` ran under `jade run` and was
@@ -85,6 +90,7 @@ impl std::fmt::Debug for VmValue {
             VmValue::Int(i)   => write!(f, "Int({})", i),
             VmValue::Float(v) => write!(f, "Float({})", v),
             VmValue::Bool(b)  => write!(f, "Bool({})", b),
+            VmValue::Char(c)  => write!(f, "Char({:?})", c.ch()),
             VmValue::Str(s)   => write!(f, "Str({:?})", s),
             VmValue::Fn(cf)   => write!(f, "Fn({})", cf.params.join(", ")),
             VmValue::Closure(cf, _) => write!(f, "Closure({})", cf.params.join(", ")),
@@ -147,6 +153,7 @@ pub fn value_to_display(v: &VmValue) -> String {
         VmValue::NativeLibFn(nfn)      => format!("<native lib fn {}>", nfn.name),
         VmValue::Future(_)             => "<future>".to_string(),
         VmValue::TokenStream(_)        => "<token stream>".to_string(),
+        VmValue::Char(c)               => c.ch().to_string(),
         VmValue::TypeRef(t)            => format!("<type {}>", t),
         VmValue::Nil                   => "nil".to_string(),
     }
@@ -158,6 +165,7 @@ pub fn value_type_name(v: &VmValue) -> &'static str {
         VmValue::Int(_) => "int",
         VmValue::Float(_) => "float",
         VmValue::Bool(_) => "bool",
+        VmValue::Char(_) => "char",
         VmValue::Str(_) => "str",
         VmValue::Array(_) => "array",
         VmValue::Dict(_) => "dict",

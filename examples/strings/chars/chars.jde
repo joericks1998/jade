@@ -1,0 +1,38 @@
+// char — a single Unicode scalar, distinct from a one-character string.
+//
+// Before v1.2.1 `s[0]` gave back a one-character `str`, which meant scanning a
+// string allocated a fresh heap string per character. A char is an immediate:
+// it rides in the tagged value word alongside int, bool and nil, so a scan
+// allocates nothing.
+//
+// It is a *scalar*, not a byte. Indexing walks characters, so a multi-byte
+// character counts once and comes back whole.
+
+let s = "café"
+
+// Indexing yields a char.
+print(s[0])
+print(s[3])
+
+// Iterating a string binds a char per step, four for this string and not five,
+// even though "é" is two bytes in UTF-8.
+for c in s {
+    print(c)
+}
+
+// A char compares equal to the one-character string spelling it. That is a
+// deliberate exception to Jade's rule that `==` refuses to compare across
+// types: without it, every existing `if s[0] == "a"` would have changed
+// meaning the day char arrived.
+print(s[0] == "c")
+print(s[0] == s[0])
+
+// Chars order by scalar value.
+print("a" < "b")
+
+// Concatenation with a string works in both directions and produces a string.
+print(s[0] + "at")
+print("the " + s[0])
+
+// char() converts a one-character string.
+print(char("x"))

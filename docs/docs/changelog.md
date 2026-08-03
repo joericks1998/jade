@@ -4,6 +4,14 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.2.1
+
+- **`char` is a real type.** Indexing a string, iterating one, `char("x")`, and `?p |> char` all produce a single Unicode scalar rather than a one-character string. It is an *immediate*, riding inside the tagged value word next to `int`, `bool`, and `nil`, so scanning a string now allocates nothing where it used to allocate once per character.
+- **Strings iterate.** `for c in s` was a type error until now; it binds a char per step and counts characters, so a four-character string with a two-byte character in it gives four steps and not five.
+- **Breaking: `s[0]` is a char, not a `str`.** A char compares equal to the one-character string spelling it, orders against strings, and concatenates with them in either direction, so `if s[0] == "a"` keeps meaning what it meant. That is a deliberate exception to Jade's "no cross-type comparison" rule and it is now written down in the types reference rather than being folklore.
+- **A char taken from a tainted string is still tainted.** The trust byte lives in a string's header, and a char has no header — so it rides in bit 63 of the value word in a compiled binary and in a field on `JChar` in the interpreter. Without it, a loop rebuilding a string character by character would have laundered it silently past `sh.exec`, and nothing in the trust fixtures would have caught it.
+- **The tagged-value layout gained its first new immediate.** `char` claims bit 4 of the nil branch, the only unused immediate space left in the word. `is_nil` therefore tests five bits rather than four: before this, *any* word ending `0b0111` was nil whatever sat above it, so a char would have read as `nil`. The Rust and C copies of that test are two spellings of one rule and moved together.
+
 ## v1.2.0
 
 - **`|>` is one operator again.** It was two, sharing a spelling. An ordinary pipe (`5 |> double`) was desugared by the parser into a call; a pipe after a prompt dereference (`?p |> int`) was read by a *different* rule that stored the stage on the dereference. Which one applied depended on surrounding syntax, decided before anything knew what the names meant. Now every `|>` parses the same way and the type checker decides what the stage is, which is where that decision belongs — a stage is a type, a Grammar, or a function, and only the checker knows which.
