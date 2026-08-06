@@ -153,11 +153,13 @@ static const char* ffi_strdup_abi_type(const char* name) {
 }
 
 /* Marshal a tagged jade_value_t into a JadeVal for the native ABI. Matches
- * native.rs::vm_to_ffi: primitives convert directly; arrays/dicts are deep-copied
- * into libc-owned JadeArr/JadeMap trees; structs and other heap kinds become nil.
+ * native.rs::vm_to_ffi: primitives convert directly; arrays, dicts, structs and
+ * bytes are deep-copied into libc-owned trees; remaining heap kinds (functions,
+ * futures, prompts) become nil, having no ABI representation.
  * `owned_str` is set for container elements (their strings are copied so the tree
  * owns them) and clear at the top level (strings are handed over non-owning — the
- * native fn copies if it needs to retain). */
+ * native fn copies if it needs to retain). It does not apply to bytes, which are
+ * copied at every level. */
 static JadeVal to_ffi_val(jade_value_t v, int owned_str) {
     JadeVal out = {0};
     if (jrt_is_int(v)) {
@@ -237,6 +239,27 @@ static JadeVal to_ffi_val(jade_value_t v, int owned_str) {
             }
             out.tag = JADE_FFI_STRUCT;
             out.data.as_struct = st;
+        } else if (kind == JK_BYTES) {
+            /* Copied into the libc heap unconditionally, ignoring `owned_str`:
+             * the far side may free it, and this process holds two mimalloc
+             * instances that must not free each other's allocations. Same rule
+             * as JadeArr/JadeMap above, and the same one native.rs applies —
+             * vm_to_ffi hands over only *strings* borrowed at the top level, so
+             * bytes are owned at every level and ffi_free_node reclaims them.
+             * The trust byte does not cross: JadeBytes is data + length, and
+             * anything coming back in is TAINTED regardless. */
+            const unsigned char* src = jrt_bytes_data(p);
+            size_t n = (size_t)jrt_bytes_len(p);
+            JadeBytes* bx = (JadeBytes*)malloc(sizeof(JadeBytes));
+            if (!bx) jade_rt_fatal("jade: out of memory");
+            /* malloc(0) may return NULL legitimately, which the free path
+             * cannot tell from failure — ask for a byte instead. */
+            bx->data = (unsigned char*)malloc(n ? n : 1);
+            if (!bx->data) jade_rt_fatal("jade: out of memory");
+            bx->len = n;
+            if (n && src) memcpy(bx->data, src, n);
+            out.tag = JADE_FFI_BYTES;
+            out.data.as_bytes = bx;
         } else {
             out.tag = JADE_FFI_NIL;  /* function / future / other heap kind */
         }
@@ -250,9 +273,9 @@ static JadeVal to_ffi_val(jade_value_t v, int owned_str) {
 static JadeVal to_ffi(jade_value_t v) { return to_ffi_val(v, 0); }
 
 /* Marshal a JadeVal returned by a native fn back to a tagged jade_value_t.
- * Matches native.rs::ffi_to_vm: output strings are copied into TAINTED tagged
- * strings (native output is external input); arrays/dicts are rebuilt as
- * kind-tagged collections. JADE_FFI_ERROR raises. */
+ * Matches native.rs::ffi_to_vm: output strings and bytes are copied in as
+ * TAINTED (native output is external input); arrays, dicts and structs are
+ * rebuilt as kind-tagged collections. JADE_FFI_ERROR raises. */
 static jade_value_t from_ffi(const JadeVal* v) {
     switch (v->tag) {
         case JADE_FFI_NIL:   return JRT_NIL;
@@ -288,6 +311,15 @@ static jade_value_t from_ffi(const JadeVal* v) {
             for (size_t i = 0; i < st->len; i++)
                 jrt_kstruct_set(obj, st->keys[i] ? st->keys[i] : "", from_ffi(&st->vals[i]));
             return jrt_box_ptr(obj);
+        }
+        case JADE_FFI_BYTES: {
+            const JadeBytes* b = v->data.as_bytes;
+            if (!b) return JRT_NIL;
+            const unsigned char* d = b->data;
+            size_t n = (d && b->len) ? b->len : 0;
+            /* TAINTED: data from a native package is from outside the program,
+             * exactly as a file read is. Matches native.rs::ffi_to_vm. */
+            return jrt_box_ptr(jrt_bytes_new(d, n, JRT_TAINTED));
         }
         case JADE_FFI_ERROR:
             native_raise("%s", v->data.as_str ? v->data.as_str : "native error");
@@ -343,16 +375,27 @@ static void ffi_free_node(JadeVal* v) {
             }
             break;
         }
+        case JADE_FFI_BYTES: {
+            JadeBytes* b = v->data.as_bytes;
+            if (b) {
+                free(b->data);
+                free(b);
+            }
+            break;
+        }
         default:
             break;  /* scalar: nothing owned */
     }
 }
 
 void jade_ffi_free(JadeVal* v) {
-    /* Only container roots own heap; top-level scalars (incl. non-owning strings)
-     * are left untouched, so this is safe to call on any JadeVal. */
+    /* Only owning kinds are reclaimed; top-level scalars (incl. non-owning
+     * strings) are left untouched, so this is safe to call on any JadeVal.
+     * Bytes belong here even though they are not a container: to_ffi_val copies
+     * them at every level, top included, so a bytes argument that is not freed
+     * leaks its payload and header on every call. */
     if (v->tag == JADE_FFI_ARRAY || v->tag == JADE_FFI_DICT ||
-        v->tag == JADE_FFI_STRUCT) ffi_free_node(v);
+        v->tag == JADE_FFI_STRUCT || v->tag == JADE_FFI_BYTES) ffi_free_node(v);
 }
 
 jade_value_t jrt_native_call(void* handle, const char* fn_name,
@@ -402,8 +445,9 @@ jade_value_t jrt_native_call(void* handle, const char* fn_name,
  * which speak tagged `jade_value_t`.
  *
  * `to_ffi`/`from_ffi` are static, and codegen cannot call a static, so these
- * thin externs expose them. Same conversions, same limits: non-primitives
- * become nil in both directions. */
+ * thin externs expose them. Same conversions, same limits: arrays, dicts,
+ * structs, strings and bytes all cross; a function, future or prompt has no ABI
+ * representation and becomes nil in both directions. */
 jade_value_t jrt_ffi_to_tagged(const JadeVal* v) {
     return from_ffi(v);
 }

@@ -1,0 +1,44 @@
+// A float displays the same way on both engines, whatever its magnitude.
+//
+// Compiled code used to format floats in C with "%.*g" at the fewest digits
+// that round-tripped. %g switches to exponent form as soon as the exponent
+// reaches the precision, which is exactly when a float needs trailing zeros
+// before the decimal point — so `jade build` printed 1e+01 for 10.0 and 4.8e+04
+// for 48000.0 while `jade run` printed 10.0 and 48000.0. Sample rates, byte
+// counts and durations were the values that broke; 1024.0 and 10.5 looked fine,
+// which is what kept it hidden. Both engines now share one renderer.
+
+// The values that broke.
+print(10.0)
+print(100.0)
+print(110.0)
+print(48000.0)
+print(44100.0)
+print(-10.0)
+// → 10.0
+// → 100.0
+// → 110.0
+// → 48000.0
+// → 44100.0
+// → -10.0
+
+// The neighbours that always worked, so a regression shows as a change rather
+// than a whole category going quiet.
+print(1024.0)
+print(10.5)
+print(0.001)
+print(0.0)
+// → 1024.0
+// → 10.5
+// → 0.001
+// → 0.0
+
+// str() and f-strings take the same path as print.
+print(str(48000.0))
+print(f"rate {44100.0} hz")
+// → 48000.0
+// → rate 44100.0 hz
+
+// Inside a container, which was always correct — the two paths must agree.
+print([10.0, 20.0])
+// → [10.0, 20.0]

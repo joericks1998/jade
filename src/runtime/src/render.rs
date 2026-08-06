@@ -186,6 +186,41 @@ mod tests {
         assert_eq!(format_float(f64::NEG_INFINITY), "-inf");
     }
 
+    /// Never scientific notation, whatever the magnitude.
+    ///
+    /// The AOT runtime used to format floats in C with `"%.*g"` at the fewest
+    /// digits that round-tripped, and `%g` switches to exponent form as soon as
+    /// the exponent reaches the precision — precisely when a float needs
+    /// trailing zeros before the decimal point. So a compiled binary printed
+    /// `1e+01` for `10.0` and `4.8e+04` for `48000.0`, which is to say sample
+    /// rates, byte counts and durations were the values that broke, while
+    /// `1024.0` and `10.5` looked fine. Both engines now share this function.
+    #[test]
+    fn integer_valued_floats_never_go_scientific() {
+        assert_eq!(format_float(10.0), "10.0");
+        assert_eq!(format_float(100.0), "100.0");
+        assert_eq!(format_float(110.0), "110.0");
+        assert_eq!(format_float(48000.0), "48000.0");
+        assert_eq!(format_float(44100.0), "44100.0");
+        assert_eq!(format_float(-10.0), "-10.0");
+        // The neighbours that always worked, so a regression is visible as a
+        // change rather than as a whole category going quiet.
+        assert_eq!(format_float(1024.0), "1024.0");
+        assert_eq!(format_float(10.5), "10.5");
+        assert_eq!(format_float(0.001), "0.001");
+    }
+
+    /// Float text has no length bound, which is why `print` and `str` render it
+    /// on the heap rather than into a fixed scratch buffer: 1e300 is 301 digits
+    /// and the old AOT path formatted scalars into 64 bytes.
+    #[test]
+    fn a_large_float_expands_in_full() {
+        let s = format_float(1e300);
+        assert!(s.len() > 64, "expected full expansion, got {} chars", s.len());
+        assert!(s.starts_with('1'), "{s}");
+        assert!(!s.contains('e'), "no exponent form: {s}");
+    }
+
     #[test]
     fn scalar_words_render() {
         assert_eq!(render_word(int_word(42)), "42");

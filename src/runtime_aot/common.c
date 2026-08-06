@@ -6,7 +6,6 @@
 
 #include <assert.h>
 #include <ctype.h>
-#include <math.h>
 #include <setjmp.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -56,11 +55,23 @@ int jrt_snprintf_any(char* buf, size_t cap, int64_t val) {
     /* Format a type-erased value by its runtime tag (matches the VM's
      * value_to_display for scalars/strings). A non-string heap object reaching
      * here is an Unknown-typed dict/array/struct printed without static type
-     * info — render a safe placeholder rather than dereferencing it as text. */
+     * info — render a safe placeholder rather than dereferencing it as text.
+     *
+     * Bounded by `cap`, so a caller with a small buffer truncates. Every branch
+     * below is short except the float one, whose text is unbounded (Rust's `{}`
+     * for f64 never uses exponent form, so 1e300 is 301 digits). Callers that
+     * must not truncate — jrt_print_any, jrt_str_of_any — send floats straight
+     * to jrt_render_any instead of coming through here. */
     jade_value_t v = (jade_value_t)val;
     if (jrt_is_int(v))   return snprintf(buf, cap, "%lld", (long long)jrt_unbox_int(v));
     if (jrt_is_str(v))   return snprintf(buf, cap, "%s", (const char*)jrt_unbox_ptr(v));
-    if (jrt_is_float(v)) return jrt_snprintf_float(buf, cap, jrt_unbox_float(v));
+    if (jrt_is_float(v)) {
+        /* One implementation of float text, in the shared Rust runtime. */
+        char* r = jrt_render_any(val);
+        int n = snprintf(buf, cap, "%s", r);
+        free(r);
+        return n;
+    }
     if (jrt_is_bool(v))  return snprintf(buf, cap, "%s", jrt_unbox_bool(v) ? "true" : "false");
     if (jrt_is_nil(v))   return snprintf(buf, cap, "nil");
     if (jrt_is_char(v)) {
@@ -94,13 +105,17 @@ void jrt_print_any(int64_t val, const char* suffix) {
     /* Print a type-erased value to stdout, then `suffix`. Used by print() for
      * statically-Unknown args. Strings are written directly (unbounded) — unlike
      * routing through jrt_snprintf_any + a fixed scratch buffer, which truncates
-     * a long Unknown string (e.g. a large llm reply). Scalars/objects are short,
-     * so they format into a small buffer via the shared jrt_snprintf_any. */
+     * a long Unknown string (e.g. a large llm reply). The remaining scalars —
+     * int, bool, nil, char — are short and format into a small buffer with no
+     * allocation, which is what keeps print() in a loop cheap. */
     jade_value_t v = (jade_value_t)val;
     if (jrt_is_str(v)) {
         fputs((const char*)jrt_unbox_ptr(v), stdout);
-    } else if (jrt_is_ptr(v)) {
-        /* A kind-tagged collection — render `[…]`/`{…}` (recursive, unbounded). */
+    } else if (jrt_is_ptr(v) || jrt_is_float(v)) {
+        /* A kind-tagged collection — render `[…]`/`{…}` (recursive, unbounded).
+         * A float joins it: its text comes from the same shared Rust renderer
+         * the VM uses, and is unbounded too (1e300 is 301 digits), so it must
+         * not go through the scratch buffer below. */
         char* r = jrt_render_any(val);
         fputs(r, stdout);
         free(r);
@@ -263,13 +278,16 @@ int64_t jrt_bool_any(int64_t val) {
 char* jrt_str_of_any(int64_t val) {
     /* Render a type-erased value to a tagged string for f-string interpolation.
      * A real string is returned as-is (its trust byte at data[-1] is preserved);
-     * a scalar formats via the shared jrt_snprintf_any as a TRUSTED string.
-     * (A non-string heap object renders as jrt_snprintf_any's "<object>"
-     * placeholder — the same ObjKind gap the Chunk backend documents.) */
+     * a short scalar formats via the shared jrt_snprintf_any as a TRUSTED
+     * string. (A non-string heap object renders as jrt_snprintf_any's
+     * "<object>" placeholder — the same ObjKind gap the Chunk backend
+     * documents.) */
     jade_value_t v = (jade_value_t)val;
     if (jrt_is_str(v)) return (char*)jrt_unbox_ptr(v);
-    if (jrt_is_ptr(v)) {
-        /* Render a kind-tagged collection into a fresh TRUSTED tagged string. */
+    if (jrt_is_ptr(v) || jrt_is_float(v)) {
+        /* Render a kind-tagged collection into a fresh TRUSTED tagged string.
+         * A float takes the same path: str(48000.0) is "48000.0", from the one
+         * renderer both engines share, and its text has no length bound. */
         char* r = jrt_render_any(val);
         char* out = jrt_str_dup(r, JRT_TRUSTED);
         free(r);
@@ -847,34 +865,16 @@ void jrt_random_shuffle_chunk(int64_t arr_word) {
     }
 }
 
-int jrt_snprintf_float(char* buf, size_t cap, double val) {
-    char tmp[64];
-    if (isnan(val)) {
-        snprintf(tmp, sizeof tmp, "NaN");
-    } else if (isinf(val)) {
-        snprintf(tmp, sizeof tmp, val < 0 ? "-inf" : "inf");
-    } else {
-        /* Match the VM's display: the shortest decimal that round-trips to the
-         * same double (mirrors Rust's `{}` for f64). Grow precision until the
-         * formatted text re-parses exactly. */
-        int prec = 1;
-        for (; prec < 17; prec++) {
-            snprintf(tmp, sizeof tmp, "%.*g", prec, val);
-            if (strtod(tmp, NULL) == val) break;
-        }
-        snprintf(tmp, sizeof tmp, "%.*g", prec, val);
-        /* Integer-valued floats print with a trailing ".0", like the VM.
-         * (%g uses exponent form for very large/small magnitudes — those keep
-         * the 'e' and are left as-is.) */
-        if (!strpbrk(tmp, ".eEnN")) {
-            size_t l = strlen(tmp);
-            if (l + 2 < sizeof tmp) {
-                tmp[l] = '.'; tmp[l + 1] = '0'; tmp[l + 2] = '\0';
-            }
-        }
-    }
-    return snprintf(buf, cap, "%s", tmp);
-}
+/* jrt_snprintf_float is gone. It formatted with "%.*g" at the fewest
+ * significant digits that round-tripped, and %g switches to exponent form
+ * whenever the exponent reaches the precision — so print(10.0) produced
+ * "1e+01" and str(48000.0) produced "4.8e+04" under `jade build` while the VM
+ * printed "10.0" and "48000.0". The ".0" suffix was then suppressed by its own
+ * strpbrk guard, because an 'e' was present.
+ *
+ * Float text now comes from the shared Rust renderer (jade-runtime,
+ * src/render.rs format_float), which is what the VM already uses. See
+ * jrt_print_any / jrt_str_of_any. */
 
 /* jrt_ipow moved to the shared Rust runtime crate (jade-runtime, src/num.rs);
  * declaration remains in runtime.h and calls resolve against the staticlib. */

@@ -33,9 +33,11 @@ The trend over time has been *shrinking*. Symbols keep moving out of `common.c` 
 
 ## Gotchas
 
-Marshalling in `native.c` and `src/native/mod.rs` must agree, or a package that works under `jade run` will misbehave when compiled — and the failure shows up as corrupted values, not a clean error.
+Marshalling in `native.c` and `src/native/mod.rs` must agree, or a package that works under `jade run` will misbehave when compiled — and the failure shows up as corrupted values, not a clean error. That is not hypothetical: v1.2.2 added the `bytes` tag to `runtime.h`, `common.c` and the VM's marshaller but not to `native.c`, so for three releases a blob argument silently became `nil` when compiled and a blob return value crashed the process. Adding a tag means four arms here — outbound, inbound, `ffi_free_node`, and the `jade_ffi_free` gate — and the gate is the easy one to miss, because forgetting it leaks rather than fails.
 
-The transport tree for arrays and dicts crossing the FFI is **libc-heap**, deliberately, so either `jade-runtime` instance in the process can free it. See the `JadeArr`/`JadeMap` notes in `runtime.h`.
+The transport tree for arrays, dicts, structs and bytes crossing the FFI is **libc-heap**, deliberately, so either `jade-runtime` instance in the process can free it. See the `JadeArr`/`JadeMap`/`JadeBytes` notes in `runtime.h`.
+
+**Nothing in this directory formats a value for display any more.** `jrt_snprintf_float` was the last holdout and is gone: it used `"%.*g"`, which switches to exponent form exactly when a float needs trailing zeros before the decimal point, so a compiled binary printed `1e+01` for `10.0` while the VM printed `10.0`. Value text comes from `jrt_render_any` in `jade-runtime`, and a second implementation here will drift the same way. Note also that float and string text are unbounded — `1e300` is 301 digits — so neither may be formatted into a fixed scratch buffer.
 
 Any change to the tagged value layout has three homes: `runtime.h`, `jade-runtime`'s `value.rs`, and the tag arithmetic in `aot/lower.rs`.
 
