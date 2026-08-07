@@ -18,6 +18,11 @@ void jade_rt_exit(int code) { exit(code); }
 
 /* ── Dynamic loading (native packages) ────────────────────────────────── */
 void* jade_dlopen(const char* path) { return dlopen(path, RTLD_NOW | RTLD_LOCAL); }
+/* The loader's own account of why the last dlopen failed — "slice is not valid
+ * mach-o file", a missing dependent library, an architecture mismatch. Worth
+ * a shim of its own because a load failure without it names the file and
+ * nothing else, which is the same message for every cause. */
+const char* jade_dlerror(void) { const char* e = dlerror(); return e ? e : "unknown error"; }
 void* jade_dlsym(void* handle, const char* sym) { return dlsym(handle, sym); }
 
 /* ── Async tasks ──────────────────────────────────────────────────────────

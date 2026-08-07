@@ -36,7 +36,15 @@ static void native_raise(const char* fmt, const char* arg) {
 void* jrt_native_load(const char* path) {
     void* lib = jade_dlopen(path);
     if (!lib) {
-        native_raise("could not load native library '%s'", path);
+        /* Carry the loader's reason, as the VM's load_native_package does. The
+         * two used to differ on exactly the failure a user is most likely to
+         * hit — a file that is not a library at all — so `jade run` said "slice
+         * is not valid mach-o file" and the compiled binary said only that it
+         * could not load, leaving which engine you ran to decide whether you
+         * were told why. */
+        char msg[512];
+        snprintf(msg, sizeof msg, "could not load native library '%s': %s", path, jade_dlerror());
+        native_raise("%s", msg);
     }
 
     /* Refuse a package built against a value ABI this runtime cannot talk to.

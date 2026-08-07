@@ -80,6 +80,8 @@ Tests must never hit the network — use the `Fetcher` trait.
 
 **`include_dirs` is written absolute, on purpose.** The shim is compiled inside `libs/<dep>/` rather than where `jade pkg bind` ran, so a relative `-I` resolves against the wrong directory and surfaces as a "file not found" from cc at install time, well away from the cause.
 
+**"It has the right name" is not "it is a library", and nothing between `add` and `dlopen` disagreed.** A dependency was checked for what it *exported* and never for whether it could be loaded at all, so a file that was not an object file passed through the manifest, `libs/`, resolution and the linker, and was refused by the dynamic loader in the finished program. `bindgen::is_loadable_object` reads the magic number, and it is called in two places on purpose: `jade pkg add`, which can then say what probably went wrong, and `materialize`, which is the one point every source passes through with the bytes in hand — a hand-written manifest and a fresh clone never touch `add`. Anything new that puts a file into `libs/` needs the same check.
+
 **A present artifact is not a current artifact.** `materialize` compares `libs/` against the *lock*, so anything that changes the true source without changing the lock is invisible to it. That is exactly how a rebuilt `path` dependency used to keep running as the copy it was when it was added. `refresh_local` closes it for local sources; any future source kind that is mutable in place needs the same treatment, and adding one without it reintroduces the same silent staleness.
 
 ## Building and testing

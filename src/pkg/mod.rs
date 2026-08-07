@@ -243,6 +243,21 @@ pub fn materialize(root: &Path, lock: &Lockfile, fetcher: &dyn Fetcher) -> Resul
             }
         };
 
+        // A dependency is something the dynamic loader can open, and this is the
+        // one point every source passes through with the bytes in hand. Checking
+        // here rather than only in `jade pkg add` covers a hand-written manifest,
+        // a URL serving the wrong file, and an `install` on a fresh clone —
+        // none of which go through `add` at all. Without it the first complaint
+        // comes from `dlopen`, in a finished program, having built cleanly.
+        if !bindgen::bytes_are_loadable_object(&bytes) {
+            return Err(format!(
+                "dependency '{}': {} is not a shared library\n  \
+                 It does not start with a Mach-O or ELF header, so nothing could load it. \
+                 A dependency is a prebuilt .dylib or .so, not source and not a header.",
+                pkg.name, artifact.file
+            ));
+        }
+
         let actual = fetch::sha256_hex(&bytes);
         if actual != artifact.sha256 {
             return Err(format!(

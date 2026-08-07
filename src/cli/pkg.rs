@@ -132,6 +132,22 @@ pub fn run_add(
             eprintln!("       a --path dependency names a file to copy, relative to the project root");
             std::process::exit(1);
         }
+        // A dependency is a *loadable* shared library, and nothing downstream
+        // checks that. Without this, a file that merely has the right name is
+        // copied into libs/, resolved, linked and built, and first refused by
+        // the dynamic loader when the finished program runs.
+        if !pkg::bindgen::is_loadable_object(&full) {
+            eprintln!("error: {p} is not a shared library");
+            eprintln!(
+                "       A dependency is a prebuilt .dylib or .so. This file does not start with\n       \
+                 a Mach-O or ELF header, so nothing could load it.\n\n       \
+                 The usual cause is compiling the header instead of the source:\n         \
+                 clang -o lib{0}.dylib {0}.h      # makes a precompiled header, not a library\n         \
+                 clang -dynamiclib -o lib{0}.dylib {0}.c",
+                name
+            );
+            std::process::exit(1);
+        }
     }
 
     let existed = dependency_exists(&root, name);

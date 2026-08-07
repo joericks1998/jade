@@ -916,6 +916,7 @@ typedef struct {
 /* Platform hooks for dynamic loading (posix.c: real dlopen/dlsym; a target
  * without an in-binary loader stubs these, so native packages are host-only). */
 void* jade_dlopen(const char* path);
+const char* jade_dlerror(void);   /* why the last jade_dlopen failed */
 void* jade_dlsym(void* handle, const char* sym);
 
 /* Load a native package: dlopen `path`, call its jade_pkg_init, and build a

@@ -89,7 +89,7 @@ fn host() -> &'static str {
 fn resolve_path_dependency_hashes_the_local_file() {
     let tmp = TempDir::new("resolvepath");
     std::fs::create_dir_all(tmp.path().join("vendor")).unwrap();
-    std::fs::write(tmp.path().join("vendor/libz.so"), b"fake so").unwrap();
+    std::fs::write(tmp.path().join("vendor/libz.so"), b"\x7fELFfake so").unwrap();
 
     let m = manifest(
         r#"
@@ -110,7 +110,7 @@ fn resolve_path_dependency_hashes_the_local_file() {
 
     let artifact = pkg.artifacts.get(ANY_PLATFORM).expect("local artifact keyed as any");
     assert_eq!(artifact.file, "zlib.so", "installed under the dependency name, not the upstream one");
-    assert_eq!(artifact.sha256, fetch::sha256_hex(b"fake so"));
+    assert_eq!(artifact.sha256, fetch::sha256_hex(b"\x7fELFfake so"));
     assert!(artifact.url.is_none(), "a local dep has nothing to download");
 }
 
@@ -134,7 +134,7 @@ fn resolve_platform_template_records_every_platform() {
     // others can install and verify from.
     let tmp = TempDir::new("resolvetmpl");
     let template = "https://example.com/tok-{platform}.so";
-    let fetcher = MockFetcher::new().with_all_platforms(template, b"tok bytes");
+    let fetcher = MockFetcher::new().with_all_platforms(template, b"\x7fELFtok bytes");
 
     let m = manifest(&format!(
         "[project]\nname = \"app\"\n[dependencies.tok]\nversion = \"1.0.0\"\nurl = \"{template}\"\n"
@@ -146,7 +146,7 @@ fn resolve_platform_template_records_every_platform() {
     assert_eq!(pkg.artifacts.len(), fetch::SUPPORTED_PLATFORMS.len());
     for p in fetch::SUPPORTED_PLATFORMS {
         let a = pkg.artifacts.get(*p).unwrap_or_else(|| panic!("missing platform {p}"));
-        assert_eq!(a.sha256, fetch::sha256_hex(b"tok bytes"));
+        assert_eq!(a.sha256, fetch::sha256_hex(b"\x7fELFtok bytes"));
         assert_eq!(a.file, "tok.so", "platform tag is stripped from the installed name");
         assert_eq!(a.url.as_deref(), Some(fetch::expand_platform(template, p).as_str()));
     }
@@ -160,7 +160,7 @@ fn resolve_records_the_platforms_that_exist_and_skips_the_rest() {
     let tmp = TempDir::new("resolvepartial");
     let template = "https://example.com/tok-{platform}.so";
     let fetcher = MockFetcher::new()
-        .with(&fetch::expand_platform(template, "linux-x86_64"), b"linux build");
+        .with(&fetch::expand_platform(template, "linux-x86_64"), b"\x7fELFlinux build");
 
     let m = manifest(&format!(
         "[project]\nname = \"app\"\n[dependencies.tok]\nversion = \"1.0.0\"\nurl = \"{template}\"\n"
@@ -192,7 +192,7 @@ fn resolve_errors_when_no_platform_yields_an_artifact() {
 fn resolve_plain_url_records_a_single_any_artifact() {
     let tmp = TempDir::new("resolveplain");
     let url = "https://example.com/tok.so";
-    let fetcher = MockFetcher::new().with(url, b"one build");
+    let fetcher = MockFetcher::new().with(url, b"\x7fELFone build");
 
     let m = manifest(&format!(
         "[project]\nname = \"app\"\n[dependencies.tok]\nversion = \"1.0.0\"\nurl = \"{url}\"\n"
@@ -253,19 +253,19 @@ fn one_remote_package(body: &[u8]) -> (Lockfile, MockFetcher) {
 #[test]
 fn materialize_downloads_into_libs() {
     let tmp = TempDir::new("matdownload");
-    let (lock, fetcher) = one_remote_package(b"tok bytes");
+    let (lock, fetcher) = one_remote_package(b"\x7fELFtok bytes");
 
     materialize(tmp.path(), &lock, &fetcher).unwrap();
 
     let installed = tmp.path().join("libs/tok-1.0.0/tok.so");
-    assert_eq!(std::fs::read(&installed).unwrap(), b"tok bytes");
+    assert_eq!(std::fs::read(&installed).unwrap(), b"\x7fELFtok bytes");
     assert_eq!(fetcher.calls(), 1);
 }
 
 #[test]
 fn materialize_is_idempotent() {
     let tmp = TempDir::new("matidem");
-    let (lock, fetcher) = one_remote_package(b"tok bytes");
+    let (lock, fetcher) = one_remote_package(b"\x7fELFtok bytes");
 
     materialize(tmp.path(), &lock, &fetcher).unwrap();
     materialize(tmp.path(), &lock, &fetcher).unwrap();
@@ -278,42 +278,84 @@ fn materialize_reverifies_an_existing_artifact() {
     // Presence is not trust: a `.so` in libs/ is dlopen'd, so a swapped or
     // corrupted file has to be caught rather than used because it is there.
     let tmp = TempDir::new("matreverify");
-    let (lock, fetcher) = one_remote_package(b"tok bytes");
+    let (lock, fetcher) = one_remote_package(b"\x7fELFtok bytes");
 
     let dir = tmp.path().join("libs/tok-1.0.0");
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("tok.so"), b"corrupted").unwrap();
+    std::fs::write(dir.join("tok.so"), b"\x7fELFcorrupted").unwrap();
 
     materialize(tmp.path(), &lock, &fetcher).unwrap();
 
-    assert_eq!(std::fs::read(dir.join("tok.so")).unwrap(), b"tok bytes");
+    assert_eq!(std::fs::read(dir.join("tok.so")).unwrap(), b"\x7fELFtok bytes");
     assert_eq!(fetcher.calls(), 1, "the corrupted file must trigger a re-fetch");
 }
 
 #[test]
 fn materialize_rejects_a_checksum_mismatch() {
     let tmp = TempDir::new("matmismatch");
-    let (lock, _) = one_remote_package(b"expected bytes");
+    let (lock, _) = one_remote_package(b"\x7fELFexpected bytes");
     // Serve something other than what the lock pins.
-    let fetcher = MockFetcher::new().with("https://example.com/tok.so", b"malicious bytes");
+    let fetcher = MockFetcher::new().with("https://example.com/tok.so", b"\x7fELFmalicious bytes");
 
     let err = materialize(tmp.path(), &lock, &fetcher).unwrap_err();
 
     assert!(err.contains("checksum mismatch"), "unexpected message: {err}");
     assert!(err.contains("tok"), "error should name the dependency: {err}");
-    assert!(err.contains(&fetch::sha256_hex(b"expected bytes")), "should show expected digest");
-    assert!(err.contains(&fetch::sha256_hex(b"malicious bytes")), "should show actual digest");
+    assert!(err.contains(&fetch::sha256_hex(b"\x7fELFexpected bytes")), "should show expected digest");
+    assert!(err.contains(&fetch::sha256_hex(b"\x7fELFmalicious bytes")), "should show actual digest");
     assert!(
         !tmp.path().join("libs/tok-1.0.0/tok.so").exists(),
         "a mismatched artifact must never be written to libs/"
     );
 }
 
+// Every artifact in these tests opens with `\x7fELF` because `materialize`
+// refuses anything the dynamic loader could not open. The bytes after it are
+// arbitrary — nothing here loads a library — but the four in front have to be
+// there, and a new fixture without them fails on the shape check rather than on
+// whatever it meant to test.
+
+#[test]
+fn materialize_rejects_something_that_is_not_a_library() {
+    // The failure this prevents: a header compiled by mistake installs cleanly,
+    // links, builds, and is first refused by `dlopen` in the finished program.
+    let (lock, _) = one_remote_package(b"\x7fELFtok bytes");
+    let fetcher = MockFetcher::new().with("https://example.com/tok.so", b"not an object file");
+    let tmp = TempDir::new("materialize_not_a_library");
+
+    let err = materialize(tmp.path(), &lock, &fetcher).unwrap_err();
+
+    assert!(err.contains("is not a shared library"), "unexpected message: {err}");
+    assert!(err.contains("tok"), "error should name the dependency: {err}");
+    assert!(
+        !tmp.path().join("libs/tok-1.0.0/tok.so").exists(),
+        "an unloadable artifact must never be written to libs/"
+    );
+}
+
+#[test]
+fn the_object_check_accepts_every_shape_a_platform_can_load() {
+    use super::bindgen::bytes_are_loadable_object;
+    // Mach-O 64-bit, both byte orders; a universal binary; and ELF.
+    assert!(bytes_are_loadable_object(b"\xcf\xfa\xed\xfe rest"));
+    assert!(bytes_are_loadable_object(b"\xfe\xed\xfa\xcf rest"));
+    assert!(bytes_are_loadable_object(b"\xca\xfe\xba\xbe rest"));
+    assert!(bytes_are_loadable_object(b"\x7fELF rest"));
+
+    // A precompiled header, a static archive, C source, and a file too short to
+    // have a magic number at all.
+    assert!(!bytes_are_loadable_object(b"CPCH rest"));
+    assert!(!bytes_are_loadable_object(b"!<arch>\n"));
+    assert!(!bytes_are_loadable_object(b"int add(int a, int b);"));
+    assert!(!bytes_are_loadable_object(b"\x7fEL"));
+    assert!(!bytes_are_loadable_object(b""));
+}
+
 #[test]
 fn materialize_copies_a_local_dependency() {
     let tmp = TempDir::new("matlocal");
     std::fs::create_dir_all(tmp.path().join("vendor")).unwrap();
-    std::fs::write(tmp.path().join("vendor/libz.so"), b"local bytes").unwrap();
+    std::fs::write(tmp.path().join("vendor/libz.so"), b"\x7fELFlocal bytes").unwrap();
 
     let m = manifest(
         "[project]\nname = \"app\"\n[dependencies.zlib]\nversion = \"1.3.1\"\n\
@@ -324,7 +366,7 @@ fn materialize_copies_a_local_dependency() {
     materialize(tmp.path(), &lock, &MockFetcher::new()).unwrap();
 
     let installed = tmp.path().join("libs/zlib-1.3.1/zlib.so");
-    assert_eq!(std::fs::read(installed).unwrap(), b"local bytes");
+    assert_eq!(std::fs::read(installed).unwrap(), b"\x7fELFlocal bytes");
 }
 
 #[test]
@@ -360,7 +402,7 @@ fn materialize_errors_when_this_platform_has_no_artifact() {
 #[test]
 fn materialize_leaves_no_temp_file_behind() {
     let tmp = TempDir::new("mattmp");
-    let (lock, fetcher) = one_remote_package(b"tok bytes");
+    let (lock, fetcher) = one_remote_package(b"\x7fELFtok bytes");
     materialize(tmp.path(), &lock, &fetcher).unwrap();
 
     let leftovers: Vec<_> = std::fs::read_dir(tmp.path().join("libs/tok-1.0.0"))
@@ -397,15 +439,15 @@ fn installed_local(tag: &str, bytes: &[u8]) -> (TempDir, ProjectManifest, Lockfi
 
 #[test]
 fn a_rebuilt_local_dependency_is_re_pinned() {
-    let (tmp, _m, mut lock) = installed_local("localrebuild", b"old engine");
-    std::fs::write(tmp.path().join("vendor/libengine.so"), b"new engine").unwrap();
+    let (tmp, _m, mut lock) = installed_local("localrebuild", b"\x7fELFold engine");
+    std::fs::write(tmp.path().join("vendor/libengine.so"), b"\x7fELFnew engine").unwrap();
 
     let changed = refresh_local(tmp.path(), &mut lock);
 
     assert_eq!(changed, vec!["engine".to_string()], "the rebuild must be reported");
     assert_eq!(
         lock.packages[0].artifacts[ANY_PLATFORM].sha256,
-        fetch::sha256_hex(b"new engine"),
+        fetch::sha256_hex(b"\x7fELFnew engine"),
         "the lock must pin the source as it is now"
     );
 }
@@ -414,24 +456,24 @@ fn a_rebuilt_local_dependency_is_re_pinned() {
 fn a_rebuilt_local_dependency_is_reinstalled() {
     // The whole bug in one test: rebuild the library, install again, and the
     // new bytes must be what sits in libs/.
-    let (tmp, _m, mut lock) = installed_local("localreinstall", b"old engine");
+    let (tmp, _m, mut lock) = installed_local("localreinstall", b"\x7fELFold engine");
     let installed = tmp.path().join("libs/engine-1.0.0/engine.so");
-    assert_eq!(std::fs::read(&installed).unwrap(), b"old engine");
+    assert_eq!(std::fs::read(&installed).unwrap(), b"\x7fELFold engine");
 
-    std::fs::write(tmp.path().join("vendor/libengine.so"), b"new engine").unwrap();
+    std::fs::write(tmp.path().join("vendor/libengine.so"), b"\x7fELFnew engine").unwrap();
     refresh_local(tmp.path(), &mut lock);
     materialize(tmp.path(), &lock, &MockFetcher::new()).unwrap();
 
     assert_eq!(
         std::fs::read(&installed).unwrap(),
-        b"new engine",
+        b"\x7fELFnew engine",
         "installing after a rebuild must replace the copy in libs/"
     );
 }
 
 #[test]
 fn an_unchanged_local_dependency_is_left_alone() {
-    let (tmp, _m, mut lock) = installed_local("localstable", b"engine");
+    let (tmp, _m, mut lock) = installed_local("localstable", b"\x7fELFengine");
     let before = lock.clone();
 
     assert!(refresh_local(tmp.path(), &mut lock).is_empty(), "nothing changed");
@@ -443,7 +485,7 @@ fn a_remote_dependency_is_never_re_pinned() {
     // Only a local path is mutable at its source. A URL either serves what the
     // lock pins or it does not, and re-pinning it would defeat the lock.
     let tmp = TempDir::new("remotepin");
-    let (mut lock, _) = one_remote_package(b"tok bytes");
+    let (mut lock, _) = one_remote_package(b"\x7fELFtok bytes");
     let before = lock.clone();
 
     assert!(refresh_local(tmp.path(), &mut lock).is_empty());
@@ -454,7 +496,7 @@ fn a_remote_dependency_is_never_re_pinned() {
 fn a_local_source_that_disappeared_keeps_its_pin() {
     // libs/ still holds a verified copy, so a source that has moved away is no
     // reason to stop working — the pin just stands until it comes back.
-    let (tmp, _m, mut lock) = installed_local("localgone", b"engine");
+    let (tmp, _m, mut lock) = installed_local("localgone", b"\x7fELFengine");
     std::fs::remove_file(tmp.path().join("vendor/libengine.so")).unwrap();
     let before = lock.clone();
 
@@ -466,10 +508,10 @@ fn a_local_source_that_disappeared_keeps_its_pin() {
 
 #[test]
 fn local_drift_reports_a_rebuilt_source() {
-    let (tmp, _m, lock) = installed_local("localdrift", b"old engine");
+    let (tmp, _m, lock) = installed_local("localdrift", b"\x7fELFold engine");
     assert!(!local_drift(tmp.path(), &lock.packages[0]));
 
-    std::fs::write(tmp.path().join("vendor/libengine.so"), b"new engine").unwrap();
+    std::fs::write(tmp.path().join("vendor/libengine.so"), b"\x7fELFnew engine").unwrap();
     assert!(local_drift(tmp.path(), &lock.packages[0]), "a rebuild is drift");
 }
 
@@ -477,16 +519,16 @@ fn local_drift_reports_a_rebuilt_source() {
 fn locked_mode_rejects_a_rebuilt_local_dependency() {
     // The CI half: --locked must not quietly fix up the lock, and must not
     // install the stale digest either.
-    let (tmp, _m, lock) = installed_local("localci", b"old engine");
+    let (tmp, _m, lock) = installed_local("localci", b"\x7fELFold engine");
     assert!(verify_local_unchanged(tmp.path(), &lock).is_ok());
 
-    std::fs::write(tmp.path().join("vendor/libengine.so"), b"new engine").unwrap();
+    std::fs::write(tmp.path().join("vendor/libengine.so"), b"\x7fELFnew engine").unwrap();
 
     let err = verify_local_unchanged(tmp.path(), &lock).unwrap_err();
     assert!(err.contains("engine"), "error should name the dependency: {err}");
     assert!(err.contains("has changed"), "unexpected message: {err}");
-    assert!(err.contains(&fetch::sha256_hex(b"old engine")), "should show the pin");
-    assert!(err.contains(&fetch::sha256_hex(b"new engine")), "should show what is on disk");
+    assert!(err.contains(&fetch::sha256_hex(b"\x7fELFold engine")), "should show the pin");
+    assert!(err.contains(&fetch::sha256_hex(b"\x7fELFnew engine")), "should show what is on disk");
     assert!(err.contains("jade pkg install"), "error should say how to recover: {err}");
 }
 
@@ -543,7 +585,7 @@ fn verify_in_sync_reports_both_directions_at_once() {
 
 #[test]
 fn dependency_libraries_produces_a_lib_entry_per_package() {
-    let (lock, _) = one_remote_package(b"tok bytes");
+    let (lock, _) = one_remote_package(b"\x7fELFtok bytes");
     let libs = dependency_libraries(&lock);
 
     let entry = libs.get("tok").expect("dependency exposed as a library");
@@ -555,7 +597,7 @@ fn dependency_libraries_produces_a_lib_entry_per_package() {
 fn dependency_libraries_resolve_as_bare_name_imports() {
     // The end-to-end claim: a dependency reaches the compiler as an ordinary
     // [lib] entry, so `use tok` resolves through the unchanged shared resolver.
-    let (lock, _) = one_remote_package(b"tok bytes");
+    let (lock, _) = one_remote_package(b"\x7fELFtok bytes");
     let libs = dependency_libraries(&lock);
 
     let resolved = crate::project::resolve_library_import(&libs, "tok", Path::new("/root"))
@@ -623,7 +665,7 @@ fn dependency_libraries_skips_a_package_with_no_artifact_here() {
 #[test]
 fn resolved_libraries_unions_manifest_libs_and_dependencies() {
     let tmp = TempDir::new("union");
-    let (lock, _) = one_remote_package(b"tok bytes");
+    let (lock, _) = one_remote_package(b"\x7fELFtok bytes");
     lock::write(tmp.path(), &lock).unwrap();
 
     let m = manifest(
@@ -639,7 +681,7 @@ fn resolved_libraries_unions_manifest_libs_and_dependencies() {
 #[test]
 fn resolved_libraries_lets_a_manifest_lib_shadow_a_dependency() {
     let tmp = TempDir::new("shadow");
-    let (lock, _) = one_remote_package(b"tok bytes");
+    let (lock, _) = one_remote_package(b"\x7fELFtok bytes");
     lock::write(tmp.path(), &lock).unwrap();
 
     // A [lib.tok] declared locally must win over the locked dependency `tok`.
