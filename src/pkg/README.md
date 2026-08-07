@@ -14,7 +14,11 @@ For a plain C dependency there is a step before that one, and it is the step tha
 <library>.h  →  binding generation  →  jade.toml [symbols]  →  generated shim  →  libs/
 ```
 
-That step is **not a command you have to know about**. `jade pkg add <name> --path <lib> --header <h.h>` does the whole chain, and `jade pkg install` fills in any dependency that names a header but has no symbols yet. `jade pkg bind` still exists for re-running it after a header changes, or narrowing a large one with `--only` — the cases that involve an actual decision.
+That step is **not a command you have to know about**, and usually not a path you have to supply either. `jade pkg add <name> --path <lib> --c-abi` finds the header, generates the table, and builds the shim; `--header` is a hint for when the guess would miss. `jade pkg install` fills in any dependency that names a header but has no symbols yet, and `jade pkg bind` remains for the cases with a real decision in them — re-running after a header changes, or narrowing a large one with `--only`.
+
+**A `.so` cannot supply the header itself**, and it is worth being precise about why: a shared library carries an export table of *names*, and C does not mangle them, so `sqlite3_open` says nothing about its signature. Types survive only in DWARF, which release builds strip. So a header has to come from the filesystem — but the library still has the last word on *which* one. `libsqlite3.dylib` implies `sqlite3.h`, the search covers pkg-config, the usual include roots and the macOS SDK, and the candidate is accepted only if the library actually exports what it declares. A header describing some other library of the same name is refused before anything is written, rather than surfacing later as an undefined symbol from the linker.
+
+That same export table gives the one number that says whether a binding is usable: **coverage**. "181 bound" reads as success whether the library has 190 entry points or 900, so the report says how many of the library's exports were covered.
 
 ## Why it was built this way
 

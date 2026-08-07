@@ -819,3 +819,151 @@ fn ret_type_of(node: &Value) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests;
+
+// ── Finding the header, and checking we found the right one ──────────────────
+
+/// The symbols a shared library actually exports.
+///
+/// This is all a `.so` can tell us. It has no headers in it and, unless it
+/// shipped with debug info that nothing strips, no types either — and C does
+/// not mangle names, so `sqlite3_open` says nothing about its signature. Which
+/// is why binding needs a header at all.
+///
+/// What the table *is* good for is checking a header against the library it is
+/// supposed to describe. A header that declares symbols the library does not
+/// export is the wrong header, and that is worth catching before the shim fails
+/// to link.
+///
+/// `None` means the symbol table could not be read, which is a reason to skip
+/// the check rather than to fail: an unreadable table proves nothing.
+pub fn exported_symbols(lib: &Path) -> Option<std::collections::HashSet<String>> {
+    // `-g` exported only. Linux and macOS disagree on the flag for "dynamic
+    // symbols", so try the GNU spelling and fall back.
+    let run = |args: &[&str]| -> Option<String> {
+        let out = std::process::Command::new("nm").args(args).arg(lib).output().ok()?;
+        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    let text = run(&["-g", "--defined-only"]).or_else(|| run(&["-gU"])).or_else(|| run(&["-g"]))?;
+
+    let mut out = std::collections::HashSet::new();
+    for line in text.lines() {
+        // "<addr> T _name" — the type letter is what says it is defined here.
+        let mut it = line.split_whitespace();
+        let (Some(_addr), Some(kind), Some(name)) = (it.next(), it.next(), it.next()) else {
+            continue;
+        };
+        if !matches!(kind, "T" | "t" | "D" | "S" | "B" | "W" | "i") {
+            continue;
+        }
+        // Mach-O prefixes every C symbol with an underscore; ELF does not.
+        out.insert(name.strip_prefix('_').unwrap_or(name).to_string());
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// Header names a library called `lib` might plausibly ship.
+///
+/// `libsqlite3.dylib` → `sqlite3.h` is close to universal, and a wrong guess is
+/// cheap because [`exported_symbols`] can check it.
+fn header_candidates(lib: &Path, dep_name: &str) -> Vec<String> {
+    let mut stems = Vec::new();
+    if let Some(file) = lib.file_name().and_then(|f| f.to_str()) {
+        // Strip the extension and any version tail: libfoo.1.2.dylib → foo.
+        let mut stem = file.split('.').next().unwrap_or(file);
+        stem = stem.strip_prefix("lib").unwrap_or(stem);
+        if !stem.is_empty() {
+            stems.push(stem.to_string());
+        }
+    }
+    if !stems.iter().any(|s| s == dep_name) {
+        stems.push(dep_name.to_string());
+    }
+    stems.into_iter().map(|s| format!("{s}.h")).collect()
+}
+
+/// Directories worth looking in, most specific first.
+fn header_search_dirs(lib: &Path, root: &Path, dep_name: &str) -> Vec<std::path::PathBuf> {
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+
+    // Beside the library, and beside the project — where a vendored library's
+    // own header almost always is.
+    if let Some(p) = lib.parent().filter(|p| !p.as_os_str().is_empty()) {
+        dirs.push(p.to_path_buf());
+        dirs.push(p.join("include"));
+    }
+    dirs.push(root.to_path_buf());
+    dirs.push(root.join("include"));
+
+    // What the library itself says, when it ships the standard description of
+    // where its headers are.
+    if let Ok(out) = std::process::Command::new("pkg-config").args(["--cflags", dep_name]).output()
+        && out.status.success()
+    {
+        for tok in String::from_utf8_lossy(&out.stdout).split_whitespace() {
+            if let Some(d) = tok.strip_prefix("-I") {
+                dirs.push(std::path::PathBuf::from(d));
+            }
+        }
+    }
+
+    for d in ["/opt/homebrew/include", "/usr/local/include", "/usr/include"] {
+        dirs.push(std::path::PathBuf::from(d));
+    }
+
+    // On macOS the system headers live in the SDK, not /usr/include.
+    if let Ok(out) = std::process::Command::new("xcrun").arg("--show-sdk-path").output()
+        && out.status.success()
+    {
+        let sdk = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !sdk.is_empty() {
+            dirs.push(std::path::PathBuf::from(sdk).join("usr/include"));
+        }
+    }
+
+    dirs
+}
+
+/// Look for the header describing `lib`, preferring one whose declarations the
+/// library actually exports.
+///
+/// The export table is what turns a guess into an answer. Several `foo.h` files
+/// can exist on a machine; the one that matters is the one declaring symbols
+/// this library has. A candidate that matches nothing is not silently accepted.
+pub fn discover_header(lib: &Path, root: &Path, dep_name: &str) -> Option<std::path::PathBuf> {
+    let exported = exported_symbols(lib);
+    let names = header_candidates(lib, dep_name);
+    let dirs = header_search_dirs(lib, root, dep_name);
+
+    let mut fallback = None;
+    for dir in &dirs {
+        for name in &names {
+            let path = dir.join(name);
+            if !path.exists() {
+                continue;
+            }
+            let Some(exported) = &exported else {
+                // Nothing to check against; first hit wins.
+                return Some(path);
+            };
+            match from_header(&path, &[], None) {
+                Ok(b) if b.symbols.keys().any(|s| exported.contains(s)) => return Some(path),
+                // Parsed, but describes some other library of the same name.
+                Ok(_) => fallback.get_or_insert(path),
+                // Did not parse here; it may still work with the -I flags the
+                // caller supplies, so keep it as a last resort.
+                Err(_) => fallback.get_or_insert(path),
+            };
+        }
+    }
+    fallback
+}
+
+/// How much of what the library exports the binding actually covers.
+///
+/// Reported because it is the one number that says whether a binding is usable,
+/// and it is invisible otherwise: "181 bound" reads as success whether the
+/// library has 190 entry points or 900.
+pub fn coverage(binding: &Binding, exported: &std::collections::HashSet<String>) -> (usize, usize) {
+    let bound = binding.symbols.keys().filter(|s| exported.contains(*s)).count();
+    (bound, exported.len())
+}
