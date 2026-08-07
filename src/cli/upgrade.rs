@@ -1,7 +1,7 @@
 const GITHUB_REPO: &str = "joericks1998/jade";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(serde::Deserialize)]
 struct GhRelease {
@@ -27,7 +27,152 @@ pub(crate) fn archive_label() -> Option<&'static str> {
     }
 }
 
+/// Where the toolchain lives: the real binary, and the `lib/jade` tree beside
+/// it that `install.sh` lays down.
+///
+/// Resolved through any symlink, because replacing or removing a symlink leaves
+/// the file it pointed at behind — which on a `brew`-style layout is the whole
+/// installation.
+pub(crate) struct Layout {
+    pub bin: PathBuf,
+    pub lib: Option<PathBuf>,
+}
+
+pub(crate) fn layout() -> Result<Layout, String> {
+    let bin = std::env::current_exe()
+        .map(|p| p.canonicalize().unwrap_or(p))
+        .map_err(|e| format!("could not determine the jade binary's path: {e}"))?;
+    let lib = bin
+        .parent()
+        .and_then(|d| d.parent())
+        .map(|prefix| prefix.join("lib").join("jade"))
+        .filter(|p| p.is_dir());
+    Ok(Layout { bin, lib })
+}
+
+/// The per-user data directory: cache, config, credentials, installed
+/// providers. Deliberately separate from the toolchain — reinstalling should
+/// not cost you your API key.
+pub(crate) fn user_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".jade")).filter(|p| p.exists())
+}
+
+/// Ask before doing something irreversible. `yes` skips it; a non-interactive
+/// stdin refuses rather than assuming consent, since a script that did not pass
+/// `--yes` did not ask for this.
+fn confirm(prompt: &str, yes: bool) -> bool {
+    use std::io::{IsTerminal, Write};
+    if yes {
+        return true;
+    }
+    if !std::io::stdin().is_terminal() {
+        eprintln!("refusing to proceed without a terminal to confirm at — pass --yes");
+        return false;
+    }
+    print!("{prompt} [y/N] ");
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        return false;
+    }
+    matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
+/// `jade uninstall [--purge] [--yes]` — remove the toolchain.
+///
+/// Keeps `~/.jade` unless `--purge`, because it holds credentials and installed
+/// providers and losing those to a reinstall would be a nasty surprise.
+pub fn run_uninstall(purge: bool, yes: bool) {
+    let layout = match layout() {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("uninstall: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    // Everything is listed before anything is touched: this is irreversible,
+    // and the paths are the only way to tell a real installation from a
+    // `cargo build` tree you did not mean to delete.
+    let mut targets: Vec<PathBuf> = vec![layout.bin.clone()];
+    if let Some(lib) = &layout.lib {
+        targets.push(lib.clone());
+    }
+    let data = user_dir();
+    if purge && let Some(d) = &data {
+        targets.push(d.clone());
+    }
+
+    println!("this will remove:");
+    for t in &targets {
+        println!("  {}", t.display());
+    }
+    if !purge && let Some(d) = &data {
+        println!("\nkeeping {} (credentials, providers, cache)", d.display());
+        println!("  pass --purge to remove that too");
+    } else if purge {
+        println!("\nincluding your stored API keys and installed providers");
+    }
+
+    if !confirm("\nremove them?", yes) {
+        println!("nothing was removed");
+        return;
+    }
+
+    let mut failed = false;
+    for t in &targets {
+        let r = if t.is_dir() { std::fs::remove_dir_all(t) } else { std::fs::remove_file(t) };
+        match r {
+            Ok(()) => println!("removed {}", t.display()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                // A permission error here is the common case for a
+                // system-wide install, so name the fix rather than the errno.
+                eprintln!("could not remove {}: {e}", t.display());
+                failed = true;
+            }
+        }
+    }
+
+    if failed {
+        eprintln!("\nsome paths could not be removed — re-run with sudo if jade is installed system-wide");
+        std::process::exit(1);
+    }
+    println!("\njade is uninstalled. Reinstall any time with:");
+    println!("  curl -fsSL https://raw.githubusercontent.com/{GITHUB_REPO}/main/install.sh | sh");
+}
+
 pub async fn run_upgrade() {
+    upgrade_or_reinstall(false, false).await
+}
+
+/// `jade reinstall [--clean] [--yes]` — fetch and install the latest release
+/// even when it is the version already running.
+///
+/// `upgrade` stops when it is already current, which is right for an upgrade
+/// and useless when the reason you are here is that something is broken.
+pub async fn run_reinstall(clean: bool, yes: bool) {
+    if clean {
+        let Some(dir) = user_dir() else {
+            eprintln!("reinstall: no ~/.jade to clean");
+            std::process::exit(1);
+        };
+        println!("this will remove {} (credentials, providers, cache)", dir.display());
+        if !confirm("remove it?", yes) {
+            println!("nothing was removed");
+            return;
+        }
+        if let Err(e) = std::fs::remove_dir_all(&dir) {
+            eprintln!("reinstall: could not remove {}: {e}", dir.display());
+            std::process::exit(1);
+        }
+        println!("removed {}", dir.display());
+        println!("note: re-register your provider afterwards with `jade register`");
+    }
+    upgrade_or_reinstall(true, clean).await
+}
+
+async fn upgrade_or_reinstall(force: bool, _cleaned: bool) {
     let label = match archive_label() {
         Some(l) => l,
         None => {
@@ -74,7 +219,7 @@ pub async fn run_upgrade() {
     };
 
     let latest = release.tag_name.trim_start_matches('v');
-    if latest == CURRENT_VERSION {
+    if latest == CURRENT_VERSION && !force {
         println!("jade {CURRENT_VERSION} is already up to date");
         return;
     }
@@ -91,7 +236,11 @@ pub async fn run_upgrade() {
         }
     };
 
-    println!("upgrading jade {CURRENT_VERSION} → {latest} ...");
+    if force && latest == CURRENT_VERSION {
+        println!("reinstalling jade {latest} ...");
+    } else {
+        println!("upgrading jade {CURRENT_VERSION} → {latest} ...");
+    }
 
     // Resolve the real binary (through any symlink) so we replace the file, and
     // derive the toolchain layout `<prefix>/bin/jade` + `<prefix>/lib/jade`
