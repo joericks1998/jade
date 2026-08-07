@@ -1,0 +1,32 @@
+// Decorators on a value declaration.
+//
+// `@f let x = v` is exactly `let x = f(v)`. The point is not that it saves
+// characters — it is that the wrapping sits above the declaration instead of
+// around the thing being declared, so what the value actually *is* stays
+// readable at a glance.
+
+fn fence(s, tag) {
+    return f"<{tag}>{s}</{tag}>"
+}
+
+fn shout(s) {
+    return s.upper()
+}
+
+@shout
+let greeting = "hello"
+
+// A decorator may take its own arguments; the decorated value goes first.
+@fence("note")
+let body = "keep it short"
+
+// Two decorators. The one written first is applied first, so `shout` runs on
+// the bare text and `fence` wraps the result — the same nesting order a `fn`
+// decorator uses.
+@shout
+@fence("p")
+let loud = "hello"
+
+print(greeting)
+print(body)
+print(loud)

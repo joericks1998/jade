@@ -21,6 +21,38 @@ let question = "What is 2 + 2?"
 prompt p = question
 ```
 
+## Decorating a Prompt
+
+Getting useful work out of a model usually means wrapping the instruction in tags it recognises. Writing that wrapper around every prompt buries the one part that actually differs between them:
+
+```jade
+prompt summarize = "<instructions>\nSummarize the document in one sentence.\n</instructions>"
+prompt extract   = "<instructions>\nList every date you find.\n</instructions>"
+```
+
+A decorator moves the wrapper above the line, so the prompt still reads as the text it is:
+
+```jade
+fn instructions(body) {
+    return f"<instructions>\n{body}\n</instructions>"
+}
+
+@instructions
+prompt summarize = "Summarize the document in one sentence."
+
+@instructions
+prompt extract = "List every date you find."
+```
+
+`@instructions prompt p = "..."` is exactly `prompt p = instructions("...")`. The decorator wraps the **text**, at the moment the prompt is built — not at the dereference. Two things follow:
+
+- `?p` still means one thing: send this prompt. Nothing hidden happens at the call.
+- The framing travels with the value, so a prompt handed to another file arrives already framed rather than being re-framed by whoever dereferences it.
+
+Decorators take arguments and stack the same way they do on a `let`, and the first one written is applied first. See [Variables](variables.md#decorators) for the full rules.
+
+One thing to know while debugging: a prompt renders as `<prompt>` and does not show its text, so a decorator's output is not visible in `print(p)`. Have the wrapper print or log what it built if you need to see exactly what was sent.
+
 ## Untyped Dereference — `?p`
 
 Prefixing a prompt variable with `?` sends the prompt to your provider and returns the raw response as a `str`.

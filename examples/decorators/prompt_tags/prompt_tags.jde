@@ -1,0 +1,29 @@
+// Decorators on a prompt declaration.
+//
+// A model almost always wants the instruction wrapped in tags it recognises,
+// and writing that wrapper around every prompt buries the one part that
+// differs. A decorator moves it above the line, so the prompt still reads as
+// the text it is.
+//
+// The decorator wraps the *text*, at the moment the prompt is built. That
+// keeps `?p` meaning exactly one thing — send this prompt — and it means the
+// framing travels with the value if the prompt is handed to another file.
+
+fn instructions(body) {
+    let framed = f"<instructions>\n{body}\n</instructions>"
+    // Echoed only so the fixture can show what the model was actually sent;
+    // a prompt renders as `<prompt>` and does not reveal its text.
+    print(framed)
+    return framed
+}
+
+@instructions
+prompt summarize = "Summarize the document in one sentence."
+
+@instructions
+prompt extract = "List every date you find."
+
+let a = ?summarize
+let b = ?extract
+print(a)
+print(b)

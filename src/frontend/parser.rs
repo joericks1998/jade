@@ -4,6 +4,13 @@ use super::{
     lexer::{token_kind_desc, RawFStrPart, Token, TokenKind},
 };
 
+/// The `@dec(a, k = v)` lines attached to one declaration, in source order.
+///
+/// Each entry is `(name, args)`, and each argument is `(keyword, expr)` with the
+/// keyword absent for a positional one. A namespaced `@a::b` arrives here as the
+/// single name `"a.b"`; the dot is what every consumer splits on.
+type Decorators = Vec<(String, Vec<(Option<String>, Expr)>)>;
+
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
@@ -134,7 +141,7 @@ impl Parser {
     }
 
     /// Parse zero or more `@ident` decorator lines preceding a fn/struct definition.
-    fn parse_decorators(&mut self) -> Result<Vec<(String, Vec<(Option<String>, Expr)>)>> {
+    fn parse_decorators(&mut self) -> Result<Decorators> {
         let mut decorators = Vec::new();
         while self.peek().kind == TokenKind::At {
             self.advance(); // consume `@`
@@ -187,20 +194,73 @@ impl Parser {
         Ok(decorators)
     }
 
+    /// Wrap a declaration's value in its decorators: `@a @b let x = v` parses as
+    /// `let x = b(a(v))`.
+    ///
+    /// This happens in the parser, so nothing downstream learns that a
+    /// declaration can carry a decorator — `type_infer`, `emit`, the VM and the
+    /// AOT backend all see an ordinary call. A `fn` decorator cannot work this
+    /// way, because the value it wraps is a function the emitter has yet to
+    /// build; that path lives in `emit.rs` and is the reason the two look
+    /// different despite meaning the same thing.
+    ///
+    /// Source order is innermost-first, matching `fn`: the decorator written
+    /// first is applied first. That is the reverse of Python's rule, and
+    /// matching `fn` matters more than matching Python — two decorators on a
+    /// `let` and two on a `fn` in the same file have to nest the same way.
+    fn apply_decorators(
+        value: Expr,
+        decorators: Decorators,
+        span: Span,
+    ) -> Expr {
+        let mut acc = value;
+        for (name, dec_args) in decorators {
+            // `@tools::register` arrived here normalized to "tools.register".
+            // Rebuild it as a field access so it resolves exactly as a
+            // hand-written `tools.register(v)` would.
+            let mut parts = name.split('.');
+            let mut callee = Expr::Identifier {
+                name: parts.next().unwrap_or_default().to_string(),
+                span,
+            };
+            for part in parts {
+                callee = Expr::FieldAccess {
+                    object: Box::new(callee),
+                    field: part.to_string(),
+                    span,
+                };
+            }
+            // The decorated value is the first argument; the decorator's own
+            // arguments follow, keeping positional and keyword forms apart.
+            let mut args = vec![acc];
+            let mut kwargs = Vec::new();
+            for (kw, arg) in dec_args {
+                match kw {
+                    Some(k) => kwargs.push((k, arg)),
+                    None => args.push(arg),
+                }
+            }
+            acc = Expr::Call { callee: Box::new(callee), args, kwargs, span };
+        }
+        acc
+    }
+
     /// Parse a single statement.
     fn parse_stmt(&mut self) -> Result<Stmt> {
         let decorators = self.parse_decorators()?;
         if !decorators.is_empty() {
-            // Decorators are valid on fn, async fn, struct, and extend.
+            // Decorators are valid on fn, async fn, struct, extend, let, and prompt.
             return match self.peek().kind {
                 TokenKind::Fn     => self.parse_fn_with_decorators(decorators),
                 TokenKind::Async  => self.parse_async_fn_with_decorators(decorators),
                 TokenKind::Struct => self.parse_struct_def_with_decorators(decorators),
                 TokenKind::Extend => self.parse_extend_block_with_decorators(decorators),
+                TokenKind::Let    => self.parse_let_with_decorators(decorators),
+                TokenKind::Prompt => self.parse_prompt_decl_with_decorators(decorators),
                 _ => {
                     let t = self.peek().clone();
                     Err(JadeError::UnexpectedToken {
-                        expected: "`fn`, `async fn`, `struct`, or `extend` after decorator".to_string(),
+                        expected: "`fn`, `async fn`, `struct`, `extend`, `let`, or `prompt` after decorator".to_string(),
                         got: token_kind_desc(&t.kind),
                         span: t.span,
                     })
@@ -208,7 +268,7 @@ impl Parser {
             };
         }
         match self.peek().kind {
-            TokenKind::Let    => self.parse_let(),
+            TokenKind::Let    => self.parse_let_with_decorators(vec![]),
             TokenKind::Fn     => self.parse_fn_with_decorators(vec![]),
             TokenKind::Async  => self.parse_async_fn_with_decorators(vec![]),
             TokenKind::Return => self.parse_return(),
@@ -219,7 +279,7 @@ impl Parser {
             TokenKind::Struct     => self.parse_struct_def_with_decorators(vec![]),
             TokenKind::Extend     => self.parse_extend_block_with_decorators(vec![]),
             TokenKind::Interface  => self.parse_interface_def(),
-            TokenKind::Prompt     => self.parse_prompt_decl(),
+            TokenKind::Prompt     => self.parse_prompt_decl_with_decorators(vec![]),
             TokenKind::Use        => self.parse_use(),
             TokenKind::From       => self.parse_from_use(),
             TokenKind::Raise      => self.parse_raise(),
@@ -287,7 +347,10 @@ impl Parser {
     }
 
     /// Parse `let <ident> = <expr> ;`
-    fn parse_let(&mut self) -> Result<Stmt> {
+    fn parse_let_with_decorators(
+        &mut self,
+        decorators: Decorators,
+    ) -> Result<Stmt> {
         let span = self.peek().span;
         self.advance(); // consume `let`
 
@@ -311,6 +374,7 @@ impl Parser {
         let value = self.parse_pipe()?;
         self.consume_semicolon()?;
 
+        let value = Self::apply_decorators(value, decorators, span);
         Ok(Stmt::Let { name, value, span })
     }
 
@@ -349,7 +413,7 @@ impl Parser {
     }
 
     /// Parse `fn <ident> ( <params> ) { <body> }` with pre-collected decorators.
-    fn parse_fn_with_decorators(&mut self, decorators: Vec<(String, Vec<(Option<String>, Expr)>)>) -> Result<Stmt> {
+    fn parse_fn_with_decorators(&mut self, decorators: Decorators) -> Result<Stmt> {
         if self.fn_depth > 0 {
             let span = self.peek().span;
             return Err(JadeError::NestedFunction { span });
@@ -386,7 +450,7 @@ impl Parser {
     }
 
     /// Parse `async fn <ident> ( <params> ) { <body> }` with pre-collected decorators.
-    fn parse_async_fn_with_decorators(&mut self, decorators: Vec<(String, Vec<(Option<String>, Expr)>)>) -> Result<Stmt> {
+    fn parse_async_fn_with_decorators(&mut self, decorators: Decorators) -> Result<Stmt> {
         let span = self.peek().span;
         self.advance(); // consume `async`
 
@@ -663,13 +727,24 @@ impl Parser {
         }
     }
 
-    fn parse_prompt_decl(&mut self) -> Result<Stmt> {
+    /// Parse `prompt name = expr`, optionally decorated.
+    ///
+    /// A decorator here wraps the *text*, not the prompt: `@tagged prompt p =
+    /// "x"` is `prompt p = tagged("x")`. That is the useful direction — it is
+    /// how a file gives every prompt the framing a model expects without
+    /// burying the content it is framing — and it means `?p` still means one
+    /// thing, since the wrapping already happened when the value was built.
+    fn parse_prompt_decl_with_decorators(
+        &mut self,
+        decorators: Decorators,
+    ) -> Result<Stmt> {
         let span = self.peek().span;
         self.advance(); // consume `prompt`
         let name = self.expect_ident("prompt variable name")?;
         self.expect(&TokenKind::Equals)?;
         let body = self.parse_pipe()?;
         self.consume_semicolon()?;
+        let body = Self::apply_decorators(body, decorators, span);
         Ok(Stmt::PromptDecl { name, body, span })
     }
 
@@ -730,7 +805,7 @@ impl Parser {
     /// Parse `struct Name { field, … }`
     /// Fields may be bare identifiers (required), `let name = expr` (optional with default),
     /// or `prompt name = expr` (optional prompt field with default text).
-    fn parse_struct_def_with_decorators(&mut self, decorators: Vec<(String, Vec<(Option<String>, Expr)>)>) -> Result<Stmt> {
+    fn parse_struct_def_with_decorators(&mut self, decorators: Decorators) -> Result<Stmt> {
         let span = self.peek().span;
         self.advance(); // consume `struct`
         let name = self.expect_ident("struct name")?;
@@ -783,7 +858,7 @@ impl Parser {
 
     /// Parse `extend TypeName { fn method(self, …) { … } … }`
     /// or    `extend TypeName: InterfaceName { fn method(self, …) { … } … }`
-    fn parse_extend_block_with_decorators(&mut self, decorators: Vec<(String, Vec<(Option<String>, Expr)>)>) -> Result<Stmt> {
+    fn parse_extend_block_with_decorators(&mut self, decorators: Decorators) -> Result<Stmt> {
         let span = self.peek().span;
         self.advance(); // consume `extend`
         let type_name = self.expect_ident("type name")?;
