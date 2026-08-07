@@ -604,7 +604,9 @@ pub(super) fn emit_module_call<'ctx>(
         ("sh", "exec") => Ok(low.tag_str(str_fn("jrt_sh_exec", 1)?)),
         ("sh", "run") => int_fn("jrt_sh_run", 1),
         ("sh", "output") => {
-            let f = low.runtime_fn("jrt_coll_sh_output", ptrt.fn_type(&[ptrt.into()], false));
+            // `jrt_sh_output`, not `jrt_coll_sh_output` — the forwarder is where
+            // the tainted-command refusal lives, matching exec and run.
+            let f = low.runtime_fn("jrt_sh_output", ptrt.fn_type(&[ptrt.into()], false));
             let p = b.build_call(f, &[strp(0).into()], "shout").map_err(err)?.as_any_value_enum().into_pointer_value();
             Ok(low.tag_ptr(p))
         }

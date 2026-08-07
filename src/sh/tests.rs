@@ -124,6 +124,26 @@ fn run_refuses_a_tainted_command() {
     assert!(err.to_string().contains("sh.run(cmd)"));
 }
 
+// `output` was the hole until v1.3.3. All three functions reach the same
+// `sh -c`, so refusing two of them and not the third did not narrow what an
+// untrusted command could do — it only decided how it had to be spelled.
+#[test]
+fn output_refuses_a_tainted_command() {
+    let err = sh_output(&[VmValue::Str(JStr::tainted("echo hi"))])
+        .expect_err("a tainted command must be refused");
+    let msg = err.to_string();
+    assert!(msg.contains("refused tainted string in sh.output(cmd)"), "got: {msg}");
+    assert!(msg.contains("code-execution sink"), "got: {msg}");
+}
+
+#[test]
+fn output_accepts_a_trusted_command() {
+    let out = sh_output(&[VmValue::Str(JStr::trusted("echo hi"))])
+        .expect("a command built from source is allowed");
+    let VmValue::Dict(d) = out else { panic!("expected a dict") };
+    assert!(matches!(d.get("stdout"), Some(VmValue::Str(s)) if s.as_str().trim() == "hi"));
+}
+
 #[test]
 fn exec_accepts_a_trusted_command() {
     match sh_exec(&[VmValue::Str(JStr::trusted("echo hi"))])

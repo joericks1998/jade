@@ -1,10 +1,10 @@
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{
-    compiler::{tir::{JadeType, TExpr, TExprKind, TFStrPart, TProgram, TStmt, TCatchArm}}, bytecode::{Chunk, CompiledFn, FStrPart, Instr, Reg},
+    compiler::{tir::{JadeType, TDecorators, TExpr, TExprKind, TFStrPart, TProgram, TStmt, TCatchArm}}, bytecode::{Chunk, CompiledFn, FStrPart, Instr, Reg},
     frontend::{
         ast::{BinOpKind, StructFieldDef, UnaryOpKind},
-        error::{Result, Span},
+        error::{JadeError, Result, Span},
     },
 };
 
@@ -284,33 +284,10 @@ fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
             if em.in_fn() {
                 let slot = em.define_local(&name);
                 em.chunk.emit(Instr::SetLocal(slot, dest), span);
+                reject_local_decorators(&decorators, span)?;
             } else {
                 em.chunk.emit(Instr::SetGlobal(name.clone(), dest), span);
-                // Apply decorators at runtime: foo = dec(foo, arg1, ...) for each @dec.
-                for (dec_name, dec_args) in &decorators {
-                    // Resolve possibly-dotted decorator: "tools.register" → GetGlobal("tools") → GetField("register")
-                    let parts: Vec<&str> = dec_name.splitn(2, '.').collect();
-                    let base_reg = em.alloc_reg();
-                    em.chunk.emit(Instr::GetGlobal(base_reg, parts[0].to_string()), span);
-                    let dec_reg = if parts.len() == 2 {
-                        let field_reg = em.alloc_reg();
-                        em.chunk.emit(Instr::GetField(field_reg, base_reg, parts[1].to_string()), span);
-                        field_reg
-                    } else {
-                        base_reg
-                    };
-                    let fn_reg = em.alloc_reg();
-                    em.chunk.emit(Instr::GetGlobal(fn_reg, name.clone()), span);
-                    // fn is first arg; extra decorator args follow
-                    let mut call_args = vec![fn_reg];
-                    for (_, arg_expr) in dec_args {
-                        let arg_reg = emit_expr(arg_expr, em, ctx)?;
-                        call_args.push(arg_reg);
-                    }
-                    let result_reg = em.alloc_reg();
-                    em.chunk.emit(Instr::Call(result_reg, dec_reg, call_args), span);
-                    em.chunk.emit(Instr::SetGlobal(name.clone(), result_reg), span);
-                }
+                emit_fn_decorators(&name, &decorators, em, ctx, span)?;
             }
         }
 
@@ -595,22 +572,14 @@ fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
             if em.in_fn() {
                 let slot = em.define_local(&name);
                 em.chunk.emit(Instr::SetLocal(slot, dest), span);
+                reject_local_decorators(&decorators, span)?;
             } else {
                 em.chunk.emit(Instr::SetGlobal(name.clone(), dest), span);
-                for (dec_name, dec_args) in &decorators {
-                    let dec_reg = em.alloc_reg();
-                    em.chunk.emit(Instr::GetGlobal(dec_reg, dec_name.clone()), span);
-                    let fn_reg = em.alloc_reg();
-                    em.chunk.emit(Instr::GetGlobal(fn_reg, name.clone()), span);
-                    let mut call_args = vec![fn_reg];
-                    for (_, arg_expr) in dec_args {
-                        let arg_reg = emit_expr(arg_expr, em, ctx)?;
-                        call_args.push(arg_reg);
-                    }
-                    let result_reg = em.alloc_reg();
-                    em.chunk.emit(Instr::Call(result_reg, dec_reg, call_args), span);
-                    em.chunk.emit(Instr::SetGlobal(name.clone(), result_reg), span);
-                }
+                // Shares the global path with `fn`. It used to have its own copy
+                // that resolved the decorator name with a bare GetGlobal, so
+                // `@tools::register` worked on a `fn` and looked up a global
+                // literally named "tools.register" on an `async fn`.
+                emit_fn_decorators(&name, &decorators, em, ctx, span)?;
             }
         }
 
@@ -619,6 +588,71 @@ fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
         }
     }
     Ok(())
+}
+
+// ── Decorators on a function ─────────────────────────────────────────────────
+//
+// A decorator on a `let` or a `prompt` is gone by the time TIR exists — the
+// parser rewrites `@f let x = v` into `let x = f(v)`. A function cannot be done
+// that way, because the value being wrapped is one this emitter is in the middle
+// of building, so it is applied here instead: `foo = dec(foo, …)` against the
+// global, in source order, which is what makes the decorator written first the
+// innermost one.
+
+/// Emit `name = dec(name, args…)` for each decorator, in source order.
+fn emit_fn_decorators(
+    name: &str,
+    decorators: &TDecorators,
+    em: &mut Emitter,
+    ctx: &mut EmitCtx,
+    span: Span,
+) -> Result<()> {
+    for (dec_name, dec_args) in decorators {
+        // A namespaced `@tools::register` reached the parser's decorator list as
+        // "tools.register": load the module, then take the field off it, the
+        // same way `tools.register(x)` written by hand resolves.
+        let parts: Vec<&str> = dec_name.splitn(2, '.').collect();
+        let base_reg = em.alloc_reg();
+        em.chunk.emit(Instr::GetGlobal(base_reg, parts[0].to_string()), span);
+        let dec_reg = if parts.len() == 2 {
+            let field_reg = em.alloc_reg();
+            em.chunk.emit(Instr::GetField(field_reg, base_reg, parts[1].to_string()), span);
+            field_reg
+        } else {
+            base_reg
+        };
+        let fn_reg = em.alloc_reg();
+        em.chunk.emit(Instr::GetGlobal(fn_reg, name.to_string()), span);
+        // The decorated function is the first argument; the decorator's own
+        // arguments follow.
+        let mut call_args = vec![fn_reg];
+        for (_, arg_expr) in dec_args {
+            let arg_reg = emit_expr(arg_expr, em, ctx)?;
+            call_args.push(arg_reg);
+        }
+        let result_reg = em.alloc_reg();
+        em.chunk.emit(Instr::Call(result_reg, dec_reg, call_args), span);
+        em.chunk.emit(Instr::SetGlobal(name.to_string(), result_reg), span);
+    }
+    Ok(())
+}
+
+/// Refuse a decorator on a function bound to a local instead of a global.
+///
+/// The code above works against a global, so a function defined inside another
+/// function has nothing for it to rewrite. This used to be an `if` with no
+/// `else`: the decorator was dropped and the program ran as though it had never
+/// been written. The parser now refuses a nested function of either kind, so
+/// nothing in a source file reaches this — it is here so that a future path
+/// which does reach it fails loudly rather than going quiet again.
+fn reject_local_decorators(
+    decorators: &TDecorators,
+    span: Span,
+) -> Result<()> {
+    if decorators.is_empty() {
+        return Ok(());
+    }
+    Err(JadeError::NestedFunction { span })
 }
 
 // ── Function compilation ──────────────────────────────────────────────────────

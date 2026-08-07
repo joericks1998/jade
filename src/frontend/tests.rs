@@ -901,6 +901,30 @@ mod parser {
         assert!(matches!(err, JadeError::NestedFunction { .. }));
     }
 
+    // `async fn` had no such guard until v1.3.3, though it tracked the same
+    // depth. Nesting one parsed, ran, and then surprised the user twice: the
+    // inner function could not see the outer one's parameters, and a decorator
+    // on it was dropped in silence.
+    #[test]
+    fn a_nested_async_fn_is_rejected() {
+        let err = parse_src_err(
+            "async fn outer() {\n    async fn inner() {\n        return 1\n    }\n    return 2\n}",
+        );
+        assert!(matches!(err, JadeError::NestedFunction { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn an_async_fn_nested_in_a_plain_fn_is_rejected() {
+        let err = parse_src_err("fn outer() {\n    async fn inner() {\n        return 1\n    }\n}");
+        assert!(matches!(err, JadeError::NestedFunction { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn async_fns_may_sit_beside_each_other_at_the_top_level() {
+        let p = parse_src("async fn a() {\n    return 1\n}\nasync fn b() {\n    return 2\n}");
+        assert_eq!(p.stmts.len(), 2);
+    }
+
     #[test]
     fn test_parse_return_outside_fn_error() {
         let err = parse_src_err("return 1");

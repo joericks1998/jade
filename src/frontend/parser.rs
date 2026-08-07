@@ -451,6 +451,19 @@ impl Parser {
 
     /// Parse `async fn <ident> ( <params> ) { <body> }` with pre-collected decorators.
     fn parse_async_fn_with_decorators(&mut self, decorators: Decorators) -> Result<Stmt> {
+        // Same rule as `fn`, which had this guard and `async fn` did not — an
+        // omission rather than a decision, since the body below increments
+        // `fn_depth` exactly as the plain form does. A nested `async fn` used to
+        // parse and run, and then hand the user two surprises: it cannot see the
+        // enclosing function's parameters (a closure captures top-level globals
+        // only), so it failed at *run* time with `undefined variable`; and a
+        // decorator on it was dropped without a word, because decorators are
+        // applied at emit time only to a global. One rule for both forms turns
+        // both into a compile error naming the problem.
+        if self.fn_depth > 0 {
+            let span = self.peek().span;
+            return Err(JadeError::NestedFunction { span });
+        }
         let span = self.peek().span;
         self.advance(); // consume `async`
 

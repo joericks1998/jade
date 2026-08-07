@@ -37,13 +37,56 @@ fn fail(e: impl std::fmt::Display) -> ! {
     std::process::exit(1);
 }
 
+/// Fail out of `jade pkg add`, taking the manifest edit with it.
+///
+/// `add` has to write the entry before it can validate it — binding a C library
+/// reads the dependency back out of `jade.toml`, and resolving needs it there to
+/// resolve. So a failure lands *after* the write. Leaving the entry behind was
+/// worse than it sounds: every other `pkg` command re-validates the whole
+/// manifest, so one `add` that failed on a missing file made `install`, `list`
+/// and even a later successful `add` fail on an orphan the user never managed to
+/// add, with nothing naming it as the cause.
+///
+/// Only a newly-created entry is removed. `add` replaces an existing dependency
+/// outright, and rolling that back would delete a working entry to clean up
+/// after a failed attempt to change it — so an existing one is left as it is,
+/// and the message says the file was touched.
+fn fail_new_dependency(root: &std::path::Path, name: &str, existed: bool, e: impl std::fmt::Display) -> ! {
+    eprintln!("error: {e}");
+    if existed {
+        eprintln!("note: [dependencies.{name}] in jade.toml was already replaced, and is left as it is");
+    } else if matches!(manifest::remove_dependency(root, name), Ok(true)) {
+        eprintln!("note: {name} was not added — jade.toml is unchanged");
+    }
+    std::process::exit(1);
+}
+
+/// Whether `[dependencies.<name>]` is already in the manifest.
+///
+/// Read before `add` writes, so a rollback can tell "undo what I just created"
+/// from "leave what was already there".
+fn dependency_exists(root: &std::path::Path, name: &str) -> bool {
+    project::load_project(root)
+        .ok()
+        .and_then(|m| m.dependencies)
+        .is_some_and(|d| d.contains_key(name))
+}
+
 /// Re-resolve every dependency and write `jade.lock`, then install.
 fn relock_and_install(root: &std::path::Path, manifest: &ProjectManifest) {
+    try_relock_and_install(root, manifest).unwrap_or_else(|e| fail(e));
+}
+
+/// The same work, handing the error back instead of exiting.
+///
+/// `jade pkg add` needs this so it can undo its manifest edit before it dies;
+/// every other caller has nothing to undo and uses the exiting form above.
+fn try_relock_and_install(root: &std::path::Path, manifest: &ProjectManifest) -> Result<(), String> {
     let fetcher = HttpFetcher::new();
-    let resolved = pkg::resolve(root, manifest, &fetcher).unwrap_or_else(|e| fail(e));
-    lock::write(root, &resolved).unwrap_or_else(|e| fail(e));
-    pkg::materialize(root, &resolved, &fetcher).unwrap_or_else(|e| fail(e));
-    pkg::build_c_shims(root, &resolved, manifest).unwrap_or_else(|e| fail(e));
+    let resolved = pkg::resolve(root, manifest, &fetcher)?;
+    lock::write(root, &resolved)?;
+    pkg::materialize(root, &resolved, &fetcher)?;
+    pkg::build_c_shims(root, &resolved, manifest)
 }
 
 // ── add ───────────────────────────────────────────────────────────────────────
@@ -78,6 +121,20 @@ pub fn run_add(
             std::process::exit(1);
         }
     };
+
+    // Catch a missing file before touching jade.toml. Resolution would catch it
+    // anyway, but only after the entry was written, and "no such file" is a much
+    // better answer here than the same fact reported as a resolution failure.
+    if let Some(p) = path {
+        let full = root.join(p);
+        if !full.exists() {
+            eprintln!("error: {p} does not exist");
+            eprintln!("       a --path dependency names a file to copy, relative to the project root");
+            std::process::exit(1);
+        }
+    }
+
+    let existed = dependency_exists(&root, name);
 
     // A local artifact can be read for its export table — which says both what
     // kind of library it is and, later, whether a candidate header describes it.
@@ -120,7 +177,7 @@ pub fn run_add(
 
     if let Some(h) = found {
         bind_header(&root, name, &h.to_string_lossy(), include, None, false, lib_path.as_deref())
-            .unwrap_or_else(|e| fail(e));
+            .unwrap_or_else(|e| fail_new_dependency(&root, name, existed, e));
     } else if abi == Abi::C {
         // Nothing to bind from, and a C dependency is not installable until its
         // symbols exist. Stop after the manifest edit rather than failing
@@ -138,7 +195,8 @@ pub fn run_add(
     }
 
     let manifest = load_or_exit(&root);
-    relock_and_install(&root, &manifest);
+    try_relock_and_install(&root, &manifest)
+        .unwrap_or_else(|e| fail_new_dependency(&root, name, existed, e));
     println!("added {name}");
 }
 

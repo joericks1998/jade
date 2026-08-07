@@ -4,6 +4,14 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.3.3
+
+- **Fixed: `sh.output` ran a command the trust model was supposed to refuse.** `sh.exec` and `sh.run` refuse a string that came from outside the program — a model reply, a file, the network, stdin — because it must not reach a shell. `sh.output` did not, and all three run through the same `sh -c`. So the check did not narrow what an untrusted command could do; it only decided how it had to be spelled, and `sh.output(x).stdout` was the way around it. Both engines refuse it now.
+- **Fixed: `d.key` on a dict raised in a compiled binary.** Reading a dict entry with a dot worked under `jade run` and failed under `jade build` with "value has no fields", because the compiled runtime's field read handled structs and nothing else. Anything handing back a dict was affected, which is how it was found: `sh.output(cmd).code`. Method calls never were — `d.keys()` is compiled as a direct call rather than a field read — so the gap only showed on data keys, which is what kept it hidden.
+- **Fixed: a failed `jade pkg add` left a broken entry in `jade.toml`.** The entry has to be written before it can be validated, so a failure landed after the write. Every other `pkg` command re-validates the whole manifest, so one `add` that failed on a missing file made `install`, `list` and even a later successful `add` fail on an orphan the user never managed to add, with nothing naming the cause. A new entry is now removed when the command fails, and a missing `--path` file is caught before anything is written. An entry that already existed is left alone, since rolling that back would delete a working dependency.
+- **A nested `async fn` is a compile error, matching `fn`.** It parsed and ran before, and then handed you two surprises: the inner function could not see the outer one's parameters, so it failed at *run* time with an undefined variable; and a decorator on it was dropped without a word. The rule now reads the same for both forms — "function definitions cannot be nested" — and both surprises are gone with it. Declare the function at the top level.
+- **Fixed: a namespaced decorator did not work on an `async fn`.** `@tools::register` resolved correctly on a `fn` and looked for a global literally named `tools.register` on an `async fn`. The two forms had separate copies of the same emission and had drifted; they share one path now.
+
 ## v1.3.2
 
 - **A `let` or `prompt` declaration can carry a decorator.** `@shout let greeting = "hello"` is exactly `let greeting = shout("hello")`. Decorators already worked on `fn`, `struct` and `extend`; the two forms that bind a plain value were the ones left out, and they are where the repetition actually accumulates.

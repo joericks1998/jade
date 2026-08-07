@@ -1,0 +1,29 @@
+// Reading a dict entry with a dot: `d.key` is `d["key"]`.
+//
+// This worked interpreted and raised "value has no fields" compiled, because
+// the compiled runtime's field read handled structs and nothing else. It took
+// out anything that hands back a dict — `sh.output(cmd).code` was the way it
+// was found — and the failure was at run time, in the built binary only.
+//
+// Method calls were never affected: codegen rewrites `d.keys()` into a direct
+// call rather than a field read, so the gap only ever showed on data keys,
+// which is what kept it hidden.
+
+let d = {"code": 0, "stdout": "hi", "nested": {"deep": 7}}
+
+print(d.code)
+print(d.stdout)
+print(d.nested.deep)
+
+// Bracket and dot are the same read.
+print(d["code"] == d.code)
+
+// Methods still work, and are not entries.
+print(d.keys().len())
+
+// A key that is not there is an error either way, not a nil.
+try {
+    print(d.missing)
+} catch e {
+    print("missing key raises")
+}

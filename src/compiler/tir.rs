@@ -151,6 +151,14 @@ pub enum TExprKind {
 /// `StructDef` and `InterfaceDef` re-use their untyped AST equivalents directly
 /// because their field/method definitions do not contain typed sub-expressions
 /// that need annotation at this stage.
+/// The `@dec(a, k = v)` lines attached to one definition, in source order, with
+/// their arguments inferred.
+///
+/// The AST counterpart is `frontend::parser::Decorators`. Only definitions carry
+/// these: a decorator on a `let` or a `prompt` is rewritten into a call by the
+/// parser and never reaches TIR at all.
+pub type TDecorators = Vec<(String, Vec<(Option<String>, TExpr)>)>;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TStmt {
     Let {
@@ -169,7 +177,7 @@ pub enum TStmt {
         params: Vec<(String, Option<TExpr>)>,
         body: Vec<TStmt>,
         ret_ty: JadeType,
-        decorators: Vec<(String, Vec<(Option<String>, TExpr)>)>,
+        decorators: TDecorators,
         span: Span,
     },
     Return {
@@ -201,7 +209,7 @@ pub enum TStmt {
     StructDef {
         name: String,
         fields: Vec<StructFieldDef>,
-        decorators: Vec<(String, Vec<(Option<String>, TExpr)>)>,
+        decorators: TDecorators,
         span: Span,
     },
     InterfaceDef {
@@ -213,7 +221,7 @@ pub enum TStmt {
         type_name: String,
         interface_name: Option<String>,
         methods: Vec<TStmt>,
-        decorators: Vec<(String, Vec<(Option<String>, TExpr)>)>,
+        decorators: TDecorators,
         span: Span,
     },
     FieldAssign {
@@ -265,7 +273,7 @@ pub enum TStmt {
         params: Vec<(String, Option<TExpr>)>,
         body: Vec<TStmt>,
         ret_ty: JadeType,
-        decorators: Vec<(String, Vec<(Option<String>, TExpr)>)>,
+        decorators: TDecorators,
         span: Span,
     },
     Expr(TExpr),

@@ -454,9 +454,7 @@ Catch it, or build the command from string literals and interpolate only the par
 
 The output of a shell command is itself tainted, so you cannot launder a value by running it through `sh` and feeding the result back in.
 
-:::caution
-`sh.output` does **not** perform this check. Build its command from trusted parts.
-:::
+All three functions check, because all three reach the same `sh -c`. Until v1.3.3 `sh.output` did not, which did not narrow what an untrusted command could do — it only meant it had to be written as `sh.output(x).stdout`.
 
 ---
 
