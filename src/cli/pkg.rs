@@ -48,8 +48,21 @@ fn relock_and_install(root: &std::path::Path, manifest: &ProjectManifest) {
 
 // ── add ───────────────────────────────────────────────────────────────────────
 
-/// `jade pkg add <name> --path <p> | --url <u> [--version <v>] [--abi c]`
-pub fn run_add(name: &str, path: Option<&str>, url: Option<&str>, version: Option<&str>, c_abi: bool) {
+/// `jade pkg add <name> --path <p> | --url <u> [--version <v>] [--header <h.h>]`
+///
+/// A `--header` says the artifact is a plain C library *and* how to bind it, so
+/// adding one is a single step: the symbol table is generated and the shim is
+/// built before the command returns. Requiring a separate `jade pkg bind` was
+/// asking the user to know about a stage that has no decision in it.
+pub fn run_add(
+    name: &str,
+    path: Option<&str>,
+    url: Option<&str>,
+    version: Option<&str>,
+    c_abi: bool,
+    header: Option<&str>,
+    include: &[String],
+) {
     let root = root_or_exit();
 
     let source = match (path, url) {
@@ -66,29 +79,248 @@ pub fn run_add(name: &str, path: Option<&str>, url: Option<&str>, version: Optio
         }
     };
 
-    let abi = if c_abi { Abi::C } else { Abi::Jade };
-    if c_abi {
-        // The symbol table cannot be supplied on the command line — it is a
-        // per-symbol prototype list. Write the entry, then point at the file.
-        eprintln!(
-            "note: add a [dependencies.{name}.symbols] table to jade.toml describing the C \
-             symbols to bind, then run `jade pkg install`"
-        );
-    }
+    // A local artifact can be read for its export table — which says both what
+    // kind of library it is and, later, whether a candidate header describes it.
+    let lib_path = path.map(|p| root.join(p)).filter(|p| p.exists());
+
+    // What the user said, then what the artifact says, then the default. A
+    // header is only meaningful for a plain C library, so passing one is itself
+    // a statement of the ABI.
+    let abi = if c_abi || header.is_some() {
+        Abi::C
+    } else {
+        match lib_path.as_deref().and_then(detect_abi) {
+            Some(Abi::C) => {
+                println!("{name} exports no jade_pkg_init, so it is a plain C library");
+                Abi::C
+            }
+            Some(Abi::Jade) => Abi::Jade,
+            // A URL dependency has nothing to read yet, and an unreadable table
+            // proves nothing. Assume a Jade package, which is what `--c-abi` is
+            // there to correct.
+            None => Abi::Jade,
+        }
+    };
 
     manifest::add_dependency(&root, name, source, version, abi, None).unwrap_or_else(|e| fail(e));
 
-    // A C dependency is not installable until its symbols are declared, so stop
-    // after the manifest edit rather than failing validation the user can't fix
-    // yet.
-    if c_abi {
+    // Given, or found. A .so has no headers in it — names only, and C does not
+    // mangle them — so one has to come from the filesystem; but the user should
+    // not have to know where. `libsqlite3.dylib` implies `sqlite3.h`, and the
+    // export table says whether the one we found is really this library's.
+    let found = header.map(std::path::PathBuf::from).or_else(|| {
+        if abi != Abi::C {
+            return None;
+        }
+        let lib = lib_path.as_deref()?;
+        let h = pkg::bindgen::discover_header(lib, &root, name)?;
+        println!("found header {}", h.display());
+        Some(h)
+    });
+
+    if let Some(h) = found {
+        bind_header(&root, name, &h.to_string_lossy(), include, None, false, lib_path.as_deref())
+            .unwrap_or_else(|e| fail(e));
+    } else if abi == Abi::C {
+        // Nothing to bind from, and a C dependency is not installable until its
+        // symbols exist. Stop after the manifest edit rather than failing
+        // validation the user cannot yet satisfy — and say what would fix it.
         println!("added {name} to jade.toml");
+        eprintln!(
+            "note: {name} is a C library and no header for it was found, so it has no symbols \
+             yet.\n  A shared library carries no headers — only symbol names, and C does not \
+             mangle them — so\n  one has to be pointed at:\n    \
+             jade pkg add {name} --path <the .so> --header <its header.h>\n  \
+             Or write a [dependencies.{name}.symbols] table by hand, which can cover what the\n  \
+             generator will not guess at."
+        );
         return;
     }
 
     let manifest = load_or_exit(&root);
     relock_and_install(&root, &manifest);
     println!("added {name}");
+}
+
+/// Which ABI an artifact speaks, read from the artifact itself.
+///
+/// A Jade package exports `jade_pkg_init`; a plain C library does not. That is
+/// not a heuristic — it is the same symbol the loader requires at run time, so
+/// anything answering "Jade" here is exactly what `use` will later accept.
+/// Both kinds are a `.dylib`, so the file extension says nothing and only the
+/// symbol table can tell them apart.
+///
+/// `None` when the table cannot be read, which is a reason to fall back on what
+/// the user said rather than to guess.
+fn detect_abi(lib: &std::path::Path) -> Option<Abi> {
+    let syms = pkg::bindgen::exported_symbols(lib)?;
+    Some(if syms.contains("jade_pkg_init") { Abi::Jade } else { Abi::C })
+}
+
+// ── binding a C library ───────────────────────────────────────────────────────
+
+/// The header path and include directories to record for a dependency.
+///
+/// Absolute, because the shim is compiled inside `libs/<dep>/` rather than
+/// wherever the command was run — a relative `-I` resolves against the wrong
+/// directory, and the failure is a "file not found" from cc at install time,
+/// well away from the cause.
+fn header_locations(header: &std::path::Path, include: &[String]) -> (Vec<String>, Vec<String>) {
+    let abs = |p: &std::path::Path| -> String {
+        std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()).to_string_lossy().into_owned()
+    };
+    let headers = vec![header
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_else(|| header.to_string_lossy().into_owned())];
+
+    let mut dirs: Vec<String> = include.iter().map(|d| abs(std::path::Path::new(d))).collect();
+    let parent = header.parent().filter(|p| !p.as_os_str().is_empty());
+    let dir = abs(parent.unwrap_or_else(|| std::path::Path::new(".")));
+    if !dirs.contains(&dir) {
+        dirs.push(dir);
+    }
+    (headers, dirs)
+}
+
+/// Read a header and write the tables into `jade.toml`. Shared by `add`,
+/// `install` and `bind`, so all three produce the same manifest.
+fn bind_header(
+    root: &std::path::Path,
+    name: &str,
+    header: &str,
+    include: &[String],
+    only: Option<&str>,
+    quiet: bool,
+    lib: Option<&std::path::Path>,
+) -> Result<(), String> {
+    let header_path = std::path::Path::new(header);
+    if !header_path.exists() {
+        return Err(format!("no such header: {header}"));
+    }
+
+    let binding = pkg::bindgen::from_header(header_path, include, only)?;
+
+    // Check the header against the library it is supposed to describe. A header
+    // declaring symbols the library does not export is the wrong header, and
+    // the shim would fail to link with an undefined-symbol error naming none of
+    // this.
+    if let Some(exported) = lib.and_then(pkg::bindgen::exported_symbols) {
+        let (covered, total) = pkg::bindgen::coverage(&binding, &exported);
+        if covered == 0 && !binding.symbols.is_empty() {
+            return Err(format!(
+                "{header} declares none of the {total} symbols {} exports — it looks like the \
+                 wrong header for this library.",
+                lib.map(|l| l.display().to_string()).unwrap_or_default()
+            ));
+        }
+        if !quiet {
+            println!("covers {covered} of the {total} symbols the library exports");
+        }
+    }
+
+    if binding.symbols.is_empty() {
+        return Err(format!(
+            "{}\nnothing in {header} could be bound. The reasons above say why; a symbol table \
+             written by hand can still cover what this could not.",
+            binding.report()
+        ));
+    }
+
+    let (headers, dirs) = header_locations(header_path, include);
+    manifest::set_bindings(root, name, &binding.symbols, &binding.structs, &headers, &dirs)?;
+
+    if !quiet {
+        println!("{}", binding.report());
+    }
+    Ok(())
+}
+
+// ── bind ──────────────────────────────────────────────────────────────────────
+
+/// `jade pkg bind <name> --header <h.h> [-I dir] [--only text] [--dry-run]`
+///
+/// Reads the header with clang and writes the symbol table into `jade.toml`, so
+/// a library with two hundred entry points does not have to be transcribed by
+/// hand. What it *could not* bind is printed, with reasons: a generator that
+/// silently covers two thirds of an API is how the missing third is found at
+/// run time.
+pub fn run_bind(name: &str, header: &str, include: &[String], only: Option<&str>, dry_run: bool) {
+    let root = root_or_exit();
+
+    if dry_run {
+        // Report only. Useful for looking at a large header before committing
+        // its table to the manifest.
+        let header_path = std::path::Path::new(header);
+        if !header_path.exists() {
+            fail(format!("no such header: {header}"));
+        }
+        let binding =
+            pkg::bindgen::from_header(header_path, include, only).unwrap_or_else(|e| fail(e));
+        println!("{}", binding.report());
+        println!("\n(dry run — jade.toml unchanged)");
+        return;
+    }
+
+    // The dependency's own artifact, so the header can be checked against the
+    // library it claims to describe before anything is written.
+    let lib = load_or_exit(&root)
+        .dependencies
+        .as_ref()
+        .and_then(|d| d.get(name))
+        .and_then(|e| e.path.clone())
+        .map(|p| root.join(p))
+        .filter(|p| p.exists());
+
+    bind_header(&root, name, header, include, only, false, lib.as_deref())
+        .unwrap_or_else(|e| fail(e));
+    println!("\nwrote [dependencies.{name}.symbols] to jade.toml");
+
+    // Build it too. Re-binding and then leaving the shim stale is never what
+    // anyone wanted, and it is the step that would otherwise be forgotten.
+    let manifest = load_or_exit(&root);
+    relock_and_install(&root, &manifest);
+    println!("installed {name}");
+}
+
+/// Bind every `abi = "c"` dependency that names a header but has no symbols.
+/// Returns whether the manifest was changed.
+fn bind_missing_symbols(root: &std::path::Path, manifest: &ProjectManifest) -> bool {
+    let Some(deps) = &manifest.dependencies else { return false };
+    let mut changed = false;
+
+    for (name, entry) in deps {
+        if entry.abi != Abi::C || entry.symbols.is_some() {
+            continue;
+        }
+        let Some(headers) = entry.headers.as_ref().filter(|h| !h.is_empty()) else { continue };
+
+        // The manifest records a bare filename plus the directories to find it
+        // in, so the lookup is the same one the shim compile will do.
+        let dirs = entry.include_dirs.clone().unwrap_or_default();
+        let found = dirs
+            .iter()
+            .map(|d| std::path::Path::new(d).join(&headers[0]))
+            .find(|p| p.exists())
+            .or_else(|| Some(root.join(&headers[0])).filter(|p| p.exists()));
+
+        let lib = entry.path.as_ref().map(|p| root.join(p)).filter(|p| p.exists());
+        let Some(path) = found else {
+            eprintln!(
+                "note: dependency '{name}' names header '{}' but it was not found, so no symbols \
+                 were generated. Point at it with\n  jade pkg bind {name} --header <path>",
+                headers[0]
+            );
+            continue;
+        };
+
+        println!("binding {name} from {}", headers[0]);
+        match bind_header(root, name, &path.to_string_lossy(), &dirs, None, false, lib.as_deref()) {
+            Ok(()) => changed = true,
+            Err(e) => eprintln!("note: could not bind '{name}': {e}"),
+        }
+    }
+    changed
 }
 
 // ── remove ────────────────────────────────────────────────────────────────────
@@ -136,12 +368,24 @@ pub fn run_remove(name: &str) {
 /// edit that was never locked should fail rather than silently resolve.
 pub fn run_install(locked: bool) {
     let root = root_or_exit();
-    let manifest = load_or_exit(&root);
+    let mut manifest = load_or_exit(&root);
 
     let has_deps = manifest.dependencies.as_ref().is_some_and(|d| !d.is_empty());
     if !has_deps {
         println!("no dependencies");
         return;
+    }
+
+    // Bind anything that says which header to read but has no symbols yet.
+    // Without this a hand-written entry naming a header would install a shim
+    // with nothing in it, and the user would have to know that a separate
+    // command exists to fill it.
+    //
+    // Only when `symbols` is *absent*: a committed manifest already carries
+    // them, so a fresh clone installs without needing clang at all. Re-running
+    // after a header changes is `jade pkg bind`, which is an explicit act.
+    if !locked && bind_missing_symbols(&root, &manifest) {
+        manifest = load_or_exit(&root);
     }
 
     let existing = lock::read(&root).unwrap_or_else(|e| fail(e));

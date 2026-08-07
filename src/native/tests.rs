@@ -230,7 +230,7 @@ fn tag_constants_are_distinct() {
     let tags = [
         JADE_TAG_NIL, JADE_TAG_INT, JADE_TAG_FLOAT, JADE_TAG_BOOL,
         JADE_TAG_STR, JADE_TAG_ERROR, JADE_TAG_ARRAY, JADE_TAG_DICT,
-        JADE_TAG_STRUCT, JADE_TAG_BYTES,
+        JADE_TAG_STRUCT, JADE_TAG_BYTES, JADE_TAG_HANDLE,
     ];
     for i in 0..tags.len() {
         for j in (i + 1)..tags.len() {
@@ -465,4 +465,151 @@ fn a_mangled_struct_round_trips_under_its_source_name() {
 
     let VmValue::Struct(arc) = back else { panic!("expected a struct back") };
     assert_eq!(arc.lock().type_name(), "Token", "the caller must see the protocol name");
+}
+
+// ── Handle round-trip ─────────────────────────────────────────────────────
+//
+// A handle is a pointer Jade holds and hands back without ever reading. Two
+// things have to survive the trip and one thing must not happen: the address
+// must come back bit-identical (a handle that shifts by a byte is a crash
+// inside the library), the type name must come back with it (that is what makes
+// `sqlite3` and `sqlite3_stmt` different values), and `ffi_free` must not touch
+// the pointee.
+
+/// A stand-in for a pointer a package would return. Never dereferenced — which
+/// is exactly the contract, so an obviously-bogus address is the honest fixture.
+const FAKE_PTR: usize = 0xDEAD_BEE0;
+
+fn sample_handle(ptr: usize, ty: &str) -> VmValue {
+    VmValue::Handle(Arc::new(jade_runtime::handle::HandleObj::new(
+        ptr,
+        std::ffi::CString::new(ty).unwrap(),
+    )))
+}
+
+#[test]
+fn vm_to_ffi_handle_carries_the_pointer_and_the_type_name() {
+    let mut scratch = Vec::new();
+    let v = vm_to_ffi(&sample_handle(FAKE_PTR, "sqlite3"), &mut scratch);
+    assert_eq!(v.tag, JADE_TAG_HANDLE);
+
+    let h = unsafe { &*v.data.as_handle };
+    assert_eq!(h.ptr as usize, FAKE_PTR);
+    let name = unsafe { CStr::from_ptr(h.type_name as *const c_char) };
+    assert_eq!(name.to_str().unwrap(), "sqlite3");
+
+    unsafe { ffi_free(&v) };
+}
+
+#[test]
+fn a_handle_survives_a_round_trip_unchanged() {
+    let mut scratch = Vec::new();
+    let v = vm_to_ffi(&sample_handle(FAKE_PTR, "SNDFILE"), &mut scratch);
+    let back = ffi_to_vm(&v, ZERO).expect("handle should convert back");
+    unsafe { ffi_free(&v) };
+
+    let VmValue::Handle(h) = back else { panic!("expected a handle back") };
+    assert_eq!(h.ptr, FAKE_PTR, "the address must survive bit-identical");
+    assert!(h.is_type("SNDFILE"));
+}
+
+#[test]
+fn the_type_name_is_copied_not_borrowed() {
+    // The wire struct must own its name: the Arc backing the source value is
+    // dropped here, and reading a freed name would be a use-after-free that a
+    // borrowed pointer would hide until it randomly did not.
+    let mut scratch = Vec::new();
+    let v = vm_to_ffi(&sample_handle(FAKE_PTR, "gzFile"), &mut scratch);
+    drop(scratch);
+
+    let h = unsafe { &*v.data.as_handle };
+    let name = unsafe { CStr::from_ptr(h.type_name as *const c_char) };
+    assert_eq!(name.to_str().unwrap(), "gzFile");
+    unsafe { ffi_free(&v) };
+}
+
+#[test]
+fn freeing_a_handle_leaves_the_pointee_alone() {
+    // The real assertion is that this does not crash or corrupt: `ffi_free`
+    // must not pass `ptr` to free(). A genuinely heap-allocated block stands in
+    // for the library's object so a stray free() would be caught by the
+    // allocator rather than silently tolerated as it would be for a fake
+    // address.
+    let owned: Box<u64> = Box::new(0x1234_5678_9ABC_DEF0);
+    let addr = Box::into_raw(owned) as usize;
+
+    let mut scratch = Vec::new();
+    let v = vm_to_ffi(&sample_handle(addr, "sqlite3"), &mut scratch);
+    unsafe { ffi_free(&v) };
+
+    // Still ours, still intact, still ours to release.
+    let owned = unsafe { Box::from_raw(addr as *mut u64) };
+    assert_eq!(*owned, 0x1234_5678_9ABC_DEF0);
+}
+
+#[test]
+fn handles_of_different_types_stay_distinct() {
+    // The point of carrying a name. These two would be interchangeable without
+    // it, and passing a statement where a connection belongs is a segfault
+    // inside SQLite rather than anything Jade could report.
+    let mut scratch = Vec::new();
+    let db = vm_to_ffi(&sample_handle(FAKE_PTR, "sqlite3"), &mut scratch);
+    let stmt = vm_to_ffi(&sample_handle(FAKE_PTR, "sqlite3_stmt"), &mut scratch);
+
+    let a = ffi_to_vm(&db, ZERO).unwrap();
+    let b = ffi_to_vm(&stmt, ZERO).unwrap();
+    unsafe {
+        ffi_free(&db);
+        ffi_free(&stmt);
+    }
+
+    let (VmValue::Handle(a), VmValue::Handle(b)) = (a, b) else { panic!("expected handles") };
+    assert_eq!(a.ptr, b.ptr, "same address, deliberately");
+    assert_ne!(a, b, "but not the same value, because the types differ");
+    assert!(a.is_type("sqlite3") && !a.is_type("sqlite3_stmt"));
+}
+
+#[test]
+fn a_null_handle_wrapper_becomes_nil_rather_than_a_null_read() {
+    let v = JadeVal {
+        tag: JADE_TAG_HANDLE,
+        _pad: [0; 7],
+        data: JadeValData { as_handle: std::ptr::null_mut() },
+    };
+    assert!(matches!(ffi_to_vm(&v, ZERO), Ok(VmValue::Nil)));
+    // The free gate must tolerate it too, since a package can return one.
+    unsafe { ffi_free(&v) };
+}
+
+#[test]
+fn a_handle_nested_in_a_container_round_trips() {
+    // Containers copy their elements through vm_to_ffi_owned rather than
+    // vm_to_ffi, so the nested path is a separate arm from the top-level one and
+    // needs its own coverage — that distinction is what the bytes bug turned on.
+    let arr = crate::builtins::make_array(vec![
+        VmValue::Int(1),
+        sample_handle(FAKE_PTR, "FT_Face"),
+    ]);
+    let mut scratch = Vec::new();
+    let v = vm_to_ffi(&arr, &mut scratch);
+    let back = ffi_to_vm(&v, ZERO).expect("array should convert back");
+    unsafe { ffi_free(&v) };
+
+    let VmValue::Array(out) = back else { panic!("expected an array back") };
+    let Some(VmValue::Handle(h)) = out.lock().get(1).cloned() else {
+        panic!("nested handle lost");
+    };
+    assert_eq!(h.ptr, FAKE_PTR);
+    assert!(h.is_type("FT_Face"));
+}
+
+#[test]
+fn a_handle_renders_by_type_and_never_by_address() {
+    // Both engines must print the same text — the parity gate diffs stdout — and
+    // an address differs every run, so printing one would fail the gate for any
+    // program holding a handle.
+    let a = crate::vm::value_to_display(&sample_handle(0x1000, "sqlite3"));
+    let b = crate::vm::value_to_display(&sample_handle(0x2000, "sqlite3"));
+    assert_eq!(a, "handle<sqlite3>");
+    assert_eq!(a, b);
 }

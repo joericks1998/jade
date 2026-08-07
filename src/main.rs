@@ -194,9 +194,36 @@ enum PkgCommands {
         /// Exact version (required for --url; there are no version ranges)
         #[arg(long, value_name = "VERSION")]
         version: Option<String>,
-        /// The artifact is a plain C library, not a Jade-ABI package
+        /// Force plain-C binding. Usually unnecessary — a local artifact is
+        /// recognised by whether it exports jade_pkg_init
         #[arg(long = "c-abi")]
         c_abi: bool,
+        /// The C library's header. Implies --c-abi, and binds it on the spot
+        #[arg(long, value_name = "FILE")]
+        header: Option<String>,
+        /// Extra include directory for the header; repeatable
+        #[arg(short = 'I', long = "include", value_name = "DIR")]
+        include: Vec<String>,
+    },
+    /// Re-generate a C dependency's symbol table from its header
+    ///
+    /// `jade pkg add --header` already does this; reach for `bind` to re-run it
+    /// after a header changes, or to narrow a large one with --only.
+    Bind {
+        /// The dependency to bind, which must already be in jade.toml
+        name: String,
+        /// The library's header, e.g. /opt/homebrew/include/sqlite3.h
+        #[arg(long, value_name = "FILE")]
+        header: String,
+        /// Extra include directory; repeatable
+        #[arg(short = 'I', long = "include", value_name = "DIR")]
+        include: Vec<String>,
+        /// Only bind symbols whose name contains this
+        #[arg(long, value_name = "TEXT")]
+        only: Option<String>,
+        /// Show what would be written without changing jade.toml
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Remove a dependency from jade.toml, jade.lock, and libs/
     Remove {
@@ -303,8 +330,17 @@ async fn run_cli() {
 
         // ── upgrade ───────────────────────────────────────────────────────────
         Commands::Pkg(subcommand) => match subcommand {
-            PkgCommands::Add { name, path, url, version, c_abi } => {
-                cli::pkg::run_add(&name, path.as_deref(), url.as_deref(), version.as_deref(), c_abi)
+            PkgCommands::Add { name, path, url, version, c_abi, header, include } => cli::pkg::run_add(
+                &name,
+                path.as_deref(),
+                url.as_deref(),
+                version.as_deref(),
+                c_abi,
+                header.as_deref(),
+                &include,
+            ),
+            PkgCommands::Bind { name, header, include, only, dry_run } => {
+                cli::pkg::run_bind(&name, &header, &include, only.as_deref(), dry_run)
             }
             PkgCommands::Remove { name } => cli::pkg::run_remove(&name),
             PkgCommands::Install { locked } => cli::pkg::run_install(locked),

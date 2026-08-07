@@ -26,7 +26,10 @@ pub const JADE_VERSION: &str = env!("CARGO_PKG_VERSION");
 ///     middle of a serde enum renumbers every variant after it, so a v5 cache
 ///     deserializes into the *wrong* types rather than failing loudly — which
 ///     showed up as an imported struct losing its field defaults.
-pub const CACHE_FORMAT_VERSION: u32 = 6;
+/// v7: `JadeType` gained `Handle` (1.3.0), inserted after `Struct` and so ahead
+///     of `Fn`/`AsyncFn`/`Future`/`Unknown` — the same mid-enum renumbering that
+///     made v6 necessary, with the same silent-misread failure if not bumped.
+pub const CACHE_FORMAT_VERSION: u32 = 7;
 
 // ── Internal types ────────────────────────────────────────────────────────────
 

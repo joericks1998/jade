@@ -61,6 +61,10 @@ pub enum ObjKind {
     /// A binary blob. Owns a `Vec<u8>`, not tagged words, so its `free_obj`
     /// arm reclaims without a child cascade.
     Bytes = 10,
+    /// An opaque pointer from a native package, plus the C type it came from.
+    /// Owns its type name and nothing else — in particular *not* the pointee,
+    /// which belongs to the library that produced it. See `handle.rs`.
+    Handle = 11,
 }
 
 /// Bacon–Rajan cycle-collector color. Stored in [`ObjHeader::color`].
