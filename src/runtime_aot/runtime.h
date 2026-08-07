@@ -449,6 +449,9 @@ int64_t jrt_bool_any(int64_t val);
 #define JK_BYTES  10
 #define JK_HANDLE 11
 #define JK_PROMPT 7
+/* A first-class function box: the code pointer sits at offset 0, behind the
+ * usual header. `jrt_uhttp_stream` reads one the same way. */
+#define JK_FN     5
 
 /* jrt_require_kind — the receiver guard the Chunk backend emits ahead of a
  * primitive method call (`recv.push(x)`, `recv.keys()`, `recv.upper()`, …).
@@ -786,6 +789,17 @@ char*   jrt_readline(const char* prompt);
  * call the binding exposes. Added in v1.3.0, which is why the runtime ABI
  * version moved to 4. */
 #define JADE_FFI_HANDLE 10
+/* data.as_fn -> JadeFn. A Jade function a C library may call back.
+ *
+ * The value carries its own `invoke` pointer rather than the shim calling some
+ * agreed host symbol. That is what keeps it engine-neutral: the compiled
+ * runtime calls a lowered function directly, while the VM cannot be re-entered
+ * from C at all and hands over an `invoke` that posts the arguments to the
+ * interpreter and waits. A dlopen'd package resolving a host symbol would have
+ * worked for neither.
+ *
+ * Added in v1.3.0 alongside JADE_FFI_HANDLE, so both ride the one ABI bump. */
+#define JADE_FFI_FN 11
 
 /* Nested payloads for JADE_FFI_ARRAY / JADE_FFI_DICT / JADE_FFI_STRUCT /
  * JADE_FFI_BYTES / JADE_FFI_HANDLE.
@@ -806,6 +820,7 @@ typedef struct JadeMap JadeMap;
 typedef struct JadeStruct JadeStruct;
 typedef struct JadeBytes JadeBytes;
 typedef struct JadeHandle JadeHandle;
+typedef struct JadeFn JadeFn;
 
 typedef union {
     int64_t     as_int;
@@ -818,6 +833,7 @@ typedef union {
     JadeStruct* as_struct;
     JadeBytes*  as_bytes;
     JadeHandle* as_handle;
+    JadeFn*     as_fn;
 } JadeValData;
 
 typedef struct {
@@ -852,6 +868,24 @@ struct JadeStruct {
 struct JadeHandle {
     void*       ptr;
     const char* type_name;
+};
+
+/* A Jade function a C library can call back into.
+ *
+ * `invoke` returns 0 when the call succeeded and `out` holds its result;
+ * non-zero when the Jade side raised, with `out` a JADE_FFI_ERROR carrying the
+ * message. A raise must NOT propagate out of `invoke` — it would longjmp
+ * through the C library's frames, past whatever it was in the middle of. Each
+ * engine catches at that boundary and reports through the return value, the
+ * same rule `jrt_uhttp_stream` follows for the same reason.
+ *
+ * `host` is opaque to the shim and meaningful only to the engine that supplied
+ * it. It is valid for the duration of the native call and no longer, so a
+ * library that stores the callback and invokes it later gets nothing: a
+ * registration outliving the call is not supported. */
+struct JadeFn {
+    void* host;
+    int (*invoke)(void* host, size_t argc, const JadeVal* argv, JadeVal* out);
 };
 
 /* Release a JadeVal tree built by the marshaller (`to_ffi`/`jrt_ffi_from_tagged`

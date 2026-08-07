@@ -644,3 +644,81 @@ extern int sqlite3_close(sqlite3* db);
         panic!("handle shim does not compile:\n{e}\n--- source ---\n{src}");
     }
 }
+
+// ── Callbacks ────────────────────────────────────────────────────────────
+//
+// The shim declares a real static C function of the declared shape, which is
+// only possible because the shape is known when the C is written. Synthesising
+// one at run time would need libffi and a trampoline compiler.
+
+#[test]
+fn a_callback_becomes_a_static_function_of_the_declared_shape() {
+    let s = sym(&["int", "callback:int(int, const char*)"], "int");
+    let src = generate("z", &symbols(&[("each", s)])).unwrap();
+    // The library's own C types, not Jade's widened ones: this declares a
+    // function pointer the library will store and call, so `int` must be `int`.
+    // Widening it is not a truncation but an incompatible function pointer.
+    assert!(src.contains("static int jade_cbt_each(int a0, const char* a1)"), "bad trampoline:\n{src}");
+    assert!(src.contains("extern int64_t each(int64_t, int (*)(int, const char*));"), "bad decl:\n{src}");
+    assert!(src.contains("each(argv[0].data.as_int, jade_cbt_each)"), "should pass the trampoline:\n{src}");
+}
+
+#[test]
+fn the_registration_lasts_exactly_one_call() {
+    // A library that stores the callback and invokes it later must find an
+    // empty slot, not a stale pointer into an interpreter that has moved on.
+    let s = sym(&["callback:int(int)"], "int");
+    let src = generate("z", &symbols(&[("go", s)])).unwrap();
+    assert!(src.contains("jade_cb_go = argv[0].data.as_fn;"), "should register:\n{src}");
+    assert!(src.contains("jade_cb_go = NULL;"), "should unregister:\n{src}");
+    assert!(src.contains("if (!jade_cb_go)"), "should answer neutrally when empty:\n{src}");
+    assert!(src.contains("_Thread_local"), "the slot must be per-thread:\n{src}");
+}
+
+#[test]
+fn a_raise_inside_a_callback_is_deferred_rather_than_unwound() {
+    // Longjmping out of the trampoline would unwind through the C library's
+    // own frames, past whatever it was in the middle of.
+    let s = sym(&["callback:int(int)"], "int");
+    let src = generate("z", &symbols(&[("go", s)])).unwrap();
+    assert!(src.contains("jade_cb_failed_go = 1;"), "should record the failure:\n{src}");
+    assert!(src.contains("if (jade_cb_failed_go) {"), "should check after the call:\n{src}");
+    assert!(src.contains("the callback raised"), "should surface it:\n{src}");
+    // Recorded inside the trampoline, surfaced only after the library returns.
+    let record = src.find("jade_cb_failed_go = 1;").unwrap();
+    let surface = src.find("if (jade_cb_failed_go) {").unwrap();
+    assert!(record < surface, "the raise must surface after the call, not during it");
+}
+
+#[test]
+fn a_void_callback_and_a_zero_argument_callback_both_work() {
+    let src = generate("z", &symbols(&[
+        ("a", sym(&["callback:void(int)"], "int")),
+        ("b", sym(&["callback:int()"], "int")),
+    ])).unwrap();
+    assert!(src.contains("static void jade_cbt_a(int a0)"), "void callback:\n{src}");
+    assert!(src.contains("static int jade_cbt_b(void)"), "no-arg callback:\n{src}");
+}
+
+#[test]
+fn a_malformed_or_unrepresentable_callback_is_refused() {
+    for bad in ["callback:int", "callback:int(", "callback:int(struct foo)", "callback:double*(int)"] {
+        let s = sym(&[bad], "int");
+        assert!(generate("z", &symbols(&[("f", s)])).is_err(), "should refuse {bad}");
+    }
+}
+
+#[test]
+fn a_callback_shim_compiles() {
+    let header = "typedef int (*each_cb)(int, const char*);\n\
+                  extern int each(int n, each_cb cb);\n\
+                  extern int walk(void (*cb)(int));\n";
+    let syms = symbols(&[
+        ("each", sym(&["int", "callback:int(int, const char*)"], "int")),
+        ("walk", sym(&["callback:nil(int)"], "int")),
+    ]);
+    let src = generate_with("z", &syms, &[], &["cbfix.h"]).unwrap();
+    if let Err(e) = compiles(&src, &[("cbfix.h", header)]) {
+        panic!("callback shim does not compile:\n{e}\n--- source ---\n{src}");
+    }
+}

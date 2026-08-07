@@ -39,6 +39,8 @@ Marshalling in `native.c` and `src/native/mod.rs` must agree, or a package that 
 
 The transport tree for arrays, dicts, structs, bytes and handles crossing the FFI is **libc-heap**, deliberately, so either `jade-runtime` instance in the process can free it. See the `JadeArr`/`JadeMap`/`JadeBytes`/`JadeHandle` notes in `runtime.h`.
 
+**A callback must not let a raise escape.** A Jade `raise` is a `longjmp`, and one leaving `aot_invoke_callback` would unwind through the C library's own frames, past whatever it was in the middle of, leaving its state however it happened to be. So the callback runs inside a `setjmp` frame and reports failure through its return value — the same rule `jrt_uhttp_stream` follows, and the reason the shim defers a callback's error until the library has returned normally.
+
 A handle is the one payload whose ownership splits: `jade_ffi_free` releases its wrapper and type name and never its `ptr`, which belongs to the library that issued it. Freeing it here would hand the C library's memory back through the wrong allocator.
 
 **Nothing in this directory formats a value for display any more.** `jrt_snprintf_float` was the last holdout and is gone: it used `"%.*g"`, which switches to exponent form exactly when a float needs trailing zeros before the decimal point, so a compiled binary printed `1e+01` for `10.0` while the VM printed `10.0`. Value text comes from `jrt_render_any` in `jade-runtime`, and a second implementation here will drift the same way. Note also that float and string text are unbounded — `1e300` is 301 digits — so neither may be formatted into a fixed scratch buffer.

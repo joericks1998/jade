@@ -28,8 +28,10 @@
 #define JADE_FFI_STR    4
 #define JADE_FFI_ERROR  5
 #define JADE_FFI_HANDLE 10
+#define JADE_FFI_FN     11
 
 typedef struct JadeHandle JadeHandle;
+typedef struct JadeFn JadeFn;
 
 typedef union {
     int64_t     as_int;
@@ -38,10 +40,15 @@ typedef union {
     const char* as_str;
     uint64_t    as_nil;
     JadeHandle* as_handle;
+    JadeFn*     as_fn;
 } JadeValData;
 
 typedef struct { uint8_t tag; uint8_t _pad[7]; JadeValData data; } JadeVal;
 struct JadeHandle { void* ptr; const char* type_name; };
+struct JadeFn {
+    void* host;
+    int (*invoke)(void* host, size_t argc, const JadeVal* argv, JadeVal* out);
+};
 
 typedef int (*JadeNativeFnPtr)(size_t argc, const JadeVal* argv, JadeVal* out);
 typedef struct { const char* name; JadeNativeFnPtr func; } JadeBinding;
@@ -145,7 +152,38 @@ static int fx_live(size_t argc, const JadeVal* argv, JadeVal* out) {
     return 0;
 }
 
+/* Calls a Jade function back, once per entry. The two engines re-enter in
+ * completely different ways — compiled code calls a lowered function directly,
+ * while the VM cannot be re-entered from a C frame at all and has to post the
+ * call to the interpreter and wait — so this is exactly the kind of thing that
+ * agrees in unit tests and diverges in practice. */
+static int fx_visit(size_t argc, const JadeVal* argv, JadeVal* out) {
+    if (argc != 2 || argv[0].tag != JADE_FFI_HANDLE || argv[1].tag != JADE_FFI_FN) return 1;
+    const JadeHandle* h = argv[0].data.as_handle;
+    const JadeFn* cb = argv[1].data.as_fn;
+    Thing* t = (Thing*)h->ptr;
+    int64_t total = 0;
+    for (int i = 0; i < 3; i++) {
+        JadeVal a[2];
+        a[0].tag = JADE_FFI_INT; a[0].data.as_int = i;
+        a[1].tag = JADE_FFI_STR; a[1].data.as_str = t->name;
+        JadeVal r; r.tag = JADE_FFI_NIL; r.data.as_nil = 0;
+        if (cb->invoke(cb->host, 2, a, &r) != 0) {
+            /* The callback raised. Stop cleanly and report — never let it
+             * unwind through these frames. */
+            out->tag = JADE_FFI_ERROR;
+            out->data.as_str = "callback failed";
+            return 1;
+        }
+        if (r.tag == JADE_FFI_INT) total += r.data.as_int;
+    }
+    out->tag = JADE_FFI_INT;
+    out->data.as_int = total;
+    return 0;
+}
+
 static const JadeBinding BINDINGS[] = {
+    { "visit",  fx_visit  },
     { "open",   fx_open   },
     { "name",   fx_name   },
     { "tag_of", fx_tag_of },

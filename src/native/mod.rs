@@ -66,6 +66,14 @@ pub const JADE_TAG_BYTES: u8 = 9;
 /// Added in v1.3.0, which is why [`jade_runtime::RUNTIME_ABI_VERSION`] moved to
 /// 4: a package built against ABI 3 has no arm for this tag.
 pub const JADE_TAG_HANDLE: u8 = 10;
+/// `data.as_fn` → a [`JadeFn`]: a Jade function a C library may call back.
+///
+/// The value carries its own `invoke` pointer instead of the package calling an
+/// agreed host symbol, because the two engines re-enter in completely different
+/// ways — compiled code calls a lowered function directly, while the VM cannot
+/// be re-entered from a C frame at all and has to post the call to the
+/// interpreter and wait. One agreed symbol would have suited neither.
+pub const JADE_TAG_FN: u8 = 11;
 
 // ── Value type ────────────────────────────────────────────────────────────────
 
@@ -83,6 +91,7 @@ pub union JadeValData {
     pub as_struct: *mut JadeStruct,
     pub as_bytes: *mut JadeBytes,
     pub as_handle: *mut JadeHandle,
+    pub as_fn: *mut JadeFn,
 }
 
 #[repr(C)]
@@ -146,6 +155,27 @@ pub struct JadeHandle {
     pub type_name: *const u8,
 }
 
+/// A Jade function a C library can call back into. Layout mirrors `JadeFn` in
+/// runtime_aot's runtime.h.
+///
+/// `invoke` answers 0 on success with the result in `out`, non-zero when the
+/// Jade side raised with `out` a `JADE_TAG_ERROR`. A raise must never leave
+/// `invoke`: it is a `longjmp` in compiled code and a `Result` in the VM, and
+/// either escaping into the C library's frames would unwind past whatever the
+/// library was in the middle of.
+#[repr(C)]
+pub struct JadeFn {
+    pub host: *mut c_void,
+    pub invoke: Option<
+        unsafe extern "C" fn(
+            host: *mut c_void,
+            argc: usize,
+            argv: *const JadeVal,
+            out: *mut JadeVal,
+        ) -> i32,
+    >,
+}
+
 impl JadeVal {
     pub fn nil() -> Self {
         JadeVal { tag: JADE_TAG_NIL, _pad: [0; 7], data: JadeValData { as_nil: 0 } }
@@ -182,6 +212,101 @@ pub struct NativeLibFn {
     fn_ptr:   JadeNativeFnPtr,
     /// Keep the library loaded for as long as any of its functions are alive.
     _lib:     Arc<libloading::Library>,
+}
+
+// ── Callbacks ─────────────────────────────────────────────────────────────────
+
+/// One call from a C callback back into the interpreter.
+///
+/// The VM cannot be re-entered from a C frame: calling a Jade function needs
+/// `VmState` and an async context, and the C library is holding the stack. So
+/// the native call runs on a worker thread and the callback *posts* here; the
+/// interpreter services it from its own loop and sends the answer back. The
+/// worker blocks in between, which is exactly what it is for.
+///
+/// This is the same inversion `uhttp.stream` uses, in both directions.
+pub(crate) struct CallbackRequest {
+    pub callee: VmValue,
+    pub args: Vec<VmValue>,
+    pub reply: tokio::sync::oneshot::Sender<Result<VmValue>>,
+    /// Where the native call was written, so an error raised inside the
+    /// callback points at the call the user can see rather than at nothing.
+    pub span: Span,
+}
+
+/// What one `JadeFn`'s `host` pointer addresses: the Jade function to call, and
+/// the way back to the interpreter.
+pub(crate) struct CallbackHost {
+    callee: VmValue,
+    tx: tokio::sync::mpsc::Sender<CallbackRequest>,
+    span: Span,
+}
+
+/// Whether a value is something a C library could call.
+pub(crate) fn is_callable(v: &VmValue) -> bool {
+    matches!(
+        v,
+        VmValue::Fn(_)
+            | VmValue::Closure(_, _)
+            | VmValue::BoundMethod(_)
+            | VmValue::BuiltinFn(_)
+            | VmValue::NativeBoundMethod(_)
+    )
+}
+
+/// The `invoke` a VM-supplied [`JadeFn`] carries.
+///
+/// Runs on the worker thread the native call was moved to, never on the
+/// interpreter's. Both channel operations are the blocking flavours for that
+/// reason.
+///
+/// # Safety
+/// `host` must point at a live [`CallbackHost`]; `argv` at `argc` values.
+unsafe extern "C" fn vm_invoke_callback(
+    host: *mut c_void,
+    argc: usize,
+    argv: *const JadeVal,
+    out: *mut JadeVal,
+) -> i32 {
+    let h = unsafe { &*(host as *const CallbackHost) };
+
+    let mut args = Vec::with_capacity(argc);
+    for i in 0..argc {
+        match ffi_to_vm(unsafe { &*argv.add(i) }, h.span) {
+            Ok(v) => args.push(v),
+            Err(_) => return 1,
+        }
+    }
+
+    let (reply, wait) = tokio::sync::oneshot::channel();
+    let req = CallbackRequest { callee: h.callee.clone(), args, reply, span: h.span };
+    if h.tx.blocking_send(req).is_err() {
+        // The interpreter stopped listening: the native call is already
+        // unwinding. Report failure rather than block forever.
+        return 1;
+    }
+
+    match wait.blocking_recv() {
+        Ok(Ok(v)) => {
+            // Scalars only, so there is nothing for the caller to free. A
+            // callback returning a container would raise the question of who
+            // releases it inside a C frame, for no use anyone has asked for.
+            unsafe { *out = vm_to_ffi_owned(&v) };
+            match unsafe { (*out).tag } {
+                JADE_TAG_NIL | JADE_TAG_INT | JADE_TAG_FLOAT | JADE_TAG_BOOL => 0,
+                _ => {
+                    unsafe { ffi_free(&*out) };
+                    unsafe { *out = JadeVal::nil() };
+                    1
+                }
+            }
+        }
+        // A raise inside the callback. It must not travel out of here — the C
+        // library is mid-operation and unwinding through its frames would leave
+        // it however it happens to be. The shim turns this into a Jade error
+        // once the native call has returned normally.
+        Ok(Err(_)) | Err(_) => 1,
+    }
 }
 
 impl NativeLibFn {
@@ -221,6 +346,127 @@ impl NativeLibFn {
         }
 
         result
+    }
+
+    /// The raw function pointer, for the callback path's worker thread.
+    pub(crate) fn fn_ptr(&self) -> JadeNativeFnPtr {
+        self.fn_ptr
+    }
+}
+
+/// Everything a native call needs, packaged so it can cross to a worker thread.
+///
+/// The pointers inside are libc-heap trees this call owns for its duration, and
+/// only one thread touches them at a time — the worker, while the interpreter
+/// waits on it. That is what makes the `Send` sound; it is not a claim that
+/// `JadeVal` is thread-safe in general.
+pub(crate) struct NativeCallArgs {
+    pub argv: Vec<JadeVal>,
+    /// Kept alive because top-level string arguments borrow from it.
+    pub _cstrings: Vec<CString>,
+    /// Kept alive because each `JadeFn`'s `host` points into it.
+    ///
+    /// `Box` is load-bearing, not habit: a raw pointer to each host crosses to
+    /// the library, and a `Vec<CallbackHost>` would move its elements on the
+    /// next reallocation and leave those pointers addressing freed memory.
+    #[allow(clippy::vec_box)]
+    pub _hosts: Vec<Box<CallbackHost>>,
+}
+
+// SAFETY: see the note on the struct — ownership is exclusive for the duration
+// of the call, and the interpreter does not touch these while the worker runs.
+unsafe impl Send for NativeCallArgs {}
+
+/// What the worker hands back: the arguments it borrowed, the value the library
+/// wrote, and the status.
+///
+/// The arguments come back rather than being freed on the worker so the
+/// interpreter reads `out` before anything is released — a native function may
+/// return a pointer *into* one of its arguments, which is the bug that bit the
+/// compiled path.
+pub(crate) struct NativeCallResult {
+    pub args: NativeCallArgs,
+    pub out: JadeVal,
+    pub status: i32,
+}
+
+// SAFETY: same reasoning as `NativeCallArgs` — handed over whole, touched by
+// one thread at a time.
+unsafe impl Send for NativeCallResult {}
+
+/// Marshal arguments for a call that passes at least one Jade function.
+///
+/// Each callable becomes a [`JadeFn`] whose `host` is a [`CallbackHost`] owning
+/// a clone of the sender. Everything else marshals as usual.
+pub(crate) fn marshal_with_callbacks(
+    args: &[VmValue],
+    tx: &tokio::sync::mpsc::Sender<CallbackRequest>,
+    span: Span,
+) -> NativeCallArgs {
+    let mut cstrings = Vec::new();
+    let mut hosts: Vec<Box<CallbackHost>> = Vec::new();
+    let mut argv = Vec::with_capacity(args.len());
+
+    for v in args {
+        if is_callable(v) {
+            let mut host =
+                Box::new(CallbackHost { callee: v.clone(), tx: tx.clone(), span });
+            let ptr: *mut c_void = &mut *host as *mut CallbackHost as *mut c_void;
+            hosts.push(host);
+
+            let f = unsafe { malloc(std::mem::size_of::<JadeFn>()) } as *mut JadeFn;
+            if f.is_null() {
+                std::alloc::handle_alloc_error(std::alloc::Layout::new::<JadeFn>());
+            }
+            unsafe {
+                std::ptr::write(f, JadeFn { host: ptr, invoke: Some(vm_invoke_callback) })
+            };
+            argv.push(JadeVal { tag: JADE_TAG_FN, _pad: [0; 7], data: JadeValData { as_fn: f } });
+        } else {
+            argv.push(vm_to_ffi(v, &mut cstrings));
+        }
+    }
+
+    NativeCallArgs { argv, _cstrings: cstrings, _hosts: hosts }
+}
+
+/// Turn a completed native call into a Jade result. Shared by both paths.
+pub(crate) fn finish_native_call(
+    name: &str,
+    argv: &[JadeVal],
+    out: &JadeVal,
+    status: i32,
+    span: Span,
+) -> Result<VmValue> {
+    let result = if status != 0 {
+        let msg = if out.tag == JADE_TAG_STR || out.tag == JADE_TAG_ERROR {
+            unsafe { CStr::from_ptr(out.data.as_str as *const c_char).to_string_lossy().into_owned() }
+        } else {
+            format!("native fn '{name}' returned error code {status}")
+        };
+        Err(JadeError::IoError { message: msg, span })
+    } else {
+        ffi_to_vm(out, span)
+    };
+
+    unsafe {
+        for a in argv {
+            ffi_free(a);
+        }
+        ffi_free(out);
+    }
+    result
+}
+
+/// Release the `JadeFn` wrappers a callback call allocated.
+///
+/// Not `ffi_free`'s job: the `host` inside is a Rust `Box` owned by
+/// `NativeCallArgs`, so the generic free path must not reach it.
+pub(crate) fn free_fn_wrappers(argv: &[JadeVal]) {
+    for a in argv {
+        if a.tag == JADE_TAG_FN {
+            unsafe { free(a.data.as_fn as *mut c_void) };
+        }
     }
 }
 
@@ -535,8 +781,12 @@ fn vm_to_ffi_owned(val: &VmValue) -> JadeVal {
             };
             JadeVal { tag: JADE_TAG_HANDLE, _pad: [0; 7], data: JadeValData { as_handle: hx } }
         }
-        // Remaining kinds (functions, futures, prompts) have no ABI
-        // representation — native fns can't consume them.
+        // A callable reaching here has no channel to post to, which happens
+        // when one is nested inside a container rather than passed directly.
+        // Nil is right: the worker-thread inversion is set up per *call*, and a
+        // function buried in an array was never wired to it.
+        //
+        // Futures and prompts have no ABI representation at all.
         _ => JadeVal::nil(),
     }
 }
@@ -618,6 +868,13 @@ pub fn ffi_to_vm(val: &JadeVal, span: Span) -> Result<VmValue> {
                 jade_runtime::bytesf::BytesObj::new(slice, jade_runtime::trust::TAINTED),
             )))
         }
+        // A JadeFn only ever travels *outward*. A package handing one back
+        // would be offering the program a C function to call, which is the
+        // opposite direction and has no representation on the Jade side.
+        JADE_TAG_FN => Err(JadeError::IoError {
+            message: "native function returned a callback, which Jade cannot hold".to_string(),
+            span,
+        }),
         JADE_TAG_HANDLE => {
             let hp = unsafe { val.data.as_handle };
             if hp.is_null() {

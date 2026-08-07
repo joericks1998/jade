@@ -112,6 +112,36 @@ call that produces a connection, which is the same as binding none of it. The
 C return value of such a symbol is a status, so the handle is what Jade gets and
 the status feeds `fails_when`.
 
+## Callbacks
+
+`callback:<ret>(<arg>,…)`, and the signature is written in the library's **own C
+types** — `callback:int(int, const char*)`, not Jade's widened ones. That is not
+a detail: the shim declares a function pointer the library will store and call,
+so `int` widened to `int64_t` is not a truncation but an incompatible function
+pointer, and a call through the wrong ABI.
+
+No `libffi` is involved, and that is the whole payoff of generating the shim from
+a declaration rather than dispatching at run time: the signature is known when
+the C is written, so a real static function of that shape can just be declared.
+
+Two rules follow from where the callback runs:
+
+**The registration lasts exactly one call.** The slot is `_Thread_local` and set
+only for the duration of the native call. A library that stores the callback and
+invokes it later finds an empty slot and gets the neutral answer, rather than a
+stale pointer into an interpreter that has moved on. Asynchronous registration
+is not supported and cannot be without keeping the interpreter available
+indefinitely.
+
+**A raise is deferred, never unwound.** The trampoline records the failure and
+returns; the wrapper turns it into a Jade error *after* the library has returned
+normally. Letting the raise out would unwind through the library's frames
+mid-operation.
+
+A callback may only give back a scalar, for the same reason an out-buffer is the
+shim's memory: anything else would have to be released inside a C frame by code
+that has no idea it is holding a Jade value.
+
 ## What is deliberately not here
 
 **Input structs.** A Jade struct crossing *into* a C function would need the
@@ -120,5 +150,6 @@ the other direction. Nothing has asked for it yet.
 
 **More than one out-parameter**, per the rule above.
 
-**Callbacks.** They need a C-callable trampoline that re-enters Jade, which is a
-different class of problem from marshalling a value. See the plan for v1.3.0.
+**A callback taking a `void *`.** The usual `user_data` parameter names no type,
+so there is nothing to hand Jade. That is the most common reason a real
+callback still does not fit.

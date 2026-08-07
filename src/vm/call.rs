@@ -101,7 +101,15 @@ pub(crate) async fn call_value(
             call_fn(&method, full_args, state, span).await
         }
         VmValue::BuiltinFn(bf) => (bf.vm_impl)(&args).map_err(|e| patch_builtin_span(e, span)),
-        VmValue::NativeLibFn(nfn) => nfn.call(&args, span),
+        VmValue::NativeLibFn(nfn) => {
+            // Only a call that actually passes a function pays for the worker
+            // thread. Everything else keeps the direct path it always had.
+            if args.iter().any(crate::native::is_callable) {
+                call_native_with_callbacks(&nfn, args, state, span).await
+            } else {
+                nfn.call(&args, span)
+            }
+        }
         VmValue::NativeBoundMethod(nbm) => {
             let mut full_args = Vec::with_capacity(args.len() + 1);
             full_args.push(nbm.receiver.clone());
@@ -365,3 +373,77 @@ pub(crate) async fn call_fn(
 
 // ── Prompt deref ──────────────────────────────────────────────────────────────
 
+
+// ── Native calls that pass a Jade function ────────────────────────────────────
+
+/// Run a native call that hands the library a Jade callback.
+///
+/// The VM cannot be re-entered from a C frame. Calling a Jade function needs
+/// `VmState` and an async context, and during a native call the C library holds
+/// the stack — so there is no way to answer a callback from where it arrives.
+///
+/// The inversion: the C call runs on a worker thread, and each callback *posts*
+/// its arguments here and waits. The interpreter stays on its own thread, picks
+/// the request up in the loop below, and answers. That is the same shape
+/// `uhttp.stream` uses to drive a Jade handler, run in both directions.
+///
+/// Callbacks are therefore serviced only while this call is in flight. A library
+/// that stores one and invokes it later finds nobody listening, and its
+/// `invoke` reports failure rather than blocking forever — a registration
+/// outliving the call is not supported, and could not be without keeping the
+/// interpreter available indefinitely.
+async fn call_native_with_callbacks(
+    nfn: &Arc<crate::native::NativeLibFn>,
+    args: Vec<VmValue>,
+    state: &mut VmState,
+    span: Span,
+) -> Result<VmValue> {
+    // Depth 1 is enough and is not a queue: a callback blocks its worker until
+    // it is answered, so at most one request is outstanding per call.
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::native::CallbackRequest>(1);
+    let marshalled = crate::native::marshal_with_callbacks(&args, &tx, span);
+    // Dropped so the channel closes when the worker finishes, which is what
+    // ends the loop below.
+    drop(tx);
+
+    let fn_ptr = nfn.fn_ptr();
+    let mut call = Box::pin(tokio::task::spawn_blocking(move || {
+        let args = marshalled;
+        let mut out = crate::native::JadeVal::nil();
+        let status = unsafe { (fn_ptr)(args.argv.len(), args.argv.as_ptr(), &mut out) };
+        crate::native::NativeCallResult { args, out, status }
+    }));
+
+    // Serve callbacks until the native call finishes. `biased` polls the
+    // callback arm first so a request that arrived alongside completion is
+    // still answered rather than dropped.
+    let done = loop {
+        tokio::select! {
+            biased;
+            Some(req) = rx.recv() => {
+                let result = call_value(req.callee, req.args, state, req.span).await;
+                // A closed receiver means the worker gave up waiting; there is
+                // nothing to do about it and nothing to report.
+                let _ = req.reply.send(result);
+            }
+            done = &mut call => {
+                break done.map_err(|e| JadeError::IoError {
+                    message: format!("native fn '{}' panicked: {e}", nfn.name),
+                    span,
+                })?;
+            }
+        }
+    };
+
+    let result = crate::native::finish_native_call(
+        &nfn.name,
+        &done.args.argv,
+        &done.out,
+        done.status,
+        span,
+    );
+    // The JadeFn wrappers are this call's, not the generic free path's: their
+    // `host` is a Rust Box that `done.args` still owns.
+    crate::native::free_fn_wrappers(&done.args.argv);
+    result
+}

@@ -208,10 +208,14 @@ fn callbacks_varargs_and_void_pointers_are_named_not_silently_dropped() {
     // The skip report is the feature. A generator that binds two thirds of an
     // API and reports success is how you find the missing third at run time.
     let b = bind(
-        "int with_cb(int (*cb)(int), int n);\n\
+        "typedef struct rec rec;\n\
+         int with_cb(int (*cb)(rec*), int n);\n\
          int fmt(const char* f, ...);\n\
          int with_ud(void* user_data);\n",
     );
+    // A callback whose *own* signature the FFI cannot carry — here a parameter
+    // that is a pointer to something opaque, which the trampoline has no way to
+    // hand Jade.
     assert!(why_skipped(&b, "with_cb").contains("callback"));
     assert!(why_skipped(&b, "fmt").contains("varargs"));
     assert!(why_skipped(&b, "with_ud").contains("void"));
@@ -273,8 +277,8 @@ fn the_report_counts_everything_and_groups_skips_by_reason() {
     let b = bind(
         "int ok1(int a);\n\
          int ok2(int a);\n\
-         int cb1(int (*f)(int));\n\
-         int cb2(int (*f)(int));\n\
+         int cb1(int (*f)(void*));\n\
+         int cb2(int (*f)(void*));\n\
          int va(const char* f, ...);\n",
     );
     let r = b.report();
@@ -420,4 +424,30 @@ fn every_spelling_the_generator_emits_is_one_the_shim_accepts() {
     ] {
         assert!(src.contains(expect), "{expect} missing from the shim");
     }
+}
+
+// ── Callbacks ────────────────────────────────────────────────────────────
+
+#[test]
+fn a_callback_keeps_the_librarys_own_c_types() {
+    // Not translated to Jade's. The shim declares a function pointer the
+    // library will store and call, so `int` has to stay `int` — widening it is
+    // not a truncation but an incompatible function pointer.
+    let b = bind("int each(int n, int (*cb)(int, const char*));\n");
+    assert_eq!(args(&b, "each"), ["int", "callback:int(int, const char *)"]);
+}
+
+#[test]
+fn a_void_returning_callback_maps() {
+    let b = bind("int walk(void (*cb)(int));\n");
+    assert_eq!(args(&b, "walk"), ["callback:void(int)"]);
+}
+
+#[test]
+fn a_callback_the_trampoline_cannot_marshal_is_skipped_by_that_reason() {
+    // `void *` is the usual reason a real callback does not fit: it names no
+    // type, so there is nothing to hand Jade.
+    let b = bind("int go(int (*cb)(void*, int));\n");
+    assert!(why_skipped(&b, "go").contains("callback"), "{:?}", b.skipped);
+    assert!(!b.symbols.contains_key("go"));
 }

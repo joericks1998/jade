@@ -38,6 +38,27 @@ print(handlefix.live())
 handlefix.close(h)
 print(handlefix.live())
 
+// A Jade function called back from C. The engines re-enter in completely
+// different ways, so this is the case most likely to agree in a unit test and
+// diverge in a real program.
+fn each(i, name) {
+    print(name)
+    return i
+}
+print(handlefix.visit(c, each))
+
+// A raise inside a callback must not unwind through the library's frames: it
+// has to finish cleanly and the error reach Jade afterwards.
+fn boom(i, name) {
+    raise "inside the callback"
+}
+try {
+    handlefix.visit(c, boom)
+    print("not reached")
+} catch e {
+    print("contained")
+}
+
 // An error from the package is catchable, and its message survives the
 // argument trees being released.
 try {

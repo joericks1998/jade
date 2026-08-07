@@ -88,12 +88,23 @@ enum ArgSpec {
     /// &db)`. Without it a generated binding could not produce a handle at all,
     /// which would leave the libraries handles exist for still unbindable.
     OutHandle { name: String },
+    /// `callback:<ret>(<arg>,…)` — one Jade function, passed as a C function
+    /// pointer of exactly that signature.
+    ///
+    /// No `libffi` is involved, and that is the point of generating the shim
+    /// from a declaration: the signature is known when the C is written, so the
+    /// shim can declare a real static function of that shape. Synthesising one
+    /// at run time would need a trampoline compiler.
+    Callback { ret: String, params: Vec<String> },
 }
 
 impl ArgSpec {
     /// Whether this consumes one of the Jade call's arguments.
     fn takes_jade_arg(&self) -> bool {
-        matches!(self, ArgSpec::Scalar(_) | ArgSpec::Bytes | ArgSpec::Handle { .. })
+        matches!(
+            self,
+            ArgSpec::Scalar(_) | ArgSpec::Bytes | ArgSpec::Handle { .. } | ArgSpec::Callback { .. }
+        )
     }
 
     /// How it is spelled in the `extern` prototype.
@@ -105,8 +116,89 @@ impl ArgSpec {
             ArgSpec::OutStruct { name } => format!("{name}*"),
             ArgSpec::Handle { name } => format!("{name}*"),
             ArgSpec::OutHandle { name } => format!("{name}**"),
+            ArgSpec::Callback { ret, params } => {
+                // Verbatim: the library's own C types, so the function pointer
+                // this declares is the one it expects.
+                let r = if ret == "nil" || ret == "void" { "void" } else { ret.as_str() };
+                let ps = if params.is_empty() { "void".to_string() } else { params.join(", ") };
+                format!("{r} (*)({ps})")
+            }
         }
     }
+}
+
+/// How a C type in a callback signature crosses into a `JadeVal`.
+///
+/// A callback signature is written in the library's **own C types**, not Jade's.
+/// It has to be: the shim declares a function pointer that the library will
+/// store and call, so `int` must be `int` and not the `int64_t` Jade widens it
+/// to. Getting that wrong is not a silent truncation — it is an incompatible
+/// function pointer, which is a call through the wrong ABI.
+///
+/// Returns the tag, the union field, and the cast used when reading the value
+/// back out of Jade.
+fn c_scalar(t: &str) -> Option<(&'static str, &'static str)> {
+    let squashed: String = t.chars().filter(|c| !c.is_whitespace()).collect();
+    Some(match squashed.as_str() {
+        "char" | "signedchar" | "unsignedchar" | "short" | "unsignedshort" | "int"
+        | "unsigned" | "unsignedint" | "long" | "unsignedlong" | "longlong"
+        | "unsignedlonglong" | "size_t" | "ssize_t" | "int8_t" | "int16_t" | "int32_t"
+        | "int64_t" | "uint8_t" | "uint16_t" | "uint32_t" | "uint64_t" => {
+            ("JADE_FFI_INT", "as_int")
+        }
+        "float" | "double" => ("JADE_FFI_FLOAT", "as_float"),
+        "_Bool" | "bool" => ("JADE_FFI_BOOL", "as_bool"),
+        "constchar*" | "char*" | "constchar *" => ("JADE_FFI_STR", "as_str"),
+        _ => return None,
+    })
+}
+
+/// Parse `callback:<ret>(<arg>,…)` into its C type names.
+fn parse_callback(pkg: &str, sym: &str, spec: &str) -> Result<ArgSpec, String> {
+    let body = spec.strip_prefix("callback:").expect("checked by the caller");
+    let bad = || {
+        format!(
+            "dependency '{pkg}': symbol '{sym}' has `{spec}`, which is not a callback signature.              Write it as `callback:<ret>(<arg>, …)`, e.g. `callback:int(int, str)`."
+        )
+    };
+    let open = body.find('(').ok_or_else(bad)?;
+    if !body.ends_with(')') {
+        return Err(bad());
+    }
+    let ret = body[..open].trim().to_string();
+    let inner = body[open + 1..body.len() - 1].trim();
+    let params: Vec<String> = if inner.is_empty() || inner == "void" {
+        Vec::new()
+    } else {
+        inner.split(',').map(|p| p.trim().to_string()).collect()
+    };
+
+    // A callback may only give back a scalar. Anything else would have to be
+    // released inside the C library's own frame, by code that has no idea it is
+    // holding a Jade value.
+    let ret_ok = ret == "void" || ret == "nil"
+        || matches!(c_scalar(&ret), Some((t, _)) if t != "JADE_FFI_STR");
+    if !ret_ok {
+        return Err(format!(
+            "dependency '{pkg}': symbol '{sym}' has a callback returning '{ret}'. A callback may \
+             return a C integer, float, bool, or void — anything else would have to be freed \
+             inside the C library's own frame."
+        ));
+    }
+    for p in &params {
+        if c_scalar(p).is_none() {
+            return Err(format!(
+                "dependency '{pkg}': symbol '{sym}' has a callback parameter '{p}'. A callback \
+                 signature is written in the library's own C types, e.g. \
+                 `callback:int(int, const char*)`, and '{p}' is not one the FFI can carry."
+            ));
+        }
+        check_c_ident(pkg, sym, &p.replace('*', ""), "callback")?;
+    }
+    if !(ret == "nil" || ret == "void") {
+        check_c_ident(pkg, sym, &ret.replace('*', ""), "callback")?;
+    }
+    Ok(ArgSpec::Callback { ret, params })
 }
 
 /// The C type a `handle<T>` names, or `None` if `spec` is not one.
@@ -164,6 +256,9 @@ fn parse_arg(pkg: &str, sym: &str, spec: &str) -> Result<ArgSpec, String> {
             name: name.to_string(),
         });
     }
+    if spec.starts_with("callback:") {
+        return parse_callback(pkg, sym, spec);
+    }
     if spec == "bytes" {
         return Ok(ArgSpec::Bytes);
     }
@@ -214,10 +309,12 @@ const PREAMBLE: &str = r#"/* Generated by `jade pkg install` — do not edit.
 #define JADE_FFI_STRUCT 8
 #define JADE_FFI_BYTES  9
 #define JADE_FFI_HANDLE 10
+#define JADE_FFI_FN     11
 
 typedef struct JadeStruct JadeStruct;
 typedef struct JadeBytes JadeBytes;
 typedef struct JadeHandle JadeHandle;
+typedef struct JadeFn JadeFn;
 
 typedef union {
     int64_t      as_int;
@@ -228,6 +325,7 @@ typedef union {
     JadeStruct*  as_struct;
     JadeBytes*   as_bytes;
     JadeHandle*  as_handle;
+    JadeFn*      as_fn;
 } JadeValData;
 
 typedef struct { uint8_t tag; uint8_t _pad[7]; JadeValData data; } JadeVal;
@@ -243,10 +341,27 @@ struct JadeStruct { const char* type_name; const char** keys; JadeVal* vals; siz
  * frees it. The name is what keeps handle<sqlite3> and handle<sqlite3_stmt>
  * from being interchangeable. */
 struct JadeHandle { void* ptr; const char* type_name; };
+
+/* A Jade function the library may call back. `invoke` answers 0 on success, and
+ * non-zero when the Jade side raised — which must never propagate out of it,
+ * because the library is mid-operation and unwinding through its frames would
+ * leave it however it happens to be. */
+struct JadeFn {
+    void* host;
+    int (*invoke)(void* host, size_t argc, const JadeVal* argv, JadeVal* out);
+};
 typedef int (*JadeNativeFnPtr)(size_t argc, const JadeVal* argv, JadeVal* out);
 typedef struct { const char* name; JadeNativeFnPtr func; } JadeBinding;
 typedef struct { const char* name; const JadeBinding* bindings; size_t binding_count; } JadeNativePkg;
 
+"#;
+
+
+/// Emitted only when some symbol declares a failure convention. Without the
+/// gate a shim whose symbols cannot fail carries a function nothing calls,
+/// which is the `-Wunused-function` noise that makes a real warning easy to
+/// miss.
+const ERRNO_HELPER: &str = r#"
 /* Describe the failure the library just reported.
  *
  * The buffer is _Thread_local because Jade tasks are real OS threads and two of
@@ -281,9 +396,7 @@ static const char* jade_shim_errmsg(void) {
 #endif
     return buf;
 }
-
 "#;
-
 
 /// Emitted only when some symbol returns a filled buffer. A shim that never
 /// needs it should not carry it: dead code in generated output invites exactly
@@ -469,6 +582,9 @@ pub fn generate(
         .iter()
         .map(|s| parse_symbol(name, s, &symbols[*s], structs, headers))
         .collect::<Result<_, _>>()?;
+    if names.iter().any(|s| symbols[*s].fails_when.is_some_and(|f| f.test().is_some())) {
+        out.push_str(ERRNO_HELPER);
+    }
     let out_specs = || parsed.iter().filter_map(|p| p.out_at.map(|i| &p.args[i]));
     if out_specs().any(|a| matches!(a, ArgSpec::OutBuffer { .. })) {
         out.push_str(BYTES_HELPER);
@@ -504,6 +620,13 @@ pub fn generate(
         out.push_str(&declare(name, sym, &symbols[*sym], structs, headers)?);
     }
     for sym in &names {
+        // The trampoline first: the wrapper names it as the C argument.
+        let parsed = parse_symbol(name, sym, &symbols[*sym], structs, headers)?;
+        for a in &parsed.args {
+            if let ArgSpec::Callback { ret, params } = a {
+                out.push_str(&trampoline(sym, ret, params));
+            }
+        }
         out.push_str(&wrapper(name, sym, &symbols[*sym], structs, headers)?);
     }
 
@@ -634,6 +757,81 @@ fn emit_out_struct(
     Ok(b)
 }
 
+/// The static C function of exactly the declared shape, which the library will
+/// call and which forwards into Jade.
+///
+/// No libffi: because the shim is generated from a declaration, the signature is
+/// known when this C is written, so a real function of that shape can simply be
+/// declared. Synthesising one at run time would need a trampoline compiler.
+///
+/// The slot is `_Thread_local` and set only for the duration of the call, which
+/// is the honest scope. A library that stores the callback and invokes it later
+/// finds an empty slot and gets the neutral answer rather than a stale pointer —
+/// an asynchronous registration is not supported, and pretending otherwise would
+/// mean calling into an interpreter that has moved on.
+fn trampoline(sym: &str, ret: &str, params: &[String]) -> String {
+    let n = params.len();
+    let c_params: Vec<String> =
+        params.iter().enumerate().map(|(i, p)| format!("{p} a{i}")).collect();
+    let c_ret = if ret == "nil" || ret == "void" { "void".to_string() } else { ret.to_string() };
+    let sig = if c_params.is_empty() { "void".to_string() } else { c_params.join(", ") };
+
+    let mut b = format!(
+        "\n/* Set for the duration of one call; see the note in cshim.rs. */\n\
+         static _Thread_local const JadeFn* jade_cb_{sym} = NULL;\n\
+         static _Thread_local int jade_cb_failed_{sym} = 0;\n\
+         \n\
+         static {c_ret} jade_cbt_{sym}({sig}) {{\n"
+    );
+
+    // Nothing registered: answer neutrally rather than dereferencing.
+    let is_void = ret == "nil" || ret == "void";
+    let neutral = if is_void { "return;".to_string() } else { "return 0;".to_string() };
+    b.push_str(&format!("    if (!jade_cb_{sym}) {{ {neutral} }}\n"));
+
+    if n > 0 {
+        b.push_str(&format!("    JadeVal cbargs[{n}];\n"));
+        for (i, p) in params.iter().enumerate() {
+            let (tag, field) = c_scalar(p).expect("validated");
+            // Cast on the way in: the C parameter is the library's width, the
+            // JadeVal field is Jade's.
+            let cast = match field {
+                "as_int" => "(int64_t)",
+                "as_float" => "(double)",
+                "as_bool" => "(uint8_t)!!",
+                _ => "",
+            };
+            b.push_str(&format!(
+                "    cbargs[{i}].tag = {tag};\n    cbargs[{i}].data.{field} = {cast}a{i};\n"
+            ));
+        }
+    }
+    b.push_str("    JadeVal cbout;\n    cbout.tag = JADE_FFI_NIL;\n    cbout.data.as_nil = 0;\n");
+    let argv = if n > 0 { "cbargs" } else { "NULL" };
+    b.push_str(&format!(
+        "    if (jade_cb_{sym}->invoke(jade_cb_{sym}->host, {n}, {argv}, &cbout) != 0) {{\n\
+         \x20       /* The Jade side raised. It must not travel out of here — the\n\
+         \x20        * library is mid-operation and unwinding through its frames\n\
+         \x20        * would leave it however it happens to be. Recorded, and\n\
+         \x20        * turned into a Jade error once the call has returned. */\n\
+         \x20       jade_cb_failed_{sym} = 1;\n\
+         \x20       {}\n\
+         \x20   }}\n",
+        if is_void { "return;".to_string() } else { "return 1;".to_string() }
+    ));
+
+    if is_void {
+        b.push_str("    (void)cbout;\n");
+    } else {
+        let (tag, field) = c_scalar(ret).expect("validated");
+        b.push_str(&format!(
+            "    if (cbout.tag != {tag}) return 0;\n    return ({ret})cbout.data.{field};\n"
+        ));
+    }
+    b.push_str("}\n");
+    b
+}
+
 /// The `JadeNativeFnPtr`-shaped wrapper that marshals in and out.
 fn wrapper(
     pkg: &str,
@@ -662,6 +860,9 @@ fn wrapper(
             }
             ArgSpec::Bytes => {
                 body.push_str(&format!("    if (argv[{j}].tag != JADE_FFI_BYTES) return 1;\n"));
+            }
+            ArgSpec::Callback { .. } => {
+                body.push_str(&format!("    if (argv[{j}].tag != JADE_FFI_FN) return 1;\n"));
             }
             ArgSpec::Handle { name } => {
                 // Unwrapped here rather than at the call, so a wrong type is
@@ -728,10 +929,20 @@ fn wrapper(
                 call_args.push(format!("({name}*)h{}", jade_idx[i].unwrap()))
             }
             ArgSpec::OutHandle { .. } => call_args.push("&ohandle".to_string()),
+            ArgSpec::Callback { .. } => call_args.push(format!("jade_cbt_{sym}")),
         }
     }
 
     let call = format!("{sym}({})", call_args.join(", "));
+
+    // Register the callback for exactly the duration of the call.
+    let cb_at = p.args.iter().position(|a| matches!(a, ArgSpec::Callback { .. }));
+    if let Some(i) = cb_at {
+        let k = jade_idx[i].expect("a callback consumes a Jade argument");
+        body.push_str(&format!(
+            "    jade_cb_{sym} = argv[{k}].data.as_fn;\n    jade_cb_failed_{sym} = 0;\n"
+        ));
+    }
 
     // Cleared right before the call so a stale value from an earlier, unrelated
     // failure cannot be reported as this one's reason. A successful call is
@@ -778,6 +989,21 @@ fn wrapper(
             ),
         }
     };
+
+    // The library has returned, so the registration ends here. A raise from
+    // inside the callback surfaces now — after the library finished cleanly,
+    // never by unwinding through it mid-operation.
+    if cb_at.is_some() {
+        body.push_str(&format!(
+            "    jade_cb_{sym} = NULL;\n\
+             \x20   if (jade_cb_failed_{sym}) {{\n\
+             \x20       jade_cb_failed_{sym} = 0;\n\
+             \x20       out->tag = JADE_FFI_ERROR;\n\
+             \x20       out->data.as_str = \"the callback raised\";\n\
+             \x20       return 1;\n\
+             \x20   }}\n"
+        ));
+    }
 
     // What Jade gets back.
     match p.out_at.map(|i| &p.args[i]) {

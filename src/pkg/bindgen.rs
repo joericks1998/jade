@@ -424,7 +424,12 @@ fn map_param(raw_in: &str, next: Option<&str>, env: &TypeEnv, ret: &str) -> Mapp
     let t = normalize(raw);
 
     if is_fn_ptr(raw) {
-        return Mapped::Reject("takes a callback".to_string());
+        return match callback_spec(raw, env) {
+            Some(spec) => Mapped::One(spec),
+            None => Mapped::Reject(
+                "takes a callback whose own signature the FFI cannot carry".to_string(),
+            ),
+        };
     }
     if let Some(s) = scalar_of(&t) {
         return Mapped::One(s.to_string());
@@ -519,6 +524,48 @@ fn map_param(raw_in: &str, next: Option<&str>, env: &TypeEnv, ret: &str) -> Mapp
     }
 
     Mapped::Reject(format!("takes an unsupported type `{raw}`"))
+}
+
+/// Turn a C function-pointer type into a `callback:` spelling, or `None` when
+/// its own signature is not one the FFI can carry.
+///
+/// The signature is kept in the library's **C** types rather than translated to
+/// Jade's. The shim declares a function pointer the library will store and
+/// call, so `int` has to stay `int`: widening it to Jade's 64-bit integer is
+/// not a truncation but an incompatible function pointer, and a call through
+/// the wrong ABI.
+fn callback_spec(raw: &str, env: &TypeEnv) -> Option<String> {
+    // clang spells these `ret (*)(params)`.
+    let expanded = env.expand(raw);
+    let open = expanded.find("(*)")?;
+    let ret = expanded[..open].trim().to_string();
+    let rest = expanded[open + 3..].trim();
+    let inner = rest.strip_prefix('(')?.strip_suffix(')')?.trim();
+
+    let params: Vec<String> = if inner.is_empty() || inner == "void" {
+        Vec::new()
+    } else {
+        inner.split(',').map(|p| p.trim().to_string()).collect()
+    };
+
+    // Only what the trampoline can marshal. A `void *` user-data parameter is
+    // the common reason a real callback does not fit — it names no type, so
+    // there is nothing to hand Jade.
+    let carriable = |t: &str| -> bool {
+        let n = normalize(&env.expand(t));
+        scalar_of(&squash(&n)).is_some()
+            || is_int(&n)
+            || pointee(&n).map(squash).as_deref() == Some("char")
+    };
+    if !params.iter().all(|p| carriable(p)) {
+        return None;
+    }
+    let ret_ok = normalize(&ret) == "void" || (carriable(&ret) && pointee(&normalize(&ret)).is_none());
+    if !ret_ok {
+        return None;
+    }
+
+    Some(format!("callback:{ret}({})", params.join(", ")))
 }
 
 /// Map a return type.

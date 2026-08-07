@@ -7,6 +7,7 @@
  * serves both `jade run` and `jade build`. */
 #include "runtime.h"
 
+#include <setjmp.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -160,6 +161,83 @@ static const char* ffi_strdup_abi_type(const char* name) {
  * owns them) and clear at the top level (strings are handed over non-owning — the
  * native fn copies if it needs to retain). It does not apply to bytes, which are
  * copied at every level. */
+/* Forward declarations: the callback trampoline below marshals in both
+ * directions, and both marshallers are defined after it. */
+static JadeVal to_ffi_val(jade_value_t v, int owned_str);
+static jade_value_t from_ffi(const JadeVal* v);
+
+/* The `invoke` a compiled binary's JadeFn carries.
+ *
+ * Compiled code can be re-entered from C directly — a function value is a box
+ * holding its code pointer — so this calls straight through, unlike the VM,
+ * which has to post the call to the interpreter and wait.
+ *
+ * The setjmp frame is the load-bearing part. A Jade `raise` is a longjmp, and
+ * letting one leave this function would unwind through the C library's frames,
+ * past whatever it was in the middle of, with its own state left however it
+ * happened to be. Catching here and reporting through the return value is the
+ * same rule `jrt_uhttp_stream` follows. */
+static int aot_invoke_callback(void* host, size_t argc, const JadeVal* argv, JadeVal* out) {
+    out->tag = JADE_FFI_NIL;
+    out->data.as_nil = 0;
+    if (argc > 6) return 1;   /* the arity ladder below */
+
+    jade_value_t a[6];
+    for (size_t i = 0; i < argc; i++) {
+        /* An ERROR tag would raise, and raising is precisely what must not
+         * happen here — refuse the call instead. */
+        if (argv[i].tag == JADE_FFI_ERROR) return 1;
+        a[i] = from_ffi(&argv[i]);
+    }
+
+    void** box = (void**)host;
+    void* f = *box;
+
+    jmp_buf jb;
+    int32_t depth = jade_exc_depth();
+    jade_exc_push_frame(&jb);
+    if (setjmp(jb) != 0) {
+        /* The callback raised. Unwind the handler stack back to where it was
+         * and report through the status, never through a longjmp. */
+        jade_exc_restore(depth);
+        return 1;
+    }
+
+    typedef jade_value_t (*F0)(void);
+    typedef jade_value_t (*F1)(jade_value_t);
+    typedef jade_value_t (*F2)(jade_value_t, jade_value_t);
+    typedef jade_value_t (*F3)(jade_value_t, jade_value_t, jade_value_t);
+    typedef jade_value_t (*F4)(jade_value_t, jade_value_t, jade_value_t, jade_value_t);
+    typedef jade_value_t (*F5)(jade_value_t, jade_value_t, jade_value_t, jade_value_t, jade_value_t);
+    typedef jade_value_t (*F6)(jade_value_t, jade_value_t, jade_value_t, jade_value_t, jade_value_t, jade_value_t);
+
+    jade_value_t r = JRT_NIL;
+    switch (argc) {
+        case 0: r = ((F0)f)(); break;
+        case 1: r = ((F1)f)(a[0]); break;
+        case 2: r = ((F2)f)(a[0], a[1]); break;
+        case 3: r = ((F3)f)(a[0], a[1], a[2]); break;
+        case 4: r = ((F4)f)(a[0], a[1], a[2], a[3]); break;
+        case 5: r = ((F5)f)(a[0], a[1], a[2], a[3], a[4]); break;
+        default: r = ((F6)f)(a[0], a[1], a[2], a[3], a[4], a[5]); break;
+    }
+
+    jade_exc_pop();
+    jade_exc_restore(depth);
+
+    /* Scalars only, matching the VM: a container coming back would raise the
+     * question of who frees it inside a C frame, for no use anyone has asked
+     * for. `owned_str` is irrelevant here because nothing else survives. */
+    JadeVal res = to_ffi_val(r, 1);
+    if (res.tag == JADE_FFI_NIL || res.tag == JADE_FFI_INT ||
+        res.tag == JADE_FFI_FLOAT || res.tag == JADE_FFI_BOOL) {
+        *out = res;
+        return 0;
+    }
+    jade_ffi_free(&res);
+    return 1;
+}
+
 static JadeVal to_ffi_val(jade_value_t v, int owned_str) {
     JadeVal out = {0};
     if (jrt_is_int(v)) {
@@ -271,6 +349,16 @@ static JadeVal to_ffi_val(jade_value_t v, int owned_str) {
             hx->type_name = ffi_strdup(jrt_handle_type(p));
             out.tag = JADE_FFI_HANDLE;
             out.data.as_handle = hx;
+        } else if (kind == JK_FN) {
+            /* The box pointer is the host: `aot_invoke_callback` reads the code
+             * pointer out of it. Nothing is copied, so nothing is owned beyond
+             * the wrapper. */
+            JadeFn* fx = (JadeFn*)malloc(sizeof(JadeFn));
+            if (!fx) jade_rt_fatal("jade: out of memory");
+            fx->host = p;
+            fx->invoke = aot_invoke_callback;
+            out.tag = JADE_FFI_FN;
+            out.data.as_fn = fx;
         } else {
             out.tag = JADE_FFI_NIL;  /* function / future / other heap kind */
         }
@@ -405,6 +493,11 @@ static void ffi_free_node(JadeVal* v) {
             }
             break;
         }
+        case JADE_FFI_FN:
+            /* Only the wrapper is ours. `host` is the program's function box,
+             * which the heap owns. */
+            free(v->data.as_fn);
+            break;
         case JADE_FFI_HANDLE: {
             JadeHandle* h = v->data.as_handle;
             if (h) {
@@ -430,7 +523,7 @@ void jade_ffi_free(JadeVal* v) {
      * wrapper and the type name only — never the pointee. */
     if (v->tag == JADE_FFI_ARRAY || v->tag == JADE_FFI_DICT ||
         v->tag == JADE_FFI_STRUCT || v->tag == JADE_FFI_BYTES ||
-        v->tag == JADE_FFI_HANDLE) ffi_free_node(v);
+        v->tag == JADE_FFI_HANDLE || v->tag == JADE_FFI_FN) ffi_free_node(v);
 }
 
 jade_value_t jrt_native_call(void* handle, const char* fn_name,
