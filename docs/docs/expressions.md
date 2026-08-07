@@ -4,7 +4,7 @@ title: Expressions
 sidebar_label: Expressions
 ---
 
-An expression produces a value. Jade's runtime types are `int` (64-bit signed integer), `float` (64-bit floating point), `bool`, `str` (UTF-8 string), arrays, user-defined `struct`s, and `fn` (function values). Expressions can be nested arbitrarily using parentheses or evaluated left-to-right following standard operator precedence.
+An expression produces a value. Expressions nest freely, and within one precedence level they evaluate left to right. See [Types](types) for every kind of value an expression can produce, and [Operators](operators) for the full precedence table.
 
 ## Integer Literals
 
@@ -13,7 +13,7 @@ let a = 0
 let b = 1000000
 ```
 
-Integer literals are 64-bit signed integers (`i64`).
+An `int` is a signed 63-bit integer, so the digits of a literal must not exceed `4611686018427387903`. More than that is refused when the file is read, with a "numeric literal overflows its type" error. There is no hex, octal, binary, or underscore-separated form.
 
 ## Float Literals
 
@@ -22,7 +22,9 @@ let pi = 3.14
 let half = 0.5
 ```
 
-Float literals require at least one digit on each side of the decimal point. `3.14` is valid; bare `.5` is not.
+Float literals require at least one digit on each side of the decimal point. `3.14` is valid; `.5` and `3.` are not. There is no exponent form, so write `1000.0` rather than `1e3`.
+
+A float always prints with a decimal point, so `print(6.0)` shows `6.0` and never `6`.
 
 ## Boolean Literals
 
@@ -102,6 +104,8 @@ let neg   = -5
 let nflag = !true
 ```
 
+`!` may also be spelled `not`, and `&&` and `||` may be spelled `and` and `or`. The word forms mean exactly the same thing and bind the same way.
+
 ## String Literals
 
 String literals may be delimited by double quotes (`"…"`) or single quotes (`'…'`) — both forms are identical. Triple-quoted strings (`"""…"""` or `'''…'''`) span multiple lines. The `+` operator concatenates two strings.
@@ -122,11 +126,23 @@ line two
 '''
 ```
 
-Strings support indexing with `[i]` to extract a single character as a one-character string. Indexes are zero-based. Out-of-range indexes raise `IndexOutOfBounds`.
+The only escapes a string recognises are `\\`, `\n`, `\t`, `\r`, and the quote character that opened it. Any other backslash is an error rather than a literal backslash, so there is no `\u` or `\0` form.
+
+Indexing a string with `[i]` gives a [`char`](types#char), a single Unicode scalar — not a one-character string. Indexes are zero-based and count characters, so a two-byte character still counts once. An index outside the string is a runtime error; there is no negative indexing.
 
 ```jade
-let s = "hello"
-let h = s[0]
+let s = "café"
+print(s[0])          // c
+print(len(s))        // 4, not 5
+print(s[0] == "c")   // true — a char compares equal to the string spelling it
+```
+
+A string also iterates, one `char` per step:
+
+```jade
+for c in "café" {
+    print(c)
+}
 ```
 
 ## F-String Interpolation
@@ -141,6 +157,12 @@ let msg2 = f'hello, {name}! answer is {n}'
 ```
 
 Triple-quoted f-strings are written as `f"""…"""` or `f'''…'''` and behave the same way.
+
+To put a literal brace in an f-string, escape it with a backslash. Doubling it does not work — `{{` opens a nested expression, not an escape.
+
+```jade
+print(f"a \{literal\} brace")   // a {literal} brace
+```
 
 ## Array Literals
 
@@ -170,6 +192,38 @@ print(mixed.contains(9))       // false — not an error
 ```
 
 That is deliberately different from `==`, which rejects a comparison across types rather than quietly answering it. Note that `1` and `1.0` are different values to both.
+
+`in` and `not in` ask the same question as an infix operator, and also work on a string and on a dict's keys:
+
+```jade
+print(2 in [1, 2, 3])          // true
+print(4 not in [1, 2, 3])      // true
+print("ell" in "hello")        // true
+print("k" in {"k": 1})         // true
+```
+
+## Dict Literals
+
+A dict is written with curly braces and string keys. See [Types](types#dict) for the full reference.
+
+```jade
+let d = {"name": "jade", "version": 1}
+print(d["name"])
+```
+
+## Closures
+
+`|params| body` builds an anonymous function value. A body without braces is an implicit return.
+
+```jade
+let double = |x| x * 2
+let add    = |a, b| { return a + b }
+let seven  = || 7
+
+print(double(4))   // 8
+```
+
+See [Functions](functions) for the full reference.
 
 ## Pipe Operator
 

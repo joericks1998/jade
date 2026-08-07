@@ -169,9 +169,10 @@ Quoted-string imports of any kind â€” `use "std/math"`, `use "lib.jde" as lib` â
 | `use std::string` | `string` | `split`, `upper`, `lower`, `trim`, `contains`, `replace`, `starts_with`, `ends_with` |
 | `use std::array` | `array` | `map`, `filter`, `sort`, `reverse` (higher-order; non-mutating) |
 | `use std::dict` | `dict` | `keys`, `values`, `has`, `get`, `merge` |
-| `use std::fs` | `fs` | `read`, `write`, `append`, `exists`, `delete`, `list_dir`, `mkdir` |
+| `use std::fs` | `fs` | `read`, `write`, `append`, `exists`, `delete`, `list_dir`, `mkdir`, plus the `_bytes` forms |
 | `use std::time` | `time` | `now`, `now_ms`, `sleep`, `local` |
-| `use std::http` | `http` | `get`, `post`, `put`, `delete`, `head` |
+| `use std::http` | `http` | `get`, `post`, `put`, `delete`, `head`, `get_bytes`, `post_bytes` |
+| `use std::uhttp` | `uhttp` | The same API over a Unix domain socket, plus `stream` |
 | `use std::sh` | `sh` | `exec`, `run`, `output` |
 | `use std::json` | `json` | `parse`, `stringify`, `stringify_pretty` |
 | `use std::env` | `env` | `get`, `set`, `args`, `cwd` |

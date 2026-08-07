@@ -19,7 +19,9 @@ A third rule applies to the whole tree: it stays formatted, and CI runs `jade fm
 
 One directory per language area, each with a subdirectory per case:
 
-`arithmatic/` (arithmetic, bitwise, unary) · `arrays/` · `assignment/` · `async/` · `closures/` · `collections/` · `control_flow/` · `dicts/` · `exceptions/` · `for_loop/` · `fs/` · `functions/` · `http/` · `imports/` · `interfaces/` · `llm/` · `llvm/` · `numbers/` · `pipe/` · `streams/` · `strings/` · `structs/` · `trust/` · `uhttp/`
+`arithmatic/` (arithmetic, bitwise, unary) · `arrays/` · `assignment/` · `async/` · `closures/` · `collections/` · `control_flow/` · `decorators/` · `dicts/` · `exceptions/` · `for_loop/` · `fs/` · `functions/` · `http/` · `imports/` · `interfaces/` · `llm/` · `llvm/` · `numbers/` · `pipe/` · `streams/` · `strings/` · `structs/` · `trust/` · `uhttp/`
+
+`decorators/` covers `@dec` on a `let` and on a `prompt`, which the parser rewrites into a call. `prompt_tags/` has its wrapper print what it built, because there is otherwise nothing to assert against: a prompt renders as `<prompt>`, so a fixture cannot observe its text any other way. Decorators on `fn`, `struct` and `extend` are older and are exercised by unit tests in `src/frontend/tests.rs` rather than here.
 
 `llm/` is worth calling out. Those fixtures do real prompt dereferences, and they are still deterministic in CI because `src/scripts/backend-parity.sh` installs `src/scripts/fake-provider.jde` as a stand-in inference provider answering with a canned reply. An example supplies its own reply as a `responses.txt` beside the `.jde`; without one it gets the default. Pointing the parity gate at these turned up a VM muting bug and an AOT segfault immediately.
 

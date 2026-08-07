@@ -758,11 +758,12 @@ char*   jrt_readline(const char* prompt);
  *
  * The FFI value type (JadeVal) is a 16-byte tagged union that MUST byte-match
  * `JadeVal` in jadelang/src/native.rs so the same .dylib serves both the VM and
- * AOT. Its tags (0..10) are an independent ABI, distinct from the jade_value_t
+ * AOT. Its tags (0..11) are an independent ABI, distinct from the jade_value_t
  * low-bit tags above. Scalars convert directly; arrays, dicts, structs, bytes
  * and handles are copied into nested JadeArr/JadeMap/JadeStruct/JadeBytes/
- * JadeHandle trees (see below). Remaining heap kinds (functions, futures,
- * prompts) become nil. */
+ * JadeHandle trees (see below). A callable crosses inward only, as a JadeFn the
+ * library may invoke for the duration of the call. Futures and prompts become
+ * nil. */
 #define JADE_FFI_NIL   0
 #define JADE_FFI_INT   1
 #define JADE_FFI_FLOAT 2

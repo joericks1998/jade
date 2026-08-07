@@ -1,0 +1,10 @@
+// A decorator wraps a declared value, so it needs a declaration under it.
+// A bare expression has no name to bind the wrapped result to, and silently
+// ignoring the decorator would be worse than refusing it.
+
+fn shout(s) {
+    return s.upper()
+}
+
+@shout
+print("hello")

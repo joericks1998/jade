@@ -45,6 +45,8 @@ A third choice worth knowing before you add syntax: *prefer desugaring*. If new 
 
 **Error messages should name the fix.** `prefix '?' cannot be applied to a field — write 'obj.(?p)' or 'obj~>p' instead` is worth much more than `unexpected token`.
 
+**A decorator means two different things depending on what it sits on, and only one of them is here.** On a `let` or a `prompt` the parser rewrites it into a call — `@f let x = v` becomes `let x = f(v)` — so nothing downstream learns the syntax exists, and the feature costs one AST-free desugar. On a `fn` it cannot work that way, because the value being wrapped is a function the emitter has yet to build, so that path lives in `emit.rs` and runs at emit time. The two must agree on nesting order: the decorator written *first* is applied first, which is the reverse of Python's rule. Change one and you have to change the other.
+
 ## Building and testing
 
 ```sh

@@ -14,7 +14,7 @@ A `try`/`catch` block wraps the statements that might raise. If the `try` body c
 
 Built-in runtime errors — division by zero, type errors, undefined variable references, index out of bounds, and all other errors — are automatically wrapped in a synthetic `RuntimeError` struct with a single `message` field. A catch-all arm (`catch e { … }`) will catch these just as it catches user-raised exceptions.
 
-If no `catch` arm matches the raised value, the exception propagates outward to the nearest enclosing `try`/`catch`. If it reaches the top level without being caught, the program exits with an error message.
+If no `catch` arm matches the raised value, the exception propagates outward to the nearest enclosing `try`/`catch`. If it reaches the top level without being caught, the program prints `unhandled exception: <value>` and exits with status 1.
 
 ## Syntax
 
@@ -94,6 +94,33 @@ try {
 ```
 
 Division by zero normally terminates the program. Inside a `try` block, built-in runtime errors are automatically wrapped in a `RuntimeError` struct with a `message` field. The catch-all arm binds this struct to `e` and the program continues. Output: `caught runtime error`.
+
+### Separating built-in errors from your own
+
+`RuntimeError` can be named in a typed arm, which lets one `try` handle the language's errors and your own separately.
+
+```jade
+struct MyError { message }
+
+try {
+    let v = 42
+    let bad = v.upper()
+} catch MyError e {
+    print("mine: " + e.message)
+} catch RuntimeError e {
+    print("built-in: " + e.message)
+}
+// built-in: struct 'int' has no field 'upper'
+```
+
+Two things follow from how the wrapping works:
+
+- *Your `raise` is never wrapped.* The value you throw is the value that arrives — a raised string stays a string, and a raised struct keeps its own type. Only the language's own errors become `RuntimeError`.
+- *`RuntimeError` is the runtime's type, not one you declare.* You catch it; you do not construct it or `raise` it.
+
+:::note
+The `message` on a caught `RuntimeError` carries a `[line:col]` prefix under `jade run`, but not in a binary built with `jade build` — compiled code has no span information at runtime. Match on the message by substring rather than by equality if you need to inspect it.
+:::
 
 ## Advanced Examples
 

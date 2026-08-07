@@ -87,11 +87,12 @@ The `std/string` package exposes functions that take the target string as the fi
 | `string.starts_with(s, prefix)` | `s.starts_with(prefix)` | `bool` | True if `s` starts with `prefix` |
 | `string.ends_with(s, suffix)` | `s.ends_with(suffix)` | `bool` | True if `s` ends with `suffix` |
 
-`str` also has a `len()` method (no package import needed):
+`str` also has `len()` and `encode()`, neither of which needs a package import. `encode()` gives the string's UTF-8 as a `bytes` value, and `bytes.decode()` goes back the other way — see [Types](types#bytes).
 
 ```jade
 let s = "Hello, Jade!"
 print(s.len())                          // 12
+print(s.encode().len())                 // 12 — bytes, not characters
 print(s.upper())                        // HELLO, JADE!
 print(s.lower())                        // hello, jade!
 print(s.trim())                         // Hello, Jade!  (no change here)
@@ -325,7 +326,9 @@ let result = json.parse(resp2["body"])
 ```
 
 :::note
-Requests time out after 30 seconds. HTTP errors (non-2xx status) do **not** raise — check `resp["status"]` yourself. Network errors (DNS failure, connection refused, etc.) raise an `IoError`.
+HTTP errors (non-2xx status) do **not** raise — check `resp["status"]` yourself. Only a transport failure raises an `IoError`: DNS failure, connection refused, a TLS handshake that fails, or a timeout.
+
+`std/http` runs requests through the `curl` binary, which has to be on `PATH` — a missing one is reported as a transport failure. Two consequences follow from that: there is no overall request timeout beyond curl's own defaults, and **redirects are not followed**, so a 301 comes back as `status` 301 with the redirect page as its body.
 :::
 
 ---
@@ -430,6 +433,31 @@ print(result["stderr"])  // ls: cannot access...
 `sh.exec` raises an `IoError` if the command exits with a non-zero code. Use `sh.run` or `sh.output` when you expect failure or need to inspect the exit code.
 :::
 
+### Untrusted strings cannot become commands
+
+Jade tracks where a string came from. Anything read from outside the program — a model reply, an HTTP body, a file, stdin — is *tainted*, and the taint spreads through concatenation, f-strings, indexing, and `.encode()` / `.decode()`.
+
+`sh.exec` and `sh.run` refuse a tainted command rather than running it:
+
+```jade
+use std::sh
+use std::fs
+
+let cmd = fs.read("command.txt")
+sh.exec(cmd)
+// raises: refused tainted string in sh.exec(cmd) — value derived from an
+// untrusted source (LLM, network, file, stdin) and cannot flow to a
+// code-execution sink
+```
+
+Catch it, or build the command from string literals and interpolate only the parts you have checked yourself.
+
+The output of a shell command is itself tainted, so you cannot launder a value by running it through `sh` and feeding the result back in.
+
+:::caution
+`sh.output` does **not** perform this check. Build its command from trusted parts.
+:::
+
 ---
 
 ## `std/json`
@@ -523,6 +551,16 @@ if args.len() > 1 {
 // Working directory
 print(env.cwd())   // /home/user/myproject
 ```
+
+:::note What `args[0]` is
+`env.args()` is the *process's* argument list, so it depends on how the program was started.
+
+A compiled binary run as `./app one two` gives `["./app", "one", "two"]` — the shape you would expect.
+
+Under the interpreter the process is `jade`, so the list starts with the jade binary and includes the subcommand: `jade run app.jde` gives `["…/jade", "run", "app.jde"]`. `jade run` also takes no arguments of its own beyond the file, so there is no way to pass any through it. The old shorthand does accept them — `jade app.jde one two` gives `["…/jade", "app.jde", "one", "two"]` — but the positions still differ from the built program's.
+
+Build the program when argument positions have to be stable.
+:::
 
 ---
 

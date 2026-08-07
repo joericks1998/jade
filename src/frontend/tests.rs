@@ -1473,6 +1473,95 @@ mod parser {
         assert_eq!(decorators[1].0, "b");
     }
 
+    // ── decorators on declarations ────────────────────────────────────────────
+    //
+    // These desugar in the parser: `@f let x = v` becomes `let x = f(v)` and
+    // nothing downstream sees a decorator at all. So the assertions are about
+    // the *call* the parser built, not about a `decorators` field — there isn't
+    // one on `Stmt::Let`, and adding one would push this syntax through every
+    // later stage for no gain.
+
+    #[test]
+    fn a_decorated_let_desugars_to_a_call() {
+        let p = parse_src("@shout\nlet x = \"hi\"");
+        let Stmt::Let { name, value, .. } = &p.stmts[0] else { panic!() };
+        assert_eq!(name, "x");
+        let Expr::Call { callee, args, kwargs, .. } = value else { panic!("not a call") };
+        assert!(matches!(&**callee, Expr::Identifier { name, .. } if name == "shout"));
+        assert_eq!(args.len(), 1);
+        assert!(matches!(&args[0], Expr::Str { value, .. } if value == "hi"));
+        assert!(kwargs.is_empty());
+    }
+
+    #[test]
+    fn a_decorated_prompt_wraps_its_text() {
+        let p = parse_src("@tagged\nprompt p = \"ask\"");
+        let Stmt::PromptDecl { name, body, .. } = &p.stmts[0] else { panic!() };
+        assert_eq!(name, "p");
+        let Expr::Call { callee, args, .. } = body else { panic!("not a call") };
+        assert!(matches!(&**callee, Expr::Identifier { name, .. } if name == "tagged"));
+        assert!(matches!(&args[0], Expr::Str { value, .. } if value == "ask"));
+    }
+
+    #[test]
+    fn decorator_arguments_follow_the_decorated_value() {
+        let p = parse_src("@fence(\"p\", cls = \"lead\")\nlet x = \"hi\"");
+        let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
+        let Expr::Call { args, kwargs, .. } = value else { panic!() };
+        // The decorated value is first; the decorator's own arguments follow,
+        // with keyword arguments kept apart from positional ones.
+        assert_eq!(args.len(), 2);
+        assert!(matches!(&args[0], Expr::Str { value, .. } if value == "hi"));
+        assert!(matches!(&args[1], Expr::Str { value, .. } if value == "p"));
+        assert_eq!(kwargs.len(), 1);
+        assert_eq!(kwargs[0].0, "cls");
+    }
+
+    #[test]
+    fn the_first_decorator_written_is_applied_first() {
+        // Matching `fn`, whose decorators emit in source order. The reverse of
+        // Python's rule, and the two forms have to agree with each other before
+        // they agree with anything else.
+        let p = parse_src("@a\n@b\nlet x = 1");
+        let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
+        let Expr::Call { callee, args, .. } = value else { panic!() };
+        assert!(matches!(&**callee, Expr::Identifier { name, .. } if name == "b"));
+        let Expr::Call { callee: inner, .. } = &args[0] else { panic!("b's arg is not a call") };
+        assert!(matches!(&**inner, Expr::Identifier { name, .. } if name == "a"));
+    }
+
+    #[test]
+    fn a_namespaced_decorator_becomes_a_field_access() {
+        let p = parse_src("@style::tagged\nprompt p = \"ask\"");
+        let Stmt::PromptDecl { body, .. } = &p.stmts[0] else { panic!() };
+        let Expr::Call { callee, .. } = body else { panic!() };
+        let Expr::FieldAccess { object, field, .. } = &**callee else { panic!("not a field access") };
+        assert_eq!(field, "tagged");
+        assert!(matches!(&**object, Expr::Identifier { name, .. } if name == "style"));
+    }
+
+    #[test]
+    fn a_decorator_on_a_bare_expression_is_refused() {
+        let err = parse_src_err("@shout\nprint(\"hi\")");
+        let JadeError::UnexpectedToken { expected, .. } = &err else { panic!("{err:?}") };
+        assert!(
+            expected.contains("`let`") && expected.contains("`prompt`"),
+            "the message should name the forms that work: {expected}"
+        );
+    }
+
+    #[test]
+    fn a_decorated_let_works_inside_a_function() {
+        // The decorator branch lives in `parse_stmt`, which is also the block
+        // parser, so this comes free — but a `fn` decorator on a nested
+        // definition is silently dropped at emit time, and that trap should not
+        // quietly extend to declarations.
+        let p = parse_src("fn f() {\n    @shout\n    let x = \"hi\"\n    return x\n}");
+        let Stmt::FnDef { body, .. } = &p.stmts[0] else { panic!() };
+        let Stmt::Let { value, .. } = &body[0] else { panic!("not a let") };
+        assert!(matches!(value, Expr::Call { .. }));
+    }
+
     #[test]
     fn test_parse_struct_decorator_with_arg() {
         let p = parse_src("@log(\"City\")\nstruct City {\n  name,\n}");

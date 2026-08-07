@@ -1,5 +1,5 @@
 // Async prompt fixtures.
-// Requires JADE_API_KEY or a [model] section in jade.toml.
+// Requires a provider: run `jade register` to install and configure one.
 //
 // Core rules:
 //   - prompt "text" is lazy — evaluates the string immediately, makes no LLM call.
