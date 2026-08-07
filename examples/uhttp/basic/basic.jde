@@ -1,5 +1,6 @@
 use std::uhttp
 use std::json
+use std::fs
 
 // HTTP over a Unix domain socket. The target is a single pseudo-URL of the form
 // unix://<socket-path>:<request-path> — here the Docker Engine API.
@@ -32,3 +33,28 @@ print(h["body"])                            // (empty string)
 // GET with a request path that defaults to "/" when omitted
 let ping = uhttp.get("unix:///var/run/docker.sock:/_ping")
 print(ping["body"])                         // OK
+
+// ── Bodies that are not text ────────────────────────────────────────────────
+//
+// Everything above reads `body` as a str, which is UTF-8 and NUL-terminated. A
+// daemon answering with an image, an audio frame, or a gzip stream breaks both
+// rules: invalid sequences become "?" and the body is cut at its first NUL. So
+// those use get_bytes / post_bytes, whose `body` is a `bytes` value instead.
+
+let img = uhttp.get_bytes("unix:///var/run/docker.sock:/v1.43/images/alpine/get")
+print(img["status"])                        // 200
+print(len(img["body"]))                     // octets, not characters
+print(img["body"][0])                       // an int in 0..=255, not a char
+
+// Sending octets works the same way round: the body must be a `bytes` value,
+// and a str is a type error rather than a silent encode.
+let wav = fs.read_bytes("clip.wav")
+let up = uhttp.post_bytes(
+    "unix:///var/run/audiod.sock:/play",
+    wav,
+    {"Content-Type": "audio/wav"}
+)
+print(up["status"])                         // 200
+
+// A reply is TAINTED whichever spelling produced it, so it cannot reach a sink
+// like sh.exec without being explicitly trusted — same rule as fs.read_bytes.

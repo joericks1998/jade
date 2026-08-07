@@ -68,10 +68,10 @@ pub(super) fn chunk_module_supported(module: &str, method: &str, argc: usize) ->
         ("time", "now" | "now_ms") => argc == 0,
         ("time", "sleep") => argc == 1,
         ("time", "local") => argc == 1,
-        ("http", "get" | "delete" | "head") => argc == 1 || argc == 2,
-        ("http", "post" | "put") => argc == 2 || argc == 3,
-        ("uhttp", "get" | "delete" | "head") => argc == 1 || argc == 2,
-        ("uhttp", "post" | "put") => argc == 2 || argc == 3,
+        ("http", "get" | "delete" | "head" | "get_bytes") => argc == 1 || argc == 2,
+        ("http", "post" | "put" | "post_bytes") => argc == 2 || argc == 3,
+        ("uhttp", "get" | "delete" | "head" | "get_bytes") => argc == 1 || argc == 2,
+        ("uhttp", "post" | "put" | "post_bytes") => argc == 2 || argc == 3,
         ("uhttp", "stream") => argc == 2 || argc == 3, // url, handler[, headers]
         ("array", "map" | "filter") => argc == 2,
         ("random", "int") => argc == 2,
@@ -672,7 +672,11 @@ pub(super) fn emit_module_call<'ctx>(
             Ok(b.build_call(f, &[], "args").map_err(err)?.as_any_value_enum().into_int_value())
         }
         ("time", "local") => Ok(low.tag_str(str_fn("jrt_time_local", 1)?)),
-        ("http", "get" | "delete" | "head") => {
+        // `get_bytes` rides the same arm as `get`: the C signature is identical
+        // (url, headers) -> tagged dict word, and only the dict's `body` differs
+        // in type. `post_bytes` cannot, because its body is a whole tagged word
+        // rather than a data pointer — see the arm below.
+        ("http", "get" | "delete" | "head" | "get_bytes") => {
             // (url, [headers]) -> already-tagged { status, body } dict word.
             let f = low.runtime_fn(&format!("jrt_http_{method}"), i64_ty.fn_type(&[ptrt.into(), ptrt.into()], false));
             let headers = if args.len() >= 2 { strp(1) } else { ptrt.const_null() };
@@ -684,7 +688,23 @@ pub(super) fn emit_module_call<'ctx>(
             let headers = if args.len() >= 3 { strp(2) } else { ptrt.const_null() };
             Ok(b.build_call(f, &[strp(0).into(), strp(1).into(), headers.into()], "http").map_err(err)?.as_any_value_enum().into_int_value())
         }
-        ("uhttp", "get" | "delete" | "head") => {
+        ("http" | "uhttp", "post_bytes") => {
+            // (url, body word, [headers]) -> tagged { status, body } dict word.
+            // The body goes over as its tagged word, not `strp(1)`: the runtime
+            // checks the tag and reports a non-bytes argument, which it could
+            // not do if all it received were a bare pointer.
+            let f = low.runtime_fn(
+                &format!("jrt_{module}_post_bytes"),
+                i64_ty.fn_type(&[ptrt.into(), i64_ty.into(), ptrt.into()], false),
+            );
+            let headers = if args.len() >= 3 { strp(2) } else { ptrt.const_null() };
+            Ok(b
+                .build_call(f, &[strp(0).into(), low.load(args[1]).into(), headers.into()], "httpb")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_int_value())
+        }
+        ("uhttp", "get" | "delete" | "head" | "get_bytes") => {
             // (unix-url, [headers]) -> already-tagged { status, body } dict word.
             let f = low.runtime_fn(&format!("jrt_uhttp_{method}"), i64_ty.fn_type(&[ptrt.into(), ptrt.into()], false));
             let headers = if args.len() >= 2 { strp(1) } else { ptrt.const_null() };

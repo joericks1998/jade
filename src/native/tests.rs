@@ -230,6 +230,7 @@ fn tag_constants_are_distinct() {
     let tags = [
         JADE_TAG_NIL, JADE_TAG_INT, JADE_TAG_FLOAT, JADE_TAG_BOOL,
         JADE_TAG_STR, JADE_TAG_ERROR, JADE_TAG_ARRAY, JADE_TAG_DICT,
+        JADE_TAG_STRUCT, JADE_TAG_BYTES,
     ];
     for i in 0..tags.len() {
         for j in (i + 1)..tags.len() {
@@ -344,6 +345,112 @@ fn a_name_without_the_mangling_suffix_is_untouched() {
     for name in ["Token", "Token$", "Token$a", "Token$1a", "$0", ""] {
         assert_eq!(super::abi_type_name(name), name, "rewrote `{name}`");
     }
+}
+
+// ── Bytes round-trip ──────────────────────────────────────────────────────
+//
+// Bytes cross as their own counted tag rather than as a string, because a blob
+// may contain NUL and need not be valid UTF-8 — a `char*` would truncate one and
+// corrupt the other. These tests exist because the tag shipped without them: the
+// VM implemented tag 9 in all three directions while the AOT marshaller
+// (runtime_aot/native.c) had no arm at all, so the same package worked under
+// `jade run` and sent nil under `jade build`. What made that easy to miss was
+// that nothing tested the tag on either side.
+
+fn sample_bytes() -> VmValue {
+    // Deliberately not text: an embedded NUL, a high byte, an invalid UTF-8
+    // lead byte. Every one of these survives a counted blob and none survives a
+    // C string.
+    VmValue::Bytes(Arc::new(jade_runtime::bytesf::BytesObj::new(
+        vec![0x00, 0xFF, 0x41, 0x00, 0x80],
+        jade_runtime::trust::TRUSTED,
+    )))
+}
+
+#[test]
+fn vm_to_ffi_bytes_carries_a_counted_payload() {
+    let mut scratch = Vec::new();
+    let v = vm_to_ffi(&sample_bytes(), &mut scratch);
+    assert_eq!(v.tag, JADE_TAG_BYTES);
+
+    let b = unsafe { &*v.data.as_bytes };
+    assert_eq!(b.len, 5, "the length travels; it is not inferred from a NUL");
+    let octets = unsafe { std::slice::from_raw_parts(b.data, b.len) };
+    assert_eq!(octets, [0x00, 0xFF, 0x41, 0x00, 0x80]);
+
+    unsafe { ffi_free(&v) };
+}
+
+#[test]
+fn bytes_survive_a_round_trip() {
+    let mut scratch = Vec::new();
+    let v = vm_to_ffi(&sample_bytes(), &mut scratch);
+    let back = ffi_to_vm(&v, ZERO).expect("bytes should convert back");
+    unsafe { ffi_free(&v) };
+
+    let VmValue::Bytes(b) = back else { panic!("expected bytes back") };
+    assert_eq!(b.as_slice(), [0x00, 0xFF, 0x41, 0x00, 0x80]);
+}
+
+/// Data from a native package is from outside the program, exactly as a file
+/// read is, so it arrives tainted however it was sent.
+#[test]
+fn inbound_bytes_are_tainted() {
+    let mut scratch = Vec::new();
+    let v = vm_to_ffi(&sample_bytes(), &mut scratch);  // sent TRUSTED
+    let back = ffi_to_vm(&v, ZERO).expect("bytes should convert back");
+    unsafe { ffi_free(&v) };
+
+    let VmValue::Bytes(b) = back else { panic!("expected bytes back") };
+    assert_eq!(b.trust, jade_runtime::trust::TAINTED);
+}
+
+/// Zero-length is the case a length-carrying ABI has to get right on its own:
+/// there is no terminator to fall back on, and `malloc(0)` may return null,
+/// which the free path cannot tell from a failed allocation.
+#[test]
+fn empty_bytes_round_trip() {
+    let empty =
+        VmValue::Bytes(Arc::new(jade_runtime::bytesf::BytesObj::new(
+            Vec::new(),
+            jade_runtime::trust::TRUSTED,
+        )));
+    let mut scratch = Vec::new();
+    let v = vm_to_ffi(&empty, &mut scratch);
+    assert_eq!(v.tag, JADE_TAG_BYTES);
+    assert_eq!(unsafe { (*v.data.as_bytes).len }, 0);
+
+    let back = ffi_to_vm(&v, ZERO).expect("empty bytes should convert back");
+    unsafe { ffi_free(&v) };
+
+    let VmValue::Bytes(b) = back else { panic!("expected bytes back") };
+    assert!(b.as_slice().is_empty());
+}
+
+/// Nested in a container, bytes are one more node the deep copy has to own and
+/// free — a leak or double-free here only shows up under load.
+#[test]
+fn bytes_nested_in_an_array_and_a_dict_round_trip() {
+    let arr = crate::builtins::make_array(vec![VmValue::Int(1), sample_bytes()]);
+    let mut scratch = Vec::new();
+    let v = vm_to_ffi(&arr, &mut scratch);
+    let back = ffi_to_vm(&v, ZERO).expect("array should convert back");
+    unsafe { ffi_free(&v) };
+    let VmValue::Array(out) = back else { panic!("expected an array back") };
+    let Some(VmValue::Bytes(b)) = out.lock().get(1).cloned() else {
+        panic!("nested bytes lost")
+    };
+    assert_eq!(b.as_slice(), [0x00, 0xFF, 0x41, 0x00, 0x80]);
+
+    let mut d: DictObj<VmValue> = DictObj::new();
+    d.insert("blob", sample_bytes());
+    let mut scratch = Vec::new();
+    let v = vm_to_ffi(&VmValue::Dict(d), &mut scratch);
+    let back = ffi_to_vm(&v, ZERO).expect("dict should convert back");
+    unsafe { ffi_free(&v) };
+    let VmValue::Dict(out) = back else { panic!("expected a dict back") };
+    let Some(VmValue::Bytes(b)) = out.get("blob") else { panic!("nested bytes lost") };
+    assert_eq!(b.as_slice(), [0x00, 0xFF, 0x41, 0x00, 0x80]);
 }
 
 /// End to end: a mangled struct arrives under the name the receiver knows.

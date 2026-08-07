@@ -200,25 +200,27 @@ int     jrt_eq_any(uint64_t a, uint64_t b);
 
 /* Format a tagged Jade value into buf (snprintf semantics), dispatching on the
  * low-bit tag to match the VM's value_to_display: INT → %lld(decoded), STRING →
- * %s, boxed FLOAT → jrt_snprintf_float, BOOL → true/false, NIL → nil. A
- * non-string heap object (printed without static type info) renders "<object>".
- * Used by print / f-string interpolation when the static type is Unknown. */
+ * %s, boxed FLOAT → jrt_render_any, BOOL → true/false, NIL → nil. A non-string
+ * heap object (printed without static type info) renders "<object>".
+ * Used by print / f-string interpolation when the static type is Unknown.
+ * Truncates at `cap`; float and string text have no length bound, so callers
+ * that must not truncate handle those two kinds themselves. */
 int     jrt_snprintf_any(char* buf, size_t cap, int64_t val);
 
 /* Print a tagged Jade value to stdout followed by `suffix`, dispatching on the
- * low-bit tag like jrt_snprintf_any — but strings are written unbounded (no
- * scratch buffer), so a long Unknown-typed string isn't truncated. Used by
- * print() for statically-Unknown args. */
+ * low-bit tag like jrt_snprintf_any — but strings, floats and collections are
+ * written unbounded (no scratch buffer), so neither a long Unknown-typed string
+ * nor a large float is truncated. Used by print() for statically-Unknown args. */
 void    jrt_print_any(int64_t val, const char* suffix);
 /* jrt_write_any — `write(x)`: print with no newline, then flush. The flush
  * matches the VM; unflushed no-newline output sits in a line-buffered stdout. */
 void    jrt_write_any(int64_t val);
 
-/* Format a Jade float into buf (snprintf semantics) the way the VM displays
- * it: the shortest decimal that round-trips to the same double, with a
- * trailing ".0" on integer-valued floats (so 4.0 prints as "4.0", not "4").
- * Used by print() and f-string interpolation for statically-Float values. */
-int     jrt_snprintf_float(char* buf, size_t cap, double val);
+/* jrt_snprintf_float is gone. Float text now comes from jrt_render_any, which
+ * calls the shared Rust format_float (jade-runtime, src/render.rs) — the same
+ * one the VM uses. The C version formatted with "%.*g", which switches to
+ * exponent form whenever a float needs trailing zeros before the decimal point,
+ * so print(10.0) printed "1e+01" when compiled and "10.0" when interpreted. */
 
 /* Integer exponentiation: base**exp by squaring, matching the VM's Int result
  * for math.pow(int, int) with a non-negative exponent. Negative exponents
@@ -381,8 +383,9 @@ int32_t jrt_str_starts_with(const char* str, const char* prefix);
 int32_t jrt_str_ends_with(const char* str, const char* suffix);
 /* jrt_str_of_any — render a type-erased value to a freshly-allocated tagged
  * string, returning its data pointer (past the 8-byte header). A string value
- * is returned as-is (trust byte preserved); scalars format via jrt_snprintf_any
- * as TRUSTED. Used by the Chunk backend's f-string builder (BuildFStr). */
+ * is returned as-is (trust byte preserved); floats and collections render via
+ * jrt_render_any and the remaining short scalars via jrt_snprintf_any, both as
+ * TRUSTED. Used by the Chunk backend's f-string builder (BuildFStr). */
 char* jrt_str_of_any(int64_t val);
 /* jrt_int_any/jrt_float_any/jrt_bool_any — the dynamic int()/float()/bool()
  * conversion builtins, dispatched on the runtime tag (mirror the VM's coerce).
@@ -613,6 +616,18 @@ jade_value_t jrt_http_post(const char* url, const char* body, void* headers);
 jade_value_t jrt_http_put(const char* url, const char* body, void* headers);
 jade_value_t jrt_http_delete(const char* url, void* headers);
 jade_value_t jrt_http_head(const char* url, void* headers);
+/* The Jade type name of any tagged word ("int", "bytes", "struct", …), as a
+ * static literal the caller must not free. The VM's value_type_name answers the
+ * same question about a VmValue; this keeps one table for both. */
+const char*  jrt_type_name_of(int64_t word);
+
+/* Byte-bodied pair. `.body` is a JK_BYTES blob rather than a string, so a reply
+ * that is not text survives; `post_bytes` takes its body as a whole tagged word
+ * so a non-bytes argument is reported instead of dereferenced. */
+int64_t      jrt_http_get_bytes_impl(const char* url, void* headers);
+int64_t      jrt_http_post_bytes_impl(const char* url, int64_t body, void* headers);
+jade_value_t jrt_http_get_bytes(const char* url, void* headers);
+jade_value_t jrt_http_post_bytes(const char* url, int64_t body, void* headers);
 
 /* uhttp (std::uhttp) — HTTP/1.1 over a Unix domain socket (jade-runtime,
  * src/uhttpf.rs). Same shape as http: each verb returns an ObjHeader dict
@@ -630,6 +645,12 @@ jade_value_t jrt_uhttp_post(const char* url, const char* body, void* headers);
 jade_value_t jrt_uhttp_put(const char* url, const char* body, void* headers);
 jade_value_t jrt_uhttp_delete(const char* url, void* headers);
 jade_value_t jrt_uhttp_head(const char* url, void* headers);
+/* Byte-bodied pair, mirroring http's. A daemon that answers with audio or an
+ * image needs these; jrt_uhttp_get decodes the reply lossily and mangles both. */
+int64_t      jrt_uhttp_get_bytes_impl(const char* url, void* headers);
+int64_t      jrt_uhttp_post_bytes_impl(const char* url, int64_t body, void* headers);
+jade_value_t jrt_uhttp_get_bytes(const char* url, void* headers);
+jade_value_t jrt_uhttp_post_bytes(const char* url, int64_t body, void* headers);
 
 /* uhttp.stream — a streaming read over a Unix socket, one Jade handler call per
  * body line. The handle API is Rust (jade-runtime, src/uhttpf.rs `Stream`); the
@@ -721,10 +742,10 @@ char*   jrt_readline(const char* prompt);
  *
  * The FFI value type (JadeVal) is a 16-byte tagged union that MUST byte-match
  * `JadeVal` in jadelang/src/native.rs so the same .dylib serves both the VM and
- * AOT. Its tags (0..8) are an independent ABI, distinct from the jade_value_t
- * low-bit tags above. Scalars convert directly; arrays, dicts, and structs are
- * deep-copied into nested JadeArr/JadeMap/JadeStruct trees (see below).
- * Remaining heap kinds (functions, futures, prompts) become nil. */
+ * AOT. Its tags (0..9) are an independent ABI, distinct from the jade_value_t
+ * low-bit tags above. Scalars convert directly; arrays, dicts, structs and
+ * bytes are deep-copied into nested JadeArr/JadeMap/JadeStruct/JadeBytes trees
+ * (see below). Remaining heap kinds (functions, futures, prompts) become nil. */
 #define JADE_FFI_NIL   0
 #define JADE_FFI_INT   1
 #define JADE_FFI_FLOAT 2
@@ -740,7 +761,8 @@ char*   jrt_readline(const char* prompt);
  * which is why the runtime ABI version moved to 3. */
 #define JADE_FFI_BYTES 9
 
-/* Nested container payloads for JADE_FFI_ARRAY / JADE_FFI_DICT.
+/* Nested payloads for JADE_FFI_ARRAY / JADE_FFI_DICT / JADE_FFI_STRUCT /
+ * JADE_FFI_BYTES.
  *
  * A collection cannot cross the boundary by pointer: the process holds two
  * `jade-runtime` instances (the VM binary and each dlopen'd package), each with
@@ -750,8 +772,9 @@ char*   jrt_readline(const char* prompt);
  * container — is allocated with libc malloc/strdup. libc's allocator is shared
  * process-wide (mimalloc is a Rust #[global_allocator], it does not override the
  * C malloc), so either side can release the whole tree with `jade_ffi_free`.
- * Top-level scalar strings keep the non-owning contract. Cyclic collections are
- * not supported (the copy would not terminate). */
+ * Top-level scalar strings keep the non-owning contract. A blob does not: it is
+ * copied at every level, top included, so `jade_ffi_free` reclaims it there too.
+ * Cyclic collections are not supported (the copy would not terminate). */
 typedef struct JadeArr JadeArr;
 typedef struct JadeMap JadeMap;
 typedef struct JadeStruct JadeStruct;
@@ -793,10 +816,10 @@ struct JadeStruct {
 
 /* Release a JadeVal tree built by the marshaller (`to_ffi`/`jrt_ffi_from_tagged`
  * / the VM's vm_to_ffi). Frees only the libc-owned parts — JadeArr/JadeMap/
- * JadeStruct nodes,
- * their element arrays, and copied strings inside a container — so it is a no-op
- * on scalars and safe to call on any JadeVal. The consumer of a native call frees
- * both the argument trees it built and a container return value with it. */
+ * JadeStruct/JadeBytes nodes, their element arrays and payloads, and copied
+ * strings inside a container — so it is a no-op on scalars and safe to call on
+ * any JadeVal. The consumer of a native call frees both the argument trees it
+ * built and an owning return value with it. */
 void jade_ffi_free(JadeVal* v);
 
 typedef int (*JadeNativeFnPtr)(size_t argc, const JadeVal* argv, JadeVal* out);
