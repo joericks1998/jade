@@ -861,6 +861,43 @@ pub fn exported_symbols(lib: &Path) -> Option<std::collections::HashSet<String>>
     (!out.is_empty()).then_some(out)
 }
 
+/// Whether a file is a shared library this platform could load.
+///
+/// Read from the first four bytes rather than by asking `nm`, because the answer
+/// has to be trustworthy when `nm` is missing and because "not an object file"
+/// and "no tools installed" are different problems with different fixes.
+///
+/// This exists because the failure it catches is otherwise reported by the
+/// dynamic loader, at run time, in a program that built without complaint. A
+/// header compiled by mistake (`clang -o libadd.dylib add.h` emits a precompiled
+/// header, not a library) reads as an ordinary file with an ordinary name, and
+/// every stage before `dlopen` is happy to pass it along.
+pub fn is_loadable_object(lib: &Path) -> bool {
+    use std::io::Read;
+    let Ok(mut f) = std::fs::File::open(lib) else { return false };
+    let mut magic = [0u8; 4];
+    if f.read_exact(&mut magic).is_err() {
+        return false;
+    }
+    bytes_are_loadable_object(&magic)
+}
+
+/// The same test against bytes already in hand, for `pkg::materialize`, which
+/// has read the artifact and is about to write it into `libs/`.
+pub fn bytes_are_loadable_object(bytes: &[u8]) -> bool {
+    let Some(magic) = bytes.get(..4) else { return false };
+    matches!(
+        [magic[0], magic[1], magic[2], magic[3]],
+        // Mach-O, 64- and 32-bit, either byte order.
+        [0xcf, 0xfa, 0xed, 0xfe] | [0xfe, 0xed, 0xfa, 0xcf]
+        | [0xce, 0xfa, 0xed, 0xfe] | [0xfe, 0xed, 0xfa, 0xce]
+        // Mach-O universal ("fat") binary.
+        | [0xca, 0xfe, 0xba, 0xbe] | [0xbe, 0xba, 0xfe, 0xca]
+        // ELF.
+        | [0x7f, b'E', b'L', b'F']
+    )
+}
+
 /// Header names a library called `lib` might plausibly ship.
 ///
 /// `libsqlite3.dylib` → `sqlite3.h` is close to universal, and a wrong guess is

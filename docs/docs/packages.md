@@ -123,6 +123,17 @@ Commit `jade.lock`. Do not commit `libs/` — `jade new` adds it to `.gitignore`
 
 A library like `libsqlite3` exports no `jade_pkg_init`, so the loader cannot take it directly. Jade generates a small binding shim that wraps it into an ordinary Jade package — and since v1.3.0 that is not a step you have to know about. Adding a C library is the same command as adding a Jade one:
 
+:::note
+Build the library from the `.c`, with `-dynamiclib` on macOS or `-shared` on Linux:
+
+```sh
+clang -dynamiclib -o libdemo.dylib demo.c    # macOS
+cc -shared -fPIC -o libdemo.so demo.c        # Linux
+```
+
+Naming the header instead — `clang -o libdemo.dylib demo.h` — produces a precompiled header, which is a perfectly ordinary file with a perfectly ordinary name and nothing the loader can open. Jade refuses it when you add it and says so.
+:::
+
 ```sh
 jade pkg add demo --path libdemo.dylib
 ```

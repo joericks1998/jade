@@ -4,6 +4,12 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.3.4
+
+- **A dependency that is not a shared library is refused when you add it.** Jade checked what a file *exported* but never that it was loadable at all, so a file with the right name went into `jade.toml`, into `libs/`, through resolution and through the linker, and was first refused by the dynamic loader when the finished program ran. The check is now at both ends: `jade pkg add` reads the file before writing anything, and `jade pkg install` checks the bytes it is about to write — which covers a hand-written manifest and a fresh clone, neither of which goes through `add`.
+- **It names the likely cause.** The common way to produce one of these is compiling the header instead of the source: `clang -o libadd.dylib add.h` emits a precompiled header, which is a perfectly ordinary file with a perfectly ordinary name. The error says so, and gives the command that works.
+- **Fixed: a compiled binary would not say why a native library failed to load.** `jade run` reported the loader's own reason — "slice is not valid mach-o file", a missing dependent library, an architecture mismatch — and a compiled binary printed only the path. Which engine you happened to run decided whether you were told anything. Both carry the reason now.
+
 ## v1.3.3
 
 - **Fixed: `sh.output` ran a command the trust model was supposed to refuse.** `sh.exec` and `sh.run` refuse a string that came from outside the program — a model reply, a file, the network, stdin — because it must not reach a shell. `sh.output` did not, and all three run through the same `sh -c`. So the check did not narrow what an untrusted command could do; it only decided how it had to be spelled, and `sh.output(x).stdout` was the way around it. Both engines refuse it now.
