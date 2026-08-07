@@ -157,6 +157,29 @@ enum Commands {
     /// Upgrade jade to the latest release
     Upgrade,
 
+    /// Reinstall jade, even if it is already the latest version
+    ///
+    /// Use when an installation is damaged rather than out of date — `upgrade`
+    /// stops when it is already current, which is exactly no help then.
+    Reinstall {
+        /// Also remove ~/.jade first: cache, config, credentials, providers
+        #[arg(long)]
+        clean: bool,
+        /// Do not ask before removing anything
+        #[arg(long)]
+        yes: bool,
+    },
+
+    /// Remove jade from this machine
+    Uninstall {
+        /// Also remove ~/.jade: cache, config, credentials, providers
+        #[arg(long)]
+        purge: bool,
+        /// Do not ask before removing anything
+        #[arg(long)]
+        yes: bool,
+    },
+
     /// Run a file directly (backward-compatible shorthand)
     ///
     /// This command is hidden — prefer `jade run <file.jde>`.
@@ -358,6 +381,14 @@ async fn run_cli() {
 
         Commands::Upgrade => {
             cli::upgrade::run_upgrade().await;
+        }
+
+        Commands::Reinstall { clean, yes } => {
+            cli::upgrade::run_reinstall(clean, yes).await;
+        }
+
+        Commands::Uninstall { purge, yes } => {
+            cli::upgrade::run_uninstall(purge, yes);
         }
 
         // ── backward-compat: jade <file.jde> [-v] ────────────────────────────

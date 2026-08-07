@@ -472,6 +472,52 @@ mod upgrade {
             _ => assert_eq!(label, None, "an unbuilt platform must upgrade to nothing"),
         }
     }
+
+    // ── uninstall / reinstall ────────────────────────────────────────────
+    //
+    // The removal itself ends in `process::exit` and deletes real files, so
+    // what is testable is the decision made before anything is touched: which
+    // paths are in scope, and that user data is out of scope unless asked for.
+
+    use crate::cli::upgrade::{layout, user_dir};
+
+    #[test]
+    fn the_layout_resolves_through_a_symlink() {
+        // Replacing or removing a symlink leaves the file it pointed at, which
+        // on a brew-style install is the entire toolchain.
+        let l = layout().expect("the running binary has a path");
+        assert!(l.bin.is_absolute(), "the binary path must be absolute: {:?}", l.bin);
+        assert_eq!(
+            l.bin,
+            l.bin.canonicalize().unwrap_or_else(|_| l.bin.clone()),
+            "the path must already be resolved, not a symlink to resolve later"
+        );
+    }
+
+    #[test]
+    fn the_lib_tree_is_only_claimed_when_it_exists() {
+        // `<prefix>/lib/jade` is install.sh's layout; a cargo build tree has no
+        // such directory, and uninstall must not report removing one.
+        let l = layout().unwrap();
+        if let Some(lib) = &l.lib {
+            assert!(lib.is_dir(), "a claimed lib tree must exist: {:?}", lib);
+            assert!(lib.ends_with("lib/jade"), "unexpected lib layout: {:?}", lib);
+        }
+    }
+
+    #[test]
+    fn user_data_is_separate_from_the_toolchain() {
+        // The reason uninstall keeps ~/.jade by default: it holds credentials
+        // and installed providers, and losing those to a reinstall would be a
+        // nasty surprise. It must never be inside the toolchain prefix.
+        let Some(data) = user_dir() else { return };
+        let l = layout().unwrap();
+        assert!(data.ends_with(".jade"), "unexpected data dir: {:?}", data);
+        assert!(!l.bin.starts_with(&data), "the binary must not live inside the data dir");
+        if let Some(lib) = &l.lib {
+            assert!(!lib.starts_with(&data), "the lib tree must not live inside the data dir");
+        }
+    }
 }
 
 // ── register::join_names ──────────────────────────────────────────────────────
