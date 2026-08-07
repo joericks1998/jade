@@ -440,6 +440,42 @@ pub struct DependencyEntry {
     pub abi: Abi,
     /// Required for `abi = "c"`: the symbols to bind, and their prototypes.
     pub symbols: Option<HashMap<String, CSymbol>>,
+    /// C structs a symbol fills through an out-parameter, by C type name.
+    ///
+    /// Only the field *names* and their Jade types live here. The **layout does
+    /// not**, deliberately — see [`headers`](Self::headers).
+    pub structs: Option<HashMap<String, CStruct>>,
+    /// Headers the generated shim includes, e.g. `["sndfile.h"]`.
+    ///
+    /// Required by any symbol with an `out_struct` parameter, because the shim
+    /// has to declare a real local of that type. The alternative — synthesizing
+    /// the struct from the declared field list — would put the layout in a
+    /// hand-written TOML file, where one wrong type or a missed padding byte
+    /// silently corrupts memory at a wrong offset. Including the real header
+    /// makes the layout the C compiler's problem, which is the only place it can
+    /// be correct. Anyone who has the library has its header.
+    pub headers: Option<Vec<String>>,
+    /// Extra `-I` directories for the shim compile, for a header that is not on
+    /// the default search path.
+    pub include_dirs: Option<Vec<String>>,
+}
+
+/// One entry of a `[dependencies.<name>.structs]` table: the fields of a C
+/// struct a symbol fills through an out-parameter.
+///
+/// ```toml
+/// [dependencies.sndfile.structs.SF_INFO]
+/// fields = [["frames", "int"], ["samplerate", "int"], ["channels", "int"]]
+/// ```
+///
+/// Each entry is a field name and the Jade type it reads as. The C type is not
+/// named because it is not needed: the shim assigns through the real struct
+/// declared by the header, so the compiler converts. Listing a field that the
+/// struct does not have is a compile error in the generated shim, naming the
+/// field — which is the failure mode you want.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct CStruct {
+    pub fields: Vec<(String, String)>,
 }
 
 /// Placeholder expanded to a platform tag when resolving a dependency `url`.

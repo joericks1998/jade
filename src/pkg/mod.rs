@@ -477,7 +477,10 @@ pub fn build_c_shims(root: &Path, lock: &Lockfile, manifest: &ProjectManifest) -
         let shim_c = dir.join(format!("{}_shim.c", pkg.name));
         let shim_out = dir.join(shim_filename(&pkg.name));
 
-        let source = cshim::generate(&pkg.name, symbols)?;
+        let empty_structs = std::collections::HashMap::new();
+        let structs = entry.structs.as_ref().unwrap_or(&empty_structs);
+        let headers = entry.headers.as_deref().unwrap_or(&[]);
+        let source = cshim::generate(&pkg.name, symbols, structs, headers)?;
 
         // Skip the compile when nothing changed — reinstalls are common and cc
         // is not cheap. "Nothing changed" means both the declared symbols and
@@ -492,7 +495,14 @@ pub fn build_c_shims(root: &Path, lock: &Lockfile, manifest: &ProjectManifest) -
         std::fs::write(&shim_c, &source)
             .map_err(|e| format!("dependency '{}': cannot write {} ({e})", pkg.name, shim_c.display()))?;
 
-        compile_shim(&pkg.name, &shim_c, &shim_out, &dir, &artifact.file)?;
+        compile_shim(
+            &pkg.name,
+            &shim_c,
+            &shim_out,
+            &dir,
+            &artifact.file,
+            entry.include_dirs.as_deref().unwrap_or(&[]),
+        )?;
     }
 
     Ok(())
@@ -518,12 +528,17 @@ fn compile_shim(
     out: &Path,
     dir: &Path,
     target_file: &str,
+    include_dirs: &[String],
 ) -> Result<(), String> {
     let mut cc = std::process::Command::new("cc");
     if cfg!(target_os = "macos") {
         cc.arg("-dynamiclib");
     } else {
         cc.arg("-shared");
+    }
+    // A header that is not on the default search path — Homebrew's, most often.
+    for inc in include_dirs {
+        cc.arg(format!("-I{inc}"));
     }
     cc.arg("-fPIC")
         .arg(shim_c)
