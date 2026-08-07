@@ -4,22 +4,44 @@ title: Types
 sidebar_label: Types
 ---
 
-Jade has twelve runtime value types.
+These are Jade's value types.
 
-| Type | Description | Status |
-|------|-------------|--------|
-| `int` | 64-bit signed integer (`i64`) | Implemented |
-| `float` | 64-bit floating point (`f64`) | Implemented |
-| `bool` | Boolean `true` or `false` | Implemented |
-| `char` | A single Unicode scalar; what indexing or iterating a string yields | Implemented |
-| `bytes` | A counted sequence of raw octets; binary data that is not text | Implemented |
-| `stream` | A buffered sequence produced by a `yield`ing function | Implemented |
-| `fn` | First-class function value | Implemented |
-| `struct` | User-defined record type with named fields | Implemented |
-| `str` | UTF-8 string with indexing and concatenation | Implemented |
-| `array` | Heterogeneous mutable array with index access | Implemented |
-| `dict` | String-keyed mutable hash map | Implemented |
-| `nil` | Absence of value | Implemented |
+| Type | Description |
+|------|-------------|
+| `int` | Signed integer, 63 bits wide |
+| `float` | 64-bit floating point (`f64`) |
+| `bool` | Boolean `true` or `false` |
+| `char` | A single Unicode scalar; what indexing or iterating a string yields |
+| `str` | UTF-8 string with indexing, iteration, and concatenation |
+| `bytes` | A counted sequence of raw octets; binary data that is not text |
+| `array` | Mutable array with index access; may hold values of different types |
+| `dict` | String-keyed mutable hash map |
+| `stream` | A buffered sequence produced by a `yield`ing function, or by `?p` |
+| `struct` | User-defined record type with named fields |
+| `fn` | First-class function value |
+| `prompt` | Text to send to a model; `?p` dereferences one |
+| `grammar` | A sampling constraint built by `Grammar.new(pattern)` |
+| `handle<T>` | An opaque pointer a native package handed you |
+| `nil` | Absence of value |
+
+An `async fn` and the `future` its call produces are covered in [Async](async).
+
+## Int is 63 bits, not 64
+
+An `int` runs from `-4611686018427387904` to `4611686018427387903`. One bit of the machine word is spent tagging what the value is, and the language follows the representation so that a program means the same thing interpreted and compiled.
+
+A literal outside that range is refused when the file is read. The lowest value is a special case: `-` is a separate negation, so the digits are bounded before the sign applies and `-4611686018427387904` cannot be typed directly. Arithmetic reaches it fine.
+
+Arithmetic that would leave the range raises rather than wrapping:
+
+```jade
+let big = 3037000500
+try {
+    print(big * big)
+} catch e {
+    print("overflow caught")
+}
+```
 
 ## Type Coercion Rules
 
@@ -29,14 +51,17 @@ Jade does not implicitly coerce types except in specific arithmetic and comparis
 |------|---------|--------|
 | Arithmetic: `int op float` → float | `1 + 0.5` | `1.5` (float) |
 | Ordering: `int < float` allowed | `1 < 2.5` | `true` |
-| Strict equality: no cross-type coercion | `1 == 1.0` | `TypeError` |
+| Strict equality: no cross-type coercion | `1 == 1.0` | type error |
 | Bool ordering: `false` = 0, `true` = 1 | `false < true` | `true` |
-| Bitwise: integer operands only | `1.0 & 2` | `TypeError` |
-| Logical: bool operands only | `1 && true` | `TypeError` |
+| String ordering, by character | `"abc" < "abd"` | `true` |
+| Bitwise: integer operands only | `1.0 & 2` | type error |
+| Logical: bool operands only | `1 && true` | type error |
 | **`char` and `str` compare and concatenate** | `"hi"[0] == "h"` | `true` |
 
 :::note
-Arithmetic promotion converts an `int` to `float` when the other operand is a `float`. Equality never promotes — comparing `1` to `1.0` is always a `TypeError`.
+Arithmetic promotion converts an `int` to `float` when the other operand is a `float`. Equality never promotes — comparing `1` to `1.0` is always an error.
+
+Every row marked "type error" is caught by `jade check` before the program runs, not while it runs.
 :::
 
 ### The one exception: `char` and `str`
@@ -48,7 +73,7 @@ Indexing a string used to give back a one-character `str`. As of v1.2.1 it gives
 ```jade
 let s = "café"
 print(s[0] == "c")     // true
-print(s[0] + "at")     // "cat"
+print(s[0] + "at")     // cat
 for c in s { print(c) }  // four lines: "é" is one character, not two
 ```
 
@@ -88,6 +113,17 @@ let back = fs.read_bytes("out.bin")
 
 Indexing gives an `int` in 0..=255 rather than a `char`. A byte is not a Unicode scalar, and making `b[0]` look like `s[0]` would hide that the two differ on any non-ASCII input.
 
+A blob has three methods and no more: `len()`, `decode()`, and `slice(start, end)`. `slice` clamps rather than raising, so taking the tail of a buffer does not need a bounds check first.
+
+```jade
+let raw = "hello".encode()
+print(raw.len())            // 5
+print(raw.slice(0, 2))      // b"he"
+print(raw.slice(3, 99))     // b"lo" — the end clamps
+```
+
+`bytes` is deliberately not a second string type, so there is nothing to compare two blobs with; `==` on them is an error. Decode both, or compare a slice.
+
 `print(b)` renders an escaped `b"…"` form rather than dumping raw octets to your terminal, since a blob can contain control characters or an escape sequence. Use `decode()` when the bytes really are text.
 
 Bytes carry a trust byte like strings do, so `fs.read_bytes(p).decode()` is refused by `sh.exec` exactly as `fs.read(p)` is.
@@ -119,6 +155,30 @@ A prompt dereference is a stream too. `?p` produces one lazily, so `print(?p)` s
 A bare `return` stops a generator early. `return x` is a compile error: a function that yields produces a stream, so returning a value too would ask it to be two things at once.
 
 Yields of different types widen to a mixed stream rather than failing, the same rule a mixed array literal follows.
+
+## Prompt
+
+A `prompt` holds text meant for a model. It is a value like any other: you can pass it to a function, store it in a struct field, or hand it to another file. Nothing is sent until you dereference it with `?`.
+
+```jade
+prompt p = "Name one prime number under 10."
+print(?p)
+```
+
+`?p` on its own produces a stream of the reply. A `|>` stage after it constrains what the model may generate and coerces the result — `?p |> int` gives you an `int`. See [Prompts and Inference](llm) for the whole story, and [Operators](operators#what-a-stage-can-be) for what a stage may be.
+
+## Handle
+
+A `handle<T>` is an opaque pointer a native package gave you: a database connection, an open audio file, a decompression context. Jade holds it, passes it back to the library, and never looks inside. There are no operations on one — everything you do with a handle is a call into the package that made it.
+
+The `T` is the C type it came from, so `handle<sqlite3>` and `handle<sqlite3_stmt>` are different values. Passing one where the other belongs is an error you can read instead of a crash inside the library. Printing a handle shows `handle<sqlite3>`, never an address.
+
+Two rules are worth knowing before you use one:
+
+- **Jade never closes a handle for you.** It cannot know what the pointer is or which allocator made it. Closing is a call the package exposes, and a handle dropped without it leaks whatever the library allocated.
+- **A handle cannot be passed into a task.** Jade sees nothing of what a library does with one and cannot tell a thread-safe library from an unsafe one, so sharing is refused at compile time. Open one inside the task instead.
+
+See [Packages](packages) for installing a native package.
 
 ## Nil
 
@@ -157,13 +217,15 @@ let d = {"name": "jade", "version": 1}
 let empty = {}
 ```
 
-Bare identifiers are also accepted as keys — the identifier's string value becomes the key:
+A key can be any expression that produces a string, evaluated when the literal is built. So a variable in key position contributes its *value*, not its name:
 
 ```jade
 let key = "hello"
 let greet = {key: "world"}
 print(greet["hello"])  // world
 ```
+
+Writing `{name: 1}` where `name` is not a variable is an undefined-variable error, not a key spelled `"name"`. Quote a literal key.
 
 ### Reading and writing values
 
@@ -174,10 +236,26 @@ d["version"] = 2       // update existing key
 d["stable"] = true     // add new key
 ```
 
-### Length
+### Length and lookup
 
 ```jade
-print(len(d))   // number of key-value pairs
+print(len(d))          // number of key-value pairs
+print(d.keys())        // [name, version]
+print(d.values())      // [jade, 1]
+print(d.has("name"))   // true
+print(d.get("name"))   // jade
+print(d.get("nope"))   // nil — a missing key is not an error here
+print("name" in d)     // true
+```
+
+`in` and `not in` test keys, never values.
+
+A dict cannot be iterated directly. Loop over `d.keys()` instead:
+
+```jade
+for k in d.keys() {
+    print(k)
+}
 ```
 
 ### Value semantics
@@ -190,6 +268,8 @@ d2["name"] = "copy"
 print(d["name"])   // jade   (unchanged)
 print(d2["name"])  // copy
 ```
+
+Arrays go the other way — assigning one shares the same storage, so writing through the second name is visible through the first. The two containers genuinely differ here; do not carry a habit from one to the other.
 
 ### Nested dicts
 

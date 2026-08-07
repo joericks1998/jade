@@ -11,7 +11,15 @@ const config = {
   organizationName: 'joericks1998',
   projectName: 'jade',
   onBrokenLinks: 'throw',
-  onBrokenMarkdownLinks: 'warn',
+
+  // Docusaurus 4 removes the top-level `onBrokenMarkdownLinks`; it lives under
+  // `markdown.hooks` now, and setting it in the old place logs a deprecation
+  // warning on every build.
+  markdown: {
+    hooks: {
+      onBrokenMarkdownLinks: 'warn',
+    },
+  },
 
   i18n: {
     defaultLocale: 'en',

@@ -23,7 +23,7 @@ Each is a sibling top-level module with a `mod.rs` and a `tests.rs`. Most are th
 
 | Module | Import name | Notes |
 |---|---|---|
-| `src/core/` | *(globals)* | `write`, `len`, `input`. `print`, `stream`, and `route` are stateful and go through `NativeFnId`. |
+| `src/core/` | *(globals)* | `write`, `len`, `input`. `print` and `route` are stateful and go through `NativeFnId`. (`stream` was a third until v1.2.5 removed it.) |
 | `src/string/` | `std/string` | Also supplies the `str` primitive methods (`upper`, `split`, `trim`, …). |
 | `src/array/` | `std/array` | `map` and `filter` are stateful — they call a user function per element. |
 | `src/dict/` | `std/dict` | Also supplies the `dict` primitive methods. |

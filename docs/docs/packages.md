@@ -29,17 +29,22 @@ A dependency names **where it lives** — a URL or a local path — rather than 
 | Command | Effect |
 |---|---|
 | `jade pkg add <name> --url <u> --version <v>` | Add a remote dependency and install it |
-| `jade pkg add <name> --path <file>` | Add a local `.so`/`.dylib` |
+| `jade pkg add <name> --path <file>` | Add a local `.so`/`.dylib`, Jade or plain C |
 | `jade pkg install` | Fetch and verify everything `jade.lock` pins |
 | `jade pkg install --locked` | Same, but fail rather than update the lock (use in CI) |
 | `jade pkg update [name]` | Re-resolve against `jade.toml` and rewrite the lock |
+| `jade pkg bind <name> --header <h>` | Re-generate a C dependency's symbol table from its header |
 | `jade pkg remove <name>` | Drop it from the manifest, the lock, and `libs/` |
 | `jade pkg list` | Show what is locked and whether it is installed here |
 
-`jade run` and `jade test` install anything missing automatically, so a fresh clone needs no separate step.
+`jade run`, `jade test`, and `jade build` install anything missing automatically, so a fresh clone needs no separate step.
+
+:::warning The package commands are nested
+Every one of them is `jade pkg <something>`. There is no bare `jade add`, `jade install`, or `jade update`.
+:::
 
 :::note
-`jade pkg update` manages **dependencies**. `jade upgrade` updates the **jade toolchain itself**. They are unrelated.
+`jade pkg update` manages **dependencies**. `jade upgrade` updates the **jade toolchain itself**. They are unrelated. See the [CLI reference](cli#jade-upgrade).
 :::
 
 ## Platforms
@@ -80,6 +85,8 @@ Checksums live in the lock, not the manifest: `jade pkg add` computes them on fi
 
 A `path` dependency points at a file you build, so it is the one source that legitimately changes while the lock stays correct. It is treated differently for that reason: **the source file is re-hashed on every install and every run**, and if it has changed, the lock is re-pinned and the new artifact copied into `libs/`.
 
+`--version` is optional here, and the lock records `local` when you leave it out. A `--url` dependency must name one, because that is what makes its directory under `libs/` unique.
+
 ```
 $ jade run main.jde
 note: re-pinned engine (local source changed)
@@ -114,33 +121,106 @@ Commit `jade.lock`. Do not commit `libs/` — `jade new` adds it to `.gitignore`
 
 ## Using a plain C library
 
-A library like `libz` exports no `jade_pkg_init`, so it cannot be loaded directly. Declare `abi = "c"` and the symbols to bind, and Jade generates and compiles a binding shim at install time:
+A library like `libsqlite3` exports no `jade_pkg_init`, so the loader cannot take it directly. Jade generates a small binding shim that wraps it into an ordinary Jade package — and since v1.3.0 that is not a step you have to know about. Adding a C library is the same command as adding a Jade one:
+
+```sh
+jade pkg add demo --path libdemo.dylib
+```
+
+```
+demo exports no jade_pkg_init, so it is a plain C library
+found header /path/to/demo.h
+covers 3 of the 5 symbols the library exports
+3 bound, 1 assumed, 2 skipped
+```
+
+Three things happened there, and none of them needed a flag:
+
+- **The kind of library came from the artifact.** A Jade package exports `jade_pkg_init` and a C library does not. Both are a `.dylib`, so the filename could never have told you — and this is the same symbol the loader requires at run time, so what is detected here is exactly what `use` will later accept.
+- **The header was found.** `libdemo` implies `demo.h`, and the search covers pkg-config, the usual include roots, and the macOS SDK. The candidate is accepted only if the library actually exports what the header declares, so a header belonging to some other library of the same name is refused now rather than surfacing later as a linker error.
+- **The symbol table was generated and the shim built.** `use demo` works immediately.
+
+The manifest it writes is ordinary TOML you can read and edit:
 
 ```toml
-[dependencies.plainc]
-version = "1.0.0"
-path    = "vendor/libplainc.dylib"
-abi     = "c"
+[dependencies.demo]
+path         = "libdemo.dylib"
+abi          = "c"
+headers      = ["demo.h"]
+include_dirs = ["/path/to"]
 
-[dependencies.plainc.symbols.square]
-args = ["int"]
+[dependencies.demo.symbols.demo_open]
+args       = ["str"]
+ret        = "handle<demo_ctx>"
+fails_when = "null"
+
+[dependencies.demo.symbols.demo_read]
+args = ["handle<demo_ctx>", "out_buffer:char", "int"]
 ret  = "int"
-
-[dependencies.plainc.symbols.half]
-args = ["float"]
-ret  = "float"
 ```
 
-```jade
-use plainc
+### When you do need a flag
 
-print(plainc.square(9))    // 81
-print(plainc.half(7.0))    // 3.5
+| Situation | Flag |
+|---|---|
+| The header search missed, or you want a specific one | `--header <file.h>` |
+| The header is not on the default search path | `-I <dir>` (repeatable) |
+| The dependency comes from `--url`, so there is no local file to read | `--c-abi` |
+
+### Where binding happens
+
+Binding runs on `add` and on `install`, not only on `bind`:
+
+- **`jade pkg add`** binds when it finds or is given a header.
+- **`jade pkg install`** fills in any dependency that names a header but has no `symbols` yet. A manifest that already carries its symbols is left alone, so a fresh clone installs without clang.
+- **`jade pkg install --locked`** never binds, because a reproducible install must not depend on what the local clang makes of a header.
+- **`jade pkg bind`** is for the cases with a real decision in them: re-running after a header changes, or narrowing a large header with `--only`. It merges into the existing table rather than replacing it, and `--dry-run` shows the report without touching `jade.toml`.
+
+Binding a C library needs `clang` on `PATH` to read the header, and a C compiler (`cc`) to build the shim.
+
+### The report is the feature
+
+No generator binds everything, and one that quietly covers two thirds of an API is how the missing third gets found at run time. So the output says what it dropped and why:
+
+```
+assumed (check these):
+  demo_read: `void *` next to a length was read as a buffer the call fills;
+             if the library reads it instead, change it to `bytes`
+
+skipped:
+  1 — returns an unsupported type `void *`
+      demo_raw
+  1 — takes varargs
+      demo_printf
 ```
 
-This needs a C compiler (`cc`) on the machine running `jade pkg install`.
+Coverage is quoted against the library's own export table — "covers 181 of the 194 symbols the library exports" — because a bare "181 bound" reads as success whether the library has 190 entry points or 900.
 
-Argument and return types come from the FFI's vocabulary: `int`, `float`, `bool`, `str`, and `nil` for a return. A symbol using anything else is rejected **by name** at install time rather than silently marshalled to nil.
+### The binding vocabulary
+
+If you write or correct a symbol by hand, these are the spellings `args` and `ret` accept.
+
+| Spelling | Meaning |
+|---|---|
+| `int`, `float`, `bool`, `str`, `nil` | Scalars. `nil` is a return only. |
+| `bytes` | Binary data. As an argument it is one Jade value and the two C parameters `(const void*, size_t)`. |
+| `handle<T>` | An opaque pointer the library owns — a `sqlite3*`, a `SNDFILE*`. Jade holds it, hands it back, and never looks inside. The type name is checked, so passing a statement where a connection belongs is a readable error rather than a crash inside the library. |
+| `out_buffer:<ctype>` | A buffer the call fills. It consumes **no** Jade argument: `x_read(handle, buf, n)` is called as `x_read(handle, n)` and hands back the bytes. Its size comes from the next declared argument, which must be an `int`. |
+| `out_struct:<Type>` | A struct the call fills through a pointer. Needs the library's real header in `headers`. |
+| `out_handle:<T>` | A handle written through a pointer — `sqlite3_open(path, &db)`. The C return value becomes the status, and the handle is what Jade gets. |
+| `callback:<ret>(<args>)` | A Jade function the library may call while the call runs. The signature is written in the library's own C types, e.g. `callback:int(int, const char*)`. |
+
+A symbol may also declare `fails_when`, naming how it reports failure: `null`, `negative`, `nonzero`, or `never`. The shim then clears `errno`, tests the return, and turns a failure into a catchable Jade error carrying the reason. Without it a failed call gives back its raw sentinel and the reason the library already recorded is thrown away — the program sees `-1` and nothing else. The default is "cannot fail", because reading a convention that is not there would turn every legitimate `-1` into a raise.
+
+Some rules worth knowing before you hand-write one:
+
+- **At most one out-parameter per symbol.** Two would have to come back as a pair with no obvious names.
+- **A symbol with both an out-parameter and a return value comes back as `.ret` and `.out`.** When the C function returns `void` there is no pair to make, and the filled value is the result directly.
+- **Jade never closes a handle for you.** It reclaims its own wrapper and leaves the pointer alone, because it cannot know what the pointer is or which allocator made it. Closing is a call the binding exposes.
+- **A handle cannot cross into a task.** Jade cannot tell a thread-safe library from an unsafe one, so this is refused at compile time rather than racing quietly. Open one inside the task and close it before returning.
+- **A callback is live only while the call that passed it is running.** A library that stores one and invokes it later is not supported. A raise inside a callback is deferred: the library finishes cleanly and the error reaches your `catch` afterwards.
+
+A symbol using anything outside this vocabulary is rejected **by name** at install time rather than silently marshalled to nil.
 
 ## Publishing a Jade package
 
@@ -218,8 +298,8 @@ jade pkg add mathlib --url 'https://example.com/mathlib-{platform}.so' --version
 
 ## The FFI's limits
 
-The native ABI carries `int`, `float`, `bool`, `str`, `nil`, and — since v1.1.31 — arrays, dicts, and structs, in both directions. A struct crosses with its type name attached, so the receiving side can tell a `Config` from anything else shaped like one.
+The native ABI carries `int`, `float`, `bool`, `str`, and `nil`; arrays, dicts, and structs since v1.1.31; `bytes` since v1.2.2; and opaque handles since v1.3.0 — all in both directions. A struct crosses with its type name attached, so the receiving side can tell a `Config` from anything else shaped like one.
 
-What still does not cross: **functions and futures**, which arrive as `nil`. A package API cannot take a callback.
+A **function** crosses in one direction only. You can pass one in as a callback, and the library invokes it while your call runs. A package cannot hand one back, because a C function is not something a Jade program can hold.
 
-In practice, package APIs are scalar-and-string shaped. Widening the ABI is the natural next step for the package ecosystem, and it is the one change here that would be difficult to make after packages are widely published.
+What still does not cross: **futures and prompts**, which arrive as `nil`.

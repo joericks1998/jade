@@ -193,8 +193,10 @@ pub fn seed_globals<S: std::hash::BuildHasher>(globals: &mut HashMap<String, VmV
     for f in CORE_BUILTINS {
         globals.insert(f.name.to_string(), VmValue::BuiltinFn(*f));
     }
-    // `print` and `stream` need async VmState access to drain TokenStreams,
-    // so they dispatch through NativeFnId rather than the pure BuiltinFn path.
+    // `print` needs async VmState access to drain a TokenStream, and `route`
+    // needs it to call the method it dispatches to, so both go through
+    // NativeFnId rather than the pure BuiltinFn path. (`stream` was here too
+    // until v1.2.5, when `?p` folded onto the buffered stream and it went away.)
     globals.insert("print".to_string(),  VmValue::NativeFn(NativeFnId::Print));
     globals.insert("route".to_string(),  VmValue::NativeFn(NativeFnId::Route));
     // Primitive type constructors: callable with one arg like Python's int(), str(), etc.

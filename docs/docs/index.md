@@ -5,7 +5,11 @@ sidebar_label: Installation
 slug: /
 ---
 
-Jade is a programming language written in Rust. It supports value types (`int`, `float`, `bool`, `str`, arrays, dicts, and user-defined `struct`s), `let` variable bindings, `fn` function definitions with `return`, anonymous closures (`|x| x * 2`), first-class functions, recursion, `if`/`elif`/`else` control flow, `while` loops, `for` loops over arrays, `try`/`catch`/`raise` exception handling, `struct` definitions with field access and mutation, `extend` blocks for methods, `interface` definitions, multi-file `use` imports, `print` and `len` built-in functions, f-string interpolation, the pipe operator (`|>`), `prompt` declarations and LLM inference via `?`, and a full operator set. The standard library covers math, string manipulation, file I/O, HTTP, JSON, shell commands, environment variables, path utilities, and random number generation — each available via `::` notation imports such as `use std::math`.
+Jade is an AI-native programming language. A `prompt` is a type, dereferencing it with `?` calls a model, and the type you ask for is a contract the compiler enforces — see [LLM Integration](llm).
+
+Around that it is an ordinary general-purpose language. It has value types (`int`, `float`, `bool`, `str`, `char`, `bytes`, arrays, dicts, and user-defined `struct`s), `let` bindings, `fn` definitions with `return`, closures (`|x| x * 2`), recursion, `if`/`elif`/`else`, `while` and `for` loops, `try`/`catch`/`raise`, `extend` blocks for methods, `interface` definitions, `async fn` and `await`, `yield` for streams, decorators, multi-file `use` imports, f-string interpolation, and the pipe operator (`|>`). The standard library covers math, strings, arrays, dicts, file I/O, time, HTTP, JSON, shell commands, environment variables, paths, and random numbers — each imported with `::` notation, such as `use std::math`.
+
+Two engines run the same language: `jade run` interprets bytecode, and `jade build` compiles a native binary through LLVM.
 
 ## Installation
 
@@ -19,11 +23,17 @@ The fastest way to install Jade is with the official install script. Open a term
 curl -fsSL https://jadelang.org/install.sh | sh
 ```
 
-The script detects your OS and architecture, downloads the correct prebuilt binary from the [latest release](https://github.com/joericks1998/jade/releases/latest), and installs it to `/usr/local/bin/jade`. To install to a different location, set the `JADE_INSTALL_DIR` environment variable before running the script:
+The script works out which prebuilt archive you need, downloads it from the [latest release](https://github.com/joericks1998/jade/releases/latest), verifies its checksum, and installs to `/usr/local/bin/jade`. Two builds ship: **macOS on Apple Silicon** and **Linux on x86_64**. On an Intel Mac, run the Apple Silicon build under Rosetta 2 or [build from source](#build-from-source).
+
+Alongside the binary it installs the runtime archives `jade build` links into every executable it emits, plus the bundled inference providers, into `lib/jade` next to the install directory. `jade` finds them relative to itself, so the two must stay together.
+
+To install somewhere else, set `JADE_INSTALL_DIR` before running the script:
 
 ```bash
 JADE_INSTALL_DIR=~/.local/bin curl -fsSL https://jadelang.org/install.sh | sh
 ```
+
+The script finishes by running `jade register`, which lists the bundled providers and asks for an API key. You can skip it and run `jade register` later; see [LLM Integration](llm#configuration).
 
 ### Windows
 
@@ -33,19 +43,36 @@ Use [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install) and follow the
 
 ### Build from Source
 
-Requires Rust 1.70 or later — install via [rustup.rs](https://rustup.rs).
+Two prerequisites:
+
+- **Rust 1.85 or later** — install via [rustup.rs](https://rustup.rs). The crate uses edition 2024, so an older toolchain will not build it.
+- **LLVM 18.** `jade build` compiles in-process, so LLVM is a build dependency of the toolchain rather than an optional extra. Point `LLVM_SYS_180_PREFIX` at your installation. A *released* `jade` binary needs nothing installed.
 
 ```bash
+brew install llvm@18                        # macOS
+sudo apt-get install llvm-18-dev libpolly-18-dev libzstd-dev    # Debian/Ubuntu
+
 git clone https://github.com/joericks1998/jade
 cd jade
+export LLVM_SYS_180_PREFIX=/opt/homebrew/opt/llvm@18   # or /usr/lib/llvm-18
 cargo build --release
-cp target/release/jade /usr/local/bin/jade
 ```
+
+The binary is then at `target/release/jade`, and it works from there. `jade build` also links two runtime archives, `libJadeRuntime.a` and `libjade_runtime.a`, which the same `cargo build` leaves in `target/release`; a locally built `jade` remembers that path, so keep the checkout around. To move the toolchain onto another machine, copy the archives with it into `<prefix>/lib/jade` — the layout the release tarball uses, and the one `jade` looks for next to itself.
+
+### Updating and removing
+
+```bash
+jade upgrade      # fetch and install the latest release
+jade reinstall    # reinstall the current version, for a damaged installation
+jade uninstall    # remove the binary and its runtime archives
+```
+
+`jade uninstall` prints every path before it removes anything, and leaves `~/.jade` — your API key, installed providers, and build cache — alone unless you pass `--purge`. See the [CLI Reference](cli) for the full flags.
 
 ### Verify
 
 ```bash
-jade --help
+jade --help    # the list of subcommands
+jade env       # version, cache, project, and which inference provider is active
 ```
-
-This prints the list of available subcommands. See the [CLI Reference](cli) for full details.

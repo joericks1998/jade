@@ -1,5 +1,5 @@
 // Basic untyped prompt dereference.
-// Requires JADE_API_KEY or jade.toml to be configured.
+// Requires a provider: run `jade register` to install and configure one.
 
 prompt p = "Say exactly: Hello from Jade!"
 let response = ?p

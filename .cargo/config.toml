@@ -1,7 +1,11 @@
-# Only consulted when building with `--features codegen` (the LLVM 18 AOT
-# backend); the default build has no LLVM dependency at all. The path below is
-# Apple Silicon Homebrew — on any other host, export LLVM_SYS_180_PREFIX
-# yourself, which wins because cargo's [env] does not overwrite a variable that
-# is already set.
+# Where to find LLVM 18. `inkwell` is an unconditional dependency — `jade build`
+# compiles in-process, so the AOT backend is part of every build of this crate,
+# not an optional feature. The path below is Apple Silicon Homebrew; on any other
+# host, export LLVM_SYS_180_PREFIX yourself, which wins because cargo's [env]
+# does not overwrite a variable that is already set.
+#
+# This once said the LLVM dependency was gated behind `--features codegen`. There
+# has never been such a feature in the shipped Cargo.toml, so anyone following
+# the comment on a machine without LLVM got a build failure it could not explain.
 [env]
 LLVM_SYS_180_PREFIX = "/opt/homebrew/opt/llvm@18"

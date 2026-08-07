@@ -10,7 +10,7 @@ prompt p = "How many moons does Mars have? Reply with just the number."
 let n = ?p |> int      // n is an int, or the program raises. Never a string to parse.
 ```
 
-That `|> int` is doing real work. If the model returns prose, a code fence, or nonsense, Jade re-asks — three times by default, configurable — until the value coerces or it raises `PromptOverflow`. The glue code you would have written by hand is the runtime's job.
+That `|> int` is doing real work, and it works in two stages. Naming a type builds a grammar that constrains how the model generates, so a reply shaped like prose or a code fence is ruled out before a token of it exists. What comes back is then coerced, and a reply that still does not fit raises `PromptOverflow` rather than handing you a string to parse. The glue code you would have written by hand is the runtime's job.
 
 Prompts live wherever values live, including inside structs, dereferenced right where you use them:
 
@@ -29,7 +29,14 @@ let review = a~>system        // or the explicit a.(?system)
 
 ## Getting started
 
-You'll need Rust 1.70+ ([rustup.rs](https://rustup.rs)).
+You'll need Rust 1.85 or later ([rustup.rs](https://rustup.rs)) — the crate is edition 2024 — and **LLVM 18**, because `jade build` compiles in-process rather than shelling out.
+
+```sh
+brew install llvm@18                 # macOS
+sudo apt-get install llvm-18-dev     # Debian/Ubuntu
+```
+
+`.cargo/config.toml` points `LLVM_SYS_180_PREFIX` at the Apple Silicon Homebrew path. On any other host, export it yourself — Cargo will not overwrite a variable you have already set. A *released* `jade` binary needs none of this installed.
 
 ```sh
 git clone https://github.com/joericks1998/jade

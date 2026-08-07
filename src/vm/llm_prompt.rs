@@ -57,8 +57,9 @@ pub(crate) async fn vm_prompt_deref(
 
     // Single-shot coercion. Grammar-constrained sampling already forces the reply
     // into a shape the target type accepts, so a failure here is a genuine
-    // mismatch to surface, not something to re-ask for — the daemon owns any
-    // retry policy now.
+    // mismatch to surface rather than something to re-ask for. Any retry policy
+    // belongs to the provider package, which is the layer that knows what a
+    // retry costs.
     let struct_defs = state.struct_defs.clone();
     match coerce(initial_resp.text.trim(), type_name, &struct_defs) {
         Ok(v) => {

@@ -4,7 +4,9 @@ title: Control Flow
 sidebar_label: Control Flow
 ---
 
-Jade provides four control flow constructs: `if`/`elif`/`else` for conditional branching, `while` for condition-driven loops, and `for` for iterating over arrays. All conditions must be `bool`.
+Jade has three control flow constructs: `if`/`elif`/`else` for conditional branching, `while` for condition-driven loops, and `for` for iterating over a sequence. All conditions must be `bool`.
+
+There is no `break` and no `continue`. To leave a loop early, `return` out of the enclosing function, or write the exit into the loop condition.
 
 ## Overview
 
@@ -12,7 +14,7 @@ The `if` statement tests a condition expression and executes the *then* block wh
 
 The `while` statement repeatedly evaluates its condition and executes its body as long as the condition remains `true`. When the condition becomes `false`, execution continues with the statement after the closing `}`. If the condition is `false` on the first check, the body never executes.
 
-Both constructs require the condition to evaluate to a `bool` value. Providing any other type — an `int`, `float`, or `fn` value — raises a `TypeError`. There is no implicit truthiness for non-boolean types.
+Both constructs require the condition to evaluate to a `bool` value. Providing any other type is a compile error: `if 1 { … }` fails with `type mismatch: expected bool, got int`. There is no implicit truthiness for non-boolean types.
 
 Control flow statements can appear at the top level or inside function bodies. A `return` inside a branch or loop body exits the enclosing function. Using `return` outside of a function body raises a `ReturnOutsideFunction` error.
 
@@ -139,11 +141,11 @@ fn sign(x) {
 |-----------|---------------|--------|
 | `if <cond>` — condition is `true` | `bool` | Then block executes |
 | `if <cond>` — condition is `false` | `bool` | Else block executes (if present) |
-| `if <cond>` — condition is not a `bool` | `int`, `float`, or `fn` | `TypeError` |
+| `if <cond>` — condition is not a `bool` | `int`, `float`, `str`, `fn`, … | Compile error: `type mismatch: expected bool, got <type>` |
 | `return` inside a branch | Any | Propagates return value up to enclosing function |
 
 :::note
-The condition must be exactly a `bool`. There is no implicit truthiness: `if 1 { … }` is a `TypeError`, not a truthy integer check.
+The condition must be exactly a `bool`. There is no implicit truthiness: `if 1 { … }` is a compile error, not a truthy integer check.
 :::
 
 ## while Loops
@@ -233,18 +235,43 @@ while i < 3 {
 
 The inner loop runs to completion on each iteration of the outer loop. After both loops finish, `total` holds `9`.
 
-## for Loops
-
-The `for` statement iterates over an array, binding each element to a loop variable in turn. It is the idiomatic way to process every element of an array without managing an index manually.
+:::warning
+**A `let` inside a loop body does not shadow — it overwrites.** If you `let` a name that already exists outside the loop, you are reassigning the outer variable, and the last value written survives the loop.
 
 ```jade
-for <var> in <array> {
+let x = "outer"
+let i = 0
+while i < 3 {
+    let x = i     // this is the same x
+    i = i + 1
+}
+print(x)          // 2, not "outer"
+```
+
+The same applies to a `for` body. Pick a different name for a loop-local value.
+:::
+
+## for Loops
+
+The `for` statement walks a sequence, binding each element to a loop variable in turn. It is the idiomatic way to process every element without managing an index manually.
+
+```jade
+for <var> in <sequence> {
     <body statements>
 }
 ```
 
 - `<var>` — a name bound to each element on each iteration. It is visible throughout the loop body.
-- `<array>` — any expression that evaluates to an `array`. The array is fully evaluated once before iteration begins.
+- `<sequence>` — an expression that evaluates to one of four types. It is fully evaluated once before iteration begins.
+
+| Sequence type | The loop variable holds |
+|---------------|-------------------------|
+| `array` | each element |
+| `str` | each character, as a `char` |
+| `bytes` | each byte, as an `int` |
+| stream (from a `yield` function) | each yielded value |
+
+Anything else is a compile error: `cannot iterate over dict`.
 
 ### Basic iteration
 
@@ -293,10 +320,41 @@ fn sum_array(arr) {
 let s = sum_array([10, 20, 30])  // 60
 ```
 
-:::note
-The iterable expression must evaluate to an `array`. Attempting to iterate over any other type (such as a string or dict) produces a `TypeError`.
-:::
+### Walking a string by character
+
+```jade
+for c in "jade" {
+    print(c)
+}
+// j
+// a
+// d
+// e
+```
+
+Each `c` is a `char`, not a one-character string.
+
+### Walking a stream
+
+A function that contains `yield` returns a stream, and `for` reads it like any other sequence. See [Functions](functions) for how streams are produced.
+
+```jade
+fn doubles(n) {
+    let i = 0
+    while i < n {
+        yield i * 2
+        i = i + 1
+    }
+}
+
+for x in doubles(3) {
+    print(x)
+}
+// 0
+// 2
+// 4
+```
 
 :::note
-**REPL limitation:** `for` loops are not supported in `jade repl`. The REPL uses the tree-walk evaluator, which does not implement `for`. Use `jade run` or `jade build` to run programs that contain `for` loops.
+A `dict` is not iterable. `for k in some_dict { … }` is a compile error. Iterate over `some_dict.keys()` instead.
 :::

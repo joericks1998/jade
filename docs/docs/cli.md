@@ -105,11 +105,11 @@ jade test my_feature
 jade test --verbose
 ```
 
-### Flags
+### Arguments and flags
 
-| Flag | Description |
+| Argument or flag | Description |
 |------|-------------|
-| `[pattern]` | Only run tests whose name contains this string. |
+| `[PATTERN]` | Only run tests whose name contains this string. |
 | `-v`, `--verbose` | Show output from each test file. |
 
 ## `jade fmt`
@@ -184,7 +184,53 @@ Download and install the latest Jade release, replacing the current binary in pl
 jade upgrade
 ```
 
-Checks the GitHub releases page, compares the latest version against the running version, downloads the correct prebuilt binary for your platform, and atomically replaces the current executable. If the binary is in a system directory, re-run with `sudo jade upgrade`.
+Checks the GitHub releases page, compares the latest version against the running version, downloads the correct prebuilt binary for your platform, and atomically replaces the current executable. If the binary is in a system directory, re-run with `sudo jade upgrade`. It stops without doing anything when you are already on the latest version.
+
+:::note
+`jade upgrade` updates the **toolchain**. `jade pkg update` updates a **project's dependencies**. The two are unrelated, and neither one does the other's job.
+:::
+
+## `jade reinstall`
+
+Fetch and install the latest release *even when it is the version already running*. Reach for it when an installation is damaged rather than out of date — `jade upgrade` returns immediately when you are current, which is exactly no help then.
+
+```bash
+jade reinstall
+jade reinstall --clean        # also wipe ~/.jade first
+jade reinstall --clean --yes  # no confirmation prompt
+```
+
+### Flags
+
+| Flag | Description |
+|------|-------------|
+| `--clean` | Remove `~/.jade` before reinstalling: cache, config, credentials, and installed providers. |
+| `--yes` | Do not ask before removing anything. |
+
+`--clean` takes your API key with it, so re-run `jade register` afterwards.
+
+## `jade uninstall`
+
+Remove Jade from this machine. It deletes the binary and the `lib/jade` tree the installer lays down beside it, and it prints every path before touching one.
+
+```bash
+jade uninstall
+jade uninstall --purge   # also remove ~/.jade
+jade uninstall --yes
+```
+
+### Flags
+
+| Flag | Description |
+|------|-------------|
+| `--purge` | Also remove `~/.jade`: cache, config, credentials, and installed providers. |
+| `--yes` | Do not ask before removing anything. |
+
+`~/.jade` holds your API key and your installed providers, and none of that is part of the toolchain — so it survives unless you ask for it to go with `--purge`.
+
+:::note
+Both `uninstall` and `reinstall --clean` refuse to run without a terminal to confirm at unless you pass `--yes`, so a script that did not ask for a deletion does not get one. Both resolve the install path through symlinks, because removing a link would leave the file it pointed at behind. If a path is owned by root, re-run with `sudo`.
+:::
 
 ## `jade cache`
 
@@ -213,11 +259,16 @@ jade cache clean --dry-run
 
 ## `jade pkg`
 
-Manage project dependencies declared in `[dependencies]` of `jade.toml` and pinned by `jade.lock`. Dependencies are prebuilt native shared libraries installed into a project-local `libs/`; `jade run` and `jade test` install anything missing automatically.
+Manage project dependencies declared in `[dependencies]` of `jade.toml` and pinned by `jade.lock`. Dependencies are prebuilt native shared libraries installed into a project-local `libs/`; `jade run`, `jade test`, and `jade build` install anything missing automatically.
+
+:::warning The package commands are nested
+It is `jade pkg add`, never `jade add`. The same goes for `bind`, `remove`, `install`, `update`, and `list` — every one of them lives under `jade pkg`.
+:::
 
 ```bash
-jade pkg add fastmath --url https://example.com/fastmath-{platform}.so
-jade pkg add mathlib --path ../mathlib
+jade pkg add fastmath --url 'https://example.com/fastmath-{platform}.so' --version 1.2.0
+jade pkg add mathlib --path ../mathlib/mathlib.dylib
+jade pkg add sqlite --path /opt/homebrew/lib/libsqlite3.dylib   # a plain C library
 jade pkg install                 # install everything in the lock
 jade pkg list
 ```
@@ -226,11 +277,36 @@ jade pkg list
 
 | Subcommand | Description |
 |------------|-------------|
-| `add <name>` | Add a dependency from `--url` or `--path` (with `--version`; `--c-abi` for a plain C library). |
-| `remove <name>` | Remove a dependency from `jade.toml` and `jade.lock`. |
-| `install` | Install all locked dependencies. Re-pins any local `path` dependency whose source has been rebuilt. `--locked` refuses to change the lock, failing instead if it is out of date. |
-| `update [name]` | Re-resolve and update a dependency (or all of them). |
-| `list` | List declared dependencies, whether they are installed here, and whether a local source has changed since it was pinned. |
+| `add <name>` | Add a dependency from `--url` or `--path`, then install it. For a local artifact it works out on its own whether the library is a Jade package or plain C, finds the C header, and generates the binding. |
+| `bind <name> --header <h>` | Re-generate a C dependency's symbol table from its header. `add` and `install` already do this; `bind` is for re-running after a header changes, or narrowing a large header with `--only`. |
+| `remove <name>` | Remove a dependency from `jade.toml`, `jade.lock`, and `libs/`. |
+| `install` | Fetch and verify everything `jade.lock` pins. Re-pins any local `path` dependency whose source has been rebuilt, and fills in the symbols of any C dependency that names a header but has none yet. `--locked` refuses to change the lock, failing instead if it is out of date. |
+| `update [name]` | Re-resolve dependencies against `jade.toml` and rewrite `jade.lock`. There is no registry, so this reconciles — it does not discover a newer version. |
+| `list` | List locked dependencies, whether they are installed here, and whether a local source has changed since it was pinned. |
+
+### `add` flags
+
+| Flag | Description |
+|------|-------------|
+| `--path <FILE>` | A local `.so`/`.dylib`, relative to the project root. |
+| `--url <URL>` | Download URL. May contain `{platform}`. |
+| `--version <VERSION>` | Exact version. Required with `--url`; optional with `--path`. There are no version ranges. |
+| `--c-abi` | Force plain-C binding. Usually unnecessary — a local artifact is recognised by whether it exports `jade_pkg_init`. Needed for a `--url` C library, since there is no local file to read yet. |
+| `--header <FILE>` | The C library's header. Implies `--c-abi`, and binds it on the spot. Pass it when the automatic search would miss. |
+| `-I`, `--include <DIR>` | Extra include directory for the header. Repeatable. |
+
+### `bind` flags
+
+| Flag | Description |
+|------|-------------|
+| `--header <FILE>` | The library's header, e.g. `/opt/homebrew/include/sqlite3.h`. Required. |
+| `-I`, `--include <DIR>` | Extra include directory. Repeatable. |
+| `--only <TEXT>` | Only bind symbols whose name contains this. |
+| `--dry-run` | Show what would be written without changing `jade.toml`. |
+
+`bind` merges into the existing symbol table rather than replacing it, so taking a large header a piece at a time with `--only` is a normal way to work.
+
+See [Packages](packages) for the full workflow.
 
 :::note
 LLM configuration lives in a provider package, not in the language. `jade register` installs one and stores your API key, `jade use` switches between installed providers, and `jade env` shows which is active. See [LLM Integration](llm).
@@ -244,6 +320,8 @@ The old `jade <file.jde>` form (without the `run` subcommand) is still accepted 
 jade program.jde          # equivalent to: jade run program.jde
 jade program.jde -v       # equivalent to: jade run program.jde --verbose
 ```
+
+The shorthand is also the only interpreter form that accepts extra arguments — `jade run program.jde one two` is rejected, while `jade program.jde one two` passes them through to `env.args()`. Build the program when you need real command-line arguments; see [`std/env`](stdlib#stdenv).
 
 ## Error Output
 
