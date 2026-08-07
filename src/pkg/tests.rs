@@ -581,6 +581,54 @@ fn verify_in_sync_reports_both_directions_at_once() {
     assert!(err.contains("tok"), "should report the lock-only dep: {err}");
 }
 
+#[test]
+fn verify_in_sync_reports_an_abi_the_lock_disagrees_with() {
+    // The two can name the same dependency and disagree about what it *is*.
+    // Comparing names alone let a lock saying "jade" outlive a manifest
+    // corrected to "c": the build read the lock, skipped the binding shim, and
+    // loaded a plain C library as though it were a Jade package — which the
+    // dynamic loader refused, in the finished program, for a missing symbol.
+    let tmp = TempDir::new("syncabi");
+    std::fs::write(tmp.path().join("a.so"), b"\x7fELFx").unwrap();
+    // `resolve` refuses a C dependency with no symbols, so the manifest carries
+    // one; the disagreement under test is the ABI, not the table.
+    let m = manifest(
+        "[project]\nname = \"app\"\n[dependencies.a]\npath = \"a.so\"\nabi = \"c\"\n\
+         [dependencies.a.symbols.add]\nargs = [\"int\"]\nret = \"int\"\n",
+    );
+    let mut lock = resolve(tmp.path(), &m, &MockFetcher::new()).unwrap();
+    lock.packages[0].abi = "jade".to_string();
+
+    let err = verify_in_sync(&m, &lock).unwrap_err();
+    assert!(err.contains("different ABI"), "unexpected message: {err}");
+    assert!(err.contains("jade.toml says c"), "should say what the manifest wants: {err}");
+    assert!(err.contains("jade.lock says jade"), "should say what the lock has: {err}");
+    assert!(err.contains("jade pkg install"), "error should say how to recover: {err}");
+}
+
+#[test]
+fn a_c_dependency_with_no_symbols_is_refused_rather_than_installed_raw() {
+    // Skipping it installed the bare C library, reported success, and left the
+    // program to fail at run time on a missing `jade_pkg_init` — a message that
+    // names a symbol rather than the fact that nothing was ever bound.
+    // The state this guards is a lock and a manifest written at different
+    // times: `resolve` refuses a symbol-less C dependency, but `ensure_ready`
+    // reads an *existing* lock rather than re-resolving, so a lock produced
+    // when the table was there outlives a manifest edit that removed it.
+    let tmp = TempDir::new("noshim");
+    std::fs::write(tmp.path().join("a.so"), b"\x7fELFx").unwrap();
+    let with_symbols = manifest(
+        "[project]\nname = \"app\"\n[dependencies.a]\npath = \"a.so\"\nabi = \"c\"\n\
+         [dependencies.a.symbols.add]\nargs = [\"int\"]\nret = \"int\"\n",
+    );
+    let lock = resolve(tmp.path(), &with_symbols, &MockFetcher::new()).unwrap();
+    let m = manifest("[project]\nname = \"app\"\n[dependencies.a]\npath = \"a.so\"\nabi = \"c\"\n");
+
+    let err = build_c_shims(tmp.path(), &lock, &m).unwrap_err();
+    assert!(err.contains("no symbols"), "unexpected message: {err}");
+    assert!(err.contains("--header"), "error should name the fix: {err}");
+}
+
 // ── dependency_libraries ──────────────────────────────────────────────────────
 
 #[test]

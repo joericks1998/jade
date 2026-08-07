@@ -4,6 +4,12 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.3.5
+
+- **Fixed: `jade.lock` and `jade.toml` could disagree about what a dependency is.** The two were compared by name only, so a lock saying `abi = "jade"` outlived a manifest corrected to `abi = "c"`. The build reads the lock rather than re-resolving — that is what a lock is for — so it skipped the binding shim and loaded a plain C library as though it were a Jade package, which the dynamic loader refused in the finished program for a missing symbol. A disagreement is now reported by name with both values and the command that fixes it.
+- **Fixed: a C dependency with no symbols installed successfully and failed at run time.** With nothing to bind, shim generation skipped the dependency and left the raw C library in `libs/`, so `jade pkg install` reported success and `jade build` produced a binary that could not load it. It is an error now, naming the header that would fix it.
+- **A missing `jade_pkg_init` says what it means.** The old message named the symbol, which tells you nothing you can act on unless you already know what defines it. Every library reaching that point is a plain C library that was never bound, so it says that instead, and gives the command. Both engines.
+
 ## v1.3.4
 
 - **A dependency that is not a shared library is refused when you add it.** Jade checked what a file *exported* but never that it was loadable at all, so a file with the right name went into `jade.toml`, into `libs/`, through resolution and through the linker, and was first refused by the dynamic loader when the finished program ran. The check is now at both ends: `jade pkg add` reads the file before writing anything, and `jade pkg install` checks the bytes it is about to write — which covers a hand-written manifest and a fresh clone, neither of which goes through `add`.

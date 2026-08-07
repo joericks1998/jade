@@ -79,7 +79,14 @@ void* jrt_native_load(const char* path) {
 
     JadePkgInitFn init = (JadePkgInitFn)jade_dlsym(lib, "jade_pkg_init");
     if (!init) {
-        native_raise("native library '%s' missing `jade_pkg_init` symbol", path);
+        /* Kept in step with load_native_package in src/native/mod.rs. Naming
+         * the symbol alone tells the reader nothing they can act on: what it
+         * means is that the library was never bound. */
+        native_raise(
+            "native library '%s' has no `jade_pkg_init`, so it is a plain C library rather than "
+            "a Jade package.\n  Jade cannot load one directly — it needs a binding generated from "
+            "the library's header:\n    jade pkg add <name> --path <the .dylib> --header <its header.h>",
+            path);
     }
 
     JadeNativePkg pkg = {0};

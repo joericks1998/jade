@@ -486,7 +486,21 @@ pub fn build_c_shims(root: &Path, lock: &Lockfile, manifest: &ProjectManifest) -
             continue;
         }
         let Some(entry) = deps.get(&pkg.name) else { continue };
-        let Some(symbols) = &entry.symbols else { continue };
+        // A C library with no symbol table has no binding, and a plain C library
+        // is exactly what the loader cannot take. Skipping used to install it
+        // raw, report success, and leave the program to fail at run time with
+        // "missing jade_pkg_init" — which names a symbol rather than the fact
+        // that the dependency was never bound.
+        let Some(symbols) = &entry.symbols else {
+            return Err(format!(
+                "dependency '{0}' is a C library with no symbols, so no binding was generated.\n  \
+                 Jade cannot load a plain C library directly — it needs a table of the functions \
+                 to bind, which is read from the library's header:\n    \
+                 jade pkg add {0} --path <the .dylib> --header <its header.h>\n  \
+                 Or write a [dependencies.{0}.symbols] table by hand.",
+                pkg.name
+            ));
+        };
 
         let (_, artifact) = select_artifact(pkg, fetch::platform_tag())?;
         let dir = root.join(LIBS_DIR).join(pkg.install_dir());
@@ -672,10 +686,25 @@ pub fn verify_in_sync(manifest: &ProjectManifest, lock: &Lockfile) -> Result<(),
         .filter(|p| !deps.contains_key(&p.name))
         .map(|p| p.name.as_str())
         .collect();
+    // The two can also name the same dependency and disagree about what it is.
+    // Comparing only names let a lock saying `abi = "jade"` outlive a manifest
+    // corrected to `abi = "c"`: the build read the lock, skipped the shim, and
+    // loaded a plain C library as though it were a Jade package. Which of the
+    // two is right is not for this function to decide — they simply must agree.
+    let mut disagreed: Vec<String> = deps
+        .iter()
+        .filter_map(|(name, entry)| {
+            let locked = lock.get(name)?;
+            (locked.abi != entry.abi.as_str()).then(|| {
+                format!("{name} (jade.toml says {}, jade.lock says {})", entry.abi.as_str(), locked.abi)
+            })
+        })
+        .collect();
     missing.sort();
     stale.sort();
+    disagreed.sort();
 
-    if missing.is_empty() && stale.is_empty() {
+    if missing.is_empty() && stale.is_empty() && disagreed.is_empty() {
         return Ok(());
     }
 
@@ -685,6 +714,9 @@ pub fn verify_in_sync(manifest: &ProjectManifest, lock: &Lockfile) -> Result<(),
     }
     if !stale.is_empty() {
         msg.push_str(&format!("\n  locked but not in jade.toml: {}", stale.join(", ")));
+    }
+    if !disagreed.is_empty() {
+        msg.push_str(&format!("\n  locked with a different ABI: {}", disagreed.join(", ")));
     }
     msg.push_str("\nRun `jade pkg install` to update the lock.");
     Err(msg)
