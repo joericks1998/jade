@@ -4,6 +4,14 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.3.1
+
+- **`jade uninstall` removes the toolchain.** There was a way to install Jade and a way to upgrade it, and no way to take it off a machine. It removes the binary and the `lib/jade` tree the installer lays down, and prints every path before touching one — the paths are the only thing that tells a real installation apart from a build directory you did not mean to delete.
+- **Your data is kept unless you ask for it to go.** `~/.jade` holds your API key, your installed providers and the cache, none of which are part of the toolchain. Losing a credential to an uninstall you meant to undo is a nasty surprise, so it takes `--purge`, and the message says so either way.
+- **`jade reinstall` repairs an installation that is already current.** `jade upgrade` returns immediately when you are on the latest version, which is right for an upgrade and no help at all when the reason you are running it is that something is broken. `--clean` clears `~/.jade` first for a genuinely fresh start.
+- **Neither command reads silence as consent.** Both refuse a non-interactive stdin without `--yes`, so a script that did not ask for a deletion does not get one.
+- **All three commands resolve the install path through symlinks.** Removing or replacing a link would leave the file it pointed at, which on a Homebrew-style install is the entire toolchain.
+
 ## v1.3.0
 
 - **Native packages can hand Jade an opaque handle.** A handle is a pointer the library owns: Jade holds it, passes it back, and never looks inside. That one addition is what makes a whole class of C library bindable at all — SQLite, libsndfile, PCRE2, FreeType, libcurl and libarchive are all built around a pointer you keep between calls, and until now there was nowhere in the value ABI to put one, so it arrived as `nil`.
