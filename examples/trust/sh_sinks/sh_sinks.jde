@@ -1,0 +1,38 @@
+// Every shell entry point is a sink, and all three refuse the same value.
+//
+// `exec`, `run` and `output` all reach the same `sh -c`. Until v1.3.3 only the
+// first two checked trust, which did not narrow what an untrusted command could
+// do — it only decided how it had to be spelled. Anything refused as
+// `sh.exec(x)` ran anyway as `sh.output(x).stdout`.
+//
+// The output of a shell command came from outside the program, so it is
+// untrusted; feeding it back in is what each of these attempts.
+
+use std::sh
+
+let untrusted = sh.exec("echo id")
+
+try {
+    sh.exec(untrusted)
+    print("exec: NOT REFUSED")
+} catch e {
+    print("exec: refused")
+}
+
+try {
+    sh.run(untrusted)
+    print("run: NOT REFUSED")
+} catch e {
+    print("run: refused")
+}
+
+try {
+    sh.output(untrusted)
+    print("output: NOT REFUSED")
+} catch e {
+    print("output: refused")
+}
+
+// A command built purely from source text is trusted, and all three still work.
+print(sh.exec("echo trusted").trim())
+print(sh.output("echo trusted").code)

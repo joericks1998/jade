@@ -7,7 +7,7 @@ use crate::{
         error::{JadeError, Result, Span},
     },
 };
-use super::tir::{JadeType, TExpr, TExprKind, TFStrPart, TProgram, TStmt};
+use super::tir::{JadeType, TDecorators, TExpr, TExprKind, TFStrPart, TProgram, TStmt};
 
 // ── TypeContext ───────────────────────────────────────────────────────────────
 
@@ -1705,7 +1705,7 @@ fn infer_unaryop(op: &UnaryOpKind, ty: &JadeType, span: Span) -> Result<JadeType
 fn infer_decorators(
     decorators: &[(String, Vec<(Option<String>, crate::frontend::ast::Expr)>)],
     ctx: &mut TypeContext,
-) -> Result<Vec<(String, Vec<(Option<String>, TExpr)>)>> {
+) -> Result<TDecorators> {
     decorators.iter()
         .map(|(name, args)| {
             let targs = args.iter()

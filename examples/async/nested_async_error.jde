@@ -1,0 +1,17 @@
+// A function definition cannot be nested, and `async fn` is not an exception.
+//
+// It used to be one: the guard sat on `fn` and not on `async fn`, so this
+// parsed and ran. Two things went wrong when it did. The inner function could
+// not see `n` — a closure captures top-level globals, not the enclosing call's
+// locals — so it failed at *run* time with an undefined variable. And a
+// decorator on the inner function was dropped without a word, because a
+// decorator rewrites a global and the inner function is bound to a local.
+
+async fn outer(n) {
+    async fn inner() {
+        return n + 1
+    }
+    return await inner()
+}
+
+print(await outer(5))

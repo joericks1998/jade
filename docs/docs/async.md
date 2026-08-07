@@ -45,7 +45,7 @@ print(await b)   // Berlin
 ```
 
 :::warning
-Declare `async fn` at the top level. A nested `async fn` is accepted by the parser today rather than refused, but it is not a supported shape — among other things, a decorator on one is silently dropped. See [Functions](functions#decorators).
+Declare `async fn` at the top level. Nesting one is a compile error — `function definitions cannot be nested` — exactly as it is for `fn`. It parsed before v1.3.3, and then failed at run time, because the inner function cannot see the outer one's parameters.
 :::
 
 ## The `await` Expression

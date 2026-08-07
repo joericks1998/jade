@@ -45,6 +45,8 @@ A third choice worth knowing before you add syntax: *prefer desugaring*. If new 
 
 **Error messages should name the fix.** `prefix '?' cannot be applied to a field — write 'obj.(?p)' or 'obj~>p' instead` is worth much more than `unexpected token`.
 
+**A rule that applies to `fn` almost certainly applies to `async fn`, and the two are parsed by separate functions.** `parse_fn_with_decorators` rejected nesting and `parse_async_fn_with_decorators` did not, though both increment `fn_depth` in the body — an omission, not a decision. The cost was two surprises a user could not connect to each other: a nested `async fn` failed at *run* time reading the enclosing function's parameters, and a decorator on it was dropped in silence. Anything added to one of the two belongs in the other unless there is a reason it does not.
+
 **A decorator means two different things depending on what it sits on, and only one of them is here.** On a `let` or a `prompt` the parser rewrites it into a call — `@f let x = v` becomes `let x = f(v)` — so nothing downstream learns the syntax exists, and the feature costs one AST-free desugar. On a `fn` it cannot work that way, because the value being wrapped is a function the emitter has yet to build, so that path lives in `emit.rs` and runs at emit time. The two must agree on nesting order: the decorator written *first* is applied first, which is the reverse of Python's rule. Change one and you have to change the other.
 
 ## Building and testing

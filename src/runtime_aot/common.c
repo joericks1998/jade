@@ -336,6 +336,19 @@ int64_t jrt_get_field(int64_t obj, const char* field) {
             if (bm) return jrt_box_ptr(bm);
             throw_msg("undefined field");
         }
+        /* A dict reads `d.key` as `d["key"]`, matching the VM (vm/dispatch.rs
+         * GetField, the VmValue::Dict arm). Without this arm every dot-access on
+         * a dict raised "value has no fields" when compiled and worked fine
+         * interpreted — which took out `sh.output(cmd).code` and every package
+         * namespace reached by a dot. Method *calls* never arrive here: codegen
+         * elides the producing GetField when the result is immediately called,
+         * so `d.keys()` was never affected and the divergence only showed up on
+         * data keys. */
+        if (jrt_kind_of(p) == JK_DICT) {
+            int64_t out;
+            if (jrt_coll_dict_get(p, field, &out)) return out;
+            throw_msg("undefined field");
+        }
     }
     throw_msg("value has no fields");
     return JRT_NIL;
@@ -746,6 +759,15 @@ int64_t jrt_sh_run(const char* cmd) {
     char* e = jrt_sh_take_error();
     if (e) { jrt_throw_io(e); jrt_str_free(e); }
     return r;
+}
+/* sh.output is the same sink and takes the same refusal. It has no pending-error
+ * step because jrt_coll_sh_output reports a spawn failure as {"","",-1} rather
+ * than raising; only the taint check is added here. Codegen calls this rather
+ * than jrt_coll_sh_output directly, so the check cannot be bypassed by the
+ * lowering forgetting about it. */
+void* jrt_sh_output(const char* cmd) {
+    jrt_refuse_if_tainted(cmd, "sh.output(cmd)");
+    return jrt_coll_sh_output(cmd);
 }
 
 /* fs.* raising forwarders: the Rust impls (jade-runtime src/fsf.rs) record a

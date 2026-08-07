@@ -174,7 +174,7 @@ let fib10 = fib(10)
 |-------|---------|---------|
 | `NotCallable` | Calling a non-function value | `let x = 5` then `let y = x(1)` |
 | `UndefinedVariable` | Referencing a name not in scope | `fn f() { return z }` where `z` is not defined |
-| `NestedFunction` | Defining a `fn` inside another `fn`, or inside a closure body | `fn outer() { fn inner() { return 1 } return 2 }` |
+| `NestedFunction` | Defining a `fn` or `async fn` inside another function, or inside a closure body | `fn outer() { fn inner() { return 1 } return 2 }` |
 | `ReturnOutsideFunction` | Using `return` at the top level | `return 1` |
 | `YieldOutsideFunction` | Using `yield` at the top level | `yield 1` |
 | `YieldAndReturn` | A function that yields also returns a value | `fn g() { yield 1  return 2 }` |
@@ -189,7 +189,7 @@ These happen while the program runs, and a `try`/`catch` can handle them.
 | `UndefinedVariable` | A closure reads a name that was not a top-level variable | A closure written inside a function that reads that function's parameter — see the closure warning below |
 
 :::note
-`fn` definitions cannot nest, but `async fn` definitions currently can. A nested `async fn` parses without complaint — see the decorator warning below for one way that bites.
+Neither `fn` nor `async fn` may nest. Declare both at the top level. Until v1.3.3 the rule applied only to `fn`, so a nested `async fn` parsed and ran — and then failed at run time when it tried to read the enclosing function's parameters, which it cannot see.
 :::
 
 ## Built-in Functions
@@ -485,22 +485,7 @@ struct Point { x, y }
 let p = Point { x: 1, y: 2 }   // prints: built one
 ```
 
-### Two traps
-
-:::warning
-**A decorator on a nested `async fn` is silently dropped.** Because `async fn` definitions are allowed to nest, you can write a decorated one inside another function body — and it compiles cleanly with the decorator thrown away. No error, no warning:
-
-```jade
-fn host() {
-    @log
-    async fn g() { return 1 }
-    return 2
-}
-// `log` is never called.
-```
-
-Declare decorated functions at the top level.
-:::
+### One trap
 
 :::warning
 **On an `extend` block, only `@route` means anything.** Any other decorator on `extend` compiles and does nothing at all.

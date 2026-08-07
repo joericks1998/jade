@@ -66,10 +66,17 @@ fn sh_run(args: &[VmValue]) -> Result<VmValue> {
 
 /// `sh.output(cmd)` — run `cmd` via `sh -c`, capture all streams.
 /// Returns a dict with `stdout`, `stderr` (strs) and `code` (int).
+///
+/// Refuses a tainted command exactly as `exec` and `run` do. It did not until
+/// v1.3.3, which made it the way around the trust model rather than a third
+/// member of it: all three reach the same `sh -c`, so refusing two of them and
+/// not the third only meant an untrusted command had to be spelled
+/// `sh.output(x).stdout`.
 fn sh_output(args: &[VmValue]) -> Result<VmValue> {
     if args.len() != 1 {
         return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: ZERO });
     }
+    refuse_if_tainted(args, 0, "sh.output(cmd)")?;
     let cmd = require_str(args, 0, "sh.output")?;
     let (stdout, stderr, code) =
         jade_runtime::shf::output(cmd).map_err(|message| JadeError::IoError { message, span: ZERO })?;

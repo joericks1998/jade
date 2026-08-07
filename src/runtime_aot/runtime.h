@@ -586,6 +586,7 @@ char*   jrt_render_any(int64_t val);
 int32_t jrt_in_any(int64_t needle, int64_t haystack);
 /* Chunk-backend collection-producing stdlib (ObjHeader outputs). */
 void*   jrt_coll_sh_output(const char* cmd);          /* -> {stdout,stderr,code} dict */
+void*   jrt_sh_output(const char* cmd);               /* the above, refusing a tainted cmd */
 void*   jrt_coll_fs_list_dir(const char* path, int32_t* err); /* -> array | null+err */
 int64_t jrt_fs_list_dir_chunk(const char* path);      /* raises on err; tagged ptr word */
 int64_t jrt_random_choice_chunk(int64_t arr_word);    /* random element word */

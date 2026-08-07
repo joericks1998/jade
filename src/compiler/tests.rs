@@ -838,6 +838,40 @@ mod emit {
         cp.top.code.iter().filter(|i| f(i)).count()
     }
 
+    // ── decorators on a function ─────────────────────────────────────────────
+    //
+    // `fn` and `async fn` had separate copies of this emission, and they had
+    // drifted: only the `fn` copy split a namespaced name. They share one path
+    // now, so both of these assert the same shape.
+
+    /// The field name of every `GetField` in the top-level chunk.
+    fn top_fields(cp: &CompiledProgram) -> Vec<String> {
+        cp.top
+            .code
+            .iter()
+            .filter_map(|i| match i {
+                Instr::GetField(_, _, f) => Some(f.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_namespaced_decorator_on_a_fn_loads_the_module_then_the_field() {
+        let cp = compile_ok("fn tag(f) {\n    return f\n}\n@tools::register\nfn go() {\n    return 1\n}");
+        assert!(top_fields(&cp).contains(&"register".to_string()));
+    }
+
+    #[test]
+    fn a_namespaced_decorator_on_an_async_fn_resolves_the_same_way() {
+        // This is the regression: the async copy emitted a bare
+        // GetGlobal("tools.register"), looking for a global whose name contains
+        // a dot — which nothing can define.
+        let cp =
+            compile_ok("fn tag(f) {\n    return f\n}\n@tools::register\nasync fn go() {\n    return 1\n}");
+        assert!(top_fields(&cp).contains(&"register".to_string()));
+    }
+
     #[test]
     fn emit_empty_program_has_no_user_declarations() {
         let cp = compile_ok("");
