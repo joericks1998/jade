@@ -94,6 +94,24 @@ This is the one place the rule differs from a top-level return, where a string
 is handed over borrowed and Jade copies it. Same tag, opposite ownership,
 decided by where the value sits.
 
+## Handles
+
+Three forms, and the third is the one that matters.
+
+`handle<T>` as an **argument** unwraps to the `T*` the library issued, checking
+the type name first. The check is why the name is carried at all: two handles
+are structurally identical, so passing a statement where a connection belongs
+would otherwise be a dereference of the wrong object inside the library, with
+nothing for Jade to report.
+
+`handle<T>` as a **return** wraps the pointer back up.
+
+`out_handle:T` is a handle written through a pointer — `sqlite3_open(path,
+&db)`. Without it the generator could bind SQLite's entire surface *except* the
+call that produces a connection, which is the same as binding none of it. The
+C return value of such a symbol is a status, so the handle is what Jade gets and
+the status feeds `fails_when`.
+
 ## What is deliberately not here
 
 **Input structs.** A Jade struct crossing *into* a C function would need the

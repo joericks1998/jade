@@ -8,6 +8,12 @@ The machinery behind `jade pkg add` / `remove` / `install` / `update` / `list`. 
 jade.toml [dependencies] → jade.lock → libs/
 ```
 
+For a plain C dependency there is a step before that one, and it is the step that makes the rest usable at scale:
+
+```
+<library>.h  →  jade pkg bind  →  jade.toml [symbols]  →  generated shim  →  libs/
+```
+
 ## Why it was built this way
 
 Dependencies are **prebuilt native shared libraries**, sourced from a local path or a URL. There is deliberately no package registry — like Go, a dependency names where it lives rather than an entry in a central index.
@@ -32,12 +38,19 @@ The integration surface with the rest of the compiler is one function, `dependen
   - `out_buffer:<ctype>` and `out_struct:<Type>` are out-parameters. They consume **no** Jade argument: the shim owns the memory, so `x_read(handle, buf, n)` is called from Jade as `x_read(handle, n)` and hands back the bytes. `src/pkg/design.md` has the full rules.
 
   A symbol may also declare `fails_when` — `null`, `negative`, `nonzero`, or `never`. The shim then clears `errno`, tests the return against that convention, and on failure hands back a `JADE_FFI_ERROR` carrying `strerror` text and the number, which both engines already turn into a catchable Jade raise. Without it a failed call returns its raw sentinel and the reason the library *had already recorded* is simply thrown away: the program sees `-1` and nothing else. There is no universal convention to infer, which is why the binding names the one its symbol uses; the default is "cannot fail", because reading a convention that is not there would turn every legitimate `-1` into a raise.
+- **`bindgen.rs`** — generates a dependency's `symbols` and `structs` tables from its C header, behind `jade pkg bind`. This is what makes "bind any `.so`" true in practice: the ABI could express handles, blobs and structs, but every signature still had to be transcribed by hand, and SQLite has around 200 entry points.
+
+  It reads the header with **clang** — `clang -Xclang -ast-dump=json -fsyntax-only`, over a pipe. Parsing C by hand is a tar pit of macros, conditionals and typedef chains, and a home-grown parser would misread far more than it read. Shelling out rather than linking `libclang` keeps a large native dependency out of the shipped binary, and costs nothing in practice: `cc` is already required to bind a C library at all.
+
+  **The skip report is the feature.** No generator binds everything, and one that quietly covers two thirds of an API is how the missing third is found at run time. So what it drops is named with a reason, grouped so one cause reads as one fact; and a binding resting on an inference — a non-const `T*` beside a count is *almost* always an out-buffer — is listed as *assumed* rather than buried. On the real `sqlite3.h` that is 179 bound, 2 assumed, 107 skipped, and every skip is a genuine limit of the ABI rather than a gap in the reader.
 - **`design.md`** — the shim's rewrite rules: how a `bytes` argument becomes two C parameters, why an out-parameter consumes no Jade argument, how two results come back, and why `out_struct` requires the library's header rather than a declared layout. Read it before changing what a binding can express.
 - **`tests.rs`** — package manager tests, all offline.
 
 ## Who uses it
 
 *Depends on:* `project/` for `ProjectManifest`, `DependencyEntry`, and `LibraryEntry`.
+
+*Also depends on:* `clang` on `PATH`, but only for `jade pkg bind`. Nothing else in the package manager needs it, and its absence is reported with the workaround (write the table by hand) rather than as a crash.
 
 *Used by:* `cli/pkg.rs` for the commands. Indirectly, `vm/chunk.rs` and `aot/imports.rs` consume the `[lib]` entries this module contributes, without knowing they came from a dependency.
 
@@ -50,6 +63,12 @@ The integration surface with the rest of the compiler is one function, `dependen
 The generated C is checked by compiling it, not only by matching strings. A test that asserts the output *contains* `if (!(r))` passes just as happily on a file with an unbalanced brace or a missing `#include`, and that file fails at install time on a user's machine instead of here.
 
 Tests must never hit the network — use the `Fetcher` trait.
+
+**`jade pkg bind` merges, it does not replace.** Binding a large header a piece at a time with `--only` is a normal way to work, and replacing the table would make the second run delete what the first produced. Merging also leaves a hand-corrected entry alone unless that same symbol is regenerated.
+
+**The generator and the shim have to agree, and nothing else checks that they do.** They are written against one vocabulary in two files, so a spelling added to `bindgen.rs` and not to `cshim.rs` passes every unit test on both sides and then fails at `jade pkg install` on a user's machine. `bindgen/tests.rs` closes the loop by driving a header through both halves and compiling the result.
+
+**`include_dirs` is written absolute, on purpose.** The shim is compiled inside `libs/<dep>/` rather than where `jade pkg bind` ran, so a relative `-I` resolves against the wrong directory and surfaces as a "file not found" from cc at install time, well away from the cause.
 
 **A present artifact is not a current artifact.** `materialize` compares `libs/` against the *lock*, so anything that changes the true source without changing the lock is invisible to it. That is exactly how a rebuilt `path` dependency used to keep running as the copy it was when it was added. `refresh_local` closes it for local sources; any future source kind that is mutable in place needs the same treatment, and adding one without it reintroduces the same silent staleness.
 

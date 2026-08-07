@@ -533,3 +533,114 @@ fn a_field_the_struct_does_not_have_fails_at_compile_time() {
     let err = compiles(&src, &[("fixture.h", header)]).expect_err("should not compile");
     assert!(err.contains("nosuch"), "the error should name the field: {err}");
 }
+
+// ── Handles ──────────────────────────────────────────────────────────────
+//
+// Stage 1 put handles in the value ABI and both marshallers, but the shim had
+// no way to produce or consume one — so the libraries handles exist for were
+// still unbindable through `abi = "c"`. These three forms close that.
+
+#[test]
+fn a_handle_argument_is_unwrapped_with_its_type_checked() {
+    let src = generate("db", &symbols(&[("close", sym(&["handle<sqlite3>"], "int"))])).unwrap();
+    assert!(src.contains(r#"jade_shim_unwrap(&argv[0], "sqlite3", &h0)"#), "missing unwrap:\n{src}");
+    assert!(src.contains("close((sqlite3*)h0)"), "should pass the unwrapped pointer:\n{src}");
+    // Checked before the call, so the library never sees a wrong-typed pointer.
+    let unwrap_at = src.find("jade_shim_unwrap").unwrap();
+    let call_at = src.find("close((sqlite3*)").unwrap();
+    assert!(unwrap_at < call_at, "the type check must precede the call:\n{src}");
+}
+
+#[test]
+fn the_wrong_handle_type_is_refused_rather_than_dereferenced() {
+    // The check is the entire reason a handle carries a name.
+    let src = generate("db", &symbols(&[("step", sym(&["handle<sqlite3_stmt>"], "int"))])).unwrap();
+    assert!(src.contains(r#""sqlite3_stmt""#), "must check the exact type:\n{src}");
+    assert!(src.contains("return 1;"), "a mismatch must fail the call:\n{src}");
+}
+
+#[test]
+fn a_handle_return_is_wrapped_with_its_type() {
+    let src = generate("db", &symbols(&[("open", sym(&["str"], "handle<sqlite3>"))])).unwrap();
+    assert!(src.contains("extern sqlite3* open(const char*);"), "bad decl:\n{src}");
+    assert!(src.contains(r#"jade_shim_handle((void*)r, "sqlite3")"#), "missing wrap:\n{src}");
+    assert!(src.contains("out->tag = JADE_FFI_HANDLE;"), "should return a handle:\n{src}");
+}
+
+#[test]
+fn an_out_handle_takes_no_jade_argument_and_returns_the_handle() {
+    // sqlite3_open(path, &db) — the shape of every SQLite connection.
+    let s = failing_sym(&["str", "out_handle:sqlite3"], "int", CFailure::Nonzero);
+    let src = generate("db", &symbols(&[("sqlite3_open", s)])).unwrap();
+
+    assert!(src.contains("extern int64_t sqlite3_open(const char*, sqlite3**);"), "bad decl:\n{src}");
+    assert!(src.contains("if (argc != 1) return 1;"), "out-handle takes no Jade arg:\n{src}");
+    assert!(src.contains("sqlite3* ohandle = NULL;"), "must start null:\n{src}");
+    assert!(src.contains("&ohandle"), "must pass its address:\n{src}");
+    assert!(src.contains(r#"jade_shim_handle((void*)ohandle, "sqlite3")"#), "missing wrap:\n{src}");
+    // The status is consumed by the failure convention, not returned.
+    assert!(src.contains("if ((r) != 0) {"), "status should drive fails_when:\n{src}");
+}
+
+#[test]
+fn an_out_handle_that_was_never_written_comes_back_nil() {
+    let src = generate("db", &symbols(&[("op", sym(&["out_handle:T"], "int"))])).unwrap();
+    assert!(src.contains("if (!ohandle) {"), "must check it was written:\n{src}");
+    assert!(src.contains("out->tag = JADE_FFI_NIL;"), "should be nil, not a null handle:\n{src}");
+}
+
+#[test]
+fn a_handle_and_a_scalar_keep_their_argument_positions() {
+    // The unwrap uses the Jade index, which is easy to get wrong once some
+    // arguments consume a slot and others do not.
+    let s = sym(&["int", "handle<sqlite3>", "str"], "int");
+    let src = generate("db", &symbols(&[("f", s)])).unwrap();
+    assert!(src.contains(r#"jade_shim_unwrap(&argv[1], "sqlite3", &h1)"#), "wrong index:\n{src}");
+    assert!(src.contains("f(argv[0].data.as_int, (sqlite3*)h1, argv[2].data.as_str)"), "bad call:\n{src}");
+}
+
+#[test]
+fn the_handle_helper_is_emitted_for_any_of_the_three_forms() {
+    let plain = generate("m", &symbols(&[("f", sym(&["int"], "int"))])).unwrap();
+    assert!(!plain.contains("jade_shim_handle"), "unused helper emitted:\n{plain}");
+
+    for spec in [
+        sym(&["handle<T>"], "int"),
+        sym(&["int"], "handle<T>"),
+        sym(&["out_handle:T"], "int"),
+    ] {
+        let src = generate("z", &symbols(&[("f", spec)])).unwrap();
+        assert!(src.contains("static JadeHandle* jade_shim_handle"), "helper missing:\n{src}");
+    }
+}
+
+#[test]
+fn a_handle_shim_compiles() {
+    // A whole SQLite-shaped surface: open through an out-handle, a connection
+    // argument, a statement of a different type, and a handle return.
+    let header = r#"
+#ifndef DBFIX_H
+#define DBFIX_H
+typedef struct sqlite3 sqlite3;
+typedef struct sqlite3_stmt sqlite3_stmt;
+extern int sqlite3_open(const char* path, sqlite3** db);
+extern int sqlite3_prepare(sqlite3* db, const char* sql, sqlite3_stmt** stmt);
+extern int sqlite3_step(sqlite3_stmt* s);
+extern const char* sqlite3_errmsg(sqlite3* db);
+extern sqlite3* sqlite3_dup(sqlite3* db);
+extern int sqlite3_close(sqlite3* db);
+#endif
+"#;
+    let syms = symbols(&[
+        ("sqlite3_open", failing_sym(&["str", "out_handle:sqlite3"], "int", CFailure::Nonzero)),
+        ("sqlite3_prepare", failing_sym(&["handle<sqlite3>", "str", "out_handle:sqlite3_stmt"], "int", CFailure::Nonzero)),
+        ("sqlite3_step", sym(&["handle<sqlite3_stmt>"], "int")),
+        ("sqlite3_errmsg", sym(&["handle<sqlite3>"], "str")),
+        ("sqlite3_dup", sym(&["handle<sqlite3>"], "handle<sqlite3>")),
+        ("sqlite3_close", sym(&["handle<sqlite3>"], "int")),
+    ]);
+    let src = generate_with("db", &syms, &[], &["dbfix.h"]).unwrap();
+    if let Err(e) = compiles(&src, &[("dbfix.h", header)]) {
+        panic!("handle shim does not compile:\n{e}\n--- source ---\n{src}");
+    }
+}

@@ -19,6 +19,7 @@
 //! keep resolving `[lib]` entries exactly as before, so the two backends cannot
 //! drift.
 
+pub mod bindgen;
 pub mod cshim;
 pub mod fetch;
 pub mod lock;

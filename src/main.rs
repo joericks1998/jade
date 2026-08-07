@@ -198,6 +198,23 @@ enum PkgCommands {
         #[arg(long = "c-abi")]
         c_abi: bool,
     },
+    /// Generate a C dependency's symbol table from its header
+    Bind {
+        /// The dependency to bind, which must already be in jade.toml
+        name: String,
+        /// The library's header, e.g. /opt/homebrew/include/sqlite3.h
+        #[arg(long, value_name = "FILE")]
+        header: String,
+        /// Extra include directory; repeatable
+        #[arg(short = 'I', long = "include", value_name = "DIR")]
+        include: Vec<String>,
+        /// Only bind symbols whose name contains this
+        #[arg(long, value_name = "TEXT")]
+        only: Option<String>,
+        /// Show what would be written without changing jade.toml
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Remove a dependency from jade.toml, jade.lock, and libs/
     Remove {
         name: String,
@@ -305,6 +322,9 @@ async fn run_cli() {
         Commands::Pkg(subcommand) => match subcommand {
             PkgCommands::Add { name, path, url, version, c_abi } => {
                 cli::pkg::run_add(&name, path.as_deref(), url.as_deref(), version.as_deref(), c_abi)
+            }
+            PkgCommands::Bind { name, header, include, only, dry_run } => {
+                cli::pkg::run_bind(&name, &header, &include, only.as_deref(), dry_run)
             }
             PkgCommands::Remove { name } => cli::pkg::run_remove(&name),
             PkgCommands::Install { locked } => cli::pkg::run_install(locked),

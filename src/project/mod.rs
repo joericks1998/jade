@@ -389,6 +389,17 @@ pub enum CFailure {
 }
 
 impl CFailure {
+    /// The spelling used in `jade.toml`. Explicit rather than derived from
+    /// `Debug`, so the manifest format cannot drift when this enum is renamed.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CFailure::Null => "null",
+            CFailure::Negative => "negative",
+            CFailure::Nonzero => "nonzero",
+            CFailure::Never => "never",
+        }
+    }
+
     /// The C expression testing `r` for failure, or `None` when it cannot fail.
     ///
     /// A pointer test is written `!(r)` rather than `(r) == NULL` so it works

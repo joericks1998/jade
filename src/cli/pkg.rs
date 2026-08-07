@@ -91,6 +91,70 @@ pub fn run_add(name: &str, path: Option<&str>, url: Option<&str>, version: Optio
     println!("added {name}");
 }
 
+// ── bind ──────────────────────────────────────────────────────────────────────
+
+/// `jade pkg bind <name> --header <h.h> [-I dir] [--only text] [--dry-run]`
+///
+/// Reads the header with clang and writes the symbol table into `jade.toml`, so
+/// a library with two hundred entry points does not have to be transcribed by
+/// hand. What it *could not* bind is printed, with reasons: a generator that
+/// silently covers two thirds of an API is how the missing third is found at
+/// run time.
+pub fn run_bind(name: &str, header: &str, include: &[String], only: Option<&str>, dry_run: bool) {
+    let root = root_or_exit();
+    let header_path = std::path::Path::new(header);
+    if !header_path.exists() {
+        fail(format!("no such header: {header}"));
+    }
+
+    let binding =
+        pkg::bindgen::from_header(header_path, include, only).unwrap_or_else(|e| fail(e));
+
+    if binding.symbols.is_empty() {
+        eprintln!("{}", binding.report());
+        fail(format!(
+            "nothing in {header} could be bound. The reasons above say why; a symbol table \
+             written by hand can still cover what this could not."
+        ));
+    }
+
+    println!("{}", binding.report());
+
+    if dry_run {
+        println!("\n(dry run — jade.toml unchanged)");
+        return;
+    }
+
+    // The header path is recorded so the generated shim can include it, and its
+    // directory so `cc` can find it. Without both, a struct out-parameter has no
+    // layout to compile against.
+    let headers = vec![
+        header_path
+            .file_name()
+            .map(|f| f.to_string_lossy().into_owned())
+            .unwrap_or_else(|| header.to_string()),
+    ];
+    // Absolute, because the shim is compiled inside `libs/<dep>/` rather than
+    // wherever `jade pkg bind` was run — a relative `-I` would resolve against
+    // the wrong directory, and the failure is a "file not found" from cc at
+    // install time, well away from the cause.
+    let abs = |p: &std::path::Path| -> String {
+        std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()).to_string_lossy().into_owned()
+    };
+    let mut dirs: Vec<String> = include.iter().map(|d| abs(std::path::Path::new(d))).collect();
+    let parent = header_path.parent().filter(|p| !p.as_os_str().is_empty());
+    let dir = abs(parent.unwrap_or_else(|| std::path::Path::new(".")));
+    if !dirs.contains(&dir) {
+        dirs.push(dir);
+    }
+
+    manifest::set_bindings(&root, name, &binding.symbols, &binding.structs, &headers, &dirs)
+        .unwrap_or_else(|e| fail(e));
+
+    println!("\nwrote [dependencies.{name}.symbols] to jade.toml");
+    println!("run `jade pkg install` to build the binding");
+}
+
 // ── remove ────────────────────────────────────────────────────────────────────
 
 /// `jade pkg remove <name>` — drop it from the manifest, the lock, and `libs/`.
