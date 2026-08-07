@@ -197,8 +197,17 @@ enum PkgCommands {
         /// The artifact is a plain C library, not a Jade-ABI package
         #[arg(long = "c-abi")]
         c_abi: bool,
+        /// The C library's header. Implies --c-abi, and binds it on the spot
+        #[arg(long, value_name = "FILE")]
+        header: Option<String>,
+        /// Extra include directory for the header; repeatable
+        #[arg(short = 'I', long = "include", value_name = "DIR")]
+        include: Vec<String>,
     },
-    /// Generate a C dependency's symbol table from its header
+    /// Re-generate a C dependency's symbol table from its header
+    ///
+    /// `jade pkg add --header` already does this; reach for `bind` to re-run it
+    /// after a header changes, or to narrow a large one with --only.
     Bind {
         /// The dependency to bind, which must already be in jade.toml
         name: String,
@@ -320,9 +329,15 @@ async fn run_cli() {
 
         // ── upgrade ───────────────────────────────────────────────────────────
         Commands::Pkg(subcommand) => match subcommand {
-            PkgCommands::Add { name, path, url, version, c_abi } => {
-                cli::pkg::run_add(&name, path.as_deref(), url.as_deref(), version.as_deref(), c_abi)
-            }
+            PkgCommands::Add { name, path, url, version, c_abi, header, include } => cli::pkg::run_add(
+                &name,
+                path.as_deref(),
+                url.as_deref(),
+                version.as_deref(),
+                c_abi,
+                header.as_deref(),
+                &include,
+            ),
             PkgCommands::Bind { name, header, include, only, dry_run } => {
                 cli::pkg::run_bind(&name, &header, &include, only.as_deref(), dry_run)
             }

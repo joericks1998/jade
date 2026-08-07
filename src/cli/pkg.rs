@@ -48,8 +48,21 @@ fn relock_and_install(root: &std::path::Path, manifest: &ProjectManifest) {
 
 // ── add ───────────────────────────────────────────────────────────────────────
 
-/// `jade pkg add <name> --path <p> | --url <u> [--version <v>] [--abi c]`
-pub fn run_add(name: &str, path: Option<&str>, url: Option<&str>, version: Option<&str>, c_abi: bool) {
+/// `jade pkg add <name> --path <p> | --url <u> [--version <v>] [--header <h.h>]`
+///
+/// A `--header` says the artifact is a plain C library *and* how to bind it, so
+/// adding one is a single step: the symbol table is generated and the shim is
+/// built before the command returns. Requiring a separate `jade pkg bind` was
+/// asking the user to know about a stage that has no decision in it.
+pub fn run_add(
+    name: &str,
+    path: Option<&str>,
+    url: Option<&str>,
+    version: Option<&str>,
+    c_abi: bool,
+    header: Option<&str>,
+    include: &[String],
+) {
     let root = root_or_exit();
 
     let source = match (path, url) {
@@ -66,29 +79,89 @@ pub fn run_add(name: &str, path: Option<&str>, url: Option<&str>, version: Optio
         }
     };
 
-    let abi = if c_abi { Abi::C } else { Abi::Jade };
-    if c_abi {
-        // The symbol table cannot be supplied on the command line — it is a
-        // per-symbol prototype list. Write the entry, then point at the file.
-        eprintln!(
-            "note: add a [dependencies.{name}.symbols] table to jade.toml describing the C \
-             symbols to bind, then run `jade pkg install`"
-        );
-    }
+    // A header is only meaningful for a plain C library, so it implies --c-abi
+    // rather than having to be paired with it.
+    let abi = if c_abi || header.is_some() { Abi::C } else { Abi::Jade };
 
     manifest::add_dependency(&root, name, source, version, abi, None).unwrap_or_else(|e| fail(e));
 
-    // A C dependency is not installable until its symbols are declared, so stop
-    // after the manifest edit rather than failing validation the user can't fix
-    // yet.
-    if c_abi {
+    if let Some(h) = header {
+        bind_header(&root, name, h, include, None, false).unwrap_or_else(|e| fail(e));
+    } else if abi == Abi::C {
+        // Nothing to bind from, and a C dependency is not installable until its
+        // symbols exist. Stop after the manifest edit rather than failing
+        // validation the user cannot yet satisfy — and say what would fix it.
         println!("added {name} to jade.toml");
+        eprintln!(
+            "note: {name} is a C library with no symbols yet. Either re-run with\n  \
+             jade pkg add {name} --path <the .so> --header <its header.h>\n\
+             to generate them, or write a [dependencies.{name}.symbols] table by hand."
+        );
         return;
     }
 
     let manifest = load_or_exit(&root);
     relock_and_install(&root, &manifest);
     println!("added {name}");
+}
+
+// ── binding a C library ───────────────────────────────────────────────────────
+
+/// The header path and include directories to record for a dependency.
+///
+/// Absolute, because the shim is compiled inside `libs/<dep>/` rather than
+/// wherever the command was run — a relative `-I` resolves against the wrong
+/// directory, and the failure is a "file not found" from cc at install time,
+/// well away from the cause.
+fn header_locations(header: &std::path::Path, include: &[String]) -> (Vec<String>, Vec<String>) {
+    let abs = |p: &std::path::Path| -> String {
+        std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()).to_string_lossy().into_owned()
+    };
+    let headers = vec![header
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_else(|| header.to_string_lossy().into_owned())];
+
+    let mut dirs: Vec<String> = include.iter().map(|d| abs(std::path::Path::new(d))).collect();
+    let parent = header.parent().filter(|p| !p.as_os_str().is_empty());
+    let dir = abs(parent.unwrap_or_else(|| std::path::Path::new(".")));
+    if !dirs.contains(&dir) {
+        dirs.push(dir);
+    }
+    (headers, dirs)
+}
+
+/// Read a header and write the tables into `jade.toml`. Shared by `add`,
+/// `install` and `bind`, so all three produce the same manifest.
+fn bind_header(
+    root: &std::path::Path,
+    name: &str,
+    header: &str,
+    include: &[String],
+    only: Option<&str>,
+    quiet: bool,
+) -> Result<(), String> {
+    let header_path = std::path::Path::new(header);
+    if !header_path.exists() {
+        return Err(format!("no such header: {header}"));
+    }
+
+    let binding = pkg::bindgen::from_header(header_path, include, only)?;
+    if binding.symbols.is_empty() {
+        return Err(format!(
+            "{}\nnothing in {header} could be bound. The reasons above say why; a symbol table \
+             written by hand can still cover what this could not.",
+            binding.report()
+        ));
+    }
+
+    let (headers, dirs) = header_locations(header_path, include);
+    manifest::set_bindings(root, name, &binding.symbols, &binding.structs, &headers, &dirs)?;
+
+    if !quiet {
+        println!("{}", binding.report());
+    }
+    Ok(())
 }
 
 // ── bind ──────────────────────────────────────────────────────────────────────
@@ -102,57 +175,68 @@ pub fn run_add(name: &str, path: Option<&str>, url: Option<&str>, version: Optio
 /// run time.
 pub fn run_bind(name: &str, header: &str, include: &[String], only: Option<&str>, dry_run: bool) {
     let root = root_or_exit();
-    let header_path = std::path::Path::new(header);
-    if !header_path.exists() {
-        fail(format!("no such header: {header}"));
-    }
-
-    let binding =
-        pkg::bindgen::from_header(header_path, include, only).unwrap_or_else(|e| fail(e));
-
-    if binding.symbols.is_empty() {
-        eprintln!("{}", binding.report());
-        fail(format!(
-            "nothing in {header} could be bound. The reasons above say why; a symbol table \
-             written by hand can still cover what this could not."
-        ));
-    }
-
-    println!("{}", binding.report());
 
     if dry_run {
+        // Report only. Useful for looking at a large header before committing
+        // its table to the manifest.
+        let header_path = std::path::Path::new(header);
+        if !header_path.exists() {
+            fail(format!("no such header: {header}"));
+        }
+        let binding =
+            pkg::bindgen::from_header(header_path, include, only).unwrap_or_else(|e| fail(e));
+        println!("{}", binding.report());
         println!("\n(dry run — jade.toml unchanged)");
         return;
     }
 
-    // The header path is recorded so the generated shim can include it, and its
-    // directory so `cc` can find it. Without both, a struct out-parameter has no
-    // layout to compile against.
-    let headers = vec![
-        header_path
-            .file_name()
-            .map(|f| f.to_string_lossy().into_owned())
-            .unwrap_or_else(|| header.to_string()),
-    ];
-    // Absolute, because the shim is compiled inside `libs/<dep>/` rather than
-    // wherever `jade pkg bind` was run — a relative `-I` would resolve against
-    // the wrong directory, and the failure is a "file not found" from cc at
-    // install time, well away from the cause.
-    let abs = |p: &std::path::Path| -> String {
-        std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()).to_string_lossy().into_owned()
-    };
-    let mut dirs: Vec<String> = include.iter().map(|d| abs(std::path::Path::new(d))).collect();
-    let parent = header_path.parent().filter(|p| !p.as_os_str().is_empty());
-    let dir = abs(parent.unwrap_or_else(|| std::path::Path::new(".")));
-    if !dirs.contains(&dir) {
-        dirs.push(dir);
-    }
-
-    manifest::set_bindings(&root, name, &binding.symbols, &binding.structs, &headers, &dirs)
-        .unwrap_or_else(|e| fail(e));
-
+    bind_header(&root, name, header, include, only, false).unwrap_or_else(|e| fail(e));
     println!("\nwrote [dependencies.{name}.symbols] to jade.toml");
-    println!("run `jade pkg install` to build the binding");
+
+    // Build it too. Re-binding and then leaving the shim stale is never what
+    // anyone wanted, and it is the step that would otherwise be forgotten.
+    let manifest = load_or_exit(&root);
+    relock_and_install(&root, &manifest);
+    println!("installed {name}");
+}
+
+/// Bind every `abi = "c"` dependency that names a header but has no symbols.
+/// Returns whether the manifest was changed.
+fn bind_missing_symbols(root: &std::path::Path, manifest: &ProjectManifest) -> bool {
+    let Some(deps) = &manifest.dependencies else { return false };
+    let mut changed = false;
+
+    for (name, entry) in deps {
+        if entry.abi != Abi::C || entry.symbols.is_some() {
+            continue;
+        }
+        let Some(headers) = entry.headers.as_ref().filter(|h| !h.is_empty()) else { continue };
+
+        // The manifest records a bare filename plus the directories to find it
+        // in, so the lookup is the same one the shim compile will do.
+        let dirs = entry.include_dirs.clone().unwrap_or_default();
+        let found = dirs
+            .iter()
+            .map(|d| std::path::Path::new(d).join(&headers[0]))
+            .find(|p| p.exists())
+            .or_else(|| Some(root.join(&headers[0])).filter(|p| p.exists()));
+
+        let Some(path) = found else {
+            eprintln!(
+                "note: dependency '{name}' names header '{}' but it was not found, so no symbols \
+                 were generated. Point at it with\n  jade pkg bind {name} --header <path>",
+                headers[0]
+            );
+            continue;
+        };
+
+        println!("binding {name} from {}", headers[0]);
+        match bind_header(root, name, &path.to_string_lossy(), &dirs, None, false) {
+            Ok(()) => changed = true,
+            Err(e) => eprintln!("note: could not bind '{name}': {e}"),
+        }
+    }
+    changed
 }
 
 // ── remove ────────────────────────────────────────────────────────────────────
@@ -200,12 +284,24 @@ pub fn run_remove(name: &str) {
 /// edit that was never locked should fail rather than silently resolve.
 pub fn run_install(locked: bool) {
     let root = root_or_exit();
-    let manifest = load_or_exit(&root);
+    let mut manifest = load_or_exit(&root);
 
     let has_deps = manifest.dependencies.as_ref().is_some_and(|d| !d.is_empty());
     if !has_deps {
         println!("no dependencies");
         return;
+    }
+
+    // Bind anything that says which header to read but has no symbols yet.
+    // Without this a hand-written entry naming a header would install a shim
+    // with nothing in it, and the user would have to know that a separate
+    // command exists to fill it.
+    //
+    // Only when `symbols` is *absent*: a committed manifest already carries
+    // them, so a fresh clone installs without needing clang at all. Re-running
+    // after a header changes is `jade pkg bind`, which is an explicit act.
+    if !locked && bind_missing_symbols(&root, &manifest) {
+        manifest = load_or_exit(&root);
     }
 
     let existing = lock::read(&root).unwrap_or_else(|e| fail(e));

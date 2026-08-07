@@ -11,8 +11,10 @@ jade.toml [dependencies] → jade.lock → libs/
 For a plain C dependency there is a step before that one, and it is the step that makes the rest usable at scale:
 
 ```
-<library>.h  →  jade pkg bind  →  jade.toml [symbols]  →  generated shim  →  libs/
+<library>.h  →  binding generation  →  jade.toml [symbols]  →  generated shim  →  libs/
 ```
+
+That step is **not a command you have to know about**. `jade pkg add <name> --path <lib> --header <h.h>` does the whole chain, and `jade pkg install` fills in any dependency that names a header but has no symbols yet. `jade pkg bind` still exists for re-running it after a header changes, or narrowing a large one with `--only` — the cases that involve an actual decision.
 
 ## Why it was built this way
 
@@ -38,11 +40,11 @@ The integration surface with the rest of the compiler is one function, `dependen
   - `out_buffer:<ctype>` and `out_struct:<Type>` are out-parameters. They consume **no** Jade argument: the shim owns the memory, so `x_read(handle, buf, n)` is called from Jade as `x_read(handle, n)` and hands back the bytes. `src/pkg/design.md` has the full rules.
 
   A symbol may also declare `fails_when` — `null`, `negative`, `nonzero`, or `never`. The shim then clears `errno`, tests the return against that convention, and on failure hands back a `JADE_FFI_ERROR` carrying `strerror` text and the number, which both engines already turn into a catchable Jade raise. Without it a failed call returns its raw sentinel and the reason the library *had already recorded* is simply thrown away: the program sees `-1` and nothing else. There is no universal convention to infer, which is why the binding names the one its symbol uses; the default is "cannot fail", because reading a convention that is not there would turn every legitimate `-1` into a raise.
-- **`bindgen.rs`** — generates a dependency's `symbols` and `structs` tables from its C header, behind `jade pkg bind`. This is what makes "bind any `.so`" true in practice: the ABI could express handles, blobs and structs, but every signature still had to be transcribed by hand, and SQLite has around 200 entry points.
+- **`bindgen.rs`** — generates a dependency's `symbols` and `structs` tables from its C header, driven by `jade pkg add --header`, `jade pkg install`, and `jade pkg bind`. This is what makes "bind any `.so`" true in practice: the ABI could express handles, blobs and structs, but every signature still had to be transcribed by hand, and SQLite has around 200 entry points.
 
   It reads the header with **clang** — `clang -Xclang -ast-dump=json -fsyntax-only`, over a pipe. Parsing C by hand is a tar pit of macros, conditionals and typedef chains, and a home-grown parser would misread far more than it read. Shelling out rather than linking `libclang` keeps a large native dependency out of the shipped binary, and costs nothing in practice: `cc` is already required to bind a C library at all.
 
-  **The skip report is the feature.** No generator binds everything, and one that quietly covers two thirds of an API is how the missing third is found at run time. So what it drops is named with a reason, grouped so one cause reads as one fact; and a binding resting on an inference — a non-const `T*` beside a count is *almost* always an out-buffer — is listed as *assumed* rather than buried. On the real `sqlite3.h` that is 179 bound, 2 assumed, 107 skipped, and every skip is a genuine limit of the ABI rather than a gap in the reader.
+  **The skip report is the feature.** No generator binds everything, and one that quietly covers two thirds of an API is how the missing third is found at run time. So what it drops is named with a reason, grouped so one cause reads as one fact; and a binding resting on an inference — a non-const `T*` beside a count is *almost* always an out-buffer — is listed as *assumed* rather than buried. On the real `sqlite3.h` that is 181 bound, 2 assumed, 105 skipped, and every skip is a genuine limit of the ABI rather than a gap in the reader.
 - **`design.md`** — the shim's rewrite rules: how a `bytes` argument becomes two C parameters, why an out-parameter consumes no Jade argument, how two results come back, and why `out_struct` requires the library's header rather than a declared layout. Read it before changing what a binding can express.
 - **`tests.rs`** — package manager tests, all offline.
 
@@ -50,7 +52,7 @@ The integration surface with the rest of the compiler is one function, `dependen
 
 *Depends on:* `project/` for `ProjectManifest`, `DependencyEntry`, and `LibraryEntry`.
 
-*Also depends on:* `clang` on `PATH`, but only for `jade pkg bind`. Nothing else in the package manager needs it, and its absence is reported with the workaround (write the table by hand) rather than as a crash.
+*Also depends on:* `clang` on `PATH`, but only when a header is actually read — `add --header`, `bind`, or an `install` filling in missing symbols. A manifest that already carries its symbols installs without it. Nothing else in the package manager needs it, and its absence is reported with the workaround (write the table by hand) rather than as a crash.
 
 *Used by:* `cli/pkg.rs` for the commands. Indirectly, `vm/chunk.rs` and `aot/imports.rs` consume the `[lib]` entries this module contributes, without knowing they came from a dependency.
 
@@ -63,6 +65,8 @@ The integration surface with the rest of the compiler is one function, `dependen
 The generated C is checked by compiling it, not only by matching strings. A test that asserts the output *contains* `if (!(r))` passes just as happily on a file with an unbalanced brace or a missing `#include`, and that file fails at install time on a user's machine instead of here.
 
 Tests must never hit the network — use the `Fetcher` trait.
+
+**Binding runs on `add` and `install`, not only on `bind`.** A separate step is one the user has to learn about, and it has no decision in it — a header either binds or it does not. `install` only fills in a dependency whose `symbols` are *absent*, so a committed manifest already carries them and a fresh clone installs without needing clang at all. `--locked` never binds, because a reproducible install must not depend on what the local clang makes of a header.
 
 **`jade pkg bind` merges, it does not replace.** Binding a large header a piece at a time with `--only` is a normal way to work, and replacing the table would make the second run delete what the first produced. Merging also leaves a hand-corrected entry alone unless that same symbol is regenerated.
 
