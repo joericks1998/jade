@@ -359,6 +359,49 @@ impl Abi {
 pub struct CSymbol {
     pub args: Vec<String>,
     pub ret: String,
+    /// How this symbol reports failure, so the shim can turn one into a
+    /// catchable Jade error carrying the reason.
+    ///
+    /// Absent means the call cannot fail, which is the safe default: reading a
+    /// convention that is not there would turn every legitimate `-1` into a
+    /// raise. Without this, a failing C call returns its raw sentinel and the
+    /// reason — which the library already put in `errno` — is simply lost.
+    #[serde(default)]
+    pub fails_when: Option<CFailure>,
+}
+
+/// The sentinel a C function returns to signal failure.
+///
+/// There is no universal convention, so the binding names the one its symbol
+/// uses. These four cover the shapes in practice: a pointer-returning `open`,
+/// a POSIX-style `int`, a status code, and a call that cannot fail.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CFailure {
+    /// A null pointer or handle. `sqlite3_open`, `gzopen`, `fopen`.
+    Null,
+    /// A negative return. The POSIX `read`/`write`/`open` convention.
+    Negative,
+    /// Any non-zero return. A status code where 0 means success.
+    Nonzero,
+    /// Never fails. The same as omitting the key, spellable for clarity.
+    Never,
+}
+
+impl CFailure {
+    /// The C expression testing `r` for failure, or `None` when it cannot fail.
+    ///
+    /// A pointer test is written `!(r)` rather than `(r) == NULL` so it works
+    /// unchanged for a handle typedef that is an integer rather than a pointer
+    /// — `gzFile` on some builds, and every `HANDLE`-shaped API.
+    pub fn test(self) -> Option<&'static str> {
+        match self {
+            CFailure::Null => Some("!(r)"),
+            CFailure::Negative => Some("(r) < 0"),
+            CFailure::Nonzero => Some("(r) != 0"),
+            CFailure::Never => None,
+        }
+    }
 }
 
 /// Entry in a `[dependencies.<name>]` section of `jade.toml`.

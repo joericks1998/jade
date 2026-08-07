@@ -128,6 +128,10 @@ pub fn render_word(word: i64) -> String {
         let b = unsafe { &*(p as *const crate::bytesf::BytesObj) };
         return render_bytes(b.as_slice());
     }
+    if kind == ObjKind::Handle as u8 {
+        let h = unsafe { &*(p as *const crate::handle::HandleObj) };
+        return crate::handle::render(h);
+    }
     if kind == ObjKind::Array as u8 {
         let a = unsafe { &*(p as *const ArrayObj<i64>) };
         let parts: Vec<String> = a.as_slice().iter().map(|w| render_word(*w)).collect();

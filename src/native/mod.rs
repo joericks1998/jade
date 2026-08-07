@@ -55,6 +55,17 @@ pub const JADE_TAG_STRUCT: u8 = 8;
 /// Added in v1.2.2, which is why [`jade_runtime::RUNTIME_ABI_VERSION`] moved to
 /// 3: a package built against ABI 2 has no arm for this tag.
 pub const JADE_TAG_BYTES: u8 = 9;
+/// `data.as_handle` → a libc-owned [`JadeHandle`] wrapper around a foreign
+/// pointer.
+///
+/// The pointer is the package's, not Jade's. [`ffi_free`] releases the wrapper
+/// and the copied type name and leaves `ptr` alone — Jade cannot know what the
+/// pointee is or which allocator made it, and closing it is a call the binding
+/// exposes.
+///
+/// Added in v1.3.0, which is why [`jade_runtime::RUNTIME_ABI_VERSION`] moved to
+/// 4: a package built against ABI 3 has no arm for this tag.
+pub const JADE_TAG_HANDLE: u8 = 10;
 
 // ── Value type ────────────────────────────────────────────────────────────────
 
@@ -71,6 +82,7 @@ pub union JadeValData {
     pub as_dict:  *mut JadeMap,
     pub as_struct: *mut JadeStruct,
     pub as_bytes: *mut JadeBytes,
+    pub as_handle: *mut JadeHandle,
 }
 
 #[repr(C)]
@@ -119,6 +131,19 @@ pub struct JadeStruct {
 pub struct JadeBytes {
     pub data: *mut u8,
     pub len: usize,
+}
+
+/// A foreign pointer plus the C type it came from. Layout mirrors `JadeHandle`
+/// in runtime_aot's runtime.h.
+///
+/// Ownership splits, and that split is the whole subtlety of this tag: the
+/// wrapper and `type_name` are libc heap released by [`ffi_free`], while `ptr`
+/// is owned by the package that produced it and is never freed here.
+#[repr(C)]
+pub struct JadeHandle {
+    pub ptr: *mut c_void,
+    /// Null-terminated UTF-8, libc-owned.
+    pub type_name: *const u8,
 }
 
 impl JadeVal {
@@ -489,6 +514,27 @@ fn vm_to_ffi_owned(val: &VmValue) -> JadeVal {
             unsafe { std::ptr::write(bx, JadeBytes { data, len: n }) };
             JadeVal { tag: JADE_TAG_BYTES, _pad: [0; 7], data: JadeValData { as_bytes: bx } }
         }
+        VmValue::Handle(h) => {
+            // The wrapper is freshly allocated so `ffi_free` has something of
+            // its own to release, and the name is copied for the same reason
+            // every container-owned string is. The pointer itself is passed
+            // straight back to the package that issued it — no copy, and
+            // nothing to free.
+            let hx = unsafe { malloc(std::mem::size_of::<JadeHandle>()) } as *mut JadeHandle;
+            if hx.is_null() {
+                std::alloc::handle_alloc_error(std::alloc::Layout::new::<JadeHandle>());
+            }
+            unsafe {
+                std::ptr::write(
+                    hx,
+                    JadeHandle {
+                        ptr: h.ptr as *mut c_void,
+                        type_name: ffi_strdup(&h.type_name()),
+                    },
+                )
+            };
+            JadeVal { tag: JADE_TAG_HANDLE, _pad: [0; 7], data: JadeValData { as_handle: hx } }
+        }
         // Remaining kinds (functions, futures, prompts) have no ABI
         // representation — native fns can't consume them.
         _ => JadeVal::nil(),
@@ -572,6 +618,28 @@ pub fn ffi_to_vm(val: &JadeVal, span: Span) -> Result<VmValue> {
                 jade_runtime::bytesf::BytesObj::new(slice, jade_runtime::trust::TAINTED),
             )))
         }
+        JADE_TAG_HANDLE => {
+            let hp = unsafe { val.data.as_handle };
+            if hp.is_null() {
+                return Ok(VmValue::Nil);
+            }
+            let (ptr, name) = unsafe { ((*hp).ptr, (*hp).type_name) };
+            // An unnamed handle is allowed but matches nothing, so a binding
+            // that forgot its type name fails a type check rather than passing
+            // silently for anything.
+            let type_name = if name.is_null() {
+                std::ffi::CString::default()
+            } else {
+                let s = unsafe { CStr::from_ptr(name as *const c_char) };
+                std::ffi::CString::from(s)
+            };
+            // No trust byte: a handle carries no data to taint. What the pointee
+            // yields gets its trust when it crosses as bytes or a string.
+            Ok(VmValue::Handle(Arc::new(jade_runtime::handle::HandleObj::new(
+                ptr as usize,
+                type_name,
+            ))))
+        }
         JADE_TAG_STRUCT => {
             let st = unsafe { val.data.as_struct };
             if st.is_null() {
@@ -619,6 +687,18 @@ unsafe fn ffi_free_node(v: &JadeVal) {
                 unsafe {
                     free((*bp).data as *mut c_void);
                     free(bp as *mut c_void);
+                }
+            }
+        }
+        JADE_TAG_HANDLE => {
+            let hp = unsafe { v.data.as_handle };
+            if !hp.is_null() {
+                unsafe {
+                    // The name and the wrapper, and deliberately not `ptr`. See
+                    // JADE_TAG_HANDLE — freeing the pointee here would hand the
+                    // package's memory back to the wrong allocator.
+                    free((*hp).type_name as *mut c_void);
+                    free(hp as *mut c_void);
                 }
             }
         }
@@ -679,7 +759,10 @@ unsafe fn ffi_free_node(v: &JadeVal) {
 /// scalars (including top-level non-owning strings) are left untouched, so this
 /// is safe to call on any `JadeVal`.
 pub unsafe fn ffi_free(v: &JadeVal) {
-    if matches!(v.tag, JADE_TAG_ARRAY | JADE_TAG_DICT | JADE_TAG_STRUCT | JADE_TAG_BYTES) {
+    if matches!(
+        v.tag,
+        JADE_TAG_ARRAY | JADE_TAG_DICT | JADE_TAG_STRUCT | JADE_TAG_BYTES | JADE_TAG_HANDLE
+    ) {
         unsafe { ffi_free_node(v) };
     }
 }

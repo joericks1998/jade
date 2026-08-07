@@ -681,6 +681,67 @@ mod type_infer {
             "a function stage applies, it does not constrain: {:?}", value.kind,
         );
     }
+
+    // ── Handles cannot cross a task boundary ──────────────────────────────────
+    //
+    // Tested at the rule rather than through source, because no syntax produces
+    // a `Handle` type yet: it arrives with a declared native binding. The check
+    // is written now so the guarantee lands with the feature rather than after
+    // someone hits the race.
+    //
+    // `taskcheck` cannot cover this. It watches SetIndex/SetField/mutating
+    // methods, and a handle has none — all the mutation is inside the C library.
+
+    use crate::compiler::tir::TExpr;
+    use crate::frontend::error::Span;
+
+    fn arg(ty: JadeType) -> TExpr {
+        TExpr { kind: TExprKind::Identifier("db".to_string()), ty, span: Span { line: 3, col: 7 } }
+    }
+
+    #[test]
+    fn a_handle_cannot_be_passed_into_a_task() {
+        let err = reject_handle_across_a_task(&[arg(JadeType::Handle("sqlite3".to_string()))])
+            .expect_err("a handle argument must be refused");
+        match err {
+            JadeError::HandleAcrossTask { type_name, span } => {
+                assert_eq!(type_name, "sqlite3");
+                assert_eq!(span.line, 3, "the error points at the argument, not the spawn");
+            }
+            other => panic!("expected HandleAcrossTask, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_message_names_the_fix_and_not_the_wrong_one() {
+        let err = reject_handle_across_a_task(&[arg(JadeType::Handle("SNDFILE".to_string()))])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("handle<SNDFILE>"), "must name the type: {err}");
+        assert!(err.contains("open the handle inside the task"), "must name the fix: {err}");
+        // The generic shared-mutation advice is the opposite of correct here —
+        // passing it in as a parameter is exactly what was just refused.
+        assert!(!err.contains("pass the value in as a parameter"), "wrong advice: {err}");
+    }
+
+    #[test]
+    fn an_array_of_handles_is_refused_too() {
+        // Wrapping one in a container does not make it safe to share.
+        let ty = JadeType::Array(Box::new(JadeType::Handle("gzFile".to_string())));
+        assert!(reject_handle_across_a_task(&[arg(ty)]).is_err());
+    }
+
+    #[test]
+    fn ordinary_arguments_still_pass() {
+        let ok = [
+            arg(JadeType::Int),
+            arg(JadeType::Str),
+            arg(JadeType::Array(Box::new(JadeType::Int))),
+            arg(JadeType::Struct("Point".to_string())),
+            arg(JadeType::Unknown),
+        ];
+        assert!(reject_handle_across_a_task(&ok).is_ok());
+    }
 }
 
 mod gbnf {

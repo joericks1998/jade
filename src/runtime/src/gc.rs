@@ -211,6 +211,10 @@ unsafe fn is_collection(p: *const c_void) -> bool {
         // Its payload is octets rather than tagged words, so its `free_obj` arm
         // reclaims without a cascade — see the note there.
         || k == ObjKind::Bytes as u8
+        // A handle owns its type name, so it is refcounted on the same terms.
+        // Note this reclaims the *wrapper* only — the foreign pointer inside is
+        // not Jade's to free. See `handle.rs`.
+        || k == ObjKind::Handle as u8
 }
 
 /// Increment the strong count of the collection a `TAG_PTR` word points at. A
@@ -316,6 +320,12 @@ pub(crate) unsafe fn free_obj(ptr: *mut c_void) {
         // read octets as tagged pointers. The opposite mistake, omitting the
         // arm entirely, leaks one object per blob.
         unsafe { free_leaked(ptr as *mut crate::bytesf::BytesObj) };
+    } else if kind == ObjKind::Handle as u8 {
+        // No cascade, and no free of the pointee. The payload is a type name and
+        // an integer; the integer happens to be a foreign pointer, and freeing
+        // it here would hand the C library's memory back to the wrong allocator.
+        // Closing a handle is an explicit call the binding exposes.
+        unsafe { free_leaked(ptr as *mut crate::handle::HandleObj) };
     } else if kind == ObjKind::Future as u8 {
         // A future is header-carrying but not a collection: its payload is a
         // single result word, not a Vec of children, so there is no cascade to

@@ -129,6 +129,12 @@ pub enum JadeError {
     /// this is a data race; see `compiler::taskcheck`.
     SharedMutation { task: String, what: String, span: Span },
 
+    /// A handle was passed into a spawned function. Distinct from
+    /// [`JadeError::SharedMutation`] because the fix is the opposite one: a
+    /// handle is exactly what must *not* be passed in as a parameter, since
+    /// nothing on the Jade side can make sharing it safe.
+    HandleAcrossTask { type_name: String, span: Span },
+
     /// `use "path"` would create a cycle: `a` imports `b` which imports `a`.
     CircularImport { path: String, span: Span },
 
@@ -240,6 +246,14 @@ impl std::fmt::Display for JadeError {
                  tasks run concurrently on a shared heap, so this is a data race\n  \
                  help: pass the value in as a parameter and return the result instead",
                 span.line, span.col, task, what
+            ),
+            JadeError::HandleAcrossTask { type_name, span } => write!(
+                f,
+                "[{}:{}] cannot pass handle<{}> into a task\n  \
+                 a handle is a pointer into a C library, and Jade cannot see what the library \
+                 does with it or know whether it is thread-safe\n  \
+                 help: open the handle inside the task and close it before returning",
+                span.line, span.col, type_name
             ),
             JadeError::CircularImport { path, span } =>
                 write!(f, "[{}:{}] circular import detected: '{}' is already being imported", span.line, span.col, path),

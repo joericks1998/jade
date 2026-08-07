@@ -124,6 +124,68 @@ $aot_out")
   fi
 done < <(find examples -name '*.jde' | sort)
 
+# ── Native handles ───────────────────────────────────────────────────────────
+#
+# Handles are the one value kind `examples/` cannot reach: a handle only ever
+# comes from a native C package, and a Jade package built with `--lib` has no
+# way to mint one. So this runs its own fixture rather than skipping the tag —
+# the same blind spot let the bytes marshaller stay broken for three releases,
+# and it is what turned up the AOT reading freed argument trees.
+#
+# Needs `cc`, which the C shim path already requires. Where there is none the
+# check reports itself skipped rather than silently passing.
+HANDLE_C="$(dirname "$0")/handle-fixture.c"
+HANDLE_JDE="$(dirname "$0")/handle-fixture.jde"
+HANDLE_DIR="$WORK/handles"
+
+if ! command -v cc >/dev/null 2>&1; then
+  printf '  skip  %-52s (%s)\n' "native handle round-trip" "no C compiler"
+  skip=$((skip + 1))
+else
+  mkdir -p "$HANDLE_DIR"
+  case "$(uname -s)" in
+    Darwin) shared=(-dynamiclib) ;;
+    *)      shared=(-shared) ;;
+  esac
+  # The module name is the file stem, so the library must be named for the
+  # `use` that imports it.
+  if ! cc_err="$(cc "${shared[@]}" -fPIC "$HANDLE_C" -o "$HANDLE_DIR/handlefix.so" 2>&1)"; then
+    printf '  FAIL  %-52s (fixture library did not build)\n' "native handle round-trip"
+    failures+=("native handle fixture: $cc_err")
+    fail=$((fail + 1))
+  else
+    cp "$HANDLE_JDE" "$HANDLE_DIR/handles.jde"
+    cat > "$HANDLE_DIR/jade.toml" <<'TOML'
+[project]
+name = "handle-parity"
+
+[lib.handlefix]
+path  = "."
+files = ["handlefix.so"]
+TOML
+    h_vm="$("$JADE" run "$HANDLE_DIR/handles.jde" 2>&1)"; h_vm_rc=$?
+    if ! h_build="$("$JADE" build "$HANDLE_DIR/handles.jde" -o "$HANDLE_DIR/handles.bin" 2>&1)"; then
+      printf '  FAIL  %-52s (AOT build failed)\n' "native handle round-trip"
+      failures+=("native handle round-trip: AOT build failed: $h_build")
+      fail=$((fail + 1))
+    else
+      h_aot="$("$HANDLE_DIR/handles.bin" 2>&1)"; h_aot_rc=$?
+      if [[ "$h_vm" == "$h_aot" && "$h_vm_rc" == "$h_aot_rc" ]]; then
+        printf '  ok    %s\n' "native handle round-trip"
+        pass=$((pass + 1))
+      else
+        printf '  FAIL  %-52s (backends disagree)\n' "native handle round-trip"
+        failures+=("native handle round-trip: VM(rc=$h_vm_rc) vs AOT(rc=$h_aot_rc)
+--- vm
+$h_vm
+--- aot
+$h_aot")
+        fail=$((fail + 1))
+      fi
+    fi
+  fi
+fi
+
 echo
 echo "parity: $pass ok, $skip skipped, $fail failed"
 

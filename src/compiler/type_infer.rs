@@ -968,7 +968,10 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
             } else {
                 let generic = match &tcallee.ty {
                     JadeType::Fn { ret, .. }      => *ret.clone(),
-                    JadeType::AsyncFn { ret, .. } => JadeType::Future(ret.clone()),
+                    JadeType::AsyncFn { ret, .. } => {
+                        reject_handle_across_a_task(&targs)?;
+                        JadeType::Future(ret.clone())
+                    }
                     JadeType::Unknown             => JadeType::Unknown,
                     _                             => return Err(JadeError::NotCallable { span: *span }),
                 };
@@ -2019,6 +2022,49 @@ fn require_bool_or_unknown(ty: &JadeType, span: Span) -> Result<()> {
     }
 }
 
+/// Refuse to let a handle cross into a task.
+///
+/// `taskcheck` cannot catch this. It rejects shared mutation by watching
+/// `SetIndex`/`SetField`/mutating methods, and a handle has none of those — the
+/// mutation happens entirely inside the C library, where Jade sees a call and
+/// nothing else. Two tasks sharing one `sqlite3*` would therefore race with no
+/// diagnostic at all, which is the one bias `taskcheck` explicitly refuses: a
+/// false positive is a compile error the author can see, a false negative is a
+/// data race nobody sees.
+///
+/// Jade cannot know whether a given library is thread-safe — SQLite in
+/// serialized mode is, a libcurl easy handle is not — so it refuses rather than
+/// guesses. A task opens its own handle and closes it before returning.
+///
+/// This fires only once a binding *declares* its types. An undeclared native
+/// call still returns `Unknown`, so a hand-written `jade.toml` package gets no
+/// protection here until its signatures say what they return.
+pub(crate) fn reject_handle_across_a_task(args: &[TExpr]) -> Result<()> {
+    for a in args {
+        if let Some(name) = handle_within(&a.ty) {
+            return Err(JadeError::HandleAcrossTask { type_name: name, span: a.span });
+        }
+    }
+    Ok(())
+}
+
+/// The name of a handle type reachable from `ty` by element types.
+///
+/// An array of handles is as unsafe to share as a bare one, so the walk
+/// descends through the types that name their element. It stops at `Dict` and
+/// `Struct`, whose contents are not in the type — a handle stored in a struct
+/// field still crosses undetected. That gap closes when those types carry their
+/// members, not by special-casing it here.
+fn handle_within(ty: &JadeType) -> Option<String> {
+    match ty {
+        JadeType::Handle(name) => Some(name.clone()),
+        JadeType::Array(elem) | JadeType::Stream(elem) | JadeType::Future(elem) => {
+            handle_within(elem)
+        }
+        _ => None,
+    }
+}
+
 pub fn jade_type_name(ty: &JadeType) -> String {
     match ty {
         JadeType::Int          => "int".to_string(),
@@ -2034,6 +2080,7 @@ pub fn jade_type_name(ty: &JadeType) -> String {
         JadeType::Array(elem)  => format!("[{}]", jade_type_name(elem)),
         JadeType::Dict         => "dict".to_string(),
         JadeType::Struct(name) => name.clone(),
+        JadeType::Handle(name) => format!("handle<{name}>"),
         JadeType::Fn { .. }       => "fn".to_string(),
         JadeType::AsyncFn { .. }  => "async fn".to_string(),
         JadeType::Future(inner)   => format!("future<{}>", jade_type_name(inner)),

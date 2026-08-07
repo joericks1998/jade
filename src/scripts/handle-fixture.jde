@@ -1,0 +1,48 @@
+// Opaque handles must behave identically on both engines.
+//
+// Run by backend-parity.sh against src/scripts/handle-fixture.c, which the
+// script compiles and registers as a native package. This cannot live under
+// examples/ because only a native package can produce a handle, and the built
+// library's extension differs per platform.
+//
+// What each line is for:
+//   - printing a handle names its type and never its address, or the two
+//     engines would diff on a number that changes every run
+//   - reading through it proves the pointer survived the trip
+//   - `tag_of` returns a pointer into its own argument, which is what caught
+//     the AOT freeing argument trees before it read the result
+//   - two handles at the same address with different types must stay distinct
+//   - the live count proves Jade frees its wrapper and never the pointee
+use handlefix
+
+let h = handlefix.open("widget")
+print(h)
+print(handlefix.name(h))
+print(handlefix.tag_of(h))
+
+let c = handlefix.cursor(h)
+print(c)
+print(handlefix.tag_of(c))
+
+print(handlefix.live())
+
+// A handle that goes out of scope: Jade reclaims its own wrapper, and the
+// library's object is untouched.
+fn scoped() {
+    let tmp = handlefix.open("temp")
+    return handlefix.name(tmp)
+}
+print(scoped())
+print(handlefix.live())
+
+handlefix.close(h)
+print(handlefix.live())
+
+// An error from the package is catchable, and its message survives the
+// argument trees being released.
+try {
+    handlefix.close(h)
+    print("not reached")
+} catch e {
+    print("caught")
+}

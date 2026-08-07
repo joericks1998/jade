@@ -39,6 +39,12 @@ pub enum VmValue {
     /// NUL-terminated and arbitrary bytes are neither, so conversion is
     /// explicit in both directions. Shares `BytesObj` with the AOT heap.
     Bytes(Arc<jade_runtime::bytesf::BytesObj>),
+    /// An opaque pointer handed over by a native package — a `sqlite3*`, a
+    /// `SNDFILE*`. Jade holds it and passes it back; it never looks inside and
+    /// never frees the pointee. Carries the C type it came from so a
+    /// `sqlite3_stmt` cannot be passed where a `sqlite3` is expected. Shares
+    /// `HandleObj` with the AOT heap.
+    Handle(Arc<jade_runtime::handle::HandleObj>),
     /// A string plus where it came from. The trust byte is the same one
     /// compiled code keeps in the string header — the interpreter tracked no
     /// trust at all, so `sh.exec(sh.exec("..."))` ran under `jade run` and was
@@ -101,6 +107,7 @@ impl std::fmt::Debug for VmValue {
             VmValue::Bool(b)  => write!(f, "Bool({})", b),
             VmValue::Char(c)  => write!(f, "Char({:?})", c.ch()),
             VmValue::Bytes(b) => write!(f, "Bytes[{} byte(s)]", b.len()),
+            VmValue::Handle(h) => write!(f, "{:?}", h),
             VmValue::Str(s)   => write!(f, "Str({:?})", s),
             VmValue::Fn(cf)   => write!(f, "Fn({})", cf.params.join(", ")),
             VmValue::Closure(cf, _) => write!(f, "Closure({})", cf.params.join(", ")),
@@ -170,6 +177,7 @@ pub fn value_to_display(v: &VmValue) -> String {
         }
         VmValue::Char(c)               => c.ch().to_string(),
         VmValue::Bytes(b)              => jade_runtime::render::render_bytes(b.as_slice()),
+        VmValue::Handle(h)             => jade_runtime::handle::render(h),
         VmValue::TypeRef(t)            => format!("<type {}>", t),
         VmValue::Nil                   => "nil".to_string(),
     }
@@ -183,6 +191,10 @@ pub fn value_type_name(v: &VmValue) -> &'static str {
         VmValue::Bool(_) => "bool",
         VmValue::Char(_) => "char",
         VmValue::Bytes(_) => "bytes",
+        // The C type is in the value, not the name — same as `struct`, which
+        // reports "struct" rather than "Point". A message that needs to name the
+        // specific type reads it off the handle.
+        VmValue::Handle(_) => "handle",
         VmValue::Str(_) => "str",
         VmValue::Array(_) => "array",
         VmValue::Dict(_) => "dict",

@@ -133,7 +133,7 @@ fn add_writes_c_abi_with_symbols() {
     let mut symbols = HashMap::new();
     symbols.insert(
         "crc32".to_string(),
-        CSymbol { args: vec!["int".into(), "str".into()], ret: "int".into() },
+        CSymbol { args: vec!["int".into(), "str".into()], ret: "int".into(), fails_when: None },
     );
 
     add_dependency(tmp.path(), "zlib", Source::Path("libz.so"), Some("1.3.1"), Abi::C, Some(&symbols))

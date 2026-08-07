@@ -2,7 +2,7 @@
 
 ## What this subtree is
 
-Two files, and they solve one problem between them: proving that Jade's two execution engines agree.
+Four files, and they solve one problem between them: proving that Jade's two execution engines agree.
 
 It lives under `src/` for tidiness rather than because it is source — nothing here is compiled into the crate. `jade.toml` makes the directory a Jade project root so the stub provider can reach the protocol submodule through a `[lib]` entry, which means the path in it is relative to *this* directory: `../protocol/jade` is `src/protocol/jade`.
 
@@ -16,6 +16,11 @@ The second file exists because the parity gate originally skipped everything und
 
 - **`backend-parity.sh`** — runs every example on both engines and diffs stdout. Takes an optional path to a `jade` binary. It builds the stand-in provider once, installs it in a throwaway slot, and points `JADE_PROVIDER_ACTIVE` there for the whole run. It maintains a skip list; read the header before assuming an example is covered.
 - **`fake-provider.jde`** — a stand-in inference provider, answering every prompt with the reply in `JADE_FAKE_REPLY`. Built with `jade build --lib` and loaded exactly the way a released binary loads a real provider, so the gate exercises the real path. An example supplies its own reply as `responses.txt` beside the `.jde`; without one it gets a default.
+- **`handle-fixture.c`** and **`handle-fixture.jde`** — a stand-in *native* package handing out opaque handles, and the Jade program that exercises it. Compiled with `cc` and run on both engines as an extra parity case after the examples.
+
+  They are here rather than under `examples/` for a reason worth stating: a handle only ever comes from a native C package, and a Jade package built with `--lib` cannot mint one, so no `.jde` fixture can reach the tag at all. Leaving it there would be the same blind spot that let the `bytes` marshaller stay broken for three releases — and pointing this at it immediately turned up the AOT releasing its argument trees before reading the result, so a native function returning a pointer into its own argument gave an empty string compiled and the right one interpreted. The built library's extension also differs per platform, which a committed `jade.toml` under `examples/` would have to hard-code.
+
+  `jade_pkg_abi_version` in the C file must match `jade_runtime::RUNTIME_ABI_VERSION`, or the loader refuses the package and the gate fails with a version message rather than a parity one.
 
 This used to be `fake-jaded.py`, a stand-in *daemon* serving canned responses over a Unix socket, restarted between the VM and AOT runs so each engine read the same script from the top. The socket went away in v1.1.30, so the stub became a package — which needs no restart, since it holds no position in a script.
 
@@ -23,7 +28,7 @@ This used to be `fake-jaded.py`, a stand-in *daemon* serving canned responses ov
 
 *Used by:* `.github/workflows/ci.yml` runs `backend-parity.sh` as a required step on every pull request. Run it locally before opening one.
 
-*Depends on:* a built `jade` binary (defaults to `./target/debug/jade`), the fixtures in `examples/`, and the `src/protocol` submodule the stub imports. Both paths are relative to the current directory, so run it from the repository root. Building the stand-in provider means the gate needs a working `jade build`, so an AOT regression fails here before it fails an example.
+*Depends on:* a built `jade` binary (defaults to `./target/debug/jade`), the fixtures in `examples/`, the `src/protocol` submodule the stub imports, and `cc` for the handle fixture — which the C shim path already requires, and whose absence reports as a skip rather than a silent pass. Both paths are relative to the current directory, so run it from the repository root. Building the stand-in provider means the gate needs a working `jade build`, so an AOT regression fails here before it fails an example.
 
 ## Running them
 

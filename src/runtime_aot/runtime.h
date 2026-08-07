@@ -419,6 +419,18 @@ void     jk_fs_write_bytes(const char* path, int64_t blob);
 void     jk_fs_append_bytes(const char* path, int64_t blob);
 int64_t  jk_fs_read_stdin_bytes(void);
 void     jk_fs_write_stdout_bytes(int64_t blob);
+/* ── handles ──────────────────────────────────────────────────────────────
+ * An opaque foreign pointer (ObjKind::Handle), plus the C type it came from.
+ * The Rust side owns the representation (jade-runtime, src/handle.rs).
+ *
+ * `jrt_handle_new` copies the type name and stores `ptr` verbatim without ever
+ * dereferencing it. Reclaiming a handle frees the name and the wrapper only —
+ * the pointee belongs to the library that made it. */
+void*       jrt_handle_new(void* ptr, const char* type_name);
+void*       jrt_handle_ptr(const void* p);
+const char* jrt_handle_type(const void* p);
+int32_t     jrt_handle_is_type(const void* p, const char* name);
+
 int64_t jrt_float_any(int64_t val);
 int64_t jrt_bool_any(int64_t val);
 
@@ -435,6 +447,7 @@ int64_t jrt_bool_any(int64_t val);
 #define JK_DICT   3
 #define JK_STRUCT 4
 #define JK_BYTES  10
+#define JK_HANDLE 11
 #define JK_PROMPT 7
 
 /* jrt_require_kind — the receiver guard the Chunk backend emits ahead of a
@@ -742,10 +755,11 @@ char*   jrt_readline(const char* prompt);
  *
  * The FFI value type (JadeVal) is a 16-byte tagged union that MUST byte-match
  * `JadeVal` in jadelang/src/native.rs so the same .dylib serves both the VM and
- * AOT. Its tags (0..9) are an independent ABI, distinct from the jade_value_t
- * low-bit tags above. Scalars convert directly; arrays, dicts, structs and
- * bytes are deep-copied into nested JadeArr/JadeMap/JadeStruct/JadeBytes trees
- * (see below). Remaining heap kinds (functions, futures, prompts) become nil. */
+ * AOT. Its tags (0..10) are an independent ABI, distinct from the jade_value_t
+ * low-bit tags above. Scalars convert directly; arrays, dicts, structs, bytes
+ * and handles are copied into nested JadeArr/JadeMap/JadeStruct/JadeBytes/
+ * JadeHandle trees (see below). Remaining heap kinds (functions, futures,
+ * prompts) become nil. */
 #define JADE_FFI_NIL   0
 #define JADE_FFI_INT   1
 #define JADE_FFI_FLOAT 2
@@ -760,9 +774,21 @@ char*   jrt_readline(const char* prompt);
  * UTF-8: a char* would truncate one and corrupt the other. Added in v1.2.2,
  * which is why the runtime ABI version moved to 3. */
 #define JADE_FFI_BYTES 9
+/* data.as_handle -> JadeHandle (wrapper copied, pointee NOT owned). An opaque
+ * pointer the package hands out and takes back — a sqlite3*, a SNDFILE*. Jade
+ * never dereferences it, so the whole class of library organised around one
+ * (SQLite, libsndfile, PCRE2, FreeType, libcurl, libarchive) becomes bindable.
+ *
+ * The critical difference from every other container tag: jade_ffi_free frees
+ * the JadeHandle wrapper and its type_name, and NEVER `ptr`. Jade does not know
+ * what the pointee is or which allocator produced it, and a sqlite3* released
+ * by anything but sqlite3_close corrupts the library. Closing is an explicit
+ * call the binding exposes. Added in v1.3.0, which is why the runtime ABI
+ * version moved to 4. */
+#define JADE_FFI_HANDLE 10
 
 /* Nested payloads for JADE_FFI_ARRAY / JADE_FFI_DICT / JADE_FFI_STRUCT /
- * JADE_FFI_BYTES.
+ * JADE_FFI_BYTES / JADE_FFI_HANDLE.
  *
  * A collection cannot cross the boundary by pointer: the process holds two
  * `jade-runtime` instances (the VM binary and each dlopen'd package), each with
@@ -779,6 +805,7 @@ typedef struct JadeArr JadeArr;
 typedef struct JadeMap JadeMap;
 typedef struct JadeStruct JadeStruct;
 typedef struct JadeBytes JadeBytes;
+typedef struct JadeHandle JadeHandle;
 
 typedef union {
     int64_t     as_int;
@@ -790,6 +817,7 @@ typedef union {
     JadeMap*    as_dict;
     JadeStruct* as_struct;
     JadeBytes*  as_bytes;
+    JadeHandle* as_handle;
 } JadeValData;
 
 typedef struct {
@@ -814,12 +842,26 @@ struct JadeStruct {
     size_t       len;
 };
 
+/* An opaque foreign pointer plus the C type it came from.
+ *
+ * `type_name` is libc-owned and freed with the wrapper, exactly like the other
+ * container payloads. `ptr` is not: it belongs to the library that produced it.
+ * The name makes `handle<sqlite3>` and `handle<sqlite3_stmt>` distinct, so a
+ * binding can refuse the wrong one instead of letting the library dereference
+ * it — the same reason JadeStruct carries a type name. */
+struct JadeHandle {
+    void*       ptr;
+    const char* type_name;
+};
+
 /* Release a JadeVal tree built by the marshaller (`to_ffi`/`jrt_ffi_from_tagged`
  * / the VM's vm_to_ffi). Frees only the libc-owned parts — JadeArr/JadeMap/
- * JadeStruct/JadeBytes nodes, their element arrays and payloads, and copied
- * strings inside a container — so it is a no-op on scalars and safe to call on
- * any JadeVal. The consumer of a native call frees both the argument trees it
- * built and an owning return value with it. */
+ * JadeStruct/JadeBytes/JadeHandle nodes, their element arrays and payloads, and
+ * copied strings inside a container — so it is a no-op on scalars and safe to
+ * call on any JadeVal. The consumer of a native call frees both the argument
+ * trees it built and an owning return value with it.
+ *
+ * The one thing it does NOT free is a JadeHandle's `ptr`. See JADE_FFI_HANDLE. */
 void jade_ffi_free(JadeVal* v);
 
 typedef int (*JadeNativeFnPtr)(size_t argc, const JadeVal* argv, JadeVal* out);

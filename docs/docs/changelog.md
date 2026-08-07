@@ -4,6 +4,16 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.3.0
+
+- **Native packages can hand Jade an opaque handle.** A handle is a pointer the library owns: Jade holds it, passes it back, and never looks inside. That one addition is what makes a whole class of C library bindable at all — SQLite, libsndfile, PCRE2, FreeType, libcurl and libarchive are all built around a pointer you keep between calls, and until now there was nowhere in the value ABI to put one, so it arrived as `nil`.
+- **A handle carries the C type it came from.** `handle<sqlite3>` and `handle<sqlite3_stmt>` are different values even at the same address, so passing a statement where a connection belongs is an error you can read rather than a crash inside the library. Printing one shows `handle<sqlite3>` — never the address, which would differ on every run.
+- **Jade never closes a handle for you.** It reclaims its own wrapper and leaves the pointer alone, because it cannot know what the pointer is or which allocator made it. Closing is a call the binding exposes. The trade is explicit: a handle you drop without closing leaks whatever the library allocated.
+- **A handle cannot be passed into a task.** Jade can see nothing of what a library does with one, and cannot tell a thread-safe library from an unsafe one, so sharing a handle across tasks is refused at compile time instead of racing silently. Open one inside the task and close it before returning.
+- **A failing C binding can say why.** A symbol in `jade.toml` may declare `fails_when` — `null`, `negative`, or `nonzero` — and the generated shim then turns a failed call into a catchable Jade error carrying the `errno` reason. Before this the reason the library had already recorded was thrown away, and the program saw `-1` and nothing else.
+- **Fixed: a compiled binary read freed memory when a native function returned a pointer into its own argument.** The compiled runtime released the marshalled arguments before it converted the result, so such a call gave an empty string built and the right one run. The interpreter always had the order right.
+- **`RUNTIME_ABI_VERSION` is 4, and `CACHE_FORMAT_VERSION` is 7.** Native packages built against an older Jade must be rebuilt — the loader refuses them by name and version rather than misreading a tag. Run `jade cache clean` if you built from a 1.2.x branch.
+
 ## v1.2.5
 
 - **Fixed: `http.get_bytes` and `post_bytes` could not be compiled.** They shipped in v1.2.2 as interpreter-only functions, with no lowering and no `jrt_*` symbol. So a program using a byte body passed `jade check`, ran under `jade run`, and failed at `jade build` with "unsupported module call" — the one place a missing builtin surfaces last, when you try to ship. Both now work on both engines.

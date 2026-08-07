@@ -1,7 +1,16 @@
 use super::*;
 
 fn sym(args: &[&str], ret: &str) -> CSymbol {
-    CSymbol { args: args.iter().map(|s| s.to_string()).collect(), ret: ret.to_string() }
+    CSymbol {
+        args: args.iter().map(|s| s.to_string()).collect(),
+        ret: ret.to_string(),
+        fails_when: None,
+    }
+}
+
+/// The same, with a declared failure convention.
+fn failing_sym(args: &[&str], ret: &str, f: crate::project::CFailure) -> CSymbol {
+    CSymbol { fails_when: Some(f), ..sym(args, ret) }
 }
 
 fn symbols(pairs: &[(&str, CSymbol)]) -> HashMap<String, CSymbol> {
@@ -104,4 +113,98 @@ fn every_ffi_type_maps() {
         assert!(map_type(t).is_some(), "{t} should map");
     }
     assert!(map_type("nil").is_none(), "nil is a return-only spelling");
+}
+
+// ── Failure conventions and errno ─────────────────────────────────────────
+//
+// Without these, a failed C call returns its raw sentinel and the reason — which
+// the library already put in errno — is thrown away. The Jade program sees -1
+// and nothing else.
+
+use crate::project::CFailure;
+
+#[test]
+fn a_null_convention_tests_the_return_and_reports_errno() {
+    let src = generate("z", &symbols(&[("gzopen", failing_sym(&["str", "str"], "int", CFailure::Null))])).unwrap();
+    assert!(src.contains("errno = 0;"), "errno must be cleared before the call:\n{src}");
+    assert!(src.contains("if (!(r)) {"), "missing null test:\n{src}");
+    assert!(src.contains("out->tag = JADE_FFI_ERROR;"), "failure must raise:\n{src}");
+    assert!(src.contains("jade_shim_errmsg()"), "must report the reason:\n{src}");
+}
+
+#[test]
+fn each_convention_emits_its_own_test() {
+    let cases = [
+        (CFailure::Null, "if (!(r)) {"),
+        (CFailure::Negative, "if ((r) < 0) {"),
+        (CFailure::Nonzero, "if ((r) != 0) {"),
+    ];
+    for (conv, expect) in cases {
+        let src = generate("l", &symbols(&[("f", failing_sym(&["int"], "int", conv))])).unwrap();
+        assert!(src.contains(expect), "{conv:?} should emit `{expect}`:\n{src}");
+    }
+}
+
+#[test]
+fn a_symbol_that_cannot_fail_does_not_touch_errno() {
+    // Every call paying for an errno read would be a cost on the common path,
+    // and a symbol with no convention has no sentinel to test anyway.
+    let src = generate("m", &symbols(&[("hypot", sym(&["float", "float"], "float"))])).unwrap();
+    assert!(!src.contains("errno = 0;"), "no convention means no errno handling:\n{src}");
+    assert!(!src.contains("JADE_FFI_ERROR;"), "nothing should raise:\n{src}");
+}
+
+#[test]
+fn never_is_the_same_as_omitting_the_key() {
+    let never = generate("m", &symbols(&[("f", failing_sym(&["int"], "int", CFailure::Never))])).unwrap();
+    let absent = generate("m", &symbols(&[("f", sym(&["int"], "int"))])).unwrap();
+    assert_eq!(never, absent);
+}
+
+#[test]
+fn a_void_symbol_cannot_declare_a_failure_convention() {
+    // There is no return value to test, so the declaration could only be
+    // silently ignored. Naming it is better.
+    let err = generate("l", &symbols(&[("f", failing_sym(&["int"], "nil", CFailure::Negative))]))
+        .expect_err("nil + fails_when should be refused");
+    assert!(err.contains("returns nil"), "message should say why: {err}");
+    assert!(err.contains("drop `fails_when`"), "message should name a fix: {err}");
+
+    // `never` on a void symbol is fine — it asserts what is already true.
+    assert!(generate("l", &symbols(&[("f", failing_sym(&["int"], "nil", CFailure::Never))])).is_ok());
+}
+
+#[test]
+fn the_generated_shim_compiles() {
+    // The rest of these tests assert on the text of the C. This one asserts the
+    // C is *valid*, which is the property that actually matters and the one a
+    // string check cannot reach — an unbalanced brace or a missing include
+    // passes every assertion above and fails at install time.
+    let syms = symbols(&[
+        ("gzopen", failing_sym(&["str", "str"], "int", CFailure::Null)),
+        ("gzread", failing_sym(&["int", "int"], "int", CFailure::Negative)),
+        ("gzclose", failing_sym(&["int"], "int", CFailure::Nonzero)),
+        ("crc32", sym(&["int", "str"], "int")),
+        ("noop", sym(&[], "nil")),
+    ]);
+    let src = generate("z", &syms).unwrap();
+
+    let dir = std::env::temp_dir().join(format!("jade-cshim-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let c = dir.join("shim.c");
+    std::fs::write(&c, &src).unwrap();
+
+    let out = std::process::Command::new("cc")
+        .args(["-c", "-Wall", "-Werror", "-o"])
+        .arg(dir.join("shim.o"))
+        .arg(&c)
+        .output()
+        .expect("cc must be available — it is already required to bind a C library");
+
+    assert!(
+        out.status.success(),
+        "generated shim does not compile:\n{}\n--- source ---\n{src}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

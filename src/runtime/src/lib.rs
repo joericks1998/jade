@@ -91,6 +91,7 @@ pub mod float;
 pub mod fsf;
 pub mod gc;
 pub mod grammarf;
+pub mod handle;
 pub mod heap;
 pub mod httpf;
 pub mod jsonf;
@@ -125,7 +126,8 @@ pub use value::{JadeValue, FALSE, NIL, TRUE};
 /// compatibility.
 /// v3 (1.2.2): `JADE_TAG_BYTES`. A package built against v2 has no arm for it,
 /// so it must be rebuilt rather than handed a tag it will read as garbage.
-pub const RUNTIME_ABI_VERSION: u32 = 3;
+/// v4 (1.3.0): `JADE_TAG_HANDLE`, and `ObjKind::Handle` on the heap side.
+pub const RUNTIME_ABI_VERSION: u32 = 4;
 
 /// C-ABI accessor for [`RUNTIME_ABI_VERSION`]. Also serves as a trivial
 /// exported symbol proving the `staticlib` links.
