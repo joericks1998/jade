@@ -79,15 +79,30 @@ pub fn run_add(
         }
     };
 
-    // A header is only meaningful for a plain C library, so it implies --c-abi
-    // rather than having to be paired with it.
-    let abi = if c_abi || header.is_some() { Abi::C } else { Abi::Jade };
+    // A local artifact can be read for its export table — which says both what
+    // kind of library it is and, later, whether a candidate header describes it.
+    let lib_path = path.map(|p| root.join(p)).filter(|p| p.exists());
+
+    // What the user said, then what the artifact says, then the default. A
+    // header is only meaningful for a plain C library, so passing one is itself
+    // a statement of the ABI.
+    let abi = if c_abi || header.is_some() {
+        Abi::C
+    } else {
+        match lib_path.as_deref().and_then(detect_abi) {
+            Some(Abi::C) => {
+                println!("{name} exports no jade_pkg_init, so it is a plain C library");
+                Abi::C
+            }
+            Some(Abi::Jade) => Abi::Jade,
+            // A URL dependency has nothing to read yet, and an unreadable table
+            // proves nothing. Assume a Jade package, which is what `--c-abi` is
+            // there to correct.
+            None => Abi::Jade,
+        }
+    };
 
     manifest::add_dependency(&root, name, source, version, abi, None).unwrap_or_else(|e| fail(e));
-
-    // A local artifact can be read for its export table, which is what turns a
-    // discovered header from a guess into a checked answer.
-    let lib_path = path.map(|p| root.join(p)).filter(|p| p.exists());
 
     // Given, or found. A .so has no headers in it — names only, and C does not
     // mangle them — so one has to come from the filesystem; but the user should
@@ -125,6 +140,21 @@ pub fn run_add(
     let manifest = load_or_exit(&root);
     relock_and_install(&root, &manifest);
     println!("added {name}");
+}
+
+/// Which ABI an artifact speaks, read from the artifact itself.
+///
+/// A Jade package exports `jade_pkg_init`; a plain C library does not. That is
+/// not a heuristic — it is the same symbol the loader requires at run time, so
+/// anything answering "Jade" here is exactly what `use` will later accept.
+/// Both kinds are a `.dylib`, so the file extension says nothing and only the
+/// symbol table can tell them apart.
+///
+/// `None` when the table cannot be read, which is a reason to fall back on what
+/// the user said rather than to guess.
+fn detect_abi(lib: &std::path::Path) -> Option<Abi> {
+    let syms = pkg::bindgen::exported_symbols(lib)?;
+    Some(if syms.contains("jade_pkg_init") { Abi::Jade } else { Abi::C })
 }
 
 // ── binding a C library ───────────────────────────────────────────────────────

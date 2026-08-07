@@ -194,7 +194,8 @@ enum PkgCommands {
         /// Exact version (required for --url; there are no version ranges)
         #[arg(long, value_name = "VERSION")]
         version: Option<String>,
-        /// The artifact is a plain C library, not a Jade-ABI package
+        /// Force plain-C binding. Usually unnecessary — a local artifact is
+        /// recognised by whether it exports jade_pkg_init
         #[arg(long = "c-abi")]
         c_abi: bool,
         /// The C library's header. Implies --c-abi, and binds it on the spot
