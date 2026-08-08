@@ -304,7 +304,7 @@ If you write or correct a symbol by hand, these are the spellings `args` and `re
 | `bytes` | Binary data. As an argument it is one Jade value and the two C parameters `(const void*, size_t)`. |
 | `handle<T>` | An opaque pointer the library owns — a `sqlite3*`, a `SNDFILE*`. Jade holds it, hands it back, and never looks inside. The type name is checked, so passing a statement where a connection belongs is a readable error rather than a crash inside the library. `T` is written the way C writes it, so a struct with no typedef of its own keeps the keyword: `handle<struct ZSTD_CCtx_s>`. |
 | `out_buffer:<ctype>` | A buffer the call fills. It consumes **no** Jade argument: `x_read(handle, buf, n)` is called as `x_read(handle, n)` and hands back the bytes. Its size comes from the next declared argument, which must be an `int`. |
-| `out_struct:<Type>` | A struct the call fills through a pointer. Needs the library's real header in `headers`. |
+| `out_struct:<Type>` | A struct the call fills through a pointer. Needs the library's real header in `headers`. Only for a record *one call* fills — a struct the caller allocates and the library keeps between calls cannot be one, because the shim zeroes a fresh local each time. |
 | `out_handle:<T>` | A handle written through a pointer — `sqlite3_open(path, &db)`. The C return value becomes the status, and the handle is what Jade gets. |
 | `callback:<ret>(<args>)` | A Jade function the library may call while the call runs. The signature is written in the library's own C types, e.g. `callback:int(int, const char*)`. |
 

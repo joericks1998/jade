@@ -808,3 +808,104 @@ fn with_no_export_table_every_declared_symbol_is_still_bound() {
     let b = bind_tree(&[("main.h", "int a(int x);\nint b(int x);\n")], None).expect("should bind");
     assert_eq!(b.symbols.len(), 2, "{:?}", b.symbols.keys());
 }
+
+// ── Caller-held state is not an out-parameter ────────────────────────────
+//
+// Three different things wear the shape "writable pointer to a struct the
+// header defines", and treating them all as out-parameters is how twelve of
+// liblzma's symbols came to bind into shims that ran and did nothing.
+
+#[test]
+fn a_struct_the_caller_keeps_between_calls_is_not_an_out_parameter() {
+    // The lzma_stream shape: pointer fields the FFI cannot carry, threaded
+    // through a sequence of calls. An out_struct shim zeroes a fresh local
+    // every call, so the encoder would initialise a stream and throw it away
+    // and the next call would run against a different zeroed one.
+    let b = bind(
+        "typedef struct { const unsigned char* next_in; unsigned long avail_in; \
+           unsigned char* next_out; void* internal; } strm;\n\
+         int strm_start(strm* s, int preset);\n\
+         int strm_code(strm* s, int action);\n\
+         void strm_end(strm* s);\n",
+    );
+    for sym in ["strm_start", "strm_code", "strm_end"] {
+        assert!(!b.symbols.contains_key(sym), "{sym} should not bind: {:?}", b.symbols.get(sym));
+        assert!(why_skipped(&b, sym).contains("caller allocates"), "{:?}", b.skipped);
+    }
+}
+
+#[test]
+fn a_struct_the_library_hands_out_is_a_handle_not_an_out_parameter() {
+    // The library allocates it, so Jade holds it. This is the same answer the
+    // return position already gives the same type.
+    let b = bind(
+        "typedef struct { int a; void* guts; } ctx;\n\
+         ctx* ctx_new(void);\n\
+         int ctx_get(ctx* c);\n\
+         int ctx_set(ctx* c, int v);\n",
+    );
+    assert_eq!(ret(&b, "ctx_new"), "handle<ctx>");
+    assert_eq!(args(&b, "ctx_get"), ["handle<ctx>"]);
+    assert_eq!(args(&b, "ctx_set"), ["handle<ctx>", "int"]);
+}
+
+#[test]
+fn a_struct_written_through_a_double_pointer_is_also_handed_out() {
+    let b = bind(
+        "typedef struct { int a; void* guts; } ctx;\n\
+         int ctx_open(const char* path, ctx** out);\n\
+         int ctx_get(ctx* c);\n",
+    );
+    assert_eq!(args(&b, "ctx_get"), ["handle<ctx>"]);
+}
+
+#[test]
+fn a_record_filled_by_several_functions_is_still_an_out_parameter() {
+    // libsndfile's SF_INFO is passed to three `sf_open` variants and is exactly
+    // what out-parameters exist for. Appearing in several functions is not on
+    // its own a reason to refuse — only losing a field as well is.
+    let b = bind(
+        "#include <stdint.h>\n\
+         typedef struct { int64_t frames; int rate; const char* title; } SF_INFO;\n\
+         int sf_open(const char* p, int mode, SF_INFO* info);\n\
+         int sf_open_fd(int fd, int mode, SF_INFO* info);\n\
+         int sf_open_virtual(int v, int mode, SF_INFO* info);\n",
+    );
+    assert_eq!(args(&b, "sf_open"), ["str", "int", "out_struct:SF_INFO"]);
+    assert_eq!(args(&b, "sf_open_fd"), ["int", "int", "out_struct:SF_INFO"]);
+    assert!(b.structs.contains_key("SF_INFO"));
+}
+
+#[test]
+fn a_record_with_one_uncarryable_field_is_still_an_out_parameter() {
+    // Losing a field is not on its own a reason to refuse either. A record
+    // filled by one call is read once and discarded, so the dropped field costs
+    // nothing — which is the behaviour the field-dropping rule already had.
+    let b = bind("typedef struct { int ok; void* opaque; int also_ok; } S;\nvoid f(S* s);\n");
+    assert_eq!(args(&b, "f"), ["out_struct:S"]);
+    let names: Vec<&str> = b.structs["S"].fields.iter().map(|(f, _)| f.as_str()).collect();
+    assert_eq!(names, ["ok", "also_ok"]);
+}
+
+#[test]
+fn caller_held_state_needs_both_signals() {
+    // The same struct as the state test, but used by one function only: a
+    // record, and it binds. Neither signal refuses on its own.
+    let b = bind(
+        "typedef struct { const unsigned char* next_in; unsigned long avail_in; } strm;\n\
+         int strm_once(strm* s);\n",
+    );
+    assert_eq!(args(&b, "strm_once"), ["out_struct:strm"]);
+}
+
+#[test]
+fn a_caller_held_state_library_still_binds_and_compiles_the_rest() {
+    round_trip(
+        "typedef struct { const unsigned char* next_in; void* internal; } strm;\n\
+         int strm_code(strm* s, int action);\n\
+         void strm_end(strm* s);\n\
+         const char* strm_version(void);\n\
+         int strm_preset(int level);\n",
+    )
+    .expect("the symbols that do not touch the state struct should still bind");
+}

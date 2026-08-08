@@ -103,6 +103,47 @@ The cost is real and worth stating: a dependency using `out_struct` needs the
 library's development headers present at install time, and `include_dirs` when
 they are not on the default search path. Anyone who has the library has them.
 
+## A writable struct pointer is three different things
+
+`int f(S* s)` where the header defines `S` looks like one shape and is three,
+and binding all of them as out-parameters is how twelve of liblzma's symbols
+came to compile, install, run and do nothing.
+
+**The library hands it out.** If some function returns `S*`, or writes one
+through an `S**`, then the library owns the allocation and Jade should hold it.
+That is a handle — the same answer the return position already gave the same
+type, so reading it here removes an asymmetry rather than adding a rule.
+
+**The caller allocates it and the library keeps it.** `lzma_stream`,
+`ZSTD_outBuffer`, `fd_set`. An `out_struct` shim declares a *zeroed local* every
+call and reads the carryable fields back out, which is right for a record one
+call fills and ruinous for a struct threaded through a sequence: the encoder
+initialises a stream and throws it away, and the next call runs against a
+different zeroed one. `ZSTD_outBuffer` is worse still — its `void* dst` would be
+zeroed to NULL and written through.
+
+**It is a record one call fills.** `SF_INFO`. This is what out-parameters are
+for, and it stays.
+
+Two signals separate the second from the third, and *both* are required:
+
+| | loses a field | threaded through several calls | verdict |
+|---|---|---|---|
+| `SF_INFO` | no | yes (three `sf_open` variants) | record |
+| `S { int; void*; int }` | yes | no (one function) | record, field dropped |
+| `lzma_stream` | yes | yes (thirteen functions) | caller-held state |
+
+Neither alone is enough. Losing a field is not disqualifying, because a record
+read once and discarded does not miss what was dropped — and refusing on that
+alone would take `SF_INFO`-shaped structs carrying one `void*`. Appearing in
+several functions is not disqualifying either, because filling the same record
+from three entry points is ordinary. It is the *combination* — state that is
+kept, and cannot be carried — that cannot work under any binding.
+
+The cost is honest and worth stating: liblzma's reported coverage falls from 49
+symbols to 36. Those thirteen were not working before; they were reporting
+success.
+
 ## Ownership at the boundary
 
 A value **inside a container** is container-owned, so Jade's `ffi_free` frees

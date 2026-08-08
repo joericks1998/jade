@@ -550,7 +550,14 @@ enum Mapped {
 /// `next` matters because C encodes two-parameter idioms positionally: a
 /// pointer followed by a length is a buffer, and the pair has to be recognised
 /// together or not at all.
-fn map_param(raw_in: &str, next: Option<&str>, env: &TypeEnv, ret: &str) -> Mapped {
+fn map_param(
+    raw_in: &str,
+    next: Option<&str>,
+    env: &TypeEnv,
+    ret: &str,
+    produced: &std::collections::HashSet<String>,
+    counts: &HashMap<String, usize>,
+) -> Mapped {
     // Expanded before anything is decided, so a library's own typedefs read as
     // the types they stand for. `const` comes from the expansion, not the
     // written parameter, because a typedef can introduce it.
@@ -646,12 +653,48 @@ fn map_param(raw_in: &str, next: Option<&str>, env: &TypeEnv, ret: &str) -> Mapp
         return Mapped::One(format!("handle<{}>", env.c_name(inner)));
     }
 
-    // A pointer to a struct the header defines. Writable means the call fills
-    // it; const means it reads one, which is the direction the shim cannot do.
+    // A pointer to a struct the header defines. Three different things wear this
+    // shape, and treating them all as out-parameters is how `lzma_code` came to
+    // bind into a shim that ran and did nothing.
     if env.complete.contains_key(inner) {
         if is_const {
             return Mapped::Reject("takes a struct by pointer as input".to_string());
         }
+
+        // The library allocates it, so Jade should hold it rather than build
+        // one. This is the same answer `map_ret` already gives the type in
+        // return position.
+        if produced.contains(inner) {
+            return Mapped::One(format!("handle<{}>", env.c_name(inner)));
+        }
+
+        // Caller-held state. Two signals, and both are needed.
+        //
+        // An `out_struct` shim declares a *zeroed local* every call and reads
+        // the carryable fields back out. That is right for a record one call
+        // fills. It is wrong for a struct the caller threads through a sequence
+        // of calls, because the fields the FFI cannot carry — the pointers a
+        // codec keeps its position in — are dropped, and the next call gets a
+        // fresh zeroed struct instead of the state it left.
+        //
+        // Losing a field alone is not enough: a record with one `void*` in it
+        // is still a record, and dropping that field is the documented
+        // behaviour. Appearing in several functions alone is not enough either:
+        // libsndfile's `SF_INFO` is passed to three `sf_open` variants and is
+        // exactly what out-parameters exist for. Together they identify a
+        // struct that is both threaded and unrepresentable, which is the
+        // combination that cannot work.
+        let threaded = counts.get(inner).copied().unwrap_or(0) > 1;
+        let lossy = env.complete.get(inner).is_some_and(|f| struct_loses_a_field(f, env));
+        if threaded && lossy {
+            return Mapped::Reject(format!(
+                "takes `{}`, which the caller allocates and the library keeps between calls. \
+                 Some of its fields are not types the FFI can carry, so every call would get a \
+                 fresh zeroed one instead of the state the last call left",
+                env.c_name(inner)
+            ));
+        }
+
         return Mapped::Out(format!("out_struct:{}", env.c_name(inner)), None);
     }
 
@@ -863,6 +906,13 @@ pub fn from_header(
     // own — one is only ever recorded because a bound function reached it.
     let all: Vec<&Value> = top.iter().collect();
     let env = build_env(&all);
+
+    // Two questions about the library as a whole, asked once before any symbol
+    // is mapped: which struct types it hands out, and which it takes. A single
+    // declaration cannot answer either.
+    let produced = produced_types(&mine, &env);
+    let counts = struct_param_counts(&mine, &env);
+
     let mut b = Binding { umbrella, ..Default::default() };
 
     for n in &mine {
@@ -900,7 +950,7 @@ pub fn from_header(
             continue;
         }
 
-        match map_function(n, &env) {
+        match map_function(n, &env, &produced, &counts) {
             Ok((sym, used_structs, assumed)) => {
                 // Every struct the symbol names has to come out with it. A
                 // symbol whose `out_struct:` has no field table is one the shim
@@ -942,6 +992,78 @@ pub fn from_header(
     Ok(b)
 }
 
+/// Struct types the library *hands out*, rather than expecting the caller to
+/// supply. A `T*` return, or a `T**` out-parameter, means the library owns the
+/// allocation — which is precisely what a handle is.
+///
+/// `map_ret` already answers this question for a return value. Reading it here
+/// too removes an asymmetry that made the same type a handle coming back and an
+/// out-parameter going in.
+fn produced_types(fns: &[&Value], env: &TypeEnv) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    let mut note = |spelling: &str, stars: usize| {
+        let t = normalize(&env.expand(spelling));
+        let inner = t.trim_end_matches('*');
+        if t.len() - inner.len() == stars && env.complete.contains_key(inner) {
+            out.insert(inner.to_string());
+        }
+    };
+    for n in fns {
+        if let Ok(r) = ret_type_of(n) {
+            note(&r, 1);
+        }
+        let empty = Vec::new();
+        for p in n.get("inner").and_then(Value::as_array).unwrap_or(&empty) {
+            if p.get("kind").and_then(Value::as_str) != Some("ParmVarDecl") {
+                continue;
+            }
+            if let Some(q) = qual_type(p) {
+                note(q, 2);
+            }
+        }
+    }
+    out
+}
+
+/// How many functions take a `T*` for each complete struct `T`.
+///
+/// This never causes a refusal on its own — see [`map_param`]. A record filled
+/// by a call is commonly filled by several of them: libsndfile's `SF_INFO`
+/// appears in `sf_open`, `sf_open_fd` and `sf_open_virtual`, and it is the case
+/// out-parameters were built for.
+fn struct_param_counts(fns: &[&Value], env: &TypeEnv) -> HashMap<String, usize> {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for n in fns {
+        let empty = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for p in n.get("inner").and_then(Value::as_array).unwrap_or(&empty) {
+            if p.get("kind").and_then(Value::as_str) != Some("ParmVarDecl") {
+                continue;
+            }
+            let Some(q) = qual_type(p) else { continue };
+            let t = normalize(&env.expand(q));
+            let Some(inner) = t.strip_suffix('*') else { continue };
+            if env.complete.contains_key(inner) && seen.insert(inner.to_string()) {
+                *counts.entry(inner.to_string()).or_default() += 1;
+            }
+        }
+    }
+    counts
+}
+
+/// Whether reading this struct back into Jade would lose a field.
+///
+/// `struct_entry` drops what the FFI cannot carry, which is the right answer
+/// for a record read once and discarded. It is the wrong answer for a struct
+/// the caller keeps: an `out_struct` shim zeroes a fresh local every call, so a
+/// dropped field is state the next call needed and no longer has.
+fn struct_loses_a_field(fields: &[(String, String)], env: &TypeEnv) -> bool {
+    fields.iter().any(|(_, t)| {
+        let n = normalize(&env.expand(t));
+        scalar_of(&n).is_none() && pointee(&n).map(squash).as_deref() != Some("char")
+    })
+}
+
 /// Only the fields the FFI can carry. A struct with one unrepresentable field
 /// is still worth binding for the rest, so this drops fields rather than the
 /// struct — but a struct with *no* usable field is not worth a table.
@@ -971,6 +1093,8 @@ fn struct_entry(fields: &[(String, String)], env: &TypeEnv) -> Result<CStruct, S
 fn map_function(
     node: &Value,
     env: &TypeEnv,
+    produced: &std::collections::HashSet<String>,
+    counts: &HashMap<String, usize>,
 ) -> Result<(CSymbol, Vec<String>, Option<String>), String> {
     let raw_ret = ret_type_of(node)?;
     let ret = map_ret(&raw_ret, env)?;
@@ -1000,7 +1124,7 @@ fn map_function(
             skip_next = false;
             continue;
         }
-        match map_param(t, raw.get(i + 1).copied(), env, &raw_ret) {
+        match map_param(t, raw.get(i + 1).copied(), env, &raw_ret, produced, counts) {
             Mapped::One(s) => args.push(s),
             Mapped::BytesPair(s) => {
                 args.push(s);
