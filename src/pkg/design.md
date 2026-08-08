@@ -1,6 +1,8 @@
 # Binding shim rewrite rules
 
-Status: shipped in v1.3.0. Governs `cshim.rs`.
+Status: shipped in v1.3.0, and extended in v1.3.7 — out-parameters for scalars,
+more than one out-parameter per symbol, and the rule that a struct the caller
+keeps between calls is not an out-parameter at all. Governs `cshim.rs`.
 
 ## The problem
 
