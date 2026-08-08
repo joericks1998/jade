@@ -206,6 +206,15 @@ pub enum TStmt {
         body: Vec<TStmt>,
         span: Span,
     },
+    /// `break` — leave the innermost loop. Whether one encloses it is settled
+    /// in the parser, alongside `return` outside a function.
+    Break {
+        span: Span,
+    },
+    /// `continue` — go on to the innermost loop's next iteration.
+    Continue {
+        span: Span,
+    },
     StructDef {
         name: String,
         fields: Vec<StructFieldDef>,

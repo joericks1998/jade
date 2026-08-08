@@ -125,6 +125,16 @@ pub enum Stmt {
         span: Span,
     },
 
+    /// `break` — leave the innermost loop.
+    Break {
+        span: Span,
+    },
+
+    /// `continue` — go on to the innermost loop's next iteration.
+    Continue {
+        span: Span,
+    },
+
     /// `name = expr` — reassign an existing variable (or introduce one) in the global env
     Assign {
         name: String,

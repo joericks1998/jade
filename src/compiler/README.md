@@ -39,6 +39,8 @@ Type inference exists so the instruction set can be *monomorphic*. Because the c
 
 `emit` is what rejects shared mutation across tasks, because the mutation opcodes (`SetGlobal`, `SetIndex`, `SetField`) only exist in bytecode — the AST's assignment expression cannot tell rebinding a local from writing through a reference. That is why `cli/check.rs` runs `emit` as part of `jade check`: it keeps `check` an honest predictor of whether `run` and `build` will succeed.
 
+`break` and `continue` are emitted as a plain `Jump` the enclosing loop patches once it knows where its exit is, so neither engine needed a new opcode — the AOT backend lowers them without knowing they exist. Two details are load-bearing. A `continue` lands at the *bottom* of the body rather than the top, so it still runs the `for` loop's index increment and the per-iteration `ArenaReset`; landing at the top would hang. And both first emit a `PopHandler` for every `try` they jump out of, tracked by `Emitter::handler_depth` — a handler frame left installed points into code the loop has already left, and the next exception anywhere in the function would land there.
+
 Changing the shape of any TIR type means bumping `CACHE_FORMAT_VERSION` in `src/cache/mod.rs`.
 
 ## Building and testing

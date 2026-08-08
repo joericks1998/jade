@@ -3458,3 +3458,117 @@ fn test_prompt_deref_outside_stream_passes_no_constraints() {
 // had the fields, so nothing stopped a caller from filling them back in. Both
 // fields are gone from `InferenceRequest` now, along with the socket that needed
 // them, so the type says what the tests used to check.
+
+// ── break and continue ────────────────────────────────────────────────────
+
+#[test]
+fn break_leaves_a_for_loop() {
+    let s = run_src("let mut_t = 0\nfor i in [1, 2, 3, 4] {\n if i == 3 { break }\n mut_t = mut_t + i\n}\n").unwrap();
+    assert_eq!(get_int(&s, "mut_t"), 3);
+}
+
+#[test]
+fn continue_skips_the_rest_of_a_for_body() {
+    let s = run_src("let mut_t = 0\nfor i in [1, 2, 3, 4] {\n if i == 2 { continue }\n mut_t = mut_t + i\n}\n").unwrap();
+    assert_eq!(get_int(&s, "mut_t"), 8);
+}
+
+#[test]
+fn continue_in_a_for_loop_still_advances_the_index() {
+    // Landing at the top of the loop instead of at the increment would never
+    // advance `idx`, and the loop would hang rather than fail.
+    let s = run_src("let mut_n = 0\nfor i in [1, 2, 3] {\n mut_n = mut_n + 1\n continue\n}\n").unwrap();
+    assert_eq!(get_int(&s, "mut_n"), 3);
+}
+
+#[test]
+fn break_leaves_a_while_loop() {
+    let s = run_src("let mut_n = 0\nwhile true {\n mut_n = mut_n + 1\n if mut_n == 5 { break }\n}\n").unwrap();
+    assert_eq!(get_int(&s, "mut_n"), 5);
+}
+
+#[test]
+fn continue_in_a_while_loop_reruns_the_condition() {
+    let s = run_src("let mut_n = 0\nlet mut_t = 0\nwhile mut_n < 5 {\n mut_n = mut_n + 1\n if mut_n == 3 { continue }\n mut_t = mut_t + mut_n\n}\n").unwrap();
+    assert_eq!(get_int(&s, "mut_t"), 12);
+}
+
+#[test]
+fn break_leaves_only_the_innermost_loop() {
+    let s = run_src(
+        "let mut_t = 0\nfor a in [1, 2, 3] {\n for b in [1, 2, 3] {\n  if b == 2 { break }\n  mut_t = mut_t + 1\n }\n}\n",
+    )
+    .unwrap();
+    assert_eq!(get_int(&s, "mut_t"), 3);
+}
+
+#[test]
+fn break_works_inside_a_function_body() {
+    let s = run_src("fn f(xs) {\n let mut_t = 0\n for x in xs {\n  if x > 2 { break }\n  mut_t = mut_t + x\n }\n return mut_t\n}\nlet v = f([1, 2, 3, 4])\n").unwrap();
+    assert_eq!(get_int(&s, "v"), 3);
+}
+
+#[test]
+fn break_from_a_catch_arm_leaves_the_loop() {
+    // The loop-until-it-raises shape. A C binding whose `fails_when` turns an
+    // end-of-input code into an exception makes this the natural way to read
+    // until the library says stop.
+    let s = run_src(
+        "fn step(n) {\n if n > 3 { raise \"EOF\" }\n return n\n}\n\
+         let mut_seen = 0\nlet mut_i = 0\n\
+         while true {\n mut_i = mut_i + 1\n try {\n  mut_seen = mut_seen + step(mut_i)\n } catch e {\n  break\n }\n}\n",
+    )
+    .unwrap();
+    assert_eq!(get_int(&s, "mut_seen"), 6);
+}
+
+#[test]
+fn breaking_out_of_a_try_body_pops_its_handler() {
+    // Leaving by a jump skips the `PopHandler` the normal exit runs. If the
+    // frame stayed installed it would point into code the loop has already
+    // left, and the *next* raise anywhere in the function would land there.
+    let s = run_src(
+        "let mut_v = 0\nfor i in [1, 2, 3] {\n try {\n  if i == 2 { break }\n } catch e {\n  mut_v = 99\n }\n}\n\
+         try {\n raise \"after\"\n} catch e {\n mut_v = 7\n}\n",
+    )
+    .unwrap();
+    assert_eq!(get_int(&s, "mut_v"), 7);
+}
+
+#[test]
+fn continue_out_of_a_try_body_pops_its_handler_too() {
+    let s = run_src(
+        "let mut_t = 0\nfor i in [1, 2, 3, 4] {\n try {\n  if i == 2 { continue }\n  mut_t = mut_t + i\n } catch e {\n  mut_t = 99\n }\n}\n\
+         try {\n raise \"after\"\n} catch e {\n mut_t = mut_t + 100\n}\n",
+    )
+    .unwrap();
+    assert_eq!(get_int(&s, "mut_t"), 108);
+}
+
+#[test]
+fn break_outside_a_loop_is_refused() {
+    let err = parser::parse(lexer::tokenize("break\n").unwrap()).expect_err("should refuse");
+    assert!(matches!(err, crate::frontend::error::JadeError::BreakOutsideLoop { .. }), "{err:?}");
+}
+
+#[test]
+fn continue_outside_a_loop_is_refused() {
+    let err = parser::parse(lexer::tokenize("continue\n").unwrap()).expect_err("should refuse");
+    assert!(matches!(err, crate::frontend::error::JadeError::ContinueOutsideLoop { .. }), "{err:?}");
+}
+
+#[test]
+fn a_loop_outside_the_function_is_not_a_loop_the_body_can_break_out_of() {
+    // The jump would have to cross a call frame, which is a `return`, not a
+    // `break`.
+    let src = "for i in [1] {\n fn f() { break }\n}\n";
+    let err = parser::parse(lexer::tokenize(src).unwrap()).expect_err("should refuse");
+    assert!(matches!(err, crate::frontend::error::JadeError::BreakOutsideLoop { .. }), "{err:?}");
+}
+
+#[test]
+fn a_closure_cannot_break_out_of_the_loop_that_encloses_it() {
+    let src = "for i in [1] {\n let g = || { break }\n}\n";
+    let err = parser::parse(lexer::tokenize(src).unwrap()).expect_err("should refuse");
+    assert!(matches!(err, crate::frontend::error::JadeError::BreakOutsideLoop { .. }), "{err:?}");
+}

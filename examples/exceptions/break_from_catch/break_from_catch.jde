@@ -1,0 +1,42 @@
+// Looping until something raises.
+//
+// This is the shape a C library pushes you toward: `fails_when` turns its
+// end-of-input return code into an exception, so "read until EOF" is a loop
+// that leaves through a `catch`.
+//
+// The handler frame is popped on the way out, so a later `try` still catches
+// its own exceptions rather than landing in an arm this loop already left.
+
+fn step(n) {
+    if n > 3 { raise "EOF" }
+    return n * 10
+}
+
+let mut_i = 0
+let mut_seen = 0
+while true {
+    mut_i = mut_i + 1
+    try {
+        print(step(mut_i))
+        mut_seen = mut_seen + 1
+    } catch e {
+        break
+    }
+}
+print(mut_seen)
+
+// Leaving from the `try` body itself pops the handler too.
+for i in [1, 2, 3] {
+    try {
+        if i == 2 { break }
+        print(i)
+    } catch e {
+        print("not reached")
+    }
+}
+
+try {
+    raise "the handler stack is intact"
+} catch e {
+    print(e)
+}

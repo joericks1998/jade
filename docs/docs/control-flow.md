@@ -6,7 +6,7 @@ sidebar_label: Control Flow
 
 Jade has three control flow constructs: `if`/`elif`/`else` for conditional branching, `while` for condition-driven loops, and `for` for iterating over a sequence. All conditions must be `bool`.
 
-There is no `break` and no `continue`. To leave a loop early, `return` out of the enclosing function, or write the exit into the loop condition.
+Inside a loop, `break` leaves it and `continue` starts its next iteration.
 
 ## Overview
 
@@ -358,3 +358,73 @@ for x in doubles(3) {
 :::note
 A `dict` is not iterable. `for k in some_dict { … }` is a compile error. Iterate over `some_dict.keys()` instead.
 :::
+
+## break and continue
+
+`break` leaves the innermost enclosing loop. `continue` skips the rest of the body and starts that loop's next iteration. Both work in `while` and in `for`.
+
+```jade
+for i in [1, 2, 3, 4, 5] {
+    if i == 4 { break }
+    if i == 2 { continue }
+    print(i)
+}
+// 1
+// 3
+```
+
+They act on the *innermost* loop only. To leave two, `return` out of the enclosing function.
+
+```jade
+for a in [1, 2] {
+    for b in [1, 2, 3] {
+        if b == 2 { break }     // leaves the b loop, not the a loop
+        print(f"{a}-{b}")
+    }
+}
+// 1-1
+// 2-1
+```
+
+### Loop until something happens
+
+`while true` with a `break` is the shape to reach for when the exit condition only becomes known part-way through the body, rather than at the top.
+
+```jade
+let n = 0
+while true {
+    n = n + 1
+    if n * n > 50 { break }
+}
+print(n)   // 8
+```
+
+### Leaving through a catch
+
+A loop can end because something raised. This is the natural shape for a C library that signals end-of-input with an error code, since [`fails_when`](packages#the-binding-vocabulary) turns that code into an exception.
+
+```jade
+while true {
+    try {
+        print(archive.next_entry(a))
+    } catch e {
+        break
+    }
+}
+```
+
+`break` and `continue` remove any exception handler they jump out of, so a `try` later in the same function still catches its own exceptions. That holds whether you leave from a `catch` arm, as above, or from the `try` body itself.
+
+### Where they are not allowed
+
+`break` and `continue` need a loop in the *same* function. A loop outside the enclosing `fn` or closure does not count, because leaving it would mean crossing a call frame — which is what `return` is for.
+
+```jade
+for i in [1, 2] {
+    fn f() {
+        break     // error: 'break' outside a loop
+    }
+}
+```
+
+Using either at the top level, or in an `if` with no loop around it, is the same error. It is reported when the file is parsed, not when the line runs.

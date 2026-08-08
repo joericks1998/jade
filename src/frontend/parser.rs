@@ -16,6 +16,11 @@ struct Parser {
     pos: usize,
     /// Depth of nested `fn` definitions. Used to detect and reject nested fns.
     fn_depth: usize,
+    /// How many loops enclose the statement being parsed, so `break` and
+    /// `continue` can be refused where there is nothing to leave. Reset — not
+    /// merely saved — across a function boundary: a loop outside a `fn` is not
+    /// a loop the body can break out of.
+    loop_depth: usize,
     /// Depth of nested `async fn` definitions. Allows `await` to know it is inside an async context.
     async_fn_depth: usize,
     /// When false, a bare identifier followed by `{` is NOT parsed as a struct
@@ -31,7 +36,7 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program> {
             span: Span { line: 1, col: 1 },
         });
     }
-    let mut parser = Parser { tokens, pos: 0, fn_depth: 0, async_fn_depth: 0, struct_literal_allowed: true };
+    let mut parser = Parser { tokens, pos: 0, fn_depth: 0, loop_depth: 0, async_fn_depth: 0, struct_literal_allowed: true };
     parser.parse_program()
 }
 
@@ -276,6 +281,8 @@ impl Parser {
             TokenKind::If     => self.parse_if(),
             TokenKind::While  => self.parse_while(),
             TokenKind::For    => self.parse_for(),
+            TokenKind::Break    => self.parse_break(),
+            TokenKind::Continue => self.parse_continue(),
             TokenKind::Struct     => self.parse_struct_def_with_decorators(vec![]),
             TokenKind::Extend     => self.parse_extend_block_with_decorators(vec![]),
             TokenKind::Interface  => self.parse_interface_def(),
@@ -443,7 +450,9 @@ impl Parser {
 
         // Body block
         self.fn_depth += 1;
+        let outer_loops = std::mem::take(&mut self.loop_depth);
         let body = self.parse_block()?;
+        self.loop_depth = outer_loops;
         self.fn_depth -= 1;
 
         Ok(Stmt::FnDef { name, params, body, decorators, span })
@@ -497,7 +506,9 @@ impl Parser {
 
         self.fn_depth += 1;
         self.async_fn_depth += 1;
+        let outer_loops = std::mem::take(&mut self.loop_depth);
         let body = self.parse_block()?;
+        self.loop_depth = outer_loops;
         self.async_fn_depth -= 1;
         self.fn_depth -= 1;
 
@@ -602,12 +613,36 @@ impl Parser {
     }
 
     /// Parse `while <condition> { <body> }`
+    /// `break` — leave the innermost loop.
+    fn parse_break(&mut self) -> Result<Stmt> {
+        let span = self.peek().span;
+        if self.loop_depth == 0 {
+            return Err(JadeError::BreakOutsideLoop { span });
+        }
+        self.advance();
+        self.consume_semicolon()?;
+        Ok(Stmt::Break { span })
+    }
+
+    /// `continue` — go on to the innermost loop's next iteration.
+    fn parse_continue(&mut self) -> Result<Stmt> {
+        let span = self.peek().span;
+        if self.loop_depth == 0 {
+            return Err(JadeError::ContinueOutsideLoop { span });
+        }
+        self.advance();
+        self.consume_semicolon()?;
+        Ok(Stmt::Continue { span })
+    }
+
     fn parse_while(&mut self) -> Result<Stmt> {
         let span = self.peek().span;
         self.advance(); // consume `while`
 
         let condition = self.parse_condition()?;
+        self.loop_depth += 1;
         let body = self.parse_block()?;
+        self.loop_depth -= 1;
 
         Ok(Stmt::While { condition, body, span })
     }
@@ -633,7 +668,9 @@ impl Parser {
 
         self.expect(&TokenKind::In)?;
         let iterable = self.parse_condition()?;
+        self.loop_depth += 1;
         let body = self.parse_block()?;
+        self.loop_depth -= 1;
 
         Ok(Stmt::For { var, iterable, body, span })
     }
@@ -1078,6 +1115,7 @@ impl Parser {
             tokens: sub_tokens,
             pos: 0,
             fn_depth,
+            loop_depth: 0,
             async_fn_depth: 0,
             struct_literal_allowed: true,
         };
@@ -1635,6 +1673,7 @@ impl Parser {
     /// Parse the body of a closure: `{ stmts }` or a single expression (implicit return).
     fn parse_closure_body(&mut self, span: Span) -> Result<Vec<Stmt>> {
         self.fn_depth += 1;
+        let outer_loops = std::mem::take(&mut self.loop_depth);
         let body = if self.peek().kind == TokenKind::LBrace {
             self.parse_block()?
         } else {
@@ -1642,6 +1681,7 @@ impl Parser {
             let expr = self.parse_pipe()?;
             vec![Stmt::Return { value: Some(expr), span }]
         };
+        self.loop_depth = outer_loops;
         self.fn_depth -= 1;
         Ok(body)
     }

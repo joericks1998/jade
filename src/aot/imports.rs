@@ -705,6 +705,8 @@ impl Renamer {
             }
             TStmt::Raise { value, .. } => self.rename_expr(value),
             TStmt::Expr(e) => self.rename_expr(e),
+            // Control flow, naming nothing to rename.
+            TStmt::Break { .. } | TStmt::Continue { .. } => {}
             // Imports were stripped in process_file (except preserved stdlib
             // from-uses, which carry nothing to rename).
             TStmt::Use { .. } | TStmt::FromUse { .. } => {}
