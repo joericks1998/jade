@@ -230,10 +230,26 @@ that has no idea it is holding a Jade value.
 ## What is deliberately not here
 
 **Input structs.** A Jade struct crossing *into* a C function would need the
-shim to build one from Jade fields, which needs the same layout guarantees in
-the other direction. Nothing has asked for it yet.
+shim to build one from Jade fields. Not built, but the stated reason for that —
+"it needs the same layout guarantees in the other direction" — no longer holds:
+the guarantee comes from including the real header, and a header is symmetric.
+Nor is it unasked for; across four libraries surveyed for v1.3.7 it is sixteen
+symbols, `lzma_stream_flags_compare` among them.
 
-**More than one out-parameter**, per the rule above.
+What it really needs is an answer to the mirror of the out-struct question:
+what the shim writes into a field Jade did not supply. Zero is right for a
+`reserved_*` field and wrong for a meaningful pointer, which is the same
+distinction `struct_loses_a_field` already draws for the out direction.
+
+**Caller-held mutable state**, and this one *is* a language limit rather than
+unbuilt work. The shim could heap-allocate the struct and hand Jade an opaque
+handle, and for a library whose caller never touches the fields that would be
+enough. `lzma_stream` is not one: its protocol is field-poking — `next_in` and
+`avail_in` point into the caller's input buffer and `next_out`/`avail_out` into
+the output buffer, reset between every call. Jade has no raw pointers and its
+`bytes` is immutable by design, so there is nothing to set them to. The blocker
+is not "a struct cannot cross the boundary" but "a pointer into a buffer Jade
+does not own cannot", which is deliberate.
 
 **A callback taking a `void *`.** The usual `user_data` parameter names no type,
 so there is nothing to hand Jade. That is the most common reason a real
