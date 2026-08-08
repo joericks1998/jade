@@ -550,8 +550,15 @@ pub fn load_native_package(
 
     let init_fn: libloading::Symbol<unsafe extern "C" fn(*mut JadeNativePkg) -> i32> =
         unsafe { lib.get(b"jade_pkg_init\0") }.map_err(|e| JadeError::IoError {
+            // Naming the symbol alone is accurate and useless: the reader has
+            // no reason to know what defines it. Every library that reaches
+            // here without it is a plain C library that was never bound, so say
+            // that and give the command.
             message: format!(
-                "native library '{}' missing `jade_pkg_init` symbol: {}",
+                "native library '{}' has no `jade_pkg_init`, so it is a plain C library rather \
+                 than a Jade package.\n  Jade cannot load one directly — it needs a binding \
+                 generated from the library's header:\n    \
+                 jade pkg add <name> --path <the .dylib> --header <its header.h>\n  ({})",
                 lib_path.display(),
                 e
             ),
