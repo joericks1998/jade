@@ -1,0 +1,36 @@
+// `break` leaves the innermost loop; `continue` starts its next iteration.
+
+for i in [1, 2, 3, 4, 5] {
+    if i == 4 { break }
+    if i == 2 { continue }
+    print(i)
+}
+
+// A `while true` with `break` is the shape you want when the exit condition
+// only becomes known part-way through the body.
+let mut_n = 0
+while true {
+    mut_n = mut_n + 1
+    if mut_n < 3 { continue }
+    break
+}
+print(mut_n)
+
+// `break` leaves one loop, not both.
+for a in [1, 2] {
+    for b in [1, 2, 3] {
+        if b == 2 { break }
+        print(f"{a}-{b}")
+    }
+}
+
+// Inside a function, and inside a stream.
+fn firstUnder(xs, limit) {
+    for x in xs {
+        if x >= limit { break }
+        yield x
+    }
+}
+for v in firstUnder([1, 2, 9, 3], 9) {
+    print(v)
+}

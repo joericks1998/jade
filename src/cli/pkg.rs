@@ -308,21 +308,15 @@ fn detect_abi(lib: &std::path::Path) -> Option<Abi> {
 /// directory, and the failure is a "file not found" from cc at install time,
 /// well away from the cause.
 fn header_locations(header: &std::path::Path, include: &[String]) -> (Vec<String>, Vec<String>) {
-    let abs = |p: &std::path::Path| -> String {
-        std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()).to_string_lossy().into_owned()
-    };
     let headers = vec![header
         .file_name()
         .map(|f| f.to_string_lossy().into_owned())
         .unwrap_or_else(|| header.to_string_lossy().into_owned())];
 
-    let mut dirs: Vec<String> = include.iter().map(|d| abs(std::path::Path::new(d))).collect();
-    let parent = header.parent().filter(|p| !p.as_os_str().is_empty());
-    let dir = abs(parent.unwrap_or_else(|| std::path::Path::new(".")));
-    if !dirs.contains(&dir) {
-        dirs.push(dir);
-    }
-    (headers, dirs)
+    // The same list clang was given, so the shim compile cannot be missing a
+    // directory the parse needed. The two used to be computed separately, and
+    // the parse got the smaller set.
+    (headers, pkg::bindgen::include_roots(header, include))
 }
 
 /// Read a header and write the tables into `jade.toml`. Shared by `add`,
@@ -341,14 +335,18 @@ fn bind_header(
         return Err(format!("no such header: {header}"));
     }
 
-    let binding = pkg::bindgen::from_header(header_path, include, only)?;
+    // Read the export table first: it is both the check below and, for an
+    // umbrella header that declares nothing itself, what decides which of the
+    // headers it includes to bind.
+    let exported = lib.and_then(pkg::bindgen::exported_symbols);
+    let binding = pkg::bindgen::from_header(header_path, include, only, exported.as_ref())?;
 
     // Check the header against the library it is supposed to describe. A header
     // declaring symbols the library does not export is the wrong header, and
     // the shim would fail to link with an undefined-symbol error naming none of
     // this.
-    if let Some(exported) = lib.and_then(pkg::bindgen::exported_symbols) {
-        let (covered, total) = pkg::bindgen::coverage(&binding, &exported);
+    if let Some(exported) = &exported {
+        let (covered, total) = pkg::bindgen::coverage(&binding, exported);
         if covered == 0 && !binding.symbols.is_empty() {
             return Err(format!(
                 "{header} declares none of the {total} symbols {} exports — it looks like the \
@@ -397,8 +395,18 @@ pub fn run_bind(name: &str, header: &str, include: &[String], only: Option<&str>
         if !header_path.exists() {
             fail(format!("no such header: {header}"));
         }
-        let binding =
-            pkg::bindgen::from_header(header_path, include, only).unwrap_or_else(|e| fail(e));
+        // A dry run may still know the artifact, and an umbrella header cannot
+        // be read without it.
+        let exported = load_or_exit(&root)
+            .dependencies
+            .as_ref()
+            .and_then(|d| d.get(name))
+            .and_then(|e| e.path.clone())
+            .map(|p| root.join(p))
+            .filter(|p| p.exists())
+            .and_then(|p| pkg::bindgen::exported_symbols(&p));
+        let binding = pkg::bindgen::from_header(header_path, include, only, exported.as_ref())
+            .unwrap_or_else(|e| fail(e));
         println!("{}", binding.report());
         println!("\n(dry run — jade.toml unchanged)");
         return;

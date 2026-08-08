@@ -45,7 +45,7 @@ The integration surface with the rest of the compiler is one function, `dependen
 - **`cshim.rs`** — generates a Jade-ABI binding shim for a plain C library. The loader requires a `jade_pkg_init` symbol, which something like `libz` does not have. Rather than teach the runtime to dispatch arbitrary C signatures — a `libffi` dependency and *two* marshalling implementations, one per engine — this emits a small C wrapper and compiles it with `cc`. The result is an ordinary Jade-ABI package both backends already know how to load. The type vocabulary is the FFI's — `int`, `float`, `bool`, `str`, `bytes`, and `nil` for returns — plus two forms that make the shim *rewrite* a call rather than forward it, which is what lets a real C signature be callable at all:
 
   - `bytes` as an argument expands to the C pair `(const void*, size_t)`.
-  - `out_buffer:<ctype>` and `out_struct:<Type>` are out-parameters. They consume **no** Jade argument: the shim owns the memory, so `x_read(handle, buf, n)` is called from Jade as `x_read(handle, n)` and hands back the bytes. `src/pkg/design.md` has the full rules.
+  - `out_buffer:<ctype>` and `out_struct:<Type>` are out-parameters. They consume **no** Jade argument: the shim owns the memory, so `x_read(handle, buf, n)` is called from Jade as `x_read(handle, n)` and hands back the bytes. The rewrite rules are below.
 
   A symbol may also declare `fails_when` — `null`, `negative`, `nonzero`, or `never`. The shim then clears `errno`, tests the return against that convention, and on failure hands back a `JADE_FFI_ERROR` carrying `strerror` text and the number, which both engines already turn into a catchable Jade raise. Without it a failed call returns its raw sentinel and the reason the library *had already recorded* is simply thrown away: the program sees `-1` and nothing else. There is no universal convention to infer, which is why the binding names the one its symbol uses; the default is "cannot fail", because reading a convention that is not there would turn every legitimate `-1` into a raise.
 - **`bindgen.rs`** — generates a dependency's `symbols` and `structs` tables from its C header, driven by `jade pkg add --header`, `jade pkg install`, and `jade pkg bind`. This is what makes "bind any `.so`" true in practice: the ABI could express handles, blobs and structs, but every signature still had to be transcribed by hand, and SQLite has around 200 entry points.
@@ -53,7 +53,6 @@ The integration surface with the rest of the compiler is one function, `dependen
   It reads the header with **clang** — `clang -Xclang -ast-dump=json -fsyntax-only`, over a pipe. Parsing C by hand is a tar pit of macros, conditionals and typedef chains, and a home-grown parser would misread far more than it read. Shelling out rather than linking `libclang` keeps a large native dependency out of the shipped binary, and costs nothing in practice: `cc` is already required to bind a C library at all.
 
   **The skip report is the feature.** No generator binds everything, and one that quietly covers two thirds of an API is how the missing third is found at run time. So what it drops is named with a reason, grouped so one cause reads as one fact; and a binding resting on an inference — a non-const `T*` beside a count is *almost* always an out-buffer — is listed as *assumed* rather than buried. On the real `sqlite3.h` that is 181 bound, 2 assumed, 105 skipped, and every skip is a genuine limit of the ABI rather than a gap in the reader.
-- **`design.md`** — the shim's rewrite rules: how a `bytes` argument becomes two C parameters, why an out-parameter consumes no Jade argument, how two results come back, and why `out_struct` requires the library's header rather than a declared layout. Read it before changing what a binding can express.
 - **`tests.rs`** — package manager tests, all offline.
 
 ## Who uses it
@@ -63,6 +62,191 @@ The integration surface with the rest of the compiler is one function, `dependen
 *Also depends on:* `clang` on `PATH`, but only when a header is actually read — `add --header`, `bind`, or an `install` filling in missing symbols. A manifest that already carries its symbols installs without it. Nothing else in the package manager needs it, and its absence is reported with the workaround (write the table by hand) rather than as a crash.
 
 *Used by:* `cli/pkg.rs` for the commands. Indirectly, `vm/chunk.rs` and `aot/imports.rs` consume the `[lib]` entries this module contributes, without knowing they came from a dependency.
+
+## How the shim rewrites a call
+
+A C signature and a callable Jade signature are not the same shape, and the gap is most of what stops a real library from being bindable:
+
+```c
+int sf_read_short(SNDFILE* f, short* buf, int count);
+int sf_open(const char* path, int mode, SF_INFO* info);
+```
+
+Neither can be called as written. The first wants a buffer the caller allocated and reports how much of it was filled; the second returns one thing and writes another through a pointer. A one-to-one mapping of parameters cannot express either, so the shim rewrites the call rather than merely forwarding it. The declared `args` list describes the **C** signature; the Jade signature is derived from it and is deliberately a different length.
+
+### The rules
+
+**A `bytes` argument is one Jade value and two C parameters.** It expands to
+`(const void*, size_t)`, and the pointer is borrowed for the duration of the
+call exactly as a `str` argument is. A nil blob passes `NULL, 0` rather than
+dereferencing.
+
+**An out-parameter consumes no Jade argument at all.** That is the rewrite that
+makes `x_read(handle, buf, n)` callable as `x_read(handle, n)`.
+
+**An `out_buffer` is the shim's memory, never Jade's.** A Jade `bytes` is
+immutable — three methods, none of which writes — and letting a C library
+scribble into one would break that for the FFI's convenience. So the shim
+allocates the scratch, the library fills it, and Jade only ever sees the
+finished blob.
+
+Its size comes from **the next declared argument**, which must be an `int`. That
+is the shape essentially every buffer-filling C function has (`read(fd, buf, n)`,
+`gzread`, `fread`, `sf_read_short`), and the shim has to know how much to
+allocate before it can call anything. The alternative — a separate key naming
+which argument holds the count — buys nothing for the cases that exist.
+
+**The return value of an `out_buffer` symbol is the element count, and it sizes
+the blob.** It does not also come back separately, because a counted buffer
+already carries its length: `b.len()` is `written * sizeof(elem)`. The count is
+clamped to what was allocated, so a library reporting more than it was given
+cannot make the copy read past the scratch.
+
+**A scalar written through a pointer is an out-parameter too.** `int
+*nextoffset`, `uint64_t *progress` — C's way of returning a second value, and
+everywhere. `out_scalar:<ctype>` carries the library's own C type rather than a
+Jade one, for the same reason `out_buffer` and `callback` do: the shim declares
+a real local, so widening `uint32_t` to `int64_t` would take the address of a
+differently-sized object and let the library write past it.
+
+Some of those are read *and* written — a position the caller sets and the
+library advances, `size_t *out_pos`. A zeroed local is right for one call and
+wrong on the second, which shows up as corrupt output rather than as an error.
+Nothing in C distinguishes the two, so `inout_scalar:<ctype>` exists for the
+second, the generator emits `out_scalar` and lists it as an *assumption* naming
+the fix. That mirrors the out_buffer guess exactly: the generator does not get
+to dress a guess as certainty.
+
+**More than one out-parameter is allowed, and then each carries a name.** The
+rule used to be one, on the grounds that two would come back as a pair with no
+obvious names. They are not nameless — the header already names them, and clang
+hands the parameter names over with the types. `out_scalar:uint64_t@progress_in`
+says what key the value comes back under. A symbol whose header does *not* name
+its parameters is skipped rather than given invented `out0`/`out1` keys, which
+was the real objection.
+
+**How many things come back decides the shape.** Count the out-parameters, plus
+the C return value when nothing has consumed it — an `out_buffer` reads it as an
+element count, an `out_handle` folds it into the failure convention. One thing
+is the result directly. Two or more become a struct: `ret` first when it is a
+key, then one key per out-parameter in declaration order.
+
+That counting reproduces every shape that existed before rather than replacing
+it. A lone out-parameter with a `void` return is still the bare value; a lone
+out-parameter beside a real return is still `.ret` and `.out`, and keeps the
+name `out` because there is nothing to tell it apart from.
+
+### Why `out_struct` requires a header
+
+The shim has to declare a real local of the struct's type. It could synthesize
+one from the declared field list — and that is exactly the wrong answer.
+
+A synthesized layout lives in a hand-written TOML file. One wrong integer width,
+one missed padding byte, one field listed out of order, and the shim reads and
+writes at offsets the library does not agree with. Nothing catches it: the
+manifest is valid, the shim compiles, and the program returns plausible garbage
+or corrupts memory that belongs to the library.
+
+Including the real header moves the layout to the only place it can be correct —
+the C compiler. The field list then carries only names and Jade types, and a
+field the struct does not have becomes a compile error naming the field.
+
+The same reasoning is why a symbol is **not** re-declared when headers are
+present. A hand-written prototype that disagrees with the real one — `int` where
+the library says `long` — truncates silently at run time; letting the header win
+turns that into a compile error. If you are going to require a header, requiring
+it to be authoritative is the only consistent position.
+
+The cost is real and worth stating: a dependency using `out_struct` needs the
+library's development headers present at install time, and `include_dirs` when
+they are not on the default search path. Anyone who has the library has them.
+
+### Ownership at the boundary
+
+A value **inside a container** is container-owned, so Jade's `ffi_free` frees
+it. A struct field holding a string must therefore be `strdup`'d, not borrowed:
+handing over a pointer into the shim's stack local would be a free of the stack,
+and a pointer into the library's memory would be a free of the library's.
+
+This is the one place the rule differs from a top-level return, where a string
+is handed over borrowed and Jade copies it. Same tag, opposite ownership,
+decided by where the value sits.
+
+### Handles
+
+Three forms, and the third is the one that matters.
+
+`handle<T>` as an **argument** unwraps to the `T*` the library issued, checking
+the type name first. The check is why the name is carried at all: two handles
+are structurally identical, so passing a statement where a connection belongs
+would otherwise be a dereference of the wrong object inside the library, with
+nothing for Jade to report.
+
+`handle<T>` as a **return** wraps the pointer back up.
+
+`out_handle:T` is a handle written through a pointer — `sqlite3_open(path,
+&db)`. Without it the generator could bind SQLite's entire surface *except* the
+call that produces a connection, which is the same as binding none of it. The
+C return value of such a symbol is a status, so the handle is what Jade gets and
+the status feeds `fails_when`.
+
+### Callbacks
+
+`callback:<ret>(<arg>,…)`, and the signature is written in the library's **own C
+types** — `callback:int(int, const char*)`, not Jade's widened ones. That is not
+a detail: the shim declares a function pointer the library will store and call,
+so `int` widened to `int64_t` is not a truncation but an incompatible function
+pointer, and a call through the wrong ABI.
+
+No `libffi` is involved, and that is the whole payoff of generating the shim from
+a declaration rather than dispatching at run time: the signature is known when
+the C is written, so a real static function of that shape can just be declared.
+
+Two rules follow from where the callback runs:
+
+**The registration lasts exactly one call.** The slot is `_Thread_local` and set
+only for the duration of the native call. A library that stores the callback and
+invokes it later finds an empty slot and gets the neutral answer, rather than a
+stale pointer into an interpreter that has moved on. Asynchronous registration
+is not supported and cannot be without keeping the interpreter available
+indefinitely.
+
+**A raise is deferred, never unwound.** The trampoline records the failure and
+returns; the wrapper turns it into a Jade error *after* the library has returned
+normally. Letting the raise out would unwind through the library's frames
+mid-operation.
+
+A callback may only give back a scalar, for the same reason an out-buffer is the
+shim's memory: anything else would have to be released inside a C frame by code
+that has no idea it is holding a Jade value.
+
+### What is deliberately not here
+
+**Input structs.** A Jade struct crossing *into* a C function would need the
+shim to build one from Jade fields. Not built, but the stated reason for that —
+"it needs the same layout guarantees in the other direction" — no longer holds:
+the guarantee comes from including the real header, and a header is symmetric.
+Nor is it unasked for; across four libraries surveyed for v1.3.7 it is sixteen
+symbols, `lzma_stream_flags_compare` among them.
+
+What it really needs is an answer to the mirror of the out-struct question:
+what the shim writes into a field Jade did not supply. Zero is right for a
+`reserved_*` field and wrong for a meaningful pointer, which is the same
+distinction `struct_loses_a_field` already draws for the out direction.
+
+**Caller-held mutable state**, and this one *is* a language limit rather than
+unbuilt work. The shim could heap-allocate the struct and hand Jade an opaque
+handle, and for a library whose caller never touches the fields that would be
+enough. `lzma_stream` is not one: its protocol is field-poking — `next_in` and
+`avail_in` point into the caller's input buffer and `next_out`/`avail_out` into
+the output buffer, reset between every call. Jade has no raw pointers and its
+`bytes` is immutable by design, so there is nothing to set them to. The blocker
+is not "a struct cannot cross the boundary" but "a pointer into a buffer Jade
+does not own cannot", which is deliberate.
+
+**A callback taking a `void *`.** The usual `user_data` parameter names no type,
+so there is nothing to hand Jade. That is the most common reason a real
+callback still does not fit.
 
 ## Gotchas
 
@@ -76,7 +260,15 @@ Tests must never hit the network — use the `Fetcher` trait.
 
 **Binding runs on `add` and `install`, not only on `bind`.** A separate step is one the user has to learn about, and it has no decision in it — a header either binds or it does not. `install` only fills in a dependency whose `symbols` are *absent*, so a committed manifest already carries them and a fresh clone installs without needing clang at all. `--locked` never binds, because a reproducible install must not depend on what the local clang makes of a header.
 
-**`jade pkg bind` merges, it does not replace.** Binding a large header a piece at a time with `--only` is a normal way to work, and replacing the table would make the second run delete what the first produced. Merging also leaves a hand-corrected entry alone unless that same symbol is regenerated.
+**`jade pkg bind` merges, it does not replace — and that has to include the header list.** Binding a large header a piece at a time with `--only` is a normal way to work, and replacing the table would make the second run delete what the first produced. Merging also leaves a hand-corrected entry alone unless that same symbol is regenerated.
+
+The `headers` list was the half that still replaced, and it produced the worst failure in the set. Binding `archive_entry.h` after `archive.h` dropped the first header while keeping the symbols that came from it, so the shim declared none of them — and C lets an undeclared function be called, assuming it returns `int`. A call that really returns a pointer came back truncated to 32 bits, and the crash landed several calls later with nothing pointing at the manifest. It compiled clean, with no diagnostic anywhere. `compile_shim` now passes `-Werror=implicit-function-declaration`, so the same gap arriving by any other route is a named error instead.
+
+**A symbol may have several out-parameters now, and the scratch locals are what breaks first.** `wrapper` used fixed names — `obuf`, `ostruct`, `ohandle` — so a second out-struct emitted the same declaration twice and the shim did not compile. Each is suffixed with the parameter's position. `Parsed.out_at: Option<usize>` became `outs: Vec<usize>` for the same reason, and the single-out assumption was threaded through four places.
+
+**`produces_result` is not the negation of `takes_jade_arg`.** An `inout_scalar` does both: the caller seeds it and the library writes it back. The out-parameter list used to be derived from "takes no Jade argument", which silently dropped it from the result — the symbol bound, compiled, ran, and handed back the bare return value. Two predicates, because there are two questions.
+
+**How many things come back decides the result's shape, and the counting has to reproduce the old shapes exactly.** `builds_result_struct` counts the out-parameters plus the C return value when nothing consumed it — an `out_buffer` reads it as an element count, an `out_handle` folds it into `fails_when`. One thing is the value directly; two or more is a keyed struct. Every binding that worked before regenerates byte-identical, which is what the untouched cshim tests check.
 
 **The generator and the shim have to agree, and nothing else checks that they do.** They are written against one vocabulary in two files, so a spelling added to `bindgen.rs` and not to `cshim.rs` passes every unit test on both sides and then fails at `jade pkg install` on a user's machine. `bindgen/tests.rs` closes the loop by driving a header through both halves and compiling the result.
 
@@ -87,6 +279,24 @@ Tests must never hit the network — use the `Fetcher` trait.
 **A `continue` in a loop over dependencies is a decision to install something unusable.** `build_c_shims` skipped a C dependency with no symbol table, which is the one combination that cannot work: nothing was bound, and a plain C library is exactly what the loader refuses. `resolve` rejects it, but `ensure_ready` does not re-resolve, so a lock written while the table was there outlives a manifest edit that removed it. It is an error now.
 
 **"It has the right name" is not "it is a library", and nothing between `add` and `dlopen` disagreed.** A dependency was checked for what it *exported* and never for whether it could be loaded at all, so a file that was not an object file passed through the manifest, `libs/`, resolution and the linker, and was refused by the dynamic loader in the finished program. `bindgen::is_loadable_object` reads the magic number, and it is called in two places on purpose: `jade pkg add`, which can then say what probably went wrong, and `materialize`, which is the one point every source passes through with the bytes in hand — a hand-written manifest and a fresh clone never touch `add`. Anything new that puts a file into `libs/` needs the same check.
+
+**A writable pointer to a complete struct is three different things.** Every one of them used to become `out_struct`. A type the library *hands out* — returned as `T*`, or written through a `T**` — is a handle, which is what the return position already called it. A type the caller allocates and the library keeps between calls cannot be an out-parameter at all, because the shim zeroes a fresh local every call: `lzma_code` bound, compiled, installed, ran, and did nothing, and `ZSTD_compressStream` would have written through a NULL `dst`. Only a record one call fills stays an out-parameter.
+
+The discriminator needs *both* signals, and getting that wrong in either direction is silent. Refusing on "loses a field" alone takes `SF_INFO`-shaped records that carry one `void*`; refusing on "appears in several functions" alone takes `SF_INFO` itself, which three `sf_open` variants fill. `struct_loses_a_field` and `struct_param_counts` are ANDed for that reason, and the two existing tests that pin each half — `an_unrepresentable_field_is_dropped_rather_than_the_whole_struct` and `a_writable_struct_pointer_is_an_out_parameter_and_the_table_follows` — both still pass unedited, which is the check that the rule did not overreach.
+
+**clang and `cc` have to be given the same include directories, and they were not.** `header_locations` computed the manifest's `include_dirs` as "the user's `-I`s plus the header's parent", while `bind_header` handed `from_header` only the user's `-I`s. So the shim compile could find a neighbouring header that reading the header could not, and the symptom was "clang could not parse" on a header that compiles fine. `bindgen::include_roots` is now the single source of both. It is called from *inside* `from_header` rather than at the call sites, which is what fixes `discover_header` — that one passed no directories at all, so any candidate needing one was silently demoted to a fallback.
+
+Two directories, for two different includes: `libfdt.h` does `#include <libfdt_env.h>` from its own directory, which an angled include does not search; `brotli/encode.h` does `#include <brotli/port.h>`, which resolves against the directory above. Each cost a library outright. A directory the caller named is searched first, because a guessed root can be wide enough to shadow the header they meant.
+
+**The export table decides what the library really has.** A header is written for the newest version while the artifact may have been configured without part of it. libbrotlienc's header declares two functions no brotli dylib on this machine exports; binding them produced a shim that compiled and then failed to *link*, and the linker refuses the whole dependency rather than the two symbols. The coverage check did not catch it because it only fires when *nothing* matches. Symbols are now filtered against the export table when one can be read, which is the same authority the umbrella-header case already leans on.
+
+**Types come from the whole translation unit; functions come only from the header you named.** The two need different scopes and used to share one. A library splits its types into `git2/types.h` and declares functions against them in twenty other files, so an environment built from a single file reported every one of those functions as taking an unsupported type. Types are safe to take from everywhere because nothing is emitted for a type on its own — one is recorded only because a bound function reached it. Functions are not, or binding `archive.h` would bind `stdio.h` with it.
+
+**An umbrella header is decided by the export table, not by a path heuristic.** `lzma.h`, `git2.h` and `alsa/asoundlib.h` declare nothing and exist to include the files that do; pointing at one reported "no declarations found", and pointing at a sub-header failed differently because a sub-header usually does not compile alone. When the named header declares no functions of its own, `bindable` falls back to every declaration in the translation unit that the artifact also exports. That is an exact test — `fopen` is in that translation unit and is not in liblzma — where "which directories are system ones" would have been a guess that breaks the moment a library lives in `/opt/homebrew/include` alongside its own dependencies. It needs the artifact, so the fallback is refused with a message naming `--path` when there is none.
+
+**One unbindable symbol must not take the dependency with it.** `from_header` resolved a symbol's structs inside a nested loop and `continue`d on failure — which continued the *inner* loop, so the symbol was emitted anyway while its field table was dropped. `cshim` refuses an `out_struct:` naming a table that is not there, and it refuses the whole dependency rather than the one symbol, so a single struct of unrepresentable fields made an otherwise fine library uninstallable. `sqlite3_snapshot_free` and `zip_file_attributes_init` are both that shape. The structs are resolved together now and the symbol is skipped as a unit, with the reason in the report.
+
+**A C `enum` is an `int`, and recording that belongs in the type environment.** Putting it in the mapper would have to be repeated at every site a type is looked up — return, parameter, struct field — so it goes in `build_env` as an alias, and every path resolves through `expand`. Both spellings clang gives have to be checked: for `typedef enum { ... } lzma_ret;` the `qualType` is `enum lzma_ret` while the `desugaredQualType` is the bare `lzma_ret`, and `underlying` prefers the desugared one — which is the spelling with the keyword already gone. Missing this cost 60 of liblzma's 114 symbols, `lzma_code` among them.
 
 **A normalized type name is a lookup key, not source text.** `normalize` drops `struct`, `union` and `enum` so a type can be found however it was written, and the stripped name was then also written into the generated shim. For `typedef struct sqlite3 sqlite3;` that is harmless, because the bare name really is a type — and every fixture in the suite used that shape, which is why nothing caught it. For the far more common `typedef struct X_s X;`, or a bare `struct X_s;`, `X_s` alone is not a type in C and the shim would not compile. `TypeEnv::c_name` puts the keyword back; `TypeEnv::tagged` is what knows whether it is needed. Anything new that turns a resolved type into shim text needs the same treatment.
 

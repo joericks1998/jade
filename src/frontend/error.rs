@@ -47,6 +47,12 @@ pub enum JadeError {
     /// `yield` outside any function body.
     YieldOutsideFunction { span: Span },
 
+    /// `break` with no enclosing loop.
+    BreakOutsideLoop { span: Span },
+
+    /// `continue` with no enclosing loop.
+    ContinueOutsideLoop { span: Span },
+
     /// A function body mixes `yield` with a value-returning `return`. It cannot
     /// be both a stream producer and a plain function.
     YieldAndReturn { span: Span },
@@ -191,6 +197,10 @@ impl std::fmt::Display for JadeError {
                 write!(f, "[{}:{}] a function that yields cannot also return a value — it produces a stream, not a single value (a bare 'return' to stop early is fine)", span.line, span.col),
             JadeError::ReturnOutsideFunction { span } =>
                 write!(f, "[{}:{}] 'return' used outside of a function", span.line, span.col),
+            JadeError::BreakOutsideLoop { span } =>
+                write!(f, "[{}:{}] 'break' outside a loop — it leaves the innermost 'for' or 'while', so there must be one (a loop outside the enclosing function does not count)", span.line, span.col),
+            JadeError::ContinueOutsideLoop { span } =>
+                write!(f, "[{}:{}] 'continue' outside a loop — it starts the innermost 'for' or 'while' on its next iteration, so there must be one (a loop outside the enclosing function does not count)", span.line, span.col),
             JadeError::NestedFunction { span } =>
                 write!(f, "[{}:{}] function definitions cannot be nested", span.line, span.col),
             JadeError::IntegerOverflow { span } =>

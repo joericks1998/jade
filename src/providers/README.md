@@ -27,7 +27,21 @@ Credentials are backed up per provider rather than only stored in the active slo
 
 - **`mod.rs`** — pool and credential path helpers (`pool_dir`, `credential_path`, `bundled_provider_dir`), discovery across the three search locations, and the add / select / configure operations that write the active slot.
 - **`tests.rs`** — registry tests.
-- **`design.md`** — a design note rather than code: what a provider package is, the `$HOME/.jade` layout, how both engines drive one, and how providers are built and distributed. It spans this directory, `src/llm/`, `src/runtime_aot/infer/`, and `jade_runtime::provider`, so it lives here rather than in any one of them.
+
+## What a provider actually is
+
+A compiled Jade `--lib` package, built outside this repo, exporting two functions:
+
+- **`infer(request) -> [Frame]`** — takes an `InferRequest` (`input`, `grammar`, `anchor`, `stop_anchor`) and returns frames: `Token*` then `Done` on success, with an optional leading `Meta` and any `Json` for tool calls; a single `Error` on failure. Every request field is always present, `nil` when the language has nothing to say.
+- **`configure(opts)`** — runtime-mutable parameters (api_key, model, temperature, tools, system). Optional; a package may read its own env var instead.
+
+Both shapes are declared once, outside this repo, in the `ovata-infer-protocol` submodule at `src/protocol/jade/infer.jde`. A package registers `jade/` as a `[lib]` and does `use ovata::infer`, so it reads and returns those definitions rather than copies. The compiler keeps a hand-written copy of the names, tripwired against that file by `src/llm/tests.rs`.
+
+A frame may be written as a struct (`Token { text: "hi" }`, where the type name is the tag) or as a dict (`{"type": "Token", "text": "hi"}`). Anything else **raises**. The decoder used to skip what it could not read, so a provider that renamed `text` or wrote `"token"` lowercase produced an empty reply with no error at any layer — the model appearing to have said nothing.
+
+The language is provider-blind. It loads whatever single package is in the active slot through the same `jade_pkg_init` C-ABI that `jade build --lib` emits, calls `configure` with the stored credential, calls `infer`, and folds the frames into the response. It never learns a vendor detail. That is the point: a cloud path any machine can run, without the public language knowing anything about Anthropic or OpenAI.
+
+Superseded, and worth knowing because the reasoning still gets cited: releases 1.1.21 through 1.1.29 also had an inference *daemon*, reached over a socket. Two ways to do one thing, and the daemon was the one with a serialization boundary, a framing layer and a second process to keep running. It was removed in v1.1.30, and a linked package has been the sole path since.
 
 ## Who uses it
 
@@ -48,4 +62,4 @@ cargo test providers::
 JADE_PROVIDERS_DIR=/path/to/built/providers ./target/debug/jade register
 ```
 
-Background on what a provider package is and why the design is shaped this way: `design.md`, beside this file.
+Background on what a provider package is and why it is shaped this way is under *What a provider actually is*, above.

@@ -63,6 +63,28 @@ struct Emitter {
     /// mark token: `ArenaReset(tok)` is emitted before every return so arena
     /// memory is reclaimed on exit (not left to balloon across calls).
     arena_fn_tok: Option<Reg>,
+    /// One entry per loop currently being emitted, innermost last. Holds the
+    /// jump sites that `break` and `continue` left behind for the loop to patch
+    /// once it knows where its exit and its next iteration begin.
+    loops: Vec<LoopSites>,
+    /// How many exception handlers are installed at this point in the chunk. A
+    /// jump out of a `try` body has to pop the ones it skips past — see
+    /// [`Emitter::emit_loop_jump`].
+    handler_depth: usize,
+}
+
+/// Where an enclosing loop has to patch the jumps its body left behind.
+#[derive(Default)]
+struct LoopSites {
+    /// Instruction indices of `break` jumps, patched to just past the loop.
+    breaks: Vec<usize>,
+    /// Instruction indices of `continue` jumps, patched to the bottom of the
+    /// body — before the increment and the arena reset, so a `continue` runs
+    /// both rather than skipping them.
+    continues: Vec<usize>,
+    /// The handler depth outside the loop, so a `break` from inside a `try`
+    /// knows how many frames it is jumping out of.
+    handler_depth: usize,
 }
 
 impl Emitter {
@@ -73,6 +95,8 @@ impl Emitter {
             locals: None,
             arena_eligible: std::collections::HashSet::new(),
             arena_fn_tok: None,
+            loops: Vec::new(),
+            handler_depth: 0,
         }
     }
 
@@ -83,6 +107,8 @@ impl Emitter {
             locals: Some(HashMap::new()),
             arena_eligible: std::collections::HashSet::new(),
             arena_fn_tok: None,
+            loops: Vec::new(),
+            handler_depth: 0,
         }
     }
 
@@ -108,6 +134,45 @@ impl Emitter {
 
     fn in_fn(&self) -> bool {
         self.locals.is_some()
+    }
+
+    /// Emit a `break` or `continue` as a jump for the enclosing loop to patch.
+    ///
+    /// Both first pop any exception handler the jump escapes. A `try` installs
+    /// a handler and removes it with `PopHandler` on the way out; leaving by a
+    /// jump instead skips that, and the frame stays installed pointing at code
+    /// the loop has already left. The next exception anywhere in the function
+    /// would then land in the wrong arm. Popping here is what makes
+    ///
+    /// ```text
+    /// while true { try { step() } catch e { break } }
+    /// ```
+    ///
+    /// mean what it reads as — and that shape is the natural one for a C
+    /// library that signals end-of-input by returning an error.
+    ///
+    /// A `break` from inside a `catch` arm pops nothing, correctly: dispatching
+    /// the exception already removed that frame.
+    ///
+    /// A `break` does skip the loop's `ArenaReset`, so the iteration it left
+    /// from keeps its arena region until the function returns. That is one
+    /// iteration's worth on the way out of a loop, reclaimed at the function's
+    /// own reset; landing it somewhere that runs the reset would mean emitting
+    /// a second one only reachable by `break`, which is more emitter to be
+    /// wrong in than the memory is worth. `continue` is the case that would
+    /// repeat, and it does run the reset.
+    fn emit_loop_jump(&mut self, is_break: bool, span: Span) {
+        let Some(depth_outside) = self.loops.last().map(|l| l.handler_depth) else { return };
+        for _ in depth_outside..self.handler_depth {
+            self.chunk.emit(Instr::PopHandler, span);
+        }
+        let site = self.chunk.emit(Instr::Jump(0), span);
+        let Some(loop_sites) = self.loops.last_mut() else { return };
+        if is_break {
+            loop_sites.breaks.push(site);
+        } else {
+            loop_sites.continues.push(site);
+        }
     }
 
     /// Open a per-iteration arena region inside a loop body — only when this
@@ -342,8 +407,17 @@ fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
             // use the arena at all (else the mark/reset would be pure overhead).
             let loop_tok = em.arena_loop_open(span);
 
+            em.loops.push(LoopSites { handler_depth: em.handler_depth, ..Default::default() });
             for s in body {
                 emit_stmt(s, em, ctx)?;
+            }
+            let sites = em.loops.pop().unwrap_or_default();
+
+            // `continue` lands here rather than at `loop_start`, so it still
+            // runs the arena reset below instead of leaking a region per
+            // iteration.
+            for site in sites.continues {
+                em.chunk.patch_jump(site, em.chunk.len());
             }
 
             if let Some(t) = loop_tok {
@@ -354,6 +428,9 @@ fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
             let back = loop_start as i32 - (em.chunk.len() as i32 + 1);
             em.chunk.emit(Instr::Jump(back), span);
             em.chunk.patch_jump(jump_exit, em.chunk.len());
+            for site in sites.breaks {
+                em.chunk.patch_jump(site, em.chunk.len());
+            }
         }
 
         TStmt::For { var, iterable, body, span } => {
@@ -393,8 +470,17 @@ fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
 
             // ── Loop body ──────────────────────────────────────────────────────
             let loop_tok = em.arena_loop_open(span);
+            em.loops.push(LoopSites { handler_depth: em.handler_depth, ..Default::default() });
             for s in body {
                 emit_stmt(s, em, ctx)?;
+            }
+            let sites = em.loops.pop().unwrap_or_default();
+
+            // `continue` lands before the increment, never after it — landing
+            // at the top of the loop instead would never advance the index, and
+            // the loop would hang.
+            for site in sites.continues {
+                em.chunk.patch_jump(site, em.chunk.len());
             }
 
             // ── Increment: idx = idx + 1 ───────────────────────────────────────
@@ -412,7 +498,13 @@ fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
             let back = loop_start as i32 - (em.chunk.len() as i32 + 1);
             em.chunk.emit(Instr::Jump(back), span);
             em.chunk.patch_jump(jump_exit, em.chunk.len());
+            for site in sites.breaks {
+                em.chunk.patch_jump(site, em.chunk.len());
+            }
         }
+
+        TStmt::Break { span } => em.emit_loop_jump(true, span),
+        TStmt::Continue { span } => em.emit_loop_jump(false, span),
 
         // Metadata only — already captured in the first pass.
         TStmt::StructDef { .. } | TStmt::InterfaceDef { .. } => {}
@@ -488,10 +580,13 @@ fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
             // Offset is patched below once we know where the handler arms begin.
             let setup_idx = em.chunk.emit(Instr::SetupHandler(caught_reg, 0), span);
 
-            // Emit try body.
+            // Emit try body. The depth is raised only for the body: an arm runs
+            // with the frame already popped by the dispatch that reached it.
+            em.handler_depth += 1;
             for s in body {
                 emit_stmt(s, em, ctx)?;
             }
+            em.handler_depth -= 1;
 
             // Normal exit from try: pop the handler frame.
             em.chunk.emit(Instr::PopHandler, span);

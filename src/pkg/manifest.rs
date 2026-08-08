@@ -141,18 +141,31 @@ pub fn set_bindings(
 
     dep.insert("abi", toml_edit::value("c"));
 
-    let mut set_list = |key: &str, values: &[String]| {
+    // Merged, like the symbols below, and for the same reason: binding a second
+    // header is how a library split across several is bound at all. Replacing
+    // the list dropped the first header while keeping the symbols that came
+    // from it, so the shim declared none of them — and C lets an undeclared
+    // function be called, so it compiled clean and crashed on the first call
+    // that returned a pointer. `-Werror=implicit-function-declaration` in
+    // `pkg::compile_shim` is the second half of that fix.
+    let mut merge_list = |key: &str, values: &[String]| {
         if values.is_empty() {
             return;
         }
-        let mut arr = toml_edit::Array::new();
+        let mut arr = dep
+            .get(key)
+            .and_then(|i| i.as_array())
+            .cloned()
+            .unwrap_or_else(toml_edit::Array::new);
         for v in values {
-            arr.push(v.as_str());
+            if !arr.iter().any(|e| e.as_str() == Some(v.as_str())) {
+                arr.push(v.as_str());
+            }
         }
         dep.insert(key, toml_edit::value(arr));
     };
-    set_list("headers", headers);
-    set_list("include_dirs", include_dirs);
+    merge_list("headers", headers);
+    merge_list("include_dirs", include_dirs);
 
     if !structs.is_empty() {
         let structs_tbl = dep

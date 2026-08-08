@@ -272,13 +272,13 @@ fn an_out_buffer_takes_no_jade_argument_and_returns_bytes() {
     assert!(src.contains("if (argc != 2) return 1;"), "buffer must not consume an argument:\n{src}");
 
     // Sized from the argument after it, which is the element count.
-    assert!(src.contains("int64_t n_elem = argv[1].data.as_int;"), "wrong count source:\n{src}");
+    assert!(src.contains("int64_t n_elem1 = argv[1].data.as_int;"), "wrong count source:\n{src}");
     assert!(src.contains("sizeof(short)"), "must size by the element type:\n{src}");
 
     // The return value is the fill count, so it sizes the blob rather than
     // coming back separately.
     assert!(src.contains("out->tag = JADE_FFI_BYTES;"), "should return bytes:\n{src}");
-    assert!(src.contains("free(obuf);"), "scratch must be released:\n{src}");
+    assert!(src.contains("free(obuf1);"), "scratch must be released:\n{src}");
 }
 
 #[test]
@@ -289,7 +289,7 @@ fn a_failing_out_buffer_call_frees_its_scratch_before_raising() {
     let src = generate("z", &symbols(&[("rd", s)])).unwrap();
     let fail_block = &src[src.find("if ((r) < 0)").expect("failure test")..];
     let raise_at = fail_block.find("JADE_FFI_ERROR").unwrap();
-    let free_at = fail_block.find("free(obuf);").unwrap();
+    let free_at = fail_block.find("free(obuf1);").unwrap();
     assert!(free_at < raise_at, "scratch must be freed before the error return:\n{src}");
 }
 
@@ -299,7 +299,7 @@ fn a_short_read_is_clamped_to_what_was_allocated() {
     // read past the scratch.
     let s = sym(&["int", "out_buffer:char", "int"], "int");
     let src = generate("z", &symbols(&[("rd", s)])).unwrap();
-    assert!(src.contains("r > n_elem ? n_elem : r"), "missing clamp:\n{src}");
+    assert!(src.contains("r > n_elem1 ? n_elem1 : r"), "missing clamp:\n{src}");
 }
 
 #[test]
@@ -318,10 +318,33 @@ fn an_out_buffer_symbol_must_return_the_count() {
 }
 
 #[test]
-fn at_most_one_out_parameter() {
+fn at_most_one_out_parameter_may_read_the_c_return_value() {
+    // Two out_buffers would both want the return value as their element count,
+    // and there is only one of it.
     let s = sym(&["out_buffer:char", "int", "out_buffer:char", "int"], "int");
     let err = generate("z", &symbols(&[("rd", s)])).unwrap_err();
-    assert!(err.contains("at most one"), "unexpected: {err}");
+    assert!(err.contains("both read the C return value"), "unexpected: {err}");
+}
+
+#[test]
+fn two_out_parameters_must_each_be_named() {
+    let s = sym(&["out_scalar:int", "out_scalar:int"], "nil");
+    let err = generate("z", &symbols(&[("f", s)])).unwrap_err();
+    assert!(err.contains("needs \na name") || err.contains("needs a name"), "unexpected: {err}");
+}
+
+#[test]
+fn two_out_parameters_may_not_share_a_name() {
+    let s = sym(&["out_scalar:int@a", "out_scalar:int@a"], "nil");
+    let err = generate("z", &symbols(&[("f", s)])).unwrap_err();
+    assert!(err.contains("names two out-parameters"), "unexpected: {err}");
+}
+
+#[test]
+fn ret_is_reserved_as_an_out_parameter_name() {
+    let s = sym(&["out_scalar:int@ret", "out_scalar:int@b"], "int");
+    let err = generate("z", &symbols(&[("f", s)])).unwrap_err();
+    assert!(err.contains("reserved"), "unexpected: {err}");
 }
 
 #[test]
@@ -357,9 +380,9 @@ fn a_struct_out_parameter_is_a_zeroed_local_passed_by_address() {
     .unwrap();
 
     assert!(src.contains("#include <sndfile.h>"), "must include the header:\n{src}");
-    assert!(src.contains("SF_INFO ostruct;"), "must declare a real local:\n{src}");
-    assert!(src.contains("memset(&ostruct, 0, sizeof ostruct);"), "must zero it:\n{src}");
-    assert!(src.contains("&ostruct"), "must pass its address:\n{src}");
+    assert!(src.contains("SF_INFO ostruct2;"), "must declare a real local:\n{src}");
+    assert!(src.contains("memset(&ostruct2, 0, sizeof ostruct2);"), "must zero it:\n{src}");
+    assert!(src.contains("&ostruct2"), "must pass its address:\n{src}");
     assert!(src.contains("if (argc != 2) return 1;"), "out-param takes no Jade arg:\n{src}");
 }
 
@@ -390,7 +413,7 @@ fn a_void_call_returns_the_filled_struct_directly() {
     let s = sym(&["out_struct:SF_INFO"], "nil");
     let src = generate_with("snd", &symbols(&[("stat_it", s)]), &[("SF_INFO", SF_INFO)], &["sndfile.h"]).unwrap();
     assert!(!src.contains("_result"), "should not wrap:\n{src}");
-    assert!(src.contains("out->data.as_struct = ostruct_j;"), "should return it directly:\n{src}");
+    assert!(src.contains("out->data.as_struct = ostruct0_j;"), "should return it directly:\n{src}");
 }
 
 #[test]
@@ -400,7 +423,7 @@ fn struct_field_strings_are_copied_not_borrowed() {
     // stack.
     let s = sym(&["out_struct:INFO"], "nil");
     let src = generate_with("z", &symbols(&[("f", s)]), &[("INFO", &[("name", "str")])], &["z.h"]).unwrap();
-    assert!(src.contains("strdup((ostruct.name)"), "field string must be copied:\n{src}");
+    assert!(src.contains("strdup((ostruct0.name)"), "field string must be copied:\n{src}");
 }
 
 #[test]
@@ -575,9 +598,9 @@ fn an_out_handle_takes_no_jade_argument_and_returns_the_handle() {
 
     assert!(src.contains("extern int64_t sqlite3_open(const char*, sqlite3**);"), "bad decl:\n{src}");
     assert!(src.contains("if (argc != 1) return 1;"), "out-handle takes no Jade arg:\n{src}");
-    assert!(src.contains("sqlite3* ohandle = NULL;"), "must start null:\n{src}");
-    assert!(src.contains("&ohandle"), "must pass its address:\n{src}");
-    assert!(src.contains(r#"jade_shim_handle((void*)ohandle, "sqlite3")"#), "missing wrap:\n{src}");
+    assert!(src.contains("sqlite3* ohandle1 = NULL;"), "must start null:\n{src}");
+    assert!(src.contains("&ohandle1"), "must pass its address:\n{src}");
+    assert!(src.contains(r#"jade_shim_handle((void*)ohandle1, "sqlite3")"#), "missing wrap:\n{src}");
     // The status is consumed by the failure convention, not returned.
     assert!(src.contains("if ((r) != 0) {"), "status should drive fails_when:\n{src}");
 }
@@ -585,7 +608,7 @@ fn an_out_handle_takes_no_jade_argument_and_returns_the_handle() {
 #[test]
 fn an_out_handle_that_was_never_written_comes_back_nil() {
     let src = generate("db", &symbols(&[("op", sym(&["out_handle:T"], "int"))])).unwrap();
-    assert!(src.contains("if (!ohandle) {"), "must check it was written:\n{src}");
+    assert!(src.contains("if (!ohandle0) {"), "must check it was written:\n{src}");
     assert!(src.contains("out->tag = JADE_FFI_NIL;"), "should be nil, not a null handle:\n{src}");
 }
 
@@ -721,4 +744,119 @@ fn a_callback_shim_compiles() {
     if let Err(e) = compiles(&src, &[("cbfix.h", header)]) {
         panic!("callback shim does not compile:\n{e}\n--- source ---\n{src}");
     }
+}
+
+// ── Scalars written through a pointer ────────────────────────────────────
+
+#[test]
+fn an_out_scalar_takes_no_jade_argument_and_is_the_result() {
+    let src = generate("z", &symbols(&[("f", sym(&["int", "out_scalar:uint32_t"], "nil"))])).unwrap();
+    assert!(src.contains("extern void f(int64_t, uint32_t*);"), "bad decl:\n{src}");
+    assert!(src.contains("if (argc != 1) return 1;"), "the out must not consume an argument:\n{src}");
+    assert!(src.contains("uint32_t oscalar1 = (uint32_t)0;"), "must be a zeroed local:\n{src}");
+    assert!(src.contains("&oscalar1"), "must pass its address:\n{src}");
+    assert!(src.contains("out->tag = JADE_FFI_INT;"), "should come back as an int:\n{src}");
+}
+
+#[test]
+fn an_out_scalar_keeps_the_librarys_own_c_type() {
+    // Widening it to int64_t would take the address of a differently-sized
+    // object and let the library write past it.
+    let src = generate("z", &symbols(&[("f", sym(&["out_scalar:uint16_t"], "nil"))])).unwrap();
+    assert!(src.contains("uint16_t oscalar0"), "must declare the real type:\n{src}");
+    assert!(!src.contains("int64_t oscalar0"), "must not widen:\n{src}");
+}
+
+#[test]
+fn an_inout_scalar_consumes_an_argument_and_is_seeded_from_it() {
+    let src = generate("z", &symbols(&[("f", sym(&["int", "inout_scalar:int"], "nil"))])).unwrap();
+    assert!(src.contains("if (argc != 2) return 1;"), "it does take an argument:\n{src}");
+    assert!(src.contains("if (argv[1].tag != JADE_FFI_INT) return 1;"), "missing tag check:\n{src}");
+    assert!(src.contains("int oscalar1 = (int)argv[1].data.as_int;"), "must be seeded:\n{src}");
+}
+
+#[test]
+fn a_string_written_through_a_pointer_is_refused() {
+    // Ownership is unresolvable from the header: nothing says who frees it.
+    // `char*` is caught by the identifier check, before the scalar one.
+    let err = generate("z", &symbols(&[("f", sym(&["out_scalar:char*"], "nil"))])).unwrap_err();
+    assert!(err.contains("not a C type name"), "unexpected: {err}");
+}
+
+#[test]
+fn an_out_scalar_that_is_not_a_scalar_is_refused_by_name() {
+    // A struct cannot be one: the shim reads the local back as a single value.
+    let err = generate("z", &symbols(&[("f", sym(&["out_scalar:SF_INFO"], "nil"))])).unwrap_err();
+    assert!(err.contains("not a scalar"), "unexpected: {err}");
+}
+
+// ── More than one out-parameter ──────────────────────────────────────────
+
+#[test]
+fn two_named_outs_come_back_under_their_own_keys() {
+    let s = sym(&["out_scalar:int@quot", "out_scalar:int@rem"], "nil");
+    let src = generate("z", &symbols(&[("divmod", s)])).unwrap();
+    assert!(src.contains(r#"jade_shim_struct("divmod_result", 2)"#), "should build a pair:\n{src}");
+    assert!(src.contains(r#"strdup("quot")"#), "missing key:\n{src}");
+    assert!(src.contains(r#"strdup("rem")"#), "missing key:\n{src}");
+    assert!(!src.contains(r#"strdup("ret")"#), "a void return has no ret key:\n{src}");
+}
+
+#[test]
+fn a_return_value_joins_named_outs_under_ret() {
+    let s = sym(&["int", "out_scalar:int@quot", "out_scalar:int@rem"], "int");
+    let src = generate("z", &symbols(&[("divmod", s)])).unwrap();
+    assert!(src.contains(r#"jade_shim_struct("divmod_result", 3)"#), "three keys:\n{src}");
+    assert!(src.contains(r#"strdup("ret")"#), "missing ret:\n{src}");
+}
+
+#[test]
+fn one_out_beside_a_return_still_comes_back_as_ret_and_out() {
+    // The shape that existed before multiple outs, unchanged.
+    let s = sym(&["int", "out_scalar:int"], "int");
+    let src = generate("z", &symbols(&[("f", s)])).unwrap();
+    assert!(src.contains(r#"jade_shim_struct("f_result", 2)"#), "{src}");
+    assert!(src.contains(r#"strdup("out")"#), "the lone out keeps the name `out`:\n{src}");
+}
+
+#[test]
+fn two_out_structs_declare_two_distinct_locals() {
+    // The scratch used to be a fixed name, so a second out-struct emitted the
+    // same declaration twice and the shim did not compile.
+    let s = sym(&["out_struct:A@first", "out_struct:B@second"], "nil");
+    let src = generate_with(
+        "z",
+        &symbols(&[("f", s)]),
+        &[("A", &[("x", "int")]), ("B", &[("y", "int")])],
+        &["z.h"],
+    )
+    .unwrap();
+    assert!(src.contains("A ostruct0;"), "{src}");
+    assert!(src.contains("B ostruct1;"), "{src}");
+}
+
+#[test]
+fn a_multi_out_wrapper_compiles() {
+    let s = sym(&["out_scalar:int@quot", "out_scalar:int@rem"], "int");
+    let src = generate("z", &symbols(&[("divmod", s)])).unwrap();
+    compiles(&src, &[]).expect("the generated C must compile");
+}
+
+#[test]
+fn a_wrapper_mixing_two_kinds_of_scratch_compiles() {
+    // An out-struct and an out-scalar in one wrapper: two different scratch
+    // kinds, two different result slots.
+    let s = sym(&["out_struct:INFO@info", "out_scalar:int@count"], "int");
+    let src = generate_with(
+        "z",
+        &symbols(&[("f", s)]),
+        &[("INFO", &[("rate", "int"), ("name", "str")])],
+        &["z.h"],
+    )
+    .unwrap();
+    compiles(
+        &src,
+        &[("z.h", "typedef struct { int rate; const char* name; } INFO;\nint f(INFO*, int*);\n")],
+    )
+    .expect("the generated C must compile");
 }

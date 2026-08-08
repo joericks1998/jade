@@ -18,7 +18,7 @@ fn bind_filtered(src: &str, only: Option<&str>) -> Binding {
     std::fs::create_dir_all(&dir).unwrap();
     let h = dir.join("probe.h");
     std::fs::write(&h, src).unwrap();
-    let out = from_header(&h, &[], only);
+    let out = from_header(&h, &[], only, None);
     let _ = std::fs::remove_dir_all(&dir);
     out.expect("binding should succeed")
 }
@@ -356,7 +356,7 @@ fn a_header_that_does_not_parse_is_an_error_not_a_partial_binding() {
     std::fs::create_dir_all(&dir).unwrap();
     let h = dir.join("bad.h");
     std::fs::write(&h, "#include <no_such_header_anywhere.h>\nint f(int);\n").unwrap();
-    let err = from_header(&h, &[], None).expect_err("should refuse");
+    let err = from_header(&h, &[], None, None).expect_err("should refuse");
     assert!(err.contains("clang could not parse"), "unexpected: {err}");
     assert!(err.contains("-I"), "should suggest the fix: {err}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -382,7 +382,7 @@ fn round_trip(header_src: &str) -> Result<String, String> {
     let h = dir.join("lib.h");
     std::fs::write(&h, header_src).unwrap();
 
-    let b = from_header(&h, &[], None).map_err(|e| format!("bind failed: {e}"))?;
+    let b = from_header(&h, &[], None, None).map_err(|e| format!("bind failed: {e}"))?;
     let symbols: std::collections::HashMap<String, CSymbol> =
         b.symbols.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
     let structs: std::collections::HashMap<String, CStruct> =
@@ -487,6 +487,9 @@ fn every_spelling_the_generator_emits_is_one_the_shim_accepts() {
          int f_bytes(const void* d, size_t n);\n\
          int f_out_buffer(opaque* h, char* buf, int n);\n\
          int f_out_struct(opaque* h, rec_t* out);\n\
+         int f_out_scalar(opaque* h, int* written);\n\
+         void f_two_outs(unsigned long long* progress_in, unsigned long long* progress_out);\n\
+         int f_ret_and_two_outs(int a, int* quot, int* rem);\n\
          void f_void(void);\n",
     )
     .unwrap();
@@ -500,6 +503,9 @@ fn every_spelling_the_generator_emits_is_one_the_shim_accepts() {
         "jade_shim_f_ret_handle",
         "jade_shim_f_out_handle",
         "jade_shim_f_handle_arg",
+        "jade_shim_f_out_scalar",
+        "jade_shim_f_two_outs",
+        "jade_shim_f_ret_and_two_outs",
         "jade_shim_f_bytes",
         "jade_shim_f_out_buffer",
         "jade_shim_f_out_struct",
@@ -533,4 +539,465 @@ fn a_callback_the_trampoline_cannot_marshal_is_skipped_by_that_reason() {
     let b = bind("int go(int (*cb)(void*, int));\n");
     assert!(why_skipped(&b, "go").contains("callback"), "{:?}", b.skipped);
     assert!(!b.symbols.contains_key("go"));
+}
+
+// ── Types come from the whole translation unit ───────────────────────────
+//
+// Functions are bound from the named header alone; the types they are written
+// in terms of are not. A library that splits its types into `git2/types.h` and
+// declares functions against them in twenty other headers used to report every
+// one of those functions as taking an unsupported type.
+
+/// Write a main header plus its includes into one directory, then bind the
+/// main one. `files` is `(name, contents)`, the first being the entry point.
+fn bind_tree(files: &[(&str, &str)], exported: Option<&[&str]>) -> Result<Binding, String> {
+    let dir = std::env::temp_dir().join(format!(
+        "jade-bindgen-tree-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, src) in files {
+        // Names may carry a subdirectory, so an angled include like
+        // `<pkg/other.h>` can be written the way a real library writes it.
+        let path = dir.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, src).unwrap();
+    }
+    let set = exported
+        .map(|e| e.iter().map(|s| s.to_string()).collect::<std::collections::HashSet<String>>());
+    let out = from_header(&dir.join(files[0].0), &[], None, set.as_ref());
+    let _ = std::fs::remove_dir_all(&dir);
+    out
+}
+
+#[test]
+fn a_type_defined_in_an_included_header_is_still_a_handle() {
+    let b = bind_tree(
+        &[
+            ("main.h", "#include \"types.h\"\nint obj_value(Obj* o);\n"),
+            ("types.h", "struct Obj_s;\ntypedef struct Obj_s Obj;\n"),
+        ],
+        None,
+    )
+    .expect("should bind");
+    assert_eq!(args(&b, "obj_value"), ["handle<Obj>"]);
+}
+
+#[test]
+fn a_struct_defined_in_an_included_header_still_gets_a_field_table() {
+    let b = bind_tree(
+        &[
+            ("main.h", "#include \"types.h\"\nint info_get(struct Info* out);\n"),
+            ("types.h", "struct Info { int rate; int channels; };\n"),
+        ],
+        None,
+    )
+    .expect("should bind");
+    assert_eq!(args(&b, "info_get"), ["out_struct:struct Info"]);
+    assert!(b.structs.contains_key("struct Info"), "{:?}", b.structs);
+}
+
+#[test]
+fn only_the_named_headers_functions_are_bound() {
+    // The included header's `helper` is in the same translation unit and must
+    // not come along — that is what keeps the C standard library out.
+    let b = bind_tree(
+        &[("main.h", "#include \"other.h\"\nint mine(int a);\n"), ("other.h", "int helper(int);\n")],
+        None,
+    )
+    .expect("should bind");
+    assert!(b.symbols.contains_key("mine"));
+    assert!(!b.symbols.contains_key("helper"), "{:?}", b.symbols.keys());
+}
+
+// ── Umbrella headers ─────────────────────────────────────────────────────
+
+#[test]
+fn an_umbrella_header_binds_what_the_library_exports() {
+    // `lzma.h` and `git2.h` declare nothing themselves. The export table is
+    // what says which of the included declarations belong to this library.
+    let b = bind_tree(
+        &[
+            ("umbrella.h", "#include <stdio.h>\n#include \"core.h\"\n"),
+            ("core.h", "int ctx_get(int a);\nint ctx_set(int a);\n"),
+        ],
+        Some(&["ctx_get", "ctx_set"]),
+    )
+    .expect("should bind");
+    assert_eq!(b.umbrella, Some(2));
+    assert!(b.symbols.contains_key("ctx_get"));
+    assert!(b.symbols.contains_key("ctx_set"));
+    // stdio.h is in the same translation unit and is not this library.
+    assert!(!b.symbols.contains_key("fopen"), "{:?}", b.symbols.keys());
+}
+
+#[test]
+fn an_umbrella_header_with_no_export_table_says_what_it_needs() {
+    let err = bind_tree(
+        &[("umbrella.h", "#include \"core.h\"\n"), ("core.h", "int ctx_get(int a);\n")],
+        None,
+    )
+    .expect_err("cannot be read without the library");
+    assert!(err.contains("umbrella"), "{err}");
+    assert!(err.contains("--path"), "should name the fix: {err}");
+}
+
+#[test]
+fn a_header_that_declares_its_own_functions_is_not_treated_as_an_umbrella() {
+    let b = bind_tree(
+        &[("main.h", "#include \"other.h\"\nint mine(int a);\n"), ("other.h", "int helper(int);\n")],
+        Some(&["mine", "helper"]),
+    )
+    .expect("should bind");
+    assert_eq!(b.umbrella, None);
+    assert!(!b.symbols.contains_key("helper"), "{:?}", b.symbols.keys());
+}
+
+// ── Enums ────────────────────────────────────────────────────────────────
+
+#[test]
+fn an_enum_return_is_an_int() {
+    // Status-code enums are how most C libraries report failure. Leaving them
+    // unbindable cost 60 of liblzma's 114 symbols.
+    let b = bind("typedef enum { OK = 0, BAD = 1 } status;\nstatus go(int a);\n");
+    assert_eq!(ret(&b, "go"), "int");
+}
+
+#[test]
+fn an_enum_parameter_is_an_int() {
+    let b = bind("typedef enum { A, B } mode;\nint go(mode m);\n");
+    assert_eq!(args(&b, "go"), ["int"]);
+}
+
+#[test]
+fn a_tagged_enum_used_without_a_typedef_is_an_int() {
+    let b = bind("enum mode { A, B };\nint go(enum mode m);\n");
+    assert_eq!(args(&b, "go"), ["int"]);
+}
+
+#[test]
+fn an_enum_named_by_a_typedef_of_its_own_tag_is_an_int() {
+    // `typedef enum lzma_ret lzma_ret;` — the tag and the typedef share a name,
+    // so stripping the keyword aliases the name to itself.
+    let b = bind("enum lzma_ret { OK };\ntypedef enum lzma_ret lzma_ret;\nint go(lzma_ret r);\n");
+    assert_eq!(args(&b, "go"), ["int"]);
+}
+
+#[test]
+fn an_enum_library_binds_and_compiles_end_to_end() {
+    round_trip(
+        "typedef enum { S_OK = 0, S_ERR = 1 } status;\n\
+         typedef struct ctx ctx;\n\
+         status ctx_open(const char* path, ctx** out);\n\
+         status ctx_step(ctx* c, status hint);\n",
+    )
+    .expect("an enum-heavy library should bind and compile");
+}
+
+// ── One unbindable symbol must not take the dependency with it ───────────
+
+#[test]
+fn a_symbol_whose_struct_has_no_carryable_field_is_skipped_not_emitted() {
+    // The sqlite3_snapshot / zip_file_attributes shape. Emitting the symbol
+    // while dropping its field table left the manifest referring to a
+    // `[structs]` entry that was never written, and the shim generator refuses
+    // the *whole dependency* over one such symbol — so a single opaque blob
+    // made an otherwise fine library uninstallable.
+    let b = bind(
+        "typedef struct snap { unsigned char hidden[48]; } snap;\n\
+         void snap_free(snap* s);\n\
+         int plain_add(int a, int b);\n",
+    );
+    assert!(b.symbols.contains_key("plain_add"));
+    assert!(!b.symbols.contains_key("snap_free"), "{:?}", b.symbols.keys());
+    assert!(why_skipped(&b, "snap_free").contains("no field the FFI can carry"));
+    // Nothing left dangling: every out_struct spec names a table that exists.
+    for spec in b.symbols.values().flat_map(|s| s.args.iter()) {
+        if let Some(name) = spec.strip_prefix("out_struct:") {
+            assert!(b.structs.contains_key(name), "{name} has no field table");
+        }
+    }
+}
+
+#[test]
+fn a_library_with_one_unbindable_struct_still_compiles_its_shim() {
+    round_trip(
+        "typedef struct snap { unsigned char hidden[48]; } snap;\n\
+         void snap_free(snap* s);\n\
+         int plain_add(int a, int b);\n",
+    )
+    .expect("the rest of the library should still bind");
+}
+
+// ── Include roots ────────────────────────────────────────────────────────
+//
+// A header is rarely self-contained, and the two ways it reaches its
+// neighbours need two different directories. Neither was passed to clang, and
+// each one cost a real library outright: libfdt could not be parsed at all,
+// and neither could brotli.
+
+#[test]
+fn include_roots_lists_the_header_directory_then_the_one_above_it() {
+    let roots = include_roots(std::path::Path::new("/tmp/inc/pkg/main.h"), &[]);
+    assert_eq!(roots, ["/tmp/inc/pkg", "/tmp/inc"], "{roots:?}");
+}
+
+#[test]
+fn a_directory_the_caller_named_wins_over_one_guessed_from_the_path() {
+    // A guessed root can be wide enough to shadow the header the caller meant,
+    // so an explicit -I is searched first.
+    let roots =
+        include_roots(std::path::Path::new("/tmp/inc/pkg/main.h"), &["/tmp/mine".to_string()]);
+    assert_eq!(roots[0], "/tmp/mine", "{roots:?}");
+}
+
+#[test]
+fn include_roots_does_not_repeat_a_directory() {
+    let roots =
+        include_roots(std::path::Path::new("/tmp/inc/pkg/main.h"), &["/tmp/inc/pkg".to_string()]);
+    assert_eq!(roots, ["/tmp/inc/pkg", "/tmp/inc"], "{roots:?}");
+}
+
+#[test]
+fn a_header_including_a_sibling_with_angle_brackets_parses() {
+    // The libfdt shape: `#include <libfdt_env.h>` beside the header. An angled
+    // include does not search the including file's own directory, so without
+    // that directory on the search path clang cannot parse the header at all.
+    let b = bind_tree(
+        &[("main.h", "#include <side.h>\nint mine(Side* s);\n"), ("side.h", "typedef struct Side Side;\n")],
+        None,
+    )
+    .expect("a sibling header should resolve");
+    assert_eq!(args(&b, "mine"), ["handle<Side>"]);
+}
+
+#[test]
+fn a_header_including_through_its_parent_directory_parses() {
+    // The brotli shape: `brotli/encode.h` does `#include <brotli/port.h>`,
+    // which resolves against the directory *above* the header.
+    let b = bind_tree(
+        &[
+            ("pkg/main.h", "#include <pkg/side.h>\nint mine(Side* s);\n"),
+            ("pkg/side.h", "typedef struct Side Side;\n"),
+        ],
+        None,
+    )
+    .expect("an include through the parent directory should resolve");
+    assert_eq!(args(&b, "mine"), ["handle<Side>"]);
+}
+
+// ── The library decides what it really has ───────────────────────────────
+
+#[test]
+fn a_symbol_the_header_declares_and_the_library_does_not_export_is_skipped() {
+    // A header is written for the newest version while the built artifact may
+    // have been configured without some of it. Binding one of those produces a
+    // shim that compiles and then fails to *link* — and the linker takes the
+    // whole dependency down over it, which is what libbrotlienc did.
+    let b = bind_tree(
+        &[("main.h", "int shipped(int a);\nint absent(int a);\n")],
+        Some(&["shipped"]),
+    )
+    .expect("should bind");
+    assert!(b.symbols.contains_key("shipped"));
+    assert!(!b.symbols.contains_key("absent"), "{:?}", b.symbols.keys());
+    assert!(why_skipped(&b, "absent").contains("not exported"), "{:?}", b.skipped);
+}
+
+#[test]
+fn with_no_export_table_every_declared_symbol_is_still_bound() {
+    // A URL dependency has no artifact to read, and an unreadable table proves
+    // nothing. The filter only applies when the library could actually be asked.
+    let b = bind_tree(&[("main.h", "int a(int x);\nint b(int x);\n")], None).expect("should bind");
+    assert_eq!(b.symbols.len(), 2, "{:?}", b.symbols.keys());
+}
+
+// ── Caller-held state is not an out-parameter ────────────────────────────
+//
+// Three different things wear the shape "writable pointer to a struct the
+// header defines", and treating them all as out-parameters is how twelve of
+// liblzma's symbols came to bind into shims that ran and did nothing.
+
+#[test]
+fn a_struct_the_caller_keeps_between_calls_is_not_an_out_parameter() {
+    // The lzma_stream shape: pointer fields the FFI cannot carry, threaded
+    // through a sequence of calls. An out_struct shim zeroes a fresh local
+    // every call, so the encoder would initialise a stream and throw it away
+    // and the next call would run against a different zeroed one.
+    let b = bind(
+        "typedef struct { const unsigned char* next_in; unsigned long avail_in; \
+           unsigned char* next_out; void* internal; } strm;\n\
+         int strm_start(strm* s, int preset);\n\
+         int strm_code(strm* s, int action);\n\
+         void strm_end(strm* s);\n",
+    );
+    for sym in ["strm_start", "strm_code", "strm_end"] {
+        assert!(!b.symbols.contains_key(sym), "{sym} should not bind: {:?}", b.symbols.get(sym));
+        assert!(why_skipped(&b, sym).contains("caller allocates"), "{:?}", b.skipped);
+    }
+}
+
+#[test]
+fn a_struct_the_library_hands_out_is_a_handle_not_an_out_parameter() {
+    // The library allocates it, so Jade holds it. This is the same answer the
+    // return position already gives the same type.
+    let b = bind(
+        "typedef struct { int a; void* guts; } ctx;\n\
+         ctx* ctx_new(void);\n\
+         int ctx_get(ctx* c);\n\
+         int ctx_set(ctx* c, int v);\n",
+    );
+    assert_eq!(ret(&b, "ctx_new"), "handle<ctx>");
+    assert_eq!(args(&b, "ctx_get"), ["handle<ctx>"]);
+    assert_eq!(args(&b, "ctx_set"), ["handle<ctx>", "int"]);
+}
+
+#[test]
+fn a_struct_written_through_a_double_pointer_is_also_handed_out() {
+    let b = bind(
+        "typedef struct { int a; void* guts; } ctx;\n\
+         int ctx_open(const char* path, ctx** out);\n\
+         int ctx_get(ctx* c);\n",
+    );
+    assert_eq!(args(&b, "ctx_get"), ["handle<ctx>"]);
+}
+
+#[test]
+fn a_record_filled_by_several_functions_is_still_an_out_parameter() {
+    // libsndfile's SF_INFO is passed to three `sf_open` variants and is exactly
+    // what out-parameters exist for. Appearing in several functions is not on
+    // its own a reason to refuse — only losing a field as well is.
+    let b = bind(
+        "#include <stdint.h>\n\
+         typedef struct { int64_t frames; int rate; const char* title; } SF_INFO;\n\
+         int sf_open(const char* p, int mode, SF_INFO* info);\n\
+         int sf_open_fd(int fd, int mode, SF_INFO* info);\n\
+         int sf_open_virtual(int v, int mode, SF_INFO* info);\n",
+    );
+    assert_eq!(args(&b, "sf_open"), ["str", "int", "out_struct:SF_INFO"]);
+    assert_eq!(args(&b, "sf_open_fd"), ["int", "int", "out_struct:SF_INFO"]);
+    assert!(b.structs.contains_key("SF_INFO"));
+}
+
+#[test]
+fn a_record_with_one_uncarryable_field_is_still_an_out_parameter() {
+    // Losing a field is not on its own a reason to refuse either. A record
+    // filled by one call is read once and discarded, so the dropped field costs
+    // nothing — which is the behaviour the field-dropping rule already had.
+    let b = bind("typedef struct { int ok; void* opaque; int also_ok; } S;\nvoid f(S* s);\n");
+    assert_eq!(args(&b, "f"), ["out_struct:S"]);
+    let names: Vec<&str> = b.structs["S"].fields.iter().map(|(f, _)| f.as_str()).collect();
+    assert_eq!(names, ["ok", "also_ok"]);
+}
+
+#[test]
+fn caller_held_state_needs_both_signals() {
+    // The same struct as the state test, but used by one function only: a
+    // record, and it binds. Neither signal refuses on its own.
+    let b = bind(
+        "typedef struct { const unsigned char* next_in; unsigned long avail_in; } strm;\n\
+         int strm_once(strm* s);\n",
+    );
+    assert_eq!(args(&b, "strm_once"), ["out_struct:strm"]);
+}
+
+#[test]
+fn a_caller_held_state_library_still_binds_and_compiles_the_rest() {
+    round_trip(
+        "typedef struct { const unsigned char* next_in; void* internal; } strm;\n\
+         int strm_code(strm* s, int action);\n\
+         void strm_end(strm* s);\n\
+         const char* strm_version(void);\n\
+         int strm_preset(int level);\n",
+    )
+    .expect("the symbols that do not touch the state struct should still bind");
+}
+
+// ── Scalars written through a pointer ────────────────────────────────────
+
+#[test]
+fn a_scalar_written_through_a_pointer_is_an_out_scalar() {
+    let b = bind("int measure(const char* path, unsigned long* size);\n");
+    assert_eq!(args(&b, "measure"), ["str", "out_scalar:unsigned long"]);
+}
+
+#[test]
+fn an_out_scalar_is_an_assumption_and_names_the_fix() {
+    // Some of these are read *and* written — a position the caller sets and
+    // the library advances. A zeroed local is right for one call and wrong on
+    // the second, which shows up as corrupt output rather than an error.
+    let b = bind("int measure(const char* path, unsigned long* size);\n");
+    let why = &b.assumed.iter().find(|(s, _)| s == "measure").expect("should be assumed").1;
+    assert!(why.contains("inout_scalar"), "the note must name the fix: {why}");
+}
+
+#[test]
+fn a_const_pointer_to_a_scalar_is_not_an_out_scalar() {
+    // The shim would have to construct the value, and `const` says the library
+    // only reads it — so this stays a refusal rather than becoming a silent
+    // zero.
+    let b = bind("int f(const int* in);\n");
+    assert!(!b.symbols.contains_key("f"), "{:?}", b.symbols.keys());
+}
+
+#[test]
+fn a_buffer_still_wins_over_an_out_scalar() {
+    // A writable pointer *next to a length* is a buffer, and that rule has to
+    // be tested first or every out_buffer would become an out_scalar.
+    let b = bind("int rd(int fd, char* buf, int n);\n");
+    assert_eq!(args(&b, "rd"), ["int", "out_buffer:char", "int"]);
+}
+
+// ── More than one out-parameter ──────────────────────────────────────────
+
+#[test]
+fn two_out_parameters_take_the_headers_own_names() {
+    // Inventing `out0`/`out1` is the objection that kept multiple outs out of
+    // the design in the first place. The library already named them.
+    let b = bind("void get_progress(unsigned long long *progress_in, unsigned long long *progress_out);\n");
+    assert_eq!(
+        args(&b, "get_progress"),
+        [
+            "out_scalar:unsigned long long@progress_in",
+            "out_scalar:unsigned long long@progress_out"
+        ]
+    );
+}
+
+#[test]
+fn one_out_parameter_is_left_unnamed() {
+    // There is nothing to tell apart, and every binding that already exists has
+    // to regenerate unchanged.
+    let b = bind("int one(int a, int* only);\n");
+    assert_eq!(args(&b, "one"), ["int", "out_scalar:int"]);
+}
+
+#[test]
+fn a_multi_out_symbol_whose_parameters_are_unnamed_is_skipped() {
+    let b = bind("void f(int*, int*);\n");
+    assert!(!b.symbols.contains_key("f"));
+    assert!(why_skipped(&b, "f").contains("does not name them"), "{:?}", b.skipped);
+}
+
+#[test]
+fn two_out_parameters_that_both_read_the_return_value_are_refused() {
+    // An out_buffer takes the C return as its element count, and there is only
+    // one of it. The shim refuses this too; mirroring it here matters because
+    // the shim refuses the whole dependency rather than the symbol.
+    let b = bind("int two(char* a, int na, char* b, int nb);\n");
+    assert!(!b.symbols.contains_key("two"));
+    assert!(why_skipped(&b, "two").contains("both read the C return value"), "{:?}", b.skipped);
+}
+
+#[test]
+fn a_multi_out_library_binds_and_compiles_end_to_end() {
+    round_trip(
+        "void get_progress(unsigned long long *progress_in, unsigned long long *progress_out);\n\
+         int divmod(int a, int b, int *quot, int *rem);\n\
+         int one_out(int a, int *only);\n",
+    )
+    .expect("multi-out should bind and compile");
 }

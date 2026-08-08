@@ -632,7 +632,14 @@ fn compile_shim(
     for inc in include_dirs {
         cc.arg(format!("-I{inc}"));
     }
-    cc.arg("-fPIC")
+    // C lets a function be called with no declaration in scope, assuming it
+    // returns `int` and taking the arguments at face value. For this shim that
+    // is never right and never survivable: a call that really returns a pointer
+    // comes back truncated to 32 bits, and the crash lands several calls later
+    // with nothing pointing at the cause. It means the manifest names a symbol
+    // whose header is missing from `headers`, so the error says that.
+    cc.arg("-Werror=implicit-function-declaration")
+        .arg("-fPIC")
         .arg(shim_c)
         .arg("-o")
         .arg(out)
@@ -656,7 +663,13 @@ fn compile_shim(
         // An undefined symbol here means the manifest declares something the
         // target library does not export. Say so, rather than surfacing raw
         // linker output the user has to decode.
-        let hint = if stderr.contains("undefined") {
+        let hint = if stderr.contains("implicit-function-declaration") {
+            format!(
+                "\n  A symbol in the manifest is declared by no header the shim includes, so C \
+                 would have\n  guessed its prototype. Add the header that declares it:\n    \
+                 jade pkg bind {name} --header <that header.h>"
+            )
+        } else if stderr.contains("undefined") {
             format!(
                 "\n  A declared symbol is missing from the library. Check the \
                  [dependencies.{name}.symbols] names against `nm -gU` on the artifact."

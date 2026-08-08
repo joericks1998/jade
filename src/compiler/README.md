@@ -27,7 +27,6 @@ Type inference exists so the instruction set can be *monomorphic*. Because the c
 - **`escape.rs`** — type-aware escape analysis for arena allocation. Decides which array literals can live in the per-frame bump arena instead of the refcounted heap. Deliberately narrow: it marks a literal eligible only when it can *prove* non-escape, because being wrong here is a use-after-free.
 - **`gbnf.rs`** — builds GBNF sampling grammars for typed prompt dereferences (`?p |> int`). The pattern-wrapping implementation itself lives in `jade_runtime::grammarf` so the VM and the AOT backend cannot wrap grammars differently.
 - **`mod.rs`**, **`tests.rs`** — module declarations and the pass tests.
-- **`design.md`** — a design note rather than code: why an array literal may hold two types, and what is still missing. Mixed arrays shipped in v1.1.32; a named sum type, which would let the compiler reject a value no protocol declares, has not. Read it before adding one.
 
 ## Who uses it
 
@@ -35,9 +34,19 @@ Type inference exists so the instruction set can be *monomorphic*. Because the c
 
 *Used by:* `vm/` and `aot/` both consume `CompiledProgram`; `build/` and `cli/check.rs` call `type_infer` directly; `cache/` stores the `TProgram`.
 
+## Mixed arrays, and the sum type that is still missing
+
+An array literal may hold two types as of v1.1.32; before that `[1, "two"]` was a type error. The check was a frontend gate over a runtime that never needed it — `push` built the same array without complaint, and the element type simply widens to `Unknown`, exactly as a dict's value type already did.
+
+Removing it cost about ten lines and surfaced three engine divergences the restriction had been hiding, because a mixed array was the only way to reach them: `arr.contains(x)` answered in the VM and raised compiled, a cross-kind comparison gave a misleading message compiled, and the VM interpolated a Rust enum name into arithmetic errors. The lesson worth keeping is that a restriction which makes a class of program unwritable also makes that class of bug unreachable.
+
+What is still missing is a **named sum type** — `type Frame = Token | Done | Error`, with `[Frame]` a homogeneous array of it. Mixed arrays only make the heterogeneous list *writable*; the element type is `Unknown`, so every check happens at run time in the decoder. A sum type would let the compiler reject a frame the protocol does not declare, and would match how the Rust half already spells it. That is a real feature — declaration syntax, inference, exhaustiveness, lowering in both engines, and an FFI representation — and worth doing when frames stop being the only caller.
+
 ## Gotchas
 
 `emit` is what rejects shared mutation across tasks, because the mutation opcodes (`SetGlobal`, `SetIndex`, `SetField`) only exist in bytecode — the AST's assignment expression cannot tell rebinding a local from writing through a reference. That is why `cli/check.rs` runs `emit` as part of `jade check`: it keeps `check` an honest predictor of whether `run` and `build` will succeed.
+
+`break` and `continue` are emitted as a plain `Jump` the enclosing loop patches once it knows where its exit is, so neither engine needed a new opcode — the AOT backend lowers them without knowing they exist. Two details are load-bearing. A `continue` lands at the *bottom* of the body rather than the top, so it still runs the `for` loop's index increment and the per-iteration `ArenaReset`; landing at the top would hang. And both first emit a `PopHandler` for every `try` they jump out of, tracked by `Emitter::handler_depth` — a handler frame left installed points into code the loop has already left, and the next exception anywhere in the function would land there.
 
 Changing the shape of any TIR type means bumping `CACHE_FORMAT_VERSION` in `src/cache/mod.rs`.
 

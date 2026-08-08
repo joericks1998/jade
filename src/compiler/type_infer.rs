@@ -646,6 +646,11 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
             Ok(TStmt::For { var: var.clone(), iterable: titerable, body: tbody, span: *span })
         }
 
+        // Control flow only: nothing to infer, and the parser has already
+        // refused either one that has no loop to act on.
+        Stmt::Break { span } => Ok(TStmt::Break { span: *span }),
+        Stmt::Continue { span } => Ok(TStmt::Continue { span: *span }),
+
         // ── Type definitions ──────────────────────────────────────────────────
 
         Stmt::StructDef { name, fields, decorators, span } => {
@@ -1909,7 +1914,9 @@ fn collect_captures_in_stmts(
                 locals.insert(name.clone());
             }
             TStmt::StructDef { .. } | TStmt::InterfaceDef { .. }
-            | TStmt::ExtendBlock { .. } | TStmt::Use { .. } | TStmt::FromUse { .. } => {}
+            | TStmt::ExtendBlock { .. } | TStmt::Use { .. } | TStmt::FromUse { .. }
+            // Control flow, capturing nothing.
+            | TStmt::Break { .. } | TStmt::Continue { .. } => {}
         }
     }
 }
