@@ -167,9 +167,38 @@ struct TypeEnv {
     /// carries, so resolving `sqlite3` to `struct sqlite3` would throw away the
     /// thing being kept.
     alias: HashMap<String, String>,
+    /// Names reachable **only** through a tag, mapped to the keyword that
+    /// introduces them (`struct` or `union`).
+    ///
+    /// `normalize` strips those keywords, which is right for looking a type up
+    /// and wrong for writing one down. `struct Ctx_s` and `Ctx_s` are the same
+    /// type to compare and are not interchangeable in C source: the bare name
+    /// is only a type if some typedef made it one. Since the recorded name goes
+    /// straight into the generated shim, the two uses need different spellings,
+    /// and this is what tells them apart.
+    tagged: HashMap<String, String>,
 }
 
 impl TypeEnv {
+    /// How to write `n` in C source.
+    ///
+    /// Every name reaching a `handle<>`, `out_handle:` or `out_struct:` spec has
+    /// been through [`normalize`], which drops `struct`/`union`/`enum` so a
+    /// lookup does not have to care how the type was spelled. That is the right
+    /// key and the wrong source text: `struct Ctx_s *` normalizes to `Ctx_s`,
+    /// and `Ctx_s` on its own is not a type unless a typedef made it one.
+    ///
+    /// The generated shim is C, so it needs the keyword back. Libraries that
+    /// name the tag and the typedef alike — `typedef struct sqlite3 sqlite3;` —
+    /// never noticed, which is why this was invisible until a library used the
+    /// far more common `typedef struct X_s X;` shape.
+    fn c_name(&self, n: &str) -> String {
+        match self.tagged.get(n) {
+            Some(kw) => format!("{kw} {n}"),
+            None => n.to_string(),
+        }
+    }
+
     /// Follow typedef chains to the spelling underneath, keeping `const`.
     ///
     /// Const has to survive because it is what distinguishes an input string
@@ -234,13 +263,17 @@ fn build_env(nodes: &[&Value]) -> TypeEnv {
         let Some(id) = n.get("id").and_then(Value::as_str) else { continue };
         let complete = n.get("completeDefinition").and_then(Value::as_bool).unwrap_or(false);
         by_id.insert(id, (n, complete));
-        // A named `struct X { ... }` is usable as `struct X` directly.
+        // A named `struct X { ... }` is usable as `struct X` directly — and, so
+        // far, only that way. A typedef giving it a bare name is a separate
+        // declaration, handled in the pass below.
         if let Some(name) = n.get("name").and_then(Value::as_str) {
             if complete {
                 env.complete.insert(name.to_string(), fields_of(n));
             } else {
                 env.opaque.insert(name.to_string());
             }
+            let kw = n.get("tagUsed").and_then(Value::as_str).unwrap_or("struct");
+            env.tagged.insert(name.to_string(), kw.to_string());
         }
     }
 
@@ -273,6 +306,10 @@ fn build_env(nodes: &[&Value]) -> TypeEnv {
         } else {
             env.opaque.insert(name.to_string());
         }
+        // `typedef struct sqlite3 sqlite3;` — the tag and the typedef share a
+        // name, and the bare one is now a type. Drop the tag requirement, which
+        // the record pass added before this declaration was seen.
+        env.tagged.remove(name);
     }
 
     env
@@ -438,7 +475,7 @@ fn map_param(raw_in: &str, next: Option<&str>, env: &TypeEnv, ret: &str) -> Mapp
     // `sqlite3**` — a handle written through a pointer.
     if let Some(inner) = pointee2(&t) {
         if env.opaque.contains(inner) || env.complete.contains_key(inner) {
-            return Mapped::Out(format!("out_handle:{inner}"), None);
+            return Mapped::Out(format!("out_handle:{}", env.c_name(inner)), None);
         }
         return Mapped::Reject("takes a pointer to a pointer".to_string());
     }
@@ -507,7 +544,7 @@ fn map_param(raw_in: &str, next: Option<&str>, env: &TypeEnv, ret: &str) -> Mapp
 
     // An opaque pointer: exactly what a handle is for.
     if env.opaque.contains(inner) {
-        return Mapped::One(format!("handle<{inner}>"));
+        return Mapped::One(format!("handle<{}>", env.c_name(inner)));
     }
 
     // A pointer to a struct the header defines. Writable means the call fills
@@ -516,7 +553,7 @@ fn map_param(raw_in: &str, next: Option<&str>, env: &TypeEnv, ret: &str) -> Mapp
         if is_const {
             return Mapped::Reject("takes a struct by pointer as input".to_string());
         }
-        return Mapped::Out(format!("out_struct:{inner}"), None);
+        return Mapped::Out(format!("out_struct:{}", env.c_name(inner)), None);
     }
 
     if squash(inner) == "void" {
@@ -593,7 +630,7 @@ fn map_ret(raw_in: &str, env: &TypeEnv) -> Result<String, String> {
             return Ok("str".to_string());
         }
         if env.opaque.contains(inner) || env.complete.contains_key(inner) {
-            return Ok(format!("handle<{inner}>"));
+            return Ok(format!("handle<{}>", env.c_name(inner)));
         }
     }
     Err(format!("returns an unsupported type `{raw_in}`"))
@@ -683,7 +720,11 @@ pub fn from_header(
         match map_function(n, &env) {
             Ok((sym, used_structs, assumed)) => {
                 for s in used_structs {
-                    if let Some(fields) = env.complete.get(&s) {
+                    // The spec carries the C spelling (`struct Info`); the
+                    // environment is keyed by the normalized one. The table
+                    // that comes out is keyed to match the spec, since that is
+                    // what the shim looks the definition up by.
+                    if let Some(fields) = env.complete.get(&normalize(&s)) {
                         match struct_entry(fields, &env) {
                             Ok(entry) => {
                                 b.structs.insert(s, entry);

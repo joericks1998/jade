@@ -94,6 +94,66 @@ fn an_opaque_typedef_becomes_a_handle() {
 }
 
 #[test]
+fn a_type_reachable_only_by_its_tag_keeps_the_keyword() {
+    // `typedef struct X_s X;` is far more common than the `typedef struct X X;`
+    // every other fixture here uses, and the difference was invisible until it
+    // reached the compiler: `normalize` drops `struct` so a lookup does not
+    // have to care how the type was written, and the stripped name was then
+    // used as the source text too. `Ctx_s` is not a type in C — only
+    // `struct Ctx_s` is — so the shim failed to compile with "must use 'struct'
+    // tag to refer to type".
+    let b = bind(
+        "struct Ctx_s;\n\
+         struct Ctx_s* ctx_new(void);\n\
+         int ctx_free(struct Ctx_s* c);\n\
+         int ctx_open(const char* p, struct Ctx_s** out);\n",
+    );
+    assert_eq!(ret(&b, "ctx_new"), "handle<struct Ctx_s>");
+    assert_eq!(args(&b, "ctx_free"), ["handle<struct Ctx_s>"]);
+    assert_eq!(args(&b, "ctx_open"), ["str", "out_handle:struct Ctx_s"]);
+}
+
+#[test]
+fn a_typedef_of_a_pointer_to_a_tagged_struct_keeps_the_keyword_too() {
+    // `typedef struct Pool_s *Pool;` reaches the same place by a different
+    // route: the typedef names the *pointer*, so it cannot stand in for the
+    // pointee, and the tag is the only spelling of the thing pointed at.
+    let b = bind(
+        "typedef struct Pool_s *Pool;\n\
+         Pool pool_new(void);\n\
+         int pool_free(Pool p);\n",
+    );
+    assert_eq!(ret(&b, "pool_new"), "handle<struct Pool_s>");
+    assert_eq!(args(&b, "pool_free"), ["handle<struct Pool_s>"]);
+}
+
+#[test]
+fn a_tag_that_a_typedef_also_names_stays_bare() {
+    // `typedef struct sqlite3 sqlite3;` makes the bare name a type, so adding
+    // the keyword would be noise — and it is the shape every handle in this
+    // file used before, which is exactly why the bug above went unnoticed.
+    let b = bind(
+        "typedef struct sqlite3 sqlite3;\n\
+         int sqlite3_close(sqlite3* db);\n",
+    );
+    assert_eq!(args(&b, "sqlite3_close"), ["handle<sqlite3>"]);
+}
+
+#[test]
+fn a_struct_out_parameter_reachable_only_by_its_tag_keeps_the_keyword() {
+    // The same flaw, on the other spec that writes a C type into the shim.
+    // The generated table is keyed to match the spec, since that is the name
+    // the shim looks the definition up by.
+    let b = bind(
+        "struct Ctx_s;\n\
+         struct Info { int rate; int chans; };\n\
+         int info_get(struct Ctx_s* c, struct Info* out);\n",
+    );
+    assert_eq!(args(&b, "info_get"), ["handle<struct Ctx_s>", "out_struct:struct Info"]);
+    assert!(b.structs.contains_key("struct Info"), "structs table: {:?}", b.structs.keys());
+}
+
+#[test]
 fn a_pointer_to_pointer_of_an_opaque_type_is_an_out_handle() {
     // sqlite3_open(path, &db) — how every SQLite connection is made. Without
     // this the generator could bind SQLite's whole surface except the one call
@@ -381,6 +441,29 @@ fn a_buffer_and_struct_library_binds_and_compiles_end_to_end() {
          int snd_read(snd* s, short* buf, int n);\n\
          int snd_write(snd* s, const void* data, size_t len);\n\
          int snd_stat(snd* s, info_t* out);\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_tag_only_library_binds_and_compiles_end_to_end() {
+    // Every other round-trip fixture writes `typedef struct X X;`, where the
+    // tag and the typedef share a name and the missing `struct` keyword makes
+    // no difference. That is why a whole class of real header — zstd, and
+    // anything else using `typedef struct X_s X;` — generated a shim that would
+    // not compile, with nothing in the suite to notice. This covers each of the
+    // three specs that write a C type name: a handle, an out-handle, and an
+    // out-struct.
+    round_trip(
+        "struct Ctx_s;\n\
+         struct Info { int rate; int chans; };\n\
+         typedef struct Pool_s *Pool;\n\
+         struct Ctx_s* ctx_new(void);\n\
+         int ctx_free(struct Ctx_s* c);\n\
+         int ctx_open(const char* p, struct Ctx_s** out);\n\
+         int info_get(struct Ctx_s* c, struct Info* out);\n\
+         Pool pool_new(void);\n\
+         int pool_free(Pool p);\n",
     )
     .unwrap();
 }
