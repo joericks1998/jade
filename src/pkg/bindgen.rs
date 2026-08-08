@@ -85,9 +85,22 @@ impl Binding {
             ));
         }
         if !self.assumed.is_empty() {
-            s.push_str("\n\nassumed (check these):");
+            // Grouped by reason, like the skips below. Every out-scalar carries
+            // the same in/out caveat, so a library with thirty of them printed
+            // thirty copies of one sentence — which is how a section meant to
+            // be read teaches people to skip it.
+            let mut by_reason: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
             for (sym, why) in &self.assumed {
-                s.push_str(&format!("\n  {sym}: {why}"));
+                by_reason.entry(why).or_default().push(sym);
+            }
+            s.push_str("\n\nassumed (check these):");
+            for (why, syms) in by_reason {
+                s.push_str(&format!("\n  {} — {why}", syms.len()));
+                let shown: Vec<&str> = syms.iter().take(6).copied().collect();
+                s.push_str(&format!("\n      {}", shown.join(", ")));
+                if syms.len() > shown.len() {
+                    s.push_str(&format!(", and {} more", syms.len() - shown.len()));
+                }
             }
         }
         if !self.skipped.is_empty() {
@@ -648,6 +661,27 @@ fn map_param(
         ));
     }
 
+    // A writable pointer to a bare scalar, with no length beside it: the C way
+    // of returning a second value. `lzma_get_progress(strm, uint64_t*,
+    // uint64_t*)` and `fdt_next_tag(fdt, offset, int *nextoffset)` are both
+    // this, and there are a lot of them.
+    //
+    // Reported as an assumption rather than done silently, exactly as the
+    // buffer guess above is. Some of these are read *and* written — a position
+    // the caller sets and the library advances, `size_t *out_pos` — and a
+    // zeroed local is right for one call and wrong on the second. That is the
+    // kind of wrong that shows up as corrupt output rather than as an error, so
+    // the note names the spelling that fixes it.
+    if !is_const && !next_is_len && scalar_of(&squashed).is_some() {
+        return Mapped::Out(
+            format!("out_scalar:{inner}"),
+            Some(format!(
+                "`{raw}` was read as a value the call writes; if the library reads it first and \
+                 advances it, change it to `inout_scalar:{inner}`"
+            )),
+        );
+    }
+
     // An opaque pointer: exactly what a handle is for.
     if env.opaque.contains(inner) {
         return Mapped::One(format!("handle<{}>", env.c_name(inner)));
@@ -980,7 +1014,7 @@ pub fn from_header(
                     continue;
                 }
                 b.structs.extend(entries);
-                if let Some(why) = assumed {
+                for why in assumed {
                     b.assumed.push((name.to_string(), why));
                 }
                 b.symbols.insert(name.to_string(), sym);
@@ -1095,7 +1129,7 @@ fn map_function(
     env: &TypeEnv,
     produced: &std::collections::HashSet<String>,
     counts: &HashMap<String, usize>,
-) -> Result<(CSymbol, Vec<String>, Option<String>), String> {
+) -> Result<(CSymbol, Vec<String>, Vec<String>), String> {
     let raw_ret = ret_type_of(node)?;
     let ret = map_ret(&raw_ret, env)?;
 
@@ -1113,10 +1147,20 @@ fn map_function(
         return Err("has a parameter clang did not give a type for".to_string());
     }
 
+    // The header's own names for its parameters. With more than one
+    // out-parameter each result needs a key, and inventing `out0`/`out1` is
+    // exactly the objection that kept multiple outs out of the design. The
+    // library already named them.
+    let parm_names: Vec<Option<&str>> =
+        parms.iter().map(|p| p.get("name").and_then(Value::as_str)).collect();
+
     let mut args: Vec<String> = Vec::new();
     let mut structs: Vec<String> = Vec::new();
-    let mut assumed: Option<String> = None;
-    let mut outs = 0usize;
+    let mut assumed: Vec<String> = Vec::new();
+    // Indices into `args` of the out-parameters, and the source parameter each
+    // came from, so a name can be attached afterwards — how many there are is
+    // not known until the loop has finished.
+    let mut out_at: Vec<(usize, usize)> = Vec::new();
     let mut skip_next = false;
 
     for (i, t) in raw.iter().enumerate() {
@@ -1132,21 +1176,42 @@ fn map_function(
                 skip_next = true;
             }
             Mapped::Out(s, why) => {
-                outs += 1;
-                if outs > 1 {
-                    return Err("has more than one out-parameter".to_string());
-                }
                 if let Some(name) = s.strip_prefix("out_struct:") {
                     structs.push(name.to_string());
                 }
                 if let Some(w) = why {
-                    assumed = Some(w);
+                    assumed.push(w);
                 }
+                out_at.push((args.len(), i));
                 args.push(s);
                 // An out_buffer keeps the count as a real Jade argument, since
                 // the shim reads it to size the allocation.
             }
             Mapped::Reject(why) => return Err(why),
+        }
+    }
+
+    // Two out-parameters that both want the C return value cannot coexist: an
+    // out_buffer reads it as an element count and an out_handle folds it into
+    // the failure convention. The shim refuses this too — mirroring it here
+    // matters because the shim refuses the whole *dependency*, not the symbol.
+    let consumes_ret = |a: &String| a.starts_with("out_buffer:") || a.starts_with("out_handle:");
+    if out_at.iter().filter(|(k, _)| consumes_ret(&args[*k])).count() > 1 {
+        return Err(
+            "has two out-parameters that both read the C return value".to_string()
+        );
+    }
+
+    if out_at.len() > 1 {
+        for &(k, p) in &out_at {
+            let Some(n) = parm_names[p].filter(|n| !n.is_empty()) else {
+                return Err(
+                    "has several out-parameters and the header does not name them, so there is \
+                     nothing to call the results"
+                        .to_string(),
+                );
+            };
+            args[k] = format!("{}@{n}", args[k]);
         }
     }
 

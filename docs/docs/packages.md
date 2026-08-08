@@ -305,8 +305,21 @@ If you write or correct a symbol by hand, these are the spellings `args` and `re
 | `handle<T>` | An opaque pointer the library owns — a `sqlite3*`, a `SNDFILE*`. Jade holds it, hands it back, and never looks inside. The type name is checked, so passing a statement where a connection belongs is a readable error rather than a crash inside the library. `T` is written the way C writes it, so a struct with no typedef of its own keeps the keyword: `handle<struct ZSTD_CCtx_s>`. |
 | `out_buffer:<ctype>` | A buffer the call fills. It consumes **no** Jade argument: `x_read(handle, buf, n)` is called as `x_read(handle, n)` and hands back the bytes. Its size comes from the next declared argument, which must be an `int`. |
 | `out_struct:<Type>` | A struct the call fills through a pointer. Needs the library's real header in `headers`. Only for a record *one call* fills — a struct the caller allocates and the library keeps between calls cannot be one, because the shim zeroes a fresh local each time. |
+| `out_scalar:<ctype>` | A single value the call writes through a pointer — `int *count`. Consumes no Jade argument; comes back as part of the result. |
+| `inout_scalar:<ctype>` | The same, but the caller supplies the starting value — a position the library advances. Consumes one Jade argument *and* comes back. |
 | `out_handle:<T>` | A handle written through a pointer — `sqlite3_open(path, &db)`. The C return value becomes the status, and the handle is what Jade gets. |
 | `callback:<ret>(<args>)` | A Jade function the library may call while the call runs. The signature is written in the library's own C types, e.g. `callback:int(int, const char*)`. |
+
+A symbol may have more than one out-parameter. When it does, each needs a name to come back under, written as an `@` suffix — `out_scalar:uint64_t@progress_in`. The generator takes those from the header's own parameter names. With one out-parameter the name is optional, since there is nothing to tell it apart from.
+
+How many things come back decides the shape of the result. Count the out-parameters, plus the C return value unless something consumed it — an `out_buffer` reads it as an element count, an `out_handle` folds it into `fails_when`. One thing is the result directly; two or more come back as a struct, with `ret` first when it is a key and then one key per out-parameter.
+
+```jade
+let d = lib.divmod(17, 5)     // int divmod(int, int, int *quot, int *rem)
+print(d.ret)                   // 0
+print(d.quot)                  // 3
+print(d.rem)                   // 2
+```
 
 A whole symbol may also be written as the single string `"?"` — the name is known, the prototype is not. That is what `jade pkg add` writes when it finds no header, and every command that would use the binding refuses it by name.
 

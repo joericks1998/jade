@@ -48,15 +48,39 @@ already carries its length: `b.len()` is `written * sizeof(elem)`. The count is
 clamped to what was allocated, so a library reporting more than it was given
 cannot make the copy read past the scratch.
 
-**At most one out-parameter per symbol.** Two would have to come back as a pair
-with no obvious names. Splitting the binding is clearer than inventing them.
+**A scalar written through a pointer is an out-parameter too.** `int
+*nextoffset`, `uint64_t *progress` — C's way of returning a second value, and
+everywhere. `out_scalar:<ctype>` carries the library's own C type rather than a
+Jade one, for the same reason `out_buffer` and `callback` do: the shim declares
+a real local, so widening `uint32_t` to `int64_t` would take the address of a
+differently-sized object and let the library write past it.
 
-**A symbol with an out-parameter and a return value comes back as `.ret` and
-`.out`.** A C function that fills a struct *and* returns a status has two
-results and Jade has one slot. Fixed names rather than configurable ones — there
-is nothing to decide, and a name in a config file is a name that can be wrong.
-When the C function returns `void` there is no pair to make, so the filled
-struct is the result directly and the common case stays clean.
+Some of those are read *and* written — a position the caller sets and the
+library advances, `size_t *out_pos`. A zeroed local is right for one call and
+wrong on the second, which shows up as corrupt output rather than as an error.
+Nothing in C distinguishes the two, so `inout_scalar:<ctype>` exists for the
+second, the generator emits `out_scalar` and lists it as an *assumption* naming
+the fix. That mirrors the out_buffer guess exactly: the generator does not get
+to dress a guess as certainty.
+
+**More than one out-parameter is allowed, and then each carries a name.** The
+rule used to be one, on the grounds that two would come back as a pair with no
+obvious names. They are not nameless — the header already names them, and clang
+hands the parameter names over with the types. `out_scalar:uint64_t@progress_in`
+says what key the value comes back under. A symbol whose header does *not* name
+its parameters is skipped rather than given invented `out0`/`out1` keys, which
+was the real objection.
+
+**How many things come back decides the shape.** Count the out-parameters, plus
+the C return value when nothing has consumed it — an `out_buffer` reads it as an
+element count, an `out_handle` folds it into the failure convention. One thing
+is the result directly. Two or more become a struct: `ret` first when it is a
+key, then one key per out-parameter in declaration order.
+
+That counting reproduces every shape that existed before rather than replacing
+it. A lone out-parameter with a `void` return is still the bare value; a lone
+out-parameter beside a real return is still `.ret` and `.out`, and keeps the
+name `out` because there is nothing to tell it apart from.
 
 ## Which directories a header is read from
 

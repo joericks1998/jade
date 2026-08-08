@@ -6,6 +6,11 @@ sidebar_label: Changelog
 
 ## v1.3.7
 
+- **A scalar written through a pointer can be bound.** `int *count`, `uint64_t *progress` — C's way of returning a second value, and there was no spelling for it. `out_scalar:<ctype>` consumes no Jade argument and comes back as part of the result. libfdt goes from 41 bound symbols to 51.
+- **A symbol may now have more than one out-parameter.** The rule was one, on the grounds that two would come back as a pair with no obvious names. They are not nameless: the header names them, and those names become the keys. `int divmod(int, int, int *quot, int *rem)` is called as `divmod(17, 5)` and hands back `.ret`, `.quot` and `.rem`. A header that does not name its parameters is skipped rather than given invented ones.
+- **`inout_scalar:<ctype>` for the values a library reads before it writes.** A position the caller sets and the call advances is not an out-parameter — zeroing it is right once and wrong on the second call. Nothing in C tells the two apart, so the generator emits `out_scalar` and lists it as an assumption naming the fix, the same way it already handles the out-buffer guess.
+- **The assumptions section is grouped by reason.** Every out-scalar carries the same caveat, so a library with thirty of them printed the sentence thirty times — which is how a section meant to be read teaches people to skip it.
+
 - **Fixed: a struct the caller owns is no longer bound as an out-parameter.** `int f(S* s)` where the header defines `S` looks like one shape and is three. A struct the library *hands out* is a handle. A struct the caller allocates and the library keeps between calls — `lzma_stream`, `ZSTD_outBuffer`, `fd_set` — cannot be an out-parameter at all, because the shim declares a zeroed local every call: `lzma_easy_encoder` initialised a stream and threw it away, and `lzma_code` then ran against a different zeroed one. Twelve of liblzma's symbols compiled, installed, ran and did nothing; `ZSTD_compressStream` would have written through a NULL destination. Those are refused by name now, and a record one call fills is unaffected.
 - **liblzma's reported coverage falls from 49 symbols to 36, and that is the fix.** Those thirteen were not working before, they were reporting success.
 

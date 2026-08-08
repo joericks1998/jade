@@ -487,6 +487,9 @@ fn every_spelling_the_generator_emits_is_one_the_shim_accepts() {
          int f_bytes(const void* d, size_t n);\n\
          int f_out_buffer(opaque* h, char* buf, int n);\n\
          int f_out_struct(opaque* h, rec_t* out);\n\
+         int f_out_scalar(opaque* h, int* written);\n\
+         void f_two_outs(unsigned long long* progress_in, unsigned long long* progress_out);\n\
+         int f_ret_and_two_outs(int a, int* quot, int* rem);\n\
          void f_void(void);\n",
     )
     .unwrap();
@@ -500,6 +503,9 @@ fn every_spelling_the_generator_emits_is_one_the_shim_accepts() {
         "jade_shim_f_ret_handle",
         "jade_shim_f_out_handle",
         "jade_shim_f_handle_arg",
+        "jade_shim_f_out_scalar",
+        "jade_shim_f_two_outs",
+        "jade_shim_f_ret_and_two_outs",
         "jade_shim_f_bytes",
         "jade_shim_f_out_buffer",
         "jade_shim_f_out_struct",
@@ -908,4 +914,90 @@ fn a_caller_held_state_library_still_binds_and_compiles_the_rest() {
          int strm_preset(int level);\n",
     )
     .expect("the symbols that do not touch the state struct should still bind");
+}
+
+// ── Scalars written through a pointer ────────────────────────────────────
+
+#[test]
+fn a_scalar_written_through_a_pointer_is_an_out_scalar() {
+    let b = bind("int measure(const char* path, unsigned long* size);\n");
+    assert_eq!(args(&b, "measure"), ["str", "out_scalar:unsigned long"]);
+}
+
+#[test]
+fn an_out_scalar_is_an_assumption_and_names_the_fix() {
+    // Some of these are read *and* written — a position the caller sets and
+    // the library advances. A zeroed local is right for one call and wrong on
+    // the second, which shows up as corrupt output rather than an error.
+    let b = bind("int measure(const char* path, unsigned long* size);\n");
+    let why = &b.assumed.iter().find(|(s, _)| s == "measure").expect("should be assumed").1;
+    assert!(why.contains("inout_scalar"), "the note must name the fix: {why}");
+}
+
+#[test]
+fn a_const_pointer_to_a_scalar_is_not_an_out_scalar() {
+    // The shim would have to construct the value, and `const` says the library
+    // only reads it — so this stays a refusal rather than becoming a silent
+    // zero.
+    let b = bind("int f(const int* in);\n");
+    assert!(!b.symbols.contains_key("f"), "{:?}", b.symbols.keys());
+}
+
+#[test]
+fn a_buffer_still_wins_over_an_out_scalar() {
+    // A writable pointer *next to a length* is a buffer, and that rule has to
+    // be tested first or every out_buffer would become an out_scalar.
+    let b = bind("int rd(int fd, char* buf, int n);\n");
+    assert_eq!(args(&b, "rd"), ["int", "out_buffer:char", "int"]);
+}
+
+// ── More than one out-parameter ──────────────────────────────────────────
+
+#[test]
+fn two_out_parameters_take_the_headers_own_names() {
+    // Inventing `out0`/`out1` is the objection that kept multiple outs out of
+    // the design in the first place. The library already named them.
+    let b = bind("void get_progress(unsigned long long *progress_in, unsigned long long *progress_out);\n");
+    assert_eq!(
+        args(&b, "get_progress"),
+        [
+            "out_scalar:unsigned long long@progress_in",
+            "out_scalar:unsigned long long@progress_out"
+        ]
+    );
+}
+
+#[test]
+fn one_out_parameter_is_left_unnamed() {
+    // There is nothing to tell apart, and every binding that already exists has
+    // to regenerate unchanged.
+    let b = bind("int one(int a, int* only);\n");
+    assert_eq!(args(&b, "one"), ["int", "out_scalar:int"]);
+}
+
+#[test]
+fn a_multi_out_symbol_whose_parameters_are_unnamed_is_skipped() {
+    let b = bind("void f(int*, int*);\n");
+    assert!(!b.symbols.contains_key("f"));
+    assert!(why_skipped(&b, "f").contains("does not name them"), "{:?}", b.skipped);
+}
+
+#[test]
+fn two_out_parameters_that_both_read_the_return_value_are_refused() {
+    // An out_buffer takes the C return as its element count, and there is only
+    // one of it. The shim refuses this too; mirroring it here matters because
+    // the shim refuses the whole dependency rather than the symbol.
+    let b = bind("int two(char* a, int na, char* b, int nb);\n");
+    assert!(!b.symbols.contains_key("two"));
+    assert!(why_skipped(&b, "two").contains("both read the C return value"), "{:?}", b.skipped);
+}
+
+#[test]
+fn a_multi_out_library_binds_and_compiles_end_to_end() {
+    round_trip(
+        "void get_progress(unsigned long long *progress_in, unsigned long long *progress_out);\n\
+         int divmod(int a, int b, int *quot, int *rem);\n\
+         int one_out(int a, int *only);\n",
+    )
+    .expect("multi-out should bind and compile");
 }
