@@ -62,12 +62,20 @@ fn check_imports(tprogram: &crate::compiler::tir::TProgram, path: &str) -> Resul
         .unwrap_or_else(|| std::path::PathBuf::from("."));
 
     let project_root = crate::project::find_project_root_from(&source_dir);
+    let manifest = project_root.as_ref().and_then(|root| crate::project::load_project(root).ok());
+
+    // A dependency whose prototypes are still `"?"` is one `jade run` refuses,
+    // and reading the manifest for it costs nothing beyond the read that just
+    // happened. Reporting it here is what keeps `jade check` an honest
+    // predictor without reaching for the network.
+    if let Some(m) = &manifest {
+        crate::pkg::check_symbols_resolved(m)?;
+    }
+
     let libraries = project_root
         .as_ref()
-        .and_then(|root| {
-            let manifest = crate::project::load_project(root).ok()?;
-            Some(crate::pkg::resolved_libraries(root, &manifest))
-        })
+        .zip(manifest.as_ref())
+        .map(|(root, m)| crate::pkg::resolved_libraries(root, m))
         .unwrap_or_default();
 
     let ctx = crate::project::ImportContext {

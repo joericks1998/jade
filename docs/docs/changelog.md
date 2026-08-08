@@ -4,6 +4,13 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.3.6
+
+- **A C library with no header now produces a manifest anyway.** `jade pkg add demo --path libdemo.dylib` used to stop and tell you to go find a header. It now reads the library's export table and writes every function it found into `jade.toml` with `"?"` where the prototype belongs, so the work left is filling in blanks in a file that already lists the whole API.
+- **`"?"` is a real spelling in the symbol table.** It means the name is known and the types are not. A shared library carries names and nothing else — C keeps no argument or return types in a compiled artifact, and DWARF is stripped from release builds and left in the `.o` files by the macOS linker — so the missing half genuinely cannot be read back out. Jade will not guess at it either: a wrong prototype is a corrupted stack several calls later with nothing pointing back at the manifest, which is worse than a blank.
+- **Fixed: a header whose structs are named by tag generated a shim that would not compile.** `typedef struct ZSTD_CCtx_s ZSTD_CCtx;` is how most C libraries declare an opaque type, and the generator wrote `ZSTD_CCtx_s*` where C requires `struct ZSTD_CCtx_s*`. The type name is stripped of `struct` so it can be looked up however it was written, and the stripped form was then used as source text too. It only ever worked for the narrower `typedef struct X X;` shape, where the bare name really is a type — which is what every test in the suite used, and why nothing caught it. Handles, out-handles and struct out-parameters were all affected; all three now write the type the way C writes it, and a test drives a tag-only header through to a real compile.
+- **Everything that would use the binding refuses a `"?"` and names the symbols.** `jade check`, `jade run` and `jade build` all stop, list what is unfilled, and show both ways out — the prototype to write, or `jade pkg bind --header` if you do have the header after all. `jade pkg list` and `jade pkg remove` keep working, since a half-filled manifest is a state you need to be able to look at.
+
 ## v1.3.5
 
 - **Fixed: `jade.lock` and `jade.toml` could disagree about what a dependency is.** The two were compared by name only, so a lock saying `abi = "jade"` outlived a manifest corrected to `abi = "c"`. The build reads the lock rather than re-resolving — that is what a lock is for — so it skipped the binding shim and loaded a plain C library as though it were a Jade package, which the dynamic loader refused in the finished program for a missing symbol. A disagreement is now reported by name with both values and the command that fixes it.

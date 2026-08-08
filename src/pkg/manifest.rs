@@ -72,7 +72,7 @@ pub fn add_dependency(
         let mut names: Vec<&String> = symbols.keys().collect();
         names.sort();
         for sym in names {
-            syms.insert(sym, toml_edit::Item::Table(symbol_table(&symbols[sym])));
+            syms.insert(sym, symbol_item(&symbols[sym]));
         }
         table.insert("symbols", toml_edit::Item::Table(syms));
     }
@@ -81,8 +81,18 @@ pub fn add_dependency(
     save(root, &doc)
 }
 
-/// One `[dependencies.<pkg>.symbols.<sym>]` table.
-fn symbol_table(spec: &CSymbol) -> toml_edit::Table {
+/// One `[dependencies.<pkg>.symbols.<sym>]` entry.
+///
+/// A symbol with no known prototype is written as the bare value `sym = "?"`
+/// rather than a table of empty fields. It has to be visibly unfinished: the
+/// whole point is that a person reads the file and fills it in, and `args = []`
+/// beside `ret = "?"` reads like a real binding for a function taking no
+/// arguments.
+fn symbol_item(spec: &CSymbol) -> toml_edit::Item {
+    if spec.is_unresolved() {
+        return toml_edit::value(crate::project::UNRESOLVED);
+    }
+
     let mut t = toml_edit::Table::new();
     let mut args = toml_edit::Array::new();
     for a in &spec.args {
@@ -93,7 +103,7 @@ fn symbol_table(spec: &CSymbol) -> toml_edit::Table {
     if let Some(f) = spec.fails_when {
         t.insert("fails_when", toml_edit::value(f.as_str()));
     }
-    t
+    toml_edit::Item::Table(t)
 }
 
 /// Write a generated binding into `[dependencies.<name>]`.
@@ -172,7 +182,7 @@ pub fn set_bindings(
         .ok_or_else(|| format!("dependency '{name}' has a `symbols` key that is not a table"))?;
     syms.set_implicit(true);
     for (sname, spec) in symbols {
-        syms.insert(sname, toml_edit::Item::Table(symbol_table(spec)));
+        syms.insert(sname, symbol_item(spec));
     }
 
     save(root, &doc)

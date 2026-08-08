@@ -629,6 +629,113 @@ fn a_c_dependency_with_no_symbols_is_refused_rather_than_installed_raw() {
     assert!(err.contains("--header"), "error should name the fix: {err}");
 }
 
+// ── unresolved symbols ────────────────────────────────────────────────────────
+
+#[test]
+fn a_symbol_may_be_written_as_a_bare_question_mark() {
+    // `jade pkg add` writes the names it read out of the export table with `"?"`
+    // where the prototype goes, so a library with no header still produces a
+    // manifest listing every function rather than nothing at all.
+    let m = manifest(
+        "[project]\nname = \"app\"\n[dependencies.a]\npath = \"a.so\"\nabi = \"c\"\n\
+         [dependencies.a.symbols]\nadd = \"?\"\nscale = \"?\"\n",
+    );
+    let entry = &m.dependencies.as_ref().unwrap()["a"];
+
+    assert_eq!(entry.unresolved_symbols(), vec!["add", "scale"]);
+    assert!(entry.symbols.as_ref().unwrap()["add"].is_unresolved());
+}
+
+#[test]
+fn a_table_and_a_placeholder_can_sit_in_one_symbols_table() {
+    // Binding a large header a piece at a time with `--only` leaves exactly
+    // this: some symbols filled in, the rest still blank.
+    let m = manifest(
+        "[project]\nname = \"app\"\n[dependencies.a]\npath = \"a.so\"\nabi = \"c\"\n\
+         [dependencies.a.symbols]\nscale = \"?\"\n\
+         [dependencies.a.symbols.add]\nargs = [\"int\", \"int\"]\nret = \"int\"\n",
+    );
+    let entry = &m.dependencies.as_ref().unwrap()["a"];
+
+    assert_eq!(entry.unresolved_symbols(), vec!["scale"]);
+    assert!(!entry.symbols.as_ref().unwrap()["add"].is_unresolved());
+}
+
+#[test]
+fn a_placeholder_in_an_argument_counts_as_unresolved() {
+    // A half-corrected entry is caught here rather than by `cc` failing on `?`
+    // as a type name, several stages further on and in a generated file.
+    let m = manifest(
+        "[project]\nname = \"app\"\n[dependencies.a]\npath = \"a.so\"\nabi = \"c\"\n\
+         [dependencies.a.symbols.add]\nargs = [\"int\", \"?\"]\nret = \"int\"\n",
+    );
+
+    assert_eq!(m.dependencies.as_ref().unwrap()["a"].unresolved_symbols(), vec!["add"]);
+}
+
+#[test]
+fn a_symbol_string_that_is_not_the_placeholder_is_rejected() {
+    // `add = "int"` is someone guessing at a shorthand that does not exist, and
+    // the message has to say what the two accepted forms are.
+    let err = toml::from_str::<ProjectManifest>(
+        "[project]\nname = \"app\"\n[dependencies.a]\npath = \"a.so\"\nabi = \"c\"\n\
+         [dependencies.a.symbols]\nadd = \"int\"\n",
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(err.contains("args"), "should name the table form: {err}");
+    assert!(err.contains('?'), "should name the placeholder form: {err}");
+}
+
+#[test]
+fn a_malformed_symbol_table_still_names_the_missing_field() {
+    // The custom deserializer replaced a derived one. Written by hand rather
+    // than with `#[serde(untagged)]` precisely so this message survives:
+    // untagged reports every failure as "data did not match any variant".
+    let err = toml::from_str::<ProjectManifest>(
+        "[project]\nname = \"app\"\n[dependencies.a]\npath = \"a.so\"\nabi = \"c\"\n\
+         [dependencies.a.symbols.add]\nargs = [\"int\"]\n",
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(err.contains("ret"), "should still name the missing field: {err}");
+}
+
+#[test]
+fn a_dependency_with_placeholder_symbols_is_refused_before_the_shim() {
+    // The whole point of writing `"?"` is to have something concrete to refuse.
+    // Passing it through would reach `cc` as a type name, in a generated file
+    // the user never wrote, with nothing pointing back at the manifest.
+    let tmp = TempDir::new("unresolved");
+    std::fs::write(tmp.path().join("a.so"), b"\x7fELFx").unwrap();
+    // `resolve` only asks that the table is non-empty, which a placeholder
+    // satisfies — the refusal under test is the one further on.
+    let m = manifest(
+        "[project]\nname = \"app\"\n[dependencies.a]\npath = \"a.so\"\nabi = \"c\"\n\
+         [dependencies.a.symbols]\nadd = \"?\"\nscale = \"?\"\n",
+    );
+    let lock = resolve(tmp.path(), &m, &MockFetcher::new()).unwrap();
+
+    let err = build_c_shims(tmp.path(), &lock, &m).unwrap_err();
+    assert!(err.contains("no signature yet"), "unexpected message: {err}");
+    assert!(err.contains("add, scale"), "should name the symbols: {err}");
+    assert!(err.contains("[dependencies.a.symbols.add]"), "should show the shape to write: {err}");
+    assert!(err.contains("jade pkg bind"), "should name the other way out: {err}");
+}
+
+#[test]
+fn a_fully_bound_dependency_reports_nothing_unresolved() {
+    let m = manifest(
+        "[project]\nname = \"app\"\n[dependencies.a]\npath = \"a.so\"\nabi = \"c\"\n\
+         [dependencies.a.symbols.add]\nargs = [\"int\"]\nret = \"int\"\n",
+    );
+
+    assert!(check_symbols_resolved(&m).is_ok());
+    assert!(unresolved_report("a", &m.dependencies.as_ref().unwrap()["a"]).is_none());
+}
+
 // ── dependency_libraries ──────────────────────────────────────────────────────
 
 #[test]

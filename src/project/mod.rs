@@ -355,7 +355,16 @@ impl Abi {
 
 /// One entry of a `[dependencies.<name>.symbols]` table: the C prototype of a
 /// symbol to bind, in terms of the FFI's primitive type names.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+///
+/// Written either as a table, or as the single string `"?"` for a symbol whose
+/// name is known and whose prototype is not — see [`UNRESOLVED`].
+///
+/// ```toml
+/// [dependencies.zlib.symbols]
+/// crc32 = { args = ["int", "str"], ret = "int" }
+/// deflate = "?"
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CSymbol {
     pub args: Vec<String>,
     pub ret: String,
@@ -366,8 +375,87 @@ pub struct CSymbol {
     /// convention that is not there would turn every legitimate `-1` into a
     /// raise. Without this, a failing C call returns its raw sentinel and the
     /// reason — which the library already put in `errno` — is simply lost.
-    #[serde(default)]
     pub fails_when: Option<CFailure>,
+}
+
+/// The signature of a symbol whose name is known and whose types are not.
+///
+/// A shared library always says what it *exports*, so `jade pkg add` can read
+/// every function's name out of any C library on the machine. It can read
+/// nothing else: C keeps no argument or return types in a compiled artifact, so
+/// `crc32` in the export table says only "there is a `crc32`". Types survive
+/// only in DWARF, which release builds strip and which the macOS linker leaves
+/// in the `.o` files rather than the library.
+///
+/// Rather than refuse to write anything, `add` writes the names it found with
+/// `"?"` where the prototype goes. That turns "go find this library's header"
+/// into "fill in two blanks", and — more importantly — gives every later stage
+/// a concrete thing to refuse. Guessing instead would be worse than blank: a
+/// wrong prototype is a corrupted stack several calls later, with nothing
+/// pointing at the manifest.
+///
+/// `?` cannot collide with a real entry because it is not one of the FFI's type
+/// names.
+pub const UNRESOLVED: &str = "?";
+
+impl CSymbol {
+    /// A symbol known only by name.
+    pub fn unresolved() -> Self {
+        CSymbol { args: Vec::new(), ret: UNRESOLVED.to_string(), fails_when: None }
+    }
+
+    /// Whether any part of this prototype is still a placeholder.
+    ///
+    /// Checks the arguments as well as the return, so a half-filled entry
+    /// written by hand is caught here rather than by `cc` failing on `?` as a
+    /// type name, several stages further on.
+    pub fn is_unresolved(&self) -> bool {
+        self.ret == UNRESOLVED || self.args.iter().any(|a| a == UNRESOLVED)
+    }
+}
+
+/// Accepts either the table or the bare `"?"` string.
+///
+/// Hand-written rather than `#[serde(untagged)]`: untagged reports every
+/// failure as "data did not match any variant", so a table with a typo in it
+/// would stop saying which field was missing. Delegating the map case to a
+/// derived struct keeps those messages exactly as they were.
+impl<'de> Deserialize<'de> for CSymbol {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = CSymbol;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                write!(f, "a table with `args` and `ret`, or \"{UNRESOLVED}\"")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<CSymbol, E> {
+                if s == UNRESOLVED {
+                    return Ok(CSymbol::unresolved());
+                }
+                Err(E::custom(format!(
+                    "expected a table with `args` and `ret`, or \"{UNRESOLVED}\" for a \
+                     signature that is not known yet — found \"{s}\""
+                )))
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> Result<CSymbol, A::Error> {
+                #[derive(Deserialize)]
+                struct Full {
+                    args: Vec<String>,
+                    ret: String,
+                    #[serde(default)]
+                    fails_when: Option<CFailure>,
+                }
+                let f = Full::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+                Ok(CSymbol { args: f.args, ret: f.ret, fails_when: f.fails_when })
+            }
+        }
+
+        d.deserialize_any(V)
+    }
 }
 
 /// The sentinel a C function returns to signal failure.
@@ -502,6 +590,25 @@ impl DependencyEntry {
     /// Whether this dependency's `url` is a per-platform template.
     pub fn is_platform_template(&self) -> bool {
         self.url.as_deref().is_some_and(|u| u.contains(PLATFORM_PLACEHOLDER))
+    }
+
+    /// The symbols whose prototype is still `"?"`, sorted.
+    ///
+    /// Not part of [`validate`](Self::validate): a manifest carrying
+    /// placeholders is a legal, expected state — it is what `jade pkg add`
+    /// writes for a library with no header — and failing to *load* it would
+    /// take `jade pkg list` and `jade pkg remove` down with it, which are the
+    /// two commands most likely to be reached for next. The refusal belongs
+    /// where a placeholder would actually be used, in `pkg::build_c_shims`.
+    pub fn unresolved_symbols(&self) -> Vec<&str> {
+        let Some(symbols) = &self.symbols else { return Vec::new() };
+        let mut out: Vec<&str> = symbols
+            .iter()
+            .filter(|(_, s)| s.is_unresolved())
+            .map(|(n, _)| n.as_str())
+            .collect();
+        out.sort_unstable();
+        out
     }
 
     /// Check the entry is well-formed, naming `name` in every error so the

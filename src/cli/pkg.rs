@@ -82,11 +82,29 @@ fn relock_and_install(root: &std::path::Path, manifest: &ProjectManifest) {
 /// `jade pkg add` needs this so it can undo its manifest edit before it dies;
 /// every other caller has nothing to undo and uses the exiting form above.
 fn try_relock_and_install(root: &std::path::Path, manifest: &ProjectManifest) -> Result<(), String> {
+    let resolved = relock_and_fetch(root, manifest)?;
+    pkg::build_c_shims(root, &resolved, manifest)
+}
+
+/// Everything up to the binding shims: resolve, write `jade.lock`, copy the
+/// artifacts into `libs/`.
+///
+/// Split out for the one case that legitimately cannot build a shim yet — a C
+/// dependency added with placeholder prototypes. Stopping short of the lock
+/// entirely would be worse: `jade run` refuses to resolve on its own, so the
+/// user would fill in the blanks, run their program, and be sent to
+/// `jade pkg install` for a step that had nothing to do with what they just
+/// fixed. Locking now leaves the shim as the only thing missing, which is
+/// exactly what filling in the blanks completes.
+fn relock_and_fetch(
+    root: &std::path::Path,
+    manifest: &ProjectManifest,
+) -> Result<lock::Lockfile, String> {
     let fetcher = HttpFetcher::new();
     let resolved = pkg::resolve(root, manifest, &fetcher)?;
     lock::write(root, &resolved)?;
     pkg::materialize(root, &resolved, &fetcher)?;
-    pkg::build_c_shims(root, &resolved, manifest)
+    Ok(resolved)
 }
 
 // ── add ───────────────────────────────────────────────────────────────────────
@@ -195,9 +213,49 @@ pub fn run_add(
         bind_header(&root, name, &h.to_string_lossy(), include, None, false, lib_path.as_deref())
             .unwrap_or_else(|e| fail_new_dependency(&root, name, existed, e));
     } else if abi == Abi::C {
-        // Nothing to bind from, and a C dependency is not installable until its
-        // symbols exist. Stop after the manifest edit rather than failing
-        // validation the user cannot yet satisfy — and say what would fix it.
+        // No header, but the library still says what it exports. Write those
+        // names with `"?"` for the prototype rather than nothing at all: the
+        // user fills in blanks in a file that already lists every function,
+        // instead of going to look for a header that may not exist on this
+        // machine. Guessing the types would be worse than leaving them blank —
+        // see `project::UNRESOLVED`.
+        let found = lib_path.as_deref().map(pkg::bindgen::placeholder_symbols).unwrap_or_default();
+        if !found.is_empty() {
+            let names: Vec<&str> = found.keys().map(String::as_str).collect();
+            let empty = std::collections::BTreeMap::new();
+            manifest::set_bindings(&root, name, &found, &empty, &[], &[])
+                .unwrap_or_else(|e| fail_new_dependency(&root, name, existed, e));
+
+            // Lock and copy the artifact, but do not try to bind it — filling
+            // in the prototypes is then the only thing left between here and a
+            // working dependency.
+            let m = load_or_exit(&root);
+            relock_and_fetch(&root, &m)
+                .unwrap_or_else(|e| fail_new_dependency(&root, name, existed, e));
+
+            println!("added {name} to jade.toml");
+            println!(
+                "{} of its symbols are listed there with no signature: {}",
+                names.len(),
+                summarize(&names)
+            );
+            eprintln!(
+                "note: replace each \"?\" under [dependencies.{name}.symbols] with the \
+                 prototype, e.g.\n    \
+                 [dependencies.{name}.symbols.{}]\n    \
+                 args = [\"int\", \"int\"]\n    \
+                 ret  = \"int\"\n  \
+                 A shared library says what it exports and nothing more — C keeps no argument \
+                 or return\n  types in a compiled artifact — so no header was found to read \
+                 them from. If you have\n  one, this generates the whole table:\n    \
+                 jade pkg bind {name} --header <its header.h>",
+                names[0]
+            );
+            return;
+        }
+
+        // Nothing readable at all: a URL dependency has no artifact yet, and a
+        // library that exports nothing bindable has no names to offer either.
         println!("added {name} to jade.toml");
         eprintln!(
             "note: {name} is a C library and no header for it was found, so it has no symbols \
@@ -214,6 +272,16 @@ pub fn run_add(
     try_relock_and_install(&root, &manifest)
         .unwrap_or_else(|e| fail_new_dependency(&root, name, existed, e));
     println!("added {name}");
+}
+
+/// A readable list of names, cut off before it fills the terminal.
+fn summarize(names: &[&str]) -> String {
+    const SHOWN: usize = 8;
+    let mut s = names.iter().take(SHOWN).copied().collect::<Vec<_>>().join(", ");
+    if names.len() > SHOWN {
+        s.push_str(&format!(", and {} more", names.len() - SHOWN));
+    }
+    s
 }
 
 /// Which ABI an artifact speaks, read from the artifact itself.
