@@ -58,6 +58,26 @@ is nothing to decide, and a name in a config file is a name that can be wrong.
 When the C function returns `void` there is no pair to make, so the filled
 struct is the result directly and the common case stays clean.
 
+## Which directories a header is read from
+
+A header is rarely self-contained, and the two ways it reaches its neighbours
+need two different directories:
+
+- `libfdt.h` does `#include <libfdt_env.h>`, which sits *beside* it. An angled
+  include does not search the including file's own directory, so that directory
+  has to be passed explicitly.
+- `brotli/encode.h` does `#include <brotli/port.h>`, which resolves against the
+  directory *above* the header.
+
+Both are searched, in that order, after any directory the caller named. The
+caller's wins because a guessed root can be wide enough — `/opt/homebrew/include`
+— to shadow the header they meant.
+
+The same list is what goes into the manifest's `include_dirs`, so the shim
+compile is given exactly what reading the header was given. Computing the two
+separately is what went wrong before: `cc` got the header's directory and clang
+did not, and the failure was "clang could not parse" on a header that was fine.
+
 ## Why `out_struct` requires a header
 
 The shim has to declare a real local of the struct's type. It could synthesize

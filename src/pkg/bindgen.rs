@@ -113,6 +113,56 @@ impl Binding {
 
 // ── clang ────────────────────────────────────────────────────────────────────
 
+/// The directories to search for the headers a header includes.
+///
+/// A header is rarely self-contained, and the two ways it reaches its
+/// neighbours need two different directories. Both were missing, and each one
+/// cost a library outright:
+///
+/// - `libfdt.h` does `#include <libfdt_env.h>`, which sits *beside* it. An
+///   angled include does not search the including file's own directory, so the
+///   header's directory has to be passed explicitly.
+/// - `brotli/encode.h` does `#include <brotli/port.h>`, which resolves against
+///   the directory *above* the header. Without the parent, the grandparent of
+///   the included file, that fails too.
+///
+/// The second is why the parent is here as well as the header's own directory;
+/// on its own it would look like superstition. Both are verified against the
+/// real headers by the tests.
+///
+/// Order matters: a directory the caller named explicitly wins over one guessed
+/// from the path, since adding a wide root like `/opt/homebrew/include` can
+/// otherwise shadow the header the caller meant. Absolute, for the same reason
+/// `cli::pkg::header_locations` is — the shim is compiled somewhere else
+/// entirely, and these are replayed as its `-I` flags.
+pub fn include_roots(header: &Path, extra: &[String]) -> Vec<String> {
+    let abs = |p: &Path| -> String {
+        std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()).to_string_lossy().into_owned()
+    };
+
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |d: String| {
+        if !d.is_empty() && !out.contains(&d) {
+            out.push(d);
+        }
+    };
+
+    for d in extra {
+        push(abs(Path::new(d)));
+    }
+    let own = header.parent().filter(|p| !p.as_os_str().is_empty());
+    if let Some(dir) = own {
+        push(abs(dir));
+        if let Some(up) = dir.parent().filter(|p| !p.as_os_str().is_empty()) {
+            push(abs(up));
+        }
+    } else {
+        // A bare filename: the header is in the working directory.
+        push(abs(Path::new(".")));
+    }
+    out
+}
+
 /// Run clang over `header` and return the translation unit as JSON.
 fn ast_of(header: &Path, include_dirs: &[String]) -> Result<Value, String> {
     let mut cmd = std::process::Command::new("clang");
@@ -794,7 +844,11 @@ pub fn from_header(
     only: Option<&str>,
     exported: Option<&std::collections::HashSet<String>>,
 ) -> Result<Binding, String> {
-    let ast = ast_of(header, include_dirs)?;
+    // Resolved here rather than at each call site: `discover_header` below
+    // passes no directories at all, so a candidate needing one was silently
+    // demoted to a fallback instead of being read.
+    let dirs = include_roots(header, include_dirs);
+    let ast = ast_of(header, &dirs)?;
 
     let empty = Vec::new();
     let top = ast.get("inner").and_then(Value::as_array).unwrap_or(&empty);
@@ -817,6 +871,20 @@ pub fn from_header(
         }
         let Some(name) = n.get("name").and_then(Value::as_str) else { continue };
         if only.is_some_and(|pat| !name.contains(pat)) {
+            continue;
+        }
+        // A header can declare more than the library actually ships — it is
+        // written for the newest version, while the built artifact may have
+        // been configured without some of it. Binding one of those produces a
+        // shim that compiles and then fails to *link*, and the linker takes the
+        // whole dependency down over it. libbrotlienc's header declares two
+        // such symbols. The export table is the authority on what is really in
+        // there, so when it can be read it decides.
+        if exported.is_some_and(|e| !e.contains(name)) {
+            b.skipped.push((
+                name.to_string(),
+                "is declared by the header but not exported by the library".into(),
+            ));
             continue;
         }
         // A definition in a header is `static inline`; there is no exported

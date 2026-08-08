@@ -237,13 +237,29 @@ the library also exports were bound instead.
 
 This needs the artifact, so `--path` has to be there too. An export table is an exact test rather than a guess about which directories count as system ones: `fopen` is declared in that translation unit and is not in liblzma, so it is not bound.
 
+### Headers that include their neighbours
+
+Almost no header stands alone, and the two ways one reaches its neighbours need two different directories. Both are searched for you.
+
+```c
+/* libfdt.h — the file sits right beside this one */
+#include <libfdt_env.h>
+
+/* brotli/encode.h — resolved against the directory above this one */
+#include <brotli/port.h>
+```
+
+An angled include does not search the including file's own directory, so the header's directory is passed explicitly; and the second form needs the parent as well. Both are recorded in `include_dirs`, so the shim compile gets exactly what reading the header got.
+
 ### When you do need a flag
 
 | Situation | Flag |
 |---|---|
 | The header search missed, or you want a specific one | `--header <file.h>` |
-| The header is not on the default search path | `-I <dir>` (repeatable) |
+| A header lives somewhere neither rule above finds | `-I <dir>` (repeatable) |
 | The dependency comes from `--url`, so there is no local file to read | `--c-abi` |
+
+A directory you name with `-I` is searched before either guessed one, since a wide root can otherwise shadow the header you meant.
 
 ### Where binding happens
 
@@ -273,6 +289,8 @@ skipped:
 ```
 
 Coverage is quoted against the library's own export table — "covers 181 of the 194 symbols the library exports" — because a bare "181 bound" reads as success whether the library has 190 entry points or 900.
+
+A symbol the header declares but the library does not export is dropped too. A header is written for the newest version while the artifact you have may have been built without some of it — libbrotlienc's header declares two such functions. Binding one produces a shim that compiles and then fails to *link*, and the linker takes the whole dependency down over it.
 
 A symbol that cannot be bound is dropped on its own. It used to be able to take the whole dependency with it: the generator would emit a symbol filling a struct while dropping that struct's field table, and the shim refuses a reference to a table that is not there — so one opaque blob among two hundred good symbols made a library uninstallable. `sqlite3_snapshot_free` and `zip_file_attributes_init` are both that shape.
 

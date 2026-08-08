@@ -308,21 +308,15 @@ fn detect_abi(lib: &std::path::Path) -> Option<Abi> {
 /// directory, and the failure is a "file not found" from cc at install time,
 /// well away from the cause.
 fn header_locations(header: &std::path::Path, include: &[String]) -> (Vec<String>, Vec<String>) {
-    let abs = |p: &std::path::Path| -> String {
-        std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()).to_string_lossy().into_owned()
-    };
     let headers = vec![header
         .file_name()
         .map(|f| f.to_string_lossy().into_owned())
         .unwrap_or_else(|| header.to_string_lossy().into_owned())];
 
-    let mut dirs: Vec<String> = include.iter().map(|d| abs(std::path::Path::new(d))).collect();
-    let parent = header.parent().filter(|p| !p.as_os_str().is_empty());
-    let dir = abs(parent.unwrap_or_else(|| std::path::Path::new(".")));
-    if !dirs.contains(&dir) {
-        dirs.push(dir);
-    }
-    (headers, dirs)
+    // The same list clang was given, so the shim compile cannot be missing a
+    // directory the parse needed. The two used to be computed separately, and
+    // the parse got the smaller set.
+    (headers, pkg::bindgen::include_roots(header, include))
 }
 
 /// Read a header and write the tables into `jade.toml`. Shared by `add`,

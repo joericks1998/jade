@@ -552,7 +552,13 @@ fn bind_tree(files: &[(&str, &str)], exported: Option<&[&str]>) -> Result<Bindin
     ));
     std::fs::create_dir_all(&dir).unwrap();
     for (name, src) in files {
-        std::fs::write(dir.join(name), src).unwrap();
+        // Names may carry a subdirectory, so an angled include like
+        // `<pkg/other.h>` can be written the way a real library writes it.
+        let path = dir.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, src).unwrap();
     }
     let set = exported
         .map(|e| e.iter().map(|s| s.to_string()).collect::<std::collections::HashSet<String>>());
@@ -718,4 +724,87 @@ fn a_library_with_one_unbindable_struct_still_compiles_its_shim() {
          int plain_add(int a, int b);\n",
     )
     .expect("the rest of the library should still bind");
+}
+
+// ── Include roots ────────────────────────────────────────────────────────
+//
+// A header is rarely self-contained, and the two ways it reaches its
+// neighbours need two different directories. Neither was passed to clang, and
+// each one cost a real library outright: libfdt could not be parsed at all,
+// and neither could brotli.
+
+#[test]
+fn include_roots_lists_the_header_directory_then_the_one_above_it() {
+    let roots = include_roots(std::path::Path::new("/tmp/inc/pkg/main.h"), &[]);
+    assert_eq!(roots, ["/tmp/inc/pkg", "/tmp/inc"], "{roots:?}");
+}
+
+#[test]
+fn a_directory_the_caller_named_wins_over_one_guessed_from_the_path() {
+    // A guessed root can be wide enough to shadow the header the caller meant,
+    // so an explicit -I is searched first.
+    let roots =
+        include_roots(std::path::Path::new("/tmp/inc/pkg/main.h"), &["/tmp/mine".to_string()]);
+    assert_eq!(roots[0], "/tmp/mine", "{roots:?}");
+}
+
+#[test]
+fn include_roots_does_not_repeat_a_directory() {
+    let roots =
+        include_roots(std::path::Path::new("/tmp/inc/pkg/main.h"), &["/tmp/inc/pkg".to_string()]);
+    assert_eq!(roots, ["/tmp/inc/pkg", "/tmp/inc"], "{roots:?}");
+}
+
+#[test]
+fn a_header_including_a_sibling_with_angle_brackets_parses() {
+    // The libfdt shape: `#include <libfdt_env.h>` beside the header. An angled
+    // include does not search the including file's own directory, so without
+    // that directory on the search path clang cannot parse the header at all.
+    let b = bind_tree(
+        &[("main.h", "#include <side.h>\nint mine(Side* s);\n"), ("side.h", "typedef struct Side Side;\n")],
+        None,
+    )
+    .expect("a sibling header should resolve");
+    assert_eq!(args(&b, "mine"), ["handle<Side>"]);
+}
+
+#[test]
+fn a_header_including_through_its_parent_directory_parses() {
+    // The brotli shape: `brotli/encode.h` does `#include <brotli/port.h>`,
+    // which resolves against the directory *above* the header.
+    let b = bind_tree(
+        &[
+            ("pkg/main.h", "#include <pkg/side.h>\nint mine(Side* s);\n"),
+            ("pkg/side.h", "typedef struct Side Side;\n"),
+        ],
+        None,
+    )
+    .expect("an include through the parent directory should resolve");
+    assert_eq!(args(&b, "mine"), ["handle<Side>"]);
+}
+
+// ── The library decides what it really has ───────────────────────────────
+
+#[test]
+fn a_symbol_the_header_declares_and_the_library_does_not_export_is_skipped() {
+    // A header is written for the newest version while the built artifact may
+    // have been configured without some of it. Binding one of those produces a
+    // shim that compiles and then fails to *link* — and the linker takes the
+    // whole dependency down over it, which is what libbrotlienc did.
+    let b = bind_tree(
+        &[("main.h", "int shipped(int a);\nint absent(int a);\n")],
+        Some(&["shipped"]),
+    )
+    .expect("should bind");
+    assert!(b.symbols.contains_key("shipped"));
+    assert!(!b.symbols.contains_key("absent"), "{:?}", b.symbols.keys());
+    assert!(why_skipped(&b, "absent").contains("not exported"), "{:?}", b.skipped);
+}
+
+#[test]
+fn with_no_export_table_every_declared_symbol_is_still_bound() {
+    // A URL dependency has no artifact to read, and an unreadable table proves
+    // nothing. The filter only applies when the library could actually be asked.
+    let b = bind_tree(&[("main.h", "int a(int x);\nint b(int x);\n")], None).expect("should bind");
+    assert_eq!(b.symbols.len(), 2, "{:?}", b.symbols.keys());
 }
