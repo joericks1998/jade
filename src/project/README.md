@@ -41,6 +41,8 @@ The package manager reuses that mechanism rather than adding a parallel one. Res
 
 Any change to resolution behavior must be checked on both engines. `./src/scripts/backend-parity.sh` covers `examples/imports/`.
 
+`CSymbol` accepts two shapes — a table, or the bare string `"?"` for a prototype nobody has written yet — and it deserializes by hand to keep them apart. `#[serde(untagged)]` would collapse every table's error into "data did not match any variant", losing the "missing field `ret`" that says what is actually wrong. A placeholder is deliberately *not* a `validate` failure: it is a legal manifest state, and refusing to load one would take `jade pkg list` and `jade pkg remove` down with it. `pkg::unresolved_report` is where the refusal lives instead.
+
 `[scripts]` entries are shell strings run by `jade run <name>`; they are not Jade code.
 
 ## Building and testing

@@ -170,6 +170,37 @@ args = ["handle<demo_ctx>", "out_buffer:char", "int"]
 ret  = "int"
 ```
 
+### When there is no header at all
+
+Sometimes there isn't one to find — a library someone handed you, or one whose headers were never installed. Jade still writes a manifest, because the library always says what it *exports*:
+
+```
+$ jade pkg add demo --path libdemo.dylib
+demo exports no jade_pkg_init, so it is a plain C library
+added demo to jade.toml
+2 of its symbols are listed there with no signature: demo_add, demo_scale
+```
+
+```toml
+[dependencies.demo.symbols]
+demo_add = "?"
+demo_scale = "?"
+```
+
+A `"?"` means *the name is known and the prototype is not*. Replace it with the real one and the dependency works:
+
+```toml
+[dependencies.demo.symbols.demo_add]
+args = ["int", "int"]
+ret  = "int"
+```
+
+Filling in blanks in a file that already lists every function beats going to look for a header, which is why Jade writes the names rather than nothing.
+
+**Why it can't just read the types out of the library.** A shared library carries an export table of *names*. C keeps no argument or return types in a compiled artifact, so `demo_add` in that table says only "there is a `demo_add`". Types survive in DWARF, which release builds strip and which the macOS linker leaves behind in the `.o` files rather than the library. So the half that is missing is genuinely gone, and Jade will not guess at it: a wrong prototype is a corrupted stack several calls later, with nothing pointing back at the manifest.
+
+`jade check`, `jade run` and `jade build` all refuse a dependency that still has a `"?"` in it, and name the symbols.
+
 ### When you do need a flag
 
 | Situation | Flag |
@@ -220,6 +251,8 @@ If you write or correct a symbol by hand, these are the spellings `args` and `re
 | `out_struct:<Type>` | A struct the call fills through a pointer. Needs the library's real header in `headers`. |
 | `out_handle:<T>` | A handle written through a pointer — `sqlite3_open(path, &db)`. The C return value becomes the status, and the handle is what Jade gets. |
 | `callback:<ret>(<args>)` | A Jade function the library may call while the call runs. The signature is written in the library's own C types, e.g. `callback:int(int, const char*)`. |
+
+A whole symbol may also be written as the single string `"?"` — the name is known, the prototype is not. That is what `jade pkg add` writes when it finds no header, and every command that would use the binding refuses it by name.
 
 A symbol may also declare `fails_when`, naming how it reports failure: `null`, `negative`, `nonzero`, or `never`. The shim then clears `errno`, tests the return, and turns a failure into a catchable Jade error carrying the reason. Without it a failed call gives back its raw sentinel and the reason the library already recorded is thrown away — the program sees `-1` and nothing else. The default is "cannot fail", because reading a convention that is not there would turn every legitimate `-1` into a raise.
 

@@ -837,6 +837,18 @@ mod tests;
 /// `None` means the symbol table could not be read, which is a reason to skip
 /// the check rather than to fail: an unreadable table proves nothing.
 pub fn exported_symbols(lib: &Path) -> Option<std::collections::HashSet<String>> {
+    let syms = nm_symbols(lib)?;
+    let out: std::collections::HashSet<String> =
+        syms.into_iter().map(|(_, name)| name).collect();
+    (!out.is_empty()).then_some(out)
+}
+
+/// Everything `nm` reports as defined in `lib`, as (type letter, name) pairs.
+///
+/// The letter is kept because callers want different subsets of it: checking a
+/// header against a library cares about every defined symbol, while generating
+/// placeholders cares only about the ones that are code.
+fn nm_symbols(lib: &Path) -> Option<Vec<(String, String)>> {
     // `-g` exported only. Linux and macOS disagree on the flag for "dynamic
     // symbols", so try the GNU spelling and fall back.
     let run = |args: &[&str]| -> Option<String> {
@@ -845,7 +857,7 @@ pub fn exported_symbols(lib: &Path) -> Option<std::collections::HashSet<String>>
     };
     let text = run(&["-g", "--defined-only"]).or_else(|| run(&["-gU"])).or_else(|| run(&["-g"]))?;
 
-    let mut out = std::collections::HashSet::new();
+    let mut out = Vec::new();
     for line in text.lines() {
         // "<addr> T _name" — the type letter is what says it is defined here.
         let mut it = line.split_whitespace();
@@ -856,9 +868,34 @@ pub fn exported_symbols(lib: &Path) -> Option<std::collections::HashSet<String>>
             continue;
         }
         // Mach-O prefixes every C symbol with an underscore; ELF does not.
-        out.insert(name.strip_prefix('_').unwrap_or(name).to_string());
+        out.push((kind.to_string(), name.strip_prefix('_').unwrap_or(name).to_string()));
     }
-    (!out.is_empty()).then_some(out)
+    Some(out)
+}
+
+/// A symbol table of names with no prototypes, read from the library's exports.
+///
+/// This is the answer to "there is no header anywhere on this machine". The
+/// export table is always readable and always incomplete — see
+/// [`crate::project::UNRESOLVED`] for why the missing half cannot be recovered
+/// — so the names go into `jade.toml` with `"?"` where the signature belongs,
+/// and the user fills in blanks instead of going looking for a header.
+///
+/// Only *code* symbols are listed. A data export cannot be called, so offering
+/// it as something to write a prototype for would be an invitation to a
+/// mistake. Names that keep a leading underscore after the Mach-O one is
+/// stripped are dropped too: those are the compiler's own (`__stack_chk_fail`)
+/// or C++ mangled (`_Z3fooi`), and neither is bindable.
+///
+/// Empty when `nm` is missing or the library exports nothing bindable, which
+/// the caller reports rather than treating as a table.
+pub fn placeholder_symbols(lib: &Path) -> BTreeMap<String, CSymbol> {
+    let Some(syms) = nm_symbols(lib) else { return Default::default() };
+    syms.into_iter()
+        .filter(|(kind, _)| matches!(kind.as_str(), "T" | "t" | "W"))
+        .filter(|(_, name)| !name.starts_with('_'))
+        .map(|(_, name)| (name, CSymbol::unresolved()))
+        .collect()
 }
 
 /// Whether a file is a shared library this platform could load.

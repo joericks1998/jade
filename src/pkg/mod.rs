@@ -472,6 +472,60 @@ fn module_file(pkg: &LockedPackage, artifact: &LockedArtifact) -> String {
     }
 }
 
+/// The error for a dependency still carrying `"?"` prototypes, or `None`.
+///
+/// One message, used from both the places that can reach a placeholder, so the
+/// answer reads the same whether it came from `jade run` or `jade check`.
+///
+/// It names the symbols because the fix is per-symbol, and it shows the shape
+/// to write because "fill in the prototype" is not an instruction anyone can
+/// act on without an example. Long tables are cut off — a two hundred symbol
+/// library would otherwise bury the two lines that say what to do.
+pub fn unresolved_report(name: &str, entry: &crate::project::DependencyEntry) -> Option<String> {
+    const SHOWN: usize = 8;
+
+    let missing = entry.unresolved_symbols();
+    if missing.is_empty() {
+        return None;
+    }
+
+    let mut listed = missing.iter().take(SHOWN).copied().collect::<Vec<_>>().join(", ");
+    if missing.len() > SHOWN {
+        listed.push_str(&format!(", and {} more", missing.len() - SHOWN));
+    }
+    let example = missing[0];
+
+    Some(format!(
+        "dependency '{name}' has {n} symbol{s} with no signature yet: {listed}\n  \
+         A shared library says what it exports and nothing more — C keeps no argument or return \
+         types in\n  a compiled artifact — so these went into jade.toml as \"?\" for you to fill \
+         in, e.g.\n    \
+         [dependencies.{name}.symbols.{example}]\n    \
+         args = [\"int\", \"int\"]\n    \
+         ret  = \"int\"\n  \
+         Or point at the library's header and let them be generated:\n    \
+         jade pkg bind {name} --header <its header.h>",
+        n = missing.len(),
+        s = if missing.len() == 1 { "" } else { "s" },
+    ))
+}
+
+/// The same check across the whole manifest, for callers with no lock in hand.
+///
+/// `jade check` claims to be an honest predictor of whether `jade run` will
+/// accept a file, and a placeholder is something `jade run` refuses. Checking
+/// costs a manifest read that has already happened, so the claim holds without
+/// `check` doing any of the installing it deliberately avoids.
+pub fn check_symbols_resolved(manifest: &ProjectManifest) -> Result<(), String> {
+    let Some(deps) = &manifest.dependencies else { return Ok(()) };
+    for (name, entry) in deps {
+        if let Some(e) = unresolved_report(name, entry) {
+            return Err(e);
+        }
+    }
+    Ok(())
+}
+
 /// Generate and compile a binding shim for every `abi = "c"` dependency.
 ///
 /// Runs after [`materialize`], against the manifest rather than the lock: the
@@ -501,6 +555,14 @@ pub fn build_c_shims(root: &Path, lock: &Lockfile, manifest: &ProjectManifest) -
                 pkg.name
             ));
         };
+
+        // A `"?"` is a prototype nobody has written yet, and it cannot be
+        // guessed on the way past — see `project::UNRESOLVED`. Refusing here
+        // means the answer arrives at `jade run` naming the manifest, rather
+        // than as `cc` failing on `?` as a type name.
+        if let Some(e) = unresolved_report(&pkg.name, entry) {
+            return Err(e);
+        }
 
         let (_, artifact) = select_artifact(pkg, fetch::platform_tag())?;
         let dir = root.join(LIBS_DIR).join(pkg.install_dir());
@@ -765,6 +827,11 @@ pub fn ensure_ready(root: &Path, manifest: &ProjectManifest) -> Result<(), Strin
     if !has_deps {
         return Ok(());
     }
+
+    // Before the lock, because an unfilled prototype is not something
+    // installing can fix. Sending the user to `jade pkg install` first would
+    // cost them a step to arrive at this same message.
+    check_symbols_resolved(manifest)?;
 
     let mut lock = lock::read(root)?.ok_or_else(|| {
         "jade.toml declares [dependencies] but there is no jade.lock — \
