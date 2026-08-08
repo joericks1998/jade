@@ -59,6 +59,10 @@ pub struct Binding {
     pub assumed: Vec<(String, String)>,
     /// Not bound, and why. `(symbol, reason)`.
     pub skipped: Vec<(String, String)>,
+    /// Set when the named header declared nothing itself and the library's
+    /// export table picked the declarations instead — see [`bindable`]. Carries
+    /// how many exported declarations were swept in.
+    pub umbrella: Option<usize>,
 }
 
 impl Binding {
@@ -73,6 +77,12 @@ impl Binding {
         );
         if !self.structs.is_empty() {
             s.push_str(&format!("; {} struct(s)", self.structs.len()));
+        }
+        if let Some(n) = self.umbrella {
+            s.push_str(&format!(
+                "\n\nthat header declares nothing itself, so the {n} declarations it includes \
+                 that\nthe library also exports were bound instead."
+            ));
         }
         if !self.assumed.is_empty() {
             s.push_str("\n\nassumed (check these):");
@@ -251,8 +261,39 @@ fn typedef_record_id(node: &Value) -> Option<&str> {
     if is_record(d) { d.get("id")?.as_str() } else { None }
 }
 
+/// Whether a typedef names an enum.
+///
+/// Both spellings clang gives have to be checked. For `typedef enum { ... }
+/// lzma_ret;` the `qualType` is `enum lzma_ret` and the `desugaredQualType` is
+/// the bare `lzma_ret` — and [`underlying`] prefers the desugared one, which is
+/// exactly the spelling with the keyword already gone.
+fn typedef_names_enum(node: &Value) -> bool {
+    let names_enum =
+        |s: &str| s.trim().trim_start_matches("const ").trim_start().starts_with("enum ");
+    let Some(ty) = node.get("type") else { return false };
+    ["qualType", "desugaredQualType"]
+        .iter()
+        .filter_map(|k| ty.get(k).and_then(Value::as_str))
+        .any(names_enum)
+}
+
 fn build_env(nodes: &[&Value]) -> TypeEnv {
     let mut env = TypeEnv::default();
+
+    // An enum is an integer, and the FFI carries integers. Recording that here
+    // rather than in the mapper means it works everywhere a type is looked up —
+    // return, parameter, struct field — because they all resolve through
+    // `expand`. Libraries lean on enums heavily for status codes, so leaving
+    // them unbindable cost more than any other single gap: on liblzma alone it
+    // was 60 of 114 symbols, `lzma_code` among them.
+    for n in nodes {
+        if n.get("kind").and_then(Value::as_str) != Some("EnumDecl") {
+            continue;
+        }
+        if let Some(name) = n.get("name").and_then(Value::as_str) {
+            env.alias.insert(name.to_string(), "int".to_string());
+        }
+    }
 
     // Records first, by id, so a typedef can be resolved in one pass afterwards.
     let mut by_id: HashMap<&str, (&Value, bool)> = HashMap::new();
@@ -289,7 +330,11 @@ fn build_env(nodes: &[&Value]) -> TypeEnv {
             // Not a struct: an alias for something else. `type.qualType` on a
             // TypedefDecl is the type underneath, which may itself be a typedef.
             if let Some(under) = underlying(n) {
-                env.alias.insert(name.to_string(), under.to_string());
+                // `typedef enum lzma_ret lzma_ret;` would otherwise alias the
+                // name to itself once the keyword is stripped, and resolve to
+                // nothing. An enum is an int wherever it appears.
+                let target = if typedef_names_enum(n) { "int" } else { under };
+                env.alias.insert(name.to_string(), target.to_string());
             }
             continue;
         };
@@ -297,7 +342,11 @@ fn build_env(nodes: &[&Value]) -> TypeEnv {
         // typedef to drop on the floor.
         let Some(&(rec, complete)) = by_id.get(rid) else {
             if let Some(under) = underlying(n) {
-                env.alias.insert(name.to_string(), under.to_string());
+                // `typedef enum lzma_ret lzma_ret;` would otherwise alias the
+                // name to itself once the keyword is stripped, and resolve to
+                // nothing. An enum is an int wherever it appears.
+                let target = if typedef_names_enum(n) { "int" } else { under };
+                env.alias.insert(name.to_string(), target.to_string());
             }
             continue;
         };
@@ -656,45 +705,111 @@ fn infer_failure(ret: &str, has_out_handle: bool) -> Option<CFailure> {
 
 // ── Driver ───────────────────────────────────────────────────────────────────
 
-/// Read `header` and produce the tables for a `[dependencies.<name>]` entry.
+/// Which of a translation unit's declarations to bind.
 ///
-/// `only` filters by substring when given, so a large header can be bound a
-/// piece at a time rather than all at once.
-pub fn from_header(
+/// Normally: the ones the named header declares itself. Everything a header
+/// includes is in the same translation unit, and binding all of it would pull
+/// in the whole C standard library.
+///
+/// Some libraries have no such header. `lzma.h`, `alsa/asoundlib.h` and
+/// `git2.h` are *umbrellas* — they declare nothing and exist to include the
+/// twenty headers that do. Pointing at one used to report "no declarations
+/// found", and pointing at a sub-header failed differently, because a
+/// sub-header on its own is usually not compilable.
+///
+/// So when the named header declares no functions of its own, the library's
+/// export table decides instead: bind what the translation unit declares *and*
+/// the artifact exports. That is an exact test rather than a guess about which
+/// paths count as system ones — `fopen` is declared in this translation unit
+/// and is not in liblzma, so it does not get bound. The umbrella stays the
+/// header the shim includes, which is what it is for.
+///
+/// Returns the nodes to bind, and how many symbols the umbrella case swept in.
+fn bindable<'a>(
     header: &Path,
-    include_dirs: &[String],
-    only: Option<&str>,
-) -> Result<Binding, String> {
-    let ast = ast_of(header, include_dirs)?;
+    top: &'a [Value],
+    exported: Option<&std::collections::HashSet<String>>,
+) -> Result<(Vec<&'a Value>, Option<usize>), String> {
+    let is_fn = |n: &Value| n.get("kind").and_then(Value::as_str) == Some("FunctionDecl");
 
-    // clang reports a file once and lets following nodes inherit it, so the
-    // filter has to carry the last one seen. Without this the binding would
-    // include every declaration from every system header the target includes —
-    // thousands of them.
+    // clang names a file once and lets the nodes after it inherit that name, so
+    // the filter has to carry the last one seen.
     let want = header.to_string_lossy().to_string();
-    let empty = Vec::new();
-    let top = ast.get("inner").and_then(Value::as_array).unwrap_or(&empty);
     let mut current = String::new();
-    let mut mine: Vec<&Value> = Vec::new();
+    let mut own: Vec<&Value> = Vec::new();
     for n in top {
         if let Some(f) = n.get("loc").and_then(|l| l.get("file")).and_then(Value::as_str) {
             current = f.to_string();
         }
         if current == want {
-            mine.push(n);
+            own.push(n);
         }
     }
 
-    if mine.is_empty() {
+    if own.iter().any(|n| is_fn(n)) {
+        return Ok((own, None));
+    }
+
+    let Some(exported) = exported else {
         return Err(format!(
-            "no declarations found in {} — clang parsed it, but every declaration came from \
-             somewhere else it includes.",
+            "{} declares no functions of its own — it is an umbrella header that only includes \
+             others.\n  Which of those to bind can be settled by the library's own export table, \
+             so point at\n  the artifact as well:\n    \
+             jade pkg add <name> --path <the .so> --header {}",
+            header.display(),
+            header.display()
+        ));
+    };
+
+    let swept: Vec<&Value> = top
+        .iter()
+        .filter(|n| is_fn(n))
+        .filter(|n| {
+            n.get("name").and_then(Value::as_str).is_some_and(|name| exported.contains(name))
+        })
+        .collect();
+
+    if swept.is_empty() {
+        return Err(format!(
+            "nothing to bind in {}: it declares no functions of its own, and none of the \
+             declarations it includes are symbols this library exports.",
             header.display()
         ));
     }
 
-    let env = build_env(&mine);
-    let mut b = Binding::default();
+    let n = swept.len();
+    Ok((swept, Some(n)))
+}
+
+/// Read `header` and produce the tables for a `[dependencies.<name>]` entry.
+///
+/// `only` filters by substring when given, so a large header can be bound a
+/// piece at a time rather than all at once.
+///
+/// `exported` is the library's symbol table when one could be read. It is what
+/// makes an umbrella header work — see [`bindable`].
+pub fn from_header(
+    header: &Path,
+    include_dirs: &[String],
+    only: Option<&str>,
+    exported: Option<&std::collections::HashSet<String>>,
+) -> Result<Binding, String> {
+    let ast = ast_of(header, include_dirs)?;
+
+    let empty = Vec::new();
+    let top = ast.get("inner").and_then(Value::as_array).unwrap_or(&empty);
+    let (mine, umbrella) = bindable(header, top, exported)?;
+
+    // Types come from the *whole* translation unit, functions only from the
+    // headers chosen above. The two need different scopes: a library splits its
+    // types out into `git2/types.h` and declares functions against them in
+    // twenty other headers, so an environment built from one file alone reports
+    // every one of those functions as taking an unsupported type. Types are
+    // safe to take from everywhere because nothing is emitted for a type on its
+    // own — one is only ever recorded because a bound function reached it.
+    let all: Vec<&Value> = top.iter().collect();
+    let env = build_env(&all);
+    let mut b = Binding { umbrella, ..Default::default() };
 
     for n in &mine {
         if n.get("kind").and_then(Value::as_str) != Some("FunctionDecl") {
@@ -719,23 +834,34 @@ pub fn from_header(
 
         match map_function(n, &env) {
             Ok((sym, used_structs, assumed)) => {
+                // Every struct the symbol names has to come out with it. A
+                // symbol whose `out_struct:` has no field table is one the shim
+                // generator refuses — and it refuses the *whole dependency*,
+                // not the one symbol, so a single unrepresentable struct made
+                // an otherwise fine library uninstallable. Resolve them all
+                // first and drop the symbol if any fails, rather than emitting
+                // a reference to a table that was never written.
+                let mut entries = Vec::new();
+                let mut failed = None;
                 for s in used_structs {
                     // The spec carries the C spelling (`struct Info`); the
                     // environment is keyed by the normalized one. The table
                     // that comes out is keyed to match the spec, since that is
                     // what the shim looks the definition up by.
-                    if let Some(fields) = env.complete.get(&normalize(&s)) {
-                        match struct_entry(fields, &env) {
-                            Ok(entry) => {
-                                b.structs.insert(s, entry);
-                            }
-                            Err(why) => {
-                                b.skipped.push((name.to_string(), why));
-                                continue;
-                            }
+                    let Some(fields) = env.complete.get(&normalize(&s)) else { continue };
+                    match struct_entry(fields, &env) {
+                        Ok(entry) => entries.push((s, entry)),
+                        Err(why) => {
+                            failed = Some(why);
+                            break;
                         }
                     }
                 }
+                if let Some(why) = failed {
+                    b.skipped.push((name.to_string(), why));
+                    continue;
+                }
+                b.structs.extend(entries);
                 if let Some(why) = assumed {
                     b.assumed.push((name.to_string(), why));
                 }
@@ -1060,7 +1186,7 @@ pub fn discover_header(lib: &Path, root: &Path, dep_name: &str) -> Option<std::p
                 // Nothing to check against; first hit wins.
                 return Some(path);
             };
-            match from_header(&path, &[], None) {
+            match from_header(&path, &[], None, Some(exported)) {
                 Ok(b) if b.symbols.keys().any(|s| exported.contains(s)) => return Some(path),
                 // Parsed, but describes some other library of the same name.
                 Ok(_) => fallback.get_or_insert(path),

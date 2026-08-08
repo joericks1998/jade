@@ -201,6 +201,42 @@ Filling in blanks in a file that already lists every function beats going to loo
 
 `jade check`, `jade run` and `jade build` all refuse a dependency that still has a `"?"` in it, and name the symbols.
 
+### Libraries split across several headers
+
+Plenty of libraries do not have one header. libarchive declares its readers in `archive.h` and its entries in `archive_entry.h`; libgit2 puts its types in `git2/types.h` and its functions in twenty other files. Two things make that work.
+
+**Bind each header in turn.** `jade pkg bind` merges, so a second run adds to the table rather than replacing it, and the header list grows with it.
+
+```sh
+jade pkg add archive --path libarchive.dylib --header /opt/homebrew/include/archive.h
+jade pkg bind archive --header /opt/homebrew/include/archive_entry.h
+```
+
+```toml
+headers = ["archive.h", "archive_entry.h"]
+```
+
+Every header in that list is `#include`d by the shim. If one were missing while its symbols stayed in the table, C would let the shim call them undeclared — assuming each returns `int` — and a call that really returns a pointer would come back truncated. The shim is compiled with `-Werror=implicit-function-declaration` so that cannot happen quietly; you get an error naming the missing header instead.
+
+**Types are read from the whole include tree, functions only from the header you name.** A function in `archive.h` written in terms of a type from `archive_entry.h` binds fine. But `archive.h` also includes `stdio.h`, and binding `fopen` along with it would be wrong — so the functions that come out are the ones the named header declares itself.
+
+### Umbrella headers
+
+Some libraries only have a header that declares nothing at all. `lzma.h`, `git2.h` and `alsa/asoundlib.h` exist to include the twenty files that do the declaring. Point at one and there is nothing in it to bind, while pointing at a sub-header usually fails because a sub-header on its own does not compile.
+
+For those, the library's own export table decides. Anything the translation unit declares *and* the artifact exports gets bound; the umbrella stays the header the shim includes, which is what it is for.
+
+```
+$ jade pkg add lzma --path /opt/homebrew/lib/liblzma.dylib --header /opt/homebrew/include/lzma.h
+covers 49 of the 114 symbols the library exports
+49 bound, 8 assumed, 65 skipped; 3 struct(s)
+
+that header declares nothing itself, so the 114 declarations it includes that
+the library also exports were bound instead.
+```
+
+This needs the artifact, so `--path` has to be there too. An export table is an exact test rather than a guess about which directories count as system ones: `fopen` is declared in that translation unit and is not in liblzma, so it is not bound.
+
 ### When you do need a flag
 
 | Situation | Flag |
@@ -238,13 +274,15 @@ skipped:
 
 Coverage is quoted against the library's own export table — "covers 181 of the 194 symbols the library exports" — because a bare "181 bound" reads as success whether the library has 190 entry points or 900.
 
+A symbol that cannot be bound is dropped on its own. It used to be able to take the whole dependency with it: the generator would emit a symbol filling a struct while dropping that struct's field table, and the shim refuses a reference to a table that is not there — so one opaque blob among two hundred good symbols made a library uninstallable. `sqlite3_snapshot_free` and `zip_file_attributes_init` are both that shape.
+
 ### The binding vocabulary
 
 If you write or correct a symbol by hand, these are the spellings `args` and `ret` accept.
 
 | Spelling | Meaning |
 |---|---|
-| `int`, `float`, `bool`, `str`, `nil` | Scalars. `nil` is a return only. |
+| `int`, `float`, `bool`, `str`, `nil` | Scalars. `nil` is a return only. A C `enum` is an `int` — status-code enums are how most libraries report failure, and on liblzma alone they account for 60 of 114 symbols. |
 | `bytes` | Binary data. As an argument it is one Jade value and the two C parameters `(const void*, size_t)`. |
 | `handle<T>` | An opaque pointer the library owns — a `sqlite3*`, a `SNDFILE*`. Jade holds it, hands it back, and never looks inside. The type name is checked, so passing a statement where a connection belongs is a readable error rather than a crash inside the library. `T` is written the way C writes it, so a struct with no typedef of its own keeps the keyword: `handle<struct ZSTD_CCtx_s>`. |
 | `out_buffer:<ctype>` | A buffer the call fills. It consumes **no** Jade argument: `x_read(handle, buf, n)` is called as `x_read(handle, n)` and hands back the bytes. Its size comes from the next declared argument, which must be an `int`. |

@@ -219,3 +219,55 @@ fn remove_preserves_unrelated_content() {
     assert!(text.contains("# keep me"), "comment lost:\n{text}");
     assert!(text.contains("[scripts]"), "section lost:\n{text}");
 }
+
+// ── Binding a second header must not undo the first ──────────────────────
+
+/// `set_bindings` with just a header list, which is all these tests vary.
+fn bind_headers(root: &Path, name: &str, headers: &[&str], dirs: &[&str]) {
+    let mut symbols = std::collections::BTreeMap::new();
+    symbols.insert(
+        format!("{}_fn", headers[0].trim_end_matches(".h")),
+        crate::project::CSymbol {
+            args: vec!["int".into()],
+            ret: "int".into(),
+            fails_when: None,
+        },
+    );
+    set_bindings(
+        root,
+        name,
+        &symbols,
+        &std::collections::BTreeMap::new(),
+        &headers.iter().map(|h| h.to_string()).collect::<Vec<_>>(),
+        &dirs.iter().map(|d| d.to_string()).collect::<Vec<_>>(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn binding_a_second_header_keeps_the_first() {
+    // Replacing the list dropped `archive.h` while keeping the symbols that
+    // came from it. The shim then declared none of them, and C lets an
+    // undeclared function be called — so it compiled clean and crashed on the
+    // first call that returned a pointer, with no diagnostic anywhere.
+    let tmp = project("hdrmerge", "[project]\nname = \"app\"\n[dependencies.arc]\npath = \"a.so\"\n");
+
+    bind_headers(tmp.path(), "arc", &["archive.h"], &["/usr/include"]);
+    bind_headers(tmp.path(), "arc", &["archive_entry.h"], &["/opt/include"]);
+
+    let dep = parsed(tmp.path()).dependencies.unwrap().remove("arc").unwrap();
+    assert_eq!(dep.headers.unwrap(), ["archive.h", "archive_entry.h"]);
+    assert_eq!(dep.include_dirs.unwrap(), ["/usr/include", "/opt/include"]);
+}
+
+#[test]
+fn rebinding_the_same_header_does_not_duplicate_it() {
+    let tmp = project("hdrdup", "[project]\nname = \"app\"\n[dependencies.arc]\npath = \"a.so\"\n");
+
+    bind_headers(tmp.path(), "arc", &["archive.h"], &["/usr/include"]);
+    bind_headers(tmp.path(), "arc", &["archive.h"], &["/usr/include"]);
+
+    let dep = parsed(tmp.path()).dependencies.unwrap().remove("arc").unwrap();
+    assert_eq!(dep.headers.unwrap(), ["archive.h"]);
+    assert_eq!(dep.include_dirs.unwrap(), ["/usr/include"]);
+}

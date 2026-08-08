@@ -341,14 +341,18 @@ fn bind_header(
         return Err(format!("no such header: {header}"));
     }
 
-    let binding = pkg::bindgen::from_header(header_path, include, only)?;
+    // Read the export table first: it is both the check below and, for an
+    // umbrella header that declares nothing itself, what decides which of the
+    // headers it includes to bind.
+    let exported = lib.and_then(pkg::bindgen::exported_symbols);
+    let binding = pkg::bindgen::from_header(header_path, include, only, exported.as_ref())?;
 
     // Check the header against the library it is supposed to describe. A header
     // declaring symbols the library does not export is the wrong header, and
     // the shim would fail to link with an undefined-symbol error naming none of
     // this.
-    if let Some(exported) = lib.and_then(pkg::bindgen::exported_symbols) {
-        let (covered, total) = pkg::bindgen::coverage(&binding, &exported);
+    if let Some(exported) = &exported {
+        let (covered, total) = pkg::bindgen::coverage(&binding, exported);
         if covered == 0 && !binding.symbols.is_empty() {
             return Err(format!(
                 "{header} declares none of the {total} symbols {} exports — it looks like the \
@@ -397,8 +401,18 @@ pub fn run_bind(name: &str, header: &str, include: &[String], only: Option<&str>
         if !header_path.exists() {
             fail(format!("no such header: {header}"));
         }
-        let binding =
-            pkg::bindgen::from_header(header_path, include, only).unwrap_or_else(|e| fail(e));
+        // A dry run may still know the artifact, and an umbrella header cannot
+        // be read without it.
+        let exported = load_or_exit(&root)
+            .dependencies
+            .as_ref()
+            .and_then(|d| d.get(name))
+            .and_then(|e| e.path.clone())
+            .map(|p| root.join(p))
+            .filter(|p| p.exists())
+            .and_then(|p| pkg::bindgen::exported_symbols(&p));
+        let binding = pkg::bindgen::from_header(header_path, include, only, exported.as_ref())
+            .unwrap_or_else(|e| fail(e));
         println!("{}", binding.report());
         println!("\n(dry run — jade.toml unchanged)");
         return;
