@@ -16,9 +16,9 @@
 //! called as `x_read(handle, n)` and hand back the bytes. Without that rewrite
 //! most real C signatures are simply not callable.
 //!
-//! `design.md` beside this file has the rules and the reasoning: how a buffer is
-//! sized, how two results come back, and why a struct out-parameter requires the
-//! library's header rather than a declared layout.
+//! `README.md` in this directory has the rules and the reasoning: how a buffer
+//! is sized, how two results come back, and why a struct out-parameter requires
+//! the library's header rather than a declared layout.
 //!
 //! An unrepresentable type is rejected by name rather than silently marshalled
 //! to nil, which is the failure mode this generator exists to avoid.

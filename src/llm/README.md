@@ -15,7 +15,7 @@ The language used to contain OpenAI and Anthropic HTTP clients. They are gone. E
 
 There used to be a second live path: `JadedBackend`, which reached a local inference daemon over a Unix socket at `$HOME/.jade/llm.sock`. It was removed in v1.1.30, along with the socket, the shared wire protocol in `jade_runtime::infer`, and the `ovata-infer-protocol` dependency. A provider package is a linked library the engine calls directly, so the daemon was a second way to do the same thing with a serialization boundary in the middle.
 
-A provider package is a compiled Jade `--lib` exporting `infer(request) -> [Frame]` and optionally `configure(opts)`. The package does the HTTP; the language decodes frames. See `src/providers/design.md` for the full shape.
+A provider package is a compiled Jade `--lib` exporting `infer(request) -> [Frame]` and optionally `configure(opts)`. The package does the HTTP; the language decodes frames. See `src/providers/README.md` for the full shape.
 
 Both directions are declared once, outside this repo, in the `ovata-infer-protocol` submodule at `src/protocol/jade/infer.jde`: the request as `InferRequest`, the reply as the `Token`/`Done`/`Error`/`Meta`/`Json` frames. A frame may be written as a struct — whose type name is the frame name — or as a dict carrying that name under `"type"`. Anything else raises. Skipping unrecognised frames is what let a renamed key or a miscased tag read as an empty reply, with no error at any layer.
 
