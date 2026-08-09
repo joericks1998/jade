@@ -4,7 +4,7 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
-## v1.3.12
+## v1.3.13
 
 **Fixed: every FFI package aborted at startup in a compiled binary on Linux.** `*** buffer overflow detected ***`, before the program's first line ran. `realpath` on glibc writes up to `PATH_MAX` bytes into the buffer it is handed, and the fortified build aborts the process when that buffer is smaller — whatever the path being resolved turns out to be. The runtime handed it 1024 bytes, which is exactly `PATH_MAX` on macOS and a quarter of it on Linux.
 
@@ -12,6 +12,8 @@ sidebar_label: Changelog
 - **Every buffer holding a path is `PATH_MAX` now**, from one definition in `runtime.h` with a 4096 fallback for systems that set no limit.
 - **A failure names the whole path.** The error messages carrying paths were 512 and 900 bytes, so the sentence explaining *where* the runtime looked could be cut off mid-path — which is the one part worth reading. The single join that can still overflow says so, rather than truncating into a "not found" that sends you after the wrong thing.
 - **Swept the whole C runtime** with `-O2 -D_FORTIFY_SOURCE=3 -Wall` on glibc. This was the only abort-class hazard, and no truncation warnings remain.
+
+## v1.3.12
 
 **Fixed: malformed JSON did nothing in a compiled program.** `json.parse` raises under `jade run` and answered `nil` under `jade build`, so a compiled binary took the success branch on input the interpreter rejected and every `try`/`catch` written around a parse stopped running. Nothing warned; the value was simply nil and the program carried on with it.
 
