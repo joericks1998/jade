@@ -48,6 +48,10 @@ It is intentionally dependency-free and LLVM-free, so it builds everywhere `jade
 
 **Standard-library cores** — `mathf.rs`, `strf.rs`, `fsf.rs`, `pathf.rs`, `envf.rs`, `shf.rs`, `jsonf.rs`, `randomf.rs`, `timef.rs`, `grammarf.rs`. Each holds the shared implementation behind a `std/*` package; the thin `VmValue` marshalling lives in the matching top-level module (`src/math/`, `src/string/`, …).
 
+A core that can *fail* has one more thing to arrange. A Jade raise is a `longjmp`, which must not unwind through a Rust frame, so nothing here throws: the function records the message and returns a neutral value, and a small C forwarder in `runtime_aot/common.c` drains it and raises. `fsf.rs`, `httpf.rs`, `uhttpf/`, `bytesf.rs` and `jsonf.rs` all work this way; `mathf.rs` uses the simpler version, an out-param error code with the message living on the C side, which is enough when the wording is fixed.
+
+Skipping that arrangement is the standing failure mode, and it is invisible: the compiled program answers nil where the VM raises, so it takes the success branch and carries on. `json.parse` did exactly that until v1.3.12 — a comment even said so — and no example parsed invalid JSON, so the parity gate never looked. If a core returns a `Result`, decide where the error surfaces before deciding what it returns.
+
 **FFI surfaces** — `ffi.rs` (scalars and general `jrt_*`), `ffi_coll.rs` (collections), `cstr.rs` (C string helpers). These are `#[no_mangle]` forwarders to the pure Rust implementations in the sibling modules. As symbols moved here from `runtime_aot/common.c`, the C definitions were deleted and their declarations left in `runtime.h`, so the linker resolves them against this crate.
 
 ## Who uses it

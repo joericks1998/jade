@@ -786,6 +786,23 @@ void* jrt_sh_output(const char* cmd) {
     return jrt_coll_sh_output(cmd);
 }
 
+/* json.parse's raising forwarder. The Rust half records serde's complaint
+ * instead of throwing (a longjmp must not cross a Rust frame), and this turns it
+ * into the same catchable I/O error the VM raises.
+ *
+ * Without it a compiled binary answered nil for input the interpreter refused,
+ * so a program took the success branch on malformed JSON and every try/catch
+ * written around a parse stopped running. */
+extern jade_value_t jrt_json_parse_impl(const char* s);
+extern char* jrt_json_take_error(void);
+
+jade_value_t jrt_json_parse(const char* s) {
+    jade_value_t w = jrt_json_parse_impl(s);
+    char* e = jrt_json_take_error();
+    if (e) { jrt_throw_io(e); jrt_str_free(e); }
+    return w;
+}
+
 /* fs.* raising forwarders: the Rust impls (jade-runtime src/fsf.rs) record a
  * pending error instead of throwing (a longjmp must not cross a Rust frame);
  * throw it here as a catchable exception. fs.read additionally refuses a tainted

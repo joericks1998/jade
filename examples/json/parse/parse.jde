@@ -1,0 +1,28 @@
+// json.parse on input that is not JSON.
+//
+// The compiled backend used to answer nil here while the interpreter raised, so
+// a program took the success branch on malformed input and every try/catch
+// written around a parse stopped running. Nothing printed a warning.
+//
+// The error text is not printed: a compiled binary carries no source span, so
+// the two engines agree on everything after the `[line:col]` prefix and not on
+// the prefix itself.
+use std::json
+
+fn attempt(label, s) {
+    try {
+        let v = json.parse(s)
+        print(f"{label}: ok {v}")
+    } catch e {
+        print(f"{label}: raised")
+    }
+}
+
+attempt("object     ", "{\"a\": 1}")
+attempt("unterminated", "{\"typ")
+// A good parse after a bad one: the failure is recorded on a channel the
+// forwarder drains, and a stale one would raise here.
+attempt("object again", "{\"a\": 1}")
+attempt("trailing junk", "{} oops")
+attempt("empty       ", "")
+attempt("array       ", "[1, 2, 3]")

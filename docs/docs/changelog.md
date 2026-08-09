@@ -4,6 +4,15 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.3.12
+
+**Fixed: malformed JSON did nothing in a compiled program.** `json.parse` raises under `jade run` and answered `nil` under `jade build`, so a compiled binary took the success branch on input the interpreter rejected and every `try`/`catch` written around a parse stopped running. Nothing warned; the value was simply nil and the program carried on with it.
+
+- **The wording matches too**, down to serde's own complaint: `I/O error: json.parse: EOF while parsing a string at line 1 column 5`. Only the `[line:col]` prefix still differs, which a compiled binary cannot carry and which every other raise already omits.
+- **A good parse after a bad one is still good.** The failure travels on a channel the raising forwarder drains, and a stale one left there would be raised by whichever call came next — a valid parse reporting an error about input it never saw.
+- **The provider config keeps the old behaviour on purpose.** It is read where no Jade frame exists to catch anything, so a malformed one leaves the provider unconfigured rather than aborting.
+- **`examples/json/parse/` covers it now.** No example parsed invalid JSON, which is why the parity gate never saw this.
+
 ## v1.3.11
 
 **Fixed: the Linux build had been broken since v1.3.9, so nothing shipped.** `jade_image_dir` asks the loader which image it is running in, using `dladdr` — which glibc hides unless `_GNU_SOURCE` is defined, while macOS declares it unconditionally. So every build on a developer's Mac passed and every build in CI failed, at the first step, inside the C compiler. v1.3.9 and v1.3.10 were merged and never tagged; their contents ship here.

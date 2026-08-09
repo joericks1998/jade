@@ -598,6 +598,9 @@ int64_t jrt_coll_array_filter(int64_t arr_word, int64_t fn_word); /* -> new arra
 /* jrt_json_parse_chunk — parse a (tagged) JSON string into an ObjHeader value
  * word (dict/array/scalar), or JRT_NIL on invalid JSON. Chunk-path native. */
 jade_value_t jrt_json_parse_chunk(const char* s);
+/* jrt_json_parse — the same, for the `json.parse` builtin: malformed input
+ * raises the I/O error the VM raises rather than answering nil. */
+jade_value_t jrt_json_parse(const char* s);
 /* jrt_json_stringify_chunk — render an ObjHeader value word to a fresh TRUSTED
  * tagged string (compact, or 2-space pretty when pretty != 0).               */
 char*   jrt_json_stringify_chunk(jade_value_t word, int pretty);
