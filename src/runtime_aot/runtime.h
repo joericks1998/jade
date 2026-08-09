@@ -1,6 +1,22 @@
 #pragma once
+#include <limits.h>
 #include <stddef.h>
 #include <stdint.h>
+
+/* The longest path this runtime will hold.
+ *
+ * It has to be PATH_MAX, not a round number that looks big enough: glibc's
+ * `realpath` writes up to PATH_MAX bytes into the buffer it is given, and its
+ * fortified build aborts the program outright when the destination is smaller
+ * — whatever the actual path turns out to be. macOS PATH_MAX is 1024 and
+ * Linux's is 4096, so a hard-coded 1024 was exactly right on one platform and
+ * an instant abort on the other.
+ *
+ * POSIX allows PATH_MAX to be undefined on systems with no fixed limit; 4096
+ * matches Linux and is the same buffer those systems' realpath will respect. */
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
 
 /* Uniform value representation: all Jade values fit in 64 bits. */
 typedef int64_t jade_value_t;
