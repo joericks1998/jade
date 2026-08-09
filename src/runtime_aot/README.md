@@ -21,6 +21,18 @@ The trend over time has been *shrinking*. Symbols keep moving out of `common.c` 
 - **`runtime.h`** — the ABI. Defines `jade_value_t` and the tagged value layout (bit 0 clear is an int; low 3 bits `001` a heap pointer, `011` a boxed float, `101` a string), plus every `jrt_*` and `jade_*` declaration. This file and `jade-runtime`'s `value.rs` are byte-identical mirrors of each other; changing one means changing both.
 - **`common.c`** — the platform-agnostic core: fatal errors, the `setjmp`-based exception machinery, and whatever value operations have not yet migrated to Rust.
 - **`posix.c`** — the host backend. pthreads-based concurrency, `dlopen`/`dlsym`, and `exit`. Guarded by `#ifndef __JADE_KERNEL__`. It defines `_GNU_SOURCE` before any header, because `jade_image_dir` uses `dladdr` — which macOS declares unconditionally and glibc hides. Without it the file built on every developer's Mac and failed only in CI, so three releases were merged and never shipped. Anything else GNU-only that lands here is covered by the same define, but the ordering is fragile: it has to precede `runtime.h`.
+
+**Path buffers are `PATH_MAX`, and that is not a style preference.** `realpath` on glibc writes up to `PATH_MAX` bytes into whatever buffer it is given, and the fortified build aborts the process when the buffer is smaller — regardless of how long the path actually is. macOS `PATH_MAX` is 1024 and Linux's is 4096, so a hard-coded 1024 was exactly right on one platform and an instant abort on the other: every FFI package in a compiled binary died at startup on Linux until v1.3.12. `runtime.h` defines the constant once, with a 4096 fallback.
+
+Two properties of this tree let that sit unnoticed, and both still hold. The fortify checks only exist in optimised builds, so a debug toolchain never runs them — `cargo test` and the parity gate will not catch the next one. And `build.rs` compiles with `.warnings(false)`, which suppressed the compile-time warning glibc emits saying exactly what was wrong. Sweeping the tree by hand is worth doing when anything here touches a fixed buffer:
+
+```sh
+docker run --rm -v "$PWD:/w" -w /w gcc:13 sh -c \
+  'for f in src/runtime_aot/*.c src/runtime_aot/infer/*.c; do
+     gcc -O2 -D_FORTIFY_SOURCE=3 -Wall -c -I src/runtime_aot -I src/runtime_aot/infer \
+       -o /tmp/o.o "$f"; done'
+```
+
 - **`native.c`** — native (C-ABI) package support: the registry, `jade_pkg_init` invocation, and value marshalling. It mirrors `src/native/mod.rs`'s `load_native_package` / `vm_to_ffi` / `ffi_to_vm` so one `.dylib` serves both `jade run` and `jade build`. The `dlopen` primitives themselves are backend hooks.
 - **`infer/infer.c`**, **`infer/infer.h`** — every `jrt_prompt_*` entry point. Each builds an `InferRequest` and drives the installed provider package through `native.c`, so this file has no transport of its own.
 - **`build.rs`** — the Cargo build script. Compiles every `.c` here into `libJadeRuntime.a`, surfaces the output directory to the linker, and copies the archive up beside the Rust one so both sit in a single predictable place. It also enforces the Unix-only constraint before `cc` runs.
