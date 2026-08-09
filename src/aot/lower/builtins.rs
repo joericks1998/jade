@@ -858,7 +858,7 @@ pub(super) fn emit_module_call<'ctx>(
         }
         ("json", "parse") => {
             // (str) -> value word (already tagged: dict/array/scalar).
-            let f = low.runtime_fn("jrt_json_parse_chunk", i64_ty.fn_type(&[ptrt.into()], false));
+            let f = low.runtime_fn("jrt_json_parse", i64_ty.fn_type(&[ptrt.into()], false));
             Ok(b.build_call(f, &[strp(0).into()], "jparse")
                 .map_err(err)?
                 .as_any_value_enum()

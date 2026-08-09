@@ -98,22 +98,78 @@ fn word_to_value(word: W) -> Value {
     }
 }
 
-/// `json.parse(s)`: parse the (tagged) JSON string `s` into an ObjHeader value
-/// tree. Invalid JSON → nil (the difftest suite only parses valid JSON; a raising
-/// variant would need a C forwarder). Parsed strings inherit `s`'s trust byte.
+/// Parse a tagged JSON string, giving back the value word or serde's complaint.
+///
+/// # Safety
+/// `s` is a NUL-terminated tagged-string data pointer (trust at `s[-1]`).
+unsafe fn parse(s: *const c_char) -> Result<W, serde_json::Error> {
+    unsafe {
+        let trust = string::trust_of(s as *const u8);
+        let bytes = core::slice::from_raw_parts(s as *const u8, strlen(s as *const u8));
+        serde_json::from_slice::<Value>(bytes).map(|v| value_to_word(&v, trust))
+    }
+}
+
+/// `json.parse(s)` where nothing is watching: invalid JSON is nil rather than a
+/// raise. The one caller is `infer.c` reading a provider's stored config, which
+/// runs where no Jade frame exists to catch anything — a malformed config there
+/// should leave the provider unconfigured, not abort the program.
+///
+/// The builtin does not come through here; see [`jrt_json_parse_impl`].
 ///
 /// # Safety
 /// `s` is a NUL-terminated tagged-string data pointer (trust at `s[-1]`).
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_json_parse_chunk(s: *const c_char) -> W {
-    unsafe {
-        let trust = string::trust_of(s as *const u8);
-        let bytes = core::slice::from_raw_parts(s as *const u8, strlen(s as *const u8));
-        match serde_json::from_slice::<Value>(bytes) {
-            Ok(v) => value_to_word(&v, trust),
-            Err(_) => NIL_BITS as i64,
+    unsafe { parse(s).unwrap_or(NIL_BITS as i64) }
+}
+
+// ── The builtin's pending-error channel ───────────────────────────────────────
+//
+// A longjmp must not cross a Rust frame, so failure is recorded here and the C
+// forwarder (`jrt_json_parse` in common.c) raises it. Exactly the shape the fs,
+// http and bytes wrappers use.
+
+thread_local! {
+    static PENDING: core::cell::Cell<*mut c_char> =
+        const { core::cell::Cell::new(core::ptr::null_mut()) };
+}
+
+/// `json.parse(s)` for the builtin: the same parse, but a failure is recorded
+/// for the forwarder to raise rather than turned into nil.
+///
+/// Silently answering nil was a real divergence: the VM raises, so a compiled
+/// program took the success branch on input the interpreter rejected, and every
+/// `try`/`catch` written around a parse stopped running.
+///
+/// # Safety
+/// `s` is a NUL-terminated tagged-string data pointer (trust at `s[-1]`).
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_json_parse_impl(s: *const c_char) -> W {
+    let (w, err) = match unsafe { parse(s) } {
+        Ok(w) => (w, core::ptr::null_mut()),
+        // The VM's wording, from `json_parse` in src/json/mod.rs. The `I/O
+        // error: ` ahead of it is the IoError display, added by jrt_throw_io.
+        Err(e) => (
+            NIL_BITS as i64,
+            crate::cstr::emit(format!("json.parse: {e}").as_bytes(), crate::string::TRUSTED),
+        ),
+    };
+    // Replaced, not just set on failure: a success has to clear whatever an
+    // earlier one left, or the next valid parse raises the last one's error.
+    PENDING.with(|p| {
+        let old = p.replace(err);
+        if !old.is_null() {
+            string::free_str(old as *mut u8);
         }
-    }
+    });
+    w
+}
+
+/// Drain the pending parse error (a tagged string the caller owns), or null.
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_json_take_error() -> *mut c_char {
+    PENDING.with(|p| p.replace(core::ptr::null_mut()))
 }
 
 /// `json.stringify(v)` / `json.stringify_pretty(v)` (when `pretty != 0`): render
@@ -160,5 +216,37 @@ mod tests {
         let s = jrt_json_stringify_chunk(w, 1);
         assert_eq!(unsafe { read(s) }, "{\n  \"a\": {\n    \"b\": 7\n  }\n}");
         unsafe { string::free_str(s as *mut u8) };
+    }
+
+    #[test]
+    fn malformed_input_records_the_vms_wording() {
+        let _g = crate::gc::test_support::lock_counter();
+        let w = jrt_json_parse_impl(c"{\"typ".as_ptr());
+        assert_eq!(w, NIL_BITS as i64);
+        let e = jrt_json_take_error();
+        assert!(!e.is_null(), "a parse failure has to leave something to raise");
+        // The VM's `json_parse` formats the same prefix; the `I/O error: ` ahead
+        // of it is added by jrt_throw_io on the C side.
+        assert!(unsafe { read(e) }.starts_with("json.parse: "), "{}", unsafe { read(e) });
+        string::free_str(e as *mut u8);
+    }
+
+    #[test]
+    fn a_good_parse_clears_the_last_ones_error() {
+        // Otherwise the failure is raised by whichever call comes next, which
+        // is a valid parse reporting an error about input it never saw.
+        let _g = crate::gc::test_support::lock_counter();
+        jrt_json_parse_impl(c"{\"typ".as_ptr());
+        jrt_json_parse_impl(c"{\"a\": 1}".as_ptr());
+        assert!(jrt_json_take_error().is_null(), "the good parse should have cleared it");
+    }
+
+    #[test]
+    fn the_non_raising_entry_still_answers_nil() {
+        // infer.c reads a provider's stored config where no Jade frame exists to
+        // catch anything, so that path keeps the old behaviour on purpose.
+        let _g = crate::gc::test_support::lock_counter();
+        assert_eq!(jrt_json_parse_chunk(c"{\"typ".as_ptr()), NIL_BITS as i64);
+        assert!(jrt_json_take_error().is_null(), "it must not arm the raising channel");
     }
 }
