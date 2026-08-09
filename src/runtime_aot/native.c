@@ -27,8 +27,12 @@ typedef struct {
 
 /* Raise a catchable Jade error with a formatted message (TRUSTED string), via
  * the runtime's typed-throw mechanism. Does not return. */
+/* The buffer holds a sentence plus up to two paths, and a path can be PATH_MAX.
+ * Sized so a real failure names the whole path rather than a truncated one —
+ * the message exists to say *where* the runtime looked, which a cut-off path
+ * does not. */
 static void native_raise(const char* fmt, const char* arg) {
-    char msg[512];
+    char msg[2 * PATH_MAX + 512];
     snprintf(msg, sizeof msg, fmt, arg ? arg : "");
     jade_exc_throw_typed(jrt_box_str(jrt_str_dup(msg, JRT_TRUSTED)), NULL);
 }
@@ -56,7 +60,7 @@ static void native_raise(const char* fmt, const char* arg) {
  * no Jade `main`, so an externally set root is the only way that process gets an
  * agreed root at all. Overwriting would break precisely the arrangement this
  * exists to protect. */
-static _Thread_local char jrt_built_root[1024];
+static _Thread_local char jrt_built_root[PATH_MAX];
 static _Thread_local int  jrt_built_root_set = 0;
 /* Whether *this* image is the one that put the value in the environment.
  * Without it the origin cannot tell a root the user chose from the one we
@@ -88,7 +92,7 @@ const char* jrt_libs_root(void) {
 void jrt_libs_root_publish(const char* built_root) {
     const char* dir = jade_image_dir();
     if (dir && built_root) {
-        char cand[1024];
+        char cand[PATH_MAX];
         snprintf(cand, sizeof cand, "%s/%s", dir, built_root);
         const char* real = jade_realpath(cand);
         if (real) {
@@ -131,7 +135,7 @@ static void jrt_native_check_one(const char* rel, const char* resolved) {
 
     const char* prior = getenv(key);
     if (prior && strcmp(prior, resolved) != 0) {
-        char msg[900];
+        char msg[2 * PATH_MAX + 256];
         snprintf(msg, sizeof msg,
                  "two different copies of the dependency '%.*s' would be loaded into one "
                  "program: '%s' and '%s'. A dependency is loaded once per process, because a "
@@ -160,7 +164,7 @@ void* jrt_native_load_rel(const char* rel, const char* abs_fallback) {
 
     const char* root = jrt_libs_root();
     if (!root) {
-        char msg[700];
+        char msg[PATH_MAX + 256];
         snprintf(msg, sizeof msg,
                  "cannot load the dependency '%s': this program has no libraries directory. It "
                  "was built without one, and JADE_LIBS is not set.",
@@ -168,11 +172,22 @@ void* jrt_native_load_rel(const char* rel, const char* abs_fallback) {
         native_raise("%s", msg);
     }
 
-    char cand[1024];
-    snprintf(cand, sizeof cand, "%s/%s", root, rel);
+    /* Joined explicitly rather than trusting the truncation: a silently cut
+     * path would be reported as "not found", which sends the reader looking for
+     * a file rather than at the length of their root. */
+    char cand[PATH_MAX];
+    int want = snprintf(cand, sizeof cand, "%s/%s", root, rel);
+    if (want < 0 || (size_t)want >= sizeof cand) {
+        char msg[PATH_MAX + 256];
+        snprintf(msg, sizeof msg,
+                 "cannot load the dependency '%s': the path under '%s' is longer than this "
+                 "system allows, so it cannot name a file.",
+                 rel, root);
+        native_raise("%s", msg);
+    }
     const char* real = jade_realpath(cand);
     if (!real) {
-        char msg[900];
+        char msg[2 * PATH_MAX + 256];
         snprintf(msg, sizeof msg,
                  "cannot load the dependency '%s': it is not in '%s', which is where this "
                  "program looks because that path came from %s.",
@@ -182,7 +197,7 @@ void* jrt_native_load_rel(const char* rel, const char* abs_fallback) {
 
     /* Copied before the check: `real` points at the platform hook's own buffer,
      * and the next jade_realpath inside the check would overwrite it. */
-    char resolved[1024];
+    char resolved[PATH_MAX];
     size_t n = strlen(real);
     if (n >= sizeof resolved) return jrt_native_load(real);
     memcpy(resolved, real, n + 1);
