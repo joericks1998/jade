@@ -4,12 +4,24 @@
 //! or a URL. There is deliberately **no package registry** — like Go, a
 //! dependency names where it lives rather than an entry in a central index.
 //!
-//! That choice has a consequence worth stating plainly: a `.so` carries no
-//! manifest of its own, so **there is no transitive resolution and no version
-//! solving**. Each dependency contributes exactly one artifact, `jade.lock` is a
-//! flat list, and "resolution" means picking the right platform build. A
-//! package that needs another package must say so in its documentation; Jade
-//! cannot discover it.
+//! That choice used to mean no transitive resolution either, on the grounds
+//! that a `.so` carries no manifest of its own. A Jade package now carries one
+//! — see [`declared_dependencies`] — so adding a package brings what it needs
+//! with it, as long as that is a URL. A `path` names a file on the machine that
+//! built the package and cannot be followed from anywhere else.
+//!
+//! **There is still no version solving**, and that is a different thing.
+//! Solving searches a space of candidate versions to satisfy a set of ranges,
+//! which needs ranges and a registry to enumerate; Jade has neither, and
+//! [`crate::project`] rejects a range outright. What there is instead is a
+//! choice between the two versions already named: the higher one wins, which is
+//! Go's rule and the only one available when there is no third version to go
+//! and fetch. See [`compare_versions`].
+//!
+//! `jade.lock` stays a flat list of one artifact per name, and once written it
+//! is authoritative — [`ensure_ready`] reads it rather than resolving again, so
+//! the choice above happens when a dependency is *added* and never at build or
+//! run time.
 //!
 //! The integration surface with the rest of the compiler is one function,
 //! [`dependency_libraries`]: resolved dependencies are handed back as synthetic
@@ -47,6 +59,33 @@ pub const ANY_PLATFORM: &str = "any";
 /// version is only ever a directory component and a label here — there is no
 /// registry to resolve it against.
 pub const LOCAL_VERSION: &str = "local";
+
+/// Order two versions, or `None` when they cannot be ordered.
+///
+/// Dotted numbers only: `1.2.0` against `1.10.0` compares component-wise, so
+/// `10` is greater than `2` rather than lexically smaller. A component that is
+/// not a plain number makes the pair incomparable — `2.0-beta` against `2.0`,
+/// or the `local` a path dependency carries.
+///
+/// Refusing to order what it cannot is the point. This is what decides which of
+/// two versions a program will actually load, and inventing an order for a
+/// spelling nobody defined would pick a winner on a coin toss. An incomparable
+/// pair falls back to the conflict error, which names both and asks.
+pub fn compare_versions(a: &str, b: &str) -> Option<std::cmp::Ordering> {
+    let parse =
+        |v: &str| -> Option<Vec<u64>> { v.split('.').map(|p| p.parse::<u64>().ok()).collect() };
+    let (x, y) = (parse(a)?, parse(b)?);
+    // `1.2` and `1.2.0` are the same version written two ways, so compare over
+    // the longer of the two with the shorter zero-extended.
+    let n = x.len().max(y.len());
+    for i in 0..n {
+        let (l, r) = (x.get(i).copied().unwrap_or(0), y.get(i).copied().unwrap_or(0));
+        if l != r {
+            return Some(l.cmp(&r));
+        }
+    }
+    Some(std::cmp::Ordering::Equal)
+}
 
 // ── Resolution ────────────────────────────────────────────────────────────────
 

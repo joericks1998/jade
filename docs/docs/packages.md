@@ -481,7 +481,23 @@ jade pkg add plotting --url https://example.com/plotting.dylib --version 2.1.0
 
 A `jade build --lib` artifact carries the lock it was built against, so a package can say what it depends on and `jade pkg add` reads it. The entries go into your `jade.toml` as ordinary dependencies — a transitive dependency is a real dependency, and the manifest is what you read to know what your project uses.
 
-This adds no version solving. A package needing a version of something you already have at a *different* version is refused, naming both. That is not only because there is no solver: two versions are two files and therefore two loaded copies, which is the one-copy rule above.
+### When two packages disagree about a version
+
+One version of a dependency is loaded per program, so two packages naming different versions have to become one. The higher of the two wins:
+
+```sh
+jade pkg add charts --url https://example.com/charts.dylib --version 1.0.0
+# added charts
+# using fastmath 2.1.0 over the 1.9.0 this project had
+```
+
+That is the only choice available without a registry. There is no third version to go and fetch — Jade has never been told one exists — so the pick is between the two already named. Go resolves versions the same way and for the same reason.
+
+It is always said out loud, never done quietly, because one of the two packages is now running against something other than what it asked for. If that version removed something the package uses, you get a missing symbol when it loads. Naming the substitution is what makes that traceable back here.
+
+Two versions are only ordered when both come from a URL and both are written as dotted numbers. `2.0-beta` orders against nothing, and neither does the `local` a path dependency carries — those are refused, naming both, and you decide.
+
+This is a *choice between two*, not version solving. Solving searches a space of candidates to satisfy a set of ranges, which needs ranges and a registry to enumerate. Jade has neither, and a range in a `version` is rejected outright.
 
 Only a `url` dependency travels this way. A `path` names a file on the machine that built the package, and that path means nothing on yours — those are named for you to add yourself, rather than written as a reference that resolves to the wrong file or to none.
 

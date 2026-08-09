@@ -1284,3 +1284,31 @@ fn opening_a_package_to_read_its_dependencies_runs_none_of_its_code() {
     );
     let _ = std::fs::remove_file(&marker);
 }
+
+// ── Choosing between two versions ─────────────────────────────────────────
+
+#[test]
+fn versions_order_by_number_not_by_spelling() {
+    use std::cmp::Ordering;
+    assert_eq!(compare_versions("1.10.0", "1.2.0"), Some(Ordering::Greater));
+    assert_eq!(compare_versions("1.2.0", "1.10.0"), Some(Ordering::Less));
+    assert_eq!(compare_versions("2.0.0", "2.0.0"), Some(Ordering::Equal));
+}
+
+#[test]
+fn a_version_written_short_equals_the_same_one_written_long() {
+    use std::cmp::Ordering;
+    assert_eq!(compare_versions("1.2", "1.2.0"), Some(Ordering::Equal));
+    assert_eq!(compare_versions("1.2.1", "1.2"), Some(Ordering::Greater));
+}
+
+#[test]
+fn a_version_that_is_not_dotted_numbers_cannot_be_ordered() {
+    // Refusing is the point: this decides which version a program loads, and
+    // inventing an order for a spelling nobody defined picks a winner on a coin
+    // toss. `local` is what a path dependency carries, so path dependencies
+    // never take part in the choice.
+    assert_eq!(compare_versions("2.0-beta", "2.0"), None);
+    assert_eq!(compare_versions(LOCAL_VERSION, "1.0.0"), None);
+    assert_eq!(compare_versions("1.0.0", LOCAL_VERSION), None);
+}
