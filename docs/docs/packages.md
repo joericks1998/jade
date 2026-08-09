@@ -317,7 +317,7 @@ If you write or correct a symbol by hand, these are the spellings `args` and `re
 | `out_str:<ctype>` | A string the call points at inside data you already gave it — `fdt_getprop_by_offset`'s `const char **namep`. Nothing was allocated, so nothing has to be released. |
 | `out_alloc_str:<ctype>` | A string the library allocated and you now own. Requires `frees_with` on the symbol, naming the function that releases it. |
 | `ret_len:<ctype>` | Marks the parameter that says how long a returned pointer is. The return type is then `bytes`. `fdt_getprop` is this shape. |
-| `callback:<ret>(<args>)` | A Jade function the library may call while the call runs. The signature is written in the library's own C types, e.g. `callback:int(int, const char*)`. A `void *` in it is the user-data slot C uses instead of closures; the shim accepts it and does not pass it on, because a Jade function carries its own environment. |
+| `callback:<ret>(<args>)` | A Jade function the library may call **while the call runs**. A parameter may be written `category:spelling` — `int:ares_bool_t` — where the spelling is what the library declared and the category is what Jade marshals it as. A pointer written `bytes:<ctype>` takes the next parameter as its length and arrives as one blob. The signature is written in the library's own C types, e.g. `callback:int(int, const char*)`. A `void *` in it is the user-data slot C uses instead of closures; the shim accepts it and does not pass it on, because a Jade function carries its own environment. |
 | `null_ptr` | A null pointer, always. For a parameter the FFI cannot carry in a position the library documents as optional — brotli's allocator hooks, where null means "use malloc". Never inferred, because a library that needs a real pointer there crashes with no diagnostic. |
 
 A symbol may have more than one out-parameter. When it does, each needs a name to come back under, written as an `@` suffix — `out_scalar:uint64_t@progress_in`. The generator takes those from the header's own parameter names. With one out-parameter the name is optional, since there is nothing to tell it apart from.
@@ -545,6 +545,14 @@ This is a *choice between two*, not version solving. Solving searches a space of
 Only a `url` dependency travels this way. A `path` names a file on the machine that built the package, and that path means nothing on yours — those are named for you to add yourself, rather than written as a reference that resolves to the wrong file or to none.
 
 Reading the record does not run any of the package's code. A Jade package runs its module top level from `jade_pkg_init`, and `jade pkg add` never calls it.
+
+### A callback only lives for the call
+
+The Jade function is registered for the duration of the call that takes it, and forgotten when that call returns.
+
+That is right for a callback the library invokes while it works — a comparator, a visitor, a progress hook. It is wrong for one the library *stores*: an async request that calls back later, a watcher, an event handler. Those find nothing registered and your function never runs.
+
+Nothing in C distinguishes the two, so the binding is generated either way and the report says so. If you see that note against a symbol, check whether the library calls back before it returns.
 
 ### `JADE_LIBS`
 

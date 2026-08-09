@@ -701,7 +701,26 @@ fn map_param(
 
     if is_fn_ptr(raw) {
         return match callback_spec(raw, env) {
-            Some(spec) => Mapped::One(spec),
+            // The Jade function is registered for the duration of *this* call
+            // and cleared when it returns — see `cshim::trampoline`, which
+            // explains why: calling back into an interpreter that has moved on
+            // is not something the slot can promise.
+            //
+            // That is right for a callback the library invokes while it works,
+            // and wrong for one it stores. `ares_search` registers and returns,
+            // and its callback fires later during `ares_process`, by which point
+            // there is nothing in the slot — so the binding is real, compiles,
+            // runs, and never calls back. Nothing in C distinguishes the two, so
+            // the report says so rather than the generator guessing.
+            Some(spec) => Mapped::Assumed(
+                spec,
+                concat!(
+                    "takes a callback, which is registered only while the call runs. If the ",
+                    "library stores it and calls back later — an async request, a watcher — ",
+                    "it will find nothing there and your function will never run"
+                )
+                .to_string(),
+            ),
             None => Mapped::Reject(
                 "takes a callback whose own signature the FFI cannot carry. If the library \
                  accepts a null pointer there — brotli's allocator hooks do, and fall back on \
@@ -1035,38 +1054,82 @@ fn callback_spec(raw: &str, env: &TypeEnv) -> Option<String> {
         inner.split(',').map(|p| p.trim().to_string()).collect()
     };
 
-    // Only what the trampoline can marshal. A `void *` user-data parameter is
-    // the common reason a real callback does not fit — it names no type, so
-    // there is nothing to hand Jade.
-    // Checked on the type *as written*, not as expanded, because the written
-    // name is what gets emitted — and what the shim then declares the trampoline
-    // with. A typedef expanded to its underlying type produces a function
-    // pointer C considers incompatible with the one the library declares: an
-    // enum typedef is a distinct type for that purpose, so a trampoline taking
-    // `int` cannot be passed where `ares_bool_t` is wanted, and the shim fails
-    // to compile — taking the whole dependency with it.
+    // Only what the trampoline can marshal, written as `category:spelling`
+    // wherever the two differ.
     //
-    // So the vocabulary here has to be the shim's own, which is a fixed list of
-    // C spellings. A name outside it is refused, which costs a symbol and keeps
-    // the two halves agreeing.
-    let carriable = |t: &str| -> bool {
-        let n = normalize(t);
-        // A `void *` is the user-data slot, which the trampoline accepts and
-        // does not forward. Refusing the whole callback over the one parameter
-        // Jade has no use for is what made every c-ares callback unbindable.
-        squash(&n) == "void*"
-            || scalar_of(&squash(&n)).is_some()
-            || is_int(&n)
-            || pointee(&n).map(squash).as_deref() == Some("char")
+    // The spelling has to survive because the trampoline is declared with it: a
+    // typedef expanded to its underlying type makes a function pointer C
+    // considers incompatible with the library's, so the shim would not compile.
+    // The category is what Jade marshals as, and it comes from expanding — which
+    // is how `ares_socket_t` and `ares_bool_t` become carriable at all. Before
+    // this, checking the expanded type and emitting the written one produced a
+    // spec the generator accepted and the shim refused, and refusing on the
+    // written name alone lost every callback whose signature names a typedef.
+    let category = |t: &str| -> Option<&'static str> {
+        let n = normalize(&env.expand(t));
+        if squash(&n) == "void*" {
+            return Some("void*");
+        }
+        if pointee(&n).map(squash).as_deref() == Some("char") {
+            return Some("const char*");
+        }
+        if is_int(&n) {
+            return Some("int");
+        }
+        scalar_of(&squash(&n)).map(|s| match s {
+            "float" => "double",
+            "bool" => "_Bool",
+            _ => "int",
+        })
     };
-    if !params.iter().all(|p| carriable(p)) {
+
+    // A pointer beside a length is one blob, the same idiom an argument list
+    // uses. `ares_callback` delivers every DNS answer that way, so without it
+    // c-ares can register a query and never see its result.
+    let mut spec: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < params.len() {
+        let p = &params[i];
+        let pn = normalize(&env.expand(p));
+        // The user-data slot first, and that order matters: a `void *` is
+        // byte-like, so `void *arg, int status` would otherwise read as a blob
+        // and its length. `ares_callback` begins with exactly that.
+        let byte_like = squash(&pn) != "void*"
+            && pointee(&pn).map(squash).is_some_and(|e| {
+                matches!(e.as_str(), "void" | "unsignedchar" | "signedchar" | "uint8_t" | "int8_t")
+            });
+        let next_is_len = params.get(i + 1).is_some_and(|q| is_int(&normalize(&env.expand(q))));
+        if byte_like && next_is_len {
+            spec.push(format!("bytes:{p}"));
+            let len = &params[i + 1];
+            spec.push(if squash("int") == squash(len) {
+                len.clone()
+            } else {
+                format!("int:{len}")
+            });
+            i += 2;
+            continue;
+        }
+        // Only prefixed when the two genuinely differ. `void *` and `void*` are
+        // one type spelled two ways, and `void*:void *` is noise in a manifest
+        // a person reads.
+        let cat = category(p)?;
+        spec.push(if squash(cat) == squash(p) { p.clone() } else { format!("{cat}:{p}") });
+        i += 1;
+    }
+    let params = spec;
+
+    let ret_cat = if normalize(&ret) == "void" { "void" } else { category(&ret)? };
+    if ret_cat == "void*" || ret_cat == "const char*" {
+        // A callback may only give back a scalar; a pointer would have to be
+        // released inside the library's own frame.
         return None;
     }
-    let ret_ok =
-        normalize(&ret) == "void" || (carriable(&ret) && pointee(&normalize(&ret)).is_none());
-    if !ret_ok {
-        return None;
-    }
+    let ret = if ret_cat == "void" || squash(ret_cat) == squash(&ret) {
+        ret
+    } else {
+        format!("{ret_cat}:{ret}")
+    };
 
     Some(format!("callback:{ret}({})", params.join(", ")))
 }

@@ -1420,3 +1420,47 @@ fn a_status_returned_beside_a_handle_still_raises() {
     );
     assert_eq!(b.symbols["sqlite3_open"].fails_when, Some(crate::project::CFailure::Nonzero));
 }
+
+#[test]
+fn a_callback_parameter_keeps_its_typedef_and_says_how_to_marshal_it() {
+    // The trampoline is declared with the spelling the library used, because a
+    // typedef expanded to its underlying type makes a function pointer C
+    // considers incompatible — and the shim then fails to compile, taking the
+    // whole dependency with it. The category is what Jade marshals as.
+    let b = bind(
+        "typedef int sock_t;\n\
+         typedef enum { NO = 0, YES = 1 } flag_t;\n\
+         void set_cb(int (*cb)(sock_t fd, flag_t ok, void* data));\n",
+    );
+    assert_eq!(args(&b, "set_cb"), ["callback:int(int:sock_t, int:flag_t, void *)"]);
+}
+
+#[test]
+fn a_callback_that_delivers_a_blob_carries_it_as_one() {
+    // `ares_callback` is `(void *arg, int status, int timeouts, unsigned char
+    // *abuf, int alen)` — every DNS answer arrives that way, so without this
+    // c-ares can register a query and never see its result.
+    let b = bind("void go(void (*cb)(void* arg, int status, unsigned char* abuf, int alen));\n");
+    assert_eq!(args(&b, "go"), ["callback:void(void *, int, bytes:unsigned char *, int)"]);
+}
+
+#[test]
+fn the_user_data_slot_is_not_mistaken_for_a_blob() {
+    // A `void *` is byte-like and the parameter after it is often an int, so
+    // the pair reads as a buffer and its length. `ares_callback` opens with
+    // exactly that shape, and reading it as a blob loses the real one.
+    let b = bind("void go(void (*cb)(void* arg, int status));\n");
+    assert_eq!(args(&b, "go"), ["callback:void(void *, int)"]);
+}
+
+#[test]
+fn a_callback_says_it_only_lives_for_the_call() {
+    // The slot is cleared when the registering call returns, so a library that
+    // stores the callback finds nothing there later. `ares_search` registers and
+    // returns, and its callback fires during `ares_process` — the binding is
+    // real, compiles, runs, and never calls back. Nothing in C tells the two
+    // apart, so it is reported rather than guessed at.
+    let b = bind("void go(int (*cb)(int));\n");
+    let why = b.assumed.iter().find(|(s, _)| s == "go").map(|(_, w)| w.clone());
+    assert!(why.is_some_and(|w| w.contains("never run")), "should warn: {:?}", b.assumed);
+}

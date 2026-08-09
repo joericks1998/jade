@@ -212,7 +212,7 @@ enum ArgSpec {
     /// from a declaration: the signature is known when the C is written, so the
     /// shim can declare a real static function of that shape. Synthesising one
     /// at run time would need a trampoline compiler.
-    Callback { ret: String, params: Vec<String> },
+    Callback { ret: CbRet, params: Vec<CbParam> },
 }
 
 impl ArgSpec {
@@ -291,12 +291,51 @@ impl ArgSpec {
             ArgSpec::Callback { ret, params } => {
                 // Verbatim: the library's own C types, so the function pointer
                 // this declares is the one it expects.
-                let r = if ret == "nil" || ret == "void" { "void" } else { ret.as_str() };
-                let ps = if params.is_empty() { "void".to_string() } else { params.join(", ") };
-                format!("{r} (*)({ps})")
+                let ps = if params.is_empty() {
+                    "void".to_string()
+                } else {
+                    params.iter().map(|p| p.c_type.clone()).collect::<Vec<_>>().join(", ")
+                };
+                format!("{} (*)({ps})", ret.c_type)
             }
         }
     }
+}
+
+/// One parameter of a callback, as the trampoline sees it.
+///
+/// `c_type` is what the *library* declared, and is what the trampoline is
+/// written with — a typedef expanded to its underlying type produces a function
+/// pointer C considers incompatible with the one the library wants, so the
+/// spelling has to survive. `kind` is what Jade does with it, which is a
+/// separate question and the reason the two are carried apart.
+#[derive(Debug, Clone)]
+struct CbParam {
+    c_type: String,
+    kind: CbKind,
+}
+
+#[derive(Debug, Clone)]
+enum CbKind {
+    /// Forwarded as one Jade value of this shape.
+    Scalar(&'static str, &'static str),
+    /// The `void *` C uses instead of a closure. Accepted, never forwarded: a
+    /// Jade function carries its own environment.
+    UserData,
+    /// A pointer whose length is the *next* parameter, forwarded as one blob.
+    /// `ares_callback` delivers every DNS answer this way.
+    Bytes,
+    /// The length belonging to the `Bytes` before it. Declared, never
+    /// forwarded — it rode in with the pointer.
+    BytesLen,
+}
+
+/// A callback's return: the C spelling, plus how to read a Jade value into it.
+#[derive(Debug, Clone)]
+struct CbRet {
+    c_type: String,
+    /// `None` for `void`.
+    marshal: Option<(&'static str, &'static str)>,
 }
 
 /// How a C type in a callback signature crosses into a `JadeVal`.
@@ -362,32 +401,91 @@ fn parse_callback(pkg: &str, sym: &str, spec: &str) -> Result<ArgSpec, String> {
     // A callback may only give back a scalar. Anything else would have to be
     // released inside the C library's own frame, by code that has no idea it is
     // holding a Jade value.
-    let ret_ok = ret == "void"
-        || ret == "nil"
-        || matches!(c_scalar(&ret), Some((t, _)) if t != "JADE_FFI_STR");
-    if !ret_ok {
-        return Err(format!(
-            "dependency '{pkg}': symbol '{sym}' has a callback returning '{ret}'. A callback may \
-             return a C integer, float, bool, or void — anything else would have to be freed \
-             inside the C library's own frame."
-        ));
+    //
+    // A parameter may be written `category:spelling` — `int:ares_bool_t`. The
+    // spelling is what the trampoline is declared with, because a typedef
+    // expanded to its underlying type makes a function pointer C considers
+    // incompatible with the library's; the category is what Jade marshals it as.
+    // Without the split, every callback whose signature mentions a typedef was
+    // unbindable, which was most of c-ares.
+    let split = |t: &str| -> (String, String) {
+        match t.split_once(':') {
+            Some((cat, spelling)) => (cat.trim().to_string(), spelling.trim().to_string()),
+            None => (t.to_string(), t.to_string()),
+        }
+    };
+
+    let (ret_cat, ret_c) = split(&ret);
+    let ret_marshal = if ret_cat == "void" || ret_cat == "nil" {
+        None
+    } else {
+        match c_scalar(&ret_cat) {
+            Some((t, f)) if t != "JADE_FFI_STR" => Some((t, f)),
+            _ => {
+                return Err(format!(
+                    "dependency '{pkg}': symbol '{sym}' has a callback returning '{ret}'. A \
+                     callback may return a C integer, float, bool, or void — anything else would \
+                     have to be freed inside the C library's own frame."
+                ));
+            }
+        }
+    };
+    if ret_marshal.is_some() {
+        check_c_ident(pkg, sym, &ret_c.replace('*', ""), "callback")?;
     }
+    let ret = CbRet {
+        c_type: if ret_marshal.is_none() { "void".to_string() } else { ret_c },
+        marshal: ret_marshal,
+    };
+
+    let mut out: Vec<CbParam> = Vec::new();
+    let mut take_len = false;
     for p in &params {
-        if is_user_data(p) {
+        let (cat, c_type) = split(p);
+        check_c_ident(pkg, sym, &c_type.replace('*', ""), "callback")?;
+
+        if take_len {
+            take_len = false;
+            // Declared so the signature matches, never forwarded: it rode in
+            // with the pointer it measures.
+            if c_scalar(&cat).is_none_or(|(t, _)| t != "JADE_FFI_INT") {
+                return Err(format!(
+                    "dependency '{pkg}': symbol '{sym}' has a callback whose `bytes` parameter is \
+                     not followed by an integer length. The argument after the pointer is how far \
+                     it runs."
+                ));
+            }
+            out.push(CbParam { c_type, kind: CbKind::BytesLen });
             continue;
         }
-        if c_scalar(p).is_none() {
-            return Err(format!(
-                "dependency '{pkg}': symbol '{sym}' has a callback parameter '{p}'. A callback \
-                 signature is written in the library's own C types, e.g. \
-                 `callback:int(int, const char*)`, and '{p}' is not one the FFI can carry."
-            ));
+        if cat == "bytes" {
+            take_len = true;
+            out.push(CbParam { c_type, kind: CbKind::Bytes });
+            continue;
         }
-        check_c_ident(pkg, sym, &p.replace('*', ""), "callback")?;
+        if is_user_data(&c_type) {
+            out.push(CbParam { c_type, kind: CbKind::UserData });
+            continue;
+        }
+        match c_scalar(&cat) {
+            Some((t, f)) => out.push(CbParam { c_type, kind: CbKind::Scalar(t, f) }),
+            None => {
+                return Err(format!(
+                    "dependency '{pkg}': symbol '{sym}' has a callback parameter '{p}'. A callback \
+                     signature is written in the library's own C types, e.g. \
+                     `callback:int(int, const char*)`, and '{p}' is not one the FFI can carry."
+                ));
+            }
+        }
     }
-    if !(ret == "nil" || ret == "void") {
-        check_c_ident(pkg, sym, &ret.replace('*', ""), "callback")?;
+    if take_len {
+        return Err(format!(
+            "dependency '{pkg}': symbol '{sym}' has a callback ending in a `bytes` parameter with \
+             no length after it."
+        ));
     }
+    let params = out;
+
     Ok(ArgSpec::Callback { ret, params })
 }
 
@@ -1193,9 +1291,17 @@ pub fn generate(
     }
     let out_specs = || parsed.iter().flat_map(|p| p.outs.iter().map(|&i| &p.args[i]));
     let returns_bytes = names.iter().any(|s| symbols[*s].ret == "bytes");
+    // A callback that delivers a blob builds one too.
+    let cb_bytes = parsed.iter().any(|p| {
+        p.args.iter().any(|a| {
+            matches!(a, ArgSpec::Callback { params, .. }
+                if params.iter().any(|q| matches!(q.kind, CbKind::Bytes)))
+        })
+    });
     // A held struct's `take` hands back what the library wrote into its buffer.
     let takes_bytes = structs.values().any(|d| d.held && d.buffers.iter().any(|b| b.writable));
     if returns_bytes
+        || cb_bytes
         || takes_bytes
         || out_specs().any(|a| {
             matches!(
@@ -1911,16 +2017,20 @@ fn held_bindings(type_name: &str, def: &CStruct) -> Vec<String> {
 /// finds an empty slot and gets the neutral answer rather than a stale pointer —
 /// an asynchronous registration is not supported, and pretending otherwise would
 /// mean calling into an interpreter that has moved on.
-fn trampoline(sym: &str, ret: &str, params: &[String]) -> String {
+fn trampoline(sym: &str, ret: &CbRet, params: &[CbParam]) -> String {
     // The C signature keeps every parameter, because the library calls through
     // this pointer and the shape has to match. Only the ones Jade can be given
-    // are forwarded — see `is_user_data`.
-    let carried: Vec<(usize, &String)> =
-        params.iter().enumerate().filter(|(_, p)| !is_user_data(p)).collect();
+    // are forwarded: the user-data slot has nothing to carry, and a length rode
+    // in with the pointer it measures.
+    let carried: Vec<(usize, &CbParam)> = params
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| matches!(p.kind, CbKind::Scalar(..) | CbKind::Bytes))
+        .collect();
     let n = carried.len();
     let c_params: Vec<String> =
-        params.iter().enumerate().map(|(i, p)| format!("{p} a{i}")).collect();
-    let c_ret = if ret == "nil" || ret == "void" { "void".to_string() } else { ret.to_string() };
+        params.iter().enumerate().map(|(i, p)| format!("{} a{i}", p.c_type)).collect();
+    let c_ret = ret.c_type.clone();
     let sig = if c_params.is_empty() { "void".to_string() } else { c_params.join(", ") };
 
     let mut b = format!(
@@ -1932,7 +2042,7 @@ fn trampoline(sym: &str, ret: &str, params: &[String]) -> String {
     );
 
     // Nothing registered: answer neutrally rather than dereferencing.
-    let is_void = ret == "nil" || ret == "void";
+    let is_void = ret.marshal.is_none();
     let neutral = if is_void { "return;".to_string() } else { "return 0;".to_string() };
     b.push_str(&format!("    if (!jade_cb_{sym}) {{ {neutral} }}\n"));
 
@@ -1941,7 +2051,7 @@ fn trampoline(sym: &str, ret: &str, params: &[String]) -> String {
     // which would make the signature harder to read against the header it
     // mirrors.
     for (i, p) in params.iter().enumerate() {
-        if is_user_data(p) {
+        if matches!(p.kind, CbKind::UserData) {
             b.push_str(&format!("    (void)a{i};\n"));
         }
     }
@@ -1950,18 +2060,37 @@ fn trampoline(sym: &str, ret: &str, params: &[String]) -> String {
         b.push_str(&format!("    JadeVal cbargs[{n}];\n"));
         for (slot, (i, p)) in carried.iter().enumerate() {
             let i = *i;
-            let (tag, field) = c_scalar(p).expect("validated");
-            // Cast on the way in: the C parameter is the library's width, the
-            // JadeVal field is Jade's.
-            let cast = match field {
-                "as_int" => "(int64_t)",
-                "as_float" => "(double)",
-                "as_bool" => "(uint8_t)!!",
-                _ => "",
-            };
-            b.push_str(&format!(
-                "    cbargs[{slot}].tag = {tag};\n    cbargs[{slot}].data.{field} = {cast}a{i};\n"
-            ));
+            match p.kind {
+                CbKind::Bytes => {
+                    // The pointer and the length arrive as two C parameters and
+                    // leave as one blob, exactly as a `bytes` argument does in
+                    // the other direction. Copied, because the library owns the
+                    // buffer and it is only valid for the duration of the call.
+                    b.push_str(&format!(
+                        "    JadeBytes* cb{slot} = jade_shim_bytes(a{i}, (size_t)(a{} < 0 ? 0 : a{}));\n\
+                         \x20   if (!cb{slot}) {{ jade_cb_failed_{sym} = 1; {neutral} }}\n\
+                         \x20   cbargs[{slot}].tag = JADE_FFI_BYTES;\n\
+                         \x20   cbargs[{slot}].data.as_bytes = cb{slot};\n",
+                        i + 1,
+                        i + 1
+                    ));
+                }
+                CbKind::Scalar(tag, field) => {
+                    // Cast on the way in: the C parameter is the library's
+                    // width, the JadeVal field is Jade's.
+                    let cast = match field {
+                        "as_int" => "(int64_t)",
+                        "as_float" => "(double)",
+                        "as_bool" => "(uint8_t)!!",
+                        _ => "",
+                    };
+                    b.push_str(&format!(
+                        "    cbargs[{slot}].tag = {tag};\n\
+                         \x20   cbargs[{slot}].data.{field} = {cast}a{i};\n"
+                    ));
+                }
+                _ => unreachable!("only forwarded kinds reach here"),
+            }
         }
     }
     b.push_str("    JadeVal cbout;\n    cbout.tag = JADE_FFI_NIL;\n    cbout.data.as_nil = 0;\n");
@@ -1981,9 +2110,10 @@ fn trampoline(sym: &str, ret: &str, params: &[String]) -> String {
     if is_void {
         b.push_str("    (void)cbout;\n");
     } else {
-        let (tag, field) = c_scalar(ret).expect("validated");
+        let (tag, field) = ret.marshal.expect("validated");
         b.push_str(&format!(
-            "    if (cbout.tag != {tag}) return 0;\n    return ({ret})cbout.data.{field};\n"
+            "    if (cbout.tag != {tag}) return 0;\n    return ({})cbout.data.{field};\n",
+            ret.c_type
         ));
     }
     b.push_str("}\n");
