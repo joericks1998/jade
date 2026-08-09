@@ -65,6 +65,14 @@ enum ArgSpec {
     /// `bytes` — one Jade blob, expanding to the C pair `(const void*, size_t)`.
     /// The pointer is borrowed for the duration of the call, like a `str`.
     Bytes,
+    /// `bytes_ptr` — one Jade blob, expanding to a single `const void*`.
+    ///
+    /// The same borrow as `bytes` without the count beside it, for the libraries
+    /// that take a blob whose extent is written *inside* it. A device tree blob
+    /// is the example: every `libfdt` call takes `const void *fdt` alone and
+    /// reads the length out of the header. There is nowhere to pass a size, so
+    /// refusing the shape refused most of the library.
+    BytesPtr,
     /// `out_buffer:<ctype>` — no Jade argument. The shim allocates scratch, the
     /// library fills it, and the filled prefix comes back as a fresh `bytes`.
     ///
@@ -138,6 +146,7 @@ impl ArgSpec {
             self,
             ArgSpec::Scalar(_)
                 | ArgSpec::Bytes
+                | ArgSpec::BytesPtr
                 | ArgSpec::Handle { .. }
                 | ArgSpec::Callback { .. }
                 | ArgSpec::InoutScalar { .. }
@@ -179,6 +188,7 @@ impl ArgSpec {
         match self {
             ArgSpec::Scalar(t) => t.decl.to_string(),
             ArgSpec::Bytes => "const void*, size_t".to_string(),
+            ArgSpec::BytesPtr => "const void*".to_string(),
             ArgSpec::OutBuffer { elem, .. } => format!("{elem}*"),
             ArgSpec::OutStruct { type_name, .. } => format!("{type_name}*"),
             ArgSpec::InStruct { type_name } => format!("const {type_name}*"),
@@ -384,6 +394,9 @@ fn parse_arg(pkg: &str, sym: &str, full: &str) -> Result<ArgSpec, String> {
     }
     if spec == "bytes" {
         return Ok(ArgSpec::Bytes);
+    }
+    if spec == "bytes_ptr" {
+        return Ok(ArgSpec::BytesPtr);
     }
     map_type(spec).map(ArgSpec::Scalar).ok_or_else(|| bad_type_msg(pkg, sym, spec))
 }
@@ -1179,7 +1192,7 @@ fn wrapper(
             ArgSpec::Scalar(t) => {
                 body.push_str(&format!("    if (argv[{j}].tag != {}) return 1;\n", t.tag));
             }
-            ArgSpec::Bytes => {
+            ArgSpec::Bytes | ArgSpec::BytesPtr => {
                 body.push_str(&format!("    if (argv[{j}].tag != JADE_FFI_BYTES) return 1;\n"));
             }
             ArgSpec::Callback { .. } => {
@@ -1275,6 +1288,12 @@ fn wrapper(
                 // borrowed for the call, exactly as a `str` argument is.
                 call_args.push(format!("argv[{k}].data.as_bytes ? (const void*)argv[{k}].data.as_bytes->data : NULL"));
                 call_args.push(format!("argv[{k}].data.as_bytes ? argv[{k}].data.as_bytes->len : (size_t)0"));
+            }
+            ArgSpec::BytesPtr => {
+                let k = jade_idx[i].unwrap();
+                call_args.push(format!(
+                    "argv[{k}].data.as_bytes ? (const void*)argv[{k}].data.as_bytes->data : NULL"
+                ));
             }
             ArgSpec::OutBuffer { .. } => call_args.push(format!("obuf{i}")),
             ArgSpec::OutStruct { .. } => call_args.push(format!("&ostruct{i}")),

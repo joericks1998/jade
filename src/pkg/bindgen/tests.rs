@@ -893,6 +893,47 @@ fn a_record_with_one_uncarryable_field_is_still_an_out_parameter() {
     assert_eq!(names, ["ok", "also_ok"]);
 }
 
+// ── A blob with no length beside it ──────────────────────────────────────
+
+#[test]
+fn a_read_only_byte_pointer_alone_is_a_borrowed_blob() {
+    // Every libfdt call takes `const void *fdt` alone and reads the length out
+    // of the blob's own header. There is nowhere to pass a size, so refusing the
+    // shape refused most of the library.
+    let b = bind(
+        "#include <stddef.h>\n\
+         int fdt_check_header(const void* fdt);\n\
+         int fdt_path_offset(const void* fdt, const char* path);\n",
+    );
+    assert_eq!(args(&b, "fdt_check_header"), ["bytes_ptr"]);
+    assert_eq!(args(&b, "fdt_path_offset"), ["bytes_ptr", "str"]);
+}
+
+#[test]
+fn a_borrowed_blob_is_reported_as_an_assumption() {
+    // Jade cannot check the extent — the library takes it from the data — so a
+    // truncated blob reads past the end. That belongs in the report.
+    let b = bind("int f(const void* blob);\n");
+    let why = b.assumed.iter().find(|(s, _)| s == "f").map(|(_, w)| w.clone()).unwrap_or_default();
+    assert!(why.contains("reads past the end"), "should say what it cannot check: {why:?}");
+}
+
+#[test]
+fn a_blob_next_to_a_length_still_takes_the_length_with_it() {
+    // The pair is better than the pointer alone whenever there is one, because
+    // the library is then told the extent rather than trusting the data.
+    let b = bind("#include <stddef.h>\nint f(const void* p, size_t n);\n");
+    assert_eq!(args(&b, "f"), ["bytes"]);
+}
+
+#[test]
+fn a_writable_void_pointer_is_still_refused() {
+    // Nothing says how much the library will write, and `void` names no type to
+    // size an allocation from.
+    let b = bind("void f(void* p);\n");
+    assert!(why_skipped(&b, "f").contains("names no type"), "{:?}", b.skipped);
+}
+
 // ── A struct read as input ───────────────────────────────────────────────
 
 #[test]

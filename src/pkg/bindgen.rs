@@ -550,6 +550,10 @@ fn is_fn_ptr(t: &str) -> bool {
 enum Mapped {
     /// A plain Jade argument.
     One(String),
+    /// A plain Jade argument decided on an inference worth checking, plus what
+    /// was inferred. `Out` already carries one of these; a parameter that is not
+    /// an out-parameter needed somewhere to put it too.
+    Assumed(String, String),
     /// A `bytes` argument that also swallows the following length parameter.
     BytesPair(String),
     /// An out-parameter, plus what was assumed to decide it (if anything).
@@ -789,8 +793,30 @@ fn map_param(
         return Mapped::Out(format!("out_struct:{}", env.c_name(inner)), None);
     }
 
+    // A read-only byte pointer with no count beside it. Some libraries take a
+    // blob whose extent is written *inside* it — every `libfdt` call takes
+    // `const void *fdt` alone and reads the length out of the header — and
+    // others take one of a size the documentation fixes, like an IPv6 address.
+    // There is nowhere to pass a length, so refusing the shape refused most of
+    // libfdt.
+    //
+    // Borrowed for the call, exactly as a `str` is. Reported as an assumption
+    // because Jade cannot check the extent: the library takes it from the data,
+    // and a truncated blob reads past the end.
+    if is_const && byte_like {
+        return Mapped::Assumed(
+            "bytes_ptr".to_string(),
+            format!(
+                "`{raw}` with no length beside it was read as a borrowed blob; the library takes \
+                 its extent from the data itself, so a truncated one reads past the end"
+            ),
+        );
+    }
+
     if squash(inner) == "void" {
-        return Mapped::Reject("takes a `void *`, which names no type to check".to_string());
+        return Mapped::Reject(
+            "writes through a `void *`, which names no type to check".to_string(),
+        );
     }
 
     Mapped::Reject(format!("takes an unsupported type `{raw}`"))
@@ -1234,6 +1260,10 @@ fn map_function(
                 if let Some(name) = s.strip_prefix("in_struct:") {
                     structs.push(name.to_string());
                 }
+                args.push(s);
+            }
+            Mapped::Assumed(s, why) => {
+                assumed.push(why);
                 args.push(s);
             }
             Mapped::BytesPair(s) => {

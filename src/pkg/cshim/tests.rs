@@ -257,6 +257,26 @@ fn an_input_blob_becomes_a_pointer_and_a_length() {
 }
 
 #[test]
+fn a_blob_with_no_length_becomes_one_pointer() {
+    // The libfdt shape: the extent is written inside the blob, so there is
+    // nowhere to pass a size and the pointer goes on its own.
+    let src = generate("fdt", &symbols(&[("check", sym(&["bytes_ptr"], "int"))])).unwrap();
+    assert!(src.contains("extern int64_t check(const void*);"), "bad decl:\n{src}");
+    assert!(src.contains("if (argv[0].tag != JADE_FFI_BYTES) return 1;"), "no tag check:\n{src}");
+    assert!(src.contains("check(argv[0].data.as_bytes"), "should pass the pointer:\n{src}");
+    assert!(!src.contains("as_bytes->len"), "must not invent a length:\n{src}");
+}
+
+#[test]
+fn a_lengthless_blob_shim_compiles() {
+    let syms = symbols(&[("check", sym(&["bytes_ptr"], "int")), ("at", sym(&["bytes_ptr", "str"], "int"))]);
+    let src = generate("fdt", &syms).unwrap();
+    if let Err(e) = compiles(&src, &[]) {
+        panic!("lengthless blob shim does not compile:\n{e}\n--- source ---\n{src}");
+    }
+}
+
+#[test]
 fn a_null_blob_passes_null_and_zero_rather_than_dereferencing() {
     let src = generate("z", &symbols(&[("put", sym(&["bytes"], "int"))])).unwrap();
     assert!(src.contains("? (const void*)argv[0].data.as_bytes->data : NULL"), "unguarded:\n{src}");

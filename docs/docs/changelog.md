@@ -11,6 +11,8 @@ sidebar_label: Changelog
 - **A struct passed in must be one every field of which survives the trip.** The asymmetry with `out_struct`, which tolerates dropping a field it cannot carry: losing an output is visible in what comes back, losing an input is not.
 - **A struct pointer beside an unrelated integer is no longer read as an array.** `cs_op_count(csh, const cs_insn *insn, unsigned op_type)` has the same shape as an array and its count, and was refused as one. The parameter's own name breaks the tie, and only a name with no count-like word in it decides — guessing the other way would hand a library one struct and tell it there were twenty.
 
+- **A read-only blob with no length beside it can be passed.** Some libraries take a blob whose extent is written *inside* it: every `libfdt` call takes `const void *fdt` alone and reads the length out of the device tree's own header. There is nowhere to pass a size, so the shape was refused, and with it most of the library. `bytes_ptr` borrows the pointer for the call exactly as `bytes` does, without the count. libfdt goes from 51 bound symbols to 64. It is listed as an assumption, because Jade cannot check the extent and a truncated blob reads past the end.
+
 - **Fixed: a writable byte pointer with no length beside it is no longer bound as a single value.** `lzma_stream_footer_encode(const lzma_stream_flags*, uint8_t *out)` writes exactly twelve bytes. The generator read `out` as one value written back, so the shim declared a one-byte local and handed the library its address — a stack overflow the C compiler cannot see, reported as a routine assumption. A byte pointer alone is a buffer whose size only the documentation gives, and it is refused by name now.
 
 ## v1.3.7
