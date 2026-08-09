@@ -3607,3 +3607,33 @@ fn a_closure_cannot_break_out_of_the_loop_that_encloses_it() {
     let err = parser::parse(lexer::tokenize(src).unwrap()).expect_err("should refuse");
     assert!(matches!(err, crate::frontend::error::JadeError::BreakOutsideLoop { .. }), "{err:?}");
 }
+
+#[test]
+fn int_of_a_char_is_its_scalar() {
+    // What makes a fixed-size C field readable: `char mnemonic[32]` arrives as
+    // thirty-two characters, NUL padding included, and this is how a program
+    // finds where the text stops. Nothing trims it, because trimming guesses.
+    let st = run_src(
+        "let a = int(char(\"j\"))\nlet b = int(char(\"\u{4e2d}\"))\nlet c = int(char(0))\n",
+    )
+    .expect("should run");
+    assert_eq!(get_int(&st, "a"), 106);
+    assert_eq!(get_int(&st, "b"), 20013);
+    assert_eq!(get_int(&st, "c"), 0);
+}
+
+#[test]
+fn char_of_an_int_is_refused_when_it_is_not_a_character() {
+    // The surrogate range and anything past U+10FFFF are not characters.
+    // Replacing them silently would corrupt what the conversion claims to do.
+    let st = run_src("let c = char(106)\n").expect("should run");
+    assert_eq!(get_char(&st, "c"), 'j');
+
+    for bad in ["1114112", "55296"] {
+        let err = match run_src(&format!("let c = char({bad})\n")) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("char({bad}) should have been refused"),
+        };
+        assert!(err.contains("not a Unicode scalar"), "char({bad}) should be refused: {err}");
+    }
+}
