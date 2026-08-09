@@ -514,6 +514,21 @@ fn bind_header(
     // umbrella header that declares nothing itself, what decides which of the
     // headers it includes to bind.
     let exported = lib.and_then(pkg::bindgen::exported_symbols);
+    // An artifact that was named and could not be read is worth saying out
+    // loud. Without a table an umbrella header fails with a message telling you
+    // to pass `--path`, which you just did — and every other header quietly
+    // binds less, since what it includes has nothing to be selected against.
+    if lib.is_some() && exported.is_none() {
+        return Err(format!(
+            "could not read the export table of {}. Nothing is wrong with the header — the \
+             library's symbols are what say which of its declarations to bind, and `nm` reported \
+             none.\n  A stripped static archive does that, as does a file that is not a library at \
+             all. Check that\n  the path names a shared library, and that `nm -D {}` lists \
+             something.",
+            lib.map(|l| l.display().to_string()).unwrap_or_default(),
+            lib.map(|l| l.display().to_string()).unwrap_or_default()
+        ));
+    }
     let binding = pkg::bindgen::from_header(header_path, include, only, exported.as_ref())?;
 
     // Check the header against the library it is supposed to describe. A header

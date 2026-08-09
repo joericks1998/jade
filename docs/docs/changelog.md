@@ -4,6 +4,25 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.3.13
+
+**glib binds and runs, and CI binds it on every push.** Pointed at glib — 1890 exported symbols, written the way widely-used C libraries actually are — the binding generator produced a table of 1357 symbols that could not be used at all. Two separate faults, each of which refuses the whole dependency rather than the symbol.
+
+- **Fixed: a callback's context slot was checked against the typedef's name, not its category.** glib spells every one of them `gconstpointer`, so a `void*` that the trampoline should accept and not forward was read as a type the FFI cannot carry. Every glib callback was unbindable.
+- **Fixed: a function-like macro could intercept the call.** glib declares `g_atomic_pointer_add` and then defines a macro of the same name whose `_Static_assert` rejects the pointer the shim holds. The macro won and the shim would not compile. Calls are parenthesised now, so the symbol the artifact exports is the one that gets called — which is the one that was bound.
+
+**`src/scripts/ffi-gate.sh` runs in CI, and it is why the two above were found.** The parity gate covers the language; this covers the part of the toolchain whose correctness depends on someone else's header, someone else's macros, and a C compiler's opinion of what we generate from them.
+
+- **It compiles the C runtime the way a release build does**, with `-O2 -D_FORTIFY_SOURCE=3` and the warning refused. That is the check that would have caught the `realpath` abort above in seconds, rather than after two releases. It only bites on glibc, since Apple's headers carry no such attribute — so for this one step the Linux run is the one that counts.
+- **It binds glib whole and runs a program on both engines.** The whole header, never a narrowed slice: a slice would cover only the shapes already handled, which is the opposite of the point. Missing glib or a missing C compiler is a reported skip, so the script is safe to run anywhere.
+
+**Fixed: every FFI package aborted at startup in a compiled binary on Linux.** `*** buffer overflow detected ***`, before the program's first line ran. `realpath` on glibc writes up to `PATH_MAX` bytes into the buffer it is handed, and the fortified build aborts the process when that buffer is smaller — whatever the path being resolved turns out to be. The runtime handed it 1024 bytes, which is exactly `PATH_MAX` on macOS and a quarter of it on Linux.
+
+- **Two things kept it hidden.** The check only runs in optimised builds, so a debug toolchain never tripped it, and the C runtime is compiled with warnings off — glibc says so at compile time, in as many words: *second argument of realpath must be either NULL or at least PATH_MAX bytes long buffer*.
+- **Every buffer holding a path is `PATH_MAX` now**, from one definition in `runtime.h` with a 4096 fallback for systems that set no limit.
+- **A failure names the whole path.** The error messages carrying paths were 512 and 900 bytes, so the sentence explaining *where* the runtime looked could be cut off mid-path — which is the one part worth reading. The single join that can still overflow says so, rather than truncating into a "not found" that sends you after the wrong thing.
+- **Swept the whole C runtime** with `-O2 -D_FORTIFY_SOURCE=3 -Wall` on glibc. This was the only abort-class hazard, and no truncation warnings remain.
+
 ## v1.3.12
 
 **Fixed: every FFI package aborted at startup in a compiled binary on Linux.** `*** buffer overflow detected ***`, before the program's first line ran. `realpath` on glibc writes up to `PATH_MAX` bytes into the buffer it is handed, and the fortified build aborts the process when that buffer is smaller — whatever the path being resolved turns out to be. The runtime handed it 1024 bytes, which is exactly `PATH_MAX` on macOS and a quarter of it on Linux.

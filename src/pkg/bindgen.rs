@@ -1924,14 +1924,37 @@ pub fn exported_symbols(lib: &Path) -> Option<std::collections::HashSet<String>>
 /// header against a library cares about every defined symbol, while generating
 /// placeholders cares only about the ones that are code.
 fn nm_symbols(lib: &Path) -> Option<Vec<(String, String)>> {
-    // `-g` exported only. Linux and macOS disagree on the flag for "dynamic
-    // symbols", so try the GNU spelling and fall back.
     let run = |args: &[&str]| -> Option<String> {
         let out = std::process::Command::new("nm").args(args).arg(lib).output().ok()?;
         out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
     };
-    let text = run(&["-g", "--defined-only"]).or_else(|| run(&["-gU"])).or_else(|| run(&["-g"]))?;
 
+    // Every spelling, unioned, because no one of them covers both platforms.
+    //
+    // `-g` reads the *static* symbol table, which is what macOS keeps and what
+    // Linux distributions strip out of their shared libraries: `nm -g` on
+    // Debian's libglib-2.0.so reports no symbols at all. `-D` reads the dynamic
+    // table, which is what a shared library actually exports and is never
+    // stripped — and which macOS `nm` does not accept.
+    //
+    // Getting this wrong is quiet rather than loud. Without an export table an
+    // umbrella header has nothing to select against, so `lzma.h` and `glib.h`
+    // were unbindable on Linux while working on a Mac, and every other header
+    // silently fell back to binding only its own declarations.
+    let mut text = String::new();
+    for args in
+        [&["-g", "--defined-only"][..], &["-D", "--defined-only"][..], &["-gU"][..], &["-g"][..]]
+    {
+        if let Some(t) = run(args) {
+            text.push_str(&t);
+            text.push('\n');
+        }
+    }
+    if text.trim().is_empty() {
+        return None;
+    }
+
+    let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
     for line in text.lines() {
         // "<addr> T _name" — the type letter is what says it is defined here.
@@ -1943,7 +1966,12 @@ fn nm_symbols(lib: &Path) -> Option<Vec<(String, String)>> {
             continue;
         }
         // Mach-O prefixes every C symbol with an underscore; ELF does not.
-        out.push((kind.to_string(), name.strip_prefix('_').unwrap_or(name).to_string()));
+        let name = name.strip_prefix('_').unwrap_or(name).to_string();
+        // Unioning several listings means the same symbol arrives more than
+        // once; callers count these, so a duplicate would inflate the total.
+        if seen.insert((kind.to_string(), name.clone())) {
+            out.push((kind.to_string(), name));
+        }
     }
     Some(out)
 }

@@ -507,7 +507,10 @@ fn every_spelling_the_generator_emits_is_one_the_shim_accepts() {
          int f_out_scalar(opaque* h, int* written);\n\
          void f_two_outs(unsigned long long* progress_in, unsigned long long* progress_out);\n\
          int f_ret_and_two_outs(int a, int* quot, int* rem);\n\
-         void f_void(void);\n",
+         void f_void(void);\n\
+         typedef const void* ctx_t;\n\
+         typedef int cbret_t;\n\
+         int f_cb_typedefs(cbret_t (*cb)(int, ctx_t), ctx_t data);\n",
     )
     .unwrap();
 
