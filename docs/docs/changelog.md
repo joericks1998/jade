@@ -4,6 +4,15 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## Unreleased
+
+- **A struct the library only reads can be passed in.** `int f(const S* s)` was refused outright: the shim could fill a struct and hand it back, but not take one. `in_struct:<Type>` is the mirror — Jade builds the struct, the shim copies it into a real local of the library's own type and passes its address. Nothing owns anything across the boundary, because the library reads it and forgets it.
+- **A field you leave out of one is zero, and a field you misspell is an error.** That is what the C it stands in for does: declare, zero, set what matters. `lzma_stream_flags` carries fifteen reserved fields the library requires to be zero, and demanding all seventeen would have made the shape unusable. The mistake worth catching is the other one — without the check a misspelling is indistinguishable from an omission, and silently becomes a zero you believed you had set.
+- **A struct passed in must be one every field of which survives the trip.** The asymmetry with `out_struct`, which tolerates dropping a field it cannot carry: losing an output is visible in what comes back, losing an input is not.
+- **A struct pointer beside an unrelated integer is no longer read as an array.** `cs_op_count(csh, const cs_insn *insn, unsigned op_type)` has the same shape as an array and its count, and was refused as one. The parameter's own name breaks the tie, and only a name with no count-like word in it decides — guessing the other way would hand a library one struct and tell it there were twenty.
+
+- **Fixed: a writable byte pointer with no length beside it is no longer bound as a single value.** `lzma_stream_footer_encode(const lzma_stream_flags*, uint8_t *out)` writes exactly twelve bytes. The generator read `out` as one value written back, so the shim declared a one-byte local and handed the library its address — a stack overflow the C compiler cannot see, reported as a routine assumption. A byte pointer alone is a buffer whose size only the documentation gives, and it is refused by name now.
+
 ## v1.3.7
 
 - **A scalar written through a pointer can be bound.** `int *count`, `uint64_t *progress` — C's way of returning a second value, and there was no spelling for it. `out_scalar:<ctype>` consumes no Jade argument and comes back as part of the result. libfdt goes from 41 bound symbols to 51.

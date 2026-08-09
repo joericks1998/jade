@@ -444,6 +444,70 @@ fn a_struct_out_parameter_needs_a_header() {
 }
 
 #[test]
+fn a_struct_input_is_copied_into_a_real_c_local() {
+    let s = sym(&["in_struct:SF_INFO", "int"], "int");
+    let src = generate_with("snd", &symbols(&[("f", s)]), &[("SF_INFO", SF_INFO)], &["sndfile.h"])
+        .unwrap();
+    assert!(src.contains("SF_INFO istruct0;"), "no local of the real type:\n{src}");
+    assert!(src.contains("memset(&istruct0, 0, sizeof istruct0);"), "not zeroed:\n{src}");
+    assert!(src.contains("f(&istruct0, argv[1].data.as_int)"), "not passed by address:\n{src}");
+}
+
+#[test]
+fn a_struct_input_takes_one_jade_argument() {
+    // Unlike an out_struct, which takes none: the caller supplies this one.
+    let s = sym(&["in_struct:SF_INFO"], "int");
+    let src = generate_with("snd", &symbols(&[("f", s)]), &[("SF_INFO", SF_INFO)], &["sndfile.h"])
+        .unwrap();
+    assert!(src.contains("if (argc != 1) return 1;"), "wrong arity:\n{src}");
+    assert!(src.contains("if (argv[0].tag != JADE_FFI_STRUCT) return 1;"), "no tag check:\n{src}");
+}
+
+#[test]
+fn a_field_left_out_of_a_struct_input_stays_zero() {
+    // What the C it stands in for does: declare, zero, set what matters. A
+    // struct with fifteen reserved fields the library requires to be zero would
+    // be unusable if every one had to be written out.
+    let s = sym(&["in_struct:SF_INFO"], "int");
+    let src = generate_with("snd", &symbols(&[("f", s)]), &[("SF_INFO", SF_INFO)], &["sndfile.h"])
+        .unwrap();
+    assert!(src.contains("if (istruct0_0) {"), "a missing field must not fail:\n{src}");
+}
+
+#[test]
+fn a_field_the_struct_does_not_have_is_refused_by_name() {
+    // The mistake worth catching. Without this a misspelling is indistinguishable
+    // from an omission, and silently becomes a zero the caller believed they set.
+    let s = sym(&["in_struct:SF_INFO"], "int");
+    let src = generate_with("snd", &symbols(&[("f", s)]), &[("SF_INFO", SF_INFO)], &["sndfile.h"])
+        .unwrap();
+    assert!(src.contains("jade_shim_nofield(\"SF_INFO\""), "no unknown-key check:\n{src}");
+    assert!(src.contains("jade_shim_known(istruct0_names"), "no name table:\n{src}");
+}
+
+#[test]
+fn a_struct_input_needs_its_fields_declared_and_a_header() {
+    // Exactly what an out_struct needs, and for the same reason: the layout has
+    // to come from the compiler rather than from a hand-written field list.
+    let s = sym(&["in_struct:SF_INFO"], "int");
+    let err = generate_with("snd", &symbols(&[("f", s.clone())]), &[], &["sndfile.h"]).unwrap_err();
+    assert!(err.contains("structs.SF_INFO"), "should name the missing table: {err}");
+
+    let err = generate_with("snd", &symbols(&[("f", s)]), &[("SF_INFO", SF_INFO)], &[]).unwrap_err();
+    assert!(err.contains("headers"), "should ask for a header: {err}");
+}
+
+#[test]
+fn a_struct_input_cannot_be_named_like_a_result() {
+    // `@name` is the key an out-parameter comes back under. An in_struct is an
+    // argument, so accepting one would read as a result that never arrives.
+    let s = sym(&["in_struct:SF_INFO@cfg"], "int");
+    let err = generate_with("snd", &symbols(&[("f", s)]), &[("SF_INFO", SF_INFO)], &["sndfile.h"])
+        .unwrap_err();
+    assert!(err.contains("produces nothing"), "should say why: {err}");
+}
+
+#[test]
 fn a_header_name_that_is_not_a_path_is_refused() {
     let s = sym(&["int"], "int");
     for bad in ["foo.h>\n#include <evil.h", "a\"b", ""] {
@@ -543,6 +607,37 @@ extern void sf_stat(SF_INFO* info);
     let src = generate_with("snd", &syms, &[("SF_INFO", fields)], &["fixture.h"]).unwrap();
     if let Err(e) = compiles(&src, &[("fixture.h", header)]) {
         panic!("struct shim does not compile:\n{e}\n--- source ---\n{src}");
+    }
+}
+
+#[test]
+fn a_struct_input_shim_compiles_against_a_real_header() {
+    // Same argument as the out_struct case: the compiler places the fields, so
+    // an assignment at a wrong offset is impossible rather than merely unlikely.
+    let header = r#"
+#ifndef FIXTURE_H
+#define FIXTURE_H
+#include <stdint.h>
+typedef struct { int version; int64_t backward_size; int check; const char* tag; } FLAGS;
+extern int cmp(const FLAGS* a, const FLAGS* b);
+extern int use_one(const FLAGS* f, int mode);
+#endif
+"#;
+    let syms = symbols(&[
+        ("cmp", sym(&["in_struct:FLAGS", "in_struct:FLAGS"], "int")),
+        ("use_one", sym(&["in_struct:FLAGS", "int"], "int")),
+    ]);
+    let fields: &[(&str, &str)] = &[
+        ("version", "int"),
+        ("backward_size", "int"),
+        ("check", "int"),
+        ("tag", "str"),
+    ];
+    let src = generate_with("lz", &syms, &[("FLAGS", fields)], &["fixture.h"]).unwrap();
+    // Two of them in one call must not collide on a local name.
+    assert!(src.contains("FLAGS istruct0;") && src.contains("FLAGS istruct1;"), "collide:\n{src}");
+    if let Err(e) = compiles(&src, &[("fixture.h", header)]) {
+        panic!("struct input shim does not compile:\n{e}\n--- source ---\n{src}");
     }
 }
 

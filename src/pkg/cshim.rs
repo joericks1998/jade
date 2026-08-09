@@ -48,8 +48,9 @@ fn map_type(t: &str) -> Option<CType> {
 }
 
 const SUPPORTED_TYPES: &str =
-    "int, float, bool, str, bytes, handle<Type>, out_buffer:<ctype>, out_struct:<Type>, \
-     out_handle:<Type>, out_scalar:<ctype>, inout_scalar:<ctype> (and nil for a return type)";
+    "int, float, bool, str, bytes, handle<Type>, in_struct:<Type>, out_buffer:<ctype>, \
+     out_struct:<Type>, out_handle:<Type>, out_scalar:<ctype>, inout_scalar:<ctype> \
+     (and nil for a return type)";
 
 /// What one entry of a symbol's `args` list means.
 ///
@@ -74,6 +75,22 @@ enum ArgSpec {
     /// `out_struct:<Type>` — no Jade argument. The shim declares a zeroed local
     /// of the real C type and passes its address.
     OutStruct { type_name: String, name: Option<String> },
+    /// `in_struct:<Type>` — one Jade struct, copied into a real C local whose
+    /// address is passed. The mirror of `out_struct`, and the shape of every
+    /// `const S*` parameter: the library reads the struct and forgets it.
+    ///
+    /// A *copy* rather than a borrow, because there is no C struct on the Jade
+    /// side to lend. Jade's value is a bag of named fields with no layout; the
+    /// shim declares the real type from the header, so the compiler places every
+    /// field. That is the same reason `out_struct` needs the header.
+    ///
+    /// Only carried for a struct whose fields the FFI can *all* represent. One
+    /// it cannot — a `void*` the caller was meant to fill in — would arrive as
+    /// the zero the local was memset to, and a library reading a NULL where the
+    /// caller meant something is the silent-wrong-answer failure this generator
+    /// exists to avoid. `out_struct` tolerates a dropped field because losing an
+    /// output is visible; losing an input is not.
+    InStruct { type_name: String },
     /// `handle<T>` — one Jade handle, unwrapped to the `T*` the library issued.
     ///
     /// The type name is checked before the pointer is used: two handles are
@@ -124,6 +141,7 @@ impl ArgSpec {
                 | ArgSpec::Handle { .. }
                 | ArgSpec::Callback { .. }
                 | ArgSpec::InoutScalar { .. }
+                | ArgSpec::InStruct { .. }
         )
     }
 
@@ -163,6 +181,7 @@ impl ArgSpec {
             ArgSpec::Bytes => "const void*, size_t".to_string(),
             ArgSpec::OutBuffer { elem, .. } => format!("{elem}*"),
             ArgSpec::OutStruct { type_name, .. } => format!("{type_name}*"),
+            ArgSpec::InStruct { type_name } => format!("const {type_name}*"),
             ArgSpec::Handle { name } => format!("{name}*"),
             ArgSpec::OutHandle { type_name, .. } => format!("{type_name}**"),
             ArgSpec::OutScalar { c_type, .. } | ArgSpec::InoutScalar { c_type, .. } => {
@@ -310,6 +329,21 @@ fn parse_arg(pkg: &str, sym: &str, full: &str) -> Result<ArgSpec, String> {
         return check_c_ident(pkg, sym, name, "out_struct").map(|_| ArgSpec::OutStruct {
             type_name: name.to_string(),
             name: out_name,
+        });
+    }
+    if let Some(name) = spec.strip_prefix("in_struct:") {
+        // `@name` is the key a *result* comes back under, and an in_struct is an
+        // argument. Accepting one and dropping it would read as a result that
+        // never arrives.
+        if out_name.is_some() {
+            return Err(format!(
+                "dependency '{pkg}': symbol '{sym}' names an `in_struct:{name}` with `@`, which \
+                 is how an out-parameter says what key it comes back under. An `in_struct` is an \
+                 argument and produces nothing."
+            ));
+        }
+        return check_c_ident(pkg, sym, name, "in_struct").map(|_| ArgSpec::InStruct {
+            type_name: name.to_string(),
         });
     }
     if let Some(name) = spec.strip_prefix("out_handle:") {
@@ -559,6 +593,40 @@ static int jade_shim_unwrap(const JadeVal* v, const char* want, void** out) {
 }
 "#;
 
+/// Emitted only when some symbol takes a struct as input.
+const FIELD_HELPER: &str = r#"
+/* One field of a Jade struct by name, or NULL when it has no such key.
+ *
+ * Linear because these are tiny — a bound struct carries the handful of fields
+ * the field table names, not a whole record — and a scan of six keys costs less
+ * than building an index would. */
+static const JadeVal* jade_shim_field(const JadeStruct* s, const char* key) {
+    if (!s || !s->keys) return NULL;
+    for (size_t i = 0; i < s->len; i++)
+        if (s->keys[i] && strcmp(s->keys[i], key) == 0) return &s->vals[i];
+    return NULL;
+}
+
+/* Whether `key` is one of the `n` field names the C type has. */
+static int jade_shim_known(const char* const* names, size_t n, const char* key) {
+    if (!key) return 0;
+    for (size_t i = 0; i < n; i++)
+        if (strcmp(names[i], key) == 0) return 1;
+    return 0;
+}
+
+/* Name the field a caller wrote that the C type does not have.
+ *
+ * _Thread_local for the reason the errno buffer is: Jade tasks are real OS
+ * threads, and the ABI only requires an output string to outlive the call,
+ * which both engines satisfy by copying before they return. */
+static const char* jade_shim_nofield(const char* type_name, const char* key) {
+    static _Thread_local char buf[192];
+    snprintf(buf, sizeof buf, "%s has no field '%s'", type_name, key ? key : "");
+    return buf;
+}
+"#;
+
 /// Emitted only when some symbol fills a struct out-parameter.
 const STRUCT_HELPER: &str = r#"
 /* An empty JadeStruct of `n` fields, named `type_name`. The caller fills keys
@@ -640,6 +708,29 @@ fn parse_symbol(
                      become keys on one result, so the names have to differ."
                 ));
             }
+        }
+    }
+
+    // An `in_struct` needs exactly what an `out_struct` needs, and for the same
+    // reason: a field list saying what to carry, and the real header so the
+    // compiler places those fields rather than a hand-written layout guessing.
+    // Checked over every argument rather than over `outs`, because this one is
+    // an argument.
+    for a in &args {
+        let ArgSpec::InStruct { type_name } = a else { continue };
+        if !structs.contains_key(type_name) {
+            return Err(format!(
+                "dependency '{pkg}': symbol '{sym}' takes an `in_struct:{type_name}`, but there is \
+                 no [dependencies.{pkg}.structs.{type_name}] table saying which fields to fill."
+            ));
+        }
+        if headers.is_empty() {
+            return Err(format!(
+                "dependency '{pkg}': symbol '{sym}' takes an `in_struct:{type_name}`, so the \
+                 dependency needs `headers = [\"<the library's header>\"]`. The shim has to \
+                 declare a real {type_name}, and taking its layout from the field list instead \
+                 would write at the wrong offsets whenever the two disagree."
+            ));
         }
     }
 
@@ -748,6 +839,9 @@ pub fn generate(
     let out_specs = || parsed.iter().flat_map(|p| p.outs.iter().map(|&i| &p.args[i]));
     if out_specs().any(|a| matches!(a, ArgSpec::OutBuffer { .. })) {
         out.push_str(BYTES_HELPER);
+    }
+    if parsed.iter().any(|p| p.args.iter().any(|a| matches!(a, ArgSpec::InStruct { .. }))) {
+        out.push_str(FIELD_HELPER);
     }
     // A struct is built for an `out_struct`, and now also whenever a symbol has
     // more than one thing to hand back — which needs no out_struct at all.
@@ -925,6 +1019,65 @@ fn emit_out_struct(
     Ok(b)
 }
 
+/// Copy a Jade struct argument into a real C local of the library's own type.
+///
+/// A field the caller left out stays as the zero the `memset` put there, which
+/// is what the C it stands in for does: declare, zero, set what matters. A
+/// struct like `lzma_stream_flags` carries fifteen reserved fields the library
+/// requires to be zero, and demanding all of them would make the shape
+/// unusable.
+///
+/// A field the caller wrote that the type does not *have* is refused, by name.
+/// That is the mistake worth catching — a misspelling would otherwise be
+/// indistinguishable from an omission, and silently become a zero the caller
+/// believed they had set.
+fn emit_in_struct(
+    pkg: &str,
+    sym: &str,
+    var: &str,
+    type_name: &str,
+    def: &CStruct,
+    at: usize,
+) -> Result<String, String> {
+    let names: Vec<String> = def.fields.iter().map(|(f, _)| format!("\"{f}\"")).collect();
+    let mut b = format!(
+        "    {type_name} {var};\n\
+         \x20   memset(&{var}, 0, sizeof {var});\n\
+         \x20   const JadeStruct* {var}_s = argv[{at}].data.as_struct;\n\
+         \x20   static const char* const {var}_names[] = {{ {} }};\n\
+         \x20   for (size_t {var}_i = 0; {var}_s && {var}_i < {var}_s->len; {var}_i++) {{\n\
+         \x20       if (jade_shim_known({var}_names, {}, {var}_s->keys[{var}_i])) continue;\n\
+         \x20       out->tag = JADE_FFI_ERROR;\n\
+         \x20       out->data.as_str = jade_shim_nofield(\"{type_name}\", {var}_s->keys[{var}_i]);\n\
+         \x20       return 1;\n\
+         \x20   }}\n",
+        names.join(", "),
+        def.fields.len()
+    );
+    for (n, (field, ty)) in def.fields.iter().enumerate() {
+        let t = map_type(ty).ok_or_else(|| {
+            format!(
+                "dependency '{pkg}': symbol '{sym}' fills field '{field}' of {type_name} from \
+                 '{ty}', which the Jade FFI cannot represent. Supported types are \
+                 {SUPPORTED_TYPES}."
+            )
+        })?;
+        b.push_str(&format!(
+            "    const JadeVal* {var}_{n} = jade_shim_field({var}_s, \"{field}\");\n\
+             \x20   if ({var}_{n}) {{\n\
+             \x20       if ({var}_{n}->tag != {}) {{\n\
+             \x20           out->tag = JADE_FFI_ERROR;\n\
+             \x20           out->data.as_str = \"{sym}: field '{field}' of {type_name} must be a {ty}\";\n\
+             \x20           return 1;\n\
+             \x20       }}\n\
+             \x20       {var}.{field} = ({}){var}_{n}->data.{};\n\
+             \x20   }}\n",
+            t.tag, t.decl, t.field
+        ));
+    }
+    Ok(b)
+}
+
 /// The static C function of exactly the declared shape, which the library will
 /// call and which forwards into Jade.
 ///
@@ -1032,6 +1185,9 @@ fn wrapper(
             ArgSpec::Callback { .. } => {
                 body.push_str(&format!("    if (argv[{j}].tag != JADE_FFI_FN) return 1;\n"));
             }
+            ArgSpec::InStruct { .. } => {
+                body.push_str(&format!("    if (argv[{j}].tag != JADE_FFI_STRUCT) return 1;\n"));
+            }
             ArgSpec::Handle { name } => {
                 // Unwrapped here rather than at the call, so a wrong type is
                 // caught before anything is allocated and the library never
@@ -1086,6 +1242,11 @@ fn wrapper(
                 // something recognisable rather than a stack pointer.
                 body.push_str(&format!("    {type_name}* ohandle{i} = NULL;\n"));
             }
+            ArgSpec::InStruct { type_name } => {
+                let k = jade_idx[i].expect("an in_struct consumes a Jade argument");
+                let def = &structs[type_name];
+                body.push_str(&emit_in_struct(pkg, sym, &format!("istruct{i}"), type_name, def, k)?);
+            }
             ArgSpec::OutScalar { c_type, .. } => {
                 body.push_str(&format!("    {c_type} oscalar{i} = ({c_type})0;\n"));
             }
@@ -1117,6 +1278,7 @@ fn wrapper(
             }
             ArgSpec::OutBuffer { .. } => call_args.push(format!("obuf{i}")),
             ArgSpec::OutStruct { .. } => call_args.push(format!("&ostruct{i}")),
+            ArgSpec::InStruct { .. } => call_args.push(format!("&istruct{i}")),
             ArgSpec::OutScalar { .. } | ArgSpec::InoutScalar { .. } => {
                 call_args.push(format!("&oscalar{i}"))
             }

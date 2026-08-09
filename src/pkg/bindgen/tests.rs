@@ -250,9 +250,9 @@ fn an_unrepresentable_field_is_dropped_rather_than_the_whole_struct() {
 }
 
 #[test]
-fn a_struct_read_as_input_is_skipped_because_the_shim_cannot_do_that_direction() {
+fn a_struct_read_as_input_is_one_the_caller_builds() {
     let b = bind("typedef struct { int a; } S;\nint f(const S* s);\n");
-    assert!(why_skipped(&b, "f").contains("input"));
+    assert_eq!(args(&b, "f"), ["in_struct:S"]);
 }
 
 #[test]
@@ -891,6 +891,81 @@ fn a_record_with_one_uncarryable_field_is_still_an_out_parameter() {
     assert_eq!(args(&b, "f"), ["out_struct:S"]);
     let names: Vec<&str> = b.structs["S"].fields.iter().map(|(f, _)| f.as_str()).collect();
     assert_eq!(names, ["ok", "also_ok"]);
+}
+
+// ── A struct read as input ───────────────────────────────────────────────
+
+#[test]
+fn a_const_struct_pointer_is_an_input_the_caller_builds() {
+    // The library reads it and forgets it, so nothing owns anything across the
+    // boundary. Jade builds one and the shim copies it into a real C local.
+    let b = bind(
+        "#include <stdint.h>\n\
+         typedef struct { int version; int64_t size; const char* tag; } FLAGS;\n\
+         int cmp(const FLAGS* a, const FLAGS* b);\n",
+    );
+    assert_eq!(args(&b, "cmp"), ["in_struct:FLAGS", "in_struct:FLAGS"]);
+    assert!(b.structs.contains_key("FLAGS"), "the field table must come out too");
+}
+
+#[test]
+fn an_input_struct_that_would_lose_a_field_is_refused() {
+    // The asymmetry with `out_struct`, which tolerates a dropped field. Losing
+    // an output is visible in what comes back; losing an input is not — the
+    // library reads the zero the local was memset to, where the caller believed
+    // they had set something.
+    let b = bind("typedef struct { int ok; void* options; } F;\nint use_it(const F* f);\n");
+    assert!(!b.symbols.contains_key("use_it"), "{:?}", b.symbols.get("use_it"));
+    assert!(why_skipped(&b, "use_it").contains("could not make the trip"), "{:?}", b.skipped);
+}
+
+#[test]
+fn a_struct_pointer_beside_an_unrelated_int_is_one_struct_not_an_array() {
+    // `cs_op_count(csh, const cs_insn *insn, unsigned op_type)` reads as "a
+    // const pointer followed by an int", which is also the shape of an array
+    // and its count. The parameter's own name breaks the tie.
+    let b = bind(
+        "typedef struct { int a; int b; } INSN;\n\
+         int op_count(const INSN* insn, unsigned int op_type);\n",
+    );
+    assert_eq!(args(&b, "op_count"), ["in_struct:INSN", "int"]);
+}
+
+#[test]
+fn a_struct_pointer_beside_a_count_is_still_refused_as_an_array() {
+    // `ares_process_fds(ch, const ares_fd_events_t *events, size_t nevents)`
+    // really is an array. Guessing the other way would hand the library one
+    // struct and tell it there were twenty, so a count-like name keeps the
+    // refusal.
+    let b = bind(
+        "#include <stddef.h>\n\
+         typedef struct { int fd; int flags; } EV;\n\
+         int process(const EV* events, size_t nevents);\n",
+    );
+    assert!(!b.symbols.contains_key("process"), "{:?}", b.symbols.get("process"));
+    assert!(why_skipped(&b, "process").contains("elements rather than bytes"), "{:?}", b.skipped);
+}
+
+#[test]
+fn a_writable_byte_pointer_with_no_length_is_not_an_out_scalar() {
+    // `lzma_stream_footer_encode(const lzma_stream_flags*, uint8_t *out)` writes
+    // exactly twelve bytes. Reading `out` as one value would declare a one-byte
+    // local and pass its address — a stack overflow the compiler cannot see.
+    let b = bind(
+        "#include <stdint.h>\n\
+         typedef struct { int version; } F;\n\
+         int footer_encode(const F* f, uint8_t* out);\n",
+    );
+    assert!(!b.symbols.contains_key("footer_encode"), "{:?}", b.symbols.get("footer_encode"));
+    assert!(why_skipped(&b, "footer_encode").contains("how much to allocate"), "{:?}", b.skipped);
+}
+
+#[test]
+fn a_writable_int_pointer_with_no_length_is_still_an_out_scalar() {
+    // The shape the byte rule must not catch: `fdt_next_tag(fdt, off, int
+    // *nextoffset)` really is one value written back.
+    let b = bind("int next_tag(int off, int* nextoffset);\n");
+    assert_eq!(args(&b, "next_tag"), ["int", "out_scalar:int"]);
 }
 
 #[test]

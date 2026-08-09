@@ -563,9 +563,28 @@ enum Mapped {
 /// `next` matters because C encodes two-parameter idioms positionally: a
 /// pointer followed by a length is a buffer, and the pair has to be recognised
 /// together or not at all.
+/// Whether a parameter's *name* says it counts something.
+///
+/// Only consulted to tell one struct from an array of them, where the type
+/// alone cannot: `ares_process_fds(ch, const ares_fd_events_t *events, size_t
+/// nevents)` really is an array, and `cs_op_count(h, const cs_insn *insn,
+/// unsigned op_type)` really is one struct beside an unrelated integer. Both
+/// read as "a const pointer followed by an int".
+///
+/// Deliberately biased towards *not* deciding: a name that matches keeps the
+/// existing refusal, and only a name with no count-like word in it becomes a
+/// single struct. Guessing the wrong way here would hand a library one struct
+/// and tell it there were twenty.
+fn names_a_count(name: Option<&str>) -> bool {
+    let Some(n) = name else { return true };
+    let n = n.to_ascii_lowercase();
+    n.starts_with('n') || ["count", "len", "size", "num"].iter().any(|w| n.contains(w))
+}
+
 fn map_param(
     raw_in: &str,
     next: Option<&str>,
+    next_name: Option<&str>,
     env: &TypeEnv,
     ret: &str,
     produced: &std::collections::HashSet<String>,
@@ -621,7 +640,15 @@ fn map_param(
     }
 
     // A pointer next to a length is a buffer, and `const` says which direction.
-    let next_is_len = next.map(|n| is_int(&normalize(&env.expand(n)))).unwrap_or(false);
+    //
+    // Except when the pointee is a struct the header defines. Then the following
+    // int is far more often an unrelated flag than a count, and reading it as a
+    // count refuses a symbol that a single struct would bind. The parameter's
+    // own name breaks the tie, and only a name with no count-like word in it
+    // counts as evidence — see `names_a_count`.
+    let next_is_int = next.map(|n| is_int(&normalize(&env.expand(n)))).unwrap_or(false);
+    let next_is_len = next_is_int
+        && !(env.complete.contains_key(inner) && !names_a_count(next_name));
     let squashed = squash(inner);
     let byte_like =
         matches!(squashed.as_str(), "void" | "char" | "unsignedchar" | "signedchar" | "uint8_t" | "int8_t");
@@ -673,6 +700,19 @@ fn map_param(
     // kind of wrong that shows up as corrupt output rather than as an error, so
     // the note names the spelling that fixes it.
     if !is_const && !next_is_len && scalar_of(&squashed).is_some() {
+        // Except a byte. `uint8_t *out` with nothing beside it is overwhelmingly
+        // a buffer whose size the caller is expected to know from the
+        // documentation — `lzma_stream_footer_encode` writes exactly twelve —
+        // and treating it as one out-parameter would declare a one-byte local
+        // and hand the library its address. That is a stack overflow the
+        // compiler cannot see and the report would call an assumption.
+        if byte_like {
+            return Mapped::Reject(format!(
+                "writes through a `{raw}` with no length beside it, so the shim cannot tell how \
+                 much to allocate. A byte pointer alone is a buffer whose size only the \
+                 documentation gives"
+            ));
+        }
         return Mapped::Out(
             format!("out_scalar:{inner}"),
             Some(format!(
@@ -691,8 +731,25 @@ fn map_param(
     // shape, and treating them all as out-parameters is how `lzma_code` came to
     // bind into a shim that ran and did nothing.
     if env.complete.contains_key(inner) {
+        // Read-only, so the library takes what the struct says and forgets it.
+        // Jade builds one, the shim copies it into a real C local and passes its
+        // address — no ownership crosses the boundary in either direction.
+        //
+        // Only when *every* field can make the trip. Dropping one would hand the
+        // library the zero the local was memset to, in a position where the
+        // caller believed they had set it; unlike a dropped output, nothing
+        // afterwards shows that it went missing.
         if is_const {
-            return Mapped::Reject("takes a struct by pointer as input".to_string());
+            let fields = env.complete.get(inner).expect("checked above");
+            if struct_loses_a_field(fields, env) {
+                return Mapped::Reject(format!(
+                    "reads `{}`, and some of its fields are not types the FFI can carry. Passing \
+                     it would give the library a zero wherever a field could not make the trip, \
+                     in a place the caller believed they had set",
+                    env.c_name(inner)
+                ));
+            }
+            return Mapped::One(format!("in_struct:{}", env.c_name(inner)));
         }
 
         // The library allocates it, so Jade should hold it rather than build
@@ -1168,8 +1225,17 @@ fn map_function(
             skip_next = false;
             continue;
         }
-        match map_param(t, raw.get(i + 1).copied(), env, &raw_ret, produced, counts) {
-            Mapped::One(s) => args.push(s),
+        let next_name = parm_names.get(i + 1).copied().flatten();
+        match map_param(t, raw.get(i + 1).copied(), next_name, env, &raw_ret, produced, counts) {
+            Mapped::One(s) => {
+                // An `in_struct` needs its field table written out with it, the
+                // same way an `out_struct` does. It is an ordinary argument
+                // rather than an out-parameter, so it is collected here.
+                if let Some(name) = s.strip_prefix("in_struct:") {
+                    structs.push(name.to_string());
+                }
+                args.push(s);
+            }
             Mapped::BytesPair(s) => {
                 args.push(s);
                 // The length rode along with the pointer.
