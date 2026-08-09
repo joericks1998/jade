@@ -822,22 +822,61 @@ fn with_no_export_table_every_declared_symbol_is_still_bound() {
 // liblzma's symbols came to bind into shims that ran and did nothing.
 
 #[test]
-fn a_struct_the_caller_keeps_between_calls_is_not_an_out_parameter() {
+fn a_struct_the_caller_keeps_between_calls_is_one_jade_holds() {
     // The lzma_stream shape: pointer fields the FFI cannot carry, threaded
-    // through a sequence of calls. An out_struct shim zeroes a fresh local
-    // every call, so the encoder would initialise a stream and throw it away
-    // and the next call would run against a different zeroed one.
+    // through a sequence of calls. An out_struct shim zeroes a fresh local every
+    // call, so the encoder would initialise a stream and throw it away and the
+    // next call would run against a different zeroed one. Held on the C heap
+    // instead, so every call gets the same pointer and the fields that cannot
+    // travel stay where the library put them.
     let b = bind(
         "typedef struct { const unsigned char* next_in; unsigned long avail_in; \
-           unsigned char* next_out; void* internal; } strm;\n\
+           unsigned char* next_out; unsigned long avail_out; void* internal; } strm;\n\
          int strm_start(strm* s, int preset);\n\
          int strm_code(strm* s, int action);\n\
          void strm_end(strm* s);\n",
     );
     for sym in ["strm_start", "strm_code", "strm_end"] {
-        assert!(!b.symbols.contains_key(sym), "{sym} should not bind: {:?}", b.symbols.get(sym));
-        assert!(why_skipped(&b, sym).contains("caller allocates"), "{:?}", b.skipped);
+        assert_eq!(args(&b, sym)[0], "handle<strm>", "{sym}");
     }
+    let def = &b.structs["strm"];
+    assert!(def.held, "the table must say so, or no `strm_new` is written");
+}
+
+#[test]
+fn a_held_structs_buffer_fields_are_found_by_the_same_rule_a_parameter_list_uses() {
+    // C encodes the idiom the same way in a struct definition: the pointer, then
+    // the count. These are the fields that make a held struct necessary in the
+    // first place, so a held struct without them is a handle you can make and
+    // never feed.
+    let b = bind(
+        "typedef struct { const unsigned char* next_in; unsigned long avail_in; \
+           unsigned char* next_out; unsigned long avail_out; void* internal; } strm;\n\
+         int strm_start(strm* s, int preset);\n\
+         int strm_code(strm* s, int action);\n",
+    );
+    let bufs = &b.structs["strm"].buffers;
+    assert_eq!(bufs.len(), 2, "{bufs:?}");
+    assert_eq!((bufs[0].ptr.as_str(), bufs[0].len.as_str(), bufs[0].writable),
+        ("next_in", "avail_in", false));
+    assert_eq!((bufs[1].ptr.as_str(), bufs[1].len.as_str(), bufs[1].writable),
+        ("next_out", "avail_out", true));
+}
+
+#[test]
+fn a_reserved_field_is_never_read_as_a_buffer() {
+    // `lzma_stream` ends in four `void *reserved_ptr` and several
+    // `reserved_int`, and two of them sit next to each other in exactly the
+    // pointer-then-count order. A setter for one would offer a way to write
+    // where the library requires a zero.
+    let b = bind(
+        "typedef struct { const unsigned char* next_in; unsigned long avail_in; \
+           void* internal; void* reserved_ptr4; unsigned long seek_pos; } strm;\n\
+         int strm_start(strm* s, int preset);\n\
+         int strm_code(strm* s, int action);\n",
+    );
+    let ptrs: Vec<&str> = b.structs["strm"].buffers.iter().map(|x| x.ptr.as_str()).collect();
+    assert_eq!(ptrs, ["next_in"], "{:?}", b.structs["strm"].buffers);
 }
 
 #[test]
@@ -1020,14 +1059,14 @@ fn a_const_struct_pointer_is_an_input_the_caller_builds() {
 }
 
 #[test]
-fn an_input_struct_that_would_lose_a_field_is_refused() {
-    // The asymmetry with `out_struct`, which tolerates a dropped field. Losing
-    // an output is visible in what comes back; losing an input is not — the
-    // library reads the zero the local was memset to, where the caller believed
-    // they had set something.
+fn an_input_struct_that_would_lose_a_field_is_held_instead() {
+    // The asymmetry with `out_struct`, which tolerates a dropped field: losing
+    // an output is visible in what comes back, losing an input is not. So the
+    // caller does not build this one at all — they hold it, and the fields that
+    // cannot travel are filled by whichever library calls know how.
     let b = bind("typedef struct { int ok; void* options; } F;\nint use_it(const F* f);\n");
-    assert!(!b.symbols.contains_key("use_it"), "{:?}", b.symbols.get("use_it"));
-    assert!(why_skipped(&b, "use_it").contains("could not make the trip"), "{:?}", b.skipped);
+    assert_eq!(args(&b, "use_it"), ["handle<F>"]);
+    assert!(b.structs["F"].held);
 }
 
 #[test]

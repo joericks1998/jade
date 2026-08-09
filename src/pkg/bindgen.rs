@@ -293,7 +293,17 @@ impl TypeEnv {
                 continue;
             }
             if let Some(u) = pointee(&key).and_then(|inner| self.alias.get(inner)) {
-                let next = format!("{u}*");
+                // `const` has to be carried across here as well as in the branch
+                // above. `normalize` strips it to make the lookup key, so
+                // rebuilding from the key alone turned `const uint8_t *` into
+                // `unsigned char *` — and a read-only input buffer read as a
+                // writable one is scratch the shim allocates and the caller's
+                // data never reaches the library.
+                let next = if s.contains("const") && !u.contains("const") {
+                    format!("const {u}*")
+                } else {
+                    format!("{u}*")
+                };
                 if normalize(&next) == key {
                     break;
                 }
@@ -554,6 +564,10 @@ enum Mapped {
     /// was inferred. `Out` already carries one of these; a parameter that is not
     /// an out-parameter needed somewhere to put it too.
     Assumed(String, String),
+    /// A `handle<T>` for a struct the *caller* allocates. Distinct from `One`
+    /// only in that the struct's table has to be written out with `held = true`,
+    /// which is what makes the generator emit `<T>_new` and the rest.
+    Held(String),
     /// A `bytes` argument that also swallows the following length parameter.
     BytesPair(String),
     /// An out-parameter, plus what was assumed to decide it (if anything).
@@ -795,13 +809,12 @@ fn map_param(
         // afterwards shows that it went missing.
         if is_const {
             let fields = env.complete.get(inner).expect("checked above");
+            // Unless a field would go missing. Then the caller cannot build a
+            // complete one, so they hold one instead: allocated on the C heap,
+            // reached through a handle, and filled by whichever library calls
+            // know how to fill it.
             if struct_loses_a_field(fields, env) {
-                return Mapped::Reject(format!(
-                    "reads `{}`, and some of its fields are not types the FFI can carry. Passing \
-                     it would give the library a zero wherever a field could not make the trip, \
-                     in a place the caller believed they had set",
-                    env.c_name(inner)
-                ));
+                return Mapped::Held(format!("handle<{}>", env.c_name(inner)));
             }
             return Mapped::One(format!("in_struct:{}", env.c_name(inner)));
         }
@@ -829,15 +842,14 @@ fn map_param(
         // exactly what out-parameters exist for. Together they identify a
         // struct that is both threaded and unrepresentable, which is the
         // combination that cannot work.
+        // Which is a struct Jade holds rather than one it builds. The
+        // allocation happens once, on the C heap, and every call is handed the
+        // same pointer — so the fields the FFI cannot carry stay exactly where
+        // the library put them, which is the whole difficulty.
         let threaded = counts.get(inner).copied().unwrap_or(0) > 1;
         let lossy = env.complete.get(inner).is_some_and(|f| struct_loses_a_field(f, env));
         if threaded && lossy {
-            return Mapped::Reject(format!(
-                "takes `{}`, which the caller allocates and the library keeps between calls. \
-                 Some of its fields are not types the FFI can carry, so every call would get a \
-                 fresh zeroed one instead of the state the last call left",
-                env.c_name(inner)
-            ));
+            return Mapped::Held(format!("handle<{}>", env.c_name(inner)));
         }
 
         return Mapped::Out(format!("out_struct:{}", env.c_name(inner)), None);
@@ -1157,13 +1169,13 @@ pub fn from_header(
                 // a reference to a table that was never written.
                 let mut entries = Vec::new();
                 let mut failed = None;
-                for s in used_structs {
+                for (s, held) in used_structs {
                     // The spec carries the C spelling (`struct Info`); the
                     // environment is keyed by the normalized one. The table
                     // that comes out is keyed to match the spec, since that is
                     // what the shim looks the definition up by.
                     let Some(fields) = env.complete.get(&normalize(&s)) else { continue };
-                    match struct_entry(fields, &env) {
+                    match struct_entry(fields, &env, held) {
                         Ok(entry) => entries.push((s, entry)),
                         Err(why) => {
                             failed = Some(why);
@@ -1175,7 +1187,19 @@ pub fn from_header(
                     b.skipped.push((name.to_string(), why));
                     continue;
                 }
-                b.structs.extend(entries);
+                // `held` is sticky. One library takes the same struct by value
+                // in a one-shot call and threads it through a sequence in
+                // another, and if either use needs it held then it is held —
+                // otherwise the last symbol read would decide, and the handle
+                // the other calls expect would stop being generated.
+                for (name, entry) in entries {
+                    match b.structs.get_mut(&name) {
+                        Some(prior) => prior.held |= entry.held,
+                        None => {
+                            b.structs.insert(name, entry);
+                        }
+                    }
+                }
                 for why in assumed {
                     b.assumed.push((name.to_string(), why));
                 }
@@ -1263,7 +1287,7 @@ fn struct_loses_a_field(fields: &[(String, String)], env: &TypeEnv) -> bool {
 /// Only the fields the FFI can carry. A struct with one unrepresentable field
 /// is still worth binding for the rest, so this drops fields rather than the
 /// struct — but a struct with *no* usable field is not worth a table.
-fn struct_entry(fields: &[(String, String)], env: &TypeEnv) -> Result<CStruct, String> {
+fn struct_entry(fields: &[(String, String)], env: &TypeEnv, held: bool) -> Result<CStruct, String> {
     let usable: Vec<(String, String)> = fields
         .iter()
         .filter_map(|(f, t)| {
@@ -1278,10 +1302,57 @@ fn struct_entry(fields: &[(String, String)], env: &TypeEnv) -> Result<CStruct, S
             Some((f.clone(), jt.to_string()))
         })
         .collect();
-    if usable.is_empty() {
+    // A struct passed by value has to carry *something*, or there is nothing to
+    // hand back. A held one does not: it is reached through a handle, so the
+    // library can keep whatever it likes in there and Jade never needs to see
+    // it. Refusing an all-opaque held struct would refuse the shape handles
+    // exist for.
+    if usable.is_empty() && !held {
         return Err("fills a struct with no field the FFI can carry".to_string());
     }
-    Ok(CStruct { fields: usable })
+    Ok(CStruct { fields: usable, held, buffers: if held { buffer_fields(fields, env) } else { Vec::new() } })
+}
+
+/// The buffer fields of a held struct: a byte pointer, and the count declared
+/// next to it.
+///
+/// The same positional idiom the parameter list uses, applied to a struct
+/// definition, because C encodes it the same way in both. `lzma_stream` declares
+/// `next_in` then `avail_in`, then `next_out` then `avail_out`; `ZSTD_outBuffer`
+/// declares `dst` then `size`.
+///
+/// These are exactly the fields that make a held struct necessary — the pointers
+/// a codec keeps its position in — so a held struct without them is a handle you
+/// can make and never feed.
+fn buffer_fields(fields: &[(String, String)], env: &TypeEnv) -> Vec<crate::project::CBuffer> {
+    let mut out = Vec::new();
+    for (a, b) in fields.iter().zip(fields.iter().skip(1)) {
+        let ta = env.expand(&a.1);
+        let na = normalize(&ta);
+        let byte_like = pointee(&na).map(squash).is_some_and(|s| {
+            matches!(s.as_str(), "void" | "char" | "unsignedchar" | "signedchar" | "uint8_t" | "int8_t")
+        });
+        if !byte_like || !is_int(&normalize(&env.expand(&b.1))) {
+            continue;
+        }
+        // A field the library set aside for its own future use is not a buffer,
+        // whatever its type. `lzma_stream` ends in four `void *reserved_ptr` and
+        // several `reserved_int`, and two of them happen to sit next to each
+        // other in the pointer-then-count order. Generating a setter for one
+        // would offer a way to write where the library requires a zero.
+        if a.0.starts_with("reserved") || b.0.starts_with("reserved") {
+            continue;
+        }
+        out.push(crate::project::CBuffer {
+            ptr: a.0.clone(),
+            len: b.0.clone(),
+            // `const` is what says which direction it runs, exactly as it does
+            // for a parameter: a read-only pointer is data going in, a writable
+            // one is room for the library to fill.
+            writable: !ta.contains("const"),
+        });
+    }
+    out
 }
 
 /// Map one `FunctionDecl`. Returns the symbol, the struct types it needs, and
@@ -1291,7 +1362,7 @@ fn map_function(
     env: &TypeEnv,
     produced: &std::collections::HashSet<String>,
     counts: &HashMap<String, usize>,
-) -> Result<(CSymbol, Vec<String>, Vec<String>), String> {
+) -> Result<(CSymbol, Vec<(String, bool)>, Vec<String>), String> {
     let raw_ret = ret_type_of(node)?;
     // A returned pointer whose length arrives through a parameter cannot be
     // decided from the return type alone, so the refusal is held until the
@@ -1325,7 +1396,9 @@ fn map_function(
         parms.iter().map(|p| p.get("name").and_then(Value::as_str)).collect();
 
     let mut args: Vec<String> = Vec::new();
-    let mut structs: Vec<String> = Vec::new();
+    // Each struct the symbol names, and whether it is one Jade *holds* rather
+    // than one it builds.
+    let mut structs: Vec<(String, bool)> = Vec::new();
     let mut assumed: Vec<String> = Vec::new();
     // Indices into `args` of the out-parameters, and the source parameter each
     // came from, so a name can be attached afterwards — how many there are is
@@ -1347,7 +1420,13 @@ fn map_function(
                 // same way an `out_struct` does. It is an ordinary argument
                 // rather than an out-parameter, so it is collected here.
                 if let Some(name) = s.strip_prefix("in_struct:") {
-                    structs.push(name.to_string());
+                    structs.push((name.to_string(), false));
+                }
+                args.push(s);
+            }
+            Mapped::Held(s) => {
+                if let Some(name) = s.strip_prefix("handle<").and_then(|n| n.strip_suffix('>')) {
+                    structs.push((name.to_string(), true));
                 }
                 args.push(s);
             }
@@ -1371,7 +1450,7 @@ fn map_function(
             }
             Mapped::Out(s, why) => {
                 if let Some(name) = s.strip_prefix("out_struct:") {
-                    structs.push(name.to_string());
+                    structs.push((name.to_string(), false));
                 }
                 if let Some(w) = why {
                     assumed.push(w);

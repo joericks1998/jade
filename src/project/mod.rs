@@ -572,9 +572,52 @@ pub struct DependencyEntry {
 /// declared by the header, so the compiler converts. Listing a field that the
 /// struct does not have is a compile error in the generated shim, naming the
 /// field — which is the failure mode you want.
+/// `held = true` marks a struct the *caller* allocates and the library keeps
+/// between calls — `lzma_stream`, `ZSTD_outBuffer`. Those cannot be passed by
+/// value in either direction: the shim would declare a fresh local every call,
+/// and the fields the FFI cannot carry, the pointers a codec keeps its position
+/// in, would be dropped. The library would get a zeroed struct instead of the
+/// state the last call left.
+///
+/// A held struct is allocated once, on the C heap, and Jade holds a handle to
+/// it. The generator writes `<T>_new`, `<T>_free`, `<T>_get` and `<T>_set`
+/// alongside the library's own symbols, so the fields that *can* travel are
+/// readable and writable and the ones that cannot simply stay where the library
+/// put them.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct CStruct {
     pub fields: Vec<(String, String)>,
+    #[serde(default)]
+    pub held: bool,
+    /// Buffer fields of a held struct: a pointer and the count beside it.
+    ///
+    /// The pointer types the FFI cannot carry are exactly the ones a codec keeps
+    /// its position in, so a held struct with no way to set them is a handle you
+    /// can make and never feed. The shim owns the memory these point at, for the
+    /// duration of the handle, because the library expects it to still be there
+    /// on the next call and a Jade blob makes no such promise.
+    #[serde(default)]
+    pub buffers: Vec<CBuffer>,
+}
+
+/// One buffer field of a held struct, and the field holding its extent.
+///
+/// ```toml
+/// buffers = [
+///   { ptr = "next_in",  len = "avail_in",  writable = false },
+///   { ptr = "next_out", len = "avail_out", writable = true },
+/// ]
+/// ```
+///
+/// `writable` decides which accessors the field gets. A read-only one is *set*
+/// from a blob the caller has; a writable one is *allocated* to a size and then
+/// *taken* from once the library has filled it.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct CBuffer {
+    pub ptr: String,
+    pub len: String,
+    #[serde(default)]
+    pub writable: bool,
 }
 
 /// Placeholder expanded to a platform tag when resolving a dependency `url`.

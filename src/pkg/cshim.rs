@@ -924,17 +924,28 @@ pub fn generate(
     }
     let out_specs = || parsed.iter().flat_map(|p| p.outs.iter().map(|&i| &p.args[i]));
     let returns_bytes = names.iter().any(|s| symbols[*s].ret == "bytes");
+    // A held struct's `take` hands back what the library wrote into its buffer.
+    let takes_bytes = structs.values().any(|d| d.held && d.buffers.iter().any(|b| b.writable));
     if returns_bytes
+        || takes_bytes
         || out_specs().any(|a| matches!(a, ArgSpec::OutBuffer { .. } | ArgSpec::InoutBytes { .. }))
     {
         out.push_str(BYTES_HELPER);
     }
-    if parsed.iter().any(|p| p.args.iter().any(|a| matches!(a, ArgSpec::InStruct { .. }))) {
+    // `jade_shim_field` has a caller only where a struct's fields are actually
+    // read out of a Jade value, which a held struct with nothing carryable does
+    // not do. An unused static function is a `-Wall -Werror` build failure.
+    if parsed.iter().any(|p| p.args.iter().any(|a| matches!(a, ArgSpec::InStruct { .. })))
+        || structs.values().any(|d| d.held && !d.fields.is_empty())
+    {
         out.push_str(FIELD_HELPER);
     }
     // A struct is built for an `out_struct`, and now also whenever a symbol has
     // more than one thing to hand back — which needs no out_struct at all.
-    let mut needs_struct = out_specs().any(|a| matches!(a, ArgSpec::OutStruct { .. }));
+    // A held struct's getter builds one too — but only when it has a field to
+    // put in it, which is the same condition its getter is emitted under.
+    let mut needs_struct = out_specs().any(|a| matches!(a, ArgSpec::OutStruct { .. }))
+        || structs.values().any(|d| d.held && !d.fields.is_empty());
     for (sym, p) in names.iter().zip(&parsed) {
         let ret_t = parse_ret(name, sym, &symbols[*sym].ret)?;
         let outs: Vec<&ArgSpec> = p.outs.iter().map(|&i| &p.args[i]).collect();
@@ -947,9 +958,8 @@ pub fn generate(
     // three have to be checked before deciding the helper is dead.
     let uses_handle = parsed.iter().any(|p| {
         p.args.iter().any(|a| matches!(a, ArgSpec::Handle { .. } | ArgSpec::OutHandle { .. }))
-    }) || names
-        .iter()
-        .any(|s| handle_target(&symbols[*s].ret).is_some());
+    }) || names.iter().any(|s| handle_target(&symbols[*s].ret).is_some())
+        || structs.values().any(|d| d.held);
     if uses_handle {
         out.push_str(HANDLE_HELPER);
     }
@@ -981,9 +991,41 @@ pub fn generate(
         out.push_str(&wrapper(name, sym, &symbols[*sym], structs, headers)?);
     }
 
+    // A struct Jade holds gets four bindings of its own. Sorted, for the same
+    // reason the symbols are: a reinstall should produce an identical file.
+    let mut held: Vec<&String> =
+        structs.iter().filter(|(_, d)| d.held).map(|(t, _)| t).collect();
+    held.sort();
+    for t in &held {
+        if headers.is_empty() {
+            return Err(format!(
+                "dependency '{name}': {t} is held, so the dependency needs \
+                 `headers = [\"<the library's header>\"]`. The shim allocates a real {t} and \
+                 reads its fields, and it cannot do either without the declaration."
+            ));
+        }
+        check_c_ident(name, t, t, "held struct")?;
+        out.push_str(&held_accessors(name, t, &structs[*t])?);
+    }
+
     out.push_str("static const JadeBinding BINDINGS[] = {\n");
     for sym in &names {
         out.push_str(&format!("    {{ \"{sym}\", jade_shim_{sym} }},\n"));
+    }
+    for t in &held {
+        for bound in held_bindings(t, &structs[*t]) {
+            // A name the library also exports would give the binding table two
+            // entries under one name, and the loader takes the first. Refused
+            // rather than resolved, because either answer is a surprise.
+            if symbols.contains_key(&bound) {
+                return Err(format!(
+                    "dependency '{name}': the library exports '{bound}', which is also a name the \
+                     held struct {t} takes for one of its own bindings. Rename one of them, or \
+                     drop `held` from [dependencies.{name}.structs.{t}]."
+                ));
+            }
+            out.push_str(&format!("    {{ \"{bound}\", jade_shim_{bound} }},\n"));
+        }
     }
     out.push_str("};\n\n");
 
@@ -1128,19 +1170,49 @@ fn emit_in_struct(
     def: &CStruct,
     at: usize,
 ) -> Result<String, String> {
-    let names: Vec<String> = def.fields.iter().map(|(f, _)| format!("\"{f}\"")).collect();
     let mut b = format!(
         "    {type_name} {var};\n\
-         \x20   memset(&{var}, 0, sizeof {var});\n\
-         \x20   const JadeStruct* {var}_s = argv[{at}].data.as_struct;\n\
-         \x20   static const char* const {var}_names[] = {{ {} }};\n\
+         \x20   memset(&{var}, 0, sizeof {var});\n"
+    );
+    b.push_str(&emit_struct_fill(
+        pkg,
+        sym,
+        var,
+        &format!("{var}."),
+        type_name,
+        def,
+        &format!("argv[{at}].data.as_struct"),
+    )?);
+    Ok(b)
+}
+
+/// Write the fields of a Jade struct into a C one, wherever that C one lives.
+///
+/// `target` is the C expression the fields hang off, with its accessor: `foo.`
+/// for a local, `sp->` for one reached through a pointer. Shared by the
+/// argument case and by a held struct's setter, which differ only in that.
+fn emit_struct_fill(
+    pkg: &str,
+    sym: &str,
+    var: &str,
+    target: &str,
+    type_name: &str,
+    def: &CStruct,
+    src: &str,
+) -> Result<String, String> {
+    let names: Vec<String> = def.fields.iter().map(|(f, _)| format!("\"{f}\"")).collect();
+    // `{ NULL }` rather than `{ }`, which is not valid C89/C99 for an
+    // initializer list. A held struct with no carryable field reaches this.
+    let list = if names.is_empty() { "NULL".to_string() } else { names.join(", ") };
+    let mut b = format!(
+        "    const JadeStruct* {var}_s = {src};\n\
+         \x20   static const char* const {var}_names[] = {{ {list} }};\n\
          \x20   for (size_t {var}_i = 0; {var}_s && {var}_i < {var}_s->len; {var}_i++) {{\n\
          \x20       if (jade_shim_known({var}_names, {}, {var}_s->keys[{var}_i])) continue;\n\
          \x20       out->tag = JADE_FFI_ERROR;\n\
          \x20       out->data.as_str = jade_shim_nofield(\"{type_name}\", {var}_s->keys[{var}_i]);\n\
          \x20       return 1;\n\
          \x20   }}\n",
-        names.join(", "),
         def.fields.len()
     );
     for (n, (field, ty)) in def.fields.iter().enumerate() {
@@ -1159,12 +1231,235 @@ fn emit_in_struct(
              \x20           out->data.as_str = \"{sym}: field '{field}' of {type_name} must be a {ty}\";\n\
              \x20           return 1;\n\
              \x20       }}\n\
-             \x20       {var}.{field} = ({}){var}_{n}->data.{};\n\
+             \x20       {target}{field} = ({}){var}_{n}->data.{};\n\
              \x20   }}\n",
             t.tag, t.decl, t.field
         ));
     }
     Ok(b)
+}
+
+/// The Jade-facing name prefix for a held struct's accessors.
+///
+/// A C type name is not always an identifier: a struct reachable only by its tag
+/// is spelled `struct Ctx_s`, and the space cannot appear in a Jade call. The
+/// non-identifier characters become underscores, which is the same name a person
+/// would have picked.
+fn held_prefix(type_name: &str) -> String {
+    type_name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .collect()
+}
+
+/// The four bindings a held struct gets alongside the library's own symbols.
+///
+/// A struct the caller allocates and the library keeps between calls cannot be
+/// passed by value in either direction: the shim would declare a fresh local
+/// every call, and the pointers a codec keeps its position in would be dropped.
+/// So Jade holds one instead. `_new` allocates it zeroed on the C heap, `_free`
+/// releases it, and `_get`/`_set` read and write the fields that can travel —
+/// the ones that cannot simply stay where the library put them, which is the
+/// entire difficulty this shape exists to solve.
+fn held_accessors(pkg: &str, type_name: &str, def: &CStruct) -> Result<String, String> {
+    let p = held_prefix(type_name);
+    let n = def.fields.len();
+    let k = def.buffers.len();
+
+    // With buffer fields the allocation is a wrapper: the struct itself, then
+    // the memory its pointers point at. C guarantees a pointer to a struct is a
+    // pointer to its first member, so the library still receives a plain
+    // `{type_name}*` and knows nothing about the rest.
+    //
+    // The shim has to own that memory because the library expects it to still be
+    // there on the next call, and a Jade blob makes no such promise — it is the
+    // caller's, and Jade may collect it the moment the call returns.
+    let mut b = String::new();
+    let (alloc_ty, deref) = if k > 0 {
+        b.push_str(&format!(
+            "\ntypedef struct {{ {type_name} s; void* owned[{k}]; size_t owned_len[{k}]; }} jade_held_{p};\n"
+        ));
+        (format!("jade_held_{p}"), format!("&((jade_held_{p}*)vp)->s"))
+    } else {
+        (type_name.to_string(), format!("({type_name}*)vp"))
+    };
+
+    let free_owned: String = (0..k)
+        .map(|i| format!("    free(((jade_held_{p}*)sp)->owned[{i}]);\n"))
+        .collect();
+
+    b.push_str(&format!(
+        "\nstatic int jade_shim_{p}_new(size_t argc, const JadeVal* argv, JadeVal* out) {{\n\
+         \x20   (void)argv;\n\
+         \x20   if (argc != 0) return 1;\n\
+         \x20   {alloc_ty}* sp = ({alloc_ty}*)calloc(1, sizeof({alloc_ty}));\n\
+         \x20   if (!sp) return 1;\n\
+         \x20   JadeHandle* h = jade_shim_handle((void*)sp, \"{type_name}\");\n\
+         \x20   if (!h) {{ free(sp); return 1; }}\n\
+         \x20   out->tag = JADE_FFI_HANDLE;\n\
+         \x20   out->data.as_handle = h;\n\
+         \x20   return 0;\n\
+         }}\n\
+         \nstatic int jade_shim_{p}_free(size_t argc, const JadeVal* argv, JadeVal* out) {{\n\
+         \x20   if (argc != 1) return 1;\n\
+         \x20   void* sp = NULL;\n\
+         \x20   if (!jade_shim_unwrap(&argv[0], \"{type_name}\", &sp)) return 1;\n\
+         {free_owned}\
+         \x20   free(sp);\n\
+         \x20   out->tag = JADE_FFI_NIL;\n\
+         \x20   out->data.as_nil = 0;\n\
+         \x20   return 0;\n\
+         }}\n"
+    ));
+
+    // A held struct with no field the FFI can carry gets no getter and no
+    // setter. There would be nothing for either to do — an empty struct out, and
+    // every key refused on the way in — and emitting them leaves the field
+    // lookup helper with no caller, which `-Wall -Werror` refuses to compile.
+    if !def.fields.is_empty() {
+        b.push_str(&format!(
+        "\nstatic int jade_shim_{p}_get(size_t argc, const JadeVal* argv, JadeVal* out) {{\n\
+         \x20   if (argc != 1) return 1;\n\
+         \x20   void* vp = NULL;\n\
+         \x20   if (!jade_shim_unwrap(&argv[0], \"{type_name}\", &vp)) return 1;\n\
+         \x20   {type_name}* sp = {deref};\n\
+         \x20   (void)sp;\n\
+         \x20   JadeStruct* j = jade_shim_struct(\"{type_name}\", {n});\n\
+         \x20   if (!j) return 1;\n"
+        ));
+    for (i, (field, ty)) in def.fields.iter().enumerate() {
+        let t = map_type(ty).ok_or_else(|| {
+            format!(
+                "dependency '{pkg}': held struct {type_name} reads field '{field}' as '{ty}', \
+                 which the Jade FFI cannot represent. Supported types are {SUPPORTED_TYPES}."
+            )
+        })?;
+        b.push_str(&emit_field("j", i, field, &t, &format!("sp->{field}")));
+    }
+    b.push_str(
+        "    out->tag = JADE_FFI_STRUCT;\n\
+         \x20   out->data.as_struct = j;\n\
+         \x20   return 0;\n\
+         }\n",
+    );
+
+        b.push_str(&format!(
+        "\nstatic int jade_shim_{p}_set(size_t argc, const JadeVal* argv, JadeVal* out) {{\n\
+         \x20   if (argc != 2) return 1;\n\
+         \x20   void* vp = NULL;\n\
+         \x20   if (!jade_shim_unwrap(&argv[0], \"{type_name}\", &vp)) return 1;\n\
+         \x20   if (argv[1].tag != JADE_FFI_STRUCT) return 1;\n\
+         \x20   {type_name}* sp = {deref};\n\
+         \x20   (void)sp;\n"
+    ));
+    // No memset: the struct already exists and the library has been filling it.
+    // A field left out keeps whatever is there, which is the only reading that
+    // makes sense for a value you are revising rather than building.
+    b.push_str(&emit_struct_fill(
+        pkg,
+        &format!("{p}_set"),
+        "st",
+        "sp->",
+        type_name,
+        def,
+        "argv[1].data.as_struct",
+    )?);
+        b.push_str(
+            "    out->tag = JADE_FFI_NIL;\n\
+             \x20   out->data.as_nil = 0;\n\
+             \x20   return 0;\n\
+             }\n",
+        );
+    }
+
+    for (i, buf) in def.buffers.iter().enumerate() {
+        let (ptr, len) = (&buf.ptr, &buf.len);
+        for f in [ptr, len] {
+            check_c_ident(pkg, type_name, f, "buffer field")?;
+        }
+        let head = format!(
+            "    if (argc != 2) return 1;\n\
+             \x20   void* vp = NULL;\n\
+             \x20   if (!jade_shim_unwrap(&argv[0], \"{type_name}\", &vp)) return 1;\n\
+             \x20   jade_held_{p}* w = (jade_held_{p}*)vp;\n"
+        );
+        if buf.writable {
+            // Room for the library to fill, then whatever it filled. Two calls
+            // rather than one, because how much of the buffer became real is
+            // something only the caller can work out: `lzma` counts down through
+            // `avail_out` and `zstd` counts up through `pos`, and no rule reads
+            // both.
+            b.push_str(&format!(
+                "\nstatic int jade_shim_{p}_alloc_{ptr}(size_t argc, const JadeVal* argv, JadeVal* out) {{\n\
+                 {head}\
+                 \x20   if (argv[1].tag != JADE_FFI_INT) return 1;\n\
+                 \x20   int64_t n = argv[1].data.as_int;\n\
+                 \x20   if (n < 0) return 1;\n\
+                 \x20   void* nb = malloc((size_t)(n ? n : 1));\n\
+                 \x20   if (!nb) return 1;\n\
+                 \x20   free(w->owned[{i}]);\n\
+                 \x20   w->owned[{i}] = nb;\n\
+                 \x20   w->owned_len[{i}] = (size_t)n;\n\
+                 \x20   w->s.{ptr} = nb;\n\
+                 \x20   w->s.{len} = (size_t)n;\n\
+                 \x20   out->tag = JADE_FFI_NIL;\n\
+                 \x20   out->data.as_nil = 0;\n\
+                 \x20   return 0;\n\
+                 }}\n\
+                 \nstatic int jade_shim_{p}_take_{ptr}(size_t argc, const JadeVal* argv, JadeVal* out) {{\n\
+                 {head}\
+                 \x20   if (argv[1].tag != JADE_FFI_INT) return 1;\n\
+                 \x20   int64_t n = argv[1].data.as_int;\n\
+                 \x20   if (n < 0) return 1;\n\
+                 \x20   /* Clamp: a caller asking for more than was allocated would\n\
+                 \x20    * otherwise read past the buffer. */\n\
+                 \x20   if ((size_t)n > w->owned_len[{i}]) n = (int64_t)w->owned_len[{i}];\n\
+                 \x20   JadeBytes* tb = jade_shim_bytes(w->owned[{i}], (size_t)n);\n\
+                 \x20   if (!tb) return 1;\n\
+                 \x20   out->tag = JADE_FFI_BYTES;\n\
+                 \x20   out->data.as_bytes = tb;\n\
+                 \x20   return 0;\n\
+                 }}\n"
+            ));
+        } else {
+            b.push_str(&format!(
+                "\nstatic int jade_shim_{p}_set_{ptr}(size_t argc, const JadeVal* argv, JadeVal* out) {{\n\
+                 {head}\
+                 \x20   if (argv[1].tag != JADE_FFI_BYTES) return 1;\n\
+                 \x20   size_t n = argv[1].data.as_bytes ? argv[1].data.as_bytes->len : (size_t)0;\n\
+                 \x20   void* nb = malloc(n ? n : 1);\n\
+                 \x20   if (!nb) return 1;\n\
+                 \x20   if (n) memcpy(nb, argv[1].data.as_bytes->data, n);\n\
+                 \x20   free(w->owned[{i}]);\n\
+                 \x20   w->owned[{i}] = nb;\n\
+                 \x20   w->owned_len[{i}] = n;\n\
+                 \x20   w->s.{ptr} = nb;\n\
+                 \x20   w->s.{len} = n;\n\
+                 \x20   out->tag = JADE_FFI_NIL;\n\
+                 \x20   out->data.as_nil = 0;\n\
+                 \x20   return 0;\n\
+                 }}\n"
+            ));
+        }
+    }
+    Ok(b)
+}
+
+/// The Jade-facing names a held struct contributes, in binding-table order.
+fn held_bindings(type_name: &str, def: &CStruct) -> Vec<String> {
+    let p = held_prefix(type_name);
+    let verbs: &[&str] =
+        if def.fields.is_empty() { &["new", "free"] } else { &["new", "free", "get", "set"] };
+    let mut v: Vec<String> = verbs.iter().map(|w| format!("{p}_{w}")).collect();
+    for buf in &def.buffers {
+        if buf.writable {
+            v.push(format!("{p}_alloc_{}", buf.ptr));
+            v.push(format!("{p}_take_{}", buf.ptr));
+        } else {
+            v.push(format!("{p}_set_{}", buf.ptr));
+        }
+    }
+    v
 }
 
 /// The static C function of exactly the declared shape, which the library will

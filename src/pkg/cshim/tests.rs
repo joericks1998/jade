@@ -38,12 +38,39 @@ fn generate_with(
                 n.to_string(),
                 crate::project::CStruct {
                     fields: fields.iter().map(|(f, t)| (f.to_string(), t.to_string())).collect(),
+                    held: false,
+                    buffers: Vec::new(),
                 },
             )
         })
         .collect();
     let headers: Vec<String> = headers.iter().map(|h| h.to_string()).collect();
     super::generate(name, syms, &structs, &headers)
+}
+
+/// The same, for a struct Jade holds rather than one it builds.
+fn generate_held(
+    name: &str,
+    syms: &HashMap<String, CSymbol>,
+    type_name: &str,
+    fields: &[(&str, &str)],
+    buffers: &[(&str, &str, bool)],
+) -> Result<String, String> {
+    let def = crate::project::CStruct {
+        fields: fields.iter().map(|(f, t)| (f.to_string(), t.to_string())).collect(),
+        held: true,
+        buffers: buffers
+            .iter()
+            .map(|(p, l, w)| crate::project::CBuffer {
+                ptr: p.to_string(),
+                len: l.to_string(),
+                writable: *w,
+            })
+            .collect(),
+    };
+    let structs: HashMap<String, crate::project::CStruct> =
+        [(type_name.to_string(), def)].into_iter().collect();
+    super::generate(name, syms, &structs, &["fixture.h".to_string()])
 }
 
 #[test]
@@ -740,6 +767,81 @@ extern int use_one(const FLAGS* f, int mode);
     assert!(src.contains("FLAGS istruct0;") && src.contains("FLAGS istruct1;"), "collide:\n{src}");
     if let Err(e) = compiles(&src, &[("fixture.h", header)]) {
         panic!("struct input shim does not compile:\n{e}\n--- source ---\n{src}");
+    }
+}
+
+// ── A struct Jade holds ──────────────────────────────────────────────────
+
+#[test]
+fn a_held_struct_gets_its_own_bindings() {
+    let syms = symbols(&[("code", sym(&["handle<strm>", "int"], "int"))]);
+    let src = generate_held("lz", &syms, "strm", &[("avail_in", "int")], &[]).unwrap();
+    for f in ["strm_new", "strm_free", "strm_get", "strm_set"] {
+        assert!(src.contains(&format!(r#"{{ "{f}", jade_shim_{f} }}"#)), "no {f}:\n{src}");
+    }
+    assert!(src.contains("calloc(1, sizeof(strm))"), "not heap allocated:\n{src}");
+}
+
+#[test]
+fn a_held_struct_with_buffers_owns_what_its_pointers_point_at() {
+    // The library expects the memory to still be there on the next call, and a
+    // Jade blob makes no such promise — it is the caller's, and Jade may collect
+    // it the moment the call returns.
+    let syms = symbols(&[("code", sym(&["handle<strm>", "int"], "int"))]);
+    let bufs = &[("next_in", "avail_in", false), ("next_out", "avail_out", true)][..];
+    let src = generate_held("lz", &syms, "strm", &[("avail_in", "int")], bufs).unwrap();
+
+    assert!(src.contains("typedef struct { strm s; void* owned[2];"), "no wrapper:\n{src}");
+    // A read-only buffer is set from a blob; a writable one is allocated to a
+    // size and then taken from.
+    assert!(src.contains("jade_shim_strm_set_next_in"), "no input setter:\n{src}");
+    assert!(src.contains("jade_shim_strm_alloc_next_out"), "no output allocator:\n{src}");
+    assert!(src.contains("jade_shim_strm_take_next_out"), "no output taker:\n{src}");
+    assert!(!src.contains("jade_shim_strm_alloc_next_in"), "input needs no allocator:\n{src}");
+    // Both allocations are released with the struct.
+    assert!(src.contains("free(((jade_held_strm*)sp)->owned[0]);"), "leaks 0:\n{src}");
+    assert!(src.contains("free(((jade_held_strm*)sp)->owned[1]);"), "leaks 1:\n{src}");
+    // And a caller cannot read past what was allocated.
+    assert!(src.contains("if ((size_t)n > w->owned_len[1])"), "unclamped take:\n{src}");
+}
+
+#[test]
+fn a_held_struct_with_nothing_carryable_gets_no_getter_or_setter() {
+    // There would be nothing for either to do — an empty struct out, and every
+    // key refused on the way in.
+    let syms = symbols(&[("code", sym(&["handle<opaque_state>", "int"], "int"))]);
+    let src = generate_held("lz", &syms, "opaque_state", &[], &[]).unwrap();
+    assert!(src.contains(r#"{ "opaque_state_new""#), "still needs a constructor:\n{src}");
+    assert!(!src.contains("opaque_state_get"), "should not emit a getter:\n{src}");
+}
+
+#[test]
+fn a_held_structs_binding_name_may_not_collide_with_the_library() {
+    let syms = symbols(&[("strm_new", sym(&["int"], "int"))]);
+    let err = generate_held("lz", &syms, "strm", &[("avail_in", "int")], &[]).unwrap_err();
+    assert!(err.contains("Rename one of them"), "should name the clash: {err}");
+}
+
+#[test]
+fn a_held_struct_shim_compiles_against_a_real_header() {
+    let header = r#"
+#ifndef FIXTURE_H
+#define FIXTURE_H
+#include <stddef.h>
+typedef struct {
+    const unsigned char* next_in;  size_t avail_in;
+    unsigned char* next_out;       size_t avail_out;
+    void* internal;
+} strm;
+extern int strm_code(strm* s, int action);
+#endif
+"#;
+    let syms = symbols(&[("strm_code", sym(&["handle<strm>", "int"], "int"))]);
+    let bufs = &[("next_in", "avail_in", false), ("next_out", "avail_out", true)][..];
+    let fields = &[("avail_in", "int"), ("avail_out", "int")][..];
+    let src = generate_held("lz", &syms, "strm", fields, bufs).unwrap();
+    if let Err(e) = compiles(&src, &[("fixture.h", header)]) {
+        panic!("held struct shim does not compile:\n{e}\n--- source ---\n{src}");
     }
 }
 
