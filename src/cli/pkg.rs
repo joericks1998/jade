@@ -326,24 +326,72 @@ fn add_declared_dependencies(
 
     let mut added: Vec<String> = Vec::new();
     let mut local: Vec<String> = Vec::new();
+    let mut upgraded: Vec<String> = Vec::new();
 
     for dep in declared {
         if let Some(existing) = have.get(&dep.name) {
-            let same = existing.version.as_deref().unwrap_or(pkg::LOCAL_VERSION) == dep.version;
-            if !same {
-                fail(format!(
-                    "'{from}' needs {} {}, and this project already has {} {}.\n  \
-                     One version of a dependency is loaded per program, so both cannot be \
-                     installed —\n  a second copy would have its own state. Align the versions, \
-                     or drop one of the two\n  packages that disagree.",
-                    dep.name,
-                    dep.version,
-                    dep.name,
-                    existing.version.as_deref().unwrap_or(pkg::LOCAL_VERSION)
-                ));
+            let mine = existing.version.as_deref().unwrap_or(pkg::LOCAL_VERSION);
+            if mine == dep.version {
+                // Two packages needing the same dependency is the ordinary case.
+                continue;
             }
-            // Two packages needing the same dependency is the ordinary case.
-            continue;
+
+            // One version is loaded per program, so the two have to become one.
+            // The higher of them is chosen — Go's rule, and the only one
+            // available without a registry: there is no third version to go and
+            // fetch, so the choice is between the two already named.
+            //
+            // Only when both are URLs and both are orderable. A path names a
+            // file on this machine and a version like `local` orders against
+            // nothing, so those fall through to the refusal below and the user
+            // decides.
+            let both_urls = existing.url.is_some() && dep.source.starts_with("url+");
+            match pkg::compare_versions(&dep.version, mine).filter(|_| both_urls) {
+                // Keep what is here. The package asked for an older one and will
+                // get this instead.
+                Some(std::cmp::Ordering::Less) => {
+                    upgraded.push(format!(
+                        "{} {} over the {} it asked for",
+                        dep.name, mine, dep.version
+                    ));
+                    continue;
+                }
+                // Take the package's, which is newer than what this project had.
+                Some(std::cmp::Ordering::Greater) => {
+                    let url = dep.source.strip_prefix("url+").expect("checked by both_urls");
+                    let abi = if dep.abi == project::Abi::C.as_str() {
+                        project::Abi::C
+                    } else {
+                        project::Abi::Jade
+                    };
+                    manifest::add_dependency(
+                        root,
+                        &dep.name,
+                        manifest::Source::Url(url),
+                        Some(dep.version.as_str()),
+                        abi,
+                        None,
+                    )
+                    .unwrap_or_else(|e| fail(e));
+                    upgraded.push(format!(
+                        "{} {} over the {} this project had",
+                        dep.name, dep.version, mine
+                    ));
+                    continue;
+                }
+                Some(std::cmp::Ordering::Equal) => continue,
+                None => {}
+            }
+
+            fail(format!(
+                "'{from}' needs {} {}, and this project already has {} {}.\n  \
+                 One version of a dependency is loaded per program, so both cannot be \
+                 installed —\n  a second copy would have its own state. The higher of two \
+                 versions is normally\n  chosen, but these two cannot be ordered: that needs \
+                 both to come from a URL and to be\n  written as dotted numbers. Align them, \
+                 or drop one of the two packages that disagree.",
+                dep.name, dep.version, dep.name, mine
+            ));
         }
 
         match dep.source.strip_prefix("url+") {
@@ -380,10 +428,20 @@ fn add_declared_dependencies(
         );
     }
 
-    if added.is_empty() {
+    // Said out loud, never silently. Choosing the higher version means one of
+    // the two packages runs against something other than what it named, and if
+    // that version dropped something it uses, the failure is a missing symbol at
+    // run time. Naming the substitution is what makes that traceable.
+    for note in &upgraded {
+        println!("using {note}");
+    }
+
+    if added.is_empty() && upgraded.is_empty() {
         return;
     }
-    println!("{from} also needs {}", added.join(", "));
+    if !added.is_empty() {
+        println!("{from} also needs {}", added.join(", "));
+    }
 
     let manifest = load_or_exit(root);
     try_relock_and_install(root, &manifest).unwrap_or_else(|e| fail(e));
