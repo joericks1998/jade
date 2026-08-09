@@ -770,6 +770,74 @@ extern int use_one(const FLAGS* f, int mode);
     }
 }
 
+#[test]
+fn a_caller_sized_buffer_allocates_what_it_was_asked_for_and_hands_it_all_back() {
+    // For the writes whose extent only the documentation gives.
+    // `lzma_stream_header_encode(const lzma_stream_flags *, uint8_t *out)`
+    // writes exactly twelve bytes and says so nowhere a generator can read.
+    let src = generate("lz", &symbols(&[("enc", sym(&["sized_buffer:unsigned char"], "int"))]))
+        .unwrap();
+    assert!(src.contains("if (argv[0].tag != JADE_FFI_INT) return 1;"), "no count check:\n{src}");
+    assert!(src.contains("calloc((size_t)(n_want0 ? n_want0 : 1)"), "not allocated:\n{src}");
+    // All of it: the call reports a status, so there is nothing to trim by.
+    assert!(src.contains("jade_shim_bytes(sbuf0, (size_t)n_want0"), "not handed back:\n{src}");
+    assert!(src.contains("free(sbuf0);"), "leaked:\n{src}");
+}
+
+#[test]
+fn a_negative_or_absurd_count_is_refused_before_anything_is_allocated() {
+    let src = generate("lz", &symbols(&[("enc", sym(&["sized_buffer:unsigned char"], "int"))]))
+        .unwrap();
+    assert!(src.contains("if (n_want0 < 0)"), "unguarded:\n{src}");
+}
+
+#[test]
+fn a_caller_sized_buffer_shim_compiles() {
+    let syms = symbols(&[("enc", sym(&["int", "sized_buffer:unsigned char"], "int"))]);
+    let src = generate("lz", &syms).unwrap();
+    if let Err(e) = compiles(&src, &[]) {
+        panic!("sized buffer shim does not compile:\n{e}\n--- source ---\n{src}");
+    }
+}
+
+// ── A struct returned by value ───────────────────────────────────────────
+
+#[test]
+fn a_struct_returned_by_value_is_read_straight_out_of_the_return() {
+    // Nothing crosses the boundary but the value: no allocation, no ownership,
+    // nothing to release. Which register or stack slot it lands in is the ABI's
+    // business, which is why this needs the header like the others.
+    let fields: &[(&str, &str)] = &[("error", "int"), ("lowerBound", "int")];
+    let s = sym(&["int"], "struct:BOUNDS");
+    let src = generate_with("z", &symbols(&[("bounds", s)]), &[("BOUNDS", fields)], &["z.h"]).unwrap();
+    assert!(src.contains("BOUNDS r = bounds("), "not received by value:\n{src}");
+    assert!(src.contains("rs->vals[0].data.as_int = (int64_t)r.error;"), "field not read:\n{src}");
+}
+
+#[test]
+fn a_struct_return_needs_its_fields_declared_and_a_header() {
+    let s = sym(&["int"], "struct:BOUNDS");
+    let err = generate_with("z", &symbols(&[("f", s.clone())]), &[], &["z.h"]).unwrap_err();
+    assert!(err.contains("structs.BOUNDS"), "should name the missing table: {err}");
+
+    let fields: &[(&str, &str)] = &[("error", "int")];
+    let err = generate_with("z", &symbols(&[("f", s)]), &[("BOUNDS", fields)], &[]).unwrap_err();
+    assert!(err.contains("headers"), "should ask for a header: {err}");
+}
+
+#[test]
+fn a_struct_return_shim_compiles_against_a_real_header() {
+    let header = "typedef struct { size_t error; int lowerBound; int upperBound; } BOUNDS;\n\
+                  extern BOUNDS bounds(int p);\n";
+    let fields: &[(&str, &str)] =
+        &[("error", "int"), ("lowerBound", "int"), ("upperBound", "int")];
+    let syms = symbols(&[("bounds", sym(&["int"], "struct:BOUNDS"))]);
+    let src = generate_with("z", &syms, &[("BOUNDS", fields)], &["fixture.h"]).unwrap();
+    if let Err(e) = compiles(&src, &[("fixture.h", &format!("#include <stddef.h>\n{header}"))]) {
+        panic!("struct return shim does not compile:\n{e}\n--- source ---\n{src}");
+    }
+}
+
 // ── A struct Jade holds ──────────────────────────────────────────────────
 
 #[test]

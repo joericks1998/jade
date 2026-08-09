@@ -92,6 +92,22 @@ enum ArgSpec {
     /// library write into one would break that for the sake of the FFI. So the
     /// shim owns the buffer and Jade only ever sees the finished blob.
     OutBuffer { elem: String, name: Option<String> },
+    /// `sized_buffer:<ctype>` — one Jade integer in, the whole filled buffer
+    /// back. The shim allocates that many elements, passes the pointer, and
+    /// hands the lot over once the call returns.
+    ///
+    /// For the writes whose extent only the documentation gives.
+    /// `lzma_stream_header_encode(const lzma_stream_flags *, uint8_t *out)`
+    /// writes exactly twelve bytes and says so nowhere a generator can read. The
+    /// alternative to letting the caller state the size is that the symbol
+    /// cannot be called at all — and the caller stating it is what the C
+    /// underneath required of them anyway.
+    ///
+    /// Distinct from `out_buffer`, which takes its count from the next declared
+    /// C parameter and sizes the result by the return value. Here there is no
+    /// such parameter and the return is a status, so the count is a Jade
+    /// argument that reaches no further than the shim.
+    SizedBuffer { elem: String, name: Option<String> },
     /// `out_struct:<Type>` — no Jade argument. The shim declares a zeroed local
     /// of the real C type and passes its address.
     OutStruct { type_name: String, name: Option<String> },
@@ -170,6 +186,7 @@ impl ArgSpec {
                 | ArgSpec::Bytes
                 | ArgSpec::BytesPtr
                 | ArgSpec::InoutBytes { .. }
+                | ArgSpec::SizedBuffer { .. }
                 | ArgSpec::Handle { .. }
                 | ArgSpec::Callback { .. }
                 | ArgSpec::InoutScalar { .. }
@@ -192,6 +209,7 @@ impl ArgSpec {
                 | ArgSpec::OutScalar { .. }
                 | ArgSpec::InoutScalar { .. }
                 | ArgSpec::InoutBytes { .. }
+                | ArgSpec::SizedBuffer { .. }
         )
     }
 
@@ -203,7 +221,8 @@ impl ArgSpec {
             | ArgSpec::OutHandle { name, .. }
             | ArgSpec::OutScalar { name, .. }
             | ArgSpec::InoutScalar { name, .. }
-            | ArgSpec::InoutBytes { name } => name.as_deref(),
+            | ArgSpec::InoutBytes { name }
+            | ArgSpec::SizedBuffer { name, .. } => name.as_deref(),
             _ => None,
         }
     }
@@ -215,7 +234,9 @@ impl ArgSpec {
             ArgSpec::Bytes => "const void*, size_t".to_string(),
             ArgSpec::BytesPtr => "const void*".to_string(),
             ArgSpec::InoutBytes { .. } => "void*".to_string(),
-            ArgSpec::OutBuffer { elem, .. } => format!("{elem}*"),
+            ArgSpec::OutBuffer { elem, .. } | ArgSpec::SizedBuffer { elem, .. } => {
+                format!("{elem}*")
+            }
             ArgSpec::OutStruct { type_name, .. } => format!("{type_name}*"),
             ArgSpec::InStruct { type_name } => format!("const {type_name}*"),
             ArgSpec::Handle { name } => format!("{name}*"),
@@ -321,6 +342,14 @@ enum RetSpec {
     /// far it runs. Copied out, because the memory is the library's or the
     /// caller's blob and neither is Jade's to hold.
     Bytes,
+    /// `struct:<Type>` — the call returns the struct itself, not a pointer to
+    /// one. `ZSTD_bounds ZSTD_cParam_getBounds(ZSTD_cParameter)` is this.
+    ///
+    /// Nothing crosses the boundary but the value: it arrives in registers or
+    /// on the caller's stack, whichever the ABI says, and the shim reads the
+    /// fields out of it. That is the compiler's problem rather than the
+    /// generator's, which is exactly why this needs the header.
+    Struct(String),
     /// `handle<T>` — the library's `T*`, wrapped for Jade to hold.
     Handle(String),
 }
@@ -332,6 +361,7 @@ impl RetSpec {
             RetSpec::Nil => "void".to_string(),
             RetSpec::Scalar(t) => t.decl.to_string(),
             RetSpec::Bytes => "const void*".to_string(),
+            RetSpec::Struct(name) => name.clone(),
             RetSpec::Handle { 0: name } => format!("{name}*"),
         }
     }
@@ -343,6 +373,9 @@ fn parse_ret(pkg: &str, sym: &str, spec: &str) -> Result<RetSpec, String> {
     }
     if spec == "bytes" {
         return Ok(RetSpec::Bytes);
+    }
+    if let Some(name) = spec.strip_prefix("struct:") {
+        return check_c_ident(pkg, sym, name, "struct").map(|_| RetSpec::Struct(name.to_string()));
     }
     if let Some(name) = handle_target(spec) {
         return check_c_ident(pkg, sym, name, "handle").map(|_| RetSpec::Handle(name.to_string()));
@@ -363,6 +396,12 @@ fn parse_arg(pkg: &str, sym: &str, full: &str) -> Result<ArgSpec, String> {
         None => (full, None),
     };
 
+    if let Some(elem) = spec.strip_prefix("sized_buffer:") {
+        return check_c_ident(pkg, sym, elem, "sized_buffer").map(|_| ArgSpec::SizedBuffer {
+            elem: elem.to_string(),
+            name: out_name,
+        });
+    }
     if let Some(elem) = spec.strip_prefix("out_buffer:") {
         return check_c_ident(pkg, sym, elem, "out_buffer").map(|_| ArgSpec::OutBuffer {
             elem: elem.to_string(),
@@ -773,6 +812,35 @@ fn parse_symbol(
         }
     }
 
+    // A struct returned by value needs what the other two struct shapes need:
+    // a field list saying what to read, and the real header so the compiler
+    // knows how the value arrives. Which register or stack slot it lands in is
+    // the ABI's business, and only the declaration settles it.
+    if let Some(type_name) = spec.ret.strip_prefix("struct:") {
+        if !structs.contains_key(type_name) {
+            return Err(format!(
+                "dependency '{pkg}': symbol '{sym}' returns a `struct:{type_name}`, but there is \
+                 no [dependencies.{pkg}.structs.{type_name}] table saying which fields to read."
+            ));
+        }
+        if headers.is_empty() {
+            return Err(format!(
+                "dependency '{pkg}': symbol '{sym}' returns a `struct:{type_name}`, so the \
+                 dependency needs `headers = [\"<the library's header>\"]`. How a struct comes \
+                 back by value is the ABI's business, and only the declaration settles it."
+            ));
+        }
+        for (field, ty) in &structs[type_name].fields {
+            if map_type(ty).is_none() {
+                return Err(format!(
+                    "dependency '{pkg}': symbol '{sym}' reads field '{field}' of {type_name} as \
+                     '{ty}', which the Jade FFI cannot represent. Supported types are \
+                     {SUPPORTED_TYPES}."
+                ));
+            }
+        }
+    }
+
     // A returned blob and the parameter that sizes it only mean anything
     // together. One without the other is a manifest that says two different
     // things about what comes back, so both directions are refused by name.
@@ -928,7 +996,12 @@ pub fn generate(
     let takes_bytes = structs.values().any(|d| d.held && d.buffers.iter().any(|b| b.writable));
     if returns_bytes
         || takes_bytes
-        || out_specs().any(|a| matches!(a, ArgSpec::OutBuffer { .. } | ArgSpec::InoutBytes { .. }))
+        || out_specs().any(|a| {
+            matches!(
+                a,
+                ArgSpec::OutBuffer { .. } | ArgSpec::InoutBytes { .. } | ArgSpec::SizedBuffer { .. }
+            )
+        })
     {
         out.push_str(BYTES_HELPER);
     }
@@ -945,7 +1018,8 @@ pub fn generate(
     // A held struct's getter builds one too — but only when it has a field to
     // put in it, which is the same condition its getter is emitted under.
     let mut needs_struct = out_specs().any(|a| matches!(a, ArgSpec::OutStruct { .. }))
-        || structs.values().any(|d| d.held && !d.fields.is_empty());
+        || structs.values().any(|d| d.held && !d.fields.is_empty())
+        || names.iter().any(|s| symbols[*s].ret.starts_with("struct:"));
     for (sym, p) in names.iter().zip(&parsed) {
         let ret_t = parse_ret(name, sym, &symbols[*sym].ret)?;
         let outs: Vec<&ArgSpec> = p.outs.iter().map(|&i| &p.args[i]).collect();
@@ -1569,6 +1643,9 @@ fn wrapper(
             ArgSpec::Callback { .. } => {
                 body.push_str(&format!("    if (argv[{j}].tag != JADE_FFI_FN) return 1;\n"));
             }
+            ArgSpec::SizedBuffer { .. } => {
+                body.push_str(&format!("    if (argv[{j}].tag != JADE_FFI_INT) return 1;\n"));
+            }
             ArgSpec::InStruct { .. } => {
                 body.push_str(&format!("    if (argv[{j}].tag != JADE_FFI_STRUCT) return 1;\n"));
             }
@@ -1616,6 +1693,19 @@ fn wrapper(
                 // must release both on the raise path, and assigning here leaked
                 // whichever one was declared first.
                 cleanup.push_str(&format!(" free(obuf{i});"));
+            }
+            ArgSpec::SizedBuffer { elem, .. } => {
+                // Room the caller asked for, zeroed. A library entitled to fill
+                // only part of it leaves the rest as something predictable
+                // rather than as whatever the heap last held.
+                let k = jade_idx[i].expect("a sized_buffer consumes a Jade argument");
+                body.push_str(&format!(
+                    "    int64_t n_want{i} = argv[{k}].data.as_int;\n\
+                     \x20   if (n_want{i} < 0) {{{cleanup} return 1; }}\n\
+                     \x20   {elem}* sbuf{i} = ({elem}*)calloc((size_t)(n_want{i} ? n_want{i} : 1), sizeof({elem}));\n\
+                     \x20   if (!sbuf{i}) {{{cleanup} return 1; }}\n"
+                ));
+                cleanup.push_str(&format!(" free(sbuf{i});"));
             }
             ArgSpec::InoutBytes { .. } => {
                 // The library edits in place, so it gets scratch of the caller's
@@ -1693,6 +1783,7 @@ fn wrapper(
                 call_args.push(format!("&oscalar{i}"))
             }
             ArgSpec::RetLen { .. } => call_args.push(format!("&rlen{i}")),
+            ArgSpec::SizedBuffer { .. } => call_args.push(format!("sbuf{i}")),
             ArgSpec::InoutBytes { .. } => call_args.push(format!("iobuf{i}")),
             ArgSpec::Handle { name } => {
                 call_args.push(format!("({name}*)h{}", jade_idx[i].unwrap()))
@@ -1771,6 +1862,27 @@ fn wrapper(
                      \x20   }}\n"
                 )
             }
+            // The value is already sitting in `r`; the fields are read straight
+            // out of it. No allocation, no ownership, nothing to release — which
+            // is what makes a by-value return the simplest of these once the
+            // header is there to declare the type.
+            RetSpec::Struct(type_name) => {
+                let def = &structs[type_name];
+                let mut s = String::new();
+                let n = def.fields.len();
+                s.push_str(&format!(
+                    "    JadeStruct* rs = jade_shim_struct(\"{type_name}\", {n});\n\
+                     \x20   if (!rs) return 1;\n"
+                ));
+                for (i, (field, ty)) in def.fields.iter().enumerate() {
+                    let t = map_type(ty).expect("validated by parse_symbol");
+                    s.push_str(&emit_field("rs", i, field, &t, &format!("r.{field}")));
+                }
+                s.push_str(&format!(
+                    "    {target}tag = JADE_FFI_STRUCT;\n    {target}data.as_struct = rs;\n"
+                ));
+                s
+            }
             RetSpec::Handle(name) => format!(
                 "    JadeHandle* rh = jade_shim_handle((void*)r, \"{name}\");\n\
                  \x20   if (!rh) return 1;\n\
@@ -1846,6 +1958,18 @@ fn wrapper(
                 let (tag, field) = c_scalar(c_type).expect("validated by parse_arg");
                 body.push_str(&format!(
                     "    {target}tag = {tag};\n    {target}data.{field} = oscalar{i};\n"
+                ));
+            }
+            ArgSpec::SizedBuffer { elem, .. } => {
+                // All of it. The call reports a status rather than a count, so
+                // there is nothing to trim by — which is the same reason the
+                // caller had to state the size in the first place.
+                body.push_str(&format!(
+                    "    JadeBytes* sb{i} = jade_shim_bytes(sbuf{i}, (size_t)n_want{i} * sizeof({elem}));\n\
+                     \x20   free(sbuf{i});\n\
+                     \x20   if (!sb{i}) return 1;\n\
+                     \x20   {target}tag = JADE_FFI_BYTES;\n\
+                     \x20   {target}data.as_bytes = sb{i};\n"
                 ));
             }
             ArgSpec::InoutBytes { .. } => {

@@ -261,6 +261,20 @@ fn a_struct_by_value_is_skipped() {
     assert!(why_skipped(&b, "f").contains("by value"));
 }
 
+#[test]
+fn a_struct_returned_by_value_is_bound() {
+    // The other direction, and much easier: nothing crosses the boundary but
+    // the value, so there is no allocation and no ownership to settle.
+    // `ZSTD_bounds ZSTD_cParam_getBounds(ZSTD_cParameter)` is this shape.
+    let b = bind(
+        "#include <stddef.h>\n\
+         typedef struct { size_t error; int lowerBound; int upperBound; } BOUNDS;\n\
+         BOUNDS getBounds(int p);\n",
+    );
+    assert_eq!(ret(&b, "getBounds"), "struct:BOUNDS");
+    assert!(b.structs.contains_key("BOUNDS"), "the field table must come out too");
+}
+
 // ── What it refuses ──────────────────────────────────────────────────────
 
 #[test]
@@ -1097,17 +1111,19 @@ fn a_struct_pointer_beside_a_count_is_still_refused_as_an_array() {
 }
 
 #[test]
-fn a_writable_byte_pointer_with_no_length_is_not_an_out_scalar() {
+fn a_writable_byte_pointer_with_no_length_is_a_buffer_the_caller_sizes() {
     // `lzma_stream_footer_encode(const lzma_stream_flags*, uint8_t *out)` writes
-    // exactly twelve bytes. Reading `out` as one value would declare a one-byte
-    // local and pass its address — a stack overflow the compiler cannot see.
+    // exactly twelve bytes and says so nowhere a generator can read. Reading
+    // `out` as one value written back declared a one-byte local and passed its
+    // address — a stack overflow the C compiler cannot see.
     let b = bind(
         "#include <stdint.h>\n\
          typedef struct { int version; } F;\n\
          int footer_encode(const F* f, uint8_t* out);\n",
     );
-    assert!(!b.symbols.contains_key("footer_encode"), "{:?}", b.symbols.get("footer_encode"));
-    assert!(why_skipped(&b, "footer_encode").contains("how much to allocate"), "{:?}", b.skipped);
+    assert_eq!(args(&b, "footer_encode"), ["in_struct:F", "sized_buffer:unsigned char"]);
+    let why = b.assumed.iter().find(|(s, _)| s == "footer_encode").map(|(_, w)| w.clone());
+    assert!(why.is_some_and(|w| w.contains("yours to say")), "should say whose job it is");
 }
 
 #[test]

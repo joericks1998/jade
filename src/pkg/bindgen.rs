@@ -774,12 +774,23 @@ fn map_param(
         // and treating it as one out-parameter would declare a one-byte local
         // and hand the library its address. That is a stack overflow the
         // compiler cannot see and the report would call an assumption.
+        // A byte pointer alone is a buffer whose extent only the documentation
+        // gives — `lzma_stream_header_encode` writes exactly twelve — so the
+        // caller states it. That is what the C underneath required of them
+        // anyway, and the alternative is that the symbol cannot be called.
+        //
+        // Reading one of these as a single value written back is what it used to
+        // do, and that declared a one-byte local and handed the library its
+        // address.
         if byte_like {
-            return Mapped::Reject(format!(
-                "writes through a `{raw}` with no length beside it, so the shim cannot tell how \
-                 much to allocate. A byte pointer alone is a buffer whose size only the \
-                 documentation gives"
-            ));
+            return Mapped::Out(
+                format!("sized_buffer:{inner}"),
+                Some(format!(
+                    "`{raw}` has no length beside it, so how much the call writes is yours to \
+                     say: the binding takes the count as its own argument and hands the whole \
+                     buffer back. Passing less than the library writes corrupts memory"
+                )),
+            );
         }
         return Mapped::Out(
             format!("out_scalar:{inner}"),
@@ -982,6 +993,14 @@ fn map_ret(raw_in: &str, env: &TypeEnv) -> Result<String, String> {
         if env.opaque.contains(inner) || env.complete.contains_key(inner) {
             return Ok(format!("handle<{}>", env.c_name(inner)));
         }
+    }
+    // A struct returned by value. Nothing crosses the boundary but the value
+    // itself — it arrives in registers or on the stack, whichever the ABI says,
+    // and the shim reads the fields straight out of it. No allocation and no
+    // ownership, which makes this the simplest of the struct shapes once the
+    // header is there to declare the type.
+    if env.complete.contains_key(&t) {
+        return Ok(format!("struct:{}", env.c_name(&t)));
     }
     Err(format!("returns an unsupported type `{raw_in}`"))
 }
@@ -1373,6 +1392,12 @@ fn map_function(
         Ok(r) => r.clone(),
         Err(_) => String::new(),
     };
+    // A struct handed back by value needs its field table written out too, the
+    // same as one filled through a parameter.
+    let mut structs: Vec<(String, bool)> = match ret.strip_prefix("struct:") {
+        Some(name) => vec![(name.to_string(), false)],
+        None => Vec::new(),
+    };
 
     let empty = Vec::new();
     let parms: Vec<&Value> = node
@@ -1396,9 +1421,6 @@ fn map_function(
         parms.iter().map(|p| p.get("name").and_then(Value::as_str)).collect();
 
     let mut args: Vec<String> = Vec::new();
-    // Each struct the symbol names, and whether it is one Jade *holds* rather
-    // than one it builds.
-    let mut structs: Vec<(String, bool)> = Vec::new();
     let mut assumed: Vec<String> = Vec::new();
     // Indices into `args` of the out-parameters, and the source parameter each
     // came from, so a name can be attached afterwards — how many there are is
