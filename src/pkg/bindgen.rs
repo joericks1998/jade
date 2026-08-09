@@ -701,7 +701,26 @@ fn map_param(
 
     if is_fn_ptr(raw) {
         return match callback_spec(raw, env) {
-            Some(spec) => Mapped::One(spec),
+            // The Jade function is registered for the duration of *this* call
+            // and cleared when it returns — see `cshim::trampoline`, which
+            // explains why: calling back into an interpreter that has moved on
+            // is not something the slot can promise.
+            //
+            // That is right for a callback the library invokes while it works,
+            // and wrong for one it stores. `ares_search` registers and returns,
+            // and its callback fires later during `ares_process`, by which point
+            // there is nothing in the slot — so the binding is real, compiles,
+            // runs, and never calls back. Nothing in C distinguishes the two, so
+            // the report says so rather than the generator guessing.
+            Some(spec) => Mapped::Assumed(
+                spec,
+                concat!(
+                    "takes a callback, which is registered only while the call runs. If the ",
+                    "library stores it and calls back later — an async request, a watcher — ",
+                    "it will find nothing there and your function will never run"
+                )
+                .to_string(),
+            ),
             None => Mapped::Reject(
                 "takes a callback whose own signature the FFI cannot carry. If the library \
                  accepts a null pointer there — brotli's allocator hooks do, and fall back on \
@@ -1035,27 +1054,82 @@ fn callback_spec(raw: &str, env: &TypeEnv) -> Option<String> {
         inner.split(',').map(|p| p.trim().to_string()).collect()
     };
 
-    // Only what the trampoline can marshal. A `void *` user-data parameter is
-    // the common reason a real callback does not fit — it names no type, so
-    // there is nothing to hand Jade.
-    let carriable = |t: &str| -> bool {
+    // Only what the trampoline can marshal, written as `category:spelling`
+    // wherever the two differ.
+    //
+    // The spelling has to survive because the trampoline is declared with it: a
+    // typedef expanded to its underlying type makes a function pointer C
+    // considers incompatible with the library's, so the shim would not compile.
+    // The category is what Jade marshals as, and it comes from expanding — which
+    // is how `ares_socket_t` and `ares_bool_t` become carriable at all. Before
+    // this, checking the expanded type and emitting the written one produced a
+    // spec the generator accepted and the shim refused, and refusing on the
+    // written name alone lost every callback whose signature names a typedef.
+    let category = |t: &str| -> Option<&'static str> {
         let n = normalize(&env.expand(t));
-        // A `void *` is the user-data slot, which the trampoline accepts and
-        // does not forward. Refusing the whole callback over the one parameter
-        // Jade has no use for is what made every c-ares callback unbindable.
-        squash(&n) == "void*"
-            || scalar_of(&squash(&n)).is_some()
-            || is_int(&n)
-            || pointee(&n).map(squash).as_deref() == Some("char")
+        if squash(&n) == "void*" {
+            return Some("void*");
+        }
+        if pointee(&n).map(squash).as_deref() == Some("char") {
+            return Some("const char*");
+        }
+        if is_int(&n) {
+            return Some("int");
+        }
+        scalar_of(&squash(&n)).map(|s| match s {
+            "float" => "double",
+            "bool" => "_Bool",
+            _ => "int",
+        })
     };
-    if !params.iter().all(|p| carriable(p)) {
+
+    // A pointer beside a length is one blob, the same idiom an argument list
+    // uses. `ares_callback` delivers every DNS answer that way, so without it
+    // c-ares can register a query and never see its result.
+    let mut spec: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < params.len() {
+        let p = &params[i];
+        let pn = normalize(&env.expand(p));
+        // The user-data slot first, and that order matters: a `void *` is
+        // byte-like, so `void *arg, int status` would otherwise read as a blob
+        // and its length. `ares_callback` begins with exactly that.
+        let byte_like = squash(&pn) != "void*"
+            && pointee(&pn).map(squash).is_some_and(|e| {
+                matches!(e.as_str(), "void" | "unsignedchar" | "signedchar" | "uint8_t" | "int8_t")
+            });
+        let next_is_len = params.get(i + 1).is_some_and(|q| is_int(&normalize(&env.expand(q))));
+        if byte_like && next_is_len {
+            spec.push(format!("bytes:{p}"));
+            let len = &params[i + 1];
+            spec.push(if squash("int") == squash(len) {
+                len.clone()
+            } else {
+                format!("int:{len}")
+            });
+            i += 2;
+            continue;
+        }
+        // Only prefixed when the two genuinely differ. `void *` and `void*` are
+        // one type spelled two ways, and `void*:void *` is noise in a manifest
+        // a person reads.
+        let cat = category(p)?;
+        spec.push(if squash(cat) == squash(p) { p.clone() } else { format!("{cat}:{p}") });
+        i += 1;
+    }
+    let params = spec;
+
+    let ret_cat = if normalize(&ret) == "void" { "void" } else { category(&ret)? };
+    if ret_cat == "void*" || ret_cat == "const char*" {
+        // A callback may only give back a scalar; a pointer would have to be
+        // released inside the library's own frame.
         return None;
     }
-    let ret_ok =
-        normalize(&ret) == "void" || (carriable(&ret) && pointee(&normalize(&ret)).is_none());
-    if !ret_ok {
-        return None;
-    }
+    let ret = if ret_cat == "void" || squash(ret_cat) == squash(&ret) {
+        ret
+    } else {
+        format!("{ret_cat}:{ret}")
+    };
 
     Some(format!("callback:{ret}({})", params.join(", ")))
 }
@@ -1099,22 +1173,51 @@ fn map_ret(raw_in: &str, env: &TypeEnv) -> Result<String, String> {
     Err(format!("returns an unsupported type `{raw_in}`"))
 }
 
-/// The failure convention a signature implies, if any is obvious.
+/// The failure convention a signature implies, and what was assumed to say so.
 ///
-/// Only the two unambiguous shapes are inferred. Guessing that every `int` is a
+/// Only the unambiguous shapes are inferred. Guessing that every `int` is a
 /// status would turn a function returning a legitimate count into one that
-/// raises on a perfectly good answer.
-fn infer_failure(ret: &str, has_out_handle: bool) -> Option<CFailure> {
+/// raises on a perfectly good answer — which is exactly what happened to
+/// `cs_disasm`, where the return is how many instructions were written and a
+/// successful disassembly of three raised.
+///
+/// The discrimination is the *C* spelling, not the Jade one. Both collapse to
+/// `int`, so by the time a return type reads as "int" the difference between
+/// `int` and `size_t` is gone — and that difference is the convention: a status
+/// is an `int`, a count is a `size_t`. Enums come through as `int` because
+/// `build_env` aliases them, which is right: `cs_err` and `lzma_ret` are
+/// statuses.
+fn infer_failure(
+    ret: &str,
+    c_ret: &str,
+    has_out_handle: bool,
+) -> (Option<CFailure>, Option<String>) {
     if ret.starts_with("handle<") || ret == "str" {
         // A pointer-returning open: NULL is the universal failure.
-        return Some(CFailure::Null);
+        return (Some(CFailure::Null), None);
     }
     if has_out_handle && ret == "int" {
-        // `x_open(path, &h)` returning a status. The handle is the result, so
-        // the status can only be a status.
-        return Some(CFailure::Nonzero);
+        if squash(c_ret) == "int" {
+            return (
+                Some(CFailure::Nonzero),
+                Some(
+                    "the handle is the result, so a non-zero return was read as a failure; if it                      is a count, drop `fails_when`"
+                        .to_string(),
+                ),
+            );
+        }
+        // A wider integer beside a handle is a count far more often than a
+        // status — `size_t cs_disasm(…, cs_insn **insn)` is how many were
+        // written. Not inferred, and said out loud, because the reverse guess
+        // is a call that raises on success.
+        return (
+            None,
+            Some(format!(
+                "`{c_ret}` beside a handle was read as a value rather than a status, so this call                  never raises; if it does report failure, add `fails_when = \"nonzero\"` or                  `\"zero\"`"
+            )),
+        );
     }
-    None
+    (None, None)
 }
 
 // ── Driver ───────────────────────────────────────────────────────────────────
@@ -1391,30 +1494,79 @@ fn struct_param_counts(fns: &[&Value], env: &TypeEnv) -> HashMap<String, usize> 
 /// the caller keeps: an `out_struct` shim zeroes a fresh local every call, so a
 /// dropped field is state the next call needed and no longer has.
 fn struct_loses_a_field(fields: &[(String, String)], env: &TypeEnv) -> bool {
-    fields.iter().any(|(_, t)| {
-        let n = normalize(&env.expand(t));
-        scalar_of(&n).is_none() && pointee(&n).map(squash).as_deref() != Some("char")
-    })
+    if fields.iter().any(|(_, t)| field_type(t, env).is_none()) {
+        return true;
+    }
+    // A struct with nothing in it but rows is a buffer rather than a record.
+    // There are no named values to read out; the thing it is for is being
+    // handed back to the library, which means it has to survive between calls —
+    // and an out-parameter cannot, because the shim declares a zeroed local
+    // every time.
+    //
+    // `fd_set` is exactly this: one `int fds_bits[32]`, filled by `ares_fds`
+    // and read by `ares_process`. It was held by handle until rows became
+    // carryable, at which point it stopped being lossy and started being an
+    // out-parameter — so `ares_process` began receiving an empty set. Nothing
+    // failed; it simply did nothing, which is the failure this whole file is
+    // organised against.
+    !fields.is_empty()
+        && fields.iter().all(|(_, t)| field_type(t, env).is_some_and(|j| j.starts_with("array<")))
+}
+
+/// The Jade spelling a struct field reads as, or `None` when the FFI cannot
+/// carry it.
+///
+/// One predicate, deliberately. `struct_entry` and `struct_loses_a_field` ask
+/// the same question — can this field make the trip — and used to answer it with
+/// two copies of the same test. That survived only because neither had changed:
+/// widening one and not the other would make a struct simultaneously carryable
+/// and lossy, and lossy is what decides whether the caller holds it by handle.
+fn field_type(ty: &str, env: &TypeEnv) -> Option<String> {
+    let n = normalize(&env.expand(ty));
+    if let Some(s) = scalar_of(&n) {
+        return Some(s.to_string());
+    }
+    if pointee(&n).map(squash).as_deref() == Some("char") {
+        return Some("str".to_string());
+    }
+    // A fixed-size array: `char mnemonic[32]`, `uint8_t bytes[24]`, `int
+    // reserved[4]`. An array of things Jade has maps to an array of them, and
+    // the element type decides what they are — one rule rather than a special
+    // case per element.
+    //
+    // Split before expanding, not after: clang leaves the element typedef
+    // alone, so the written type is `uint8_t[24]` and `expand` finds no alias
+    // for that whole string.
+    if let Some((elem, count)) = array_of(ty) {
+        // Plain `char` is text and `unsigned char` is data, the same rule
+        // `map_param` uses for a pointer. The element type decides, not the
+        // position.
+        let e = normalize(&env.expand(elem));
+        let jade_elem = if squash(&e) == "char" { "char" } else { scalar_of(&e)? };
+        return Some(format!("array<{jade_elem}>:{count}"));
+    }
+    None
+}
+
+/// Split a fixed-size array type into its element and extent.
+///
+/// `char[32]` → `("char", 32)`. An array with no size — a flexible member, or a
+/// parameter that decayed — has no extent to read and is not one of these.
+fn array_of(ty: &str) -> Option<(&str, usize)> {
+    let open = ty.rfind('[')?;
+    let rest = ty[open + 1..].strip_suffix(']')?;
+    let count: usize = rest.trim().parse().ok()?;
+    // Zero-length arrays are a GCC extension used as a flexible member; there
+    // is nothing to read and nothing to write.
+    (count > 0).then(|| (ty[..open].trim(), count))
 }
 
 /// Only the fields the FFI can carry. A struct with one unrepresentable field
 /// is still worth binding for the rest, so this drops fields rather than the
 /// struct — but a struct with *no* usable field is not worth a table.
 fn struct_entry(fields: &[(String, String)], env: &TypeEnv, held: bool) -> Result<CStruct, String> {
-    let usable: Vec<(String, String)> = fields
-        .iter()
-        .filter_map(|(f, t)| {
-            let n = normalize(&env.expand(t));
-            let jt = if let Some(s) = scalar_of(&n) {
-                s
-            } else if pointee(&n).map(squash).as_deref() == Some("char") {
-                "str"
-            } else {
-                return None;
-            };
-            Some((f.clone(), jt.to_string()))
-        })
-        .collect();
+    let usable: Vec<(String, String)> =
+        fields.iter().filter_map(|(f, t)| Some((f.clone(), field_type(t, env)?))).collect();
     // A struct passed by value has to carry *something*, or there is nothing to
     // hand back. A held one does not: it is reached through a handle, so the
     // library can keep whatever it likes in there and Jade never needs to see
@@ -1577,6 +1729,18 @@ fn map_function(
                 if let Some(name) = s.strip_prefix("out_struct:") {
                     structs.push((name.to_string(), false));
                 }
+                // A handle written through `T**` where the header *defines* `T`
+                // is a struct the caller can read, not an opaque token — so it
+                // needs a field table and the accessors that come with being
+                // held. Without this `size_t d_disasm(…, insn **out)` hands back
+                // a handle nothing in the package can look inside, which is a
+                // pointer and not an answer. An opaque `sqlite3**` is unaffected:
+                // there is nothing to read.
+                if let Some(name) = s.strip_prefix("out_handle:")
+                    && env.complete.contains_key(&normalize(name))
+                {
+                    structs.push((name.to_string(), true));
+                }
                 if let Some(w) = why {
                     assumed.push(w);
                 }
@@ -1657,7 +1821,11 @@ fn map_function(
     }
 
     let has_out_handle = args.iter().any(|a| a.starts_with("out_handle:"));
-    let fails_when = infer_failure(&ret, has_out_handle);
+    let (fails_when, why_failure) =
+        infer_failure(&ret, &normalize(&env.expand(&raw_ret)), has_out_handle);
+    if let Some(w) = why_failure {
+        assumed.push(w);
+    }
 
     // The shim reads an out_buffer's count from the following argument and its
     // fill count from the return value; a signature that does not have both is

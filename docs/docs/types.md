@@ -81,7 +81,9 @@ for c in s { print(c) }  // four lines: "é" is one character, not two
 
 A `char` is a single Unicode scalar, not a byte. It is an *immediate*: it rides inside the tagged value word alongside `int`, `bool`, and `nil`, so scanning a string allocates nothing at all, where the old one-character-string behavior allocated once per character.
 
-There is no char literal. A char comes from indexing a string, iterating one, `char("x")`, or `?p |> char`.
+There is no char literal. A char comes from indexing a string, iterating one, `char("x")`, `char(<number>)`, or `?p |> char`.
+
+`int(c)` gives a character's Unicode scalar and `char(n)` builds one from a number, refusing anything that is not a scalar rather than substituting a replacement character. The pair exists for reading fixed-size C fields across the FFI: a `char[32]` arrives as thirty-two characters with its NUL padding intact — nothing trims it, because trimming would guess where the text stops — so `int(c) == 0` is how a program finds that itself.
 
 ```jade
 let c = char("x")

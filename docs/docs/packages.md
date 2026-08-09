@@ -312,11 +312,12 @@ If you write or correct a symbol by hand, these are the spellings `args` and `re
 | `struct:<Type>` | A return only: the call hands the struct back by value. Needs the header. |
 | `out_scalar:<ctype>` | A single value the call writes through a pointer — `int *count`. Consumes no Jade argument; comes back as part of the result. |
 | `inout_scalar:<ctype>` | The same, but the caller supplies the starting value — a position the library advances. Consumes one Jade argument *and* comes back. |
-| `out_handle:<T>` | A handle written through a pointer — `sqlite3_open(path, &db)`. The C return value becomes the status, and the handle is what Jade gets. |
+| `out_handle:<T>` | A handle written through a pointer — `sqlite3_open(path, &db)`. When the symbol declares a `fails_when`, the C return is that status and the handle is the whole result; without one the return is a value and comes back beside the handle, which is how a count like `cs_disasm`'s survives. |
+| `array<elem>:<count>` | A struct *field* only: a fixed-size row. `array<char>:32` reads as characters, `array<int>:24` as numbers. Not legal in an `args` list. |
 | `out_str:<ctype>` | A string the call points at inside data you already gave it — `fdt_getprop_by_offset`'s `const char **namep`. Nothing was allocated, so nothing has to be released. |
 | `out_alloc_str:<ctype>` | A string the library allocated and you now own. Requires `frees_with` on the symbol, naming the function that releases it. |
 | `ret_len:<ctype>` | Marks the parameter that says how long a returned pointer is. The return type is then `bytes`. `fdt_getprop` is this shape. |
-| `callback:<ret>(<args>)` | A Jade function the library may call while the call runs. The signature is written in the library's own C types, e.g. `callback:int(int, const char*)`. A `void *` in it is the user-data slot C uses instead of closures; the shim accepts it and does not pass it on, because a Jade function carries its own environment. |
+| `callback:<ret>(<args>)` | A Jade function the library may call **while the call runs**. A parameter may be written `category:spelling` — `int:ares_bool_t` — where the spelling is what the library declared and the category is what Jade marshals it as. A pointer written `bytes:<ctype>` takes the next parameter as its length and arrives as one blob. The signature is written in the library's own C types, e.g. `callback:int(int, const char*)`. A `void *` in it is the user-data slot C uses instead of closures; the shim accepts it and does not pass it on, because a Jade function carries its own environment. |
 | `null_ptr` | A null pointer, always. For a parameter the FFI cannot carry in a position the library documents as optional — brotli's allocator hooks, where null means "use malloc". Never inferred, because a library that needs a real pointer there crashes with no diagnostic. |
 
 A symbol may have more than one out-parameter. When it does, each needs a name to come back under, written as an `@` suffix — `out_scalar:uint64_t@progress_in`. The generator takes those from the header's own parameter names. With one out-parameter the name is optional, since there is nothing to tell it apart from.
@@ -331,6 +332,48 @@ print(d.rem)                   // 2
 ```
 
 A whole symbol may also be written as the single string `"?"` — the name is known, the prototype is not. That is what `jade pkg add` writes when it finds no header, and every command that would use the binding refuses it by name.
+
+### Fixed-size array fields
+
+A C struct often holds a fixed-size row rather than a pointer — `char mnemonic[32]`, `uint8_t bytes[24]`, `int reserved[4]`. Those come back as a Jade array, and the element type decides what is in it: plain `char` is characters, everything else is numbers.
+
+Nothing is trimmed. A `char[32]` holding `push` arrives as thirty-two characters, the NUL padding included, because trimming would be guessing where the text stops. `int(c) == 0` is how you find that yourself:
+
+```jade
+fn text(row) {
+    let s = ""
+    for ch in row {
+        if int(ch) == 0 {
+            break
+        }
+        s = s + ch
+    }
+    return s
+}
+```
+
+Writing one back is bounded. A row longer than the field is an error naming the field rather than a silent truncation; a shorter one fills the rest with zeros, which is what leaving a field out already does. A character that does not fit in a byte is refused too — every byte is a character, but not every character is a byte.
+
+### Reading a row of structs
+
+A library that produces many structs hands back a pointer to the first and says how many. `<T>_at(handle, i)` reads one of them:
+
+```jade
+use capstone
+
+let h = capstone.cs_open(3, 8)                       // x86, 64-bit
+let r = capstone.cs_disasm(h.out, code, 0x1000, 0)
+
+let i = 0
+while i < r.ret {
+    let insn = capstone.cs_insn_at(r.out, i)
+    print(f"{text(insn.mnemonic)} {text(insn.op_str)}")
+    i = i + 1
+}
+capstone.cs_free(r.out, r.ret)
+```
+
+The index is not checked against the count, and cannot be — the count came back on the Jade side, and reading past it is the same trust the library already asks of a C caller.
 
 ### A struct Jade holds
 
@@ -355,7 +398,7 @@ lzma.lzma_end(s)
 lzma.lzma_stream_free(s)
 ```
 
-A symbol may also declare `fails_when`, naming how it reports failure: `null`, `negative`, `nonzero`, or `never`. The shim then clears `errno`, tests the return, and turns a failure into a catchable Jade error carrying the reason. Without it a failed call gives back its raw sentinel and the reason the library already recorded is thrown away — the program sees `-1` and nothing else. The default is "cannot fail", because reading a convention that is not there would turn every legitimate `-1` into a raise.
+A symbol may also declare `fails_when`, naming how it reports failure: `null`, `negative`, `nonzero`, `zero`, or `never`. The shim then clears `errno`, tests the return, and turns a failure into a catchable Jade error carrying the reason. Without it a failed call gives back its raw sentinel and the reason the library already recorded is thrown away — the program sees `-1` and nothing else. The default is "cannot fail", because reading a convention that is not there would turn every legitimate `-1` into a raise.
 
 Some rules worth knowing before you hand-write one:
 
@@ -502,6 +545,14 @@ This is a *choice between two*, not version solving. Solving searches a space of
 Only a `url` dependency travels this way. A `path` names a file on the machine that built the package, and that path means nothing on yours — those are named for you to add yourself, rather than written as a reference that resolves to the wrong file or to none.
 
 Reading the record does not run any of the package's code. A Jade package runs its module top level from `jade_pkg_init`, and `jade pkg add` never calls it.
+
+### A callback only lives for the call
+
+The Jade function is registered for the duration of the call that takes it, and forgotten when that call returns.
+
+That is right for a callback the library invokes while it works — a comparator, a visitor, a progress hook. It is wrong for one the library *stores*: an async request that calls back later, a watcher, an event handler. Those find nothing registered and your function never runs.
+
+Nothing in C distinguishes the two, so the binding is generated either way and the report says so. If you see that note against a symbol, check whether the library calls back before it returns.
 
 ### `JADE_LIBS`
 

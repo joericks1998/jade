@@ -1094,9 +1094,27 @@ fn an_out_handle_takes_no_jade_argument_and_returns_the_handle() {
 
 #[test]
 fn an_out_handle_that_was_never_written_comes_back_nil() {
-    let src = generate("db", &symbols(&[("op", sym(&["out_handle:T"], "int"))])).unwrap();
+    // With a failure convention, which is the shape the generator emits: the
+    // return is a status, so the handle is the whole result.
+    let s = failing_sym(&["out_handle:T"], "int", CFailure::Nonzero);
+    let src = generate("db", &symbols(&[("op", s)])).unwrap();
     assert!(src.contains("if (!ohandle0) {"), "must check it was written:\n{src}");
     assert!(src.contains("out->tag = JADE_FFI_NIL;"), "should be nil, not a null handle:\n{src}");
+}
+
+#[test]
+fn a_count_returned_beside_a_handle_is_not_swallowed() {
+    // An out_handle used to consume the C return unconditionally, on the
+    // reasoning that the handle is the result so the return can only be a
+    // status. `size_t cs_disasm(…, cs_insn **insn)` returns how many
+    // instructions were written, and discarding it leaves the caller a pointer
+    // to a row whose length they cannot know.
+    //
+    // A failure convention is what says the return is a status. Without one it
+    // is a value, and comes back beside the handle.
+    let src = generate("cs", &symbols(&[("disasm", sym(&["out_handle:cs_insn"], "int"))])).unwrap();
+    assert!(src.contains(r#"jade_shim_struct("disasm_result", 2)"#), "should pair:\n{src}");
+    assert!(src.contains(r#"res->keys[0] = strdup("ret");"#), "count missing:\n{src}");
 }
 
 #[test]
@@ -1376,4 +1394,66 @@ fn a_wrapper_mixing_two_kinds_of_scratch_compiles() {
         &[("z.h", "typedef struct { int rate; const char* name; } INFO;\nint f(INFO*, int*);\n")],
     )
     .expect("the generated C must compile");
+}
+
+// ── Fixed-size array fields ──────────────────────────────────────────────
+
+#[test]
+fn a_char_row_reads_as_characters_and_casts_through_unsigned() {
+    // `char` is signed on x86 Linux and unsigned on ARM macOS. Without the cast
+    // a byte of 0x80 sign-extends to 0xFFFFFF80, which is not a Unicode scalar,
+    // and the far side raises — on one platform only.
+    let fields: &[(&str, &str)] = &[("mnemonic", "array<char>:32")];
+    let s = sym(&["out_struct:INSN"], "nil");
+    let src = generate_with("cs", &symbols(&[("f", s)]), &[("INSN", fields)], &["cs.h"]).unwrap();
+    assert!(src.contains("jade_shim_array(32)"), "no row:\n{src}");
+    assert!(src.contains("(uint32_t)(unsigned char)"), "missing the signedness cast:\n{src}");
+    assert!(src.contains("JADE_FFI_CHAR"), "should read as characters:\n{src}");
+}
+
+#[test]
+fn a_row_longer_than_the_field_is_refused_rather_than_truncated() {
+    // Dropping the tail silently is the failure this generator exists to avoid.
+    // Shorter is filled with zeros, which is what an omitted field already gets.
+    let fields: &[(&str, &str)] = &[("name", "array<char>:8")];
+    let s = sym(&["in_struct:REC"], "int");
+    let src = generate_with("z", &symbols(&[("f", s)]), &[("REC", fields)], &["z.h"]).unwrap();
+    assert!(src.contains("->len > 8"), "no length check:\n{src}");
+    assert!(src.contains("= 0;\n"), "short rows should zero-fill:\n{src}");
+}
+
+#[test]
+fn a_character_that_does_not_fit_in_a_byte_is_refused() {
+    // The one place the byte-per-character mapping is not symmetric: every byte
+    // is a character, but not every character fits in a byte.
+    let fields: &[(&str, &str)] = &[("name", "array<char>:8")];
+    let s = sym(&["in_struct:REC"], "int");
+    let src = generate_with("z", &symbols(&[("f", s)]), &[("REC", fields)], &["z.h"]).unwrap();
+    assert!(src.contains("> 0xFF"), "no range check:\n{src}");
+}
+
+#[test]
+fn an_array_field_shim_compiles_against_a_real_header() {
+    let header = "#include <stdint.h>\n\
+                  typedef struct { unsigned int id; char mnemonic[32]; uint8_t bytes[8]; } INSN;\n\
+                  extern void fill(INSN* i);\n\
+                  extern int put(const INSN* i);\n";
+    let fields: &[(&str, &str)] =
+        &[("id", "int"), ("mnemonic", "array<char>:32"), ("bytes", "array<int>:8")];
+    let syms = symbols(&[
+        ("fill", sym(&["out_struct:INSN"], "nil")),
+        ("put", sym(&["in_struct:INSN"], "int")),
+    ]);
+    let src = generate_with("cs", &syms, &[("INSN", fields)], &["fixture.h"]).unwrap();
+    if let Err(e) = compiles(&src, &[("fixture.h", header)]) {
+        panic!("array field shim does not compile:\n{e}\n--- source ---\n{src}");
+    }
+}
+
+#[test]
+fn an_array_spelling_is_not_legal_as_an_argument() {
+    // Field types and argument types are separate vocabularies on purpose: the
+    // wrapper has nothing to do with a fixed-size row in an `args` list.
+    let err = generate("z", &symbols(&[("f", sym(&["array<char>:32"], "int"))])).unwrap_err();
+    assert!(err.contains("array<char>:32"), "should name it: {err}");
 }

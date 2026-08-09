@@ -492,6 +492,12 @@ pub enum CFailure {
     Negative,
     /// Any non-zero return. A status code where 0 means success.
     Nonzero,
+    /// A zero return. The shape where the value *is* the answer and zero means
+    /// there is none — a count that came back empty, a lookup that found
+    /// nothing. Never inferred, because a zero count is a legitimate answer
+    /// almost everywhere; it exists so a report that declines to guess can name
+    /// a spelling that works.
+    Zero,
     /// Never fails. The same as omitting the key, spellable for clarity.
     Never,
 }
@@ -504,6 +510,7 @@ impl CFailure {
             CFailure::Null => "null",
             CFailure::Negative => "negative",
             CFailure::Nonzero => "nonzero",
+            CFailure::Zero => "zero",
             CFailure::Never => "never",
         }
     }
@@ -518,6 +525,7 @@ impl CFailure {
             CFailure::Null => Some("!(r)"),
             CFailure::Negative => Some("(r) < 0"),
             CFailure::Nonzero => Some("(r) != 0"),
+            CFailure::Zero => Some("(r) == 0"),
             CFailure::Never => None,
         }
     }

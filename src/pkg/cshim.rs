@@ -25,7 +25,7 @@
 
 use std::collections::HashMap;
 
-use crate::project::{CStruct, CSymbol};
+use crate::project::{CFailure, CStruct, CSymbol};
 
 /// How one Jade FFI type appears in generated C.
 struct CType {
@@ -43,6 +43,12 @@ fn map_type(t: &str) -> Option<CType> {
         "float" => CType { decl: "double", tag: "JADE_FFI_FLOAT", field: "as_float" },
         "bool" => CType { decl: "uint8_t", tag: "JADE_FFI_BOOL", field: "as_bool" },
         "str" => CType { decl: "const char*", tag: "JADE_FFI_STR", field: "as_str" },
+        // The C parameter is `uint32_t` rather than `char`, because the value is
+        // a Unicode scalar and not a byte. The generator never emits this for a
+        // scalar C `char` — that stays `int`, since widening is exact and
+        // changing it would rewrite every binding that takes one — so in
+        // practice it arrives as the element type of a row.
+        "char" => CType { decl: "uint32_t", tag: "JADE_FFI_CHAR", field: "as_char" },
         _ => return None,
     })
 }
@@ -206,7 +212,7 @@ enum ArgSpec {
     /// from a declaration: the signature is known when the C is written, so the
     /// shim can declare a real static function of that shape. Synthesising one
     /// at run time would need a trampoline compiler.
-    Callback { ret: String, params: Vec<String> },
+    Callback { ret: CbRet, params: Vec<CbParam> },
 }
 
 impl ArgSpec {
@@ -285,12 +291,51 @@ impl ArgSpec {
             ArgSpec::Callback { ret, params } => {
                 // Verbatim: the library's own C types, so the function pointer
                 // this declares is the one it expects.
-                let r = if ret == "nil" || ret == "void" { "void" } else { ret.as_str() };
-                let ps = if params.is_empty() { "void".to_string() } else { params.join(", ") };
-                format!("{r} (*)({ps})")
+                let ps = if params.is_empty() {
+                    "void".to_string()
+                } else {
+                    params.iter().map(|p| p.c_type.clone()).collect::<Vec<_>>().join(", ")
+                };
+                format!("{} (*)({ps})", ret.c_type)
             }
         }
     }
+}
+
+/// One parameter of a callback, as the trampoline sees it.
+///
+/// `c_type` is what the *library* declared, and is what the trampoline is
+/// written with — a typedef expanded to its underlying type produces a function
+/// pointer C considers incompatible with the one the library wants, so the
+/// spelling has to survive. `kind` is what Jade does with it, which is a
+/// separate question and the reason the two are carried apart.
+#[derive(Debug, Clone)]
+struct CbParam {
+    c_type: String,
+    kind: CbKind,
+}
+
+#[derive(Debug, Clone)]
+enum CbKind {
+    /// Forwarded as one Jade value of this shape.
+    Scalar(&'static str, &'static str),
+    /// The `void *` C uses instead of a closure. Accepted, never forwarded: a
+    /// Jade function carries its own environment.
+    UserData,
+    /// A pointer whose length is the *next* parameter, forwarded as one blob.
+    /// `ares_callback` delivers every DNS answer this way.
+    Bytes,
+    /// The length belonging to the `Bytes` before it. Declared, never
+    /// forwarded — it rode in with the pointer.
+    BytesLen,
+}
+
+/// A callback's return: the C spelling, plus how to read a Jade value into it.
+#[derive(Debug, Clone)]
+struct CbRet {
+    c_type: String,
+    /// `None` for `void`.
+    marshal: Option<(&'static str, &'static str)>,
 }
 
 /// How a C type in a callback signature crosses into a `JadeVal`.
@@ -356,32 +401,91 @@ fn parse_callback(pkg: &str, sym: &str, spec: &str) -> Result<ArgSpec, String> {
     // A callback may only give back a scalar. Anything else would have to be
     // released inside the C library's own frame, by code that has no idea it is
     // holding a Jade value.
-    let ret_ok = ret == "void"
-        || ret == "nil"
-        || matches!(c_scalar(&ret), Some((t, _)) if t != "JADE_FFI_STR");
-    if !ret_ok {
-        return Err(format!(
-            "dependency '{pkg}': symbol '{sym}' has a callback returning '{ret}'. A callback may \
-             return a C integer, float, bool, or void — anything else would have to be freed \
-             inside the C library's own frame."
-        ));
+    //
+    // A parameter may be written `category:spelling` — `int:ares_bool_t`. The
+    // spelling is what the trampoline is declared with, because a typedef
+    // expanded to its underlying type makes a function pointer C considers
+    // incompatible with the library's; the category is what Jade marshals it as.
+    // Without the split, every callback whose signature mentions a typedef was
+    // unbindable, which was most of c-ares.
+    let split = |t: &str| -> (String, String) {
+        match t.split_once(':') {
+            Some((cat, spelling)) => (cat.trim().to_string(), spelling.trim().to_string()),
+            None => (t.to_string(), t.to_string()),
+        }
+    };
+
+    let (ret_cat, ret_c) = split(&ret);
+    let ret_marshal = if ret_cat == "void" || ret_cat == "nil" {
+        None
+    } else {
+        match c_scalar(&ret_cat) {
+            Some((t, f)) if t != "JADE_FFI_STR" => Some((t, f)),
+            _ => {
+                return Err(format!(
+                    "dependency '{pkg}': symbol '{sym}' has a callback returning '{ret}'. A \
+                     callback may return a C integer, float, bool, or void — anything else would \
+                     have to be freed inside the C library's own frame."
+                ));
+            }
+        }
+    };
+    if ret_marshal.is_some() {
+        check_c_ident(pkg, sym, &ret_c.replace('*', ""), "callback")?;
     }
+    let ret = CbRet {
+        c_type: if ret_marshal.is_none() { "void".to_string() } else { ret_c },
+        marshal: ret_marshal,
+    };
+
+    let mut out: Vec<CbParam> = Vec::new();
+    let mut take_len = false;
     for p in &params {
-        if is_user_data(p) {
+        let (cat, c_type) = split(p);
+        check_c_ident(pkg, sym, &c_type.replace('*', ""), "callback")?;
+
+        if take_len {
+            take_len = false;
+            // Declared so the signature matches, never forwarded: it rode in
+            // with the pointer it measures.
+            if c_scalar(&cat).is_none_or(|(t, _)| t != "JADE_FFI_INT") {
+                return Err(format!(
+                    "dependency '{pkg}': symbol '{sym}' has a callback whose `bytes` parameter is \
+                     not followed by an integer length. The argument after the pointer is how far \
+                     it runs."
+                ));
+            }
+            out.push(CbParam { c_type, kind: CbKind::BytesLen });
             continue;
         }
-        if c_scalar(p).is_none() {
-            return Err(format!(
-                "dependency '{pkg}': symbol '{sym}' has a callback parameter '{p}'. A callback \
-                 signature is written in the library's own C types, e.g. \
-                 `callback:int(int, const char*)`, and '{p}' is not one the FFI can carry."
-            ));
+        if cat == "bytes" {
+            take_len = true;
+            out.push(CbParam { c_type, kind: CbKind::Bytes });
+            continue;
         }
-        check_c_ident(pkg, sym, &p.replace('*', ""), "callback")?;
+        if is_user_data(&c_type) {
+            out.push(CbParam { c_type, kind: CbKind::UserData });
+            continue;
+        }
+        match c_scalar(&cat) {
+            Some((t, f)) => out.push(CbParam { c_type, kind: CbKind::Scalar(t, f) }),
+            None => {
+                return Err(format!(
+                    "dependency '{pkg}': symbol '{sym}' has a callback parameter '{p}'. A callback \
+                     signature is written in the library's own C types, e.g. \
+                     `callback:int(int, const char*)`, and '{p}' is not one the FFI can carry."
+                ));
+            }
+        }
     }
-    if !(ret == "nil" || ret == "void") {
-        check_c_ident(pkg, sym, &ret.replace('*', ""), "callback")?;
+    if take_len {
+        return Err(format!(
+            "dependency '{pkg}': symbol '{sym}' has a callback ending in a `bytes` parameter with \
+             no length after it."
+        ));
     }
+    let params = out;
+
     Ok(ArgSpec::Callback { ret, params })
 }
 
@@ -546,6 +650,37 @@ fn parse_arg(pkg: &str, sym: &str, full: &str) -> Result<ArgSpec, String> {
     map_type(spec).map(ArgSpec::Scalar).ok_or_else(|| bad_type_msg(pkg, sym, spec))
 }
 
+/// What one struct field reads as: a scalar, or a row of them.
+///
+/// Deliberately not `map_type`. That one serves `args` and `ret` as well, so
+/// teaching it `array<char>:32` would make the spelling legal in an argument
+/// list, where the wrapper has nothing to do with it. One resolver per position,
+/// each refusing by name, is the rule `parse_arg` and `parse_ret` already follow.
+enum FieldType {
+    One(CType),
+    /// `array<elem>:N` — N of them, read in declaration order.
+    Row(CType, usize),
+}
+
+fn field_type(pkg: &str, sym: &str, spec: &str) -> Result<FieldType, String> {
+    if let Some(rest) = spec.strip_prefix("array<") {
+        let bad = || {
+            format!(
+                "dependency '{pkg}': symbol '{sym}' has field type `{spec}`, which is not a row. \
+                 Write it as `array<elem>:count`, e.g. `array<char>:32`."
+            )
+        };
+        let (elem, count) = rest.split_once(">:").ok_or_else(bad)?;
+        let n: usize = count.parse().map_err(|_| bad())?;
+        if n == 0 {
+            return Err(bad());
+        }
+        let t = map_type(elem).ok_or_else(|| bad_type_msg(pkg, sym, elem))?;
+        return Ok(FieldType::Row(t, n));
+    }
+    map_type(spec).map(FieldType::One).ok_or_else(|| bad_type_msg(pkg, sym, spec))
+}
+
 /// Refuse an out-parameter name that could not be a struct key.
 ///
 /// It becomes a `strdup("…")` literal in the generated shim and a field name in
@@ -610,11 +745,14 @@ const PREAMBLE: &str = r#"/* Generated by `jade pkg install` — do not edit.
 #define JADE_FFI_STR    4
 #define JADE_FFI_ERROR  5
 #define JADE_FFI_STRUCT 8
+#define JADE_FFI_ARRAY  6
+#define JADE_FFI_CHAR  12
 #define JADE_FFI_BYTES  9
 #define JADE_FFI_HANDLE 10
 #define JADE_FFI_FN     11
 
 typedef struct JadeStruct JadeStruct;
+typedef struct JadeArr JadeArr;
 typedef struct JadeBytes JadeBytes;
 typedef struct JadeHandle JadeHandle;
 typedef struct JadeFn JadeFn;
@@ -626,7 +764,9 @@ typedef union {
     const char*  as_str;
     uint64_t     as_nil;
     JadeStruct*  as_struct;
+    JadeArr*     as_arr;
     JadeBytes*   as_bytes;
+    uint32_t     as_char;
     JadeHandle*  as_handle;
     JadeFn*      as_fn;
 } JadeValData;
@@ -636,6 +776,10 @@ typedef struct { uint8_t tag; uint8_t _pad[7]; JadeValData data; } JadeVal;
 /* Counted, not NUL-terminated: a blob may contain NUL bytes and need not be
  * valid UTF-8. Allocated with libc malloc so Jade's ffi_free can reclaim it —
  * the process holds two allocators that must not free each other's memory. */
+/* A row of values. Layout must match JadeArr in src/native/mod.rs and
+ * runtime_aot/runtime.h — every node is libc heap so either side can release
+ * the whole tree with ffi_free. */
+struct JadeArr { JadeVal* items; size_t len; };
 struct JadeBytes { unsigned char* data; size_t len; };
 struct JadeStruct { const char* type_name; const char** keys; JadeVal* vals; size_t len; };
 
@@ -747,6 +891,25 @@ static int jade_shim_unwrap(const JadeVal* v, const char* want, void** out) {
     if (!h->type_name || strcmp(h->type_name, want) != 0) return 0;
     *out = h->ptr;
     return 1;
+}
+"#;
+
+/// Emitted only when some struct carries a fixed-size array field.
+const ARRAY_HELPER: &str = r#"
+/* A row of `n` values, zeroed. libc heap for the reason everything else here
+ * is: Jade releases it with ffi_free, and the two runtimes in the process must
+ * not free each other's memory.
+ *
+ * Zeroed rather than merely allocated because a JadeVal carries seven padding
+ * bytes and a char's trust bit lives in the first of them. Leaving them
+ * uninitialised would make the value's provenance whatever the heap last held. */
+static JadeArr* jade_shim_array(size_t n) {
+    JadeArr* a = (JadeArr*)malloc(sizeof(JadeArr));
+    if (!a) return NULL;
+    a->items = (JadeVal*)calloc(n ? n : 1, sizeof(JadeVal));
+    if (!a->items) { free(a); return NULL; }
+    a->len = n;
+    return a;
 }
 "#;
 
@@ -1049,9 +1212,24 @@ fn parse_symbol(
 /// count that sizes the blob, and an `out_handle`'s return is a status that
 /// feeds `fails_when`. Both already did this; naming the rule is what lets the
 /// multi-out case reuse it rather than re-derive it.
-fn ret_is_a_key(ret: &RetSpec, outs: &[&ArgSpec]) -> bool {
-    !matches!(ret, RetSpec::Nil)
-        && !outs.iter().any(|a| matches!(a, ArgSpec::OutBuffer { .. } | ArgSpec::OutHandle { .. }))
+fn ret_is_a_key(ret: &RetSpec, outs: &[&ArgSpec], fails_when: Option<CFailure>) -> bool {
+    if matches!(ret, RetSpec::Nil) {
+        return false;
+    }
+    // An out_buffer always reads the return as its element count — that is how
+    // the blob is sized, and there is nothing left of it afterwards.
+    if outs.iter().any(|a| matches!(a, ArgSpec::OutBuffer { .. })) {
+        return false;
+    }
+    // An out_handle only swallows it when a failure convention is actually
+    // testing it. `sqlite3_open(path, &db) -> int` returns a status and the
+    // handle is the answer; `cs_disasm(…, &insn) -> size_t` returns how many
+    // were written, and discarding that leaves the caller a pointer to a row
+    // whose length they cannot know.
+    if outs.iter().any(|a| matches!(a, ArgSpec::OutHandle { .. })) {
+        return fails_when.is_none_or(|f| f.test().is_none());
+    }
+    true
 }
 
 /// Whether the result is a keyed struct rather than a single value.
@@ -1087,8 +1265,10 @@ pub fn generate(
     // define the wrapper twice under one name — which the C compiler reports
     // against generated source, several hundred lines from anything the reader
     // wrote. Refusing it here says which symbol and why.
-    const HELPERS: [&str; 9] =
-        ["errmsg", "bytes", "handle", "unwrap", "struct", "field", "known", "nofield", "owned"];
+    const HELPERS: [&str; 10] = [
+        "errmsg", "bytes", "handle", "unwrap", "struct", "field", "known", "nofield", "owned",
+        "array",
+    ];
     if let Some(clash) = names.iter().find(|s| HELPERS.contains(&s.as_str())) {
         return Err(format!(
             "dependency '{name}': the library exports '{clash}', and the shim's own helper of \
@@ -1111,9 +1291,17 @@ pub fn generate(
     }
     let out_specs = || parsed.iter().flat_map(|p| p.outs.iter().map(|&i| &p.args[i]));
     let returns_bytes = names.iter().any(|s| symbols[*s].ret == "bytes");
+    // A callback that delivers a blob builds one too.
+    let cb_bytes = parsed.iter().any(|p| {
+        p.args.iter().any(|a| {
+            matches!(a, ArgSpec::Callback { params, .. }
+                if params.iter().any(|q| matches!(q.kind, CbKind::Bytes)))
+        })
+    });
     // A held struct's `take` hands back what the library wrote into its buffer.
     let takes_bytes = structs.values().any(|d| d.held && d.buffers.iter().any(|b| b.writable));
     if returns_bytes
+        || cb_bytes
         || takes_bytes
         || out_specs().any(|a| {
             matches!(
@@ -1125,6 +1313,12 @@ pub fn generate(
         })
     {
         out.push_str(BYTES_HELPER);
+    }
+    // Only when a struct actually carries a row. An unused static is a
+    // `-Wall -Werror` build failure, which is why every helper here is gated
+    // rather than always emitted.
+    if structs.values().any(|d| d.fields.iter().any(|(_, t)| t.starts_with("array<"))) {
+        out.push_str(ARRAY_HELPER);
     }
     // `jade_shim_field` has a caller only where a struct's fields are actually
     // read out of a Jade value, which a held struct with nothing carryable does
@@ -1147,7 +1341,8 @@ pub fn generate(
     for (sym, p) in names.iter().zip(&parsed) {
         let ret_t = parse_ret(name, sym, &symbols[*sym].ret)?;
         let outs: Vec<&ArgSpec> = p.outs.iter().map(|&i| &p.args[i]).collect();
-        needs_struct |= builds_result_struct(ret_is_a_key(&ret_t, &outs), outs.len());
+        needs_struct |=
+            builds_result_struct(ret_is_a_key(&ret_t, &outs, symbols[*sym].fails_when), outs.len());
     }
     if needs_struct {
         out.push_str(STRUCT_HELPER);
@@ -1294,24 +1489,82 @@ fn declare(
     Ok(format!("extern {ret} {sym}({args});\n"))
 }
 
-/// Assign one JadeVal slot inside a container from a C expression.
+/// One field of a struct being handed back: the key, then the value.
 ///
-/// A string here must be **copied**, unlike a top-level string return: a value
-/// inside a container is container-owned, so Jade's `ffi_free` frees it. Handing
-/// over a pointer into a stack local would be a free of the stack; handing over
-/// a pointer into the library's memory would be a free of the library's.
-fn emit_field(target: &str, i: usize, key: &str, jade_ty: &CType, expr: &str) -> String {
-    let value = match jade_ty.field {
-        "as_str" => format!("strdup(({expr}) ? ({expr}) : \"\")"),
-        "as_bool" => format!("(uint8_t)(({expr}) ? 1 : 0)"),
-        _ => format!("({}){expr}", jade_ty.decl),
-    };
-    format!(
-        "    {target}->keys[{i}] = strdup(\"{key}\");\n\
-         \x20   {target}->vals[{i}].tag = {};\n\
-         \x20   {target}->vals[{i}].data.{} = {value};\n",
-        jade_ty.tag, jade_ty.field
-    )
+/// Shared by every read path — an out-parameter, a by-value return, and a held
+/// struct's getter — so a field shape added here reaches all three at once.
+fn emit_keyed_field(
+    at: FieldSite<'_>,
+    target: &str,
+    i: usize,
+    field: &(String, String),
+    expr: &str,
+) -> Result<String, String> {
+    let (key, ty) = field;
+    let mut b = format!("    {target}->keys[{i}] = strdup(\"{key}\");\n");
+    b.push_str(&emit_field_of(at, &format!("{target}->vals[{i}]"), ty, expr, i)?);
+    Ok(b)
+}
+
+/// Where a field is being read, for the message when its type does not carry.
+///
+/// Three arguments that always travel together and never independently, which
+/// is the whole reason they are one thing.
+#[derive(Clone, Copy)]
+struct FieldSite<'a> {
+    pkg: &'a str,
+    sym: &'a str,
+    var: &'a str,
+}
+
+/// Read one struct field into a JadeVal slot, scalar or row.
+///
+/// `slot` is where the value lands and `expr` is the C expression naming the
+/// field. A row allocates its own `JadeArr` and fills it element by element.
+///
+/// A `char` element is cast through `unsigned char` before widening. `char` is
+/// signed on x86 Linux and unsigned on ARM macOS, so without it a byte of 0x80
+/// sign-extends to 0xFFFFFF80, which is not a Unicode scalar — and the far side
+/// raises, on one platform only.
+fn emit_field_of(
+    at: FieldSite<'_>,
+    slot: &str,
+    ty: &str,
+    expr: &str,
+    idx: usize,
+) -> Result<String, String> {
+    let FieldSite { pkg, sym, var } = at;
+    match field_type(pkg, sym, ty)? {
+        FieldType::One(t) => {
+            let value = match t.field {
+                "as_str" => format!("strdup(({expr}) ? ({expr}) : \"\")"),
+                "as_bool" => format!("(uint8_t)(({expr}) ? 1 : 0)"),
+                "as_char" => format!("(uint32_t)(unsigned char)({expr})"),
+                _ => format!("({}){expr}", t.decl),
+            };
+            Ok(format!("    {slot}.tag = {};\n    {slot}.data.{} = {value};\n", t.tag, t.field))
+        }
+        FieldType::Row(t, n) => {
+            let a = format!("{var}_row{idx}");
+            let elem = match t.field {
+                "as_str" => format!("strdup(({expr}[i_{idx}]) ? ({expr}[i_{idx}]) : \"\")"),
+                "as_bool" => format!("(uint8_t)(({expr}[i_{idx}]) ? 1 : 0)"),
+                "as_char" => format!("(uint32_t)(unsigned char)({expr}[i_{idx}])"),
+                _ => format!("({}){expr}[i_{idx}]", t.decl),
+            };
+            Ok(format!(
+                "    JadeArr* {a} = jade_shim_array({n});\n\
+                 \x20   if (!{a}) return 1;\n\
+                 \x20   for (size_t i_{idx} = 0; i_{idx} < {n}; i_{idx}++) {{\n\
+                 \x20       {a}->items[i_{idx}].tag = {};\n\
+                 \x20       {a}->items[i_{idx}].data.{} = {elem};\n\
+                 \x20   }}\n\
+                 \x20   {slot}.tag = JADE_FFI_ARRAY;\n\
+                 \x20   {slot}.data.as_arr = {a};\n",
+                t.tag, t.field
+            ))
+        }
+    }
 }
 
 /// Build the JadeStruct for a filled out-parameter.
@@ -1329,14 +1582,13 @@ fn emit_out_struct(
          \x20   if (!{var}_j) {{{cleanup} return 1; }}\n"
     );
     for (i, (field, ty)) in def.fields.iter().enumerate() {
-        let t = map_type(ty).ok_or_else(|| {
-            format!(
-                "dependency '{pkg}': symbol '{sym}' reads field '{field}' of {type_name} as \
-                 '{ty}', which the Jade FFI cannot represent. Supported types are \
-                 {SUPPORTED_TYPES}."
-            )
-        })?;
-        b.push_str(&emit_field(&format!("{var}_j"), i, field, &t, &format!("{var}.{field}")));
+        b.push_str(&emit_keyed_field(
+            FieldSite { pkg, sym, var },
+            &format!("{var}_j"),
+            i,
+            &(field.clone(), ty.clone()),
+            &format!("{var}.{field}"),
+        )?);
     }
     Ok(b)
 }
@@ -1407,25 +1659,77 @@ fn emit_struct_fill(
         def.fields.len()
     );
     for (n, (field, ty)) in def.fields.iter().enumerate() {
-        let t = map_type(ty).ok_or_else(|| {
-            format!(
-                "dependency '{pkg}': symbol '{sym}' fills field '{field}' of {type_name} from \
-                 '{ty}', which the Jade FFI cannot represent. Supported types are \
-                 {SUPPORTED_TYPES}."
-            )
-        })?;
-        b.push_str(&format!(
+        let t = field_type(pkg, sym, ty)?;
+        let head = format!(
             "    const JadeVal* {var}_{n} = jade_shim_field({var}_s, \"{field}\");\n\
-             \x20   if ({var}_{n}) {{\n\
-             \x20       if ({var}_{n}->tag != {}) {{\n\
-             \x20           out->tag = JADE_FFI_ERROR;\n\
-             \x20           out->data.as_str = \"{sym}: field '{field}' of {type_name} must be a {ty}\";\n\
-             \x20           return 1;\n\
-             \x20       }}\n\
-             \x20       {target}{field} = ({}){var}_{n}->data.{};\n\
-             \x20   }}\n",
-            t.tag, t.decl, t.field
-        ));
+             \x20   if ({var}_{n}) {{\n"
+        );
+        let wrong = |want: &str| {
+            format!(
+                "        if ({var}_{n}->tag != {want}) {{\n\
+                 \x20           out->tag = JADE_FFI_ERROR;\n\
+                 \x20           out->data.as_str = \"{sym}: field '{field}' of {type_name} must be a {ty}\";\n\
+                 \x20           return 1;\n\
+                 \x20       }}\n"
+            )
+        };
+        b.push_str(&head);
+        match t {
+            FieldType::One(t) => {
+                b.push_str(&wrong(t.tag));
+                b.push_str(&format!(
+                    "        {target}{field} = ({}){var}_{n}->data.{};\n",
+                    t.decl, t.field
+                ));
+            }
+            FieldType::Row(t, count) => {
+                // Longer than the field is refused rather than truncated. A row
+                // that does not fit is a mistake, and silently dropping the tail
+                // is the failure this generator exists to avoid. Shorter is
+                // filled with zeros, which is the same reading an omitted field
+                // already gets.
+                b.push_str(&wrong("JADE_FFI_ARRAY"));
+                b.push_str(&format!(
+                    "        const JadeArr* {var}_a{n} = {var}_{n}->data.as_arr;\n\
+                     \x20       if ({var}_a{n} && {var}_a{n}->len > {count}) {{\n\
+                     \x20           out->tag = JADE_FFI_ERROR;\n\
+                     \x20           out->data.as_str = \"{sym}: field '{field}' of {type_name} holds {count}\";\n\
+                     \x20           return 1;\n\
+                     \x20       }}\n\
+                     \x20       for (size_t k_{n} = 0; k_{n} < {count}; k_{n}++) {{\n\
+                     \x20           if (!{var}_a{n} || k_{n} >= {var}_a{n}->len) {{\n\
+                     \x20               {target}{field}[k_{n}] = 0;\n\
+                     \x20               continue;\n\
+                     \x20           }}\n\
+                     \x20           const JadeVal* e_{n} = &{var}_a{n}->items[k_{n}];\n\
+                     \x20           if (e_{n}->tag != {}) {{\n\
+                     \x20               out->tag = JADE_FFI_ERROR;\n\
+                     \x20               out->data.as_str = \"{sym}: field '{field}' of {type_name} must be a {ty}\";\n\
+                     \x20               return 1;\n\
+                     \x20           }}\n",
+                    t.tag
+                ));
+                if t.field == "as_char" {
+                    // The one place the byte-per-character mapping is not
+                    // symmetric: every byte is a character, but not every
+                    // character fits in a byte. Refused by name rather than
+                    // wrapped around.
+                    b.push_str(&format!(
+                        "            if (e_{n}->data.as_char > 0xFF) {{\n\
+                         \x20               out->tag = JADE_FFI_ERROR;\n\
+                         \x20               out->data.as_str = \"{sym}: field '{field}' of {type_name} holds bytes, and this character does not fit in one\";\n\
+                         \x20               return 1;\n\
+                         \x20           }}\n"
+                    ));
+                }
+                b.push_str(&format!(
+                    "            {target}{field}[k_{n}] = ({})e_{n}->data.{};\n\
+                     \x20       }}\n",
+                    t.decl, t.field
+                ));
+            }
+        }
+        b.push_str("    }\n");
     }
     Ok(b)
 }
@@ -1515,13 +1819,13 @@ fn held_accessors(pkg: &str, type_name: &str, def: &CStruct) -> Result<String, S
          \x20   if (!j) return 1;\n"
         ));
         for (i, (field, ty)) in def.fields.iter().enumerate() {
-            let t = map_type(ty).ok_or_else(|| {
-                format!(
-                    "dependency '{pkg}': held struct {type_name} reads field '{field}' as '{ty}', \
-                 which the Jade FFI cannot represent. Supported types are {SUPPORTED_TYPES}."
-                )
-            })?;
-            b.push_str(&emit_field("j", i, field, &t, &format!("sp->{field}")));
+            b.push_str(&emit_keyed_field(
+                FieldSite { pkg, sym: type_name, var: "g" },
+                "j",
+                i,
+                &(field.clone(), ty.clone()),
+                &format!("sp->{field}"),
+            )?);
         }
         b.push_str(
             "    out->tag = JADE_FFI_STRUCT;\n\
@@ -1529,6 +1833,51 @@ fn held_accessors(pkg: &str, type_name: &str, def: &CStruct) -> Result<String, S
          \x20   return 0;\n\
          }\n",
         );
+
+        // Reading one of a *row* of these.
+        //
+        // A library that hands back many structs hands back a pointer to the
+        // first and says how many — `cs_disasm` returns the count beside the
+        // handle. Without this the caller holds a pointer to a row and can only
+        // ever see its first element, which is a binding that answers one third
+        // of the question it was asked.
+        //
+        // Only when the struct has no buffer fields, because then the handle
+        // points at a wrapper rather than at a plain array and indexing it
+        // would step over the shim's own bookkeeping.
+        //
+        // The index is not bounds-checked, and cannot be: the count came from
+        // the call that produced the handle and lives on the Jade side. Reading
+        // past it is the same trust the library already asks of a C caller.
+        if k == 0 {
+            b.push_str(&format!(
+                "\nstatic int jade_shim_{p}_at(size_t argc, const JadeVal* argv, JadeVal* out) {{\n\
+                 \x20   if (argc != 2) return 1;\n\
+                 \x20   void* vp = NULL;\n\
+                 \x20   if (!jade_shim_unwrap(&argv[0], \"{type_name}\", &vp)) return 1;\n\
+                 \x20   if (argv[1].tag != JADE_FFI_INT) return 1;\n\
+                 \x20   int64_t idx = argv[1].data.as_int;\n\
+                 \x20   if (idx < 0) return 1;\n\
+                 \x20   {type_name}* sp = &(({type_name}*)vp)[idx];\n\
+                 \x20   JadeStruct* j = jade_shim_struct(\"{type_name}\", {n});\n\
+                 \x20   if (!j) return 1;\n"
+            ));
+            for (i, (field, ty)) in def.fields.iter().enumerate() {
+                b.push_str(&emit_keyed_field(
+                    FieldSite { pkg, sym: type_name, var: "a" },
+                    "j",
+                    i,
+                    &(field.clone(), ty.clone()),
+                    &format!("sp->{field}"),
+                )?);
+            }
+            b.push_str(
+                "    out->tag = JADE_FFI_STRUCT;\n\
+             \x20   out->data.as_struct = j;\n\
+             \x20   return 0;\n\
+             }\n",
+            );
+        }
 
         b.push_str(&format!(
             "\nstatic int jade_shim_{p}_set(size_t argc, const JadeVal* argv, JadeVal* out) {{\n\
@@ -1635,8 +1984,15 @@ fn held_accessors(pkg: &str, type_name: &str, def: &CStruct) -> Result<String, S
 /// The Jade-facing names a held struct contributes, in binding-table order.
 fn held_bindings(type_name: &str, def: &CStruct) -> Vec<String> {
     let p = held_prefix(type_name);
-    let verbs: &[&str] =
-        if def.fields.is_empty() { &["new", "free"] } else { &["new", "free", "get", "set"] };
+    let verbs: &[&str] = if def.fields.is_empty() {
+        &["new", "free"]
+    } else if def.buffers.is_empty() {
+        // `_at` reads one of a row. Only without buffer fields, where the handle
+        // points at a plain struct rather than at the shim's wrapper.
+        &["new", "free", "get", "set", "at"]
+    } else {
+        &["new", "free", "get", "set"]
+    };
     let mut v: Vec<String> = verbs.iter().map(|w| format!("{p}_{w}")).collect();
     for buf in &def.buffers {
         if buf.writable {
@@ -1661,16 +2017,20 @@ fn held_bindings(type_name: &str, def: &CStruct) -> Vec<String> {
 /// finds an empty slot and gets the neutral answer rather than a stale pointer —
 /// an asynchronous registration is not supported, and pretending otherwise would
 /// mean calling into an interpreter that has moved on.
-fn trampoline(sym: &str, ret: &str, params: &[String]) -> String {
+fn trampoline(sym: &str, ret: &CbRet, params: &[CbParam]) -> String {
     // The C signature keeps every parameter, because the library calls through
     // this pointer and the shape has to match. Only the ones Jade can be given
-    // are forwarded — see `is_user_data`.
-    let carried: Vec<(usize, &String)> =
-        params.iter().enumerate().filter(|(_, p)| !is_user_data(p)).collect();
+    // are forwarded: the user-data slot has nothing to carry, and a length rode
+    // in with the pointer it measures.
+    let carried: Vec<(usize, &CbParam)> = params
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| matches!(p.kind, CbKind::Scalar(..) | CbKind::Bytes))
+        .collect();
     let n = carried.len();
     let c_params: Vec<String> =
-        params.iter().enumerate().map(|(i, p)| format!("{p} a{i}")).collect();
-    let c_ret = if ret == "nil" || ret == "void" { "void".to_string() } else { ret.to_string() };
+        params.iter().enumerate().map(|(i, p)| format!("{} a{i}", p.c_type)).collect();
+    let c_ret = ret.c_type.clone();
     let sig = if c_params.is_empty() { "void".to_string() } else { c_params.join(", ") };
 
     let mut b = format!(
@@ -1682,7 +2042,7 @@ fn trampoline(sym: &str, ret: &str, params: &[String]) -> String {
     );
 
     // Nothing registered: answer neutrally rather than dereferencing.
-    let is_void = ret == "nil" || ret == "void";
+    let is_void = ret.marshal.is_none();
     let neutral = if is_void { "return;".to_string() } else { "return 0;".to_string() };
     b.push_str(&format!("    if (!jade_cb_{sym}) {{ {neutral} }}\n"));
 
@@ -1691,7 +2051,7 @@ fn trampoline(sym: &str, ret: &str, params: &[String]) -> String {
     // which would make the signature harder to read against the header it
     // mirrors.
     for (i, p) in params.iter().enumerate() {
-        if is_user_data(p) {
+        if matches!(p.kind, CbKind::UserData) {
             b.push_str(&format!("    (void)a{i};\n"));
         }
     }
@@ -1700,18 +2060,37 @@ fn trampoline(sym: &str, ret: &str, params: &[String]) -> String {
         b.push_str(&format!("    JadeVal cbargs[{n}];\n"));
         for (slot, (i, p)) in carried.iter().enumerate() {
             let i = *i;
-            let (tag, field) = c_scalar(p).expect("validated");
-            // Cast on the way in: the C parameter is the library's width, the
-            // JadeVal field is Jade's.
-            let cast = match field {
-                "as_int" => "(int64_t)",
-                "as_float" => "(double)",
-                "as_bool" => "(uint8_t)!!",
-                _ => "",
-            };
-            b.push_str(&format!(
-                "    cbargs[{slot}].tag = {tag};\n    cbargs[{slot}].data.{field} = {cast}a{i};\n"
-            ));
+            match p.kind {
+                CbKind::Bytes => {
+                    // The pointer and the length arrive as two C parameters and
+                    // leave as one blob, exactly as a `bytes` argument does in
+                    // the other direction. Copied, because the library owns the
+                    // buffer and it is only valid for the duration of the call.
+                    b.push_str(&format!(
+                        "    JadeBytes* cb{slot} = jade_shim_bytes(a{i}, (size_t)(a{} < 0 ? 0 : a{}));\n\
+                         \x20   if (!cb{slot}) {{ jade_cb_failed_{sym} = 1; {neutral} }}\n\
+                         \x20   cbargs[{slot}].tag = JADE_FFI_BYTES;\n\
+                         \x20   cbargs[{slot}].data.as_bytes = cb{slot};\n",
+                        i + 1,
+                        i + 1
+                    ));
+                }
+                CbKind::Scalar(tag, field) => {
+                    // Cast on the way in: the C parameter is the library's
+                    // width, the JadeVal field is Jade's.
+                    let cast = match field {
+                        "as_int" => "(int64_t)",
+                        "as_float" => "(double)",
+                        "as_bool" => "(uint8_t)!!",
+                        _ => "",
+                    };
+                    b.push_str(&format!(
+                        "    cbargs[{slot}].tag = {tag};\n\
+                         \x20   cbargs[{slot}].data.{field} = {cast}a{i};\n"
+                    ));
+                }
+                _ => unreachable!("only forwarded kinds reach here"),
+            }
         }
     }
     b.push_str("    JadeVal cbout;\n    cbout.tag = JADE_FFI_NIL;\n    cbout.data.as_nil = 0;\n");
@@ -1731,9 +2110,10 @@ fn trampoline(sym: &str, ret: &str, params: &[String]) -> String {
     if is_void {
         b.push_str("    (void)cbout;\n");
     } else {
-        let (tag, field) = c_scalar(ret).expect("validated");
+        let (tag, field) = ret.marshal.expect("validated");
         b.push_str(&format!(
-            "    if (cbout.tag != {tag}) return 0;\n    return ({ret})cbout.data.{field};\n"
+            "    if (cbout.tag != {tag}) return 0;\n    return ({})cbout.data.{field};\n",
+            ret.c_type
         ));
     }
     b.push_str("}\n");
@@ -2026,8 +2406,17 @@ fn wrapper(
                      \x20   if (!rs) return 1;\n"
                 ));
                 for (i, (field, ty)) in def.fields.iter().enumerate() {
-                    let t = map_type(ty).expect("validated by parse_symbol");
-                    s.push_str(&emit_field("rs", i, field, &t, &format!("r.{field}")));
+                    // Validated by parse_symbol, which refuses a field type the
+                    // FFI cannot carry before any of this runs.
+                    let one = emit_keyed_field(
+                        FieldSite { pkg, sym, var: "rv" },
+                        "rs",
+                        i,
+                        &(field.clone(), ty.clone()),
+                        &format!("r.{field}"),
+                    )
+                    .expect("validated by parse_symbol");
+                    s.push_str(&one);
                 }
                 s.push_str(&format!(
                     "    {target}tag = JADE_FFI_STRUCT;\n    {target}data.as_struct = rs;\n"
@@ -2065,7 +2454,7 @@ fn wrapper(
     // shape that existed before: a bare return, a lone filled buffer, a lone
     // handle, and the `.ret`/`.out` pair.
     let outs: Vec<&ArgSpec> = p.outs.iter().map(|&i| &p.args[i]).collect();
-    let ret_key = ret_is_a_key(&ret_t, &outs);
+    let ret_key = ret_is_a_key(&ret_t, &outs, spec.fails_when);
 
     // Each out-parameter's value, written into a slot named by `target`.
     let emit_out = |target: &str, i: usize, body: &mut String| -> Result<(), String> {

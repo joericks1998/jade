@@ -168,6 +168,11 @@ int64_t jrt_int_any(int64_t val) {
     if (jrt_is_int(v))   return val;
     if (jrt_is_float(v)) return jrt_box_int((int64_t)jrt_unbox_float(v));
     if (jrt_is_bool(v))  return jrt_box_int(jrt_unbox_bool(v) ? 1 : 0);
+    /* A character's Unicode scalar. This is what lets a program read a
+     * fixed-size C field: `char mnemonic[32]` arrives as thirty-two characters,
+     * NUL padding included, and `int(c) == 0` finds where the text stops.
+     * Mirrors the VM's `vm_type_call` "int" arm. */
+    if (jrt_is_char(v))  return jrt_box_int((int64_t)jrt_unbox_char(v));
     if (jrt_is_str(v)) {
         const char* s = (const char*)jrt_unbox_ptr(v);
         const char *a, *b;
@@ -200,6 +205,17 @@ int64_t jrt_int_any(int64_t val) {
 int64_t jrt_char_any(int64_t val) {
     jade_value_t v = (jade_value_t)val;
     if (jrt_is_char(v)) return val;
+    /* The other direction, for building a fixed-size C field from numbers.
+     * Refused rather than replaced when the number is not a character, because
+     * a silent substitution corrupts what it claims to convert. */
+    if (jrt_is_int(v)) {
+        int64_t i = jrt_unbox_int(v);
+        if (i >= 0 && i <= 0x10FFFF && !(i >= 0xD800 && i <= 0xDFFF))
+            return jrt_box_char((uint32_t)i);
+        char msg[96];
+        snprintf(msg, sizeof msg, "char(): %lld is not a Unicode scalar", (long long)i);
+        throw_msg(msg);
+    }
     if (jrt_is_str(v)) {
         const char* s = (const char*)jrt_unbox_ptr(v);
         unsigned char c = (unsigned char)s[0];

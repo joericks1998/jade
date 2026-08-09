@@ -219,6 +219,12 @@ pub(crate) fn vm_type_call(
             VmValue::Int(i) => Ok(VmValue::Int(i)),
             VmValue::Float(f) => Ok(VmValue::Int(f as i64)),
             VmValue::Bool(b) => Ok(VmValue::Int(if b { 1 } else { 0 })),
+            // A character's Unicode scalar. This is what lets a program read a
+            // fixed-size C field: `char mnemonic[32]` arrives as thirty-two
+            // characters, NUL padding included, and `int(c) == 0` is how you
+            // find where the text stops. Without it the field is carried
+            // faithfully and cannot be used.
+            VmValue::Char(c) => Ok(VmValue::Int(c.ch() as i64)),
             VmValue::Str(s) => {
                 s.trim().parse::<i64>().map(VmValue::Int).map_err(|_| JadeError::Exception {
                     message: format!("int(): cannot convert {:?} to int", s),
@@ -263,6 +269,15 @@ pub(crate) fn vm_type_call(
         }
         "char" => match arg {
             VmValue::Char(c) => Ok(VmValue::Char(c)),
+            // The other direction, for building a fixed-size C field from
+            // numbers. Refused rather than replaced when the number is not a
+            // character — the surrogate range and anything past U+10FFFF are
+            // not — because a silent substitution corrupts what it claims to
+            // convert.
+            VmValue::Int(i) => match u32::try_from(i).ok().and_then(char::from_u32) {
+                Some(c) => Ok(VmValue::Char(jade_runtime::trust::JChar::trusted(c))),
+                None => err(format!("char(): {i} is not a Unicode scalar")),
+            },
             // Exactly one character, so the conversion cannot silently drop
             // input. A multi-character string is a mistake worth reporting.
             VmValue::Str(s) => {

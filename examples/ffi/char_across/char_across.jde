@@ -1,0 +1,36 @@
+// `char` crossing the FFI, and the two conversions that make a fixed-size C
+// field readable.
+//
+// A C `char[32]` arrives as thirty-two characters, NUL padding included —
+// nothing is trimmed, because trimming would guess where the text stops. So
+// `int(c)` is how a program finds that itself, and `char(n)` builds one from a
+// number for the write direction.
+
+let c = char("j")
+print(c)
+print(int(c))
+print(char(106))
+print(char(106) == "j")
+
+// Unicode, not bytes: a scalar above 255 survives in both directions.
+print(int(char("中")))
+print(char(20013))
+
+// Reading a fixed-size field the way C does: stop at the first NUL.
+let field = [char("p"), char("u"), char("s"), char("h"), char(0), char(0), char(0)]
+let text = ""
+for ch in field {
+    if int(ch) == 0 {
+        break
+    }
+    text = text + ch
+}
+print(text)
+print(text.len())
+
+// A number that is not a character is refused rather than replaced.
+try {
+    print(char(1114112))
+} catch e {
+    print("refused")
+}
