@@ -59,10 +59,20 @@ pub struct Binding {
     pub assumed: Vec<(String, String)>,
     /// Not bound, and why. `(symbol, reason)`.
     pub skipped: Vec<(String, String)>,
-    /// Set when the named header declared nothing itself and the library's
-    /// export table picked the declarations instead — see [`bindable`]. Carries
-    /// how many exported declarations were swept in.
-    pub umbrella: Option<usize>,
+    /// Set when declarations came from headers the named one includes rather
+    /// than from the header itself — see [`bindable`].
+    pub swept: Option<Swept>,
+}
+
+/// Declarations taken from headers the named one includes, and whether the
+/// named header had any of its own.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Swept {
+    /// How many exported declarations came from the included headers.
+    pub n: usize,
+    /// The named header declared no functions at all, so *every* bound symbol
+    /// came from an include.
+    pub umbrella: bool,
 }
 
 impl Binding {
@@ -78,11 +88,16 @@ impl Binding {
         if !self.structs.is_empty() {
             s.push_str(&format!("; {} struct(s)", self.structs.len()));
         }
-        if let Some(n) = self.umbrella {
-            s.push_str(&format!(
+        match self.swept {
+            Some(Swept { n, umbrella: true }) => s.push_str(&format!(
                 "\n\nthat header declares nothing itself, so the {n} declarations it includes \
                  that\nthe library also exports were bound instead."
-            ));
+            )),
+            Some(Swept { n, umbrella: false }) => s.push_str(&format!(
+                "\n\n{n} of these are declared in headers that one includes, and are bound \
+                 because\nthe library exports them."
+            )),
+            None => {}
         }
         if !self.assumed.is_empty() {
             // Grouped by reason, like the skips below. Every out-scalar carries
@@ -701,23 +716,21 @@ fn map_param(
 
     if is_fn_ptr(raw) {
         return match callback_spec(raw, env) {
-            // The Jade function is registered for the duration of *this* call
-            // and cleared when it returns — see `cshim::trampoline`, which
-            // explains why: calling back into an interpreter that has moved on
-            // is not something the slot can promise.
-            //
-            // That is right for a callback the library invokes while it works,
-            // and wrong for one it stores. `ares_search` registers and returns,
-            // and its callback fires later during `ares_process`, by which point
-            // there is nothing in the slot — so the binding is real, compiles,
-            // runs, and never calls back. Nothing in C distinguishes the two, so
-            // the report says so rather than the generator guessing.
+            // A stored callback works now — the registration outlives the call
+            // and the Jade function is kept alive by `native::CallbackBus`. What
+            // is still assumed is *which* function an answer belongs to: the
+            // shim keeps one slot per symbol, so two outstanding registrations
+            // collide unless the library offers a context parameter to route
+            // through. Reported rather than guessed, because filling that slot
+            // means the library must hand back exactly what it was given.
             Some(spec) => Mapped::Assumed(
                 spec,
                 concat!(
-                    "takes a callback, which is registered only while the call runs. If the ",
-                    "library stores it and calls back later — an async request, a watcher — ",
-                    "it will find nothing there and your function will never run"
+                    "takes a callback. The library may store it and call back later, which ",
+                    "works — but the shim keeps one registration per symbol, so calling ",
+                    "this twice with different functions sends both answers to the ",
+                    "second. If the library has a context parameter beside the callback, ",
+                    "write `callback_data` for it instead of `null_ptr` and each gets its own"
                 )
                 .to_string(),
             ),
@@ -1234,19 +1247,29 @@ fn infer_failure(
 /// found", and pointing at a sub-header failed differently, because a
 /// sub-header on its own is usually not compilable.
 ///
-/// So when the named header declares no functions of its own, the library's
-/// export table decides instead: bind what the translation unit declares *and*
-/// the artifact exports. That is an exact test rather than a guess about which
-/// paths count as system ones — `fopen` is declared in this translation unit
-/// and is not in liblzma, so it does not get bound. The umbrella stays the
-/// header the shim includes, which is what it is for.
+/// So the library's export table decides instead: bind what the translation
+/// unit declares *and* the artifact exports. That is an exact test rather than
+/// a guess about which paths count as system ones — `fopen` is declared in this
+/// translation unit and is not in liblzma, so it does not get bound. The named
+/// header stays the one the shim includes, which is what it is for.
 ///
-/// Returns the nodes to bind, and how many symbols the umbrella case swept in.
+/// This runs whether or not the named header declares functions of its own,
+/// because plenty of libraries do both. `ares.h` declares seventy-odd symbols
+/// and includes `ares_dns_record.h`, which declares sixty-three more — the
+/// whole modern DNS record API, invisible for as long as the rule was
+/// all-or-nothing. Its own declarations are kept either way, so no library
+/// loses a symbol by this being additive.
+///
+/// Without an export table there is nothing exact to test against, so only the
+/// header's own declarations are bound, and an umbrella is an error naming the
+/// artifact it needs.
+///
+/// Returns the nodes to bind, and what was swept in from the includes.
 fn bindable<'a>(
     header: &Path,
     top: &'a [Value],
     exported: Option<&std::collections::HashSet<String>>,
-) -> Result<(Vec<&'a Value>, Option<usize>), String> {
+) -> Result<(Vec<&'a Value>, Option<Swept>), String> {
     let is_fn = |n: &Value| n.get("kind").and_then(Value::as_str) == Some("FunctionDecl");
 
     // clang names a file once and lets the nodes after it inherit that name, so
@@ -1263,11 +1286,12 @@ fn bindable<'a>(
         }
     }
 
-    if own.iter().any(|n| is_fn(n)) {
-        return Ok((own, None));
-    }
+    let has_own = own.iter().any(|n| is_fn(n));
 
     let Some(exported) = exported else {
+        if has_own {
+            return Ok((own, None));
+        }
         return Err(format!(
             "{} declares no functions of its own — it is an umbrella header that only includes \
              others.\n  Which of those to bind can be settled by the library's own export table, \
@@ -1278,15 +1302,27 @@ fn bindable<'a>(
         ));
     };
 
+    // A declaration the named header already carries is not swept in again.
+    // Its own come first and unconditionally: they are what the user pointed
+    // at, and an exported-only rule would silently drop a symbol declared there
+    // that the artifact happens not to export.
+    let own_names: std::collections::HashSet<&str> = own
+        .iter()
+        .filter(|n| is_fn(n))
+        .filter_map(|n| n.get("name").and_then(Value::as_str))
+        .collect();
+
     let swept: Vec<&Value> = top
         .iter()
         .filter(|n| is_fn(n))
         .filter(|n| {
-            n.get("name").and_then(Value::as_str).is_some_and(|name| exported.contains(name))
+            n.get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|name| exported.contains(name) && !own_names.contains(name))
         })
         .collect();
 
-    if swept.is_empty() {
+    if !has_own && swept.is_empty() {
         return Err(format!(
             "nothing to bind in {}: it declares no functions of its own, and none of the \
              declarations it includes are symbols this library exports.",
@@ -1294,8 +1330,15 @@ fn bindable<'a>(
         ));
     }
 
+    if swept.is_empty() {
+        return Ok((own, None));
+    }
+
     let n = swept.len();
-    Ok((swept, Some(n)))
+    let umbrella = !has_own;
+    let mut all = own;
+    all.extend(swept);
+    Ok((all, Some(Swept { n, umbrella })))
 }
 
 /// Read `header` and produce the tables for a `[dependencies.<name>]` entry.
@@ -1319,7 +1362,7 @@ pub fn from_header(
 
     let empty = Vec::new();
     let top = ast.get("inner").and_then(Value::as_array).unwrap_or(&empty);
-    let (mine, umbrella) = bindable(header, top, exported)?;
+    let (mine, swept) = bindable(header, top, exported)?;
 
     // Types come from the *whole* translation unit, functions only from the
     // headers chosen above. The two need different scopes: a library splits its
@@ -1337,7 +1380,7 @@ pub fn from_header(
     let produced = produced_types(&mine, &env);
     let counts = struct_param_counts(&mine, &env);
 
-    let mut b = Binding { umbrella, ..Default::default() };
+    let mut b = Binding { swept, ..Default::default() };
 
     for n in &mine {
         if n.get("kind").and_then(Value::as_str) != Some("FunctionDecl") {

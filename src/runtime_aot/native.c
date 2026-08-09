@@ -700,9 +700,19 @@ static void ffi_free_node(JadeVal* v) {
             break;
         }
         case JADE_FFI_FN:
-            /* Only the wrapper is ours. `host` is the program's function box,
-             * which the heap owns. */
-            free(v->data.as_fn);
+            /* Deliberately not freed.
+             *
+             * A library may *store* the callback and invoke it from a later
+             * call entirely — `ares_search` registers and the answer arrives
+             * during `ares_process` — so releasing the wrapper when the
+             * registering call returns leaves the library holding a pointer to
+             * freed memory. Nothing in C says when a library is finished with a
+             * stored callback, so there is no later moment that would be safe
+             * either.
+             *
+             * The cost is one wrapper per callback-passing call, held until the
+             * process exits. `host` is the program's own function box, which
+             * `program_collections_only` in aot/lower keeps alive regardless. */
             break;
         case JADE_FFI_HANDLE: {
             JadeHandle* h = v->data.as_handle;
@@ -729,7 +739,7 @@ void jade_ffi_free(JadeVal* v) {
      * wrapper and the type name only — never the pointee. */
     if (v->tag == JADE_FFI_ARRAY || v->tag == JADE_FFI_DICT ||
         v->tag == JADE_FFI_STRUCT || v->tag == JADE_FFI_BYTES ||
-        v->tag == JADE_FFI_HANDLE || v->tag == JADE_FFI_FN) ffi_free_node(v);
+        v->tag == JADE_FFI_HANDLE) ffi_free_node(v);
 }
 
 jade_value_t jrt_native_call(void* handle, const char* fn_name,

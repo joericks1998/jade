@@ -236,12 +236,28 @@ the C is written, so a real static function of that shape can just be declared.
 
 Two rules follow from where the callback runs:
 
-**The registration lasts exactly one call.** The slot is `_Thread_local` and set
-only for the duration of the native call. A library that stores the callback and
-invokes it later finds an empty slot and gets the neutral answer, rather than a
-stale pointer into an interpreter that has moved on. Asynchronous registration
-is not supported and cannot be without keeping the interpreter available
-indefinitely.
+**The registration outlives the call that made it, and is not thread-local.**
+Both used to be the other way round, and both had to change together for a
+library that *stores* a callback: it invokes it from a later call entirely, and
+under the VM each native call runs on its own worker thread, so a thread-local
+slot set during one would read empty in the next even if nothing cleared it.
+The Jade function behind it is kept alive by `native::CallbackBus` for the life
+of the VM — nothing in C says when a library is finished with a stored callback,
+so there is no moment at which releasing it would be safe.
+
+**There is one slot per symbol, which is not always enough.** Two outstanding
+registrations on one symbol collide: the second takes the first's answers. Where
+the library offers a context parameter beside the callback, `callback_data`
+fills it with the callback's own pointer and the trampoline reads it back, so
+each registration reaches its own function. Never inferred, for the reason
+`null_ptr` is not — a library that puts something else in that slot would have
+it dereferenced as a `JadeFn`.
+
+**Every wrapper checks whether a callback raised, not only the ones that
+register one.** Once a registration outlives its call, the symbol that
+registered is not the symbol that was running when the raise happened: a
+function given to `ares_search` raises during `ares_process`, and that is the
+call that has to report it. So the flag is one per shim.
 
 **A raise is deferred, never unwound.** The trampoline records the failure and
 returns; the wrapper turns it into a Jade error *after* the library has returned
@@ -480,7 +496,11 @@ Two directories, for two different includes: `libfdt.h` does `#include <libfdt_e
 
 **Types come from the whole translation unit; functions come only from the header you named.** The two need different scopes and used to share one. A library splits its types into `git2/types.h` and declares functions against them in twenty other files, so an environment built from a single file reported every one of those functions as taking an unsupported type. Types are safe to take from everywhere because nothing is emitted for a type on its own — one is recorded only because a bound function reached it. Functions are not, or binding `archive.h` would bind `stdio.h` with it.
 
-**An umbrella header is decided by the export table, not by a path heuristic.** `lzma.h`, `git2.h` and `alsa/asoundlib.h` declare nothing and exist to include the files that do; pointing at one reported "no declarations found", and pointing at a sub-header failed differently because a sub-header usually does not compile alone. When the named header declares no functions of its own, `bindable` falls back to every declaration in the translation unit that the artifact also exports. That is an exact test — `fopen` is in that translation unit and is not in liblzma — where "which directories are system ones" would have been a guess that breaks the moment a library lives in `/opt/homebrew/include` alongside its own dependencies. It needs the artifact, so the fallback is refused with a message naming `--path` when there is none.
+**What a header includes is scoped by the export table, not by a path heuristic.** `bindable` binds the named header's own declarations plus every declaration in the translation unit that the artifact also exports. That is an exact test — `fopen` is in that translation unit and is not in liblzma — where "which directories are system ones" would have been a guess that breaks the moment a library lives in `/opt/homebrew/include` alongside its own dependencies.
+
+It started as a rule for umbrella headers alone. `lzma.h`, `git2.h` and `alsa/asoundlib.h` declare nothing and exist to include the files that do; pointing at one reported "no declarations found", and pointing at a sub-header failed differently because a sub-header usually does not compile alone. But the rule was all-or-nothing — a header declaring anything of its own bound only its own — and plenty of libraries do both. `ares.h` declares seventy-odd symbols and includes `ares_dns_record.h`, which declares sixty-three more; the whole modern DNS record API was invisible, and nothing reported it, because a symbol never reached is a symbol with nothing to refuse. The same exact test settles both cases, so it runs for both. Own declarations are kept unconditionally, which makes it additive: they are what the user pointed at, and an exported-only rule would drop one the artifact happens not to export.
+
+Without an artifact there is nothing to test against: a header with its own declarations binds those alone, and an umbrella is refused with a message naming `--path`.
 
 **One unbindable symbol must not take the dependency with it.** `from_header` resolved a symbol's structs inside a nested loop and `continue`d on failure — which continued the *inner* loop, so the symbol was emitted anyway while its field table was dropped. `cshim` refuses an `out_struct:` naming a table that is not there, and it refuses the whole dependency rather than the one symbol, so a single struct of unrepresentable fields made an otherwise fine library uninstallable. `sqlite3_snapshot_free` and `zip_file_attributes_init` are both that shape. The structs are resolved together now and the symbol is skipped as a unit, with the reason in the report.
 

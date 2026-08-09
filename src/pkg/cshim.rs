@@ -191,6 +191,21 @@ enum ArgSpec {
     /// rather than guessing. Guessing one way leaks on every call, and the other
     /// frees memory that was never allocated.
     OutAllocStr { c_type: String, name: Option<String> },
+    /// `callback_data` — no Jade argument. The library's own context slot, and
+    /// the shim puts the *caller's own function pointer* in it.
+    ///
+    /// C has no closures, so a library that stores a callback takes a `void *`
+    /// beside it and hands that back when it calls. Jade has no use for the
+    /// slot — a Jade function carries its own environment — so it is normally
+    /// passed as `null_ptr`. Filling it instead is what lets two outstanding
+    /// registrations on one symbol each get their own function: without it
+    /// there is one slot per symbol, and a second `ares_search` silently takes
+    /// the first one's answers.
+    ///
+    /// Never inferred, for the reason `null_ptr` is never inferred. A library
+    /// that puts something other than the caller's cookie in that parameter
+    /// would have it read back as a `JadeFn` and dereferenced.
+    CallbackData,
     /// `null_ptr` — no Jade argument. A null pointer is passed, always.
     ///
     /// The escape hatch for a parameter the FFI genuinely cannot carry in a
@@ -275,7 +290,9 @@ impl ArgSpec {
             ArgSpec::Scalar(t) => t.decl.to_string(),
             ArgSpec::Bytes => "const void*, size_t".to_string(),
             ArgSpec::BytesPtr => "const void*".to_string(),
-            ArgSpec::InoutBytes { .. } | ArgSpec::NullPtr => "void*".to_string(),
+            ArgSpec::InoutBytes { .. } | ArgSpec::NullPtr | ArgSpec::CallbackData => {
+                "void*".to_string()
+            }
             ArgSpec::OutStr { c_type, .. } => format!("const {c_type}**"),
             ArgSpec::OutAllocStr { c_type, .. } => format!("{c_type}**"),
             ArgSpec::OutBuffer { elem, .. } | ArgSpec::SizedBuffer { elem, .. } => {
@@ -644,6 +661,9 @@ fn parse_arg(pkg: &str, sym: &str, full: &str) -> Result<ArgSpec, String> {
     if spec == "null_ptr" {
         return Ok(ArgSpec::NullPtr);
     }
+    if spec == "callback_data" {
+        return Ok(ArgSpec::CallbackData);
+    }
     if spec == "inout_bytes" {
         return Ok(ArgSpec::InoutBytes { name: out_name });
     }
@@ -894,6 +914,21 @@ static int jade_shim_unwrap(const JadeVal* v, const char* want, void** out) {
 }
 "#;
 
+/// Emitted only when some symbol takes a callback.
+///
+/// One flag for the whole shim rather than one per symbol. Once a registration
+/// outlives the call that made it, the symbol that registered is not the symbol
+/// that was running when the callback raised — a function given to
+/// `ares_search` raises during `ares_process` — so the flag every wrapper checks
+/// has to be the one every trampoline sets.
+const CB_FAILED_HELPER: &str = r#"
+/* Set by a trampoline when the Jade side raised, cleared by whichever wrapper
+ * reports it. A raise must never travel out of a trampoline: the library is
+ * mid-operation and unwinding through its frames would leave it however it
+ * happens to be. */
+static int jade_cb_failed = 0;
+"#;
+
 /// Emitted only when some struct carries a fixed-size array field.
 const ARRAY_HELPER: &str = r#"
 /* A row of `n` values, zeroed. libc heap for the reason everything else here
@@ -1073,7 +1108,28 @@ fn parse_symbol(
     // parameter it only knows as "a null pointer" would be declared `void*`
     // where the real one is a function pointer. That is a prototype mismatch,
     // which C is entitled to compile into a call through the wrong ABI.
-    if headers.is_empty() && args.iter().any(|a| matches!(a, ArgSpec::NullPtr)) {
+    // `callback_data` needs a callback beside it — it carries that function's
+    // pointer, so on its own it names nothing.
+    if args.iter().any(|a| matches!(a, ArgSpec::CallbackData))
+        && !args.iter().any(|a| matches!(a, ArgSpec::Callback { .. }))
+    {
+        return Err(format!(
+            "dependency '{pkg}': symbol '{sym}' has a `callback_data` but takes no callback. It \
+             carries the callback's own pointer, so there has to be one."
+        ));
+    }
+    if args.iter().any(|a| matches!(a, ArgSpec::CallbackData))
+        && args.iter().filter(|a| matches!(a, ArgSpec::Callback { .. })).count() > 1
+    {
+        return Err(format!(
+            "dependency '{pkg}': symbol '{sym}' has a `callback_data` and more than one callback. \
+             One context slot cannot tell two of them apart — the library passes the same value \
+             back to both — so drop it and write `null_ptr` there instead."
+        ));
+    }
+    if headers.is_empty()
+        && args.iter().any(|a| matches!(a, ArgSpec::NullPtr | ArgSpec::CallbackData))
+    {
         return Err(format!(
             "dependency '{pkg}': symbol '{sym}' passes a `null_ptr`, so the dependency needs \
              `headers = [\"<the library's header>\"]`. Without one the shim declares the symbol \
@@ -1356,6 +1412,14 @@ pub fn generate(
     if uses_handle {
         out.push_str(HANDLE_HELPER);
     }
+    // Every wrapper checks the raised flag, not only the ones that register a
+    // callback — a function given to one call raises during another. So the
+    // whole shim shares one flag, and a shim with no callbacks declares none.
+    let any_callback =
+        parsed.iter().any(|p| p.args.iter().any(|a| matches!(a, ArgSpec::Callback { .. })));
+    if any_callback {
+        out.push_str(CB_FAILED_HELPER);
+    }
 
     // The library's own headers, so a struct out-parameter is declared with the
     // real type rather than a guess at its layout. Sorted for a stable file.
@@ -1376,12 +1440,13 @@ pub fn generate(
     for sym in &names {
         // The trampoline first: the wrapper names it as the C argument.
         let parsed = parse_symbol(name, sym, &symbols[*sym], structs, headers)?;
-        for a in &parsed.args {
+        for (at, a) in parsed.args.iter().enumerate() {
             if let ArgSpec::Callback { ret, params } = a {
-                out.push_str(&trampoline(sym, ret, params));
+                let routed = parsed.args.iter().any(|x| matches!(x, ArgSpec::CallbackData));
+                out.push_str(&trampoline(sym, at, ret, params, routed));
             }
         }
-        out.push_str(&wrapper(name, sym, &symbols[*sym], structs, headers)?);
+        out.push_str(&wrapper(name, sym, &symbols[*sym], structs, headers, any_callback)?);
     }
 
     // A struct Jade holds gets four bindings of its own. Sorted, for the same
@@ -2012,12 +2077,22 @@ fn held_bindings(type_name: &str, def: &CStruct) -> Vec<String> {
 /// known when this C is written, so a real function of that shape can simply be
 /// declared. Synthesising one at run time would need a trampoline compiler.
 ///
-/// The slot is `_Thread_local` and set only for the duration of the call, which
-/// is the honest scope. A library that stores the callback and invokes it later
-/// finds an empty slot and gets the neutral answer rather than a stale pointer —
-/// an asynchronous registration is not supported, and pretending otherwise would
-/// mean calling into an interpreter that has moved on.
-fn trampoline(sym: &str, ret: &CbRet, params: &[CbParam]) -> String {
+/// The slot outlives the call that set it, and is not thread-local. Both matter
+/// for a library that *stores* the callback: it invokes it from a later call
+/// entirely — `ares_search` registers and the answer arrives during
+/// `ares_process` — and under the VM each native call runs on its own worker
+/// thread, so a thread-local slot set by one would read empty in the other.
+///
+/// The Jade function behind it is kept alive by `native::CallbackBus` for the
+/// life of the VM. Nothing in C says when a library is finished with a stored
+/// callback, so there is no moment at which releasing it would be safe.
+fn trampoline(sym: &str, at: usize, ret: &CbRet, params: &[CbParam], routed: bool) -> String {
+    // Keyed by where the callback sits in the symbol's own argument list, not
+    // by the symbol alone: `BrotliDecoderSetMetadataCallbacks` takes two, and
+    // one name for both is two definitions of the same C function — which the
+    // compiler rejects, and a shim that will not compile refuses the whole
+    // dependency.
+    let sym = &format!("{sym}_{at}");
     // The C signature keeps every parameter, because the library calls through
     // this pointer and the shape has to match. Only the ones Jade can be given
     // are forwarded: the user-data slot has nothing to carry, and a length rode
@@ -2035,8 +2110,7 @@ fn trampoline(sym: &str, ret: &CbRet, params: &[CbParam]) -> String {
 
     let mut b = format!(
         "\n/* Set for the duration of one call; see the note in cshim.rs. */\n\
-         static _Thread_local const JadeFn* jade_cb_{sym} = NULL;\n\
-         static _Thread_local int jade_cb_failed_{sym} = 0;\n\
+         static const JadeFn* jade_cb_{sym} = NULL;\n\
          \n\
          static {c_ret} jade_cbt_{sym}({sig}) {{\n"
     );
@@ -2044,7 +2118,22 @@ fn trampoline(sym: &str, ret: &CbRet, params: &[CbParam]) -> String {
     // Nothing registered: answer neutrally rather than dereferencing.
     let is_void = ret.marshal.is_none();
     let neutral = if is_void { "return;".to_string() } else { "return 0;".to_string() };
-    b.push_str(&format!("    if (!jade_cb_{sym}) {{ {neutral} }}\n"));
+    // Which Jade function this call is for.
+    //
+    // Routed through the library's own context slot when the symbol declares
+    // `callback_data`, so two outstanding registrations each reach their own
+    // function rather than the later one taking both. The shared slot is the
+    // fallback, and the only answer when the library offers no such parameter.
+    let ud = params.iter().position(|p| matches!(p.kind, CbKind::UserData));
+    match (routed, ud) {
+        (true, Some(i)) => b.push_str(&format!(
+            "    const JadeFn* cb = a{i} ? (const JadeFn*)a{i} : jade_cb_{sym};\n\
+             \x20   if (!cb) {{ {neutral} }}\n"
+        )),
+        _ => b.push_str(&format!(
+            "    const JadeFn* cb = jade_cb_{sym};\n    if (!cb) {{ {neutral} }}\n"
+        )),
+    }
 
     // Every parameter is named in the signature, and the ones not forwarded are
     // never read. Saying so keeps the compiler quiet without dropping the name,
@@ -2068,7 +2157,7 @@ fn trampoline(sym: &str, ret: &CbRet, params: &[CbParam]) -> String {
                     // buffer and it is only valid for the duration of the call.
                     b.push_str(&format!(
                         "    JadeBytes* cb{slot} = jade_shim_bytes(a{i}, (size_t)(a{} < 0 ? 0 : a{}));\n\
-                         \x20   if (!cb{slot}) {{ jade_cb_failed_{sym} = 1; {neutral} }}\n\
+                         \x20   if (!cb{slot}) {{ jade_cb_failed = 1; {neutral} }}\n\
                          \x20   cbargs[{slot}].tag = JADE_FFI_BYTES;\n\
                          \x20   cbargs[{slot}].data.as_bytes = cb{slot};\n",
                         i + 1,
@@ -2096,12 +2185,12 @@ fn trampoline(sym: &str, ret: &CbRet, params: &[CbParam]) -> String {
     b.push_str("    JadeVal cbout;\n    cbout.tag = JADE_FFI_NIL;\n    cbout.data.as_nil = 0;\n");
     let argv = if n > 0 { "cbargs" } else { "NULL" };
     b.push_str(&format!(
-        "    if (jade_cb_{sym}->invoke(jade_cb_{sym}->host, {n}, {argv}, &cbout) != 0) {{\n\
+        "    if (cb->invoke(cb->host, {n}, {argv}, &cbout) != 0) {{\n\
          \x20       /* The Jade side raised. It must not travel out of here — the\n\
          \x20        * library is mid-operation and unwinding through its frames\n\
          \x20        * would leave it however it happens to be. Recorded, and\n\
          \x20        * turned into a Jade error once the call has returned. */\n\
-         \x20       jade_cb_failed_{sym} = 1;\n\
+         \x20       jade_cb_failed = 1;\n\
          \x20       {}\n\
          \x20   }}\n",
         if is_void { "return;".to_string() } else { "return 1;".to_string() }
@@ -2127,6 +2216,11 @@ fn wrapper(
     spec: &CSymbol,
     structs: &HashMap<String, CStruct>,
     headers: &[String],
+    // Whether *any* symbol in this shim takes a callback. Every wrapper has to
+    // check the raised flag, not only the ones that register — a function given
+    // to one call raises during another — but a shim with no callbacks at all
+    // declares no flag and must not reference one.
+    any_callback: bool,
 ) -> Result<String, String> {
     let p = parse_symbol(pkg, sym, spec, structs, headers)?;
     let jade_arity = p.args.iter().filter(|a| a.takes_jade_arg()).count();
@@ -2311,6 +2405,17 @@ fn wrapper(
             ArgSpec::RetLen { .. } => call_args.push(format!("&rlen{i}")),
             ArgSpec::SizedBuffer { .. } => call_args.push(format!("sbuf{i}")),
             ArgSpec::NullPtr => call_args.push("NULL".to_string()),
+            // The caller's own function pointer, handed to the library to hand
+            // back. That is what tells one registration from another.
+            ArgSpec::CallbackData => {
+                let at = p
+                    .args
+                    .iter()
+                    .position(|a| matches!(a, ArgSpec::Callback { .. }))
+                    .expect("validated by parse_symbol");
+                let k = jade_idx[at].expect("a callback consumes a Jade argument");
+                call_args.push(format!("(void*)argv[{k}].data.as_fn"));
+            }
             ArgSpec::OutStr { .. } => call_args.push(format!("&ostr{i}")),
             ArgSpec::OutAllocStr { .. } => call_args.push(format!("&oastr{i}")),
             ArgSpec::InoutBytes { .. } => call_args.push(format!("iobuf{i}")),
@@ -2318,19 +2423,24 @@ fn wrapper(
                 call_args.push(format!("({name}*)h{}", jade_idx[i].unwrap()))
             }
             ArgSpec::OutHandle { .. } => call_args.push(format!("&ohandle{i}")),
-            ArgSpec::Callback { .. } => call_args.push(format!("jade_cbt_{sym}")),
+            ArgSpec::Callback { .. } => call_args.push(format!("jade_cbt_{sym}_{i}")),
         }
     }
 
     let call = format!("{sym}({})", call_args.join(", "));
 
-    // Register the callback for exactly the duration of the call.
-    let cb_at = p.args.iter().position(|a| matches!(a, ArgSpec::Callback { .. }));
-    if let Some(i) = cb_at {
-        let k = jade_idx[i].expect("a callback consumes a Jade argument");
-        body.push_str(&format!(
-            "    jade_cb_{sym} = argv[{k}].data.as_fn;\n    jade_cb_failed_{sym} = 0;\n"
-        ));
+    // Register each callback the symbol takes. The registration outlives the
+    // call, so this is where the slot is written and nowhere is it cleared.
+    let mut any_cb = false;
+    for (i, a) in p.args.iter().enumerate() {
+        if matches!(a, ArgSpec::Callback { .. }) {
+            let k = jade_idx[i].expect("a callback consumes a Jade argument");
+            body.push_str(&format!("    jade_cb_{sym}_{i} = argv[{k}].data.as_fn;\n"));
+            any_cb = true;
+        }
+    }
+    if any_cb {
+        body.push_str("    jade_cb_failed = 0;\n");
     }
 
     // Cleared right before the call so a stale value from an earlier, unrelated
@@ -2432,19 +2542,27 @@ fn wrapper(
         }
     };
 
-    // The library has returned, so the registration ends here. A raise from
-    // inside the callback surfaces now — after the library finished cleanly,
-    // never by unwinding through it mid-operation.
-    if cb_at.is_some() {
-        body.push_str(&format!(
-            "    jade_cb_{sym} = NULL;\n\
-             \x20   if (jade_cb_failed_{sym}) {{\n\
-             \x20       jade_cb_failed_{sym} = 0;\n\
+    // A raise from inside a callback surfaces here — after the library finished
+    // cleanly, never by unwinding through it mid-operation.
+    //
+    // Checked by *every* wrapper, not only one that takes a callback. Once a
+    // registration outlives the call that made it, the symbol that registered
+    // is not the symbol that was running when the callback raised: a Jade
+    // function given to `ares_search` raises during `ares_process`, and that is
+    // the call that has to report it. The flag is one per shim for the same
+    // reason.
+    //
+    // The registration itself is deliberately *not* cleared. A library that
+    // stored it will call it again.
+    if any_callback {
+        body.push_str(
+            "    if (jade_cb_failed) {\n\
+             \x20       jade_cb_failed = 0;\n\
              \x20       out->tag = JADE_FFI_ERROR;\n\
              \x20       out->data.as_str = \"the callback raised\";\n\
              \x20       return 1;\n\
-             \x20   }}\n"
-        ));
+             \x20   }\n",
+        );
     }
 
     // What Jade gets back.

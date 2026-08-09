@@ -67,3 +67,39 @@ try {
 } catch e {
     print("caught")
 }
+
+// A callback the library stores and invokes from a *later* call.
+//
+// The shape every async C API has, and the one that used to bind and do
+// nothing: the Jade function was freed when `store` returned, and `pump` — which
+// passes no function of its own — took a path that serviced no callbacks.
+let seen = 0
+fn note(i) {
+    seen = seen + 1
+    return i * 10
+}
+handlefix.store(note)
+print(handlefix.pump(3))
+print(seen)
+
+// A closure, not just a plain function: it captures, and its environment has to
+// survive the call that registered it too.
+let base = 100
+fn offset(i) {
+    return base + i
+}
+handlefix.store(offset)
+print(handlefix.pump(2))
+
+// A raise inside a stored callback surfaces from the call that pumped it, not
+// from the one that registered it.
+fn explode(i) {
+    raise "from the stored callback"
+}
+handlefix.store(explode)
+try {
+    handlefix.pump(1)
+    print("not reached")
+} catch e {
+    print("stored raise contained")
+}

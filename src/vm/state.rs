@@ -37,6 +37,18 @@ pub struct VmState {
     pub route_configs: HashMap<String, String>,
     /// Optional LLM inference backend.
     pub inference_backend: Option<std::sync::Arc<dyn llm::InferenceBackend>>,
+    /// Jade functions this VM has handed to C libraries, and the way back in.
+    ///
+    /// Per VM rather than per call, because a library may store a callback and
+    /// invoke it from a later call entirely. See `native::CallbackBus`.
+    ///
+    /// A spawned task gets a **fresh** one rather than sharing this. Sharing
+    /// would let one task's serve loop run a callback registered by another,
+    /// against a different globals map — user code executing somewhere nobody
+    /// chose, and invisible to the parity gate because both engines would do it.
+    /// A cross-task callback finds nothing registered and the library gets the
+    /// neutral answer, which is a refusal rather than a surprise.
+    pub(crate) callbacks: std::sync::Arc<crate::native::CallbackBus>,
     /// REPL only: the value of the last bare trailing expression, captured
     /// out-of-band (see [`REPL_CAPTURE`]) so the REPL can echo it without a
     /// global. `None` outside the REPL and after each snippet is read.
@@ -76,6 +88,7 @@ impl VmState {
             struct_decorators: HashMap::new(),
             route_configs: HashMap::new(),
             inference_backend: None,
+            callbacks: crate::native::CallbackBus::new(),
             repl_capture: None,
             prompt_cache: HashMap::new(),
             source_dir: PathBuf::new(),
@@ -132,6 +145,8 @@ impl VmState {
             struct_decorators: self.struct_decorators.clone(),
             route_configs: self.route_configs.clone(),
             inference_backend: self.inference_backend.clone(),
+            // Deliberately not shared — see the field's note.
+            callbacks: crate::native::CallbackBus::new(),
             repl_capture: None,
             prompt_cache: self.prompt_cache.clone(),
             source_dir: self.source_dir.clone(),

@@ -887,11 +887,11 @@ fn a_callbacks_user_data_is_accepted_and_not_forwarded() {
     // nothing to do with it, so nothing is forwarded.
     let s = sym(&["callback:int(int, void*)"], "int");
     let src = generate("ar", &symbols(&[("go", s)])).unwrap();
-    assert!(src.contains("static int jade_cbt_go(int a0, void* a1)"), "bad signature:\n{src}");
+    assert!(src.contains("static int jade_cbt_go_0(int a0, void* a1)"), "bad signature:\n{src}");
     assert!(src.contains("(void)a1;"), "should be explicitly unused:\n{src}");
     // One forwarded argument, and it is the first.
     assert!(src.contains("cbargs[0].data.as_int = (int64_t)a0;"), "bad marshal:\n{src}");
-    assert!(src.contains("invoke(jade_cb_go->host, 1, cbargs"), "wrong arity:\n{src}");
+    assert!(src.contains("invoke(cb->host, 1, cbargs"), "wrong arity:\n{src}");
 }
 
 #[test]
@@ -1195,7 +1195,7 @@ fn a_callback_becomes_a_static_function_of_the_declared_shape() {
     // function pointer the library will store and call, so `int` must be `int`.
     // Widening it is not a truncation but an incompatible function pointer.
     assert!(
-        src.contains("static int jade_cbt_each(int a0, const char* a1)"),
+        src.contains("static int jade_cbt_each_1(int a0, const char* a1)"),
         "bad trampoline:\n{src}"
     );
     assert!(
@@ -1203,21 +1203,34 @@ fn a_callback_becomes_a_static_function_of_the_declared_shape() {
         "bad decl:\n{src}"
     );
     assert!(
-        src.contains("each(argv[0].data.as_int, jade_cbt_each)"),
+        src.contains("each(argv[0].data.as_int, jade_cbt_each_1)"),
         "should pass the trampoline:\n{src}"
     );
 }
 
 #[test]
-fn the_registration_lasts_exactly_one_call() {
-    // A library that stores the callback and invokes it later must find an
-    // empty slot, not a stale pointer into an interpreter that has moved on.
+fn a_registration_outlives_the_call_that_made_it() {
+    // A library that stores the callback invokes it from a later call entirely:
+    // `ares_search` registers and the answer arrives during `ares_process`.
+    // Clearing the slot on return is what made that never fire.
     let s = sym(&["callback:int(int)"], "int");
     let src = generate("z", &symbols(&[("go", s)])).unwrap();
-    assert!(src.contains("jade_cb_go = argv[0].data.as_fn;"), "should register:\n{src}");
-    assert!(src.contains("jade_cb_go = NULL;"), "should unregister:\n{src}");
-    assert!(src.contains("if (!jade_cb_go)"), "should answer neutrally when empty:\n{src}");
-    assert!(src.contains("_Thread_local"), "the slot must be per-thread:\n{src}");
+    assert!(src.contains("jade_cb_go_0 = argv[0].data.as_fn;"), "should register:\n{src}");
+    // The declaration says `= NULL` too, so look only at the wrapper body.
+    let body = &src[src.find("jade_shim_go(size_t").unwrap()..];
+    assert!(!body.contains("jade_cb_go_0 = NULL;"), "must not unregister:\n{body}");
+    assert!(src.contains("if (!cb) {"), "should answer neutrally when empty:\n{src}");
+}
+
+#[test]
+fn the_registration_slot_is_not_thread_local() {
+    // Under the VM every native call runs on its own worker thread, so a slot
+    // set while `ares_search` ran would read empty during `ares_process` even
+    // if nothing ever cleared it.
+    let s = sym(&["callback:int(int)"], "int");
+    let src = generate("z", &symbols(&[("go", s)])).unwrap();
+    let decl = src.lines().find(|l| l.contains("jade_cb_go_0 = NULL")).unwrap_or("");
+    assert!(!decl.contains("_Thread_local"), "the slot must be shared across threads: {decl}");
 }
 
 #[test]
@@ -1226,13 +1239,32 @@ fn a_raise_inside_a_callback_is_deferred_rather_than_unwound() {
     // own frames, past whatever it was in the middle of.
     let s = sym(&["callback:int(int)"], "int");
     let src = generate("z", &symbols(&[("go", s)])).unwrap();
-    assert!(src.contains("jade_cb_failed_go = 1;"), "should record the failure:\n{src}");
-    assert!(src.contains("if (jade_cb_failed_go) {"), "should check after the call:\n{src}");
+    assert!(src.contains("jade_cb_failed = 1;"), "should record the failure:\n{src}");
+    assert!(src.contains("if (jade_cb_failed) {"), "should check after the call:\n{src}");
     assert!(src.contains("the callback raised"), "should surface it:\n{src}");
     // Recorded inside the trampoline, surfaced only after the library returns.
-    let record = src.find("jade_cb_failed_go = 1;").unwrap();
-    let surface = src.find("if (jade_cb_failed_go) {").unwrap();
+    let record = src.find("jade_cb_failed = 1;").unwrap();
+    let surface = src.find("if (jade_cb_failed) {").unwrap();
     assert!(record < surface, "the raise must surface after the call, not during it");
+}
+
+#[test]
+fn every_wrapper_reports_a_raise_even_if_it_took_no_callback() {
+    // Once a registration outlives its call, the symbol that registered is not
+    // the symbol that was running when the callback raised. A function given to
+    // `ares_search` raises during `ares_process`, and that is the call that has
+    // to report it — so the flag is one per shim and every wrapper checks it.
+    let syms =
+        symbols(&[("go", sym(&["callback:int(int)"], "int")), ("pump", sym(&["int"], "int"))]);
+    let src = generate("z", &syms).unwrap();
+    let pump = &src[src.find("jade_shim_pump").unwrap()..];
+    assert!(pump.contains("if (jade_cb_failed) {"), "a pumping call must report:\n{pump}");
+}
+
+#[test]
+fn a_shim_with_no_callbacks_declares_no_raised_flag() {
+    let src = generate("z", &symbols(&[("f", sym(&["int"], "int"))])).unwrap();
+    assert!(!src.contains("jade_cb_failed"), "nothing to check:\n{src}");
 }
 
 #[test]
@@ -1245,8 +1277,8 @@ fn a_void_callback_and_a_zero_argument_callback_both_work() {
         ]),
     )
     .unwrap();
-    assert!(src.contains("static void jade_cbt_a(int a0)"), "void callback:\n{src}");
-    assert!(src.contains("static int jade_cbt_b(void)"), "no-arg callback:\n{src}");
+    assert!(src.contains("static void jade_cbt_a_0(int a0)"), "void callback:\n{src}");
+    assert!(src.contains("static int jade_cbt_b_0(void)"), "no-arg callback:\n{src}");
 }
 
 #[test]
@@ -1456,4 +1488,67 @@ fn an_array_spelling_is_not_legal_as_an_argument() {
     // wrapper has nothing to do with a fixed-size row in an `args` list.
     let err = generate("z", &symbols(&[("f", sym(&["array<char>:32"], "int"))])).unwrap_err();
     assert!(err.contains("array<char>:32"), "should name it: {err}");
+}
+
+#[test]
+fn a_routed_callback_prefers_the_librarys_own_cookie() {
+    // Without routing there is one slot per symbol, so a second registration
+    // silently takes the first one's answers — it runs and answers the wrong
+    // caller, which is worse than not running.
+    let s = sym(&["callback:void(int, void*)", "callback_data"], "nil");
+    let src = generate_with("ar", &symbols(&[("go", s)]), &[], &["ares.h"]).unwrap();
+    assert!(src.contains("(void*)argv[0].data.as_fn"), "should hand over the pointer:\n{src}");
+    assert!(src.contains("a1 ? (const JadeFn*)a1 : jade_cb_go_0"), "should read it back:\n{src}");
+}
+
+#[test]
+fn an_unrouted_callback_still_uses_the_shared_slot() {
+    // A library with no context parameter leaves nothing to route through, and
+    // that has to keep working — it is what `store`/`pump` in the parity fixture
+    // exercises.
+    let src = generate("z", &symbols(&[("go", sym(&["callback:void(int)"], "nil"))])).unwrap();
+    assert!(src.contains("const JadeFn* cb = jade_cb_go_0;"), "should use the slot:\n{src}");
+}
+
+#[test]
+fn a_callback_data_with_no_callback_is_refused() {
+    let s = sym(&["callback_data"], "nil");
+    let err = generate_with("ar", &symbols(&[("go", s)]), &[], &["ares.h"]).unwrap_err();
+    assert!(err.contains("takes no callback"), "should say why: {err}");
+}
+
+#[test]
+fn two_callbacks_on_one_symbol_get_a_trampoline_each() {
+    // brotli's decoder takes two, and one name for both is two definitions of
+    // the same C function — which does not compile, and a shim that does not
+    // compile refuses the whole dependency rather than the symbol.
+    let header = "extern void go(void (*a)(int), void (*b)(int, int));\n";
+    let s = sym(&["callback:void(int)", "callback:void(int, int)"], "nil");
+    let src = generate_with("ar", &symbols(&[("go", s)]), &[], &["fixture.h"]).unwrap();
+    assert!(src.contains("jade_cbt_go_0"), "{src}");
+    assert!(src.contains("jade_cbt_go_1"), "{src}");
+    if let Err(e) = compiles(&src, &[("fixture.h", header)]) {
+        panic!("two-callback shim does not compile:\n{e}\n--- source ---\n{src}");
+    }
+}
+
+#[test]
+fn a_context_slot_cannot_tell_two_callbacks_apart() {
+    // The library passes the same value back to both, so routing through it
+    // sends both answers to whichever registered last — the bug `callback_data`
+    // exists to prevent.
+    let s =
+        sym(&["callback:void(int, void*)", "callback:void(int, void*)", "callback_data"], "nil");
+    let e = generate_with("ar", &symbols(&[("go", s)]), &[], &["fixture.h"]).unwrap_err();
+    assert!(e.contains("more than one callback"), "{e}");
+}
+
+#[test]
+fn a_routed_callback_shim_compiles() {
+    let header = "extern void go(void (*cb)(int, void*), void* data);\n";
+    let s = sym(&["callback:void(int, void*)", "callback_data"], "nil");
+    let src = generate_with("ar", &symbols(&[("go", s)]), &[], &["fixture.h"]).unwrap();
+    if let Err(e) = compiles(&src, &[("fixture.h", header)]) {
+        panic!("routed callback shim does not compile:\n{e}\n--- source ---\n{src}");
+    }
 }

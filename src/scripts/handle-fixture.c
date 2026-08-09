@@ -182,7 +182,55 @@ static int fx_visit(size_t argc, const JadeVal* argv, JadeVal* out) {
     return 0;
 }
 
+/* A callback the library *stores* and invokes from a later call entirely.
+ *
+ * This is the shape every async C API has — register now, called back when the
+ * answer arrives — and the one that used to bind, compile, run and do nothing:
+ * the Jade function was freed when `store` returned and the shim's slot was
+ * cleared, so `pump` found nothing and called nobody.
+ *
+ * `pump` deliberately takes no function of its own, because that is the other
+ * half of the bug: a call that passes no callback used to skip the path that
+ * services them. */
+static const JadeFn* g_stored = NULL;
+
+static int fx_store(size_t argc, const JadeVal* argv, JadeVal* out) {
+    if (argc != 1 || argv[0].tag != JADE_FFI_FN) return 1;
+    g_stored = argv[0].data.as_fn;
+    out->tag = JADE_FFI_NIL;
+    out->data.as_nil = 0;
+    return 0;
+}
+
+static int fx_pump(size_t argc, const JadeVal* argv, JadeVal* out) {
+    if (argc != 1 || argv[0].tag != JADE_FFI_INT) return 1;
+    if (!g_stored) {
+        out->tag = JADE_FFI_ERROR;
+        out->data.as_str = "nothing stored";
+        return 1;
+    }
+    int64_t n = argv[0].data.as_int;
+    int64_t total = 0;
+    for (int64_t i = 0; i < n; i++) {
+        JadeVal a; a.tag = JADE_FFI_INT; a.data.as_int = i;
+        JadeVal r; r.tag = JADE_FFI_NIL; r.data.as_nil = 0;
+        if (g_stored->invoke(g_stored->host, 1, &a, &r) != 0) {
+            /* The Jade side raised. Stop cleanly and let the shim report it
+             * from *this* call, which is the one that was running. */
+            out->tag = JADE_FFI_ERROR;
+            out->data.as_str = "stored callback failed";
+            return 1;
+        }
+        if (r.tag == JADE_FFI_INT) total += r.data.as_int;
+    }
+    out->tag = JADE_FFI_INT;
+    out->data.as_int = total;
+    return 0;
+}
+
 static const JadeBinding BINDINGS[] = {
+    { "store",  fx_store  },
+    { "pump",   fx_pump   },
     { "visit",  fx_visit  },
     { "open",   fx_open   },
     { "name",   fx_name   },
