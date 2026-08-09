@@ -285,14 +285,17 @@ fn callbacks_varargs_and_void_pointers_are_named_not_silently_dropped() {
         "typedef struct rec rec;\n\
          int with_cb(int (*cb)(rec*), int n);\n\
          int fmt(const char* f, ...);\n\
-         int with_ud(void* user_data);\n",
+         void release(void* p);\n",
     );
     // A callback whose *own* signature the FFI cannot carry — here a parameter
     // that is a pointer to something opaque, which the trampoline has no way to
     // hand Jade.
     assert!(why_skipped(&b, "with_cb").contains("callback"));
     assert!(why_skipped(&b, "fmt").contains("varargs"));
-    assert!(why_skipped(&b, "with_ud").contains("void"));
+    // A lone `void *` on a call that reports nothing is a deallocator, and
+    // handing one shim-owned scratch would have the library free it and the
+    // shim free it again on the way out.
+    assert!(why_skipped(&b, "release").contains("frees what it is given"));
     assert!(b.symbols.is_empty(), "none of these should be bound");
 }
 
@@ -1113,6 +1116,27 @@ fn a_name_that_counts_nothing_leaves_the_integer_as_an_argument() {
         let b = bind(&format!("#include <stddef.h>\nint f(const void* p, size_t {name});\n"));
         assert_eq!(args(&b, "f"), ["bytes_ptr", "int"], "{name} should not read as a length");
     }
+}
+
+#[test]
+fn a_pointer_named_like_a_position_is_not_a_buffer_of_the_count_beside_it() {
+    // `lzma_stream_buffer_decode(…, size_t *in_pos, size_t in_size, …)` has
+    // exactly the shape of a buffer and its count, and is a position beside an
+    // unrelated size. Reading it as a buffer allocated `in_size` of them and
+    // handed the library a pointer to scratch instead of to the position.
+    let b = bind(
+        "#include <stddef.h>\n#include <stdint.h>\n\
+         int decode(const uint8_t* in, size_t* in_pos, size_t in_size);\n",
+    );
+    assert_eq!(args(&b, "decode"), ["bytes_ptr", "out_scalar:unsigned long", "int"]);
+}
+
+#[test]
+fn a_pointer_named_like_a_buffer_still_is_one() {
+    // The shape that has to survive the rule above: `sf_read_short(short *buf,
+    // int n)` really is a buffer and its count.
+    let b = bind("int read_short(short* buf, int n);\n");
+    assert_eq!(args(&b, "read_short"), ["out_buffer:short", "int"]);
 }
 
 // ── A struct read as input ───────────────────────────────────────────────

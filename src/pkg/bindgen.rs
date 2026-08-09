@@ -607,6 +607,19 @@ const POSITION_WORDS: [&str; 4] = ["offset", "index", "idx", "pos"];
 ///
 /// A header that names nothing keeps the old behaviour, since there is no
 /// evidence either way and the pairing was the standing assumption.
+/// Whether a parameter's *name* says it holds a position rather than a thing.
+///
+/// Asked of the pointer this time, not of the integer after it. `size_t *in_pos,
+/// size_t in_size` has exactly the shape of a buffer and its count, and is a
+/// position beside an unrelated size — reading it as a buffer allocated
+/// `in_size` of them and handed the library the wrong pointer entirely. `short
+/// *buf, int n` is the shape that has to survive it.
+fn names_a_position(name: Option<&str>) -> bool {
+    let Some(n) = name else { return false };
+    let n = n.to_ascii_lowercase();
+    POSITION_WORDS.iter().any(|w| n.contains(w))
+}
+
 fn names_a_count(name: Option<&str>) -> bool {
     let Some(n) = name else { return true };
     let n = n.to_ascii_lowercase();
@@ -649,6 +662,7 @@ struct FnCtx<'a> {
 fn map_param(
     raw_in: &str,
     prev: Option<&str>,
+    own_name: Option<&str>,
     next: Option<&str>,
     next_name: Option<&str>,
     cx: &FnCtx<'_>,
@@ -764,7 +778,11 @@ fn map_param(
     let byte_like =
         matches!(squashed.as_str(), "void" | "char" | "unsignedchar" | "signedchar" | "uint8_t" | "int8_t");
 
-    if next_is_len && !is_const && (byte_like || scalar_of(&squashed).is_some()) {
+    if next_is_len
+        && !is_const
+        && (byte_like || scalar_of(&squashed).is_some())
+        && !names_a_position(own_name)
+    {
         // Writable, so almost certainly filled by the call — but "almost" is
         // why this is reported as an assumption rather than done silently.
         if is_int(&normalize(&env.expand(ret))) {
@@ -810,7 +828,10 @@ fn map_param(
     // zeroed local is right for one call and wrong on the second. That is the
     // kind of wrong that shows up as corrupt output rather than as an error, so
     // the note names the spelling that fixes it.
-    if !is_const && !next_is_len && scalar_of(&squashed).is_some() {
+    // Reaching here with a count beside it means the buffer reading above was
+    // declined — the pointer's own name said it holds a position — so the count
+    // belongs to something else and this is one value written back.
+    if !is_const && scalar_of(&squashed).is_some() {
         // Except a byte. `uint8_t *out` with nothing beside it is overwhelmingly
         // a buffer whose size the caller is expected to know from the
         // documentation — `lzma_stream_footer_encode` writes exactly twelve —
@@ -946,11 +967,11 @@ fn map_param(
         // the type says which of the two it is, so the one-argument shape is
         // refused and the multi-argument one — every `libfdt` writer, which
         // takes the tree plus what to do to it — is not.
-        if squashed == "void" && n_params == 1 {
+        if squashed == "void" && n_params == 1 && normalize(&env.expand(ret)) == "void" {
             return Mapped::Reject(
-                "takes a `void *` on its own, which is the shape of a call that frees what it is \
-                 given. Passing it a buffer would leave the shim freeing memory the library \
-                 already released"
+                "takes a `void *` on its own and reports nothing, which is the shape of a call \
+                 that frees what it is given. Passing it a buffer would leave the shim freeing \
+                 memory the library already released"
                     .to_string(),
             );
         }
@@ -1484,7 +1505,8 @@ fn map_function(
         }
         let next_name = parm_names.get(i + 1).copied().flatten();
         let prev = i.checked_sub(1).and_then(|k| raw.get(k)).copied();
-        match map_param(t, prev, raw.get(i + 1).copied(), next_name, &cx) {
+        let own_name = parm_names.get(i).copied().flatten();
+        match map_param(t, prev, own_name, raw.get(i + 1).copied(), next_name, &cx) {
             Mapped::One(s) => {
                 // An `in_struct` needs its field table written out with it, the
                 // same way an `out_struct` does. It is an ordinary argument
