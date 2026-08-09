@@ -784,8 +784,12 @@ fn a_symbol_whose_struct_has_no_carryable_field_is_skipped_not_emitted() {
     // `[structs]` entry that was never written, and the shim generator refuses
     // the *whole dependency* over one such symbol — so a single opaque blob
     // made an otherwise fine library uninstallable.
+    // A function pointer, because a fixed-size byte array is no longer opaque —
+    // `unsigned char hidden[48]` is what sqlite3_snapshot actually is, and it
+    // carries now, which is the point of array fields. What stays uncarryable
+    // is a field with no Jade shape at all.
     let b = bind(
-        "typedef struct snap { unsigned char hidden[48]; } snap;\n\
+        "typedef struct snap { void (*cb)(void); } snap;\n\
          void snap_free(snap* s);\n\
          int plain_add(int a, int b);\n",
     );
@@ -1334,4 +1338,85 @@ fn a_multi_out_library_binds_and_compiles_end_to_end() {
          int one_out(int a, int *only);\n",
     )
     .expect("multi-out should bind and compile");
+}
+
+// ── Fixed-size array fields ──────────────────────────────────────────────
+
+#[test]
+fn a_fixed_size_array_field_is_carried_as_a_row() {
+    // An array of things Jade has maps to an array of them, and the element
+    // type decides what they are. Plain `char` is text and `unsigned char` is
+    // data, the same rule a pointer parameter follows.
+    let b = bind(
+        "#include <stdint.h>\n\
+         typedef struct { unsigned int id; char mnemonic[32]; uint8_t bytes[24]; int r[4]; } insn;\n\
+         void fill(insn* i);\n",
+    );
+    let fields: Vec<(&str, &str)> =
+        b.structs["insn"].fields.iter().map(|(f, t)| (f.as_str(), t.as_str())).collect();
+    assert_eq!(
+        fields,
+        [
+            ("id", "int"),
+            ("mnemonic", "array<char>:32"),
+            ("bytes", "array<int>:24"),
+            ("r", "array<int>:4"),
+        ]
+    );
+}
+
+#[test]
+fn a_struct_that_is_only_rows_is_still_held() {
+    // `fd_set` is one `int fds_bits[32]`, filled by `ares_fds` and read by
+    // `ares_process`. Rows made it carryable, which nearly turned it into an
+    // out-parameter — and an out-parameter is a zeroed local every call, so
+    // `ares_process` would have received an empty set and quietly done nothing.
+    let b = bind(
+        "typedef struct { int fds_bits[32]; } fdset;\n\
+         int sel_fds(int n, fdset* r, fdset* w);\n\
+         void sel_process(int n, fdset* r, fdset* w);\n",
+    );
+    assert_eq!(args(&b, "sel_process")[1], "handle<fdset>");
+    assert!(b.structs["fdset"].held, "a bag of rows has to survive between calls");
+}
+
+#[test]
+fn a_record_of_scalars_filled_by_several_calls_is_still_an_out_parameter() {
+    // The shape the rule above must not catch. libsndfile's SF_INFO is filled
+    // by three `sf_open` variants and read once each time; it is never handed
+    // back, so there is no state to carry.
+    let b = bind(
+        "#include <stdint.h>\n\
+         typedef struct { int64_t frames; int rate; } SF_INFO;\n\
+         int sf_open(const char* p, int mode, SF_INFO* i);\n\
+         int sf_open_fd(int fd, int mode, SF_INFO* i);\n",
+    );
+    assert_eq!(args(&b, "sf_open")[2], "out_struct:SF_INFO");
+    assert!(!b.structs["SF_INFO"].held);
+}
+
+// ── A count is not a status ──────────────────────────────────────────────
+
+#[test]
+fn a_count_returned_beside_a_handle_is_not_read_as_a_status() {
+    // `size_t cs_disasm(…, cs_insn **insn)` returns how many instructions were
+    // written. Read as a status, a successful disassembly of three raised.
+    let b = bind(
+        "#include <stddef.h>\n\
+         typedef struct insn insn;\n\
+         size_t disasm(const void* code, size_t n, insn** out);\n",
+    );
+    assert!(b.symbols["disasm"].fails_when.is_none(), "a count must not raise on success");
+    let why = b.assumed.iter().find(|(s, _)| s == "disasm").map(|(_, w)| w.clone());
+    assert!(why.is_some_and(|w| w.contains("fails_when")), "should name the spelling");
+}
+
+#[test]
+fn a_status_returned_beside_a_handle_still_raises() {
+    // The shape that must survive it: `sqlite3_open(path, &db) -> int`.
+    let b = bind(
+        "typedef struct sqlite3 sqlite3;\n\
+         int sqlite3_open(const char* path, sqlite3** db);\n",
+    );
+    assert_eq!(b.symbols["sqlite3_open"].fails_when, Some(crate::project::CFailure::Nonzero));
 }
