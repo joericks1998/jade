@@ -4,7 +4,19 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
-## Unreleased
+## v1.3.11
+
+**A C library can keep a Jade function and call it back later.** Every async C API works this way — register now, called when the answer arrives — and none of them worked: the whole mechanism was scoped to a single call, so `ares_search` registered a callback, returned, and it never fired. Nothing errored. A real DNS query through c-ares now delivers its answer to a Jade function, on both engines.
+
+- **Three things were per-call and are now per-VM:** the channel the callback posts on, which used to close when the registering call returned; the Jade function itself, which used to be freed then, leaving the library holding a dead pointer; and the shim's registration slot, which was cleared on return *and* thread-local — the sharper half, since each native call runs on its own worker thread.
+- **Any call in flight can deliver a callback**, not only one that passes a function. `ares_process` passes none, and without that a callback fired from it would have found nobody listening.
+- **A raise inside a stored callback surfaces from the call that pumped it**, since the call that registered is no longer the one that was running.
+- **A callback fired with nothing in flight gets a neutral answer** rather than blocking forever. A library that calls back from a thread of its own is still unsupported, and this is where it says so.
+- **A registration lasts until the program ends.** Nothing in C says when a library is finished with a stored callback, so there is no safe moment to release one. One small allocation per call that passes a function, not per invocation.
+- **`callback_data` routes each registration through the library's own context slot**, so calling one symbol twice with different functions does not send both answers to the second. Where a library offers no such parameter there is one registration per symbol, and the binding report says so.
+- **A spawned task has its own registrations.** Sharing them would let one task run a callback against another task's variables — user code executing somewhere nobody chose, and invisible to the parity gate since both engines would do it.
+
+## v1.3.10
 
 **A bound library that cannot tell you anything is not bound.** capstone reported 19 of 20 symbols and was not a disassembler: `cs_insn` arrived as an id, an address and a size, because the mnemonic and operands are `char[32]` and `char[160]` and fixed-size arrays were dropped. A Jade program now disassembles x86 and prints `push rbp`, `mov rbp, rsp`, `ret`.
 
@@ -25,6 +37,8 @@ sidebar_label: Changelog
 
 - **Fixed: the compiled engine accepted invalid characters the interpreter refused.** A package returning a surrogate raised under `jade run` and produced a corrupt char under `jade build`. No example moved a char across the FFI, so the parity gate never ran the path; there is one now.
 
+## v1.3.9
+
 **A compiled program now runs somewhere other than the machine that built it.** `jade build` wrote the build machine's absolute path to every dependency into the artifact and loaded from there, so a binary worked in the directory it was produced in and nowhere else — and said so only at run time, on someone else's computer, naming a path that never existed there. The same was true of `jade build --lib`. Artifacts now name their dependencies by a path relative to a libraries directory, and `jade build` writes that directory beside the artifact. Move the pair and it works.
 
 - **`-o` now produces a directory's worth of files when your program has dependencies.** `jade build main.jde -o dist/app` writes `dist/app` and `dist/libs/`. The `built:` line names what it wrote. A program with no dependencies is still a single file.
@@ -33,6 +47,8 @@ sidebar_label: Changelog
 - **`JADE_LIBS` points a program at a different libraries directory, and always wins.** Nothing overwrites a value you set. That is the only way to give a single root to a process with no Jade program in it — a C or Python host that loads a Jade package. It also has to be right: a `JADE_LIBS` missing a dependency fails rather than falling back, because a fallback is a second directory and a second directory is a second copy.
 - **A package now says what it depends on, and `jade pkg add` installs it.** A `jade build --lib` artifact carries the lock it was built against, so adding a package brings its dependencies with it instead of leaving you to read its documentation. They go into your `jade.toml` as ordinary entries, because a transitive dependency is a real dependency. When two packages name different versions of one dependency, the higher wins, which is Go's rule and the only one available with no registry to fetch a third from. It is always reported, because one of the two packages is then running against something other than what it asked for. Two versions are only ordered when both come from a URL and both are dotted numbers; anything else is refused, naming both. This is a choice between two, not version solving — solving needs ranges and a registry to search, and Jade has neither. Only a `url` dependency travels; a `path` names a file on the machine that built the package, so those are named for you to add yourself. Reading the record runs none of the package's code.
 - **Fixed: the VM opened a dependency by whatever path resolution produced, without canonicalizing.** A symlinked `libs/` was two spellings of one file, and therefore two copies of it.
+
+## v1.3.8
 
 **Binding a C library reaches 91% of what a real library exports, up from 59%.** Measured across seven Homebrew libraries — liblzma, zstd, libfdt, capstone, c-ares and both halves of brotli — counting only what the header declares *and* the artifact exports. 348 of 381 symbols, from 223. A full lzma compress and decompress round trip now runs in Jade through nothing but the generated binding. Several of the old 223 were bindings that ran and did nothing; those are fixed too, and the notes below say which.
 

@@ -701,23 +701,21 @@ fn map_param(
 
     if is_fn_ptr(raw) {
         return match callback_spec(raw, env) {
-            // The Jade function is registered for the duration of *this* call
-            // and cleared when it returns — see `cshim::trampoline`, which
-            // explains why: calling back into an interpreter that has moved on
-            // is not something the slot can promise.
-            //
-            // That is right for a callback the library invokes while it works,
-            // and wrong for one it stores. `ares_search` registers and returns,
-            // and its callback fires later during `ares_process`, by which point
-            // there is nothing in the slot — so the binding is real, compiles,
-            // runs, and never calls back. Nothing in C distinguishes the two, so
-            // the report says so rather than the generator guessing.
+            // A stored callback works now — the registration outlives the call
+            // and the Jade function is kept alive by `native::CallbackBus`. What
+            // is still assumed is *which* function an answer belongs to: the
+            // shim keeps one slot per symbol, so two outstanding registrations
+            // collide unless the library offers a context parameter to route
+            // through. Reported rather than guessed, because filling that slot
+            // means the library must hand back exactly what it was given.
             Some(spec) => Mapped::Assumed(
                 spec,
                 concat!(
-                    "takes a callback, which is registered only while the call runs. If the ",
-                    "library stores it and calls back later — an async request, a watcher — ",
-                    "it will find nothing there and your function will never run"
+                    "takes a callback. The library may store it and call back later, which ",
+                    "works — but the shim keeps one registration per symbol, so calling ",
+                    "this twice with different functions sends both answers to the ",
+                    "second. If the library has a context parameter beside the callback, ",
+                    "write `callback_data` for it instead of `null_ptr` and each gets its own"
                 )
                 .to_string(),
             ),

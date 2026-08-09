@@ -1454,13 +1454,15 @@ fn the_user_data_slot_is_not_mistaken_for_a_blob() {
 }
 
 #[test]
-fn a_callback_says_it_only_lives_for_the_call() {
-    // The slot is cleared when the registering call returns, so a library that
-    // stores the callback finds nothing there later. `ares_search` registers and
-    // returns, and its callback fires during `ares_process` — the binding is
-    // real, compiles, runs, and never calls back. Nothing in C tells the two
-    // apart, so it is reported rather than guessed at.
+fn a_callback_says_which_registration_an_answer_belongs_to_is_assumed() {
+    // A stored callback works now. What is still assumed is *which* function an
+    // answer is for: one slot per symbol, so two outstanding registrations
+    // collide unless the library offers a context parameter to route through.
     let b = bind("void go(int (*cb)(int));\n");
     let why = b.assumed.iter().find(|(s, _)| s == "go").map(|(_, w)| w.clone());
-    assert!(why.is_some_and(|w| w.contains("never run")), "should warn: {:?}", b.assumed);
+    assert!(
+        why.is_some_and(|w| w.contains("callback_data")),
+        "should name the spelling that separates them: {:?}",
+        b.assumed
+    );
 }

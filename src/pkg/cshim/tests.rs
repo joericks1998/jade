@@ -891,7 +891,7 @@ fn a_callbacks_user_data_is_accepted_and_not_forwarded() {
     assert!(src.contains("(void)a1;"), "should be explicitly unused:\n{src}");
     // One forwarded argument, and it is the first.
     assert!(src.contains("cbargs[0].data.as_int = (int64_t)a0;"), "bad marshal:\n{src}");
-    assert!(src.contains("invoke(jade_cb_go->host, 1, cbargs"), "wrong arity:\n{src}");
+    assert!(src.contains("invoke(cb->host, 1, cbargs"), "wrong arity:\n{src}");
 }
 
 #[test]
@@ -1219,7 +1219,7 @@ fn a_registration_outlives_the_call_that_made_it() {
     // The declaration says `= NULL` too, so look only at the wrapper body.
     let body = &src[src.find("jade_shim_go(size_t").unwrap()..];
     assert!(!body.contains("jade_cb_go = NULL;"), "must not unregister:\n{body}");
-    assert!(src.contains("if (!jade_cb_go)"), "should answer neutrally when empty:\n{src}");
+    assert!(src.contains("if (!cb) {"), "should answer neutrally when empty:\n{src}");
 }
 
 #[test]
@@ -1488,4 +1488,41 @@ fn an_array_spelling_is_not_legal_as_an_argument() {
     // wrapper has nothing to do with a fixed-size row in an `args` list.
     let err = generate("z", &symbols(&[("f", sym(&["array<char>:32"], "int"))])).unwrap_err();
     assert!(err.contains("array<char>:32"), "should name it: {err}");
+}
+
+#[test]
+fn a_routed_callback_prefers_the_librarys_own_cookie() {
+    // Without routing there is one slot per symbol, so a second registration
+    // silently takes the first one's answers — it runs and answers the wrong
+    // caller, which is worse than not running.
+    let s = sym(&["callback:void(int, void*)", "callback_data"], "nil");
+    let src = generate_with("ar", &symbols(&[("go", s)]), &[], &["ares.h"]).unwrap();
+    assert!(src.contains("(void*)argv[0].data.as_fn"), "should hand over the pointer:\n{src}");
+    assert!(src.contains("a1 ? (const JadeFn*)a1 : jade_cb_go"), "should read it back:\n{src}");
+}
+
+#[test]
+fn an_unrouted_callback_still_uses_the_shared_slot() {
+    // A library with no context parameter leaves nothing to route through, and
+    // that has to keep working — it is what `store`/`pump` in the parity fixture
+    // exercises.
+    let src = generate("z", &symbols(&[("go", sym(&["callback:void(int)"], "nil"))])).unwrap();
+    assert!(src.contains("const JadeFn* cb = jade_cb_go;"), "should use the slot:\n{src}");
+}
+
+#[test]
+fn a_callback_data_with_no_callback_is_refused() {
+    let s = sym(&["callback_data"], "nil");
+    let err = generate_with("ar", &symbols(&[("go", s)]), &[], &["ares.h"]).unwrap_err();
+    assert!(err.contains("takes no callback"), "should say why: {err}");
+}
+
+#[test]
+fn a_routed_callback_shim_compiles() {
+    let header = "extern void go(void (*cb)(int, void*), void* data);\n";
+    let s = sym(&["callback:void(int, void*)", "callback_data"], "nil");
+    let src = generate_with("ar", &symbols(&[("go", s)]), &[], &["fixture.h"]).unwrap();
+    if let Err(e) = compiles(&src, &[("fixture.h", header)]) {
+        panic!("routed callback shim does not compile:\n{e}\n--- source ---\n{src}");
+    }
 }

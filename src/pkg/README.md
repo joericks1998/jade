@@ -236,12 +236,28 @@ the C is written, so a real static function of that shape can just be declared.
 
 Two rules follow from where the callback runs:
 
-**The registration lasts exactly one call.** The slot is `_Thread_local` and set
-only for the duration of the native call. A library that stores the callback and
-invokes it later finds an empty slot and gets the neutral answer, rather than a
-stale pointer into an interpreter that has moved on. Asynchronous registration
-is not supported and cannot be without keeping the interpreter available
-indefinitely.
+**The registration outlives the call that made it, and is not thread-local.**
+Both used to be the other way round, and both had to change together for a
+library that *stores* a callback: it invokes it from a later call entirely, and
+under the VM each native call runs on its own worker thread, so a thread-local
+slot set during one would read empty in the next even if nothing cleared it.
+The Jade function behind it is kept alive by `native::CallbackBus` for the life
+of the VM — nothing in C says when a library is finished with a stored callback,
+so there is no moment at which releasing it would be safe.
+
+**There is one slot per symbol, which is not always enough.** Two outstanding
+registrations on one symbol collide: the second takes the first's answers. Where
+the library offers a context parameter beside the callback, `callback_data`
+fills it with the callback's own pointer and the trampoline reads it back, so
+each registration reaches its own function. Never inferred, for the reason
+`null_ptr` is not — a library that puts something else in that slot would have
+it dereferenced as a `JadeFn`.
+
+**Every wrapper checks whether a callback raised, not only the ones that
+register one.** Once a registration outlives its call, the symbol that
+registered is not the symbol that was running when the raise happened: a
+function given to `ares_search` raises during `ares_process`, and that is the
+call that has to report it. So the flag is one per shim.
 
 **A raise is deferred, never unwound.** The trampoline records the failure and
 returns; the wrapper turns it into a Jade error *after* the library has returned

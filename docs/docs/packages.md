@@ -318,6 +318,7 @@ If you write or correct a symbol by hand, these are the spellings `args` and `re
 | `out_alloc_str:<ctype>` | A string the library allocated and you now own. Requires `frees_with` on the symbol, naming the function that releases it. |
 | `ret_len:<ctype>` | Marks the parameter that says how long a returned pointer is. The return type is then `bytes`. `fdt_getprop` is this shape. |
 | `callback:<ret>(<args>)` | A Jade function the library may call **while the call runs**. A parameter may be written `category:spelling` — `int:ares_bool_t` — where the spelling is what the library declared and the category is what Jade marshals it as. A pointer written `bytes:<ctype>` takes the next parameter as its length and arrives as one blob. The signature is written in the library's own C types, e.g. `callback:int(int, const char*)`. A `void *` in it is the user-data slot C uses instead of closures; the shim accepts it and does not pass it on, because a Jade function carries its own environment. |
+| `callback_data` | The library's own context slot, filled with the callback's own pointer so two outstanding registrations do not collide. Needs a `callback:` beside it. |
 | `null_ptr` | A null pointer, always. For a parameter the FFI cannot carry in a position the library documents as optional — brotli's allocator hooks, where null means "use malloc". Never inferred, because a library that needs a real pointer there crashes with no diagnostic. |
 
 A symbol may have more than one out-parameter. When it does, each needs a name to come back under, written as an `@` suffix — `out_scalar:uint64_t@progress_in`. The generator takes those from the header's own parameter names. With one out-parameter the name is optional, since there is nothing to tell it apart from.
@@ -546,13 +547,39 @@ Only a `url` dependency travels this way. A `path` names a file on the machine t
 
 Reading the record does not run any of the package's code. A Jade package runs its module top level from `jade_pkg_init`, and `jade pkg add` never calls it.
 
-### A callback only lives for the call
+### A library can keep your callback
 
-The Jade function is registered for the duration of the call that takes it, and forgotten when that call returns.
+A Jade function given to a C library stays valid after the call that handed it over, so a library that *stores* it and calls back later works — an async request, a watcher, an event handler:
 
-That is right for a callback the library invokes while it works — a comparator, a visitor, a progress hook. It is wrong for one the library *stores*: an async request that calls back later, a watcher, an event handler. Those find nothing registered and your function never runs.
+```jade
+use cares
 
-Nothing in C distinguishes the two, so the binding is generated either way and the report says so. If you see that note against a symbol, check whether the library calls back before it returns.
+cares.ares_library_init(1)
+let ch = cares.ares_init()
+
+fn on_answer(status, timeouts, answer) {
+    print(f"got {answer.len()} bytes")
+}
+
+cares.ares_search(ch, "example.com", 1, 1, on_answer)
+
+// The answer arrives during a later call entirely.
+let r = cares.fd_set_new()
+let w = cares.fd_set_new()
+while cares.ares_fds(ch, r, w) > 0 {
+    cares.ares_process(ch, r, w)
+}
+```
+
+Three things are worth knowing about it.
+
+**Your callback runs while some native call is in flight.** The interpreter services it from the call it is parked in — `ares_process` above. A library that calls back from a thread of its own, with no Jade call running, gets a neutral answer instead: that is not supported, and it fails rather than hanging.
+
+**A registration lasts until the program ends.** Nothing in C says when a library is finished with a stored callback, so there is no moment at which releasing it would be safe. The cost is one small allocation per call that passes a function, not per invocation.
+
+**One registration per symbol, unless the library offers somewhere to put a cookie.** Calling `ares_search` twice with two different Jade functions sends both answers to the second. Where the library has a context parameter beside the callback — most do — write `callback_data` for it in place of `null_ptr` and each registration gets its own function back. The binding report says so against any symbol taking a callback.
+
+A callback registered in one task is not serviced in another: a spawned task has its own registrations, so a cross-task callback finds nothing and gets the neutral answer rather than running against another task's variables.
 
 ### `JADE_LIBS`
 

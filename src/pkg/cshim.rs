@@ -191,6 +191,21 @@ enum ArgSpec {
     /// rather than guessing. Guessing one way leaks on every call, and the other
     /// frees memory that was never allocated.
     OutAllocStr { c_type: String, name: Option<String> },
+    /// `callback_data` — no Jade argument. The library's own context slot, and
+    /// the shim puts the *caller's own function pointer* in it.
+    ///
+    /// C has no closures, so a library that stores a callback takes a `void *`
+    /// beside it and hands that back when it calls. Jade has no use for the
+    /// slot — a Jade function carries its own environment — so it is normally
+    /// passed as `null_ptr`. Filling it instead is what lets two outstanding
+    /// registrations on one symbol each get their own function: without it
+    /// there is one slot per symbol, and a second `ares_search` silently takes
+    /// the first one's answers.
+    ///
+    /// Never inferred, for the reason `null_ptr` is never inferred. A library
+    /// that puts something other than the caller's cookie in that parameter
+    /// would have it read back as a `JadeFn` and dereferenced.
+    CallbackData,
     /// `null_ptr` — no Jade argument. A null pointer is passed, always.
     ///
     /// The escape hatch for a parameter the FFI genuinely cannot carry in a
@@ -275,7 +290,9 @@ impl ArgSpec {
             ArgSpec::Scalar(t) => t.decl.to_string(),
             ArgSpec::Bytes => "const void*, size_t".to_string(),
             ArgSpec::BytesPtr => "const void*".to_string(),
-            ArgSpec::InoutBytes { .. } | ArgSpec::NullPtr => "void*".to_string(),
+            ArgSpec::InoutBytes { .. } | ArgSpec::NullPtr | ArgSpec::CallbackData => {
+                "void*".to_string()
+            }
             ArgSpec::OutStr { c_type, .. } => format!("const {c_type}**"),
             ArgSpec::OutAllocStr { c_type, .. } => format!("{c_type}**"),
             ArgSpec::OutBuffer { elem, .. } | ArgSpec::SizedBuffer { elem, .. } => {
@@ -643,6 +660,9 @@ fn parse_arg(pkg: &str, sym: &str, full: &str) -> Result<ArgSpec, String> {
     }
     if spec == "null_ptr" {
         return Ok(ArgSpec::NullPtr);
+    }
+    if spec == "callback_data" {
+        return Ok(ArgSpec::CallbackData);
     }
     if spec == "inout_bytes" {
         return Ok(ArgSpec::InoutBytes { name: out_name });
@@ -1088,7 +1108,19 @@ fn parse_symbol(
     // parameter it only knows as "a null pointer" would be declared `void*`
     // where the real one is a function pointer. That is a prototype mismatch,
     // which C is entitled to compile into a call through the wrong ABI.
-    if headers.is_empty() && args.iter().any(|a| matches!(a, ArgSpec::NullPtr)) {
+    // `callback_data` needs a callback beside it — it carries that function's
+    // pointer, so on its own it names nothing.
+    if args.iter().any(|a| matches!(a, ArgSpec::CallbackData))
+        && !args.iter().any(|a| matches!(a, ArgSpec::Callback { .. }))
+    {
+        return Err(format!(
+            "dependency '{pkg}': symbol '{sym}' has a `callback_data` but takes no callback. It \
+             carries the callback's own pointer, so there has to be one."
+        ));
+    }
+    if headers.is_empty()
+        && args.iter().any(|a| matches!(a, ArgSpec::NullPtr | ArgSpec::CallbackData))
+    {
         return Err(format!(
             "dependency '{pkg}': symbol '{sym}' passes a `null_ptr`, so the dependency needs \
              `headers = [\"<the library's header>\"]`. Without one the shim declares the symbol \
@@ -1401,7 +1433,8 @@ pub fn generate(
         let parsed = parse_symbol(name, sym, &symbols[*sym], structs, headers)?;
         for a in &parsed.args {
             if let ArgSpec::Callback { ret, params } = a {
-                out.push_str(&trampoline(sym, ret, params));
+                let routed = parsed.args.iter().any(|x| matches!(x, ArgSpec::CallbackData));
+                out.push_str(&trampoline(sym, ret, params, routed));
             }
         }
         out.push_str(&wrapper(name, sym, &symbols[*sym], structs, headers, any_callback)?);
@@ -2044,7 +2077,7 @@ fn held_bindings(type_name: &str, def: &CStruct) -> Vec<String> {
 /// The Jade function behind it is kept alive by `native::CallbackBus` for the
 /// life of the VM. Nothing in C says when a library is finished with a stored
 /// callback, so there is no moment at which releasing it would be safe.
-fn trampoline(sym: &str, ret: &CbRet, params: &[CbParam]) -> String {
+fn trampoline(sym: &str, ret: &CbRet, params: &[CbParam], routed: bool) -> String {
     // The C signature keeps every parameter, because the library calls through
     // this pointer and the shape has to match. Only the ones Jade can be given
     // are forwarded: the user-data slot has nothing to carry, and a length rode
@@ -2070,7 +2103,22 @@ fn trampoline(sym: &str, ret: &CbRet, params: &[CbParam]) -> String {
     // Nothing registered: answer neutrally rather than dereferencing.
     let is_void = ret.marshal.is_none();
     let neutral = if is_void { "return;".to_string() } else { "return 0;".to_string() };
-    b.push_str(&format!("    if (!jade_cb_{sym}) {{ {neutral} }}\n"));
+    // Which Jade function this call is for.
+    //
+    // Routed through the library's own context slot when the symbol declares
+    // `callback_data`, so two outstanding registrations each reach their own
+    // function rather than the later one taking both. The shared slot is the
+    // fallback, and the only answer when the library offers no such parameter.
+    let ud = params.iter().position(|p| matches!(p.kind, CbKind::UserData));
+    match (routed, ud) {
+        (true, Some(i)) => b.push_str(&format!(
+            "    const JadeFn* cb = a{i} ? (const JadeFn*)a{i} : jade_cb_{sym};\n\
+             \x20   if (!cb) {{ {neutral} }}\n"
+        )),
+        _ => b.push_str(&format!(
+            "    const JadeFn* cb = jade_cb_{sym};\n    if (!cb) {{ {neutral} }}\n"
+        )),
+    }
 
     // Every parameter is named in the signature, and the ones not forwarded are
     // never read. Saying so keeps the compiler quiet without dropping the name,
@@ -2122,7 +2170,7 @@ fn trampoline(sym: &str, ret: &CbRet, params: &[CbParam]) -> String {
     b.push_str("    JadeVal cbout;\n    cbout.tag = JADE_FFI_NIL;\n    cbout.data.as_nil = 0;\n");
     let argv = if n > 0 { "cbargs" } else { "NULL" };
     b.push_str(&format!(
-        "    if (jade_cb_{sym}->invoke(jade_cb_{sym}->host, {n}, {argv}, &cbout) != 0) {{\n\
+        "    if (cb->invoke(cb->host, {n}, {argv}, &cbout) != 0) {{\n\
          \x20       /* The Jade side raised. It must not travel out of here — the\n\
          \x20        * library is mid-operation and unwinding through its frames\n\
          \x20        * would leave it however it happens to be. Recorded, and\n\
@@ -2342,6 +2390,17 @@ fn wrapper(
             ArgSpec::RetLen { .. } => call_args.push(format!("&rlen{i}")),
             ArgSpec::SizedBuffer { .. } => call_args.push(format!("sbuf{i}")),
             ArgSpec::NullPtr => call_args.push("NULL".to_string()),
+            // The caller's own function pointer, handed to the library to hand
+            // back. That is what tells one registration from another.
+            ArgSpec::CallbackData => {
+                let at = p
+                    .args
+                    .iter()
+                    .position(|a| matches!(a, ArgSpec::Callback { .. }))
+                    .expect("validated by parse_symbol");
+                let k = jade_idx[at].expect("a callback consumes a Jade argument");
+                call_args.push(format!("(void*)argv[{k}].data.as_fn"));
+            }
             ArgSpec::OutStr { .. } => call_args.push(format!("&ostr{i}")),
             ArgSpec::OutAllocStr { .. } => call_args.push(format!("&oastr{i}")),
             ArgSpec::InoutBytes { .. } => call_args.push(format!("iobuf{i}")),
