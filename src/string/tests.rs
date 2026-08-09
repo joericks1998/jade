@@ -38,10 +38,7 @@ fn len_counts_chars_not_bytes() {
 
 #[test]
 fn len_wrong_type() {
-    assert!(matches!(
-        str_len(&[VmValue::Int(1)]),
-        Err(JadeError::TypeError { .. })
-    ));
+    assert!(matches!(str_len(&[VmValue::Int(1)]), Err(JadeError::TypeError { .. })));
 }
 
 // ── upper / lower ─────────────────────────────────────────────────────────────
@@ -89,18 +86,12 @@ fn split_no_match_returns_whole() {
 
 #[test]
 fn split_missing_sep() {
-    assert!(matches!(
-        str_split(&[s("abc")]),
-        Err(JadeError::TypeError { .. })
-    ));
+    assert!(matches!(str_split(&[s("abc")]), Err(JadeError::TypeError { .. })));
 }
 
 #[test]
 fn split_non_str_sep() {
-    assert!(matches!(
-        str_split(&[s("abc"), VmValue::Int(1)]),
-        Err(JadeError::TypeError { .. })
-    ));
+    assert!(matches!(str_split(&[s("abc"), VmValue::Int(1)]), Err(JadeError::TypeError { .. })));
 }
 
 // ── contains ──────────────────────────────────────────────────────────────────
@@ -140,10 +131,7 @@ fn replace_no_match() {
 
 #[test]
 fn replace_missing_third_arg() {
-    assert!(matches!(
-        str_replace(&[s("abc"), s("a")]),
-        Err(JadeError::TypeError { .. })
-    ));
+    assert!(matches!(str_replace(&[s("abc"), s("a")]), Err(JadeError::TypeError { .. })));
 }
 
 // ── starts_with / ends_with ───────────────────────────────────────────────────

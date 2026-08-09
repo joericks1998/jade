@@ -109,7 +109,10 @@ fn resolve_path_dependency_hashes_the_local_file() {
     assert_eq!(pkg.abi, "jade");
 
     let artifact = pkg.artifacts.get(ANY_PLATFORM).expect("local artifact keyed as any");
-    assert_eq!(artifact.file, "zlib.so", "installed under the dependency name, not the upstream one");
+    assert_eq!(
+        artifact.file, "zlib.so",
+        "installed under the dependency name, not the upstream one"
+    );
     assert_eq!(artifact.sha256, fetch::sha256_hex(b"\x7fELFfake so"));
     assert!(artifact.url.is_none(), "a local dep has nothing to download");
 }
@@ -117,9 +120,7 @@ fn resolve_path_dependency_hashes_the_local_file() {
 #[test]
 fn resolve_path_dependency_errors_when_the_file_is_absent() {
     let tmp = TempDir::new("resolvemissing");
-    let m = manifest(
-        "[project]\nname = \"app\"\n[dependencies.gone]\npath = \"nope.so\"\n",
-    );
+    let m = manifest("[project]\nname = \"app\"\n[dependencies.gone]\npath = \"nope.so\"\n");
 
     let err = resolve(tmp.path(), &m, &MockFetcher::new()).unwrap_err();
     assert!(err.contains("gone"), "error should name the dependency: {err}");
@@ -301,8 +302,14 @@ fn materialize_rejects_a_checksum_mismatch() {
 
     assert!(err.contains("checksum mismatch"), "unexpected message: {err}");
     assert!(err.contains("tok"), "error should name the dependency: {err}");
-    assert!(err.contains(&fetch::sha256_hex(b"\x7fELFexpected bytes")), "should show expected digest");
-    assert!(err.contains(&fetch::sha256_hex(b"\x7fELFmalicious bytes")), "should show actual digest");
+    assert!(
+        err.contains(&fetch::sha256_hex(b"\x7fELFexpected bytes")),
+        "should show expected digest"
+    );
+    assert!(
+        err.contains(&fetch::sha256_hex(b"\x7fELFmalicious bytes")),
+        "should show actual digest"
+    );
     assert!(
         !tmp.path().join("libs/tok-1.0.0/tok.so").exists(),
         "a mismatched artifact must never be written to libs/"
@@ -823,9 +830,7 @@ fn resolved_libraries_unions_manifest_libs_and_dependencies() {
     let (lock, _) = one_remote_package(b"\x7fELFtok bytes");
     lock::write(tmp.path(), &lock).unwrap();
 
-    let m = manifest(
-        "[project]\nname = \"app\"\n[lib.utils]\npath = \"src/utils\"\n",
-    );
+    let m = manifest("[project]\nname = \"app\"\n[lib.utils]\npath = \"src/utils\"\n");
 
     let libs = resolved_libraries(tmp.path(), &m);
     assert_eq!(libs.len(), 2);
@@ -945,10 +950,7 @@ int jade_pkg_init(JadeNativePkg* out) {
 /// Whether a C compiler is usable here. CI images without one skip rather than
 /// fail — these tests verify the loader, not the toolchain.
 fn have_cc() -> bool {
-    std::process::Command::new("cc")
-        .arg("--version")
-        .output()
-        .is_ok_and(|o| o.status.success())
+    std::process::Command::new("cc").arg("--version").output().is_ok_and(|o| o.status.success())
 }
 
 /// Compile `source` into a shared library at `dir/<name>.<ext>`.
@@ -965,11 +967,7 @@ fn compile_lib(dir: &Path, name: &str, source: &str) -> PathBuf {
         cc.arg("-shared");
     }
     let result = cc.arg("-fPIC").arg(&src).arg("-o").arg(&out).output().unwrap();
-    assert!(
-        result.status.success(),
-        "cc failed: {}",
-        String::from_utf8_lossy(&result.stderr)
-    );
+    assert!(result.status.success(), "cc failed: {}", String::from_utf8_lossy(&result.stderr));
     out
 }
 

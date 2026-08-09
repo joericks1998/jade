@@ -143,8 +143,11 @@ mod tests {
         let b = buf(b"ok\xffbad");
         let got = unsafe { borrow(b.as_ptr() as *const c_char) };
         assert_eq!(got, "ok", "the valid prefix survives, the rest truncates");
-        assert_eq!(unsafe { to_string(b.as_ptr() as *const c_char) }, "ok",
-                   "owned and borrowed must agree — one rule, not two");
+        assert_eq!(
+            unsafe { to_string(b.as_ptr() as *const c_char) },
+            "ok",
+            "owned and borrowed must agree — one rule, not two"
+        );
     }
 
     /// A leading bad byte leaves nothing valid, which is the one case that

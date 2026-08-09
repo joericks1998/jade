@@ -25,12 +25,14 @@ use inkwell::basic_block::BasicBlock as LlvmBlock;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
-use inkwell::values::{AnyValue, BasicMetadataValueEnum, FloatValue, FunctionValue, IntValue, PointerValue};
+use inkwell::values::{
+    AnyValue, BasicMetadataValueEnum, FloatValue, FunctionValue, IntValue, PointerValue,
+};
 use inkwell::{AddressSpace, FloatPredicate, IntPredicate};
 
 use crate::bytecode::{Chunk, CompiledFn, FStrPart, Instr, Reg};
-use crate::vm::VmValue;
 use crate::frontend::ast::{BinOpKind, Expr, StructFieldDef, UnaryOpKind};
+use crate::vm::VmValue;
 
 use super::cfg;
 
@@ -52,12 +54,12 @@ mod tests;
 // touches, each does `use super::*` and this block lifts their `pub(super)`
 // items into the shared parent scope. Splitting the old monolith was a pure
 // move, so this keeps every call site exactly as it was written.
-use calls::*;
+use abi::default_word_const;
 use builtins::*;
+use calls::*;
 use instr::lower_instr;
 use llm::emit_stream_call;
 use strings::emit_str_method;
-use abi::default_word_const;
 
 // Tagged-immediate bit patterns (mirror runtime.h / jade-runtime value.rs).
 const NIL: u64 = 0x07;
@@ -84,12 +86,6 @@ const OBJKIND_BOUND_METHOD: u64 = 9;
 const WANT_STR: u64 = 0x1;
 const WANT_ARRAY: u64 = 0x2;
 const WANT_DICT: u64 = 0x4;
-
-
-
-
-
-
 
 /// Per-function lowering helper: bundles the builder, the i64 slot type, and the
 /// register `alloca`s so the instruction handlers stay terse.
@@ -118,83 +114,14 @@ struct Lowerer<'a, 'ctx> {
 }
 
 impl<'a, 'ctx> Lowerer<'a, 'ctx> {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     // ── Reference counting (B4.2; all no-ops unless `self.refcount`) ──────────
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     // ── Dynamic (Unknown-operand) ops → tag-dispatching runtime (A7) ─────────
     // Operands are tagged words in slots, so — unlike the legacy static-SSA
     // backend — we pass the slot words straight to the `jrt_*_any` helpers (the
     // same decision core the VM runs via `dynop`). Arithmetic returns a tagged
     // word; comparisons return an i32 that we fold into a bool word.
-
-
-
-
-
-
-
-
 }
-
-
-
-
 
 // ── User-function lowering (A6b) ───────────────────────────────────────────────
 //
@@ -300,20 +227,6 @@ impl<'ctx> FnCtx<'ctx> {
         hit
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 /// A struct field default the backend can materialize (scalar literals only;
 /// mirrors the VM's `eval_literal_default` for the representable subset).
@@ -432,8 +345,7 @@ pub fn lower_program<'ctx>(
     // Forward-declare every function first, so bodies can call each other.
     let mut funcs = Vec::with_capacity(defs.len());
     for (uid, cf) in defs.iter().enumerate() {
-        let ptys: Vec<inkwell::types::BasicMetadataTypeEnum> =
-            vec![i64_ty.into(); cf.params.len()];
+        let ptys: Vec<inkwell::types::BasicMetadataTypeEnum> = vec![i64_ty.into(); cf.params.len()];
         funcs.push(module.add_function(&format!("jf_{uid}"), i64_ty.fn_type(&ptys, false), None));
     }
     // Async task-entry wrappers: `jf_task_<uid>(i64* args, i32 n) -> i64` unpacks
@@ -458,10 +370,18 @@ pub fn lower_program<'ctx>(
             for i in 0..n {
                 let slot = unsafe {
                     builder
-                        .build_in_bounds_gep(i64_ty, args_ptr, &[i64_ty.const_int(i as u64, false)], "argslot")
+                        .build_in_bounds_gep(
+                            i64_ty,
+                            args_ptr,
+                            &[i64_ty.const_int(i as u64, false)],
+                            "argslot",
+                        )
                         .map_err(|e| e.to_string())?
                 };
-                let v = builder.build_load(i64_ty, slot, "arg").map_err(|e| e.to_string())?.into_int_value();
+                let v = builder
+                    .build_load(i64_ty, slot, "arg")
+                    .map_err(|e| e.to_string())?
+                    .into_int_value();
                 argv.push(v.into());
             }
             let r = builder
@@ -493,7 +413,17 @@ pub fn lower_program<'ctx>(
         collect_setglobals(&d.chunk);
     }
     let refcount = program_collections_only(top, &defs);
-    let fnctx = FnCtx { funcs, defs, ptr2uid, global_fns, struct_defaults, struct_field_names, method_candidates, user_globals, refcount };
+    let fnctx = FnCtx {
+        funcs,
+        defs,
+        ptr2uid,
+        global_fns,
+        struct_defaults,
+        struct_field_names,
+        method_candidates,
+        user_globals,
+        refcount,
+    };
 
     for uid in 0..fnctx.defs.len() {
         let cf = fnctx.defs[uid].clone();
@@ -522,7 +452,8 @@ pub fn lower_program<'ctx>(
         let en = module.get_function("jrt_rc_enable").unwrap_or_else(|| {
             module.add_function("jrt_rc_enable", context.void_type().fn_type(&[], false), None)
         });
-        let entry = top_fn.get_first_basic_block().ok_or("lower.rs: jade_toplevel has no entry block")?;
+        let entry =
+            top_fn.get_first_basic_block().ok_or("lower.rs: jade_toplevel has no entry block")?;
         let eb = context.create_builder();
         match entry.get_first_instruction() {
             Some(first) => eb.position_before(&first),
@@ -557,15 +488,22 @@ pub fn lower_program<'ctx>(
                 None,
             )
         });
-        let entry = top_fn.get_first_basic_block().ok_or("lower.rs: jade_toplevel has no entry block")?;
+        let entry =
+            top_fn.get_first_basic_block().ok_or("lower.rs: jade_toplevel has no entry block")?;
         let rb = context.create_builder();
         match entry.get_first_instruction() {
             Some(first) => rb.position_before(&first),
             None => rb.position_at_end(entry),
         }
         for (ty, m, uid) in regs {
-            let tcstr = rb.build_global_string_ptr(ty, "mtype").map_err(|e| e.to_string())?.as_pointer_value();
-            let mcstr = rb.build_global_string_ptr(m, "mname").map_err(|e| e.to_string())?.as_pointer_value();
+            let tcstr = rb
+                .build_global_string_ptr(ty, "mtype")
+                .map_err(|e| e.to_string())?
+                .as_pointer_value();
+            let mcstr = rb
+                .build_global_string_ptr(m, "mname")
+                .map_err(|e| e.to_string())?
+                .as_pointer_value();
             let fnptr = fnctx.funcs[uid].as_global_value().as_pointer_value();
             rb.build_call(reg_fn, &[tcstr.into(), mcstr.into(), fnptr.into()], "")
                 .map_err(|e| e.to_string())?;
@@ -592,7 +530,8 @@ pub fn lower_program<'ctx>(
                 None,
             )
         });
-        let entry = top_fn.get_first_basic_block().ok_or("lower.rs: jade_toplevel has no entry block")?;
+        let entry =
+            top_fn.get_first_basic_block().ok_or("lower.rs: jade_toplevel has no entry block")?;
         let rb = context.create_builder();
         match entry.get_first_instruction() {
             Some(first) => rb.position_before(&first),
@@ -601,22 +540,34 @@ pub fn lower_program<'ctx>(
         let mut types: Vec<(&String, &Vec<String>)> = fnctx.struct_field_names.iter().collect();
         types.sort_by(|a, b| a.0.cmp(b.0)); // deterministic IR
         for (tn, fields) in types {
-            let tcstr = rb.build_global_string_ptr(tn, "sftype").map_err(|e| e.to_string())?.as_pointer_value();
+            let tcstr = rb
+                .build_global_string_ptr(tn, "sftype")
+                .map_err(|e| e.to_string())?
+                .as_pointer_value();
             let defaults = fnctx.struct_defaults.get(tn);
             for f in fields {
-                let fcstr = rb.build_global_string_ptr(f, "sffield").map_err(|e| e.to_string())?.as_pointer_value();
+                let fcstr = rb
+                    .build_global_string_ptr(f, "sffield")
+                    .map_err(|e| e.to_string())?
+                    .as_pointer_value();
                 // The prompt flag is not consulted here: this registry feeds
                 // struct *coercion* (`?p |> City`), which stores the default word
                 // as-is on both engines. Boxing only happens where a literal is
                 // built, which is `MakeStruct` above.
-                let dv = defaults.and_then(|ds| ds.iter().find(|(n, _, _)| n == f)).map(|(_, v, _)| v);
+                let dv =
+                    defaults.and_then(|ds| ds.iter().find(|(n, _, _)| n == f)).map(|(_, v, _)| v);
                 let (word, has) = match dv {
                     Some(v) => (default_word_const(context, module, &rb, v)?, 1u64),
                     None => (i64_ty2.const_int(NIL, false), 0u64),
                 };
                 rb.build_call(
                     reg_field,
-                    &[tcstr.into(), fcstr.into(), word.into(), i32_ty2.const_int(has, false).into()],
+                    &[
+                        tcstr.into(),
+                        fcstr.into(),
+                        word.into(),
+                        i32_ty2.const_int(has, false).into(),
+                    ],
                     "",
                 )
                 .map_err(|e| e.to_string())?;
@@ -673,11 +624,7 @@ fn lower_body<'ctx>(
     let n = (n_slots as usize).max(n_params);
     let mut slots = Vec::with_capacity(n);
     for i in 0..n {
-        slots.push(
-            builder
-                .build_alloca(i64_ty, &format!("r{i}"))
-                .map_err(|e| e.to_string())?,
-        );
+        slots.push(builder.build_alloca(i64_ty, &format!("r{i}")).map_err(|e| e.to_string())?);
     }
     // In refcount mode, nil-initialize every slot so the release-old-value logic
     // in `store`/`store_idx` (and scope-exit `decref`) never reads uninitialized
@@ -748,17 +695,13 @@ fn lower_body<'ctx>(
     // One LLVM block per reconstructed basic block; entry branches to the first.
     let graph = cfg::build(code);
     if graph.blocks.is_empty() {
-        builder
-            .build_return(Some(&i64_ty.const_int(NIL, false)))
-            .map_err(|e| e.to_string())?;
+        builder.build_return(Some(&i64_ty.const_int(NIL, false))).map_err(|e| e.to_string())?;
         return Ok(());
     }
     let llblocks: Vec<LlvmBlock> = (0..graph.blocks.len())
         .map(|bi| context.append_basic_block(function, &format!("bb{bi}")))
         .collect();
-    builder
-        .build_unconditional_branch(llblocks[0])
-        .map_err(|e| e.to_string())?;
+    builder.build_unconditional_branch(llblocks[0]).map_err(|e| e.to_string())?;
 
     let low = Lowerer {
         is_generator,

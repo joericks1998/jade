@@ -41,14 +41,9 @@ fn artifact(file: &str, sha: &str) -> LockedArtifact {
 
 fn package(name: &str, version: &str) -> LockedPackage {
     let mut artifacts = BTreeMap::new();
-    artifacts.insert(
-        "darwin-aarch64".to_string(),
-        artifact(&format!("{name}.dylib"), &"a".repeat(64)),
-    );
-    artifacts.insert(
-        "linux-x86_64".to_string(),
-        artifact(&format!("{name}.so"), &"b".repeat(64)),
-    );
+    artifacts
+        .insert("darwin-aarch64".to_string(), artifact(&format!("{name}.dylib"), &"a".repeat(64)));
+    artifacts.insert("linux-x86_64".to_string(), artifact(&format!("{name}.so"), &"b".repeat(64)));
     LockedPackage {
         name: name.to_string(),
         version: version.to_string(),
@@ -144,11 +139,7 @@ fn malformed_lockfile_is_an_error_not_a_silent_reset() {
 #[test]
 fn future_lock_version_is_rejected() {
     let tmp = TempDir::new("future");
-    std::fs::write(
-        path(tmp.path()),
-        format!("version = {}\n", LOCK_VERSION + 1),
-    )
-    .unwrap();
+    std::fs::write(path(tmp.path()), format!("version = {}\n", LOCK_VERSION + 1)).unwrap();
 
     let err = read(tmp.path()).unwrap_err();
     assert!(

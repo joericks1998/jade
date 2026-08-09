@@ -9,8 +9,8 @@ use jade_runtime::coll::{DictObj, StructObj};
 
 use crate::{
     builtins::make_array,
-    vm::{Mutex, VmValue},
     frontend::error::{JadeError, Result, Span},
+    vm::{Mutex, VmValue},
 };
 
 // The transport trees for arrays/dicts are libc-heap so either `jade-runtime`
@@ -24,20 +24,20 @@ unsafe extern "C" {
 
 // ── C-ABI tag constants ───────────────────────────────────────────────────────
 
-pub const JADE_TAG_NIL:   u8 = 0;
-pub const JADE_TAG_INT:   u8 = 1;
+pub const JADE_TAG_NIL: u8 = 0;
+pub const JADE_TAG_INT: u8 = 1;
 pub const JADE_TAG_FLOAT: u8 = 2;
-pub const JADE_TAG_BOOL:  u8 = 3;
+pub const JADE_TAG_BOOL: u8 = 3;
 /// Null-terminated UTF-8.  For *input* args, jade owns the buffer.
 /// For *output* vals, the native lib owns the buffer (must stay valid through
 /// the return of the native function — jade copies immediately).
-pub const JADE_TAG_STR:   u8 = 4;
+pub const JADE_TAG_STR: u8 = 4;
 /// Like JADE_TAG_STR but signals an error.  The str is the error message.
 pub const JADE_TAG_ERROR: u8 = 5;
 /// `data.as_arr` → a deep-copied [`JadeArr`] tree (libc-owned).
 pub const JADE_TAG_ARRAY: u8 = 6;
 /// `data.as_dict` → a deep-copied [`JadeMap`] tree (libc-owned).
-pub const JADE_TAG_DICT:  u8 = 7;
+pub const JADE_TAG_DICT: u8 = 7;
 /// `data.as_struct` → a deep-copied [`JadeStruct`] tree (libc-owned).
 ///
 /// A struct is a dict that also carries its type name. The name is what makes a
@@ -79,15 +79,15 @@ pub const JADE_TAG_FN: u8 = 11;
 
 #[repr(C)]
 pub union JadeValData {
-    pub as_int:   i64,
+    pub as_int: i64,
     pub as_float: f64,
-    pub as_bool:  u8,
+    pub as_bool: u8,
     /// Non-owning pointer to null-terminated UTF-8.
-    pub as_str:   *const u8,
+    pub as_str: *const u8,
     /// Padding — present for JADE_TAG_NIL.
-    pub as_nil:   u64,
-    pub as_arr:   *mut JadeArr,
-    pub as_dict:  *mut JadeMap,
+    pub as_nil: u64,
+    pub as_arr: *mut JadeArr,
+    pub as_dict: *mut JadeMap,
     pub as_struct: *mut JadeStruct,
     pub as_bytes: *mut JadeBytes,
     pub as_handle: *mut JadeHandle,
@@ -96,7 +96,7 @@ pub union JadeValData {
 
 #[repr(C)]
 pub struct JadeVal {
-    pub tag:  u8,
+    pub tag: u8,
     pub _pad: [u8; 7],
     pub data: JadeValData,
 }
@@ -112,14 +112,14 @@ pub struct JadeVal {
 #[repr(C)]
 pub struct JadeArr {
     pub items: *mut JadeVal,
-    pub len:   usize,
+    pub len: usize,
 }
 
 #[repr(C)]
 pub struct JadeMap {
     pub keys: *mut *const u8,
     pub vals: *mut JadeVal,
-    pub len:  usize,
+    pub len: usize,
 }
 
 /// A [`JadeMap`] plus the struct's type name, in declaration order. Same
@@ -130,7 +130,7 @@ pub struct JadeStruct {
     pub type_name: *const u8,
     pub keys: *mut *const u8,
     pub vals: *mut JadeVal,
-    pub len:  usize,
+    pub len: usize,
 }
 
 /// A counted binary buffer. Same ownership rules as [`JadeArr`]: libc heap,
@@ -200,8 +200,8 @@ pub struct JadeBinding {
 #[repr(C)]
 pub struct JadeNativePkg {
     /// Null-terminated package name (informational).
-    pub name:          *const std::ffi::c_char,
-    pub bindings:      *const JadeBinding,
+    pub name: *const std::ffi::c_char,
+    pub bindings: *const JadeBinding,
     pub binding_count: usize,
 }
 
@@ -209,9 +209,9 @@ pub struct JadeNativePkg {
 
 pub struct NativeLibFn {
     pub name: String,
-    fn_ptr:   JadeNativeFnPtr,
+    fn_ptr: JadeNativeFnPtr,
     /// Keep the library loaded for as long as any of its functions are alive.
-    _lib:     Arc<libloading::Library>,
+    _lib: Arc<libloading::Library>,
 }
 
 // ── Callbacks ─────────────────────────────────────────────────────────────────
@@ -317,8 +317,7 @@ impl NativeLibFn {
         let ffi_args: Vec<JadeVal> = args.iter().map(|v| vm_to_ffi(v, &mut cstrings)).collect();
 
         let mut out = JadeVal::nil();
-        let status =
-            unsafe { (self.fn_ptr)(ffi_args.len(), ffi_args.as_ptr(), &mut out) };
+        let status = unsafe { (self.fn_ptr)(ffi_args.len(), ffi_args.as_ptr(), &mut out) };
         // ffi_args and cstrings are still alive here ↑
 
         // Read the result before freeing anything (ffi_to_vm deep-copies out of
@@ -326,9 +325,7 @@ impl NativeLibFn {
         let result = if status != 0 {
             let msg = if out.tag == JADE_TAG_STR || out.tag == JADE_TAG_ERROR {
                 unsafe {
-                    CStr::from_ptr(out.data.as_str as *const c_char)
-                        .to_string_lossy()
-                        .into_owned()
+                    CStr::from_ptr(out.data.as_str as *const c_char).to_string_lossy().into_owned()
                 }
             } else {
                 format!("native fn '{}' returned error code {}", self.name, status)
@@ -409,8 +406,7 @@ pub(crate) fn marshal_with_callbacks(
 
     for v in args {
         if is_callable(v) {
-            let mut host =
-                Box::new(CallbackHost { callee: v.clone(), tx: tx.clone(), span });
+            let mut host = Box::new(CallbackHost { callee: v.clone(), tx: tx.clone(), span });
             let ptr: *mut c_void = &mut *host as *mut CallbackHost as *mut c_void;
             hosts.push(host);
 
@@ -418,9 +414,7 @@ pub(crate) fn marshal_with_callbacks(
             if f.is_null() {
                 std::alloc::handle_alloc_error(std::alloc::Layout::new::<JadeFn>());
             }
-            unsafe {
-                std::ptr::write(f, JadeFn { host: ptr, invoke: Some(vm_invoke_callback) })
-            };
+            unsafe { std::ptr::write(f, JadeFn { host: ptr, invoke: Some(vm_invoke_callback) }) };
             argv.push(JadeVal { tag: JADE_TAG_FN, _pad: [0; 7], data: JadeValData { as_fn: f } });
         } else {
             argv.push(vm_to_ffi(v, &mut cstrings));
@@ -440,7 +434,9 @@ pub(crate) fn finish_native_call(
 ) -> Result<VmValue> {
     let result = if status != 0 {
         let msg = if out.tag == JADE_TAG_STR || out.tag == JADE_TAG_ERROR {
-            unsafe { CStr::from_ptr(out.data.as_str as *const c_char).to_string_lossy().into_owned() }
+            unsafe {
+                CStr::from_ptr(out.data.as_str as *const c_char).to_string_lossy().into_owned()
+            }
         } else {
             format!("native fn '{name}' returned error code {status}")
         };
@@ -493,14 +489,9 @@ pub(crate) fn free_fn_wrappers(argv: &[JadeVal]) {
 /// inference request as a struct, every published provider — built against
 /// ABI 1 — failed with `native function returned an unknown value tag` from
 /// inside the call, naming neither the version nor the fix.
-fn check_package_abi(
-    lib: &libloading::Library,
-    lib_path: &Path,
-    span: Span,
-) -> Result<()> {
+fn check_package_abi(lib: &libloading::Library, lib_path: &Path, span: Span) -> Result<()> {
     let read = |sym: &[u8]| -> Option<u32> {
-        let f: libloading::Symbol<unsafe extern "C" fn() -> u32> =
-            unsafe { lib.get(sym) }.ok()?;
+        let f: libloading::Symbol<unsafe extern "C" fn() -> u32> = unsafe { lib.get(sym) }.ok()?;
         Some(unsafe { f() })
     };
 
@@ -529,19 +520,10 @@ fn check_package_abi(
     })
 }
 
-pub fn load_native_package(
-    lib_path: &Path,
-    span: Span,
-) -> Result<HashMap<String, VmValue>> {
-    let lib = unsafe { libloading::Library::new(lib_path) }.map_err(|e| {
-        JadeError::IoError {
-            message: format!(
-                "could not load native library '{}': {}",
-                lib_path.display(),
-                e
-            ),
-            span,
-        }
+pub fn load_native_package(lib_path: &Path, span: Span) -> Result<HashMap<String, VmValue>> {
+    let lib = unsafe { libloading::Library::new(lib_path) }.map_err(|e| JadeError::IoError {
+        message: format!("could not load native library '{}': {}", lib_path.display(), e),
+        span,
     })?;
 
     let lib = Arc::new(lib);
@@ -565,11 +547,8 @@ pub fn load_native_package(
             span,
         })?;
 
-    let mut pkg = JadeNativePkg {
-        name:          std::ptr::null(),
-        bindings:      std::ptr::null(),
-        binding_count: 0,
-    };
+    let mut pkg =
+        JadeNativePkg { name: std::ptr::null(), bindings: std::ptr::null(), binding_count: 0 };
     let status = unsafe { init_fn(&mut pkg) };
     if status != 0 {
         return Err(JadeError::IoError {
@@ -593,9 +572,7 @@ pub fn load_native_package(
         if binding.name.is_null() {
             continue;
         }
-        let name = unsafe { CStr::from_ptr(binding.name) }
-            .to_string_lossy()
-            .into_owned();
+        let name = unsafe { CStr::from_ptr(binding.name) }.to_string_lossy().into_owned();
         let nfn = Arc::new(NativeLibFn {
             name: name.clone(),
             fn_ptr: binding.func,
@@ -618,9 +595,7 @@ unsafe fn ffi_alloc<T>(n: usize) -> *mut T {
     }
     let p = unsafe { malloc(n * std::mem::size_of::<T>()) } as *mut T;
     if p.is_null() {
-        std::alloc::handle_alloc_error(
-            std::alloc::Layout::array::<T>(n).expect("ffi layout"),
-        );
+        std::alloc::handle_alloc_error(std::alloc::Layout::array::<T>(n).expect("ffi layout"));
     }
     p
 }
@@ -676,16 +651,12 @@ pub fn abi_type_name(name: &str) -> &str {
 fn vm_to_ffi_owned(val: &VmValue) -> JadeVal {
     match val {
         VmValue::Nil => JadeVal::nil(),
-        VmValue::Int(i) => JadeVal {
-            tag: JADE_TAG_INT,
-            _pad: [0; 7],
-            data: JadeValData { as_int: *i },
-        },
-        VmValue::Float(f) => JadeVal {
-            tag: JADE_TAG_FLOAT,
-            _pad: [0; 7],
-            data: JadeValData { as_float: *f },
-        },
+        VmValue::Int(i) => {
+            JadeVal { tag: JADE_TAG_INT, _pad: [0; 7], data: JadeValData { as_int: *i } }
+        }
+        VmValue::Float(f) => {
+            JadeVal { tag: JADE_TAG_FLOAT, _pad: [0; 7], data: JadeValData { as_float: *f } }
+        }
         VmValue::Bool(b) => JadeVal {
             tag: JADE_TAG_BOOL,
             _pad: [0; 7],
@@ -760,9 +731,7 @@ fn vm_to_ffi_owned(val: &VmValue) -> JadeVal {
             }
             let bx = unsafe { malloc(std::mem::size_of::<JadeBytes>()) } as *mut JadeBytes;
             if bx.is_null() {
-                std::alloc::handle_alloc_error(
-                    std::alloc::Layout::new::<JadeBytes>(),
-                );
+                std::alloc::handle_alloc_error(std::alloc::Layout::new::<JadeBytes>());
             }
             unsafe { std::ptr::write(bx, JadeBytes { data, len: n }) };
             JadeVal { tag: JADE_TAG_BYTES, _pad: [0; 7], data: JadeValData { as_bytes: bx } }
@@ -780,10 +749,7 @@ fn vm_to_ffi_owned(val: &VmValue) -> JadeVal {
             unsafe {
                 std::ptr::write(
                     hx,
-                    JadeHandle {
-                        ptr: h.ptr as *mut c_void,
-                        type_name: ffi_strdup(&h.type_name()),
-                    },
+                    JadeHandle { ptr: h.ptr as *mut c_void, type_name: ffi_strdup(&h.type_name()) },
                 )
             };
             JadeVal { tag: JADE_TAG_HANDLE, _pad: [0; 7], data: JadeValData { as_handle: hx } }
@@ -822,9 +788,7 @@ pub fn ffi_to_vm(val: &JadeVal, span: Span) -> Result<VmValue> {
         JADE_TAG_BOOL => Ok(VmValue::Bool(unsafe { val.data.as_bool } != 0)),
         JADE_TAG_STR => {
             let s = unsafe {
-                CStr::from_ptr(val.data.as_str as *const c_char)
-                    .to_string_lossy()
-                    .into_owned()
+                CStr::from_ptr(val.data.as_str as *const c_char).to_string_lossy().into_owned()
             };
             Ok(VmValue::Str(s.into()))
         }
@@ -848,9 +812,7 @@ pub fn ffi_to_vm(val: &JadeVal, span: Span) -> Result<VmValue> {
                 let (keys, vals) = unsafe { ((*m).keys, (*m).vals) };
                 for i in 0..len {
                     let key = unsafe {
-                        CStr::from_ptr(*keys.add(i) as *const c_char)
-                            .to_string_lossy()
-                            .into_owned()
+                        CStr::from_ptr(*keys.add(i) as *const c_char).to_string_lossy().into_owned()
                     };
                     let value = ffi_to_vm(unsafe { &*vals.add(i) }, span)?;
                     d.insert(key, value);
@@ -871,9 +833,10 @@ pub fn ffi_to_vm(val: &JadeVal, span: Span) -> Result<VmValue> {
             };
             // Data from a native package is from outside the program, exactly
             // as a file read is.
-            Ok(VmValue::Bytes(std::sync::Arc::new(
-                jade_runtime::bytesf::BytesObj::new(slice, jade_runtime::trust::TAINTED),
-            )))
+            Ok(VmValue::Bytes(std::sync::Arc::new(jade_runtime::bytesf::BytesObj::new(
+                slice,
+                jade_runtime::trust::TAINTED,
+            ))))
         }
         // A JadeFn only ever travels *outward*. A package handing one back
         // would be offering the program a C function to call, which is the
@@ -926,9 +889,7 @@ pub fn ffi_to_vm(val: &JadeVal, span: Span) -> Result<VmValue> {
         }
         JADE_TAG_ERROR => {
             let msg = unsafe {
-                CStr::from_ptr(val.data.as_str as *const c_char)
-                    .to_string_lossy()
-                    .into_owned()
+                CStr::from_ptr(val.data.as_str as *const c_char).to_string_lossy().into_owned()
             };
             Err(JadeError::IoError { message: msg, span })
         }

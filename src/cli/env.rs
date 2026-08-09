@@ -13,10 +13,8 @@ pub fn run_env(json: bool) {
     // Cache stats
     let cache_entries = crate::cache::list_entries();
     let entry_count = cache_entries.len();
-    let stale_count = cache_entries
-        .iter()
-        .filter(|e| e.version != crate::cache::JADE_VERSION)
-        .count();
+    let stale_count =
+        cache_entries.iter().filter(|e| e.version != crate::cache::JADE_VERSION).count();
     let total_bytes: u64 = cache_entries.iter().map(|e| e.size_bytes).sum();
     let cache_size = super::format_bytes(total_bytes);
 
@@ -24,10 +22,8 @@ pub fn run_env(json: bool) {
 
     // Inference: the active provider and what's installed.
     let active_provider = crate::providers::active_provider();
-    let provider_key_set = active_provider
-        .as_deref()
-        .map(crate::providers::has_credential)
-        .unwrap_or(false);
+    let provider_key_set =
+        active_provider.as_deref().map(crate::providers::has_credential).unwrap_or(false);
     let installed_providers: Vec<String> =
         crate::providers::installed().into_iter().map(|p| p.name).collect();
 
@@ -90,7 +86,8 @@ pub fn run_env(json: bool) {
         println!("inference:");
         match &active_provider {
             Some(p) => {
-                let key = if provider_key_set { "key set" } else { "no key — run 'jade register'" };
+                let key =
+                    if provider_key_set { "key set" } else { "no key — run 'jade register'" };
                 println!("  provider   {} ({})", p, key);
             }
             None => println!("  provider   none — run 'jade register' to choose one"),

@@ -54,9 +54,9 @@ impl SizeClass {
     }
 }
 
-static CLASSES: [SizeClass; NUM_CLASSES] = [const {
-    SizeClass { lock: AtomicBool::new(false), head: AtomicPtr::new(ptr::null_mut()) }
-}; NUM_CLASSES];
+static CLASSES: [SizeClass; NUM_CLASSES] =
+    [const { SizeClass { lock: AtomicBool::new(false), head: AtomicPtr::new(ptr::null_mut()) } };
+        NUM_CLASSES];
 
 #[inline]
 fn class_index(size: usize) -> Option<usize> {

@@ -121,10 +121,7 @@ fn char_temp(v: JadeValue) -> *mut u8 {
 
 /// Run `f` with both operands as strings, materializing either char operand.
 fn with_char_as_str<T>(a: JadeValue, b: JadeValue, f: impl FnOnce(JadeValue, JadeValue) -> T) -> T {
-    let (ta, tb) = (
-        a.is_char().then(|| char_temp(a)),
-        b.is_char().then(|| char_temp(b)),
-    );
+    let (ta, tb) = (a.is_char().then(|| char_temp(a)), b.is_char().then(|| char_temp(b)));
     let av = ta.map_or(a, |p| JadeValue::from_str_ptr(p as *const ()));
     let bv = tb.map_or(b, |p| JadeValue::from_str_ptr(p as *const ()));
     let out = f(av, bv);
@@ -147,7 +144,9 @@ fn either_char(a: JadeValue, b: JadeValue) -> bool {
 
 pub fn add(a: JadeValue, b: JadeValue) -> OpResult {
     if either_char(a, b) {
-        return with_char_as_str(a, b, |x, y| finish(dynop::binop(Op::Add, kind(x), kind(y)), x, y));
+        return with_char_as_str(a, b, |x, y| {
+            finish(dynop::binop(Op::Add, kind(x), kind(y)), x, y)
+        });
     }
     finish(dynop::binop(Op::Add, kind(a), kind(b)), a, b)
 }
@@ -359,10 +358,7 @@ mod tests {
         assert!(eq_total(crate::value::NIL, crate::value::NIL));
 
         // Cross-kind: `eq` errors, `eq_total` says "not equal" and never raises.
-        for (a, b) in [
-            (i(1), JadeValue::from_bool(true)),
-            (i(1), box_float(1.0)),
-        ] {
+        for (a, b) in [(i(1), JadeValue::from_bool(true)), (i(1), box_float(1.0))] {
             assert_eq!(eq(a, b), Err(DynErr::Type), "expected `==` to reject");
             assert!(!eq_total(a, b), "membership must answer, not raise");
         }

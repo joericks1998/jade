@@ -51,10 +51,17 @@ fn fail(e: impl std::fmt::Display) -> ! {
 /// outright, and rolling that back would delete a working entry to clean up
 /// after a failed attempt to change it — so an existing one is left as it is,
 /// and the message says the file was touched.
-fn fail_new_dependency(root: &std::path::Path, name: &str, existed: bool, e: impl std::fmt::Display) -> ! {
+fn fail_new_dependency(
+    root: &std::path::Path,
+    name: &str,
+    existed: bool,
+    e: impl std::fmt::Display,
+) -> ! {
     eprintln!("error: {e}");
     if existed {
-        eprintln!("note: [dependencies.{name}] in jade.toml was already replaced, and is left as it is");
+        eprintln!(
+            "note: [dependencies.{name}] in jade.toml was already replaced, and is left as it is"
+        );
     } else if matches!(manifest::remove_dependency(root, name), Ok(true)) {
         eprintln!("note: {name} was not added — jade.toml is unchanged");
     }
@@ -81,7 +88,10 @@ fn relock_and_install(root: &std::path::Path, manifest: &ProjectManifest) {
 ///
 /// `jade pkg add` needs this so it can undo its manifest edit before it dies;
 /// every other caller has nothing to undo and uses the exiting form above.
-fn try_relock_and_install(root: &std::path::Path, manifest: &ProjectManifest) -> Result<(), String> {
+fn try_relock_and_install(
+    root: &std::path::Path,
+    manifest: &ProjectManifest,
+) -> Result<(), String> {
     let resolved = relock_and_fetch(root, manifest)?;
     pkg::build_c_shims(root, &resolved, manifest)
 }
@@ -147,7 +157,9 @@ pub fn run_add(
         let full = root.join(p);
         if !full.exists() {
             eprintln!("error: {p} does not exist");
-            eprintln!("       a --path dependency names a file to copy, relative to the project root");
+            eprintln!(
+                "       a --path dependency names a file to copy, relative to the project root"
+            );
             std::process::exit(1);
         }
         // A dependency is a *loadable* shared library, and nothing downstream
@@ -308,10 +320,12 @@ fn detect_abi(lib: &std::path::Path) -> Option<Abi> {
 /// directory, and the failure is a "file not found" from cc at install time,
 /// well away from the cause.
 fn header_locations(header: &std::path::Path, include: &[String]) -> (Vec<String>, Vec<String>) {
-    let headers = vec![header
-        .file_name()
-        .map(|f| f.to_string_lossy().into_owned())
-        .unwrap_or_else(|| header.to_string_lossy().into_owned())];
+    let headers = vec![
+        header
+            .file_name()
+            .map(|f| f.to_string_lossy().into_owned())
+            .unwrap_or_else(|| header.to_string_lossy().into_owned()),
+    ];
 
     // The same list clang was given, so the shim compile cannot be missing a
     // directory the parse needed. The two used to be computed separately, and
@@ -480,10 +494,8 @@ pub fn run_remove(name: &str) {
     let root = root_or_exit();
 
     // Capture the install directory before the lock loses the entry.
-    let install_dir = lock::read(&root)
-        .ok()
-        .flatten()
-        .and_then(|l| l.get(name).map(|p| p.install_dir()));
+    let install_dir =
+        lock::read(&root).ok().flatten().and_then(|l| l.get(name).map(|p| p.install_dir()));
 
     let removed = manifest::remove_dependency(&root, name).unwrap_or_else(|e| fail(e));
     if !removed {
@@ -541,9 +553,7 @@ pub fn run_install(locked: bool) {
     let existing = lock::read(&root).unwrap_or_else(|e| fail(e));
 
     if locked {
-        let lock = existing.unwrap_or_else(|| {
-            fail("--locked was given but there is no jade.lock")
-        });
+        let lock = existing.unwrap_or_else(|| fail("--locked was given but there is no jade.lock"));
         pkg::verify_in_sync(&manifest, &lock).unwrap_or_else(|e| fail(e));
         // A rebuilt local dependency is a stale lock, and this mode is where a
         // stale lock has to be an error rather than a fixup.
@@ -619,10 +629,7 @@ pub fn run_list() {
     let platform = pkg::fetch::platform_tag().unwrap_or("unsupported");
     for p in &lock.packages {
         let dir = root.join(pkg::LIBS_DIR).join(p.install_dir());
-        let here = p
-            .artifacts
-            .get(platform)
-            .or_else(|| p.artifacts.get(pkg::ANY_PLATFORM));
+        let here = p.artifacts.get(platform).or_else(|| p.artifacts.get(pkg::ANY_PLATFORM));
 
         let status = match here {
             // A local dependency whose source has been rebuilt is installed but

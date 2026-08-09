@@ -1,6 +1,7 @@
 use crate::{
-    compiler::{tir::JadeType, type_infer::TypeContext}, vm::VmValue,
+    compiler::{tir::JadeType, type_infer::TypeContext},
     frontend::error::{JadeError, Result, Span},
+    vm::VmValue,
 };
 
 use crate::builtins::{BuiltinFn, Package};
@@ -100,11 +101,11 @@ fn random_seed(args: &[VmValue]) -> Result<VmValue> {
 }
 
 static RANDOM_PKG_FNS: &[BuiltinFn] = &[
-    BuiltinFn { name: "int",     vm_impl: random_int },
-    BuiltinFn { name: "float",   vm_impl: random_float },
-    BuiltinFn { name: "choice",  vm_impl: random_choice },
+    BuiltinFn { name: "int", vm_impl: random_int },
+    BuiltinFn { name: "float", vm_impl: random_float },
+    BuiltinFn { name: "choice", vm_impl: random_choice },
     BuiltinFn { name: "shuffle", vm_impl: random_shuffle },
-    BuiltinFn { name: "seed",    vm_impl: random_seed },
+    BuiltinFn { name: "seed", vm_impl: random_seed },
 ];
 
 fn register_random_pkg_types(ctx: &mut TypeContext) {

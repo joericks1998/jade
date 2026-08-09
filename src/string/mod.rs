@@ -2,8 +2,9 @@
 mod tests;
 
 use crate::{
-    compiler::{tir::JadeType, type_infer::TypeContext}, vm::VmValue,
+    compiler::{tir::JadeType, type_infer::TypeContext},
     frontend::error::{JadeError, Result, Span},
+    vm::VmValue,
 };
 
 use crate::builtins::{BuiltinFn, Package, make_array};
@@ -44,7 +45,8 @@ fn str_trim(args: &[VmValue]) -> Result<VmValue> {
 fn str_split(args: &[VmValue]) -> Result<VmValue> {
     match (&args[0], args.get(1)) {
         (VmValue::Str(s), Some(VmValue::Str(sep))) => {
-            let parts: Vec<VmValue> = s.split(sep.as_str()).map(|p| VmValue::Str(s.derive(p))).collect();
+            let parts: Vec<VmValue> =
+                s.split(sep.as_str()).map(|p| VmValue::Str(s.derive(p))).collect();
             Ok(make_array(parts))
         }
         _ => Err(JadeError::TypeError { message: "str.split".to_string(), span: ZERO }),
@@ -70,14 +72,18 @@ fn str_replace(args: &[VmValue]) -> Result<VmValue> {
 
 fn str_starts_with(args: &[VmValue]) -> Result<VmValue> {
     match (&args[0], args.get(1)) {
-        (VmValue::Str(s), Some(VmValue::Str(prefix))) => Ok(VmValue::Bool(s.starts_with(prefix.as_str()))),
+        (VmValue::Str(s), Some(VmValue::Str(prefix))) => {
+            Ok(VmValue::Bool(s.starts_with(prefix.as_str())))
+        }
         _ => Err(JadeError::TypeError { message: "str.starts_with".to_string(), span: ZERO }),
     }
 }
 
 fn str_ends_with(args: &[VmValue]) -> Result<VmValue> {
     match (&args[0], args.get(1)) {
-        (VmValue::Str(s), Some(VmValue::Str(suffix))) => Ok(VmValue::Bool(s.ends_with(suffix.as_str()))),
+        (VmValue::Str(s), Some(VmValue::Str(suffix))) => {
+            Ok(VmValue::Bool(s.ends_with(suffix.as_str())))
+        }
         _ => Err(JadeError::TypeError { message: "str.ends_with".to_string(), span: ZERO }),
     }
 }
@@ -97,16 +103,16 @@ fn str_encode(args: &[VmValue]) -> Result<VmValue> {
 }
 
 static STR_METHODS: &[BuiltinFn] = &[
-    BuiltinFn { name: "encode",      vm_impl: str_encode },
-    BuiltinFn { name: "len",         vm_impl: str_len },
-    BuiltinFn { name: "upper",       vm_impl: str_upper },
-    BuiltinFn { name: "lower",       vm_impl: str_lower },
-    BuiltinFn { name: "trim",        vm_impl: str_trim },
-    BuiltinFn { name: "split",       vm_impl: str_split },
-    BuiltinFn { name: "contains",    vm_impl: str_contains },
-    BuiltinFn { name: "replace",     vm_impl: str_replace },
+    BuiltinFn { name: "encode", vm_impl: str_encode },
+    BuiltinFn { name: "len", vm_impl: str_len },
+    BuiltinFn { name: "upper", vm_impl: str_upper },
+    BuiltinFn { name: "lower", vm_impl: str_lower },
+    BuiltinFn { name: "trim", vm_impl: str_trim },
+    BuiltinFn { name: "split", vm_impl: str_split },
+    BuiltinFn { name: "contains", vm_impl: str_contains },
+    BuiltinFn { name: "replace", vm_impl: str_replace },
     BuiltinFn { name: "starts_with", vm_impl: str_starts_with },
-    BuiltinFn { name: "ends_with",   vm_impl: str_ends_with },
+    BuiltinFn { name: "ends_with", vm_impl: str_ends_with },
 ];
 
 pub fn find_str_method(name: &str) -> Option<BuiltinFn> {
@@ -118,7 +124,8 @@ pub fn find_str_method(name: &str) -> Option<BuiltinFn> {
 fn pkg_split(args: &[VmValue]) -> Result<VmValue> {
     match (&args[0], args.get(1)) {
         (VmValue::Str(s), Some(VmValue::Str(sep))) => {
-            let parts: Vec<VmValue> = s.split(sep.as_str()).map(|p| VmValue::Str(s.derive(p))).collect();
+            let parts: Vec<VmValue> =
+                s.split(sep.as_str()).map(|p| VmValue::Str(s.derive(p))).collect();
             Ok(make_array(parts))
         }
         _ => Err(JadeError::TypeError { message: "string.split".to_string(), span: ZERO }),
@@ -165,27 +172,31 @@ fn pkg_replace(args: &[VmValue]) -> Result<VmValue> {
 
 fn pkg_starts_with(args: &[VmValue]) -> Result<VmValue> {
     match (&args[0], args.get(1)) {
-        (VmValue::Str(s), Some(VmValue::Str(prefix))) => Ok(VmValue::Bool(s.starts_with(prefix.as_str()))),
+        (VmValue::Str(s), Some(VmValue::Str(prefix))) => {
+            Ok(VmValue::Bool(s.starts_with(prefix.as_str())))
+        }
         _ => Err(JadeError::TypeError { message: "string.starts_with".to_string(), span: ZERO }),
     }
 }
 
 fn pkg_ends_with(args: &[VmValue]) -> Result<VmValue> {
     match (&args[0], args.get(1)) {
-        (VmValue::Str(s), Some(VmValue::Str(suffix))) => Ok(VmValue::Bool(s.ends_with(suffix.as_str()))),
+        (VmValue::Str(s), Some(VmValue::Str(suffix))) => {
+            Ok(VmValue::Bool(s.ends_with(suffix.as_str())))
+        }
         _ => Err(JadeError::TypeError { message: "string.ends_with".to_string(), span: ZERO }),
     }
 }
 
 static STRING_PKG_FNS: &[BuiltinFn] = &[
-    BuiltinFn { name: "split",       vm_impl: pkg_split },
-    BuiltinFn { name: "upper",       vm_impl: pkg_upper },
-    BuiltinFn { name: "lower",       vm_impl: pkg_lower },
-    BuiltinFn { name: "trim",        vm_impl: pkg_trim },
-    BuiltinFn { name: "contains",    vm_impl: pkg_contains },
-    BuiltinFn { name: "replace",     vm_impl: pkg_replace },
+    BuiltinFn { name: "split", vm_impl: pkg_split },
+    BuiltinFn { name: "upper", vm_impl: pkg_upper },
+    BuiltinFn { name: "lower", vm_impl: pkg_lower },
+    BuiltinFn { name: "trim", vm_impl: pkg_trim },
+    BuiltinFn { name: "contains", vm_impl: pkg_contains },
+    BuiltinFn { name: "replace", vm_impl: pkg_replace },
     BuiltinFn { name: "starts_with", vm_impl: pkg_starts_with },
-    BuiltinFn { name: "ends_with",   vm_impl: pkg_ends_with },
+    BuiltinFn { name: "ends_with", vm_impl: pkg_ends_with },
 ];
 
 fn register_string_pkg_types(ctx: &mut TypeContext) {
@@ -203,22 +214,22 @@ pub static STRING_PKG: Package = Package {
 // ── Type checker primitive method registration ────────────────────────────────
 
 pub fn register_str_method_types(ctx: &mut TypeContext) {
-    let ret_str  = || Box::new(JadeType::Str);
-    let ret_int  = || Box::new(JadeType::Int);
+    let ret_str = || Box::new(JadeType::Str);
+    let ret_int = || Box::new(JadeType::Int);
     let ret_bool = || Box::new(JadeType::Bool);
-    let ret_arr  = || Box::new(JadeType::Array(Box::new(JadeType::Str)));
+    let ret_arr = || Box::new(JadeType::Array(Box::new(JadeType::Str)));
 
     let methods: &[(&str, JadeType)] = &[
-        ("len",         JadeType::Fn { params: vec![], ret: ret_int() }),
-        ("upper",       JadeType::Fn { params: vec![], ret: ret_str() }),
-        ("lower",       JadeType::Fn { params: vec![], ret: ret_str() }),
-        ("trim",        JadeType::Fn { params: vec![], ret: ret_str() }),
-        ("split",       JadeType::Fn { params: vec![JadeType::Str], ret: ret_arr() }),
-        ("contains",    JadeType::Fn { params: vec![JadeType::Str], ret: ret_bool() }),
-        ("replace",     JadeType::Fn { params: vec![JadeType::Str, JadeType::Str], ret: ret_str() }),
+        ("len", JadeType::Fn { params: vec![], ret: ret_int() }),
+        ("upper", JadeType::Fn { params: vec![], ret: ret_str() }),
+        ("lower", JadeType::Fn { params: vec![], ret: ret_str() }),
+        ("trim", JadeType::Fn { params: vec![], ret: ret_str() }),
+        ("split", JadeType::Fn { params: vec![JadeType::Str], ret: ret_arr() }),
+        ("contains", JadeType::Fn { params: vec![JadeType::Str], ret: ret_bool() }),
+        ("replace", JadeType::Fn { params: vec![JadeType::Str, JadeType::Str], ret: ret_str() }),
         ("starts_with", JadeType::Fn { params: vec![JadeType::Str], ret: ret_bool() }),
-        ("ends_with",   JadeType::Fn { params: vec![JadeType::Str], ret: ret_bool() }),
-        ("encode",      JadeType::Fn { params: vec![], ret: Box::new(JadeType::Bytes) }),
+        ("ends_with", JadeType::Fn { params: vec![JadeType::Str], ret: ret_bool() }),
+        ("encode", JadeType::Fn { params: vec![], ret: Box::new(JadeType::Bytes) }),
     ];
     for (name, ty) in methods {
         ctx.define_primitive_method("str", name, ty.clone());

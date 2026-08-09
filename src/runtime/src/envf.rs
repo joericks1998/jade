@@ -10,9 +10,9 @@
 use core::ffi::{c_char, c_void};
 
 use crate::coll::ArrayObj;
+use crate::cstr;
 use crate::string::{TAINTED, TRUSTED};
 use crate::value::JadeValue;
-use crate::cstr;
 
 // ── Neutral cores (used by both the VM and the AOT wrappers) ──────────────────
 

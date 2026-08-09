@@ -4,8 +4,9 @@ mod tests;
 use jade_runtime::coll::DictObj;
 
 use crate::{
-    compiler::{tir::JadeType, type_infer::TypeContext}, vm::VmValue,
+    compiler::{tir::JadeType, type_infer::TypeContext},
     frontend::error::{JadeError, Result, Span},
+    vm::VmValue,
 };
 
 use crate::builtins::{BuiltinFn, Package, make_array};
@@ -15,19 +16,22 @@ const ZERO: Span = Span { line: 0, col: 0 };
 
 fn json_to_vm(val: serde_json::Value) -> VmValue {
     match val {
-        serde_json::Value::Null      => VmValue::Nil,
-        serde_json::Value::Bool(b)   => VmValue::Bool(b),
+        serde_json::Value::Null => VmValue::Nil,
+        serde_json::Value::Bool(b) => VmValue::Bool(b),
         serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() { VmValue::Int(i) }
-            else { VmValue::Float(n.as_f64().unwrap_or(0.0)) }
+            if let Some(i) = n.as_i64() {
+                VmValue::Int(i)
+            } else {
+                VmValue::Float(n.as_f64().unwrap_or(0.0))
+            }
         }
         serde_json::Value::String(s) => VmValue::Str(s.into()),
-        serde_json::Value::Array(arr) => {
-            make_array(arr.into_iter().map(json_to_vm).collect())
-        }
+        serde_json::Value::Array(arr) => make_array(arr.into_iter().map(json_to_vm).collect()),
         serde_json::Value::Object(map) => {
             let mut d = DictObj::new();
-            for (k, v) in map { d.insert(k, json_to_vm(v)); }
+            for (k, v) in map {
+                d.insert(k, json_to_vm(v));
+            }
             VmValue::Dict(d)
         }
     }
@@ -35,21 +39,20 @@ fn json_to_vm(val: serde_json::Value) -> VmValue {
 
 fn vm_to_json(val: &VmValue) -> serde_json::Value {
     match val {
-        VmValue::Nil      => serde_json::Value::Null,
-        VmValue::Bool(b)  => serde_json::Value::Bool(*b),
-        VmValue::Int(i)   => serde_json::Value::Number((*i).into()),
+        VmValue::Nil => serde_json::Value::Null,
+        VmValue::Bool(b) => serde_json::Value::Bool(*b),
+        VmValue::Int(i) => serde_json::Value::Number((*i).into()),
         VmValue::Float(f) => serde_json::Number::from_f64(*f)
             .map(serde_json::Value::Number)
             .unwrap_or(serde_json::Value::Null),
-        VmValue::Str(s)   => serde_json::Value::String(s.to_string()),
+        VmValue::Str(s) => serde_json::Value::String(s.to_string()),
         VmValue::Array(arc) => {
             let guard = arc.lock();
             serde_json::Value::Array(guard.iter().map(vm_to_json).collect())
         }
         VmValue::Dict(map) => {
-            let obj: serde_json::Map<_, _> = map.iter()
-                .map(|(k, v)| (k.clone(), vm_to_json(v)))
-                .collect();
+            let obj: serde_json::Map<_, _> =
+                map.iter().map(|(k, v)| (k.clone(), vm_to_json(v))).collect();
             serde_json::Value::Object(obj)
         }
         _ => serde_json::Value::Null,
@@ -64,10 +67,8 @@ fn json_parse(args: &[VmValue]) -> Result<VmValue> {
         VmValue::Str(s) => s.as_str(),
         _ => return Err(JadeError::TypeError { message: "json.parse".to_string(), span: ZERO }),
     };
-    let val: serde_json::Value = serde_json::from_str(s).map_err(|e| JadeError::IoError {
-        message: format!("json.parse: {}", e),
-        span: ZERO,
-    })?;
+    let val: serde_json::Value = serde_json::from_str(s)
+        .map_err(|e| JadeError::IoError { message: format!("json.parse: {}", e), span: ZERO })?;
     Ok(json_to_vm(val))
 }
 
@@ -86,14 +87,14 @@ fn json_stringify_pretty(args: &[VmValue]) -> Result<VmValue> {
         return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: ZERO });
     }
     let j = vm_to_json(&args[0]);
-    serde_json::to_string_pretty(&j)
-        .map(|s| VmValue::Str(JStr::trusted(s)))
-        .map_err(|e| JadeError::IoError { message: format!("json.stringify_pretty: {}", e), span: ZERO })
+    serde_json::to_string_pretty(&j).map(|s| VmValue::Str(JStr::trusted(s))).map_err(|e| {
+        JadeError::IoError { message: format!("json.stringify_pretty: {}", e), span: ZERO }
+    })
 }
 
 static JSON_PKG_FNS: &[BuiltinFn] = &[
-    BuiltinFn { name: "parse",            vm_impl: json_parse },
-    BuiltinFn { name: "stringify",        vm_impl: json_stringify },
+    BuiltinFn { name: "parse", vm_impl: json_parse },
+    BuiltinFn { name: "stringify", vm_impl: json_stringify },
     BuiltinFn { name: "stringify_pretty", vm_impl: json_stringify_pretty },
 ];
 

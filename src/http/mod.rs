@@ -1,8 +1,9 @@
 use jade_runtime::coll::DictObj;
 
 use crate::{
-    compiler::{tir::JadeType, type_infer::TypeContext}, vm::VmValue,
+    compiler::{tir::JadeType, type_infer::TypeContext},
     frontend::error::{JadeError, Result, Span},
+    vm::VmValue,
 };
 
 use crate::builtins::{BuiltinFn, Package};
@@ -13,7 +14,7 @@ fn require_str_owned(args: &[VmValue], pos: usize, fn_name: &str) -> Result<Stri
     match args.get(pos) {
         Some(VmValue::Str(s)) => Ok(s.to_string()),
         Some(_) => Err(JadeError::TypeError { message: fn_name.to_string(), span: ZERO }),
-        None    => Err(JadeError::ArityMismatch { expected: pos + 1, got: args.len(), span: ZERO }),
+        None => Err(JadeError::ArityMismatch { expected: pos + 1, got: args.len(), span: ZERO }),
     }
 }
 
@@ -25,15 +26,20 @@ fn extract_headers(val: Option<&VmValue>) -> Result<Vec<(String, String)>> {
             for (k, v) in map.iter() {
                 match v {
                     VmValue::Str(s) => headers.push((k.clone(), s.to_string())),
-                    _ => return Err(JadeError::TypeError {
-                        message: "http header value must be str".to_string(),
-                        span: ZERO,
-                    }),
+                    _ => {
+                        return Err(JadeError::TypeError {
+                            message: "http header value must be str".to_string(),
+                            span: ZERO,
+                        });
+                    }
                 }
             }
             Ok(headers)
         }
-        Some(_) => Err(JadeError::TypeError { message: "http headers must be a dict".to_string(), span: ZERO }),
+        Some(_) => Err(JadeError::TypeError {
+            message: "http headers must be a dict".to_string(),
+            span: ZERO,
+        }),
     }
 }
 
@@ -92,7 +98,7 @@ fn http_post_bytes(args: &[VmValue]) -> Result<VmValue> {
                     crate::vm::value_type_name(other)
                 ),
                 span: ZERO,
-            })
+            });
         }
         None => return Err(JadeError::ArityMismatch { expected: 2, got: args.len(), span: ZERO }),
     };
@@ -113,11 +119,11 @@ enum HttpMethod {
 // Shares the curl-subprocess core with the AOT backend (jade_runtime::httpf).
 fn execute(url: String, method: HttpMethod, headers: Vec<(String, String)>) -> Result<VmValue> {
     let (m, body): (&str, Option<String>) = match method {
-        HttpMethod::Get        => ("GET", None),
+        HttpMethod::Get => ("GET", None),
         HttpMethod::Post(body) => ("POST", Some(body)),
-        HttpMethod::Put(body)  => ("PUT", Some(body)),
-        HttpMethod::Delete     => ("DELETE", None),
-        HttpMethod::Head       => ("HEAD", None),
+        HttpMethod::Put(body) => ("PUT", Some(body)),
+        HttpMethod::Delete => ("DELETE", None),
+        HttpMethod::Head => ("HEAD", None),
     };
     jade_runtime::httpf::request(m, &url, body.as_deref(), &headers)
         .map(|(status, body)| make_response(status as u16, body))
@@ -137,7 +143,7 @@ fn http_post(args: &[VmValue]) -> Result<VmValue> {
     if args.len() < 2 || args.len() > 3 {
         return Err(JadeError::ArityMismatch { expected: 2, got: args.len(), span: ZERO });
     }
-    let url  = require_str_owned(args, 0, "http.post")?;
+    let url = require_str_owned(args, 0, "http.post")?;
     let body = require_str_owned(args, 1, "http.post")?;
     let headers = extract_headers(args.get(2))?;
     execute(url, HttpMethod::Post(body), headers)
@@ -147,7 +153,7 @@ fn http_put(args: &[VmValue]) -> Result<VmValue> {
     if args.len() < 2 || args.len() > 3 {
         return Err(JadeError::ArityMismatch { expected: 2, got: args.len(), span: ZERO });
     }
-    let url  = require_str_owned(args, 0, "http.put")?;
+    let url = require_str_owned(args, 0, "http.put")?;
     let body = require_str_owned(args, 1, "http.put")?;
     let headers = extract_headers(args.get(2))?;
     execute(url, HttpMethod::Put(body), headers)
@@ -172,13 +178,13 @@ fn http_head(args: &[VmValue]) -> Result<VmValue> {
 }
 
 static HTTP_PKG_FNS: &[BuiltinFn] = &[
-    BuiltinFn { name: "get",        vm_impl: http_get },
-    BuiltinFn { name: "get_bytes",  vm_impl: http_get_bytes },
+    BuiltinFn { name: "get", vm_impl: http_get },
+    BuiltinFn { name: "get_bytes", vm_impl: http_get_bytes },
     BuiltinFn { name: "post_bytes", vm_impl: http_post_bytes },
-    BuiltinFn { name: "post",   vm_impl: http_post },
-    BuiltinFn { name: "put",    vm_impl: http_put },
+    BuiltinFn { name: "post", vm_impl: http_post },
+    BuiltinFn { name: "put", vm_impl: http_put },
     BuiltinFn { name: "delete", vm_impl: http_delete },
-    BuiltinFn { name: "head",   vm_impl: http_head },
+    BuiltinFn { name: "head", vm_impl: http_head },
 ];
 
 fn register_http_pkg_types(ctx: &mut TypeContext) {

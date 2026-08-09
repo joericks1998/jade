@@ -39,8 +39,8 @@ use core::ffi::c_char;
 use std::sync::Mutex;
 
 use crate::coll::StructObj;
-use crate::value::{JadeValue, NIL_BITS};
 use crate::cstr;
+use crate::value::{JadeValue, NIL_BITS};
 
 type W = i64;
 
@@ -70,10 +70,8 @@ pub extern "C" fn jrt_struct_field(
     has_default: i32,
 ) {
     let (t, f) = unsafe { (cstr::to_string(type_name), cstr::to_string(field)) };
-    let entry = Field {
-        name: f,
-        default: if has_default != 0 { Some(default_word) } else { None },
-    };
+    let entry =
+        Field { name: f, default: if has_default != 0 { Some(default_word) } else { None } };
     if let Ok(mut reg) = REGISTRY.lock() {
         match reg.iter_mut().find(|e| e.name == t) {
             Some(e) => e.fields.push(entry),
@@ -113,9 +111,9 @@ pub extern "C" fn jrt_coerce_struct(json: *const c_char, type_name: *const c_cha
     // Extraction, field order, defaults and which failures re-prompt are the
     // shared rule; the only thing supplied here is how a JSON value becomes a
     // tagged word.
-    let Ok(pairs) = coerce_fields(&text, &fields, |_name, v| {
-        Ok(crate::jsonf::value_to_word(v, trust))
-    }) else {
+    let Ok(pairs) =
+        coerce_fields(&text, &fields, |_name, v| Ok(crate::jsonf::value_to_word(v, trust)))
+    else {
         return nil;
     };
 
@@ -126,7 +124,6 @@ pub extern "C" fn jrt_coerce_struct(json: *const c_char, type_name: *const c_cha
     }
     JadeValue::from_ptr(crate::gc::leak_obj(sobj) as *const ()).bits() as W
 }
-
 
 // ── The shared rule ──────────────────────────────────────────────────────────
 //
@@ -140,7 +137,8 @@ pub extern "C" fn jrt_coerce_struct(json: *const c_char, type_name: *const c_cha
 pub fn extract_json(text: &str) -> String {
     let t = text.trim();
     let inner = t
-        .strip_prefix("```json").or_else(|| t.strip_prefix("```"))
+        .strip_prefix("```json")
+        .or_else(|| t.strip_prefix("```"))
         .and_then(|s| s.strip_suffix("```"))
         .map(str::trim);
     let t = inner.unwrap_or(t);
@@ -208,8 +206,11 @@ fn quote_keys(s: &str) -> String {
             let word = &s[start..i];
             // Peek past whitespace to see if ':' follows (and it's not '::').
             let mut j = i;
-            while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') { j += 1; }
-            let is_key = j < bytes.len() && bytes[j] == b':'
+            while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') {
+                j += 1;
+            }
+            let is_key = j < bytes.len()
+                && bytes[j] == b':'
                 && (j + 1 >= bytes.len() || bytes[j + 1] != b':');
             if is_key {
                 out.push('"');
@@ -238,8 +239,10 @@ fn strip_number_commas(s: &str) -> String {
         // Skip comma that sits between two digits outside a string.
         if !in_string
             && bytes[i] == b','
-            && i > 0 && bytes[i - 1].is_ascii_digit()
-            && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit()
+            && i > 0
+            && bytes[i - 1].is_ascii_digit()
+            && i + 1 < bytes.len()
+            && bytes[i + 1].is_ascii_digit()
         {
             i += 1;
             continue;
@@ -262,20 +265,31 @@ fn find_end(s: &str) -> Option<usize> {
     let mut i = start;
     while i < bytes.len() {
         match bytes[i] {
-            b'\\' if in_string => { i += 2; }
-            b'"' => { in_string = !in_string; i += 1; }
-            b if !in_string && b == open  => { depth += 1; i += 1; }
+            b'\\' if in_string => {
+                i += 2;
+            }
+            b'"' => {
+                in_string = !in_string;
+                i += 1;
+            }
+            b if !in_string && b == open => {
+                depth += 1;
+                i += 1;
+            }
             b if !in_string && b == close => {
                 depth -= 1;
                 i += 1;
-                if depth == 0 { return Some(i); }
+                if depth == 0 {
+                    return Some(i);
+                }
             }
-            _ => { i += 1; }
+            _ => {
+                i += 1;
+            }
         }
     }
     None
 }
-
 
 /// One declared field of a struct, as the coercion needs to see it.
 ///
@@ -324,8 +338,8 @@ where
     F: Fn(&str, &serde_json::Value) -> Result<T, String>,
 {
     let raw = extract_json(text);
-    let json: serde_json::Value = serde_json::from_str(&raw)
-        .map_err(|e| CoerceError::NotJson(e.to_string()))?;
+    let json: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| CoerceError::NotJson(e.to_string()))?;
     let obj = json.as_object().ok_or(CoerceError::NotObject)?;
 
     let mut out = Vec::with_capacity(fields.len());
@@ -361,7 +375,6 @@ mod tests {
         crate::gc::test_support::lock_counter()
     }
 
-
     // ── the shared rule ──────────────────────────────────────────────────────
     //
     // These exercise `coerce_fields` directly, with a trivial element type, so
@@ -373,9 +386,7 @@ mod tests {
 
     fn run(text: &str, fields: &[FieldSpec<i32>]) -> Result<Vec<(String, i32)>, CoerceError> {
         coerce_fields(text, fields, |name, v| {
-            v.as_i64()
-                .map(|n| n as i32)
-                .ok_or_else(|| format!("{name} is not a number"))
+            v.as_i64().map(|n| n as i32).ok_or_else(|| format!("{name} is not a number"))
         })
     }
 
@@ -401,14 +412,20 @@ mod tests {
     fn common_malformations_are_repaired() {
         let _c = counted();
         assert_eq!(run(r#"{a: 1}"#, &[spec("a", None)]).unwrap(), vec![("a".to_string(), 1)]);
-        assert_eq!(run(r#"{"a": 1,000}"#, &[spec("a", None)]).unwrap(), vec![("a".to_string(), 1000)]);
+        assert_eq!(
+            run(r#"{"a": 1,000}"#, &[spec("a", None)]).unwrap(),
+            vec![("a".to_string(), 1000)]
+        );
     }
 
     #[test]
     fn fields_come_back_in_declaration_order() {
         let _c = counted();
-        let got = run(r#"{"c": 3, "a": 1, "b": 2}"#,
-                      &[spec("a", None), spec("b", None), spec("c", None)]).unwrap();
+        let got = run(
+            r#"{"c": 3, "a": 1, "b": 2}"#,
+            &[spec("a", None), spec("b", None), spec("c", None)],
+        )
+        .unwrap();
         let names: Vec<&str> = got.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, vec!["a", "b", "c"]);
     }
@@ -445,7 +462,6 @@ mod tests {
         let got = run(r#"{"a": 1, "stowaway": 2}"#, &[spec("a", None)]).unwrap();
         assert_eq!(got.len(), 1);
     }
-
 
     // The registry is process-global, so tests must not share type names.
     fn declare(type_name: &str, fields: &[(&str, Option<W>)]) {

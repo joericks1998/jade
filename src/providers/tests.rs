@@ -112,10 +112,7 @@ fn activate_installs_into_pool_and_slot_with_credential() {
     assert!(pool_dir().join(format!("anthropic.{LIB_EXT}")).exists());
     // …and in the active slot, with the materialized credential.
     assert!(active_dir().join(format!("anthropic.{LIB_EXT}")).exists());
-    assert_eq!(
-        std::fs::read(active_dir().join("config.json")).unwrap(),
-        envelope("sk-1")
-    );
+    assert_eq!(std::fs::read(active_dir().join("config.json")).unwrap(), envelope("sk-1"));
 
     deisolate(prev_home, prev_src);
 }

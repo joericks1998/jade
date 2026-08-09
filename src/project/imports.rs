@@ -163,8 +163,8 @@ fn walk(
     seen: &mut HashSet<PathBuf>,
 ) -> Result<(), JadeError> {
     for (path, span) in paths.iter().cloned() {
-        let target = resolve_import(ctx, &path)
-            .map_err(|message| JadeError::IoError { message, span })?;
+        let target =
+            resolve_import(ctx, &path).map_err(|message| JadeError::IoError { message, span })?;
 
         let file = match target {
             // Compiled in — nothing to look for.
@@ -198,10 +198,7 @@ fn walk(
         let sub_ctx = ImportContext {
             libraries: ctx.libraries,
             project_root: ctx.project_root,
-            source_dir: canon
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .to_path_buf(),
+            source_dir: canon.parent().unwrap_or_else(|| Path::new(".")).to_path_buf(),
         };
         walk(&program_import_paths(&sub), &sub_ctx, seen)?;
     }

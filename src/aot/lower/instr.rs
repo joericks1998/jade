@@ -101,7 +101,8 @@ pub(super) fn lower_instr<'ctx>(
             // so their final value intentionally lives until process end).
             low.retain(v);
             if low.refcount {
-                let old = b.build_load(i64_ty, g, "gold").map_err(|e| e.to_string())?.into_int_value();
+                let old =
+                    b.build_load(i64_ty, g, "gold").map_err(|e| e.to_string())?.into_int_value();
                 let f = low.runtime_fn(
                     "jrt_rc_replace",
                     low.ctx.void_type().fn_type(&[i64_ty.into(), i64_ty.into()], false),
@@ -117,21 +118,24 @@ pub(super) fn lower_instr<'ctx>(
         // `checked_int_result` for why the arithmetic widens to i128 first.
         AddInt(d, l, r) => {
             let (a, c) = low.int_operands(*l, *r);
-            let s = b.build_int_add(low.widen(a)?, low.widen(c)?, "addi").map_err(|e| e.to_string())?;
+            let s =
+                b.build_int_add(low.widen(a)?, low.widen(c)?, "addi").map_err(|e| e.to_string())?;
             let res = low.checked_int_result(s, "addi")?;
             low.store(*d, res);
             Ok(false)
         }
         SubInt(d, l, r) => {
             let (a, c) = low.int_operands(*l, *r);
-            let s = b.build_int_sub(low.widen(a)?, low.widen(c)?, "subi").map_err(|e| e.to_string())?;
+            let s =
+                b.build_int_sub(low.widen(a)?, low.widen(c)?, "subi").map_err(|e| e.to_string())?;
             let res = low.checked_int_result(s, "subi")?;
             low.store(*d, res);
             Ok(false)
         }
         MulInt(d, l, r) => {
             let (a, c) = low.int_operands(*l, *r);
-            let s = b.build_int_mul(low.widen(a)?, low.widen(c)?, "muli").map_err(|e| e.to_string())?;
+            let s =
+                b.build_int_mul(low.widen(a)?, low.widen(c)?, "muli").map_err(|e| e.to_string())?;
             let res = low.checked_int_result(s, "muli")?;
             low.store(*d, res);
             Ok(false)
@@ -196,43 +200,119 @@ pub(super) fn lower_instr<'ctx>(
         }
         IntToFloat(d, s) => {
             let i = low.untag_int(low.load(*s));
-            let f = b
-                .build_signed_int_to_float(i, low.f64t(), "i2f")
-                .map_err(|e| e.to_string())?;
+            let f = b.build_signed_int_to_float(i, low.f64t(), "i2f").map_err(|e| e.to_string())?;
             low.store(*d, low.box_float(f));
             Ok(false)
         }
 
         // ── Typed comparisons → bool word (native icmp/fcmp) ──────────────
-        CmpEqInt(d, l, r) => { low.store(*d, low.int_cmp(*l, *r, IntPredicate::EQ)); Ok(false) }
-        CmpNeInt(d, l, r) => { low.store(*d, low.int_cmp(*l, *r, IntPredicate::NE)); Ok(false) }
-        CmpLtInt(d, l, r) => { low.store(*d, low.int_cmp(*l, *r, IntPredicate::SLT)); Ok(false) }
-        CmpGtInt(d, l, r) => { low.store(*d, low.int_cmp(*l, *r, IntPredicate::SGT)); Ok(false) }
-        CmpLeInt(d, l, r) => { low.store(*d, low.int_cmp(*l, *r, IntPredicate::SLE)); Ok(false) }
-        CmpGeInt(d, l, r) => { low.store(*d, low.int_cmp(*l, *r, IntPredicate::SGE)); Ok(false) }
+        CmpEqInt(d, l, r) => {
+            low.store(*d, low.int_cmp(*l, *r, IntPredicate::EQ));
+            Ok(false)
+        }
+        CmpNeInt(d, l, r) => {
+            low.store(*d, low.int_cmp(*l, *r, IntPredicate::NE));
+            Ok(false)
+        }
+        CmpLtInt(d, l, r) => {
+            low.store(*d, low.int_cmp(*l, *r, IntPredicate::SLT));
+            Ok(false)
+        }
+        CmpGtInt(d, l, r) => {
+            low.store(*d, low.int_cmp(*l, *r, IntPredicate::SGT));
+            Ok(false)
+        }
+        CmpLeInt(d, l, r) => {
+            low.store(*d, low.int_cmp(*l, *r, IntPredicate::SLE));
+            Ok(false)
+        }
+        CmpGeInt(d, l, r) => {
+            low.store(*d, low.int_cmp(*l, *r, IntPredicate::SGE));
+            Ok(false)
+        }
 
-        CmpEqFloat(d, l, r) => { low.store(*d, low.float_cmp(*l, *r, FloatPredicate::OEQ)); Ok(false) }
-        CmpNeFloat(d, l, r) => { low.store(*d, low.float_cmp(*l, *r, FloatPredicate::UNE)); Ok(false) }
-        CmpLtFloat(d, l, r) => { low.store(*d, low.float_cmp(*l, *r, FloatPredicate::OLT)); Ok(false) }
-        CmpGtFloat(d, l, r) => { low.store(*d, low.float_cmp(*l, *r, FloatPredicate::OGT)); Ok(false) }
-        CmpLeFloat(d, l, r) => { low.store(*d, low.float_cmp(*l, *r, FloatPredicate::OLE)); Ok(false) }
-        CmpGeFloat(d, l, r) => { low.store(*d, low.float_cmp(*l, *r, FloatPredicate::OGE)); Ok(false) }
+        CmpEqFloat(d, l, r) => {
+            low.store(*d, low.float_cmp(*l, *r, FloatPredicate::OEQ));
+            Ok(false)
+        }
+        CmpNeFloat(d, l, r) => {
+            low.store(*d, low.float_cmp(*l, *r, FloatPredicate::UNE));
+            Ok(false)
+        }
+        CmpLtFloat(d, l, r) => {
+            low.store(*d, low.float_cmp(*l, *r, FloatPredicate::OLT));
+            Ok(false)
+        }
+        CmpGtFloat(d, l, r) => {
+            low.store(*d, low.float_cmp(*l, *r, FloatPredicate::OGT));
+            Ok(false)
+        }
+        CmpLeFloat(d, l, r) => {
+            low.store(*d, low.float_cmp(*l, *r, FloatPredicate::OLE));
+            Ok(false)
+        }
+        CmpGeFloat(d, l, r) => {
+            low.store(*d, low.float_cmp(*l, *r, FloatPredicate::OGE));
+            Ok(false)
+        }
 
-        CmpEqBool(d, l, r) => { low.store(*d, low.bool_cmp(*l, *r, IntPredicate::EQ)); Ok(false) }
-        CmpNeBool(d, l, r) => { low.store(*d, low.bool_cmp(*l, *r, IntPredicate::NE)); Ok(false) }
-        CmpLtBool(d, l, r) => { low.store(*d, low.bool_cmp(*l, *r, IntPredicate::ULT)); Ok(false) }
-        CmpGtBool(d, l, r) => { low.store(*d, low.bool_cmp(*l, *r, IntPredicate::UGT)); Ok(false) }
-        CmpLeBool(d, l, r) => { low.store(*d, low.bool_cmp(*l, *r, IntPredicate::ULE)); Ok(false) }
-        CmpGeBool(d, l, r) => { low.store(*d, low.bool_cmp(*l, *r, IntPredicate::UGE)); Ok(false) }
+        CmpEqBool(d, l, r) => {
+            low.store(*d, low.bool_cmp(*l, *r, IntPredicate::EQ));
+            Ok(false)
+        }
+        CmpNeBool(d, l, r) => {
+            low.store(*d, low.bool_cmp(*l, *r, IntPredicate::NE));
+            Ok(false)
+        }
+        CmpLtBool(d, l, r) => {
+            low.store(*d, low.bool_cmp(*l, *r, IntPredicate::ULT));
+            Ok(false)
+        }
+        CmpGtBool(d, l, r) => {
+            low.store(*d, low.bool_cmp(*l, *r, IntPredicate::UGT));
+            Ok(false)
+        }
+        CmpLeBool(d, l, r) => {
+            low.store(*d, low.bool_cmp(*l, *r, IntPredicate::ULE));
+            Ok(false)
+        }
+        CmpGeBool(d, l, r) => {
+            low.store(*d, low.bool_cmp(*l, *r, IntPredicate::UGE));
+            Ok(false)
+        }
 
-        CmpLtIntFloat(d, l, r) => { low.store(*d, low.mixed_cmp(*l, true, *r, false, FloatPredicate::OLT)); Ok(false) }
-        CmpGtIntFloat(d, l, r) => { low.store(*d, low.mixed_cmp(*l, true, *r, false, FloatPredicate::OGT)); Ok(false) }
-        CmpLeIntFloat(d, l, r) => { low.store(*d, low.mixed_cmp(*l, true, *r, false, FloatPredicate::OLE)); Ok(false) }
-        CmpGeIntFloat(d, l, r) => { low.store(*d, low.mixed_cmp(*l, true, *r, false, FloatPredicate::OGE)); Ok(false) }
-        CmpLtFloatInt(d, l, r) => { low.store(*d, low.mixed_cmp(*l, false, *r, true, FloatPredicate::OLT)); Ok(false) }
-        CmpGtFloatInt(d, l, r) => { low.store(*d, low.mixed_cmp(*l, false, *r, true, FloatPredicate::OGT)); Ok(false) }
-        CmpLeFloatInt(d, l, r) => { low.store(*d, low.mixed_cmp(*l, false, *r, true, FloatPredicate::OLE)); Ok(false) }
-        CmpGeFloatInt(d, l, r) => { low.store(*d, low.mixed_cmp(*l, false, *r, true, FloatPredicate::OGE)); Ok(false) }
+        CmpLtIntFloat(d, l, r) => {
+            low.store(*d, low.mixed_cmp(*l, true, *r, false, FloatPredicate::OLT));
+            Ok(false)
+        }
+        CmpGtIntFloat(d, l, r) => {
+            low.store(*d, low.mixed_cmp(*l, true, *r, false, FloatPredicate::OGT));
+            Ok(false)
+        }
+        CmpLeIntFloat(d, l, r) => {
+            low.store(*d, low.mixed_cmp(*l, true, *r, false, FloatPredicate::OLE));
+            Ok(false)
+        }
+        CmpGeIntFloat(d, l, r) => {
+            low.store(*d, low.mixed_cmp(*l, true, *r, false, FloatPredicate::OGE));
+            Ok(false)
+        }
+        CmpLtFloatInt(d, l, r) => {
+            low.store(*d, low.mixed_cmp(*l, false, *r, true, FloatPredicate::OLT));
+            Ok(false)
+        }
+        CmpGtFloatInt(d, l, r) => {
+            low.store(*d, low.mixed_cmp(*l, false, *r, true, FloatPredicate::OGT));
+            Ok(false)
+        }
+        CmpLeFloatInt(d, l, r) => {
+            low.store(*d, low.mixed_cmp(*l, false, *r, true, FloatPredicate::OLE));
+            Ok(false)
+        }
+        CmpGeFloatInt(d, l, r) => {
+            low.store(*d, low.mixed_cmp(*l, false, *r, true, FloatPredicate::OGE));
+            Ok(false)
+        }
 
         // ── Logical / bitwise (integers) ──────────────────────────────────
         Not(d, s) => {
@@ -241,11 +321,45 @@ pub(super) fn lower_instr<'ctx>(
             low.store(*d, low.bool_word(n));
             Ok(false)
         }
-        BitAnd(d, l, r) => { low.store(*d, low.int_bitop(*l, *r, |a, c| b.build_and(a, c, "band").map_err(|e| e.to_string()))?); Ok(false) }
-        BitOr(d, l, r)  => { low.store(*d, low.int_bitop(*l, *r, |a, c| b.build_or(a, c, "bor").map_err(|e| e.to_string()))?); Ok(false) }
-        BitXor(d, l, r) => { low.store(*d, low.int_bitop(*l, *r, |a, c| b.build_xor(a, c, "bxor").map_err(|e| e.to_string()))?); Ok(false) }
-        Shl(d, l, r)    => { low.store(*d, low.int_bitop(*l, *r, |a, c| b.build_left_shift(a, c, "shl").map_err(|e| e.to_string()))?); Ok(false) }
-        Shr(d, l, r)    => { low.store(*d, low.int_bitop(*l, *r, |a, c| b.build_right_shift(a, c, true, "shr").map_err(|e| e.to_string()))?); Ok(false) }
+        BitAnd(d, l, r) => {
+            low.store(
+                *d,
+                low.int_bitop(*l, *r, |a, c| b.build_and(a, c, "band").map_err(|e| e.to_string()))?,
+            );
+            Ok(false)
+        }
+        BitOr(d, l, r) => {
+            low.store(
+                *d,
+                low.int_bitop(*l, *r, |a, c| b.build_or(a, c, "bor").map_err(|e| e.to_string()))?,
+            );
+            Ok(false)
+        }
+        BitXor(d, l, r) => {
+            low.store(
+                *d,
+                low.int_bitop(*l, *r, |a, c| b.build_xor(a, c, "bxor").map_err(|e| e.to_string()))?,
+            );
+            Ok(false)
+        }
+        Shl(d, l, r) => {
+            low.store(
+                *d,
+                low.int_bitop(*l, *r, |a, c| {
+                    b.build_left_shift(a, c, "shl").map_err(|e| e.to_string())
+                })?,
+            );
+            Ok(false)
+        }
+        Shr(d, l, r) => {
+            low.store(
+                *d,
+                low.int_bitop(*l, *r, |a, c| {
+                    b.build_right_shift(a, c, true, "shr").map_err(|e| e.to_string())
+                })?,
+            );
+            Ok(false)
+        }
         BitNot(d, s) => {
             let a = low.untag_int(low.load(*s));
             let n = b.build_not(a, "bnot").map_err(|e| e.to_string())?;
@@ -260,17 +374,51 @@ pub(super) fn lower_instr<'ctx>(
         BinOp(d, op, l, r) => {
             use BinOpKind::*;
             match op {
-                Add => { let v = low.any2_int_fast("jrt_add_any", *l, *r)?; low.store(*d, v); }
-                Sub => { let v = low.any2_int_fast("jrt_sub_any", *l, *r)?; low.store(*d, v); }
-                Mul => { let v = low.any2_int_fast("jrt_mul_any", *l, *r)?; low.store(*d, v); }
+                Add => {
+                    let v = low.any2_int_fast("jrt_add_any", *l, *r)?;
+                    low.store(*d, v);
+                }
+                Sub => {
+                    let v = low.any2_int_fast("jrt_sub_any", *l, *r)?;
+                    low.store(*d, v);
+                }
+                Mul => {
+                    let v = low.any2_int_fast("jrt_mul_any", *l, *r)?;
+                    low.store(*d, v);
+                }
                 Div => low.store(*d, low.any2("jrt_div_any", *l, *r)),
                 Mod => low.store(*d, low.any2("jrt_mod_any", *l, *r)),
                 // Bitwise/shift are int-only: untag, native op, re-tag.
-                BitAnd => low.store(*d, low.int_bitop(*l, *r, |a, c| b.build_and(a, c, "band").map_err(|e| e.to_string()))?),
-                BitOr  => low.store(*d, low.int_bitop(*l, *r, |a, c| b.build_or(a, c, "bor").map_err(|e| e.to_string()))?),
-                BitXor => low.store(*d, low.int_bitop(*l, *r, |a, c| b.build_xor(a, c, "bxor").map_err(|e| e.to_string()))?),
-                Shl    => low.store(*d, low.int_bitop(*l, *r, |a, c| b.build_left_shift(a, c, "shl").map_err(|e| e.to_string()))?),
-                Shr    => low.store(*d, low.int_bitop(*l, *r, |a, c| b.build_right_shift(a, c, true, "shr").map_err(|e| e.to_string()))?),
+                BitAnd => low.store(
+                    *d,
+                    low.int_bitop(*l, *r, |a, c| {
+                        b.build_and(a, c, "band").map_err(|e| e.to_string())
+                    })?,
+                ),
+                BitOr => low.store(
+                    *d,
+                    low.int_bitop(*l, *r, |a, c| {
+                        b.build_or(a, c, "bor").map_err(|e| e.to_string())
+                    })?,
+                ),
+                BitXor => low.store(
+                    *d,
+                    low.int_bitop(*l, *r, |a, c| {
+                        b.build_xor(a, c, "bxor").map_err(|e| e.to_string())
+                    })?,
+                ),
+                Shl => low.store(
+                    *d,
+                    low.int_bitop(*l, *r, |a, c| {
+                        b.build_left_shift(a, c, "shl").map_err(|e| e.to_string())
+                    })?,
+                ),
+                Shr => low.store(
+                    *d,
+                    low.int_bitop(*l, *r, |a, c| {
+                        b.build_right_shift(a, c, true, "shr").map_err(|e| e.to_string())
+                    })?,
+                ),
                 // `x in y` / `x not in y` — runtime containment (substring / array
                 // element / dict key), producing a bool word.
                 In | NotIn => {
@@ -309,12 +457,36 @@ pub(super) fn lower_instr<'ctx>(
             Ok(false)
         }
         // Dynamic equality/ordering → bool word (mirror expr.rs emit_binop_any).
-        CmpEq(d, l, r) => { let e = low.eq_any(*l, *r); low.store(*d, low.i32cmp_word(e, IntPredicate::NE)); Ok(false) }
-        CmpNe(d, l, r) => { let e = low.eq_any(*l, *r); low.store(*d, low.i32cmp_word(e, IntPredicate::EQ)); Ok(false) }
-        CmpLt(d, l, r) => { let c = low.cmp_any(*l, *r, "'<'"); low.store(*d, low.i32cmp_word(c, IntPredicate::SLT)); Ok(false) }
-        CmpGt(d, l, r) => { let c = low.cmp_any(*l, *r, "'>'"); low.store(*d, low.i32cmp_word(c, IntPredicate::SGT)); Ok(false) }
-        CmpLe(d, l, r) => { let c = low.cmp_any(*l, *r, "'<='"); low.store(*d, low.i32cmp_word(c, IntPredicate::SLE)); Ok(false) }
-        CmpGe(d, l, r) => { let c = low.cmp_any(*l, *r, "'>='"); low.store(*d, low.i32cmp_word(c, IntPredicate::SGE)); Ok(false) }
+        CmpEq(d, l, r) => {
+            let e = low.eq_any(*l, *r);
+            low.store(*d, low.i32cmp_word(e, IntPredicate::NE));
+            Ok(false)
+        }
+        CmpNe(d, l, r) => {
+            let e = low.eq_any(*l, *r);
+            low.store(*d, low.i32cmp_word(e, IntPredicate::EQ));
+            Ok(false)
+        }
+        CmpLt(d, l, r) => {
+            let c = low.cmp_any(*l, *r, "'<'");
+            low.store(*d, low.i32cmp_word(c, IntPredicate::SLT));
+            Ok(false)
+        }
+        CmpGt(d, l, r) => {
+            let c = low.cmp_any(*l, *r, "'>'");
+            low.store(*d, low.i32cmp_word(c, IntPredicate::SGT));
+            Ok(false)
+        }
+        CmpLe(d, l, r) => {
+            let c = low.cmp_any(*l, *r, "'<='");
+            low.store(*d, low.i32cmp_word(c, IntPredicate::SLE));
+            Ok(false)
+        }
+        CmpGe(d, l, r) => {
+            let c = low.cmp_any(*l, *r, "'>='");
+            low.store(*d, low.i32cmp_word(c, IntPredicate::SGE));
+            Ok(false)
+        }
 
         // ── Strings (pre-tagged literal globals; runtime concat/compare) ──
         LoadStr(d, s) => {
@@ -326,12 +498,30 @@ pub(super) fn lower_instr<'ctx>(
             low.store(*d, low.str_concat(*l, *r));
             Ok(false)
         }
-        CmpEqStr(d, l, r) => { low.store(*d, low.str_cmp(*l, *r, IntPredicate::EQ)); Ok(false) }
-        CmpNeStr(d, l, r) => { low.store(*d, low.str_cmp(*l, *r, IntPredicate::NE)); Ok(false) }
-        CmpLtStr(d, l, r) => { low.store(*d, low.str_cmp(*l, *r, IntPredicate::SLT)); Ok(false) }
-        CmpGtStr(d, l, r) => { low.store(*d, low.str_cmp(*l, *r, IntPredicate::SGT)); Ok(false) }
-        CmpLeStr(d, l, r) => { low.store(*d, low.str_cmp(*l, *r, IntPredicate::SLE)); Ok(false) }
-        CmpGeStr(d, l, r) => { low.store(*d, low.str_cmp(*l, *r, IntPredicate::SGE)); Ok(false) }
+        CmpEqStr(d, l, r) => {
+            low.store(*d, low.str_cmp(*l, *r, IntPredicate::EQ));
+            Ok(false)
+        }
+        CmpNeStr(d, l, r) => {
+            low.store(*d, low.str_cmp(*l, *r, IntPredicate::NE));
+            Ok(false)
+        }
+        CmpLtStr(d, l, r) => {
+            low.store(*d, low.str_cmp(*l, *r, IntPredicate::SLT));
+            Ok(false)
+        }
+        CmpGtStr(d, l, r) => {
+            low.store(*d, low.str_cmp(*l, *r, IntPredicate::SGT));
+            Ok(false)
+        }
+        CmpLeStr(d, l, r) => {
+            low.store(*d, low.str_cmp(*l, *r, IntPredicate::SLE));
+            Ok(false)
+        }
+        CmpGeStr(d, l, r) => {
+            low.store(*d, low.str_cmp(*l, *r, IntPredicate::SGE));
+            Ok(false)
+        }
 
         // ── f-strings ─────────────────────────────────────────────────────
         // Fold the parts left-to-right with `jrt_str_concat` (trust = max):
@@ -434,7 +624,9 @@ pub(super) fn lower_instr<'ctx>(
                 .into_pointer_value();
             let set_f = low.runtime_fn(
                 "jrt_kdict_set",
-                low.ctx.void_type().fn_type(&[low.ptrt().into(), i64_ty.into(), i64_ty.into()], false),
+                low.ctx
+                    .void_type()
+                    .fn_type(&[low.ptrt().into(), i64_ty.into(), i64_ty.into()], false),
             );
             for (kr, vr) in pairs {
                 let k = low.load(*kr);
@@ -473,7 +665,8 @@ pub(super) fn lower_instr<'ctx>(
         // fills these at runtime). GetField/SetField are data-field access on a
         // struct (a missing field / non-struct raises).
         MakeStruct(d, type_name, field_specs) => {
-            let new_f = low.runtime_fn("jrt_kstruct_new", low.ptrt().fn_type(&[low.ptrt().into()], false));
+            let new_f =
+                low.runtime_fn("jrt_kstruct_new", low.ptrt().fn_type(&[low.ptrt().into()], false));
             let tn = low.cstr(type_name);
             let s = b
                 .build_call(new_f, &[tn.into()], "kstruct")
@@ -482,7 +675,9 @@ pub(super) fn lower_instr<'ctx>(
                 .into_pointer_value();
             let set_f = low.runtime_fn(
                 "jrt_kstruct_set",
-                low.ctx.void_type().fn_type(&[low.ptrt().into(), low.ptrt().into(), i64_ty.into()], false),
+                low.ctx
+                    .void_type()
+                    .fn_type(&[low.ptrt().into(), low.ptrt().into(), i64_ty.into()], false),
             );
             // A `prompt` field holds a prompt value, not the string it wraps —
             // the same wrapping the VM does on this opcode. Without it a compiled
@@ -539,7 +734,9 @@ pub(super) fn lower_instr<'ctx>(
         SetField(obj, field, val) => {
             let f = low.runtime_fn(
                 "jrt_set_field",
-                low.ctx.void_type().fn_type(&[i64_ty.into(), low.ptrt().into(), i64_ty.into()], false),
+                low.ctx
+                    .void_type()
+                    .fn_type(&[i64_ty.into(), low.ptrt().into(), i64_ty.into()], false),
             );
             b.build_call(
                 f,
@@ -553,7 +750,8 @@ pub(super) fn lower_instr<'ctx>(
         // as a tagged string (empty for a non-struct), compared against the
         // expected name with CmpEqStr. Now lowerable via the JK_STRUCT type tag.
         GetTypeName(d, src) => {
-            let f = low.runtime_fn("jrt_get_type_name", low.ptrt().fn_type(&[i64_ty.into()], false));
+            let f =
+                low.runtime_fn("jrt_get_type_name", low.ptrt().fn_type(&[i64_ty.into()], false));
             let p = b
                 .build_call(f, &[low.load(*src).into()], "typename")
                 .map_err(|e| e.to_string())?
@@ -617,7 +815,9 @@ pub(super) fn lower_instr<'ctx>(
                     .map_err(e)?
                     .as_any_value_enum()
                     .into_pointer_value()
-            } else if let Some(t) = output_type.as_deref().filter(|t| fnctx.struct_field_names.contains_key(*t)) {
+            } else if let Some(t) =
+                output_type.as_deref().filter(|t| fnctx.struct_field_names.contains_key(*t))
+            {
                 // A struct output type coerces the reply into a struct. This
                 // returns a tagged *word*, not a string, so it bypasses the
                 // tag_str + coerce tail below entirely. Without it the C
@@ -644,16 +844,13 @@ pub(super) fn lower_instr<'ctx>(
                     ptrt.fn_type(&[ptrt.into(), ptrt.into(), ptrt.into()], false),
                 );
                 let tname = low.cstr(t);
-                b.build_call(
-                    f,
-                    &[prompt_ptr.into(), model.into(), tname.into()],
-                    "promptt",
-                )
-                .map_err(e)?
-                .as_any_value_enum()
-                .into_pointer_value()
+                b.build_call(f, &[prompt_ptr.into(), model.into(), tname.into()], "promptt")
+                    .map_err(e)?
+                    .as_any_value_enum()
+                    .into_pointer_value()
             } else {
-                let f = low.runtime_fn("jrt_prompt", ptrt.fn_type(&[ptrt.into(), ptrt.into()], false));
+                let f =
+                    low.runtime_fn("jrt_prompt", ptrt.fn_type(&[ptrt.into(), ptrt.into()], false));
                 b.build_call(f, &[prompt_ptr.into(), model.into()], "prompt")
                     .map_err(e)?
                     .as_any_value_enum()
@@ -694,11 +891,17 @@ pub(super) fn lower_instr<'ctx>(
                 let cf = &fnctx.defs[*uid];
                 let n = cf.params.len();
                 let count = i64_ty.const_int(n.max(1) as u64, false);
-                let arr = b.build_array_alloca(i64_ty, count, "spawn_args").map_err(|e| e.to_string())?;
+                let arr =
+                    b.build_array_alloca(i64_ty, count, "spawn_args").map_err(|e| e.to_string())?;
                 let store_slot = |slot_i: usize, val: IntValue| -> Result<(), String> {
                     let slot = unsafe {
-                        b.build_in_bounds_gep(i64_ty, arr, &[i64_ty.const_int(slot_i as u64, false)], "sa")
-                            .map_err(|e| e.to_string())?
+                        b.build_in_bounds_gep(
+                            i64_ty,
+                            arr,
+                            &[i64_ty.const_int(slot_i as u64, false)],
+                            "sa",
+                        )
+                        .map_err(|e| e.to_string())?
                     };
                     b.build_store(slot, val).map_err(|e| e.to_string())?;
                     Ok(())
@@ -716,7 +919,10 @@ pub(super) fn lower_instr<'ctx>(
                     .ok_or("lower.rs: missing task wrapper")?;
                 let spawn_f = low.runtime_fn(
                     "jade_spawn",
-                    low.ptrt().fn_type(&[low.ptrt().into(), low.ptrt().into(), low.ctx.i32_type().into()], false),
+                    low.ptrt().fn_type(
+                        &[low.ptrt().into(), low.ptrt().into(), low.ctx.i32_type().into()],
+                        false,
+                    ),
                 );
                 let fut = b
                     .build_call(
@@ -746,7 +952,8 @@ pub(super) fn lower_instr<'ctx>(
             // Pass the tagged word through: the runtime checks the tag and the
             // ObjKind before touching the pointer, so awaiting a non-future
             // raises instead of dereferencing an integer.
-            let await_f = low.runtime_fn("jade_await_word", i64_ty.fn_type(&[i64_ty.into()], false));
+            let await_f =
+                low.runtime_fn("jade_await_word", i64_ty.fn_type(&[i64_ty.into()], false));
             let r = b
                 .build_call(await_f, &[low.load(*fut).into()], "await")
                 .map_err(|e| e.to_string())?
@@ -758,22 +965,36 @@ pub(super) fn lower_instr<'ctx>(
         Join(dest, futs) => {
             let n = futs.len();
             let cnt = i64_ty.const_int(n.max(1) as u64, false);
-            let futarr = b.build_array_alloca(i64_ty, cnt, "join_futs").map_err(|e| e.to_string())?;
+            let futarr =
+                b.build_array_alloca(i64_ty, cnt, "join_futs").map_err(|e| e.to_string())?;
             for (i, r) in futs.iter().enumerate() {
                 let slot = unsafe {
-                    b.build_in_bounds_gep(i64_ty, futarr, &[i64_ty.const_int(i as u64, false)], "jfs")
-                        .map_err(|e| e.to_string())?
+                    b.build_in_bounds_gep(
+                        i64_ty,
+                        futarr,
+                        &[i64_ty.const_int(i as u64, false)],
+                        "jfs",
+                    )
+                    .map_err(|e| e.to_string())?
                 };
                 b.build_store(slot, low.load(*r)).map_err(|e| e.to_string())?;
             }
-            let resarr = b.build_array_alloca(i64_ty, cnt, "join_res").map_err(|e| e.to_string())?;
+            let resarr =
+                b.build_array_alloca(i64_ty, cnt, "join_res").map_err(|e| e.to_string())?;
             let join_f = low.runtime_fn(
                 "jade_join_words",
-                low.ctx.void_type().fn_type(&[low.ptrt().into(), low.ctx.i32_type().into(), low.ptrt().into()], false),
+                low.ctx.void_type().fn_type(
+                    &[low.ptrt().into(), low.ctx.i32_type().into(), low.ptrt().into()],
+                    false,
+                ),
             );
             b.build_call(
                 join_f,
-                &[futarr.into(), low.ctx.i32_type().const_int(n as u64, false).into(), resarr.into()],
+                &[
+                    futarr.into(),
+                    low.ctx.i32_type().const_int(n as u64, false).into(),
+                    resarr.into(),
+                ],
                 "",
             )
             .map_err(|e| e.to_string())?;
@@ -790,10 +1011,16 @@ pub(super) fn lower_instr<'ctx>(
             );
             for i in 0..n {
                 let slot = unsafe {
-                    b.build_in_bounds_gep(i64_ty, resarr, &[i64_ty.const_int(i as u64, false)], "jrs")
-                        .map_err(|e| e.to_string())?
+                    b.build_in_bounds_gep(
+                        i64_ty,
+                        resarr,
+                        &[i64_ty.const_int(i as u64, false)],
+                        "jrs",
+                    )
+                    .map_err(|e| e.to_string())?
                 };
-                let v = b.build_load(i64_ty, slot, "jr").map_err(|e| e.to_string())?.into_int_value();
+                let v =
+                    b.build_load(i64_ty, slot, "jr").map_err(|e| e.to_string())?.into_int_value();
                 b.build_call(push_f, &[arr.into(), v.into()], "").map_err(|e| e.to_string())?;
             }
             low.store(*dest, low.tag_ptr(arr));
@@ -815,10 +1042,8 @@ pub(super) fn lower_instr<'ctx>(
         // block (idx+1+offset). cfg records the handler as a leader-but-not-
         // normal-successor, so the only edge into it is this landing.
         SetupHandler(caught_reg, off) => {
-            let buf = handler_bufs
-                .get(&idx)
-                .copied()
-                .ok_or("SetupHandler: no jmp_buf pre-allocated")?;
+            let buf =
+                handler_bufs.get(&idx).copied().ok_or("SetupHandler: no jmp_buf pre-allocated")?;
             low.push_frame(buf);
             let sj = low.setjmp_fn();
             let r = b
@@ -827,12 +1052,7 @@ pub(super) fn lower_instr<'ctx>(
                 .as_any_value_enum()
                 .into_int_value();
             let is_throw = b
-                .build_int_compare(
-                    IntPredicate::NE,
-                    r,
-                    low.ctx.i32_type().const_zero(),
-                    "is_throw",
-                )
+                .build_int_compare(IntPredicate::NE, r, low.ctx.i32_type().const_zero(), "is_throw")
                 .map_err(|e| e.to_string())?;
             let func = b.get_insert_block().and_then(|bb| bb.get_parent()).unwrap();
             let landing = low.ctx.append_basic_block(func, "exc_landing");
@@ -842,8 +1062,7 @@ pub(super) fn lower_instr<'ctx>(
             b.position_at_end(landing);
             let caught = low.exc_value();
             low.store(*caught_reg, caught);
-            b.build_unconditional_branch(block_of(target(*off)))
-                .map_err(|e| e.to_string())?;
+            b.build_unconditional_branch(block_of(target(*off))).map_err(|e| e.to_string())?;
             Ok(true)
         }
         PopHandler => {
@@ -853,8 +1072,7 @@ pub(super) fn lower_instr<'ctx>(
 
         // ── Control flow ──────────────────────────────────────────────────
         Jump(off) => {
-            b.build_unconditional_branch(block_of(target(*off)))
-                .map_err(|e| e.to_string())?;
+            b.build_unconditional_branch(block_of(target(*off))).map_err(|e| e.to_string())?;
             Ok(true)
         }
         JumpIfFalse(r, off) => {
@@ -915,8 +1133,7 @@ pub(super) fn lower_instr<'ctx>(
         Halt => {
             low.emit_scope_exit();
             low.emit_exc_restore()?;
-            b.build_return(Some(&i64_ty.const_int(NIL, false)))
-                .map_err(|e| e.to_string())?;
+            b.build_return(Some(&i64_ty.const_int(NIL, false))).map_err(|e| e.to_string())?;
             Ok(true)
         }
 
@@ -1067,7 +1284,8 @@ pub(super) fn lower_instr<'ctx>(
                 // len() over them must read the header count — jrt_len_unknown reads
                 // the legacy offset-8 length and would return the kind byte here.
                 Some(bc) if bc.name == "len" => {
-                    let f = low.runtime_fn("jrt_len_chunk", i64_ty.fn_type(&[i64_ty.into()], false));
+                    let f =
+                        low.runtime_fn("jrt_len_chunk", i64_ty.fn_type(&[i64_ty.into()], false));
                     let arg = low.load(bc.args[0]);
                     let count = b
                         .build_call(f, &[arg.into()], "len")

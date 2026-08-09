@@ -7,8 +7,8 @@
 use core::ffi::c_char;
 use std::path::{Path, PathBuf};
 
-use crate::string::trust_of;
 use crate::cstr;
+use crate::string::trust_of;
 
 // ── Neutral cores (std::path; used by both engines) ───────────────────────────
 
@@ -99,7 +99,8 @@ pub extern "C" fn jrt_path_stem(p: *const c_char) -> *mut c_char {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_path_abs(p: *const c_char) -> *mut c_char {
-    let s = abs(unsafe { cstr::borrow(p) }).unwrap_or_else(|_| unsafe { cstr::borrow(p) }.to_owned());
+    let s =
+        abs(unsafe { cstr::borrow(p) }).unwrap_or_else(|_| unsafe { cstr::borrow(p) }.to_owned());
     cstr::emit(s.as_bytes(), trust(p))
 }
 

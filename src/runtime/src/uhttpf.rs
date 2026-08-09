@@ -23,7 +23,9 @@ use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
 use crate::cstr;
-use crate::httpf::{body_text, bytes_arg, make_bytes_dict, make_dict, read_headers, word_type_name};
+use crate::httpf::{
+    body_text, bytes_arg, make_bytes_dict, make_dict, read_headers, word_type_name,
+};
 use crate::string::{self, TRUSTED};
 
 type W = i64;
@@ -40,9 +42,8 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 /// path (query strings, matrix params) intact, at the cost of not supporting a
 /// `:` inside the socket path itself.
 pub fn parse_unix_url(url: &str) -> Result<(String, String), String> {
-    let rest = url
-        .strip_prefix("unix://")
-        .ok_or_else(|| "url must start with unix://".to_string())?;
+    let rest =
+        url.strip_prefix("unix://").ok_or_else(|| "url must start with unix://".to_string())?;
     match rest.split_once(':') {
         Some((sock, path)) => {
             if sock.is_empty() {
@@ -463,12 +464,20 @@ pub extern "C" fn jrt_uhttp_get_impl(url: *const c_char, headers: *const c_void)
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn jrt_uhttp_post_impl(url: *const c_char, body: *const c_char, headers: *const c_void) -> W {
+pub extern "C" fn jrt_uhttp_post_impl(
+    url: *const c_char,
+    body: *const c_char,
+    headers: *const c_void,
+) -> W {
     request_aot("POST", url, Some(unsafe { cstr::borrow(body) }), headers)
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn jrt_uhttp_put_impl(url: *const c_char, body: *const c_char, headers: *const c_void) -> W {
+pub extern "C" fn jrt_uhttp_put_impl(
+    url: *const c_char,
+    body: *const c_char,
+    headers: *const c_void,
+) -> W {
     request_aot("PUT", url, Some(unsafe { cstr::borrow(body) }), headers)
 }
 
@@ -490,7 +499,12 @@ pub extern "C" fn jrt_uhttp_head_impl(url: *const c_char, headers: *const c_void
 
 /// Run `request_bytes`, building the byte-bodied dict; on transport failure,
 /// record the pending error and return `{ status: 0, body: <empty> }`.
-fn request_bytes_aot(method: &str, url: *const c_char, body: Option<&[u8]>, headers: *const c_void) -> W {
+fn request_bytes_aot(
+    method: &str,
+    url: *const c_char,
+    body: Option<&[u8]>,
+    headers: *const c_void,
+) -> W {
     match request_bytes(method, unsafe { cstr::borrow(url) }, body, &read_headers(headers)) {
         Ok((status, body)) => make_bytes_dict(status, &body),
         Err(m) => {
@@ -508,7 +522,11 @@ pub extern "C" fn jrt_uhttp_get_bytes_impl(url: *const c_char, headers: *const c
 /// `body` is the argument's whole tagged word, so a non-`bytes` value is
 /// reported rather than dereferenced. See [`crate::httpf::bytes_arg`].
 #[unsafe(no_mangle)]
-pub extern "C" fn jrt_uhttp_post_bytes_impl(url: *const c_char, body: W, headers: *const c_void) -> W {
+pub extern "C" fn jrt_uhttp_post_bytes_impl(
+    url: *const c_char,
+    body: W,
+    headers: *const c_void,
+) -> W {
     match bytes_arg(body) {
         Some(b) => request_bytes_aot("POST", url, Some(b), headers),
         None => {
@@ -561,9 +579,10 @@ pub extern "C" fn jrt_uhttp_stream_next(h: *mut c_void, out: *mut W) -> i32 {
     let s = unsafe { &mut *(h as *mut Stream) };
     match s.next_line() {
         Ok(Some(line)) => {
-            let w = crate::JadeValue::from_str_ptr(
-                cstr::emit(line.as_bytes(), crate::string::TAINTED) as *const ()
-            )
+            let w = crate::JadeValue::from_str_ptr(cstr::emit(
+                line.as_bytes(),
+                crate::string::TAINTED,
+            ) as *const ())
             .bits() as i64;
             unsafe { *out = w };
             1

@@ -12,8 +12,8 @@ use core::ffi::c_char;
 use std::cell::Cell;
 use std::process::Command;
 
-use crate::string::{self, TAINTED, TRUSTED};
 use crate::cstr;
+use crate::string::{self, TAINTED, TRUSTED};
 
 // ── Neutral cores (used by both engines) ──────────────────────────────────────
 

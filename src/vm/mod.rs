@@ -14,13 +14,18 @@
 // These imports are re-exported at `pub(crate)` so every submodule of `vm` can
 // pull the whole shared set in with a single `use super::*;` — the split below
 // keeps each file focused without repeating this preamble in every one.
-pub(crate) use std::{sync::Arc, collections::{HashMap, HashSet}, path::PathBuf};
 pub(crate) use parking_lot::Mutex;
+pub(crate) use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    sync::Arc,
+};
 pub(crate) use tokio::task::JoinHandle;
 
 pub(crate) use crate::{
     builtins::{self, BuiltinFn, NativeBoundMethod, PrimType},
-    compiler::{emit::CompiledProgram}, bytecode::{Chunk, CompiledFn, FStrPart, Instr, Reg},
+    bytecode::{Chunk, CompiledFn, FStrPart, Instr, Reg},
+    compiler::emit::CompiledProgram,
     frontend::{
         ast::{BinOpKind, StructFieldDef, UnaryOpKind},
         error::{JadeError, Result, Span},
@@ -28,34 +33,34 @@ pub(crate) use crate::{
     llm,
     native::NativeLibFn,
 };
-pub(crate) use jade_runtime::dynop;
 pub(crate) use jade_runtime::coll::{ArrayObj, DictObj, StructObj};
+pub(crate) use jade_runtime::dynop;
 pub(crate) use jade_runtime::grammarf::GrammarObj;
 pub(crate) use jade_runtime::trust::JStr;
 
 // ── Submodules (extracted from the former monolith; added incrementally) ──────
 // `pub(crate)` for `value_type_name`, which the provider backend uses to name the
 // type of a frame it cannot read.
-pub(crate) mod value;
-mod state;
 mod async_tasks;
-mod ops;
-mod chunk;
-mod exceptions;
 mod call;
-mod llm_prompt;
+mod chunk;
 pub(crate) mod coerce;
 mod dispatch;
-pub use value::*;
-pub use state::*;
-pub use chunk::*;
+mod exceptions;
+mod llm_prompt;
+mod ops;
+mod state;
+pub(crate) mod value;
 pub(crate) use async_tasks::*;
-pub(crate) use ops::*;
-pub(crate) use exceptions::*;
 pub(crate) use call::*;
-pub(crate) use llm_prompt::*;
+pub use chunk::*;
 pub(crate) use coerce::*;
 pub(crate) use dispatch::*;
+pub(crate) use exceptions::*;
+pub(crate) use llm_prompt::*;
+pub(crate) use ops::*;
+pub use state::*;
+pub use value::*;
 // Tests for this module live in `src/compiler/tests.rs` (`mod vm`).
 
 #[cfg(test)]

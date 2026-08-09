@@ -22,7 +22,6 @@ use crate::value::{JadeValue, NIL_BITS};
 
 type W = i64;
 
-
 /// `serde_json::Value` → an ObjHeader value word. Parsed strings inherit `trust`
 /// (taint propagates from the JSON source). Mirrors the VM's `json_to_vm`.
 pub(crate) fn value_to_word(v: &Value, trust: u8) -> W {
@@ -36,7 +35,9 @@ pub(crate) fn value_to_word(v: &Value, trust: u8) -> W {
                 box_float(n.as_f64().unwrap_or(0.0)).bits() as i64
             }
         }
-        Value::String(s) => JadeValue::from_str_ptr(crate::cstr::emit_str(s, trust) as *const ()).bits() as W,
+        Value::String(s) => {
+            JadeValue::from_str_ptr(crate::cstr::emit_str(s, trust) as *const ()).bits() as W
+        }
         Value::Array(a) => {
             let mut arr = ArrayObj::<W>::new();
             for e in a {
@@ -69,7 +70,9 @@ fn word_to_value(word: W) -> Value {
         return Value::Null;
     }
     if v.is_float() {
-        return serde_json::Number::from_f64(unbox_float(v)).map(Value::Number).unwrap_or(Value::Null);
+        return serde_json::Number::from_f64(unbox_float(v))
+            .map(Value::Number)
+            .unwrap_or(Value::Null);
     }
     if v.is_str() {
         let bytes = unsafe {
@@ -119,12 +122,8 @@ pub extern "C" fn jrt_json_parse_chunk(s: *const c_char) -> W {
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_json_stringify_chunk(word: W, pretty: i32) -> *mut c_char {
     let v = word_to_value(word);
-    let s = if pretty != 0 {
-        serde_json::to_string_pretty(&v)
-    } else {
-        serde_json::to_string(&v)
-    }
-    .unwrap_or_default();
+    let s = if pretty != 0 { serde_json::to_string_pretty(&v) } else { serde_json::to_string(&v) }
+        .unwrap_or_default();
     let bytes = s.as_bytes();
     unsafe {
         let out = string::new(bytes.len(), string::TRUSTED);

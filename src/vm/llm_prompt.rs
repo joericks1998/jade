@@ -32,9 +32,8 @@ pub(crate) async fn vm_prompt_deref(
     }
 
     // Clone the Arc so we don't hold a borrow of state across .await points.
-    let backend = state.inference_backend.as_ref()
-        .ok_or(JadeError::NoInferenceBackend { span })?
-        .clone();
+    let backend =
+        state.inference_backend.as_ref().ok_or(JadeError::NoInferenceBackend { span })?.clone();
 
     // Grammar priority: user-supplied override > auto-generated from output type.
     let grammar = grammar_override.or_else(|| {
@@ -43,12 +42,18 @@ pub(crate) async fn vm_prompt_deref(
 
     // Stateless call — no conversation history is sent or recorded.
     // Conversational memory is the JadeLang program's responsibility.
-    let initial_resp = backend.infer(llm::InferenceRequest {
-        prompt: prompt_text.clone(),
-        grammar: grammar.clone(),
-        anchor: grammar_anchor.clone(),
-        stop_anchor: grammar_stop.clone(), ..Default::default()
-    }, span).await?;
+    let initial_resp = backend
+        .infer(
+            llm::InferenceRequest {
+                prompt: prompt_text.clone(),
+                grammar: grammar.clone(),
+                anchor: grammar_anchor.clone(),
+                stop_anchor: grammar_stop.clone(),
+                ..Default::default()
+            },
+            span,
+        )
+        .await?;
 
     let Some(type_name) = output_type else {
         state.prompt_cache.insert(cache_key, initial_resp.text.clone());
@@ -66,7 +71,9 @@ pub(crate) async fn vm_prompt_deref(
             state.prompt_cache.insert(cache_key, initial_resp.text);
             apply_struct_decorators(v, type_name, state, span).await
         }
-        Err(_) => Err(JadeError::PromptOverflow { name: "<prompt>".to_string(), attempts: 1, span }),
+        Err(_) => {
+            Err(JadeError::PromptOverflow { name: "<prompt>".to_string(), attempts: 1, span })
+        }
     }
 }
 
@@ -121,10 +128,12 @@ pub(crate) async fn vm_drain_token_stream(
         match h.await {
             Ok(Ok(())) => {}
             Ok(Err(e)) => return Err(e),
-            Err(e) => return Err(JadeError::AsyncPanic {
-                message: format!("token stream task panicked: {e}"),
-                span,
-            }),
+            Err(e) => {
+                return Err(JadeError::AsyncPanic {
+                    message: format!("token stream task panicked: {e}"),
+                    span,
+                });
+            }
         }
     }
     state.prompt_cache.insert(ts.prompt_key.clone(), text.clone());
@@ -140,18 +149,11 @@ pub(crate) async fn vm_drain_token_stream(
 /// times — once per drain path plus once in `stream()` — and the copies drifted:
 /// one sent a Grammar's bare pattern where another sent the wrapped GBNF, so the
 /// same Grammar constrained the model differently depending on how it was used.
-async fn start_inference(
-    ts: &Arc<JadeTokenStream>,
-    state: &mut VmState,
-    span: Span,
-) -> Result<()> {
+async fn start_inference(ts: &Arc<JadeTokenStream>, state: &mut VmState, span: Span) -> Result<()> {
     let lazy = ts.lazy_prompt.lock().take();
     let Some(prompt_text) = lazy else { return Ok(()) };
-    let backend = state
-        .inference_backend
-        .as_ref()
-        .ok_or(JadeError::NoInferenceBackend { span })?
-        .clone();
+    let backend =
+        state.inference_backend.as_ref().ok_or(JadeError::NoInferenceBackend { span })?.clone();
     let (rx, handle) = backend
         .infer_stream(
             llm::InferenceRequest {
@@ -239,7 +241,9 @@ pub(crate) async fn drain_tokens_with_mute<W: std::io::Write + Send>(
         text.push_str(&token);
 
         // Fast path: permanent mute (no stop anchor).
-        if muted && region_stop.is_empty() { continue; }
+        if muted && region_stop.is_empty() {
+            continue;
+        }
         // Fast path: nothing to check while not muted.
         if !muted && region_start.is_empty() {
             let _ = out.write_all(token.as_bytes());
@@ -258,7 +262,9 @@ pub(crate) async fn drain_tokens_with_mute<W: std::io::Write + Send>(
                     continue;
                 }
                 // Might still grow into a stop anchor — hold and wait.
-                if is_partial_match(region_stop, &pending) { break; }
+                if is_partial_match(region_stop, &pending) {
+                    break;
+                }
                 pop_first_char(&mut pending); // still muted: discard
             } else {
                 // Scanning for region_start to enter muted mode.
@@ -271,7 +277,9 @@ pub(crate) async fn drain_tokens_with_mute<W: std::io::Write + Send>(
                     muted = true;
                     continue;
                 }
-                if is_partial_match(region_start, &pending) { break; }
+                if is_partial_match(region_start, &pending) {
+                    break;
+                }
                 if let Some(c) = pop_first_char(&mut pending) {
                     let mut b = [0u8; 4];
                     let _ = out.write_all(c.encode_utf8(&mut b).as_bytes());
@@ -290,7 +298,9 @@ pub(crate) async fn drain_tokens_with_mute<W: std::io::Write + Send>(
             let _ = out.flush();
         }
     }
-    if newline { let _ = writeln!(out); }
+    if newline {
+        let _ = writeln!(out);
+    }
     text
 }
 
@@ -336,22 +346,41 @@ pub(crate) async fn vm_drain_token_stream_printing(
     #[cfg(test)]
     let text = if let Some(buf) = &state.test_stdout {
         let mut w = TestWriter(std::sync::Arc::clone(buf));
-        drain_tokens_with_mute(&mut rx, start_muted, region_start, region_stop, &mut w, newline).await
+        drain_tokens_with_mute(&mut rx, start_muted, region_start, region_stop, &mut w, newline)
+            .await
     } else {
-        drain_tokens_with_mute(&mut rx, start_muted, region_start, region_stop, &mut std::io::stdout(), newline).await
+        drain_tokens_with_mute(
+            &mut rx,
+            start_muted,
+            region_start,
+            region_stop,
+            &mut std::io::stdout(),
+            newline,
+        )
+        .await
     };
     #[cfg(not(test))]
-    let text = drain_tokens_with_mute(&mut rx, start_muted, region_start, region_stop, &mut std::io::stdout(), newline).await;
+    let text = drain_tokens_with_mute(
+        &mut rx,
+        start_muted,
+        region_start,
+        region_stop,
+        &mut std::io::stdout(),
+        newline,
+    )
+    .await;
 
     let h_opt = ts.tokens_handle.lock().take();
     if let Some(h) = h_opt {
         match h.await {
             Ok(Ok(())) => {}
             Ok(Err(e)) => return Err(e),
-            Err(e) => return Err(JadeError::AsyncPanic {
-                message: format!("token stream task panicked: {e}"),
-                span,
-            }),
+            Err(e) => {
+                return Err(JadeError::AsyncPanic {
+                    message: format!("token stream task panicked: {e}"),
+                    span,
+                });
+            }
         }
     }
     state.prompt_cache.insert(ts.prompt_key.clone(), text.clone());

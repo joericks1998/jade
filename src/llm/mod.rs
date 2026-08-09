@@ -61,8 +61,7 @@ pub const FRAME_META: &str = "Meta";
 pub const FRAME_JSON: &str = "Json";
 
 /// Every frame name, in the order the shared definition declares them.
-pub const FRAME_TYPES: [&str; 5] =
-    [FRAME_TOKEN, FRAME_DONE, FRAME_ERROR, FRAME_META, FRAME_JSON];
+pub const FRAME_TYPES: [&str; 5] = [FRAME_TOKEN, FRAME_DONE, FRAME_ERROR, FRAME_META, FRAME_JSON];
 
 /// The dict form's tag key. A struct form has no equivalent — its type name is
 /// the tag.
@@ -152,7 +151,7 @@ impl MockBackend {
     pub fn new(responses: Vec<&str>) -> Self {
         MockBackend {
             responses: std::sync::Mutex::new(
-                responses.into_iter().map(|s| s.to_string()).collect()
+                responses.into_iter().map(|s| s.to_string()).collect(),
             ),
             captured: std::sync::Mutex::new(Vec::new()),
         }
@@ -162,7 +161,9 @@ impl MockBackend {
         let lower = prompt.to_lowercase();
         if lower.contains("true or false") || lower.contains("yes or no") {
             "true".to_string()
-        } else if lower.contains("only the number") || lower.contains("respond with only the number") {
+        } else if lower.contains("only the number")
+            || lower.contains("respond with only the number")
+        {
             "7".to_string()
         } else {
             "mock response".to_string()
@@ -175,7 +176,11 @@ impl MockBackend {
 impl InferenceBackend for MockBackend {
     async fn infer(&self, req: InferenceRequest, _span: Span) -> Result<InferenceResponse> {
         self.captured.lock().unwrap().push(req.clone());
-        let text = self.responses.lock().unwrap().pop_front()
+        let text = self
+            .responses
+            .lock()
+            .unwrap()
+            .pop_front()
             .unwrap_or_else(|| Self::mock_response(&req.prompt));
         Ok(InferenceResponse { text })
     }

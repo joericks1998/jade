@@ -53,6 +53,15 @@ jobs:
           LLVM_SYS_180_PREFIX: /usr/lib/llvm-18
         run: cargo clippy --all-targets
 
+      # The tree was not rustfmt-clean, so `cargo fmt` rewrote 151 files and
+      # anyone who ran it lost their own diff in the noise. `rustfmt.toml` now
+      # says what the code was already written to, and this keeps it true —
+      # which is the only way the command stays safe to run.
+      #
+      # Needs no LLVM: rustfmt parses, it does not build.
+      - name: Rust formatting
+        run: cargo fmt --all --check
+
       # Exercises the real `jade check` binary against every committed fixture,
       # covering the CLI wiring and on-disk cache that the in-process test in
       # cli/check.rs cannot reach. Fixtures named *_error.jde document rejected

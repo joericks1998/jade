@@ -3,18 +3,18 @@
 // imports, emits a thin `main()`, and lowers the bytecode `Chunk` (the same one
 // the VM runs); an opcode it can't lower is a hard build error.
 pub mod cfg;
-pub mod lower;
 pub mod imports;
+pub mod lower;
 
 use std::path::Path;
 
 use inkwell::{
+    AddressSpace, OptimizationLevel,
     context::Context,
     module::Module,
     passes::PassBuilderOptions,
     targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine},
     values::AnyValue,
-    AddressSpace, OptimizationLevel,
 };
 
 use crate::compiler::tir::TProgram;
@@ -39,9 +39,23 @@ fn try_chunk_toplevel<'ctx>(
     {
         let probe_ctx = Context::create();
         let probe_mod = probe_ctx.create_module("probe");
-        lower::lower_program(&probe_ctx, &probe_mod, &cp.top, cp.top_n_slots, &cp.struct_defs, &cp.extend_methods)?;
+        lower::lower_program(
+            &probe_ctx,
+            &probe_mod,
+            &cp.top,
+            cp.top_n_slots,
+            &cp.struct_defs,
+            &cp.extend_methods,
+        )?;
     }
-    lower::lower_program(context, module, &cp.top, cp.top_n_slots, &cp.struct_defs, &cp.extend_methods)
+    lower::lower_program(
+        context,
+        module,
+        &cp.top,
+        cp.top_n_slots,
+        &cp.struct_defs,
+        &cp.extend_methods,
+    )
 }
 
 /// What `compile` produces.
@@ -193,10 +207,8 @@ fn emit_pkg_init<'ctx>(
                 .build_global_string_ptr(name, "export_name")
                 .map_err(|e| e.to_string())?
                 .as_pointer_value();
-            Ok(binding_ty.const_named_struct(&[
-                s.into(),
-                f.as_global_value().as_pointer_value().into(),
-            ]))
+            Ok(binding_ty
+                .const_named_struct(&[s.into(), f.as_global_value().as_pointer_value().into()]))
         })
         .collect::<Result<_, String>>()?;
 
@@ -221,26 +233,17 @@ fn emit_pkg_init<'ctx>(
     // the failure surfaced as "native function returned an unknown value tag"
     // from deep inside the call, with nothing naming the real problem.
     {
-        let abi_fn = module.add_function(
-            "jade_pkg_abi_version",
-            i32_ty.fn_type(&[], false),
-            None,
-        );
+        let abi_fn = module.add_function("jade_pkg_abi_version", i32_ty.fn_type(&[], false), None);
         let abi_entry = context.append_basic_block(abi_fn, "entry");
         builder.position_at_end(abi_entry);
         builder
-            .build_return(Some(
-                &i32_ty.const_int(jade_runtime::RUNTIME_ABI_VERSION as u64, false),
-            ))
+            .build_return(Some(&i32_ty.const_int(jade_runtime::RUNTIME_ABI_VERSION as u64, false)))
             .map_err(|e| e.to_string())?;
     }
 
     // ── int jade_pkg_init(JadeNativePkg* out) ─────────────────────────────
-    let pkg_init = module.add_function(
-        "jade_pkg_init",
-        i32_ty.fn_type(&[ptr_ty.into()], false),
-        None,
-    );
+    let pkg_init =
+        module.add_function("jade_pkg_init", i32_ty.fn_type(&[ptr_ty.into()], false), None);
     let entry = context.append_basic_block(pkg_init, "entry");
     let do_init = context.append_basic_block(pkg_init, "do_init");
     let fill = context.append_basic_block(pkg_init, "fill");
@@ -271,11 +274,8 @@ fn emit_pkg_init<'ctx>(
     let out = pkg_init.get_nth_param(0).unwrap().into_pointer_value();
     let pkg_ty = context.struct_type(&[ptr_ty.into(), ptr_ty.into(), i64_ty.into()], false);
 
-    let pkg_name = output_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("jade_package")
-        .to_string();
+    let pkg_name =
+        output_path.file_stem().and_then(|s| s.to_str()).unwrap_or("jade_package").to_string();
     let name_ptr = builder
         .build_global_string_ptr(&pkg_name, "pkg_name")
         .map_err(|e| e.to_string())?
@@ -289,9 +289,8 @@ fn emit_pkg_init<'ctx>(
     .into_iter()
     .enumerate()
     {
-        let field = builder
-            .build_struct_gep(pkg_ty, out, i as u32, "field")
-            .map_err(|e| e.to_string())?;
+        let field =
+            builder.build_struct_gep(pkg_ty, out, i as u32, "field").map_err(|e| e.to_string())?;
         builder.build_store(field, value).map_err(|e| e.to_string())?;
     }
 
@@ -334,12 +333,8 @@ fn runtime_archive_dirs() -> (String, String) {
         baked.to_string()
     };
 
-    (
-        pick("JADE_RT_LIB", env!("JADE_RT_LIB_DIR")),
-        pick("JADE_RUST_RT", env!("JADE_RUST_RT_DIR")),
-    )
+    (pick("JADE_RT_LIB", env!("JADE_RT_LIB_DIR")), pick("JADE_RUST_RT", env!("JADE_RUST_RT_DIR")))
 }
-
 
 pub fn compile(
     program: TProgram,
@@ -444,7 +439,10 @@ pub fn compile_with_mode(
             // Forward the args to the runtime via jrt_set_args so env.args() can
             // read them; a bare main() would leave env.args() empty.
             let main_fn = module.add_function(
-                "main", i32_ty.fn_type(&[i32_ty.into(), ptr_ty.into()], false), None);
+                "main",
+                i32_ty.fn_type(&[i32_ty.into(), ptr_ty.into()], false),
+                None,
+            );
             let entry_bb = context.append_basic_block(main_fn, "entry");
             builder.position_at_end(entry_bb);
 
@@ -452,9 +450,13 @@ pub fn compile_with_mode(
             let argv = main_fn.get_nth_param(1).unwrap().into_pointer_value();
             let set_args = module.get_function("jrt_set_args").unwrap_or_else(|| {
                 module.add_function(
-                    "jrt_set_args", void_ty.fn_type(&[i32_ty.into(), ptr_ty.into()], false), None)
+                    "jrt_set_args",
+                    void_ty.fn_type(&[i32_ty.into(), ptr_ty.into()], false),
+                    None,
+                )
             });
-            builder.build_call(set_args, &[argc.into(), argv.into()], "")
+            builder
+                .build_call(set_args, &[argc.into(), argv.into()], "")
                 .map_err(|e| e.to_string())?;
 
             builder.build_call(init_fn, &[], "").map_err(|e| e.to_string())?;
@@ -469,9 +471,7 @@ pub fn compile_with_mode(
                 module.add_function("jrt_heap_report", void_ty.fn_type(&[], false), None)
             });
             builder.build_call(report, &[], "").map_err(|e| e.to_string())?;
-            builder
-                .build_return(Some(&i32_ty.const_int(0, false)))
-                .map_err(|e| e.to_string())?;
+            builder.build_return(Some(&i32_ty.const_int(0, false))).map_err(|e| e.to_string())?;
         }
         CompileMode::SharedLib { exports } => {
             emit_pkg_init(&context, &module, &builder, init_fn, &lowered, exports, output_path)?;
@@ -511,9 +511,7 @@ pub fn compile_with_mode(
         .map_err(|e| e.to_string())?;
 
     let obj_path = output_path.with_extension("o");
-    machine
-        .write_to_file(&module, FileType::Object, &obj_path)
-        .map_err(|e| e.to_string())?;
+    machine.write_to_file(&module, FileType::Object, &obj_path).map_err(|e| e.to_string())?;
 
     let mut cc = std::process::Command::new("cc");
     cc.arg(&obj_path).arg("-o").arg(output_path);
@@ -579,10 +577,7 @@ pub fn compile_with_mode(
     if !result.status.success() {
         // Include the linker's own output: "linking failed" alone gives the user
         // nothing to act on, and undefined-symbol lists are the whole diagnosis.
-        return Err(format!(
-            "linking failed\n{}",
-            String::from_utf8_lossy(&result.stderr).trim()
-        ));
+        return Err(format!("linking failed\n{}", String::from_utf8_lossy(&result.stderr).trim()));
     }
 
     Ok(None)

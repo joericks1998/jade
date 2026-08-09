@@ -19,7 +19,9 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
         let one = self.i64t().const_int(1, false);
         let seven = self.i64t().const_int(7, false);
         let low1 = b.build_and(w, one, "rc_low1").unwrap();
-        let is_odd = b.build_int_compare(IntPredicate::NE, low1, self.i64t().const_zero(), "rc_odd").unwrap();
+        let is_odd = b
+            .build_int_compare(IntPredicate::NE, low1, self.i64t().const_zero(), "rc_odd")
+            .unwrap();
         let low3 = b.build_and(w, seven, "rc_low3").unwrap();
         let not_imm = b.build_int_compare(IntPredicate::NE, low3, seven, "rc_nonimm").unwrap();
         b.build_and(is_odd, not_imm, "rc_isheap").unwrap()
@@ -46,7 +48,10 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
             return;
         }
         self.if_heap(w, || {
-            let f = self.runtime_fn("jrt_incref", self.ctx.void_type().fn_type(&[self.i64t().into()], false));
+            let f = self.runtime_fn(
+                "jrt_incref",
+                self.ctx.void_type().fn_type(&[self.i64t().into()], false),
+            );
             self.builder.build_call(f, &[w.into()], "").unwrap();
         });
     }
@@ -57,7 +62,10 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
             return;
         }
         self.if_heap(w, || {
-            let f = self.runtime_fn("jrt_decref", self.ctx.void_type().fn_type(&[self.i64t().into()], false));
+            let f = self.runtime_fn(
+                "jrt_decref",
+                self.ctx.void_type().fn_type(&[self.i64t().into()], false),
+            );
             self.builder.build_call(f, &[w.into()], "").unwrap();
         });
     }
@@ -77,11 +85,8 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
         if !self.refcount {
             return;
         }
-        let old = self
-            .builder
-            .build_load(self.i64t(), self.slots[i], "rcold")
-            .unwrap()
-            .into_int_value();
+        let old =
+            self.builder.build_load(self.i64t(), self.slots[i], "rcold").unwrap().into_int_value();
         // `jrt_rc_replace` decrefs `old` and increfs `new`; both no-op unless the
         // word is heap. Skip the call when *neither* is heap (the common case for
         // scalar slots) with an inline guard — `is_heap(old) || is_heap(new)`.
@@ -114,5 +119,4 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
             self.decref(v);
         }
     }
-
 }

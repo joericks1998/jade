@@ -32,11 +32,7 @@ use crate::value::JadeValue;
 /// left as Rust prints them (they contain non-digit chars, so no `.0`).
 pub fn format_float(f: f64) -> String {
     let s = format!("{}", f);
-    if s.chars().all(|c| c.is_ascii_digit() || c == '-') {
-        format!("{}.0", s)
-    } else {
-        s
-    }
+    if s.chars().all(|c| c.is_ascii_digit() || c == '-') { format!("{}.0", s) } else { s }
 }
 
 /// Frame already-rendered array elements as `[a, b, c]`.
@@ -138,11 +134,8 @@ pub fn render_word(word: i64) -> String {
         render_array(&parts)
     } else if kind == ObjKind::Dict as u8 {
         let d = unsafe { &*(p as *const DictObj<i64>) };
-        let mut entries: Vec<(String, String)> = d
-            .entries()
-            .iter()
-            .map(|(k, w)| (k.clone(), render_word(*w)))
-            .collect();
+        let mut entries: Vec<(String, String)> =
+            d.entries().iter().map(|(k, w)| (k.clone(), render_word(*w))).collect();
         render_dict(&mut entries)
     } else if kind == ObjKind::Struct as u8 {
         // The VM renders any struct opaquely as `<struct>` (no field walk).

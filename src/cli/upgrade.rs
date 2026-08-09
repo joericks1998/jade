@@ -135,7 +135,9 @@ pub fn run_uninstall(purge: bool, yes: bool) {
     }
 
     if failed {
-        eprintln!("\nsome paths could not be removed — re-run with sudo if jade is installed system-wide");
+        eprintln!(
+            "\nsome paths could not be removed — re-run with sudo if jade is installed system-wide"
+        );
         std::process::exit(1);
     }
     println!("\njade is uninstalled. Reinstall any time with:");
@@ -283,12 +285,8 @@ async fn upgrade_or_reinstall(force: bool, _cleaned: bool) {
         std::process::exit(1);
     }
 
-    let status = std::process::Command::new("tar")
-        .arg("-xzf")
-        .arg(&tarball)
-        .arg("-C")
-        .arg(&work)
-        .status();
+    let status =
+        std::process::Command::new("tar").arg("-xzf").arg(&tarball).arg("-C").arg(&work).status();
     match status {
         Ok(s) if s.success() => {}
         _ => {

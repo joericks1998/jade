@@ -2,10 +2,7 @@
 pub fn run_cache_info() {
     let entries = crate::cache::list_entries();
     let total = entries.len();
-    let stale = entries
-        .iter()
-        .filter(|e| e.version != crate::cache::JADE_VERSION)
-        .count();
+    let stale = entries.iter().filter(|e| e.version != crate::cache::JADE_VERSION).count();
     let total_bytes: u64 = entries.iter().map(|e| e.size_bytes).sum();
 
     let cache_path = crate::cache::cache_root().display().to_string();
@@ -43,11 +40,7 @@ pub fn run_cache_clean(older_than_days: Option<u64>, dry_run: bool) {
     );
 
     if dry_run {
-        println!(
-            "would remove {} entries ({})",
-            count,
-            super::format_bytes(bytes)
-        );
+        println!("would remove {} entries ({})", count, super::format_bytes(bytes));
     } else {
         println!("removed {} entries ({} freed)", count, super::format_bytes(bytes));
     }

@@ -149,8 +149,10 @@ impl<T: Clone> ArrayObj<T, Global> {
     /// AOT side reads `header.len`, and AOT arrays are built through `push`.
     #[inline]
     pub fn from_vec(data: std::vec::Vec<T>) -> Self {
-        let mut a =
-            ArrayObj { header: ObjHeader::new(ObjKind::Array, 0), data: data.into_iter().collect() };
+        let mut a = ArrayObj {
+            header: ObjHeader::new(ObjKind::Array, 0),
+            data: data.into_iter().collect(),
+        };
         a.sync_len();
         a
     }
@@ -532,7 +534,6 @@ mod tests {
         assert_eq!(s.get_field("z"), None);
     }
 }
-
 
 // ── Generator buffers ─────────────────────────────────────────────────────────
 //

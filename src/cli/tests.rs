@@ -26,8 +26,7 @@ impl TempDir {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path =
-            std::env::temp_dir().join(format!("jade_cli_{tag}_{}_{n}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("jade_cli_{tag}_{}_{n}", std::process::id()));
         std::fs::create_dir_all(&path).expect("create temp dir");
         TempDir { path }
     }
@@ -108,10 +107,7 @@ mod fmt {
     #[test]
     fn nested_braces_increase_indent() {
         let src = "fn f() {\nif x {\ny()\n}\n}\n";
-        assert_eq!(
-            format_source(src),
-            "fn f() {\n    if x {\n        y()\n    }\n}\n"
-        );
+        assert_eq!(format_source(src), "fn f() {\n    if x {\n        y()\n    }\n}\n");
     }
 
     #[test]
@@ -162,10 +158,7 @@ mod fmt {
         // The scanner used to track only `"`, so a `}` in a single-quoted string
         // dedented every line after it.
         let src = "fn f() {\nprint('a } b')\nprint(2)\n}\n";
-        assert_eq!(
-            format_source(src),
-            "fn f() {\n    print('a } b')\n    print(2)\n}\n"
-        );
+        assert_eq!(format_source(src), "fn f() {\n    print('a } b')\n    print(2)\n}\n");
     }
 
     #[test]
@@ -179,10 +172,7 @@ mod fmt {
     #[test]
     fn a_trailing_comment_does_not_affect_depth() {
         let src = "fn f() {\nprint(1) // note {\nprint(2)\n}\n";
-        assert_eq!(
-            format_source(src),
-            "fn f() {\n    print(1) // note {\n    print(2)\n}\n"
-        );
+        assert_eq!(format_source(src), "fn f() {\n    print(1) // note {\n    print(2)\n}\n");
     }
 
     #[test]
@@ -207,19 +197,13 @@ mod fmt {
     #[test]
     fn an_empty_string_does_not_read_as_a_triple_quote() {
         let src = "fn f() {\nlet s = \"\"\nprint(s)\n}\n";
-        assert_eq!(
-            format_source(src),
-            "fn f() {\n    let s = \"\"\n    print(s)\n}\n"
-        );
+        assert_eq!(format_source(src), "fn f() {\n    let s = \"\"\n    print(s)\n}\n");
     }
 
     #[test]
     fn fstring_interpolation_braces_do_not_affect_depth() {
         let src = "fn f() {\nprint(f\"x = {x}\")\nprint(2)\n}\n";
-        assert_eq!(
-            format_source(src),
-            "fn f() {\n    print(f\"x = {x}\")\n    print(2)\n}\n"
-        );
+        assert_eq!(format_source(src), "fn f() {\n    print(f\"x = {x}\")\n    print(2)\n}\n");
     }
 
     #[test]
@@ -273,10 +257,7 @@ mod fmt {
     #[test]
     fn triple_single_quotes_work_the_same_way() {
         let src = "fn f() {\nlet s = '''\n  raw\n'''\nreturn s\n}\n";
-        assert_eq!(
-            format_source(src),
-            "fn f() {\n    let s = '''\n  raw\n'''\n    return s\n}\n"
-        );
+        assert_eq!(format_source(src), "fn f() {\n    let s = '''\n  raw\n'''\n    return s\n}\n");
     }
 
     // ── wrapped expressions ───────────────────────────────────────────────────
@@ -304,10 +285,7 @@ mod fmt {
         // line after it. Flattening the continuation to the block depth threw
         // away alignment people had written by hand.
         let src = "fn f() {\nreturn R { a: 1,\n           b: 2 }\n}\n";
-        assert_eq!(
-            format_source(src),
-            "fn f() {\n    return R { a: 1,\n           b: 2 }\n}\n"
-        );
+        assert_eq!(format_source(src), "fn f() {\n    return R { a: 1,\n           b: 2 }\n}\n");
     }
 
     #[test]
@@ -326,19 +304,13 @@ mod fmt {
         // Braces are block structure; brackets are expression layout. A dict
         // spanning lines has no open bracket, so it gets indented normally.
         let src = "let cfg = {\n\"a\": 1,\n\"b\": 2\n}\n";
-        assert_eq!(
-            format_source(src),
-            "let cfg = {\n    \"a\": 1,\n    \"b\": 2\n}\n"
-        );
+        assert_eq!(format_source(src), "let cfg = {\n    \"a\": 1,\n    \"b\": 2\n}\n");
     }
 
     #[test]
     fn a_balanced_call_on_one_line_does_not_leave_a_bracket_open() {
         let src = "fn f() {\nprint(g(1), h(2))\nprint(3)\n}\n";
-        assert_eq!(
-            format_source(src),
-            "fn f() {\n    print(g(1), h(2))\n    print(3)\n}\n"
-        );
+        assert_eq!(format_source(src), "fn f() {\n    print(g(1), h(2))\n    print(3)\n}\n");
     }
 
     // ── the safety net ────────────────────────────────────────────────────────
@@ -397,10 +369,8 @@ mod fmt {
 
         let mut found = Vec::new();
         collect_jde_files(tmp.path(), &mut found);
-        let mut names: Vec<String> = found
-            .iter()
-            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
-            .collect();
+        let mut names: Vec<String> =
+            found.iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
         names.sort();
         assert_eq!(names, ["a.jde", "b.jde", "c.jde"]);
     }
@@ -414,10 +384,8 @@ mod fmt {
 
         let mut found = Vec::new();
         collect_jde_files(tmp.path(), &mut found);
-        let names: Vec<String> = found
-            .iter()
-            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
-            .collect();
+        let names: Vec<String> =
+            found.iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
         assert_eq!(names, ["keep.jde"]);
     }
 }
@@ -540,10 +508,7 @@ mod register {
     #[test]
     fn lists_providers_in_order() {
         assert_eq!(join_names(&[provider("anthropic")]), "anthropic");
-        assert_eq!(
-            join_names(&[provider("anthropic"), provider("openai")]),
-            "anthropic, openai"
-        );
+        assert_eq!(join_names(&[provider("anthropic"), provider("openai")]), "anthropic, openai");
     }
 }
 
@@ -606,10 +571,7 @@ mod run {
     fn scalars_read_back_as_they_were_written() {
         assert_eq!(format_global("n", &VmValue::Int(42)).unwrap(), "n = 42");
         assert_eq!(format_global("b", &VmValue::Bool(true)).unwrap(), "b = true");
-        assert_eq!(
-            format_global("s", &VmValue::Str("hi".into())).unwrap(),
-            "s = \"hi\""
-        );
+        assert_eq!(format_global("s", &VmValue::Str("hi".into())).unwrap(), "s = \"hi\"");
     }
 
     #[test]

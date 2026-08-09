@@ -7,8 +7,8 @@
 use core::ffi::c_char;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::string::TAINTED;
 use crate::cstr;
+use crate::string::TAINTED;
 
 // ── Neutral cores (used by both engines) ──────────────────────────────────────
 

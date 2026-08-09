@@ -137,7 +137,7 @@ mod tests {
             ("FALSE", false),
             ("true", true),
             ("t", true),
-            ("0", true),   // only literal "false" is falsey
+            ("0", true), // only literal "false" is falsey
             ("false ", true),
             (" false", true),
             ("falsehood", true),

@@ -103,8 +103,14 @@ fn wrappers_check_arity_and_tags_before_calling() {
     let src = generate("z", &symbols(&[("f", sym(&["int", "str"], "bool"))])).unwrap();
 
     assert!(src.contains("if (argc != 2) return 1;"), "missing arity check:\n{src}");
-    assert!(src.contains("if (argv[0].tag != JADE_FFI_INT) return 1;"), "missing tag check:\n{src}");
-    assert!(src.contains("if (argv[1].tag != JADE_FFI_STR) return 1;"), "missing tag check:\n{src}");
+    assert!(
+        src.contains("if (argv[0].tag != JADE_FFI_INT) return 1;"),
+        "missing tag check:\n{src}"
+    );
+    assert!(
+        src.contains("if (argv[1].tag != JADE_FFI_STR) return 1;"),
+        "missing tag check:\n{src}"
+    );
     assert!(src.contains("f(argv[0].data.as_int, argv[1].data.as_str)"), "bad call:\n{src}");
 }
 
@@ -182,7 +188,9 @@ use crate::project::CFailure;
 
 #[test]
 fn a_null_convention_tests_the_return_and_reports_errno() {
-    let src = generate("z", &symbols(&[("gzopen", failing_sym(&["str", "str"], "int", CFailure::Null))])).unwrap();
+    let src =
+        generate("z", &symbols(&[("gzopen", failing_sym(&["str", "str"], "int", CFailure::Null))]))
+            .unwrap();
     assert!(src.contains("errno = 0;"), "errno must be cleared before the call:\n{src}");
     assert!(src.contains("if (!(r)) {"), "missing null test:\n{src}");
     assert!(src.contains("out->tag = JADE_FFI_ERROR;"), "failure must raise:\n{src}");
@@ -213,7 +221,8 @@ fn a_symbol_that_cannot_fail_does_not_touch_errno() {
 
 #[test]
 fn never_is_the_same_as_omitting_the_key() {
-    let never = generate("m", &symbols(&[("f", failing_sym(&["int"], "int", CFailure::Never))])).unwrap();
+    let never =
+        generate("m", &symbols(&[("f", failing_sym(&["int"], "int", CFailure::Never))])).unwrap();
     let absent = generate("m", &symbols(&[("f", sym(&["int"], "int"))])).unwrap();
     assert_eq!(never, absent);
 }
@@ -228,7 +237,9 @@ fn a_void_symbol_cannot_declare_a_failure_convention() {
     assert!(err.contains("drop `fails_when`"), "message should name a fix: {err}");
 
     // `never` on a void symbol is fine — it asserts what is already true.
-    assert!(generate("l", &symbols(&[("f", failing_sym(&["int"], "nil", CFailure::Never))])).is_ok());
+    assert!(
+        generate("l", &symbols(&[("f", failing_sym(&["int"], "nil", CFailure::Never))])).is_ok()
+    );
 }
 
 #[test]
@@ -277,7 +288,10 @@ fn the_generated_shim_compiles() {
 fn an_input_blob_becomes_a_pointer_and_a_length() {
     let src = generate("z", &symbols(&[("put", sym(&["bytes"], "int"))])).unwrap();
     assert!(src.contains("extern int64_t put(const void*, size_t);"), "bad decl:\n{src}");
-    assert!(src.contains("if (argv[0].tag != JADE_FFI_BYTES) return 1;"), "missing tag check:\n{src}");
+    assert!(
+        src.contains("if (argv[0].tag != JADE_FFI_BYTES) return 1;"),
+        "missing tag check:\n{src}"
+    );
     assert!(src.contains("as_bytes->data"), "should pass the pointer:\n{src}");
     assert!(src.contains("as_bytes->len"), "should pass the length:\n{src}");
     // One Jade argument, two C parameters.
@@ -297,7 +311,10 @@ fn a_blob_with_no_length_becomes_one_pointer() {
 
 #[test]
 fn a_lengthless_blob_shim_compiles() {
-    let syms = symbols(&[("check", sym(&["bytes_ptr"], "int")), ("at", sym(&["bytes_ptr", "str"], "int"))]);
+    let syms = symbols(&[
+        ("check", sym(&["bytes_ptr"], "int")),
+        ("at", sym(&["bytes_ptr", "str"], "int")),
+    ]);
     let src = generate("fdt", &syms).unwrap();
     if let Err(e) = compiles(&src, &[]) {
         panic!("lengthless blob shim does not compile:\n{e}\n--- source ---\n{src}");
@@ -310,7 +327,10 @@ fn a_blob_revised_in_place_is_copied_and_handed_back() {
     // bytes rather than the caller's bytes, and the edit comes back as a return.
     let src = generate("fdt", &symbols(&[("nop", sym(&["inout_bytes", "int"], "int"))])).unwrap();
     assert!(src.contains("extern int64_t nop(void*, int64_t);"), "bad decl:\n{src}");
-    assert!(src.contains("memcpy(iobuf0, argv[0].data.as_bytes->data, iolen0);"), "no copy:\n{src}");
+    assert!(
+        src.contains("memcpy(iobuf0, argv[0].data.as_bytes->data, iolen0);"),
+        "no copy:\n{src}"
+    );
     assert!(src.contains("jade_shim_bytes(iobuf0, iolen0)"), "not handed back:\n{src}");
     assert!(src.contains("free(iobuf0);"), "scratch leaked:\n{src}");
     // One argument in, and a pair back: the status and the edited blob.
@@ -348,8 +368,14 @@ fn an_out_buffer_takes_no_jade_argument_and_returns_bytes() {
     let src = generate("snd", &symbols(&[("sf_read_short", s)])).unwrap();
 
     // Three C parameters, two Jade arguments: the buffer is the shim's.
-    assert!(src.contains("extern int64_t sf_read_short(int64_t, short*, int64_t);"), "bad decl:\n{src}");
-    assert!(src.contains("if (argc != 2) return 1;"), "buffer must not consume an argument:\n{src}");
+    assert!(
+        src.contains("extern int64_t sf_read_short(int64_t, short*, int64_t);"),
+        "bad decl:\n{src}"
+    );
+    assert!(
+        src.contains("if (argc != 2) return 1;"),
+        "buffer must not consume an argument:\n{src}"
+    );
 
     // Sized from the argument after it, which is the element count.
     assert!(src.contains("int64_t n_elem1 = argv[1].data.as_int;"), "wrong count source:\n{src}");
@@ -433,31 +459,20 @@ fn a_c_type_that_is_not_an_identifier_is_refused() {
     // much as a typo guard.
     for bad in ["short; evil()", "char*", "1int", ""] {
         let s = sym(&[format!("out_buffer:{bad}").as_str(), "int"], "int");
-        assert!(
-            generate("z", &symbols(&[("rd", s)])).is_err(),
-            "should refuse out_buffer:{bad}"
-        );
+        assert!(generate("z", &symbols(&[("rd", s)])).is_err(), "should refuse out_buffer:{bad}");
     }
 }
 
 // ── Struct out-parameters ────────────────────────────────────────────────
 
-const SF_INFO: &[(&str, &str)] = &[
-    ("frames", "int"),
-    ("samplerate", "int"),
-    ("channels", "int"),
-];
+const SF_INFO: &[(&str, &str)] = &[("frames", "int"), ("samplerate", "int"), ("channels", "int")];
 
 #[test]
 fn a_struct_out_parameter_is_a_zeroed_local_passed_by_address() {
     let s = failing_sym(&["str", "int", "out_struct:SF_INFO"], "int", CFailure::Null);
-    let src = generate_with(
-        "snd",
-        &symbols(&[("sf_open", s)]),
-        &[("SF_INFO", SF_INFO)],
-        &["sndfile.h"],
-    )
-    .unwrap();
+    let src =
+        generate_with("snd", &symbols(&[("sf_open", s)]), &[("SF_INFO", SF_INFO)], &["sndfile.h"])
+            .unwrap();
 
     assert!(src.contains("#include <sndfile.h>"), "must include the header:\n{src}");
     assert!(src.contains("SF_INFO ostruct2;"), "must declare a real local:\n{src}");
@@ -473,14 +488,18 @@ fn the_header_declares_the_symbol_rather_than_the_shim() {
     // header win turns that into a compile error, which is the whole reason to
     // require one.
     let s = sym(&["str", "int", "out_struct:SF_INFO"], "int");
-    let src = generate_with("snd", &symbols(&[("sf_open", s)]), &[("SF_INFO", SF_INFO)], &["sndfile.h"]).unwrap();
+    let src =
+        generate_with("snd", &symbols(&[("sf_open", s)]), &[("SF_INFO", SF_INFO)], &["sndfile.h"])
+            .unwrap();
     assert!(!src.contains("extern int64_t sf_open"), "must not redeclare:\n{src}");
 }
 
 #[test]
 fn a_returned_value_and_a_filled_struct_come_back_as_ret_and_out() {
     let s = sym(&["str", "int", "out_struct:SF_INFO"], "int");
-    let src = generate_with("snd", &symbols(&[("sf_open", s)]), &[("SF_INFO", SF_INFO)], &["sndfile.h"]).unwrap();
+    let src =
+        generate_with("snd", &symbols(&[("sf_open", s)]), &[("SF_INFO", SF_INFO)], &["sndfile.h"])
+            .unwrap();
     assert!(src.contains(r#"jade_shim_struct("sf_open_result", 2)"#), "missing pair:\n{src}");
     assert!(src.contains(r#"res->keys[0] = strdup("ret");"#), "missing ret:\n{src}");
     assert!(src.contains(r#"res->keys[1] = strdup("out");"#), "missing out:\n{src}");
@@ -491,7 +510,9 @@ fn a_void_call_returns_the_filled_struct_directly() {
     // With nothing else to report there is no pair to make, so the common case
     // stays clean rather than paying for the general one.
     let s = sym(&["out_struct:SF_INFO"], "nil");
-    let src = generate_with("snd", &symbols(&[("stat_it", s)]), &[("SF_INFO", SF_INFO)], &["sndfile.h"]).unwrap();
+    let src =
+        generate_with("snd", &symbols(&[("stat_it", s)]), &[("SF_INFO", SF_INFO)], &["sndfile.h"])
+            .unwrap();
     assert!(!src.contains("_result"), "should not wrap:\n{src}");
     assert!(src.contains("out->data.as_struct = ostruct0_j;"), "should return it directly:\n{src}");
 }
@@ -502,7 +523,8 @@ fn struct_field_strings_are_copied_not_borrowed() {
     // it. Handing over a pointer into a stack local would be a free of the
     // stack.
     let s = sym(&["out_struct:INFO"], "nil");
-    let src = generate_with("z", &symbols(&[("f", s)]), &[("INFO", &[("name", "str")])], &["z.h"]).unwrap();
+    let src = generate_with("z", &symbols(&[("f", s)]), &[("INFO", &[("name", "str")])], &["z.h"])
+        .unwrap();
     assert!(src.contains("strdup((ostruct0.name)"), "field string must be copied:\n{src}");
 }
 
@@ -518,7 +540,8 @@ fn a_struct_out_parameter_needs_a_header() {
     // Without one the shim would have to synthesize the layout from the field
     // list, and any disagreement writes at the wrong offset.
     let s = sym(&["out_struct:SF_INFO"], "nil");
-    let err = generate_with("snd", &symbols(&[("f", s)]), &[("SF_INFO", SF_INFO)], &[]).unwrap_err();
+    let err =
+        generate_with("snd", &symbols(&[("f", s)]), &[("SF_INFO", SF_INFO)], &[]).unwrap_err();
     assert!(err.contains("headers"), "should ask for a header: {err}");
     assert!(err.contains("wrong offsets"), "should say why: {err}");
 }
@@ -623,7 +646,8 @@ fn a_struct_input_needs_its_fields_declared_and_a_header() {
     let err = generate_with("snd", &symbols(&[("f", s.clone())]), &[], &["sndfile.h"]).unwrap_err();
     assert!(err.contains("structs.SF_INFO"), "should name the missing table: {err}");
 
-    let err = generate_with("snd", &symbols(&[("f", s)]), &[("SF_INFO", SF_INFO)], &[]).unwrap_err();
+    let err =
+        generate_with("snd", &symbols(&[("f", s)]), &[("SF_INFO", SF_INFO)], &[]).unwrap_err();
     assert!(err.contains("headers"), "should ask for a header: {err}");
 }
 
@@ -728,12 +752,8 @@ extern void sf_stat(SF_INFO* info);
         ("sf_open", failing_sym(&["str", "int", "out_struct:SF_INFO"], "int", CFailure::Nonzero)),
         ("sf_stat", sym(&["out_struct:SF_INFO"], "nil")),
     ]);
-    let fields: &[(&str, &str)] = &[
-        ("frames", "int"),
-        ("samplerate", "int"),
-        ("channels", "int"),
-        ("title", "str"),
-    ];
+    let fields: &[(&str, &str)] =
+        &[("frames", "int"), ("samplerate", "int"), ("channels", "int"), ("title", "str")];
     let src = generate_with("snd", &syms, &[("SF_INFO", fields)], &["fixture.h"]).unwrap();
     if let Err(e) = compiles(&src, &[("fixture.h", header)]) {
         panic!("struct shim does not compile:\n{e}\n--- source ---\n{src}");
@@ -757,12 +777,8 @@ extern int use_one(const FLAGS* f, int mode);
         ("cmp", sym(&["in_struct:FLAGS", "in_struct:FLAGS"], "int")),
         ("use_one", sym(&["in_struct:FLAGS", "int"], "int")),
     ]);
-    let fields: &[(&str, &str)] = &[
-        ("version", "int"),
-        ("backward_size", "int"),
-        ("check", "int"),
-        ("tag", "str"),
-    ];
+    let fields: &[(&str, &str)] =
+        &[("version", "int"), ("backward_size", "int"), ("check", "int"), ("tag", "str")];
     let src = generate_with("lz", &syms, &[("FLAGS", fields)], &["fixture.h"]).unwrap();
     // Two of them in one call must not collide on a local name.
     assert!(src.contains("FLAGS istruct0;") && src.contains("FLAGS istruct1;"), "collide:\n{src}");
@@ -776,8 +792,8 @@ fn a_caller_sized_buffer_allocates_what_it_was_asked_for_and_hands_it_all_back()
     // For the writes whose extent only the documentation gives.
     // `lzma_stream_header_encode(const lzma_stream_flags *, uint8_t *out)`
     // writes exactly twelve bytes and says so nowhere a generator can read.
-    let src = generate("lz", &symbols(&[("enc", sym(&["sized_buffer:unsigned char"], "int"))]))
-        .unwrap();
+    let src =
+        generate("lz", &symbols(&[("enc", sym(&["sized_buffer:unsigned char"], "int"))])).unwrap();
     assert!(src.contains("if (argv[0].tag != JADE_FFI_INT) return 1;"), "no count check:\n{src}");
     assert!(src.contains("calloc((size_t)(n_want0 ? n_want0 : 1)"), "not allocated:\n{src}");
     // All of it: the call reports a status, so there is nothing to trim by.
@@ -787,8 +803,8 @@ fn a_caller_sized_buffer_allocates_what_it_was_asked_for_and_hands_it_all_back()
 
 #[test]
 fn a_negative_or_absurd_count_is_refused_before_anything_is_allocated() {
-    let src = generate("lz", &symbols(&[("enc", sym(&["sized_buffer:unsigned char"], "int"))]))
-        .unwrap();
+    let src =
+        generate("lz", &symbols(&[("enc", sym(&["sized_buffer:unsigned char"], "int"))])).unwrap();
     assert!(src.contains("if (n_want0 < 0)"), "unguarded:\n{src}");
 }
 
@@ -903,7 +919,8 @@ fn a_struct_returned_by_value_is_read_straight_out_of_the_return() {
     // business, which is why this needs the header like the others.
     let fields: &[(&str, &str)] = &[("error", "int"), ("lowerBound", "int")];
     let s = sym(&["int"], "struct:BOUNDS");
-    let src = generate_with("z", &symbols(&[("bounds", s)]), &[("BOUNDS", fields)], &["z.h"]).unwrap();
+    let src =
+        generate_with("z", &symbols(&[("bounds", s)]), &[("BOUNDS", fields)], &["z.h"]).unwrap();
     assert!(src.contains("BOUNDS r = bounds("), "not received by value:\n{src}");
     assert!(src.contains("rs->vals[0].data.as_int = (int64_t)r.error;"), "field not read:\n{src}");
 }
@@ -923,8 +940,7 @@ fn a_struct_return_needs_its_fields_declared_and_a_header() {
 fn a_struct_return_shim_compiles_against_a_real_header() {
     let header = "typedef struct { size_t error; int lowerBound; int upperBound; } BOUNDS;\n\
                   extern BOUNDS bounds(int p);\n";
-    let fields: &[(&str, &str)] =
-        &[("error", "int"), ("lowerBound", "int"), ("upperBound", "int")];
+    let fields: &[(&str, &str)] = &[("error", "int"), ("lowerBound", "int"), ("upperBound", "int")];
     let syms = symbols(&[("bounds", sym(&["int"], "struct:BOUNDS"))]);
     let src = generate_with("z", &syms, &[("BOUNDS", fields)], &["fixture.h"]).unwrap();
     if let Err(e) = compiles(&src, &[("fixture.h", &format!("#include <stddef.h>\n{header}"))]) {
@@ -1013,7 +1029,8 @@ fn a_field_the_struct_does_not_have_fails_at_compile_time() {
     // the C compiler against the real header, not by writing at a wrong offset.
     let header = "typedef struct { int frames; } SF_INFO;\nextern void f(SF_INFO*);\n";
     let syms = symbols(&[("f", sym(&["out_struct:SF_INFO"], "nil"))]);
-    let src = generate_with("snd", &syms, &[("SF_INFO", &[("nosuch", "int")])], &["fixture.h"]).unwrap();
+    let src =
+        generate_with("snd", &syms, &[("SF_INFO", &[("nosuch", "int")])], &["fixture.h"]).unwrap();
     let err = compiles(&src, &[("fixture.h", header)]).expect_err("should not compile");
     assert!(err.contains("nosuch"), "the error should name the field: {err}");
 }
@@ -1027,7 +1044,10 @@ fn a_field_the_struct_does_not_have_fails_at_compile_time() {
 #[test]
 fn a_handle_argument_is_unwrapped_with_its_type_checked() {
     let src = generate("db", &symbols(&[("close", sym(&["handle<sqlite3>"], "int"))])).unwrap();
-    assert!(src.contains(r#"jade_shim_unwrap(&argv[0], "sqlite3", &h0)"#), "missing unwrap:\n{src}");
+    assert!(
+        src.contains(r#"jade_shim_unwrap(&argv[0], "sqlite3", &h0)"#),
+        "missing unwrap:\n{src}"
+    );
     assert!(src.contains("close((sqlite3*)h0)"), "should pass the unwrapped pointer:\n{src}");
     // Checked before the call, so the library never sees a wrong-typed pointer.
     let unwrap_at = src.find("jade_shim_unwrap").unwrap();
@@ -1057,11 +1077,17 @@ fn an_out_handle_takes_no_jade_argument_and_returns_the_handle() {
     let s = failing_sym(&["str", "out_handle:sqlite3"], "int", CFailure::Nonzero);
     let src = generate("db", &symbols(&[("sqlite3_open", s)])).unwrap();
 
-    assert!(src.contains("extern int64_t sqlite3_open(const char*, sqlite3**);"), "bad decl:\n{src}");
+    assert!(
+        src.contains("extern int64_t sqlite3_open(const char*, sqlite3**);"),
+        "bad decl:\n{src}"
+    );
     assert!(src.contains("if (argc != 1) return 1;"), "out-handle takes no Jade arg:\n{src}");
     assert!(src.contains("sqlite3* ohandle1 = NULL;"), "must start null:\n{src}");
     assert!(src.contains("&ohandle1"), "must pass its address:\n{src}");
-    assert!(src.contains(r#"jade_shim_handle((void*)ohandle1, "sqlite3")"#), "missing wrap:\n{src}");
+    assert!(
+        src.contains(r#"jade_shim_handle((void*)ohandle1, "sqlite3")"#),
+        "missing wrap:\n{src}"
+    );
     // The status is consumed by the failure convention, not returned.
     assert!(src.contains("if ((r) != 0) {"), "status should drive fails_when:\n{src}");
 }
@@ -1080,7 +1106,10 @@ fn a_handle_and_a_scalar_keep_their_argument_positions() {
     let s = sym(&["int", "handle<sqlite3>", "str"], "int");
     let src = generate("db", &symbols(&[("f", s)])).unwrap();
     assert!(src.contains(r#"jade_shim_unwrap(&argv[1], "sqlite3", &h1)"#), "wrong index:\n{src}");
-    assert!(src.contains("f(argv[0].data.as_int, (sqlite3*)h1, argv[2].data.as_str)"), "bad call:\n{src}");
+    assert!(
+        src.contains("f(argv[0].data.as_int, (sqlite3*)h1, argv[2].data.as_str)"),
+        "bad call:\n{src}"
+    );
 }
 
 #[test]
@@ -1088,11 +1117,9 @@ fn the_handle_helper_is_emitted_for_any_of_the_three_forms() {
     let plain = generate("m", &symbols(&[("f", sym(&["int"], "int"))])).unwrap();
     assert!(!plain.contains("jade_shim_handle"), "unused helper emitted:\n{plain}");
 
-    for spec in [
-        sym(&["handle<T>"], "int"),
-        sym(&["int"], "handle<T>"),
-        sym(&["out_handle:T"], "int"),
-    ] {
+    for spec in
+        [sym(&["handle<T>"], "int"), sym(&["int"], "handle<T>"), sym(&["out_handle:T"], "int")]
+    {
         let src = generate("z", &symbols(&[("f", spec)])).unwrap();
         assert!(src.contains("static JadeHandle* jade_shim_handle"), "helper missing:\n{src}");
     }
@@ -1117,7 +1144,14 @@ extern int sqlite3_close(sqlite3* db);
 "#;
     let syms = symbols(&[
         ("sqlite3_open", failing_sym(&["str", "out_handle:sqlite3"], "int", CFailure::Nonzero)),
-        ("sqlite3_prepare", failing_sym(&["handle<sqlite3>", "str", "out_handle:sqlite3_stmt"], "int", CFailure::Nonzero)),
+        (
+            "sqlite3_prepare",
+            failing_sym(
+                &["handle<sqlite3>", "str", "out_handle:sqlite3_stmt"],
+                "int",
+                CFailure::Nonzero,
+            ),
+        ),
         ("sqlite3_step", sym(&["handle<sqlite3_stmt>"], "int")),
         ("sqlite3_errmsg", sym(&["handle<sqlite3>"], "str")),
         ("sqlite3_dup", sym(&["handle<sqlite3>"], "handle<sqlite3>")),
@@ -1142,9 +1176,18 @@ fn a_callback_becomes_a_static_function_of_the_declared_shape() {
     // The library's own C types, not Jade's widened ones: this declares a
     // function pointer the library will store and call, so `int` must be `int`.
     // Widening it is not a truncation but an incompatible function pointer.
-    assert!(src.contains("static int jade_cbt_each(int a0, const char* a1)"), "bad trampoline:\n{src}");
-    assert!(src.contains("extern int64_t each(int64_t, int (*)(int, const char*));"), "bad decl:\n{src}");
-    assert!(src.contains("each(argv[0].data.as_int, jade_cbt_each)"), "should pass the trampoline:\n{src}");
+    assert!(
+        src.contains("static int jade_cbt_each(int a0, const char* a1)"),
+        "bad trampoline:\n{src}"
+    );
+    assert!(
+        src.contains("extern int64_t each(int64_t, int (*)(int, const char*));"),
+        "bad decl:\n{src}"
+    );
+    assert!(
+        src.contains("each(argv[0].data.as_int, jade_cbt_each)"),
+        "should pass the trampoline:\n{src}"
+    );
 }
 
 #[test]
@@ -1176,17 +1219,23 @@ fn a_raise_inside_a_callback_is_deferred_rather_than_unwound() {
 
 #[test]
 fn a_void_callback_and_a_zero_argument_callback_both_work() {
-    let src = generate("z", &symbols(&[
-        ("a", sym(&["callback:void(int)"], "int")),
-        ("b", sym(&["callback:int()"], "int")),
-    ])).unwrap();
+    let src = generate(
+        "z",
+        &symbols(&[
+            ("a", sym(&["callback:void(int)"], "int")),
+            ("b", sym(&["callback:int()"], "int")),
+        ]),
+    )
+    .unwrap();
     assert!(src.contains("static void jade_cbt_a(int a0)"), "void callback:\n{src}");
     assert!(src.contains("static int jade_cbt_b(void)"), "no-arg callback:\n{src}");
 }
 
 #[test]
 fn a_malformed_or_unrepresentable_callback_is_refused() {
-    for bad in ["callback:int", "callback:int(", "callback:int(struct foo)", "callback:double*(int)"] {
+    for bad in
+        ["callback:int", "callback:int(", "callback:int(struct foo)", "callback:double*(int)"]
+    {
         let s = sym(&[bad], "int");
         assert!(generate("z", &symbols(&[("f", s)])).is_err(), "should refuse {bad}");
     }
@@ -1211,9 +1260,13 @@ fn a_callback_shim_compiles() {
 
 #[test]
 fn an_out_scalar_takes_no_jade_argument_and_is_the_result() {
-    let src = generate("z", &symbols(&[("f", sym(&["int", "out_scalar:uint32_t"], "nil"))])).unwrap();
+    let src =
+        generate("z", &symbols(&[("f", sym(&["int", "out_scalar:uint32_t"], "nil"))])).unwrap();
     assert!(src.contains("extern void f(int64_t, uint32_t*);"), "bad decl:\n{src}");
-    assert!(src.contains("if (argc != 1) return 1;"), "the out must not consume an argument:\n{src}");
+    assert!(
+        src.contains("if (argc != 1) return 1;"),
+        "the out must not consume an argument:\n{src}"
+    );
     assert!(src.contains("uint32_t oscalar1 = (uint32_t)0;"), "must be a zeroed local:\n{src}");
     assert!(src.contains("&oscalar1"), "must pass its address:\n{src}");
     assert!(src.contains("out->tag = JADE_FFI_INT;"), "should come back as an int:\n{src}");
@@ -1232,7 +1285,10 @@ fn an_out_scalar_keeps_the_librarys_own_c_type() {
 fn an_inout_scalar_consumes_an_argument_and_is_seeded_from_it() {
     let src = generate("z", &symbols(&[("f", sym(&["int", "inout_scalar:int"], "nil"))])).unwrap();
     assert!(src.contains("if (argc != 2) return 1;"), "it does take an argument:\n{src}");
-    assert!(src.contains("if (argv[1].tag != JADE_FFI_INT) return 1;"), "missing tag check:\n{src}");
+    assert!(
+        src.contains("if (argv[1].tag != JADE_FFI_INT) return 1;"),
+        "missing tag check:\n{src}"
+    );
     assert!(src.contains("int oscalar1 = (int)argv[1].data.as_int;"), "must be seeded:\n{src}");
 }
 

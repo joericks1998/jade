@@ -10,18 +10,24 @@ fn s(x: &str) -> VmValue {
 fn get_present_var() {
     let name = "JADE_ENV_TEST_GET_PRESENT";
     #[allow(deprecated)]
-    unsafe { std::env::set_var(name, "hello") };
+    unsafe {
+        std::env::set_var(name, "hello")
+    };
     let out = env_get(&[s(name)]).unwrap();
     assert!(matches!(out, VmValue::Str(ref v) if v == "hello"));
     #[allow(deprecated)]
-    unsafe { std::env::remove_var(name) };
+    unsafe {
+        std::env::remove_var(name)
+    };
 }
 
 #[test]
 fn get_absent_var_is_nil() {
     let name = "JADE_ENV_TEST_GET_ABSENT_DEFINITELY_UNSET";
     #[allow(deprecated)]
-    unsafe { std::env::remove_var(name) };
+    unsafe {
+        std::env::remove_var(name)
+    };
     let out = env_get(&[s(name)]).unwrap();
     assert!(matches!(out, VmValue::Nil));
 }
@@ -34,7 +40,9 @@ fn set_round_trip_through_get() {
     let got = env_get(&[s(name)]).unwrap();
     assert!(matches!(got, VmValue::Str(ref v) if v == "world"));
     #[allow(deprecated)]
-    unsafe { std::env::remove_var(name) };
+    unsafe {
+        std::env::remove_var(name)
+    };
 }
 
 #[test]

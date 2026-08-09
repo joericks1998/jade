@@ -1,8 +1,8 @@
 use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::frontend::ast::Program;
 use crate::compiler::tir::TProgram;
+use crate::frontend::ast::Program;
 
 /// Monotonic counter making each test's temp directory name unique.  A
 /// timestamp is not sufficient: two tests starting in the same nanosecond tick
@@ -75,10 +75,7 @@ fn file_hash_matches_known_sha256() {
     let path = std::env::temp_dir().join(format!("jade-empty-{}.jde", std::process::id()));
     std::fs::write(&path, b"").unwrap();
     let h = file_hash(&path).unwrap();
-    assert_eq!(
-        hex(&h),
-        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-    );
+    assert_eq!(hex(&h), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
     let _ = std::fs::remove_file(&path);
 }
 

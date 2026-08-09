@@ -20,9 +20,7 @@ fn write_str_handles_ordinary_output() {
 #[test]
 fn recognises_the_macro_broken_pipe_panic() {
     // The exact message std's print macros produce when the reader is gone.
-    assert!(is_broken_pipe_message(
-        "failed printing to stdout: Broken pipe (os error 32)"
-    ));
+    assert!(is_broken_pipe_message("failed printing to stdout: Broken pipe (os error 32)"));
 }
 
 #[test]
@@ -36,9 +34,6 @@ fn does_not_swallow_unrelated_panics() {
         "failed printing to stdout: Permission denied (os error 13)",
         "",
     ] {
-        assert!(
-            !is_broken_pipe_message(message),
-            "wrongly treated as a broken pipe: {message:?}"
-        );
+        assert!(!is_broken_pipe_message(message), "wrongly treated as a broken pipe: {message:?}");
     }
 }

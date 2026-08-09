@@ -5,8 +5,8 @@
 //! its target through the public crate path (`crate::frontend::<sub>::*`).
 
 mod lexer {
-    use crate::frontend::lexer::*;
     use crate::frontend::error::JadeError;
+    use crate::frontend::lexer::*;
 
     fn kinds(src: &str) -> Vec<TokenKind> {
         tokenize(src).unwrap().into_iter().map(|t| t.kind).collect()
@@ -23,7 +23,10 @@ mod lexer {
     #[allow(clippy::approx_constant)]
     #[test]
     fn test_float_literal() {
-        assert_eq!(kinds("3.14"), vec![TokenKind::Float(3.14), TokenKind::Semicolon, TokenKind::Eof]);
+        assert_eq!(
+            kinds("3.14"),
+            vec![TokenKind::Float(3.14), TokenKind::Semicolon, TokenKind::Eof]
+        );
     }
 
     #[test]
@@ -36,8 +39,11 @@ mod lexer {
         assert_eq!(
             kinds("+ - * / %"),
             vec![
-                TokenKind::Plus, TokenKind::Minus, TokenKind::Star,
-                TokenKind::Slash, TokenKind::Percent,
+                TokenKind::Plus,
+                TokenKind::Minus,
+                TokenKind::Star,
+                TokenKind::Slash,
+                TokenKind::Percent,
                 TokenKind::Eof,
             ]
         );
@@ -48,8 +54,12 @@ mod lexer {
         assert_eq!(
             kinds("& | ^ ~ << >>"),
             vec![
-                TokenKind::Ampersand, TokenKind::Pipe, TokenKind::Caret,
-                TokenKind::Tilde, TokenKind::LtLt, TokenKind::GtGt,
+                TokenKind::Ampersand,
+                TokenKind::Pipe,
+                TokenKind::Caret,
+                TokenKind::Tilde,
+                TokenKind::LtLt,
+                TokenKind::GtGt,
                 TokenKind::Eof,
             ]
         );
@@ -60,8 +70,10 @@ mod lexer {
         assert_eq!(
             kinds("1\n2"),
             vec![
-                TokenKind::Integer(1), TokenKind::Semicolon,
-                TokenKind::Integer(2), TokenKind::Semicolon,
+                TokenKind::Integer(1),
+                TokenKind::Semicolon,
+                TokenKind::Integer(2),
+                TokenKind::Semicolon,
                 TokenKind::Eof,
             ]
         );
@@ -88,8 +100,10 @@ mod lexer {
         assert_eq!(
             kinds("1 +\n2"),
             vec![
-                TokenKind::Integer(1), TokenKind::Plus,
-                TokenKind::Integer(2), TokenKind::Semicolon,
+                TokenKind::Integer(1),
+                TokenKind::Plus,
+                TokenKind::Integer(2),
+                TokenKind::Semicolon,
                 TokenKind::Eof,
             ]
         );
@@ -162,9 +176,12 @@ mod lexer {
         assert_eq!(
             kinds("== != < > <= >="),
             vec![
-                TokenKind::EqEq, TokenKind::BangEq,
-                TokenKind::Lt,   TokenKind::Gt,
-                TokenKind::LtEq, TokenKind::GtEq,
+                TokenKind::EqEq,
+                TokenKind::BangEq,
+                TokenKind::Lt,
+                TokenKind::Gt,
+                TokenKind::LtEq,
+                TokenKind::GtEq,
                 TokenKind::Eof,
             ]
         );
@@ -175,8 +192,10 @@ mod lexer {
         assert_eq!(
             kinds("true\nfalse"),
             vec![
-                TokenKind::True,  TokenKind::Semicolon,
-                TokenKind::False, TokenKind::Semicolon,
+                TokenKind::True,
+                TokenKind::Semicolon,
+                TokenKind::False,
+                TokenKind::Semicolon,
                 TokenKind::Eof,
             ]
         );
@@ -187,9 +206,12 @@ mod lexer {
         assert_eq!(
             kinds("1 < 2 > 0"),
             vec![
-                TokenKind::Integer(1), TokenKind::Lt,
-                TokenKind::Integer(2), TokenKind::Gt,
-                TokenKind::Integer(0), TokenKind::Semicolon,
+                TokenKind::Integer(1),
+                TokenKind::Lt,
+                TokenKind::Integer(2),
+                TokenKind::Gt,
+                TokenKind::Integer(0),
+                TokenKind::Semicolon,
                 TokenKind::Eof,
             ]
         );
@@ -197,14 +219,14 @@ mod lexer {
 
     #[test]
     fn test_eq_eq_vs_equals() {
-        assert_eq!(kinds("=="), vec![TokenKind::EqEq,   TokenKind::Eof]);
-        assert_eq!(kinds("="),  vec![TokenKind::Equals, TokenKind::Eof]);
+        assert_eq!(kinds("=="), vec![TokenKind::EqEq, TokenKind::Eof]);
+        assert_eq!(kinds("="), vec![TokenKind::Equals, TokenKind::Eof]);
     }
 
     #[test]
     fn test_bang_eq_vs_bang() {
         assert_eq!(kinds("!="), vec![TokenKind::BangEq, TokenKind::Eof]);
-        assert_eq!(kinds("!"),  vec![TokenKind::Bang,   TokenKind::Eof]);
+        assert_eq!(kinds("!"), vec![TokenKind::Bang, TokenKind::Eof]);
     }
 
     // ── function / control flow tokens ───────────────────────────────────────
@@ -221,10 +243,7 @@ mod lexer {
 
     #[test]
     fn test_tokenize_if_else() {
-        assert_eq!(
-            kinds("if else"),
-            vec![TokenKind::If, TokenKind::Else, TokenKind::Eof]
-        );
+        assert_eq!(kinds("if else"), vec![TokenKind::If, TokenKind::Else, TokenKind::Eof]);
     }
 
     #[test]
@@ -249,8 +268,10 @@ mod lexer {
         assert_eq!(
             kinds("a, b"),
             vec![
-                TokenKind::Identifier("a".into()), TokenKind::Comma,
-                TokenKind::Identifier("b".into()), TokenKind::Semicolon,
+                TokenKind::Identifier("a".into()),
+                TokenKind::Comma,
+                TokenKind::Identifier("b".into()),
+                TokenKind::Semicolon,
                 TokenKind::Eof,
             ]
         );
@@ -263,10 +284,7 @@ mod lexer {
         // inserted semicolon before checking for `else`.
         assert_eq!(
             kinds("}\nelse"),
-            vec![
-                TokenKind::RBrace, TokenKind::Semicolon,
-                TokenKind::Else, TokenKind::Eof,
-            ]
+            vec![TokenKind::RBrace, TokenKind::Semicolon, TokenKind::Else, TokenKind::Eof,]
         );
     }
 
@@ -274,10 +292,7 @@ mod lexer {
     fn test_float_requires_digit_after_dot() {
         // `1.` tokenizes as Integer(1) followed by a standalone Dot — not a float literal.
         // Float literals require at least one digit after the decimal point: `1.0`.
-        assert_eq!(
-            kinds("1."),
-            vec![TokenKind::Integer(1), TokenKind::Dot, TokenKind::Eof]
-        );
+        assert_eq!(kinds("1."), vec![TokenKind::Integer(1), TokenKind::Dot, TokenKind::Eof]);
     }
 
     // ── struct / extend ───────────────────────────────────────────────────────
@@ -312,12 +327,8 @@ mod lexer {
     #[test]
     fn test_tokenize_squiggly_arrow_vs_tilde() {
         // `~` alone stays Tilde (bitwise NOT); only `~>` becomes TildeGt
-        assert_eq!(
-            kinds("~ ~>"),
-            vec![TokenKind::Tilde, TokenKind::TildeGt, TokenKind::Eof]
-        );
+        assert_eq!(kinds("~ ~>"), vec![TokenKind::Tilde, TokenKind::TildeGt, TokenKind::Eof]);
     }
-
 
     #[test]
     fn test_tokenize_dot() {
@@ -352,7 +363,11 @@ mod lexer {
     fn test_str_triple_quote_with_inner_quotes() {
         assert_eq!(
             kinds(r#""""he said "hi" to her""""#),
-            vec![TokenKind::Str(r#"he said "hi" to her"#.into()), TokenKind::Semicolon, TokenKind::Eof]
+            vec![
+                TokenKind::Str(r#"he said "hi" to her"#.into()),
+                TokenKind::Semicolon,
+                TokenKind::Eof
+            ]
         );
     }
 
@@ -476,8 +491,10 @@ mod lexer {
         assert_eq!(
             kinds("\"a\"\n\"b\""),
             vec![
-                TokenKind::Str("a".into()), TokenKind::Semicolon,
-                TokenKind::Str("b".into()), TokenKind::Semicolon,
+                TokenKind::Str("a".into()),
+                TokenKind::Semicolon,
+                TokenKind::Str("b".into()),
+                TokenKind::Semicolon,
                 TokenKind::Eof,
             ]
         );
@@ -811,8 +828,10 @@ mod parser {
     fn test_parse_precedence_compare_before_and() {
         let p = parse_src("let x = 1 < 2 && 3 > 0");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
-        let Expr::BinOp { op: BinOpKind::And, left, right, .. } = value else { panic!("expected And") };
-        assert!(matches!(left.as_ref(),  Expr::BinOp { op: BinOpKind::Lt, .. }));
+        let Expr::BinOp { op: BinOpKind::And, left, right, .. } = value else {
+            panic!("expected And")
+        };
+        assert!(matches!(left.as_ref(), Expr::BinOp { op: BinOpKind::Lt, .. }));
         assert!(matches!(right.as_ref(), Expr::BinOp { op: BinOpKind::Gt, .. }));
     }
 
@@ -855,7 +874,9 @@ mod parser {
 
     #[test]
     fn test_parse_if_with_else() {
-        let p = parse_src("fn f(x) {\n    if x {\n        return 1\n    } else {\n        return 0\n    }\n}");
+        let p = parse_src(
+            "fn f(x) {\n    if x {\n        return 1\n    } else {\n        return 0\n    }\n}",
+        );
         let Stmt::FnDef { body, .. } = &p.stmts[0] else { panic!() };
         let Stmt::If { then_body, else_body, .. } = &body[0] else { panic!() };
         assert_eq!(then_body.len(), 1);
@@ -897,7 +918,9 @@ mod parser {
     #[test]
     fn test_parse_nested_fn_ok() {
         // Nested function definitions are now a parse error.
-        let err = parse_src_err("fn outer() {\n    fn inner() {\n        return 1\n    }\n    return 2\n}");
+        let err = parse_src_err(
+            "fn outer() {\n    fn inner() {\n        return 1\n    }\n    return 2\n}",
+        );
         assert!(matches!(err, JadeError::NestedFunction { .. }));
     }
 
@@ -952,7 +975,9 @@ mod parser {
 
     #[test]
     fn test_parse_while_inside_fn() {
-        let p = parse_src("fn f(n) {\n    while n > 0 {\n        let n = n - 1\n    }\n    return n\n}");
+        let p = parse_src(
+            "fn f(n) {\n    while n > 0 {\n        let n = n - 1\n    }\n    return n\n}",
+        );
         let Stmt::FnDef { body, .. } = &p.stmts[0] else { panic!() };
         assert!(matches!(body[0], Stmt::While { .. }));
     }
@@ -997,7 +1022,9 @@ mod parser {
 
     #[test]
     fn test_parse_struct_def_mixed() {
-        let p = parse_src("struct Mixed {\n    x,\n    let label = \"origin\",\n    prompt sys = \"helpful\"\n}");
+        let p = parse_src(
+            "struct Mixed {\n    x,\n    let label = \"origin\",\n    prompt sys = \"helpful\"\n}",
+        );
         let Stmt::StructDef { fields, .. } = &p.stmts[0] else { panic!() };
         assert_eq!(fields.len(), 3);
         assert!(matches!(&fields[0], StructFieldDef::Required(n) if n == "x"));
@@ -1012,7 +1039,9 @@ mod parser {
         let p = parse_src("struct Wrapper {\n    let inner = Point { x: 0, y: 0 }\n}");
         let Stmt::StructDef { fields, .. } = &p.stmts[0] else { panic!() };
         assert_eq!(fields.len(), 1);
-        assert!(matches!(&fields[0], StructFieldDef::Let { name, default: Expr::StructLiteral { .. }, .. } if name == "inner"));
+        assert!(
+            matches!(&fields[0], StructFieldDef::Let { name, default: Expr::StructLiteral { .. }, .. } if name == "inner")
+        );
     }
 
     #[test]
@@ -1127,7 +1156,9 @@ mod parser {
     #[test]
     fn test_parse_extend_with_interface() {
         let p = parse_src("extend Foo: Bar {\n    fn go(self) {\n        return 1\n    }\n}");
-        let Stmt::ExtendBlock { type_name, interface_name, methods, .. } = &p.stmts[0] else { panic!() };
+        let Stmt::ExtendBlock { type_name, interface_name, methods, .. } = &p.stmts[0] else {
+            panic!()
+        };
         assert_eq!(type_name, "Foo");
         assert_eq!(interface_name.as_deref(), Some("Bar"));
         assert_eq!(methods.len(), 1);
@@ -1164,7 +1195,9 @@ mod parser {
     fn test_parse_prompt_deref_untyped() {
         let p = parse_src("let x = ?p");
         let Stmt::Let { value: Expr::PromptDeref { expr, constraint, .. }, .. } = &p.stmts[0]
-            else { panic!("expected Let with PromptDeref") };
+        else {
+            panic!("expected Let with PromptDeref")
+        };
         assert!(matches!(expr.as_ref(), Expr::Identifier { name, .. } if name == "p"));
         assert!(constraint.is_none());
     }
@@ -1175,10 +1208,12 @@ mod parser {
     #[test]
     fn test_parse_prompt_deref_typed_int() {
         let p = parse_src("let x = ?p |> int");
-        let Stmt::Let { value: Expr::Pipe { value, stage, .. }, .. } = &p.stmts[0]
-            else { panic!("expected Let with Pipe") };
-        let Expr::PromptDeref { expr, constraint, .. } = value.as_ref()
-            else { panic!("expected the piped value to be a PromptDeref") };
+        let Stmt::Let { value: Expr::Pipe { value, stage, .. }, .. } = &p.stmts[0] else {
+            panic!("expected Let with Pipe")
+        };
+        let Expr::PromptDeref { expr, constraint, .. } = value.as_ref() else {
+            panic!("expected the piped value to be a PromptDeref")
+        };
         assert!(matches!(expr.as_ref(), Expr::Identifier { name, .. } if name == "p"));
         assert!(constraint.is_none(), "the parser no longer sets a constraint");
         assert!(matches!(stage.as_ref(), Expr::Identifier { name, .. } if name == "int"));
@@ -1207,8 +1242,9 @@ mod parser {
     #[test]
     fn test_prefix_deref_on_bare_prompt_still_works() {
         let p = parse_src("let x = ?p");
-        let Stmt::Let { value: Expr::PromptDeref { expr, style, .. }, .. } = &p.stmts[0]
-            else { panic!("expected Let with PromptDeref") };
+        let Stmt::Let { value: Expr::PromptDeref { expr, style, .. }, .. } = &p.stmts[0] else {
+            panic!("expected Let with PromptDeref")
+        };
         assert!(matches!(expr.as_ref(), Expr::Identifier { name, .. } if name == "p"));
         assert_eq!(*style, DerefStyle::Prefix);
     }
@@ -1218,9 +1254,12 @@ mod parser {
         for src in ["let x = obj.(?system)", "let x = obj~>system"] {
             let p = parse_src(src);
             let Stmt::Let { value: Expr::PromptDeref { expr, constraint, .. }, .. } = &p.stmts[0]
-                else { panic!("expected Let with PromptDeref for {src}") };
-            let Expr::FieldAccess { object, field, .. } = expr.as_ref()
-                else { panic!("expected FieldAccess for {src}") };
+            else {
+                panic!("expected Let with PromptDeref for {src}")
+            };
+            let Expr::FieldAccess { object, field, .. } = expr.as_ref() else {
+                panic!("expected FieldAccess for {src}")
+            };
             assert!(matches!(object.as_ref(), Expr::Identifier { name, .. } if name == "obj"));
             assert_eq!(field, "system");
             assert!(constraint.is_none());
@@ -1232,21 +1271,23 @@ mod parser {
         // `.` followed by an identifier must still be ordinary field access —
         // only `.(?` diverts into a deref.
         let p = parse_src("let x = obj.system");
-        let Stmt::Let { value: Expr::FieldAccess { field, .. }, .. } = &p.stmts[0]
-            else { panic!("expected plain FieldAccess") };
+        let Stmt::Let { value: Expr::FieldAccess { field, .. }, .. } = &p.stmts[0] else {
+            panic!("expected plain FieldAccess")
+        };
         assert_eq!(field, "system");
     }
 
     #[test]
     fn test_deref_records_its_surface_style() {
         for (src, want) in [
-            ("let x = ?p",          DerefStyle::Prefix),
-            ("let x = obj.(?p)",    DerefStyle::DotParen),
-            ("let x = obj~>p",      DerefStyle::Squiggly),
+            ("let x = ?p", DerefStyle::Prefix),
+            ("let x = obj.(?p)", DerefStyle::DotParen),
+            ("let x = obj~>p", DerefStyle::Squiggly),
         ] {
             let p = parse_src(src);
-            let Stmt::Let { value: Expr::PromptDeref { style, .. }, .. } = &p.stmts[0]
-                else { panic!("expected Let with PromptDeref for {src}") };
+            let Stmt::Let { value: Expr::PromptDeref { style, .. }, .. } = &p.stmts[0] else {
+                panic!("expected Let with PromptDeref for {src}")
+            };
             assert_eq!(*style, want, "wrong style for {src}");
         }
     }
@@ -1259,9 +1300,12 @@ mod parser {
         for src in ["let x = obj.(?p)", "let x = obj~>p"] {
             let p = parse_src(src);
             let Stmt::Let { value: Expr::PromptDeref { expr, constraint, .. }, .. } = &p.stmts[0]
-                else { panic!("expected PromptDeref for {src}") };
-            let Expr::FieldAccess { object, field, .. } = expr.as_ref()
-                else { panic!("expected FieldAccess for {src}") };
+            else {
+                panic!("expected PromptDeref for {src}")
+            };
+            let Expr::FieldAccess { object, field, .. } = expr.as_ref() else {
+                panic!("expected FieldAccess for {src}")
+            };
             assert!(matches!(object.as_ref(), Expr::Identifier { name, .. } if name == "obj"));
             assert_eq!(field, "p");
             assert!(constraint.is_none());
@@ -1275,10 +1319,12 @@ mod parser {
     fn test_parse_postfix_deref_typed() {
         for src in ["let x = obj.(?field) |> int", "let x = obj~>field |> int"] {
             let p = parse_src(src);
-            let Stmt::Let { value: Expr::Pipe { value, stage, .. }, .. } = &p.stmts[0]
-                else { panic!("expected Let with Pipe for {src}") };
-            let Expr::PromptDeref { expr, constraint, .. } = value.as_ref()
-                else { panic!("expected a PromptDeref for {src}") };
+            let Stmt::Let { value: Expr::Pipe { value, stage, .. }, .. } = &p.stmts[0] else {
+                panic!("expected Let with Pipe for {src}")
+            };
+            let Expr::PromptDeref { expr, constraint, .. } = value.as_ref() else {
+                panic!("expected a PromptDeref for {src}")
+            };
             assert!(matches!(expr.as_ref(), Expr::FieldAccess { field, .. } if field == "field"));
             assert!(constraint.is_none(), "the parser no longer sets a constraint");
             assert!(matches!(stage.as_ref(), Expr::Identifier { name, .. } if name == "int"));
@@ -1290,10 +1336,12 @@ mod parser {
         // The point of the sugar: the deref stays at the tail of a chain.
         for src in ["let x = make(1).inner.(?p)", "let x = make(1).inner~>p"] {
             let p = parse_src(src);
-            let Stmt::Let { value: Expr::PromptDeref { expr, .. }, .. } = &p.stmts[0]
-                else { panic!("expected Let with PromptDeref for {src}") };
-            let Expr::FieldAccess { object, field, .. } = expr.as_ref()
-                else { panic!("expected FieldAccess for {src}") };
+            let Stmt::Let { value: Expr::PromptDeref { expr, .. }, .. } = &p.stmts[0] else {
+                panic!("expected Let with PromptDeref for {src}")
+            };
+            let Expr::FieldAccess { object, field, .. } = expr.as_ref() else {
+                panic!("expected FieldAccess for {src}")
+            };
             assert_eq!(field, "p");
             assert!(matches!(object.as_ref(), Expr::FieldAccess { field, .. } if field == "inner"));
         }
@@ -1329,10 +1377,7 @@ mod parser {
         let p = parse_src("let x = ?p |> int");
         let Stmt::Let { value, .. } = &p.stmts[0] else { panic!("expected Let") };
         let Expr::Pipe { value: piped, .. } = value else { panic!("expected Pipe, got {value:?}") };
-        assert!(matches!(
-            piped.as_ref(),
-            Expr::PromptDeref { constraint: None, .. }
-        ));
+        assert!(matches!(piped.as_ref(), Expr::PromptDeref { constraint: None, .. }));
     }
 
     #[test]
@@ -1350,16 +1395,18 @@ mod parser {
     #[test]
     fn test_parse_dict_empty() {
         let p = parse_src("let d = {}");
-        let Stmt::Let { value: Expr::Dict { entries, .. }, .. } = &p.stmts[0]
-            else { panic!("expected Let with Dict") };
+        let Stmt::Let { value: Expr::Dict { entries, .. }, .. } = &p.stmts[0] else {
+            panic!("expected Let with Dict")
+        };
         assert!(entries.is_empty());
     }
 
     #[test]
     fn test_parse_dict_single_entry() {
         let p = parse_src(r#"let d = {"key": 1}"#);
-        let Stmt::Let { value: Expr::Dict { entries, .. }, .. } = &p.stmts[0]
-            else { panic!("expected Let with Dict") };
+        let Stmt::Let { value: Expr::Dict { entries, .. }, .. } = &p.stmts[0] else {
+            panic!("expected Let with Dict")
+        };
         assert_eq!(entries.len(), 1);
         assert!(matches!(&entries[0].0, Expr::Str { value, .. } if value == "key"));
         assert!(matches!(&entries[0].1, Expr::Integer { value: 1, .. }));
@@ -1368,16 +1415,18 @@ mod parser {
     #[test]
     fn test_parse_dict_multiple_entries() {
         let p = parse_src(r#"let d = {"a": 1, "b": 2}"#);
-        let Stmt::Let { value: Expr::Dict { entries, .. }, .. } = &p.stmts[0]
-            else { panic!("expected Let with Dict") };
+        let Stmt::Let { value: Expr::Dict { entries, .. }, .. } = &p.stmts[0] else {
+            panic!("expected Let with Dict")
+        };
         assert_eq!(entries.len(), 2);
     }
 
     #[test]
     fn test_parse_dict_trailing_comma() {
         let p = parse_src(r#"let d = {"a": 1,}"#);
-        let Stmt::Let { value: Expr::Dict { entries, .. }, .. } = &p.stmts[0]
-            else { panic!("expected Let with Dict") };
+        let Stmt::Let { value: Expr::Dict { entries, .. }, .. } = &p.stmts[0] else {
+            panic!("expected Let with Dict")
+        };
         assert_eq!(entries.len(), 1);
     }
 
@@ -1385,8 +1434,9 @@ mod parser {
     fn test_parse_dict_identifier_key() {
         // Variable key: the key expression is an identifier
         let p = parse_src("let d = {k: 1}");
-        let Stmt::Let { value: Expr::Dict { entries, .. }, .. } = &p.stmts[0]
-            else { panic!("expected Let with Dict") };
+        let Stmt::Let { value: Expr::Dict { entries, .. }, .. } = &p.stmts[0] else {
+            panic!("expected Let with Dict")
+        };
         assert_eq!(entries.len(), 1);
         assert!(matches!(&entries[0].0, Expr::Identifier { name, .. } if name == "k"));
     }
@@ -1559,7 +1609,9 @@ mod parser {
         let p = parse_src("@style::tagged\nprompt p = \"ask\"");
         let Stmt::PromptDecl { body, .. } = &p.stmts[0] else { panic!() };
         let Expr::Call { callee, .. } = body else { panic!() };
-        let Expr::FieldAccess { object, field, .. } = &**callee else { panic!("not a field access") };
+        let Expr::FieldAccess { object, field, .. } = &**callee else {
+            panic!("not a field access")
+        };
         assert_eq!(field, "tagged");
         assert!(matches!(&**object, Expr::Identifier { name, .. } if name == "style"));
     }
@@ -1804,11 +1856,8 @@ mod ast {
 
     #[test]
     fn test_interface_method_fields() {
-        let m = InterfaceMethod {
-            name: "to_str".into(),
-            params: vec!["self".into()],
-            span: span(),
-        };
+        let m =
+            InterfaceMethod { name: "to_str".into(), params: vec!["self".into()], span: span() };
         assert_eq!(m.name, "to_str");
         assert_eq!(m.params, vec!["self".to_string()]);
     }
@@ -1903,10 +1952,7 @@ mod error {
     #[test]
     fn test_display_unexpected_char() {
         let e = JadeError::UnexpectedChar { ch: '$', span: span(2, 5) };
-        assert_eq!(
-            e.to_string(),
-            "[2:5] syntax error: unexpected character '$'"
-        );
+        assert_eq!(e.to_string(), "[2:5] syntax error: unexpected character '$'");
     }
 
     #[test]
@@ -1916,10 +1962,7 @@ mod error {
             got: "integer".into(),
             span: span(1, 4),
         };
-        assert_eq!(
-            e.to_string(),
-            "[1:4] syntax error: expected identifier, found integer"
-        );
+        assert_eq!(e.to_string(), "[1:4] syntax error: expected identifier, found integer");
     }
 
     #[test]
@@ -1943,10 +1986,7 @@ mod error {
     #[test]
     fn test_display_arity_mismatch() {
         let e = JadeError::ArityMismatch { expected: 1, got: 0, span: span(8, 3) };
-        assert_eq!(
-            e.to_string(),
-            "[8:3] wrong number of arguments: expected 1, got 0"
-        );
+        assert_eq!(e.to_string(), "[8:3] wrong number of arguments: expected 1, got 0");
     }
 
     #[test]
@@ -1991,9 +2031,7 @@ mod error {
     #[test]
     fn test_display_import_alias_removed() {
         let e = JadeError::ImportAlias { span: span(1, 1) };
-        assert!(e.to_string().starts_with(
-            "[1:1] the `as` import alias was removed"
-        ), "got: {}", e);
+        assert!(e.to_string().starts_with("[1:1] the `as` import alias was removed"), "got: {}", e);
     }
 
     #[test]
@@ -2001,10 +2039,7 @@ mod error {
         // `InFile` has no span of its own; it prefixes the wrapped cause's message.
         let inner = JadeError::DivisionByZero { span: span(7, 3) };
         let e = JadeError::InFile { file: "helpers.jde".into(), cause: Box::new(inner) };
-        assert_eq!(
-            e.to_string(),
-            "in \"helpers.jde\": [7:3] division by zero"
-        );
+        assert_eq!(e.to_string(), "in \"helpers.jde\": [7:3] division by zero");
     }
 
     #[test]
@@ -2012,10 +2047,7 @@ mod error {
         let inner = JadeError::UndefinedVariable { name: "x".into(), span: span(1, 1) };
         let mid = JadeError::InFile { file: "b.jde".into(), cause: Box::new(inner) };
         let outer = JadeError::InFile { file: "a.jde".into(), cause: Box::new(mid) };
-        assert_eq!(
-            outer.to_string(),
-            "in \"a.jde\": in \"b.jde\": [1:1] undefined variable 'x'"
-        );
+        assert_eq!(outer.to_string(), "in \"a.jde\": in \"b.jde\": [1:1] undefined variable 'x'");
     }
 
     // ── `Result` alias ───────────────────────────────────────────────────────

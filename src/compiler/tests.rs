@@ -6,10 +6,9 @@
 //! test scope clean.
 #![allow(clippy::all)]
 
-
 mod type_infer {
-    use crate::compiler::type_infer::*;
     use crate::compiler::tir::{JadeType, TProgram, TStmt};
+    use crate::compiler::type_infer::*;
     use crate::frontend::error::{JadeError, Result};
     use crate::frontend::{lexer, parser};
 
@@ -179,7 +178,7 @@ mod type_infer {
         // Regression for the v1.1.10 fix (and guards against re-widening `!`
         // to accept non-bool concrete operands).
         for (src, label) in [
-            ("fn f(x) {\n return !x\n}",       "not"),
+            ("fn f(x) {\n return !x\n}", "not"),
             ("fn f(x, y) {\n return x && y\n}", "and"),
             ("fn f(x, y) {\n return x || y\n}", "or"),
         ] {
@@ -478,8 +477,9 @@ mod type_infer {
     fn a_type_name_stage_on_a_deref_becomes_an_output_type() {
         let tp = infer_ok("prompt p = \"x\"\nlet n = ?p |> int");
         let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!("expected Let") };
-        let TExprKind::PromptDeref { output_type, grammar_expr, .. } = &value.kind
-            else { panic!("expected PromptDeref, got {:?}", value.kind) };
+        let TExprKind::PromptDeref { output_type, grammar_expr, .. } = &value.kind else {
+            panic!("expected PromptDeref, got {:?}", value.kind)
+        };
         assert_eq!(output_type.as_deref(), Some("int"));
         assert!(grammar_expr.is_none());
         assert_eq!(value.ty, JadeType::Int);
@@ -492,8 +492,9 @@ mod type_infer {
     fn a_struct_name_stage_on_a_deref_is_a_type_not_a_call() {
         let tp = infer_ok("struct City { name }\nprompt p = \"x\"\nlet c = ?p |> City");
         let TStmt::Let { value, .. } = &tp.stmts[2] else { panic!("expected Let") };
-        let TExprKind::PromptDeref { output_type, .. } = &value.kind
-            else { panic!("expected PromptDeref, got {:?}", value.kind) };
+        let TExprKind::PromptDeref { output_type, .. } = &value.kind else {
+            panic!("expected PromptDeref, got {:?}", value.kind)
+        };
         assert_eq!(output_type.as_deref(), Some("City"));
         // `parse_type_name` maps only the builtin keywords, so a struct-typed
         // dereference is statically `Unknown` and its fields are checked at run
@@ -504,12 +505,12 @@ mod type_infer {
 
     #[test]
     fn a_grammar_stage_on_a_deref_becomes_a_grammar_expr() {
-        let tp = infer_ok(
-            "let g = Grammar.new('\"yes\" | \"no\"')\nprompt p = \"x\"\nlet r = ?p |> g",
-        );
+        let tp =
+            infer_ok("let g = Grammar.new('\"yes\" | \"no\"')\nprompt p = \"x\"\nlet r = ?p |> g");
         let TStmt::Let { value, .. } = &tp.stmts[2] else { panic!("expected Let") };
-        let TExprKind::PromptDeref { output_type, grammar_expr, .. } = &value.kind
-            else { panic!("expected PromptDeref, got {:?}", value.kind) };
+        let TExprKind::PromptDeref { output_type, grammar_expr, .. } = &value.kind else {
+            panic!("expected PromptDeref, got {:?}", value.kind)
+        };
         assert!(output_type.is_none());
         assert!(grammar_expr.is_some());
         assert_eq!(value.ty, JadeType::Str);
@@ -524,8 +525,9 @@ mod type_infer {
             "fn double(x) { return x * 2 }\nprompt p = \"x\"\nlet n = ?p |> int |> double",
         );
         let TStmt::Let { value, .. } = &tp.stmts[2] else { panic!("expected Let") };
-        let TExprKind::Call { args, .. } = &value.kind
-            else { panic!("expected the outer stage to be a Call, got {:?}", value.kind) };
+        let TExprKind::Call { args, .. } = &value.kind else {
+            panic!("expected the outer stage to be a Call, got {:?}", value.kind)
+        };
         assert_eq!(args.len(), 1, "the piped value is the sole argument");
         assert_eq!(args[0].ty, JadeType::Int, "double() receives an int, not the reply text");
     }
@@ -615,8 +617,9 @@ mod type_infer {
     fn a_char_stage_on_a_deref_constrains_rather_than_converts() {
         let tp = infer_ok("prompt p = \"x\"\nlet c = ?p |> char");
         let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!("expected Let") };
-        let TExprKind::PromptDeref { output_type, .. } = &value.kind
-            else { panic!("expected PromptDeref, got {:?}", value.kind) };
+        let TExprKind::PromptDeref { output_type, .. } = &value.kind else {
+            panic!("expected PromptDeref, got {:?}", value.kind)
+        };
         assert_eq!(output_type.as_deref(), Some("char"));
         assert_eq!(value.ty, JadeType::Char);
     }
@@ -665,20 +668,21 @@ mod type_infer {
 
     #[test]
     fn a_generator_may_return_bare_to_stop_early() {
-        let tp = infer_ok("fn g(n) {\n    yield 1\n    if n > 0 {\n        return\n    }\n    yield 2\n}\nlet s = g(0)");
+        let tp = infer_ok(
+            "fn g(n) {\n    yield 1\n    if n > 0 {\n        return\n    }\n    yield 2\n}\nlet s = g(0)",
+        );
         let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!("expected Let") };
         assert!(matches!(value.ty, JadeType::Stream(_)), "got {:?}", value.ty);
     }
 
     #[test]
     fn a_user_function_stage_beats_a_grammar_variable_of_the_same_name() {
-        let tp = infer_ok(
-            "fn shout(s) { return s }\nprompt p = \"x\"\nlet r = ?p |> shout",
-        );
+        let tp = infer_ok("fn shout(s) { return s }\nprompt p = \"x\"\nlet r = ?p |> shout");
         let TStmt::Let { value, .. } = &tp.stmts[2] else { panic!("expected Let") };
         assert!(
             matches!(value.kind, TExprKind::Call { .. }),
-            "a function stage applies, it does not constrain: {:?}", value.kind,
+            "a function stage applies, it does not constrain: {:?}",
+            value.kind,
         );
     }
 
@@ -749,74 +753,75 @@ mod gbnf {
     use crate::frontend::ast::StructFieldDef;
     use std::collections::HashMap;
 
-        fn no_defs() -> HashMap<String, Vec<StructFieldDef>> { HashMap::new() }
+    fn no_defs() -> HashMap<String, Vec<StructFieldDef>> {
+        HashMap::new()
+    }
 
-        #[test]
-        fn int_grammar() {
-            let g = grammar_for("int", &no_defs()).unwrap();
-            assert!(g.contains("root ::="));
-            assert!(g.contains("[0-9]"));
-        }
+    #[test]
+    fn int_grammar() {
+        let g = grammar_for("int", &no_defs()).unwrap();
+        assert!(g.contains("root ::="));
+        assert!(g.contains("[0-9]"));
+    }
 
-        #[test]
-        fn bool_grammar() {
-            let g = grammar_for("bool", &no_defs()).unwrap();
-            assert!(g.contains("\"true\""), "should match true");
-            assert!(g.contains("\"false\""), "should match false");
-            assert!(g.contains(r"[ \t\n\r]*"), "should allow trailing whitespace");
-        }
+    #[test]
+    fn bool_grammar() {
+        let g = grammar_for("bool", &no_defs()).unwrap();
+        assert!(g.contains("\"true\""), "should match true");
+        assert!(g.contains("\"false\""), "should match false");
+        assert!(g.contains(r"[ \t\n\r]*"), "should allow trailing whitespace");
+    }
 
-        #[test]
-        fn str_is_none() {
-            assert!(grammar_for("str", &no_defs()).is_none());
-        }
+    #[test]
+    fn str_is_none() {
+        assert!(grammar_for("str", &no_defs()).is_none());
+    }
 
-        #[test]
-        fn unknown_type_is_none() {
-            assert!(grammar_for("UnknownType", &no_defs()).is_none());
-        }
+    #[test]
+    fn unknown_type_is_none() {
+        assert!(grammar_for("UnknownType", &no_defs()).is_none());
+    }
 
-        #[test]
-        fn struct_grammar_is_prefix_with_free_rest() {
-            let fields = vec![
-                StructFieldDef::Required("name".to_string()),
-                StructFieldDef::Required("age".to_string()),
-            ];
-            let mut defs = HashMap::new();
-            defs.insert("Person".to_string(), fields);
-            let g = grammar_for("Person", &defs).unwrap();
-            assert!(g.contains("\"{\""), "grammar should anchor opening brace");
-            // Must allow a continuation after the brace — an anchor-only grammar
-            // (`root ::= "{"`) forces premature EOG and never coerces.
-            assert!(g.contains("rest"), "grammar must permit a continuation after `{{`");
-            assert_ne!(g.trim(), "root ::= \"{\"", "grammar must not be anchor-only");
-        }
+    #[test]
+    fn struct_grammar_is_prefix_with_free_rest() {
+        let fields = vec![
+            StructFieldDef::Required("name".to_string()),
+            StructFieldDef::Required("age".to_string()),
+        ];
+        let mut defs = HashMap::new();
+        defs.insert("Person".to_string(), fields);
+        let g = grammar_for("Person", &defs).unwrap();
+        assert!(g.contains("\"{\""), "grammar should anchor opening brace");
+        // Must allow a continuation after the brace — an anchor-only grammar
+        // (`root ::= "{"`) forces premature EOG and never coerces.
+        assert!(g.contains("rest"), "grammar must permit a continuation after `{{`");
+        assert_ne!(g.trim(), "root ::= \"{\"", "grammar must not be anchor-only");
+    }
 
-        #[test]
-        fn array_grammar() {
-            let g = grammar_for("array", &no_defs()).unwrap();
-            assert!(g.starts_with("root"));
-            assert!(g.contains("\"[\""), "should anchor opening bracket");
-            assert!(g.contains("rest"), "grammar must permit a continuation after `[`");
-            assert_ne!(g.trim(), "root ::= \"[\"", "grammar must not be anchor-only");
-        }
+    #[test]
+    fn array_grammar() {
+        let g = grammar_for("array", &no_defs()).unwrap();
+        assert!(g.starts_with("root"));
+        assert!(g.contains("\"[\""), "should anchor opening bracket");
+        assert!(g.contains("rest"), "grammar must permit a continuation after `[`");
+        assert_ne!(g.trim(), "root ::= \"[\"", "grammar must not be anchor-only");
+    }
 
-        #[test]
-        fn dict_grammar() {
-            let g = grammar_for("dict", &no_defs()).unwrap();
-            assert!(g.starts_with("root"));
-            assert!(g.contains("\"{\""), "should anchor opening brace");
-            assert!(g.contains("rest"), "grammar must permit a continuation after `{{`");
-            assert_ne!(g.trim(), "root ::= \"{\"", "grammar must not be anchor-only");
-        }
-
+    #[test]
+    fn dict_grammar() {
+        let g = grammar_for("dict", &no_defs()).unwrap();
+        assert!(g.starts_with("root"));
+        assert!(g.contains("\"{\""), "should anchor opening brace");
+        assert!(g.contains("rest"), "grammar must permit a continuation after `{{`");
+        assert_ne!(g.trim(), "root ::= \"{\"", "grammar must not be anchor-only");
+    }
 }
 
 // ─── NEW TESTS ──────────────────────────────────────────────────────────────
 
 mod emit {
-    use crate::compiler::emit::{self, CompiledProgram};
     use crate::bytecode::Instr;
+    use crate::compiler::emit::{self, CompiledProgram};
     use crate::compiler::type_infer;
     use crate::frontend::error::Result;
     use crate::frontend::{lexer, parser};
@@ -858,7 +863,9 @@ mod emit {
 
     #[test]
     fn a_namespaced_decorator_on_a_fn_loads_the_module_then_the_field() {
-        let cp = compile_ok("fn tag(f) {\n    return f\n}\n@tools::register\nfn go() {\n    return 1\n}");
+        let cp = compile_ok(
+            "fn tag(f) {\n    return f\n}\n@tools::register\nfn go() {\n    return 1\n}",
+        );
         assert!(top_fields(&cp).contains(&"register".to_string()));
     }
 
@@ -867,8 +874,9 @@ mod emit {
         // This is the regression: the async copy emitted a bare
         // GetGlobal("tools.register"), looking for a global whose name contains
         // a dot — which nothing can define.
-        let cp =
-            compile_ok("fn tag(f) {\n    return f\n}\n@tools::register\nasync fn go() {\n    return 1\n}");
+        let cp = compile_ok(
+            "fn tag(f) {\n    return f\n}\n@tools::register\nasync fn go() {\n    return 1\n}",
+        );
         assert!(top_fields(&cp).contains(&"register".to_string()));
     }
 
@@ -885,10 +893,14 @@ mod emit {
     #[test]
     fn emit_int_let_loads_int_and_sets_global() {
         let cp = compile_ok("let x = 7");
-        assert!(count_top(&cp, |i| matches!(i, Instr::LoadInt(_, 7))) >= 1,
-            "expected a LoadInt(_, 7)");
-        assert!(count_top(&cp, |i| matches!(i, Instr::SetGlobal(n, _) if n == "x")) == 1,
-            "expected exactly one SetGlobal(x)");
+        assert!(
+            count_top(&cp, |i| matches!(i, Instr::LoadInt(_, 7))) >= 1,
+            "expected a LoadInt(_, 7)"
+        );
+        assert!(
+            count_top(&cp, |i| matches!(i, Instr::SetGlobal(n, _) if n == "x")) == 1,
+            "expected exactly one SetGlobal(x)"
+        );
     }
 
     #[test]
@@ -910,10 +922,15 @@ mod emit {
         // Both operands are statically Int → the emitter must pick the typed op,
         // not the dynamic BinOp fallback.
         let cp = compile_ok("let x = 1 + 2");
-        assert!(count_top(&cp, |i| matches!(i, Instr::AddInt(..))) >= 1,
-            "int + int must lower to AddInt");
-        assert_eq!(count_top(&cp, |i| matches!(i, Instr::BinOp(..))), 0,
-            "typed add must not fall back to dynamic BinOp");
+        assert!(
+            count_top(&cp, |i| matches!(i, Instr::AddInt(..))) >= 1,
+            "int + int must lower to AddInt"
+        );
+        assert_eq!(
+            count_top(&cp, |i| matches!(i, Instr::BinOp(..))),
+            0,
+            "typed add must not fall back to dynamic BinOp"
+        );
     }
 
     #[test]
@@ -926,8 +943,10 @@ mod emit {
     fn emit_int_float_mix_promotes_with_inttofloat() {
         // int + float → int operand widened before AddFloat.
         let cp = compile_ok("let x = 1 + 2.0");
-        assert!(count_top(&cp, |i| matches!(i, Instr::IntToFloat(..))) >= 1,
-            "mixed arithmetic must widen the int");
+        assert!(
+            count_top(&cp, |i| matches!(i, Instr::IntToFloat(..))) >= 1,
+            "mixed arithmetic must widen the int"
+        );
         assert!(count_top(&cp, |i| matches!(i, Instr::AddFloat(..))) >= 1);
     }
 
@@ -940,8 +959,10 @@ mod emit {
     #[test]
     fn emit_if_produces_conditional_jump() {
         let cp = compile_ok("let x = 0\nif true { x = 1 }");
-        assert!(count_top(&cp, |i| matches!(i, Instr::JumpIfFalse(..))) >= 1,
-            "an if must emit a JumpIfFalse guard");
+        assert!(
+            count_top(&cp, |i| matches!(i, Instr::JumpIfFalse(..))) >= 1,
+            "an if must emit a JumpIfFalse guard"
+        );
     }
 
     #[test]
@@ -969,8 +990,10 @@ mod emit {
     #[test]
     fn emit_call_of_builtin_emits_call_instr() {
         let cp = compile_ok(r#"print("hi")"#);
-        assert!(count_top(&cp, |i| matches!(i, Instr::Call(..))) >= 1,
-            "a function call must lower to a Call instruction");
+        assert!(
+            count_top(&cp, |i| matches!(i, Instr::Call(..))) >= 1,
+            "a function call must lower to a Call instruction"
+        );
     }
 
     #[test]
@@ -994,12 +1017,13 @@ mod emit {
     }
 }
 
-
 mod tir {
     use crate::compiler::tir::{JadeType, TExpr, TExprKind, TProgram, TStmt};
     use crate::frontend::error::Span;
 
-    fn sp() -> Span { Span { line: 1, col: 1 } }
+    fn sp() -> Span {
+        Span { line: 1, col: 1 }
+    }
 
     #[test]
     fn jadetype_equality_and_clone() {
@@ -1063,14 +1087,9 @@ mod tir {
 
     #[test]
     fn texpr_and_program_serde_roundtrip() {
-        let expr = TExpr {
-            kind: TExprKind::Integer(42),
-            ty: JadeType::Int,
-            span: sp(),
-        };
-        let prog = TProgram {
-            stmts: vec![TStmt::Let { name: "x".into(), value: expr, span: sp() }],
-        };
+        let expr = TExpr { kind: TExprKind::Integer(42), ty: JadeType::Int, span: sp() };
+        let prog =
+            TProgram { stmts: vec![TStmt::Let { name: "x".into(), value: expr, span: sp() }] };
         let json = serde_json::to_string(&prog).expect("serialize program");
         let back: TProgram = serde_json::from_str(&json).expect("deserialize program");
         assert_eq!(back.stmts.len(), 1);
@@ -1089,7 +1108,11 @@ mod tir {
 
     #[test]
     fn texpr_carries_type_and_span() {
-        let e = TExpr { kind: TExprKind::Bool(true), ty: JadeType::Bool, span: Span { line: 4, col: 9 } };
+        let e = TExpr {
+            kind: TExprKind::Bool(true),
+            ty: JadeType::Bool,
+            span: Span { line: 4, col: 9 },
+        };
         assert_eq!(e.ty, JadeType::Bool);
         assert_eq!(e.span.line, 4);
         assert_eq!(e.span.col, 9);

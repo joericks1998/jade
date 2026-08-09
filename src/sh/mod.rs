@@ -1,8 +1,9 @@
 use jade_runtime::coll::DictObj;
 
 use crate::{
-    compiler::{tir::JadeType, type_infer::TypeContext}, vm::VmValue,
+    compiler::{tir::JadeType, type_infer::TypeContext},
     frontend::error::{JadeError, Result, Span},
+    vm::VmValue,
 };
 
 use crate::builtins::{BuiltinFn, Package};
@@ -17,7 +18,7 @@ fn require_str<'a>(args: &'a [VmValue], pos: usize, fn_name: &str) -> Result<&'a
     match args.get(pos) {
         Some(VmValue::Str(s)) => Ok(s.as_str()),
         Some(_) => Err(JadeError::TypeError { message: fn_name.to_string(), span: ZERO }),
-        None    => Err(JadeError::ArityMismatch { expected: pos + 1, got: args.len(), span: ZERO }),
+        None => Err(JadeError::ArityMismatch { expected: pos + 1, got: args.len(), span: ZERO }),
     }
 }
 
@@ -78,8 +79,8 @@ fn sh_output(args: &[VmValue]) -> Result<VmValue> {
     }
     refuse_if_tainted(args, 0, "sh.output(cmd)")?;
     let cmd = require_str(args, 0, "sh.output")?;
-    let (stdout, stderr, code) =
-        jade_runtime::shf::output(cmd).map_err(|message| JadeError::IoError { message, span: ZERO })?;
+    let (stdout, stderr, code) = jade_runtime::shf::output(cmd)
+        .map_err(|message| JadeError::IoError { message, span: ZERO })?;
     let mut map = DictObj::new();
     map.insert("stdout".to_string(), VmValue::Str(stdout.into()));
     map.insert("stderr".to_string(), VmValue::Str(stderr.into()));
@@ -88,8 +89,8 @@ fn sh_output(args: &[VmValue]) -> Result<VmValue> {
 }
 
 static SH_PKG_FNS: &[BuiltinFn] = &[
-    BuiltinFn { name: "exec",   vm_impl: sh_exec },
-    BuiltinFn { name: "run",    vm_impl: sh_run },
+    BuiltinFn { name: "exec", vm_impl: sh_exec },
+    BuiltinFn { name: "run", vm_impl: sh_run },
     BuiltinFn { name: "output", vm_impl: sh_output },
 ];
 

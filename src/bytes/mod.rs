@@ -45,10 +45,7 @@ fn bytes_decode(args: &[VmValue]) -> Result<VmValue> {
         VmValue::Bytes(b) => match std::str::from_utf8(b.as_slice()) {
             Ok(s) => Ok(VmValue::Str(jade_runtime::trust::JStr::with_trust(s, b.trust))),
             Err(e) => Err(JadeError::Exception {
-                message: format!(
-                    "bytes.decode(): not valid UTF-8 at byte {}",
-                    e.valid_up_to()
-                ),
+                message: format!("bytes.decode(): not valid UTF-8 at byte {}", e.valid_up_to()),
                 span: ZERO,
             }),
         },
@@ -67,10 +64,7 @@ fn bytes_slice(args: &[VmValue]) -> Result<VmValue> {
             let len = b.len() as i64;
             let start = (*s).clamp(0, len) as usize;
             let end = (*e).clamp(start as i64, len) as usize;
-            Ok(VmValue::Bytes(Arc::new(BytesObj::new(
-                b.as_slice()[start..end].to_vec(),
-                b.trust,
-            ))))
+            Ok(VmValue::Bytes(Arc::new(BytesObj::new(b.as_slice()[start..end].to_vec(), b.trust))))
         }
         _ => Err(JadeError::TypeError { message: "bytes.slice".to_string(), span: ZERO }),
     }

@@ -107,11 +107,8 @@ fn resolve_target(
 
     // A command-line --export wins over the manifest: an explicit flag should
     // not be silently ignored because a config file also had an opinion.
-    let exports = if exports.is_empty() {
-        pkg.exports.clone().unwrap_or_default()
-    } else {
-        exports.to_vec()
-    };
+    let exports =
+        if exports.is_empty() { pkg.exports.clone().unwrap_or_default() } else { exports.to_vec() };
 
     Target {
         source: entry,
@@ -149,13 +146,12 @@ fn verify_sources(
     };
     // Lex and parse only. The entry's imports are all this needs, and a type
     // error here belongs to the compile below, with its own message.
-    let paths = match crate::frontend::lexer::tokenize(&source)
-        .and_then(crate::frontend::parser::parse)
-    {
-        Ok(program) => crate::project::program_import_paths(&program),
-        // Let the real compile report it, in its own words and with its span.
-        Err(_) => return,
-    };
+    let paths =
+        match crate::frontend::lexer::tokenize(&source).and_then(crate::frontend::parser::parse) {
+            Ok(program) => crate::project::program_import_paths(&program),
+            // Let the real compile report it, in its own words and with its span.
+            Err(_) => return,
+        };
 
     let libraries = crate::pkg::resolved_libraries(root, manifest);
     let ctx = crate::project::ImportContext {
@@ -197,16 +193,11 @@ pub(crate) fn compare_sources(
     // the error is something they can search their manifest for.
     let show = |p: &Path| p.strip_prefix(root).unwrap_or(p).to_string_lossy().into_owned();
 
-    let declared_paths: Vec<(&str, PathBuf)> = declared
-        .iter()
-        .map(|s| (s.as_str(), canon(&root.join(s))))
-        .collect();
+    let declared_paths: Vec<(&str, PathBuf)> =
+        declared.iter().map(|s| (s.as_str(), canon(&root.join(s)))).collect();
 
-    let mut unreached: Vec<&str> = declared_paths
-        .iter()
-        .filter(|(_, p)| !reached.contains(p))
-        .map(|(s, _)| *s)
-        .collect();
+    let mut unreached: Vec<&str> =
+        declared_paths.iter().filter(|(_, p)| !reached.contains(p)).map(|(s, _)| *s).collect();
     let mut undeclared: Vec<String> = reached
         .iter()
         .filter(|p| !declared_paths.iter().any(|(_, d)| d == *p))
@@ -298,9 +289,7 @@ pub fn run_build(
         // silently links whatever `libs/` was last left holding, and a fresh
         // clone builds against nothing at all. The project is found from the
         // source file's directory because that is how `aot/imports.rs` finds it.
-        if let Some(root) = abs_source
-            .parent()
-            .and_then(crate::project::find_project_root_from)
+        if let Some(root) = abs_source.parent().and_then(crate::project::find_project_root_from)
             && let Ok(manifest) = crate::project::load_project(&root)
             && let Err(e) = crate::pkg::ensure_ready(&root, &manifest)
         {
@@ -313,9 +302,7 @@ pub fn run_build(
         let abs_out = if out.is_absolute() {
             out.clone()
         } else {
-            std::env::current_dir()
-                .map(|d| d.join(&out))
-                .unwrap_or_else(|_| out.clone())
+            std::env::current_dir().map(|d| d.join(&out)).unwrap_or_else(|_| out.clone())
         };
 
         let emit = if emit_ir {

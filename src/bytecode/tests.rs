@@ -4,7 +4,9 @@
 use crate::bytecode::{Chunk, Instr};
 use crate::frontend::error::Span;
 
-fn sp() -> Span { Span { line: 1, col: 1 } }
+fn sp() -> Span {
+    Span { line: 1, col: 1 }
+}
 
 #[test]
 fn chunk_new_is_empty() {
@@ -77,11 +79,17 @@ fn patch_jump_handles_conditional_variants() {
     c.patch_jump(jf, 5);
     c.patch_jump(jt, 5);
     match c.code[jf] {
-        Instr::JumpIfFalse(r, o) => { assert_eq!(r, 0); assert_eq!(o, 4); }
+        Instr::JumpIfFalse(r, o) => {
+            assert_eq!(r, 0);
+            assert_eq!(o, 4);
+        }
         ref other => panic!("expected JumpIfFalse, got {:?}", other),
     }
     match c.code[jt] {
-        Instr::JumpIfTrue(r, o) => { assert_eq!(r, 1); assert_eq!(o, 3); }
+        Instr::JumpIfTrue(r, o) => {
+            assert_eq!(r, 1);
+            assert_eq!(o, 3);
+        }
         ref other => panic!("expected JumpIfTrue, got {:?}", other),
     }
 }
@@ -99,15 +107,17 @@ fn intern_fn_returns_sequential_indices() {
     use crate::bytecode::CompiledFn;
     use std::sync::Arc;
     let mut c = Chunk::new("t");
-    let mk = |name: &str| Arc::new(CompiledFn {
-        params: vec![],
-        defaults: vec![],
-        chunk: Chunk::new(name),
-        n_slots: 0,
-        source_file: String::new(),
-        module_scope: None,
-        is_generator: false,
-    });
+    let mk = |name: &str| {
+        Arc::new(CompiledFn {
+            params: vec![],
+            defaults: vec![],
+            chunk: Chunk::new(name),
+            n_slots: 0,
+            source_file: String::new(),
+            module_scope: None,
+            is_generator: false,
+        })
+    };
     let a = c.intern_fn(mk("a"));
     let b = c.intern_fn(mk("b"));
     assert_eq!(a, 0);

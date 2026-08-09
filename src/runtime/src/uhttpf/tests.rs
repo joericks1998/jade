@@ -7,7 +7,8 @@ use super::*;
 
 #[test]
 fn parse_url_sock_and_path() {
-    let (sock, path) = parse_unix_url("unix:///var/run/docker.sock:/v1.43/containers/json").unwrap();
+    let (sock, path) =
+        parse_unix_url("unix:///var/run/docker.sock:/v1.43/containers/json").unwrap();
     assert_eq!(sock, "/var/run/docker.sock");
     assert_eq!(path, "/v1.43/containers/json");
 }
@@ -253,7 +254,8 @@ fn request_bytes_round_trips_a_binary_body_over_a_socket() {
                 }
             }
         }
-        let mut out = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", served.len()).into_bytes();
+        let mut out =
+            format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", served.len()).into_bytes();
         out.extend_from_slice(&served);
         conn.write_all(&out).expect("write");
         got_body

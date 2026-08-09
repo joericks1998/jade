@@ -1,6 +1,6 @@
-use jade_runtime::coll::DictObj;
 use super::*;
 use crate::builtins::make_array;
+use jade_runtime::coll::DictObj;
 
 fn s(x: &str) -> VmValue {
     VmValue::Str(x.to_string().into())
@@ -92,26 +92,17 @@ fn parse_nested_with_null() {
 
 #[test]
 fn parse_invalid_is_io_error() {
-    assert!(matches!(
-        json_parse(&[s("{ not json")]),
-        Err(JadeError::IoError { .. })
-    ));
+    assert!(matches!(json_parse(&[s("{ not json")]), Err(JadeError::IoError { .. })));
 }
 
 #[test]
 fn parse_non_str_arg() {
-    assert!(matches!(
-        json_parse(&[VmValue::Int(1)]),
-        Err(JadeError::TypeError { .. })
-    ));
+    assert!(matches!(json_parse(&[VmValue::Int(1)]), Err(JadeError::TypeError { .. })));
 }
 
 #[test]
 fn parse_arity() {
-    assert!(matches!(
-        json_parse(&[]),
-        Err(JadeError::ArityMismatch { expected: 1, got: 0, .. })
-    ));
+    assert!(matches!(json_parse(&[]), Err(JadeError::ArityMismatch { expected: 1, got: 0, .. })));
 }
 
 // ── json_stringify ────────────────────────────────────────────────────────────

@@ -110,12 +110,8 @@ fn float_arity_error() {
 #[test]
 fn choice_is_reproducible_for_fixed_seed() {
     let _g = TEST_LOCK.lock();
-    let arr = make_array(vec![
-        VmValue::Int(10),
-        VmValue::Int(20),
-        VmValue::Int(30),
-        VmValue::Int(40),
-    ]);
+    let arr =
+        make_array(vec![VmValue::Int(10), VmValue::Int(20), VmValue::Int(30), VmValue::Int(40)]);
     seed(123);
     let a = random_choice(&[arr.clone()]).unwrap();
     seed(123);

@@ -35,10 +35,7 @@ fn len_nonempty() {
 
 #[test]
 fn len_wrong_type() {
-    assert!(matches!(
-        arr_len(&[VmValue::Int(1)]),
-        Err(JadeError::TypeError { .. })
-    ));
+    assert!(matches!(arr_len(&[VmValue::Int(1)]), Err(JadeError::TypeError { .. })));
 }
 
 // ── arr_push ──────────────────────────────────────────────────────────────────
@@ -63,10 +60,7 @@ fn push_reference_semantics() {
 #[test]
 fn push_missing_arg() {
     let a = arr(vec![]);
-    assert!(matches!(
-        arr_push(&[a]),
-        Err(JadeError::TypeError { .. })
-    ));
+    assert!(matches!(arr_push(&[a]), Err(JadeError::TypeError { .. })));
 }
 
 #[test]
@@ -94,10 +88,7 @@ fn pop_empty_returns_nil() {
 
 #[test]
 fn pop_wrong_type() {
-    assert!(matches!(
-        arr_pop(&[VmValue::Str("x".into())]),
-        Err(JadeError::TypeError { .. })
-    ));
+    assert!(matches!(arr_pop(&[VmValue::Str("x".into())]), Err(JadeError::TypeError { .. })));
 }
 
 // ── arr_contains ──────────────────────────────────────────────────────────────
@@ -114,29 +105,20 @@ fn contains_found() {
 #[test]
 fn contains_not_found() {
     let a = arr(vec![VmValue::Int(1)]);
-    assert!(matches!(
-        arr_contains(&[a, VmValue::Int(2)]),
-        Ok(VmValue::Bool(false))
-    ));
+    assert!(matches!(arr_contains(&[a, VmValue::Int(2)]), Ok(VmValue::Bool(false))));
 }
 
 #[test]
 fn contains_type_mismatch_is_false() {
     // 1 (int) vs 1.0 (float) are not equal in vm_values_equal
     let a = arr(vec![VmValue::Int(1)]);
-    assert!(matches!(
-        arr_contains(&[a, VmValue::Float(1.0)]),
-        Ok(VmValue::Bool(false))
-    ));
+    assert!(matches!(arr_contains(&[a, VmValue::Float(1.0)]), Ok(VmValue::Bool(false))));
 }
 
 #[test]
 fn contains_missing_needle() {
     let a = arr(vec![]);
-    assert!(matches!(
-        arr_contains(&[a]),
-        Err(JadeError::TypeError { .. })
-    ));
+    assert!(matches!(arr_contains(&[a]), Err(JadeError::TypeError { .. })));
 }
 
 // ── arr_sort (in place) ───────────────────────────────────────────────────────
@@ -151,10 +133,7 @@ fn sort_ints_in_place() {
 
 #[test]
 fn sort_wrong_type() {
-    assert!(matches!(
-        arr_sort(&[VmValue::Nil]),
-        Err(JadeError::TypeError { .. })
-    ));
+    assert!(matches!(arr_sort(&[VmValue::Nil]), Err(JadeError::TypeError { .. })));
 }
 
 // ── arr_reverse (in place) ────────────────────────────────────────────────────
@@ -169,10 +148,7 @@ fn reverse_in_place() {
 
 #[test]
 fn reverse_wrong_type() {
-    assert!(matches!(
-        arr_reverse(&[VmValue::Int(1)]),
-        Err(JadeError::TypeError { .. })
-    ));
+    assert!(matches!(arr_reverse(&[VmValue::Int(1)]), Err(JadeError::TypeError { .. })));
 }
 
 // ── pkg_sort / pkg_reverse (return a new array, leave source untouched) ────────
@@ -196,10 +172,7 @@ fn pkg_reverse_returns_new() {
 
 #[test]
 fn pkg_sort_wrong_type() {
-    assert!(matches!(
-        pkg_sort(&[VmValue::Int(1)]),
-        Err(JadeError::TypeError { .. })
-    ));
+    assert!(matches!(pkg_sort(&[VmValue::Int(1)]), Err(JadeError::TypeError { .. })));
 }
 
 // ── sort helper: mixed int/float ordering ─────────────────────────────────────

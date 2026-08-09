@@ -29,11 +29,7 @@ fn as_int(w: i64) -> i64 {
 #[inline]
 fn as_f64(w: i64) -> f64 {
     let x = v(w);
-    if x.is_int() {
-        x.as_int() as f64
-    } else {
-        unbox_float(x)
-    }
+    if x.is_int() { x.as_int() as f64 } else { unbox_float(x) }
 }
 #[inline]
 fn int_word(i: i64) -> i64 {

@@ -144,8 +144,8 @@ pub fn read(root: &Path) -> Result<Option<Lockfile>, String> {
         Err(e) => return Err(format!("cannot read {}: {e}", file.display())),
     };
 
-    let lock: Lockfile = toml::from_str(&content)
-        .map_err(|e| format!("invalid {}: {e}", file.display()))?;
+    let lock: Lockfile =
+        toml::from_str(&content).map_err(|e| format!("invalid {}: {e}", file.display()))?;
 
     if lock.version != LOCK_VERSION {
         return Err(format!(
@@ -168,8 +168,8 @@ pub fn write(root: &Path, lock: &Lockfile) -> Result<(), String> {
     let mut sorted = lock.clone();
     sorted.packages.sort_by(|a, b| a.name.cmp(&b.name));
 
-    let content = toml::to_string_pretty(&sorted)
-        .map_err(|e| format!("cannot serialize lockfile: {e}"))?;
+    let content =
+        toml::to_string_pretty(&sorted).map_err(|e| format!("cannot serialize lockfile: {e}"))?;
 
     let file = path(root);
     std::fs::write(&file, content).map_err(|e| format!("cannot write {}: {e}", file.display()))

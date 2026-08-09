@@ -45,11 +45,7 @@ pub fn new(len: usize, trust: u8) -> *mut u8 {
 /// `s` is null or a tagged-string data pointer (trust byte readable at `s[-1]`).
 #[inline]
 pub fn trust_of(s: *const u8) -> u8 {
-    if s.is_null() {
-        TRUSTED
-    } else {
-        unsafe { *s.sub(1) }
-    }
+    if s.is_null() { TRUSTED } else { unsafe { *s.sub(1) } }
 }
 
 /// Allocate a tagged copy of a NUL-terminated string. Mirrors C `jrt_str_dup`.

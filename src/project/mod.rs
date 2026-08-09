@@ -118,11 +118,9 @@ impl PackageSection {
 
         if let Some(sources) = &self.sources {
             if sources.is_empty() {
-                return Err(
-                    "[package] sources in jade.toml is empty — omit it entirely to \
+                return Err("[package] sources in jade.toml is empty — omit it entirely to \
                      take the import graph at its word"
-                        .to_string(),
-                );
+                    .to_string());
             }
             for s in sources {
                 if !s.ends_with(".jde") {
@@ -154,11 +152,9 @@ impl PackageSection {
         }
 
         if self.exports.as_ref().is_some_and(|e| e.is_empty()) {
-            return Err(
-                "[package] exports in jade.toml is empty, which would build a \
+            return Err("[package] exports in jade.toml is empty, which would build a \
                  package binding nothing — omit it to export every function"
-                    .to_string(),
-            );
+                .to_string());
         }
 
         Ok(())
@@ -669,11 +665,8 @@ impl DependencyEntry {
     /// where a placeholder would actually be used, in `pkg::build_c_shims`.
     pub fn unresolved_symbols(&self) -> Vec<&str> {
         let Some(symbols) = &self.symbols else { return Vec::new() };
-        let mut out: Vec<&str> = symbols
-            .iter()
-            .filter(|(_, s)| s.is_unresolved())
-            .map(|(n, _)| n.as_str())
-            .collect();
+        let mut out: Vec<&str> =
+            symbols.iter().filter(|(_, s)| s.is_unresolved()).map(|(n, _)| n.as_str()).collect();
         out.sort_unstable();
         out
     }
@@ -796,10 +789,7 @@ impl ProjectManifest {
 
     /// The entry-point file for this project (default: `main.jde`).
     pub fn entry_file(&self) -> &str {
-        self.project
-            .as_ref()
-            .and_then(|p| p.entry.as_deref())
-            .unwrap_or("main.jde")
+        self.project.as_ref().and_then(|p| p.entry.as_deref()).unwrap_or("main.jde")
     }
 }
 
@@ -838,8 +828,7 @@ pub fn load_project(root: &Path) -> Result<ProjectManifest, String> {
     let path = root.join("jade.toml");
     let content = std::fs::read_to_string(&path)
         .map_err(|e| format!("cannot read {}: {}", path.display(), e))?;
-    toml::from_str::<ProjectManifest>(&content)
-        .map_err(|e| format!("invalid jade.toml: {}", e))
+    toml::from_str::<ProjectManifest>(&content).map_err(|e| format!("invalid jade.toml: {}", e))
 }
 
 // ── Test file discovery ───────────────────────────────────────────────────────

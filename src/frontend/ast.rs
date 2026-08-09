@@ -91,10 +91,7 @@ pub enum Stmt {
     /// the caller reads the buffer. That is the whole model — a stream *is* a
     /// buffer, not a one-shot channel — so reading one twice gives the same
     /// values twice, and there is no rule about what a second read means.
-    Yield {
-        value: Expr,
-        span: Span,
-    },
+    Yield { value: Expr, span: Span },
 
     Return {
         value: Option<Expr>,
@@ -103,37 +100,19 @@ pub enum Stmt {
     },
 
     /// `if condition { then_body } else { else_body }`
-    If {
-        condition: Expr,
-        then_body: Vec<Stmt>,
-        else_body: Option<Vec<Stmt>>,
-        span: Span,
-    },
+    If { condition: Expr, then_body: Vec<Stmt>, else_body: Option<Vec<Stmt>>, span: Span },
 
     /// `while condition { body }`
-    While {
-        condition: Expr,
-        body: Vec<Stmt>,
-        span: Span,
-    },
+    While { condition: Expr, body: Vec<Stmt>, span: Span },
 
     /// `for var in iterable { body }`
-    For {
-        var: String,
-        iterable: Expr,
-        body: Vec<Stmt>,
-        span: Span,
-    },
+    For { var: String, iterable: Expr, body: Vec<Stmt>, span: Span },
 
     /// `break` — leave the innermost loop.
-    Break {
-        span: Span,
-    },
+    Break { span: Span },
 
     /// `continue` — go on to the innermost loop's next iteration.
-    Continue {
-        span: Span,
-    },
+    Continue { span: Span },
 
     /// `name = expr` — reassign an existing variable (or introduce one) in the global env
     Assign {
@@ -192,45 +171,24 @@ pub enum Stmt {
     },
 
     /// `prompt name = expr` — declare a prompt value from a string expression.
-    PromptDecl {
-        name: String,
-        body: Expr,
-        span: Span,
-    },
+    PromptDecl { name: String, body: Expr, span: Span },
 
     /// `use "path/to/file.jde"` — import all top-level definitions from another file.
     /// Also accepts `::` notation: `use std::time` → path `"std/time"`.
     /// `as_name` binds the module under that name; if absent, the stem of the path is used.
     /// stdlib packages are unaffected (they always bind under their own `global_name`).
     /// `path_is_string` is true when the user wrote `use "..."` (string literal form).
-    Use {
-        path: String,
-        as_name: Option<String>,
-        path_is_string: bool,
-        span: Span,
-    },
+    Use { path: String, as_name: Option<String>, path_is_string: bool, span: Span },
 
     /// `from std::time use now, sleep` — import specific names directly into scope.
     /// Path follows the same rules as `Use` (string literal or `::` notation).
-    FromUse {
-        path: String,
-        names: Vec<String>,
-        path_is_string: bool,
-        span: Span,
-    },
+    FromUse { path: String, names: Vec<String>, path_is_string: bool, span: Span },
 
     /// `raise expr` — raise any value as an exception.
-    Raise {
-        value: Expr,
-        span: Span,
-    },
+    Raise { value: Expr, span: Span },
 
     /// `try { body } catch Type e { arm } ... catch e { arm }`
-    TryCatch {
-        body: Vec<Stmt>,
-        arms: Vec<CatchArm>,
-        span: Span,
-    },
+    TryCatch { body: Vec<Stmt>, arms: Vec<CatchArm>, span: Span },
 
     /// `async fn name(param, param = default, ...) { body }`
     AsyncFnDef {
@@ -252,34 +210,19 @@ pub enum Stmt {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Expr {
     /// An integer literal, e.g. `42`
-    Integer {
-        value: i64,
-        span: Span,
-    },
+    Integer { value: i64, span: Span },
 
     /// A float literal, e.g. `3.14`
-    Float {
-        value: f64,
-        span: Span,
-    },
+    Float { value: f64, span: Span },
 
     /// A boolean literal, e.g. `true` or `false`
-    Bool {
-        value: bool,
-        span: Span,
-    },
+    Bool { value: bool, span: Span },
 
     /// A string literal, e.g. `"hello"`
-    Str {
-        value: String,
-        span: Span,
-    },
+    Str { value: String, span: Span },
 
     /// A reference to a variable or function, e.g. `add`
-    Identifier {
-        name: String,
-        span: Span,
-    },
+    Identifier { name: String, span: Span },
 
     /// A function call, e.g. `add(1, 2)` or `f(x)`
     Call {
@@ -292,60 +235,30 @@ pub enum Expr {
     },
 
     /// A binary operation, e.g. `1 + 1` or `a && b`
-    BinOp {
-        op: BinOpKind,
-        left: Box<Expr>,
-        right: Box<Expr>,
-        span: Span,
-    },
+    BinOp { op: BinOpKind, left: Box<Expr>, right: Box<Expr>, span: Span },
 
     /// A unary operation, e.g. `~x`, `!flag`, `-n`
-    UnaryOp {
-        op: UnaryOpKind,
-        operand: Box<Expr>,
-        span: Span,
-    },
+    UnaryOp { op: UnaryOpKind, operand: Box<Expr>, span: Span },
 
     /// A struct literal, e.g. `Point { x: 10, y: 20 }`
-    StructLiteral {
-        type_name: String,
-        fields: Vec<(String, Expr)>,
-        span: Span,
-    },
+    StructLiteral { type_name: String, fields: Vec<(String, Expr)>, span: Span },
 
     /// Field access on a struct, e.g. `p.x` or `obj.method`
-    FieldAccess {
-        object: Box<Expr>,
-        field: String,
-        span: Span,
-    },
+    FieldAccess { object: Box<Expr>, field: String, span: Span },
 
     /// Index into a string, e.g. `s[0]`
-    Index {
-        object: Box<Expr>,
-        index: Box<Expr>,
-        span: Span,
-    },
+    Index { object: Box<Expr>, index: Box<Expr>, span: Span },
 
     /// An array literal, e.g. `[1, 2, 3]` or `[]`
-    Array {
-        elements: Vec<Expr>,
-        span: Span,
-    },
+    Array { elements: Vec<Expr>, span: Span },
 
     /// An interpolated string, e.g. `f"hello, {name}!"`
-    FStr {
-        parts: Vec<FStrPart>,
-        span: Span,
-    },
+    FStr { parts: Vec<FStrPart>, span: Span },
 
     /// `prompt <expr>` — produce a prompt value from a string expression.
     /// Expression form of the `prompt p = "text"` declaration; valid anywhere an
     /// expression is allowed, e.g. `let p = prompt "text"` inside a function.
-    PromptLiteral {
-        body: Box<Expr>,
-        span: Span,
-    },
+    PromptLiteral { body: Box<Expr>, span: Span },
 
     /// `?expr` — dereference a prompt, calling the LLM backend.
     /// `?expr |> TypeName`   — typed deref: coerces output to the named type with retry.
@@ -365,23 +278,13 @@ pub enum Expr {
     },
 
     /// A dictionary literal, e.g. `{"key": 1, "other": 2}` or `{}`
-    Dict {
-        entries: Vec<(Expr, Expr)>,
-        span: Span,
-    },
+    Dict { entries: Vec<(Expr, Expr)>, span: Span },
 
     /// An anonymous function (closure), e.g. `|x| x * 2` or `|x, y| { x + y }`
-    Closure {
-        params: Vec<String>,
-        body: Vec<Stmt>,
-        span: Span,
-    },
+    Closure { params: Vec<String>, body: Vec<Stmt>, span: Span },
 
     /// `await expr`
-    Await {
-        expr: Box<Expr>,
-        span: Span,
-    },
+    Await { expr: Box<Expr>, span: Span },
 
     /// `value |> stage` — one pipe stage.
     ///
@@ -401,11 +304,7 @@ pub enum Expr {
     /// and a *separate* parse path stored the stage on `PromptDeref.constraint`,
     /// so which rule applied was decided by surrounding syntax before anything
     /// knew what the names referred to. See `PromptDeref`.
-    Pipe {
-        value: Box<Expr>,
-        stage: Box<Expr>,
-        span: Span,
-    },
+    Pipe { value: Box<Expr>, stage: Box<Expr>, span: Span },
 }
 
 /// All binary operators Jade supports.

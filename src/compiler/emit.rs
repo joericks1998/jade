@@ -1,7 +1,10 @@
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{
-    compiler::{tir::{JadeType, TDecorators, TExpr, TExprKind, TFStrPart, TProgram, TStmt, TCatchArm}}, bytecode::{Chunk, CompiledFn, FStrPart, Instr, Reg},
+    bytecode::{Chunk, CompiledFn, FStrPart, Instr, Reg},
+    compiler::tir::{
+        JadeType, TCatchArm, TDecorators, TExpr, TExprKind, TFStrPart, TProgram, TStmt,
+    },
     frontend::{
         ast::{BinOpKind, StructFieldDef, UnaryOpKind},
         error::{JadeError, Result, Span},
@@ -255,7 +258,8 @@ pub fn emit(program: TProgram) -> Result<CompiledProgram> {
                 for (dec_name, args) in decorators {
                     if dec_name == "route" {
                         // Accept `on = "field"` kwarg or the first positional arg.
-                        let field_name = args.iter()
+                        let field_name = args
+                            .iter()
                             .find(|(kw, _)| kw.as_deref() == Some("on"))
                             .or_else(|| args.first())
                             .and_then(|(_, e)| {
@@ -274,12 +278,12 @@ pub fn emit(program: TProgram) -> Result<CompiledProgram> {
             TStmt::StructDef { name, fields, decorators, span } => {
                 ctx.struct_defs.insert(name.clone(), fields.clone());
                 if !decorators.is_empty() {
-                    let compiled: crate::frontend::error::Result<Vec<_>> = decorators.iter()
+                    let compiled: crate::frontend::error::Result<Vec<_>> = decorators
+                        .iter()
                         .map(|(dec_name, args)| {
                             // Keyword names are stripped — values are passed positionally.
-                            let vals: crate::frontend::error::Result<Vec<_>> = args.iter()
-                                .map(|(_, e)| eval_literal_expr(e, *span))
-                                .collect();
+                            let vals: crate::frontend::error::Result<Vec<_>> =
+                                args.iter().map(|(_, e)| eval_literal_expr(e, *span)).collect();
                             Ok((dec_name.clone(), vals?))
                         })
                         .collect();
@@ -308,7 +312,11 @@ pub fn emit(program: TProgram) -> Result<CompiledProgram> {
     // the AST's assignment expression does not distinguish rebinding a local
     // from writing through a reference.
     if let Err(v) = crate::compiler::taskcheck::check(&em.chunk, &ctx.extend_methods) {
-        return Err(crate::frontend::error::JadeError::SharedMutation { task: v.task, what: v.what, span: v.span });
+        return Err(crate::frontend::error::JadeError::SharedMutation {
+            task: v.task,
+            what: v.what,
+            span: v.span,
+        });
     }
 
     Ok(CompiledProgram {
@@ -448,11 +456,7 @@ fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
             em.chunk.emit(Instr::Call(len_reg, len_fn_reg, vec![iter_reg]), span);
 
             // Allocate the loop variable: a local slot inside fn, a scratch reg at top level.
-            let x_reg = if em.in_fn() {
-                em.define_local(&var)
-            } else {
-                em.alloc_reg()
-            };
+            let x_reg = if em.in_fn() { em.define_local(&var) } else { em.alloc_reg() };
 
             // ── Loop header ────────────────────────────────────────────────────
             let loop_start = em.chunk.len();
@@ -740,10 +744,7 @@ fn emit_fn_decorators(
 /// been written. The parser now refuses a nested function of either kind, so
 /// nothing in a source file reaches this — it is here so that a future path
 /// which does reach it fails loudly rather than going quiet again.
-fn reject_local_decorators(
-    decorators: &TDecorators,
-    span: Span,
-) -> Result<()> {
+fn reject_local_decorators(decorators: &TDecorators, span: Span) -> Result<()> {
     if decorators.is_empty() {
         return Ok(());
     }
@@ -808,10 +809,8 @@ fn emit_fn(
     // If the body already ends with an explicit terminator (return or raise),
     // we must not append a second Return(None) after it — that would be dead
     // code.  Check *before* the pop below so we see the original last stmt.
-    let already_terminated = matches!(
-        body.last(),
-        Some(TStmt::Return { .. } | TStmt::Raise { .. })
-    );
+    let already_terminated =
+        matches!(body.last(), Some(TStmt::Return { .. } | TStmt::Raise { .. }));
 
     // If the last statement is a bare expression, treat it as an implicit return value.
     let implicit_ret = if matches!(body.last(), Some(TStmt::Expr(_))) {
@@ -839,7 +838,15 @@ fn emit_fn(
     }
 
     let n_slots = fn_em.next_reg;
-    Ok(CompiledFn { params: param_names, defaults, chunk: fn_em.chunk, n_slots, source_file: String::new(), module_scope: None, is_generator })
+    Ok(CompiledFn {
+        params: param_names,
+        defaults,
+        chunk: fn_em.chunk,
+        n_slots,
+        source_file: String::new(),
+        module_scope: None,
+        is_generator,
+    })
 }
 
 /// Whether a body contains a `yield` at any depth inside this function.
@@ -967,7 +974,7 @@ fn emit_expr(expr: &TExpr, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<Reg> {
             for part in parts {
                 match part {
                     TFStrPart::Literal(s) => compiled.push(FStrPart::Literal(s.clone())),
-                    TFStrPart::Expr(e)    => compiled.push(FStrPart::Reg(emit_expr(e, em, ctx)?)),
+                    TFStrPart::Expr(e) => compiled.push(FStrPart::Reg(emit_expr(e, em, ctx)?)),
                 }
             }
             let dest = em.alloc_reg();
@@ -992,7 +999,8 @@ fn emit_expr(expr: &TExpr, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<Reg> {
 
         TExprKind::Closure { params, body, .. } => {
             let name = ctx.next_closure_name();
-            let owned: Vec<(String, Option<TExpr>)> = params.iter().map(|p| (p.clone(), None)).collect();
+            let owned: Vec<(String, Option<TExpr>)> =
+                params.iter().map(|p| (p.clone(), None)).collect();
             let compiled = emit_fn(&name, owned, body.clone(), span, ctx)?;
             let rc = Arc::new(compiled);
             let idx = em.chunk.intern_fn(Arc::clone(&rc));
@@ -1093,8 +1101,8 @@ fn emit_binop(
         em.chunk.emit(Instr::Move(dest, l), span);
         let jump_idx = match op {
             And => em.chunk.emit(Instr::JumpIfFalse(l, 0), span),
-            Or  => em.chunk.emit(Instr::JumpIfTrue(l, 0), span),
-            _   => unreachable!(),
+            Or => em.chunk.emit(Instr::JumpIfTrue(l, 0), span),
+            _ => unreachable!(),
         };
         let r = emit_expr(right, em, ctx)?;
         em.chunk.emit(Instr::Move(dest, r), span);
@@ -1123,43 +1131,43 @@ fn emit_binop(
 
     let instr = match (op, &left.ty, &right.ty) {
         // ── Arithmetic ───────────────────────────────────────────────────────
-        (Add, Int, Int)     => Instr::AddInt(dest, l, r),
+        (Add, Int, Int) => Instr::AddInt(dest, l, r),
         (Add, Float, Float) => Instr::AddFloat(dest, l, r),
-        (Add, Int, Float)   => promote_left!(Instr::AddFloat),
-        (Add, Float, Int)   => promote_right!(Instr::AddFloat),
-        (Add, Str, Str)     => Instr::ConcatStr(dest, l, r),
+        (Add, Int, Float) => promote_left!(Instr::AddFloat),
+        (Add, Float, Int) => promote_right!(Instr::AddFloat),
+        (Add, Str, Str) => Instr::ConcatStr(dest, l, r),
 
-        (Sub, Int, Int)     => Instr::SubInt(dest, l, r),
+        (Sub, Int, Int) => Instr::SubInt(dest, l, r),
         (Sub, Float, Float) => Instr::SubFloat(dest, l, r),
-        (Sub, Int, Float)   => promote_left!(Instr::SubFloat),
-        (Sub, Float, Int)   => promote_right!(Instr::SubFloat),
+        (Sub, Int, Float) => promote_left!(Instr::SubFloat),
+        (Sub, Float, Int) => promote_right!(Instr::SubFloat),
 
-        (Mul, Int, Int)     => Instr::MulInt(dest, l, r),
+        (Mul, Int, Int) => Instr::MulInt(dest, l, r),
         (Mul, Float, Float) => Instr::MulFloat(dest, l, r),
-        (Mul, Int, Float)   => promote_left!(Instr::MulFloat),
-        (Mul, Float, Int)   => promote_right!(Instr::MulFloat),
+        (Mul, Int, Float) => promote_left!(Instr::MulFloat),
+        (Mul, Float, Int) => promote_right!(Instr::MulFloat),
 
-        (Div, Int, Int)     => Instr::DivInt(dest, l, r),
+        (Div, Int, Int) => Instr::DivInt(dest, l, r),
         (Div, Float, Float) => Instr::DivFloat(dest, l, r),
-        (Div, Int, Float)   => promote_left!(Instr::DivFloat),
-        (Div, Float, Int)   => promote_right!(Instr::DivFloat),
+        (Div, Int, Float) => promote_left!(Instr::DivFloat),
+        (Div, Float, Int) => promote_right!(Instr::DivFloat),
 
-        (Mod, Int, Int)     => Instr::ModInt(dest, l, r),
+        (Mod, Int, Int) => Instr::ModInt(dest, l, r),
 
         // ── Bitwise ──────────────────────────────────────────────────────────
-        (BitAnd, Int, Int)  => Instr::BitAnd(dest, l, r),
-        (BitOr,  Int, Int)  => Instr::BitOr(dest, l, r),
-        (BitXor, Int, Int)  => Instr::BitXor(dest, l, r),
-        (Shl,    Int, Int)  => Instr::Shl(dest, l, r),
-        (Shr,    Int, Int)  => Instr::Shr(dest, l, r),
+        (BitAnd, Int, Int) => Instr::BitAnd(dest, l, r),
+        (BitOr, Int, Int) => Instr::BitOr(dest, l, r),
+        (BitXor, Int, Int) => Instr::BitXor(dest, l, r),
+        (Shl, Int, Int) => Instr::Shl(dest, l, r),
+        (Shr, Int, Int) => Instr::Shr(dest, l, r),
 
         // ── Comparisons — int ─────────────────────────────────────────────────
-        (Eq, Int, Int)  => Instr::CmpEqInt(dest, l, r),
-        (Ne, Int, Int)  => Instr::CmpNeInt(dest, l, r),
-        (Lt, Int, Int)  => Instr::CmpLtInt(dest, l, r),
-        (Gt, Int, Int)  => Instr::CmpGtInt(dest, l, r),
-        (Le, Int, Int)  => Instr::CmpLeInt(dest, l, r),
-        (Ge, Int, Int)  => Instr::CmpGeInt(dest, l, r),
+        (Eq, Int, Int) => Instr::CmpEqInt(dest, l, r),
+        (Ne, Int, Int) => Instr::CmpNeInt(dest, l, r),
+        (Lt, Int, Int) => Instr::CmpLtInt(dest, l, r),
+        (Gt, Int, Int) => Instr::CmpGtInt(dest, l, r),
+        (Le, Int, Int) => Instr::CmpLeInt(dest, l, r),
+        (Ge, Int, Int) => Instr::CmpGeInt(dest, l, r),
 
         // ── Comparisons — float ───────────────────────────────────────────────
         (Eq, Float, Float) => Instr::CmpEqFloat(dest, l, r),
@@ -1170,14 +1178,14 @@ fn emit_binop(
         (Ge, Float, Float) => Instr::CmpGeFloat(dest, l, r),
 
         // ── Comparisons — mixed int/float ─────────────────────────────────────
-        (Lt, Int, Float)   => Instr::CmpLtIntFloat(dest, l, r),
-        (Gt, Int, Float)   => Instr::CmpGtIntFloat(dest, l, r),
-        (Le, Int, Float)   => Instr::CmpLeIntFloat(dest, l, r),
-        (Ge, Int, Float)   => Instr::CmpGeIntFloat(dest, l, r),
-        (Lt, Float, Int)   => Instr::CmpLtFloatInt(dest, l, r),
-        (Gt, Float, Int)   => Instr::CmpGtFloatInt(dest, l, r),
-        (Le, Float, Int)   => Instr::CmpLeFloatInt(dest, l, r),
-        (Ge, Float, Int)   => Instr::CmpGeFloatInt(dest, l, r),
+        (Lt, Int, Float) => Instr::CmpLtIntFloat(dest, l, r),
+        (Gt, Int, Float) => Instr::CmpGtIntFloat(dest, l, r),
+        (Le, Int, Float) => Instr::CmpLeIntFloat(dest, l, r),
+        (Ge, Int, Float) => Instr::CmpGeIntFloat(dest, l, r),
+        (Lt, Float, Int) => Instr::CmpLtFloatInt(dest, l, r),
+        (Gt, Float, Int) => Instr::CmpGtFloatInt(dest, l, r),
+        (Le, Float, Int) => Instr::CmpLeFloatInt(dest, l, r),
+        (Ge, Float, Int) => Instr::CmpGeFloatInt(dest, l, r),
 
         // ── Comparisons — bool ────────────────────────────────────────────────
         (Eq, Bool, Bool) => Instr::CmpEqBool(dest, l, r),
@@ -1202,7 +1210,7 @@ fn emit_binop(
         (Gt, _, _) => Instr::CmpGt(dest, l, r),
         (Le, _, _) => Instr::CmpLe(dest, l, r),
         (Ge, _, _) => Instr::CmpGe(dest, l, r),
-        _          => Instr::BinOp(dest, op.clone(), l, r),
+        _ => Instr::BinOp(dest, op.clone(), l, r),
     };
     em.chunk.emit(instr, span);
     Ok(dest)
@@ -1220,11 +1228,11 @@ fn emit_unaryop(
     let src = emit_expr(operand, em, ctx)?;
     let dest = em.alloc_reg();
     let instr = match (op, &operand.ty) {
-        (UnaryOpKind::Neg, JadeType::Int)    => Instr::NegInt(dest, src),
-        (UnaryOpKind::Neg, JadeType::Float)  => Instr::NegFloat(dest, src),
+        (UnaryOpKind::Neg, JadeType::Int) => Instr::NegInt(dest, src),
+        (UnaryOpKind::Neg, JadeType::Float) => Instr::NegFloat(dest, src),
         (UnaryOpKind::BitNot, JadeType::Int) => Instr::BitNot(dest, src),
-        (UnaryOpKind::Not, JadeType::Bool)   => Instr::Not(dest, src),
-        _                                    => Instr::UnaryOp(dest, op.clone(), src),
+        (UnaryOpKind::Not, JadeType::Bool) => Instr::Not(dest, src),
+        _ => Instr::UnaryOp(dest, op.clone(), src),
     };
     em.chunk.emit(instr, span);
     Ok(dest)

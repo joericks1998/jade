@@ -2,9 +2,9 @@
 //! primitive-method lookup, the `PACKAGES`/`CORE_BUILTINS` tables, and the
 //! `PrimType` / `Package` helpers.
 
-use jade_runtime::coll::DictObj;
 use super::*;
 use crate::vm::VmValue;
+use jade_runtime::coll::DictObj;
 
 // ── PrimType ──────────────────────────────────────────────────────────────────
 
@@ -13,14 +13,8 @@ fn prim_type_from_value_covers_all_primitives() {
     assert_eq!(PrimType::from_value(&VmValue::Str("x".into())), Some(PrimType::Str));
     assert_eq!(PrimType::from_value(&VmValue::Int(1)), Some(PrimType::Int));
     assert_eq!(PrimType::from_value(&VmValue::Float(1.0)), Some(PrimType::Float));
-    assert_eq!(
-        PrimType::from_value(&make_array(vec![VmValue::Int(1)])),
-        Some(PrimType::Array)
-    );
-    assert_eq!(
-        PrimType::from_value(&VmValue::Dict(DictObj::new())),
-        Some(PrimType::Dict)
-    );
+    assert_eq!(PrimType::from_value(&make_array(vec![VmValue::Int(1)])), Some(PrimType::Array));
+    assert_eq!(PrimType::from_value(&VmValue::Dict(DictObj::new())), Some(PrimType::Dict));
 }
 
 #[test]
@@ -207,10 +201,7 @@ fn find_primitive_method_unknown_returns_none() {
 #[test]
 fn native_bound_method_captures_receiver_and_method() {
     let method = find_primitive_method(PrimType::Str, "upper").unwrap();
-    let bound = NativeBoundMethod {
-        receiver: VmValue::Str("hi".into()),
-        method,
-    };
+    let bound = NativeBoundMethod { receiver: VmValue::Str("hi".into()), method };
     assert_eq!(bound.method.name, "upper");
     match &bound.receiver {
         VmValue::Str(s) => assert_eq!(s, "hi"),

@@ -92,8 +92,15 @@ fn add_preserves_comments_and_unrelated_sections() {
          [lib.utils]\npath = \"src/utils\"\n",
     );
 
-    add_dependency(tmp.path(), "tok", Source::Url("https://x/t.so"), Some("1.0.0"), Abi::Jade, None)
-        .unwrap();
+    add_dependency(
+        tmp.path(),
+        "tok",
+        Source::Url("https://x/t.so"),
+        Some("1.0.0"),
+        Abi::Jade,
+        None,
+    )
+    .unwrap();
 
     let text = read(tmp.path());
     assert!(text.contains("# my project"), "leading comment lost:\n{text}");
@@ -117,8 +124,15 @@ fn add_replaces_an_existing_dependency_wholesale() {
          url = \"https://x/old.so\"\n",
     );
 
-    add_dependency(tmp.path(), "tok", Source::Path("vendor/tok.so"), Some("2.0.0"), Abi::Jade, None)
-        .unwrap();
+    add_dependency(
+        tmp.path(),
+        "tok",
+        Source::Path("vendor/tok.so"),
+        Some("2.0.0"),
+        Abi::Jade,
+        None,
+    )
+    .unwrap();
 
     let dep = &parsed(tmp.path()).dependencies.unwrap()["tok"];
     assert_eq!(dep.path.as_deref(), Some("vendor/tok.so"));
@@ -141,8 +155,15 @@ fn add_writes_c_abi_with_symbols() {
         },
     );
 
-    add_dependency(tmp.path(), "zlib", Source::Path("libz.so"), Some("1.3.1"), Abi::C, Some(&symbols))
-        .unwrap();
+    add_dependency(
+        tmp.path(),
+        "zlib",
+        Source::Path("libz.so"),
+        Some("1.3.1"),
+        Abi::C,
+        Some(&symbols),
+    )
+    .unwrap();
 
     let dep = &parsed(tmp.path()).dependencies.unwrap()["zlib"];
     assert_eq!(dep.abi, Abi::C);
@@ -198,10 +219,8 @@ fn remove_reports_an_absent_dependency() {
 
 #[test]
 fn remove_drops_an_emptied_dependencies_table() {
-    let tmp = project(
-        "rmempty",
-        "[project]\nname = \"app\"\n[dependencies.only]\npath = \"a.so\"\n",
-    );
+    let tmp =
+        project("rmempty", "[project]\nname = \"app\"\n[dependencies.only]\npath = \"a.so\"\n");
 
     remove_dependency(tmp.path(), "only").unwrap();
 
@@ -256,7 +275,8 @@ fn binding_a_second_header_keeps_the_first() {
     // came from it. The shim then declared none of them, and C lets an
     // undeclared function be called — so it compiled clean and crashed on the
     // first call that returned a pointer, with no diagnostic anywhere.
-    let tmp = project("hdrmerge", "[project]\nname = \"app\"\n[dependencies.arc]\npath = \"a.so\"\n");
+    let tmp =
+        project("hdrmerge", "[project]\nname = \"app\"\n[dependencies.arc]\npath = \"a.so\"\n");
 
     bind_headers(tmp.path(), "arc", &["archive.h"], &["/usr/include"]);
     bind_headers(tmp.path(), "arc", &["archive_entry.h"], &["/opt/include"]);

@@ -383,9 +383,9 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
+    use super::test_support::lock_counter;
     use super::*;
     use crate::coll::ArrayObj;
-    use super::test_support::lock_counter;
 
     #[test]
     fn leak_obj_increments_the_live_count() {
@@ -472,7 +472,11 @@ mod tests {
         unsafe { push(ap, aw) }; // self-reference
         jrt_incref(aw); // rc 2 — the self-reference is a real reference
         jrt_decref(aw); // external ref gone: rc 1, NOT freed
-        assert_eq!(jrt_heap_live_count(), base + 1, "cycle survives refcounting (B4.3 collects it)");
+        assert_eq!(
+            jrt_heap_live_count(),
+            base + 1,
+            "cycle survives refcounting (B4.3 collects it)"
+        );
 
         // Manual teardown for the test: reclaim directly WITHOUT the cascade
         // (the cascade would re-enter free_obj on the self-word → double free).

@@ -114,8 +114,7 @@ pub fn active_provider() -> Option<String> {
 /// credential to `active/config.json`. Enforces "one active provider" by clearing
 /// the slot first.
 pub fn activate(name: &str) -> Result<(), String> {
-    let src = source_lib(name)
-        .ok_or_else(|| format!("provider '{name}' is not installed"))?;
+    let src = source_lib(name).ok_or_else(|| format!("provider '{name}' is not installed"))?;
 
     let map_io = |e: io::Error| format!("activating '{name}': {e}");
 
@@ -240,11 +239,8 @@ fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let tmp = parent.join(format!(".{stem}.{}.{seq}.tmp", std::process::id()));
 
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&tmp)?;
+    let mut file =
+        std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
     if let Err(e) = file.write_all(bytes).and_then(|()| file.flush()) {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);

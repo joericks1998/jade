@@ -30,11 +30,7 @@ fn to_c_buffer(bytes: &[u8]) -> *mut c_char {
 /// provider in-process rather than connect to the daemon. Cheap: a directory check.
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_provider_available() -> i32 {
-    if super::is_active() {
-        1
-    } else {
-        0
-    }
+    if super::is_active() { 1 } else { 0 }
 }
 
 /// The active provider `.so`'s absolute path as a `malloc`'d NUL-terminated string
@@ -52,11 +48,7 @@ pub extern "C" fn jrt_provider_active_lib_path() -> *mut c_char {
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_provider_active_config() -> *mut c_char {
     let cfg = super::active_config();
-    if cfg.is_empty() {
-        core::ptr::null_mut()
-    } else {
-        to_c_buffer(&cfg)
-    }
+    if cfg.is_empty() { core::ptr::null_mut() } else { to_c_buffer(&cfg) }
 }
 
 #[cfg(test)]

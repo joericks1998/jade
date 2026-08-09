@@ -33,12 +33,12 @@
 use core::ffi::{c_char, c_void};
 
 use crate::coll::{ArrayObj, DictObj, StructObj};
+use crate::cstr;
 use crate::heap::{ObjHeader, ObjKind};
 use crate::render::render_word;
 use crate::string;
 use crate::sys::{malloc, oom, strlen};
 use crate::value::JadeValue;
-use crate::cstr;
 
 /// The element word type the AOT backend stores: a tagged [`JadeValue`] as `i64`.
 type W = i64;
@@ -438,11 +438,13 @@ pub extern "C" fn jrt_get_type_name(obj: W) -> *mut c_char {
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_coll_sh_output(cmd: *const c_char) -> *mut c_void {
     let mut d = DictObj::<W>::new();
-    let (so, se, code) =
-        crate::shf::output(unsafe { cstr::borrow(cmd) }).unwrap_or_else(|_| (String::new(), String::new(), -1));
+    let (so, se, code) = crate::shf::output(unsafe { cstr::borrow(cmd) })
+        .unwrap_or_else(|_| (String::new(), String::new(), -1));
     unsafe {
-        let so_w = JadeValue::from_str_ptr(tagged_string(so.as_bytes(), 1 /*TAINTED*/) as *const ()).bits() as i64;
-        let se_w = JadeValue::from_str_ptr(tagged_string(se.as_bytes(), 1) as *const ()).bits() as i64;
+        let so_w = JadeValue::from_str_ptr(tagged_string(so.as_bytes(), 1 /*TAINTED*/) as *const ())
+            .bits() as i64;
+        let se_w =
+            JadeValue::from_str_ptr(tagged_string(se.as_bytes(), 1) as *const ()).bits() as i64;
         d.insert("stdout", so_w);
         d.insert("stderr", se_w);
         d.insert("code", JadeValue::from_int(code).bits() as i64);
@@ -462,7 +464,10 @@ pub extern "C" fn jrt_coll_fs_list_dir(path: *const c_char, err: *mut i32) -> *m
             let mut arr = ArrayObj::<W>::new();
             for name in names {
                 let w = unsafe {
-                    JadeValue::from_str_ptr(tagged_string(name.as_bytes(), 1 /*TAINTED*/) as *const ()).bits() as i64
+                    JadeValue::from_str_ptr(
+                        tagged_string(name.as_bytes(), 1 /*TAINTED*/) as *const ()
+                    )
+                    .bits() as i64
                 };
                 arr.push(w);
             }

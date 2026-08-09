@@ -57,11 +57,7 @@ pub fn active_dir() -> PathBuf {
 
 /// The single provider `.so` in the active slot, or `None` if none is installed.
 pub fn active_lib_path() -> Option<PathBuf> {
-    std::fs::read_dir(active_dir())
-        .ok()?
-        .flatten()
-        .map(|e| e.path())
-        .find(|p| is_provider_lib(p))
+    std::fs::read_dir(active_dir()).ok()?.flatten().map(|e| e.path()).find(|p| is_provider_lib(p))
 }
 
 /// The opaque credential blob the active provider is configured with

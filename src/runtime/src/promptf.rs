@@ -74,11 +74,7 @@ pub extern "C" fn jrt_prompt_text(v: i64) -> i64 {
     }
     let p = val.as_ptr();
     let kind = unsafe { (*(p as *const ObjHeader)).kind };
-    if kind == ObjKind::Prompt as u8 {
-        unsafe { (*(p as *const PromptObj)).text }
-    } else {
-        v
-    }
+    if kind == ObjKind::Prompt as u8 { unsafe { (*(p as *const PromptObj)).text } } else { v }
 }
 
 #[cfg(test)]

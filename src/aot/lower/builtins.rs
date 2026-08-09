@@ -34,8 +34,21 @@ pub(super) fn parse_native_ref(name: &str) -> Option<(u32, &str)> {
 pub(super) fn is_stdlib_module(name: &str) -> bool {
     matches!(
         name,
-        "math" | "json" | "llm" | "path" | "time" | "env" | "fs" | "random" | "http" | "uhttp"
-            | "sh" | "dict" | "array" | "string" | "Grammar"
+        "math"
+            | "json"
+            | "llm"
+            | "path"
+            | "time"
+            | "env"
+            | "fs"
+            | "random"
+            | "http"
+            | "uhttp"
+            | "sh"
+            | "dict"
+            | "array"
+            | "string"
+            | "Grammar"
     )
 }
 
@@ -103,14 +116,14 @@ pub(super) fn chunk_str_method_supported(method: &str, argc: usize) -> bool {
 /// type-checked it). `contains` (str/array/dict) and `len` (all) are excluded.
 pub(super) fn chunk_val_method_supported(method: &str, argc: usize) -> bool {
     match method {
-        "push" => argc == 1,                       // array
-        "pop" | "sort" | "reverse" => argc == 0,   // array
-        "keys" | "values" => argc == 0,            // dict
-        "has" | "get" => argc == 1,                // dict
-        "contains" => argc == 1,                   // str / array (runtime-dispatched)
-        "len" => argc == 0,                        // str / array / dict / bytes (runtime-dispatched)
-        "decode" => argc == 0,                     // bytes
-        "slice" => argc == 2,                      // bytes
+        "push" => argc == 1,                     // array
+        "pop" | "sort" | "reverse" => argc == 0, // array
+        "keys" | "values" => argc == 0,          // dict
+        "has" | "get" => argc == 1,              // dict
+        "contains" => argc == 1,                 // str / array (runtime-dispatched)
+        "len" => argc == 0,                      // str / array / dict / bytes (runtime-dispatched)
+        "decode" => argc == 0,                   // bytes
+        "slice" => argc == 2,                    // bytes
         _ => false,
     }
 }
@@ -140,7 +153,8 @@ pub(super) fn emit_dynamic_method<'ctx>(
         .into_pointer_value();
     let type_word = low.tag_str(tn);
     // fnptr = jrt_method_lookup(type_word, "method")
-    let lookup = low.runtime_fn("jrt_method_lookup", ptrt.fn_type(&[i64_ty.into(), ptrt.into()], false));
+    let lookup =
+        low.runtime_fn("jrt_method_lookup", ptrt.fn_type(&[i64_ty.into(), ptrt.into()], false));
     let fnptr = b
         .build_call(lookup, &[type_word.into(), low.cstr(method).into()], "mfn")
         .map_err(err)?
@@ -155,8 +169,7 @@ pub(super) fn emit_dynamic_method<'ctx>(
     for a in args {
         argv.push(low.load(*a).into());
     }
-    Ok(b
-        .build_indirect_call(fn_ty, fnptr, &argv, "dmcall")
+    Ok(b.build_indirect_call(fn_ty, fnptr, &argv, "dmcall")
         .map_err(err)?
         .as_any_value_enum()
         .into_int_value())
@@ -165,7 +178,10 @@ pub(super) fn emit_dynamic_method<'ctx>(
 /// Load a native package's `dlopen` handle from its `native_pkg$<pkgid>` global.
 /// `compile()` creates + fills this in `main`'s prologue for the real module; it
 /// is created lazily (nil) if missing so the throwaway probe module also lowers.
-pub(super) fn native_pkg_handle<'ctx>(low: &Lowerer<'_, 'ctx>, pkgid: u32) -> Result<PointerValue<'ctx>, String> {
+pub(super) fn native_pkg_handle<'ctx>(
+    low: &Lowerer<'_, 'ctx>,
+    pkgid: u32,
+) -> Result<PointerValue<'ctx>, String> {
     let gname = format!("native_pkg${pkgid}");
     let g = low.module.get_global(&gname).unwrap_or_else(|| {
         let g = low.module.add_global(low.ptrt(), None, &gname);
@@ -215,15 +231,19 @@ pub(super) fn emit_native_call<'ctx>(
         "jrt_native_call",
         i64_ty.fn_type(&[ptrt.into(), ptrt.into(), ptrt.into(), i64_ty.into()], false),
     );
-    Ok(b
-        .build_call(
-            call_fn,
-            &[handle.into(), name_ptr.into(), argv.into(), i64_ty.const_int(args.len() as u64, false).into()],
-            "ncall",
-        )
-        .map_err(err)?
-        .as_any_value_enum()
-        .into_int_value())
+    Ok(b.build_call(
+        call_fn,
+        &[
+            handle.into(),
+            name_ptr.into(),
+            argv.into(),
+            i64_ty.const_int(args.len() as u64, false).into(),
+        ],
+        "ncall",
+    )
+    .map_err(err)?
+    .as_any_value_enum()
+    .into_int_value())
 }
 
 /// Materialize a first-class native function value: a heap
@@ -259,9 +279,13 @@ pub(super) fn emit_native_fn_value<'ctx>(
             .as_any_value_enum()
             .into_pointer_value())
     };
-    let store_ptr = |base: PointerValue<'ctx>, idx: u64, val: BasicMetadataValueEnum<'ctx>| -> Result<(), String> {
+    let store_ptr = |base: PointerValue<'ctx>,
+                     idx: u64,
+                     val: BasicMetadataValueEnum<'ctx>|
+     -> Result<(), String> {
         let slot = unsafe {
-            b.build_in_bounds_gep(ptrt, base, &[i64_ty.const_int(idx, false)], "fslot").map_err(err)?
+            b.build_in_bounds_gep(ptrt, base, &[i64_ty.const_int(idx, false)], "fslot")
+                .map_err(err)?
         };
         let v: inkwell::values::BasicValueEnum = match val {
             BasicMetadataValueEnum::PointerValue(p) => p.into(),
@@ -319,7 +343,9 @@ pub(super) fn emit_val_method<'ctx>(
     // / `jrt_in_any`, which dispatch on the tag themselves and are already safe
     // on a scalar. Every other arm untags to a pointer and trusts the kind.
     match method {
-        "push" | "pop" | "sort" | "reverse" => low.require_kind(low.load(recv), WANT_ARRAY, method)?,
+        "push" | "pop" | "sort" | "reverse" => {
+            low.require_kind(low.load(recv), WANT_ARRAY, method)?
+        }
         "keys" | "values" | "has" | "get" => low.require_kind(low.load(recv), WANT_DICT, method)?,
         _ => {}
     }
@@ -356,24 +382,34 @@ pub(super) fn emit_val_method<'ctx>(
             Ok(low.tag_ptr(p))
         }
         "push" => {
-            let f = low.runtime_fn("jrt_karr_push", void_ty.fn_type(&[ptrt.into(), i64_ty.into()], false));
+            let f = low
+                .runtime_fn("jrt_karr_push", void_ty.fn_type(&[ptrt.into(), i64_ty.into()], false));
             b.build_call(f, &[recv_p.into(), low.load(args[0]).into()], "").map_err(err)?;
             Ok(nil)
         }
         "pop" => {
             let f = low.runtime_fn("jrt_coll_array_pop", i64_ty.fn_type(&[ptrt.into()], false));
-            Ok(b.build_call(f, &[recv_p.into()], "pop").map_err(err)?.as_any_value_enum().into_int_value())
+            Ok(b.build_call(f, &[recv_p.into()], "pop")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_int_value())
         }
         "sort" | "reverse" => {
-            let cname = if method == "sort" { "jrt_coll_array_sort" } else { "jrt_coll_array_reverse" };
+            let cname =
+                if method == "sort" { "jrt_coll_array_sort" } else { "jrt_coll_array_reverse" };
             let f = low.runtime_fn(cname, void_ty.fn_type(&[ptrt.into()], false));
             b.build_call(f, &[recv_p.into()], "").map_err(err)?;
             Ok(nil)
         }
         "keys" | "values" => {
-            let cname = if method == "keys" { "jrt_coll_dict_keys" } else { "jrt_coll_dict_values" };
+            let cname =
+                if method == "keys" { "jrt_coll_dict_keys" } else { "jrt_coll_dict_values" };
             let f = low.runtime_fn(cname, ptrt.fn_type(&[ptrt.into()], false));
-            let p = b.build_call(f, &[recv_p.into()], "kv").map_err(err)?.as_any_value_enum().into_pointer_value();
+            let p = b
+                .build_call(f, &[recv_p.into()], "kv")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_pointer_value();
             Ok(low.tag_ptr(p))
         }
         "len" => {
@@ -390,7 +426,8 @@ pub(super) fn emit_val_method<'ctx>(
         "contains" => {
             // `haystack.contains(needle)` == `needle in haystack`: jrt_in_any
             // dispatches str (substring) / array (element eq) at runtime.
-            let f = low.runtime_fn("jrt_in_any", i32_ty.fn_type(&[i64_ty.into(), i64_ty.into()], false));
+            let f = low
+                .runtime_fn("jrt_in_any", i32_ty.fn_type(&[i64_ty.into(), i64_ty.into()], false));
             let r = b
                 .build_call(f, &[low.load(args[0]).into(), low.load(recv).into()], "cont")
                 .map_err(err)?
@@ -492,7 +529,11 @@ pub(super) fn emit_module_call<'ctx>(
     // A `(ptr) -> i32` predicate → bool word.
     let bool_ptr_fn = |name: &str| -> Result<IntValue<'ctx>, String> {
         let f = low.runtime_fn(name, i32_ty.fn_type(&[ptrt.into()], false));
-        let r = b.build_call(f, &[strp(0).into()], "").map_err(err)?.as_any_value_enum().into_int_value();
+        let r = b
+            .build_call(f, &[strp(0).into()], "")
+            .map_err(err)?
+            .as_any_value_enum()
+            .into_int_value();
         let bit = b
             .build_int_compare(inkwell::IntPredicate::NE, r, i32_ty.const_zero(), "b")
             .map_err(err)?;
@@ -529,7 +570,8 @@ pub(super) fn emit_module_call<'ctx>(
         ("path", "is_abs") => bool_ptr_fn("jrt_path_is_abs"),
         ("path", "join") => {
             // Variadic left-fold through the 2-arg jrt_path_join primitive.
-            let f = low.runtime_fn("jrt_path_join", ptrt.fn_type(&[ptrt.into(), ptrt.into()], false));
+            let f =
+                low.runtime_fn("jrt_path_join", ptrt.fn_type(&[ptrt.into(), ptrt.into()], false));
             let mut acc = strp(0);
             for k in 1..args.len() {
                 acc = b
@@ -543,10 +585,13 @@ pub(super) fn emit_module_call<'ctx>(
         ("fs", "read") => {
             // jrt_fs_read(path, i32 trust) -> str (TAINTED unless trust, raises on
             // error). `fs.read(path, trust=<bool>)` passes the bool's bit4 as trust.
-            let f = low.runtime_fn("jrt_fs_read", ptrt.fn_type(&[ptrt.into(), i32_ty.into()], false));
+            let f =
+                low.runtime_fn("jrt_fs_read", ptrt.fn_type(&[ptrt.into(), i32_ty.into()], false));
             let trust = if args.len() == 2 {
                 let w = low.load(args[1]);
-                let sh = b.build_right_shift(w, i64_ty.const_int(4, false), false, "tsh").map_err(err)?;
+                let sh = b
+                    .build_right_shift(w, i64_ty.const_int(4, false), false, "tsh")
+                    .map_err(err)?;
                 let bit = b.build_and(sh, i64_ty.const_int(1, false), "tbit").map_err(err)?;
                 b.build_int_truncate(bit, i32_ty, "t32").map_err(err)?
             } else {
@@ -562,10 +607,15 @@ pub(super) fn emit_module_call<'ctx>(
         ("fs", "read_bytes") => {
             // Same shape as fs.read: a `trust=<bool>` second argument passes the
             // bool's bit4 through, and the content is TAINTED without it.
-            let f = low.runtime_fn("jk_fs_read_bytes", i64_ty.fn_type(&[ptrt.into(), i32_ty.into()], false));
+            let f = low.runtime_fn(
+                "jk_fs_read_bytes",
+                i64_ty.fn_type(&[ptrt.into(), i32_ty.into()], false),
+            );
             let trust = if args.len() == 2 {
                 let w = low.load(args[1]);
-                let sh = b.build_right_shift(w, i64_ty.const_int(4, false), false, "tsh").map_err(err)?;
+                let sh = b
+                    .build_right_shift(w, i64_ty.const_int(4, false), false, "tsh")
+                    .map_err(err)?;
                 let bit = b.build_and(sh, i64_ty.const_int(1, false), "tbit").map_err(err)?;
                 b.build_int_truncate(bit, i32_ty, "t32").map_err(err)?
             } else {
@@ -579,20 +629,21 @@ pub(super) fn emit_module_call<'ctx>(
             Ok(r)
         }
         ("fs", "write_bytes" | "append_bytes") => {
-            let fname = if method == "write_bytes" { "jk_fs_write_bytes" } else { "jk_fs_append_bytes" };
+            let fname =
+                if method == "write_bytes" { "jk_fs_write_bytes" } else { "jk_fs_append_bytes" };
             let f = low.runtime_fn(fname, void_ty.fn_type(&[ptrt.into(), i64_ty.into()], false));
-            b.build_call(f, &[strp(0).into(), low.load(args[1]).into()], "")
-                .map_err(err)?;
+            b.build_call(f, &[strp(0).into(), low.load(args[1]).into()], "").map_err(err)?;
             Ok(i64_ty.const_int(NIL, false))
         }
         ("fs", "read_stdin_bytes") => {
             let f = low.runtime_fn("jk_fs_read_stdin_bytes", i64_ty.fn_type(&[], false));
-            let r = b.build_call(f, &[], "stdinb").map_err(err)?
-                .as_any_value_enum().into_int_value();
+            let r =
+                b.build_call(f, &[], "stdinb").map_err(err)?.as_any_value_enum().into_int_value();
             Ok(r)
         }
         ("fs", "write_stdout_bytes") => {
-            let f = low.runtime_fn("jk_fs_write_stdout_bytes", void_ty.fn_type(&[i64_ty.into()], false));
+            let f = low
+                .runtime_fn("jk_fs_write_stdout_bytes", void_ty.fn_type(&[i64_ty.into()], false));
             b.build_call(f, &[low.load(args[0]).into()], "").map_err(err)?;
             Ok(i64_ty.const_int(NIL, false))
         }
@@ -607,21 +658,33 @@ pub(super) fn emit_module_call<'ctx>(
             // `jrt_sh_output`, not `jrt_coll_sh_output` — the forwarder is where
             // the tainted-command refusal lives, matching exec and run.
             let f = low.runtime_fn("jrt_sh_output", ptrt.fn_type(&[ptrt.into()], false));
-            let p = b.build_call(f, &[strp(0).into()], "shout").map_err(err)?.as_any_value_enum().into_pointer_value();
+            let p = b
+                .build_call(f, &[strp(0).into()], "shout")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_pointer_value();
             Ok(low.tag_ptr(p))
         }
         ("fs", "list_dir") => {
             // raises on I/O error; returns an already-tagged array pointer word.
             let f = low.runtime_fn("jrt_fs_list_dir_chunk", i64_ty.fn_type(&[ptrt.into()], false));
-            Ok(b.build_call(f, &[strp(0).into()], "ld").map_err(err)?.as_any_value_enum().into_int_value())
+            Ok(b.build_call(f, &[strp(0).into()], "ld")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_int_value())
         }
         ("random", "choice") => {
             // (arr word) -> element word (already tagged).
-            let f = low.runtime_fn("jrt_random_choice_chunk", i64_ty.fn_type(&[i64_ty.into()], false));
-            Ok(b.build_call(f, &[low.load(args[0]).into()], "choice").map_err(err)?.as_any_value_enum().into_int_value())
+            let f =
+                low.runtime_fn("jrt_random_choice_chunk", i64_ty.fn_type(&[i64_ty.into()], false));
+            Ok(b.build_call(f, &[low.load(args[0]).into()], "choice")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_int_value())
         }
         ("random", "shuffle") => {
-            let f = low.runtime_fn("jrt_random_shuffle_chunk", void_ty.fn_type(&[i64_ty.into()], false));
+            let f = low
+                .runtime_fn("jrt_random_shuffle_chunk", void_ty.fn_type(&[i64_ty.into()], false));
             b.build_call(f, &[low.load(args[0]).into()], "").map_err(err)?;
             Ok(nil)
         }
@@ -633,27 +696,38 @@ pub(super) fn emit_module_call<'ctx>(
         ("time", "sleep") => {
             // (float seconds) -> nil. Unbox the boxed-float arg to a native f64.
             let unbox = low.runtime_fn("jrt_unbox_float", f64_ty.fn_type(&[i64_ty.into()], false));
-            let d = b.build_call(unbox, &[low.load(args[0]).into()], "sec").map_err(err)?.as_any_value_enum().into_float_value();
+            let d = b
+                .build_call(unbox, &[low.load(args[0]).into()], "sec")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_float_value();
             let f = low.runtime_fn("jrt_time_sleep", void_ty.fn_type(&[f64_ty.into()], false));
             b.build_call(f, &[d.into()], "").map_err(err)?;
             Ok(nil)
         }
         ("array", "map" | "filter") => {
             // (arr word, fn word) -> new array word. Both args are tagged words.
-            let cname = if method == "map" { "jrt_coll_array_map" } else { "jrt_coll_array_filter" };
+            let cname =
+                if method == "map" { "jrt_coll_array_map" } else { "jrt_coll_array_filter" };
             let f = low.runtime_fn(cname, i64_ty.fn_type(&[i64_ty.into(), i64_ty.into()], false));
-            Ok(b
-                .build_call(f, &[low.load(args[0]).into(), low.load(args[1]).into()], "mapf")
+            Ok(b.build_call(f, &[low.load(args[0]).into(), low.load(args[1]).into()], "mapf")
                 .map_err(err)?
                 .as_any_value_enum()
                 .into_int_value())
         }
         ("random", "int") => {
             // Raw (untagged) i64 bounds; raises if lo > hi.
-            let f = low.runtime_fn("jrt_random_int", i64_ty.fn_type(&[i64_ty.into(), i64_ty.into()], false));
+            let f = low.runtime_fn(
+                "jrt_random_int",
+                i64_ty.fn_type(&[i64_ty.into(), i64_ty.into()], false),
+            );
             let lo = low.untag_int(low.load(args[0]));
             let hi = low.untag_int(low.load(args[1]));
-            let r = b.build_call(f, &[lo.into(), hi.into()], "").map_err(err)?.as_any_value_enum().into_int_value();
+            let r = b
+                .build_call(f, &[lo.into(), hi.into()], "")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_int_value();
             Ok(low.tag_int(r))
         }
         ("random", "seed") => {
@@ -665,7 +739,10 @@ pub(super) fn emit_module_call<'ctx>(
             let f = low.runtime_fn("jrt_random_float", f64_ty.fn_type(&[], false));
             let d = b.build_call(f, &[], "").map_err(err)?.as_any_value_enum().into_float_value();
             let boxf = low.runtime_fn("jrt_box_float", i64_ty.fn_type(&[f64_ty.into()], false));
-            Ok(b.build_call(boxf, &[d.into()], "boxf").map_err(err)?.as_any_value_enum().into_int_value())
+            Ok(b.build_call(boxf, &[d.into()], "boxf")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_int_value())
         }
         // These return already-tagged ObjHeader value words (dict/array or nil).
         ("env", "args") => {
@@ -680,15 +757,27 @@ pub(super) fn emit_module_call<'ctx>(
         // rather than a data pointer — see the arm below.
         ("http", "get" | "delete" | "head" | "get_bytes") => {
             // (url, [headers]) -> already-tagged { status, body } dict word.
-            let f = low.runtime_fn(&format!("jrt_http_{method}"), i64_ty.fn_type(&[ptrt.into(), ptrt.into()], false));
+            let f = low.runtime_fn(
+                &format!("jrt_http_{method}"),
+                i64_ty.fn_type(&[ptrt.into(), ptrt.into()], false),
+            );
             let headers = if args.len() >= 2 { strp(1) } else { ptrt.const_null() };
-            Ok(b.build_call(f, &[strp(0).into(), headers.into()], "http").map_err(err)?.as_any_value_enum().into_int_value())
+            Ok(b.build_call(f, &[strp(0).into(), headers.into()], "http")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_int_value())
         }
         ("http", "post" | "put") => {
             // (url, body, [headers]) -> tagged { status, body } dict word.
-            let f = low.runtime_fn(&format!("jrt_http_{method}"), i64_ty.fn_type(&[ptrt.into(), ptrt.into(), ptrt.into()], false));
+            let f = low.runtime_fn(
+                &format!("jrt_http_{method}"),
+                i64_ty.fn_type(&[ptrt.into(), ptrt.into(), ptrt.into()], false),
+            );
             let headers = if args.len() >= 3 { strp(2) } else { ptrt.const_null() };
-            Ok(b.build_call(f, &[strp(0).into(), strp(1).into(), headers.into()], "http").map_err(err)?.as_any_value_enum().into_int_value())
+            Ok(b.build_call(f, &[strp(0).into(), strp(1).into(), headers.into()], "http")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_int_value())
         }
         ("http" | "uhttp", "post_bytes") => {
             // (url, body word, [headers]) -> tagged { status, body } dict word.
@@ -700,23 +789,38 @@ pub(super) fn emit_module_call<'ctx>(
                 i64_ty.fn_type(&[ptrt.into(), i64_ty.into(), ptrt.into()], false),
             );
             let headers = if args.len() >= 3 { strp(2) } else { ptrt.const_null() };
-            Ok(b
-                .build_call(f, &[strp(0).into(), low.load(args[1]).into(), headers.into()], "httpb")
+            Ok(b.build_call(
+                f,
+                &[strp(0).into(), low.load(args[1]).into(), headers.into()],
+                "httpb",
+            )
+            .map_err(err)?
+            .as_any_value_enum()
+            .into_int_value())
+        }
+        ("uhttp", "get" | "delete" | "head" | "get_bytes") => {
+            // (unix-url, [headers]) -> already-tagged { status, body } dict word.
+            let f = low.runtime_fn(
+                &format!("jrt_uhttp_{method}"),
+                i64_ty.fn_type(&[ptrt.into(), ptrt.into()], false),
+            );
+            let headers = if args.len() >= 2 { strp(1) } else { ptrt.const_null() };
+            Ok(b.build_call(f, &[strp(0).into(), headers.into()], "uhttp")
                 .map_err(err)?
                 .as_any_value_enum()
                 .into_int_value())
         }
-        ("uhttp", "get" | "delete" | "head" | "get_bytes") => {
-            // (unix-url, [headers]) -> already-tagged { status, body } dict word.
-            let f = low.runtime_fn(&format!("jrt_uhttp_{method}"), i64_ty.fn_type(&[ptrt.into(), ptrt.into()], false));
-            let headers = if args.len() >= 2 { strp(1) } else { ptrt.const_null() };
-            Ok(b.build_call(f, &[strp(0).into(), headers.into()], "uhttp").map_err(err)?.as_any_value_enum().into_int_value())
-        }
         ("uhttp", "post" | "put") => {
             // (unix-url, body, [headers]) -> tagged { status, body } dict word.
-            let f = low.runtime_fn(&format!("jrt_uhttp_{method}"), i64_ty.fn_type(&[ptrt.into(), ptrt.into(), ptrt.into()], false));
+            let f = low.runtime_fn(
+                &format!("jrt_uhttp_{method}"),
+                i64_ty.fn_type(&[ptrt.into(), ptrt.into(), ptrt.into()], false),
+            );
             let headers = if args.len() >= 3 { strp(2) } else { ptrt.const_null() };
-            Ok(b.build_call(f, &[strp(0).into(), strp(1).into(), headers.into()], "uhttp").map_err(err)?.as_any_value_enum().into_int_value())
+            Ok(b.build_call(f, &[strp(0).into(), strp(1).into(), headers.into()], "uhttp")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_int_value())
         }
         ("uhttp", "stream") => {
             // (unix-url, handler fn word, [headers]) -> status as a tagged int.
@@ -729,7 +833,11 @@ pub(super) fn emit_module_call<'ctx>(
             );
             let headers = if args.len() >= 3 { strp(2) } else { ptrt.const_null() };
             let status = b
-                .build_call(f, &[strp(0).into(), low.load(args[1]).into(), headers.into()], "ustream")
+                .build_call(
+                    f,
+                    &[strp(0).into(), low.load(args[1]).into(), headers.into()],
+                    "ustream",
+                )
                 .map_err(err)?
                 .as_any_value_enum()
                 .into_int_value();
@@ -737,7 +845,10 @@ pub(super) fn emit_module_call<'ctx>(
         }
         ("dict", "merge") => {
             // (d1, d2) -> new dict word (tagged ptr).
-            let f = low.runtime_fn("jrt_coll_dict_merge", ptrt.fn_type(&[ptrt.into(), ptrt.into()], false));
+            let f = low.runtime_fn(
+                "jrt_coll_dict_merge",
+                ptrt.fn_type(&[ptrt.into(), ptrt.into()], false),
+            );
             let p = b
                 .build_call(f, &[strp(0).into(), strp(1).into()], "merge")
                 .map_err(err)?
@@ -748,11 +859,17 @@ pub(super) fn emit_module_call<'ctx>(
         ("json", "parse") => {
             // (str) -> value word (already tagged: dict/array/scalar).
             let f = low.runtime_fn("jrt_json_parse_chunk", i64_ty.fn_type(&[ptrt.into()], false));
-            Ok(b.build_call(f, &[strp(0).into()], "jparse").map_err(err)?.as_any_value_enum().into_int_value())
+            Ok(b.build_call(f, &[strp(0).into()], "jparse")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_int_value())
         }
         ("json", "stringify" | "stringify_pretty") => {
             // (value word, i32 pretty) -> tagged string.
-            let f = low.runtime_fn("jrt_json_stringify_chunk", ptrt.fn_type(&[i64_ty.into(), i32_ty.into()], false));
+            let f = low.runtime_fn(
+                "jrt_json_stringify_chunk",
+                ptrt.fn_type(&[i64_ty.into(), i32_ty.into()], false),
+            );
             let pretty = i32_ty.const_int(u64::from(method == "stringify_pretty"), false);
             let p = b
                 .build_call(f, &[low.load(args[0]).into(), pretty.into()], "jstr")
@@ -795,17 +912,17 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
             .build_global_string_ptr("\n", "jprint_nl")
             .map_err(|e| e.to_string())?
             .as_pointer_value();
-        self.builder
-            .build_call(f, &[val.into(), nl.into()], "")
-            .map_err(|e| e.to_string())?;
+        self.builder.build_call(f, &[val.into(), nl.into()], "").map_err(|e| e.to_string())?;
         self.store(dest, self.i64t().const_int(NIL, false));
         Ok(())
     }
 
     /// `write(x)`: the same render as `print`, with no newline and a flush.
     pub(super) fn write_value(&self, val: IntValue<'ctx>, dest: Reg) -> Result<(), String> {
-        let f = self
-            .runtime_fn("jrt_write_any", self.ctx.void_type().fn_type(&[self.i64t().into()], false));
+        let f = self.runtime_fn(
+            "jrt_write_any",
+            self.ctx.void_type().fn_type(&[self.i64t().into()], false),
+        );
         self.builder.build_call(f, &[val.into()], "").map_err(|e| e.to_string())?;
         self.store(dest, self.i64t().const_int(NIL, false));
         Ok(())
@@ -823,7 +940,12 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
     ///
     /// `jrt_require_kind` returns normally on a match, so callers keep emitting
     /// into the same block — unlike `throw`, this needs no block surgery.
-    pub(super) fn require_kind(&self, recv: IntValue<'ctx>, want: u64, method: &str) -> Result<(), String> {
+    pub(super) fn require_kind(
+        &self,
+        recv: IntValue<'ctx>,
+        want: u64,
+        method: &str,
+    ) -> Result<(), String> {
         let i32_ty = self.ctx.i32_type();
         let f = self.runtime_fn(
             "jrt_require_kind",
@@ -840,5 +962,4 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
             .map_err(|e| e.to_string())?;
         Ok(())
     }
-
 }

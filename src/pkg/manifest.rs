@@ -155,11 +155,8 @@ pub fn set_bindings(
         if values.is_empty() {
             return;
         }
-        let mut arr = dep
-            .get(key)
-            .and_then(|i| i.as_array())
-            .cloned()
-            .unwrap_or_else(toml_edit::Array::new);
+        let mut arr =
+            dep.get(key).and_then(|i| i.as_array()).cloned().unwrap_or_else(toml_edit::Array::new);
         for v in values {
             if !arr.iter().any(|e| e.as_str() == Some(v.as_str())) {
                 arr.push(v.as_str());
@@ -175,7 +172,9 @@ pub fn set_bindings(
             .entry("structs")
             .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
             .as_table_mut()
-            .ok_or_else(|| format!("dependency '{name}' has a `structs` key that is not a table"))?;
+            .ok_or_else(|| {
+                format!("dependency '{name}' has a `structs` key that is not a table")
+            })?;
         structs_tbl.set_implicit(true);
         for (sname, def) in structs {
             let mut t = toml_edit::Table::new();

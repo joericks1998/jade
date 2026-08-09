@@ -71,7 +71,8 @@ fn stored_in_array_escapes() {
 fn bare_use_in_arithmetic_context_escapes() {
     // `a` used without indexing (here as an equality operand) is not a scalar
     // index read, so it must be treated as escaping.
-    let p = plan("fn f() {\n  let a = [1, 2, 3]\n  let b = [1, 2, 3]\n  let c = a == b\n  return c\n}");
+    let p =
+        plan("fn f() {\n  let a = [1, 2, 3]\n  let b = [1, 2, 3]\n  let c = a == b\n  return c\n}");
     assert!(p.is_empty(), "comparing the array by value is not an allowed use");
 }
 

@@ -113,74 +113,74 @@ pub enum TokenKind {
 /// Used in parser error messages so users see `` `{` `` instead of `LBrace`.
 pub fn token_kind_desc(kind: &TokenKind) -> String {
     match kind {
-        TokenKind::Integer(n)    => format!("`{}`", n),
-        TokenKind::Float(f)      => format!("`{}`", f),
-        TokenKind::Str(_)        => "string literal".to_string(),
-        TokenKind::FStr(_)       => "f-string".to_string(),
+        TokenKind::Integer(n) => format!("`{}`", n),
+        TokenKind::Float(f) => format!("`{}`", f),
+        TokenKind::Str(_) => "string literal".to_string(),
+        TokenKind::FStr(_) => "f-string".to_string(),
         TokenKind::Identifier(s) => format!("`{}`", s),
-        TokenKind::Let           => "`let`".to_string(),
-        TokenKind::Fn            => "`fn`".to_string(),
-        TokenKind::Return        => "`return`".to_string(),
-        TokenKind::If            => "`if`".to_string(),
-        TokenKind::Elif          => "`elif`".to_string(),
-        TokenKind::Else          => "`else`".to_string(),
-        TokenKind::While         => "`while`".to_string(),
-        TokenKind::For           => "`for`".to_string(),
-        TokenKind::In            => "`in`".to_string(),
-        TokenKind::Break         => "`break`".to_string(),
-        TokenKind::Continue      => "`continue`".to_string(),
-        TokenKind::Struct        => "`struct`".to_string(),
-        TokenKind::Extend        => "`extend`".to_string(),
-        TokenKind::Interface     => "`interface`".to_string(),
-        TokenKind::Prompt        => "`prompt`".to_string(),
-        TokenKind::Use           => "`use`".to_string(),
-        TokenKind::True          => "`true`".to_string(),
-        TokenKind::False         => "`false`".to_string(),
-        TokenKind::Raise         => "`raise`".to_string(),
-        TokenKind::Try           => "`try`".to_string(),
-        TokenKind::Catch         => "`catch`".to_string(),
-        TokenKind::Async         => "`async`".to_string(),
-        TokenKind::Await         => "`await`".to_string(),
-        TokenKind::Yield         => "`yield`".to_string(),
-        TokenKind::From          => "`from`".to_string(),
-        TokenKind::As            => "`as`".to_string(),
-        TokenKind::Question      => "`?`".to_string(),
-        TokenKind::TildeGt       => "`~>`".to_string(),
-        TokenKind::At            => "`@`".to_string(),
-        TokenKind::Plus          => "`+`".to_string(),
-        TokenKind::Minus         => "`-`".to_string(),
-        TokenKind::Star          => "`*`".to_string(),
-        TokenKind::Slash         => "`/`".to_string(),
-        TokenKind::Percent       => "`%`".to_string(),
-        TokenKind::Ampersand     => "`&`".to_string(),
-        TokenKind::Pipe          => "`|`".to_string(),
-        TokenKind::Caret         => "`^`".to_string(),
-        TokenKind::Tilde         => "`~`".to_string(),
-        TokenKind::LtLt          => "`<<`".to_string(),
-        TokenKind::GtGt          => "`>>`".to_string(),
-        TokenKind::AmpAmp        => "`&&`".to_string(),
-        TokenKind::PipePipe      => "`||`".to_string(),
-        TokenKind::PipeGt        => "`|>`".to_string(),
-        TokenKind::Bang          => "`!`".to_string(),
-        TokenKind::EqEq          => "`==`".to_string(),
-        TokenKind::BangEq        => "`!=`".to_string(),
-        TokenKind::Lt            => "`<`".to_string(),
-        TokenKind::Gt            => "`>`".to_string(),
-        TokenKind::LtEq          => "`<=`".to_string(),
-        TokenKind::GtEq          => "`>=`".to_string(),
-        TokenKind::Equals        => "`=`".to_string(),
-        TokenKind::Comma         => "`,`".to_string(),
-        TokenKind::Semicolon     => "`;`".to_string(),
-        TokenKind::Dot           => "`.`".to_string(),
-        TokenKind::Colon         => "`:`".to_string(),
-        TokenKind::ColonColon    => "`::`".to_string(),
-        TokenKind::LParen        => "`(`".to_string(),
-        TokenKind::RParen        => "`)`".to_string(),
-        TokenKind::LBrace        => "`{`".to_string(),
-        TokenKind::RBrace        => "`}`".to_string(),
-        TokenKind::LBracket      => "`[`".to_string(),
-        TokenKind::RBracket      => "`]`".to_string(),
-        TokenKind::Eof           => "end of file".to_string(),
+        TokenKind::Let => "`let`".to_string(),
+        TokenKind::Fn => "`fn`".to_string(),
+        TokenKind::Return => "`return`".to_string(),
+        TokenKind::If => "`if`".to_string(),
+        TokenKind::Elif => "`elif`".to_string(),
+        TokenKind::Else => "`else`".to_string(),
+        TokenKind::While => "`while`".to_string(),
+        TokenKind::For => "`for`".to_string(),
+        TokenKind::In => "`in`".to_string(),
+        TokenKind::Break => "`break`".to_string(),
+        TokenKind::Continue => "`continue`".to_string(),
+        TokenKind::Struct => "`struct`".to_string(),
+        TokenKind::Extend => "`extend`".to_string(),
+        TokenKind::Interface => "`interface`".to_string(),
+        TokenKind::Prompt => "`prompt`".to_string(),
+        TokenKind::Use => "`use`".to_string(),
+        TokenKind::True => "`true`".to_string(),
+        TokenKind::False => "`false`".to_string(),
+        TokenKind::Raise => "`raise`".to_string(),
+        TokenKind::Try => "`try`".to_string(),
+        TokenKind::Catch => "`catch`".to_string(),
+        TokenKind::Async => "`async`".to_string(),
+        TokenKind::Await => "`await`".to_string(),
+        TokenKind::Yield => "`yield`".to_string(),
+        TokenKind::From => "`from`".to_string(),
+        TokenKind::As => "`as`".to_string(),
+        TokenKind::Question => "`?`".to_string(),
+        TokenKind::TildeGt => "`~>`".to_string(),
+        TokenKind::At => "`@`".to_string(),
+        TokenKind::Plus => "`+`".to_string(),
+        TokenKind::Minus => "`-`".to_string(),
+        TokenKind::Star => "`*`".to_string(),
+        TokenKind::Slash => "`/`".to_string(),
+        TokenKind::Percent => "`%`".to_string(),
+        TokenKind::Ampersand => "`&`".to_string(),
+        TokenKind::Pipe => "`|`".to_string(),
+        TokenKind::Caret => "`^`".to_string(),
+        TokenKind::Tilde => "`~`".to_string(),
+        TokenKind::LtLt => "`<<`".to_string(),
+        TokenKind::GtGt => "`>>`".to_string(),
+        TokenKind::AmpAmp => "`&&`".to_string(),
+        TokenKind::PipePipe => "`||`".to_string(),
+        TokenKind::PipeGt => "`|>`".to_string(),
+        TokenKind::Bang => "`!`".to_string(),
+        TokenKind::EqEq => "`==`".to_string(),
+        TokenKind::BangEq => "`!=`".to_string(),
+        TokenKind::Lt => "`<`".to_string(),
+        TokenKind::Gt => "`>`".to_string(),
+        TokenKind::LtEq => "`<=`".to_string(),
+        TokenKind::GtEq => "`>=`".to_string(),
+        TokenKind::Equals => "`=`".to_string(),
+        TokenKind::Comma => "`,`".to_string(),
+        TokenKind::Semicolon => "`;`".to_string(),
+        TokenKind::Dot => "`.`".to_string(),
+        TokenKind::Colon => "`:`".to_string(),
+        TokenKind::ColonColon => "`::`".to_string(),
+        TokenKind::LParen => "`(`".to_string(),
+        TokenKind::RParen => "`)`".to_string(),
+        TokenKind::LBrace => "`{`".to_string(),
+        TokenKind::RBrace => "`}`".to_string(),
+        TokenKind::LBracket => "`[`".to_string(),
+        TokenKind::RBracket => "`]`".to_string(),
+        TokenKind::Eof => "end of file".to_string(),
     }
 }
 
@@ -258,22 +258,51 @@ fn scan_str_content(
                 }
                 let esc = chars[*i];
                 if esc == quote {
-                    content.push(quote); *i += 1; *col += 1;
+                    content.push(quote);
+                    *i += 1;
+                    *col += 1;
                 } else {
                     match esc {
-                        '\\' => { content.push('\\'); *i += 1; *col += 1; }
-                        'n'  => { content.push('\n'); *i += 1; *col += 1; }
-                        't'  => { content.push('\t'); *i += 1; *col += 1; }
-                        'r'  => { content.push('\r'); *i += 1; *col += 1; }
-                        other => return Err(JadeError::UnexpectedChar {
-                            ch: other,
-                            span: Span { line: *line, col: *col },
-                        }),
+                        '\\' => {
+                            content.push('\\');
+                            *i += 1;
+                            *col += 1;
+                        }
+                        'n' => {
+                            content.push('\n');
+                            *i += 1;
+                            *col += 1;
+                        }
+                        't' => {
+                            content.push('\t');
+                            *i += 1;
+                            *col += 1;
+                        }
+                        'r' => {
+                            content.push('\r');
+                            *i += 1;
+                            *col += 1;
+                        }
+                        other => {
+                            return Err(JadeError::UnexpectedChar {
+                                ch: other,
+                                span: Span { line: *line, col: *col },
+                            });
+                        }
                     }
                 }
             }
-            '\n' => { content.push('\n'); *line += 1; *col = 1; *i += 1; }
-            ch   => { content.push(ch);  *col += 1; *i += 1; }
+            '\n' => {
+                content.push('\n');
+                *line += 1;
+                *col = 1;
+                *i += 1;
+            }
+            ch => {
+                content.push(ch);
+                *col += 1;
+                *i += 1;
+            }
         }
     }
     Ok(content)
@@ -333,14 +362,34 @@ fn scan_fstr_content(
                         });
                     }
                     match chars[*i] {
-                        '{' => { depth += 1; expr_src.push('{'); *col += 1; *i += 1; }
+                        '{' => {
+                            depth += 1;
+                            expr_src.push('{');
+                            *col += 1;
+                            *i += 1;
+                        }
                         '}' => {
                             depth -= 1;
-                            if depth == 0 { *col += 1; *i += 1; break; }
-                            expr_src.push('}'); *col += 1; *i += 1;
+                            if depth == 0 {
+                                *col += 1;
+                                *i += 1;
+                                break;
+                            }
+                            expr_src.push('}');
+                            *col += 1;
+                            *i += 1;
                         }
-                        '\n' => { expr_src.push('\n'); *line += 1; *col = 1; *i += 1; }
-                        c    => { expr_src.push(c); *col += 1; *i += 1; }
+                        '\n' => {
+                            expr_src.push('\n');
+                            *line += 1;
+                            *col = 1;
+                            *i += 1;
+                        }
+                        c => {
+                            expr_src.push(c);
+                            *col += 1;
+                            *i += 1;
+                        }
                     }
                 }
                 parts.push(RawFStrPart::Expr(expr_src));
@@ -355,24 +404,61 @@ fn scan_fstr_content(
                 }
                 let esc = chars[*i];
                 if esc == quote {
-                    literal.push(quote); *i += 1; *col += 1;
+                    literal.push(quote);
+                    *i += 1;
+                    *col += 1;
                 } else {
                     match esc {
-                        '\\' => { literal.push('\\'); *i += 1; *col += 1; }
-                        'n'  => { literal.push('\n'); *i += 1; *col += 1; }
-                        't'  => { literal.push('\t'); *i += 1; *col += 1; }
-                        'r'  => { literal.push('\r'); *i += 1; *col += 1; }
-                        '{'  => { literal.push('{');  *i += 1; *col += 1; }
-                        '}'  => { literal.push('}');  *i += 1; *col += 1; }
-                        other => return Err(JadeError::UnexpectedChar {
-                            ch: other,
-                            span: Span { line: *line, col: *col },
-                        }),
+                        '\\' => {
+                            literal.push('\\');
+                            *i += 1;
+                            *col += 1;
+                        }
+                        'n' => {
+                            literal.push('\n');
+                            *i += 1;
+                            *col += 1;
+                        }
+                        't' => {
+                            literal.push('\t');
+                            *i += 1;
+                            *col += 1;
+                        }
+                        'r' => {
+                            literal.push('\r');
+                            *i += 1;
+                            *col += 1;
+                        }
+                        '{' => {
+                            literal.push('{');
+                            *i += 1;
+                            *col += 1;
+                        }
+                        '}' => {
+                            literal.push('}');
+                            *i += 1;
+                            *col += 1;
+                        }
+                        other => {
+                            return Err(JadeError::UnexpectedChar {
+                                ch: other,
+                                span: Span { line: *line, col: *col },
+                            });
+                        }
                     }
                 }
             }
-            '\n' => { literal.push('\n'); *line += 1; *col = 1; *i += 1; }
-            ch   => { literal.push(ch);  *col += 1; *i += 1; }
+            '\n' => {
+                literal.push('\n');
+                *line += 1;
+                *col = 1;
+                *i += 1;
+            }
+            ch => {
+                literal.push(ch);
+                *col += 1;
+                *i += 1;
+            }
         }
     }
     if !literal.is_empty() {
@@ -426,10 +512,15 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
                 let start_col = col;
                 let start_line = line;
                 let triple = chars.get(i + 1) == Some(&quote) && chars.get(i + 2) == Some(&quote);
-                if triple { col += 3; i += 3; } else { col += 1; i += 1; }
+                if triple {
+                    col += 3;
+                    i += 3;
+                } else {
+                    col += 1;
+                    i += 1;
+                }
                 let content = scan_str_content(
-                    &chars, &mut i, &mut col, &mut line,
-                    start_line, start_col, triple, quote,
+                    &chars, &mut i, &mut col, &mut line, start_line, start_col, triple, quote,
                 )?;
                 tokens.push(Token {
                     kind: TokenKind::Str(content),
@@ -474,8 +565,8 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
                         .ok()
                         .filter(|v| jade_runtime::value::JadeValue::int_fits(*v))
                         .ok_or(JadeError::LiteralOverflow {
-                        span: Span { line, col: start_col },
-                    })?;
+                            span: Span { line, col: start_col },
+                        })?;
                     tokens.push(Token {
                         kind: TokenKind::Integer(value),
                         span: Span { line, col: start_col },
@@ -493,59 +584,75 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
                     col += 1;
                 }
                 let kind = match name.as_str() {
-                    "let"    => TokenKind::Let,
-                    "fn"     => TokenKind::Fn,
+                    "let" => TokenKind::Let,
+                    "fn" => TokenKind::Fn,
                     "return" => TokenKind::Return,
-                    "if"     => TokenKind::If,
-                    "elif"   => TokenKind::Elif,
-                    "else"   => TokenKind::Else,
-                    "while"  => TokenKind::While,
-                    "for"    => TokenKind::For,
-                    "in"     => TokenKind::In,
-                    "break"    => TokenKind::Break,
+                    "if" => TokenKind::If,
+                    "elif" => TokenKind::Elif,
+                    "else" => TokenKind::Else,
+                    "while" => TokenKind::While,
+                    "for" => TokenKind::For,
+                    "in" => TokenKind::In,
+                    "break" => TokenKind::Break,
                     "continue" => TokenKind::Continue,
-                    "struct"    => TokenKind::Struct,
-                    "extend"    => TokenKind::Extend,
+                    "struct" => TokenKind::Struct,
+                    "extend" => TokenKind::Extend,
                     "interface" => TokenKind::Interface,
-                    "prompt"    => TokenKind::Prompt,
-                    "use"       => TokenKind::Use,
-                    "raise"     => TokenKind::Raise,
-                    "try"       => TokenKind::Try,
-                    "catch"     => TokenKind::Catch,
-                    "async"     => TokenKind::Async,
-                    "await"     => TokenKind::Await,
-                    "yield"     => TokenKind::Yield,
-                    "from"      => TokenKind::From,
-                    "as"        => TokenKind::As,
-                    "true"      => TokenKind::True,
-                    "false"     => TokenKind::False,
-                    "and"       => TokenKind::AmpAmp,
-                    "or"        => TokenKind::PipePipe,
-                    "not"       => TokenKind::Bang,
+                    "prompt" => TokenKind::Prompt,
+                    "use" => TokenKind::Use,
+                    "raise" => TokenKind::Raise,
+                    "try" => TokenKind::Try,
+                    "catch" => TokenKind::Catch,
+                    "async" => TokenKind::Async,
+                    "await" => TokenKind::Await,
+                    "yield" => TokenKind::Yield,
+                    "from" => TokenKind::From,
+                    "as" => TokenKind::As,
+                    "true" => TokenKind::True,
+                    "false" => TokenKind::False,
+                    "and" => TokenKind::AmpAmp,
+                    "or" => TokenKind::PipePipe,
+                    "not" => TokenKind::Bang,
                     // f-string: `f"…"` / `f"""…"""` or `f'…'` / `f'''…'''`
                     "f" if matches!(chars.get(i), Some(&'"') | Some(&'\'')) => {
                         let quote = chars[i];
                         let start_line = line;
-                        let triple = chars.get(i + 1) == Some(&quote) && chars.get(i + 2) == Some(&quote);
-                        if triple { col += 3; i += 3; } else { col += 1; i += 1; }
+                        let triple =
+                            chars.get(i + 1) == Some(&quote) && chars.get(i + 2) == Some(&quote);
+                        if triple {
+                            col += 3;
+                            i += 3;
+                        } else {
+                            col += 1;
+                            i += 1;
+                        }
                         let parts = scan_fstr_content(
-                            &chars, &mut i, &mut col, &mut line,
-                            start_line, start_col, triple, quote,
+                            &chars, &mut i, &mut col, &mut line, start_line, start_col, triple,
+                            quote,
                         )?;
                         TokenKind::FStr(parts)
                     }
-                    _        => TokenKind::Identifier(name),
+                    _ => TokenKind::Identifier(name),
                 };
-                tokens.push(Token {
-                    kind,
-                    span: Span { line, col: start_col },
-                });
+                tokens.push(Token { kind, span: Span { line, col: start_col } });
             }
 
             // Unambiguous single-character tokens
-            '+' => { tokens.push(Token { kind: TokenKind::Plus,    span: Span { line, col } }); col += 1; i += 1; }
-            '-' => { tokens.push(Token { kind: TokenKind::Minus,   span: Span { line, col } }); col += 1; i += 1; }
-            '*' => { tokens.push(Token { kind: TokenKind::Star,    span: Span { line, col } }); col += 1; i += 1; }
+            '+' => {
+                tokens.push(Token { kind: TokenKind::Plus, span: Span { line, col } });
+                col += 1;
+                i += 1;
+            }
+            '-' => {
+                tokens.push(Token { kind: TokenKind::Minus, span: Span { line, col } });
+                col += 1;
+                i += 1;
+            }
+            '*' => {
+                tokens.push(Token { kind: TokenKind::Star, span: Span { line, col } });
+                col += 1;
+                i += 1;
+            }
             // `/` or `//` (line comment)
             '/' => {
                 if i + 1 < chars.len() && chars[i + 1] == '/' {
@@ -555,47 +662,98 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
                     }
                 } else {
                     tokens.push(Token { kind: TokenKind::Slash, span: Span { line, col } });
-                    col += 1; i += 1;
+                    col += 1;
+                    i += 1;
                 }
             }
-            '%' => { tokens.push(Token { kind: TokenKind::Percent, span: Span { line, col } }); col += 1; i += 1; }
+            '%' => {
+                tokens.push(Token { kind: TokenKind::Percent, span: Span { line, col } });
+                col += 1;
+                i += 1;
+            }
             // `~` (bitwise NOT) or `~>` (postfix prompt dereference)
             '~' => {
                 if i + 1 < chars.len() && chars[i + 1] == '>' {
                     tokens.push(Token { kind: TokenKind::TildeGt, span: Span { line, col } });
-                    col += 2; i += 2;
+                    col += 2;
+                    i += 2;
                 } else {
                     tokens.push(Token { kind: TokenKind::Tilde, span: Span { line, col } });
-                    col += 1; i += 1;
+                    col += 1;
+                    i += 1;
                 }
             }
-            '^' => { tokens.push(Token { kind: TokenKind::Caret,   span: Span { line, col } }); col += 1; i += 1; }
-            '(' => { tokens.push(Token { kind: TokenKind::LParen,  span: Span { line, col } }); bracket_depth += 1; col += 1; i += 1; }
-            ')' => { tokens.push(Token { kind: TokenKind::RParen,  span: Span { line, col } }); bracket_depth -= 1; col += 1; i += 1; }
-            '{' => { tokens.push(Token { kind: TokenKind::LBrace,    span: Span { line, col } }); col += 1; i += 1; }
-            '}' => { tokens.push(Token { kind: TokenKind::RBrace,    span: Span { line, col } }); col += 1; i += 1; }
-            '[' => { tokens.push(Token { kind: TokenKind::LBracket,  span: Span { line, col } }); bracket_depth += 1; col += 1; i += 1; }
-            ']' => { tokens.push(Token { kind: TokenKind::RBracket,  span: Span { line, col } }); bracket_depth -= 1; col += 1; i += 1; }
-            ',' => { tokens.push(Token { kind: TokenKind::Comma,   span: Span { line, col } }); col += 1; i += 1; }
-            '.' => { tokens.push(Token { kind: TokenKind::Dot,     span: Span { line, col } }); col += 1; i += 1; }
+            '^' => {
+                tokens.push(Token { kind: TokenKind::Caret, span: Span { line, col } });
+                col += 1;
+                i += 1;
+            }
+            '(' => {
+                tokens.push(Token { kind: TokenKind::LParen, span: Span { line, col } });
+                bracket_depth += 1;
+                col += 1;
+                i += 1;
+            }
+            ')' => {
+                tokens.push(Token { kind: TokenKind::RParen, span: Span { line, col } });
+                bracket_depth -= 1;
+                col += 1;
+                i += 1;
+            }
+            '{' => {
+                tokens.push(Token { kind: TokenKind::LBrace, span: Span { line, col } });
+                col += 1;
+                i += 1;
+            }
+            '}' => {
+                tokens.push(Token { kind: TokenKind::RBrace, span: Span { line, col } });
+                col += 1;
+                i += 1;
+            }
+            '[' => {
+                tokens.push(Token { kind: TokenKind::LBracket, span: Span { line, col } });
+                bracket_depth += 1;
+                col += 1;
+                i += 1;
+            }
+            ']' => {
+                tokens.push(Token { kind: TokenKind::RBracket, span: Span { line, col } });
+                bracket_depth -= 1;
+                col += 1;
+                i += 1;
+            }
+            ',' => {
+                tokens.push(Token { kind: TokenKind::Comma, span: Span { line, col } });
+                col += 1;
+                i += 1;
+            }
+            '.' => {
+                tokens.push(Token { kind: TokenKind::Dot, span: Span { line, col } });
+                col += 1;
+                i += 1;
+            }
             ':' => {
                 if i + 1 < chars.len() && chars[i + 1] == ':' {
                     tokens.push(Token { kind: TokenKind::ColonColon, span: Span { line, col } });
-                    col += 2; i += 2;
+                    col += 2;
+                    i += 2;
                 } else {
                     tokens.push(Token { kind: TokenKind::Colon, span: Span { line, col } });
-                    col += 1; i += 1;
+                    col += 1;
+                    i += 1;
                 }
             }
 
             // `&` or `&&`
             '&' => {
                 if i + 1 < chars.len() && chars[i + 1] == '&' {
-                    tokens.push(Token { kind: TokenKind::AmpAmp,    span: Span { line, col } });
-                    col += 2; i += 2;
+                    tokens.push(Token { kind: TokenKind::AmpAmp, span: Span { line, col } });
+                    col += 2;
+                    i += 2;
                 } else {
                     tokens.push(Token { kind: TokenKind::Ampersand, span: Span { line, col } });
-                    col += 1; i += 1;
+                    col += 1;
+                    i += 1;
                 }
             }
 
@@ -603,24 +761,29 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
             '|' => {
                 if i + 1 < chars.len() && chars[i + 1] == '|' {
                     tokens.push(Token { kind: TokenKind::PipePipe, span: Span { line, col } });
-                    col += 2; i += 2;
+                    col += 2;
+                    i += 2;
                 } else if i + 1 < chars.len() && chars[i + 1] == '>' {
-                    tokens.push(Token { kind: TokenKind::PipeGt,   span: Span { line, col } });
-                    col += 2; i += 2;
+                    tokens.push(Token { kind: TokenKind::PipeGt, span: Span { line, col } });
+                    col += 2;
+                    i += 2;
                 } else {
-                    tokens.push(Token { kind: TokenKind::Pipe,     span: Span { line, col } });
-                    col += 1; i += 1;
+                    tokens.push(Token { kind: TokenKind::Pipe, span: Span { line, col } });
+                    col += 1;
+                    i += 1;
                 }
             }
 
             // `=` or `==`
             '=' => {
                 if i + 1 < chars.len() && chars[i + 1] == '=' {
-                    tokens.push(Token { kind: TokenKind::EqEq,   span: Span { line, col } });
-                    col += 2; i += 2;
+                    tokens.push(Token { kind: TokenKind::EqEq, span: Span { line, col } });
+                    col += 2;
+                    i += 2;
                 } else {
                     tokens.push(Token { kind: TokenKind::Equals, span: Span { line, col } });
-                    col += 1; i += 1;
+                    col += 1;
+                    i += 1;
                 }
             }
 
@@ -628,10 +791,12 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
             '!' => {
                 if i + 1 < chars.len() && chars[i + 1] == '=' {
                     tokens.push(Token { kind: TokenKind::BangEq, span: Span { line, col } });
-                    col += 2; i += 2;
+                    col += 2;
+                    i += 2;
                 } else {
-                    tokens.push(Token { kind: TokenKind::Bang,   span: Span { line, col } });
-                    col += 1; i += 1;
+                    tokens.push(Token { kind: TokenKind::Bang, span: Span { line, col } });
+                    col += 1;
+                    i += 1;
                 }
             }
 
@@ -639,13 +804,16 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
             '<' => {
                 if i + 1 < chars.len() && chars[i + 1] == '<' {
                     tokens.push(Token { kind: TokenKind::LtLt, span: Span { line, col } });
-                    col += 2; i += 2;
+                    col += 2;
+                    i += 2;
                 } else if i + 1 < chars.len() && chars[i + 1] == '=' {
                     tokens.push(Token { kind: TokenKind::LtEq, span: Span { line, col } });
-                    col += 2; i += 2;
+                    col += 2;
+                    i += 2;
                 } else {
-                    tokens.push(Token { kind: TokenKind::Lt,   span: Span { line, col } });
-                    col += 1; i += 1;
+                    tokens.push(Token { kind: TokenKind::Lt, span: Span { line, col } });
+                    col += 1;
+                    i += 1;
                 }
             }
 
@@ -653,28 +821,36 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
             '>' => {
                 if i + 1 < chars.len() && chars[i + 1] == '>' {
                     tokens.push(Token { kind: TokenKind::GtGt, span: Span { line, col } });
-                    col += 2; i += 2;
+                    col += 2;
+                    i += 2;
                 } else if i + 1 < chars.len() && chars[i + 1] == '=' {
                     tokens.push(Token { kind: TokenKind::GtEq, span: Span { line, col } });
-                    col += 2; i += 2;
+                    col += 2;
+                    i += 2;
                 } else {
-                    tokens.push(Token { kind: TokenKind::Gt,   span: Span { line, col } });
-                    col += 1; i += 1;
+                    tokens.push(Token { kind: TokenKind::Gt, span: Span { line, col } });
+                    col += 1;
+                    i += 1;
                 }
             }
 
             // `?` — prompt dereference operator
-            '?' => { tokens.push(Token { kind: TokenKind::Question, span: Span { line, col } }); col += 1; i += 1; }
+            '?' => {
+                tokens.push(Token { kind: TokenKind::Question, span: Span { line, col } });
+                col += 1;
+                i += 1;
+            }
 
             // `@` — decorator prefix
-            '@' => { tokens.push(Token { kind: TokenKind::At, span: Span { line, col } }); col += 1; i += 1; }
+            '@' => {
+                tokens.push(Token { kind: TokenKind::At, span: Span { line, col } });
+                col += 1;
+                i += 1;
+            }
 
             // Anything else is an error
             _ => {
-                return Err(JadeError::UnexpectedChar {
-                    ch,
-                    span: Span { line, col },
-                });
+                return Err(JadeError::UnexpectedChar { ch, span: Span { line, col } });
             }
         }
     }
@@ -683,18 +859,12 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
     if bracket_depth == 0 {
         if let Some(last) = tokens.last() {
             if is_line_terminator(&last.kind) {
-                tokens.push(Token {
-                    kind: TokenKind::Semicolon,
-                    span: Span { line, col },
-                });
+                tokens.push(Token { kind: TokenKind::Semicolon, span: Span { line, col } });
             }
         }
     }
 
-    tokens.push(Token {
-        kind: TokenKind::Eof,
-        span: Span { line, col },
-    });
+    tokens.push(Token { kind: TokenKind::Eof, span: Span { line, col } });
 
     Ok(tokens)
 }

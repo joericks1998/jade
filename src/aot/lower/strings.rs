@@ -41,7 +41,8 @@ pub(super) fn emit_str_method<'ctx>(
             Ok(low.tag_ptr(p))
         }
         "trim" | "upper" | "lower" => {
-            let f = low.runtime_fn(&format!("jrt_str_{method}"), ptrt.fn_type(&[ptrt.into()], false));
+            let f =
+                low.runtime_fn(&format!("jrt_str_{method}"), ptrt.fn_type(&[ptrt.into()], false));
             let r = b
                 .build_call(f, &[sp(recv).into()], "strm")
                 .map_err(err)?
@@ -78,7 +79,8 @@ pub(super) fn emit_str_method<'ctx>(
         }
         "split" => {
             // (s, sep) -> new array of substrings (tagged ptr).
-            let f = low.runtime_fn("jrt_coll_str_split", ptrt.fn_type(&[ptrt.into(), ptrt.into()], false));
+            let f = low
+                .runtime_fn("jrt_coll_str_split", ptrt.fn_type(&[ptrt.into(), ptrt.into()], false));
             let p = b
                 .build_call(f, &[sp(recv).into(), sp(args[0]).into()], "split")
                 .map_err(err)?
@@ -137,7 +139,11 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
 
     /// Concatenate two tagged-string **data pointers** via the shared runtime
     /// `jrt_str_concat` (trust = max of inputs); returns a new data pointer.
-    pub(super) fn concat_ptrs(&self, a: PointerValue<'ctx>, b: PointerValue<'ctx>) -> PointerValue<'ctx> {
+    pub(super) fn concat_ptrs(
+        &self,
+        a: PointerValue<'ctx>,
+        b: PointerValue<'ctx>,
+    ) -> PointerValue<'ctx> {
         let f = self.runtime_fn(
             "jrt_str_concat",
             self.ptrt().fn_type(&[self.ptrt().into(), self.ptrt().into()], false),
@@ -160,7 +166,8 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
     /// `jrt_str_of_any` (VM-faithful for scalars/strings; preserves trust). Used
     /// to interpolate an f-string part.
     pub(super) fn str_of_any(&self, r: Reg) -> PointerValue<'ctx> {
-        let f = self.runtime_fn("jrt_str_of_any", self.ptrt().fn_type(&[self.i64t().into()], false));
+        let f =
+            self.runtime_fn("jrt_str_of_any", self.ptrt().fn_type(&[self.i64t().into()], false));
         self.builder
             .build_call(f, &[self.load(r).into()], "strofany")
             .unwrap()
@@ -199,5 +206,4 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
             .into_int_value();
         self.i32cmp_word(c, pred)
     }
-
 }

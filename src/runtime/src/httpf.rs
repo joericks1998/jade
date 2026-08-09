@@ -15,9 +15,9 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 use crate::coll::DictObj;
+use crate::cstr;
 use crate::string::{self, TAINTED, TRUSTED};
 use crate::value::JadeValue;
-use crate::cstr;
 
 type W = i64;
 
@@ -136,10 +136,12 @@ pub fn request_bytes(
     // Split the "\nJADE_STATUS:<code>" trailer off the body.
     let buf = &out.stdout;
     const MARK: &[u8] = b"\nJADE_STATUS:";
-    let (body_bytes, status): (&[u8], i64) = match buf.windows(MARK.len()).rposition(|w| w == MARK) {
+    let (body_bytes, status): (&[u8], i64) = match buf.windows(MARK.len()).rposition(|w| w == MARK)
+    {
         Some(i) => {
             let digits = &buf[i + MARK.len()..];
-            let n: String = digits.iter().take_while(|c| c.is_ascii_digit()).map(|&c| c as char).collect();
+            let n: String =
+                digits.iter().take_while(|c| c.is_ascii_digit()).map(|&c| c as char).collect();
             (&buf[..i], n.parse().unwrap_or(0))
         }
         None => (&buf[..], 0),
@@ -152,11 +154,7 @@ pub fn request_bytes(
 /// A tagged-string word's bytes as `&str` (non-string → "").
 pub(crate) fn header_val(word: W) -> &'static str {
     let v = JadeValue::from_bits(word as u64);
-    if v.is_str() {
-        unsafe { cstr::borrow(v.as_ptr() as *const c_char) }
-    } else {
-        ""
-    }
+    if v.is_str() { unsafe { cstr::borrow(v.as_ptr() as *const c_char) } } else { "" }
 }
 
 /// Read the AOT ObjHeader header-dict into `(name, value)` pairs.
@@ -172,7 +170,8 @@ pub(crate) fn read_headers(headers: *const c_void) -> Vec<(String, String)> {
 pub(crate) fn make_dict(status: i64, body: &str) -> W {
     let mut d = DictObj::<W>::new();
     d.insert("status", JadeValue::from_int(status).bits() as i64);
-    let body_w = JadeValue::from_str_ptr(cstr::emit(body.as_bytes(), TAINTED) as *const ()).bits() as i64;
+    let body_w =
+        JadeValue::from_str_ptr(cstr::emit(body.as_bytes(), TAINTED) as *const ()).bits() as i64;
     d.insert("body", body_w);
     JadeValue::from_ptr(crate::gc::leak_obj(d) as *const c_void as *const ()).bits() as i64
 }
@@ -288,12 +287,20 @@ pub extern "C" fn jrt_http_get_impl(url: *const c_char, headers: *const c_void) 
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn jrt_http_post_impl(url: *const c_char, body: *const c_char, headers: *const c_void) -> W {
+pub extern "C" fn jrt_http_post_impl(
+    url: *const c_char,
+    body: *const c_char,
+    headers: *const c_void,
+) -> W {
     request_aot("POST", url, Some(unsafe { cstr::borrow(body) }), headers)
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn jrt_http_put_impl(url: *const c_char, body: *const c_char, headers: *const c_void) -> W {
+pub extern "C" fn jrt_http_put_impl(
+    url: *const c_char,
+    body: *const c_char,
+    headers: *const c_void,
+) -> W {
     request_aot("PUT", url, Some(unsafe { cstr::borrow(body) }), headers)
 }
 
@@ -316,7 +323,12 @@ pub extern "C" fn jrt_http_head_impl(url: *const c_char, headers: *const c_void)
 
 /// Run `request_bytes`, building the byte-bodied dict; on transport failure,
 /// record the pending error and return `{ status: 0, body: <empty> }`.
-fn request_bytes_aot(method: &str, url: *const c_char, body: Option<&[u8]>, headers: *const c_void) -> W {
+fn request_bytes_aot(
+    method: &str,
+    url: *const c_char,
+    body: Option<&[u8]>,
+    headers: *const c_void,
+) -> W {
     match request_bytes(method, unsafe { cstr::borrow(url) }, body, &read_headers(headers)) {
         Ok((status, body)) => make_bytes_dict(status, &body),
         Err(m) => {
@@ -334,7 +346,11 @@ pub extern "C" fn jrt_http_get_bytes_impl(url: *const c_char, headers: *const c_
 /// `body` is the argument's whole tagged word so a non-`bytes` value can be
 /// reported rather than dereferenced. See [`bytes_arg`].
 #[unsafe(no_mangle)]
-pub extern "C" fn jrt_http_post_bytes_impl(url: *const c_char, body: W, headers: *const c_void) -> W {
+pub extern "C" fn jrt_http_post_bytes_impl(
+    url: *const c_char,
+    body: W,
+    headers: *const c_void,
+) -> W {
     match bytes_arg(body) {
         Some(b) => request_bytes_aot("POST", url, Some(b), headers),
         None => {
