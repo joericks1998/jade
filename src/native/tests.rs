@@ -614,3 +614,48 @@ fn a_handle_renders_by_type_and_never_by_address() {
     assert_eq!(a, "handle<sqlite3>");
     assert_eq!(a, b);
 }
+
+// ── char across the boundary ──────────────────────────────────────────────
+
+#[test]
+fn a_char_survives_the_round_trip() {
+    // `char` is a first-class Jade type that could not cross the FFI in any
+    // position before ABI 5, which is why a C `char[32]` field had nothing to
+    // become — an array of characters needs characters.
+    for ch in ['j', 'é', '中', '\u{10FFFF}'] {
+        let v = VmValue::Char(jade_runtime::trust::JChar::trusted(ch));
+        let ffi = vm_to_ffi_owned(&v);
+        assert_eq!(ffi.tag, JADE_TAG_CHAR, "wrong tag for {ch:?}");
+        let back = ffi_to_vm(&ffi, Span { line: 0, col: 0 }).expect("should convert back");
+        match back {
+            VmValue::Char(c) => assert_eq!(c.ch(), ch),
+            other => panic!("expected a char, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_char_from_a_package_is_tainted_whatever_it_claimed() {
+    // Data coming back from a native package is from outside the program, as a
+    // returned string and a returned blob already are. `TRUSTED` is zero, so
+    // honouring the incoming bit would mark a char trusted for no better reason
+    // than that the package zeroed its struct.
+    let ffi =
+        JadeVal { tag: JADE_TAG_CHAR, _pad: [0; 7], data: JadeValData { as_char: 'j' as u32 } };
+    match ffi_to_vm(&ffi, Span { line: 0, col: 0 }).expect("convert") {
+        VmValue::Char(c) => assert!(c.is_tainted(), "a char from a package must be tainted"),
+        other => panic!("expected a char, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_scalar_that_is_not_a_character_is_refused_by_name() {
+    // A package can put anything in 32 bits. The surrogate range and everything
+    // past U+10FFFF are not characters, and replacing them silently would
+    // corrupt the data the tag claims to carry.
+    for raw in [0xD800u32, 0x110000, 0xFFFF_FFFF] {
+        let ffi = JadeVal { tag: JADE_TAG_CHAR, _pad: [0; 7], data: JadeValData { as_char: raw } };
+        let err = ffi_to_vm(&ffi, Span { line: 0, col: 0 }).unwrap_err();
+        assert!(format!("{err}").contains("not a Unicode scalar"), "{err}");
+    }
+}

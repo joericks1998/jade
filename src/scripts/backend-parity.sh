@@ -149,7 +149,17 @@ else
   esac
   # The module name is the file stem, so the library must be named for the
   # `use` that imports it.
-  if ! cc_err="$(cc "${shared[@]}" -fPIC "$HANDLE_C" -o "$HANDLE_DIR/handlefix.so" 2>&1)"; then
+  # One source of truth for the value ABI. The fixture used to carry a literal
+  # and a comment asking for it to be bumped by hand; the comment was not enough.
+  ABI="$(sed -n 's/.*RUNTIME_ABI_VERSION: u32 = \([0-9]*\).*/\1/p' \
+        "$(dirname "$0")/../runtime/src/lib.rs" | head -1)"
+  if [ -z "$ABI" ]; then
+    printf '  FAIL  %-52s (cannot read RUNTIME_ABI_VERSION)\n' "native handle round-trip"
+    failures+=("native handle fixture: RUNTIME_ABI_VERSION not found")
+    fail=$((fail + 1))
+    ABI=0
+  fi
+  if ! cc_err="$(cc "${shared[@]}" -fPIC -DJADE_PKG_ABI="$ABI" "$HANDLE_C" -o "$HANDLE_DIR/handlefix.so" 2>&1)"; then
     printf '  FAIL  %-52s (fixture library did not build)\n' "native handle round-trip"
     failures+=("native handle fixture: $cc_err")
     fail=$((fail + 1))

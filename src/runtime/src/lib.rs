@@ -127,7 +127,10 @@ pub use value::{FALSE, JadeValue, NIL, TRUE};
 /// v3 (1.2.2): `JADE_TAG_BYTES`. A package built against v2 has no arm for it,
 /// so it must be rebuilt rather than handed a tag it will read as garbage.
 /// v4 (1.3.0): `JADE_TAG_HANDLE`, and `ObjKind::Handle` on the heap side.
-pub const RUNTIME_ABI_VERSION: u32 = 4;
+/// v5 (1.3.10): `JADE_TAG_CHAR`. `char` is a first-class Jade type that could
+/// not cross the FFI in any position, which is why a C `char[32]` field had
+/// nothing to become — an array of characters needs characters.
+pub const RUNTIME_ABI_VERSION: u32 = 5;
 
 /// C-ABI accessor for [`RUNTIME_ABI_VERSION`]. Also serves as a trivial
 /// exported symbol proving the `staticlib` links.

@@ -74,6 +74,21 @@ pub const JADE_TAG_HANDLE: u8 = 10;
 /// be re-entered from a C frame at all and has to post the call to the
 /// interpreter and wait. One agreed symbol would have suited neither.
 pub const JADE_TAG_FN: u8 = 11;
+/// `data.as_char` → a Unicode scalar, with the trust bit in `_pad[0]`.
+///
+/// `char` is a first-class Jade type — `for c in "jade"` yields one — and until
+/// v1.3.10 there was no way to move one across this boundary in any position.
+/// The gap surfaced on struct fields: a C `char[32]` is an array of characters,
+/// and an array of characters needs characters.
+///
+/// Not folded into [`JADE_TAG_INT`]. A char is not a number: it compares,
+/// prints, and concatenates as text, and arriving as an integer would make the
+/// receiving side guess which of the two it was holding. That guess is the
+/// silent-wrong-answer failure this ABI carries tags to avoid.
+///
+/// Added in v1.3.10, which is why [`jade_runtime::RUNTIME_ABI_VERSION`] moved to
+/// 5: a package built against ABI 4 has no arm for this tag.
+pub const JADE_TAG_CHAR: u8 = 12;
 
 // ── Value type ────────────────────────────────────────────────────────────────
 
@@ -92,6 +107,10 @@ pub union JadeValData {
     pub as_bytes: *mut JadeBytes,
     pub as_handle: *mut JadeHandle,
     pub as_fn: *mut JadeFn,
+    /// A Unicode scalar. 32 bits rather than the 21 a scalar needs, because a
+    /// union member that is not a natural width is a portability question
+    /// nobody wants to answer twice.
+    pub as_char: u32,
 }
 
 #[repr(C)]
@@ -669,6 +688,15 @@ fn vm_to_ffi_owned(val: &VmValue) -> JadeVal {
             _pad: [0; 7],
             data: JadeValData { as_bool: if *b { 1 } else { 0 } },
         },
+        // Trust rides in `_pad[0]`. A char taken from a tainted string is still
+        // tainted, and it has no header of its own to carry that in the way a
+        // string does — so the padding the struct already had becomes the
+        // provenance bit, rather than the tag growing a second field.
+        VmValue::Char(c) => JadeVal {
+            tag: JADE_TAG_CHAR,
+            _pad: [c.trust(), 0, 0, 0, 0, 0, 0],
+            data: JadeValData { as_char: c.ch() as u32 },
+        },
         VmValue::Str(s) => JadeVal {
             tag: JADE_TAG_STR,
             _pad: [0; 7],
@@ -793,6 +821,28 @@ pub fn ffi_to_vm(val: &JadeVal, span: Span) -> Result<VmValue> {
         JADE_TAG_INT => Ok(VmValue::Int(unsafe { val.data.as_int })),
         JADE_TAG_FLOAT => Ok(VmValue::Float(unsafe { val.data.as_float })),
         JADE_TAG_BOOL => Ok(VmValue::Bool(unsafe { val.data.as_bool } != 0)),
+        JADE_TAG_CHAR => {
+            let raw = unsafe { val.data.as_char };
+            // A scalar a native package invented may not be one: the surrogate
+            // range and anything past U+10FFFF are not characters, and Rust's
+            // `char` cannot hold them. Refused by name rather than silently
+            // replaced, which would corrupt the data it claims to carry.
+            let ch = char::from_u32(raw).ok_or_else(|| JadeError::IoError {
+                message: format!(
+                    "native function returned {raw:#x} as a char, which is not a Unicode scalar"
+                ),
+                span,
+            })?;
+            // Tainted whatever the package said, exactly as a returned string
+            // and a returned blob are. Data coming back from a native package is
+            // from outside the program, and `TRUSTED` is zero — so honouring the
+            // incoming bit would mark a char trusted for no better reason than
+            // that the package zeroed its struct.
+            Ok(VmValue::Char(jade_runtime::trust::JChar::with_trust(
+                ch,
+                jade_runtime::trust::TAINTED,
+            )))
+        }
         JADE_TAG_STR => {
             let s = unsafe {
                 CStr::from_ptr(val.data.as_str as *const c_char).to_string_lossy().into_owned()

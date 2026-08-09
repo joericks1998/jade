@@ -422,6 +422,14 @@ static JadeVal to_ffi_val(jade_value_t v, int owned_str) {
     } else if (jrt_is_bool(v)) {
         out.tag = JADE_FFI_BOOL;
         out.data.as_bool = (uint8_t)jrt_unbox_bool(v);
+    } else if (jrt_is_char(v)) {
+        /* Trust rides in _pad[0], matching native.rs. A char has no header of
+         * its own to carry provenance in the way a string does, so the padding
+         * the struct already had becomes the bit. Checked before jrt_is_int
+         * would ever see it: a char word is an immediate, not an integer. */
+        out.tag = JADE_FFI_CHAR;
+        out._pad[0] = jrt_char_trust(v);
+        out.data.as_char = jrt_unbox_char(v);
     } else if (jrt_is_str(v)) {
         const char* s = (const char*)jrt_unbox_ptr(v);
         out.tag = JADE_FFI_STR;
@@ -555,6 +563,11 @@ static jade_value_t from_ffi(const JadeVal* v) {
         case JADE_FFI_INT:   return jrt_box_int(v->data.as_int);
         case JADE_FFI_FLOAT: return jrt_box_float(v->data.as_float);
         case JADE_FFI_BOOL:  return jrt_box_bool(v->data.as_bool);
+        /* TAINTED whatever the package said, as the string and bytes cases
+         * below are: what comes back from a native package is from outside the
+         * program, and TRUSTED is zero — so honouring the incoming bit would
+         * mark a char trusted because a package zeroed its struct. */
+        case JADE_FFI_CHAR:  return jrt_box_char_trust(v->data.as_char, JRT_TAINTED);
         case JADE_FFI_STR:
             return jrt_box_str(jrt_str_dup(v->data.as_str ? v->data.as_str : "",
                                            JRT_TAINTED));

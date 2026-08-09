@@ -802,6 +802,13 @@ char*   jrt_readline(const char* prompt);
  *
  * Added in v1.3.0 alongside JADE_FFI_HANDLE, so both ride the one ABI bump. */
 #define JADE_FFI_FN 11
+/* data.as_char -> a Unicode scalar; the trust bit rides in _pad[0].
+ *
+ * `char` is a Jade type in its own right, and until v1.3.10 it could not cross
+ * this boundary at all. Deliberately not folded into JADE_FFI_INT: a char is
+ * not a number, and arriving as one would make the far side guess which it was
+ * holding. Added at ABI 5. */
+#define JADE_FFI_CHAR 12
 
 /* Nested payloads for JADE_FFI_ARRAY / JADE_FFI_DICT / JADE_FFI_STRUCT /
  * JADE_FFI_BYTES / JADE_FFI_HANDLE.
@@ -836,6 +843,10 @@ typedef union {
     JadeBytes*  as_bytes;
     JadeHandle* as_handle;
     JadeFn*     as_fn;
+    /* A Unicode scalar. 32 bits rather than the 21 one needs, because a union
+     * member of an unnatural width is a portability question nobody wants to
+     * answer twice. Mirrors JadeValData in src/native/mod.rs. */
+    uint32_t    as_char;
 } JadeValData;
 
 typedef struct {

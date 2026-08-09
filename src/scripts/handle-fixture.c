@@ -194,8 +194,15 @@ static const JadeBinding BINDINGS[] = {
 
 /* Must match jade_runtime::RUNTIME_ABI_VERSION, or the loader refuses this
  * package — which is the check working, but it makes the gate fail with a
- * version message rather than a parity one. Bump this with that constant. */
-uint32_t jade_pkg_abi_version(void) { return 4; }
+ * version message rather than a parity one.
+ *
+ * Passed in by backend-parity.sh, read from the constant itself, so an ABI bump
+ * does not silently leave this behind. It used to be a literal with a note
+ * saying to bump it by hand, and the note was not enough: v5 broke the gate. */
+#ifndef JADE_PKG_ABI
+#error "define JADE_PKG_ABI (backend-parity.sh reads it from jade_runtime::RUNTIME_ABI_VERSION)"
+#endif
+uint32_t jade_pkg_abi_version(void) { return JADE_PKG_ABI; }
 
 int jade_pkg_init(JadeNativePkg* out) {
     out->name = "handlefix";
