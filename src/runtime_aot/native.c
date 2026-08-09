@@ -567,7 +567,27 @@ static jade_value_t from_ffi(const JadeVal* v) {
          * below are: what comes back from a native package is from outside the
          * program, and TRUSTED is zero — so honouring the incoming bit would
          * mark a char trusted because a package zeroed its struct. */
-        case JADE_FFI_CHAR:  return jrt_box_char_trust(v->data.as_char, JRT_TAINTED);
+        case JADE_FFI_CHAR: {
+            /* A package can put any 32 bits here, and not all of them are
+             * characters: the surrogate range and anything past U+10FFFF are
+             * not. Refused by name rather than replaced, because replacing it
+             * corrupts the data the tag claims to carry.
+             *
+             * The wording matches ffi_to_vm in src/native/mod.rs deliberately.
+             * The VM refused this from the start and this arm did not, so one
+             * package returning 0xD800 raised under `jade run` and produced a
+             * corrupt char under `jade build` — a divergence no example
+             * exercises, and therefore one the parity gate could not see. */
+            uint32_t cp = v->data.as_char;
+            if (cp > 0x10FFFFu || (cp >= 0xD800u && cp <= 0xDFFFu)) {
+                char msg[160];
+                snprintf(msg, sizeof msg,
+                         "native function returned 0x%x as a char, which is not a Unicode scalar",
+                         cp);
+                native_raise("%s", msg);
+            }
+            return jrt_box_char_trust(cp, JRT_TAINTED);
+        }
         case JADE_FFI_STR:
             return jrt_box_str(jrt_str_dup(v->data.as_str ? v->data.as_str : "",
                                            JRT_TAINTED));
