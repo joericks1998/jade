@@ -14,6 +14,7 @@ sidebar_label: Changelog
 - **A callback fired with nothing in flight gets a neutral answer** rather than blocking forever. A library that calls back from a thread of its own is still unsupported, and this is where it says so.
 - **A registration lasts until the program ends.** Nothing in C says when a library is finished with a stored callback, so there is no safe moment to release one. One small allocation per call that passes a function, not per invocation.
 - **`callback_data` routes each registration through the library's own context slot**, so calling one symbol twice with different functions does not send both answers to the second. Where a library offers no such parameter there is one registration per symbol, and the binding report says so.
+- **Fixed: a symbol taking two callbacks refused the whole library.** brotli's decoder has one, and the slot and trampoline were named for the symbol alone — so the shim defined the same C function twice and would not compile. They are named for where the callback sits in the symbol's own argument list now, and each is registered separately. `callback_data` is refused beside two, because the library hands the same context value to both and it cannot tell them apart.
 - **A spawned task has its own registrations.** Sharing them would let one task run a callback against another task's variables — user code executing somewhere nobody chose, and invisible to the parity gate since both engines would do it.
 
 ## v1.3.10

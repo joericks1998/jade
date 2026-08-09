@@ -1118,6 +1118,15 @@ fn parse_symbol(
              carries the callback's own pointer, so there has to be one."
         ));
     }
+    if args.iter().any(|a| matches!(a, ArgSpec::CallbackData))
+        && args.iter().filter(|a| matches!(a, ArgSpec::Callback { .. })).count() > 1
+    {
+        return Err(format!(
+            "dependency '{pkg}': symbol '{sym}' has a `callback_data` and more than one callback. \
+             One context slot cannot tell two of them apart — the library passes the same value \
+             back to both — so drop it and write `null_ptr` there instead."
+        ));
+    }
     if headers.is_empty()
         && args.iter().any(|a| matches!(a, ArgSpec::NullPtr | ArgSpec::CallbackData))
     {
@@ -1431,10 +1440,10 @@ pub fn generate(
     for sym in &names {
         // The trampoline first: the wrapper names it as the C argument.
         let parsed = parse_symbol(name, sym, &symbols[*sym], structs, headers)?;
-        for a in &parsed.args {
+        for (at, a) in parsed.args.iter().enumerate() {
             if let ArgSpec::Callback { ret, params } = a {
                 let routed = parsed.args.iter().any(|x| matches!(x, ArgSpec::CallbackData));
-                out.push_str(&trampoline(sym, ret, params, routed));
+                out.push_str(&trampoline(sym, at, ret, params, routed));
             }
         }
         out.push_str(&wrapper(name, sym, &symbols[*sym], structs, headers, any_callback)?);
@@ -2077,7 +2086,13 @@ fn held_bindings(type_name: &str, def: &CStruct) -> Vec<String> {
 /// The Jade function behind it is kept alive by `native::CallbackBus` for the
 /// life of the VM. Nothing in C says when a library is finished with a stored
 /// callback, so there is no moment at which releasing it would be safe.
-fn trampoline(sym: &str, ret: &CbRet, params: &[CbParam], routed: bool) -> String {
+fn trampoline(sym: &str, at: usize, ret: &CbRet, params: &[CbParam], routed: bool) -> String {
+    // Keyed by where the callback sits in the symbol's own argument list, not
+    // by the symbol alone: `BrotliDecoderSetMetadataCallbacks` takes two, and
+    // one name for both is two definitions of the same C function — which the
+    // compiler rejects, and a shim that will not compile refuses the whole
+    // dependency.
+    let sym = &format!("{sym}_{at}");
     // The C signature keeps every parameter, because the library calls through
     // this pointer and the shape has to match. Only the ones Jade can be given
     // are forwarded: the user-data slot has nothing to carry, and a length rode
@@ -2408,19 +2423,24 @@ fn wrapper(
                 call_args.push(format!("({name}*)h{}", jade_idx[i].unwrap()))
             }
             ArgSpec::OutHandle { .. } => call_args.push(format!("&ohandle{i}")),
-            ArgSpec::Callback { .. } => call_args.push(format!("jade_cbt_{sym}")),
+            ArgSpec::Callback { .. } => call_args.push(format!("jade_cbt_{sym}_{i}")),
         }
     }
 
     let call = format!("{sym}({})", call_args.join(", "));
 
-    // Register the callback for exactly the duration of the call.
-    let cb_at = p.args.iter().position(|a| matches!(a, ArgSpec::Callback { .. }));
-    if let Some(i) = cb_at {
-        let k = jade_idx[i].expect("a callback consumes a Jade argument");
-        body.push_str(&format!(
-            "    jade_cb_{sym} = argv[{k}].data.as_fn;\n    jade_cb_failed = 0;\n"
-        ));
+    // Register each callback the symbol takes. The registration outlives the
+    // call, so this is where the slot is written and nowhere is it cleared.
+    let mut any_cb = false;
+    for (i, a) in p.args.iter().enumerate() {
+        if matches!(a, ArgSpec::Callback { .. }) {
+            let k = jade_idx[i].expect("a callback consumes a Jade argument");
+            body.push_str(&format!("    jade_cb_{sym}_{i} = argv[{k}].data.as_fn;\n"));
+            any_cb = true;
+        }
+    }
+    if any_cb {
+        body.push_str("    jade_cb_failed = 0;\n");
     }
 
     // Cleared right before the call so a stale value from an earlier, unrelated
