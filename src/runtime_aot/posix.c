@@ -46,7 +46,7 @@ void* jade_dlsym(void* handle, const char* sym) { return dlsym(handle, sym); }
  * NULL when the loader cannot say. The buffer is _Thread_local for the reason
  * the errno buffer is: Jade tasks are real OS threads. */
 const char* jade_image_dir(void) {
-    static _Thread_local char buf[1024];
+    static _Thread_local char buf[PATH_MAX];
     Dl_info info;
     if (!dladdr((const void*)(uintptr_t)&jade_image_dir, &info) || !info.dli_fname) return NULL;
     size_t n = strlen(info.dli_fname);
@@ -72,7 +72,10 @@ const char* jade_image_dir(void) {
  * library that owns a device that is not a waste of memory, it is two devices.
  * Canonicalizing first is what makes "the same dependency" mean one thing. */
 const char* jade_realpath(const char* path) {
-    static _Thread_local char buf[1024];
+    /* PATH_MAX exactly: glibc's realpath writes up to that much and its
+     * fortified build aborts on a smaller destination regardless of the path
+     * it is actually resolving. See the note in runtime.h. */
+    static _Thread_local char buf[PATH_MAX];
     if (!path) return NULL;
     return realpath(path, buf);
 }
