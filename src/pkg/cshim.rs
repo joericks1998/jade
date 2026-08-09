@@ -73,6 +73,18 @@ enum ArgSpec {
     /// reads the length out of the header. There is nowhere to pass a size, so
     /// refusing the shape refused most of the library.
     BytesPtr,
+    /// `inout_bytes` — one Jade blob in, and the edited blob back out.
+    ///
+    /// For the libraries that revise a buffer in place. Every `libfdt` writer
+    /// takes `void *fdt` and edits the device tree where it sits, and there is
+    /// no other shape for that: a Jade blob is immutable, so the library cannot
+    /// be given one to scribble on.
+    ///
+    /// The shim copies the caller's bytes into scratch it owns, lets the library
+    /// work on that, and hands the result back as a fresh blob. Jade's value is
+    /// untouched, which is what immutable has to mean, and the edit is visible
+    /// as a return rather than as a mutation nothing declared.
+    InoutBytes { name: Option<String> },
     /// `out_buffer:<ctype>` — no Jade argument. The shim allocates scratch, the
     /// library fills it, and the filled prefix comes back as a fresh `bytes`.
     ///
@@ -129,6 +141,16 @@ enum ArgSpec {
     /// of those is right for a single call and wrong on the second, which is
     /// the kind of wrong that shows up as corrupt output rather than an error.
     InoutScalar { c_type: String, name: Option<String> },
+    /// `ret_len:<ctype>` — no Jade argument, and no result of its own. The shim
+    /// declares a zeroed local, passes its address, and reads it as the length
+    /// of the pointer the call *returned*.
+    ///
+    /// The mirror of `out_buffer`, which reads the return value as the count for
+    /// a buffer it passed in. Here the bytes are the return value and the count
+    /// comes back through a parameter: `const void *fdt_getprop(const void *fdt,
+    /// int off, const char *name, int *lenp)`, which is the main read call in
+    /// libfdt and has no other spelling.
+    RetLen { c_type: String },
     /// `callback:<ret>(<arg>,…)` — one Jade function, passed as a C function
     /// pointer of exactly that signature.
     ///
@@ -147,6 +169,7 @@ impl ArgSpec {
             ArgSpec::Scalar(_)
                 | ArgSpec::Bytes
                 | ArgSpec::BytesPtr
+                | ArgSpec::InoutBytes { .. }
                 | ArgSpec::Handle { .. }
                 | ArgSpec::Callback { .. }
                 | ArgSpec::InoutScalar { .. }
@@ -168,6 +191,7 @@ impl ArgSpec {
                 | ArgSpec::OutHandle { .. }
                 | ArgSpec::OutScalar { .. }
                 | ArgSpec::InoutScalar { .. }
+                | ArgSpec::InoutBytes { .. }
         )
     }
 
@@ -178,7 +202,8 @@ impl ArgSpec {
             | ArgSpec::OutStruct { name, .. }
             | ArgSpec::OutHandle { name, .. }
             | ArgSpec::OutScalar { name, .. }
-            | ArgSpec::InoutScalar { name, .. } => name.as_deref(),
+            | ArgSpec::InoutScalar { name, .. }
+            | ArgSpec::InoutBytes { name } => name.as_deref(),
             _ => None,
         }
     }
@@ -189,14 +214,15 @@ impl ArgSpec {
             ArgSpec::Scalar(t) => t.decl.to_string(),
             ArgSpec::Bytes => "const void*, size_t".to_string(),
             ArgSpec::BytesPtr => "const void*".to_string(),
+            ArgSpec::InoutBytes { .. } => "void*".to_string(),
             ArgSpec::OutBuffer { elem, .. } => format!("{elem}*"),
             ArgSpec::OutStruct { type_name, .. } => format!("{type_name}*"),
             ArgSpec::InStruct { type_name } => format!("const {type_name}*"),
             ArgSpec::Handle { name } => format!("{name}*"),
             ArgSpec::OutHandle { type_name, .. } => format!("{type_name}**"),
-            ArgSpec::OutScalar { c_type, .. } | ArgSpec::InoutScalar { c_type, .. } => {
-                format!("{c_type}*")
-            }
+            ArgSpec::OutScalar { c_type, .. }
+            | ArgSpec::InoutScalar { c_type, .. }
+            | ArgSpec::RetLen { c_type } => format!("{c_type}*"),
             ArgSpec::Callback { ret, params } => {
                 // Verbatim: the library's own C types, so the function pointer
                 // this declares is the one it expects.
@@ -291,6 +317,10 @@ fn handle_target(spec: &str) -> Option<&str> {
 enum RetSpec {
     Nil,
     Scalar(CType),
+    /// `bytes` — the call returns a pointer, and a `ret_len:` parameter says how
+    /// far it runs. Copied out, because the memory is the library's or the
+    /// caller's blob and neither is Jade's to hold.
+    Bytes,
     /// `handle<T>` — the library's `T*`, wrapped for Jade to hold.
     Handle(String),
 }
@@ -301,6 +331,7 @@ impl RetSpec {
         match self {
             RetSpec::Nil => "void".to_string(),
             RetSpec::Scalar(t) => t.decl.to_string(),
+            RetSpec::Bytes => "const void*".to_string(),
             RetSpec::Handle { 0: name } => format!("{name}*"),
         }
     }
@@ -309,6 +340,9 @@ impl RetSpec {
 fn parse_ret(pkg: &str, sym: &str, spec: &str) -> Result<RetSpec, String> {
     if spec == "nil" {
         return Ok(RetSpec::Nil);
+    }
+    if spec == "bytes" {
+        return Ok(RetSpec::Bytes);
     }
     if let Some(name) = handle_target(spec) {
         return check_c_ident(pkg, sym, name, "handle").map(|_| RetSpec::Handle(name.to_string()));
@@ -362,7 +396,7 @@ fn parse_arg(pkg: &str, sym: &str, full: &str) -> Result<ArgSpec, String> {
             name: out_name,
         });
     }
-    for (prefix, inout) in [("out_scalar:", false), ("inout_scalar:", true)] {
+    for (prefix, inout) in [("out_scalar:", false), ("inout_scalar:", true), ("ret_len:", false)] {
         let Some(t) = spec.strip_prefix(prefix) else { continue };
         let what = prefix.trim_end_matches(':');
         check_c_ident(pkg, sym, t, what)?;
@@ -377,6 +411,18 @@ fn parse_arg(pkg: &str, sym: &str, full: &str) -> Result<ArgSpec, String> {
                 ));
             }
             Some(_) => {}
+        }
+        if prefix == "ret_len:" {
+            // It sizes the return value rather than becoming a result, so there
+            // is no key for a name to be.
+            if out_name.is_some() {
+                return Err(format!(
+                    "dependency '{pkg}': symbol '{sym}' names a `ret_len:{t}` with `@`. It sizes \
+                     the returned blob rather than coming back on its own, so there is no key \
+                     for the name to be."
+                ));
+            }
+            return Ok(ArgSpec::RetLen { c_type: t.to_string() });
         }
         return Ok(if inout {
             ArgSpec::InoutScalar { c_type: t.to_string(), name: out_name }
@@ -397,6 +443,9 @@ fn parse_arg(pkg: &str, sym: &str, full: &str) -> Result<ArgSpec, String> {
     }
     if spec == "bytes_ptr" {
         return Ok(ArgSpec::BytesPtr);
+    }
+    if spec == "inout_bytes" {
+        return Ok(ArgSpec::InoutBytes { name: out_name });
     }
     map_type(spec).map(ArgSpec::Scalar).ok_or_else(|| bad_type_msg(pkg, sym, spec))
 }
@@ -724,6 +773,30 @@ fn parse_symbol(
         }
     }
 
+    // A returned blob and the parameter that sizes it only mean anything
+    // together. One without the other is a manifest that says two different
+    // things about what comes back, so both directions are refused by name.
+    let ret_lens = args.iter().filter(|a| matches!(a, ArgSpec::RetLen { .. })).count();
+    if ret_lens > 1 {
+        return Err(format!(
+            "dependency '{pkg}': symbol '{sym}' has {ret_lens} `ret_len` parameters. There is one \
+             returned pointer, so only one of them can say how far it runs."
+        ));
+    }
+    if ret_lens == 1 && spec.ret != "bytes" {
+        return Err(format!(
+            "dependency '{pkg}': symbol '{sym}' has a `ret_len` but returns '{}'. A `ret_len` \
+             sizes a returned pointer, so the return type must be `bytes`.",
+            spec.ret
+        ));
+    }
+    if ret_lens == 0 && spec.ret == "bytes" {
+        return Err(format!(
+            "dependency '{pkg}': symbol '{sym}' returns `bytes` but nothing says how long it is. \
+             Mark the parameter the length is written through as `ret_len:<ctype>`."
+        ));
+    }
+
     // An `in_struct` needs exactly what an `out_struct` needs, and for the same
     // reason: a field list saying what to carry, and the real header so the
     // compiler places those fields rather than a hand-written layout guessing.
@@ -850,7 +923,10 @@ pub fn generate(
         out.push_str(ERRNO_HELPER);
     }
     let out_specs = || parsed.iter().flat_map(|p| p.outs.iter().map(|&i| &p.args[i]));
-    if out_specs().any(|a| matches!(a, ArgSpec::OutBuffer { .. })) {
+    let returns_bytes = names.iter().any(|s| symbols[*s].ret == "bytes");
+    if returns_bytes
+        || out_specs().any(|a| matches!(a, ArgSpec::OutBuffer { .. } | ArgSpec::InoutBytes { .. }))
+    {
         out.push_str(BYTES_HELPER);
     }
     if parsed.iter().any(|p| p.args.iter().any(|a| matches!(a, ArgSpec::InStruct { .. }))) {
@@ -1192,7 +1268,7 @@ fn wrapper(
             ArgSpec::Scalar(t) => {
                 body.push_str(&format!("    if (argv[{j}].tag != {}) return 1;\n", t.tag));
             }
-            ArgSpec::Bytes | ArgSpec::BytesPtr => {
+            ArgSpec::Bytes | ArgSpec::BytesPtr | ArgSpec::InoutBytes { .. } => {
                 body.push_str(&format!("    if (argv[{j}].tag != JADE_FFI_BYTES) return 1;\n"));
             }
             ArgSpec::Callback { .. } => {
@@ -1241,7 +1317,24 @@ fn wrapper(
                      \x20   {elem}* obuf{i} = ({elem}*)malloc((size_t)(n_elem{i} ? n_elem{i} : 1) * sizeof({elem}));\n\
                      \x20   if (!obuf{i}) return 1;\n"
                 ));
-                cleanup = format!(" free(obuf{i});");
+                // Accumulated, not replaced: a symbol with two pieces of scratch
+                // must release both on the raise path, and assigning here leaked
+                // whichever one was declared first.
+                cleanup.push_str(&format!(" free(obuf{i});"));
+            }
+            ArgSpec::InoutBytes { .. } => {
+                // The library edits in place, so it gets scratch of the caller's
+                // own bytes rather than the caller's bytes. A Jade blob is
+                // immutable; handing one over to be scribbled on would make that
+                // untrue for the FFI's convenience.
+                let k = jade_idx[i].expect("an inout_bytes consumes a Jade argument");
+                body.push_str(&format!(
+                    "    size_t iolen{i} = argv[{k}].data.as_bytes ? argv[{k}].data.as_bytes->len : (size_t)0;\n\
+                     \x20   void* iobuf{i} = malloc(iolen{i} ? iolen{i} : 1);\n\
+                     \x20   if (!iobuf{i}) {{{cleanup} return 1; }}\n\
+                     \x20   if (iolen{i}) memcpy(iobuf{i}, argv[{k}].data.as_bytes->data, iolen{i});\n"
+                ));
+                cleanup.push_str(&format!(" free(iobuf{i});"));
             }
             ArgSpec::OutStruct { type_name, .. } => {
                 // Zeroed, because a library is entitled to fill only the fields
@@ -1262,6 +1355,9 @@ fn wrapper(
             }
             ArgSpec::OutScalar { c_type, .. } => {
                 body.push_str(&format!("    {c_type} oscalar{i} = ({c_type})0;\n"));
+            }
+            ArgSpec::RetLen { c_type } => {
+                body.push_str(&format!("    {c_type} rlen{i} = ({c_type})0;\n"));
             }
             ArgSpec::InoutScalar { c_type, .. } => {
                 // Seeded from what Jade passed, not zeroed: this is the shape
@@ -1301,6 +1397,8 @@ fn wrapper(
             ArgSpec::OutScalar { .. } | ArgSpec::InoutScalar { .. } => {
                 call_args.push(format!("&oscalar{i}"))
             }
+            ArgSpec::RetLen { .. } => call_args.push(format!("&rlen{i}")),
+            ArgSpec::InoutBytes { .. } => call_args.push(format!("iobuf{i}")),
             ArgSpec::Handle { name } => {
                 call_args.push(format!("({name}*)h{}", jade_idx[i].unwrap()))
             }
@@ -1356,6 +1454,27 @@ fn wrapper(
             RetSpec::Nil => format!("    {target}tag = JADE_FFI_NIL;\n    {target}data.as_nil = 0;\n"),
             RetSpec::Scalar(t) => {
                 format!("    {target}tag = {};\n    {target}data.{} = r;\n", t.tag, t.field)
+            }
+            // The pointer belongs to the library, or to the caller's own blob,
+            // and neither is Jade's to hold — so it is copied out. A NULL return
+            // or a negative length is how these signal "nothing", which is nil.
+            RetSpec::Bytes => {
+                let at = p
+                    .args
+                    .iter()
+                    .position(|a| matches!(a, ArgSpec::RetLen { .. }))
+                    .expect("validated by parse_symbol");
+                format!(
+                    "    if (!r || (int64_t)rlen{at} < 0) {{\n\
+                     \x20       {target}tag = JADE_FFI_NIL;\n\
+                     \x20       {target}data.as_nil = 0;\n\
+                     \x20   }} else {{\n\
+                     \x20       JadeBytes* rb{at} = jade_shim_bytes(r, (size_t)rlen{at});\n\
+                     \x20       if (!rb{at}) return 1;\n\
+                     \x20       {target}tag = JADE_FFI_BYTES;\n\
+                     \x20       {target}data.as_bytes = rb{at};\n\
+                     \x20   }}\n"
+                )
             }
             RetSpec::Handle(name) => format!(
                 "    JadeHandle* rh = jade_shim_handle((void*)r, \"{name}\");\n\
@@ -1432,6 +1551,18 @@ fn wrapper(
                 let (tag, field) = c_scalar(c_type).expect("validated by parse_arg");
                 body.push_str(&format!(
                     "    {target}tag = {tag};\n    {target}data.{field} = oscalar{i};\n"
+                ));
+            }
+            ArgSpec::InoutBytes { .. } => {
+                // The whole buffer comes back, edited. Its length cannot change:
+                // the library was given exactly what the caller had, so anything
+                // that needs to grow reports no space rather than reallocating.
+                body.push_str(&format!(
+                    "    JadeBytes* io{i} = jade_shim_bytes(iobuf{i}, iolen{i});\n\
+                     \x20   free(iobuf{i});\n\
+                     \x20   if (!io{i}) return 1;\n\
+                     \x20   {target}tag = JADE_FFI_BYTES;\n\
+                     \x20   {target}data.as_bytes = io{i};\n"
                 ));
             }
             _ => unreachable!("only out-parameters land here"),

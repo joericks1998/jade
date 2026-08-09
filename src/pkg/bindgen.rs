@@ -567,33 +567,78 @@ enum Mapped {
 /// `next` matters because C encodes two-parameter idioms positionally: a
 /// pointer followed by a length is a buffer, and the pair has to be recognised
 /// together or not at all.
-/// Whether a parameter's *name* says it counts something.
+/// Words that appear in the name of a number counting something, taken from
+/// every such parameter across the survey headers rather than invented:
+/// `srcSize`, `dstCapacity`, `namelen`, `buflen`, `props_size`, `in_size`.
+const COUNT_WORDS: [&str; 5] = ["len", "size", "capacity", "count", "num"];
+
+/// Words that appear in the name of a number saying *where*, which is the shape
+/// a count is most often confused with. `nodeoffset` is the single most common
+/// name to follow a byte pointer in these headers, and it starts with the same
+/// `n` that `nbytes` does.
+const POSITION_WORDS: [&str; 4] = ["offset", "index", "idx", "pos"];
+
+/// Whether a parameter's *name* says it counts what came before it.
 ///
-/// Only consulted to tell one struct from an array of them, where the type
-/// alone cannot: `ares_process_fds(ch, const ares_fd_events_t *events, size_t
-/// nevents)` really is an array, and `cs_op_count(h, const cs_insn *insn,
-/// unsigned op_type)` really is one struct beside an unrelated integer. Both
-/// read as "a const pointer followed by an int".
+/// Consulted for two questions the types cannot answer on their own: whether the
+/// pointer before it is a buffer of this length, and whether it is an array of
+/// this many structs. `fdt_getprop(const void *fdt, int nodeoffset, …)` takes a
+/// blob and a position; `cs_op_count(csh, const cs_insn *insn, unsigned
+/// op_type)` takes one struct and a flag; `ares_process_fds(ch, const
+/// ares_fd_events_t *events, size_t nevents)` really does take an array.
 ///
-/// Deliberately biased towards *not* deciding: a name that matches keeps the
-/// existing refusal, and only a name with no count-like word in it becomes a
-/// single struct. Guessing the wrong way here would hand a library one struct
-/// and tell it there were twenty.
+/// The `n`-plus-noun convention is why a leading `n` counts, and `nodeoffset` is
+/// why saying *where* takes it back. Both halves are drawn from the names that
+/// actually appear in these headers.
+///
+/// A header that names nothing keeps the old behaviour, since there is no
+/// evidence either way and the pairing was the standing assumption.
 fn names_a_count(name: Option<&str>) -> bool {
     let Some(n) = name else { return true };
     let n = n.to_ascii_lowercase();
-    n.starts_with('n') || ["count", "len", "size", "num"].iter().any(|w| n.contains(w))
+    let counts = n.starts_with('n') || COUNT_WORDS.iter().any(|w| n.contains(w));
+    counts && !POSITION_WORDS.iter().any(|w| n.contains(w))
+}
+
+/// Whether a parameter's *name* says it holds a length.
+///
+/// Narrower than [`names_a_count`], and used for a different question: which
+/// parameter sizes a returned pointer. Nothing in the types tells `int *lenp`
+/// apart from the second value a call happens to write back, so a name that
+/// does not say "length" leaves the symbol refused rather than sizing a blob
+/// from an unrelated number.
+fn names_a_length(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    n.contains("len") || n.contains("size")
+}
+
+/// What every parameter of one function is decided against.
+///
+/// Grouped rather than passed one by one because it is genuinely per-function:
+/// the same environment, the same return type, the same arity, for every
+/// parameter in the list. Only `next` and its name change between calls.
+struct FnCtx<'a> {
+    env: &'a TypeEnv,
+    /// The function's *raw* return type. An out-buffer is only an out-buffer if
+    /// the call reports how much it filled.
+    ret: &'a str,
+    /// Struct types the library hands out, which are handles rather than
+    /// anything the caller builds.
+    produced: &'a std::collections::HashSet<String>,
+    /// How many functions take each struct type, which is half of what
+    /// identifies caller-held state.
+    counts: &'a HashMap<String, usize>,
+    /// How many parameters the function has. A lone `void *` is a deallocator.
+    n_params: usize,
 }
 
 fn map_param(
     raw_in: &str,
     next: Option<&str>,
     next_name: Option<&str>,
-    env: &TypeEnv,
-    ret: &str,
-    produced: &std::collections::HashSet<String>,
-    counts: &HashMap<String, usize>,
+    cx: &FnCtx<'_>,
 ) -> Mapped {
+    let FnCtx { env, ret, produced, counts, n_params } = *cx;
     // Expanded before anything is decided, so a library's own typedefs read as
     // the types they stand for. `const` comes from the expansion, not the
     // written parameter, because a typedef can introduce it.
@@ -645,14 +690,19 @@ fn map_param(
 
     // A pointer next to a length is a buffer, and `const` says which direction.
     //
-    // Except when the pointee is a struct the header defines. Then the following
-    // int is far more often an unrelated flag than a count, and reading it as a
-    // count refuses a symbol that a single struct would bind. The parameter's
-    // own name breaks the tie, and only a name with no count-like word in it
-    // counts as evidence — see `names_a_count`.
+    // "Next to a length" is decided by the parameter's *name* as well as its
+    // type, because plenty of pointers are followed by an int that counts
+    // nothing: `fdt_getprop(const void *fdt, int nodeoffset, …)` takes a blob
+    // and an offset, and `cs_op_count(csh, const cs_insn *insn, unsigned
+    // op_type)` takes one struct and a flag.
+    //
+    // The two mistakes are not symmetric, which is what makes the name worth
+    // trusting. Reading a real length as an ordinary argument costs nothing —
+    // the int is still passed, the caller just supplies it — while reading an
+    // offset as a length *drops* it, and hands the library a size it never
+    // computed. A header that names no parameters keeps the old behaviour.
     let next_is_int = next.map(|n| is_int(&normalize(&env.expand(n)))).unwrap_or(false);
-    let next_is_len = next_is_int
-        && !(env.complete.contains_key(inner) && !names_a_count(next_name));
+    let next_is_len = next_is_int && names_a_count(next_name);
     let squashed = squash(inner);
     let byte_like =
         matches!(squashed.as_str(), "void" | "char" | "unsignedchar" | "signedchar" | "uint8_t" | "int8_t");
@@ -813,9 +863,38 @@ fn map_param(
         );
     }
 
-    if squash(inner) == "void" {
-        return Mapped::Reject(
-            "writes through a `void *`, which names no type to check".to_string(),
+    // A writable byte pointer with no count beside it, where the *whole* shape
+    // is a buffer the library revises in place. Every `libfdt` writer takes
+    // `void *fdt` and edits the device tree where it sits.
+    //
+    // Distinct from the `out_buffer` case above, which allocates scratch the
+    // caller never filled: here the caller's own bytes are the starting point,
+    // so they are copied in and the edited copy comes back. Distinct from
+    // `bytes_ptr` too, because a Jade blob is immutable and cannot be lent out
+    // to be scribbled on.
+    if byte_like {
+        // A bare `void *` on its own is a deallocator, not a buffer: c-ares
+        // spells `ares_free_string(void *str)` and `ares_free_data(void *)` that
+        // way. Handing one of those the shim's own scratch would have the
+        // library free it, and the shim free it again on the way out. Nothing in
+        // the type says which of the two it is, so the one-argument shape is
+        // refused and the multi-argument one — every `libfdt` writer, which
+        // takes the tree plus what to do to it — is not.
+        if squashed == "void" && n_params == 1 {
+            return Mapped::Reject(
+                "takes a `void *` on its own, which is the shape of a call that frees what it is \
+                 given. Passing it a buffer would leave the shim freeing memory the library \
+                 already released"
+                    .to_string(),
+            );
+        }
+        return Mapped::Assumed(
+            "inout_bytes".to_string(),
+            format!(
+                "`{raw}` with no length beside it was read as a buffer the call revises in place, \
+                 so the edited copy comes back; if the library only reads it, change it to \
+                 `bytes_ptr`"
+            ),
         );
     }
 
@@ -1214,7 +1293,15 @@ fn map_function(
     counts: &HashMap<String, usize>,
 ) -> Result<(CSymbol, Vec<String>, Vec<String>), String> {
     let raw_ret = ret_type_of(node)?;
-    let ret = map_ret(&raw_ret, env)?;
+    // A returned pointer whose length arrives through a parameter cannot be
+    // decided from the return type alone, so the refusal is held until the
+    // parameters have been read. `returns_a_blob` below either rescues it or
+    // hands back exactly this error.
+    let mapped_ret = map_ret(&raw_ret, env);
+    let mut ret = match &mapped_ret {
+        Ok(r) => r.clone(),
+        Err(_) => String::new(),
+    };
 
     let empty = Vec::new();
     let parms: Vec<&Value> = node
@@ -1246,13 +1333,15 @@ fn map_function(
     let mut out_at: Vec<(usize, usize)> = Vec::new();
     let mut skip_next = false;
 
+    let cx = FnCtx { env, ret: &raw_ret, produced, counts, n_params: raw.len() };
+
     for (i, t) in raw.iter().enumerate() {
         if skip_next {
             skip_next = false;
             continue;
         }
         let next_name = parm_names.get(i + 1).copied().flatten();
-        match map_param(t, raw.get(i + 1).copied(), next_name, env, &raw_ret, produced, counts) {
+        match map_param(t, raw.get(i + 1).copied(), next_name, &cx) {
             Mapped::One(s) => {
                 // An `in_struct` needs its field table written out with it, the
                 // same way an `out_struct` does. It is an ordinary argument
@@ -1264,6 +1353,15 @@ fn map_function(
             }
             Mapped::Assumed(s, why) => {
                 assumed.push(why);
+                // An `inout_bytes` is an argument *and* a result, so it counts
+                // towards the rule that several results each need a key.
+                // `fdt_overlay_apply(void *fdt, void *fdto)` has two, and
+                // leaving them out here let the symbol reach the shim generator
+                // unnamed — which refuses the whole dependency rather than the
+                // one symbol.
+                if s == "inout_bytes" {
+                    out_at.push((args.len(), i));
+                }
                 args.push(s);
             }
             Mapped::BytesPair(s) => {
@@ -1285,6 +1383,49 @@ fn map_function(
             }
             Mapped::Reject(why) => return Err(why),
         }
+    }
+
+    // A returned pointer, sized by one of the parameters.
+    //
+    // The mirror of `out_buffer`: there the return value is the count and the
+    // bytes went in through a parameter, here the bytes are the return value and
+    // the count comes back through one. `const void *fdt_getprop(const void
+    // *fdt, int off, const char *name, int *lenp)` is the main read call in
+    // libfdt and has no other spelling.
+    //
+    // Only rescues a return the type alone could not represent, and only when
+    // exactly one parameter is a writable integer the header *named* like a
+    // length. Without the name there is nothing to tell `int *lenp` from the
+    // second value a call happens to write back, and guessing would size a blob
+    // from an unrelated number.
+    if let Err(why) = &mapped_ret {
+        let is_blob = {
+            let expanded = env.expand(&raw_ret);
+            let t = normalize(&expanded);
+            expanded.contains("const")
+                && pointee(&t).map(squash).is_some_and(|s| {
+                    matches!(s.as_str(), "void" | "unsignedchar" | "signedchar" | "uint8_t" | "int8_t")
+                })
+        };
+        let lengths: Vec<usize> = out_at
+            .iter()
+            .filter(|(k, p)| {
+                args[*k].starts_with("out_scalar:")
+                    && parm_names[*p].is_some_and(names_a_length)
+            })
+            .map(|(k, _)| *k)
+            .collect();
+        if !is_blob || lengths.len() != 1 {
+            return Err(why.clone());
+        }
+        let k = lengths[0];
+        let c_type = args[k].trim_start_matches("out_scalar:").to_string();
+        args[k] = format!("ret_len:{c_type}");
+        out_at.retain(|(i, _)| *i != k);
+        // The note `out_scalar` attached no longer applies: it is not coming
+        // back on its own, it is sizing the blob.
+        assumed.retain(|w| !w.contains(&format!("inout_scalar:{c_type}")));
+        ret = "bytes".to_string();
     }
 
     // Two out-parameters that both want the C return value cannot coexist: an

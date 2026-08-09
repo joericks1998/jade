@@ -927,11 +927,81 @@ fn a_blob_next_to_a_length_still_takes_the_length_with_it() {
 }
 
 #[test]
-fn a_writable_void_pointer_is_still_refused() {
-    // Nothing says how much the library will write, and `void` names no type to
-    // size an allocation from.
-    let b = bind("void f(void* p);\n");
-    assert!(why_skipped(&b, "f").contains("names no type"), "{:?}", b.skipped);
+fn a_writable_blob_is_revised_in_place_and_handed_back() {
+    // Every libfdt writer takes `void *fdt` and edits the device tree where it
+    // sits. A Jade blob is immutable, so the shim works on a copy and the edit
+    // comes back as a return rather than as a mutation nothing declared.
+    let b = bind("int fdt_nop_property(void* fdt, int nodeoffset, const char* name);\n");
+    assert_eq!(args(&b, "fdt_nop_property"), ["inout_bytes", "int", "str"]);
+}
+
+#[test]
+fn a_lone_void_pointer_is_refused_because_it_may_free_what_it_is_given() {
+    // `ares_free_string(void *str)` releases what it is handed. Passing it the
+    // shim's own scratch would have the library free it and the shim free it
+    // again on the way out.
+    let b = bind("void ares_free_string(void* str);\n");
+    assert!(why_skipped(&b, "ares_free_string").contains("frees what it is given"), "{:?}", b.skipped);
+}
+
+#[test]
+fn two_revised_blobs_take_their_keys_from_the_header() {
+    // `fdt_overlay_apply(void *fdt, void *fdto)` has two results. Leaving them
+    // unnamed let the symbol reach the shim generator, which refuses the whole
+    // dependency rather than the one symbol.
+    let b = bind("int fdt_overlay_apply(void* fdt, void* fdto);\n");
+    assert_eq!(args(&b, "fdt_overlay_apply"), ["inout_bytes@fdt", "inout_bytes@fdto"]);
+}
+
+// ── A returned pointer, sized by a parameter ─────────────────────────────
+
+#[test]
+fn a_returned_pointer_sized_by_a_named_length_becomes_a_blob() {
+    // `fdt_getprop` is the main read call in libfdt and has no other spelling:
+    // the bytes are the return value and the count comes back through `lenp`.
+    let b = bind(
+        "const void* fdt_getprop(const void* fdt, int nodeoffset, const char* name, int* lenp);\n",
+    );
+    assert_eq!(ret(&b, "fdt_getprop"), "bytes");
+    assert_eq!(args(&b, "fdt_getprop"), ["bytes_ptr", "int", "str", "ret_len:int"]);
+}
+
+#[test]
+fn a_returned_pointer_with_no_named_length_stays_refused() {
+    // Nothing in the types tells `int *lenp` from the second value a call
+    // happens to write back, so without the name there is nothing to size from.
+    let b = bind("const void* f(const void* blob, int* nextoffset);\n");
+    assert!(why_skipped(&b, "f").contains("unsupported type"), "{:?}", b.skipped);
+}
+
+// ── Which integer is a length ────────────────────────────────────────────
+
+#[test]
+fn an_offset_after_a_blob_is_not_read_as_its_length() {
+    // `nodeoffset` is the single most common name to follow a byte pointer in
+    // these headers. Reading it as a length *drops* it and hands the library a
+    // size it never computed.
+    let b = bind("int fdt_path_offset_at(const void* fdt, int nodeoffset, const char* p);\n");
+    assert_eq!(args(&b, "fdt_path_offset_at"), ["bytes_ptr", "int", "str"]);
+}
+
+#[test]
+fn the_names_a_real_length_goes_by_are_all_recognised() {
+    // Taken from every such parameter across the survey headers rather than
+    // invented: srcSize, dstCapacity, namelen, buflen, in_size.
+    for name in ["n", "len", "size", "srcSize", "dstCapacity", "buflen", "in_size", "nbytes"] {
+        let b = bind(&format!("#include <stddef.h>\nint f(const void* p, size_t {name});\n"));
+        assert_eq!(args(&b, "f"), ["bytes"], "{name} should read as a length");
+    }
+}
+
+#[test]
+fn a_name_that_counts_nothing_leaves_the_integer_as_an_argument() {
+    // The safe direction: the int is still passed, the caller just supplies it.
+    for name in ["nodeoffset", "offset", "val", "family", "index", "phandle", "stroffset"] {
+        let b = bind(&format!("#include <stddef.h>\nint f(const void* p, size_t {name});\n"));
+        assert_eq!(args(&b, "f"), ["bytes_ptr", "int"], "{name} should not read as a length");
+    }
 }
 
 // ── A struct read as input ───────────────────────────────────────────────

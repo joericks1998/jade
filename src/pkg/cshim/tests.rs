@@ -277,6 +277,38 @@ fn a_lengthless_blob_shim_compiles() {
 }
 
 #[test]
+fn a_blob_revised_in_place_is_copied_and_handed_back() {
+    // A Jade blob is immutable, so the library gets scratch of the caller's
+    // bytes rather than the caller's bytes, and the edit comes back as a return.
+    let src = generate("fdt", &symbols(&[("nop", sym(&["inout_bytes", "int"], "int"))])).unwrap();
+    assert!(src.contains("extern int64_t nop(void*, int64_t);"), "bad decl:\n{src}");
+    assert!(src.contains("memcpy(iobuf0, argv[0].data.as_bytes->data, iolen0);"), "no copy:\n{src}");
+    assert!(src.contains("jade_shim_bytes(iobuf0, iolen0)"), "not handed back:\n{src}");
+    assert!(src.contains("free(iobuf0);"), "scratch leaked:\n{src}");
+    // One argument in, and a pair back: the status and the edited blob.
+    assert!(src.contains(r#"jade_shim_struct("nop_result", 2)"#), "should pair:\n{src}");
+}
+
+#[test]
+fn two_revised_blobs_free_both_when_the_call_raises() {
+    // The cleanup string used to be assigned rather than appended, so whichever
+    // buffer was declared first leaked on the raise path.
+    let s = failing_sym(&["inout_bytes@a", "inout_bytes@b"], "int", CFailure::Nonzero);
+    let src = generate("fdt", &symbols(&[("apply", s)])).unwrap();
+    let raise = src.split("out->tag = JADE_FFI_ERROR").next().unwrap_or_default();
+    assert!(raise.contains("free(iobuf0);") && raise.contains("free(iobuf1);"), "leak:\n{src}");
+}
+
+#[test]
+fn a_revised_blob_shim_compiles() {
+    let syms = symbols(&[("nop", sym(&["inout_bytes", "int", "str"], "int"))]);
+    let src = generate("fdt", &syms).unwrap();
+    if let Err(e) = compiles(&src, &[]) {
+        panic!("in-place blob shim does not compile:\n{e}\n--- source ---\n{src}");
+    }
+}
+
+#[test]
 fn a_null_blob_passes_null_and_zero_rather_than_dereferencing() {
     let src = generate("z", &symbols(&[("put", sym(&["bytes"], "int"))])).unwrap();
     assert!(src.contains("? (const void*)argv[0].data.as_bytes->data : NULL"), "unguarded:\n{src}");
@@ -461,6 +493,56 @@ fn a_struct_out_parameter_needs_a_header() {
     let err = generate_with("snd", &symbols(&[("f", s)]), &[("SF_INFO", SF_INFO)], &[]).unwrap_err();
     assert!(err.contains("headers"), "should ask for a header: {err}");
     assert!(err.contains("wrong offsets"), "should say why: {err}");
+}
+
+// ── A returned pointer, sized by a parameter ─────────────────────────────
+
+#[test]
+fn a_returned_pointer_is_sized_by_its_ret_len_parameter() {
+    // The mirror of out_buffer: there the return value is the count, here the
+    // bytes are the return value and the count comes back through a parameter.
+    let mut s = sym(&["bytes_ptr", "str", "ret_len:int"], "bytes");
+    s.ret = "bytes".to_string();
+    let src = generate("fdt", &symbols(&[("getprop", s)])).unwrap();
+    assert!(src.contains("extern const void* getprop("), "bad decl:\n{src}");
+    assert!(src.contains("int rlen2 = (int)0;"), "no length local:\n{src}");
+    assert!(src.contains("jade_shim_bytes(r, (size_t)rlen2)"), "not sized by it:\n{src}");
+    // The parameter is not a Jade argument and not a result of its own.
+    assert!(src.contains("if (argc != 2) return 1;"), "wrong arity:\n{src}");
+    assert!(!src.contains("_result"), "should not pair:\n{src}");
+}
+
+#[test]
+fn a_returned_pointer_that_is_null_or_negative_comes_back_as_nil() {
+    // How these signal "nothing": libfdt returns NULL and writes a negative
+    // error code through the length.
+    let s = sym(&["bytes_ptr", "ret_len:int"], "bytes");
+    let src = generate("fdt", &symbols(&[("getprop", s)])).unwrap();
+    assert!(src.contains("if (!r || (int64_t)rlen1 < 0)"), "unguarded:\n{src}");
+}
+
+#[test]
+fn a_returned_blob_and_its_length_only_mean_anything_together() {
+    let lone = sym(&["bytes_ptr", "ret_len:int"], "int");
+    let err = generate("fdt", &symbols(&[("f", lone)])).unwrap_err();
+    assert!(err.contains("must be `bytes`"), "should refuse a stray length: {err}");
+
+    let bare = sym(&["bytes_ptr"], "bytes");
+    let err = generate("fdt", &symbols(&[("f", bare)])).unwrap_err();
+    assert!(err.contains("how long it is"), "should refuse a stray blob: {err}");
+
+    let two = sym(&["ret_len:int", "ret_len:int"], "bytes");
+    let err = generate("fdt", &symbols(&[("f", two)])).unwrap_err();
+    assert!(err.contains("only one of them"), "should refuse two lengths: {err}");
+}
+
+#[test]
+fn a_returned_blob_shim_compiles() {
+    let syms = symbols(&[("getprop", sym(&["bytes_ptr", "int", "str", "ret_len:int"], "bytes"))]);
+    let src = generate("fdt", &syms).unwrap();
+    if let Err(e) = compiles(&src, &[]) {
+        panic!("returned blob shim does not compile:\n{e}\n--- source ---\n{src}");
+    }
 }
 
 #[test]
