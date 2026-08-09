@@ -702,7 +702,7 @@ fn an_umbrella_header_binds_what_the_library_exports() {
         Some(&["ctx_get", "ctx_set"]),
     )
     .expect("should bind");
-    assert_eq!(b.umbrella, Some(2));
+    assert_eq!(b.swept, Some(crate::pkg::bindgen::Swept { n: 2, umbrella: true }));
     assert!(b.symbols.contains_key("ctx_get"));
     assert!(b.symbols.contains_key("ctx_set"));
     // stdio.h is in the same translation unit and is not this library.
@@ -721,7 +721,10 @@ fn an_umbrella_header_with_no_export_table_says_what_it_needs() {
 }
 
 #[test]
-fn a_header_that_declares_its_own_functions_is_not_treated_as_an_umbrella() {
+fn a_header_that_declares_its_own_also_binds_what_it_includes() {
+    // `ares.h` declares seventy-odd symbols of its own *and* includes
+    // `ares_dns_record.h`, which declares sixty-three more the library exports.
+    // While the rule was all-or-nothing those sixty-three were invisible.
     let b = bind_tree(
         &[
             ("main.h", "#include \"other.h\"\nint mine(int a);\n"),
@@ -730,7 +733,41 @@ fn a_header_that_declares_its_own_functions_is_not_treated_as_an_umbrella() {
         Some(&["mine", "helper"]),
     )
     .expect("should bind");
-    assert_eq!(b.umbrella, None);
+    assert_eq!(b.swept, Some(crate::pkg::bindgen::Swept { n: 1, umbrella: false }));
+    assert!(b.symbols.contains_key("mine"));
+    assert!(b.symbols.contains_key("helper"), "{:?}", b.symbols.keys());
+}
+
+#[test]
+fn an_included_declaration_the_library_does_not_export_is_left_alone() {
+    // The export table is the whole test. `stdio.h` rides in on every header
+    // and belongs to nobody.
+    let b = bind_tree(
+        &[
+            ("main.h", "#include <stdio.h>\n#include \"other.h\"\nint mine(int a);\n"),
+            ("other.h", "int helper(int);\n"),
+        ],
+        Some(&["mine"]),
+    )
+    .expect("should bind");
+    assert_eq!(b.swept, None);
+    assert!(!b.symbols.contains_key("helper"), "{:?}", b.symbols.keys());
+    assert!(!b.symbols.contains_key("fopen"), "{:?}", b.symbols.keys());
+}
+
+#[test]
+fn without_an_export_table_only_the_headers_own_declarations_are_bound() {
+    // Nothing exact to test an include against, so the named header is the
+    // whole scope — which is what it was for every header before.
+    let b = bind_tree(
+        &[
+            ("main.h", "#include \"other.h\"\nint mine(int a);\n"),
+            ("other.h", "int helper(int);\n"),
+        ],
+        None,
+    )
+    .expect("should bind");
+    assert_eq!(b.swept, None);
     assert!(!b.symbols.contains_key("helper"), "{:?}", b.symbols.keys());
 }
 

@@ -6,6 +6,13 @@ sidebar_label: Changelog
 
 ## v1.3.11
 
+**A library that splits its API across headers is now bound whole.** `ares.h` declares seventy-odd symbols itself and includes `ares_dns_record.h`, which declares sixty-three more — the entire modern DNS record API, and none of it was ever looked at. The rule was all-or-nothing: a header declaring nothing of its own was an umbrella and bound everything it included that the library exports, and a header declaring anything bound only its own. Plenty of libraries do both.
+
+The export table decides for every header now, not only umbrellas. It is an exact test rather than a guess about which paths count as system ones — `fopen` rides in on every header and belongs to nobody, so it is not bound. The named header's own declarations are kept either way, so no library loses a symbol.
+
+- **c-ares goes from 57 bound symbols to 114, of the 136 it exports and declares.** A Jade program now takes a real DNS answer, parses it with `ares_dns_parse`, and walks the records: `A for example.com`, on both engines.
+- **zstd reaches all 68.** Across the seven libraries measured it is 410 of 444, from 352.
+
 **A C library can keep a Jade function and call it back later.** Every async C API works this way — register now, called when the answer arrives — and none of them worked: the whole mechanism was scoped to a single call, so `ares_search` registered a callback, returned, and it never fired. Nothing errored. A real DNS query through c-ares now delivers its answer to a Jade function, on both engines.
 
 - **Three things were per-call and are now per-VM:** the channel the callback posts on, which used to close when the registering call returned; the Jade function itself, which used to be freed then, leaving the library holding a dead pointer; and the shim's registration slot, which was cleared on return *and* thread-local — the sharper half, since each native call runs on its own worker thread.
