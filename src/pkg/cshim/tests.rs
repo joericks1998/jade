@@ -5,6 +5,7 @@ fn sym(args: &[&str], ret: &str) -> CSymbol {
         args: args.iter().map(|s| s.to_string()).collect(),
         ret: ret.to_string(),
         fails_when: None,
+        frees_with: None,
     }
 }
 
@@ -38,12 +39,39 @@ fn generate_with(
                 n.to_string(),
                 crate::project::CStruct {
                     fields: fields.iter().map(|(f, t)| (f.to_string(), t.to_string())).collect(),
+                    held: false,
+                    buffers: Vec::new(),
                 },
             )
         })
         .collect();
     let headers: Vec<String> = headers.iter().map(|h| h.to_string()).collect();
     super::generate(name, syms, &structs, &headers)
+}
+
+/// The same, for a struct Jade holds rather than one it builds.
+fn generate_held(
+    name: &str,
+    syms: &HashMap<String, CSymbol>,
+    type_name: &str,
+    fields: &[(&str, &str)],
+    buffers: &[(&str, &str, bool)],
+) -> Result<String, String> {
+    let def = crate::project::CStruct {
+        fields: fields.iter().map(|(f, t)| (f.to_string(), t.to_string())).collect(),
+        held: true,
+        buffers: buffers
+            .iter()
+            .map(|(p, l, w)| crate::project::CBuffer {
+                ptr: p.to_string(),
+                len: l.to_string(),
+                writable: *w,
+            })
+            .collect(),
+    };
+    let structs: HashMap<String, crate::project::CStruct> =
+        [(type_name.to_string(), def)].into_iter().collect();
+    super::generate(name, syms, &structs, &["fixture.h".to_string()])
 }
 
 #[test]
@@ -257,6 +285,58 @@ fn an_input_blob_becomes_a_pointer_and_a_length() {
 }
 
 #[test]
+fn a_blob_with_no_length_becomes_one_pointer() {
+    // The libfdt shape: the extent is written inside the blob, so there is
+    // nowhere to pass a size and the pointer goes on its own.
+    let src = generate("fdt", &symbols(&[("check", sym(&["bytes_ptr"], "int"))])).unwrap();
+    assert!(src.contains("extern int64_t check(const void*);"), "bad decl:\n{src}");
+    assert!(src.contains("if (argv[0].tag != JADE_FFI_BYTES) return 1;"), "no tag check:\n{src}");
+    assert!(src.contains("check(argv[0].data.as_bytes"), "should pass the pointer:\n{src}");
+    assert!(!src.contains("as_bytes->len"), "must not invent a length:\n{src}");
+}
+
+#[test]
+fn a_lengthless_blob_shim_compiles() {
+    let syms = symbols(&[("check", sym(&["bytes_ptr"], "int")), ("at", sym(&["bytes_ptr", "str"], "int"))]);
+    let src = generate("fdt", &syms).unwrap();
+    if let Err(e) = compiles(&src, &[]) {
+        panic!("lengthless blob shim does not compile:\n{e}\n--- source ---\n{src}");
+    }
+}
+
+#[test]
+fn a_blob_revised_in_place_is_copied_and_handed_back() {
+    // A Jade blob is immutable, so the library gets scratch of the caller's
+    // bytes rather than the caller's bytes, and the edit comes back as a return.
+    let src = generate("fdt", &symbols(&[("nop", sym(&["inout_bytes", "int"], "int"))])).unwrap();
+    assert!(src.contains("extern int64_t nop(void*, int64_t);"), "bad decl:\n{src}");
+    assert!(src.contains("memcpy(iobuf0, argv[0].data.as_bytes->data, iolen0);"), "no copy:\n{src}");
+    assert!(src.contains("jade_shim_bytes(iobuf0, iolen0)"), "not handed back:\n{src}");
+    assert!(src.contains("free(iobuf0);"), "scratch leaked:\n{src}");
+    // One argument in, and a pair back: the status and the edited blob.
+    assert!(src.contains(r#"jade_shim_struct("nop_result", 2)"#), "should pair:\n{src}");
+}
+
+#[test]
+fn two_revised_blobs_free_both_when_the_call_raises() {
+    // The cleanup string used to be assigned rather than appended, so whichever
+    // buffer was declared first leaked on the raise path.
+    let s = failing_sym(&["inout_bytes@a", "inout_bytes@b"], "int", CFailure::Nonzero);
+    let src = generate("fdt", &symbols(&[("apply", s)])).unwrap();
+    let raise = src.split("out->tag = JADE_FFI_ERROR").next().unwrap_or_default();
+    assert!(raise.contains("free(iobuf0);") && raise.contains("free(iobuf1);"), "leak:\n{src}");
+}
+
+#[test]
+fn a_revised_blob_shim_compiles() {
+    let syms = symbols(&[("nop", sym(&["inout_bytes", "int", "str"], "int"))]);
+    let src = generate("fdt", &syms).unwrap();
+    if let Err(e) = compiles(&src, &[]) {
+        panic!("in-place blob shim does not compile:\n{e}\n--- source ---\n{src}");
+    }
+}
+
+#[test]
 fn a_null_blob_passes_null_and_zero_rather_than_dereferencing() {
     let src = generate("z", &symbols(&[("put", sym(&["bytes"], "int"))])).unwrap();
     assert!(src.contains("? (const void*)argv[0].data.as_bytes->data : NULL"), "unguarded:\n{src}");
@@ -443,6 +523,120 @@ fn a_struct_out_parameter_needs_a_header() {
     assert!(err.contains("wrong offsets"), "should say why: {err}");
 }
 
+// ── A returned pointer, sized by a parameter ─────────────────────────────
+
+#[test]
+fn a_returned_pointer_is_sized_by_its_ret_len_parameter() {
+    // The mirror of out_buffer: there the return value is the count, here the
+    // bytes are the return value and the count comes back through a parameter.
+    let mut s = sym(&["bytes_ptr", "str", "ret_len:int"], "bytes");
+    s.ret = "bytes".to_string();
+    let src = generate("fdt", &symbols(&[("getprop", s)])).unwrap();
+    assert!(src.contains("extern const void* getprop("), "bad decl:\n{src}");
+    assert!(src.contains("int rlen2 = (int)0;"), "no length local:\n{src}");
+    assert!(src.contains("jade_shim_bytes(r, (size_t)rlen2)"), "not sized by it:\n{src}");
+    // The parameter is not a Jade argument and not a result of its own.
+    assert!(src.contains("if (argc != 2) return 1;"), "wrong arity:\n{src}");
+    assert!(!src.contains("_result"), "should not pair:\n{src}");
+}
+
+#[test]
+fn a_returned_pointer_that_is_null_or_negative_comes_back_as_nil() {
+    // How these signal "nothing": libfdt returns NULL and writes a negative
+    // error code through the length.
+    let s = sym(&["bytes_ptr", "ret_len:int"], "bytes");
+    let src = generate("fdt", &symbols(&[("getprop", s)])).unwrap();
+    assert!(src.contains("if (!r || (int64_t)rlen1 < 0)"), "unguarded:\n{src}");
+}
+
+#[test]
+fn a_returned_blob_and_its_length_only_mean_anything_together() {
+    let lone = sym(&["bytes_ptr", "ret_len:int"], "int");
+    let err = generate("fdt", &symbols(&[("f", lone)])).unwrap_err();
+    assert!(err.contains("must be `bytes`"), "should refuse a stray length: {err}");
+
+    let bare = sym(&["bytes_ptr"], "bytes");
+    let err = generate("fdt", &symbols(&[("f", bare)])).unwrap_err();
+    assert!(err.contains("how long it is"), "should refuse a stray blob: {err}");
+
+    let two = sym(&["ret_len:int", "ret_len:int"], "bytes");
+    let err = generate("fdt", &symbols(&[("f", two)])).unwrap_err();
+    assert!(err.contains("only one of them"), "should refuse two lengths: {err}");
+}
+
+#[test]
+fn a_returned_blob_shim_compiles() {
+    let syms = symbols(&[("getprop", sym(&["bytes_ptr", "int", "str", "ret_len:int"], "bytes"))]);
+    let src = generate("fdt", &syms).unwrap();
+    if let Err(e) = compiles(&src, &[]) {
+        panic!("returned blob shim does not compile:\n{e}\n--- source ---\n{src}");
+    }
+}
+
+#[test]
+fn a_struct_input_is_copied_into_a_real_c_local() {
+    let s = sym(&["in_struct:SF_INFO", "int"], "int");
+    let src = generate_with("snd", &symbols(&[("f", s)]), &[("SF_INFO", SF_INFO)], &["sndfile.h"])
+        .unwrap();
+    assert!(src.contains("SF_INFO istruct0;"), "no local of the real type:\n{src}");
+    assert!(src.contains("memset(&istruct0, 0, sizeof istruct0);"), "not zeroed:\n{src}");
+    assert!(src.contains("f(&istruct0, argv[1].data.as_int)"), "not passed by address:\n{src}");
+}
+
+#[test]
+fn a_struct_input_takes_one_jade_argument() {
+    // Unlike an out_struct, which takes none: the caller supplies this one.
+    let s = sym(&["in_struct:SF_INFO"], "int");
+    let src = generate_with("snd", &symbols(&[("f", s)]), &[("SF_INFO", SF_INFO)], &["sndfile.h"])
+        .unwrap();
+    assert!(src.contains("if (argc != 1) return 1;"), "wrong arity:\n{src}");
+    assert!(src.contains("if (argv[0].tag != JADE_FFI_STRUCT) return 1;"), "no tag check:\n{src}");
+}
+
+#[test]
+fn a_field_left_out_of_a_struct_input_stays_zero() {
+    // What the C it stands in for does: declare, zero, set what matters. A
+    // struct with fifteen reserved fields the library requires to be zero would
+    // be unusable if every one had to be written out.
+    let s = sym(&["in_struct:SF_INFO"], "int");
+    let src = generate_with("snd", &symbols(&[("f", s)]), &[("SF_INFO", SF_INFO)], &["sndfile.h"])
+        .unwrap();
+    assert!(src.contains("if (istruct0_0) {"), "a missing field must not fail:\n{src}");
+}
+
+#[test]
+fn a_field_the_struct_does_not_have_is_refused_by_name() {
+    // The mistake worth catching. Without this a misspelling is indistinguishable
+    // from an omission, and silently becomes a zero the caller believed they set.
+    let s = sym(&["in_struct:SF_INFO"], "int");
+    let src = generate_with("snd", &symbols(&[("f", s)]), &[("SF_INFO", SF_INFO)], &["sndfile.h"])
+        .unwrap();
+    assert!(src.contains("jade_shim_nofield(\"SF_INFO\""), "no unknown-key check:\n{src}");
+    assert!(src.contains("jade_shim_known(istruct0_names"), "no name table:\n{src}");
+}
+
+#[test]
+fn a_struct_input_needs_its_fields_declared_and_a_header() {
+    // Exactly what an out_struct needs, and for the same reason: the layout has
+    // to come from the compiler rather than from a hand-written field list.
+    let s = sym(&["in_struct:SF_INFO"], "int");
+    let err = generate_with("snd", &symbols(&[("f", s.clone())]), &[], &["sndfile.h"]).unwrap_err();
+    assert!(err.contains("structs.SF_INFO"), "should name the missing table: {err}");
+
+    let err = generate_with("snd", &symbols(&[("f", s)]), &[("SF_INFO", SF_INFO)], &[]).unwrap_err();
+    assert!(err.contains("headers"), "should ask for a header: {err}");
+}
+
+#[test]
+fn a_struct_input_cannot_be_named_like_a_result() {
+    // `@name` is the key an out-parameter comes back under. An in_struct is an
+    // argument, so accepting one would read as a result that never arrives.
+    let s = sym(&["in_struct:SF_INFO@cfg"], "int");
+    let err = generate_with("snd", &symbols(&[("f", s)]), &[("SF_INFO", SF_INFO)], &["sndfile.h"])
+        .unwrap_err();
+    assert!(err.contains("produces nothing"), "should say why: {err}");
+}
+
 #[test]
 fn a_header_name_that_is_not_a_path_is_refused() {
     let s = sym(&["int"], "int");
@@ -543,6 +737,273 @@ extern void sf_stat(SF_INFO* info);
     let src = generate_with("snd", &syms, &[("SF_INFO", fields)], &["fixture.h"]).unwrap();
     if let Err(e) = compiles(&src, &[("fixture.h", header)]) {
         panic!("struct shim does not compile:\n{e}\n--- source ---\n{src}");
+    }
+}
+
+#[test]
+fn a_struct_input_shim_compiles_against_a_real_header() {
+    // Same argument as the out_struct case: the compiler places the fields, so
+    // an assignment at a wrong offset is impossible rather than merely unlikely.
+    let header = r#"
+#ifndef FIXTURE_H
+#define FIXTURE_H
+#include <stdint.h>
+typedef struct { int version; int64_t backward_size; int check; const char* tag; } FLAGS;
+extern int cmp(const FLAGS* a, const FLAGS* b);
+extern int use_one(const FLAGS* f, int mode);
+#endif
+"#;
+    let syms = symbols(&[
+        ("cmp", sym(&["in_struct:FLAGS", "in_struct:FLAGS"], "int")),
+        ("use_one", sym(&["in_struct:FLAGS", "int"], "int")),
+    ]);
+    let fields: &[(&str, &str)] = &[
+        ("version", "int"),
+        ("backward_size", "int"),
+        ("check", "int"),
+        ("tag", "str"),
+    ];
+    let src = generate_with("lz", &syms, &[("FLAGS", fields)], &["fixture.h"]).unwrap();
+    // Two of them in one call must not collide on a local name.
+    assert!(src.contains("FLAGS istruct0;") && src.contains("FLAGS istruct1;"), "collide:\n{src}");
+    if let Err(e) = compiles(&src, &[("fixture.h", header)]) {
+        panic!("struct input shim does not compile:\n{e}\n--- source ---\n{src}");
+    }
+}
+
+#[test]
+fn a_caller_sized_buffer_allocates_what_it_was_asked_for_and_hands_it_all_back() {
+    // For the writes whose extent only the documentation gives.
+    // `lzma_stream_header_encode(const lzma_stream_flags *, uint8_t *out)`
+    // writes exactly twelve bytes and says so nowhere a generator can read.
+    let src = generate("lz", &symbols(&[("enc", sym(&["sized_buffer:unsigned char"], "int"))]))
+        .unwrap();
+    assert!(src.contains("if (argv[0].tag != JADE_FFI_INT) return 1;"), "no count check:\n{src}");
+    assert!(src.contains("calloc((size_t)(n_want0 ? n_want0 : 1)"), "not allocated:\n{src}");
+    // All of it: the call reports a status, so there is nothing to trim by.
+    assert!(src.contains("jade_shim_bytes(sbuf0, (size_t)n_want0"), "not handed back:\n{src}");
+    assert!(src.contains("free(sbuf0);"), "leaked:\n{src}");
+}
+
+#[test]
+fn a_negative_or_absurd_count_is_refused_before_anything_is_allocated() {
+    let src = generate("lz", &symbols(&[("enc", sym(&["sized_buffer:unsigned char"], "int"))]))
+        .unwrap();
+    assert!(src.contains("if (n_want0 < 0)"), "unguarded:\n{src}");
+}
+
+#[test]
+fn a_caller_sized_buffer_shim_compiles() {
+    let syms = symbols(&[("enc", sym(&["int", "sized_buffer:unsigned char"], "int"))]);
+    let src = generate("lz", &syms).unwrap();
+    if let Err(e) = compiles(&src, &[]) {
+        panic!("sized buffer shim does not compile:\n{e}\n--- source ---\n{src}");
+    }
+}
+
+// ── Strings handed back through a parameter ──────────────────────────────
+
+#[test]
+fn a_borrowed_string_is_copied_inside_a_struct_and_lent_at_the_top() {
+    // The ABI's rule rather than a choice: a value inside a container is
+    // container-owned and Jade's `ffi_free` releases it, while a top-level
+    // string is copied by both engines before the call returns.
+    let alone = generate("fdt", &symbols(&[("f", sym(&["out_str:char"], "nil"))])).unwrap();
+    assert!(alone.contains("out->data.as_str = (const char*)ostr0;"), "should lend:\n{alone}");
+
+    let paired = generate("fdt", &symbols(&[("f", sym(&["out_str:char"], "int"))])).unwrap();
+    assert!(paired.contains("strdup((const char*)ostr0)"), "should copy:\n{paired}");
+}
+
+#[test]
+fn an_owned_string_is_always_copied_and_always_released() {
+    // Borrowing at top level is only safe while the pointer stays valid, and
+    // this one stops being valid on the next line.
+    // Alone, so it is the whole result and would otherwise be lent out.
+    let mut s = sym(&["out_alloc_str:char"], "nil");
+    s.frees_with = Some("ares_free_string".to_string());
+    let src = generate_with("ar", &symbols(&[("f", s)]), &[], &["ares.h"]).unwrap();
+    assert!(src.contains("jade_shim_owned(oastr0)"), "should copy before freeing:\n{src}");
+    assert!(src.contains("ares_free_string(oastr0);"), "should release:\n{src}");
+}
+
+#[test]
+fn an_owned_string_and_its_free_function_only_mean_anything_together() {
+    let bare = sym(&["out_alloc_str:char"], "int");
+    let err = generate_with("ar", &symbols(&[("f", bare)]), &[], &["ares.h"]).unwrap_err();
+    assert!(err.contains("who releases it"), "should ask: {err}");
+
+    let mut stray = sym(&["int"], "int");
+    stray.frees_with = Some("free".to_string());
+    let err = generate_with("ar", &symbols(&[("f", stray)]), &[], &["ares.h"]).unwrap_err();
+    assert!(err.contains("hands nothing back"), "should refuse a stray rule: {err}");
+}
+
+#[test]
+fn a_string_out_parameter_shim_compiles() {
+    let header = "extern int borrowed(const char** namep);\n\
+                  extern void take_owned(char** str);\n";
+    let mut o = sym(&["out_alloc_str:char"], "nil");
+    o.frees_with = Some("free".to_string());
+    let syms = symbols(&[("borrowed", sym(&["out_str:char"], "int")), ("take_owned", o)]);
+    let src = generate_with("z", &syms, &[], &["fixture.h"]).unwrap();
+    if let Err(e) = compiles(&src, &[("fixture.h", header)]) {
+        panic!("string out shim does not compile:\n{e}\n--- source ---\n{src}");
+    }
+}
+
+#[test]
+fn a_symbol_that_would_shadow_a_shim_helper_is_refused_by_name() {
+    // Every wrapper is `jade_shim_<symbol>`, and so is every helper. A library
+    // exporting `bytes` would define one of them twice, and the C compiler
+    // reports that against generated source hundreds of lines from anything the
+    // reader wrote.
+    let err = generate("z", &symbols(&[("bytes", sym(&["int"], "int"))])).unwrap_err();
+    assert!(err.contains("defined twice"), "should say why: {err}");
+    assert!(err.contains("'bytes'"), "should name it: {err}");
+}
+
+// ── A callback's user-data slot ──────────────────────────────────────────
+
+#[test]
+fn a_callbacks_user_data_is_accepted_and_not_forwarded() {
+    // The library will pass one, so the C signature must have it. Jade has
+    // nothing to do with it, so nothing is forwarded.
+    let s = sym(&["callback:int(int, void*)"], "int");
+    let src = generate("ar", &symbols(&[("go", s)])).unwrap();
+    assert!(src.contains("static int jade_cbt_go(int a0, void* a1)"), "bad signature:\n{src}");
+    assert!(src.contains("(void)a1;"), "should be explicitly unused:\n{src}");
+    // One forwarded argument, and it is the first.
+    assert!(src.contains("cbargs[0].data.as_int = (int64_t)a0;"), "bad marshal:\n{src}");
+    assert!(src.contains("invoke(jade_cb_go->host, 1, cbargs"), "wrong arity:\n{src}");
+}
+
+#[test]
+fn a_null_pointer_stands_in_for_what_cannot_be_carried() {
+    let s = sym(&["null_ptr", "int"], "int");
+    let src = generate_with("br", &symbols(&[("go", s)]), &[], &["brotli.h"]).unwrap();
+    assert!(src.contains("go(NULL, argv[0].data.as_int)"), "should pass null:\n{src}");
+    assert!(src.contains("if (argc != 1) return 1;"), "should take no argument:\n{src}");
+}
+
+#[test]
+fn a_null_pointer_needs_a_header_to_stand_in_against() {
+    // Without one the shim declares the symbol itself, and it does not know what
+    // type the null is standing in for.
+    let err = generate("br", &symbols(&[("go", sym(&["null_ptr"], "int"))])).unwrap_err();
+    assert!(err.contains("headers"), "should ask for a header: {err}");
+}
+
+// ── A struct returned by value ───────────────────────────────────────────
+
+#[test]
+fn a_struct_returned_by_value_is_read_straight_out_of_the_return() {
+    // Nothing crosses the boundary but the value: no allocation, no ownership,
+    // nothing to release. Which register or stack slot it lands in is the ABI's
+    // business, which is why this needs the header like the others.
+    let fields: &[(&str, &str)] = &[("error", "int"), ("lowerBound", "int")];
+    let s = sym(&["int"], "struct:BOUNDS");
+    let src = generate_with("z", &symbols(&[("bounds", s)]), &[("BOUNDS", fields)], &["z.h"]).unwrap();
+    assert!(src.contains("BOUNDS r = bounds("), "not received by value:\n{src}");
+    assert!(src.contains("rs->vals[0].data.as_int = (int64_t)r.error;"), "field not read:\n{src}");
+}
+
+#[test]
+fn a_struct_return_needs_its_fields_declared_and_a_header() {
+    let s = sym(&["int"], "struct:BOUNDS");
+    let err = generate_with("z", &symbols(&[("f", s.clone())]), &[], &["z.h"]).unwrap_err();
+    assert!(err.contains("structs.BOUNDS"), "should name the missing table: {err}");
+
+    let fields: &[(&str, &str)] = &[("error", "int")];
+    let err = generate_with("z", &symbols(&[("f", s)]), &[("BOUNDS", fields)], &[]).unwrap_err();
+    assert!(err.contains("headers"), "should ask for a header: {err}");
+}
+
+#[test]
+fn a_struct_return_shim_compiles_against_a_real_header() {
+    let header = "typedef struct { size_t error; int lowerBound; int upperBound; } BOUNDS;\n\
+                  extern BOUNDS bounds(int p);\n";
+    let fields: &[(&str, &str)] =
+        &[("error", "int"), ("lowerBound", "int"), ("upperBound", "int")];
+    let syms = symbols(&[("bounds", sym(&["int"], "struct:BOUNDS"))]);
+    let src = generate_with("z", &syms, &[("BOUNDS", fields)], &["fixture.h"]).unwrap();
+    if let Err(e) = compiles(&src, &[("fixture.h", &format!("#include <stddef.h>\n{header}"))]) {
+        panic!("struct return shim does not compile:\n{e}\n--- source ---\n{src}");
+    }
+}
+
+// ── A struct Jade holds ──────────────────────────────────────────────────
+
+#[test]
+fn a_held_struct_gets_its_own_bindings() {
+    let syms = symbols(&[("code", sym(&["handle<strm>", "int"], "int"))]);
+    let src = generate_held("lz", &syms, "strm", &[("avail_in", "int")], &[]).unwrap();
+    for f in ["strm_new", "strm_free", "strm_get", "strm_set"] {
+        assert!(src.contains(&format!(r#"{{ "{f}", jade_shim_{f} }}"#)), "no {f}:\n{src}");
+    }
+    assert!(src.contains("calloc(1, sizeof(strm))"), "not heap allocated:\n{src}");
+}
+
+#[test]
+fn a_held_struct_with_buffers_owns_what_its_pointers_point_at() {
+    // The library expects the memory to still be there on the next call, and a
+    // Jade blob makes no such promise — it is the caller's, and Jade may collect
+    // it the moment the call returns.
+    let syms = symbols(&[("code", sym(&["handle<strm>", "int"], "int"))]);
+    let bufs = &[("next_in", "avail_in", false), ("next_out", "avail_out", true)][..];
+    let src = generate_held("lz", &syms, "strm", &[("avail_in", "int")], bufs).unwrap();
+
+    assert!(src.contains("typedef struct { strm s; void* owned[2];"), "no wrapper:\n{src}");
+    // A read-only buffer is set from a blob; a writable one is allocated to a
+    // size and then taken from.
+    assert!(src.contains("jade_shim_strm_set_next_in"), "no input setter:\n{src}");
+    assert!(src.contains("jade_shim_strm_alloc_next_out"), "no output allocator:\n{src}");
+    assert!(src.contains("jade_shim_strm_take_next_out"), "no output taker:\n{src}");
+    assert!(!src.contains("jade_shim_strm_alloc_next_in"), "input needs no allocator:\n{src}");
+    // Both allocations are released with the struct.
+    assert!(src.contains("free(((jade_held_strm*)sp)->owned[0]);"), "leaks 0:\n{src}");
+    assert!(src.contains("free(((jade_held_strm*)sp)->owned[1]);"), "leaks 1:\n{src}");
+    // And a caller cannot read past what was allocated.
+    assert!(src.contains("if ((size_t)n > w->owned_len[1])"), "unclamped take:\n{src}");
+}
+
+#[test]
+fn a_held_struct_with_nothing_carryable_gets_no_getter_or_setter() {
+    // There would be nothing for either to do — an empty struct out, and every
+    // key refused on the way in.
+    let syms = symbols(&[("code", sym(&["handle<opaque_state>", "int"], "int"))]);
+    let src = generate_held("lz", &syms, "opaque_state", &[], &[]).unwrap();
+    assert!(src.contains(r#"{ "opaque_state_new""#), "still needs a constructor:\n{src}");
+    assert!(!src.contains("opaque_state_get"), "should not emit a getter:\n{src}");
+}
+
+#[test]
+fn a_held_structs_binding_name_may_not_collide_with_the_library() {
+    let syms = symbols(&[("strm_new", sym(&["int"], "int"))]);
+    let err = generate_held("lz", &syms, "strm", &[("avail_in", "int")], &[]).unwrap_err();
+    assert!(err.contains("Rename one of them"), "should name the clash: {err}");
+}
+
+#[test]
+fn a_held_struct_shim_compiles_against_a_real_header() {
+    let header = r#"
+#ifndef FIXTURE_H
+#define FIXTURE_H
+#include <stddef.h>
+typedef struct {
+    const unsigned char* next_in;  size_t avail_in;
+    unsigned char* next_out;       size_t avail_out;
+    void* internal;
+} strm;
+extern int strm_code(strm* s, int action);
+#endif
+"#;
+    let syms = symbols(&[("strm_code", sym(&["handle<strm>", "int"], "int"))]);
+    let bufs = &[("next_in", "avail_in", false), ("next_out", "avail_out", true)][..];
+    let fields = &[("avail_in", "int"), ("avail_out", "int")][..];
+    let src = generate_held("lz", &syms, "strm", fields, bufs).unwrap();
+    if let Err(e) = compiles(&src, &[("fixture.h", header)]) {
+        panic!("held struct shim does not compile:\n{e}\n--- source ---\n{src}");
     }
 }
 

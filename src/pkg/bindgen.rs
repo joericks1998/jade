@@ -293,7 +293,17 @@ impl TypeEnv {
                 continue;
             }
             if let Some(u) = pointee(&key).and_then(|inner| self.alias.get(inner)) {
-                let next = format!("{u}*");
+                // `const` has to be carried across here as well as in the branch
+                // above. `normalize` strips it to make the lookup key, so
+                // rebuilding from the key alone turned `const uint8_t *` into
+                // `unsigned char *` — and a read-only input buffer read as a
+                // writable one is scratch the shim allocates and the caller's
+                // data never reaches the library.
+                let next = if s.contains("const") && !u.contains("const") {
+                    format!("const {u}*")
+                } else {
+                    format!("{u}*")
+                };
                 if normalize(&next) == key {
                     break;
                 }
@@ -550,6 +560,14 @@ fn is_fn_ptr(t: &str) -> bool {
 enum Mapped {
     /// A plain Jade argument.
     One(String),
+    /// A plain Jade argument decided on an inference worth checking, plus what
+    /// was inferred. `Out` already carries one of these; a parameter that is not
+    /// an out-parameter needed somewhere to put it too.
+    Assumed(String, String),
+    /// A `handle<T>` for a struct the *caller* allocates. Distinct from `One`
+    /// only in that the struct's table has to be written out with `held = true`,
+    /// which is what makes the generator emit `<T>_new` and the rest.
+    Held(String),
     /// A `bytes` argument that also swallows the following length parameter.
     BytesPair(String),
     /// An out-parameter, plus what was assumed to decide it (if anything).
@@ -563,14 +581,93 @@ enum Mapped {
 /// `next` matters because C encodes two-parameter idioms positionally: a
 /// pointer followed by a length is a buffer, and the pair has to be recognised
 /// together or not at all.
+/// Words that appear in the name of a number counting something, taken from
+/// every such parameter across the survey headers rather than invented:
+/// `srcSize`, `dstCapacity`, `namelen`, `buflen`, `props_size`, `in_size`.
+const COUNT_WORDS: [&str; 5] = ["len", "size", "capacity", "count", "num"];
+
+/// Words that appear in the name of a number saying *where*, which is the shape
+/// a count is most often confused with. `nodeoffset` is the single most common
+/// name to follow a byte pointer in these headers, and it starts with the same
+/// `n` that `nbytes` does.
+const POSITION_WORDS: [&str; 4] = ["offset", "index", "idx", "pos"];
+
+/// Whether a parameter's *name* says it counts what came before it.
+///
+/// Consulted for two questions the types cannot answer on their own: whether the
+/// pointer before it is a buffer of this length, and whether it is an array of
+/// this many structs. `fdt_getprop(const void *fdt, int nodeoffset, …)` takes a
+/// blob and a position; `cs_op_count(csh, const cs_insn *insn, unsigned
+/// op_type)` takes one struct and a flag; `ares_process_fds(ch, const
+/// ares_fd_events_t *events, size_t nevents)` really does take an array.
+///
+/// The `n`-plus-noun convention is why a leading `n` counts, and `nodeoffset` is
+/// why saying *where* takes it back. Both halves are drawn from the names that
+/// actually appear in these headers.
+///
+/// A header that names nothing keeps the old behaviour, since there is no
+/// evidence either way and the pairing was the standing assumption.
+/// Whether a parameter's *name* says it holds a position rather than a thing.
+///
+/// Asked of the pointer this time, not of the integer after it. `size_t *in_pos,
+/// size_t in_size` has exactly the shape of a buffer and its count, and is a
+/// position beside an unrelated size — reading it as a buffer allocated
+/// `in_size` of them and handed the library the wrong pointer entirely. `short
+/// *buf, int n` is the shape that has to survive it.
+fn names_a_position(name: Option<&str>) -> bool {
+    let Some(n) = name else { return false };
+    let n = n.to_ascii_lowercase();
+    POSITION_WORDS.iter().any(|w| n.contains(w))
+}
+
+fn names_a_count(name: Option<&str>) -> bool {
+    let Some(n) = name else { return true };
+    let n = n.to_ascii_lowercase();
+    let counts = n.starts_with('n') || COUNT_WORDS.iter().any(|w| n.contains(w));
+    counts && !POSITION_WORDS.iter().any(|w| n.contains(w))
+}
+
+/// Whether a parameter's *name* says it holds a length.
+///
+/// Narrower than [`names_a_count`], and used for a different question: which
+/// parameter sizes a returned pointer. Nothing in the types tells `int *lenp`
+/// apart from the second value a call happens to write back, so a name that
+/// does not say "length" leaves the symbol refused rather than sizing a blob
+/// from an unrelated number.
+fn names_a_length(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    n.contains("len") || n.contains("size")
+}
+
+/// What every parameter of one function is decided against.
+///
+/// Grouped rather than passed one by one because it is genuinely per-function:
+/// the same environment, the same return type, the same arity, for every
+/// parameter in the list. Only `next` and its name change between calls.
+struct FnCtx<'a> {
+    env: &'a TypeEnv,
+    /// The function's *raw* return type. An out-buffer is only an out-buffer if
+    /// the call reports how much it filled.
+    ret: &'a str,
+    /// Struct types the library hands out, which are handles rather than
+    /// anything the caller builds.
+    produced: &'a std::collections::HashSet<String>,
+    /// How many functions take each struct type, which is half of what
+    /// identifies caller-held state.
+    counts: &'a HashMap<String, usize>,
+    /// How many parameters the function has. A lone `void *` is a deallocator.
+    n_params: usize,
+}
+
 fn map_param(
     raw_in: &str,
+    prev: Option<&str>,
+    own_name: Option<&str>,
     next: Option<&str>,
-    env: &TypeEnv,
-    ret: &str,
-    produced: &std::collections::HashSet<String>,
-    counts: &HashMap<String, usize>,
+    next_name: Option<&str>,
+    cx: &FnCtx<'_>,
 ) -> Mapped {
+    let FnCtx { env, ret, produced, counts, n_params } = *cx;
     // Expanded before anything is decided, so a library's own typedefs read as
     // the types they stand for. `const` comes from the expansion, not the
     // written parameter, because a typedef can introduce it.
@@ -583,10 +680,25 @@ fn map_param(
         return match callback_spec(raw, env) {
             Some(spec) => Mapped::One(spec),
             None => Mapped::Reject(
-                "takes a callback whose own signature the FFI cannot carry".to_string(),
+                "takes a callback whose own signature the FFI cannot carry. If the library \
+                 accepts a null pointer there — brotli's allocator hooks do, and fall back on \
+                 malloc without one — write `null_ptr` for it in jade.toml"
+                    .to_string(),
             ),
         };
     }
+    // The `void *` that follows a callback is the context C has instead of
+    // closures: the library stores it and hands it back to the callback. A Jade
+    // function already carries its own environment, so there is nothing to put
+    // there — the shim passes null, and it is not a Jade argument at all.
+    //
+    // Decided by position rather than by name, because the position is the
+    // convention: `ares_set_socket_callback(ch, cb, void *data)`,
+    // `BrotliDecoderSetMetadataCallbacks(state, start, chunk, void *opaque)`.
+    if squash(&t) == "void*" && prev.is_some_and(|p| is_fn_ptr(&env.expand(p))) {
+        return Mapped::One("null_ptr".to_string());
+    }
+
     if let Some(s) = scalar_of(&t) {
         return Mapped::One(s.to_string());
     }
@@ -596,7 +708,34 @@ fn map_param(
         if env.opaque.contains(inner) || env.complete.contains_key(inner) {
             return Mapped::Out(format!("out_handle:{}", env.c_name(inner)), None);
         }
-        return Mapped::Reject("takes a pointer to a pointer".to_string());
+        // A name pointed at rather than allocated. `fdt_getprop_by_offset(const
+        // void *fdt, int off, const char **namep, int *lenp)` points `namep`
+        // into the device tree it was handed, so nothing was allocated and
+        // nothing has to be released — which is the whole difference between
+        // this and the pointers a library mallocs for you.
+        //
+        // `const` is what says which of the two it is.
+        if is_const && squash(inner) == "char" {
+            return Mapped::Out(format!("out_str:{inner}"), None);
+        }
+        // And a writable `char **` is the allocating shape, with the same C.
+        // Which it is, and who then releases it, are things the header does not
+        // record — so the spelling is named rather than guessed. Guessing one
+        // way leaks on every call and the other frees memory that was never
+        // allocated.
+        if squash(inner) == "char" {
+            return Mapped::Reject(
+                "hands back a string through a `char **`, and the header does not say whether the \
+                 caller then owns it. If they do, write `out_alloc_str:char` for it in jade.toml, \
+                 with `frees_with` naming the library's own free function"
+                    .to_string(),
+            );
+        }
+        return Mapped::Reject(
+            "takes a pointer to a pointer, which is how a library hands back memory it \
+             allocated. Who releases it is not something the header says"
+                .to_string(),
+        );
     }
 
     let Some(inner) = pointee(&t) else {
@@ -621,12 +760,29 @@ fn map_param(
     }
 
     // A pointer next to a length is a buffer, and `const` says which direction.
-    let next_is_len = next.map(|n| is_int(&normalize(&env.expand(n)))).unwrap_or(false);
+    //
+    // "Next to a length" is decided by the parameter's *name* as well as its
+    // type, because plenty of pointers are followed by an int that counts
+    // nothing: `fdt_getprop(const void *fdt, int nodeoffset, …)` takes a blob
+    // and an offset, and `cs_op_count(csh, const cs_insn *insn, unsigned
+    // op_type)` takes one struct and a flag.
+    //
+    // The two mistakes are not symmetric, which is what makes the name worth
+    // trusting. Reading a real length as an ordinary argument costs nothing —
+    // the int is still passed, the caller just supplies it — while reading an
+    // offset as a length *drops* it, and hands the library a size it never
+    // computed. A header that names no parameters keeps the old behaviour.
+    let next_is_int = next.map(|n| is_int(&normalize(&env.expand(n)))).unwrap_or(false);
+    let next_is_len = next_is_int && names_a_count(next_name);
     let squashed = squash(inner);
     let byte_like =
         matches!(squashed.as_str(), "void" | "char" | "unsignedchar" | "signedchar" | "uint8_t" | "int8_t");
 
-    if next_is_len && !is_const && (byte_like || scalar_of(&squashed).is_some()) {
+    if next_is_len
+        && !is_const
+        && (byte_like || scalar_of(&squashed).is_some())
+        && !names_a_position(own_name)
+    {
         // Writable, so almost certainly filled by the call — but "almost" is
         // why this is reported as an assumption rather than done silently.
         if is_int(&normalize(&env.expand(ret))) {
@@ -672,7 +828,34 @@ fn map_param(
     // zeroed local is right for one call and wrong on the second. That is the
     // kind of wrong that shows up as corrupt output rather than as an error, so
     // the note names the spelling that fixes it.
-    if !is_const && !next_is_len && scalar_of(&squashed).is_some() {
+    // Reaching here with a count beside it means the buffer reading above was
+    // declined — the pointer's own name said it holds a position — so the count
+    // belongs to something else and this is one value written back.
+    if !is_const && scalar_of(&squashed).is_some() {
+        // Except a byte. `uint8_t *out` with nothing beside it is overwhelmingly
+        // a buffer whose size the caller is expected to know from the
+        // documentation — `lzma_stream_footer_encode` writes exactly twelve —
+        // and treating it as one out-parameter would declare a one-byte local
+        // and hand the library its address. That is a stack overflow the
+        // compiler cannot see and the report would call an assumption.
+        // A byte pointer alone is a buffer whose extent only the documentation
+        // gives — `lzma_stream_header_encode` writes exactly twelve — so the
+        // caller states it. That is what the C underneath required of them
+        // anyway, and the alternative is that the symbol cannot be called.
+        //
+        // Reading one of these as a single value written back is what it used to
+        // do, and that declared a one-byte local and handed the library its
+        // address.
+        if byte_like {
+            return Mapped::Out(
+                format!("sized_buffer:{inner}"),
+                Some(format!(
+                    "`{raw}` has no length beside it, so how much the call writes is yours to \
+                     say: the binding takes the count as its own argument and hands the whole \
+                     buffer back. Passing less than the library writes corrupts memory"
+                )),
+            );
+        }
         return Mapped::Out(
             format!("out_scalar:{inner}"),
             Some(format!(
@@ -691,8 +874,24 @@ fn map_param(
     // shape, and treating them all as out-parameters is how `lzma_code` came to
     // bind into a shim that ran and did nothing.
     if env.complete.contains_key(inner) {
+        // Read-only, so the library takes what the struct says and forgets it.
+        // Jade builds one, the shim copies it into a real C local and passes its
+        // address — no ownership crosses the boundary in either direction.
+        //
+        // Only when *every* field can make the trip. Dropping one would hand the
+        // library the zero the local was memset to, in a position where the
+        // caller believed they had set it; unlike a dropped output, nothing
+        // afterwards shows that it went missing.
         if is_const {
-            return Mapped::Reject("takes a struct by pointer as input".to_string());
+            let fields = env.complete.get(inner).expect("checked above");
+            // Unless a field would go missing. Then the caller cannot build a
+            // complete one, so they hold one instead: allocated on the C heap,
+            // reached through a handle, and filled by whichever library calls
+            // know how to fill it.
+            if struct_loses_a_field(fields, env) {
+                return Mapped::Held(format!("handle<{}>", env.c_name(inner)));
+            }
+            return Mapped::One(format!("in_struct:{}", env.c_name(inner)));
         }
 
         // The library allocates it, so Jade should hold it rather than build
@@ -718,22 +917,72 @@ fn map_param(
         // exactly what out-parameters exist for. Together they identify a
         // struct that is both threaded and unrepresentable, which is the
         // combination that cannot work.
+        // Which is a struct Jade holds rather than one it builds. The
+        // allocation happens once, on the C heap, and every call is handed the
+        // same pointer — so the fields the FFI cannot carry stay exactly where
+        // the library put them, which is the whole difficulty.
         let threaded = counts.get(inner).copied().unwrap_or(0) > 1;
         let lossy = env.complete.get(inner).is_some_and(|f| struct_loses_a_field(f, env));
         if threaded && lossy {
-            return Mapped::Reject(format!(
-                "takes `{}`, which the caller allocates and the library keeps between calls. \
-                 Some of its fields are not types the FFI can carry, so every call would get a \
-                 fresh zeroed one instead of the state the last call left",
-                env.c_name(inner)
-            ));
+            return Mapped::Held(format!("handle<{}>", env.c_name(inner)));
         }
 
         return Mapped::Out(format!("out_struct:{}", env.c_name(inner)), None);
     }
 
-    if squash(inner) == "void" {
-        return Mapped::Reject("takes a `void *`, which names no type to check".to_string());
+    // A read-only byte pointer with no count beside it. Some libraries take a
+    // blob whose extent is written *inside* it — every `libfdt` call takes
+    // `const void *fdt` alone and reads the length out of the header — and
+    // others take one of a size the documentation fixes, like an IPv6 address.
+    // There is nowhere to pass a length, so refusing the shape refused most of
+    // libfdt.
+    //
+    // Borrowed for the call, exactly as a `str` is. Reported as an assumption
+    // because Jade cannot check the extent: the library takes it from the data,
+    // and a truncated blob reads past the end.
+    if is_const && byte_like {
+        return Mapped::Assumed(
+            "bytes_ptr".to_string(),
+            format!(
+                "`{raw}` with no length beside it was read as a borrowed blob; the library takes \
+                 its extent from the data itself, so a truncated one reads past the end"
+            ),
+        );
+    }
+
+    // A writable byte pointer with no count beside it, where the *whole* shape
+    // is a buffer the library revises in place. Every `libfdt` writer takes
+    // `void *fdt` and edits the device tree where it sits.
+    //
+    // Distinct from the `out_buffer` case above, which allocates scratch the
+    // caller never filled: here the caller's own bytes are the starting point,
+    // so they are copied in and the edited copy comes back. Distinct from
+    // `bytes_ptr` too, because a Jade blob is immutable and cannot be lent out
+    // to be scribbled on.
+    if byte_like {
+        // A bare `void *` on its own is a deallocator, not a buffer: c-ares
+        // spells `ares_free_string(void *str)` and `ares_free_data(void *)` that
+        // way. Handing one of those the shim's own scratch would have the
+        // library free it, and the shim free it again on the way out. Nothing in
+        // the type says which of the two it is, so the one-argument shape is
+        // refused and the multi-argument one — every `libfdt` writer, which
+        // takes the tree plus what to do to it — is not.
+        if squashed == "void" && n_params == 1 && normalize(&env.expand(ret)) == "void" {
+            return Mapped::Reject(
+                "takes a `void *` on its own and reports nothing, which is the shape of a call \
+                 that frees what it is given. Passing it a buffer would leave the shim freeing \
+                 memory the library already released"
+                    .to_string(),
+            );
+        }
+        return Mapped::Assumed(
+            "inout_bytes".to_string(),
+            format!(
+                "`{raw}` with no length beside it was read as a buffer the call revises in place, \
+                 so the edited copy comes back; if the library only reads it, change it to \
+                 `bytes_ptr`"
+            ),
+        );
     }
 
     Mapped::Reject(format!("takes an unsupported type `{raw}`"))
@@ -766,7 +1015,11 @@ fn callback_spec(raw: &str, env: &TypeEnv) -> Option<String> {
     // there is nothing to hand Jade.
     let carriable = |t: &str| -> bool {
         let n = normalize(&env.expand(t));
-        scalar_of(&squash(&n)).is_some()
+        // A `void *` is the user-data slot, which the trampoline accepts and
+        // does not forward. Refusing the whole callback over the one parameter
+        // Jade has no use for is what made every c-ares callback unbindable.
+        squash(&n) == "void*"
+            || scalar_of(&squash(&n)).is_some()
             || is_int(&n)
             || pointee(&n).map(squash).as_deref() == Some("char")
     };
@@ -808,6 +1061,14 @@ fn map_ret(raw_in: &str, env: &TypeEnv) -> Result<String, String> {
         if env.opaque.contains(inner) || env.complete.contains_key(inner) {
             return Ok(format!("handle<{}>", env.c_name(inner)));
         }
+    }
+    // A struct returned by value. Nothing crosses the boundary but the value
+    // itself — it arrives in registers or on the stack, whichever the ABI says,
+    // and the shim reads the fields straight out of it. No allocation and no
+    // ownership, which makes this the simplest of the struct shapes once the
+    // header is there to declare the type.
+    if env.complete.contains_key(&t) {
+        return Ok(format!("struct:{}", env.c_name(&t)));
     }
     Err(format!("returns an unsupported type `{raw_in}`"))
 }
@@ -995,13 +1256,13 @@ pub fn from_header(
                 // a reference to a table that was never written.
                 let mut entries = Vec::new();
                 let mut failed = None;
-                for s in used_structs {
+                for (s, held) in used_structs {
                     // The spec carries the C spelling (`struct Info`); the
                     // environment is keyed by the normalized one. The table
                     // that comes out is keyed to match the spec, since that is
                     // what the shim looks the definition up by.
                     let Some(fields) = env.complete.get(&normalize(&s)) else { continue };
-                    match struct_entry(fields, &env) {
+                    match struct_entry(fields, &env, held) {
                         Ok(entry) => entries.push((s, entry)),
                         Err(why) => {
                             failed = Some(why);
@@ -1013,7 +1274,19 @@ pub fn from_header(
                     b.skipped.push((name.to_string(), why));
                     continue;
                 }
-                b.structs.extend(entries);
+                // `held` is sticky. One library takes the same struct by value
+                // in a one-shot call and threads it through a sequence in
+                // another, and if either use needs it held then it is held —
+                // otherwise the last symbol read would decide, and the handle
+                // the other calls expect would stop being generated.
+                for (name, entry) in entries {
+                    match b.structs.get_mut(&name) {
+                        Some(prior) => prior.held |= entry.held,
+                        None => {
+                            b.structs.insert(name, entry);
+                        }
+                    }
+                }
                 for why in assumed {
                     b.assumed.push((name.to_string(), why));
                 }
@@ -1101,7 +1374,7 @@ fn struct_loses_a_field(fields: &[(String, String)], env: &TypeEnv) -> bool {
 /// Only the fields the FFI can carry. A struct with one unrepresentable field
 /// is still worth binding for the rest, so this drops fields rather than the
 /// struct — but a struct with *no* usable field is not worth a table.
-fn struct_entry(fields: &[(String, String)], env: &TypeEnv) -> Result<CStruct, String> {
+fn struct_entry(fields: &[(String, String)], env: &TypeEnv, held: bool) -> Result<CStruct, String> {
     let usable: Vec<(String, String)> = fields
         .iter()
         .filter_map(|(f, t)| {
@@ -1116,10 +1389,57 @@ fn struct_entry(fields: &[(String, String)], env: &TypeEnv) -> Result<CStruct, S
             Some((f.clone(), jt.to_string()))
         })
         .collect();
-    if usable.is_empty() {
+    // A struct passed by value has to carry *something*, or there is nothing to
+    // hand back. A held one does not: it is reached through a handle, so the
+    // library can keep whatever it likes in there and Jade never needs to see
+    // it. Refusing an all-opaque held struct would refuse the shape handles
+    // exist for.
+    if usable.is_empty() && !held {
         return Err("fills a struct with no field the FFI can carry".to_string());
     }
-    Ok(CStruct { fields: usable })
+    Ok(CStruct { fields: usable, held, buffers: if held { buffer_fields(fields, env) } else { Vec::new() } })
+}
+
+/// The buffer fields of a held struct: a byte pointer, and the count declared
+/// next to it.
+///
+/// The same positional idiom the parameter list uses, applied to a struct
+/// definition, because C encodes it the same way in both. `lzma_stream` declares
+/// `next_in` then `avail_in`, then `next_out` then `avail_out`; `ZSTD_outBuffer`
+/// declares `dst` then `size`.
+///
+/// These are exactly the fields that make a held struct necessary — the pointers
+/// a codec keeps its position in — so a held struct without them is a handle you
+/// can make and never feed.
+fn buffer_fields(fields: &[(String, String)], env: &TypeEnv) -> Vec<crate::project::CBuffer> {
+    let mut out = Vec::new();
+    for (a, b) in fields.iter().zip(fields.iter().skip(1)) {
+        let ta = env.expand(&a.1);
+        let na = normalize(&ta);
+        let byte_like = pointee(&na).map(squash).is_some_and(|s| {
+            matches!(s.as_str(), "void" | "char" | "unsignedchar" | "signedchar" | "uint8_t" | "int8_t")
+        });
+        if !byte_like || !is_int(&normalize(&env.expand(&b.1))) {
+            continue;
+        }
+        // A field the library set aside for its own future use is not a buffer,
+        // whatever its type. `lzma_stream` ends in four `void *reserved_ptr` and
+        // several `reserved_int`, and two of them happen to sit next to each
+        // other in the pointer-then-count order. Generating a setter for one
+        // would offer a way to write where the library requires a zero.
+        if a.0.starts_with("reserved") || b.0.starts_with("reserved") {
+            continue;
+        }
+        out.push(crate::project::CBuffer {
+            ptr: a.0.clone(),
+            len: b.0.clone(),
+            // `const` is what says which direction it runs, exactly as it does
+            // for a parameter: a read-only pointer is data going in, a writable
+            // one is room for the library to fill.
+            writable: !ta.contains("const"),
+        });
+    }
+    out
 }
 
 /// Map one `FunctionDecl`. Returns the symbol, the struct types it needs, and
@@ -1129,9 +1449,23 @@ fn map_function(
     env: &TypeEnv,
     produced: &std::collections::HashSet<String>,
     counts: &HashMap<String, usize>,
-) -> Result<(CSymbol, Vec<String>, Vec<String>), String> {
+) -> Result<(CSymbol, Vec<(String, bool)>, Vec<String>), String> {
     let raw_ret = ret_type_of(node)?;
-    let ret = map_ret(&raw_ret, env)?;
+    // A returned pointer whose length arrives through a parameter cannot be
+    // decided from the return type alone, so the refusal is held until the
+    // parameters have been read. `returns_a_blob` below either rescues it or
+    // hands back exactly this error.
+    let mapped_ret = map_ret(&raw_ret, env);
+    let mut ret = match &mapped_ret {
+        Ok(r) => r.clone(),
+        Err(_) => String::new(),
+    };
+    // A struct handed back by value needs its field table written out too, the
+    // same as one filled through a parameter.
+    let mut structs: Vec<(String, bool)> = match ret.strip_prefix("struct:") {
+        Some(name) => vec![(name.to_string(), false)],
+        None => Vec::new(),
+    };
 
     let empty = Vec::new();
     let parms: Vec<&Value> = node
@@ -1155,7 +1489,6 @@ fn map_function(
         parms.iter().map(|p| p.get("name").and_then(Value::as_str)).collect();
 
     let mut args: Vec<String> = Vec::new();
-    let mut structs: Vec<String> = Vec::new();
     let mut assumed: Vec<String> = Vec::new();
     // Indices into `args` of the out-parameters, and the source parameter each
     // came from, so a name can be attached afterwards — how many there are is
@@ -1163,13 +1496,45 @@ fn map_function(
     let mut out_at: Vec<(usize, usize)> = Vec::new();
     let mut skip_next = false;
 
+    let cx = FnCtx { env, ret: &raw_ret, produced, counts, n_params: raw.len() };
+
     for (i, t) in raw.iter().enumerate() {
         if skip_next {
             skip_next = false;
             continue;
         }
-        match map_param(t, raw.get(i + 1).copied(), env, &raw_ret, produced, counts) {
-            Mapped::One(s) => args.push(s),
+        let next_name = parm_names.get(i + 1).copied().flatten();
+        let prev = i.checked_sub(1).and_then(|k| raw.get(k)).copied();
+        let own_name = parm_names.get(i).copied().flatten();
+        match map_param(t, prev, own_name, raw.get(i + 1).copied(), next_name, &cx) {
+            Mapped::One(s) => {
+                // An `in_struct` needs its field table written out with it, the
+                // same way an `out_struct` does. It is an ordinary argument
+                // rather than an out-parameter, so it is collected here.
+                if let Some(name) = s.strip_prefix("in_struct:") {
+                    structs.push((name.to_string(), false));
+                }
+                args.push(s);
+            }
+            Mapped::Held(s) => {
+                if let Some(name) = s.strip_prefix("handle<").and_then(|n| n.strip_suffix('>')) {
+                    structs.push((name.to_string(), true));
+                }
+                args.push(s);
+            }
+            Mapped::Assumed(s, why) => {
+                assumed.push(why);
+                // An `inout_bytes` is an argument *and* a result, so it counts
+                // towards the rule that several results each need a key.
+                // `fdt_overlay_apply(void *fdt, void *fdto)` has two, and
+                // leaving them out here let the symbol reach the shim generator
+                // unnamed — which refuses the whole dependency rather than the
+                // one symbol.
+                if s == "inout_bytes" {
+                    out_at.push((args.len(), i));
+                }
+                args.push(s);
+            }
             Mapped::BytesPair(s) => {
                 args.push(s);
                 // The length rode along with the pointer.
@@ -1177,7 +1542,7 @@ fn map_function(
             }
             Mapped::Out(s, why) => {
                 if let Some(name) = s.strip_prefix("out_struct:") {
-                    structs.push(name.to_string());
+                    structs.push((name.to_string(), false));
                 }
                 if let Some(w) = why {
                     assumed.push(w);
@@ -1189,6 +1554,49 @@ fn map_function(
             }
             Mapped::Reject(why) => return Err(why),
         }
+    }
+
+    // A returned pointer, sized by one of the parameters.
+    //
+    // The mirror of `out_buffer`: there the return value is the count and the
+    // bytes went in through a parameter, here the bytes are the return value and
+    // the count comes back through one. `const void *fdt_getprop(const void
+    // *fdt, int off, const char *name, int *lenp)` is the main read call in
+    // libfdt and has no other spelling.
+    //
+    // Only rescues a return the type alone could not represent, and only when
+    // exactly one parameter is a writable integer the header *named* like a
+    // length. Without the name there is nothing to tell `int *lenp` from the
+    // second value a call happens to write back, and guessing would size a blob
+    // from an unrelated number.
+    if let Err(why) = &mapped_ret {
+        let is_blob = {
+            let expanded = env.expand(&raw_ret);
+            let t = normalize(&expanded);
+            expanded.contains("const")
+                && pointee(&t).map(squash).is_some_and(|s| {
+                    matches!(s.as_str(), "void" | "unsignedchar" | "signedchar" | "uint8_t" | "int8_t")
+                })
+        };
+        let lengths: Vec<usize> = out_at
+            .iter()
+            .filter(|(k, p)| {
+                args[*k].starts_with("out_scalar:")
+                    && parm_names[*p].is_some_and(names_a_length)
+            })
+            .map(|(k, _)| *k)
+            .collect();
+        if !is_blob || lengths.len() != 1 {
+            return Err(why.clone());
+        }
+        let k = lengths[0];
+        let c_type = args[k].trim_start_matches("out_scalar:").to_string();
+        args[k] = format!("ret_len:{c_type}");
+        out_at.retain(|(i, _)| *i != k);
+        // The note `out_scalar` attached no longer applies: it is not coming
+        // back on its own, it is sizing the blob.
+        assumed.retain(|w| !w.contains(&format!("inout_scalar:{c_type}")));
+        ret = "bytes".to_string();
     }
 
     // Two out-parameters that both want the C return value cannot coexist: an
@@ -1227,7 +1635,7 @@ fn map_function(
         return Err("takes a writable buffer in a shape the shim cannot rewrite".to_string());
     }
 
-    Ok((CSymbol { args, ret, fails_when }, structs, assumed))
+    Ok((CSymbol { args, ret, fails_when, frees_with: None }, structs, assumed))
 }
 
 /// The return type, taken from the function's `qualType` by removing the

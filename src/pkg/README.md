@@ -74,6 +74,32 @@ int sf_open(const char* path, int mode, SF_INFO* info);
 
 Neither can be called as written. The first wants a buffer the caller allocated and reports how much of it was filled; the second returns one thing and writes another through a pointer. A one-to-one mapping of parameters cannot express either, so the shim rewrites the call rather than merely forwarding it. The declared `args` list describes the **C** signature; the Jade signature is derived from it and is deliberately a different length.
 
+### How much of a real library this reaches
+
+Measured against seven Homebrew libraries, counting only what the header
+declares *and* the artifact exports, because a header written for a newer
+version is not a gap in the binding:
+
+| library | bound | of | |
+|---|---|---|---|
+| zstd | 67 | 67 | 100% |
+| liblzma | 111 | 114 | 97% |
+| libfdt | 76 | 79 | 96% |
+| capstone | 19 | 20 | 95% |
+| brotlidec | 11 | 14 | 79% |
+| brotlienc | 10 | 13 | 77% |
+| c-ares | 54 | 74 | 73% |
+| **all seven** | **348** | **381** | **91%** |
+
+It was 223 of the same 381 before the v1.3.8 work, and several of those 223 were
+bindings that ran and did nothing.
+
+The refusals that remain are, with two exceptions, cases where the header does
+not carry the answer — see *What the header does not say* below. Re-measure with
+`jade pkg add <name> --path <lib> --header <hdr>` and read the `covers` line;
+the skip report is grouped by reason and is the thing to read before adding a
+rule.
+
 ### The rules
 
 **A `bytes` argument is one Jade value and two C parameters.** It expands to
@@ -220,33 +246,143 @@ A callback may only give back a scalar, for the same reason an out-buffer is the
 shim's memory: anything else would have to be released inside a C frame by code
 that has no idea it is holding a Jade value.
 
-### What is deliberately not here
+### Structs going the other way
 
-**Input structs.** A Jade struct crossing *into* a C function would need the
-shim to build one from Jade fields. Not built, but the stated reason for that —
-"it needs the same layout guarantees in the other direction" — no longer holds:
-the guarantee comes from including the real header, and a header is symmetric.
-Nor is it unasked for; across four libraries surveyed for v1.3.7 it is sixteen
-symbols, `lzma_stream_flags_compare` among them.
+**`in_struct:<Type>` is the mirror of `out_struct`.** Jade builds the struct,
+the shim copies it into a real local of the library's own type and passes its
+address. Nothing owns anything across the boundary, because the library reads it
+and forgets it. It needs the header for the reason `out_struct` does, and a
+header is symmetric.
 
-What it really needs is an answer to the mirror of the out-struct question:
-what the shim writes into a field Jade did not supply. Zero is right for a
-`reserved_*` field and wrong for a meaningful pointer, which is the same
-distinction `struct_loses_a_field` already draws for the out direction.
+A field the caller left out stays as the zero the `memset` put there, which is
+what the C it stands in for does: declare, zero, set what matters.
+`lzma_stream_flags` carries fifteen reserved fields the library requires to be
+zero, and demanding all seventeen would make the shape unusable. A field the
+caller wrote that the type does not *have* is refused by name — that is the
+mistake worth catching, because without the check a misspelling and an omission
+are the same thing, and both become a zero the caller believed they had set.
 
-**Caller-held mutable state**, and this one *is* a language limit rather than
-unbuilt work. The shim could heap-allocate the struct and hand Jade an opaque
-handle, and for a library whose caller never touches the fields that would be
-enough. `lzma_stream` is not one: its protocol is field-poking — `next_in` and
-`avail_in` point into the caller's input buffer and `next_out`/`avail_out` into
-the output buffer, reset between every call. Jade has no raw pointers and its
-`bytes` is immutable by design, so there is nothing to set them to. The blocker
-is not "a struct cannot cross the boundary" but "a pointer into a buffer Jade
-does not own cannot", which is deliberate.
+Only for a struct every field of which survives the trip. Losing an output is
+visible in what comes back; losing an input is not.
 
-**A callback taking a `void *`.** The usual `user_data` parameter names no type,
-so there is nothing to hand Jade. That is the most common reason a real
-callback still does not fit.
+**`struct:<Type>` in return position** is a struct handed back by value. Nothing
+crosses the boundary but the value — it arrives in registers or on the stack,
+whichever the ABI says — so there is no allocation and no ownership to settle.
+Only the declaration settles how it arrives, which is why this needs the header
+too.
+
+### A struct Jade holds
+
+Some structs cannot be passed by value in either direction. `lzma_stream`,
+`ZSTD_outBuffer`, `fd_set`: the caller allocates them and the library keeps them
+between calls, so a shim declaring a fresh local every call would drop the
+pointers a codec keeps its position in and hand back a zeroed struct instead of
+the state the last call left.
+
+`held = true` on a struct's table makes the generator write four bindings
+alongside the library's own symbols — `<T>_new`, `<T>_free`, `<T>_get` and
+`<T>_set`. The struct is allocated once on the C heap and every call gets the
+same pointer, so what cannot travel stays exactly where the library put it. The
+same shape answers the read-only case: a `const S*` whose fields do not all
+survive the trip is not something the caller can build, so they hold one.
+
+**The uncarryable pointers are the point, so they can be filled.** A held struct
+with no way to set `next_in` is a handle you can make and never feed. With
+buffer fields the allocation becomes a wrapper — the struct, then the memory its
+pointers point at — and C guarantees a pointer to a struct is a pointer to its
+first member, so the library still receives a plain `T*` and knows nothing about
+the rest. The shim owns that memory because the library expects it to still be
+there on the next call, and a Jade blob is the caller's and may be collected the
+moment the call returns.
+
+A read-only field is *set* from a blob you have. A writable one is *allocated*
+to a size and then *taken* from once the library has filled it — two calls
+rather than one, because how much of the buffer became real is something only
+the caller can work out. `lzma` counts down through `avail_out` and `zstd`
+counts up through `pos`, and no rule reads both.
+
+The buffer fields are found by the rule the parameter list already uses, a byte
+pointer then the count declared next to it, because C encodes the idiom the same
+way in a struct definition. Fields named `reserved*` are excluded: `lzma_stream`
+ends in four `void *reserved_ptr` and several `reserved_int`, two of which sit
+in exactly that order, and a setter for one would offer a way to write where the
+library requires a zero.
+
+### Blobs without a length beside them
+
+**`bytes_ptr` is `bytes` without the count.** Some libraries take a blob whose
+extent is written *inside* it: every `libfdt` call takes `const void *fdt` alone
+and reads the length out of the device tree's own header. Borrowed for the call,
+exactly as a `str` is. Listed as an assumption, because Jade cannot check the
+extent and a truncated blob reads past the end — which is the library's contract
+with its caller and not something Jade can improve on.
+
+**`inout_bytes` is for the buffers a library revises in place.** Every `libfdt`
+writer edits the device tree where it sits, and a Jade blob is immutable, so
+there is nothing to lend out to be scribbled on. The shim copies the caller's
+bytes into scratch it owns, lets the library work on that, and hands the result
+back as a fresh blob. The edit is a return rather than a mutation nothing
+declared.
+
+**`sized_buffer:<ctype>` is for the writes whose extent only the documentation
+gives.** `lzma_stream_header_encode(const lzma_stream_flags *, uint8_t *out)`
+writes exactly twelve bytes and says so nowhere a generator can read, so the
+caller states it: the count is a Jade argument that reaches no further than the
+shim, and the whole buffer comes back. Stating the size is what the C underneath
+required of them anyway.
+
+**`ret_len:<ctype>` is the mirror of `out_buffer`.** There the return value is
+the count and the bytes went in through a parameter; here the bytes are the
+return value and the count comes back through one. `fdt_getprop` is that shape
+and is the main read call in libfdt. Only inferred when the header *names* the
+parameter like a length, because nothing in the types tells `int *lenp` from the
+second value a call happens to write back.
+
+### What the header does not say
+
+Three refusals survive on purpose, and each names the spelling that gets past it
+rather than guessing.
+
+**Who frees a string.** `const char **namep` and `char **str` are the same C and
+opposite ownership. The first points into data the caller already had, so
+nothing was allocated and nothing has to be released; that is `out_str`, and it
+is inferred. The second was malloc'd for you; that is `out_alloc_str`, it needs
+`frees_with` naming the library's own free function, and it is refused with the
+spelling named. Guessing one way leaks on every call and the other frees memory
+that was never allocated.
+
+**A pointer that cannot be carried at all.** Brotli's allocator hooks hand back
+`void *`, which Jade cannot produce, and passing null is what tells brotli to
+fall back on `malloc`. `null_ptr` says so, and is never inferred: a library that
+*requires* a real pointer there gets a null dereference with no diagnostic,
+which is the worst failure this generator can produce, so the decision belongs
+to whoever read the documentation.
+
+**A call that frees what it is given.** `ares_free_string(void *str)` takes a
+lone `void *` and reports nothing. Handing one shim-owned scratch would have the
+library free it and the shim free it again on the way out. Returning nothing is
+what marks it — a lone `void *` on a call that reports a status is an in-place
+edit, which `fdt_pack` is.
+
+### What names decide, and why
+
+Three questions cannot be answered from types alone, and all three are settled
+by the parameter's own name — taken from the names that actually appear in these
+headers rather than invented.
+
+- *Does this integer count the thing before it?* `names_a_count`. A leading `n`
+  or a count word, unless the name also says *where*: `nodeoffset` is the single
+  most common name to follow a byte pointer in the set, and it counts nothing.
+- *Does this pointer hold a position rather than a thing?* `names_a_position`.
+  `size_t *in_pos, size_t in_size` has exactly the shape of a buffer and its
+  count and is neither.
+- *Which parameter sizes the returned pointer?* `names_a_length`, the strictest
+  of the three, because sizing a blob from an unrelated number is unrecoverable.
+
+The mistakes are not symmetric, and that is what makes a name worth trusting.
+Reading a real length as an ordinary argument costs nothing, because the integer
+is still passed and the caller supplies it. Reading an offset as a length
+*drops* it and hands the library a size it never computed.
 
 ## Gotchas
 
@@ -280,7 +416,9 @@ The `headers` list was the half that still replaced, and it produced the worst f
 
 **"It has the right name" is not "it is a library", and nothing between `add` and `dlopen` disagreed.** A dependency was checked for what it *exported* and never for whether it could be loaded at all, so a file that was not an object file passed through the manifest, `libs/`, resolution and the linker, and was refused by the dynamic loader in the finished program. `bindgen::is_loadable_object` reads the magic number, and it is called in two places on purpose: `jade pkg add`, which can then say what probably went wrong, and `materialize`, which is the one point every source passes through with the bytes in hand — a hand-written manifest and a fresh clone never touch `add`. Anything new that puts a file into `libs/` needs the same check.
 
-**A writable pointer to a complete struct is three different things.** Every one of them used to become `out_struct`. A type the library *hands out* — returned as `T*`, or written through a `T**` — is a handle, which is what the return position already called it. A type the caller allocates and the library keeps between calls cannot be an out-parameter at all, because the shim zeroes a fresh local every call: `lzma_code` bound, compiled, installed, ran, and did nothing, and `ZSTD_compressStream` would have written through a NULL `dst`. Only a record one call fills stays an out-parameter.
+**A writable pointer to a complete struct is three different things.** Every one of them used to become `out_struct`. A type the library *hands out* — returned as `T*`, or written through a `T**` — is a handle, which is what the return position already called it. A type the caller allocates and the library keeps between calls cannot be an out-parameter at all, because the shim zeroes a fresh local every call: `lzma_code` bound, compiled, installed, ran, and did nothing, and `ZSTD_compressStream` would have written through a NULL `dst`. That one is a *held* struct, allocated once on the C heap and reached through a handle. Only a record one call fills stays an out-parameter.
+
+**A generated binding that runs and does nothing is worse than a refusal, and both have happened here.** Every rule in this file that looks over-cautious is one of them. `lzma_code` bound against a struct zeroed on every call. `void *fdt` bound as scratch sized by a node offset, so fourteen of libfdt's writers handed the library uninitialised memory as the device tree. `uint8_t *out` bound as a one-byte local for a library that writes twelve. `const uint8_t *` lost its `const` through a typedef and became a buffer the shim allocated, so the caller's data never arrived. None of these failed at bind time, at compile time, or at link time. When a coverage number falls after a change here, check which of the two directions it moved in before treating it as a regression.
 
 The discriminator needs *both* signals, and getting that wrong in either direction is silent. Refusing on "loses a field" alone takes `SF_INFO`-shaped records that carry one `void*`; refusing on "appears in several functions" alone takes `SF_INFO` itself, which three `sf_open` variants fill. `struct_loses_a_field` and `struct_param_counts` are ANDed for that reason, and the two existing tests that pin each half — `an_unrepresentable_field_is_dropped_rather_than_the_whole_struct` and `a_writable_struct_pointer_is_an_out_parameter_and_the_table_follows` — both still pass unedited, which is the check that the rule did not overreach.
 

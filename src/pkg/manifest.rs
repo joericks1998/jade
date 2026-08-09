@@ -103,6 +103,9 @@ fn symbol_item(spec: &CSymbol) -> toml_edit::Item {
     if let Some(f) = spec.fails_when {
         t.insert("fails_when", toml_edit::value(f.as_str()));
     }
+    if let Some(f) = &spec.frees_with {
+        t.insert("frees_with", toml_edit::value(f.as_str()));
+    }
     toml_edit::Item::Table(t)
 }
 
@@ -184,6 +187,23 @@ pub fn set_bindings(
                 fields.push(pair);
             }
             t.insert("fields", toml_edit::value(fields));
+            // Only when true, so the common table stays as short as it was.
+            // Without it the generator writes no `<T>_new`, and a symbol taking
+            // `handle<T>` binds with nothing in the package able to produce one.
+            if def.held {
+                t.insert("held", toml_edit::value(true));
+            }
+            if !def.buffers.is_empty() {
+                let mut bufs = toml_edit::Array::new();
+                for b in &def.buffers {
+                    let mut it = toml_edit::InlineTable::new();
+                    it.insert("ptr", b.ptr.as_str().into());
+                    it.insert("len", b.len.as_str().into());
+                    it.insert("writable", b.writable.into());
+                    bufs.push(toml_edit::Value::InlineTable(it));
+                }
+                t.insert("buffers", toml_edit::value(bufs));
+            }
             structs_tbl.insert(sname, toml_edit::Item::Table(t));
         }
     }

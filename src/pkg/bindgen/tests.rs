@@ -250,15 +250,29 @@ fn an_unrepresentable_field_is_dropped_rather_than_the_whole_struct() {
 }
 
 #[test]
-fn a_struct_read_as_input_is_skipped_because_the_shim_cannot_do_that_direction() {
+fn a_struct_read_as_input_is_one_the_caller_builds() {
     let b = bind("typedef struct { int a; } S;\nint f(const S* s);\n");
-    assert!(why_skipped(&b, "f").contains("input"));
+    assert_eq!(args(&b, "f"), ["in_struct:S"]);
 }
 
 #[test]
 fn a_struct_by_value_is_skipped() {
     let b = bind("typedef struct { int a; } S;\nint f(S s);\n");
     assert!(why_skipped(&b, "f").contains("by value"));
+}
+
+#[test]
+fn a_struct_returned_by_value_is_bound() {
+    // The other direction, and much easier: nothing crosses the boundary but
+    // the value, so there is no allocation and no ownership to settle.
+    // `ZSTD_bounds ZSTD_cParam_getBounds(ZSTD_cParameter)` is this shape.
+    let b = bind(
+        "#include <stddef.h>\n\
+         typedef struct { size_t error; int lowerBound; int upperBound; } BOUNDS;\n\
+         BOUNDS getBounds(int p);\n",
+    );
+    assert_eq!(ret(&b, "getBounds"), "struct:BOUNDS");
+    assert!(b.structs.contains_key("BOUNDS"), "the field table must come out too");
 }
 
 // ── What it refuses ──────────────────────────────────────────────────────
@@ -271,14 +285,17 @@ fn callbacks_varargs_and_void_pointers_are_named_not_silently_dropped() {
         "typedef struct rec rec;\n\
          int with_cb(int (*cb)(rec*), int n);\n\
          int fmt(const char* f, ...);\n\
-         int with_ud(void* user_data);\n",
+         void release(void* p);\n",
     );
     // A callback whose *own* signature the FFI cannot carry — here a parameter
     // that is a pointer to something opaque, which the trampoline has no way to
     // hand Jade.
     assert!(why_skipped(&b, "with_cb").contains("callback"));
     assert!(why_skipped(&b, "fmt").contains("varargs"));
-    assert!(why_skipped(&b, "with_ud").contains("void"));
+    // A lone `void *` on a call that reports nothing is a deallocator, and
+    // handing one shim-owned scratch would have the library free it and the
+    // shim free it again on the way out.
+    assert!(why_skipped(&b, "release").contains("frees what it is given"));
     assert!(b.symbols.is_empty(), "none of these should be bound");
 }
 
@@ -337,8 +354,8 @@ fn the_report_counts_everything_and_groups_skips_by_reason() {
     let b = bind(
         "int ok1(int a);\n\
          int ok2(int a);\n\
-         int cb1(int (*f)(void*));\n\
-         int cb2(int (*f)(void*));\n\
+         int cb1(void* (*f)(int));\n\
+         int cb2(void* (*f)(int));\n\
          int va(const char* f, ...);\n",
     );
     let r = b.report();
@@ -534,11 +551,69 @@ fn a_void_returning_callback_maps() {
 
 #[test]
 fn a_callback_the_trampoline_cannot_marshal_is_skipped_by_that_reason() {
-    // `void *` is the usual reason a real callback does not fit: it names no
-    // type, so there is nothing to hand Jade.
-    let b = bind("int go(int (*cb)(void*, int));\n");
+    // A callback that hands back a pointer is the shape that genuinely does not
+    // fit: Jade has no value to return there. Brotli's allocator hooks are this.
+    let b = bind("int go(void* (*cb)(int));\n");
     assert!(why_skipped(&b, "go").contains("callback"), "{:?}", b.skipped);
     assert!(!b.symbols.contains_key("go"));
+}
+
+#[test]
+fn a_refused_callback_names_the_spelling_that_gets_past_it() {
+    // Passing null is what tells brotli to fall back on malloc, and it is never
+    // inferred: a library that requires a real pointer there gets a null
+    // dereference with no diagnostic, which is the worst failure this generator
+    // can produce.
+    let b = bind("int go(void* (*cb)(int));\n");
+    assert!(why_skipped(&b, "go").contains("null_ptr"), "{:?}", b.skipped);
+}
+
+#[test]
+fn a_callbacks_user_data_parameter_does_not_make_it_unbindable() {
+    // C has no closures, so a callback that needs context takes a `void *`. A
+    // Jade function carries its own environment, so the trampoline accepts the
+    // parameter — the library will pass one — and does not forward it. Refusing
+    // the whole callback over the one parameter Jade has no use for made every
+    // c-ares callback unbindable.
+    let b = bind("int go(int (*cb)(int fd, int kind, void* data));\n");
+    assert_eq!(args(&b, "go"), ["callback:int(int, int, void *)"]);
+}
+
+#[test]
+fn the_void_pointer_beside_a_callback_is_context_and_is_passed_as_null() {
+    // `ares_set_socket_callback(ch, cb, void *data)`. Decided by position,
+    // because the position is the convention.
+    let b = bind(
+        "typedef struct chan chan;\n\
+         void set_cb(chan* c, int (*cb)(int, void*), void* data);\n",
+    );
+    assert_eq!(args(&b, "set_cb"), ["handle<chan>", "callback:int(int, void *)", "null_ptr"]);
+}
+
+// ── A pointer to a pointer ───────────────────────────────────────────────
+
+#[test]
+fn a_name_pointed_at_inside_the_callers_own_data_comes_back_as_a_string() {
+    // `fdt_getprop_by_offset` points `namep` into the device tree it was handed,
+    // so nothing was allocated and nothing has to be released.
+    let b = bind(
+        "const void* getprop_by_offset(const void* fdt, int offset, const char** namep, int* lenp);\n",
+    );
+    assert_eq!(
+        args(&b, "getprop_by_offset"),
+        ["bytes_ptr", "int", "out_str:char", "ret_len:int"]
+    );
+}
+
+#[test]
+fn a_writable_string_pointer_names_the_spelling_rather_than_guessing_who_frees_it() {
+    // The same C shape with the opposite ownership, and the header does not say
+    // which. Guessing one way leaks on every call and the other frees memory
+    // that was never allocated.
+    let b = bind("int str_from(char** out, int flags);\n");
+    let why = why_skipped(&b, "str_from");
+    assert!(why.contains("out_alloc_str"), "{why}");
+    assert!(why.contains("frees_with"), "{why}");
 }
 
 // ── Types come from the whole translation unit ───────────────────────────
@@ -822,22 +897,61 @@ fn with_no_export_table_every_declared_symbol_is_still_bound() {
 // liblzma's symbols came to bind into shims that ran and did nothing.
 
 #[test]
-fn a_struct_the_caller_keeps_between_calls_is_not_an_out_parameter() {
+fn a_struct_the_caller_keeps_between_calls_is_one_jade_holds() {
     // The lzma_stream shape: pointer fields the FFI cannot carry, threaded
-    // through a sequence of calls. An out_struct shim zeroes a fresh local
-    // every call, so the encoder would initialise a stream and throw it away
-    // and the next call would run against a different zeroed one.
+    // through a sequence of calls. An out_struct shim zeroes a fresh local every
+    // call, so the encoder would initialise a stream and throw it away and the
+    // next call would run against a different zeroed one. Held on the C heap
+    // instead, so every call gets the same pointer and the fields that cannot
+    // travel stay where the library put them.
     let b = bind(
         "typedef struct { const unsigned char* next_in; unsigned long avail_in; \
-           unsigned char* next_out; void* internal; } strm;\n\
+           unsigned char* next_out; unsigned long avail_out; void* internal; } strm;\n\
          int strm_start(strm* s, int preset);\n\
          int strm_code(strm* s, int action);\n\
          void strm_end(strm* s);\n",
     );
     for sym in ["strm_start", "strm_code", "strm_end"] {
-        assert!(!b.symbols.contains_key(sym), "{sym} should not bind: {:?}", b.symbols.get(sym));
-        assert!(why_skipped(&b, sym).contains("caller allocates"), "{:?}", b.skipped);
+        assert_eq!(args(&b, sym)[0], "handle<strm>", "{sym}");
     }
+    let def = &b.structs["strm"];
+    assert!(def.held, "the table must say so, or no `strm_new` is written");
+}
+
+#[test]
+fn a_held_structs_buffer_fields_are_found_by_the_same_rule_a_parameter_list_uses() {
+    // C encodes the idiom the same way in a struct definition: the pointer, then
+    // the count. These are the fields that make a held struct necessary in the
+    // first place, so a held struct without them is a handle you can make and
+    // never feed.
+    let b = bind(
+        "typedef struct { const unsigned char* next_in; unsigned long avail_in; \
+           unsigned char* next_out; unsigned long avail_out; void* internal; } strm;\n\
+         int strm_start(strm* s, int preset);\n\
+         int strm_code(strm* s, int action);\n",
+    );
+    let bufs = &b.structs["strm"].buffers;
+    assert_eq!(bufs.len(), 2, "{bufs:?}");
+    assert_eq!((bufs[0].ptr.as_str(), bufs[0].len.as_str(), bufs[0].writable),
+        ("next_in", "avail_in", false));
+    assert_eq!((bufs[1].ptr.as_str(), bufs[1].len.as_str(), bufs[1].writable),
+        ("next_out", "avail_out", true));
+}
+
+#[test]
+fn a_reserved_field_is_never_read_as_a_buffer() {
+    // `lzma_stream` ends in four `void *reserved_ptr` and several
+    // `reserved_int`, and two of them sit next to each other in exactly the
+    // pointer-then-count order. A setter for one would offer a way to write
+    // where the library requires a zero.
+    let b = bind(
+        "typedef struct { const unsigned char* next_in; unsigned long avail_in; \
+           void* internal; void* reserved_ptr4; unsigned long seek_pos; } strm;\n\
+         int strm_start(strm* s, int preset);\n\
+         int strm_code(strm* s, int action);\n",
+    );
+    let ptrs: Vec<&str> = b.structs["strm"].buffers.iter().map(|x| x.ptr.as_str()).collect();
+    assert_eq!(ptrs, ["next_in"], "{:?}", b.structs["strm"].buffers);
 }
 
 #[test]
@@ -891,6 +1005,215 @@ fn a_record_with_one_uncarryable_field_is_still_an_out_parameter() {
     assert_eq!(args(&b, "f"), ["out_struct:S"]);
     let names: Vec<&str> = b.structs["S"].fields.iter().map(|(f, _)| f.as_str()).collect();
     assert_eq!(names, ["ok", "also_ok"]);
+}
+
+// ── A blob with no length beside it ──────────────────────────────────────
+
+#[test]
+fn a_read_only_byte_pointer_alone_is_a_borrowed_blob() {
+    // Every libfdt call takes `const void *fdt` alone and reads the length out
+    // of the blob's own header. There is nowhere to pass a size, so refusing the
+    // shape refused most of the library.
+    let b = bind(
+        "#include <stddef.h>\n\
+         int fdt_check_header(const void* fdt);\n\
+         int fdt_path_offset(const void* fdt, const char* path);\n",
+    );
+    assert_eq!(args(&b, "fdt_check_header"), ["bytes_ptr"]);
+    assert_eq!(args(&b, "fdt_path_offset"), ["bytes_ptr", "str"]);
+}
+
+#[test]
+fn a_borrowed_blob_is_reported_as_an_assumption() {
+    // Jade cannot check the extent — the library takes it from the data — so a
+    // truncated blob reads past the end. That belongs in the report.
+    let b = bind("int f(const void* blob);\n");
+    let why = b.assumed.iter().find(|(s, _)| s == "f").map(|(_, w)| w.clone()).unwrap_or_default();
+    assert!(why.contains("reads past the end"), "should say what it cannot check: {why:?}");
+}
+
+#[test]
+fn a_blob_next_to_a_length_still_takes_the_length_with_it() {
+    // The pair is better than the pointer alone whenever there is one, because
+    // the library is then told the extent rather than trusting the data.
+    let b = bind("#include <stddef.h>\nint f(const void* p, size_t n);\n");
+    assert_eq!(args(&b, "f"), ["bytes"]);
+}
+
+#[test]
+fn a_writable_blob_is_revised_in_place_and_handed_back() {
+    // Every libfdt writer takes `void *fdt` and edits the device tree where it
+    // sits. A Jade blob is immutable, so the shim works on a copy and the edit
+    // comes back as a return rather than as a mutation nothing declared.
+    let b = bind("int fdt_nop_property(void* fdt, int nodeoffset, const char* name);\n");
+    assert_eq!(args(&b, "fdt_nop_property"), ["inout_bytes", "int", "str"]);
+}
+
+#[test]
+fn a_lone_void_pointer_is_refused_because_it_may_free_what_it_is_given() {
+    // `ares_free_string(void *str)` releases what it is handed. Passing it the
+    // shim's own scratch would have the library free it and the shim free it
+    // again on the way out.
+    let b = bind("void ares_free_string(void* str);\n");
+    assert!(why_skipped(&b, "ares_free_string").contains("frees what it is given"), "{:?}", b.skipped);
+}
+
+#[test]
+fn two_revised_blobs_take_their_keys_from_the_header() {
+    // `fdt_overlay_apply(void *fdt, void *fdto)` has two results. Leaving them
+    // unnamed let the symbol reach the shim generator, which refuses the whole
+    // dependency rather than the one symbol.
+    let b = bind("int fdt_overlay_apply(void* fdt, void* fdto);\n");
+    assert_eq!(args(&b, "fdt_overlay_apply"), ["inout_bytes@fdt", "inout_bytes@fdto"]);
+}
+
+// ── A returned pointer, sized by a parameter ─────────────────────────────
+
+#[test]
+fn a_returned_pointer_sized_by_a_named_length_becomes_a_blob() {
+    // `fdt_getprop` is the main read call in libfdt and has no other spelling:
+    // the bytes are the return value and the count comes back through `lenp`.
+    let b = bind(
+        "const void* fdt_getprop(const void* fdt, int nodeoffset, const char* name, int* lenp);\n",
+    );
+    assert_eq!(ret(&b, "fdt_getprop"), "bytes");
+    assert_eq!(args(&b, "fdt_getprop"), ["bytes_ptr", "int", "str", "ret_len:int"]);
+}
+
+#[test]
+fn a_returned_pointer_with_no_named_length_stays_refused() {
+    // Nothing in the types tells `int *lenp` from the second value a call
+    // happens to write back, so without the name there is nothing to size from.
+    let b = bind("const void* f(const void* blob, int* nextoffset);\n");
+    assert!(why_skipped(&b, "f").contains("unsupported type"), "{:?}", b.skipped);
+}
+
+// ── Which integer is a length ────────────────────────────────────────────
+
+#[test]
+fn an_offset_after_a_blob_is_not_read_as_its_length() {
+    // `nodeoffset` is the single most common name to follow a byte pointer in
+    // these headers. Reading it as a length *drops* it and hands the library a
+    // size it never computed.
+    let b = bind("int fdt_path_offset_at(const void* fdt, int nodeoffset, const char* p);\n");
+    assert_eq!(args(&b, "fdt_path_offset_at"), ["bytes_ptr", "int", "str"]);
+}
+
+#[test]
+fn the_names_a_real_length_goes_by_are_all_recognised() {
+    // Taken from every such parameter across the survey headers rather than
+    // invented: srcSize, dstCapacity, namelen, buflen, in_size.
+    for name in ["n", "len", "size", "srcSize", "dstCapacity", "buflen", "in_size", "nbytes"] {
+        let b = bind(&format!("#include <stddef.h>\nint f(const void* p, size_t {name});\n"));
+        assert_eq!(args(&b, "f"), ["bytes"], "{name} should read as a length");
+    }
+}
+
+#[test]
+fn a_name_that_counts_nothing_leaves_the_integer_as_an_argument() {
+    // The safe direction: the int is still passed, the caller just supplies it.
+    for name in ["nodeoffset", "offset", "val", "family", "index", "phandle", "stroffset"] {
+        let b = bind(&format!("#include <stddef.h>\nint f(const void* p, size_t {name});\n"));
+        assert_eq!(args(&b, "f"), ["bytes_ptr", "int"], "{name} should not read as a length");
+    }
+}
+
+#[test]
+fn a_pointer_named_like_a_position_is_not_a_buffer_of_the_count_beside_it() {
+    // `lzma_stream_buffer_decode(…, size_t *in_pos, size_t in_size, …)` has
+    // exactly the shape of a buffer and its count, and is a position beside an
+    // unrelated size. Reading it as a buffer allocated `in_size` of them and
+    // handed the library a pointer to scratch instead of to the position.
+    let b = bind(
+        "#include <stddef.h>\n#include <stdint.h>\n\
+         int decode(const uint8_t* in, size_t* in_pos, size_t in_size);\n",
+    );
+    assert_eq!(args(&b, "decode"), ["bytes_ptr", "out_scalar:unsigned long", "int"]);
+}
+
+#[test]
+fn a_pointer_named_like_a_buffer_still_is_one() {
+    // The shape that has to survive the rule above: `sf_read_short(short *buf,
+    // int n)` really is a buffer and its count.
+    let b = bind("int read_short(short* buf, int n);\n");
+    assert_eq!(args(&b, "read_short"), ["out_buffer:short", "int"]);
+}
+
+// ── A struct read as input ───────────────────────────────────────────────
+
+#[test]
+fn a_const_struct_pointer_is_an_input_the_caller_builds() {
+    // The library reads it and forgets it, so nothing owns anything across the
+    // boundary. Jade builds one and the shim copies it into a real C local.
+    let b = bind(
+        "#include <stdint.h>\n\
+         typedef struct { int version; int64_t size; const char* tag; } FLAGS;\n\
+         int cmp(const FLAGS* a, const FLAGS* b);\n",
+    );
+    assert_eq!(args(&b, "cmp"), ["in_struct:FLAGS", "in_struct:FLAGS"]);
+    assert!(b.structs.contains_key("FLAGS"), "the field table must come out too");
+}
+
+#[test]
+fn an_input_struct_that_would_lose_a_field_is_held_instead() {
+    // The asymmetry with `out_struct`, which tolerates a dropped field: losing
+    // an output is visible in what comes back, losing an input is not. So the
+    // caller does not build this one at all — they hold it, and the fields that
+    // cannot travel are filled by whichever library calls know how.
+    let b = bind("typedef struct { int ok; void* options; } F;\nint use_it(const F* f);\n");
+    assert_eq!(args(&b, "use_it"), ["handle<F>"]);
+    assert!(b.structs["F"].held);
+}
+
+#[test]
+fn a_struct_pointer_beside_an_unrelated_int_is_one_struct_not_an_array() {
+    // `cs_op_count(csh, const cs_insn *insn, unsigned op_type)` reads as "a
+    // const pointer followed by an int", which is also the shape of an array
+    // and its count. The parameter's own name breaks the tie.
+    let b = bind(
+        "typedef struct { int a; int b; } INSN;\n\
+         int op_count(const INSN* insn, unsigned int op_type);\n",
+    );
+    assert_eq!(args(&b, "op_count"), ["in_struct:INSN", "int"]);
+}
+
+#[test]
+fn a_struct_pointer_beside_a_count_is_still_refused_as_an_array() {
+    // `ares_process_fds(ch, const ares_fd_events_t *events, size_t nevents)`
+    // really is an array. Guessing the other way would hand the library one
+    // struct and tell it there were twenty, so a count-like name keeps the
+    // refusal.
+    let b = bind(
+        "#include <stddef.h>\n\
+         typedef struct { int fd; int flags; } EV;\n\
+         int process(const EV* events, size_t nevents);\n",
+    );
+    assert!(!b.symbols.contains_key("process"), "{:?}", b.symbols.get("process"));
+    assert!(why_skipped(&b, "process").contains("elements rather than bytes"), "{:?}", b.skipped);
+}
+
+#[test]
+fn a_writable_byte_pointer_with_no_length_is_a_buffer_the_caller_sizes() {
+    // `lzma_stream_footer_encode(const lzma_stream_flags*, uint8_t *out)` writes
+    // exactly twelve bytes and says so nowhere a generator can read. Reading
+    // `out` as one value written back declared a one-byte local and passed its
+    // address — a stack overflow the C compiler cannot see.
+    let b = bind(
+        "#include <stdint.h>\n\
+         typedef struct { int version; } F;\n\
+         int footer_encode(const F* f, uint8_t* out);\n",
+    );
+    assert_eq!(args(&b, "footer_encode"), ["in_struct:F", "sized_buffer:unsigned char"]);
+    let why = b.assumed.iter().find(|(s, _)| s == "footer_encode").map(|(_, w)| w.clone());
+    assert!(why.is_some_and(|w| w.contains("yours to say")), "should say whose job it is");
+}
+
+#[test]
+fn a_writable_int_pointer_with_no_length_is_still_an_out_scalar() {
+    // The shape the byte rule must not catch: `fdt_next_tag(fdt, off, int
+    // *nextoffset)` really is one value written back.
+    let b = bind("int next_tag(int off, int* nextoffset);\n");
+    assert_eq!(args(&b, "next_tag"), ["int", "out_scalar:int"]);
 }
 
 #[test]
