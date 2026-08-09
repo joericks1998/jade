@@ -31,6 +31,20 @@ The trend over time has been *shrinking*. Symbols keep moving out of `common.c` 
 
 *Used by:* `build.rs` (in this directory) compiles it; `src/aot/` emits calls into it and links the archive into every binary `jade build` produces. `src/native/mod.rs` is its Rust counterpart and must stay in step with `native.c`.
 
+## One libraries directory per process
+
+A dependency has to be loaded once, not once per package that uses it, and that is the reason `jrt_native_load_rel` exists alongside the older `jrt_native_load`.
+
+`dlopen` keys a loaded image by the path it was asked for. Two images that resolve the same dependency to two different paths therefore get two independent instances, each with its own globals and its own initializer. For an ordinary library that is wasted memory. For one that owns a device or a graphics context it is two devices, and the failure is in the operating system rather than in Jade.
+
+So the root is chosen **once**, by whoever hosts the process — a compiled binary's `main`, or the CLI — and published. Every load resolves `<root>/<key>` and nothing else. Deliberately **not** a search chain: with a chain, two images can land on different steps and therefore different copies, and nothing can observe that it happened.
+
+**The channel is the environment, and that is forced rather than chosen.** Every image carries its own statically linked copy of this runtime, so no C or Rust global crosses a `dlopen` boundary. The environment is held by libc, which is shared, and it is the only channel available. `jrt_libs_root_publish` writes `JADE_LIBS` with `overwrite = 0`, so a root the user set is never replaced — which is what lets a process with no Jade host in it, a C program embedding a package, still have one agreed root.
+
+`jrt_native_check_one` records each dependency's resolved path under `JADE_PKG_<name>` and raises if a second, different path appears for the same name. Keying on the resolved path rather than the version is stronger than checking versions: it also catches two roots, a stray copy, and a symlink that escaped canonicalization.
+
+`jade_realpath` is load-bearing for the same reason, not cosmetic. Two spellings of one file are two instances.
+
 ## Gotchas
 
 Marshalling in `native.c` and `src/native/mod.rs` must agree, or a package that works under `jade run` will misbehave when compiled — and the failure shows up as corrupted values, not a clean error. That is not hypothetical: v1.2.2 added the `bytes` tag to `runtime.h`, `common.c` and the VM's marshaller but not to `native.c`, so for three releases a blob argument silently became `nil` when compiled and a blob return value crashed the process. Adding a tag means four arms here — outbound, inbound, `ffi_free_node`, and the `jade_ffi_free` gate — and the gate is the easy one to miss, because forgetting it leaks rather than fails.

@@ -1124,3 +1124,62 @@ fn a_shim_is_relinked_when_its_library_is_rebuilt() {
         .expect("the relinked shim must dlopen");
     assert!(pkg.contains_key("square"));
 }
+
+// ── Bundling a dependency beside an artifact ──────────────────────────────
+
+#[test]
+fn bundling_copies_a_whole_install_directory() {
+    // A C dependency's install dir holds two files — the generated shim and the
+    // library it wraps — and the shim finds the second through a loader-relative
+    // reference. Copying only the importable one leaves that pointing at nothing.
+    let tmp = TempDir::new("bundle_whole");
+    let libs = tmp.path().join("libs");
+    let src = libs.join("zlib-1.3.1");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("zlib.dylib"), b"shim").unwrap();
+    std::fs::write(src.join("zlib_native.dylib"), b"target").unwrap();
+
+    let ship = tmp.path().join("out");
+    std::fs::create_dir_all(&ship).unwrap();
+    let written = bundle_beside_artifact(&ship.join("app"), &libs).unwrap();
+
+    assert_eq!(written, ["zlib-1.3.1"]);
+    let dest = ship.join("libs").join("zlib-1.3.1");
+    assert!(dest.join("zlib.dylib").exists(), "the shim should be bundled");
+    assert!(dest.join("zlib_native.dylib").exists(), "so should what it wraps");
+}
+
+#[test]
+fn bundling_is_a_no_op_when_the_artifact_is_already_beside_its_libs() {
+    // `jade build --lib` at the project root. Copying a directory onto itself
+    // would truncate every file in it.
+    let tmp = TempDir::new("bundle_inplace");
+    let libs = tmp.path().join("libs");
+    let src = libs.join("dep-local");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("dep.dylib"), b"contents").unwrap();
+
+    let written = bundle_beside_artifact(&tmp.path().join("main.dylib"), &libs).unwrap();
+    assert!(written.is_empty(), "nothing to copy: {written:?}");
+    assert_eq!(std::fs::read(src.join("dep.dylib")).unwrap(), b"contents");
+}
+
+#[test]
+fn bundling_refuses_a_directory_already_holding_a_different_build() {
+    // Two artifacts built into one directory share one libs/, which is the
+    // point. Two *different* builds of one dependency landing there is not — the
+    // second would silently replace the first for both.
+    let tmp = TempDir::new("bundle_conflict");
+    let libs = tmp.path().join("libs");
+    let src = libs.join("dep-local");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("dep.dylib"), b"new build").unwrap();
+
+    let ship = tmp.path().join("out");
+    std::fs::create_dir_all(ship.join("libs").join("dep-local")).unwrap();
+    std::fs::write(ship.join("libs").join("dep-local").join("dep.dylib"), b"old build").unwrap();
+
+    let err = bundle_beside_artifact(&ship.join("app"), &libs).unwrap_err();
+    assert!(err.contains("different build"), "should say why: {err}");
+    assert!(err.contains("dep-local"), "should name it: {err}");
+}

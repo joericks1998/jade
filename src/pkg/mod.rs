@@ -446,6 +446,99 @@ fn write_artifact(dir: &Path, dest: &Path, bytes: &[u8]) -> Result<(), String> {
     })
 }
 
+/// Copy this project's installed dependencies into a `libs/` beside an artifact.
+///
+/// Returns the install directories written, for the message the CLI prints.
+///
+/// **Everything installed, not only what the artifact names.** A package can
+/// load a dependency of its own, and the artifact that uses that package never
+/// mentions it — the host cannot see through a package to what it will reach
+/// for. Copying only the direct ones produces a bundle that works until the
+/// first nested load, which is the failure this exists to prevent. The cost is
+/// carrying a dependency the program may not use; the alternative is shipping
+/// one that breaks.
+///
+/// **Whole directories, never single files.** A C dependency's install dir holds
+/// two artifacts — the generated shim and the library it wraps — and the shim
+/// finds the second through `@loader_path` on macOS and `$ORIGIN` on Linux (see
+/// [`compile_shim`]). Copying the shim alone leaves that reference pointing at
+/// nothing, and the failure lands as a dyld error on someone else's machine with
+/// no mention of bundling.
+///
+/// **One shared `libs/`, not one per artifact.** That is a requirement rather
+/// than a layout preference. `dlopen` keys a loaded image by the path it was
+/// asked for, so a per-artifact bundle would give two packages that share a
+/// dependency two copies of it — two sets of globals, two initializers. For a
+/// library that owns a device that is two devices.
+pub fn bundle_beside_artifact(artifact: &Path, libs_root: &Path) -> Result<Vec<String>, String> {
+    let dest_root = artifact.parent().unwrap_or_else(|| Path::new(".")).join(LIBS_DIR);
+    let mut written: Vec<String> = Vec::new();
+
+    let entries = std::fs::read_dir(libs_root)
+        .map_err(|e| format!("cannot read {} ({e})", libs_root.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("cannot read {} ({e})", libs_root.display()))?;
+        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        let src_dir = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let dest_dir = dest_root.join(&name);
+
+        // Building in place — `jade build --lib` at the project root — already
+        // has the dependency exactly where it belongs. Copying a directory onto
+        // itself would truncate every file in it.
+        if same_dir(&src_dir, &dest_dir) {
+            continue;
+        }
+
+        for entry in std::fs::read_dir(&src_dir)
+            .map_err(|e| format!("cannot read {} ({e})", src_dir.display()))?
+        {
+            let entry = entry.map_err(|e| format!("cannot read {} ({e})", src_dir.display()))?;
+            if !entry.file_type().is_ok_and(|t| t.is_file()) {
+                continue;
+            }
+            let from = entry.path();
+            let to = dest_dir.join(entry.file_name());
+            let bytes = std::fs::read(&from)
+                .map_err(|e| format!("cannot read {} ({e})", from.display()))?;
+
+            // Two artifacts built into one directory share the bundle, which is
+            // the point. Two *different* builds of one dependency landing there
+            // is not — the second would silently replace the first for both.
+            if let Ok(existing) = std::fs::read(&to)
+                && crate::pkg::fetch::sha256_hex(&existing) != crate::pkg::fetch::sha256_hex(&bytes)
+            {
+                return Err(format!(
+                    "cannot bundle '{name}': {} already holds a different build of it.\n  \
+                     Two artifacts in one directory share one libs/, so they must agree on \
+                     every dependency. Build them into separate directories, or install one \
+                     version of it.",
+                    dest_dir.display()
+                ));
+            }
+            write_artifact(&dest_dir, &to, &bytes)?;
+        }
+        written.push(name);
+    }
+
+    written.sort();
+    written.dedup();
+    Ok(written)
+}
+
+/// Whether two directories are the same place, following symlinks.
+///
+/// A plain path comparison would miss a symlinked `libs/`, and copying a
+/// directory onto itself truncates every file in it.
+fn same_dir(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => false,
+    }
+}
+
 // ── C binding shims ───────────────────────────────────────────────────────────
 
 /// Filename of the generated shim for a C dependency, using the host's native

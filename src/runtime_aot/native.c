@@ -33,6 +33,164 @@ static void native_raise(const char* fmt, const char* arg) {
     jade_exc_throw_typed(jrt_box_str(jrt_str_dup(msg, JRT_TRUSTED)), NULL);
 }
 
+/* ── One libs root per process ─────────────────────────────────────────────
+ *
+ * A dependency must be loaded once, not once per package that uses it. dlopen
+ * keys a loaded image by the path it was asked for, so two images resolving the
+ * same dependency to two paths get two independent instances — two sets of
+ * globals, two initializers. For a library that owns a device or a graphics
+ * context that is not wasted memory, it is two devices.
+ *
+ * So the root is chosen *once*, by whoever hosts the process, and every load
+ * resolves against that one root. Deliberately not a search chain: with a chain,
+ * two images can land on different steps and therefore different copies, and
+ * nothing in the process can observe that it happened.
+ *
+ * The channel is the environment, and that is not a stylistic choice. Every
+ * image carries its own statically linked copy of this runtime, so no C or Rust
+ * global is shared across a dlopen boundary — the environment is held by libc,
+ * which is shared, and it is the only channel available.
+ *
+ * A root the user set wins, and is never overwritten. The case that most needs
+ * it has no Jade host to publish from: a C program embedding a Jade package has
+ * no Jade `main`, so an externally set root is the only way that process gets an
+ * agreed root at all. Overwriting would break precisely the arrangement this
+ * exists to protect. */
+static _Thread_local char jrt_built_root[1024];
+static _Thread_local int  jrt_built_root_set = 0;
+/* Whether *this* image is the one that put the value in the environment.
+ * Without it the origin cannot tell a root the user chose from the one we
+ * published a moment earlier, and the message would blame the user either way. */
+static _Thread_local int  jrt_root_is_ours = 0;
+
+/* Where the root in force came from, for the message when a load fails. A wrong
+ * root is otherwise indistinguishable from a missing dependency. */
+const char* jrt_libs_root_origin(void) {
+    if (jrt_root_is_ours) return "the bundle beside this program";
+    if (getenv("JADE_LIBS")) return "JADE_LIBS";
+    return "the build";
+}
+
+const char* jrt_libs_root(void) {
+    const char* env = getenv("JADE_LIBS");
+    if (env && *env) return env;
+    return jrt_built_root_set ? jrt_built_root : NULL;
+}
+
+/* Publish the root, from a host and only from a host.
+ *
+ * `overwrite = 0` on the setenv *is* the deference rule, expressed as the
+ * call's own argument rather than as a branch around it.
+ *
+ * `built_root` is where the build put the bundle, relative to the image asking.
+ * A package must never call this: a package is not a host, and a second
+ * publisher is a second root. */
+void jrt_libs_root_publish(const char* built_root) {
+    const char* dir = jade_image_dir();
+    if (dir && built_root) {
+        char cand[1024];
+        snprintf(cand, sizeof cand, "%s/%s", dir, built_root);
+        const char* real = jade_realpath(cand);
+        if (real) {
+            size_t n = strlen(real);
+            if (n < sizeof jrt_built_root) {
+                memcpy(jrt_built_root, real, n + 1);
+                jrt_built_root_set = 1;
+            }
+        }
+    }
+    if (!jrt_built_root_set) return;
+    /* Read before writing, so we know whose value ends up in force. The write
+     * itself defers via overwrite = 0. */
+    if (!getenv("JADE_LIBS")) jrt_root_is_ours = 1;
+    setenv("JADE_LIBS", jrt_built_root, 0);
+}
+
+/* Refuse a second, different copy of a dependency already loaded.
+ *
+ * `rel` is `<name>-<version>/<file>`, so the name is the first segment up to its
+ * last '-' — the inverse of LockedPackage::install_dir, and unambiguous because
+ * a package name is letters, digits and underscores.
+ *
+ * Keyed on the *resolved path* rather than the version, which is strictly
+ * stronger: it also catches two roots, a stray copy, and a symlink that escaped
+ * canonicalization. Same channel as the root, for the same reason. */
+static void jrt_native_check_one(const char* rel, const char* resolved) {
+    const char* slash = strchr(rel, '/');
+    size_t seg = slash ? (size_t)(slash - rel) : strlen(rel);
+    const char* dash = NULL;
+    for (size_t i = 0; i < seg; i++)
+        if (rel[i] == '-') dash = rel + i;
+    size_t namelen = dash ? (size_t)(dash - rel) : seg;
+
+    char key[256];
+    if (namelen + 10 >= sizeof key) return;
+    memcpy(key, "JADE_PKG_", 9);
+    memcpy(key + 9, rel, namelen);
+    key[9 + namelen] = '\0';
+
+    const char* prior = getenv(key);
+    if (prior && strcmp(prior, resolved) != 0) {
+        char msg[900];
+        snprintf(msg, sizeof msg,
+                 "two different copies of the dependency '%.*s' would be loaded into one "
+                 "program: '%s' and '%s'. A dependency is loaded once per process, because a "
+                 "second copy has its own state — for a library that owns a device that is two "
+                 "devices. Install one version of it, or point JADE_LIBS at a single tree.",
+                 (int)namelen, rel, prior, resolved);
+        native_raise("%s", msg);
+    }
+    setenv(key, resolved, 0);
+}
+
+/* Load a native package named by a `libs/`-relative key.
+ *
+ * `rel` is NULL for a library that is not a dependency artifact — a hand-written
+ * `[lib]` pointing anywhere on disk. Those keep the absolute path they always
+ * had, and are outside the one-instance contract by definition.
+ *
+ * There is deliberately no second root to fall back to. A fallback is a second
+ * place a dependency can be found from, which is the duplication this exists to
+ * prevent — so a wrong root fails loudly, naming where the root came from. */
+void* jrt_native_load_rel(const char* rel, const char* abs_fallback) {
+    if (!rel) {
+        const char* real = jade_realpath(abs_fallback);
+        return jrt_native_load(real ? real : abs_fallback);
+    }
+
+    const char* root = jrt_libs_root();
+    if (!root) {
+        char msg[700];
+        snprintf(msg, sizeof msg,
+                 "cannot load the dependency '%s': this program has no libraries directory. It "
+                 "was built without one, and JADE_LIBS is not set.",
+                 rel);
+        native_raise("%s", msg);
+    }
+
+    char cand[1024];
+    snprintf(cand, sizeof cand, "%s/%s", root, rel);
+    const char* real = jade_realpath(cand);
+    if (!real) {
+        char msg[900];
+        snprintf(msg, sizeof msg,
+                 "cannot load the dependency '%s': it is not in '%s', which is where this "
+                 "program looks because that path came from %s.",
+                 rel, root, jrt_libs_root_origin());
+        native_raise("%s", msg);
+    }
+
+    /* Copied before the check: `real` points at the platform hook's own buffer,
+     * and the next jade_realpath inside the check would overwrite it. */
+    char resolved[1024];
+    size_t n = strlen(real);
+    if (n >= sizeof resolved) return jrt_native_load(real);
+    memcpy(resolved, real, n + 1);
+
+    jrt_native_check_one(rel, resolved);
+    return jrt_native_load(resolved);
+}
+
 void* jrt_native_load(const char* path) {
     void* lib = jade_dlopen(path);
     if (!lib) {

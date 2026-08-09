@@ -38,6 +38,10 @@ Two design choices are worth knowing before you edit:
 
 ## Gotchas
 
+**An artifact must not name a dependency by where it was when it was built.** It used to: `jade_mod_init` embedded an absolute path per native package and `dlopen`'d it, so a binary ran in the directory that produced it and nowhere else, and said so only at run time on someone else's machine. Each is now named twice — by a `libs/`-relative key, which is what a moved artifact resolves against the root its host published, and by the build-time absolute path, which is the answer for a hand-written `[lib]` that is not a dependency and has no relative spelling. A null key means the second is all there is.
+
+**Only `CompileMode::Binary` publishes a libraries root.** A binary owns its process, so it is the thing entitled to decide the one root every image resolves against. A package is not, and `SharedLib` deliberately emits no `jrt_libs_root_publish` call — a second publisher is a second root, and a second root is a second copy of a dependency with its own state. `runtime_aot/README.md` has the full argument; there is a test that a package emits no publish call, because nothing else would catch it.
+
 **An opcode this backend cannot lower is a hard build error.** There is no legacy fallback, so any new instruction added in `compiler/emit.rs` must be lowered here too.
 
 **The same applies to a builtin, and it is easier to miss.** A builtin the VM has and this backend does not is not a missing feature, it is the two engines disagreeing about what the language is — and the program finds out at `jade build`, long after it was written and tested under `jade run`. `write` and `uhttp.stream` sat in that state until v1.1.34. If you add one to `builtins/` or a `std/*` package, add it here in the same change, or the parity gate will not catch it: a builtin nothing in `examples/` exercises looks fine to every test in the repo.

@@ -441,6 +441,46 @@ Nothing changes for consumers. The artifact is an ordinary Jade package, added a
 jade pkg add mathlib --url 'https://example.com/mathlib-{platform}.so' --version 1.2.0
 ```
 
+## Shipping what you build
+
+`jade build` writes a `libs/` directory beside the artifact holding the dependencies it needs, and the pair travels together:
+
+```sh
+jade build main.jde -o dist/app
+# built: dist/app (with fastmath-1.2.0 in dist/libs/)
+```
+
+Move `dist/` anywhere, onto any machine of the same platform, and it runs. Copy `dist/app` on its own and it will not — the dependencies are beside it, not inside it.
+
+That is worth stating plainly because `-o` names a file and now produces a directory's worth of them. If your release process copies one path, copy the directory.
+
+A program with no dependencies writes no `libs/` and is a single file, exactly as before.
+
+### One copy of a dependency, per program
+
+Two packages that both use `fastmath` share one copy of it. Not as an optimisation — as a rule.
+
+A second copy would be a second instance: its own globals, its own module top level run a second time. For a library that owns a device, a graphics context, or a connection pool, two instances is two devices, and the resulting bug lives in the operating system rather than in your program.
+
+Jade guarantees one copy by giving the whole program one libraries directory to resolve against, rather than letting each package look beside itself. The program's host — a compiled binary, or the `jade` CLI — decides which directory that is before anything loads.
+
+Two consequences follow, and both are deliberate:
+
+- **Two versions of one dependency is an error**, not a silent pick. `jade.lock` records one version per name, and a program that somehow reaches two copies raises rather than loading both.
+- **A dependency your program cannot find fails loudly**, naming the directory it searched and where that directory came from. There is no second place to look, because a second place is a second copy.
+
+### `JADE_LIBS`
+
+Set it to point a program at a different libraries directory:
+
+```sh
+JADE_LIBS=/opt/jade-libs ./app
+```
+
+A value you set always wins, and nothing overwrites it. That matters for the case with no Jade program in it at all: a C or Python process that loads a Jade package has no `jade` host to decide a root, so setting the variable is the only way to give that process one.
+
+The cost of winning is that it also has to be right. A `JADE_LIBS` missing a dependency fails rather than quietly falling back to the bundle — falling back would mean two directories in play, which is the two-copies bug.
+
 ## The FFI's limits
 
 The native ABI carries `int`, `float`, `bool`, `str`, and `nil`; arrays, dicts, and structs since v1.1.31; `bytes` since v1.2.2; and opaque handles since v1.3.0 — all in both directions. A struct crosses with its type name attached, so the receiving side can tell a `Config` from anything else shaped like one.

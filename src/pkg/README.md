@@ -28,7 +28,7 @@ That same export table gives the one number that says whether a binding is usabl
 
 Dependencies are **prebuilt native shared libraries**, sourced from a local path or a URL. There is deliberately no package registry — like Go, a dependency names where it lives rather than an entry in a central index.
 
-That choice has a consequence worth stating plainly: a `.so` carries no manifest of its own, so **there is no transitive resolution and no version solving**. Each dependency contributes exactly one artifact, `jade.lock` is a flat list, and "resolution" means picking the right platform build. A package that needs another package must say so in its documentation; Jade cannot discover it.
+That choice has a consequence worth stating plainly: a `.so` carries no manifest of its own, so **there is no transitive resolution and no version solving**. (A package's dependencies still *load* correctly once installed — see `bundle_beside_artifact` — but nothing discovers what a package needs on your behalf.) Each dependency contributes exactly one artifact, `jade.lock` is a flat list, and "resolution" means picking the right platform build. A package that needs another package must say so in its documentation; Jade cannot discover it.
 
 The second decision is that the lock records an artifact **for every platform**, not just the current one. Unlike Cargo, which locks portable source, a lock naming one artifact would only be valid on the machine that generated it — a macOS developer would commit a lock that Linux CI could not install, and with no registry to ask, could not even *verify*.
 

@@ -313,13 +313,47 @@ pub fn run_build(
             crate::build::Emit::Binary
         };
 
-        if let Err(e) = crate::build::build(&tprogram, &abs_source, &abs_out, emit) {
-            eprintln!("{path}: build error: {e}");
-            process::exit(1);
+        let needed = match crate::build::build(&tprogram, &abs_source, &abs_out, emit) {
+            Ok(needed) => needed,
+            Err(e) => {
+                eprintln!("{path}: build error: {e}");
+                process::exit(1);
+            }
+        };
+
+        // Copy the dependencies the artifact will look for into a `libs/` beside
+        // it, so the pair can be moved together and still work. Without this the
+        // artifact holds the build machine's absolute paths, which is why one
+        // used to run here and nowhere else.
+        let mut bundled: Vec<String> = Vec::new();
+        if !needed.is_empty()
+            && let Some(root) = abs_source.parent().and_then(crate::project::find_project_root_from)
+        {
+            let libs_root = root.join(crate::pkg::LIBS_DIR);
+            let libs_root = std::fs::canonicalize(&libs_root).unwrap_or(libs_root);
+            match crate::pkg::bundle_beside_artifact(&abs_out, &libs_root) {
+                Ok(names) => bundled = names,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    process::exit(1);
+                }
+            }
         }
 
         if !emit_ir {
-            eprintln!("built: {}", out.display());
+            if bundled.is_empty() {
+                eprintln!("built: {}", out.display());
+            } else {
+                // Named rather than counted: `-o` now writes a directory's worth
+                // of files, and a reader who does not know that will ship one.
+                let dir = out.parent().unwrap_or_else(|| Path::new(".")).join(crate::pkg::LIBS_DIR);
+                eprintln!(
+                    "built: {} (with {} in {}/)",
+                    out.display(),
+                    bundled.join(", "),
+                    dir.display()
+                );
+            }
         }
     }
 }

@@ -50,8 +50,16 @@ impl From<&Emit> for crate::aot::CompileMode {
 ///
 /// `source_path` anchors import resolution: imports resolve relative to the file
 /// being compiled, not the working directory.
-pub fn build(program: &TProgram, source_path: &Path, out: &Path, emit: Emit) -> Result<(), String> {
-    let ir = crate::aot::compile_with_mode(
+/// Returns the native packages the artifact will look for at startup, so the
+/// caller can copy exactly those beside it. Empty for an IR emit, which writes
+/// no artifact to put anything beside.
+pub fn build(
+    program: &TProgram,
+    source_path: &Path,
+    out: &Path,
+    emit: Emit,
+) -> Result<Vec<std::path::PathBuf>, String> {
+    let outcome = crate::aot::compile_with_mode(
         program.clone(),
         Some(source_path),
         out,
@@ -61,12 +69,13 @@ pub fn build(program: &TProgram, source_path: &Path, out: &Path, emit: Emit) -> 
 
     // `compile_with_mode` returns the IR text only when asked for it; a binary
     // or package build writes to `out` and returns None.
-    if let Some(text) = ir {
+    if let Some(text) = outcome.ir {
         crate::stdio::write_str(&text);
         crate::stdio::flush();
+        return Ok(Vec::new());
     }
 
-    Ok(())
+    Ok(outcome.dependencies)
 }
 
 #[cfg(test)]

@@ -918,12 +918,31 @@ typedef struct {
 void* jade_dlopen(const char* path);
 const char* jade_dlerror(void);   /* why the last jade_dlopen failed */
 void* jade_dlsym(void* handle, const char* sym);
+/* The directory of the image *this* copy of the runtime was linked into, and
+ * the canonical path of an existing file. Both underpin the rule that one
+ * dependency is loaded once per process — see jrt_native_load_rel. */
+const char* jade_image_dir(void);
+const char* jade_realpath(const char* path);
 
 /* Load a native package: dlopen `path`, call its jade_pkg_init, and build a
  * name -> function-pointer registry. Returns an opaque handle. Raises a
  * catchable Jade error on failure (missing file, missing jade_pkg_init,
  * non-zero init status), mirroring the VM raising on load. */
 void* jrt_native_load(const char* path);
+
+/* Load a dependency named by a `libs/`-relative key, resolved against the one
+ * root this process agreed on. `rel` is NULL for a library that is not a
+ * dependency artifact, which keeps the absolute path it always had.
+ *
+ * The pair below is what makes a dependency load once rather than once per
+ * package that uses it. `publish` is called by a host — a compiled binary's
+ * `main`, or the CLI before it runs anything — and never by a package, because
+ * a second publisher is a second root. See native.c for why the channel is the
+ * environment and cannot be anything tidier. */
+void* jrt_native_load_rel(const char* rel, const char* abs_fallback);
+void jrt_libs_root_publish(const char* built_root);
+const char* jrt_libs_root(void);
+const char* jrt_libs_root_origin(void);
 
 /* Resolve `fn_name` in `handle`, marshal `argc` tagged args into JadeVal, invoke
  * the native function, and marshal the result back to a tagged jade_value_t.
