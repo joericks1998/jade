@@ -3,6 +3,15 @@
  * platform-agnostic common.c. Compiled by build.rs for macOS/Linux hosts. */
 #ifndef __JADE_KERNEL__
 
+/* `dladdr` and `Dl_info` are a GNU extension, and glibc hides both behind this
+ * unless it is defined. macOS declares them unconditionally, so the Linux build
+ * was the only one that failed, and it failed inside cc-rs — which reports a
+ * compiler error against a file nobody edited. It has to come before any header
+ * is read, which is why it sits above runtime.h rather than beside dlfcn.h. */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include "runtime.h"
 
 #include <assert.h>

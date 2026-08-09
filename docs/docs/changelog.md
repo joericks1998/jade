@@ -6,6 +6,8 @@ sidebar_label: Changelog
 
 ## v1.3.11
 
+**Fixed: the Linux build had been broken since v1.3.9, so nothing shipped.** `jade_image_dir` asks the loader which image it is running in, using `dladdr` — which glibc hides unless `_GNU_SOURCE` is defined, while macOS declares it unconditionally. So every build on a developer's Mac passed and every build in CI failed, at the first step, inside the C compiler. v1.3.9 and v1.3.10 were merged and never tagged; their contents ship here.
+
 **A library that splits its API across headers is now bound whole.** `ares.h` declares seventy-odd symbols itself and includes `ares_dns_record.h`, which declares sixty-three more — the entire modern DNS record API, and none of it was ever looked at. The rule was all-or-nothing: a header declaring nothing of its own was an umbrella and bound everything it included that the library exports, and a header declaring anything bound only its own. Plenty of libraries do both.
 
 The export table decides for every header now, not only umbrellas. It is an exact test rather than a guess about which paths count as system ones — `fopen` rides in on every header and belongs to nobody, so it is not bound. The named header's own declarations are kept either way, so no library loses a symbol.
