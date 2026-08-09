@@ -304,11 +304,20 @@ If you write or correct a symbol by hand, these are the spellings `args` and `re
 | `bytes` | Binary data. As an argument it is one Jade value and the two C parameters `(const void*, size_t)`. |
 | `handle<T>` | An opaque pointer the library owns — a `sqlite3*`, a `SNDFILE*`. Jade holds it, hands it back, and never looks inside. The type name is checked, so passing a statement where a connection belongs is a readable error rather than a crash inside the library. `T` is written the way C writes it, so a struct with no typedef of its own keeps the keyword: `handle<struct ZSTD_CCtx_s>`. |
 | `out_buffer:<ctype>` | A buffer the call fills. It consumes **no** Jade argument: `x_read(handle, buf, n)` is called as `x_read(handle, n)` and hands back the bytes. Its size comes from the next declared argument, which must be an `int`. |
-| `out_struct:<Type>` | A struct the call fills through a pointer. Needs the library's real header in `headers`. Only for a record *one call* fills — a struct the caller allocates and the library keeps between calls cannot be one, because the shim zeroes a fresh local each time. |
+| `bytes_ptr` | The same, without the count, for a library that takes a blob whose extent is written inside it — every `libfdt` call takes `const void *fdt` alone. Borrowed for the call, like a `str`. |
+| `inout_bytes` | A buffer the call revises in place. Your blob is copied into scratch the shim owns, and the edited copy comes back as a result — a Jade blob is immutable, so there is nothing to lend out to be written into. |
+| `sized_buffer:<ctype>` | A buffer the call fills whose size only the documentation gives. You pass the count, the shim allocates it, and the whole buffer comes back. `lzma_stream_header_encode` writes exactly twelve bytes and says so nowhere a generator can read. |
+| `in_struct:<Type>` | A struct the call only reads. You build it, the shim copies it into a real local of the library's type. Needs the header. A field you leave out is zero, as in C; a field the type does not have is an error. |
+| `out_struct:<Type>` | A struct the call fills through a pointer. Needs the library's real header in `headers`. Only for a record *one call* fills — a struct the caller allocates and the library keeps between calls is a `held` struct instead. |
+| `struct:<Type>` | A return only: the call hands the struct back by value. Needs the header. |
 | `out_scalar:<ctype>` | A single value the call writes through a pointer — `int *count`. Consumes no Jade argument; comes back as part of the result. |
 | `inout_scalar:<ctype>` | The same, but the caller supplies the starting value — a position the library advances. Consumes one Jade argument *and* comes back. |
 | `out_handle:<T>` | A handle written through a pointer — `sqlite3_open(path, &db)`. The C return value becomes the status, and the handle is what Jade gets. |
-| `callback:<ret>(<args>)` | A Jade function the library may call while the call runs. The signature is written in the library's own C types, e.g. `callback:int(int, const char*)`. |
+| `out_str:<ctype>` | A string the call points at inside data you already gave it — `fdt_getprop_by_offset`'s `const char **namep`. Nothing was allocated, so nothing has to be released. |
+| `out_alloc_str:<ctype>` | A string the library allocated and you now own. Requires `frees_with` on the symbol, naming the function that releases it. |
+| `ret_len:<ctype>` | Marks the parameter that says how long a returned pointer is. The return type is then `bytes`. `fdt_getprop` is this shape. |
+| `callback:<ret>(<args>)` | A Jade function the library may call while the call runs. The signature is written in the library's own C types, e.g. `callback:int(int, const char*)`. A `void *` in it is the user-data slot C uses instead of closures; the shim accepts it and does not pass it on, because a Jade function carries its own environment. |
+| `null_ptr` | A null pointer, always. For a parameter the FFI cannot carry in a position the library documents as optional — brotli's allocator hooks, where null means "use malloc". Never inferred, because a library that needs a real pointer there crashes with no diagnostic. |
 
 A symbol may have more than one out-parameter. When it does, each needs a name to come back under, written as an `@` suffix — `out_scalar:uint64_t@progress_in`. The generator takes those from the header's own parameter names. With one out-parameter the name is optional, since there is nothing to tell it apart from.
 
@@ -322,6 +331,29 @@ print(d.rem)                   // 2
 ```
 
 A whole symbol may also be written as the single string `"?"` — the name is known, the prototype is not. That is what `jade pkg add` writes when it finds no header, and every command that would use the binding refuses it by name.
+
+### A struct Jade holds
+
+Some structs cannot be passed by value in either direction. `lzma_stream`, `ZSTD_outBuffer` and `fd_set` are allocated by the caller and kept by the library between calls, so a fresh zeroed local each time would throw away the state the last call left.
+
+Marking one `held = true` in its struct table gives you four extra calls in the package: `<T>_new`, `<T>_free`, `<T>_get` and `<T>_set`. The struct is allocated once and every call gets the same pointer.
+
+The pointer fields such a struct keeps its position in are the reason it exists, so they can be filled too. A read-only one gets `<T>_set_<field>`, taking a blob. A writable one gets `<T>_alloc_<field>`, taking a size, and `<T>_take_<field>`, taking how many bytes to read back — two calls, because how much of the buffer became real is something only you can work out from the fields.
+
+```jade
+use lzma
+
+let s = lzma.lzma_stream_new()
+lzma.lzma_easy_encoder(s, 6, 0)
+lzma.lzma_stream_set_next_in(s, data)
+lzma.lzma_stream_alloc_next_out(s, 4096)
+lzma.lzma_code(s, 3)                        // LZMA_FINISH
+
+let st = lzma.lzma_stream_get(s)
+let packed = lzma.lzma_stream_take_next_out(s, 4096 - st.avail_out)
+lzma.lzma_end(s)
+lzma.lzma_stream_free(s)
+```
 
 A symbol may also declare `fails_when`, naming how it reports failure: `null`, `negative`, `nonzero`, or `never`. The shim then clears `errno`, tests the return, and turns a failure into a catchable Jade error carrying the reason. Without it a failed call gives back its raw sentinel and the reason the library already recorded is thrown away — the program sees `-1` and nothing else. The default is "cannot fail", because reading a convention that is not there would turn every legitimate `-1` into a raise.
 

@@ -6,6 +6,8 @@ sidebar_label: Changelog
 
 ## Unreleased
 
+**Binding a C library reaches 91% of what a real library exports, up from 59%.** Measured across seven Homebrew libraries — liblzma, zstd, libfdt, capstone, c-ares and both halves of brotli — counting only what the header declares *and* the artifact exports. 348 of 381 symbols, from 223. A full lzma compress and decompress round trip now runs in Jade through nothing but the generated binding. Several of the old 223 were bindings that ran and did nothing; those are fixed too, and the notes below say which.
+
 - **A struct the library only reads can be passed in.** `int f(const S* s)` was refused outright: the shim could fill a struct and hand it back, but not take one. `in_struct:<Type>` is the mirror — Jade builds the struct, the shim copies it into a real local of the library's own type and passes its address. Nothing owns anything across the boundary, because the library reads it and forgets it.
 - **A field you leave out of one is zero, and a field you misspell is an error.** That is what the C it stands in for does: declare, zero, set what matters. `lzma_stream_flags` carries fifteen reserved fields the library requires to be zero, and demanding all seventeen would have made the shape unusable. The mistake worth catching is the other one — without the check a misspelling is indistinguishable from an omission, and silently becomes a zero you believed you had set.
 - **A struct passed in must be one every field of which survives the trip.** The asymmetry with `out_struct`, which tolerates dropping a field it cannot carry: losing an output is visible in what comes back, losing an input is not.
