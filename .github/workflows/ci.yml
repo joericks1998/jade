@@ -30,6 +30,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y llvm-18-dev libpolly-18-dev libzstd-dev
 
+      # glib is the FFI gate's fixture — see src/scripts/ffi-gate.sh for why a
+      # big ordinary library is the point. pkg-config is how the gate finds it,
+      # since the library sits in an architecture-named directory.
+      - name: Install glib
+        run: sudo apt-get install -y libglib2.0-dev pkg-config
+
       # Overrides the Apple Silicon Homebrew path in .cargo/config.toml. Cargo's
       # [env] does not set a variable that is already present, so this wins.
       - name: Build
@@ -105,6 +111,27 @@ jobs:
         env:
           LLVM_SYS_180_PREFIX: /usr/lib/llvm-18
         run: ./src/scripts/backend-parity.sh
+
+      # Binds a real C library and runs it on both engines, and compiles the C
+      # runtime the way a release build compiles it.
+      #
+      # Both halves exist because of bugs that reached users. The C runtime
+      # handed `realpath` a buffer a quarter of the size glibc requires, which
+      # aborts the process — but only in an optimised build, so nothing here saw
+      # it and every FFI package in a compiled binary died at startup on Linux
+      # for two releases. And binding glib rather than the tidy libraries the
+      # survey used turned up two more the same afternoon: a callback parameter
+      # checked against a typedef's name instead of its category, and a
+      # function-like macro shadowing the symbol we bound. Each refused the whole
+      # dependency.
+      #
+      # Notably this is the one step where the *Linux* run is the one that
+      # counts: Apple's headers carry no fortify attributes, so the check that
+      # matters most cannot fire on a developer's machine.
+      - name: FFI gate
+        env:
+          LLVM_SYS_180_PREFIX: /usr/lib/llvm-18
+        run: ./src/scripts/ffi-gate.sh
 
   tag-release:
     name: Tag release

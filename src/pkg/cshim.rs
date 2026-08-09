@@ -480,7 +480,11 @@ fn parse_callback(pkg: &str, sym: &str, spec: &str) -> Result<ArgSpec, String> {
             out.push(CbParam { c_type, kind: CbKind::Bytes });
             continue;
         }
-        if is_user_data(&c_type) {
+        // The *category* decides, not the spelling. A library that names its
+        // context slot `gconstpointer` still means `void*`, and glib names all
+        // of them that way — checking the spelling refused every callback it
+        // has, which refuses the whole dependency.
+        if is_user_data(&cat) {
             out.push(CbParam { c_type, kind: CbKind::UserData });
             continue;
         }
@@ -2427,7 +2431,12 @@ fn wrapper(
         }
     }
 
-    let call = format!("{sym}({})", call_args.join(", "));
+    // Parenthesised so a function-like macro of the same name cannot intercept
+    // the call. Headers do this constantly — glib defines `g_atomic_pointer_add`
+    // as a macro whose `_Static_assert` rejects the `void*` the shim holds, and
+    // one such symbol fails the compile, which refuses the whole dependency. We
+    // bound the symbol the artifact exports, so that is what should be called.
+    let call = format!("({sym})({})", call_args.join(", "));
 
     // Register each callback the symbol takes. The registration outlives the
     // call, so this is where the slot is written and nowhere is it cleared.

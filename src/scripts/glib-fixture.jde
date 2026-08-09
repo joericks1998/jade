@@ -1,0 +1,28 @@
+// A real C library, called from Jade, on both engines.
+//
+// glib is the fixture rather than something small on purpose: it is 1890
+// exported symbols of ordinary C, written the way widely-used libraries are
+// actually written — typedefs over everything, function-like macros shadowing
+// declared functions, deprecated corners still in the header. Every bug this
+// gate has caught so far came from that texture and not from anything exotic.
+//
+// The calls below are deliberately dull. What is being tested is that binding a
+// large real header produces a shim that compiles at all, that installing it
+// works, and that the two engines agree — not that glib computes correctly.
+use glib
+
+// str in, str out. `g_basename` returns a pointer *into* its argument, so a
+// wrong lifetime shows up as garbage rather than as a plausible answer.
+print(f"basename    = {glib.g_basename("/usr/local/lib/libglib.so")}")
+print(f"uri scheme  = {glib.g_uri_peek_scheme("https://jadelang.org/docs")}")
+
+// Two strs in, an int out.
+print(f"has prefix  = {glib.g_str_has_prefix("jadelang", "jade")}")
+print(f"strcasecmp  = {glib.g_ascii_strcasecmp("Jade", "jade")}")
+
+// Counts characters, not bytes, so a mangled string gives the wrong number.
+print(f"utf8 strlen = {glib.g_utf8_strlen("héllo wörld", -1)}")
+
+// int in, int out, and a string glib keeps a copy of.
+print(f"digit value = {glib.g_ascii_digit_value(55)}")
+print(f"interned    = {glib.g_intern_static_string("jade")}")

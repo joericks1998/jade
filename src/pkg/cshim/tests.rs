@@ -111,7 +111,7 @@ fn wrappers_check_arity_and_tags_before_calling() {
         src.contains("if (argv[1].tag != JADE_FFI_STR) return 1;"),
         "missing tag check:\n{src}"
     );
-    assert!(src.contains("f(argv[0].data.as_int, argv[1].data.as_str)"), "bad call:\n{src}");
+    assert!(src.contains("(f)(argv[0].data.as_int, argv[1].data.as_str)"), "bad call:\n{src}");
 }
 
 #[test]
@@ -305,7 +305,7 @@ fn a_blob_with_no_length_becomes_one_pointer() {
     let src = generate("fdt", &symbols(&[("check", sym(&["bytes_ptr"], "int"))])).unwrap();
     assert!(src.contains("extern int64_t check(const void*);"), "bad decl:\n{src}");
     assert!(src.contains("if (argv[0].tag != JADE_FFI_BYTES) return 1;"), "no tag check:\n{src}");
-    assert!(src.contains("check(argv[0].data.as_bytes"), "should pass the pointer:\n{src}");
+    assert!(src.contains("(check)(argv[0].data.as_bytes"), "should pass the pointer:\n{src}");
     assert!(!src.contains("as_bytes->len"), "must not invent a length:\n{src}");
 }
 
@@ -603,7 +603,7 @@ fn a_struct_input_is_copied_into_a_real_c_local() {
         .unwrap();
     assert!(src.contains("SF_INFO istruct0;"), "no local of the real type:\n{src}");
     assert!(src.contains("memset(&istruct0, 0, sizeof istruct0);"), "not zeroed:\n{src}");
-    assert!(src.contains("f(&istruct0, argv[1].data.as_int)"), "not passed by address:\n{src}");
+    assert!(src.contains("(f)(&istruct0, argv[1].data.as_int)"), "not passed by address:\n{src}");
 }
 
 #[test]
@@ -898,7 +898,7 @@ fn a_callbacks_user_data_is_accepted_and_not_forwarded() {
 fn a_null_pointer_stands_in_for_what_cannot_be_carried() {
     let s = sym(&["null_ptr", "int"], "int");
     let src = generate_with("br", &symbols(&[("go", s)]), &[], &["brotli.h"]).unwrap();
-    assert!(src.contains("go(NULL, argv[0].data.as_int)"), "should pass null:\n{src}");
+    assert!(src.contains("(go)(NULL, argv[0].data.as_int)"), "should pass null:\n{src}");
     assert!(src.contains("if (argc != 1) return 1;"), "should take no argument:\n{src}");
 }
 
@@ -921,7 +921,7 @@ fn a_struct_returned_by_value_is_read_straight_out_of_the_return() {
     let s = sym(&["int"], "struct:BOUNDS");
     let src =
         generate_with("z", &symbols(&[("bounds", s)]), &[("BOUNDS", fields)], &["z.h"]).unwrap();
-    assert!(src.contains("BOUNDS r = bounds("), "not received by value:\n{src}");
+    assert!(src.contains("BOUNDS r = (bounds)("), "not received by value:\n{src}");
     assert!(src.contains("rs->vals[0].data.as_int = (int64_t)r.error;"), "field not read:\n{src}");
 }
 
@@ -1048,10 +1048,10 @@ fn a_handle_argument_is_unwrapped_with_its_type_checked() {
         src.contains(r#"jade_shim_unwrap(&argv[0], "sqlite3", &h0)"#),
         "missing unwrap:\n{src}"
     );
-    assert!(src.contains("close((sqlite3*)h0)"), "should pass the unwrapped pointer:\n{src}");
+    assert!(src.contains("(close)((sqlite3*)h0)"), "should pass the unwrapped pointer:\n{src}");
     // Checked before the call, so the library never sees a wrong-typed pointer.
     let unwrap_at = src.find("jade_shim_unwrap").unwrap();
-    let call_at = src.find("close((sqlite3*)").unwrap();
+    let call_at = src.find("(close)((sqlite3*)").unwrap();
     assert!(unwrap_at < call_at, "the type check must precede the call:\n{src}");
 }
 
@@ -1125,7 +1125,7 @@ fn a_handle_and_a_scalar_keep_their_argument_positions() {
     let src = generate("db", &symbols(&[("f", s)])).unwrap();
     assert!(src.contains(r#"jade_shim_unwrap(&argv[1], "sqlite3", &h1)"#), "wrong index:\n{src}");
     assert!(
-        src.contains("f(argv[0].data.as_int, (sqlite3*)h1, argv[2].data.as_str)"),
+        src.contains("(f)(argv[0].data.as_int, (sqlite3*)h1, argv[2].data.as_str)"),
         "bad call:\n{src}"
     );
 }
@@ -1203,7 +1203,7 @@ fn a_callback_becomes_a_static_function_of_the_declared_shape() {
         "bad decl:\n{src}"
     );
     assert!(
-        src.contains("each(argv[0].data.as_int, jade_cbt_each_1)"),
+        src.contains("(each)(argv[0].data.as_int, jade_cbt_each_1)"),
         "should pass the trampoline:\n{src}"
     );
 }
@@ -1515,6 +1515,21 @@ fn a_callback_data_with_no_callback_is_refused() {
     let s = sym(&["callback_data"], "nil");
     let err = generate_with("ar", &symbols(&[("go", s)]), &[], &["ares.h"]).unwrap_err();
     assert!(err.contains("takes no callback"), "should say why: {err}");
+}
+
+#[test]
+fn a_function_like_macro_cannot_intercept_the_call() {
+    // glib declares `g_atomic_pointer_add` and then defines a macro of the same
+    // name whose `_Static_assert` rejects a `void*`. The macro won, the shim did
+    // not compile, and one such symbol refuses the whole dependency — so glib
+    // bound 1357 symbols and could not be used at all.
+    let header = "extern int go(int a);\n#define go(a) (\"a macro won\")\n";
+    let s = sym(&["int"], "int");
+    let src = generate_with("m", &symbols(&[("go", s)]), &[], &["fixture.h"]).unwrap();
+    assert!(src.contains("(go)("), "the call must be parenthesised:\n{src}");
+    if let Err(e) = compiles(&src, &[("fixture.h", header)]) {
+        panic!("a macro of the same name broke the shim:\n{e}\n--- source ---\n{src}");
+    }
 }
 
 #[test]

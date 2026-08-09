@@ -44,3 +44,21 @@ To drive a Jade program against a canned reply by hand:
 mkdir -p /tmp/slot && jade build src/scripts/fake-provider.jde --lib -o /tmp/slot/fake.so
 JADE_PROVIDER_ACTIVE=/tmp/slot JADE_FAKE_REPLY="hello" jade run your.jde
 ```
+
+## `ffi-gate.sh` — a real C library, bound and run
+
+`backend-parity.sh` covers the language. This covers the part of the toolchain whose correctness depends on code nobody here wrote: someone else's header, someone else's macros, and a C compiler's opinion of the shim generated from them.
+
+Two checks, catching different classes.
+
+**The C runtime, compiled optimised.** glibc's `realpath` writes up to `PATH_MAX` bytes into the buffer it is handed and aborts the process when that buffer is smaller — but the check only exists in an optimised build, so `cargo test` and the parity gate both miss it. Every FFI package in a compiled binary died at startup on Linux for two releases. glibc says what is wrong at compile time, so compiling with `-O2 -D_FORTIFY_SOURCE=3 -Werror=attribute-warning` is enough, and it takes seconds rather than the minutes a release build of the toolchain would. This half only bites on glibc: Apple's headers carry no such attribute, so on a Mac it passes on code that aborts on Linux. That asymmetry is how the bug shipped, and it is why CI is the run that counts.
+
+**glib, bound whole and run on both engines.** glib is the fixture because it is big and ordinary — 1890 exported symbols written the way widely-used libraries are actually written, with typedefs over everything and function-like macros shadowing declared functions. The seven tidy libraries the coverage survey used never produced either. Binding glib turned up two bugs the same afternoon: a callback parameter checked against the typedef's name instead of its category, and a macro intercepting the call to the symbol that was bound. Each refused the whole dependency, so glib bound 1357 symbols and could not be used at all.
+
+The whole header is bound, never a narrowed slice. A slice would cover only the shapes already handled, which is the opposite of the point. The fixture program itself (`glib-fixture.jde`) is deliberately dull: what is under test is that a large real header produces a shim that compiles, installs, and gives both engines the same answer.
+
+Missing glib or a missing C compiler is a *skip*, reported rather than silent, so the script is safe to run anywhere.
+
+```sh
+./src/scripts/ffi-gate.sh                    # or pass a path to a jade binary
+```
