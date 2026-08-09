@@ -26,10 +26,7 @@ fn binary_and_ir_both_lower_as_a_binary() {
 #[test]
 fn cdylib_carries_its_export_list_through() {
     let emit = Emit::CDylib { exports: vec!["add".into()] };
-    assert_eq!(
-        CompileMode::from(&emit),
-        CompileMode::SharedLib { exports: vec!["add".into()] }
-    );
+    assert_eq!(CompileMode::from(&emit), CompileMode::SharedLib { exports: vec!["add".into()] });
 }
 
 #[test]
@@ -57,7 +54,8 @@ struct Source {
 
 impl Source {
     fn new(tag: &str, body: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("jade_build_test_{tag}_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("jade_build_test_{tag}_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("main.jde");
         std::fs::write(&file, body).unwrap();

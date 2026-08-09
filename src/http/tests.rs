@@ -1,5 +1,5 @@
-use jade_runtime::coll::DictObj;
 use super::*;
+use jade_runtime::coll::DictObj;
 
 // NOTE: no live-network tests here. The request-dispatch path (`execute`) opens
 // a real TCP connection, so we only cover the PURE helpers and the arg-validation
@@ -104,11 +104,7 @@ fn http_get_empty_args_arity_err() {
 
 #[test]
 fn http_get_too_many_args_arity_err() {
-    let args = [
-        VmValue::Str("a".to_string().into()),
-        VmValue::Nil,
-        VmValue::Nil,
-    ];
+    let args = [VmValue::Str("a".to_string().into()), VmValue::Nil, VmValue::Nil];
     match http_get(&args).unwrap_err() {
         JadeError::ArityMismatch { .. } => {}
         other => panic!("expected ArityMismatch, got {:?}", other),

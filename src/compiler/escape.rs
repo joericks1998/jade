@@ -167,10 +167,7 @@ fn scan_expr(e: &TExpr, name: &str, ok: &mut usize, bad: &mut usize) {
             scan_expr(object, name, ok, bad);
             scan_expr(index, name, ok, bad);
         }
-        TExprKind::Integer(_)
-        | TExprKind::Float(_)
-        | TExprKind::Bool(_)
-        | TExprKind::Str(_) => {}
+        TExprKind::Integer(_) | TExprKind::Float(_) | TExprKind::Bool(_) | TExprKind::Str(_) => {}
         TExprKind::Call { callee, args, kwargs } => {
             scan_expr(callee, name, ok, bad);
             for a in args {

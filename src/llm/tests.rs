@@ -7,7 +7,7 @@
 //! the shape of that struct, and whether it still matches the shared definition
 //! both this repo and dovata are written against.
 
-use crate::llm::{provider_backend::request_value, InferenceRequest, REQUEST_TYPE};
+use crate::llm::{InferenceRequest, REQUEST_TYPE, provider_backend::request_value};
 use crate::vm::VmValue;
 
 /// The request as a list of `(field, value)` pairs, values rendered as
@@ -181,11 +181,8 @@ fn meta_and_json_carry_no_text() {
 /// An `Error` frame becomes a catchable inference error carrying its message.
 #[test]
 fn an_error_frame_raises_with_its_message() {
-    let e = decode(vec![dict_frame(&[
-        ("type", s("Error")),
-        ("message", s("model not loaded")),
-    ])])
-    .expect_err("an Error frame must raise");
+    let e = decode(vec![dict_frame(&[("type", s("Error")), ("message", s("model not loaded"))])])
+        .expect_err("an Error frame must raise");
     assert!(format!("{e:?}").contains("model not loaded"), "got {e:?}");
 }
 
@@ -281,10 +278,9 @@ fn structs_in_shared_definition() -> Vec<(String, Vec<String>)> {
         .stmts
         .iter()
         .filter_map(|stmt| match stmt {
-            Stmt::StructDef { name, fields, .. } => Some((
-                name.clone(),
-                fields.iter().map(|f| f.name().to_owned()).collect(),
-            )),
+            Stmt::StructDef { name, fields, .. } => {
+                Some((name.clone(), fields.iter().map(|f| f.name().to_owned()).collect()))
+            }
             _ => None,
         })
         .collect()

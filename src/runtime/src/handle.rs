@@ -118,7 +118,12 @@ impl core::fmt::Debug for HandleObj {
     /// panic message is noise that also varies run to run, which would make any
     /// test asserting on it flaky.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "HandleObj(handle<{}>{})", self.type_name(), if self.is_null() { ", null" } else { "" })
+        write!(
+            f,
+            "HandleObj(handle<{}>{})",
+            self.type_name(),
+            if self.is_null() { ", null" } else { "" }
+        )
     }
 }
 

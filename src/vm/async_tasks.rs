@@ -111,4 +111,3 @@ pub(crate) async fn call_value_standalone(
     let raised = state.raised_exception.take();
     (result, raised)
 }
-

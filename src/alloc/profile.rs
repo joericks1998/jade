@@ -21,11 +21,11 @@ use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 const NBUCKETS: usize = 22;
 
 static COUNTS: [AtomicU64; NBUCKETS] = [const { AtomicU64::new(0) }; NBUCKETS];
-static BYTES:  [AtomicU64; NBUCKETS] = [const { AtomicU64::new(0) }; NBUCKETS];
+static BYTES: [AtomicU64; NBUCKETS] = [const { AtomicU64::new(0) }; NBUCKETS];
 static TOTAL_ALLOCS: AtomicU64 = AtomicU64::new(0);
-static TOTAL_FREES:  AtomicU64 = AtomicU64::new(0);
-static LIVE_BYTES:   AtomicU64 = AtomicU64::new(0);
-static PEAK_BYTES:   AtomicU64 = AtomicU64::new(0);
+static TOTAL_FREES: AtomicU64 = AtomicU64::new(0);
+static LIVE_BYTES: AtomicU64 = AtomicU64::new(0);
+static PEAK_BYTES: AtomicU64 = AtomicU64::new(0);
 
 /// Bucket index for `size`: `floor(log2(size)) - 2`, clamped to `[0, NBUCKETS)`.
 #[inline]
@@ -183,11 +183,19 @@ mod tests {
             assert!(!q.is_null());
             assert_eq!(TOTAL_ALLOCS.load(Relaxed), allocs0 + 2, "realloc should count an alloc");
             assert_eq!(TOTAL_FREES.load(Relaxed), frees0 + 1, "realloc should count a free");
-            assert_eq!(LIVE_BYTES.load(Relaxed), live0 + 8192, "live bytes should track the new size");
+            assert_eq!(
+                LIVE_BYTES.load(Relaxed),
+                live0 + 8192,
+                "live bytes should track the new size"
+            );
 
             a.dealloc(q, large);
             assert_eq!(TOTAL_FREES.load(Relaxed), frees0 + 2);
-            assert_eq!(LIVE_BYTES.load(Relaxed), live0, "live bytes should return to the starting value");
+            assert_eq!(
+                LIVE_BYTES.load(Relaxed),
+                live0,
+                "live bytes should return to the starting value"
+            );
         }
     }
 

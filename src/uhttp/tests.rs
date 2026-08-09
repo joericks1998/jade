@@ -1,5 +1,5 @@
-use jade_runtime::coll::DictObj;
 use super::*;
+use jade_runtime::coll::DictObj;
 
 // VM-surface tests only. The framing/parsing helpers (parse_unix_url, dechunk,
 // parse_response, find_subsequence) now live in `jade_runtime::uhttpf` and are

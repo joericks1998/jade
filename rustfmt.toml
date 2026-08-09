@@ -1,0 +1,12 @@
+# Match the style the code is already written in, so `cargo fmt` is a no-op
+# rather than a 150-file rewrite. Everything here is a stable option.
+
+# The width the code has always been written to.
+max_width = 100
+
+# Without this, rustfmt breaks any call whose arguments run past 60 columns,
+# which is most of the assertions and half the `format!`s in this repo. It is
+# the single setting that decides whether formatting agrees with the code or
+# fights it: `use_small_heuristics = "Max"` ties every sub-width to `max_width`
+# instead, so a call that fits on a line stays on one.
+use_small_heuristics = "Max"

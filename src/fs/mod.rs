@@ -1,6 +1,7 @@
 use crate::{
-    compiler::{tir::JadeType, type_infer::TypeContext}, vm::VmValue,
+    compiler::{tir::JadeType, type_infer::TypeContext},
     frontend::error::{JadeError, Result, Span},
+    vm::VmValue,
 };
 
 use crate::builtins::{BuiltinFn, Package, make_array};
@@ -12,17 +13,14 @@ mod tests;
 const ZERO: Span = Span { line: 0, col: 0 };
 
 fn io_err(op: &str, path: &str, e: std::io::Error) -> JadeError {
-    JadeError::IoError {
-        message: format!("{} '{}': {}", op, path, e),
-        span: ZERO,
-    }
+    JadeError::IoError { message: format!("{} '{}': {}", op, path, e), span: ZERO }
 }
 
 fn require_str<'a>(args: &'a [VmValue], pos: usize, fn_name: &str) -> Result<&'a str> {
     match args.get(pos) {
         Some(VmValue::Str(s)) => Ok(s.as_str()),
         Some(_) => Err(JadeError::TypeError { message: fn_name.to_string(), span: ZERO }),
-        None    => Err(JadeError::ArityMismatch { expected: pos + 1, got: args.len(), span: ZERO }),
+        None => Err(JadeError::ArityMismatch { expected: pos + 1, got: args.len(), span: ZERO }),
     }
 }
 
@@ -57,7 +55,7 @@ fn fs_write(args: &[VmValue]) -> Result<VmValue> {
     if args.len() < 2 || args.len() > 3 {
         return Err(JadeError::ArityMismatch { expected: 2, got: args.len(), span: ZERO });
     }
-    let path    = require_str(args, 0, "fs.write")?;
+    let path = require_str(args, 0, "fs.write")?;
     let content = require_str(args, 1, "fs.write")?;
     jade_runtime::fsf::write(path, content)
         .map(|_| VmValue::Nil)
@@ -68,7 +66,7 @@ fn fs_append(args: &[VmValue]) -> Result<VmValue> {
     if args.len() < 2 || args.len() > 3 {
         return Err(JadeError::ArityMismatch { expected: 2, got: args.len(), span: ZERO });
     }
-    let path    = require_str(args, 0, "fs.append")?;
+    let path = require_str(args, 0, "fs.append")?;
     let content = require_str(args, 1, "fs.append")?;
     jade_runtime::fsf::append(path, content)
         .map(|_| VmValue::Nil)
@@ -88,9 +86,7 @@ fn fs_delete(args: &[VmValue]) -> Result<VmValue> {
         return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: ZERO });
     }
     let path = require_str(args, 0, "fs.delete")?;
-    jade_runtime::fsf::delete(path)
-        .map(|_| VmValue::Nil)
-        .map_err(|e| io_err("delete", path, e))
+    jade_runtime::fsf::delete(path).map(|_| VmValue::Nil).map_err(|e| io_err("delete", path, e))
 }
 
 fn fs_list_dir(args: &[VmValue]) -> Result<VmValue> {
@@ -99,7 +95,9 @@ fn fs_list_dir(args: &[VmValue]) -> Result<VmValue> {
     }
     let path = require_str(args, 0, "fs.list_dir")?;
     jade_runtime::fsf::list_dir(path)
-        .map(|names| make_array(names.into_iter().map(|s| VmValue::Str(JStr::tainted(s))).collect()))
+        .map(|names| {
+            make_array(names.into_iter().map(|s| VmValue::Str(JStr::tainted(s))).collect())
+        })
         .map_err(|e| io_err("list_dir", path, e))
 }
 
@@ -108,9 +106,7 @@ fn fs_mkdir(args: &[VmValue]) -> Result<VmValue> {
         return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: ZERO });
     }
     let path = require_str(args, 0, "fs.mkdir")?;
-    jade_runtime::fsf::mkdir(path)
-        .map(|_| VmValue::Nil)
-        .map_err(|e| io_err("mkdir", path, e))
+    jade_runtime::fsf::mkdir(path).map(|_| VmValue::Nil).map_err(|e| io_err("mkdir", path, e))
 }
 
 /// `fs.read_bytes(path)` — a file as raw octets.
@@ -135,9 +131,12 @@ fn fs_read_bytes(args: &[VmValue]) -> Result<VmValue> {
     }
     let path = require_str(args, 0, "fs.read_bytes")?;
     jade_runtime::fsf::read_bytes(path)
-        .map(|d| VmValue::Bytes(std::sync::Arc::new(
-            jade_runtime::bytesf::BytesObj::new(d, jade_runtime::trust::TAINTED),
-        )))
+        .map(|d| {
+            VmValue::Bytes(std::sync::Arc::new(jade_runtime::bytesf::BytesObj::new(
+                d,
+                jade_runtime::trust::TAINTED,
+            )))
+        })
         .map_err(|e| io_err("read_bytes", path, e))
 }
 
@@ -181,9 +180,12 @@ fn fs_read_stdin_bytes(args: &[VmValue]) -> Result<VmValue> {
         return Err(JadeError::ArityMismatch { expected: 0, got: args.len(), span: ZERO });
     }
     jade_runtime::fsf::read_stdin_bytes()
-        .map(|d| VmValue::Bytes(std::sync::Arc::new(
-            jade_runtime::bytesf::BytesObj::new(d, jade_runtime::trust::TAINTED),
-        )))
+        .map(|d| {
+            VmValue::Bytes(std::sync::Arc::new(jade_runtime::bytesf::BytesObj::new(
+                d,
+                jade_runtime::trust::TAINTED,
+            )))
+        })
         .map_err(|e| io_err("read_stdin_bytes", "<stdin>", e))
 }
 
@@ -199,18 +201,18 @@ fn fs_write_stdout_bytes(args: &[VmValue]) -> Result<VmValue> {
 }
 
 static FS_PKG_FNS: &[BuiltinFn] = &[
-    BuiltinFn { name: "read_stdin_bytes",   vm_impl: fs_read_stdin_bytes },
+    BuiltinFn { name: "read_stdin_bytes", vm_impl: fs_read_stdin_bytes },
     BuiltinFn { name: "write_stdout_bytes", vm_impl: fs_write_stdout_bytes },
-    BuiltinFn { name: "read_bytes",   vm_impl: fs_read_bytes },
-    BuiltinFn { name: "write_bytes",  vm_impl: fs_write_bytes },
+    BuiltinFn { name: "read_bytes", vm_impl: fs_read_bytes },
+    BuiltinFn { name: "write_bytes", vm_impl: fs_write_bytes },
     BuiltinFn { name: "append_bytes", vm_impl: fs_append_bytes },
-    BuiltinFn { name: "read",     vm_impl: fs_read },
-    BuiltinFn { name: "write",    vm_impl: fs_write },
-    BuiltinFn { name: "append",   vm_impl: fs_append },
-    BuiltinFn { name: "exists",   vm_impl: fs_exists },
-    BuiltinFn { name: "delete",   vm_impl: fs_delete },
+    BuiltinFn { name: "read", vm_impl: fs_read },
+    BuiltinFn { name: "write", vm_impl: fs_write },
+    BuiltinFn { name: "append", vm_impl: fs_append },
+    BuiltinFn { name: "exists", vm_impl: fs_exists },
+    BuiltinFn { name: "delete", vm_impl: fs_delete },
     BuiltinFn { name: "list_dir", vm_impl: fs_list_dir },
-    BuiltinFn { name: "mkdir",    vm_impl: fs_mkdir },
+    BuiltinFn { name: "mkdir", vm_impl: fs_mkdir },
 ];
 
 fn register_fs_pkg_types(ctx: &mut TypeContext) {

@@ -108,9 +108,9 @@ pub mod render;
 pub mod shf;
 pub mod strf;
 pub mod string;
-pub mod task;
 pub mod strval;
 pub mod sys;
+pub mod task;
 pub mod timef;
 pub mod trust;
 pub mod uhttpf;
@@ -118,7 +118,7 @@ pub mod value;
 
 pub use coll::{ArrayObj, DictObj, StructObj};
 pub use heap::{Color, ObjHeader, ObjKind};
-pub use value::{JadeValue, FALSE, NIL, TRUE};
+pub use value::{FALSE, JadeValue, NIL, TRUE};
 
 /// ABI version of this runtime. Bumped when the shared value/heap ABI changes,
 /// so an AOT binary and a native package built against different runtimes can

@@ -599,10 +599,7 @@ fn a_name_pointed_at_inside_the_callers_own_data_comes_back_as_a_string() {
     let b = bind(
         "const void* getprop_by_offset(const void* fdt, int offset, const char** namep, int* lenp);\n",
     );
-    assert_eq!(
-        args(&b, "getprop_by_offset"),
-        ["bytes_ptr", "int", "out_str:char", "ret_len:int"]
-    );
+    assert_eq!(args(&b, "getprop_by_offset"), ["bytes_ptr", "int", "out_str:char", "ret_len:int"]);
 }
 
 #[test]
@@ -680,7 +677,10 @@ fn only_the_named_headers_functions_are_bound() {
     // The included header's `helper` is in the same translation unit and must
     // not come along — that is what keeps the C standard library out.
     let b = bind_tree(
-        &[("main.h", "#include \"other.h\"\nint mine(int a);\n"), ("other.h", "int helper(int);\n")],
+        &[
+            ("main.h", "#include \"other.h\"\nint mine(int a);\n"),
+            ("other.h", "int helper(int);\n"),
+        ],
         None,
     )
     .expect("should bind");
@@ -723,7 +723,10 @@ fn an_umbrella_header_with_no_export_table_says_what_it_needs() {
 #[test]
 fn a_header_that_declares_its_own_functions_is_not_treated_as_an_umbrella() {
     let b = bind_tree(
-        &[("main.h", "#include \"other.h\"\nint mine(int a);\n"), ("other.h", "int helper(int);\n")],
+        &[
+            ("main.h", "#include \"other.h\"\nint mine(int a);\n"),
+            ("other.h", "int helper(int);\n"),
+        ],
         Some(&["mine", "helper"]),
     )
     .expect("should bind");
@@ -842,7 +845,10 @@ fn a_header_including_a_sibling_with_angle_brackets_parses() {
     // include does not search the including file's own directory, so without
     // that directory on the search path clang cannot parse the header at all.
     let b = bind_tree(
-        &[("main.h", "#include <side.h>\nint mine(Side* s);\n"), ("side.h", "typedef struct Side Side;\n")],
+        &[
+            ("main.h", "#include <side.h>\nint mine(Side* s);\n"),
+            ("side.h", "typedef struct Side Side;\n"),
+        ],
         None,
     )
     .expect("a sibling header should resolve");
@@ -872,11 +878,9 @@ fn a_symbol_the_header_declares_and_the_library_does_not_export_is_skipped() {
     // have been configured without some of it. Binding one of those produces a
     // shim that compiles and then fails to *link* — and the linker takes the
     // whole dependency down over it, which is what libbrotlienc did.
-    let b = bind_tree(
-        &[("main.h", "int shipped(int a);\nint absent(int a);\n")],
-        Some(&["shipped"]),
-    )
-    .expect("should bind");
+    let b =
+        bind_tree(&[("main.h", "int shipped(int a);\nint absent(int a);\n")], Some(&["shipped"]))
+            .expect("should bind");
     assert!(b.symbols.contains_key("shipped"));
     assert!(!b.symbols.contains_key("absent"), "{:?}", b.symbols.keys());
     assert!(why_skipped(&b, "absent").contains("not exported"), "{:?}", b.skipped);
@@ -932,10 +936,14 @@ fn a_held_structs_buffer_fields_are_found_by_the_same_rule_a_parameter_list_uses
     );
     let bufs = &b.structs["strm"].buffers;
     assert_eq!(bufs.len(), 2, "{bufs:?}");
-    assert_eq!((bufs[0].ptr.as_str(), bufs[0].len.as_str(), bufs[0].writable),
-        ("next_in", "avail_in", false));
-    assert_eq!((bufs[1].ptr.as_str(), bufs[1].len.as_str(), bufs[1].writable),
-        ("next_out", "avail_out", true));
+    assert_eq!(
+        (bufs[0].ptr.as_str(), bufs[0].len.as_str(), bufs[0].writable),
+        ("next_in", "avail_in", false)
+    );
+    assert_eq!(
+        (bufs[1].ptr.as_str(), bufs[1].len.as_str(), bufs[1].writable),
+        ("next_out", "avail_out", true)
+    );
 }
 
 #[test]
@@ -1055,7 +1063,11 @@ fn a_lone_void_pointer_is_refused_because_it_may_free_what_it_is_given() {
     // shim's own scratch would have the library free it and the shim free it
     // again on the way out.
     let b = bind("void ares_free_string(void* str);\n");
-    assert!(why_skipped(&b, "ares_free_string").contains("frees what it is given"), "{:?}", b.skipped);
+    assert!(
+        why_skipped(&b, "ares_free_string").contains("frees what it is given"),
+        "{:?}",
+        b.skipped
+    );
 }
 
 #[test]
@@ -1280,13 +1292,12 @@ fn a_buffer_still_wins_over_an_out_scalar() {
 fn two_out_parameters_take_the_headers_own_names() {
     // Inventing `out0`/`out1` is the objection that kept multiple outs out of
     // the design in the first place. The library already named them.
-    let b = bind("void get_progress(unsigned long long *progress_in, unsigned long long *progress_out);\n");
+    let b = bind(
+        "void get_progress(unsigned long long *progress_in, unsigned long long *progress_out);\n",
+    );
     assert_eq!(
         args(&b, "get_progress"),
-        [
-            "out_scalar:unsigned long long@progress_in",
-            "out_scalar:unsigned long long@progress_out"
-        ]
+        ["out_scalar:unsigned long long@progress_in", "out_scalar:unsigned long long@progress_out"]
     );
 }
 

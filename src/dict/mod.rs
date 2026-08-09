@@ -2,8 +2,9 @@
 mod tests;
 
 use crate::{
-    compiler::{tir::JadeType, type_infer::TypeContext}, vm::VmValue,
+    compiler::{tir::JadeType, type_infer::TypeContext},
     frontend::error::{JadeError, Result, Span},
+    vm::VmValue,
 };
 
 use crate::builtins::{BuiltinFn, Package, make_array};
@@ -51,17 +52,19 @@ fn dict_has(args: &[VmValue]) -> Result<VmValue> {
 
 fn dict_get(args: &[VmValue]) -> Result<VmValue> {
     match (&args[0], args.get(1)) {
-        (VmValue::Dict(m), Some(VmValue::Str(k))) => Ok(m.get(k.as_str()).cloned().unwrap_or(VmValue::Nil)),
+        (VmValue::Dict(m), Some(VmValue::Str(k))) => {
+            Ok(m.get(k.as_str()).cloned().unwrap_or(VmValue::Nil))
+        }
         _ => Err(JadeError::TypeError { message: "dict.get".to_string(), span: ZERO }),
     }
 }
 
 static DICT_METHODS: &[BuiltinFn] = &[
-    BuiltinFn { name: "len",    vm_impl: dict_len },
-    BuiltinFn { name: "keys",   vm_impl: dict_keys },
+    BuiltinFn { name: "len", vm_impl: dict_len },
+    BuiltinFn { name: "keys", vm_impl: dict_keys },
     BuiltinFn { name: "values", vm_impl: dict_values },
-    BuiltinFn { name: "has",    vm_impl: dict_has },
-    BuiltinFn { name: "get",    vm_impl: dict_get },
+    BuiltinFn { name: "has", vm_impl: dict_has },
+    BuiltinFn { name: "get", vm_impl: dict_get },
 ];
 
 pub fn find_dict_method(name: &str) -> Option<BuiltinFn> {
@@ -70,10 +73,18 @@ pub fn find_dict_method(name: &str) -> Option<BuiltinFn> {
 
 // ── std/dict package functions ────────────────────────────────────────────────
 
-fn pkg_keys(args: &[VmValue]) -> Result<VmValue> { dict_keys(args) }
-fn pkg_values(args: &[VmValue]) -> Result<VmValue> { dict_values(args) }
-fn pkg_has(args: &[VmValue]) -> Result<VmValue> { dict_has(args) }
-fn pkg_get(args: &[VmValue]) -> Result<VmValue> { dict_get(args) }
+fn pkg_keys(args: &[VmValue]) -> Result<VmValue> {
+    dict_keys(args)
+}
+fn pkg_values(args: &[VmValue]) -> Result<VmValue> {
+    dict_values(args)
+}
+fn pkg_has(args: &[VmValue]) -> Result<VmValue> {
+    dict_has(args)
+}
+fn pkg_get(args: &[VmValue]) -> Result<VmValue> {
+    dict_get(args)
+}
 
 fn pkg_merge(args: &[VmValue]) -> Result<VmValue> {
     match (&args[0], args.get(1)) {
@@ -89,11 +100,11 @@ fn pkg_merge(args: &[VmValue]) -> Result<VmValue> {
 }
 
 static DICT_PKG_FNS: &[BuiltinFn] = &[
-    BuiltinFn { name: "keys",   vm_impl: pkg_keys },
+    BuiltinFn { name: "keys", vm_impl: pkg_keys },
     BuiltinFn { name: "values", vm_impl: pkg_values },
-    BuiltinFn { name: "has",    vm_impl: pkg_has },
-    BuiltinFn { name: "get",    vm_impl: pkg_get },
-    BuiltinFn { name: "merge",  vm_impl: pkg_merge },
+    BuiltinFn { name: "has", vm_impl: pkg_has },
+    BuiltinFn { name: "get", vm_impl: pkg_get },
+    BuiltinFn { name: "merge", vm_impl: pkg_merge },
 ];
 
 fn register_dict_pkg_types(ctx: &mut TypeContext) {
@@ -112,11 +123,23 @@ pub static DICT_PKG: Package = Package {
 
 pub fn register_dict_method_types(ctx: &mut TypeContext) {
     let methods: &[(&str, JadeType)] = &[
-        ("len",    JadeType::Fn { params: vec![], ret: Box::new(JadeType::Int) }),
-        ("keys",   JadeType::Fn { params: vec![], ret: Box::new(JadeType::Array(Box::new(JadeType::Str))) }),
-        ("values", JadeType::Fn { params: vec![], ret: Box::new(JadeType::Array(Box::new(JadeType::Unknown))) }),
-        ("has",    JadeType::Fn { params: vec![JadeType::Str], ret: Box::new(JadeType::Bool) }),
-        ("get",    JadeType::Fn { params: vec![JadeType::Str], ret: Box::new(JadeType::Unknown) }),
+        ("len", JadeType::Fn { params: vec![], ret: Box::new(JadeType::Int) }),
+        (
+            "keys",
+            JadeType::Fn {
+                params: vec![],
+                ret: Box::new(JadeType::Array(Box::new(JadeType::Str))),
+            },
+        ),
+        (
+            "values",
+            JadeType::Fn {
+                params: vec![],
+                ret: Box::new(JadeType::Array(Box::new(JadeType::Unknown))),
+            },
+        ),
+        ("has", JadeType::Fn { params: vec![JadeType::Str], ret: Box::new(JadeType::Bool) }),
+        ("get", JadeType::Fn { params: vec![JadeType::Str], ret: Box::new(JadeType::Unknown) }),
     ];
     for (name, ty) in methods {
         ctx.define_primitive_method("dict", name, ty.clone());

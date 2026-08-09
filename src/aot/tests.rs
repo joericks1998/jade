@@ -32,10 +32,7 @@ fn binary_mode_emits_main_and_no_pkg_init() {
 fn shared_lib_emits_pkg_init_and_no_main() {
     let out = ir(LIB, CompileMode::SharedLib { exports: vec![] });
     assert!(out.contains("define i32 @jade_pkg_init("), "no pkg_init:\n{out}");
-    assert!(
-        !out.contains("define i32 @main("),
-        "a shared library must not define main:\n{out}"
-    );
+    assert!(!out.contains("define i32 @main("), "a shared library must not define main:\n{out}");
 }
 
 #[test]
@@ -56,10 +53,7 @@ fn an_empty_export_list_exports_every_function() {
 #[test]
 fn a_shared_library_declares_the_abi_it_was_built_against() {
     let out = ir(LIB, CompileMode::SharedLib { exports: vec![] });
-    assert!(
-        out.contains("@jade_pkg_abi_version"),
-        "a package must declare its value ABI:\n{out}"
-    );
+    assert!(out.contains("@jade_pkg_abi_version"), "a package must declare its value ABI:\n{out}");
     assert!(
         out.contains(&format!("ret i32 {}", jade_runtime::RUNTIME_ABI_VERSION)),
         "the declared ABI must be this runtime's ({}):\n{out}",
@@ -79,7 +73,10 @@ fn a_binary_declares_no_package_abi() {
 fn an_export_list_narrows_the_bindings() {
     let out = ir(LIB, CompileMode::SharedLib { exports: vec!["add".to_string()] });
     assert!(out.contains(r#""jade_export$add""#), "add not exported:\n{out}");
-    assert!(!out.contains(r#""jade_export$triple""#), "triple should have been filtered out:\n{out}");
+    assert!(
+        !out.contains(r#""jade_export$triple""#),
+        "triple should have been filtered out:\n{out}"
+    );
 }
 
 #[test]
@@ -147,13 +144,8 @@ fn a_compiled_jade_package_loads_and_binds_its_exports() {
     let ext = if cfg!(target_os = "macos") { "dylib" } else { "so" };
     let out = dir.join(format!("mathpkg.{ext}"));
 
-    let result = compile_with_mode(
-        tir(LIB),
-        None,
-        &out,
-        false,
-        CompileMode::SharedLib { exports: vec![] },
-    );
+    let result =
+        compile_with_mode(tir(LIB), None, &out, false, CompileMode::SharedLib { exports: vec![] });
     assert!(result.is_ok(), "linking a package failed: {:?}", result.err());
     assert!(out.exists(), "no shared library was produced at {}", out.display());
 

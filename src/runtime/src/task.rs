@@ -784,10 +784,7 @@ mod tests {
             let _ = unsafe { await_one(f) };
         }
         let workers = pool().worker_count();
-        assert!(
-            workers <= HARD_MAX_WORKERS,
-            "worker count {workers} exceeded the hard ceiling"
-        );
+        assert!(workers <= HARD_MAX_WORKERS, "worker count {workers} exceeded the hard ceiling");
         assert!(
             workers < 200,
             "200 tasks produced {workers} threads — the pool is not bounding anything"

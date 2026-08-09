@@ -10,8 +10,8 @@
 //! LLVM `add`, and it is why the two engines share this representation but no
 //! execution code.
 
-use std::{collections::HashMap, sync::Arc};
 use parking_lot::Mutex;
+use std::{collections::HashMap, sync::Arc};
 
 use crate::frontend::{
     ast::{BinOpKind, UnaryOpKind},
@@ -71,12 +71,7 @@ pub struct Chunk {
 
 impl Chunk {
     pub fn new(name: impl Into<String>) -> Self {
-        Chunk {
-            name: name.into(),
-            code: Vec::new(),
-            spans: Vec::new(),
-            fn_defs: Vec::new(),
-        }
+        Chunk { name: name.into(), code: Vec::new(), spans: Vec::new(), fn_defs: Vec::new() }
     }
 
     /// Append an instruction and return its index.
@@ -101,10 +96,10 @@ impl Chunk {
     pub fn patch_jump(&mut self, idx: usize, target_idx: usize) {
         let offset = target_idx as i32 - (idx as i32 + 1);
         match &mut self.code[idx] {
-            Instr::Jump(o)             => *o = offset,
-            Instr::JumpIfFalse(_, o)   => *o = offset,
-            Instr::JumpIfTrue(_, o)    => *o = offset,
-            Instr::SetupHandler(_, o)  => *o = offset,
+            Instr::Jump(o) => *o = offset,
+            Instr::JumpIfFalse(_, o) => *o = offset,
+            Instr::JumpIfTrue(_, o) => *o = offset,
+            Instr::SetupHandler(_, o) => *o = offset,
             other => unreachable!("patch_jump on non-jump: {:?}", other),
         }
     }

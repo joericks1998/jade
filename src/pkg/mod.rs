@@ -110,9 +110,8 @@ fn resolve_local(
     abi: &str,
 ) -> Result<BTreeMap<String, LockedArtifact>, String> {
     let src = root.join(rel);
-    let bytes = std::fs::read(&src).map_err(|e| {
-        format!("dependency '{name}': cannot read {} ({e})", src.display())
-    })?;
+    let bytes = std::fs::read(&src)
+        .map_err(|e| format!("dependency '{name}': cannot read {} ({e})", src.display()))?;
 
     let file = artifact_filename(name, rel, abi);
 
@@ -234,7 +233,9 @@ pub fn materialize(root: &Path, lock: &Lockfile, fetcher: &dyn Fetcher) -> Resul
         }
 
         let bytes = match &artifact.url {
-            Some(url) => fetcher.fetch(url).map_err(|e| format!("dependency '{}': {e}", pkg.name))?,
+            Some(url) => {
+                fetcher.fetch(url).map_err(|e| format!("dependency '{}': {e}", pkg.name))?
+            }
             None => {
                 let src = local_source_path(root, pkg)?;
                 std::fs::read(&src).map_err(|e| {
@@ -309,15 +310,12 @@ fn select_artifact<'a>(
 
 /// Recover the original local path from a `path+…` lock source.
 fn local_source_path(root: &Path, pkg: &LockedPackage) -> Result<PathBuf, String> {
-    pkg.source
-        .strip_prefix(lock::PATH_SOURCE)
-        .map(|rel| root.join(rel))
-        .ok_or_else(|| {
-            format!(
-                "dependency '{}': lock entry has no url and source '{}' is not a local path",
-                pkg.name, pkg.source
-            )
-        })
+    pkg.source.strip_prefix(lock::PATH_SOURCE).map(|rel| root.join(rel)).ok_or_else(|| {
+        format!(
+            "dependency '{}': lock entry has no url and source '{}' is not a local path",
+            pkg.name, pkg.source
+        )
+    })
 }
 
 // ── Local sources ─────────────────────────────────────────────────────────────
@@ -429,8 +427,7 @@ pub fn verify_local_unchanged(root: &Path, lock: &Lockfile) -> Result<(), String
 /// Write via a temp file and rename, so an interrupted install never leaves a
 /// half-written `.so` that would pass an existence check and fail a `dlopen`.
 fn write_artifact(dir: &Path, dest: &Path, bytes: &[u8]) -> Result<(), String> {
-    std::fs::create_dir_all(dir)
-        .map_err(|e| format!("cannot create {} ({e})", dir.display()))?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {} ({e})", dir.display()))?;
 
     let tmp = dir.join(format!(".jade-install-{}", std::process::id()));
     std::fs::write(&tmp, bytes).map_err(|e| format!("cannot write {} ({e})", tmp.display()))?;
@@ -530,7 +527,11 @@ pub fn check_symbols_resolved(manifest: &ProjectManifest) -> Result<(), String> 
 ///
 /// Runs after [`materialize`], against the manifest rather than the lock: the
 /// symbol table is user-declared configuration, not a resolution result.
-pub fn build_c_shims(root: &Path, lock: &Lockfile, manifest: &ProjectManifest) -> Result<(), String> {
+pub fn build_c_shims(
+    root: &Path,
+    lock: &Lockfile,
+    manifest: &ProjectManifest,
+) -> Result<(), String> {
     let Some(deps) = &manifest.dependencies else {
         return Ok(());
     };
@@ -584,8 +585,9 @@ pub fn build_c_shims(root: &Path, lock: &Lockfile, manifest: &ProjectManifest) -
             continue;
         }
 
-        std::fs::write(&shim_c, &source)
-            .map_err(|e| format!("dependency '{}': cannot write {} ({e})", pkg.name, shim_c.display()))?;
+        std::fs::write(&shim_c, &source).map_err(|e| {
+            format!("dependency '{}': cannot write {} ({e})", pkg.name, shim_c.display())
+        })?;
 
         compile_shim(
             &pkg.name,
@@ -750,11 +752,8 @@ pub fn verify_in_sync(manifest: &ProjectManifest, lock: &Lockfile) -> Result<(),
     let empty = Default::default();
     let deps = manifest.dependencies.as_ref().unwrap_or(&empty);
 
-    let mut missing: Vec<&str> = deps
-        .keys()
-        .filter(|n| lock.get(n).is_none())
-        .map(String::as_str)
-        .collect();
+    let mut missing: Vec<&str> =
+        deps.keys().filter(|n| lock.get(n).is_none()).map(String::as_str).collect();
     let mut stale: Vec<&str> = lock
         .packages
         .iter()
@@ -771,7 +770,11 @@ pub fn verify_in_sync(manifest: &ProjectManifest, lock: &Lockfile) -> Result<(),
         .filter_map(|(name, entry)| {
             let locked = lock.get(name)?;
             (locked.abi != entry.abi.as_str()).then(|| {
-                format!("{name} (jade.toml says {}, jade.lock says {})", entry.abi.as_str(), locked.abi)
+                format!(
+                    "{name} (jade.toml says {}, jade.lock says {})",
+                    entry.abi.as_str(),
+                    locked.abi
+                )
             })
         })
         .collect();

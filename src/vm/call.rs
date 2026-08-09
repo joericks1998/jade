@@ -13,7 +13,9 @@ pub(crate) fn patch_builtin_span(mut e: JadeError, call_span: Span) -> JadeError
         JadeError::ArityMismatch { span, .. }
         | JadeError::TypeError { span, .. }
         | JadeError::IoError { span, .. } => {
-            if span.line == 0 { *span = call_span; }
+            if span.line == 0 {
+                *span = call_span;
+            }
         }
         _ => {}
     }
@@ -36,14 +38,14 @@ pub(crate) fn resolve_named_args(
             let params = &cf.params;
             let mut result = vec![VmValue::Nil; params.len()];
             for (i, v) in positional.into_iter().enumerate() {
-                if i < result.len() { result[i] = v; }
+                if i < result.len() {
+                    result[i] = v;
+                }
             }
             for (name, v) in named {
-                let pos = params.iter().position(|p| p == &name)
-                    .ok_or_else(|| JadeError::TypeError {
-                        message: format!("unknown parameter '{}'", name),
-                        span,
-                    })?;
+                let pos = params.iter().position(|p| p == &name).ok_or_else(|| {
+                    JadeError::TypeError { message: format!("unknown parameter '{}'", name), span }
+                })?;
                 result[pos] = v;
             }
             Ok(result)
@@ -51,7 +53,9 @@ pub(crate) fn resolve_named_args(
         _ => {
             // For native/builtin/closure callees, append named values positionally.
             let mut args = positional;
-            for (_, v) in named { args.push(v); }
+            for (_, v) in named {
+                args.push(v);
+            }
             Ok(args)
         }
     }
@@ -87,8 +91,12 @@ pub(crate) async fn call_value(
             let result = call_fn(&cf, args, state, span).await;
             for (k, old) in saved {
                 match old {
-                    Some(v) => { state.globals.insert(k, v); }
-                    None    => { state.globals.remove(&k); }
+                    Some(v) => {
+                        state.globals.insert(k, v);
+                    }
+                    None => {
+                        state.globals.remove(&k);
+                    }
                 }
             }
             result
@@ -127,11 +135,16 @@ pub(crate) async fn call_value(
                 // Default "\n" matches Python's print() behaviour.
                 let end = match iter.next() {
                     None | Some(VmValue::Nil) => "\n".to_owned(),
-                    Some(VmValue::Str(s))     => s.to_string(),
-                    Some(other) => return Err(JadeError::TypeError {
-                        message: format!("print() end= must be str, got {}", value_type_name(&other)),
-                        span,
-                    }),
+                    Some(VmValue::Str(s)) => s.to_string(),
+                    Some(other) => {
+                        return Err(JadeError::TypeError {
+                            message: format!(
+                                "print() end= must be str, got {}",
+                                value_type_name(&other)
+                            ),
+                            span,
+                        });
+                    }
                 };
                 match val {
                     VmValue::TokenStream(ts) => {
@@ -146,7 +159,11 @@ pub(crate) async fn call_value(
                         }
                     }
                     other => {
-                        crate::stdio::write_str_flush(&format!("{}{}", value_to_display(&other), end));
+                        crate::stdio::write_str_flush(&format!(
+                            "{}{}",
+                            value_to_display(&other),
+                            end
+                        ));
                     }
                 }
                 Ok(VmValue::Nil)
@@ -163,9 +180,7 @@ pub(crate) async fn call_value(
                         let type_name = s.lock().type_name().to_string();
                         if let Some(field_name) = state.route_configs.get(&type_name) {
                             let fields = s.lock();
-                            return fields.get_field(field_name)
-                                .cloned()
-                                .unwrap_or(VmValue::Nil);
+                            return fields.get_field(field_name).cloned().unwrap_or(VmValue::Nil);
                         }
                     }
                     VmValue::Nil
@@ -176,7 +191,8 @@ pub(crate) async fn call_value(
                         // Prefer the struct's own extend methods; fall back to globals.
                         let fn_val = if let VmValue::Struct(ref s) = obj {
                             let type_name = s.lock().type_name().to_string();
-                            state.extend_methods
+                            state
+                                .extend_methods
                                 .get(&type_name)
                                 .and_then(|m| m.get(method_name.as_str()))
                                 .map(|cf| VmValue::Fn(Arc::clone(cf)))
@@ -187,13 +203,19 @@ pub(crate) async fn call_value(
                         match fn_val {
                             Some(f) => call_value(f, vec![obj], state, span).await,
                             None => Err(JadeError::Exception {
-                                message: format!("route(): no method or function named {:?}", method_name),
+                                message: format!(
+                                    "route(): no method or function named {:?}",
+                                    method_name
+                                ),
                                 span,
                             }),
                         }
                     }
                     other => Err(JadeError::TypeError {
-                        message: format!("route(): expected string method name, got {}", value_to_display(&other)),
+                        message: format!(
+                            "route(): expected string method name, got {}",
+                            value_to_display(&other)
+                        ),
                         span,
                     }),
                 }
@@ -205,10 +227,15 @@ pub(crate) async fn call_value(
                 }
                 let elems = match &args[0] {
                     VmValue::Array(arc) => arc.lock().clone(),
-                    other => return Err(JadeError::TypeError {
-                        message: format!("array.map: first argument must be an array, got {}", value_type_name(other)),
-                        span,
-                    }),
+                    other => {
+                        return Err(JadeError::TypeError {
+                            message: format!(
+                                "array.map: first argument must be an array, got {}",
+                                value_type_name(other)
+                            ),
+                            span,
+                        });
+                    }
                 };
                 let f = args[1].clone();
                 let mut out = Vec::with_capacity(elems.len());
@@ -224,21 +251,31 @@ pub(crate) async fn call_value(
                 }
                 let elems = match &args[0] {
                     VmValue::Array(arc) => arc.lock().clone(),
-                    other => return Err(JadeError::TypeError {
-                        message: format!("array.filter: first argument must be an array, got {}", value_type_name(other)),
-                        span,
-                    }),
+                    other => {
+                        return Err(JadeError::TypeError {
+                            message: format!(
+                                "array.filter: first argument must be an array, got {}",
+                                value_type_name(other)
+                            ),
+                            span,
+                        });
+                    }
                 };
                 let f = args[1].clone();
                 let mut out = Vec::new();
                 for e in elems {
                     match call_value(f.clone(), vec![e.clone()], state, span).await? {
-                        VmValue::Bool(true)  => out.push(e),
+                        VmValue::Bool(true) => out.push(e),
                         VmValue::Bool(false) => {}
-                        other => return Err(JadeError::TypeError {
-                            message: format!("array.filter: predicate must return a bool, got {}", value_type_name(&other)),
-                            span,
-                        }),
+                        other => {
+                            return Err(JadeError::TypeError {
+                                message: format!(
+                                    "array.filter: predicate must return a bool, got {}",
+                                    value_type_name(&other)
+                                ),
+                                span,
+                            });
+                        }
                     }
                 }
                 Ok(VmValue::Array(Arc::new(Mutex::new(ArrayObj::from_vec(out)))))
@@ -250,30 +287,46 @@ pub(crate) async fn call_value(
                 }
                 let url = match &args[0] {
                     VmValue::Str(s) => s.clone(),
-                    other => return Err(JadeError::TypeError {
-                        message: format!("uhttp.stream() url must be a str, got {}", value_type_name(other)),
-                        span,
-                    }),
+                    other => {
+                        return Err(JadeError::TypeError {
+                            message: format!(
+                                "uhttp.stream() url must be a str, got {}",
+                                value_type_name(other)
+                            ),
+                            span,
+                        });
+                    }
                 };
                 let handler = args[1].clone();
-                if !matches!(handler,
-                    VmValue::Fn(_) | VmValue::Closure(_, _) | VmValue::BoundMethod(_)) {
+                if !matches!(
+                    handler,
+                    VmValue::Fn(_) | VmValue::Closure(_, _) | VmValue::BoundMethod(_)
+                ) {
                     return Err(JadeError::TypeError {
-                        message: format!("uhttp.stream() handler must be a function, got {}", value_type_name(&handler)),
+                        message: format!(
+                            "uhttp.stream() handler must be a function, got {}",
+                            value_type_name(&handler)
+                        ),
                         span,
                     });
                 }
-                let headers = uhttp::extract_headers(args.get(2))
-                    .map_err(|e| patch_builtin_span(e, span))?;
+                let headers =
+                    uhttp::extract_headers(args.get(2)).map_err(|e| patch_builtin_span(e, span))?;
 
-                let mut rx = uhttp::open_stream(&url, headers)
-                    .map_err(|e| patch_builtin_span(e, span))?;
+                let mut rx =
+                    uhttp::open_stream(&url, headers).map_err(|e| patch_builtin_span(e, span))?;
                 let mut status: i64 = 0;
                 while let Some(ev) = rx.recv().await {
                     match ev {
                         StreamEvent::Status(s) => status = s as i64,
                         StreamEvent::Line(line) => {
-                            let r = call_value(handler.clone(), vec![VmValue::Str(line.into())], state, span).await?;
+                            let r = call_value(
+                                handler.clone(),
+                                vec![VmValue::Str(line.into())],
+                                state,
+                                span,
+                            )
+                            .await?;
                             // A handler returning `false` stops the stream early;
                             // dropping `rx` closes the socket on the worker side.
                             if matches!(r, VmValue::Bool(false)) {
@@ -318,19 +371,17 @@ pub(crate) async fn call_fn(
         for i in missing_start..cf.params.len() {
             match cf.defaults.get(i).and_then(|d| d.as_ref()) {
                 Some(default) => args.push(default.clone()),
-                None => return Err(JadeError::ArityMismatch {
-                    expected: cf.params.len(),
-                    got: missing_start,
-                    span,
-                }),
+                None => {
+                    return Err(JadeError::ArityMismatch {
+                        expected: cf.params.len(),
+                        got: missing_start,
+                        span,
+                    });
+                }
             }
         }
     } else if args.len() > cf.params.len() {
-        return Err(JadeError::ArityMismatch {
-            expected: cf.params.len(),
-            got: args.len(),
-            span,
-        });
+        return Err(JadeError::ArityMismatch { expected: cf.params.len(), got: args.len(), span });
     }
     // Build the frame: params occupy slots 0..params.len(); rest start as Nil.
     let n = (cf.n_slots as usize).max(cf.params.len());
@@ -352,14 +403,13 @@ pub(crate) async fn call_fn(
     if cf.is_generator {
         state.yield_stack.push(Arc::new(Mutex::new(Vec::new())));
     }
-    let result = execute_chunk(&cf.chunk, &mut frame, state).await
-        .map_err(|e| {
-            if cf.source_file.is_empty() || matches!(e, JadeError::InFile { .. }) {
-                e
-            } else {
-                JadeError::InFile { file: cf.source_file.clone(), cause: Box::new(e) }
-            }
-        });
+    let result = execute_chunk(&cf.chunk, &mut frame, state).await.map_err(|e| {
+        if cf.source_file.is_empty() || matches!(e, JadeError::InFile { .. }) {
+            e
+        } else {
+            JadeError::InFile { file: cf.source_file.clone(), cause: Box::new(e) }
+        }
+    });
     state.active_module_scope = saved_scope;
     if cf.is_generator {
         // Pop even on the error path, or a raise inside a generator would leave
@@ -372,7 +422,6 @@ pub(crate) async fn call_fn(
 }
 
 // ── Prompt deref ──────────────────────────────────────────────────────────────
-
 
 // ── Native calls that pass a Jade function ────────────────────────────────────
 
@@ -435,13 +484,8 @@ async fn call_native_with_callbacks(
         }
     };
 
-    let result = crate::native::finish_native_call(
-        &nfn.name,
-        &done.args.argv,
-        &done.out,
-        done.status,
-        span,
-    );
+    let result =
+        crate::native::finish_native_call(&nfn.name, &done.args.argv, &done.out, done.status, span);
     // The JadeFn wrappers are this call's, not the generic free path's: their
     // `host` is a Rust Box that `done.args` still owns.
     crate::native::free_fn_wrappers(&done.args.argv);

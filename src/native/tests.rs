@@ -1,5 +1,5 @@
-use jade_runtime::coll::DictObj;
 use super::*;
+use jade_runtime::coll::DictObj;
 
 const ZERO: Span = Span { line: 0, col: 0 };
 
@@ -60,9 +60,7 @@ fn vm_to_ffi_str_pushes_cstring_and_points_at_it() {
     assert_eq!(scratch.len(), 1, "CString must be kept alive in scratch");
     // Pointer must resolve back to the original bytes.
     let read = unsafe {
-        CStr::from_ptr(v.data.as_str as *const std::ffi::c_char)
-            .to_string_lossy()
-            .into_owned()
+        CStr::from_ptr(v.data.as_str as *const std::ffi::c_char).to_string_lossy().into_owned()
     };
     assert_eq!(read, "hi");
 }
@@ -228,9 +226,17 @@ fn roundtrip_array_nested() {
 #[test]
 fn tag_constants_are_distinct() {
     let tags = [
-        JADE_TAG_NIL, JADE_TAG_INT, JADE_TAG_FLOAT, JADE_TAG_BOOL,
-        JADE_TAG_STR, JADE_TAG_ERROR, JADE_TAG_ARRAY, JADE_TAG_DICT,
-        JADE_TAG_STRUCT, JADE_TAG_BYTES, JADE_TAG_HANDLE,
+        JADE_TAG_NIL,
+        JADE_TAG_INT,
+        JADE_TAG_FLOAT,
+        JADE_TAG_BOOL,
+        JADE_TAG_STR,
+        JADE_TAG_ERROR,
+        JADE_TAG_ARRAY,
+        JADE_TAG_DICT,
+        JADE_TAG_STRUCT,
+        JADE_TAG_BYTES,
+        JADE_TAG_HANDLE,
     ];
     for i in 0..tags.len() {
         for j in (i + 1)..tags.len() {
@@ -397,7 +403,7 @@ fn bytes_survive_a_round_trip() {
 #[test]
 fn inbound_bytes_are_tainted() {
     let mut scratch = Vec::new();
-    let v = vm_to_ffi(&sample_bytes(), &mut scratch);  // sent TRUSTED
+    let v = vm_to_ffi(&sample_bytes(), &mut scratch); // sent TRUSTED
     let back = ffi_to_vm(&v, ZERO).expect("bytes should convert back");
     unsafe { ffi_free(&v) };
 
@@ -410,11 +416,10 @@ fn inbound_bytes_are_tainted() {
 /// which the free path cannot tell from a failed allocation.
 #[test]
 fn empty_bytes_round_trip() {
-    let empty =
-        VmValue::Bytes(Arc::new(jade_runtime::bytesf::BytesObj::new(
-            Vec::new(),
-            jade_runtime::trust::TRUSTED,
-        )));
+    let empty = VmValue::Bytes(Arc::new(jade_runtime::bytesf::BytesObj::new(
+        Vec::new(),
+        jade_runtime::trust::TRUSTED,
+    )));
     let mut scratch = Vec::new();
     let v = vm_to_ffi(&empty, &mut scratch);
     assert_eq!(v.tag, JADE_TAG_BYTES);
@@ -437,9 +442,7 @@ fn bytes_nested_in_an_array_and_a_dict_round_trip() {
     let back = ffi_to_vm(&v, ZERO).expect("array should convert back");
     unsafe { ffi_free(&v) };
     let VmValue::Array(out) = back else { panic!("expected an array back") };
-    let Some(VmValue::Bytes(b)) = out.lock().get(1).cloned() else {
-        panic!("nested bytes lost")
-    };
+    let Some(VmValue::Bytes(b)) = out.lock().get(1).cloned() else { panic!("nested bytes lost") };
     assert_eq!(b.as_slice(), [0x00, 0xFF, 0x41, 0x00, 0x80]);
 
     let mut d: DictObj<VmValue> = DictObj::new();
@@ -586,10 +589,8 @@ fn a_handle_nested_in_a_container_round_trips() {
     // Containers copy their elements through vm_to_ffi_owned rather than
     // vm_to_ffi, so the nested path is a separate arm from the top-level one and
     // needs its own coverage — that distinction is what the bytes bug turned on.
-    let arr = crate::builtins::make_array(vec![
-        VmValue::Int(1),
-        sample_handle(FAKE_PTR, "FT_Face"),
-    ]);
+    let arr =
+        crate::builtins::make_array(vec![VmValue::Int(1), sample_handle(FAKE_PTR, "FT_Face")]);
     let mut scratch = Vec::new();
     let v = vm_to_ffi(&arr, &mut scratch);
     let back = ffi_to_vm(&v, ZERO).expect("array should convert back");

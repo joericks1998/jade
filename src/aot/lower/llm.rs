@@ -54,7 +54,8 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
     /// returns a non-prompt value unchanged, so this stays correct on a path where
     /// the type checker guarantees a prompt but codegen cannot see one.
     pub(super) fn prompt_text_ptr(&self, r: Reg) -> PointerValue<'ctx> {
-        let f = self.runtime_fn("jrt_prompt_text", self.i64t().fn_type(&[self.i64t().into()], false));
+        let f =
+            self.runtime_fn("jrt_prompt_text", self.i64t().fn_type(&[self.i64t().into()], false));
         let text = self
             .builder
             .build_call(f, &[self.load(r).into()], "ptext")
@@ -63,5 +64,4 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
             .into_int_value();
         self.untag_ptr(text)
     }
-
 }

@@ -8,14 +8,17 @@ use jade_runtime::coll::{ArrayObj, DictObj};
 use parking_lot::Mutex;
 
 use crate::{
-    compiler::{type_infer::TypeContext}, vm::{NativeFnId, VmValue},
+    compiler::type_infer::TypeContext,
     frontend::error::Result,
+    vm::{NativeFnId, VmValue},
 };
 
 // The built-in packages are flat top-level modules; pull them into scope so the
 // registry can refer to them by bare name.
-use crate::{array, bytes, core, dict, env, fs, grammar, http, json, math, path, random, sh, string, time};
 use crate::uhttp;
+use crate::{
+    array, bytes, core, dict, env, fs, grammar, http, json, math, path, random, sh, string, time,
+};
 
 // ── BuiltinFn ─────────────────────────────────────────────────────────────────
 
@@ -63,11 +66,11 @@ pub enum PrimType {
 impl PrimType {
     pub fn from_value(v: &VmValue) -> Option<Self> {
         match v {
-            VmValue::Str(_)   => Some(PrimType::Str),
+            VmValue::Str(_) => Some(PrimType::Str),
             VmValue::Bytes(_) => Some(PrimType::Bytes),
             VmValue::Array(_) => Some(PrimType::Array),
-            VmValue::Dict(_)  => Some(PrimType::Dict),
-            VmValue::Int(_)   => Some(PrimType::Int),
+            VmValue::Dict(_) => Some(PrimType::Dict),
+            VmValue::Int(_) => Some(PrimType::Int),
             VmValue::Float(_) => Some(PrimType::Float),
             _ => None,
         }
@@ -75,11 +78,11 @@ impl PrimType {
 
     pub fn type_name(self) -> &'static str {
         match self {
-            PrimType::Str   => "str",
+            PrimType::Str => "str",
             PrimType::Bytes => "bytes",
             PrimType::Array => "array",
-            PrimType::Dict  => "dict",
-            PrimType::Int   => "int",
+            PrimType::Dict => "dict",
+            PrimType::Int => "int",
             PrimType::Float => "float",
         }
     }
@@ -138,11 +141,7 @@ impl Package {
 /// All core globals (always available without import).
 /// `print` and `stream` are excluded — they are state-mutating and dispatched
 /// through `NativeFnId` variants injected directly in `seed_globals`.
-static CORE_BUILTINS: &[BuiltinFn] = &[
-    core::WRITE,
-    core::LEN,
-    core::INPUT,
-];
+static CORE_BUILTINS: &[BuiltinFn] = &[core::WRITE, core::LEN, core::INPUT];
 
 /// All stdlib packages (available via `use "..."`).
 static PACKAGES: &[&Package] = &[
@@ -165,11 +164,11 @@ static PACKAGES: &[&Package] = &[
 
 pub fn find_primitive_method(ty: PrimType, method: &str) -> Option<BuiltinFn> {
     match ty {
-        PrimType::Str   => string::find_str_method(method),
+        PrimType::Str => string::find_str_method(method),
         PrimType::Bytes => bytes::find_bytes_method(method),
         PrimType::Array => array::find_array_method(method),
-        PrimType::Dict  => dict::find_dict_method(method),
-        PrimType::Int   => None,
+        PrimType::Dict => dict::find_dict_method(method),
+        PrimType::Int => None,
         PrimType::Float => None,
     }
 }
@@ -197,8 +196,8 @@ pub fn seed_globals<S: std::hash::BuildHasher>(globals: &mut HashMap<String, VmV
     // needs it to call the method it dispatches to, so both go through
     // NativeFnId rather than the pure BuiltinFn path. (`stream` was here too
     // until v1.2.5, when `?p` folded onto the buffered stream and it went away.)
-    globals.insert("print".to_string(),  VmValue::NativeFn(NativeFnId::Print));
-    globals.insert("route".to_string(),  VmValue::NativeFn(NativeFnId::Route));
+    globals.insert("print".to_string(), VmValue::NativeFn(NativeFnId::Print));
+    globals.insert("route".to_string(), VmValue::NativeFn(NativeFnId::Route));
     // Primitive type constructors: callable with one arg like Python's int(), str(), etc.
     for name in &["int", "float", "bool", "str", "char", "func"] {
         globals.insert(name.to_string(), VmValue::TypeRef(name.to_string()));

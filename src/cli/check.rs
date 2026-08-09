@@ -18,10 +18,7 @@ use crate::{
 /// depends on. The import walk was missing until v1.1.33, and its absence made
 /// that claim false for any file with an import: `use totally_made_up_module`
 /// reported `ok` and then failed at run time.
-fn post_tir_checks(
-    tprogram: &crate::compiler::tir::TProgram,
-    path: &str,
-) -> Result<(), String> {
+fn post_tir_checks(tprogram: &crate::compiler::tir::TProgram, path: &str) -> Result<(), String> {
     crate::compiler::emit::emit(tprogram.clone()).map_err(|e| e.to_string())?;
     check_imports(tprogram, path)
 }
@@ -214,9 +211,7 @@ mod tests {
     /// Fixtures named `*_error.jde` document a rejected program and are expected
     /// to fail; everything else is expected to type-check.
     fn expects_failure(path: &Path) -> bool {
-        path.file_stem()
-            .and_then(|s| s.to_str())
-            .is_some_and(|s| s.ends_with("_error"))
+        path.file_stem().and_then(|s| s.to_str()).is_some_and(|s| s.ends_with("_error"))
     }
 
     /// `examples/` is the fixture-first workflow's source of truth, so a stale
@@ -231,11 +226,8 @@ mod tests {
         // run reports the full list.
         let mut problems = Vec::new();
         for path in &files {
-            let rel = path
-                .strip_prefix(env!("CARGO_MANIFEST_DIR"))
-                .unwrap_or(path)
-                .display()
-                .to_string();
+            let rel =
+                path.strip_prefix(env!("CARGO_MANIFEST_DIR")).unwrap_or(path).display().to_string();
             match (check_file(path), expects_failure(path)) {
                 // Expected outcomes.
                 (Ok(()), false) | (Err(_), true) => {}

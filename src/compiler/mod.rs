@@ -6,8 +6,8 @@
 
 pub mod emit;
 pub mod escape;
-pub mod taskcheck;
 pub mod gbnf;
+pub mod taskcheck;
 pub mod tir;
 pub mod type_infer;
 

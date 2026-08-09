@@ -166,14 +166,7 @@ mod tests {
     //   4: LoadInt r1, 2
     //   5: Halt
     fn if_chunk() -> Vec<Instr> {
-        vec![
-            LoadBool(0, true),
-            JumpIfFalse(0, 2),
-            LoadInt(1, 1),
-            Jump(1),
-            LoadInt(1, 2),
-            Halt,
-        ]
+        vec![LoadBool(0, true), JumpIfFalse(0, 2), LoadInt(1, 1), Jump(1), LoadInt(1, 2), Halt]
     }
 
     #[test]
@@ -240,14 +233,8 @@ mod tests {
         // 3: Jump +1              (→ 5, skip handler)
         // 4: LoadInt r1, 9        (handler body)
         // 5: Halt
-        let code = vec![
-            SetupHandler(0, 3),
-            LoadInt(1, 1),
-            PopHandler,
-            Jump(1),
-            LoadInt(1, 9),
-            Halt,
-        ];
+        let code =
+            vec![SetupHandler(0, 3), LoadInt(1, 1), PopHandler, Jump(1), LoadInt(1, 9), Halt];
         let cfg = build(&code);
         // 4 is a leader (handler entry)...
         assert!(cfg.block_at.contains_key(&4), "handler target must be a leader");

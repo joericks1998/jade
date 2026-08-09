@@ -52,12 +52,9 @@ fn new_with_anchor_and_stop_anchor() {
 
 #[test]
 fn nil_anchor_is_treated_as_none() {
-    let out = (GRAMMAR_NEW.vm_impl)(&[
-        VmValue::Str("p".to_string().into()),
-        VmValue::Nil,
-        VmValue::Nil,
-    ])
-    .unwrap();
+    let out =
+        (GRAMMAR_NEW.vm_impl)(&[VmValue::Str("p".to_string().into()), VmValue::Nil, VmValue::Nil])
+            .unwrap();
     match out {
         VmValue::Grammar(g) => {
             assert!(g.anchor.is_none());
@@ -90,11 +87,8 @@ fn non_str_pattern_is_type_mismatch() {
 
 #[test]
 fn non_str_anchor_is_type_mismatch() {
-    let err = (GRAMMAR_NEW.vm_impl)(&[
-        VmValue::Str("p".to_string().into()),
-        VmValue::Int(1),
-    ])
-    .unwrap_err();
+    let err = (GRAMMAR_NEW.vm_impl)(&[VmValue::Str("p".to_string().into()), VmValue::Int(1)])
+        .unwrap_err();
     match err {
         JadeError::TypeMismatch { expected, .. } => assert_eq!(expected, "str"),
         other => panic!("expected TypeMismatch, got {:?}", other),

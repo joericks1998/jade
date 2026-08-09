@@ -10,7 +10,12 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
     /// so we branch on a zero divisor and `raise` a "division/modulo by zero"
     /// string instead. Leaves the builder on the non-zero ("ok") block and
     /// returns the tagged result word.
-    pub(super) fn int_div_mod(&self, l: Reg, r: Reg, is_mod: bool) -> Result<IntValue<'ctx>, String> {
+    pub(super) fn int_div_mod(
+        &self,
+        l: Reg,
+        r: Reg,
+        is_mod: bool,
+    ) -> Result<IntValue<'ctx>, String> {
         let (a, c) = self.int_operands(l, r);
         let func = self
             .builder
@@ -53,7 +58,11 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
     /// any of these operations, so one range check against the tagged bounds is
     /// exact. The widening costs a couple of instructions and buys agreement
     /// with the VM on every integer operation.
-    pub(super) fn checked_int_result(&self, wide: IntValue<'ctx>, what: &str) -> Result<IntValue<'ctx>, String> {
+    pub(super) fn checked_int_result(
+        &self,
+        wide: IntValue<'ctx>,
+        what: &str,
+    ) -> Result<IntValue<'ctx>, String> {
         let i128t = self.ctx.i128_type();
         let func = self
             .builder
@@ -89,18 +98,14 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
         self.throw_runtime("integer overflow")?;
 
         self.builder.position_at_end(ok_bb);
-        let narrowed = self
-            .builder
-            .build_int_truncate(wide, self.i64t(), what)
-            .map_err(|e| e.to_string())?;
+        let narrowed =
+            self.builder.build_int_truncate(wide, self.i64t(), what).map_err(|e| e.to_string())?;
         Ok(self.tag_int(narrowed))
     }
 
     /// Sign-extend an untagged i64 operand to i128 for checked arithmetic.
     pub(super) fn widen(&self, v: IntValue<'ctx>) -> Result<IntValue<'ctx>, String> {
-        self.builder
-            .build_int_s_extend(v, self.ctx.i128_type(), "w")
-            .map_err(|e| e.to_string())
+        self.builder.build_int_s_extend(v, self.ctx.i128_type(), "w").map_err(|e| e.to_string())
     }
 
     pub(super) fn int_cmp(&self, l: Reg, r: Reg, pred: IntPredicate) -> IntValue<'ctx> {
@@ -122,7 +127,14 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
     }
 
     /// Mixed int/float ordering: widen whichever side is an int, then `fcmp`.
-    pub(super) fn mixed_cmp(&self, l: Reg, l_int: bool, r: Reg, r_int: bool, pred: FloatPredicate) -> IntValue<'ctx> {
+    pub(super) fn mixed_cmp(
+        &self,
+        l: Reg,
+        l_int: bool,
+        r: Reg,
+        r_int: bool,
+        pred: FloatPredicate,
+    ) -> IntValue<'ctx> {
         let a = self.as_float(l, l_int);
         let c = self.as_float(r, r_int);
         let b = self.builder.build_float_compare(pred, a, c, "mcmp").unwrap();
@@ -162,7 +174,12 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
     ///
     /// This is what makes untyped integer code (recursive `fib`, whose params are
     /// `Unknown`) run on native adds/subs rather than a tag-dispatching call.
-    pub(super) fn any2_int_fast(&self, slow_name: &str, l: Reg, r: Reg) -> Result<IntValue<'ctx>, String> {
+    pub(super) fn any2_int_fast(
+        &self,
+        slow_name: &str,
+        l: Reg,
+        r: Reg,
+    ) -> Result<IntValue<'ctx>, String> {
         let b = self.builder;
         let e = |x: inkwell::builder::BuilderError| x.to_string();
         let lw = self.load(l);
@@ -175,7 +192,9 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
         // both int  ⇔  (lw | rw) & 1 == 0  (an int is the only tag with bit0 == 0).
         let orw = b.build_or(lw, rw, "arith_or").map_err(e)?;
         let low1 = b.build_and(orw, self.i64t().const_int(1, false), "arith_low1").map_err(e)?;
-        let both_int = b.build_int_compare(IntPredicate::EQ, low1, self.i64t().const_zero(), "arith_bothint").map_err(e)?;
+        let both_int = b
+            .build_int_compare(IntPredicate::EQ, low1, self.i64t().const_zero(), "arith_bothint")
+            .map_err(e)?;
         b.build_conditional_branch(both_int, fast_bb, slow_bb).map_err(e)?;
 
         // Fast: native checked arithmetic on the untagged operands.
@@ -194,9 +213,15 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
 
         // Slow: the tag-dispatching runtime helper (handles float/str/mixed/error).
         b.position_at_end(slow_bb);
-        let f = self.runtime_fn(slow_name, self.i64t().fn_type(&[self.i64t().into(), self.i64t().into()], false));
-        let slow_res = b.build_call(f, &[lw.into(), rw.into()], "any2slow").map_err(e)?
-            .as_any_value_enum().into_int_value();
+        let f = self.runtime_fn(
+            slow_name,
+            self.i64t().fn_type(&[self.i64t().into(), self.i64t().into()], false),
+        );
+        let slow_res = b
+            .build_call(f, &[lw.into(), rw.into()], "any2slow")
+            .map_err(e)?
+            .as_any_value_enum()
+            .into_int_value();
         let slow_end = b.get_insert_block().unwrap();
         b.build_unconditional_branch(merge_bb).map_err(e)?;
 
@@ -236,7 +261,9 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
 
         let orw = b.build_or(lw, rw, "cmp_or").unwrap();
         let low1 = b.build_and(orw, self.i64t().const_int(1, false), "cmp_low1").unwrap();
-        let both_int = b.build_int_compare(IntPredicate::EQ, low1, self.i64t().const_zero(), "cmp_bothint").unwrap();
+        let both_int = b
+            .build_int_compare(IntPredicate::EQ, low1, self.i64t().const_zero(), "cmp_bothint")
+            .unwrap();
         b.build_conditional_branch(both_int, fast_bb, slow_bb).unwrap();
 
         // Fast: native three-way `(a > c) - (a < c)` on untagged ints → i32.
@@ -258,8 +285,11 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
             i32t.fn_type(&[self.i64t().into(), self.i64t().into(), ptrt.into()], false),
         );
         let op_str = self.cstr(op);
-        let slow_res = b.build_call(f, &[lw.into(), rw.into(), op_str.into()], "cmpany").unwrap()
-            .as_any_value_enum().into_int_value();
+        let slow_res = b
+            .build_call(f, &[lw.into(), rw.into(), op_str.into()], "cmpany")
+            .unwrap()
+            .as_any_value_enum()
+            .into_int_value();
         b.build_unconditional_branch(merge_bb).unwrap();
 
         b.position_at_end(merge_bb);
@@ -284,5 +314,4 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
         let b = self.builder.build_int_compare(pred, v, z, "i32c").unwrap();
         self.bool_word(b)
     }
-
 }

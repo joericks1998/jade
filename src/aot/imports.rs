@@ -81,13 +81,9 @@ pub fn resolve_and_namespace(
     stmts: Vec<TStmt>,
     source_path: &Path,
 ) -> Result<(Vec<TStmt>, Vec<(u32, String)>), String> {
-    let main_canon = source_path
-        .canonicalize()
-        .map_err(|e| format!("{}: {e}", source_path.display()))?;
-    let main_dir = main_canon
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .to_path_buf();
+    let main_canon =
+        source_path.canonicalize().map_err(|e| format!("{}: {e}", source_path.display()))?;
+    let main_dir = main_canon.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
 
     let mut reg = Registry::new();
     // Load registered [lib] libraries from the project's jade.toml (walking up
@@ -107,7 +103,8 @@ pub fn resolve_and_namespace(
     reg.loaded.insert(main_canon);
 
     // main carries self_id = None → its own names are never mangled (root namespace).
-    let main_stmts = process_file(&mut reg, stmts, &main_dir, None, HashSet::new(), HashSet::new())?;
+    let main_stmts =
+        process_file(&mut reg, stmts, &main_dir, None, HashSet::new(), HashSet::new())?;
 
     // Imported modules were appended to `reg.out` in dependency order (deps before
     // dependents); main's statements come last.
@@ -180,8 +177,8 @@ impl Registry {
 
 /// Parse + type-infer an imported file, returning its TIR statements.
 fn parse_and_infer(canon: &Path) -> Result<Vec<TStmt>, String> {
-    let src = std::fs::read_to_string(canon)
-        .map_err(|e| format!("import '{}': {e}", canon.display()))?;
+    let src =
+        std::fs::read_to_string(canon).map_err(|e| format!("import '{}': {e}", canon.display()))?;
     let tokens = crate::frontend::lexer::tokenize(&src).map_err(|e| e.to_string())?;
     let ast = crate::frontend::parser::parse(tokens).map_err(|e| e.to_string())?;
     let tp = crate::compiler::type_infer::infer(ast).map_err(|e| e.to_string())?;
@@ -226,10 +223,7 @@ fn load_dep(reg: &mut Registry, dep_canon: &Path) -> Result<(), String> {
     reg.values.insert(dep_canon.to_path_buf(), values.clone());
     reg.types.insert(dep_canon.to_path_buf(), types.clone());
 
-    let dep_dir = dep_canon
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .to_path_buf();
+    let dep_dir = dep_canon.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
 
     // Recurse first (post-order): this module's own deps land in `reg.out` before
     // it does, so forward references resolve.
@@ -277,7 +271,8 @@ fn process_file(
                         load_dep(reg, &dep)?;
                         let alias = as_name.unwrap_or_else(|| stem(&path));
                         let id = reg.id[&dep];
-                        aliases.insert(alias, (id, reg.values[&dep].clone(), reg.types[&dep].clone()));
+                        aliases
+                            .insert(alias, (id, reg.values[&dep].clone(), reg.types[&dep].clone()));
                         // `use` itself is dropped — the body is inlined+mangled already.
                     }
                 }
@@ -364,18 +359,12 @@ fn resolve_use(reg: &Registry, dir: &Path, path: &str) -> Result<Resolved, Strin
         },
         None => relative(),
     };
-    let canon = target
-        .canonicalize()
-        .map_err(|e| format!("import '{}': {e}", path))?;
+    let canon = target.canonicalize().map_err(|e| format!("import '{}': {e}", path))?;
     Ok(if is_native { Resolved::Native(canon) } else { Resolved::Jade(canon) })
 }
 
 fn stem(path: &str) -> String {
-    Path::new(path)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or(path)
-        .to_string()
+    Path::new(path).file_stem().and_then(|s| s.to_str()).unwrap_or(path).to_string()
 }
 
 // ── Renamer ───────────────────────────────────────────────────────────────────
@@ -463,11 +452,7 @@ impl Renamer {
             return None;
         }
         let (id, values, _) = self.aliases.get(alias)?;
-        if values.contains(field) {
-            Some(mangle(field, *id))
-        } else {
-            None
-        }
+        if values.contains(field) { Some(mangle(field, *id)) } else { None }
     }
 
     /// Resolve a type name (possibly `alias.Type`). Types share no namespace with
@@ -526,15 +511,11 @@ impl Renamer {
 
     /// Mangle a top-level value *definition* name (no-op for `main`).
     fn def_value(&self, name: &str) -> Option<String> {
-        self.self_id
-            .filter(|_| self.self_values.contains(name))
-            .map(|id| mangle(name, id))
+        self.self_id.filter(|_| self.self_values.contains(name)).map(|id| mangle(name, id))
     }
     /// Mangle a top-level type *definition* name (no-op for `main`).
     fn def_type(&self, name: &str) -> Option<String> {
-        self.self_id
-            .filter(|_| self.self_types.contains(name))
-            .map(|id| mangle(name, id))
+        self.self_id.filter(|_| self.self_types.contains(name)).map(|id| mangle(name, id))
     }
 
     // ── Statements ────────────────────────────────────────────────────────────
@@ -721,10 +702,7 @@ impl Renamer {
         self.pop_scope();
     }
 
-    fn rename_decorators(
-        &mut self,
-        decorators: &mut [(String, Vec<(Option<String>, TExpr)>)],
-    ) {
+    fn rename_decorators(&mut self, decorators: &mut [(String, Vec<(Option<String>, TExpr)>)]) {
         for (dname, dargs) in decorators.iter_mut() {
             if let Some(m) = self.ref_decorator(dname) {
                 *dname = m;
@@ -744,8 +722,7 @@ impl Renamer {
         // before walking children so the bare alias isn't independently rewritten.
         let collapse = if let TExprKind::FieldAccess { object, field } = &e.kind {
             if let TExprKind::Identifier(alias) = &object.kind {
-                self.ref_native_qual(alias, field)
-                    .or_else(|| self.ref_value_qual(alias, field))
+                self.ref_native_qual(alias, field).or_else(|| self.ref_value_qual(alias, field))
             } else {
                 None
             }
@@ -956,10 +933,7 @@ impl Renamer {
             }
             // Known gap: closure bodies inside a default are not walked (see module doc).
             Expr::Closure { .. } => {}
-            Expr::Integer { .. }
-            | Expr::Float { .. }
-            | Expr::Bool { .. }
-            | Expr::Str { .. } => {}
+            Expr::Integer { .. } | Expr::Float { .. } | Expr::Bool { .. } | Expr::Str { .. } => {}
         }
     }
 }

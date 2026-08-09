@@ -24,11 +24,7 @@ pub async fn run_test(pattern: Option<&str>, verbose: bool) {
     let mut failures: Vec<(String, String)> = Vec::new();
 
     for file in &files {
-        let name = file
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("?")
-            .to_string();
+        let name = file.file_stem().and_then(|s| s.to_str()).unwrap_or("?").to_string();
 
         print!("  {} ... ", name);
 
@@ -64,14 +60,14 @@ pub async fn run_test(pattern: Option<&str>, verbose: bool) {
 ///
 /// Uses `select_backend` (same as `jade run`) so the daemon socket drives
 /// inference, matching the path that regular `jade run` uses.
-async fn run_test_file(
-    path: &std::path::Path,
-    _verbose: bool,
-) -> Result<(), String> {
-    use crate::{compiler::{emit, type_infer}, vm};
+async fn run_test_file(path: &std::path::Path, _verbose: bool) -> Result<(), String> {
+    use crate::{
+        compiler::{emit, type_infer},
+        vm,
+    };
 
-    let source = std::fs::read_to_string(path)
-        .map_err(|e| format!("could not read file: {}", e))?;
+    let source =
+        std::fs::read_to_string(path).map_err(|e| format!("could not read file: {}", e))?;
 
     // Lex + parse (with cache).
     let hash = crate::cache::file_hash(path);
@@ -96,8 +92,7 @@ async fn run_test_file(
         match crate::cache::read_tir_cache(h) {
             Some(tp) => tp,
             None => {
-                let tp = type_infer::infer(program)
-                    .map_err(|e| format!("type error: {}", e))?;
+                let tp = type_infer::infer(program).map_err(|e| format!("type error: {}", e))?;
                 crate::cache::write_tir_cache(h, &path.to_string_lossy(), &tp);
                 tp
             }
@@ -107,8 +102,7 @@ async fn run_test_file(
     };
 
     // Emit + run.
-    let compiled = emit::emit(tprogram)
-        .map_err(|e| format!("compile error: {}", e))?;
+    let compiled = emit::emit(tprogram).map_err(|e| format!("compile error: {}", e))?;
 
     // Connect to the inference daemon if it's running, same as `jade run`.
     let backend = crate::llm::select_backend();

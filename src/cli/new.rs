@@ -28,9 +28,7 @@ pub fn scaffold(dir: &Path, name: &str, template: &str) {
              let response = ?p\n\
              print(response)\n"
         ),
-        _ => format!(
-            "print(\"Hello from {name}!\")\n"
-        ),
+        _ => format!("print(\"Hello from {name}!\")\n"),
     };
     fs::write(dir.join("main.jde"), main_jde).unwrap_or_else(|e| {
         eprintln!("error: could not write main.jde: {}", e);
@@ -49,7 +47,10 @@ pub fn scaffold(dir: &Path, name: &str, template: &str) {
 /// `jade new <name> [--template basic|llm]`
 pub fn run_new(name: &str, template: &str) {
     if name.contains('/') || name.contains('\\') || name.starts_with('.') {
-        eprintln!("error: project name '{}' must not contain path separators or start with '.'", name);
+        eprintln!(
+            "error: project name '{}' must not contain path separators or start with '.'",
+            name
+        );
         process::exit(1);
     }
 
@@ -84,11 +85,7 @@ pub fn run_init(template: &str) {
         }
     }
 
-    let name = cwd
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("jade-project")
-        .to_string();
+    let name = cwd.file_name().and_then(|n| n.to_str()).unwrap_or("jade-project").to_string();
 
     // Don't overwrite an existing main.jde.
     let has_main = cwd.join("main.jde").exists();

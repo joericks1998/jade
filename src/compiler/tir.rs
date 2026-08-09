@@ -33,9 +33,9 @@ pub enum JadeType {
     Prompt,
     /// A user-defined GBNF sampling constraint. Produced by `Grammar.new(pattern)`.
     Grammar,
-    Array(Box<JadeType>),       // homogeneous; empty arrays are Array(Unknown)
-    Dict,                       // keys and values are untyped at this stage
-    Struct(String),             // named struct, e.g. Struct("Point")
+    Array(Box<JadeType>), // homogeneous; empty arrays are Array(Unknown)
+    Dict,                 // keys and values are untyped at this stage
+    Struct(String),       // named struct, e.g. Struct("Point")
     /// An opaque pointer from a native package, named by the C type it came
     /// from — `Handle("sqlite3")`. Distinct per type on purpose, so passing a
     /// `sqlite3_stmt` where a `sqlite3` belongs is a type error rather than a
@@ -43,15 +43,15 @@ pub enum JadeType {
     /// produces one; an undeclared native call still returns `Unknown`.
     Handle(String),
     Fn {
-        params: Vec<JadeType>,  // all Unknown for user fns (params are unannotated)
+        params: Vec<JadeType>, // all Unknown for user fns (params are unannotated)
         ret: Box<JadeType>,
     },
     AsyncFn {
         params: Vec<JadeType>,
         ret: Box<JadeType>,
     },
-    Future(Box<JadeType>),      // result of calling an AsyncFn
-    Unknown,                    // type could not be statically determined
+    Future(Box<JadeType>), // result of calling an AsyncFn
+    Unknown,               // type could not be statically determined
 }
 
 // ── TIR expression ────────────────────────────────────────────────────────────

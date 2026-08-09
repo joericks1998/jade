@@ -1,6 +1,7 @@
 use crate::{
-    compiler::{tir::JadeType, type_infer::TypeContext}, vm::VmValue,
+    compiler::{tir::JadeType, type_infer::TypeContext},
     frontend::error::{JadeError, Result, Span},
+    vm::VmValue,
 };
 
 use crate::builtins::{BuiltinFn, Package};
@@ -30,7 +31,7 @@ fn time_sleep(args: &[VmValue]) -> Result<VmValue> {
         return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: ZERO });
     }
     let secs = match &args[0] {
-        VmValue::Int(n)   => *n as f64,
+        VmValue::Int(n) => *n as f64,
         VmValue::Float(f) => *f,
         _ => return Err(JadeError::TypeError { message: "time.sleep".to_string(), span: ZERO }),
     };
@@ -47,22 +48,27 @@ fn time_local(args: &[VmValue]) -> Result<VmValue> {
     }
     let tz = match &args[0] {
         VmValue::Str(s) => s.clone(),
-        VmValue::Nil    => String::new().into(),
-        _ => return Err(JadeError::TypeError { message: "time.local: tz must be str".to_string(), span: ZERO }),
+        VmValue::Nil => String::new().into(),
+        _ => {
+            return Err(JadeError::TypeError {
+                message: "time.local: tz must be str".to_string(),
+                span: ZERO,
+            });
+        }
     };
-    jade_runtime::timef::local(&tz)
-        .map(|s| VmValue::Str(JStr::tainted(s)))
-        .map_err(|e| JadeError::IoError {
+    jade_runtime::timef::local(&tz).map(|s| VmValue::Str(JStr::tainted(s))).map_err(|e| {
+        JadeError::IoError {
             message: format!("time.local: could not spawn date: {}", e),
             span: ZERO,
-        })
+        }
+    })
 }
 
 static TIME_PKG_FNS: &[BuiltinFn] = &[
-    BuiltinFn { name: "now",    vm_impl: time_now },
+    BuiltinFn { name: "now", vm_impl: time_now },
     BuiltinFn { name: "now_ms", vm_impl: time_now_ms },
-    BuiltinFn { name: "sleep",  vm_impl: time_sleep },
-    BuiltinFn { name: "local",  vm_impl: time_local },
+    BuiltinFn { name: "sleep", vm_impl: time_sleep },
+    BuiltinFn { name: "local", vm_impl: time_local },
 ];
 
 fn register_time_pkg_types(ctx: &mut TypeContext) {

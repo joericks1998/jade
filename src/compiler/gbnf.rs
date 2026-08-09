@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use crate::frontend::ast::StructFieldDef;
+use std::collections::HashMap;
 
 // The canonical tool-call body GBNF used to live here (`TOOL_CALL_GBNF` +
 // `tool_call_grammar()`, backing `llm.tool_grammar()`). Both are gone: tool-call

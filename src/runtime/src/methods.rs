@@ -14,8 +14,8 @@
 use core::ffi::{c_char, c_void};
 use std::sync::Mutex;
 
-use crate::value::JadeValue;
 use crate::cstr;
+use crate::value::JadeValue;
 
 struct Entry {
     type_name: String,
@@ -28,7 +28,11 @@ static REGISTRY: Mutex<Vec<Entry>> = Mutex::new(Vec::new());
 /// Register that struct type `type_name`'s method `method` is implemented by
 /// `fnptr` (a `jf_<uid>` address). Called once per extend method at startup.
 #[unsafe(no_mangle)]
-pub extern "C" fn jrt_method_register(type_name: *const c_char, method: *const c_char, fnptr: *const c_void) {
+pub extern "C" fn jrt_method_register(
+    type_name: *const c_char,
+    method: *const c_char,
+    fnptr: *const c_void,
+) {
     let (t, m) = unsafe { (cstr::to_string(type_name), cstr::to_string(method)) };
     if let Ok(mut reg) = REGISTRY.lock() {
         reg.push(Entry { type_name: t, method: m, fnptr: fnptr as usize });
@@ -143,7 +147,6 @@ mod tests {
     fn counted() -> std::sync::MutexGuard<'static, ()> {
         crate::gc::test_support::lock_counter()
     }
-
 
     extern "C" fn dummy(_: i64) -> i64 {
         0

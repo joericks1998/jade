@@ -118,7 +118,10 @@ struct FnTable {
 }
 
 impl FnTable {
-    fn collect(top: &Chunk, extend_methods: &HashMap<String, HashMap<String, Arc<CompiledFn>>>) -> Self {
+    fn collect(
+        top: &Chunk,
+        extend_methods: &HashMap<String, HashMap<String, Arc<CompiledFn>>>,
+    ) -> Self {
         let mut t = FnTable { fns: Vec::new(), by_ptr: HashMap::new(), by_name: HashMap::new() };
         t.walk_chunk(top);
         for methods in extend_methods.values() {
@@ -447,10 +450,12 @@ pub fn check(
                     }
                     // Report the operation, not the spawn: the author needs the
                     // line to change, and the spawn is only where it becomes a race.
-                    let (what, span) = sites[uid]
-                        .first()
-                        .cloned()
-                        .unwrap_or_else(|| ("mutates shared state".to_string(), chunk.spans.get(i).copied().unwrap_or(Span { line: 0, col: 0 })));
+                    let (what, span) = sites[uid].first().cloned().unwrap_or_else(|| {
+                        (
+                            "mutates shared state".to_string(),
+                            chunk.spans.get(i).copied().unwrap_or(Span { line: 0, col: 0 }),
+                        )
+                    });
                     return Err(Violation { task: table.fns[uid].chunk.name.clone(), what, span });
                 }
                 _ => {}

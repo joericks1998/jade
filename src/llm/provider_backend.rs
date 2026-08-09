@@ -30,7 +30,7 @@ use jade_runtime::coll::StructObj;
 
 use super::{InferenceBackend, InferenceRequest, InferenceResponse};
 use crate::frontend::error::{JadeError, Result, Span};
-use crate::native::{load_native_package, NativeLibFn};
+use crate::native::{NativeLibFn, load_native_package};
 use crate::vm::VmValue;
 
 pub struct ProviderPackageBackend {
@@ -186,7 +186,7 @@ pub(super) fn decode_frames(result: VmValue, span: Span) -> Result<String> {
                             other.as_ref().map_or("missing", crate::vm::value::value_type_name)
                         ),
                         span,
-                    ))
+                    ));
                 }
             },
             super::FRAME_ERROR => {
@@ -206,7 +206,7 @@ pub(super) fn decode_frames(result: VmValue, span: Span) -> Result<String> {
                          expected one of {expected}"
                     ),
                     span,
-                ))
+                ));
             }
         }
     }

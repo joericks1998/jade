@@ -203,11 +203,7 @@ fn ast_of(header: &Path, include_dirs: &[String]) -> Result<Value, String> {
         } else {
             ""
         };
-        return Err(format!(
-            "clang could not parse {}{hint}\n{}",
-            header.display(),
-            stderr.trim()
-        ));
+        return Err(format!("clang could not parse {}{hint}\n{}", header.display(), stderr.trim()));
     }
 
     serde_json::from_slice(&out.stdout).map_err(|e| {
@@ -444,10 +440,7 @@ fn fields_of(rec: &Value) -> Vec<(String, String)> {
             fs.iter()
                 .filter(|f| f.get("kind").and_then(Value::as_str) == Some("FieldDecl"))
                 .filter_map(|f| {
-                    Some((
-                        f.get("name")?.as_str()?.to_string(),
-                        qual_type(f)?.to_string(),
-                    ))
+                    Some((f.get("name")?.as_str()?.to_string(), qual_type(f)?.to_string()))
                 })
                 .collect()
         })
@@ -507,12 +500,42 @@ fn squash(t: &str) -> String {
 /// `short` parameter — is the C compiler's ordinary implicit conversion, which
 /// is what a hand-written binding would have done too.
 const INT_TYPES: &[&str] = &[
-    "char", "signedchar", "unsignedchar", "short", "shortint", "unsignedshort",
-    "unsignedshortint", "int", "unsigned", "unsignedint", "long", "longint",
-    "unsignedlong", "unsignedlongint", "longlong", "longlongint", "unsignedlonglong",
-    "unsignedlonglongint", "size_t", "ssize_t", "ptrdiff_t", "intptr_t", "uintptr_t",
-    "int8_t", "int16_t", "int32_t", "int64_t", "uint8_t", "uint16_t", "uint32_t",
-    "uint64_t", "off_t", "time_t", "mode_t", "pid_t", "wchar_t",
+    "char",
+    "signedchar",
+    "unsignedchar",
+    "short",
+    "shortint",
+    "unsignedshort",
+    "unsignedshortint",
+    "int",
+    "unsigned",
+    "unsignedint",
+    "long",
+    "longint",
+    "unsignedlong",
+    "unsignedlongint",
+    "longlong",
+    "longlongint",
+    "unsignedlonglong",
+    "unsignedlonglongint",
+    "size_t",
+    "ssize_t",
+    "ptrdiff_t",
+    "intptr_t",
+    "uintptr_t",
+    "int8_t",
+    "int16_t",
+    "int32_t",
+    "int64_t",
+    "uint8_t",
+    "uint16_t",
+    "uint32_t",
+    "uint64_t",
+    "off_t",
+    "time_t",
+    "mode_t",
+    "pid_t",
+    "wchar_t",
 ];
 
 fn is_int(t: &str) -> bool {
@@ -775,8 +798,10 @@ fn map_param(
     let next_is_int = next.map(|n| is_int(&normalize(&env.expand(n)))).unwrap_or(false);
     let next_is_len = next_is_int && names_a_count(next_name);
     let squashed = squash(inner);
-    let byte_like =
-        matches!(squashed.as_str(), "void" | "char" | "unsignedchar" | "signedchar" | "uint8_t" | "int8_t");
+    let byte_like = matches!(
+        squashed.as_str(),
+        "void" | "char" | "unsignedchar" | "signedchar" | "uint8_t" | "int8_t"
+    );
 
     if next_is_len
         && !is_const
@@ -1026,7 +1051,8 @@ fn callback_spec(raw: &str, env: &TypeEnv) -> Option<String> {
     if !params.iter().all(|p| carriable(p)) {
         return None;
     }
-    let ret_ok = normalize(&ret) == "void" || (carriable(&ret) && pointee(&normalize(&ret)).is_none());
+    let ret_ok =
+        normalize(&ret) == "void" || (carriable(&ret) && pointee(&normalize(&ret)).is_none());
     if !ret_ok {
         return None;
     }
@@ -1397,7 +1423,11 @@ fn struct_entry(fields: &[(String, String)], env: &TypeEnv, held: bool) -> Resul
     if usable.is_empty() && !held {
         return Err("fills a struct with no field the FFI can carry".to_string());
     }
-    Ok(CStruct { fields: usable, held, buffers: if held { buffer_fields(fields, env) } else { Vec::new() } })
+    Ok(CStruct {
+        fields: usable,
+        held,
+        buffers: if held { buffer_fields(fields, env) } else { Vec::new() },
+    })
 }
 
 /// The buffer fields of a held struct: a byte pointer, and the count declared
@@ -1417,7 +1447,10 @@ fn buffer_fields(fields: &[(String, String)], env: &TypeEnv) -> Vec<crate::proje
         let ta = env.expand(&a.1);
         let na = normalize(&ta);
         let byte_like = pointee(&na).map(squash).is_some_and(|s| {
-            matches!(s.as_str(), "void" | "char" | "unsignedchar" | "signedchar" | "uint8_t" | "int8_t")
+            matches!(
+                s.as_str(),
+                "void" | "char" | "unsignedchar" | "signedchar" | "uint8_t" | "int8_t"
+            )
         });
         if !byte_like || !is_int(&normalize(&env.expand(&b.1))) {
             continue;
@@ -1575,14 +1608,16 @@ fn map_function(
             let t = normalize(&expanded);
             expanded.contains("const")
                 && pointee(&t).map(squash).is_some_and(|s| {
-                    matches!(s.as_str(), "void" | "unsignedchar" | "signedchar" | "uint8_t" | "int8_t")
+                    matches!(
+                        s.as_str(),
+                        "void" | "unsignedchar" | "signedchar" | "uint8_t" | "int8_t"
+                    )
                 })
         };
         let lengths: Vec<usize> = out_at
             .iter()
             .filter(|(k, p)| {
-                args[*k].starts_with("out_scalar:")
-                    && parm_names[*p].is_some_and(names_a_length)
+                args[*k].starts_with("out_scalar:") && parm_names[*p].is_some_and(names_a_length)
             })
             .map(|(k, _)| *k)
             .collect();
@@ -1605,9 +1640,7 @@ fn map_function(
     // matters because the shim refuses the whole *dependency*, not the symbol.
     let consumes_ret = |a: &String| a.starts_with("out_buffer:") || a.starts_with("out_handle:");
     if out_at.iter().filter(|(k, _)| consumes_ret(&args[*k])).count() > 1 {
-        return Err(
-            "has two out-parameters that both read the C return value".to_string()
-        );
+        return Err("has two out-parameters that both read the C return value".to_string());
     }
 
     if out_at.len() > 1 {
@@ -1670,8 +1703,7 @@ mod tests;
 /// the check rather than to fail: an unreadable table proves nothing.
 pub fn exported_symbols(lib: &Path) -> Option<std::collections::HashSet<String>> {
     let syms = nm_symbols(lib)?;
-    let out: std::collections::HashSet<String> =
-        syms.into_iter().map(|(_, name)| name).collect();
+    let out: std::collections::HashSet<String> = syms.into_iter().map(|(_, name)| name).collect();
     (!out.is_empty()).then_some(out)
 }
 

@@ -4,8 +4,8 @@
 //! it is an execution engine, not a compiler phase.
 #![allow(clippy::all)]
 
-use crate::vm::*;
 use crate::frontend::error::{JadeError, Result};
+use crate::vm::*;
 use crate::{
     compiler::{emit, type_infer},
     frontend::{lexer, parser},
@@ -162,7 +162,8 @@ fn test_vm_if_else() {
 
 #[test]
 fn test_vm_while_loop() {
-    let s = run_src("let i = 0\nlet sum = 0\nwhile i < 5 {\n  sum = sum + i\n  i = i + 1\n}").unwrap();
+    let s =
+        run_src("let i = 0\nlet sum = 0\nwhile i < 5 {\n  sum = sum + i\n  i = i + 1\n}").unwrap();
     assert_eq!(get_int(&s, "sum"), 10);
 }
 
@@ -219,13 +220,17 @@ fn test_vm_unary_neg() {
 
 #[test]
 fn test_vm_struct() {
-    let s = run_src("struct Point {\n  x,\n  y,\n}\nlet p = Point { x: 10, y: 20 }\nlet px = p.x").unwrap();
+    let s = run_src("struct Point {\n  x,\n  y,\n}\nlet p = Point { x: 10, y: 20 }\nlet px = p.x")
+        .unwrap();
     assert_eq!(get_int(&s, "px"), 10);
 }
 
 #[test]
 fn test_vm_struct_field_assign() {
-    let s = run_src("struct Point {\n  x,\n  y,\n}\nlet p = Point { x: 1, y: 2 }\np.x = 99\nlet px = p.x").unwrap();
+    let s = run_src(
+        "struct Point {\n  x,\n  y,\n}\nlet p = Point { x: 1, y: 2 }\np.x = 99\nlet px = p.x",
+    )
+    .unwrap();
     assert_eq!(get_int(&s, "px"), 99);
 }
 
@@ -282,7 +287,8 @@ fn test_vm_implicit_return_bare_expr() {
 /// expression value, not nil.
 #[test]
 fn test_vm_implicit_return_after_let() {
-    let s = run_src("fn double(n) {\n  let result = n * 2\n  result\n}\nlet x = double(5)").unwrap();
+    let s =
+        run_src("fn double(n) {\n  let result = n * 2\n  result\n}\nlet x = double(5)").unwrap();
     assert_eq!(get_int(&s, "x"), 10);
 }
 
@@ -327,10 +333,7 @@ fn run_src_with_mock(src: &str, responses: Vec<&str>) -> Result<VmState> {
 
 /// Like `run_src_with_mock` but also returns a string of everything written to
 /// stdout by `vm_drain_token_stream_printing` (i.e. printing a stream).
-fn run_src_with_stdout_capture(
-    src: &str,
-    responses: Vec<&str>,
-) -> Result<(VmState, String)> {
+fn run_src_with_stdout_capture(src: &str, responses: Vec<&str>) -> Result<(VmState, String)> {
     let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
     let state = run_src_with_mock_inner(src, responses, Some(std::sync::Arc::clone(&buf)))?;
     let printed = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
@@ -614,7 +617,8 @@ fn test_vm_fn_square() {
 
 #[test]
 fn test_vm_fn_multiply_three() {
-    let s = run_src("fn multiply(a, b, c) {\n  return a * b * c\n}\nlet r = multiply(2, 3, 4)").unwrap();
+    let s = run_src("fn multiply(a, b, c) {\n  return a * b * c\n}\nlet r = multiply(2, 3, 4)")
+        .unwrap();
     assert_eq!(get_int(&s, "r"), 24);
 }
 
@@ -639,7 +643,9 @@ fn test_vm_fn_uses_param() {
 
 #[test]
 fn test_vm_fn_local_shadow() {
-    let s = run_src("fn local_shadow(x) {\n  let y = x * 2\n  return y\n}\nlet c = local_shadow(5)").unwrap();
+    let s =
+        run_src("fn local_shadow(x) {\n  let y = x * 2\n  return y\n}\nlet c = local_shadow(5)")
+            .unwrap();
     assert_eq!(get_int(&s, "c"), 10);
 }
 
@@ -808,7 +814,8 @@ fn test_vm_nested_calls_pipeline() {
 
 #[test]
 fn test_vm_arity_mismatch() {
-    let err = try_run_src("fn f(a) {\n  return a\n}\nlet x = f(1, 2)").err().expect("expected error");
+    let err =
+        try_run_src("fn f(a) {\n  return a\n}\nlet x = f(1, 2)").err().expect("expected error");
     assert!(matches!(err, JadeError::ArityMismatch { expected: 1, got: 2, .. }));
 }
 
@@ -862,7 +869,10 @@ fn test_integer_range_boundary_is_usable() {
 #[test]
 fn test_vm_nested_fn_ok() {
     // Nested function definitions are now a parse error.
-    let tokens = crate::frontend::lexer::tokenize("fn outer() {\n  fn inner() {\n    return 1\n  }\n  return 2\n}").expect("lex");
+    let tokens = crate::frontend::lexer::tokenize(
+        "fn outer() {\n  fn inner() {\n    return 1\n  }\n  return 2\n}",
+    )
+    .expect("lex");
     let result = crate::frontend::parser::parse(tokens);
     assert!(matches!(result, Err(crate::frontend::error::JadeError::NestedFunction { .. })));
 }
@@ -877,7 +887,8 @@ fn test_vm_while_condition_false_from_start() {
 
 #[test]
 fn test_vm_while_accumulate_sum() {
-    let s = run_src("let sum = 0\nlet i = 1\nwhile i <= 10 {\n  sum = sum + i\n  i = i + 1\n}").unwrap();
+    let s = run_src("let sum = 0\nlet i = 1\nwhile i <= 10 {\n  sum = sum + i\n  i = i + 1\n}")
+        .unwrap();
     assert_eq!(get_int(&s, "sum"), 55);
 }
 
@@ -925,25 +936,37 @@ fn test_vm_undefined_type_error() {
 
 #[test]
 fn test_vm_missing_field_error() {
-    let err = try_run_src("struct Point {\n  x,\n  y\n}\nlet p = Point { x: 1 }").err().expect("expected error");
+    let err = try_run_src("struct Point {\n  x,\n  y\n}\nlet p = Point { x: 1 }")
+        .err()
+        .expect("expected error");
     assert!(matches!(err, JadeError::MissingField { .. }));
 }
 
 #[test]
 fn test_vm_extra_field_error() {
-    let err = try_run_src("struct Point {\n  x,\n  y\n}\nlet p = Point { x: 1, y: 2, z: 3 }").err().expect("expected error");
+    let err = try_run_src("struct Point {\n  x,\n  y\n}\nlet p = Point { x: 1, y: 2, z: 3 }")
+        .err()
+        .expect("expected error");
     assert!(matches!(err, JadeError::UndefinedField { .. }));
 }
 
 #[test]
 fn test_vm_field_access_on_non_struct_error() {
     let err = try_run_src("let x = 5\nlet v = x.y").err().expect("expected error");
-    assert!(matches!(err, JadeError::NotAStruct { .. } | JadeError::TypeMismatch { .. } | JadeError::UndefinedField { .. }));
+    assert!(matches!(
+        err,
+        JadeError::NotAStruct { .. }
+            | JadeError::TypeMismatch { .. }
+            | JadeError::UndefinedField { .. }
+    ));
 }
 
 #[test]
 fn test_vm_undefined_field_access_error() {
-    let err = try_run_src("struct Point {\n  x,\n  y\n}\nlet p = Point { x: 1, y: 2 }\nlet v = p.z").err().expect("expected error");
+    let err =
+        try_run_src("struct Point {\n  x,\n  y\n}\nlet p = Point { x: 1, y: 2 }\nlet v = p.z")
+            .err()
+            .expect("expected error");
     assert!(matches!(err, JadeError::UndefinedField { .. }));
 }
 
@@ -1123,7 +1146,10 @@ fn test_vm_fstr_multiple_slots() {
 
 #[test]
 fn test_vm_fstr_field_access() {
-    let s = run_src("struct Point {\n  x,\n  y\n}\nlet p = Point { x: 3, y: 4 }\nlet sv = f\"({p.x}, {p.y})\"").unwrap();
+    let s = run_src(
+        "struct Point {\n  x,\n  y\n}\nlet p = Point { x: 3, y: 4 }\nlet sv = f\"({p.x}, {p.y})\"",
+    )
+    .unwrap();
     assert_eq!(get_str(&s, "sv"), "(3, 4)");
 }
 
@@ -1323,17 +1349,18 @@ fn test_vm_prompt_deref_not_a_prompt_returns_error() {
 #[test]
 fn test_vm_prompt_deref_field_access_no_backend() {
     let err = try_run_src(
-        "struct Agent {\n  prompt system = \"helpful\"\n}\nlet a = Agent {}\nlet r = a.(?system)"
-    ).err().expect("expected error");
+        "struct Agent {\n  prompt system = \"helpful\"\n}\nlet a = Agent {}\nlet r = a.(?system)",
+    )
+    .err()
+    .expect("expected error");
     assert!(matches!(err, JadeError::NoInferenceBackend { .. }));
 }
 
 #[test]
 fn test_vm_prompt_deref_field_access_not_a_prompt() {
-    let err = run_src_with_mock(
-        "struct S {\n  x,\n}\nlet s = S { x: 42 }\nlet r = s.(?x)",
-        vec![]
-    ).err().expect("expected error");
+    let err = run_src_with_mock("struct S {\n  x,\n}\nlet s = S { x: 42 }\nlet r = s.(?x)", vec![])
+        .err()
+        .expect("expected error");
     assert!(matches!(err, JadeError::NotAPrompt { .. }));
 }
 
@@ -1341,8 +1368,9 @@ fn test_vm_prompt_deref_field_access_not_a_prompt() {
 fn test_vm_prompt_deref_field_access_with_mock() {
     let s = run_src_with_mock(
         "struct Agent {\n  prompt system = \"Say hello\"\n}\nlet a = Agent {}\nlet r = a.(?system)",
-        vec!["hello!"]
-    ).unwrap();
+        vec!["hello!"],
+    )
+    .unwrap();
     assert_eq!(get_str(&s, "r"), "hello!");
 }
 
@@ -1397,7 +1425,9 @@ fn test_vm_typed_deref_overflow() {
     let err = run_src_with_mock(
         "prompt p = \"bad\"\nlet n = ?p |> int",
         vec!["oops", "still wrong", "nope", "nah"],
-    ).err().expect("expected error");
+    )
+    .err()
+    .expect("expected error");
     assert!(matches!(err, JadeError::PromptOverflow { .. }));
 }
 
@@ -1412,10 +1442,10 @@ fn test_vm_typed_deref_is_single_shot() {
     // A typed deref no longer re-asks: the first non-coercing reply raises
     // PromptOverflow rather than triggering a correction round. (The daemon owns
     // any retry policy now; grammar-constrained sampling shapes the reply.)
-    let err = run_src_with_mock(
-        "prompt p = \"number?\"\nlet n = ?p |> int",
-        vec!["not a number", "42"],
-    ).err().expect("expected error");
+    let err =
+        run_src_with_mock("prompt p = \"number?\"\nlet n = ?p |> int", vec!["not a number", "42"])
+            .err()
+            .expect("expected error");
     assert!(matches!(err, JadeError::PromptOverflow { attempts: 1, .. }));
 }
 
@@ -1442,7 +1472,8 @@ let g = Grammar.new('"yes" | "no"')
 let answer = ?p |> g
 "#,
         vec!["yes"],
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(get_str(&s, "answer"), "yes");
 }
 
@@ -1553,7 +1584,10 @@ fn test_vm_dict_non_string_index_type_error() {
 
 #[test]
 fn test_vm_struct_default_omitted() {
-    let s = run_src("struct Config {\n  let host = \"localhost\"\n}\nlet c = Config {}\nlet h = c.host").unwrap();
+    let s = run_src(
+        "struct Config {\n  let host = \"localhost\"\n}\nlet c = Config {}\nlet h = c.host",
+    )
+    .unwrap();
     assert_eq!(get_str(&s, "h"), "localhost");
 }
 
@@ -1572,7 +1606,9 @@ fn test_vm_struct_all_defaults_empty_literal() {
 
 #[test]
 fn test_vm_struct_required_still_required() {
-    let err = try_run_src("struct Mixed {\n  x,\n  let label = \"origin\"\n}\nlet m = Mixed {}").err().expect("expected error");
+    let err = try_run_src("struct Mixed {\n  x,\n  let label = \"origin\"\n}\nlet m = Mixed {}")
+        .err()
+        .expect("expected error");
     assert!(matches!(err, JadeError::MissingField { .. }));
 }
 
@@ -1619,7 +1655,9 @@ fn test_vm_struct_prompt_field_non_string_error() {
 
 #[test]
 fn test_vm_struct_prompt_field_override_non_string_error() {
-    let Err(err) = try_run_src("struct Agent {\n  prompt system = \"ok\"\n}\nlet a = Agent { system: 99 }") else {
+    let Err(err) =
+        try_run_src("struct Agent {\n  prompt system = \"ok\"\n}\nlet a = Agent { system: 99 }")
+    else {
         panic!("a non-string prompt field override must be rejected");
     };
     assert!(matches!(err, JadeError::PromptFieldNotStr { .. }), "got {err:?}");
@@ -1627,25 +1665,34 @@ fn test_vm_struct_prompt_field_override_non_string_error() {
 
 #[test]
 fn test_vm_struct_extra_field_still_errors_with_defaults() {
-    let err = try_run_src("struct Agent {\n  let name = \"Jade\"\n}\nlet a = Agent { name: \"x\", extra: 1 }").err().expect("expected error");
+    let err = try_run_src(
+        "struct Agent {\n  let name = \"Jade\"\n}\nlet a = Agent { name: \"x\", extra: 1 }",
+    )
+    .err()
+    .expect("expected error");
     assert!(matches!(err, JadeError::UndefinedField { .. }));
 }
 
 #[test]
 fn test_vm_struct_duplicate_field_error() {
-    let err = try_run_src("struct Point {\n  x,\n  y\n}\nlet p = Point { x: 1, y: 2, x: 3 }").err().expect("expected error");
+    let err = try_run_src("struct Point {\n  x,\n  y\n}\nlet p = Point { x: 1, y: 2, x: 3 }")
+        .err()
+        .expect("expected error");
     assert!(matches!(err, JadeError::DuplicateField { field, .. } if field == "x"));
 }
 
 #[test]
 fn test_vm_struct_default_references_variable() {
-    let s = run_src("let base = 10\nstruct S {\n  let x = base\n}\nlet sv = S {}\nlet v = sv.x").unwrap();
+    let s = run_src("let base = 10\nstruct S {\n  let x = base\n}\nlet sv = S {}\nlet v = sv.x")
+        .unwrap();
     assert_eq!(get_int(&s, "v"), 10);
 }
 
 #[test]
 fn test_vm_struct_required_after_let_field() {
-    let err = try_run_src("struct S {\n  let x = 0,\n  y\n}\nlet s = S { x: 1 }").err().expect("expected error");
+    let err = try_run_src("struct S {\n  let x = 0,\n  y\n}\nlet s = S { x: 1 }")
+        .err()
+        .expect("expected error");
     assert!(matches!(err, JadeError::MissingField { field, .. } if field == "y"));
 }
 
@@ -1763,10 +1810,14 @@ fn test_fs_list_dir() {
     let s = run_src(&src).unwrap();
     match s.globals.get("v").unwrap() {
         VmValue::Array(a) => {
-            let names: Vec<String> = a.lock().iter().map(|v| match v {
-                VmValue::Str(s) => s.to_string(),
-                _ => panic!("non-str entry"),
-            }).collect();
+            let names: Vec<String> = a
+                .lock()
+                .iter()
+                .map(|v| match v {
+                    VmValue::Str(s) => s.to_string(),
+                    _ => panic!("non-str entry"),
+                })
+                .collect();
             assert!(names.contains(&"a.txt".to_string()));
             assert!(names.contains(&"b.txt".to_string()));
         }
@@ -1789,7 +1840,9 @@ fn test_fs_mkdir() {
 
 #[test]
 fn test_fs_read_nonexistent_errors() {
-    let err = try_run_src("use std::fs\nlet v = fs.read(\"/tmp/jade_no_such_file_xyz.txt\")").err().expect("expected error");
+    let err = try_run_src("use std::fs\nlet v = fs.read(\"/tmp/jade_no_such_file_xyz.txt\")")
+        .err()
+        .expect("expected error");
     assert!(matches!(err, JadeError::IoError { .. }));
 }
 
@@ -1831,7 +1884,11 @@ fn test_import_module_let_binding_visible_in_fn() {
     let dir = std::env::temp_dir().join("jade_test_mod_let_d");
     std::fs::create_dir_all(&dir).unwrap();
     let mod_path = dir.join("m.jde");
-    std::fs::write(&mod_path, "let _PREFIX = \"hi \"\nfn greet(name) {\n return _PREFIX + name\n}\n").unwrap();
+    std::fs::write(
+        &mod_path,
+        "let _PREFIX = \"hi \"\nfn greet(name) {\n return _PREFIX + name\n}\n",
+    )
+    .unwrap();
     let src = "use m\nlet v = m.greet(\"jade\")".to_string();
 
     let tokens = crate::frontend::lexer::tokenize(&src).expect("lex");
@@ -1858,7 +1915,11 @@ fn test_import_module_mutable_state() {
     let dir = std::env::temp_dir().join("jade_test_mod_mut_d");
     std::fs::create_dir_all(&dir).unwrap();
     let mod_path = dir.join("c.jde");
-    std::fs::write(&mod_path, "let count = 0\nfn inc() { count = count + 1 }\nfn get() { return count }\n").unwrap();
+    std::fs::write(
+        &mod_path,
+        "let count = 0\nfn inc() { count = count + 1 }\nfn get() { return count }\n",
+    )
+    .unwrap();
     let src = "use c\nc.inc()\nc.inc()\nc.inc()\nlet v = c.get()".to_string();
 
     let tokens = crate::frontend::lexer::tokenize(&src).expect("lex");
@@ -1889,9 +1950,7 @@ fn test_import_module_stdlib_promotion() {
     std::fs::write(&mod_path, "use std::fs\nfn write_file(p, s) {\n fs.write(p, s)\n}\n").unwrap();
 
     let txt_str = txt_path.to_str().unwrap();
-    let src = format!(
-        "use io\nio.write_file(\"{txt_str}\", \"ok\")\nlet v = true"
-    );
+    let src = format!("use io\nio.write_file(\"{txt_str}\", \"ok\")\nlet v = true");
 
     let tokens = crate::frontend::lexer::tokenize(&src).expect("lex");
     let program = crate::frontend::parser::parse(tokens).expect("parse");
@@ -2266,7 +2325,8 @@ fn test_default_param_bool() {
 
 #[test]
 fn test_decorator_no_args_passthrough() {
-    let src = "fn identity(f) {\n  return f\n}\n@identity\nfn greet() {\n  return 42\n}\nlet v = greet()";
+    let src =
+        "fn identity(f) {\n  return f\n}\n@identity\nfn greet() {\n  return 42\n}\nlet v = greet()";
     let s = run_src(src).unwrap();
     assert_eq!(get_int(&s, "v"), 42);
 }
@@ -2454,9 +2514,7 @@ fn start_http_test_server(status: u16, body: &'static str) -> u16 {
 #[test]
 fn test_http_get_status_and_body() {
     let port = start_http_test_server(200, "hello jade");
-    let src = format!(
-        "use std::http\nlet r = http.get(\"http://127.0.0.1:{port}/\")"
-    );
+    let src = format!("use std::http\nlet r = http.get(\"http://127.0.0.1:{port}/\")");
     let s = run_src(&src).unwrap();
     match s.globals.get("r").unwrap() {
         VmValue::Dict(map) => {
@@ -2476,9 +2534,8 @@ fn test_http_get_status_and_body() {
 #[test]
 fn test_http_post_returns_response() {
     let port = start_http_test_server(201, "created");
-    let src = format!(
-        "use std::http\nlet r = http.post(\"http://127.0.0.1:{port}/\", \"payload\")"
-    );
+    let src =
+        format!("use std::http\nlet r = http.post(\"http://127.0.0.1:{port}/\", \"payload\")");
     let s = run_src(&src).unwrap();
     match s.globals.get("r").unwrap() {
         VmValue::Dict(map) => {
@@ -2525,13 +2582,17 @@ fn test_http_get_type_error() {
 
 #[test]
 fn test_http_post_arity_error() {
-    let err = try_run_src("use std::http\nhttp.post(\"http://example.com\")").err().expect("expected error");
+    let err = try_run_src("use std::http\nhttp.post(\"http://example.com\")")
+        .err()
+        .expect("expected error");
     assert!(matches!(err, JadeError::ArityMismatch { .. }));
 }
 
 #[test]
 fn test_http_get_connection_refused_errors() {
-    let err = try_run_src("use std::http\nhttp.get(\"http://127.0.0.1:1/\")").err().expect("expected error");
+    let err = try_run_src("use std::http\nhttp.get(\"http://127.0.0.1:1/\")")
+        .err()
+        .expect("expected error");
     assert!(matches!(err, JadeError::IoError { .. }));
 }
 
@@ -2617,9 +2678,8 @@ fn test_uhttp_post_returns_response() {
 #[test]
 fn test_uhttp_get_with_headers() {
     let sock = start_uhttp_test_server(canned_response(200, "ok"));
-    let src = format!(
-        "use std::uhttp\nlet r = uhttp.get(\"unix://{sock}:/\", {{\"X-Test\": \"jade\"}})"
-    );
+    let src =
+        format!("use std::uhttp\nlet r = uhttp.get(\"unix://{sock}:/\", {{\"X-Test\": \"jade\"}})");
     let s = run_src(&src).unwrap();
     match s.globals.get("r").unwrap() {
         VmValue::Dict(map) => match map.get("status").unwrap() {
@@ -2835,11 +2895,8 @@ fn run_mute_full(
 ) -> (String, String) {
     let s: Vec<String> = start.into_iter().map(|s| s.to_string()).collect();
     let e: Vec<String> = stop.into_iter().map(|s| s.to_string()).collect();
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(async move {
+    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(
+        async move {
             let (tx, mut rx) = tokio::sync::mpsc::channel(64);
             for t in tokens {
                 tx.send(t.to_string()).await.unwrap();
@@ -2849,7 +2906,8 @@ fn run_mute_full(
             let full = drain_tokens_with_mute(&mut rx, start_muted, &s, &e, &mut out, false).await;
             let printed = String::from_utf8(out).unwrap();
             (full, printed)
-        })
+        },
+    )
 }
 
 #[test]
@@ -2863,11 +2921,8 @@ fn test_mute_no_region_prints_everything() {
 #[test]
 fn test_mute_region_anchor_enters_permanent_mute() {
     // anchor fires → region entered, everything after suppressed (no stop_anchor).
-    let (full, printed) = run_mute_region(
-        vec!["<tool>", r#"{"tool_name": "x"}"#],
-        vec!["<tool>"],
-        vec![],
-    );
+    let (full, printed) =
+        run_mute_region(vec!["<tool>", r#"{"tool_name": "x"}"#], vec!["<tool>"], vec![]);
     assert_eq!(full, r#"<tool>{"tool_name": "x"}"#);
     assert_eq!(printed, "");
 }
@@ -2881,11 +2936,8 @@ fn test_mute_region_anchor_enters_permanent_mute() {
 // silently did nothing at all.
 #[test]
 fn test_mute_anchor_shares_a_token_with_visible_text() {
-    let (full, printed) = run_mute_region(
-        vec!["Hello<", "tool>", "secret"],
-        vec!["<tool>"],
-        vec![],
-    );
+    let (full, printed) =
+        run_mute_region(vec!["Hello<", "tool>", "secret"], vec!["<tool>"], vec![]);
     assert_eq!(full, "Hello<tool>secret");
     assert_eq!(printed, "Hello", "text before the anchor prints, the anchor and after do not");
 }
@@ -2894,11 +2946,8 @@ fn test_mute_anchor_shares_a_token_with_visible_text() {
 // a token with muted text, and the visible tail after it must survive.
 #[test]
 fn test_mute_stop_shares_a_token_with_muted_text() {
-    let (full, printed) = run_mute_region(
-        vec!["a<t>", "hidden</", "t>tail"],
-        vec!["<t>"],
-        vec!["</t>"],
-    );
+    let (full, printed) =
+        run_mute_region(vec!["a<t>", "hidden</", "t>tail"], vec!["<t>"], vec!["</t>"]);
     assert_eq!(full, "a<t>hidden</t>tail");
     assert_eq!(printed, "atail", "the muted region is dropped, the tail resumes");
 }
@@ -2908,11 +2957,8 @@ fn test_mute_stop_shares_a_token_with_muted_text() {
 // produces for "ABCDEFGH<t>HIDD</t>TAIL".
 #[test]
 fn test_mute_both_anchors_split_across_token_boundaries() {
-    let (full, printed) = run_mute_region(
-        vec!["ABCDEFGH", "<t>HIDD<", "/t>TAIL"],
-        vec!["<t>"],
-        vec!["</t>"],
-    );
+    let (full, printed) =
+        run_mute_region(vec!["ABCDEFGH", "<t>HIDD<", "/t>TAIL"], vec!["<t>"], vec!["</t>"]);
     assert_eq!(full, "ABCDEFGH<t>HIDD</t>TAIL");
     assert_eq!(printed, "ABCDEFGHTAIL");
 }
@@ -2921,8 +2967,13 @@ fn test_mute_both_anchors_split_across_token_boundaries() {
 #[test]
 fn test_mute_one_character_per_token() {
     let (full, printed) = run_mute_region(
-        "vis<t>hid</t>end".chars().map(|c| c.to_string()).collect::<Vec<_>>()
-            .iter().map(|s| s.as_str()).collect(),
+        "vis<t>hid</t>end"
+            .chars()
+            .map(|c| c.to_string())
+            .collect::<Vec<_>>()
+            .iter()
+            .map(|s| s.as_str())
+            .collect(),
         vec!["<t>"],
         vec!["</t>"],
     );
@@ -2933,11 +2984,8 @@ fn test_mute_one_character_per_token() {
 #[test]
 fn test_mute_anchor_split_across_three_tokens() {
     // "<", "tool", ">" reassembled by buffering → anchor matched, region entered.
-    let (full, printed) = run_mute_region(
-        vec!["<", "tool", ">", r#"{"tool_name": "x"}"#],
-        vec!["<tool>"],
-        vec![],
-    );
+    let (full, printed) =
+        run_mute_region(vec!["<", "tool", ">", r#"{"tool_name": "x"}"#], vec!["<tool>"], vec![]);
     assert_eq!(full, r#"<tool>{"tool_name": "x"}"#);
     assert_eq!(printed, "");
 }
@@ -2946,11 +2994,8 @@ fn test_mute_anchor_split_across_three_tokens() {
 fn test_mute_bpe_merge_anchor_plus_brace() {
     // Tokenizer merged "<tool>" with "{" — anchor found at sub-token boundary,
     // region entered, remainder ("{…") suppressed.
-    let (full, printed) = run_mute_region(
-        vec![r#"<tool>{"#, r#""tool_name": "x"}"#],
-        vec!["<tool>"],
-        vec![],
-    );
+    let (full, printed) =
+        run_mute_region(vec![r#"<tool>{"#, r#""tool_name": "x"}"#], vec!["<tool>"], vec![]);
     assert_eq!(full, r#"<tool>{"tool_name": "x"}"#);
     assert_eq!(printed, "");
 }
@@ -2994,11 +3039,7 @@ fn test_mute_preamble_and_anchor_in_single_token() {
 #[test]
 fn test_mute_no_anchor_in_response_prints_all() {
     // Anchor configured but never appears → prints everything.
-    let (full, printed) = run_mute_region(
-        vec!["Hello, ", "world!"],
-        vec!["<tool>"],
-        vec![],
-    );
+    let (full, printed) = run_mute_region(vec!["Hello, ", "world!"], vec!["<tool>"], vec![]);
     assert_eq!(full, "Hello, world!");
     assert_eq!(printed, "Hello, world!");
 }
@@ -3007,11 +3048,7 @@ fn test_mute_no_anchor_in_response_prints_all() {
 fn test_mute_partial_prefix_at_end_of_stream_flushes() {
     // "<too" + "k " accumulates to "<took " which is NOT a prefix of "<tool>",
     // so it flushes without entering muted mode.
-    let (full, printed) = run_mute_region(
-        vec!["<too", "k "],
-        vec!["<tool>"],
-        vec![],
-    );
+    let (full, printed) = run_mute_region(vec!["<too", "k "], vec!["<tool>"], vec![]);
     assert_eq!(full, "<took ");
     assert_eq!(printed, "<took ");
 }
@@ -3020,11 +3057,8 @@ fn test_mute_partial_prefix_at_end_of_stream_flushes() {
 fn test_mute_incomplete_stop_at_end_of_stream_suppressed() {
     // Daemon stopped mid-"</tool>" sending only "</". We're inside a muted
     // region (after "<tool>"), so the partial stop is just discarded.
-    let (full, printed) = run_mute_region(
-        vec!["<tool>", "payload", "</"],
-        vec!["<tool>"],
-        vec!["</tool>"],
-    );
+    let (full, printed) =
+        run_mute_region(vec!["<tool>", "payload", "</"], vec!["<tool>"], vec!["</tool>"]);
     assert_eq!(full, "<tool>payload</");
     assert_eq!(printed, "");
 }
@@ -3032,11 +3066,7 @@ fn test_mute_incomplete_stop_at_end_of_stream_suppressed() {
 #[test]
 fn test_mute_preamble_partial_prefix_then_no_anchor() {
     // "< " is a prefix of "<tool>" briefly, but "price < today" never completes it.
-    let (full, printed) = run_mute_region(
-        vec!["price < today"],
-        vec!["<tool>"],
-        vec![],
-    );
+    let (full, printed) = run_mute_region(vec!["price < today"], vec!["<tool>"], vec![]);
     assert_eq!(full, "price < today");
     assert_eq!(printed, "price < today");
 }
@@ -3063,37 +3093,29 @@ fn test_mute_empty_stream_no_region() {
 #[test]
 fn test_mute_newline_appended_to_printed() {
     // newline=true must append '\n' to the printed output.
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(async {
-            let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-            tx.send("hello".to_string()).await.unwrap();
-            drop(tx);
-            let mut out = Vec::<u8>::new();
-            let full = drain_tokens_with_mute(&mut rx, false, &[], &[], &mut out, true).await;
-            let printed = String::from_utf8(out).unwrap();
-            assert_eq!(full, "hello");
-            assert_eq!(printed, "hello\n");
-        });
+    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        tx.send("hello".to_string()).await.unwrap();
+        drop(tx);
+        let mut out = Vec::<u8>::new();
+        let full = drain_tokens_with_mute(&mut rx, false, &[], &[], &mut out, true).await;
+        let printed = String::from_utf8(out).unwrap();
+        assert_eq!(full, "hello");
+        assert_eq!(printed, "hello\n");
+    });
 }
 
 #[test]
 fn test_mute_newline_not_appended_when_false() {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(async {
-            let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-            tx.send("hello".to_string()).await.unwrap();
-            drop(tx);
-            let mut out = Vec::<u8>::new();
-            drain_tokens_with_mute(&mut rx, false, &[], &[], &mut out, false).await;
-            let printed = String::from_utf8(out).unwrap();
-            assert_eq!(printed, "hello");
-        });
+    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        tx.send("hello".to_string()).await.unwrap();
+        drop(tx);
+        let mut out = Vec::<u8>::new();
+        drain_tokens_with_mute(&mut rx, false, &[], &[], &mut out, false).await;
+        let printed = String::from_utf8(out).unwrap();
+        assert_eq!(printed, "hello");
+    });
 }
 
 // ── Gap: additional anchor split boundaries ───────────────────────────────
@@ -3101,11 +3123,8 @@ fn test_mute_newline_not_appended_when_false() {
 #[test]
 fn test_mute_anchor_split_two_tokens_midpoint() {
     // "<too" + "l>" reassembled → anchor matched, region entered, payload suppressed.
-    let (full, printed) = run_mute_region(
-        vec!["<too", "l>", r#"{"tool_name": "x"}"#],
-        vec!["<tool>"],
-        vec![],
-    );
+    let (full, printed) =
+        run_mute_region(vec!["<too", "l>", r#"{"tool_name": "x"}"#], vec!["<tool>"], vec![]);
     assert_eq!(full, r#"<tool>{"tool_name": "x"}"#);
     assert_eq!(printed, "");
 }
@@ -3113,11 +3132,8 @@ fn test_mute_anchor_split_two_tokens_midpoint() {
 #[test]
 fn test_mute_anchor_split_as_name_then_close() {
     // "<tool" + ">" — different 2-token split; same result.
-    let (full, printed) = run_mute_region(
-        vec!["<tool", ">", r#"{"tool_name": "x"}"#],
-        vec!["<tool>"],
-        vec![],
-    );
+    let (full, printed) =
+        run_mute_region(vec!["<tool", ">", r#"{"tool_name": "x"}"#], vec!["<tool>"], vec![]);
     assert_eq!(full, r#"<tool>{"tool_name": "x"}"#);
     assert_eq!(printed, "");
 }
@@ -3165,10 +3181,8 @@ fn test_mute_region_stop_exits_and_trailing_prints() {
 #[test]
 fn test_mute_from_start_stop_anchor_exits_then_prints() {
     // start_muted=true: suppressed from token 1 until stop_anchor; rest prints.
-    let (full, printed) = run_mute_from_start(
-        vec!["reasoning", "</think>", "answer"],
-        vec!["</think>"],
-    );
+    let (full, printed) =
+        run_mute_from_start(vec!["reasoning", "</think>", "answer"], vec!["</think>"]);
     assert_eq!(full, "reasoning</think>answer");
     assert_eq!(printed, "answer");
 }
@@ -3176,10 +3190,7 @@ fn test_mute_from_start_stop_anchor_exits_then_prints() {
 #[test]
 fn test_mute_from_start_no_stop_suppresses_all() {
     // start_muted=true, no stop → entire response suppressed.
-    let (full, printed) = run_mute_from_start(
-        vec!["all", "suppressed"],
-        vec![],
-    );
+    let (full, printed) = run_mute_from_start(vec!["all", "suppressed"], vec![]);
     assert_eq!(full, "allsuppressed");
     assert_eq!(printed, "");
 }
@@ -3194,7 +3205,8 @@ fn test_mute_grammar_no_anchor_suppresses_from_start() {
 let g = Grammar.new("root ::= [a-z]+")
 let reply = ?p |> g"#,
         vec!["hello world"],
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(get_str(&s, "reply"), "hello world");
 }
 
@@ -3209,7 +3221,8 @@ fn test_mute_stream_returns_full_text_via_vm() {
 let g = Grammar.new("root ::= \"{\" [a-z]+ \"}\"", "<tool>")
 let reply = ?p |> g"#,
         vec![r#"<tool>{"tool_name": "x"}"#],
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(get_str(&s, "reply"), r#"<tool>{"tool_name": "x"}"#);
 }
 
@@ -3220,7 +3233,8 @@ fn test_mute_stream_returns_full_text_with_preamble_via_vm() {
 let g = Grammar.new("root ::= \"{\" [a-z]+ \"}\"", "<tool>")
 let reply = ?p |> g"#,
         vec![r#"Sure thing!<tool>{"tool_name": "x"}"#],
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(get_str(&s, "reply"), r#"Sure thing!<tool>{"tool_name": "x"}"#);
 }
 
@@ -3244,7 +3258,8 @@ fn test_mute_grammar_anchor_suppresses_entire_region() {
 let g = Grammar.new("root ::= \"{\" [a-z]+ \"}\"", "<tool>")
 print(?p |> g)"#,
         vec![r#"<tool>{"tool_name": "x"}"#],
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(printed, "\n");
 }
 
@@ -3256,7 +3271,8 @@ fn test_mute_grammar_preamble_printed_anchor_suppressed() {
 let g = Grammar.new("root ::= \"{\" [a-z]+ \"}\"", "<tool>")
 print(?p |> g)"#,
         vec![r#"Sure thing!<tool>{"tool_name": "x"}"#],
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(printed, "Sure thing!\n");
 }
 
@@ -3267,7 +3283,8 @@ fn test_mute_no_mute_on_kwarg_prints_everything() {
         r#"prompt p = "test"
 print(?p)"#,
         vec!["hello world"],
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(printed, "hello world\n");
 }
 
@@ -3291,7 +3308,8 @@ print(?p |> g)"#,
     let (_s, printed) = run_src_with_stdout_capture(
         &src,
         vec![r#"<tool>{"tool_name": "get_weather", "city": "Paris"}</tool>"#],
-    ).unwrap();
+    )
+    .unwrap();
     // "<tool>" enters region mute, "</tool>" exits it; entire region suppressed, nothing prints.
     assert_eq!(printed, "\n");
 }
@@ -3342,7 +3360,8 @@ fn test_mute_no_anchor_suppresses_entire_response() {
 let g = Grammar.new("\"<think>\" | \"</think>\"")
 print(?p |> g)"#,
         vec!["<think>some reasoning</think>final answer"],
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(printed, "\n");
 }
 
@@ -3354,7 +3373,8 @@ fn test_mute_no_anchor_with_stop_anchor_prints_after() {
 let g = Grammar.new("root ::= [a-z]+", nil, "</think>")
 print(?p |> g)"#,
         vec!["reasoning</think>answer"],
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(printed, "answer\n");
 }
 
@@ -3366,7 +3386,8 @@ fn test_mute_grammar_no_anchor_regex_suppresses_everything() {
 let g = Grammar.new("root ::= [a-z]+")
 print(?p |> g)"#,
         vec!["hello world"],
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(printed, "\n");
 }
 
@@ -3388,7 +3409,9 @@ fn run_src_with_shared_backend(
     let tprogram = type_infer::infer(program).expect("type inference failed");
     let compiled = emit::emit(tprogram).expect("emit failed");
     let opts = VmOpts {
-        backend: Some(std::sync::Arc::clone(&backend) as std::sync::Arc<dyn crate::llm::InferenceBackend>),
+        backend: Some(
+            std::sync::Arc::clone(&backend) as std::sync::Arc<dyn crate::llm::InferenceBackend>
+        ),
         #[cfg(test)]
         test_stdout: None,
         ..VmOpts::default()
@@ -3404,9 +3427,9 @@ fn run_src_with_shared_backend(
 fn test_stream_with_grammar_passes_stop_anchor_to_backend() {
     // Verify that `?p |> g` sends stop_anchor="</tool>" to the
     // inference backend rather than None — this is what prevents the model loop.
-    let backend = std::sync::Arc::new(crate::llm::MockBackend::new(
-        vec![r#"<tool>{"tool_name": "x"}</tool>"#],
-    ));
+    let backend = std::sync::Arc::new(crate::llm::MockBackend::new(vec![
+        r#"<tool>{"tool_name": "x"}</tool>"#,
+    ]));
     let src = r#"prompt p = "test"
 let g = Grammar.new("root ::= \"{\" [a-z]+ \"}\"", "<tool>", "</tool>")
 let reply = ?p |> g"#;
@@ -3463,13 +3486,19 @@ fn test_prompt_deref_outside_stream_passes_no_constraints() {
 
 #[test]
 fn break_leaves_a_for_loop() {
-    let s = run_src("let mut_t = 0\nfor i in [1, 2, 3, 4] {\n if i == 3 { break }\n mut_t = mut_t + i\n}\n").unwrap();
+    let s = run_src(
+        "let mut_t = 0\nfor i in [1, 2, 3, 4] {\n if i == 3 { break }\n mut_t = mut_t + i\n}\n",
+    )
+    .unwrap();
     assert_eq!(get_int(&s, "mut_t"), 3);
 }
 
 #[test]
 fn continue_skips_the_rest_of_a_for_body() {
-    let s = run_src("let mut_t = 0\nfor i in [1, 2, 3, 4] {\n if i == 2 { continue }\n mut_t = mut_t + i\n}\n").unwrap();
+    let s = run_src(
+        "let mut_t = 0\nfor i in [1, 2, 3, 4] {\n if i == 2 { continue }\n mut_t = mut_t + i\n}\n",
+    )
+    .unwrap();
     assert_eq!(get_int(&s, "mut_t"), 8);
 }
 
@@ -3477,13 +3506,16 @@ fn continue_skips_the_rest_of_a_for_body() {
 fn continue_in_a_for_loop_still_advances_the_index() {
     // Landing at the top of the loop instead of at the increment would never
     // advance `idx`, and the loop would hang rather than fail.
-    let s = run_src("let mut_n = 0\nfor i in [1, 2, 3] {\n mut_n = mut_n + 1\n continue\n}\n").unwrap();
+    let s =
+        run_src("let mut_n = 0\nfor i in [1, 2, 3] {\n mut_n = mut_n + 1\n continue\n}\n").unwrap();
     assert_eq!(get_int(&s, "mut_n"), 3);
 }
 
 #[test]
 fn break_leaves_a_while_loop() {
-    let s = run_src("let mut_n = 0\nwhile true {\n mut_n = mut_n + 1\n if mut_n == 5 { break }\n}\n").unwrap();
+    let s =
+        run_src("let mut_n = 0\nwhile true {\n mut_n = mut_n + 1\n if mut_n == 5 { break }\n}\n")
+            .unwrap();
     assert_eq!(get_int(&s, "mut_n"), 5);
 }
 
@@ -3554,7 +3586,10 @@ fn break_outside_a_loop_is_refused() {
 #[test]
 fn continue_outside_a_loop_is_refused() {
     let err = parser::parse(lexer::tokenize("continue\n").unwrap()).expect_err("should refuse");
-    assert!(matches!(err, crate::frontend::error::JadeError::ContinueOutsideLoop { .. }), "{err:?}");
+    assert!(
+        matches!(err, crate::frontend::error::JadeError::ContinueOutsideLoop { .. }),
+        "{err:?}"
+    );
 }
 
 #[test]

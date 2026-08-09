@@ -22,8 +22,9 @@ use jade_runtime::uhttpf;
 use tokio::sync::mpsc;
 
 use crate::{
-    compiler::{tir::JadeType, type_infer::TypeContext}, vm::{NativeFnId, VmValue},
+    compiler::{tir::JadeType, type_infer::TypeContext},
     frontend::error::{JadeError, Result, Span},
+    vm::{NativeFnId, VmValue},
 };
 
 use crate::builtins::{BuiltinFn, Package};
@@ -42,7 +43,7 @@ fn require_str_owned(args: &[VmValue], pos: usize, fn_name: &str) -> Result<Stri
     match args.get(pos) {
         Some(VmValue::Str(s)) => Ok(s.to_string()),
         Some(_) => Err(JadeError::TypeError { message: fn_name.to_string(), span: ZERO }),
-        None    => Err(JadeError::ArityMismatch { expected: pos + 1, got: args.len(), span: ZERO }),
+        None => Err(JadeError::ArityMismatch { expected: pos + 1, got: args.len(), span: ZERO }),
     }
 }
 
@@ -54,15 +55,20 @@ pub fn extract_headers(val: Option<&VmValue>) -> Result<Vec<(String, String)>> {
             for (k, v) in map.iter() {
                 match v {
                     VmValue::Str(s) => headers.push((k.clone(), s.to_string())),
-                    _ => return Err(JadeError::TypeError {
-                        message: "uhttp header value must be str".to_string(),
-                        span: ZERO,
-                    }),
+                    _ => {
+                        return Err(JadeError::TypeError {
+                            message: "uhttp header value must be str".to_string(),
+                            span: ZERO,
+                        });
+                    }
                 }
             }
             Ok(headers)
         }
-        Some(_) => Err(JadeError::TypeError { message: "uhttp headers must be a dict".to_string(), span: ZERO }),
+        Some(_) => Err(JadeError::TypeError {
+            message: "uhttp headers must be a dict".to_string(),
+            span: ZERO,
+        }),
     }
 }
 
@@ -92,19 +98,35 @@ fn make_bytes_response(status: i64, body: Vec<u8>) -> VmValue {
 
 /// Run one request through the shared `uhttpf` core, mapping its `(status, body)`
 /// into a `{status, body}` dict and its transport failure into an `IoError`.
-fn execute(url: &str, method: &str, body: Option<&str>, headers: Vec<(String, String)>) -> Result<VmValue> {
+fn execute(
+    url: &str,
+    method: &str,
+    body: Option<&str>,
+    headers: Vec<(String, String)>,
+) -> Result<VmValue> {
     uhttpf::request(method, url, body, &headers)
         .map(|(status, body)| make_response(status, body))
         // Message shape matches the AOT path's `set_err` ("uhttp <METHOD>: <detail>").
-        .map_err(|message| JadeError::IoError { message: format!("uhttp {method}: {message}"), span: ZERO })
+        .map_err(|message| JadeError::IoError {
+            message: format!("uhttp {method}: {message}"),
+            span: ZERO,
+        })
 }
 
 /// [`execute`] for the byte-bodied pair. Same core, same error wording — only
 /// the body's type differs.
-fn execute_bytes(url: &str, method: &str, body: Option<&[u8]>, headers: Vec<(String, String)>) -> Result<VmValue> {
+fn execute_bytes(
+    url: &str,
+    method: &str,
+    body: Option<&[u8]>,
+    headers: Vec<(String, String)>,
+) -> Result<VmValue> {
     uhttpf::request_bytes(method, url, body, &headers)
         .map(|(status, body)| make_bytes_response(status, body))
-        .map_err(|message| JadeError::IoError { message: format!("uhttp {method}: {message}"), span: ZERO })
+        .map_err(|message| JadeError::IoError {
+            message: format!("uhttp {method}: {message}"),
+            span: ZERO,
+        })
 }
 
 fn uhttp_get(args: &[VmValue]) -> Result<VmValue> {
@@ -120,7 +142,7 @@ fn uhttp_post(args: &[VmValue]) -> Result<VmValue> {
     if args.len() < 2 || args.len() > 3 {
         return Err(JadeError::ArityMismatch { expected: 2, got: args.len(), span: ZERO });
     }
-    let url  = require_str_owned(args, 0, "uhttp.post")?;
+    let url = require_str_owned(args, 0, "uhttp.post")?;
     let body = require_str_owned(args, 1, "uhttp.post")?;
     let headers = extract_headers(args.get(2))?;
     execute(&url, "POST", Some(&body), headers)
@@ -155,7 +177,7 @@ fn uhttp_post_bytes(args: &[VmValue]) -> Result<VmValue> {
                     crate::vm::value_type_name(other)
                 ),
                 span: ZERO,
-            })
+            });
         }
         None => return Err(JadeError::ArityMismatch { expected: 2, got: args.len(), span: ZERO }),
     };
@@ -167,7 +189,7 @@ fn uhttp_put(args: &[VmValue]) -> Result<VmValue> {
     if args.len() < 2 || args.len() > 3 {
         return Err(JadeError::ArityMismatch { expected: 2, got: args.len(), span: ZERO });
     }
-    let url  = require_str_owned(args, 0, "uhttp.put")?;
+    let url = require_str_owned(args, 0, "uhttp.put")?;
     let body = require_str_owned(args, 1, "uhttp.put")?;
     let headers = extract_headers(args.get(2))?;
     execute(&url, "PUT", Some(&body), headers)
@@ -221,7 +243,10 @@ pub enum StreamEvent {
 /// line as a `StreamEvent` until the server closes the connection or the
 /// receiver is dropped. URL/parse errors surface synchronously; connect and
 /// read errors surface as `StreamEvent::Error`.
-pub fn open_stream(url: &str, headers: Vec<(String, String)>) -> Result<mpsc::Receiver<StreamEvent>> {
+pub fn open_stream(
+    url: &str,
+    headers: Vec<(String, String)>,
+) -> Result<mpsc::Receiver<StreamEvent>> {
     // Parse before spawning so a malformed URL is a synchronous error, not an
     // event the caller has to drain the channel to discover.
     uhttpf::parse_unix_url(url).map_err(|e| uhttp_io_error(&e))?;
@@ -258,14 +283,13 @@ pub fn open_stream(url: &str, headers: Vec<(String, String)>) -> Result<mpsc::Re
     Ok(rx)
 }
 
-
 static UHTTP_PKG_FNS: &[BuiltinFn] = &[
-    BuiltinFn { name: "get",        vm_impl: uhttp_get },
-    BuiltinFn { name: "post",       vm_impl: uhttp_post },
-    BuiltinFn { name: "put",        vm_impl: uhttp_put },
-    BuiltinFn { name: "delete",     vm_impl: uhttp_delete },
-    BuiltinFn { name: "head",       vm_impl: uhttp_head },
-    BuiltinFn { name: "get_bytes",  vm_impl: uhttp_get_bytes },
+    BuiltinFn { name: "get", vm_impl: uhttp_get },
+    BuiltinFn { name: "post", vm_impl: uhttp_post },
+    BuiltinFn { name: "put", vm_impl: uhttp_put },
+    BuiltinFn { name: "delete", vm_impl: uhttp_delete },
+    BuiltinFn { name: "head", vm_impl: uhttp_head },
+    BuiltinFn { name: "get_bytes", vm_impl: uhttp_get_bytes },
     BuiltinFn { name: "post_bytes", vm_impl: uhttp_post_bytes },
 ];
 

@@ -2,8 +2,9 @@
 mod tests;
 
 use crate::{
-    compiler::{tir::JadeType, type_infer::TypeContext}, vm::{NativeFnId, VmValue},
+    compiler::{tir::JadeType, type_infer::TypeContext},
     frontend::error::{JadeError, Result, Span},
+    vm::{NativeFnId, VmValue},
 };
 
 use crate::builtins::{BuiltinFn, Package, make_array};
@@ -72,12 +73,12 @@ fn arr_reverse(args: &[VmValue]) -> Result<VmValue> {
 }
 
 static ARRAY_METHODS: &[BuiltinFn] = &[
-    BuiltinFn { name: "len",      vm_impl: arr_len },
-    BuiltinFn { name: "push",     vm_impl: arr_push },
-    BuiltinFn { name: "pop",      vm_impl: arr_pop },
+    BuiltinFn { name: "len", vm_impl: arr_len },
+    BuiltinFn { name: "push", vm_impl: arr_push },
+    BuiltinFn { name: "pop", vm_impl: arr_pop },
     BuiltinFn { name: "contains", vm_impl: arr_contains },
-    BuiltinFn { name: "sort",     vm_impl: arr_sort },
-    BuiltinFn { name: "reverse",  vm_impl: arr_reverse },
+    BuiltinFn { name: "sort", vm_impl: arr_sort },
+    BuiltinFn { name: "reverse", vm_impl: arr_reverse },
 ];
 
 pub fn find_array_method(name: &str) -> Option<BuiltinFn> {
@@ -126,9 +127,9 @@ fn pkg_reverse(args: &[VmValue]) -> Result<VmValue> {
 }
 
 static ARRAY_PKG_FNS: &[BuiltinFn] = &[
-    BuiltinFn { name: "map",     vm_impl: pkg_map },
-    BuiltinFn { name: "filter",  vm_impl: pkg_filter },
-    BuiltinFn { name: "sort",    vm_impl: pkg_sort },
+    BuiltinFn { name: "map", vm_impl: pkg_map },
+    BuiltinFn { name: "filter", vm_impl: pkg_filter },
+    BuiltinFn { name: "sort", vm_impl: pkg_sort },
     BuiltinFn { name: "reverse", vm_impl: pkg_reverse },
 ];
 
@@ -139,10 +140,8 @@ fn register_array_pkg_types(ctx: &mut TypeContext) {
 /// `map`/`filter` run a Jade function per element, so they dispatch through the
 /// VM; the pure entries in `ARRAY_PKG_FNS` are shadowed by these (natives are
 /// inserted last). `sort`/`reverse` need no VM state and stay pure.
-static ARRAY_PKG_NATIVES: &[(&str, NativeFnId)] = &[
-    ("map",    NativeFnId::ArrayMap),
-    ("filter", NativeFnId::ArrayFilter),
-];
+static ARRAY_PKG_NATIVES: &[(&str, NativeFnId)] =
+    &[("map", NativeFnId::ArrayMap), ("filter", NativeFnId::ArrayFilter)];
 
 pub static ARRAY_PKG: Package = Package {
     import_name: "std/array",
@@ -157,12 +156,12 @@ pub static ARRAY_PKG: Package = Package {
 pub fn register_array_method_types(ctx: &mut TypeContext) {
     let unk = JadeType::Unknown;
     let methods: &[(&str, JadeType)] = &[
-        ("len",      JadeType::Fn { params: vec![], ret: Box::new(JadeType::Int) }),
-        ("push",     JadeType::Fn { params: vec![unk.clone()], ret: Box::new(JadeType::Nil) }),
-        ("pop",      JadeType::Fn { params: vec![], ret: Box::new(JadeType::Unknown) }),
+        ("len", JadeType::Fn { params: vec![], ret: Box::new(JadeType::Int) }),
+        ("push", JadeType::Fn { params: vec![unk.clone()], ret: Box::new(JadeType::Nil) }),
+        ("pop", JadeType::Fn { params: vec![], ret: Box::new(JadeType::Unknown) }),
         ("contains", JadeType::Fn { params: vec![unk.clone()], ret: Box::new(JadeType::Bool) }),
-        ("sort",     JadeType::Fn { params: vec![], ret: Box::new(JadeType::Nil) }),
-        ("reverse",  JadeType::Fn { params: vec![], ret: Box::new(JadeType::Nil) }),
+        ("sort", JadeType::Fn { params: vec![], ret: Box::new(JadeType::Nil) }),
+        ("reverse", JadeType::Fn { params: vec![], ret: Box::new(JadeType::Nil) }),
     ];
     for (name, ty) in methods {
         ctx.define_primitive_method("array", name, ty.clone());
@@ -173,23 +172,29 @@ pub fn register_array_method_types(ctx: &mut TypeContext) {
 
 fn vm_values_equal(a: &VmValue, b: &VmValue) -> bool {
     match (a, b) {
-        (VmValue::Int(x), VmValue::Int(y))     => x == y,
+        (VmValue::Int(x), VmValue::Int(y)) => x == y,
         (VmValue::Float(x), VmValue::Float(y)) => x == y,
-        (VmValue::Bool(x), VmValue::Bool(y))   => x == y,
-        (VmValue::Str(x), VmValue::Str(y))     => x == y,
-        (VmValue::Nil, VmValue::Nil)           => true,
+        (VmValue::Bool(x), VmValue::Bool(y)) => x == y,
+        (VmValue::Str(x), VmValue::Str(y)) => x == y,
+        (VmValue::Nil, VmValue::Nil) => true,
         _ => false,
     }
 }
 
 fn vm_cmp_for_sort(a: &VmValue, b: &VmValue) -> std::cmp::Ordering {
     match (a, b) {
-        (VmValue::Int(x), VmValue::Int(y))         => x.cmp(y),
-        (VmValue::Float(x), VmValue::Float(y))     => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
-        (VmValue::Int(x), VmValue::Float(y))       => (*x as f64).partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
-        (VmValue::Float(x), VmValue::Int(y))       => x.partial_cmp(&(*y as f64)).unwrap_or(std::cmp::Ordering::Equal),
-        (VmValue::Str(x), VmValue::Str(y))         => x.cmp(y),
-        (VmValue::Bool(x), VmValue::Bool(y))       => x.cmp(y),
+        (VmValue::Int(x), VmValue::Int(y)) => x.cmp(y),
+        (VmValue::Float(x), VmValue::Float(y)) => {
+            x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
+        }
+        (VmValue::Int(x), VmValue::Float(y)) => {
+            (*x as f64).partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
+        }
+        (VmValue::Float(x), VmValue::Int(y)) => {
+            x.partial_cmp(&(*y as f64)).unwrap_or(std::cmp::Ordering::Equal)
+        }
+        (VmValue::Str(x), VmValue::Str(y)) => x.cmp(y),
+        (VmValue::Bool(x), VmValue::Bool(y)) => x.cmp(y),
         _ => std::cmp::Ordering::Equal,
     }
 }

@@ -25,7 +25,11 @@ pub(crate) enum ResolvedImport {
 /// The stdlib case never reaches here — `Instr::ImportFile` binds a built-in
 /// package before calling this — so a `Builtin` target is unreachable in
 /// practice and is mapped to a not-found rather than given a variant of its own.
-pub(crate) fn resolve_user_import(state: &VmState, path: &str, span: Span) -> Result<ResolvedImport> {
+pub(crate) fn resolve_user_import(
+    state: &VmState,
+    path: &str,
+    span: Span,
+) -> Result<ResolvedImport> {
     let ctx = crate::project::ImportContext {
         libraries: &state.libraries,
         project_root: state.project_root.as_deref(),

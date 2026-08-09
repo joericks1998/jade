@@ -123,10 +123,7 @@ fn runtime_dispatched_methods_are_not_guarded() {
 #[test]
 fn arithmetic_lowers_to_add_and_ret() {
     // r2 = r0 + r1 ; return r2   with r0=2, r1=3
-    let ir = ir_of(
-        &[LoadInt(0, 2), LoadInt(1, 3), AddInt(2, 0, 1), Return(Some(2))],
-        3,
-    );
+    let ir = ir_of(&[LoadInt(0, 2), LoadInt(1, 3), AddInt(2, 0, 1), Return(Some(2))], 3);
     assert!(ir.contains("alloca i64"), "slots allocated:\n{ir}");
     assert!(ir.contains(" add "), "native add emitted:\n{ir}");
     assert!(ir.contains("ret i64"), "returns a value word:\n{ir}");
@@ -163,10 +160,7 @@ fn every_block_is_terminated() {
 #[test]
 fn float_arithmetic_boxes_and_unboxes() {
     // r2 = r0 + r1 (floats) ; return r2
-    let ir = ir_of(
-        &[LoadFloat(0, 2.5), LoadFloat(1, 1.5), AddFloat(2, 0, 1), Return(Some(2))],
-        3,
-    );
+    let ir = ir_of(&[LoadFloat(0, 2.5), LoadFloat(1, 1.5), AddFloat(2, 0, 1), Return(Some(2))], 3);
     assert!(ir.contains("jrt_box_float"), "boxes floats:\n{ir}");
     assert!(ir.contains("jrt_unbox_float"), "unboxes operands:\n{ir}");
     assert!(ir.contains("fadd"), "native fadd emitted:\n{ir}");
@@ -207,10 +201,7 @@ fn string_literal_and_concat() {
 #[test]
 fn int_div_guards_zero_divisor_with_a_raise() {
     // r2 = r0 / r1 ; return r2
-    let ir = ir_of(
-        &[LoadInt(0, 6), LoadInt(1, 2), DivInt(2, 0, 1), Return(Some(2))],
-        3,
-    );
+    let ir = ir_of(&[LoadInt(0, 6), LoadInt(1, 2), DivInt(2, 0, 1), Return(Some(2))], 3);
     assert!(ir.contains("sdiv"), "native signed div:\n{ir}");
     assert!(ir.contains("divzero_throw"), "a throw block guards the divisor:\n{ir}");
     // Via jrt_throw_runtime, not a bare throw: codegen's own failures are
@@ -222,10 +213,7 @@ fn int_div_guards_zero_divisor_with_a_raise() {
 
 #[test]
 fn mod_uses_srem() {
-    let ir = ir_of(
-        &[LoadInt(0, 7), LoadInt(1, 3), ModInt(2, 0, 1), Return(Some(2))],
-        3,
-    );
+    let ir = ir_of(&[LoadInt(0, 7), LoadInt(1, 3), ModInt(2, 0, 1), Return(Some(2))], 3);
     assert!(ir.contains("srem"), "native signed remainder:\n{ir}");
     assert!(ir.contains("divzero_throw"), "modulo also guards zero:\n{ir}");
 }
@@ -243,17 +231,7 @@ fn try_catch_lowers_to_setjmp_frame() {
     // 0: SetupHandler(caught=r1, →4)   1: LoadInt r0,1 (try body)
     // 2: PopHandler                    3: Jump →5 (skip handler)
     // 4: Move r0,r1 (handler body)     5: Halt
-    let ir = ir_of(
-        &[
-            SetupHandler(1, 3),
-            LoadInt(0, 1),
-            PopHandler,
-            Jump(1),
-            Move(0, 1),
-            Halt,
-        ],
-        2,
-    );
+    let ir = ir_of(&[SetupHandler(1, 3), LoadInt(0, 1), PopHandler, Jump(1), Move(0, 1), Halt], 2);
     assert!(ir.contains("jade_exc_push_frame"), "frame registered:\n{ir}");
     assert!(ir.contains("call i32 @setjmp"), "setjmp split:\n{ir}");
     assert!(ir.contains("returns_twice"), "setjmp marked returns_twice:\n{ir}");
@@ -267,10 +245,7 @@ fn a_function_with_a_handler_scopes_it_to_the_frame() {
     // SetupHandler ; Return — the return leaves the try WITHOUT reaching
     // PopHandler, so the depth captured on entry has to be restored or the
     // frame outlives the stack that holds its jmp_buf.
-    let ir = ir_of(
-        &[SetupHandler(1, 2), LoadInt(0, 1), Return(Some(0)), Halt],
-        2,
-    );
+    let ir = ir_of(&[SetupHandler(1, 2), LoadInt(0, 1), Return(Some(0)), Halt], 2);
     assert!(ir.contains("jade_exc_depth"), "entry snapshots the depth:\n{ir}");
     assert!(ir.contains("jade_exc_restore"), "return unwinds to it:\n{ir}");
 }
@@ -304,10 +279,7 @@ fn globals_load_and_store_a_named_cell() {
 #[test]
 fn locals_are_moves_within_the_slot_array() {
     // GetLocal/SetLocal shuffle slots; must verify and touch both slots.
-    let ir = ir_of(
-        &[LoadInt(0, 7), SetLocal(1, 0), GetLocal(2, 1), Return(Some(2))],
-        3,
-    );
+    let ir = ir_of(&[LoadInt(0, 7), SetLocal(1, 0), GetLocal(2, 1), Return(Some(2))], 3);
     assert!(ir.contains("ret i64"), "returns a word:\n{ir}");
 }
 
@@ -317,8 +289,8 @@ fn unsupported_opcode_is_reported_not_panicked() {
     let module = context.create_module("t");
     // `ImportFile` is resolved away before lowering, so it never reaches the
     // backend in a real chunk — a clean "unsupported opcode" Err, not a panic.
-    let err = lower_chunk(&context, &module, "f", &[ImportFile("a".into(), "b".into())], 1)
-        .unwrap_err();
+    let err =
+        lower_chunk(&context, &module, "f", &[ImportFile("a".into(), "b".into())], 1).unwrap_err();
     assert!(err.contains("unsupported opcode"), "got: {err}");
 }
 
@@ -345,15 +317,8 @@ fn typed_comparisons_lower_to_native_icmp_fcmp() {
 #[test]
 fn print_devirtualizes_to_jrt_print_any() {
     // GetGlobal print ; LoadInt r1,5 ; Call r2 = print(r1) ; Halt
-    let ir = ir_of(
-        &[
-            GetGlobal(0, "print".to_string()),
-            LoadInt(1, 5),
-            Call(2, 0, vec![1]),
-            Halt,
-        ],
-        3,
-    );
+    let ir =
+        ir_of(&[GetGlobal(0, "print".to_string()), LoadInt(1, 5), Call(2, 0, vec![1]), Halt], 3);
     assert!(ir.contains("jrt_print_any"), "print devirtualized to runtime:\n{ir}");
 }
 
@@ -393,7 +358,8 @@ fn user_function_lowers_to_a_direct_call() {
     let context = Context::create();
     let module = context.create_module("t");
     let top = add_program();
-    lower_program(&context, &module, &top, 5, &HashMap::new(), &HashMap::new()).expect("program lowering failed");
+    lower_program(&context, &module, &top, 5, &HashMap::new(), &HashMap::new())
+        .expect("program lowering failed");
     module.verify().expect("module failed verification");
     let ir = module.print_to_string().to_string();
     // The function body is its own LLVM function taking two i64 params.
@@ -428,7 +394,8 @@ fn call_with_omitted_default_is_filled_at_the_call_site() {
     ];
     let context = Context::create();
     let module = context.create_module("t");
-    lower_program(&context, &module, &top, 3, &HashMap::new(), &HashMap::new()).expect("lowering failed");
+    lower_program(&context, &module, &top, 3, &HashMap::new(), &HashMap::new())
+        .expect("lowering failed");
     module.verify().expect("verification failed");
     let ir = module.print_to_string().to_string();
     // Default 5 materialized as a tagged int (5<<1 = 10) passed to the call.
@@ -454,7 +421,8 @@ fn function_value_is_first_class_and_returnable() {
     top.code = vec![LoadFn(0, 0), Return(Some(0))];
     let context = Context::create();
     let module = context.create_module("t");
-    lower_program(&context, &module, &top, 1, &HashMap::new(), &HashMap::new()).expect("first-class fn value should lower");
+    lower_program(&context, &module, &top, 1, &HashMap::new(), &HashMap::new())
+        .expect("first-class fn value should lower");
     let ir = module.print_to_string().to_string();
     assert!(ir.contains("@jf_box_0"), "boxed function pointer global emitted:\n{ir}");
 }
@@ -466,7 +434,12 @@ fn keyword_call_reorders_args_to_parameter_order() {
     let f = Arc::new(CompiledFn {
         params: vec!["a".into(), "b".into(), "c".into()],
         defaults: vec![None, None, None],
-        chunk: Chunk { name: "f".into(), code: vec![GetLocal(3, 0), Return(Some(3))], spans: vec![], fn_defs: vec![] },
+        chunk: Chunk {
+            name: "f".into(),
+            code: vec![GetLocal(3, 0), Return(Some(3))],
+            spans: vec![],
+            fn_defs: vec![],
+        },
         n_slots: 4,
         source_file: String::new(),
         module_scope: None,
@@ -487,7 +460,8 @@ fn keyword_call_reorders_args_to_parameter_order() {
     ];
     let context = Context::create();
     let module = context.create_module("t");
-    lower_program(&context, &module, &top, 6, &HashMap::new(), &HashMap::new()).expect("keyword call lowering");
+    lower_program(&context, &module, &top, 6, &HashMap::new(), &HashMap::new())
+        .expect("keyword call lowering");
     module.verify().expect("module failed verification");
     let ir = module.print_to_string().to_string();
     // A direct call to jf_0 with three i64 args (reordered to a, b, c).
@@ -511,14 +485,11 @@ fn higher_order_call_lowers_to_indirect_call() {
     });
     let mut top = Chunk::new("<top>");
     top.fn_defs.push(apply);
-    top.code = vec![
-        LoadFn(0, 0),
-        SetGlobal("apply".into(), 0),
-        Halt,
-    ];
+    top.code = vec![LoadFn(0, 0), SetGlobal("apply".into(), 0), Halt];
     let context = Context::create();
     let module = context.create_module("t");
-    lower_program(&context, &module, &top, 1, &HashMap::new(), &HashMap::new()).expect("higher-order lowering");
+    lower_program(&context, &module, &top, 1, &HashMap::new(), &HashMap::new())
+        .expect("higher-order lowering");
     module.verify().expect("module failed verification");
     let ir = module.print_to_string().to_string();
     // apply's body calls its parameter indirectly (a load then a call of a ptr).
@@ -579,10 +550,7 @@ fn array_make_index_and_set_lower_to_kind_runtime() {
 fn native_fn_value_carries_an_objkind_at_offset_8() {
     // `let f = <native ref>` — loading the ref as a value (not calling it)
     // is what materializes the box.
-    let ir = ir_of(
-        &[GetGlobal(0, "__native$0$somefn".into()), Return(Some(0))],
-        2,
-    );
+    let ir = ir_of(&[GetGlobal(0, "__native$0$somefn".into()), Return(Some(0))], 2);
     // 24-byte box, and the kind constant stored into it.
     assert!(ir.contains("native_fn_val"), "native fn box allocated:\n{ir}");
     assert!(
@@ -599,7 +567,12 @@ fn async_spawn_await_lower_to_runtime() {
     let f = Arc::new(CompiledFn {
         params: vec!["x".into()],
         defaults: vec![None],
-        chunk: Chunk { name: "f".into(), code: vec![GetLocal(1, 0), Return(Some(1))], spans: vec![], fn_defs: vec![] },
+        chunk: Chunk {
+            name: "f".into(),
+            code: vec![GetLocal(1, 0), Return(Some(1))],
+            spans: vec![],
+            fn_defs: vec![],
+        },
         n_slots: 2,
         source_file: String::new(),
         module_scope: None,
@@ -618,7 +591,8 @@ fn async_spawn_await_lower_to_runtime() {
     ];
     let context = Context::create();
     let module = context.create_module("t");
-    lower_program(&context, &module, &top, 5, &HashMap::new(), &HashMap::new()).expect("async lowering");
+    lower_program(&context, &module, &top, 5, &HashMap::new(), &HashMap::new())
+        .expect("async lowering");
     module.verify().expect("module failed verification");
     let ir = module.print_to_string().to_string();
     assert!(ir.contains("@jf_task_0"), "task wrapper emitted:\n{ir}");
@@ -721,17 +695,10 @@ fn string_comparison_lowers_to_strcmp() {
 #[test]
 fn calling_a_struct_type_is_a_named_build_error() {
     let mut struct_defs = HashMap::new();
-    struct_defs.insert(
-        "City".to_string(),
-        vec![StructFieldDef::Required("name".to_string())],
-    );
+    struct_defs.insert("City".to_string(), vec![StructFieldDef::Required("name".to_string())]);
     let mut top = Chunk::new("<top>");
-    top.code = vec![
-        MakeDict(0, vec![]),
-        GetGlobal(1, "City".to_string()),
-        Call(2, 1, vec![0]),
-        Halt,
-    ];
+    top.code =
+        vec![MakeDict(0, vec![]), GetGlobal(1, "City".to_string()), Call(2, 1, vec![0]), Halt];
     let context = Context::create();
     let module = context.create_module("t");
     let err = match lower_program(&context, &module, &top, 3, &struct_defs, &HashMap::new()) {
@@ -840,12 +807,7 @@ fn the_byte_bodied_http_pair_lowers_on_both_modules() {
 fn str_builtin_devirtualizes_to_str_of_any() {
     // GetGlobal str ; LoadInt r1,42 ; Call r2 = str(r1) ; Return r2
     let ir = ir_of(
-        &[
-            GetGlobal(0, "str".to_string()),
-            LoadInt(1, 42),
-            Call(2, 0, vec![1]),
-            Return(Some(2)),
-        ],
+        &[GetGlobal(0, "str".to_string()), LoadInt(1, 42), Call(2, 0, vec![1]), Return(Some(2))],
         3,
     );
     assert!(ir.contains("jrt_str_of_any"), "str() lowered to runtime render:\n{ir}");

@@ -49,13 +49,16 @@ pub(super) fn default_word_const<'ctx>(
                 .map_err(|e| e.to_string())?
                 .as_pointer_value();
             let raw = b
-                .build_call(dup, &[g.into(), context.i8_type().const_int(TRUSTED, false).into()], "dsw")
+                .build_call(
+                    dup,
+                    &[g.into(), context.i8_type().const_int(TRUSTED, false).into()],
+                    "dsw",
+                )
                 .map_err(|e| e.to_string())?
                 .as_any_value_enum()
                 .into_pointer_value();
             let iv = b.build_ptr_to_int(raw, i64_ty, "dsi").map_err(|e| e.to_string())?;
-            b.build_or(iv, i64_ty.const_int(TAG_STR, false), "dstag")
-                .map_err(|e| e.to_string())?
+            b.build_or(iv, i64_ty.const_int(TAG_STR, false), "dstag").map_err(|e| e.to_string())?
         }
         other => return Err(format!("lower.rs: unsupported struct field default {other:?}")),
     })
@@ -76,9 +79,7 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
         name: &str,
         ty: inkwell::types::FunctionType<'ctx>,
     ) -> FunctionValue<'ctx> {
-        self.module
-            .get_function(name)
-            .unwrap_or_else(|| self.module.add_function(name, ty, None))
+        self.module.get_function(name).unwrap_or_else(|| self.module.add_function(name, ty, None))
     }
 
     /// Box a native f64 into a tagged float word via `jrt_box_float` (a heap
@@ -94,7 +95,8 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
 
     /// Load a boxed float word back to a native f64 via `jrt_unbox_float`.
     pub(super) fn unbox_float(&self, v: IntValue<'ctx>) -> FloatValue<'ctx> {
-        let f = self.runtime_fn("jrt_unbox_float", self.f64t().fn_type(&[self.i64t().into()], false));
+        let f =
+            self.runtime_fn("jrt_unbox_float", self.f64t().fn_type(&[self.i64t().into()], false));
         self.builder
             .build_call(f, &[v.into()], "unboxf")
             .unwrap()
@@ -113,36 +115,27 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
 
     /// Strip the low-3-bit tag off a heap word and reinterpret as a data pointer.
     pub(super) fn untag_ptr(&self, v: IntValue<'ctx>) -> PointerValue<'ctx> {
-        let masked = self
-            .builder
-            .build_and(v, self.i64t().const_int(!7u64, false), "pmask")
-            .unwrap();
+        let masked =
+            self.builder.build_and(v, self.i64t().const_int(!7u64, false), "pmask").unwrap();
         self.builder.build_int_to_ptr(masked, self.ptrt(), "asptr").unwrap()
     }
 
     /// Tag an 8-aligned data pointer as a heap string word (`ptr | TAG_STR`).
     pub(super) fn tag_str(&self, p: PointerValue<'ctx>) -> IntValue<'ctx> {
         let asint = self.builder.build_ptr_to_int(p, self.i64t(), "p2i").unwrap();
-        self.builder
-            .build_or(asint, self.i64t().const_int(TAG_STR, false), "tagstr")
-            .unwrap()
+        self.builder.build_or(asint, self.i64t().const_int(TAG_STR, false), "tagstr").unwrap()
     }
 
     /// Tag a malloc'd (8-aligned) heap object pointer as a non-string heap word
     /// (`ptr | TAG_PTR`) — used for kind-tagged collections.
     pub(super) fn tag_ptr(&self, p: PointerValue<'ctx>) -> IntValue<'ctx> {
         let asint = self.builder.build_ptr_to_int(p, self.i64t(), "op2i").unwrap();
-        self.builder
-            .build_or(asint, self.i64t().const_int(TAG_PTR, false), "tagptr")
-            .unwrap()
+        self.builder.build_or(asint, self.i64t().const_int(TAG_PTR, false), "tagptr").unwrap()
     }
 
     /// Load a register's tagged word.
     pub(super) fn load(&self, r: Reg) -> IntValue<'ctx> {
-        self.builder
-            .build_load(self.i64t(), self.slots[r as usize], "ld")
-            .unwrap()
-            .into_int_value()
+        self.builder.build_load(self.i64t(), self.slots[r as usize], "ld").unwrap().into_int_value()
     }
 
     /// Store a tagged word into a register, releasing the reference the slot
@@ -156,10 +149,7 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
     /// Load a slot by raw index (locals share the register array in the VM, so
     /// `GetLocal`/`SetLocal` index the same `slots`).
     pub(super) fn load_idx(&self, i: usize) -> IntValue<'ctx> {
-        self.builder
-            .build_load(self.i64t(), self.slots[i], "ldl")
-            .unwrap()
-            .into_int_value()
+        self.builder.build_load(self.i64t(), self.slots[i], "ldl").unwrap().into_int_value()
     }
 
     pub(super) fn store_idx(&self, i: usize, v: IntValue<'ctx>) {
@@ -184,16 +174,12 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
 
     /// Untag an int word to its native i64 (arithmetic shift right by 1).
     pub(super) fn untag_int(&self, v: IntValue<'ctx>) -> IntValue<'ctx> {
-        self.builder
-            .build_right_shift(v, self.i64t().const_int(1, false), true, "utag")
-            .unwrap()
+        self.builder.build_right_shift(v, self.i64t().const_int(1, false), true, "utag").unwrap()
     }
 
     /// Tag a native i64 as an int word (shift left by 1; low bit 0).
     pub(super) fn tag_int(&self, v: IntValue<'ctx>) -> IntValue<'ctx> {
-        self.builder
-            .build_left_shift(v, self.i64t().const_int(1, false), "tag")
-            .unwrap()
+        self.builder.build_left_shift(v, self.i64t().const_int(1, false), "tag").unwrap()
     }
 
     /// Untag a bool word to an `i1` (bit 4 holds the value).
@@ -202,10 +188,7 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
             .builder
             .build_right_shift(v, self.i64t().const_int(4, false), false, "bsh")
             .unwrap();
-        let bit = self
-            .builder
-            .build_and(shifted, self.i64t().const_int(1, false), "band")
-            .unwrap();
+        let bit = self.builder.build_and(shifted, self.i64t().const_int(1, false), "band").unwrap();
         self.builder
             .build_int_compare(IntPredicate::NE, bit, self.i64t().const_zero(), "btrue")
             .unwrap()
@@ -259,5 +242,4 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
             other => return Err(format!("lower.rs: unsupported default value {other:?}")),
         })
     }
-
 }

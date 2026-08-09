@@ -1,6 +1,7 @@
 use crate::{
-    compiler::{tir::JadeType, type_infer::TypeContext}, vm::VmValue,
+    compiler::{tir::JadeType, type_infer::TypeContext},
     frontend::error::{JadeError, Result, Span},
+    vm::VmValue,
 };
 
 use crate::builtins::{BuiltinFn, Package};
@@ -25,7 +26,7 @@ fn require_str<'a>(args: &'a [VmValue], pos: usize, fn_name: &str) -> Result<&'a
     match args.get(pos) {
         Some(VmValue::Str(s)) => Ok(s.as_str()),
         Some(_) => Err(JadeError::TypeError { message: fn_name.to_string(), span: ZERO }),
-        None    => Err(JadeError::ArityMismatch { expected: pos + 1, got: args.len(), span: ZERO }),
+        None => Err(JadeError::ArityMismatch { expected: pos + 1, got: args.len(), span: ZERO }),
     }
 }
 
@@ -102,13 +103,13 @@ fn path_is_abs(args: &[VmValue]) -> Result<VmValue> {
 }
 
 static PATH_PKG_FNS: &[BuiltinFn] = &[
-    BuiltinFn { name: "join",     vm_impl: path_join },
+    BuiltinFn { name: "join", vm_impl: path_join },
     BuiltinFn { name: "basename", vm_impl: path_basename },
-    BuiltinFn { name: "dirname",  vm_impl: path_dirname },
-    BuiltinFn { name: "ext",      vm_impl: path_ext },
-    BuiltinFn { name: "stem",     vm_impl: path_stem },
-    BuiltinFn { name: "abs",      vm_impl: path_abs },
-    BuiltinFn { name: "is_abs",   vm_impl: path_is_abs },
+    BuiltinFn { name: "dirname", vm_impl: path_dirname },
+    BuiltinFn { name: "ext", vm_impl: path_ext },
+    BuiltinFn { name: "stem", vm_impl: path_stem },
+    BuiltinFn { name: "abs", vm_impl: path_abs },
+    BuiltinFn { name: "is_abs", vm_impl: path_is_abs },
 ];
 
 fn register_path_pkg_types(ctx: &mut TypeContext) {

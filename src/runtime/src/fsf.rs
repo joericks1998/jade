@@ -10,8 +10,8 @@ use core::ffi::c_char;
 use std::cell::Cell;
 use std::io::Write as _;
 
-use crate::string::{self, TAINTED, TRUSTED};
 use crate::cstr;
+use crate::string::{self, TAINTED, TRUSTED};
 
 // ── Neutral cores (used by both engines) ──────────────────────────────────────
 
@@ -169,7 +169,10 @@ pub unsafe extern "C" fn jrt_fs_write_stdout_bytes_impl(data: *const u8, len: us
 
 /// `fs.read_bytes(path)` core. Null + pending error on failure.
 #[unsafe(no_mangle)]
-pub extern "C" fn jrt_fs_read_bytes_impl(path: *const c_char, trust: i32) -> *mut core::ffi::c_void {
+pub extern "C" fn jrt_fs_read_bytes_impl(
+    path: *const c_char,
+    trust: i32,
+) -> *mut core::ffi::c_void {
     let tag = if trust != 0 { TRUSTED } else { TAINTED };
     let p = unsafe { cstr::borrow(path) };
     match read_bytes(p) {
@@ -199,7 +202,11 @@ pub unsafe extern "C" fn jrt_fs_write_bytes_impl(path: *const c_char, data: *con
 /// # Safety
 /// `data` must point at `len` readable bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn jrt_fs_append_bytes_impl(path: *const c_char, data: *const u8, len: usize) {
+pub unsafe extern "C" fn jrt_fs_append_bytes_impl(
+    path: *const c_char,
+    data: *const u8,
+    len: usize,
+) {
     let p = unsafe { cstr::borrow(path) };
     let slice = if data.is_null() || len == 0 {
         &[][..]

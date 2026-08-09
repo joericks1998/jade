@@ -45,7 +45,7 @@
 
 use core::cell::UnsafeCell;
 use core::ptr::NonNull;
-use std::alloc::{alloc as sys_alloc, dealloc as sys_dealloc, Layout};
+use std::alloc::{Layout, alloc as sys_alloc, dealloc as sys_dealloc};
 
 use allocator_api2::alloc::{AllocError, Allocator};
 
@@ -198,7 +198,10 @@ unsafe impl Allocator for ArenaAlloc {
 impl Mark {
     #[inline]
     fn to_token(self) -> i64 {
-        debug_assert!(self.pos < (1 << 32) && self.cur < (1 << 30), "arena mark out of token range");
+        debug_assert!(
+            self.pos < (1 << 32) && self.cur < (1 << 30),
+            "arena mark out of token range"
+        );
         // Shift left 1 so the token is even (low bit 0). Codegen stores the token
         // in an ordinary refcounted register; an even value reads as an int, so
         // the incref/decref emitted around that register no-op on it (a `TAG_PTR`

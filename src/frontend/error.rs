@@ -154,7 +154,6 @@ pub enum JadeError {
     /// The same Future was awaited more than once.
     DoubleAwait { span: Span },
 
-
     /// A spawned async task panicked (tokio JoinError).
     AsyncPanic { message: String, span: Span },
 
@@ -169,87 +168,173 @@ pub enum JadeError {
 impl std::fmt::Display for JadeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            JadeError::UnexpectedChar { ch, span } =>
-                write!(f, "[{}:{}] syntax error: unexpected character {:?}", span.line, span.col, ch),
-            JadeError::UnexpectedToken { expected, got, span } =>
-                write!(f, "[{}:{}] syntax error: expected {}, found {}", span.line, span.col, expected, got),
-            JadeError::UnexpectedEof { span } =>
-                write!(f, "[{}:{}] syntax error: unexpected end of file — did you forget a closing `}}`?", span.line, span.col),
-            JadeError::UndefinedVariable { name, span } =>
-                write!(f, "[{}:{}] undefined variable '{}'", span.line, span.col, name),
-            JadeError::DivisionByZero { span } =>
-                write!(f, "[{}:{}] division by zero", span.line, span.col),
-            JadeError::RemainderByZero { span } =>
-                write!(f, "[{}:{}] remainder by zero", span.line, span.col),
-            JadeError::InvalidShift { amount, span } =>
-                write!(f, "[{}:{}] invalid shift amount {}", span.line, span.col, amount),
-            JadeError::TypeError { message, span } =>
-                write!(f, "[{}:{}] type error: {}", span.line, span.col, message),
-            JadeError::LiteralOverflow { span } =>
-                write!(f, "[{}:{}] numeric literal overflows its type", span.line, span.col),
-            JadeError::ArityMismatch { expected, got, span } =>
-                write!(f, "[{}:{}] wrong number of arguments: expected {}, got {}", span.line, span.col, expected, got),
-            JadeError::NotCallable { span } =>
-                write!(f, "[{}:{}] value is not callable", span.line, span.col),
-            JadeError::YieldOutsideFunction { span } =>
-                write!(f, "[{}:{}] 'yield' outside a function — it appends to the stream a function produces, so there must be one", span.line, span.col),
-            JadeError::YieldAndReturn { span } =>
-                write!(f, "[{}:{}] a function that yields cannot also return a value — it produces a stream, not a single value (a bare 'return' to stop early is fine)", span.line, span.col),
-            JadeError::ReturnOutsideFunction { span } =>
-                write!(f, "[{}:{}] 'return' used outside of a function", span.line, span.col),
-            JadeError::BreakOutsideLoop { span } =>
-                write!(f, "[{}:{}] 'break' outside a loop — it leaves the innermost 'for' or 'while', so there must be one (a loop outside the enclosing function does not count)", span.line, span.col),
-            JadeError::ContinueOutsideLoop { span } =>
-                write!(f, "[{}:{}] 'continue' outside a loop — it starts the innermost 'for' or 'while' on its next iteration, so there must be one (a loop outside the enclosing function does not count)", span.line, span.col),
-            JadeError::NestedFunction { span } =>
-                write!(f, "[{}:{}] function definitions cannot be nested", span.line, span.col),
-            JadeError::IntegerOverflow { span } =>
-                write!(f, "[{}:{}] integer overflow", span.line, span.col),
-            JadeError::NotAStruct { span } =>
-                write!(f, "[{}:{}] value is not a struct", span.line, span.col),
-            JadeError::UndefinedField { type_name, field, span } =>
-                write!(f, "[{}:{}] struct '{}' has no field '{}'", span.line, span.col, type_name, field),
-            JadeError::UndefinedType { name, span } =>
-                write!(f, "[{}:{}] undefined struct type '{}'", span.line, span.col, name),
-            JadeError::MissingField { field, span } =>
-                write!(f, "[{}:{}] missing required field '{}' in struct literal", span.line, span.col, field),
-            JadeError::UnterminatedString { span } =>
-                write!(f, "[{}:{}] unterminated string literal", span.line, span.col),
-            JadeError::IndexOutOfBounds { index, len, span } =>
-                write!(f, "[{}:{}] index {} out of bounds (length {})", span.line, span.col, index, len),
-            JadeError::UndefinedInterface { name, span } =>
-                write!(f, "[{}:{}] interface '{}' is not defined", span.line, span.col, name),
-            JadeError::MissingInterfaceMethod { type_name, interface_name, method, span } =>
-                write!(f, "[{}:{}] type '{}' does not implement interface '{}': missing method '{}'", span.line, span.col, type_name, interface_name, method),
-            JadeError::InferenceError { message, span } =>
-                write!(f, "[{}:{}] inference error: {}", span.line, span.col, message),
-            JadeError::NoInferenceBackend { span } =>
-                write!(f, "[{}:{}] no inference backend available — run `jade register` to \
-                    choose a provider and set your API key", span.line, span.col),
-            JadeError::NotAPrompt { name, span } =>
-                write!(f, "[{}:{}] '{}' is not a prompt variable", span.line, span.col, name),
-            JadeError::PromptOverflow { name, attempts, span } =>
-                write!(f, "[{}:{}] prompt '{}' failed to produce a valid typed value after {} attempt(s)", span.line, span.col, name, attempts),
-            JadeError::InvalidPipeStage { got, span } =>
-                write!(f, "[{}:{}] '|>' needs a function, a type name, or a Grammar on its right; got {}", span.line, span.col, got),
-            JadeError::PrefixDerefOnField { field, span } =>
-                write!(f, "[{}:{}] prefix '?' cannot be applied to a field — write 'obj.(?{})' or 'obj~>{}' instead", span.line, span.col, field, field),
-            JadeError::KeyNotFound { key, span } =>
-                write!(f, "[{}:{}] key '{}' not found in dict", span.line, span.col, key),
-            JadeError::PromptFieldNotStr { field, span } =>
-                write!(f, "[{}:{}] prompt field '{}' requires a string value", span.line, span.col, field),
-            JadeError::DuplicateField { field, span } =>
-                write!(f, "[{}:{}] field '{}' is specified more than once in struct literal", span.line, span.col, field),
-            JadeError::TypeMismatch { expected, got, span } =>
-                write!(f, "[{}:{}] type mismatch: expected {}, got {}", span.line, span.col, expected, got),
+            JadeError::UnexpectedChar { ch, span } => write!(
+                f,
+                "[{}:{}] syntax error: unexpected character {:?}",
+                span.line, span.col, ch
+            ),
+            JadeError::UnexpectedToken { expected, got, span } => write!(
+                f,
+                "[{}:{}] syntax error: expected {}, found {}",
+                span.line, span.col, expected, got
+            ),
+            JadeError::UnexpectedEof { span } => write!(
+                f,
+                "[{}:{}] syntax error: unexpected end of file — did you forget a closing `}}`?",
+                span.line, span.col
+            ),
+            JadeError::UndefinedVariable { name, span } => {
+                write!(f, "[{}:{}] undefined variable '{}'", span.line, span.col, name)
+            }
+            JadeError::DivisionByZero { span } => {
+                write!(f, "[{}:{}] division by zero", span.line, span.col)
+            }
+            JadeError::RemainderByZero { span } => {
+                write!(f, "[{}:{}] remainder by zero", span.line, span.col)
+            }
+            JadeError::InvalidShift { amount, span } => {
+                write!(f, "[{}:{}] invalid shift amount {}", span.line, span.col, amount)
+            }
+            JadeError::TypeError { message, span } => {
+                write!(f, "[{}:{}] type error: {}", span.line, span.col, message)
+            }
+            JadeError::LiteralOverflow { span } => {
+                write!(f, "[{}:{}] numeric literal overflows its type", span.line, span.col)
+            }
+            JadeError::ArityMismatch { expected, got, span } => write!(
+                f,
+                "[{}:{}] wrong number of arguments: expected {}, got {}",
+                span.line, span.col, expected, got
+            ),
+            JadeError::NotCallable { span } => {
+                write!(f, "[{}:{}] value is not callable", span.line, span.col)
+            }
+            JadeError::YieldOutsideFunction { span } => write!(
+                f,
+                "[{}:{}] 'yield' outside a function — it appends to the stream a function produces, so there must be one",
+                span.line, span.col
+            ),
+            JadeError::YieldAndReturn { span } => write!(
+                f,
+                "[{}:{}] a function that yields cannot also return a value — it produces a stream, not a single value (a bare 'return' to stop early is fine)",
+                span.line, span.col
+            ),
+            JadeError::ReturnOutsideFunction { span } => {
+                write!(f, "[{}:{}] 'return' used outside of a function", span.line, span.col)
+            }
+            JadeError::BreakOutsideLoop { span } => write!(
+                f,
+                "[{}:{}] 'break' outside a loop — it leaves the innermost 'for' or 'while', so there must be one (a loop outside the enclosing function does not count)",
+                span.line, span.col
+            ),
+            JadeError::ContinueOutsideLoop { span } => write!(
+                f,
+                "[{}:{}] 'continue' outside a loop — it starts the innermost 'for' or 'while' on its next iteration, so there must be one (a loop outside the enclosing function does not count)",
+                span.line, span.col
+            ),
+            JadeError::NestedFunction { span } => {
+                write!(f, "[{}:{}] function definitions cannot be nested", span.line, span.col)
+            }
+            JadeError::IntegerOverflow { span } => {
+                write!(f, "[{}:{}] integer overflow", span.line, span.col)
+            }
+            JadeError::NotAStruct { span } => {
+                write!(f, "[{}:{}] value is not a struct", span.line, span.col)
+            }
+            JadeError::UndefinedField { type_name, field, span } => write!(
+                f,
+                "[{}:{}] struct '{}' has no field '{}'",
+                span.line, span.col, type_name, field
+            ),
+            JadeError::UndefinedType { name, span } => {
+                write!(f, "[{}:{}] undefined struct type '{}'", span.line, span.col, name)
+            }
+            JadeError::MissingField { field, span } => write!(
+                f,
+                "[{}:{}] missing required field '{}' in struct literal",
+                span.line, span.col, field
+            ),
+            JadeError::UnterminatedString { span } => {
+                write!(f, "[{}:{}] unterminated string literal", span.line, span.col)
+            }
+            JadeError::IndexOutOfBounds { index, len, span } => write!(
+                f,
+                "[{}:{}] index {} out of bounds (length {})",
+                span.line, span.col, index, len
+            ),
+            JadeError::UndefinedInterface { name, span } => {
+                write!(f, "[{}:{}] interface '{}' is not defined", span.line, span.col, name)
+            }
+            JadeError::MissingInterfaceMethod { type_name, interface_name, method, span } => {
+                write!(
+                    f,
+                    "[{}:{}] type '{}' does not implement interface '{}': missing method '{}'",
+                    span.line, span.col, type_name, interface_name, method
+                )
+            }
+            JadeError::InferenceError { message, span } => {
+                write!(f, "[{}:{}] inference error: {}", span.line, span.col, message)
+            }
+            JadeError::NoInferenceBackend { span } => write!(
+                f,
+                "[{}:{}] no inference backend available — run `jade register` to \
+                    choose a provider and set your API key",
+                span.line, span.col
+            ),
+            JadeError::NotAPrompt { name, span } => {
+                write!(f, "[{}:{}] '{}' is not a prompt variable", span.line, span.col, name)
+            }
+            JadeError::PromptOverflow { name, attempts, span } => write!(
+                f,
+                "[{}:{}] prompt '{}' failed to produce a valid typed value after {} attempt(s)",
+                span.line, span.col, name, attempts
+            ),
+            JadeError::InvalidPipeStage { got, span } => write!(
+                f,
+                "[{}:{}] '|>' needs a function, a type name, or a Grammar on its right; got {}",
+                span.line, span.col, got
+            ),
+            JadeError::PrefixDerefOnField { field, span } => write!(
+                f,
+                "[{}:{}] prefix '?' cannot be applied to a field — write 'obj.(?{})' or 'obj~>{}' instead",
+                span.line, span.col, field, field
+            ),
+            JadeError::KeyNotFound { key, span } => {
+                write!(f, "[{}:{}] key '{}' not found in dict", span.line, span.col, key)
+            }
+            JadeError::PromptFieldNotStr { field, span } => write!(
+                f,
+                "[{}:{}] prompt field '{}' requires a string value",
+                span.line, span.col, field
+            ),
+            JadeError::DuplicateField { field, span } => write!(
+                f,
+                "[{}:{}] field '{}' is specified more than once in struct literal",
+                span.line, span.col, field
+            ),
+            JadeError::TypeMismatch { expected, got, span } => write!(
+                f,
+                "[{}:{}] type mismatch: expected {}, got {}",
+                span.line, span.col, expected, got
+            ),
             JadeError::QuotedImport { path, span } => {
                 let dotted = path.trim_end_matches(".jde").replace('/', "::");
-                write!(f, "[{}:{}] quoted file imports were removed. Import by module name with `::` notation: `use {}` (a sibling `.jde` file, a subdir with `sub::name`, a stdlib package like `std::math`, or a registered `[lib]`/dependency).", span.line, span.col, dotted)
+                write!(
+                    f,
+                    "[{}:{}] quoted file imports were removed. Import by module name with `::` notation: `use {}` (a sibling `.jde` file, a subdir with `sub::name`, a stdlib package like `std::math`, or a registered `[lib]`/dependency).",
+                    span.line, span.col, dotted
+                )
             }
-            JadeError::ImportAlias { span } =>
-                write!(f, "[{}:{}] the `as` import alias was removed; an import binds its module's last path segment automatically (`use sub::helper` binds `helper`).", span.line, span.col),
-            JadeError::ImportNotFound { path, span } =>
-                write!(f, "[{}:{}] cannot find import '{}': file not found", span.line, span.col, path),
+            JadeError::ImportAlias { span } => write!(
+                f,
+                "[{}:{}] the `as` import alias was removed; an import binds its module's last path segment automatically (`use sub::helper` binds `helper`).",
+                span.line, span.col
+            ),
+            JadeError::ImportNotFound { path, span } => write!(
+                f,
+                "[{}:{}] cannot find import '{}': file not found",
+                span.line, span.col, path
+            ),
             JadeError::SharedMutation { task, what, span } => write!(
                 f,
                 "[{}:{}] async function '{}' {}\n  \
@@ -265,20 +350,29 @@ impl std::fmt::Display for JadeError {
                  help: open the handle inside the task and close it before returning",
                 span.line, span.col, type_name
             ),
-            JadeError::CircularImport { path, span } =>
-                write!(f, "[{}:{}] circular import detected: '{}' is already being imported", span.line, span.col, path),
-            JadeError::Exception { message, span } =>
-                write!(f, "[{}:{}] unhandled exception: {}", span.line, span.col, message),
-            JadeError::NotAFuture { span } =>
-                write!(f, "[{}:{}] 'await' applied to a non-Future value", span.line, span.col),
-            JadeError::DoubleAwait { span } =>
-                write!(f, "[{}:{}] cannot await the same Future more than once", span.line, span.col),
-            JadeError::AsyncPanic { message, span } =>
-                write!(f, "[{}:{}] async task panicked: {}", span.line, span.col, message),
-            JadeError::IoError { message, span } =>
-                write!(f, "[{}:{}] I/O error: {}", span.line, span.col, message),
-            JadeError::InFile { file, cause } =>
-                write!(f, "in \"{}\": {}", file, cause),
+            JadeError::CircularImport { path, span } => write!(
+                f,
+                "[{}:{}] circular import detected: '{}' is already being imported",
+                span.line, span.col, path
+            ),
+            JadeError::Exception { message, span } => {
+                write!(f, "[{}:{}] unhandled exception: {}", span.line, span.col, message)
+            }
+            JadeError::NotAFuture { span } => {
+                write!(f, "[{}:{}] 'await' applied to a non-Future value", span.line, span.col)
+            }
+            JadeError::DoubleAwait { span } => write!(
+                f,
+                "[{}:{}] cannot await the same Future more than once",
+                span.line, span.col
+            ),
+            JadeError::AsyncPanic { message, span } => {
+                write!(f, "[{}:{}] async task panicked: {}", span.line, span.col, message)
+            }
+            JadeError::IoError { message, span } => {
+                write!(f, "[{}:{}] I/O error: {}", span.line, span.col, message)
+            }
+            JadeError::InFile { file, cause } => write!(f, "in \"{}\": {}", file, cause),
         }
     }
 }

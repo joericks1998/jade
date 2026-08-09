@@ -1,6 +1,7 @@
 use crate::{
-    compiler::{tir::JadeType, type_infer::TypeContext}, vm::VmValue,
+    compiler::{tir::JadeType, type_infer::TypeContext},
     frontend::error::{JadeError, Result, Span},
+    vm::VmValue,
 };
 
 use crate::builtins::{BuiltinFn, Package, make_array};
@@ -21,7 +22,7 @@ fn env_get(args: &[VmValue]) -> Result<VmValue> {
     };
     Ok(match jade_runtime::envf::get(name) {
         Some(val) => VmValue::Str(val.into()),
-        None      => VmValue::Nil,
+        None => VmValue::Nil,
     })
 }
 
@@ -45,7 +46,8 @@ fn env_args(args: &[VmValue]) -> Result<VmValue> {
     if !args.is_empty() {
         return Err(JadeError::ArityMismatch { expected: 0, got: args.len(), span: ZERO });
     }
-    let argv: Vec<VmValue> = jade_runtime::envf::args().into_iter().map(|a| VmValue::Str(JStr::trusted(a))).collect();
+    let argv: Vec<VmValue> =
+        jade_runtime::envf::args().into_iter().map(|a| VmValue::Str(JStr::trusted(a))).collect();
     Ok(make_array(argv))
 }
 
@@ -59,10 +61,10 @@ fn env_cwd(args: &[VmValue]) -> Result<VmValue> {
 }
 
 static ENV_PKG_FNS: &[BuiltinFn] = &[
-    BuiltinFn { name: "get",  vm_impl: env_get },
-    BuiltinFn { name: "set",  vm_impl: env_set },
+    BuiltinFn { name: "get", vm_impl: env_get },
+    BuiltinFn { name: "set", vm_impl: env_set },
     BuiltinFn { name: "args", vm_impl: env_args },
-    BuiltinFn { name: "cwd",  vm_impl: env_cwd },
+    BuiltinFn { name: "cwd", vm_impl: env_cwd },
 ];
 
 fn register_env_pkg_types(ctx: &mut TypeContext) {

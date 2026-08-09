@@ -41,10 +41,7 @@ pub fn run_register(provider: Option<&str>, key: Option<&str>, list: bool, remov
 
     // It must actually be installed — you can't select a provider with no library.
     if !installed.iter().any(|p| p.name == name) {
-        eprintln!(
-            "Provider '{name}' is not installed. Installed: {}.",
-            join_names(&installed)
-        );
+        eprintln!("Provider '{name}' is not installed. Installed: {}.", join_names(&installed));
         std::process::exit(1);
     }
 
@@ -98,18 +95,13 @@ pub fn run_register(provider: Option<&str>, key: Option<&str>, list: bool, remov
 pub fn run_use(provider: &str) {
     let installed = providers::installed();
     if !installed.iter().any(|p| p.name == provider) {
-        eprintln!(
-            "Provider '{provider}' is not installed. Installed: {}.",
-            join_names(&installed)
-        );
+        eprintln!("Provider '{provider}' is not installed. Installed: {}.", join_names(&installed));
         std::process::exit(1);
     }
     activate_or_exit(provider);
     println!("✓ '{provider}' is now your active inference provider.");
     if !providers::has_credential(provider) {
-        eprintln!(
-            "Warning: '{provider}' has no credential yet — run `jade register {provider}`."
-        );
+        eprintln!("Warning: '{provider}' has no credential yet — run `jade register {provider}`.");
     }
 }
 

@@ -1,7 +1,10 @@
 use super::{
-    ast::{BinOpKind, CatchArm, DerefStyle, Expr, FStrPart, InterfaceMethod, Program, StructFieldDef, Stmt, UnaryOpKind},
+    ast::{
+        BinOpKind, CatchArm, DerefStyle, Expr, FStrPart, InterfaceMethod, Program, Stmt,
+        StructFieldDef, UnaryOpKind,
+    },
     error::{JadeError, Result, Span},
-    lexer::{token_kind_desc, RawFStrPart, Token, TokenKind},
+    lexer::{RawFStrPart, Token, TokenKind, token_kind_desc},
 };
 
 /// The `@dec(a, k = v)` lines attached to one declaration, in source order.
@@ -32,11 +35,16 @@ struct Parser {
 /// Public entry point. Builds a Parser and drives it to produce a Program.
 pub fn parse(tokens: Vec<Token>) -> Result<Program> {
     if tokens.is_empty() {
-        return Err(JadeError::UnexpectedEof {
-            span: Span { line: 1, col: 1 },
-        });
+        return Err(JadeError::UnexpectedEof { span: Span { line: 1, col: 1 } });
     }
-    let mut parser = Parser { tokens, pos: 0, fn_depth: 0, loop_depth: 0, async_fn_depth: 0, struct_literal_allowed: true };
+    let mut parser = Parser {
+        tokens,
+        pos: 0,
+        fn_depth: 0,
+        loop_depth: 0,
+        async_fn_depth: 0,
+        struct_literal_allowed: true,
+    };
     parser.parse_program()
 }
 
@@ -69,8 +77,7 @@ impl Parser {
     // the Eof sentinel, so `self.pos` is always a valid index. The fallback to
     // the last token is an extra safety net — it returns Eof rather than panicking.
     fn peek(&self) -> &Token {
-        self.tokens.get(self.pos)
-            .unwrap_or_else(|| &self.tokens[self.tokens.len() - 1])
+        self.tokens.get(self.pos).unwrap_or_else(|| &self.tokens[self.tokens.len() - 1])
     }
 
     /// Look `offset` tokens ahead without advancing. Clamped to the last token.
@@ -96,7 +103,10 @@ impl Parser {
     /// This lets single-line function bodies work: `fn f(x) { return x * 2 }`.
     fn consume_semicolon(&mut self) -> Result<()> {
         match self.peek().kind {
-            TokenKind::Semicolon => { self.advance(); Ok(()) }
+            TokenKind::Semicolon => {
+                self.advance();
+                Ok(())
+            }
             TokenKind::RBrace | TokenKind::Eof => Ok(()),
             _ => {
                 let token = self.peek().clone();
@@ -213,27 +223,18 @@ impl Parser {
     /// first is applied first. That is the reverse of Python's rule, and
     /// matching `fn` matters more than matching Python — two decorators on a
     /// `let` and two on a `fn` in the same file have to nest the same way.
-    fn apply_decorators(
-        value: Expr,
-        decorators: Decorators,
-        span: Span,
-    ) -> Expr {
+    fn apply_decorators(value: Expr, decorators: Decorators, span: Span) -> Expr {
         let mut acc = value;
         for (name, dec_args) in decorators {
             // `@tools::register` arrived here normalized to "tools.register".
             // Rebuild it as a field access so it resolves exactly as a
             // hand-written `tools.register(v)` would.
             let mut parts = name.split('.');
-            let mut callee = Expr::Identifier {
-                name: parts.next().unwrap_or_default().to_string(),
-                span,
-            };
+            let mut callee =
+                Expr::Identifier { name: parts.next().unwrap_or_default().to_string(), span };
             for part in parts {
-                callee = Expr::FieldAccess {
-                    object: Box::new(callee),
-                    field: part.to_string(),
-                    span,
-                };
+                callee =
+                    Expr::FieldAccess { object: Box::new(callee), field: part.to_string(), span };
             }
             // The decorated value is the first argument; the decorator's own
             // arguments follow, keeping positional and keyword forms apart.
@@ -256,11 +257,11 @@ impl Parser {
         if !decorators.is_empty() {
             // Decorators are valid on fn, async fn, struct, extend, let, and prompt.
             return match self.peek().kind {
-                TokenKind::Fn     => self.parse_fn_with_decorators(decorators),
-                TokenKind::Async  => self.parse_async_fn_with_decorators(decorators),
+                TokenKind::Fn => self.parse_fn_with_decorators(decorators),
+                TokenKind::Async => self.parse_async_fn_with_decorators(decorators),
                 TokenKind::Struct => self.parse_struct_def_with_decorators(decorators),
                 TokenKind::Extend => self.parse_extend_block_with_decorators(decorators),
-                TokenKind::Let    => self.parse_let_with_decorators(decorators),
+                TokenKind::Let => self.parse_let_with_decorators(decorators),
                 TokenKind::Prompt => self.parse_prompt_decl_with_decorators(decorators),
                 _ => {
                     let t = self.peek().clone();
@@ -273,36 +274,39 @@ impl Parser {
             };
         }
         match self.peek().kind {
-            TokenKind::Let    => self.parse_let_with_decorators(vec![]),
-            TokenKind::Fn     => self.parse_fn_with_decorators(vec![]),
-            TokenKind::Async  => self.parse_async_fn_with_decorators(vec![]),
+            TokenKind::Let => self.parse_let_with_decorators(vec![]),
+            TokenKind::Fn => self.parse_fn_with_decorators(vec![]),
+            TokenKind::Async => self.parse_async_fn_with_decorators(vec![]),
             TokenKind::Return => self.parse_return(),
-            TokenKind::Yield  => self.parse_yield(),
-            TokenKind::If     => self.parse_if(),
-            TokenKind::While  => self.parse_while(),
-            TokenKind::For    => self.parse_for(),
-            TokenKind::Break    => self.parse_break(),
+            TokenKind::Yield => self.parse_yield(),
+            TokenKind::If => self.parse_if(),
+            TokenKind::While => self.parse_while(),
+            TokenKind::For => self.parse_for(),
+            TokenKind::Break => self.parse_break(),
             TokenKind::Continue => self.parse_continue(),
-            TokenKind::Struct     => self.parse_struct_def_with_decorators(vec![]),
-            TokenKind::Extend     => self.parse_extend_block_with_decorators(vec![]),
-            TokenKind::Interface  => self.parse_interface_def(),
-            TokenKind::Prompt     => self.parse_prompt_decl_with_decorators(vec![]),
-            TokenKind::Use        => self.parse_use(),
-            TokenKind::From       => self.parse_from_use(),
-            TokenKind::Raise      => self.parse_raise(),
-            TokenKind::Try        => self.parse_try_catch(),
+            TokenKind::Struct => self.parse_struct_def_with_decorators(vec![]),
+            TokenKind::Extend => self.parse_extend_block_with_decorators(vec![]),
+            TokenKind::Interface => self.parse_interface_def(),
+            TokenKind::Prompt => self.parse_prompt_decl_with_decorators(vec![]),
+            TokenKind::Use => self.parse_use(),
+            TokenKind::From => self.parse_from_use(),
+            TokenKind::Raise => self.parse_raise(),
+            TokenKind::Try => self.parse_try_catch(),
             TokenKind::Identifier(_) => {
                 // Disambiguate identifier-led statement forms:
                 //   `ident =`              → bare variable assignment
                 //   `ident . ident =`      → struct field assignment
                 //   `ident [ expr ] =`     → array index assignment
                 //   anything else          → expression statement (e.g. method call)
-                let next_is_eq = self.peek_at(1)
-                    .map(|t| t.kind == TokenKind::Equals).unwrap_or(false);
-                let next_is_dot = self.peek_at(1)
-                    .map(|t| t.kind == TokenKind::Dot).unwrap_or(false);
+                let next_is_eq =
+                    self.peek_at(1).map(|t| t.kind == TokenKind::Equals).unwrap_or(false);
+                let next_is_dot =
+                    self.peek_at(1).map(|t| t.kind == TokenKind::Dot).unwrap_or(false);
                 let dot_field_eq = next_is_dot
-                    && self.peek_at(2).map(|t| matches!(t.kind, TokenKind::Identifier(_))).unwrap_or(false)
+                    && self
+                        .peek_at(2)
+                        .map(|t| matches!(t.kind, TokenKind::Identifier(_)))
+                        .unwrap_or(false)
                     && self.peek_at(3).map(|t| t.kind == TokenKind::Equals).unwrap_or(false);
 
                 if next_is_eq {
@@ -317,8 +321,10 @@ impl Parser {
             }
             // Implicit self field assignment: `.field = expr` → `self.field = expr`
             TokenKind::Dot => {
-                let is_implicit_field_assign =
-                    self.peek_at(1).map(|t| matches!(t.kind, TokenKind::Identifier(_))).unwrap_or(false)
+                let is_implicit_field_assign = self
+                    .peek_at(1)
+                    .map(|t| matches!(t.kind, TokenKind::Identifier(_)))
+                    .unwrap_or(false)
                     && self.peek_at(2).map(|t| t.kind == TokenKind::Equals).unwrap_or(false);
                 if is_implicit_field_assign {
                     let span = self.peek().span;
@@ -354,10 +360,7 @@ impl Parser {
     }
 
     /// Parse `let <ident> = <expr> ;`
-    fn parse_let_with_decorators(
-        &mut self,
-        decorators: Decorators,
-    ) -> Result<Stmt> {
+    fn parse_let_with_decorators(&mut self, decorators: Decorators) -> Result<Stmt> {
         let span = self.peek().span;
         self.advance(); // consume `let`
 
@@ -394,12 +397,18 @@ impl Parser {
             loop {
                 let param_token = self.peek().clone();
                 let name = match &param_token.kind {
-                    TokenKind::Identifier(p) => { let n = p.clone(); self.advance(); n }
-                    _ => return Err(JadeError::UnexpectedToken {
-                        expected: "parameter name".to_string(),
-                        got: token_kind_desc(&param_token.kind),
-                        span: param_token.span,
-                    }),
+                    TokenKind::Identifier(p) => {
+                        let n = p.clone();
+                        self.advance();
+                        n
+                    }
+                    _ => {
+                        return Err(JadeError::UnexpectedToken {
+                            expected: "parameter name".to_string(),
+                            got: token_kind_desc(&param_token.kind),
+                            span: param_token.span,
+                        });
+                    }
                 };
                 let default = if self.peek().kind == TokenKind::Equals {
                     self.advance(); // consume `=`
@@ -495,11 +504,13 @@ impl Parser {
                 self.advance();
                 n
             }
-            _ => return Err(JadeError::UnexpectedToken {
-                expected: "function name".to_string(),
-                got: token_kind_desc(&name_token.kind),
-                span: name_token.span,
-            }),
+            _ => {
+                return Err(JadeError::UnexpectedToken {
+                    expected: "function name".to_string(),
+                    got: token_kind_desc(&name_token.kind),
+                    span: name_token.span,
+                });
+            }
         };
 
         let params = self.parse_param_list()?;
@@ -540,7 +551,10 @@ impl Parser {
 
         // If the next token ends the statement without a value, it's a bare return
         match self.peek().kind {
-            TokenKind::Semicolon => { self.advance(); return Ok(Stmt::Return { value: None, span }); }
+            TokenKind::Semicolon => {
+                self.advance();
+                return Ok(Stmt::Return { value: None, span });
+            }
             TokenKind::RBrace | TokenKind::Eof => return Ok(Stmt::Return { value: None, span }),
             _ => {}
         }
@@ -659,11 +673,13 @@ impl Parser {
                 self.advance();
                 n
             }
-            _ => return Err(JadeError::UnexpectedToken {
-                expected: "loop variable name after `for`".to_string(),
-                got: token_kind_desc(&var_token.kind),
-                span: var_token.span,
-            }),
+            _ => {
+                return Err(JadeError::UnexpectedToken {
+                    expected: "loop variable name after `for`".to_string(),
+                    got: token_kind_desc(&var_token.kind),
+                    span: var_token.span,
+                });
+            }
         };
 
         self.expect(&TokenKind::In)?;
@@ -756,8 +772,13 @@ impl Parser {
                 self.advance();
                 while self.peek().kind == TokenKind::ColonColon {
                     // peek ahead: only consume the `::` if the next token is an identifier
-                    let next = self.peek_at(1).map(|t| matches!(t.kind, TokenKind::Identifier(_))).unwrap_or(false);
-                    if !next { break; }
+                    let next = self
+                        .peek_at(1)
+                        .map(|t| matches!(t.kind, TokenKind::Identifier(_)))
+                        .unwrap_or(false);
+                    if !next {
+                        break;
+                    }
                     self.advance(); // consume `::`
                     let ident_tok = self.peek().clone();
                     if let TokenKind::Identifier(part) = &ident_tok.kind {
@@ -784,10 +805,7 @@ impl Parser {
     /// how a file gives every prompt the framing a model expects without
     /// burying the content it is framing — and it means `?p` still means one
     /// thing, since the wrapping already happened when the value was built.
-    fn parse_prompt_decl_with_decorators(
-        &mut self,
-        decorators: Decorators,
-    ) -> Result<Stmt> {
+    fn parse_prompt_decl_with_decorators(&mut self, decorators: Decorators) -> Result<Stmt> {
         let span = self.peek().span;
         self.advance(); // consume `prompt`
         let name = self.expect_ident("prompt variable name")?;
@@ -826,7 +844,8 @@ impl Parser {
             // Disambiguate between:
             //   `catch TypeName binding { … }` — two identifiers before `{`
             //   `catch binding { … }`           — one identifier before `{`
-            let second_is_ident = self.peek_at(1)
+            let second_is_ident = self
+                .peek_at(1)
                 .map(|t| matches!(t.kind, TokenKind::Identifier(_)))
                 .unwrap_or(false);
 
@@ -962,7 +981,9 @@ impl Parser {
             // Expect `fn`
             let method_span = self.peek().span;
             match self.peek().kind.clone() {
-                TokenKind::Fn => { self.advance(); } // consume `fn`
+                TokenKind::Fn => {
+                    self.advance();
+                } // consume `fn`
                 _ => {
                     let t = self.peek().clone();
                     return Err(JadeError::UnexpectedToken {
@@ -1081,25 +1102,25 @@ impl Parser {
     /// Extract the span from any expression node.
     fn expr_span(e: &Expr) -> Span {
         match e {
-            Expr::Integer      { span, .. } => *span,
-            Expr::Float        { span, .. } => *span,
-            Expr::Bool         { span, .. } => *span,
-            Expr::Str          { span, .. } => *span,
-            Expr::Identifier   { span, .. } => *span,
-            Expr::Call         { span, .. } => *span,
-            Expr::BinOp        { span, .. } => *span,
-            Expr::UnaryOp      { span, .. } => *span,
-            Expr::StructLiteral{ span, .. } => *span,
-            Expr::FieldAccess  { span, .. } => *span,
-            Expr::Index        { span, .. } => *span,
-            Expr::Array        { span, .. } => *span,
-            Expr::FStr         { span, .. } => *span,
-            Expr::PromptLiteral{ span, .. } => *span,
-            Expr::PromptDeref  { span, .. } => *span,
-            Expr::Dict         { span, .. } => *span,
-            Expr::Closure      { span, .. } => *span,
-            Expr::Await        { span, .. } => *span,
-            Expr::Pipe         { span, .. } => *span,
+            Expr::Integer { span, .. } => *span,
+            Expr::Float { span, .. } => *span,
+            Expr::Bool { span, .. } => *span,
+            Expr::Str { span, .. } => *span,
+            Expr::Identifier { span, .. } => *span,
+            Expr::Call { span, .. } => *span,
+            Expr::BinOp { span, .. } => *span,
+            Expr::UnaryOp { span, .. } => *span,
+            Expr::StructLiteral { span, .. } => *span,
+            Expr::FieldAccess { span, .. } => *span,
+            Expr::Index { span, .. } => *span,
+            Expr::Array { span, .. } => *span,
+            Expr::FStr { span, .. } => *span,
+            Expr::PromptLiteral { span, .. } => *span,
+            Expr::PromptDeref { span, .. } => *span,
+            Expr::Dict { span, .. } => *span,
+            Expr::Closure { span, .. } => *span,
+            Expr::Await { span, .. } => *span,
+            Expr::Pipe { span, .. } => *span,
         }
     }
 
@@ -1155,7 +1176,12 @@ impl Parser {
                 let span = Self::expr_span(&left);
                 self.advance();
                 let right = self.parse_and()?;
-                left = Expr::BinOp { op: BinOpKind::Or, left: Box::new(left), right: Box::new(right), span };
+                left = Expr::BinOp {
+                    op: BinOpKind::Or,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                    span,
+                };
             } else {
                 break;
             }
@@ -1171,7 +1197,12 @@ impl Parser {
                 let span = Self::expr_span(&left);
                 self.advance();
                 let right = self.parse_comparison()?;
-                left = Expr::BinOp { op: BinOpKind::And, left: Box::new(left), right: Box::new(right), span };
+                left = Expr::BinOp {
+                    op: BinOpKind::And,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                    span,
+                };
             } else {
                 break;
             }
@@ -1191,13 +1222,13 @@ impl Parser {
                 BinOpKind::NotIn
             } else {
                 match self.peek().kind {
-                    TokenKind::EqEq   => BinOpKind::Eq,
+                    TokenKind::EqEq => BinOpKind::Eq,
                     TokenKind::BangEq => BinOpKind::Ne,
-                    TokenKind::Lt     => BinOpKind::Lt,
-                    TokenKind::Gt     => BinOpKind::Gt,
-                    TokenKind::LtEq   => BinOpKind::Le,
-                    TokenKind::GtEq   => BinOpKind::Ge,
-                    TokenKind::In     => BinOpKind::In,
+                    TokenKind::Lt => BinOpKind::Lt,
+                    TokenKind::Gt => BinOpKind::Gt,
+                    TokenKind::LtEq => BinOpKind::Le,
+                    TokenKind::GtEq => BinOpKind::Ge,
+                    TokenKind::In => BinOpKind::In,
                     _ => break,
                 }
             };
@@ -1217,7 +1248,12 @@ impl Parser {
                 let span = Self::expr_span(&left);
                 self.advance();
                 let right = self.parse_bitxor()?;
-                left = Expr::BinOp { op: BinOpKind::BitOr, left: Box::new(left), right: Box::new(right), span };
+                left = Expr::BinOp {
+                    op: BinOpKind::BitOr,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                    span,
+                };
             } else {
                 break;
             }
@@ -1233,7 +1269,12 @@ impl Parser {
                 let span = Self::expr_span(&left);
                 self.advance();
                 let right = self.parse_bitand()?;
-                left = Expr::BinOp { op: BinOpKind::BitXor, left: Box::new(left), right: Box::new(right), span };
+                left = Expr::BinOp {
+                    op: BinOpKind::BitXor,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                    span,
+                };
             } else {
                 break;
             }
@@ -1249,7 +1290,12 @@ impl Parser {
                 let span = Self::expr_span(&left);
                 self.advance();
                 let right = self.parse_shift()?;
-                left = Expr::BinOp { op: BinOpKind::BitAnd, left: Box::new(left), right: Box::new(right), span };
+                left = Expr::BinOp {
+                    op: BinOpKind::BitAnd,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                    span,
+                };
             } else {
                 break;
             }
@@ -1266,13 +1312,23 @@ impl Parser {
                     let span = Self::expr_span(&left);
                     self.advance();
                     let right = self.parse_additive()?;
-                    left = Expr::BinOp { op: BinOpKind::Shl, left: Box::new(left), right: Box::new(right), span };
+                    left = Expr::BinOp {
+                        op: BinOpKind::Shl,
+                        left: Box::new(left),
+                        right: Box::new(right),
+                        span,
+                    };
                 }
                 TokenKind::GtGt => {
                     let span = Self::expr_span(&left);
                     self.advance();
                     let right = self.parse_additive()?;
-                    left = Expr::BinOp { op: BinOpKind::Shr, left: Box::new(left), right: Box::new(right), span };
+                    left = Expr::BinOp {
+                        op: BinOpKind::Shr,
+                        left: Box::new(left),
+                        right: Box::new(right),
+                        span,
+                    };
                 }
                 _ => break,
             }
@@ -1289,13 +1345,23 @@ impl Parser {
                     let span = Self::expr_span(&left);
                     self.advance();
                     let right = self.parse_term()?;
-                    left = Expr::BinOp { op: BinOpKind::Add, left: Box::new(left), right: Box::new(right), span };
+                    left = Expr::BinOp {
+                        op: BinOpKind::Add,
+                        left: Box::new(left),
+                        right: Box::new(right),
+                        span,
+                    };
                 }
                 TokenKind::Minus => {
                     let span = Self::expr_span(&left);
                     self.advance();
                     let right = self.parse_term()?;
-                    left = Expr::BinOp { op: BinOpKind::Sub, left: Box::new(left), right: Box::new(right), span };
+                    left = Expr::BinOp {
+                        op: BinOpKind::Sub,
+                        left: Box::new(left),
+                        right: Box::new(right),
+                        span,
+                    };
                 }
                 _ => break,
             }
@@ -1312,19 +1378,34 @@ impl Parser {
                     let span = Self::expr_span(&left);
                     self.advance();
                     let right = self.parse_unary()?;
-                    left = Expr::BinOp { op: BinOpKind::Mul, left: Box::new(left), right: Box::new(right), span };
+                    left = Expr::BinOp {
+                        op: BinOpKind::Mul,
+                        left: Box::new(left),
+                        right: Box::new(right),
+                        span,
+                    };
                 }
                 TokenKind::Slash => {
                     let span = Self::expr_span(&left);
                     self.advance();
                     let right = self.parse_unary()?;
-                    left = Expr::BinOp { op: BinOpKind::Div, left: Box::new(left), right: Box::new(right), span };
+                    left = Expr::BinOp {
+                        op: BinOpKind::Div,
+                        left: Box::new(left),
+                        right: Box::new(right),
+                        span,
+                    };
                 }
                 TokenKind::Percent => {
                     let span = Self::expr_span(&left);
                     self.advance();
                     let right = self.parse_unary()?;
-                    left = Expr::BinOp { op: BinOpKind::Mod, left: Box::new(left), right: Box::new(right), span };
+                    left = Expr::BinOp {
+                        op: BinOpKind::Mod,
+                        left: Box::new(left),
+                        right: Box::new(right),
+                        span,
+                    };
                 }
                 _ => break,
             }
@@ -1466,7 +1547,7 @@ impl Parser {
                         };
                         let val = self.parse_pipe()?;
                         match kw {
-                            None    => args.push(val),
+                            None => args.push(val),
                             Some(k) => kwargs.push((k, val)),
                         }
                         if self.peek().kind == TokenKind::Comma {
@@ -1564,7 +1645,10 @@ impl Parser {
                 // Requires: `.` then `Identifier` then `{` (3-token lookahead).
                 if self.struct_literal_allowed
                     && self.peek().kind == TokenKind::Dot
-                    && matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::Identifier(_)))
+                    && matches!(
+                        self.tokens.get(self.pos + 1).map(|t| &t.kind),
+                        Some(TokenKind::Identifier(_))
+                    )
                     && self.tokens.get(self.pos + 2).map(|t| &t.kind) == Some(&TokenKind::LBrace)
                 {
                     self.advance(); // consume `.`

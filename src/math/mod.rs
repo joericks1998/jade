@@ -2,8 +2,9 @@
 mod tests;
 
 use crate::{
-    compiler::{tir::JadeType, type_infer::TypeContext}, vm::VmValue,
+    compiler::{tir::JadeType, type_infer::TypeContext},
     frontend::error::{JadeError, Result, Span},
+    vm::VmValue,
 };
 
 use crate::builtins::{BuiltinFn, Package};
@@ -76,12 +77,12 @@ fn math_pow(args: &[VmValue]) -> Result<VmValue> {
 
 static MATH_PKG_FNS: &[BuiltinFn] = &[
     BuiltinFn { name: "floor", vm_impl: math_floor },
-    BuiltinFn { name: "ceil",  vm_impl: math_ceil },
-    BuiltinFn { name: "abs",   vm_impl: math_abs },
-    BuiltinFn { name: "sqrt",  vm_impl: math_sqrt },
-    BuiltinFn { name: "min",   vm_impl: math_min },
-    BuiltinFn { name: "max",   vm_impl: math_max },
-    BuiltinFn { name: "pow",   vm_impl: math_pow },
+    BuiltinFn { name: "ceil", vm_impl: math_ceil },
+    BuiltinFn { name: "abs", vm_impl: math_abs },
+    BuiltinFn { name: "sqrt", vm_impl: math_sqrt },
+    BuiltinFn { name: "min", vm_impl: math_min },
+    BuiltinFn { name: "max", vm_impl: math_max },
+    BuiltinFn { name: "pow", vm_impl: math_pow },
 ];
 
 fn register_math_pkg_types(ctx: &mut TypeContext) {

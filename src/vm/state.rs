@@ -97,7 +97,9 @@ impl VmState {
         self.project_root = opts.project_root;
         self.libraries = opts.libraries;
         #[cfg(test)]
-        { self.test_stdout = opts.test_stdout; }
+        {
+            self.test_stdout = opts.test_stdout;
+        }
     }
 
     /// Iterate over all global bindings — used by `-v` verbose output.

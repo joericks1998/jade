@@ -1,5 +1,5 @@
-use jade_runtime::coll::DictObj;
 use super::*;
+use jade_runtime::coll::DictObj;
 
 fn dict(pairs: &[(&str, VmValue)]) -> VmValue {
     let mut m = DictObj::new();
@@ -38,10 +38,7 @@ fn len_nonempty() {
 
 #[test]
 fn len_wrong_type() {
-    assert!(matches!(
-        dict_len(&[VmValue::Int(1)]),
-        Err(JadeError::TypeError { .. })
-    ));
+    assert!(matches!(dict_len(&[VmValue::Int(1)]), Err(JadeError::TypeError { .. })));
 }
 
 // ── dict_keys (sorted) ────────────────────────────────────────────────────────
@@ -61,10 +58,7 @@ fn keys_empty() {
 
 #[test]
 fn keys_wrong_type() {
-    assert!(matches!(
-        dict_keys(&[VmValue::Nil]),
-        Err(JadeError::TypeError { .. })
-    ));
+    assert!(matches!(dict_keys(&[VmValue::Nil]), Err(JadeError::TypeError { .. })));
 }
 
 // ── dict_values (ordered by sorted keys) ──────────────────────────────────────
@@ -85,10 +79,7 @@ fn values_ordered_by_key() {
 
 #[test]
 fn values_wrong_type() {
-    assert!(matches!(
-        dict_values(&[VmValue::Int(0)]),
-        Err(JadeError::TypeError { .. })
-    ));
+    assert!(matches!(dict_values(&[VmValue::Int(0)]), Err(JadeError::TypeError { .. })));
 }
 
 // ── dict_has ──────────────────────────────────────────────────────────────────
@@ -96,37 +87,25 @@ fn values_wrong_type() {
 #[test]
 fn has_present() {
     let d = dict(&[("x", VmValue::Int(1))]);
-    assert!(matches!(
-        dict_has(&[d, VmValue::Str("x".into())]),
-        Ok(VmValue::Bool(true))
-    ));
+    assert!(matches!(dict_has(&[d, VmValue::Str("x".into())]), Ok(VmValue::Bool(true))));
 }
 
 #[test]
 fn has_absent() {
     let d = dict(&[("x", VmValue::Int(1))]);
-    assert!(matches!(
-        dict_has(&[d, VmValue::Str("y".into())]),
-        Ok(VmValue::Bool(false))
-    ));
+    assert!(matches!(dict_has(&[d, VmValue::Str("y".into())]), Ok(VmValue::Bool(false))));
 }
 
 #[test]
 fn has_non_str_key() {
     let d = dict(&[("x", VmValue::Int(1))]);
-    assert!(matches!(
-        dict_has(&[d, VmValue::Int(1)]),
-        Err(JadeError::TypeError { .. })
-    ));
+    assert!(matches!(dict_has(&[d, VmValue::Int(1)]), Err(JadeError::TypeError { .. })));
 }
 
 #[test]
 fn has_missing_key_arg() {
     let d = dict(&[]);
-    assert!(matches!(
-        dict_has(&[d]),
-        Err(JadeError::TypeError { .. })
-    ));
+    assert!(matches!(dict_has(&[d]), Err(JadeError::TypeError { .. })));
 }
 
 // ── dict_get ──────────────────────────────────────────────────────────────────
@@ -134,28 +113,19 @@ fn has_missing_key_arg() {
 #[test]
 fn get_present() {
     let d = dict(&[("k", VmValue::Int(7))]);
-    assert!(matches!(
-        dict_get(&[d, VmValue::Str("k".into())]),
-        Ok(VmValue::Int(7))
-    ));
+    assert!(matches!(dict_get(&[d, VmValue::Str("k".into())]), Ok(VmValue::Int(7))));
 }
 
 #[test]
 fn get_absent_returns_nil() {
     let d = dict(&[]);
-    assert!(matches!(
-        dict_get(&[d, VmValue::Str("missing".into())]),
-        Ok(VmValue::Nil)
-    ));
+    assert!(matches!(dict_get(&[d, VmValue::Str("missing".into())]), Ok(VmValue::Nil)));
 }
 
 #[test]
 fn get_non_str_key() {
     let d = dict(&[]);
-    assert!(matches!(
-        dict_get(&[d, VmValue::Float(1.0)]),
-        Err(JadeError::TypeError { .. })
-    ));
+    assert!(matches!(dict_get(&[d, VmValue::Float(1.0)]), Err(JadeError::TypeError { .. })));
 }
 
 // ── pkg_merge ─────────────────────────────────────────────────────────────────
@@ -179,10 +149,7 @@ fn merge_combines_and_overrides() {
 #[test]
 fn merge_wrong_types() {
     let d1 = dict(&[]);
-    assert!(matches!(
-        pkg_merge(&[d1, VmValue::Int(1)]),
-        Err(JadeError::TypeError { .. })
-    ));
+    assert!(matches!(pkg_merge(&[d1, VmValue::Int(1)]), Err(JadeError::TypeError { .. })));
 }
 
 // ── method lookup ─────────────────────────────────────────────────────────────

@@ -249,9 +249,7 @@ enum PkgCommands {
         dry_run: bool,
     },
     /// Remove a dependency from jade.toml, jade.lock, and libs/
-    Remove {
-        name: String,
-    },
+    Remove { name: String },
     /// Fetch and verify everything jade.lock pins
     Install {
         /// Fail instead of updating jade.lock (use in CI)
@@ -266,7 +264,6 @@ enum PkgCommands {
     /// List locked dependencies and their install status
     List,
 }
-
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
@@ -295,7 +292,9 @@ async fn run_cli() {
         Commands::Run { target: None, verbose } => {
             cli::run::run_entry(verbose).await;
         }
-        Commands::Run { target: Some(ref t), verbose } if t.ends_with(".jde") || std::path::Path::new(t).exists() => {
+        Commands::Run { target: Some(ref t), verbose }
+            if t.ends_with(".jde") || std::path::Path::new(t).exists() =>
+        {
             cli::run::run_file(t, verbose).await;
         }
         Commands::Run { target: Some(ref t), .. } => {
@@ -353,15 +352,17 @@ async fn run_cli() {
 
         // ── upgrade ───────────────────────────────────────────────────────────
         Commands::Pkg(subcommand) => match subcommand {
-            PkgCommands::Add { name, path, url, version, c_abi, header, include } => cli::pkg::run_add(
-                &name,
-                path.as_deref(),
-                url.as_deref(),
-                version.as_deref(),
-                c_abi,
-                header.as_deref(),
-                &include,
-            ),
+            PkgCommands::Add { name, path, url, version, c_abi, header, include } => {
+                cli::pkg::run_add(
+                    &name,
+                    path.as_deref(),
+                    url.as_deref(),
+                    version.as_deref(),
+                    c_abi,
+                    header.as_deref(),
+                    &include,
+                )
+            }
             PkgCommands::Bind { name, header, include, only, dry_run } => {
                 cli::pkg::run_bind(&name, &header, &include, only.as_deref(), dry_run)
             }

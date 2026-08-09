@@ -1,12 +1,13 @@
 use std::io::{self, BufRead, Write};
 
 use crate::{
-    compiler::{emit, type_infer}, vm::{self, VmOpts, VmState, value_to_display},
+    compiler::{emit, type_infer},
     frontend::{
         ast::{Expr, Stmt},
         error::Span,
         lexer, parser,
     },
+    vm::{self, VmOpts, VmState, value_to_display},
 };
 
 /// `jade repl [-v]`
@@ -16,10 +17,7 @@ use crate::{
 pub async fn run_repl(_verbose: bool) {
     let backend = crate::llm::select_backend();
 
-    let opts = VmOpts {
-        backend,
-        ..VmOpts::default()
-    };
+    let opts = VmOpts { backend, ..VmOpts::default() };
 
     let mut state = VmState::new_for_repl(opts);
 
@@ -58,10 +56,21 @@ pub async fn run_repl(_verbose: bool) {
             let mut in_str = false;
             let mut escape = false;
             for ch in line.chars() {
-                if escape { escape = false; continue; }
-                if ch == '\\' && in_str { escape = true; continue; }
-                if ch == '"' { in_str = !in_str; continue; }
-                if in_str { continue; }
+                if escape {
+                    escape = false;
+                    continue;
+                }
+                if ch == '\\' && in_str {
+                    escape = true;
+                    continue;
+                }
+                if ch == '"' {
+                    in_str = !in_str;
+                    continue;
+                }
+                if in_str {
+                    continue;
+                }
                 match ch {
                     '{' => open_braces += 1,
                     '}' => open_braces -= 1,
@@ -109,10 +118,11 @@ async fn eval_snippet_vm(src: &str, state: &mut VmState) -> Result<Option<String
     // Some expressions print their own output as they evaluate — a bare `?p`
     // (streams tokens live) and `stream(...)` (prints as it generates). Don't
     // echo their result on top of what they already wrote.
-    let suppress_echo = capture && matches!(
-        program.stmts.last(),
-        Some(Stmt::Expr(e)) if prints_own_output(e)
-    );
+    let suppress_echo = capture
+        && matches!(
+            program.stmts.last(),
+            Some(Stmt::Expr(e)) if prints_own_output(e)
+        );
 
     if capture {
         if let Some(Stmt::Expr(expr)) = program.stmts.pop() {
@@ -128,8 +138,7 @@ async fn eval_snippet_vm(src: &str, state: &mut VmState) -> Result<Option<String
     // cross-snippet references resolve. Unknown types are fine — the VM will
     // catch real type mismatches at runtime.
     let known: Vec<String> = state.globals.keys().cloned().collect();
-    let tprogram = type_infer::infer_with_globals(program, &known)
-        .map_err(|e| e.to_string())?;
+    let tprogram = type_infer::infer_with_globals(program, &known).map_err(|e| e.to_string())?;
     let compiled = emit::emit(tprogram).map_err(|e| e.to_string())?;
 
     vm::run_incremental(compiled, state).await.map_err(|e| e.to_string())?;

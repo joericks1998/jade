@@ -102,14 +102,14 @@ pub struct VmBoundMethod {
 impl std::fmt::Debug for VmValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            VmValue::Int(i)   => write!(f, "Int({})", i),
+            VmValue::Int(i) => write!(f, "Int({})", i),
             VmValue::Float(v) => write!(f, "Float({})", v),
-            VmValue::Bool(b)  => write!(f, "Bool({})", b),
-            VmValue::Char(c)  => write!(f, "Char({:?})", c.ch()),
+            VmValue::Bool(b) => write!(f, "Bool({})", b),
+            VmValue::Char(c) => write!(f, "Char({:?})", c.ch()),
             VmValue::Bytes(b) => write!(f, "Bytes[{} byte(s)]", b.len()),
             VmValue::Handle(h) => write!(f, "{:?}", h),
-            VmValue::Str(s)   => write!(f, "Str({:?})", s),
-            VmValue::Fn(cf)   => write!(f, "Fn({})", cf.params.join(", ")),
+            VmValue::Str(s) => write!(f, "Str({:?})", s),
+            VmValue::Fn(cf) => write!(f, "Fn({})", cf.params.join(", ")),
             VmValue::Closure(cf, _) => write!(f, "Closure({})", cf.params.join(", ")),
             VmValue::Struct(rc) => {
                 let inst = rc.lock();
@@ -117,21 +117,21 @@ impl std::fmt::Debug for VmValue {
             }
             VmValue::BoundMethod(_) => write!(f, "<bound method>"),
             VmValue::Array(arc) => write!(f, "Array[{} elem(s)]", arc.lock().len()),
-            VmValue::Prompt(s)   => write!(f, "Prompt({:?})", s),
+            VmValue::Prompt(s) => write!(f, "Prompt({:?})", s),
             VmValue::Grammar(g) => match &g.anchor {
-                None    => write!(f, "Grammar({:?})", g.pattern),
+                None => write!(f, "Grammar({:?})", g.pattern),
                 Some(a) => write!(f, "Grammar({:?}, anchor={:?})", g.pattern, a),
             },
-            VmValue::Dict(m)     => write!(f, "Dict({} key(s))", m.len()),
+            VmValue::Dict(m) => write!(f, "Dict({} key(s))", m.len()),
             VmValue::BuiltinFn(bf) => write!(f, "BuiltinFn({})", bf.name),
             VmValue::NativeBoundMethod(nbm) => write!(f, "NativeBoundMethod({})", nbm.method.name),
             VmValue::NativeFn(nf) => write!(f, "NativeFn({:?})", nf),
             VmValue::NativeLibFn(nfn) => write!(f, "NativeLibFn({})", nfn.name),
-            VmValue::Future(_)       => write!(f, "Future"),
-            VmValue::TokenStream(_)  => write!(f, "TokenStream"),
-            VmValue::Stream(b)       => write!(f, "Stream[{} item(s)]", b.lock().len()),
-            VmValue::TypeRef(t)      => write!(f, "TypeRef({})", t),
-            VmValue::Nil             => write!(f, "Nil"),
+            VmValue::Future(_) => write!(f, "Future"),
+            VmValue::TokenStream(_) => write!(f, "TokenStream"),
+            VmValue::Stream(b) => write!(f, "Stream[{} item(s)]", b.lock().len()),
+            VmValue::TypeRef(t) => write!(f, "TypeRef({})", t),
+            VmValue::Nil => write!(f, "Nil"),
         }
     }
 }
@@ -145,41 +145,39 @@ pub fn value_to_display(v: &VmValue) -> String {
     match v {
         VmValue::Int(i) => i.to_string(),
         VmValue::Float(f) => jade_runtime::render::format_float(*f),
-        VmValue::Bool(b)   => b.to_string(),
-        VmValue::Str(s)    => s.to_string(),
+        VmValue::Bool(b) => b.to_string(),
+        VmValue::Str(s) => s.to_string(),
         VmValue::Array(arc) => {
             let guard = arc.lock();
             let parts: Vec<String> = guard.iter().map(value_to_display).collect();
             jade_runtime::render::render_array(&parts)
         }
         VmValue::Dict(m) => {
-            let mut entries: Vec<(String, String)> = m
-                .iter()
-                .map(|(k, v)| (k.clone(), value_to_display(v)))
-                .collect();
+            let mut entries: Vec<(String, String)> =
+                m.iter().map(|(k, v)| (k.clone(), value_to_display(v))).collect();
             jade_runtime::render::render_dict(&mut entries)
         }
-        VmValue::Fn(_)                 => "<fn>".to_string(),
-        VmValue::Closure(_, _)         => "<fn>".to_string(),
-        VmValue::Struct(_)             => "<struct>".to_string(),
-        VmValue::BoundMethod(_)        => "<bound method>".to_string(),
-        VmValue::BuiltinFn(bf)         => format!("<builtin {}>", bf.name),
+        VmValue::Fn(_) => "<fn>".to_string(),
+        VmValue::Closure(_, _) => "<fn>".to_string(),
+        VmValue::Struct(_) => "<struct>".to_string(),
+        VmValue::BoundMethod(_) => "<bound method>".to_string(),
+        VmValue::BuiltinFn(bf) => format!("<builtin {}>", bf.name),
         VmValue::NativeBoundMethod(nm) => format!("<builtin {}>", nm.method.name),
-        VmValue::Prompt(_)             => "<prompt>".to_string(),
-        VmValue::Grammar(_)            => "<grammar>".to_string(),
-        VmValue::NativeFn(_)           => "<native fn>".to_string(),
-        VmValue::NativeLibFn(nfn)      => format!("<native lib fn {}>", nfn.name),
-        VmValue::Future(_)             => "<future>".to_string(),
-        VmValue::TokenStream(_)        => "<token stream>".to_string(),
+        VmValue::Prompt(_) => "<prompt>".to_string(),
+        VmValue::Grammar(_) => "<grammar>".to_string(),
+        VmValue::NativeFn(_) => "<native fn>".to_string(),
+        VmValue::NativeLibFn(nfn) => format!("<native lib fn {}>", nfn.name),
+        VmValue::Future(_) => "<future>".to_string(),
+        VmValue::TokenStream(_) => "<token stream>".to_string(),
         VmValue::Stream(b) => {
             let parts: Vec<String> = b.lock().iter().map(value_to_display).collect();
             jade_runtime::render::render_array(&parts)
         }
-        VmValue::Char(c)               => c.ch().to_string(),
-        VmValue::Bytes(b)              => jade_runtime::render::render_bytes(b.as_slice()),
-        VmValue::Handle(h)             => jade_runtime::handle::render(h),
-        VmValue::TypeRef(t)            => format!("<type {}>", t),
-        VmValue::Nil                   => "nil".to_string(),
+        VmValue::Char(c) => c.ch().to_string(),
+        VmValue::Bytes(b) => jade_runtime::render::render_bytes(b.as_slice()),
+        VmValue::Handle(h) => jade_runtime::handle::render(h),
+        VmValue::TypeRef(t) => format!("<type {}>", t),
+        VmValue::Nil => "nil".to_string(),
     }
 }
 
@@ -226,5 +224,7 @@ impl std::io::Write for TestWriter {
         self.0.lock().unwrap().extend_from_slice(buf);
         Ok(buf.len())
     }
-    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }

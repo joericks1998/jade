@@ -1,10 +1,13 @@
-use std::{fs, path::{Path, PathBuf}};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
-use sha2::{Digest, Sha256};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
-use crate::frontend::ast::Program;
 use crate::compiler::tir::TProgram;
+use crate::frontend::ast::Program;
 
 /// Jade version baked in at compile time — used to invalidate cached artifacts
 /// when the AST format changes between releases.
@@ -211,14 +214,18 @@ pub fn list_entries() -> Vec<CacheEntry> {
     };
 
     for prefix_entry in prefix_dirs.flatten() {
-        if !prefix_entry.path().is_dir() { continue; }
+        if !prefix_entry.path().is_dir() {
+            continue;
+        }
         let hash_dirs = match fs::read_dir(prefix_entry.path()) {
             Ok(d) => d,
             Err(_) => continue,
         };
         for hash_entry in hash_dirs.flatten() {
             let dir = hash_entry.path();
-            if !dir.is_dir() { continue; }
+            if !dir.is_dir() {
+                continue;
+            }
 
             // Read meta.json to get version.
             let meta_path = dir.join("meta.json");
@@ -234,17 +241,10 @@ pub fn list_entries() -> Vec<CacheEntry> {
 
             // Sum the size of all files in this entry's directory.
             let size_bytes = fs::read_dir(&dir)
-                .map(|iter| {
-                    iter.flatten()
-                        .filter_map(|e| e.metadata().ok())
-                        .map(|m| m.len())
-                        .sum()
-                })
+                .map(|iter| iter.flatten().filter_map(|e| e.metadata().ok()).map(|m| m.len()).sum())
                 .unwrap_or(0);
 
-            let modified = fs::metadata(&meta_path)
-                .ok()
-                .and_then(|m| m.modified().ok());
+            let modified = fs::metadata(&meta_path).ok().and_then(|m| m.modified().ok());
 
             entries.push(CacheEntry { version, dir, size_bytes, modified });
         }

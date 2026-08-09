@@ -37,9 +37,7 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
             "jrt_throw_runtime",
             self.ctx.void_type().fn_type(&[self.ptrt().into()], false),
         );
-        self.builder
-            .build_call(f, &[self.cstr(msg).into()], "")
-            .map_err(|e| e.to_string())?;
+        self.builder.build_call(f, &[self.cstr(msg).into()], "").map_err(|e| e.to_string())?;
         self.builder.build_unreachable().map_err(|e| e.to_string())?;
         Ok(())
     }
@@ -60,8 +58,10 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
     }
 
     pub(super) fn push_frame(&self, buf: PointerValue<'ctx>) {
-        let f = self
-            .runtime_fn("jade_exc_push_frame", self.ctx.void_type().fn_type(&[self.ptrt().into()], false));
+        let f = self.runtime_fn(
+            "jade_exc_push_frame",
+            self.ctx.void_type().fn_type(&[self.ptrt().into()], false),
+        );
         self.builder.build_call(f, &[buf.into()], "").unwrap();
     }
 
@@ -81,10 +81,8 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
             .build_load(i32_ty, slot, "exc_saved")
             .map_err(|e| e.to_string())?
             .into_int_value();
-        let f = self.runtime_fn(
-            "jade_exc_restore",
-            self.ctx.void_type().fn_type(&[i32_ty.into()], false),
-        );
+        let f = self
+            .runtime_fn("jade_exc_restore", self.ctx.void_type().fn_type(&[i32_ty.into()], false));
         self.builder.build_call(f, &[saved.into()], "").map_err(|e| e.to_string())?;
         Ok(())
     }
@@ -98,11 +96,6 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
     /// handler's landing block.
     pub(super) fn exc_value(&self) -> IntValue<'ctx> {
         let f = self.runtime_fn("jade_exc_value", self.i64t().fn_type(&[], false));
-        self.builder
-            .build_call(f, &[], "excv")
-            .unwrap()
-            .as_any_value_enum()
-            .into_int_value()
+        self.builder.build_call(f, &[], "excv").unwrap().as_any_value_enum().into_int_value()
     }
-
 }

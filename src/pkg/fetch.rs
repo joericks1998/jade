@@ -49,10 +49,8 @@ impl Fetcher for HttpFetcher {
                 .build()
                 .map_err(|e| format!("could not build http client: {e}"))?;
 
-            let resp = client
-                .get(&owned)
-                .send()
-                .map_err(|e| format!("could not fetch {owned}: {e}"))?;
+            let resp =
+                client.get(&owned).send().map_err(|e| format!("could not fetch {owned}: {e}"))?;
 
             let status = resp.status();
             if !status.is_success() {

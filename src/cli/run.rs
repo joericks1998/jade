@@ -1,6 +1,9 @@
 use std::{fs, path::Path, process};
 
-use crate::{compiler::{emit, type_infer}, vm};
+use crate::{
+    compiler::{emit, type_infer},
+    vm,
+};
 
 // ── Project-aware run ─────────────────────────────────────────────────────────
 
@@ -46,15 +49,15 @@ pub fn run_script(name: &str) {
     let scripts = manifest.scripts.unwrap_or_default();
     let cmd = scripts.get(name).cloned().unwrap_or_else(|| {
         eprintln!("error: no script named '{}' in jade.toml", name);
-        eprintln!("       available scripts: {}", scripts.keys().cloned().collect::<Vec<_>>().join(", "));
+        eprintln!(
+            "       available scripts: {}",
+            scripts.keys().cloned().collect::<Vec<_>>().join(", ")
+        );
         process::exit(1);
     });
 
     // Execute via shell.
-    let status = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(&cmd)
-        .status();
+    let status = std::process::Command::new("sh").arg("-c").arg(&cmd).status();
 
     match status {
         Ok(s) => {
@@ -113,7 +116,10 @@ pub async fn run_file(path: &str, verbose: bool) {
             None => {
                 let tp = match type_infer::infer(program) {
                     Ok(tp) => tp,
-                    Err(e) => { eprintln!("{}: {}", path, e); process::exit(1); }
+                    Err(e) => {
+                        eprintln!("{}: {}", path, e);
+                        process::exit(1);
+                    }
                 };
                 crate::cache::write_tir_cache(h, path, &tp);
                 tp
@@ -122,7 +128,10 @@ pub async fn run_file(path: &str, verbose: bool) {
     } else {
         match type_infer::infer(program) {
             Ok(tp) => tp,
-            Err(e) => { eprintln!("{}: {}", path, e); process::exit(1); }
+            Err(e) => {
+                eprintln!("{}: {}", path, e);
+                process::exit(1);
+            }
         }
     };
 
@@ -217,7 +226,9 @@ pub(crate) fn format_global(name: &str, val: &vm::VmValue) -> Option<String> {
         vm::VmValue::Bool(b) => format!("{name} = {b}"),
         vm::VmValue::Char(c) => format!("{name} = '{c}'"),
         vm::VmValue::Stream(_) => format!("{name} = <stream>"),
-        vm::VmValue::Bytes(b) => format!("{name} = {}", jade_runtime::render::render_bytes(b.as_slice())),
+        vm::VmValue::Bytes(b) => {
+            format!("{name} = {}", jade_runtime::render::render_bytes(b.as_slice()))
+        }
         vm::VmValue::Handle(h) => format!("{name} = {}", jade_runtime::handle::render(h)),
         vm::VmValue::Str(s) => format!("{name} = \"{s}\""),
         vm::VmValue::Fn(_) | vm::VmValue::Closure(_, _) => format!("{name} = <fn>"),

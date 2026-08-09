@@ -47,8 +47,7 @@ fn map_type(t: &str) -> Option<CType> {
     })
 }
 
-const SUPPORTED_TYPES: &str =
-    "int, float, bool, str, bytes, handle<Type>, in_struct:<Type>, out_buffer:<ctype>, \
+const SUPPORTED_TYPES: &str = "int, float, bool, str, bytes, handle<Type>, in_struct:<Type>, out_buffer:<ctype>, \
      out_struct:<Type>, out_handle:<Type>, out_scalar:<ctype>, inout_scalar:<ctype> \
      (and nil for a return type)";
 
@@ -307,12 +306,10 @@ impl ArgSpec {
 fn c_scalar(t: &str) -> Option<(&'static str, &'static str)> {
     let squashed: String = t.chars().filter(|c| !c.is_whitespace()).collect();
     Some(match squashed.as_str() {
-        "char" | "signedchar" | "unsignedchar" | "short" | "unsignedshort" | "int"
-        | "unsigned" | "unsignedint" | "long" | "unsignedlong" | "longlong"
-        | "unsignedlonglong" | "size_t" | "ssize_t" | "int8_t" | "int16_t" | "int32_t"
-        | "int64_t" | "uint8_t" | "uint16_t" | "uint32_t" | "uint64_t" => {
-            ("JADE_FFI_INT", "as_int")
-        }
+        "char" | "signedchar" | "unsignedchar" | "short" | "unsignedshort" | "int" | "unsigned"
+        | "unsignedint" | "long" | "unsignedlong" | "longlong" | "unsignedlonglong" | "size_t"
+        | "ssize_t" | "int8_t" | "int16_t" | "int32_t" | "int64_t" | "uint8_t" | "uint16_t"
+        | "uint32_t" | "uint64_t" => ("JADE_FFI_INT", "as_int"),
         "float" | "double" => ("JADE_FFI_FLOAT", "as_float"),
         "_Bool" | "bool" => ("JADE_FFI_BOOL", "as_bool"),
         "constchar*" | "char*" | "constchar *" => ("JADE_FFI_STR", "as_str"),
@@ -359,7 +356,8 @@ fn parse_callback(pkg: &str, sym: &str, spec: &str) -> Result<ArgSpec, String> {
     // A callback may only give back a scalar. Anything else would have to be
     // released inside the C library's own frame, by code that has no idea it is
     // holding a Jade value.
-    let ret_ok = ret == "void" || ret == "nil"
+    let ret_ok = ret == "void"
+        || ret == "nil"
         || matches!(c_scalar(&ret), Some((t, _)) if t != "JADE_FFI_STR");
     if !ret_ok {
         return Err(format!(
@@ -455,22 +453,16 @@ fn parse_arg(pkg: &str, sym: &str, full: &str) -> Result<ArgSpec, String> {
     };
 
     if let Some(elem) = spec.strip_prefix("sized_buffer:") {
-        return check_c_ident(pkg, sym, elem, "sized_buffer").map(|_| ArgSpec::SizedBuffer {
-            elem: elem.to_string(),
-            name: out_name,
-        });
+        return check_c_ident(pkg, sym, elem, "sized_buffer")
+            .map(|_| ArgSpec::SizedBuffer { elem: elem.to_string(), name: out_name });
     }
     if let Some(elem) = spec.strip_prefix("out_buffer:") {
-        return check_c_ident(pkg, sym, elem, "out_buffer").map(|_| ArgSpec::OutBuffer {
-            elem: elem.to_string(),
-            name: out_name,
-        });
+        return check_c_ident(pkg, sym, elem, "out_buffer")
+            .map(|_| ArgSpec::OutBuffer { elem: elem.to_string(), name: out_name });
     }
     if let Some(name) = spec.strip_prefix("out_struct:") {
-        return check_c_ident(pkg, sym, name, "out_struct").map(|_| ArgSpec::OutStruct {
-            type_name: name.to_string(),
-            name: out_name,
-        });
+        return check_c_ident(pkg, sym, name, "out_struct")
+            .map(|_| ArgSpec::OutStruct { type_name: name.to_string(), name: out_name });
     }
     if let Some(name) = spec.strip_prefix("in_struct:") {
         // `@name` is the key a *result* comes back under, and an in_struct is an
@@ -483,25 +475,20 @@ fn parse_arg(pkg: &str, sym: &str, full: &str) -> Result<ArgSpec, String> {
                  argument and produces nothing."
             ));
         }
-        return check_c_ident(pkg, sym, name, "in_struct").map(|_| ArgSpec::InStruct {
-            type_name: name.to_string(),
-        });
+        return check_c_ident(pkg, sym, name, "in_struct")
+            .map(|_| ArgSpec::InStruct { type_name: name.to_string() });
     }
     if let Some(t) = spec.strip_prefix("out_alloc_str:") {
-        return check_c_ident(pkg, sym, t, "out_alloc_str").map(|_| ArgSpec::OutAllocStr {
-            c_type: t.to_string(),
-            name: out_name,
-        });
+        return check_c_ident(pkg, sym, t, "out_alloc_str")
+            .map(|_| ArgSpec::OutAllocStr { c_type: t.to_string(), name: out_name });
     }
     if let Some(t) = spec.strip_prefix("out_str:") {
         return check_c_ident(pkg, sym, t, "out_str")
             .map(|_| ArgSpec::OutStr { c_type: t.to_string(), name: out_name });
     }
     if let Some(name) = spec.strip_prefix("out_handle:") {
-        return check_c_ident(pkg, sym, name, "out_handle").map(|_| ArgSpec::OutHandle {
-            type_name: name.to_string(),
-            name: out_name,
-        });
+        return check_c_ident(pkg, sym, name, "out_handle")
+            .map(|_| ArgSpec::OutHandle { type_name: name.to_string(), name: out_name });
     }
     for (prefix, inout) in [("out_scalar:", false), ("inout_scalar:", true), ("ret_len:", false)] {
         let Some(t) = spec.strip_prefix(prefix) else { continue };
@@ -538,9 +525,8 @@ fn parse_arg(pkg: &str, sym: &str, full: &str) -> Result<ArgSpec, String> {
         });
     }
     if let Some(name) = handle_target(spec) {
-        return check_c_ident(pkg, sym, name, "handle").map(|_| ArgSpec::Handle {
-            name: name.to_string(),
-        });
+        return check_c_ident(pkg, sym, name, "handle")
+            .map(|_| ArgSpec::Handle { name: name.to_string() });
     }
     if spec.starts_with("callback:") {
         return parse_callback(pkg, sym, spec);
@@ -672,7 +658,6 @@ typedef struct { const char* name; JadeNativeFnPtr func; } JadeBinding;
 typedef struct { const char* name; const JadeBinding* bindings; size_t binding_count; } JadeNativePkg;
 
 "#;
-
 
 /// Emitted only when some symbol declares a failure convention. Without the
 /// gate a shim whose symbols cannot fail carries a function nothing calls,
@@ -856,23 +841,17 @@ fn parse_symbol(
     structs: &HashMap<String, CStruct>,
     headers: &[String],
 ) -> Result<Parsed, String> {
-    let args: Vec<ArgSpec> = spec
-        .args
-        .iter()
-        .map(|a| parse_arg(pkg, sym, a))
-        .collect::<Result<_, _>>()?;
+    let args: Vec<ArgSpec> =
+        spec.args.iter().map(|a| parse_arg(pkg, sym, a)).collect::<Result<_, _>>()?;
 
-    let outs: Vec<usize> = args
-        .iter()
-        .enumerate()
-        .filter(|(_, a)| a.produces_result())
-        .map(|(i, _)| i)
-        .collect();
+    let outs: Vec<usize> =
+        args.iter().enumerate().filter(|(_, a)| a.produces_result()).map(|(i, _)| i).collect();
 
     // Two results that both consume the C return value cannot coexist: an
     // out_buffer reads it as an element count, an out_handle folds it into the
     // failure convention, and there is only one of it.
-    let consumes_ret = |a: &ArgSpec| matches!(a, ArgSpec::OutBuffer { .. } | ArgSpec::OutHandle { .. });
+    let consumes_ret =
+        |a: &ArgSpec| matches!(a, ArgSpec::OutBuffer { .. } | ArgSpec::OutHandle { .. });
     if outs.iter().filter(|&&i| consumes_ret(&args[i])).count() > 1 {
         return Err(format!(
             "dependency '{pkg}': symbol '{sym}' has two out-parameters that both read the C \
@@ -1072,9 +1051,7 @@ fn parse_symbol(
 /// multi-out case reuse it rather than re-derive it.
 fn ret_is_a_key(ret: &RetSpec, outs: &[&ArgSpec]) -> bool {
     !matches!(ret, RetSpec::Nil)
-        && !outs
-            .iter()
-            .any(|a| matches!(a, ArgSpec::OutBuffer { .. } | ArgSpec::OutHandle { .. }))
+        && !outs.iter().any(|a| matches!(a, ArgSpec::OutBuffer { .. } | ArgSpec::OutHandle { .. }))
 }
 
 /// Whether the result is a keyed struct rather than a single value.
@@ -1141,7 +1118,9 @@ pub fn generate(
         || out_specs().any(|a| {
             matches!(
                 a,
-                ArgSpec::OutBuffer { .. } | ArgSpec::InoutBytes { .. } | ArgSpec::SizedBuffer { .. }
+                ArgSpec::OutBuffer { .. }
+                    | ArgSpec::InoutBytes { .. }
+                    | ArgSpec::SizedBuffer { .. }
             )
         })
     {
@@ -1212,8 +1191,7 @@ pub fn generate(
 
     // A struct Jade holds gets four bindings of its own. Sorted, for the same
     // reason the symbols are: a reinstall should produce an identical file.
-    let mut held: Vec<&String> =
-        structs.iter().filter(|(_, d)| d.held).map(|(t, _)| t).collect();
+    let mut held: Vec<&String> = structs.iter().filter(|(_, d)| d.held).map(|(t, _)| t).collect();
     held.sort();
     for t in &held {
         if headers.is_empty() {
@@ -1358,13 +1336,7 @@ fn emit_out_struct(
                  {SUPPORTED_TYPES}."
             )
         })?;
-        b.push_str(&emit_field(
-            &format!("{var}_j"),
-            i,
-            field,
-            &t,
-            &format!("{var}.{field}"),
-        ));
+        b.push_str(&emit_field(&format!("{var}_j"), i, field, &t, &format!("{var}.{field}")));
     }
     Ok(b)
 }
@@ -1465,10 +1437,7 @@ fn emit_struct_fill(
 /// non-identifier characters become underscores, which is the same name a person
 /// would have picked.
 fn held_prefix(type_name: &str) -> String {
-    type_name
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
-        .collect()
+    type_name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }).collect()
 }
 
 /// The four bindings a held struct gets alongside the library's own symbols.
@@ -1503,9 +1472,8 @@ fn held_accessors(pkg: &str, type_name: &str, def: &CStruct) -> Result<String, S
         (type_name.to_string(), format!("({type_name}*)vp"))
     };
 
-    let free_owned: String = (0..k)
-        .map(|i| format!("    free(((jade_held_{p}*)sp)->owned[{i}]);\n"))
-        .collect();
+    let free_owned: String =
+        (0..k).map(|i| format!("    free(((jade_held_{p}*)sp)->owned[{i}]);\n")).collect();
 
     b.push_str(&format!(
         "\nstatic int jade_shim_{p}_new(size_t argc, const JadeVal* argv, JadeVal* out) {{\n\
@@ -1537,7 +1505,7 @@ fn held_accessors(pkg: &str, type_name: &str, def: &CStruct) -> Result<String, S
     // lookup helper with no caller, which `-Wall -Werror` refuses to compile.
     if !def.fields.is_empty() {
         b.push_str(&format!(
-        "\nstatic int jade_shim_{p}_get(size_t argc, const JadeVal* argv, JadeVal* out) {{\n\
+            "\nstatic int jade_shim_{p}_get(size_t argc, const JadeVal* argv, JadeVal* out) {{\n\
          \x20   if (argc != 1) return 1;\n\
          \x20   void* vp = NULL;\n\
          \x20   if (!jade_shim_unwrap(&argv[0], \"{type_name}\", &vp)) return 1;\n\
@@ -1546,43 +1514,43 @@ fn held_accessors(pkg: &str, type_name: &str, def: &CStruct) -> Result<String, S
          \x20   JadeStruct* j = jade_shim_struct(\"{type_name}\", {n});\n\
          \x20   if (!j) return 1;\n"
         ));
-    for (i, (field, ty)) in def.fields.iter().enumerate() {
-        let t = map_type(ty).ok_or_else(|| {
-            format!(
-                "dependency '{pkg}': held struct {type_name} reads field '{field}' as '{ty}', \
+        for (i, (field, ty)) in def.fields.iter().enumerate() {
+            let t = map_type(ty).ok_or_else(|| {
+                format!(
+                    "dependency '{pkg}': held struct {type_name} reads field '{field}' as '{ty}', \
                  which the Jade FFI cannot represent. Supported types are {SUPPORTED_TYPES}."
-            )
-        })?;
-        b.push_str(&emit_field("j", i, field, &t, &format!("sp->{field}")));
-    }
-    b.push_str(
-        "    out->tag = JADE_FFI_STRUCT;\n\
+                )
+            })?;
+            b.push_str(&emit_field("j", i, field, &t, &format!("sp->{field}")));
+        }
+        b.push_str(
+            "    out->tag = JADE_FFI_STRUCT;\n\
          \x20   out->data.as_struct = j;\n\
          \x20   return 0;\n\
          }\n",
-    );
+        );
 
         b.push_str(&format!(
-        "\nstatic int jade_shim_{p}_set(size_t argc, const JadeVal* argv, JadeVal* out) {{\n\
+            "\nstatic int jade_shim_{p}_set(size_t argc, const JadeVal* argv, JadeVal* out) {{\n\
          \x20   if (argc != 2) return 1;\n\
          \x20   void* vp = NULL;\n\
          \x20   if (!jade_shim_unwrap(&argv[0], \"{type_name}\", &vp)) return 1;\n\
          \x20   if (argv[1].tag != JADE_FFI_STRUCT) return 1;\n\
          \x20   {type_name}* sp = {deref};\n\
          \x20   (void)sp;\n"
-    ));
-    // No memset: the struct already exists and the library has been filling it.
-    // A field left out keeps whatever is there, which is the only reading that
-    // makes sense for a value you are revising rather than building.
-    b.push_str(&emit_struct_fill(
-        pkg,
-        &format!("{p}_set"),
-        "st",
-        "sp->",
-        type_name,
-        def,
-        "argv[1].data.as_struct",
-    )?);
+        ));
+        // No memset: the struct already exists and the library has been filling it.
+        // A field left out keeps whatever is there, which is the only reading that
+        // makes sense for a value you are revising rather than building.
+        b.push_str(&emit_struct_fill(
+            pkg,
+            &format!("{p}_set"),
+            "st",
+            "sp->",
+            type_name,
+            def,
+            "argv[1].data.as_struct",
+        )?);
         b.push_str(
             "    out->tag = JADE_FFI_NIL;\n\
              \x20   out->data.as_nil = 0;\n\
@@ -1897,7 +1865,14 @@ fn wrapper(
             ArgSpec::InStruct { type_name } => {
                 let k = jade_idx[i].expect("an in_struct consumes a Jade argument");
                 let def = &structs[type_name];
-                body.push_str(&emit_in_struct(pkg, sym, &format!("istruct{i}"), type_name, def, k)?);
+                body.push_str(&emit_in_struct(
+                    pkg,
+                    sym,
+                    &format!("istruct{i}"),
+                    type_name,
+                    def,
+                    k,
+                )?);
             }
             ArgSpec::OutScalar { c_type, .. } => {
                 body.push_str(&format!("    {c_type} oscalar{i} = ({c_type})0;\n"));
@@ -1934,8 +1909,12 @@ fn wrapper(
                 let k = jade_idx[i].unwrap();
                 // A blob is one Jade value and two C parameters. The pointer is
                 // borrowed for the call, exactly as a `str` argument is.
-                call_args.push(format!("argv[{k}].data.as_bytes ? (const void*)argv[{k}].data.as_bytes->data : NULL"));
-                call_args.push(format!("argv[{k}].data.as_bytes ? argv[{k}].data.as_bytes->len : (size_t)0"));
+                call_args.push(format!(
+                    "argv[{k}].data.as_bytes ? (const void*)argv[{k}].data.as_bytes->data : NULL"
+                ));
+                call_args.push(format!(
+                    "argv[{k}].data.as_bytes ? argv[{k}].data.as_bytes->len : (size_t)0"
+                ));
             }
             ArgSpec::BytesPtr => {
                 let k = jade_idx[i].unwrap();
@@ -2007,7 +1986,9 @@ fn wrapper(
     // where the value lands.
     let emit_ret = |target: &str| -> String {
         match &ret_t {
-            RetSpec::Nil => format!("    {target}tag = JADE_FFI_NIL;\n    {target}data.as_nil = 0;\n"),
+            RetSpec::Nil => {
+                format!("    {target}tag = JADE_FFI_NIL;\n    {target}data.as_nil = 0;\n")
+            }
             RetSpec::Scalar(t) => {
                 format!("    {target}tag = {};\n    {target}data.{} = r;\n", t.tag, t.field)
             }
@@ -2103,7 +2084,14 @@ fn wrapper(
             }
             ArgSpec::OutStruct { type_name, .. } => {
                 let def = &structs[type_name];
-                body.push_str(&emit_out_struct(pkg, sym, &format!("ostruct{i}"), type_name, def, "")?);
+                body.push_str(&emit_out_struct(
+                    pkg,
+                    sym,
+                    &format!("ostruct{i}"),
+                    type_name,
+                    def,
+                    "",
+                )?);
                 body.push_str(&format!(
                     "    {target}tag = JADE_FFI_STRUCT;\n\
                      \x20   {target}data.as_struct = ostruct{i}_j;\n"
@@ -2203,7 +2191,10 @@ fn wrapper(
 
     // The C return value is dead when an out-parameter consumed it, and `-Wall
     // -Werror` is on, so say so.
-    if !matches!(ret_t, RetSpec::Nil) && !ret_key && !outs.iter().any(|a| matches!(a, ArgSpec::OutBuffer { .. })) {
+    if !matches!(ret_t, RetSpec::Nil)
+        && !ret_key
+        && !outs.iter().any(|a| matches!(a, ArgSpec::OutBuffer { .. }))
+    {
         body.push_str("    (void)r;\n");
     }
 
