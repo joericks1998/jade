@@ -25,6 +25,49 @@ void* jade_dlopen(const char* path) { return dlopen(path, RTLD_NOW | RTLD_LOCAL)
 const char* jade_dlerror(void) { const char* e = dlerror(); return e ? e : "unknown error"; }
 void* jade_dlsym(void* handle, const char* sym) { return dlsym(handle, sym); }
 
+/* The directory of the image this code is compiled into.
+ *
+ * `dladdr` on the address of a function defined *here* answers for whichever
+ * image that copy of the runtime was linked into — the host executable when the
+ * host asks, a package's own dylib when the package asks. That is why this uses
+ * dladdr rather than /proc/self/exe or _NSGetExecutablePath: those two always
+ * name the executable, which is the wrong answer for a package, and they need a
+ * platform split that this does not.
+ *
+ * NULL when the loader cannot say. The buffer is _Thread_local for the reason
+ * the errno buffer is: Jade tasks are real OS threads. */
+const char* jade_image_dir(void) {
+    static _Thread_local char buf[1024];
+    Dl_info info;
+    if (!dladdr((const void*)(uintptr_t)&jade_image_dir, &info) || !info.dli_fname) return NULL;
+    size_t n = strlen(info.dli_fname);
+    if (n >= sizeof buf) return NULL;
+    memcpy(buf, info.dli_fname, n + 1);
+    char* slash = strrchr(buf, '/');
+    if (!slash) return ".";
+    /* A library at the filesystem root would otherwise become the empty
+     * string, which is not a directory anything can be joined onto. */
+    if (slash == buf) {
+        buf[1] = '\0';
+    } else {
+        *slash = '\0';
+    }
+    return buf;
+}
+
+/* The canonical path of an existing file, or NULL when there is none.
+ *
+ * Load-bearing rather than cosmetic. dlopen keys a loaded image by the path it
+ * was asked for, so two spellings of one file — a symlinked directory, a `..`
+ * segment — produce two independent instances with two sets of globals. For a
+ * library that owns a device that is not a waste of memory, it is two devices.
+ * Canonicalizing first is what makes "the same dependency" mean one thing. */
+const char* jade_realpath(const char* path) {
+    static _Thread_local char buf[1024];
+    if (!path) return NULL;
+    return realpath(path, buf);
+}
+
 /* ── Async tasks ──────────────────────────────────────────────────────────
  *
  * The scheduler now lives in the Rust runtime (`jade-runtime/src/task.rs`):

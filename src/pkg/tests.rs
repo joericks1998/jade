@@ -1124,3 +1124,163 @@ fn a_shim_is_relinked_when_its_library_is_rebuilt() {
         .expect("the relinked shim must dlopen");
     assert!(pkg.contains_key("square"));
 }
+
+// ── Bundling a dependency beside an artifact ──────────────────────────────
+
+#[test]
+fn bundling_copies_a_whole_install_directory() {
+    // A C dependency's install dir holds two files — the generated shim and the
+    // library it wraps — and the shim finds the second through a loader-relative
+    // reference. Copying only the importable one leaves that pointing at nothing.
+    let tmp = TempDir::new("bundle_whole");
+    let libs = tmp.path().join("libs");
+    let src = libs.join("zlib-1.3.1");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("zlib.dylib"), b"shim").unwrap();
+    std::fs::write(src.join("zlib_native.dylib"), b"target").unwrap();
+
+    let ship = tmp.path().join("out");
+    std::fs::create_dir_all(&ship).unwrap();
+    let written = bundle_beside_artifact(&ship.join("app"), &libs).unwrap();
+
+    assert_eq!(written, ["zlib-1.3.1"]);
+    let dest = ship.join("libs").join("zlib-1.3.1");
+    assert!(dest.join("zlib.dylib").exists(), "the shim should be bundled");
+    assert!(dest.join("zlib_native.dylib").exists(), "so should what it wraps");
+}
+
+#[test]
+fn bundling_is_a_no_op_when_the_artifact_is_already_beside_its_libs() {
+    // `jade build --lib` at the project root. Copying a directory onto itself
+    // would truncate every file in it.
+    let tmp = TempDir::new("bundle_inplace");
+    let libs = tmp.path().join("libs");
+    let src = libs.join("dep-local");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("dep.dylib"), b"contents").unwrap();
+
+    let written = bundle_beside_artifact(&tmp.path().join("main.dylib"), &libs).unwrap();
+    assert!(written.is_empty(), "nothing to copy: {written:?}");
+    assert_eq!(std::fs::read(src.join("dep.dylib")).unwrap(), b"contents");
+}
+
+#[test]
+fn bundling_refuses_a_directory_already_holding_a_different_build() {
+    // Two artifacts built into one directory share one libs/, which is the
+    // point. Two *different* builds of one dependency landing there is not — the
+    // second would silently replace the first for both.
+    let tmp = TempDir::new("bundle_conflict");
+    let libs = tmp.path().join("libs");
+    let src = libs.join("dep-local");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("dep.dylib"), b"new build").unwrap();
+
+    let ship = tmp.path().join("out");
+    std::fs::create_dir_all(ship.join("libs").join("dep-local")).unwrap();
+    std::fs::write(ship.join("libs").join("dep-local").join("dep.dylib"), b"old build").unwrap();
+
+    let err = bundle_beside_artifact(&ship.join("app"), &libs).unwrap_err();
+    assert!(err.contains("different build"), "should say why: {err}");
+    assert!(err.contains("dep-local"), "should name it: {err}");
+}
+
+// ── A package that says what it needs ─────────────────────────────────────
+//
+// The repo's standing claim was that a `.so` carries no manifest, so nothing
+// could discover what a package depends on. A package can answer for itself.
+
+/// Build `src` as a Jade package inside a project carrying `lock`.
+fn package_with_lock(tag: &str, src: &str, lock: &str) -> (TempDir, PathBuf) {
+    let tmp = TempDir::new(tag);
+    let ext = if cfg!(target_os = "macos") { "dylib" } else { "so" };
+    std::fs::write(tmp.path().join("jade.toml"), "[project]\nname = \"p\"\n").unwrap();
+    std::fs::write(tmp.path().join("jade.lock"), lock).unwrap();
+    let main = tmp.path().join("main.jde");
+    std::fs::write(&main, src).unwrap();
+
+    let out = tmp.path().join(format!("p.{ext}"));
+    let tokens = crate::frontend::lexer::tokenize(src).expect("lex");
+    let program = crate::frontend::parser::parse(tokens).expect("parse");
+    let tir = crate::compiler::type_infer::infer(program).expect("infer");
+    crate::aot::compile_with_mode(
+        tir,
+        Some(&main),
+        &out,
+        false,
+        crate::aot::CompileMode::SharedLib { exports: vec![] },
+    )
+    .expect("the package should build");
+    (tmp, out)
+}
+
+const ONE_DEP_LOCK: &str = r#"version = 1
+
+[[package]]
+name = "fastmath"
+version = "1.2.0"
+source = "url+https://example.invalid/fastmath.dylib"
+abi = "jade"
+
+[package.artifacts.any]
+url = "https://example.invalid/fastmath.dylib"
+file = "fastmath.dylib"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+"#;
+
+#[test]
+fn a_package_reports_its_own_dependencies() {
+    let (_tmp, artifact) = package_with_lock("deps", "fn wrapped() { return 1 }\n", ONE_DEP_LOCK);
+
+    let declared = declared_dependencies(&artifact).expect("the package should carry its lock");
+    assert_eq!(declared.len(), 1, "{declared:?}");
+    assert_eq!(declared[0].name, "fastmath");
+    assert_eq!(declared[0].version, "1.2.0");
+    assert!(declared[0].source.starts_with("url+"), "{:?}", declared[0].source);
+}
+
+#[test]
+fn a_package_with_no_dependencies_carries_no_record() {
+    // Which is also what every package published before this looks like, so the
+    // absent symbol has to be an ordinary answer rather than a failure.
+    let (_tmp, artifact) =
+        package_with_lock("nodeps", "fn wrapped() { return 1 }\n", "version = 1\n");
+    assert!(declared_dependencies(&artifact).is_none());
+}
+
+#[test]
+fn a_plain_c_library_is_never_opened_to_ask() {
+    // The symbol-table check comes first, so a library that is not a Jade
+    // package is never loaded at all — `jade pkg add` is in the middle of
+    // deciding whether to trust it.
+    let tmp = TempDir::new("notjade");
+    let f = tmp.path().join("libnotjade.dylib");
+    std::fs::write(&f, b"not an object file").unwrap();
+    assert!(declared_dependencies(&f).is_none());
+}
+
+#[test]
+fn opening_a_package_to_read_its_dependencies_runs_none_of_its_code() {
+    // Load-bearing, and easy to break: a Jade package runs its module top level
+    // from `jade_mod_init`, which `jade_pkg_init` calls and nothing else. If a
+    // constructor were ever added, `jade pkg add` would start executing the
+    // package it is being asked to add — before the user has agreed to run it.
+    //
+    // Proved by side effect rather than by reading the source, because reading
+    // the source is exactly what would stop being true.
+    let marker = std::env::temp_dir().join(format!("jade_ranit_{}", std::process::id()));
+    let _ = std::fs::remove_file(&marker);
+    let src = format!(
+        "use std::fs\n\nfs.write(\"{}\", \"ran\")\n\nfn wrapped() {{ return 1 }}\n",
+        marker.display()
+    );
+
+    let (_tmp, artifact) = package_with_lock("noexec", &src, ONE_DEP_LOCK);
+    let declared = declared_dependencies(&artifact);
+
+    assert!(declared.is_some(), "the record should still be readable");
+    assert!(
+        !marker.exists(),
+        "opening a package to read its dependencies must not run its top level"
+    );
+    let _ = std::fs::remove_file(&marker);
+}

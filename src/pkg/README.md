@@ -28,7 +28,13 @@ That same export table gives the one number that says whether a binding is usabl
 
 Dependencies are **prebuilt native shared libraries**, sourced from a local path or a URL. There is deliberately no package registry — like Go, a dependency names where it lives rather than an entry in a central index.
 
-That choice has a consequence worth stating plainly: a `.so` carries no manifest of its own, so **there is no transitive resolution and no version solving**. Each dependency contributes exactly one artifact, `jade.lock` is a flat list, and "resolution" means picking the right platform build. A package that needs another package must say so in its documentation; Jade cannot discover it.
+That choice has a consequence worth stating plainly: **there is no version solving**. Each dependency contributes exactly one artifact, `jade.lock` is a flat list, and "resolution" means picking the right platform build.
+
+What *has* changed is the half of that which used to read "and no transitive resolution, because a `.so` carries no manifest of its own". A Jade package now carries one. `jade build --lib` emits `jade_pkg_deps`, a function whose whole body returns the `[[package]]` tables of the lock it was built against, and `declared_dependencies` reads it back — statically first, through `exported_symbols`, so a plain C library is never opened at all. `jade pkg add` merges what it finds into the consuming project's `jade.toml`, because a transitive dependency is a real dependency and the manifest is what a person reads to know what their project uses.
+
+Two limits on that, and both are honest rather than temporary. Only a `url` dependency travels: a `path` names a file on the machine that built the package, which means nothing on another, so those are named for the user rather than written as a reference that resolves to the wrong file. And a name already present at a different version is refused rather than resolved — not only because there is no solver, but because two versions are two files, two paths, and therefore two loaded copies with their own state.
+
+Reading the record runs none of the package's code, and that is load-bearing rather than incidental: a package runs its module top level from `jade_mod_init`, which `jade_pkg_init` calls and nothing else. Add a constructor anywhere in the AOT output and `jade pkg add` starts executing the package it is being asked to add, before the user has agreed to run it. There is a test asserting it by side effect, because reading the source is exactly what would stop being true.
 
 The second decision is that the lock records an artifact **for every platform**, not just the current one. Unlike Cargo, which locks portable source, a lock naming one artifact would only be valid on the machine that generated it — a macOS developer would commit a lock that Linux CI could not install, and with no registry to ask, could not even *verify*.
 

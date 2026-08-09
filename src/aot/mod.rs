@@ -6,7 +6,7 @@ pub mod cfg;
 pub mod imports;
 pub mod lower;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use inkwell::{
     AddressSpace, OptimizationLevel,
@@ -87,6 +87,7 @@ fn emit_pkg_init<'ctx>(
     lowered: &lower::LoweredProgram<'ctx>,
     exports: &[String],
     output_path: &Path,
+    deps_toml: Option<&str>,
 ) -> Result<(), String> {
     let i8_ty = context.i8_type();
     let i32_ty = context.i32_type();
@@ -241,6 +242,33 @@ fn emit_pkg_init<'ctx>(
             .map_err(|e| e.to_string())?;
     }
 
+    // ── const char* jade_pkg_deps(void) ───────────────────────────────────
+    //
+    // What this package needs installed alongside it, as the `[[package]]`
+    // tables of the lockfile it was built from. `jade pkg add` reads it and
+    // merges the entries into the consuming project's lock, so adding a package
+    // brings what it depends on with it.
+    //
+    // Carried *in the artifact* because that is the only place it can be. A
+    // dependency names where a library lives, not an entry in a registry, so
+    // there is nothing to ask about a `.so` except the `.so`. That is exactly
+    // the claim this repo made for why transitive resolution was impossible; a
+    // package can answer for itself, and now does.
+    //
+    // Emitted the same way `jade_pkg_abi_version` is, for the same reason: a
+    // function whose whole body returns a constant is always in the symbol
+    // table, where a linked-in symbol can be dropped.
+    if let Some(toml) = deps_toml {
+        let deps_fn = module.add_function("jade_pkg_deps", ptr_ty.fn_type(&[], false), None);
+        let deps_entry = context.append_basic_block(deps_fn, "entry");
+        builder.position_at_end(deps_entry);
+        let text = builder
+            .build_global_string_ptr(toml, "jade_pkg_deps_text")
+            .map_err(|e| e.to_string())?
+            .as_pointer_value();
+        builder.build_return(Some(&text)).map_err(|e| e.to_string())?;
+    }
+
     // ── int jade_pkg_init(JadeNativePkg* out) ─────────────────────────────
     let pkg_init =
         module.add_function("jade_pkg_init", i32_ty.fn_type(&[ptr_ty.into()], false), None);
@@ -336,12 +364,24 @@ fn runtime_archive_dirs() -> (String, String) {
     (pick("JADE_RT_LIB", env!("JADE_RT_LIB_DIR")), pick("JADE_RUST_RT", env!("JADE_RUST_RT_DIR")))
 }
 
+/// What a compile produced, beyond the artifact on disk.
+///
+/// `ir` is the printed module when `emit_ir` asked for it. `dependencies` are
+/// the native packages the artifact will look for at startup — the caller needs
+/// them to copy exactly those beside it, rather than everything the project
+/// happens to have locked.
+#[derive(Debug)]
+pub struct CompileOutcome {
+    pub ir: Option<String>,
+    pub dependencies: Vec<PathBuf>,
+}
+
 pub fn compile(
     program: TProgram,
     source_path: Option<&Path>,
     output_path: &Path,
     emit_ir: bool,
-) -> Result<Option<String>, String> {
+) -> Result<CompileOutcome, String> {
     compile_with_mode(program, source_path, output_path, emit_ir, CompileMode::Binary)
 }
 
@@ -351,17 +391,17 @@ pub fn compile_with_mode(
     output_path: &Path,
     emit_ir: bool,
     mode: CompileMode,
-) -> Result<Option<String>, String> {
+) -> Result<CompileOutcome, String> {
     // ── Import resolution + module namespacing ────────────────────────────
     // Inline every imported `.jde` file into one stream, mangling each imported
     // module's globals into its own `name$<id>` namespace so distinct modules
     // never collide — matching the bytecode VM (the source of truth), which keeps
     // imports namespaced. `main` keeps bare names. See `imports.rs`.
-    let (mut program, native_pkgs) = if let Some(src) = source_path {
-        let (stmts, native_pkgs) = imports::resolve_and_namespace(program.stmts, src)?;
-        (crate::compiler::tir::TProgram { stmts }, native_pkgs)
+    let (mut program, native_pkgs, _libs_root) = if let Some(src) = source_path {
+        let r = imports::resolve_and_namespace(program.stmts, src)?;
+        (crate::compiler::tir::TProgram { stmts: r.stmts }, r.native_pkgs, r.libs_root)
     } else {
-        (program, Vec::new())
+        (program, Vec::new(), None)
     };
 
     // ── Inline defaults into cross-file struct literals ───────────────────
@@ -384,7 +424,8 @@ pub fn compile_with_mode(
     // One `@native_pkg$<id>: ptr = null` per dlopen'd native library, filled in
     // main's prologue below. A `__native$<id>$<fn>` reference (lowered in
     // lower.rs) loads its handle from this by-name global.
-    for (pkgid, _) in &native_pkgs {
+    for pkg in &native_pkgs {
+        let pkgid = pkg.id;
         let g = module.add_global(ptr_ty, None, &format!("native_pkg${pkgid}"));
         g.set_initializer(&ptr_ty.const_null());
     }
@@ -398,22 +439,40 @@ pub fn compile_with_mode(
     let init_bb = context.append_basic_block(init_fn, "entry");
     builder.position_at_end(init_bb);
 
-    // Load every native package once, before any user code runs. The path is a
-    // build-time-resolved absolute path embedded as a plain C string (dlopen'd at
-    // runtime — see imports.rs / runtime_aot/native.c). jrt_native_load raises on
-    // a failed dlopen; with no handler installed here that aborts the program,
-    // matching the VM's fatal-on-missing-package behavior.
+    // Load every native package once, before any user code runs.
+    //
+    // Each is named twice: by a `libs/`-relative key, which is what a relocated
+    // artifact resolves against the root its host published, and by the absolute
+    // path it sat at when this was built, which is the answer for a library that
+    // is not a dependency and so has no relative spelling. A null key means the
+    // second one is all there is. See runtime_aot/native.c for why there is one
+    // root and not a search order.
+    //
+    // jrt_native_load_rel raises on failure; with no handler installed here that
+    // aborts the program, matching the VM's fatal-on-missing-package behavior.
     if !native_pkgs.is_empty() {
-        let load_fn = module.get_function("jrt_native_load").unwrap_or_else(|| {
-            module.add_function("jrt_native_load", ptr_ty.fn_type(&[ptr_ty.into()], false), None)
+        let load_fn = module.get_function("jrt_native_load_rel").unwrap_or_else(|| {
+            module.add_function(
+                "jrt_native_load_rel",
+                ptr_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], false),
+                None,
+            )
         });
-        for (pkgid, path) in &native_pkgs {
-            let path_ptr = builder
-                .build_global_string_ptr(path, "native_pkg_path")
+        for pkg in &native_pkgs {
+            let pkgid = pkg.id;
+            let rel_ptr = match &pkg.rel {
+                Some(rel) => builder
+                    .build_global_string_ptr(rel, "native_pkg_rel")
+                    .map_err(|e| e.to_string())?
+                    .as_pointer_value(),
+                None => ptr_ty.const_null(),
+            };
+            let abs_ptr = builder
+                .build_global_string_ptr(&pkg.abs, "native_pkg_path")
                 .map_err(|e| e.to_string())?
                 .as_pointer_value();
             let handle = builder
-                .build_call(load_fn, &[path_ptr.into()], "native_load")
+                .build_call(load_fn, &[rel_ptr.into(), abs_ptr.into()], "native_load")
                 .map_err(|e| e.to_string())?
                 .as_any_value_enum()
                 .into_pointer_value();
@@ -459,6 +518,31 @@ pub fn compile_with_mode(
                 .build_call(set_args, &[argc.into(), argv.into()], "")
                 .map_err(|e| e.to_string())?;
 
+            // Say where this program's dependencies live, before anything loads
+            // one. A binary is a host: it owns the process, so it is the thing
+            // entitled to decide the single root every image will resolve
+            // against. A package is not, and `SharedLib` below deliberately does
+            // not do this — a second publisher would be a second root, and a
+            // second root is a second copy of a dependency with its own state.
+            //
+            // The path is relative to the artifact, so moving the pair moves
+            // both. `jrt_libs_root_publish` defers to a root the user already
+            // set; see runtime_aot/native.c.
+            if !native_pkgs.is_empty() {
+                let publish = module.get_function("jrt_libs_root_publish").unwrap_or_else(|| {
+                    module.add_function(
+                        "jrt_libs_root_publish",
+                        void_ty.fn_type(&[ptr_ty.into()], false),
+                        None,
+                    )
+                });
+                let root_ptr = builder
+                    .build_global_string_ptr(crate::pkg::LIBS_DIR, "jade_libs_root")
+                    .map_err(|e| e.to_string())?
+                    .as_pointer_value();
+                builder.build_call(publish, &[root_ptr.into()], "").map_err(|e| e.to_string())?;
+            }
+
             builder.build_call(init_fn, &[], "").map_err(|e| e.to_string())?;
 
             // Just before returning, call jrt_heap_report() — a no-op unless
@@ -474,14 +558,39 @@ pub fn compile_with_mode(
             builder.build_return(Some(&i32_ty.const_int(0, false))).map_err(|e| e.to_string())?;
         }
         CompileMode::SharedLib { exports } => {
-            emit_pkg_init(&context, &module, &builder, init_fn, &lowered, exports, output_path)?;
+            // What this package will need installed beside it, taken from the
+            // lock it was built against. A package built outside a project, or
+            // one with no dependencies, carries nothing and the symbol is
+            // simply absent — which is also what every package published before
+            // this looks like.
+            let deps_toml = source_path
+                .and_then(|p| p.parent())
+                .and_then(crate::project::find_project_root_from)
+                .and_then(|root| crate::pkg::lock::read(&root).ok().flatten())
+                .filter(|l| !l.packages.is_empty())
+                .and_then(|l| toml::to_string_pretty(&l).ok());
+            emit_pkg_init(
+                &context,
+                &module,
+                &builder,
+                init_fn,
+                &lowered,
+                exports,
+                output_path,
+                deps_toml.as_deref(),
+            )?;
         }
     }
 
     module.verify().map_err(|e| e.to_string())?;
 
+    // Only the ones that came from the project's `libs/`. A hand-written `[lib]`
+    // pointing elsewhere is not a dependency and is not the caller's to copy.
+    let dependencies: Vec<PathBuf> =
+        native_pkgs.iter().filter(|p| p.rel.is_some()).map(|p| PathBuf::from(&p.abs)).collect();
+
     if emit_ir {
-        return Ok(Some(module.print_to_string().to_string()));
+        return Ok(CompileOutcome { ir: Some(module.print_to_string().to_string()), dependencies });
     }
 
     // ── AOT compilation ───────────────────────────────────────────────────
@@ -580,7 +689,7 @@ pub fn compile_with_mode(
         return Err(format!("linking failed\n{}", String::from_utf8_lossy(&result.stderr).trim()));
     }
 
-    Ok(None)
+    Ok(CompileOutcome { ir: None, dependencies })
 }
 
 #[cfg(test)]

@@ -521,7 +521,14 @@ fn check_package_abi(lib: &libloading::Library, lib_path: &Path, span: Span) -> 
 }
 
 pub fn load_native_package(lib_path: &Path, span: Span) -> Result<HashMap<String, VmValue>> {
-    let lib = unsafe { libloading::Library::new(lib_path) }.map_err(|e| JadeError::IoError {
+    // Canonicalized first, and that is load-bearing rather than tidy. `dlopen`
+    // keys a loaded image by the path it was asked for, so two spellings of one
+    // file — a symlinked `libs/`, a project reached through one — produce two
+    // independent instances with two sets of globals. A compiled artifact
+    // resolves through `realpath` for the same reason, and the two engines have
+    // to arrive at the same string or a package loaded by both is loaded twice.
+    let canon = std::fs::canonicalize(lib_path).unwrap_or_else(|_| lib_path.to_path_buf());
+    let lib = unsafe { libloading::Library::new(&canon) }.map_err(|e| JadeError::IoError {
         message: format!("could not load native library '{}': {}", lib_path.display(), e),
         span,
     })?;

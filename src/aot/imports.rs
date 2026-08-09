@@ -80,7 +80,7 @@ fn is_stdlib(path: &str) -> bool {
 pub fn resolve_and_namespace(
     stmts: Vec<TStmt>,
     source_path: &Path,
-) -> Result<(Vec<TStmt>, Vec<(u32, String)>), String> {
+) -> Result<ResolvedImports, String> {
     let main_canon =
         source_path.canonicalize().map_err(|e| format!("{}: {e}", source_path.display()))?;
     let main_dir = main_canon.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
@@ -108,9 +108,23 @@ pub fn resolve_and_namespace(
 
     // Imported modules were appended to `reg.out` in dependency order (deps before
     // dependents); main's statements come last.
+    let libs_root = reg.libs_root();
     let mut out = reg.out;
     out.extend(main_stmts);
-    Ok((out, reg.native_pkgs))
+    Ok(ResolvedImports { stmts: out, libs_root, native_pkgs: reg.native_pkgs })
+}
+
+/// What one resolution pass produced.
+///
+/// `libs_root` is where this build's dependencies live. Codegen needs it to
+/// tell a compiled program where to look, and the CLI needs it to know what to
+/// copy beside the artifact — so it is answered once, here, rather than
+/// recomputed at each.
+pub struct ResolvedImports {
+    pub stmts: Vec<TStmt>,
+    pub native_pkgs: Vec<NativePkg>,
+    /// `None` when the build is not inside a project.
+    pub libs_root: Option<PathBuf>,
 }
 
 // ── Module registry ───────────────────────────────────────────────────────────
@@ -135,7 +149,25 @@ struct Registry {
     /// `__native$` prefix). `native_pkgs` is the ordered output list.
     native_ids: HashMap<PathBuf, u32>,
     native_next_id: u32,
-    native_pkgs: Vec<(u32, String)>,
+    native_pkgs: Vec<NativePkg>,
+}
+
+/// A native package the artifact will load at startup.
+///
+/// Two spellings, because they answer different questions. `rel` is the
+/// dependency's path *within* the project's `libs/` —
+/// `fastmath-1.2.0/fastmath.dylib` — and is what makes an artifact relocatable,
+/// and what makes two packages naming the same dependency resolve to one file
+/// rather than to two copies with two sets of state. `abs` is where it sat at
+/// build time, kept for a library that is not a dependency at all: a
+/// hand-written `[lib]` pointing anywhere on disk has no `libs/`-relative
+/// spelling and never had one.
+#[derive(Debug, Clone)]
+pub struct NativePkg {
+    pub id: u32,
+    /// `None` when the library is not under the project's `libs/`.
+    pub rel: Option<String>,
+    pub abs: String,
 }
 
 impl Registry {
@@ -162,7 +194,7 @@ impl Registry {
     }
 
     /// Assign (or reuse) the pkgid for a native library's canonical path,
-    /// recording `(pkgid, abs_path)` for codegen's startup loader.
+    /// recording what codegen's startup loader needs to find it again.
     fn native_pkg_id(&mut self, canon: &Path) -> u32 {
         if let Some(&id) = self.native_ids.get(canon) {
             return id;
@@ -170,8 +202,33 @@ impl Registry {
         let id = self.native_next_id;
         self.native_next_id += 1;
         self.native_ids.insert(canon.to_path_buf(), id);
-        self.native_pkgs.push((id, canon.to_string_lossy().into_owned()));
+        self.native_pkgs.push(NativePkg {
+            id,
+            rel: self.libs_relative(canon),
+            abs: canon.to_string_lossy().into_owned(),
+        });
         id
+    }
+
+    /// The dependency's path within the project's `libs/`, or `None` when it is
+    /// not in there.
+    ///
+    /// Deliberately not a guess at the shape: `pkg::dependency_libraries` builds
+    /// every dependency's `[lib]` entry as `libs/<install dir>`, so stripping
+    /// that prefix yields exactly the string the package manager put there. A
+    /// library reached any other way is outside the one-instance contract by
+    /// definition, and keeps the absolute path it always had.
+    fn libs_relative(&self, canon: &Path) -> Option<String> {
+        let root = self.lib_root.as_ref()?;
+        let libs = std::fs::canonicalize(root.join(crate::pkg::LIBS_DIR)).ok()?;
+        let rest = canon.strip_prefix(&libs).ok()?;
+        Some(rest.to_string_lossy().replace('\\', "/"))
+    }
+
+    /// Where this build's `libs/` is, for the bundle the artifact will look in.
+    fn libs_root(&self) -> Option<PathBuf> {
+        let root = self.lib_root.as_ref()?;
+        std::fs::canonicalize(root.join(crate::pkg::LIBS_DIR)).ok()
     }
 }
 
