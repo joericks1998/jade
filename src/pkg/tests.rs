@@ -1312,3 +1312,153 @@ fn a_version_that_is_not_dotted_numbers_cannot_be_ordered() {
     assert_eq!(compare_versions(LOCAL_VERSION, "1.0.0"), None);
     assert_eq!(compare_versions("1.0.0", LOCAL_VERSION), None);
 }
+
+/// A capstone-shaped C library: a call that writes a row of structs and returns
+/// how many, and structs whose interesting fields are fixed-size char arrays.
+///
+/// Hermetic — no capstone on the machine — and it exercises every piece of the
+/// v1.3.10 work at once. Before that work this library bound "cleanly" and a
+/// caller could learn that three instructions existed and nothing about them.
+const ROW_C_SOURCE: &str = r#"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stddef.h>
+
+typedef struct { unsigned int id; unsigned long long address; char mnemonic[32]; } insn;
+
+/* Returns a count, not a status — the shape that used to be read as one, so a
+ * successful call of three raised. */
+size_t d_disasm(const unsigned char* code, size_t n, insn** out) {
+    static const char* names[3] = { "push", "mov", "ret" };
+    size_t made = n < 3 ? n : 3;
+    insn* row = (insn*)calloc(made ? made : 1, sizeof(insn));
+    for (size_t i = 0; i < made; i++) {
+        row[i].id = (unsigned int)(i + 1);
+        row[i].address = 0x1000 + i;
+        snprintf(row[i].mnemonic, sizeof row[i].mnemonic, "%s", names[i]);
+    }
+    *out = row;
+    return made;
+}
+
+void d_free(insn* p) { free(p); }
+"#;
+
+#[test]
+fn a_row_of_structs_is_readable_end_to_end() {
+    if !have_cc() {
+        eprintln!("skipping: no C compiler");
+        return;
+    }
+    let tmp = TempDir::new("rowstructs");
+    let built = compile_lib(tmp.path(), "rowlib", ROW_C_SOURCE);
+    let rel = built.file_name().unwrap().to_str().unwrap().to_string();
+
+    // Bound from the library's own header, so the shapes come from clang rather
+    // than from a hand-written table that could agree with the bug.
+    let header = tmp.path().join("rowlib.h");
+    std::fs::write(
+        &header,
+        "#include <stddef.h>\n\
+         typedef struct { unsigned int id; unsigned long long address; char mnemonic[32]; } insn;\n\
+         size_t d_disasm(const unsigned char* code, size_t n, insn** out);\n\
+         void d_free(insn* p);\n",
+    )
+    .unwrap();
+
+    let b = crate::pkg::bindgen::from_header(&header, &[], None, None).expect("bind");
+
+    // The count must not have been read as a status, or every successful call
+    // raises.
+    let disasm_sym = b
+        .symbols
+        .get("d_disasm")
+        .unwrap_or_else(|| panic!("d_disasm did not bind: {:?}", b.skipped));
+    assert!(
+        disasm_sym.fails_when.is_none(),
+        "a count beside a handle is not a status: {:?}",
+        disasm_sym.fails_when
+    );
+    // And the mnemonic must have survived as characters.
+    let fields: Vec<&str> = b.structs["insn"].fields.iter().map(|(f, _)| f.as_str()).collect();
+    assert!(fields.contains(&"mnemonic"), "the text field was dropped: {fields:?}");
+
+    let mut toml = format!(
+        "[project]\nname = \"app\"\n[dependencies.rowlib]\nversion = \"1.0.0\"\npath = \"{rel}\"\n\
+         abi = \"c\"\nheaders = [\"rowlib.h\"]\ninclude_dirs = [\"{}\"]\n",
+        tmp.path().display()
+    );
+    for (name, sym) in &b.symbols {
+        toml.push_str(&format!("[dependencies.rowlib.symbols.{name}]\n"));
+        let args: Vec<String> = sym.args.iter().map(|a| format!("\"{a}\"")).collect();
+        toml.push_str(&format!("args = [{}]\nret = \"{}\"\n", args.join(", "), sym.ret));
+    }
+    for (name, def) in &b.structs {
+        toml.push_str(&format!("[dependencies.rowlib.structs.{name}]\n"));
+        let fs: Vec<String> =
+            def.fields.iter().map(|(f, t)| format!("[\"{f}\", \"{t}\"]")).collect();
+        toml.push_str(&format!("fields = [{}]\n", fs.join(", ")));
+        if def.held {
+            toml.push_str("held = true\n");
+        }
+    }
+
+    let m = manifest(&toml);
+    let lock = resolve(tmp.path(), &m, &MockFetcher::new()).unwrap();
+    lock::write(tmp.path(), &lock).unwrap();
+    materialize(tmp.path(), &lock, &MockFetcher::new()).unwrap();
+    build_c_shims(tmp.path(), &lock, &m).expect("the shim must compile");
+
+    let libs = resolved_libraries(tmp.path(), &m);
+    let span = crate::frontend::error::Span { line: 0, col: 0 };
+    let resolved =
+        crate::project::resolve_library_import(&libs, "rowlib", tmp.path()).unwrap().unwrap();
+    let pkg = crate::native::load_native_package(&resolved.path, span).expect("load");
+
+    // Call it, rather than only loading it. Nothing in the suite did that
+    // before, which is why a binding that raised on success went unnoticed.
+    let callable = |name: &str| match pkg.get(name) {
+        Some(crate::vm::VmValue::NativeLibFn(f)) => f.clone(),
+        other => panic!("{name} should be callable, got {other:?}"),
+    };
+    let disasm = callable("d_disasm");
+    let at = callable("insn_at");
+
+    let code = crate::vm::VmValue::Bytes(std::sync::Arc::new(jade_runtime::bytesf::BytesObj::new(
+        vec![0x55, 0x48, 0xc3],
+        jade_runtime::trust::TRUSTED,
+    )));
+    let result = disasm.call(&[code], span).expect("the call must not raise on success");
+
+    // Two things back: how many, and the row.
+    let (count, handle) = match &result {
+        crate::vm::VmValue::Struct(s) => {
+            let g = s.lock();
+            (g.get_field("ret").cloned().unwrap(), g.get_field("out").cloned().unwrap())
+        }
+        other => panic!("expected a count beside the row, got {other:?}"),
+    };
+    assert!(matches!(count, crate::vm::VmValue::Int(3)), "wrong count: {count:?}");
+
+    // And every one of them is readable, not just the first.
+    let mut seen = Vec::new();
+    for i in 0..3 {
+        let one = at.call(&[handle.clone(), crate::vm::VmValue::Int(i)], span).expect("at");
+        let crate::vm::VmValue::Struct(s) = one else { panic!("expected a struct") };
+        let g = s.lock();
+        let crate::vm::VmValue::Array(row) = g.get_field("mnemonic").cloned().unwrap() else {
+            panic!("mnemonic should be a row of characters")
+        };
+        let text: String = row
+            .lock()
+            .iter()
+            .filter_map(|v| match v {
+                crate::vm::VmValue::Char(c) if c.ch() != '\0' => Some(c.ch()),
+                _ => None,
+            })
+            .collect();
+        seen.push(text);
+    }
+    assert_eq!(seen, ["push", "mov", "ret"], "every instruction should be readable");
+}

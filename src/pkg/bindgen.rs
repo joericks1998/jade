@@ -1666,6 +1666,18 @@ fn map_function(
                 if let Some(name) = s.strip_prefix("out_struct:") {
                     structs.push((name.to_string(), false));
                 }
+                // A handle written through `T**` where the header *defines* `T`
+                // is a struct the caller can read, not an opaque token — so it
+                // needs a field table and the accessors that come with being
+                // held. Without this `size_t d_disasm(…, insn **out)` hands back
+                // a handle nothing in the package can look inside, which is a
+                // pointer and not an answer. An opaque `sqlite3**` is unaffected:
+                // there is nothing to read.
+                if let Some(name) = s.strip_prefix("out_handle:")
+                    && env.complete.contains_key(&normalize(name))
+                {
+                    structs.push((name.to_string(), true));
+                }
                 if let Some(w) = why {
                     assumed.push(w);
                 }

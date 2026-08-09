@@ -370,6 +370,35 @@ library free it and the shim free it again on the way out. Returning nothing is
 what marks it — a lone `void *` on a call that reports a status is an in-place
 edit, which `fdt_pack` is.
 
+### Fixed-size array fields
+
+A field like `char mnemonic[32]` is a row, and a row of things Jade has maps to
+an array of them. The element type decides what they are — plain `char` is text
+and everything else is data, the same rule a pointer parameter follows — so
+`int reserved[4]` and `uint8_t bytes[24]` need no separate cases.
+
+Nothing is trimmed on the way out. Thirty-two characters arrive, NUL padding
+included, because trimming would guess where the text stops; `int(c)` exists so
+a program can find that itself. On the way in, a row longer than the field is
+refused by name rather than truncated, and a shorter one zero-fills.
+
+**A `char` element is cast through `unsigned char` before widening.** `char` is
+signed on x86 Linux and unsigned on ARM macOS, so without the cast a byte of
+`0x80` sign-extends to `0xFFFFFF80`, which is not a Unicode scalar — and the far
+side raises, on one platform and not the other.
+
+**A struct holding nothing but rows stays held.** `fd_set` is one `int
+fds_bits[32]`, filled by `ares_fds` and read by `ares_process`. Rows made it
+carryable, which stopped it being lossy and turned it into an out-parameter — a
+zeroed local every call, so `ares_process` would have received an empty set and
+done nothing. A bag of rows is a buffer rather than a record: there are no named
+values to read out, and the thing it is for is surviving between calls.
+
+**Field types resolve through their own function, not `map_type`.** That one
+also serves `args` and `ret`, so teaching it about rows would make
+`array<char>:32` legal in an argument list where the wrapper has nothing to do
+with it. One resolver per position, each refusing by name.
+
 ### What names decide, and why
 
 Three questions cannot be answered from types alone, and all three are settled
@@ -421,6 +450,21 @@ The `headers` list was the half that still replaced, and it produced the worst f
 **A `continue` in a loop over dependencies is a decision to install something unusable.** `build_c_shims` skipped a C dependency with no symbol table, which is the one combination that cannot work: nothing was bound, and a plain C library is exactly what the loader refuses. `resolve` rejects it, but `ensure_ready` does not re-resolve, so a lock written while the table was there outlives a manifest edit that removed it. It is an error now.
 
 **"It has the right name" is not "it is a library", and nothing between `add` and `dlopen` disagreed.** A dependency was checked for what it *exported* and never for whether it could be loaded at all, so a file that was not an object file passed through the manifest, `libs/`, resolution and the linker, and was refused by the dynamic loader in the finished program. `bindgen::is_loadable_object` reads the magic number, and it is called in two places on purpose: `jade pkg add`, which can then say what probably went wrong, and `materialize`, which is the one point every source passes through with the bytes in hand — a hand-written manifest and a fresh clone never touch `add`. Anything new that puts a file into `libs/` needs the same check.
+
+**A count returned beside a handle is not a status.** `infer_failure` read any
+`int` return beside an `out_handle` as a status code, reasoning that the handle
+is the result so the return can only be one. `size_t cs_disasm(…, cs_insn
+**insn)` returns how many instructions it wrote, and a successful disassembly of
+three raised. The discrimination is the *C* spelling — a status is an `int`, a
+count is a `size_t` — and both collapse to Jade's `int` before the old test ever
+saw them, which is why the predicate now takes both. Enums arrive as `int`
+through `build_env`, which is right: `cs_err` and `lzma_ret` really are statuses.
+
+**And an `out_handle` only swallows the return when something is testing it.**
+`ret_is_a_key` discarded it unconditionally, so even with the inference fixed the
+count had nowhere to go. A failure convention is what makes a return a status;
+without one it is a value, and a pointer to a row whose length the caller cannot
+know is not much of a result.
 
 **A writable pointer to a complete struct is three different things.** Every one of them used to become `out_struct`. A type the library *hands out* — returned as `T*`, or written through a `T**` — is a handle, which is what the return position already called it. A type the caller allocates and the library keeps between calls cannot be an out-parameter at all, because the shim zeroes a fresh local every call: `lzma_code` bound, compiled, installed, ran, and did nothing, and `ZSTD_compressStream` would have written through a NULL `dst`. That one is a *held* struct, allocated once on the C heap and reached through a handle. Only a record one call fills stays an out-parameter.
 

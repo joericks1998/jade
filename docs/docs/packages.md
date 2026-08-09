@@ -312,7 +312,8 @@ If you write or correct a symbol by hand, these are the spellings `args` and `re
 | `struct:<Type>` | A return only: the call hands the struct back by value. Needs the header. |
 | `out_scalar:<ctype>` | A single value the call writes through a pointer — `int *count`. Consumes no Jade argument; comes back as part of the result. |
 | `inout_scalar:<ctype>` | The same, but the caller supplies the starting value — a position the library advances. Consumes one Jade argument *and* comes back. |
-| `out_handle:<T>` | A handle written through a pointer — `sqlite3_open(path, &db)`. The C return value becomes the status, and the handle is what Jade gets. |
+| `out_handle:<T>` | A handle written through a pointer — `sqlite3_open(path, &db)`. When the symbol declares a `fails_when`, the C return is that status and the handle is the whole result; without one the return is a value and comes back beside the handle, which is how a count like `cs_disasm`'s survives. |
+| `array<elem>:<count>` | A struct *field* only: a fixed-size row. `array<char>:32` reads as characters, `array<int>:24` as numbers. Not legal in an `args` list. |
 | `out_str:<ctype>` | A string the call points at inside data you already gave it — `fdt_getprop_by_offset`'s `const char **namep`. Nothing was allocated, so nothing has to be released. |
 | `out_alloc_str:<ctype>` | A string the library allocated and you now own. Requires `frees_with` on the symbol, naming the function that releases it. |
 | `ret_len:<ctype>` | Marks the parameter that says how long a returned pointer is. The return type is then `bytes`. `fdt_getprop` is this shape. |
@@ -331,6 +332,48 @@ print(d.rem)                   // 2
 ```
 
 A whole symbol may also be written as the single string `"?"` — the name is known, the prototype is not. That is what `jade pkg add` writes when it finds no header, and every command that would use the binding refuses it by name.
+
+### Fixed-size array fields
+
+A C struct often holds a fixed-size row rather than a pointer — `char mnemonic[32]`, `uint8_t bytes[24]`, `int reserved[4]`. Those come back as a Jade array, and the element type decides what is in it: plain `char` is characters, everything else is numbers.
+
+Nothing is trimmed. A `char[32]` holding `push` arrives as thirty-two characters, the NUL padding included, because trimming would be guessing where the text stops. `int(c) == 0` is how you find that yourself:
+
+```jade
+fn text(row) {
+    let s = ""
+    for ch in row {
+        if int(ch) == 0 {
+            break
+        }
+        s = s + ch
+    }
+    return s
+}
+```
+
+Writing one back is bounded. A row longer than the field is an error naming the field rather than a silent truncation; a shorter one fills the rest with zeros, which is what leaving a field out already does. A character that does not fit in a byte is refused too — every byte is a character, but not every character is a byte.
+
+### Reading a row of structs
+
+A library that produces many structs hands back a pointer to the first and says how many. `<T>_at(handle, i)` reads one of them:
+
+```jade
+use capstone
+
+let h = capstone.cs_open(3, 8)                       // x86, 64-bit
+let r = capstone.cs_disasm(h.out, code, 0x1000, 0)
+
+let i = 0
+while i < r.ret {
+    let insn = capstone.cs_insn_at(r.out, i)
+    print(f"{text(insn.mnemonic)} {text(insn.op_str)}")
+    i = i + 1
+}
+capstone.cs_free(r.out, r.ret)
+```
+
+The index is not checked against the count, and cannot be — the count came back on the Jade side, and reading past it is the same trust the library already asks of a C caller.
 
 ### A struct Jade holds
 
@@ -355,7 +398,7 @@ lzma.lzma_end(s)
 lzma.lzma_stream_free(s)
 ```
 
-A symbol may also declare `fails_when`, naming how it reports failure: `null`, `negative`, `nonzero`, or `never`. The shim then clears `errno`, tests the return, and turns a failure into a catchable Jade error carrying the reason. Without it a failed call gives back its raw sentinel and the reason the library already recorded is thrown away — the program sees `-1` and nothing else. The default is "cannot fail", because reading a convention that is not there would turn every legitimate `-1` into a raise.
+A symbol may also declare `fails_when`, naming how it reports failure: `null`, `negative`, `nonzero`, `zero`, or `never`. The shim then clears `errno`, tests the return, and turns a failure into a catchable Jade error carrying the reason. Without it a failed call gives back its raw sentinel and the reason the library already recorded is thrown away — the program sees `-1` and nothing else. The default is "cannot fail", because reading a convention that is not there would turn every legitimate `-1` into a raise.
 
 Some rules worth knowing before you hand-write one:
 

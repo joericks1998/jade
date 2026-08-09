@@ -1728,6 +1728,51 @@ fn held_accessors(pkg: &str, type_name: &str, def: &CStruct) -> Result<String, S
          }\n",
         );
 
+        // Reading one of a *row* of these.
+        //
+        // A library that hands back many structs hands back a pointer to the
+        // first and says how many — `cs_disasm` returns the count beside the
+        // handle. Without this the caller holds a pointer to a row and can only
+        // ever see its first element, which is a binding that answers one third
+        // of the question it was asked.
+        //
+        // Only when the struct has no buffer fields, because then the handle
+        // points at a wrapper rather than at a plain array and indexing it
+        // would step over the shim's own bookkeeping.
+        //
+        // The index is not bounds-checked, and cannot be: the count came from
+        // the call that produced the handle and lives on the Jade side. Reading
+        // past it is the same trust the library already asks of a C caller.
+        if k == 0 {
+            b.push_str(&format!(
+                "\nstatic int jade_shim_{p}_at(size_t argc, const JadeVal* argv, JadeVal* out) {{\n\
+                 \x20   if (argc != 2) return 1;\n\
+                 \x20   void* vp = NULL;\n\
+                 \x20   if (!jade_shim_unwrap(&argv[0], \"{type_name}\", &vp)) return 1;\n\
+                 \x20   if (argv[1].tag != JADE_FFI_INT) return 1;\n\
+                 \x20   int64_t idx = argv[1].data.as_int;\n\
+                 \x20   if (idx < 0) return 1;\n\
+                 \x20   {type_name}* sp = &(({type_name}*)vp)[idx];\n\
+                 \x20   JadeStruct* j = jade_shim_struct(\"{type_name}\", {n});\n\
+                 \x20   if (!j) return 1;\n"
+            ));
+            for (i, (field, ty)) in def.fields.iter().enumerate() {
+                b.push_str(&emit_keyed_field(
+                    FieldSite { pkg, sym: type_name, var: "a" },
+                    "j",
+                    i,
+                    &(field.clone(), ty.clone()),
+                    &format!("sp->{field}"),
+                )?);
+            }
+            b.push_str(
+                "    out->tag = JADE_FFI_STRUCT;\n\
+             \x20   out->data.as_struct = j;\n\
+             \x20   return 0;\n\
+             }\n",
+            );
+        }
+
         b.push_str(&format!(
             "\nstatic int jade_shim_{p}_set(size_t argc, const JadeVal* argv, JadeVal* out) {{\n\
          \x20   if (argc != 2) return 1;\n\
@@ -1833,8 +1878,15 @@ fn held_accessors(pkg: &str, type_name: &str, def: &CStruct) -> Result<String, S
 /// The Jade-facing names a held struct contributes, in binding-table order.
 fn held_bindings(type_name: &str, def: &CStruct) -> Vec<String> {
     let p = held_prefix(type_name);
-    let verbs: &[&str] =
-        if def.fields.is_empty() { &["new", "free"] } else { &["new", "free", "get", "set"] };
+    let verbs: &[&str] = if def.fields.is_empty() {
+        &["new", "free"]
+    } else if def.buffers.is_empty() {
+        // `_at` reads one of a row. Only without buffer fields, where the handle
+        // points at a plain struct rather than at the shim's wrapper.
+        &["new", "free", "get", "set", "at"]
+    } else {
+        &["new", "free", "get", "set"]
+    };
     let mut v: Vec<String> = verbs.iter().map(|w| format!("{p}_{w}")).collect();
     for buf in &def.buffers {
         if buf.writable {
