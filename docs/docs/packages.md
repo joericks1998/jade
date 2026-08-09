@@ -218,13 +218,15 @@ headers = ["archive.h", "archive_entry.h"]
 
 Every header in that list is `#include`d by the shim. If one were missing while its symbols stayed in the table, C would let the shim call them undeclared — assuming each returns `int` — and a call that really returns a pointer would come back truncated. The shim is compiled with `-Werror=implicit-function-declaration` so that cannot happen quietly; you get an error naming the missing header instead.
 
-**Types are read from the whole include tree, functions only from the header you name.** A function in `archive.h` written in terms of a type from `archive_entry.h` binds fine. But `archive.h` also includes `stdio.h`, and binding `fopen` along with it would be wrong — so the functions that come out are the ones the named header declares itself.
+**Types are read from the whole include tree, and so are functions the library exports.** A function in `archive.h` written in terms of a type from `archive_entry.h` binds fine. `archive.h` also includes `stdio.h`, and binding `fopen` along with it would be wrong — so what a header includes is filtered by the library's own export table. `fopen` belongs to nobody; `archive_entry_new` is in the artifact, so it is bound. The header you name always contributes its own declarations, export table or not.
+
+Point at the top header of a library that splits its API up and you get the whole library. `ares.h` declares seventy-odd symbols and includes `ares_dns_record.h`, which declares sixty-three more.
 
 ### Umbrella headers
 
 Some libraries only have a header that declares nothing at all. `lzma.h`, `git2.h` and `alsa/asoundlib.h` exist to include the twenty files that do the declaring. Point at one and there is nothing in it to bind, while pointing at a sub-header usually fails because a sub-header on its own does not compile.
 
-For those, the library's own export table decides. Anything the translation unit declares *and* the artifact exports gets bound; the umbrella stays the header the shim includes, which is what it is for.
+The same rule covers them, which is why they work: everything is swept in from the includes, and the umbrella stays the header the shim includes. It is the one case that *needs* the artifact — with no export table there is nothing exact to test an include against, so a header with declarations of its own binds those alone and an umbrella is an error naming `--path`.
 
 ```
 $ jade pkg add lzma --path /opt/homebrew/lib/liblzma.dylib --header /opt/homebrew/include/lzma.h
