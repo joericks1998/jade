@@ -528,6 +528,44 @@ pub fn bundle_beside_artifact(artifact: &Path, libs_root: &Path) -> Result<Vec<S
     Ok(written)
 }
 
+/// What a Jade package says it needs installed beside it.
+///
+/// `None` when the artifact carries no such record: a plain C library, or any
+/// package built before `jade_pkg_deps` existed. That is a legal answer rather
+/// than a failure — the dependency model has always been "a package documents
+/// what it needs", and this only removes the need to read the documentation.
+///
+/// Opening the library is safe, and the reason is worth stating because it would
+/// not be obvious: a Jade package runs its module top level from `jade_mod_init`,
+/// which is called by `jade_pkg_init` and by nothing else — there is no
+/// constructor. So `dlopen` maps the image and runs none of its Jade code, which
+/// is what makes it acceptable for `jade pkg add` to open a library it is in the
+/// middle of deciding whether to trust. The `exported_symbols` check comes first
+/// so a plain C library is never opened at all.
+pub fn declared_dependencies(artifact: &Path) -> Option<Vec<LockedPackage>> {
+    let exports = bindgen::exported_symbols(artifact)?;
+    if !exports.contains("jade_pkg_deps") {
+        return None;
+    }
+
+    // SAFETY: loading a Jade package runs no Jade code (see above), and the
+    // symbol's whole body returns a pointer to a string constant in the image,
+    // which stays mapped for as long as the library is loaded.
+    let text = unsafe {
+        let lib = libloading::Library::new(artifact).ok()?;
+        let f: libloading::Symbol<unsafe extern "C" fn() -> *const std::ffi::c_char> =
+            lib.get(b"jade_pkg_deps\0").ok()?;
+        let p = f();
+        if p.is_null() {
+            return None;
+        }
+        std::ffi::CStr::from_ptr(p).to_str().ok()?.to_owned()
+    };
+
+    let lock: Lockfile = toml::from_str(&text).ok()?;
+    (!lock.packages.is_empty()).then_some(lock.packages)
+}
+
 /// Whether two directories are the same place, following symlinks.
 ///
 /// A plain path comparison would miss a symlinked `libs/`, and copying a

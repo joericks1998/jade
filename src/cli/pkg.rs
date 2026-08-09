@@ -284,6 +284,109 @@ pub fn run_add(
     try_relock_and_install(&root, &manifest)
         .unwrap_or_else(|e| fail_new_dependency(&root, name, existed, e));
     println!("added {name}");
+
+    // A Jade package can say what it needs installed beside it. Adding one
+    // brings those with it, so a package with dependencies of its own works
+    // without the user reading its documentation and adding them by hand.
+    if abi == Abi::Jade
+        && let Some(installed) = lib_path.as_deref().and_then(pkg::declared_dependencies)
+    {
+        add_declared_dependencies(&root, name, installed);
+    }
+}
+
+/// Add a package's own dependencies to this project.
+///
+/// Written into `jade.toml` rather than straight into the lock, so the two stay
+/// in agreement — a lock entry with no manifest entry is exactly what
+/// `verify_in_sync` refuses, and rightly: the manifest is what a person reads to
+/// know what their project depends on. A transitive dependency is a real
+/// dependency, so it says so.
+///
+/// **Only a `url` dependency travels.** A `path` names a file on the machine
+/// that built the package, and that path means nothing here — the directory may
+/// not exist, and if it does it may hold something else. Rather than write a
+/// reference that resolves to the wrong file or to none, those are named and
+/// left to the user. That is the honest boundary of what an artifact can tell
+/// you about itself.
+///
+/// Flat entries, like every other one: this adds no version solving. A name
+/// already present at a *different* version is refused, and not only because
+/// there is no solver — two versions are two files, two paths, and therefore two
+/// loaded copies with their own state, which for a library that owns a device is
+/// two devices.
+fn add_declared_dependencies(
+    root: &std::path::Path,
+    from: &str,
+    declared: Vec<pkg::lock::LockedPackage>,
+) {
+    let manifest = load_or_exit(root);
+    let empty = Default::default();
+    let have = manifest.dependencies.as_ref().unwrap_or(&empty);
+
+    let mut added: Vec<String> = Vec::new();
+    let mut local: Vec<String> = Vec::new();
+
+    for dep in declared {
+        if let Some(existing) = have.get(&dep.name) {
+            let same = existing.version.as_deref().unwrap_or(pkg::LOCAL_VERSION) == dep.version;
+            if !same {
+                fail(format!(
+                    "'{from}' needs {} {}, and this project already has {} {}.\n  \
+                     One version of a dependency is loaded per program, so both cannot be \
+                     installed —\n  a second copy would have its own state. Align the versions, \
+                     or drop one of the two\n  packages that disagree.",
+                    dep.name,
+                    dep.version,
+                    dep.name,
+                    existing.version.as_deref().unwrap_or(pkg::LOCAL_VERSION)
+                ));
+            }
+            // Two packages needing the same dependency is the ordinary case.
+            continue;
+        }
+
+        match dep.source.strip_prefix("url+") {
+            Some(url) => {
+                let version = (dep.version != pkg::LOCAL_VERSION).then_some(dep.version.as_str());
+                let abi = if dep.abi == project::Abi::C.as_str() {
+                    project::Abi::C
+                } else {
+                    project::Abi::Jade
+                };
+                manifest::add_dependency(
+                    root,
+                    &dep.name,
+                    manifest::Source::Url(url),
+                    version,
+                    abi,
+                    None,
+                )
+                .unwrap_or_else(|e| fail(e));
+                added.push(dep.name);
+            }
+            None => local.push(dep.name),
+        }
+    }
+
+    if !local.is_empty() {
+        eprintln!(
+            "note: '{from}' also needs {}, which it names by a local path.\n  \
+             A path points at a file on the machine that built '{from}', so it cannot be \
+             followed\n  from here. Add each one yourself:\n    \
+             jade pkg add {} --path <where it is on this machine>",
+            local.join(", "),
+            local[0]
+        );
+    }
+
+    if added.is_empty() {
+        return;
+    }
+    println!("{from} also needs {}", added.join(", "));
+
+    let manifest = load_or_exit(root);
+    try_relock_and_install(root, &manifest).unwrap_or_else(|e| fail(e));
 }
 
 /// A readable list of names, cut off before it fills the terminal.

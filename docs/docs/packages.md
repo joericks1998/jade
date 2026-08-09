@@ -469,6 +469,24 @@ Two consequences follow, and both are deliberate:
 - **Two versions of one dependency is an error**, not a silent pick. `jade.lock` records one version per name, and a program that somehow reaches two copies raises rather than loading both.
 - **A dependency your program cannot find fails loudly**, naming the directory it searched and where that directory came from. There is no second place to look, because a second place is a second copy.
 
+### A package brings its own dependencies
+
+Adding a package adds what it needs:
+
+```sh
+jade pkg add plotting --url https://example.com/plotting.dylib --version 2.1.0
+# added plotting
+# plotting also needs fastmath
+```
+
+A `jade build --lib` artifact carries the lock it was built against, so a package can say what it depends on and `jade pkg add` reads it. The entries go into your `jade.toml` as ordinary dependencies — a transitive dependency is a real dependency, and the manifest is what you read to know what your project uses.
+
+This adds no version solving. A package needing a version of something you already have at a *different* version is refused, naming both. That is not only because there is no solver: two versions are two files and therefore two loaded copies, which is the one-copy rule above.
+
+Only a `url` dependency travels this way. A `path` names a file on the machine that built the package, and that path means nothing on yours — those are named for you to add yourself, rather than written as a reference that resolves to the wrong file or to none.
+
+Reading the record does not run any of the package's code. A Jade package runs its module top level from `jade_pkg_init`, and `jade pkg add` never calls it.
+
 ### `JADE_LIBS`
 
 Set it to point a program at a different libraries directory:

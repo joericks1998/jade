@@ -87,6 +87,7 @@ fn emit_pkg_init<'ctx>(
     lowered: &lower::LoweredProgram<'ctx>,
     exports: &[String],
     output_path: &Path,
+    deps_toml: Option<&str>,
 ) -> Result<(), String> {
     let i8_ty = context.i8_type();
     let i32_ty = context.i32_type();
@@ -239,6 +240,33 @@ fn emit_pkg_init<'ctx>(
         builder
             .build_return(Some(&i32_ty.const_int(jade_runtime::RUNTIME_ABI_VERSION as u64, false)))
             .map_err(|e| e.to_string())?;
+    }
+
+    // ── const char* jade_pkg_deps(void) ───────────────────────────────────
+    //
+    // What this package needs installed alongside it, as the `[[package]]`
+    // tables of the lockfile it was built from. `jade pkg add` reads it and
+    // merges the entries into the consuming project's lock, so adding a package
+    // brings what it depends on with it.
+    //
+    // Carried *in the artifact* because that is the only place it can be. A
+    // dependency names where a library lives, not an entry in a registry, so
+    // there is nothing to ask about a `.so` except the `.so`. That is exactly
+    // the claim this repo made for why transitive resolution was impossible; a
+    // package can answer for itself, and now does.
+    //
+    // Emitted the same way `jade_pkg_abi_version` is, for the same reason: a
+    // function whose whole body returns a constant is always in the symbol
+    // table, where a linked-in symbol can be dropped.
+    if let Some(toml) = deps_toml {
+        let deps_fn = module.add_function("jade_pkg_deps", ptr_ty.fn_type(&[], false), None);
+        let deps_entry = context.append_basic_block(deps_fn, "entry");
+        builder.position_at_end(deps_entry);
+        let text = builder
+            .build_global_string_ptr(toml, "jade_pkg_deps_text")
+            .map_err(|e| e.to_string())?
+            .as_pointer_value();
+        builder.build_return(Some(&text)).map_err(|e| e.to_string())?;
     }
 
     // ── int jade_pkg_init(JadeNativePkg* out) ─────────────────────────────
@@ -530,7 +558,27 @@ pub fn compile_with_mode(
             builder.build_return(Some(&i32_ty.const_int(0, false))).map_err(|e| e.to_string())?;
         }
         CompileMode::SharedLib { exports } => {
-            emit_pkg_init(&context, &module, &builder, init_fn, &lowered, exports, output_path)?;
+            // What this package will need installed beside it, taken from the
+            // lock it was built against. A package built outside a project, or
+            // one with no dependencies, carries nothing and the symbol is
+            // simply absent — which is also what every package published before
+            // this looks like.
+            let deps_toml = source_path
+                .and_then(|p| p.parent())
+                .and_then(crate::project::find_project_root_from)
+                .and_then(|root| crate::pkg::lock::read(&root).ok().flatten())
+                .filter(|l| !l.packages.is_empty())
+                .and_then(|l| toml::to_string_pretty(&l).ok());
+            emit_pkg_init(
+                &context,
+                &module,
+                &builder,
+                init_fn,
+                &lowered,
+                exports,
+                output_path,
+                deps_toml.as_deref(),
+            )?;
         }
     }
 
