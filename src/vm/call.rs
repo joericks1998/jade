@@ -110,9 +110,16 @@ pub(crate) async fn call_value(
         }
         VmValue::BuiltinFn(bf) => (bf.vm_impl)(&args).map_err(|e| patch_builtin_span(e, span)),
         VmValue::NativeLibFn(nfn) => {
-            // Only a call that actually passes a function pays for the worker
-            // thread. Everything else keeps the direct path it always had.
-            if args.iter().any(crate::native::is_callable) {
+            // Any call can be the one a library calls back from, so once this
+            // VM has handed out a Jade function, every native call serves.
+            // Without that second condition the rest of this machinery is
+            // invisible: `ares_process` passes no function, would take the
+            // direct path on the interpreter's own thread, and a callback fired
+            // from it would find nobody draining.
+            //
+            // A program that never passes a callback keeps the direct path and
+            // pays for no worker thread.
+            if state.callbacks.has_live() || args.iter().any(crate::native::is_callable) {
                 call_native_with_callbacks(&nfn, args, state, span).await
             } else {
                 nfn.call(&args, span)
@@ -447,13 +454,17 @@ async fn call_native_with_callbacks(
     state: &mut VmState,
     span: Span,
 ) -> Result<VmValue> {
-    // Depth 1 is enough and is not a queue: a callback blocks its worker until
-    // it is answered, so at most one request is outstanding per call.
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::native::CallbackRequest>(1);
-    let marshalled = crate::native::marshal_with_callbacks(&args, &tx, span);
-    // Dropped so the channel closes when the worker finishes, which is what
-    // ends the loop below.
-    drop(tx);
+    // The bus belongs to the VM, not to this call. A library that stores a
+    // callback invokes it from some later call entirely, so the loop below
+    // serves requests raised by *any* registration this VM has handed out, not
+    // only the ones this call is passing.
+    let bus = Arc::clone(&state.callbacks);
+    let marshalled = crate::native::marshal_with_callbacks(&args, &bus, span);
+
+    // Counted for the duration of the loop. A callback fired while nothing is
+    // draining gets the neutral answer instead of blocking on a channel that no
+    // longer closes when a call ends.
+    let _serving = bus.serving();
 
     let fn_ptr = nfn.fn_ptr();
     let mut call = Box::pin(tokio::task::spawn_blocking(move || {
@@ -469,7 +480,11 @@ async fn call_native_with_callbacks(
     let done = loop {
         tokio::select! {
             biased;
-            Some(req) = rx.recv() => {
+            // The receiver's lock is released inside `recv`, before any Jade
+            // code runs — a callback may itself call a native function, and
+            // that call has to be able to serve its own callbacks or it hangs
+            // waiting for a receiver this loop is holding.
+            Some(req) = bus.recv() => {
                 let result = call_value(req.callee, req.args, state, req.span).await;
                 // A closed receiver means the worker gave up waiting; there is
                 // nothing to do about it and nothing to report.
@@ -484,10 +499,8 @@ async fn call_native_with_callbacks(
         }
     };
 
-    let result =
-        crate::native::finish_native_call(&nfn.name, &done.args.argv, &done.out, done.status, span);
-    // The JadeFn wrappers are this call's, not the generic free path's: their
-    // `host` is a Rust Box that `done.args` still owns.
-    crate::native::free_fn_wrappers(&done.args.argv);
-    result
+    // The JadeFn wrappers are the bus's now, and are released with the VM.
+    // Nothing in C says when a library is finished with a stored callback, so
+    // there is no moment at which freeing one here would be safe.
+    crate::native::finish_native_call(&nfn.name, &done.args.argv, &done.out, done.status, span)
 }

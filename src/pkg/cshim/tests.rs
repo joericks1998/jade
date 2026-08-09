@@ -1209,15 +1209,28 @@ fn a_callback_becomes_a_static_function_of_the_declared_shape() {
 }
 
 #[test]
-fn the_registration_lasts_exactly_one_call() {
-    // A library that stores the callback and invokes it later must find an
-    // empty slot, not a stale pointer into an interpreter that has moved on.
+fn a_registration_outlives_the_call_that_made_it() {
+    // A library that stores the callback invokes it from a later call entirely:
+    // `ares_search` registers and the answer arrives during `ares_process`.
+    // Clearing the slot on return is what made that never fire.
     let s = sym(&["callback:int(int)"], "int");
     let src = generate("z", &symbols(&[("go", s)])).unwrap();
     assert!(src.contains("jade_cb_go = argv[0].data.as_fn;"), "should register:\n{src}");
-    assert!(src.contains("jade_cb_go = NULL;"), "should unregister:\n{src}");
+    // The declaration says `= NULL` too, so look only at the wrapper body.
+    let body = &src[src.find("jade_shim_go(size_t").unwrap()..];
+    assert!(!body.contains("jade_cb_go = NULL;"), "must not unregister:\n{body}");
     assert!(src.contains("if (!jade_cb_go)"), "should answer neutrally when empty:\n{src}");
-    assert!(src.contains("_Thread_local"), "the slot must be per-thread:\n{src}");
+}
+
+#[test]
+fn the_registration_slot_is_not_thread_local() {
+    // Under the VM every native call runs on its own worker thread, so a slot
+    // set while `ares_search` ran would read empty during `ares_process` even
+    // if nothing ever cleared it.
+    let s = sym(&["callback:int(int)"], "int");
+    let src = generate("z", &symbols(&[("go", s)])).unwrap();
+    let decl = src.lines().find(|l| l.contains("jade_cb_go = NULL")).unwrap_or("");
+    assert!(!decl.contains("_Thread_local"), "the slot must be shared across threads: {decl}");
 }
 
 #[test]
@@ -1226,13 +1239,32 @@ fn a_raise_inside_a_callback_is_deferred_rather_than_unwound() {
     // own frames, past whatever it was in the middle of.
     let s = sym(&["callback:int(int)"], "int");
     let src = generate("z", &symbols(&[("go", s)])).unwrap();
-    assert!(src.contains("jade_cb_failed_go = 1;"), "should record the failure:\n{src}");
-    assert!(src.contains("if (jade_cb_failed_go) {"), "should check after the call:\n{src}");
+    assert!(src.contains("jade_cb_failed = 1;"), "should record the failure:\n{src}");
+    assert!(src.contains("if (jade_cb_failed) {"), "should check after the call:\n{src}");
     assert!(src.contains("the callback raised"), "should surface it:\n{src}");
     // Recorded inside the trampoline, surfaced only after the library returns.
-    let record = src.find("jade_cb_failed_go = 1;").unwrap();
-    let surface = src.find("if (jade_cb_failed_go) {").unwrap();
+    let record = src.find("jade_cb_failed = 1;").unwrap();
+    let surface = src.find("if (jade_cb_failed) {").unwrap();
     assert!(record < surface, "the raise must surface after the call, not during it");
+}
+
+#[test]
+fn every_wrapper_reports_a_raise_even_if_it_took_no_callback() {
+    // Once a registration outlives its call, the symbol that registered is not
+    // the symbol that was running when the callback raised. A function given to
+    // `ares_search` raises during `ares_process`, and that is the call that has
+    // to report it — so the flag is one per shim and every wrapper checks it.
+    let syms =
+        symbols(&[("go", sym(&["callback:int(int)"], "int")), ("pump", sym(&["int"], "int"))]);
+    let src = generate("z", &syms).unwrap();
+    let pump = &src[src.find("jade_shim_pump").unwrap()..];
+    assert!(pump.contains("if (jade_cb_failed) {"), "a pumping call must report:\n{pump}");
+}
+
+#[test]
+fn a_shim_with_no_callbacks_declares_no_raised_flag() {
+    let src = generate("z", &symbols(&[("f", sym(&["int"], "int"))])).unwrap();
+    assert!(!src.contains("jade_cb_failed"), "nothing to check:\n{src}");
 }
 
 #[test]

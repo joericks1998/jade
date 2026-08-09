@@ -257,8 +257,117 @@ pub(crate) struct CallbackRequest {
 /// the way back to the interpreter.
 pub(crate) struct CallbackHost {
     callee: VmValue,
-    tx: tokio::sync::mpsc::Sender<CallbackRequest>,
+    bus: std::sync::Arc<CallbackBus>,
     span: Span,
+}
+
+/// Where a Jade function lives once a C library has been given it.
+///
+/// One per VM rather than one per call, and that is the whole feature. A
+/// library that *stores* a callback — an async request, a watcher — invokes it
+/// from some later call entirely: `ares_search` registers and returns, and the
+/// answer arrives during `ares_process`. With a channel scoped to the
+/// registering call there is nobody listening by then, so the callback found a
+/// closed channel and the Jade function was freed underneath it. It bound,
+/// compiled, ran and did nothing.
+///
+/// Three things live here, and each answers a way that could go wrong.
+///
+/// `rx` is behind an async mutex rather than owned by the in-flight call,
+/// because callbacks nest. While a serve loop awaits a Jade callback it must
+/// not be holding the receiver — that callback may itself call a native
+/// function, and that call needs to serve its own callbacks or it hangs. The
+/// lock is taken across `recv` and nothing else.
+///
+/// `serving` counts the loops currently draining. A callback fired when none
+/// are gets the neutral answer, exactly as it did when the channel closed at
+/// the end of a call. Without the count it would block forever instead, since
+/// the channel now never closes.
+///
+/// `live` owns every host and wrapper handed out. A stored callback is one the
+/// library may invoke at any later moment, so there is no point at which
+/// releasing it is safe — nothing in C says when a library is finished with
+/// one. They live until the VM does. That is a bounded, deliberate leak: one
+/// per callback-passing call, not one per invocation.
+pub(crate) struct CallbackBus {
+    tx: tokio::sync::mpsc::Sender<CallbackRequest>,
+    rx: tokio::sync::Mutex<tokio::sync::mpsc::Receiver<CallbackRequest>>,
+    serving: std::sync::atomic::AtomicUsize,
+    live: parking_lot::Mutex<CallbackRegistry>,
+}
+
+#[derive(Default)]
+struct CallbackRegistry {
+    /// `Box` is load-bearing: a raw pointer to each host crosses to the library,
+    /// and a `Vec<CallbackHost>` would move its elements on the next
+    /// reallocation and leave those pointers addressing freed memory.
+    #[allow(clippy::vec_box)]
+    hosts: Vec<Box<CallbackHost>>,
+    wrappers: Vec<*mut JadeFn>,
+}
+
+impl Drop for CallbackRegistry {
+    fn drop(&mut self) {
+        // libc `free`, because `malloc` made them — the process holds two
+        // allocators and they must not free each other's memory.
+        for w in self.wrappers.drain(..) {
+            unsafe { free(w as *mut c_void) };
+        }
+    }
+}
+
+// SAFETY: a host is reached only through a raw pointer held by C, and only one
+// thread is inside a given callback at a time — the worker that the library
+// called it from. The boxes never move, and the registry is behind a mutex.
+unsafe impl Send for CallbackBus {}
+unsafe impl Sync for CallbackBus {}
+
+/// Held for as long as a loop is draining the bus. Its only job is to make the
+/// count exact whichever way the loop exits.
+pub(crate) struct ServeGuard(std::sync::Arc<CallbackBus>);
+
+impl Drop for ServeGuard {
+    fn drop(&mut self) {
+        self.0.serving.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl CallbackBus {
+    pub(crate) fn new() -> std::sync::Arc<Self> {
+        // Depth 1 and not a queue: a callback blocks its worker until it is
+        // answered, so at most one request is outstanding per serving loop.
+        let (tx, rx) = tokio::sync::mpsc::channel::<CallbackRequest>(1);
+        std::sync::Arc::new(CallbackBus {
+            tx,
+            rx: tokio::sync::Mutex::new(rx),
+            serving: std::sync::atomic::AtomicUsize::new(0),
+            live: parking_lot::Mutex::new(CallbackRegistry::default()),
+        })
+    }
+
+    /// Whether any Jade function has been handed to a library on this VM.
+    ///
+    /// What makes a call that passes no function still take the serving path:
+    /// once something is registered, any native call may be the one the library
+    /// calls back from.
+    pub(crate) fn has_live(&self) -> bool {
+        !self.live.lock().hosts.is_empty()
+    }
+
+    pub(crate) fn serving(self: &std::sync::Arc<Self>) -> ServeGuard {
+        self.serving.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        ServeGuard(std::sync::Arc::clone(self))
+    }
+
+    fn is_serving(&self) -> bool {
+        self.serving.load(std::sync::atomic::Ordering::SeqCst) > 0
+    }
+
+    /// Take the next request. The lock is released before the caller runs Jade
+    /// code, so a native call made from inside a callback can serve its own.
+    pub(crate) async fn recv(&self) -> Option<CallbackRequest> {
+        self.rx.lock().await.recv().await
+    }
 }
 
 /// Whether a value is something a C library could call.
@@ -297,9 +406,21 @@ unsafe extern "C" fn vm_invoke_callback(
         }
     }
 
+    // Nobody draining means nobody will ever answer, and the channel no longer
+    // closes at the end of a call to say so — it lives as long as the VM. So
+    // the check that used to be a failed `send` is an explicit one, and the
+    // outcome is the same: the neutral answer rather than a worker blocked for
+    // good.
+    //
+    // A library calling back from a thread of its own lands here. That is not
+    // supported and this is where it says so.
+    if !h.bus.is_serving() {
+        return 1;
+    }
+
     let (reply, wait) = tokio::sync::oneshot::channel();
     let req = CallbackRequest { callee: h.callee.clone(), args, reply, span: h.span };
-    if h.tx.blocking_send(req).is_err() {
+    if h.bus.tx.blocking_send(req).is_err() {
         // The interpreter stopped listening: the native call is already
         // unwinding. Report failure rather than block forever.
         return 1;
@@ -380,13 +501,6 @@ pub(crate) struct NativeCallArgs {
     pub argv: Vec<JadeVal>,
     /// Kept alive because top-level string arguments borrow from it.
     pub _cstrings: Vec<CString>,
-    /// Kept alive because each `JadeFn`'s `host` points into it.
-    ///
-    /// `Box` is load-bearing, not habit: a raw pointer to each host crosses to
-    /// the library, and a `Vec<CallbackHost>` would move its elements on the
-    /// next reallocation and leave those pointers addressing freed memory.
-    #[allow(clippy::vec_box)]
-    pub _hosts: Vec<Box<CallbackHost>>,
 }
 
 // SAFETY: see the note on the struct — ownership is exclusive for the duration
@@ -416,31 +530,40 @@ unsafe impl Send for NativeCallResult {}
 /// a clone of the sender. Everything else marshals as usual.
 pub(crate) fn marshal_with_callbacks(
     args: &[VmValue],
-    tx: &tokio::sync::mpsc::Sender<CallbackRequest>,
+    bus: &std::sync::Arc<CallbackBus>,
     span: Span,
 ) -> NativeCallArgs {
     let mut cstrings = Vec::new();
-    let mut hosts: Vec<Box<CallbackHost>> = Vec::new();
     let mut argv = Vec::with_capacity(args.len());
 
     for v in args {
         if is_callable(v) {
-            let mut host = Box::new(CallbackHost { callee: v.clone(), tx: tx.clone(), span });
+            let mut host =
+                Box::new(CallbackHost { callee: v.clone(), bus: std::sync::Arc::clone(bus), span });
             let ptr: *mut c_void = &mut *host as *mut CallbackHost as *mut c_void;
-            hosts.push(host);
 
             let f = unsafe { malloc(std::mem::size_of::<JadeFn>()) } as *mut JadeFn;
             if f.is_null() {
                 std::alloc::handle_alloc_error(std::alloc::Layout::new::<JadeFn>());
             }
             unsafe { std::ptr::write(f, JadeFn { host: ptr, invoke: Some(vm_invoke_callback) }) };
+
+            // Handed to the bus rather than to this call. A library may store
+            // the pointer and invoke it from a later call entirely, so the call
+            // that passed it is the wrong owner — that is what used to free the
+            // function out from under a stored callback.
+            {
+                let mut live = bus.live.lock();
+                live.hosts.push(host);
+                live.wrappers.push(f);
+            }
             argv.push(JadeVal { tag: JADE_TAG_FN, _pad: [0; 7], data: JadeValData { as_fn: f } });
         } else {
             argv.push(vm_to_ffi(v, &mut cstrings));
         }
     }
 
-    NativeCallArgs { argv, _cstrings: cstrings, _hosts: hosts }
+    NativeCallArgs { argv, _cstrings: cstrings }
 }
 
 /// Turn a completed native call into a Jade result. Shared by both paths.
@@ -471,18 +594,6 @@ pub(crate) fn finish_native_call(
         ffi_free(out);
     }
     result
-}
-
-/// Release the `JadeFn` wrappers a callback call allocated.
-///
-/// Not `ffi_free`'s job: the `host` inside is a Rust `Box` owned by
-/// `NativeCallArgs`, so the generic free path must not reach it.
-pub(crate) fn free_fn_wrappers(argv: &[JadeVal]) {
-    for a in argv {
-        if a.tag == JADE_TAG_FN {
-            unsafe { free(a.data.as_fn as *mut c_void) };
-        }
-    }
 }
 
 // ── Loader ────────────────────────────────────────────────────────────────────
