@@ -376,6 +376,18 @@ pub struct CSymbol {
     /// raise. Without this, a failing C call returns its raw sentinel and the
     /// reason — which the library already put in `errno` — is simply lost.
     pub fails_when: Option<CFailure>,
+    /// The library function that releases what this call allocated, for the
+    /// shapes that hand back memory the caller then owns.
+    ///
+    /// Required by `out_alloc_str`, and only useful with it. A header never says
+    /// this — `char **str` looks exactly like the borrowed `const char **name`
+    /// beside it — so the generator refuses those shapes and names this key
+    /// rather than guessing. Guessing one way leaks on every call; the other
+    /// frees memory that was never allocated.
+    ///
+    /// The value is a C function name taking one pointer: `free` for a library
+    /// that documents plain malloc, `ares_free_string` for one with its own.
+    pub frees_with: Option<String>,
 }
 
 /// The signature of a symbol whose name is known and whose types are not.
@@ -401,7 +413,12 @@ pub const UNRESOLVED: &str = "?";
 impl CSymbol {
     /// A symbol known only by name.
     pub fn unresolved() -> Self {
-        CSymbol { args: Vec::new(), ret: UNRESOLVED.to_string(), fails_when: None }
+        CSymbol {
+            args: Vec::new(),
+            ret: UNRESOLVED.to_string(),
+            fails_when: None,
+            frees_with: None,
+        }
     }
 
     /// Whether any part of this prototype is still a placeholder.
@@ -448,9 +465,16 @@ impl<'de> Deserialize<'de> for CSymbol {
                     ret: String,
                     #[serde(default)]
                     fails_when: Option<CFailure>,
+                    #[serde(default)]
+                    frees_with: Option<String>,
                 }
                 let f = Full::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
-                Ok(CSymbol { args: f.args, ret: f.ret, fails_when: f.fails_when })
+                Ok(CSymbol {
+                    args: f.args,
+                    ret: f.ret,
+                    fails_when: f.fails_when,
+                    frees_with: f.frees_with,
+                })
             }
         }
 

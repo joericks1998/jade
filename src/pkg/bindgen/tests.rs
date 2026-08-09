@@ -351,8 +351,8 @@ fn the_report_counts_everything_and_groups_skips_by_reason() {
     let b = bind(
         "int ok1(int a);\n\
          int ok2(int a);\n\
-         int cb1(int (*f)(void*));\n\
-         int cb2(int (*f)(void*));\n\
+         int cb1(void* (*f)(int));\n\
+         int cb2(void* (*f)(int));\n\
          int va(const char* f, ...);\n",
     );
     let r = b.report();
@@ -548,11 +548,69 @@ fn a_void_returning_callback_maps() {
 
 #[test]
 fn a_callback_the_trampoline_cannot_marshal_is_skipped_by_that_reason() {
-    // `void *` is the usual reason a real callback does not fit: it names no
-    // type, so there is nothing to hand Jade.
-    let b = bind("int go(int (*cb)(void*, int));\n");
+    // A callback that hands back a pointer is the shape that genuinely does not
+    // fit: Jade has no value to return there. Brotli's allocator hooks are this.
+    let b = bind("int go(void* (*cb)(int));\n");
     assert!(why_skipped(&b, "go").contains("callback"), "{:?}", b.skipped);
     assert!(!b.symbols.contains_key("go"));
+}
+
+#[test]
+fn a_refused_callback_names_the_spelling_that_gets_past_it() {
+    // Passing null is what tells brotli to fall back on malloc, and it is never
+    // inferred: a library that requires a real pointer there gets a null
+    // dereference with no diagnostic, which is the worst failure this generator
+    // can produce.
+    let b = bind("int go(void* (*cb)(int));\n");
+    assert!(why_skipped(&b, "go").contains("null_ptr"), "{:?}", b.skipped);
+}
+
+#[test]
+fn a_callbacks_user_data_parameter_does_not_make_it_unbindable() {
+    // C has no closures, so a callback that needs context takes a `void *`. A
+    // Jade function carries its own environment, so the trampoline accepts the
+    // parameter — the library will pass one — and does not forward it. Refusing
+    // the whole callback over the one parameter Jade has no use for made every
+    // c-ares callback unbindable.
+    let b = bind("int go(int (*cb)(int fd, int kind, void* data));\n");
+    assert_eq!(args(&b, "go"), ["callback:int(int, int, void *)"]);
+}
+
+#[test]
+fn the_void_pointer_beside_a_callback_is_context_and_is_passed_as_null() {
+    // `ares_set_socket_callback(ch, cb, void *data)`. Decided by position,
+    // because the position is the convention.
+    let b = bind(
+        "typedef struct chan chan;\n\
+         void set_cb(chan* c, int (*cb)(int, void*), void* data);\n",
+    );
+    assert_eq!(args(&b, "set_cb"), ["handle<chan>", "callback:int(int, void *)", "null_ptr"]);
+}
+
+// ── A pointer to a pointer ───────────────────────────────────────────────
+
+#[test]
+fn a_name_pointed_at_inside_the_callers_own_data_comes_back_as_a_string() {
+    // `fdt_getprop_by_offset` points `namep` into the device tree it was handed,
+    // so nothing was allocated and nothing has to be released.
+    let b = bind(
+        "const void* getprop_by_offset(const void* fdt, int offset, const char** namep, int* lenp);\n",
+    );
+    assert_eq!(
+        args(&b, "getprop_by_offset"),
+        ["bytes_ptr", "int", "out_str:char", "ret_len:int"]
+    );
+}
+
+#[test]
+fn a_writable_string_pointer_names_the_spelling_rather_than_guessing_who_frees_it() {
+    // The same C shape with the opposite ownership, and the header does not say
+    // which. Guessing one way leaks on every call and the other frees memory
+    // that was never allocated.
+    let b = bind("int str_from(char** out, int flags);\n");
+    let why = why_skipped(&b, "str_from");
+    assert!(why.contains("out_alloc_str"), "{why}");
+    assert!(why.contains("frees_with"), "{why}");
 }
 
 // ── Types come from the whole translation unit ───────────────────────────

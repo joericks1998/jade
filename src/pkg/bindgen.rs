@@ -648,6 +648,7 @@ struct FnCtx<'a> {
 
 fn map_param(
     raw_in: &str,
+    prev: Option<&str>,
     next: Option<&str>,
     next_name: Option<&str>,
     cx: &FnCtx<'_>,
@@ -665,10 +666,25 @@ fn map_param(
         return match callback_spec(raw, env) {
             Some(spec) => Mapped::One(spec),
             None => Mapped::Reject(
-                "takes a callback whose own signature the FFI cannot carry".to_string(),
+                "takes a callback whose own signature the FFI cannot carry. If the library \
+                 accepts a null pointer there — brotli's allocator hooks do, and fall back on \
+                 malloc without one — write `null_ptr` for it in jade.toml"
+                    .to_string(),
             ),
         };
     }
+    // The `void *` that follows a callback is the context C has instead of
+    // closures: the library stores it and hands it back to the callback. A Jade
+    // function already carries its own environment, so there is nothing to put
+    // there — the shim passes null, and it is not a Jade argument at all.
+    //
+    // Decided by position rather than by name, because the position is the
+    // convention: `ares_set_socket_callback(ch, cb, void *data)`,
+    // `BrotliDecoderSetMetadataCallbacks(state, start, chunk, void *opaque)`.
+    if squash(&t) == "void*" && prev.is_some_and(|p| is_fn_ptr(&env.expand(p))) {
+        return Mapped::One("null_ptr".to_string());
+    }
+
     if let Some(s) = scalar_of(&t) {
         return Mapped::One(s.to_string());
     }
@@ -678,7 +694,34 @@ fn map_param(
         if env.opaque.contains(inner) || env.complete.contains_key(inner) {
             return Mapped::Out(format!("out_handle:{}", env.c_name(inner)), None);
         }
-        return Mapped::Reject("takes a pointer to a pointer".to_string());
+        // A name pointed at rather than allocated. `fdt_getprop_by_offset(const
+        // void *fdt, int off, const char **namep, int *lenp)` points `namep`
+        // into the device tree it was handed, so nothing was allocated and
+        // nothing has to be released — which is the whole difference between
+        // this and the pointers a library mallocs for you.
+        //
+        // `const` is what says which of the two it is.
+        if is_const && squash(inner) == "char" {
+            return Mapped::Out(format!("out_str:{inner}"), None);
+        }
+        // And a writable `char **` is the allocating shape, with the same C.
+        // Which it is, and who then releases it, are things the header does not
+        // record — so the spelling is named rather than guessed. Guessing one
+        // way leaks on every call and the other frees memory that was never
+        // allocated.
+        if squash(inner) == "char" {
+            return Mapped::Reject(
+                "hands back a string through a `char **`, and the header does not say whether the \
+                 caller then owns it. If they do, write `out_alloc_str:char` for it in jade.toml, \
+                 with `frees_with` naming the library's own free function"
+                    .to_string(),
+            );
+        }
+        return Mapped::Reject(
+            "takes a pointer to a pointer, which is how a library hands back memory it \
+             allocated. Who releases it is not something the header says"
+                .to_string(),
+        );
     }
 
     let Some(inner) = pointee(&t) else {
@@ -951,7 +994,11 @@ fn callback_spec(raw: &str, env: &TypeEnv) -> Option<String> {
     // there is nothing to hand Jade.
     let carriable = |t: &str| -> bool {
         let n = normalize(&env.expand(t));
-        scalar_of(&squash(&n)).is_some()
+        // A `void *` is the user-data slot, which the trampoline accepts and
+        // does not forward. Refusing the whole callback over the one parameter
+        // Jade has no use for is what made every c-ares callback unbindable.
+        squash(&n) == "void*"
+            || scalar_of(&squash(&n)).is_some()
             || is_int(&n)
             || pointee(&n).map(squash).as_deref() == Some("char")
     };
@@ -1436,7 +1483,8 @@ fn map_function(
             continue;
         }
         let next_name = parm_names.get(i + 1).copied().flatten();
-        match map_param(t, raw.get(i + 1).copied(), next_name, &cx) {
+        let prev = i.checked_sub(1).and_then(|k| raw.get(k)).copied();
+        match map_param(t, prev, raw.get(i + 1).copied(), next_name, &cx) {
             Mapped::One(s) => {
                 // An `in_struct` needs its field table written out with it, the
                 // same way an `out_struct` does. It is an ordinary argument
@@ -1565,7 +1613,7 @@ fn map_function(
         return Err("takes a writable buffer in a shape the shim cannot rewrite".to_string());
     }
 
-    Ok((CSymbol { args, ret, fails_when }, structs, assumed))
+    Ok((CSymbol { args, ret, fails_when, frees_with: None }, structs, assumed))
 }
 
 /// The return type, taken from the function's `qualType` by removing the

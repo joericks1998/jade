@@ -103,6 +103,9 @@ fn symbol_item(spec: &CSymbol) -> toml_edit::Item {
     if let Some(f) = spec.fails_when {
         t.insert("fails_when", toml_edit::value(f.as_str()));
     }
+    if let Some(f) = &spec.frees_with {
+        t.insert("frees_with", toml_edit::value(f.as_str()));
+    }
     toml_edit::Item::Table(t)
 }
 

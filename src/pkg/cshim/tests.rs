@@ -5,6 +5,7 @@ fn sym(args: &[&str], ret: &str) -> CSymbol {
         args: args.iter().map(|s| s.to_string()).collect(),
         ret: ret.to_string(),
         fails_when: None,
+        frees_with: None,
     }
 }
 
@@ -798,6 +799,99 @@ fn a_caller_sized_buffer_shim_compiles() {
     if let Err(e) = compiles(&src, &[]) {
         panic!("sized buffer shim does not compile:\n{e}\n--- source ---\n{src}");
     }
+}
+
+// ── Strings handed back through a parameter ──────────────────────────────
+
+#[test]
+fn a_borrowed_string_is_copied_inside_a_struct_and_lent_at_the_top() {
+    // The ABI's rule rather than a choice: a value inside a container is
+    // container-owned and Jade's `ffi_free` releases it, while a top-level
+    // string is copied by both engines before the call returns.
+    let alone = generate("fdt", &symbols(&[("f", sym(&["out_str:char"], "nil"))])).unwrap();
+    assert!(alone.contains("out->data.as_str = (const char*)ostr0;"), "should lend:\n{alone}");
+
+    let paired = generate("fdt", &symbols(&[("f", sym(&["out_str:char"], "int"))])).unwrap();
+    assert!(paired.contains("strdup((const char*)ostr0)"), "should copy:\n{paired}");
+}
+
+#[test]
+fn an_owned_string_is_always_copied_and_always_released() {
+    // Borrowing at top level is only safe while the pointer stays valid, and
+    // this one stops being valid on the next line.
+    // Alone, so it is the whole result and would otherwise be lent out.
+    let mut s = sym(&["out_alloc_str:char"], "nil");
+    s.frees_with = Some("ares_free_string".to_string());
+    let src = generate_with("ar", &symbols(&[("f", s)]), &[], &["ares.h"]).unwrap();
+    assert!(src.contains("jade_shim_owned(oastr0)"), "should copy before freeing:\n{src}");
+    assert!(src.contains("ares_free_string(oastr0);"), "should release:\n{src}");
+}
+
+#[test]
+fn an_owned_string_and_its_free_function_only_mean_anything_together() {
+    let bare = sym(&["out_alloc_str:char"], "int");
+    let err = generate_with("ar", &symbols(&[("f", bare)]), &[], &["ares.h"]).unwrap_err();
+    assert!(err.contains("who releases it"), "should ask: {err}");
+
+    let mut stray = sym(&["int"], "int");
+    stray.frees_with = Some("free".to_string());
+    let err = generate_with("ar", &symbols(&[("f", stray)]), &[], &["ares.h"]).unwrap_err();
+    assert!(err.contains("hands nothing back"), "should refuse a stray rule: {err}");
+}
+
+#[test]
+fn a_string_out_parameter_shim_compiles() {
+    let header = "extern int borrowed(const char** namep);\n\
+                  extern void take_owned(char** str);\n";
+    let mut o = sym(&["out_alloc_str:char"], "nil");
+    o.frees_with = Some("free".to_string());
+    let syms = symbols(&[("borrowed", sym(&["out_str:char"], "int")), ("take_owned", o)]);
+    let src = generate_with("z", &syms, &[], &["fixture.h"]).unwrap();
+    if let Err(e) = compiles(&src, &[("fixture.h", header)]) {
+        panic!("string out shim does not compile:\n{e}\n--- source ---\n{src}");
+    }
+}
+
+#[test]
+fn a_symbol_that_would_shadow_a_shim_helper_is_refused_by_name() {
+    // Every wrapper is `jade_shim_<symbol>`, and so is every helper. A library
+    // exporting `bytes` would define one of them twice, and the C compiler
+    // reports that against generated source hundreds of lines from anything the
+    // reader wrote.
+    let err = generate("z", &symbols(&[("bytes", sym(&["int"], "int"))])).unwrap_err();
+    assert!(err.contains("defined twice"), "should say why: {err}");
+    assert!(err.contains("'bytes'"), "should name it: {err}");
+}
+
+// ── A callback's user-data slot ──────────────────────────────────────────
+
+#[test]
+fn a_callbacks_user_data_is_accepted_and_not_forwarded() {
+    // The library will pass one, so the C signature must have it. Jade has
+    // nothing to do with it, so nothing is forwarded.
+    let s = sym(&["callback:int(int, void*)"], "int");
+    let src = generate("ar", &symbols(&[("go", s)])).unwrap();
+    assert!(src.contains("static int jade_cbt_go(int a0, void* a1)"), "bad signature:\n{src}");
+    assert!(src.contains("(void)a1;"), "should be explicitly unused:\n{src}");
+    // One forwarded argument, and it is the first.
+    assert!(src.contains("cbargs[0].data.as_int = (int64_t)a0;"), "bad marshal:\n{src}");
+    assert!(src.contains("invoke(jade_cb_go->host, 1, cbargs"), "wrong arity:\n{src}");
+}
+
+#[test]
+fn a_null_pointer_stands_in_for_what_cannot_be_carried() {
+    let s = sym(&["null_ptr", "int"], "int");
+    let src = generate_with("br", &symbols(&[("go", s)]), &[], &["brotli.h"]).unwrap();
+    assert!(src.contains("go(NULL, argv[0].data.as_int)"), "should pass null:\n{src}");
+    assert!(src.contains("if (argc != 1) return 1;"), "should take no argument:\n{src}");
+}
+
+#[test]
+fn a_null_pointer_needs_a_header_to_stand_in_against() {
+    // Without one the shim declares the symbol itself, and it does not know what
+    // type the null is standing in for.
+    let err = generate("br", &symbols(&[("go", sym(&["null_ptr"], "int"))])).unwrap_err();
+    assert!(err.contains("headers"), "should ask for a header: {err}");
 }
 
 // ── A struct returned by value ───────────────────────────────────────────
