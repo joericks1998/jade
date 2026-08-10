@@ -574,11 +574,13 @@ pub(super) fn resolve_user_calls(
                 if let Some(&uid) = reg_fn.get(callee) {
                     let cf = &fnctx.defs[uid];
                     if args.len() > cf.params.len() {
-                        return Err("lower.rs: spawn passes more arguments than parameters".into());
+                        return Err(
+                            "this spawn passes more arguments than the function takes.".into()
+                        );
                     }
                     for j in args.len()..cf.params.len() {
                         if cf.defaults.get(j).and_then(|x| x.as_ref()).is_none() {
-                            return Err("lower.rs: spawn omits a required argument".into());
+                            return Err("this spawn omits an argument that has no default.".into());
                         }
                     }
                     out.insert(i, CallKind::Spawn { uid, args: args.clone() });
@@ -650,25 +652,45 @@ pub(super) fn resolve_user_calls(
                         // method calls" — alarming, and untrue. The receiver's
                         // type is a run-time thing, so unlike the interpreter
                         // this cannot say *which* type lacks it.
-                        return Err(format!(
-                            "no method named `{mname}`. Method calls compile fine — this one \
-                             does not name a method any type defines, so check the spelling \
-                             against the type it is called on. `jade run` on the same file \
-                             will name that type."
-                        ));
+                        // `chunk_*_method_supported` answers false both for a
+                        // name no type defines and for a real method called
+                        // with the wrong number of arguments, and those are
+                        // very different mistakes to be told about. Asking the
+                        // arity table separates them, so `"abc".upper(1, 2, 3)`
+                        // is told its arity rather than that `upper` does not
+                        // exist — which it plainly does.
+                        return Err(match crate::builtins::primitive_method_arity(&mname) {
+                            Some(want) => format!(
+                                "`{mname}` takes {want} argument{}, but {} were given.",
+                                if want == 1 { "" } else { "s" },
+                                args.len()
+                            ),
+                            None => format!(
+                                "no method named `{mname}`. Method calls compile fine — this \
+                                 one does not name a method any type defines, so check the \
+                                 spelling against the type it is called on. `jade run` on the \
+                                 same file will name that type."
+                            ),
+                        });
                     }
                 } else {
                     let kind = if let Some(&uid) = reg_fn.get(callee) {
                         // Statically-known function → direct call (fill defaults).
                         let cf = &fnctx.defs[uid];
                         if args.len() > cf.params.len() {
-                            return Err(
-                                "lower.rs: call passes more arguments than parameters".into()
-                            );
+                            return Err(format!(
+                                "this call passes {} arguments, but the function takes {}.",
+                                args.len(),
+                                cf.params.len()
+                            ));
                         }
                         for j in args.len()..cf.params.len() {
                             if cf.defaults.get(j).and_then(|x| x.as_ref()).is_none() {
-                                return Err("lower.rs: call omits a required argument".into());
+                                return Err(format!(
+                                    "this call omits argument {} (`{}`), which has no default.",
+                                    j + 1,
+                                    cf.params.get(j).map(|p| p.as_str()).unwrap_or("?")
+                                ));
                             }
                         }
                         Some(CallKind::Direct { uid, args: args.clone() })

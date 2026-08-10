@@ -4,6 +4,12 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.3.17
+
+**Fixed: a method called with the wrong number of arguments was reported as a method that does not exist.** `"abc".upper(1, 2, 3)` answered *no method named `upper`* — and `upper` plainly does exist, it takes no arguments. The predicate the compiler asks returns false both for a name no type defines and for a real method called wrongly, and 1.3.16 read every false as the first. It asks the arity table now, so the two mistakes are told apart: `` `upper` takes 0 arguments, but 3 were given ``.
+
+- **Four more build errors stopped naming `lower.rs`.** Calling a function with too many arguments, omitting one that has no default, and the two `spawn` equivalents all reported an internal Rust source file for what is an ordinary mistake in the program. The omitted-argument case now names *which* argument and what it is called — `this call omits argument 2 (\`b\`), which has no default.`
+
 ## v1.3.16
 
 **Twenty bugs the userland found, mostly bindings that looked like they worked.** JADE OS keeps a list of what it has hit in the toolchain; this is most of it. The common shape is a binding `jade pkg add` wrote by itself that ran, returned a plausible value, and exited 0 — with the wrong answer.
