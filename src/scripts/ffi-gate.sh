@@ -28,8 +28,16 @@
 #      a function-like macro shadowing the symbol we bound. Each one refused the
 #      whole dependency, so glib bound 1357 symbols and could not be used at all.
 #
-# Both are skipped rather than failed when what they need is absent, so this is
-# safe to run anywhere. Skips are reported, never silent.
+#   3. The long run. Step 2 calls each binding once, which proves the answer is
+#      right and nothing else. `alloc_str` is a claim about many calls — the
+#      shim copies the string out and hands the original to the library's free
+#      function, so a long run holds no more memory than a short one. One call
+#      cannot tell a correct release from a leak, and cannot tell either from a
+#      crash that only shows up under sustained churn. A user hit exactly that:
+#      SIGSEGV at roughly 300,000 iterations over `g_uri_escape_string`.
+#
+# All three are skipped rather than failed when what they need is absent, so
+# this is safe to run anywhere. Skips are reported, never silent.
 #
 # Usage: src/scripts/ffi-gate.sh [path-to-jade-binary]
 
@@ -40,6 +48,7 @@ JADE="${1:-./target/debug/jade}"
 case "$JADE" in /*) ;; *) JADE="$PWD/${JADE#./}" ;; esac
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 FIXTURE="$ROOT/src/scripts/glib-fixture.jde"
+LOOP_FIXTURE="$ROOT/src/scripts/alloc-str-loop.jde"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -78,6 +87,10 @@ fi
 # architecture-named directory on Linux and under the Homebrew prefix on macOS,
 # and neither is worth guessing.
 glib_lib=""; glib_hdr=""; incs=()
+# Set by step 2 once glib is installed, so step 3 can reuse the same project
+# rather than bind the header a second time. Binding glib is nearly all of this
+# script's runtime; doing it twice would roughly double it.
+loop_proj=""; loop_skip="glib not installed"
 if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists glib-2.0 2>/dev/null; then
   libdir="$(pkg-config --variable=libdir glib-2.0)"
   for ext in so dylib; do
@@ -139,7 +152,9 @@ TOML
     echo "  FAIL  glib does not install:"
     head -5 "$proj/add.err" | sed 's/^/        /'
     fail=$((fail + 1))
+    loop_skip="glib does not install"
   else
+    loop_proj="$proj"
     bound="$(grep -m1 -oE '^[0-9]+ bound' "$proj/add.txt" || echo '? bound')"
     ( cd "$proj" && "$JADE" run main.jde > vm.txt 2>&1 )
     ( cd "$proj" && "$JADE" build main.jde -o app > build.txt 2>&1 && ./app > aot.txt 2>&1 )
@@ -158,6 +173,136 @@ TOML
     else
       echo "  ok    glib bound and run on both engines             ($bound)"
       pass=$((pass + 1))
+    fi
+  fi
+fi
+
+# ── 3. An alloc_str binding, called until something breaks ────────────────────
+#
+# Two runs of the same program at different call counts. Surviving is the
+# assertion that matters and is checked always; comparing what the two runs held
+# needs a peak-RSS tool, and skips when there is none.
+#
+# Compiled only, not both engines. Two reasons. The VM is far slower per FFI
+# call, so matching these counts there would cost minutes rather than seconds.
+# And the failure being chased is a compiled one — the user's report is a
+# compiled binary, and step 2 already covers the two engines agreeing about
+# alloc_str. Nothing is lost by leaving the VM out of the long run.
+#
+# The counts: the smaller is a baseline, the larger has to clear the ~300,000
+# from the user's report by enough to be worth calling a gate. 800,000 calls
+# between them run in about two seconds compiled.
+LOOP_BASE=200000
+LOOP_BIG=600000
+# A leaked string costs about 100 bytes: the v1.3.14 measurement was 62 MB held
+# before the release was added and 42 MB after, over 200,000 calls. So the
+# 400,000 extra calls in the big run cost roughly 40 MB if they leak. Ordinary
+# allocator churn over the same 400,000 is a few MB. 16 MB sits between the two
+# with room on both sides, which is why it is not a number tuned to one machine.
+LOOP_MARGIN_KB=$((16 * 1024))
+
+# Peak RSS in KB from whichever /usr/bin/time this platform has, or nothing.
+# GNU coreutils prints kbytes under -v; BSD and macOS print bytes under -l.
+peak_rss_kb() {
+  local kb
+  kb="$(sed -n 's/.*Maximum resident set size (kbytes): \([0-9]*\).*/\1/p' "$1")"
+  if [ -n "$kb" ]; then echo "$kb"; return 0; fi
+  kb="$(sed -n 's/^ *\([0-9]*\)  *maximum resident set size.*/\1/p' "$1")"
+  [ -n "$kb" ] && echo $((kb / 1024))
+}
+
+# Neither flag is guaranteed to exist, so ask rather than guess from `uname`.
+time_flag=""
+if [ -x /usr/bin/time ]; then
+  for f in -l -v; do
+    /usr/bin/time "$f" true >/dev/null 2>"$WORK/timeprobe.txt"
+    if [ -n "$(peak_rss_kb "$WORK/timeprobe.txt")" ]; then time_flag="$f"; break; fi
+  done
+fi
+
+# Runs the loop binary at $1 calls, output to $2 and the timer's report to
+# $2.time. Exits with the binary's own status, which is the whole point.
+#
+# Through an inner shell because the crash being looked for kills the process
+# with a signal, and the shell that waits on it announces that with a
+# "Segmentation fault" line of its own. Down here that line is noise on top of a
+# FAIL that already says the same thing, so the inner shell absorbs it and hands
+# back a plain exit status.
+run_loop() {
+  if [ -n "$time_flag" ]; then
+    JADE_FFI_LOOP_ITERS="$1" bash -c \
+      '/usr/bin/time "$1" "$2" > "$3" 2> "$4"' \
+      _ "$time_flag" "$loop_proj/looper" "$2" "$2.time" 2>/dev/null
+  else
+    JADE_FFI_LOOP_ITERS="$1" bash -c \
+      '"$1" > "$2" 2>&1' _ "$loop_proj/looper" "$2" 2>/dev/null
+  fi
+}
+
+if [ -z "$loop_proj" ]; then
+  printf '  skip  %-47s(%s)\n' "alloc_str called $LOOP_BIG times" "$loop_skip"
+  skip=$((skip + 1))
+  printf '  skip  %-47s(%s)\n' "alloc_str loop, memory held" "$loop_skip"
+  skip=$((skip + 1))
+else
+  cp "$LOOP_FIXTURE" "$loop_proj/loop.jde"
+  ( cd "$loop_proj" && "$JADE" build loop.jde -o looper > loopbuild.txt 2>&1 )
+  if [ ! -x "$loop_proj/looper" ]; then
+    echo "  FAIL  the alloc_str loop would not compile:"
+    tail -5 "$loop_proj/loopbuild.txt" | sed 's/^/        /'
+    fail=$((fail + 1))
+    printf '  skip  %-47s(%s)\n' "alloc_str loop, memory held" "loop would not compile"
+    skip=$((skip + 1))
+  else
+    run_loop "$LOOP_BASE" "$loop_proj/loop-base.txt"; base_rc=$?
+    run_loop "$LOOP_BIG"  "$loop_proj/loop-big.txt";  big_rc=$?
+
+    # A wrong answer is as much a failure as a crash: releasing the string
+    # before it is copied out gives back garbage of the right length, so the
+    # fixture compares every result and reports how many did not match.
+    ok_out=1
+    grep -qE "^calls +=  *$LOOP_BIG\$" "$loop_proj/loop-big.txt" || ok_out=0
+    grep -qE "^mismatched +=  *0\$"    "$loop_proj/loop-big.txt" || ok_out=0
+
+    if [ "$base_rc" -ne 0 ] || [ "$big_rc" -ne 0 ]; then
+      bad=$LOOP_BIG; rc=$big_rc; out="$loop_proj/loop-big.txt"
+      if [ "$base_rc" -ne 0 ]; then
+        bad=$LOOP_BASE; rc=$base_rc; out="$loop_proj/loop-base.txt"
+      fi
+      echo "  FAIL  the compiled binary did not survive $bad alloc_str calls (exit $rc):"
+      [ -s "$out" ] && tail -3 "$out" | sed 's/^/        /'
+      fail=$((fail + 1))
+      printf '  skip  %-47s(%s)\n' "alloc_str loop, memory held" "the loop did not survive"
+      skip=$((skip + 1))
+    elif [ "$ok_out" -eq 0 ]; then
+      echo "  FAIL  alloc_str gave back the wrong string over $LOOP_BIG calls:"
+      head -3 "$loop_proj/loop-big.txt" | sed 's/^/        /'
+      fail=$((fail + 1))
+      printf '  skip  %-47s(%s)\n' "alloc_str loop, memory held" "the loop gave wrong answers"
+      skip=$((skip + 1))
+    else
+      printf '  ok    %-47s(%s)\n' "alloc_str called $LOOP_BIG times, compiled" "every answer correct"
+      pass=$((pass + 1))
+
+      if [ -z "$time_flag" ]; then
+        printf '  skip  %-47s(%s)\n' "alloc_str loop, memory held" \
+          "no /usr/bin/time -l or -v"
+        skip=$((skip + 1))
+      else
+        base_kb="$(peak_rss_kb "$loop_proj/loop-base.txt.time")"
+        big_kb="$(peak_rss_kb "$loop_proj/loop-big.txt.time")"
+        grew=$((big_kb - base_kb))
+        if [ "$grew" -gt "$LOOP_MARGIN_KB" ]; then
+          echo "  FAIL  alloc_str holds memory in proportion to the calls made:"
+          echo "        $LOOP_BASE calls held $((base_kb / 1024)) MB, $LOOP_BIG held $((big_kb / 1024)) MB"
+          echo "        $((grew / 1024)) MB more for $((LOOP_BIG - LOOP_BASE)) more calls, over the $((LOOP_MARGIN_KB / 1024)) MB allowed"
+          fail=$((fail + 1))
+        else
+          printf '  ok    %-47s(%s)\n' "alloc_str loop, memory held" \
+            "$((base_kb / 1024)) MB then $((big_kb / 1024)) MB"
+          pass=$((pass + 1))
+        fi
+      fi
     fi
   fi
 fi

@@ -387,9 +387,17 @@ allocation on every call.
 cannot drift. Where the copy lands decides who owns it: inside a container it is
 `strdup` and Jade's `ffi_free` reclaims it with the rest of the tree; at top level
 the ABI says a string is borrowed, so it goes into `jade_shim_owned` — one buffer
-per thread, grown to fit and reused by the next call. That buffer used to be a
-fixed 4096 and truncated, which is the worst answer available: a URL-escaped path
-came back silently short and nothing anywhere said so.
+per thread, grown to fit and reused by the next call, and released when the thread
+exits. That buffer used to be a fixed 4096 and truncated, which is the worst answer
+available: a URL-escaped path came back silently short and nothing anywhere said so.
+
+A copy that fails is a failed call, and it says so: `out` comes back as a
+`JADE_FFI_ERROR` naming the symbol and the cause. It used to be a bare status with
+`out` left as it was found, which reads as "returned a non-zero status" in a
+compiled binary and "returned error code 1" under the VM — neither of which is
+"out of memory". The error goes on `out` rather than on wherever the string was
+headed, because with two results the string's target is a field of the result
+struct and a failure is always reported through the top-level `out`.
 
 `frees_with` names a function the shim calls directly, and it is deliberately not
 required to be a bound symbol — it usually cannot be one. A call taking a lone
@@ -535,6 +543,8 @@ Without an artifact there is nothing to test against: a header with its own decl
 **A placeholder has to be refused everywhere the binding is used, not just where it is generated.** `"?"` passes `resolve` — the table is non-empty, which is all resolution asks — so the refusal lives in `build_c_shims` and in `ensure_ready` ahead of the lock read. The second one matters: without it `jade run` on a fresh project answers "there is no jade.lock, run `jade pkg install`", and the user spends a command to arrive at the message they should have had first. `cli/check.rs` runs the same check against the manifest alone, which costs a read it was already doing and keeps `jade check` an honest predictor of `jade run` without installing anything.
 
 **`CSymbol` deserializes by hand rather than with `#[serde(untagged)]`.** Untagged reports every failure as "data did not match any variant", so accepting the `"?"` string that way would have cost every *table* its "missing field `ret`". The visitor takes the string case itself and delegates the map case to a derived struct, which leaves those messages exactly as they were. A test pins it.
+
+**A thread-exit hook cannot read a thread-local, and the version that does still runs.** The per-thread buffer behind `jade_shim_owned` is released through a `pthread_key_create` destructor, because C11's `_Thread_local` has none and both engines retire idle pool workers after ten seconds — threads come and go for as long as the program does, so the last buffer each one held accumulates rather than staying capped at one per pool slot. The trap is in how the destructor finds the buffer. Written to read a `_Thread_local`, it compiles, it is called once per thread, and it frees nothing: on macOS the thread's thread-local storage is already torn down by the time key destructors run, so the pointer reads back null. Peak RSS was identical with the hook and without it, and only measuring across a few thousand threads showed it. So the buffer travels in the key's own value, which is what the destructor is handed — and that value is a small holder rather than the buffer itself, because `realloc` moves the buffer and a key naming a released block would be a double free at thread exit. `-pthread` is passed by `compile_shim` for this.
 
 **A present artifact is not a current artifact.** `materialize` compares `libs/` against the *lock*, so anything that changes the true source without changing the lock is invisible to it. That is exactly how a rebuilt `path` dependency used to keep running as the copy it was when it was added. `refresh_local` closes it for local sources; any future source kind that is mutable in place needs the same treatment, and adding one without it reintroduces the same silent staleness.
 

@@ -17,6 +17,7 @@
 //! return an `Err` so the daemon can fall back to the legacy `expr.rs` path
 //! while this backend grows (the migration never runs an incomplete lowering).
 
+use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
@@ -26,7 +27,8 @@ use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::values::{
-    AnyValue, BasicMetadataValueEnum, FloatValue, FunctionValue, IntValue, PointerValue,
+    AnyValue, BasicMetadataValueEnum, FloatValue, FunctionValue, GlobalValue, IntValue,
+    PointerValue,
 };
 use inkwell::{AddressSpace, FloatPredicate, IntPredicate};
 
@@ -111,9 +113,65 @@ struct Lowerer<'a, 'ctx> {
     /// `Return` discards the body's value and hands back the generator's buffer
     /// instead — that is what makes calling a generator give you a stream.
     pub(super) is_generator: bool,
+    /// Scratch stack buffers a call site needs, keyed by purpose and length and
+    /// allocated once in the entry block. See [`Lowerer::entry_buf`].
+    entry_bufs: RefCell<HashMap<(&'static str, usize), PointerValue<'ctx>>>,
 }
 
 impl<'a, 'ctx> Lowerer<'a, 'ctx> {
+    /// A `[n x i64]` scratch buffer in the function's **entry block**, reused by
+    /// every call site that asks for the same `tag` and `n`.
+    ///
+    /// A call site that marshals its arguments into memory needs somewhere to
+    /// put them, and the obvious spelling — an `alloca` right where the call is
+    /// emitted — is wrong here. LLVM does not reclaim an `alloca` until the
+    /// function returns, so a call inside a loop walks the stack down once per
+    /// iteration until it hits the guard page. An FFI call in a `while` loop
+    /// died at a fixed iteration count for exactly this reason, and the count
+    /// scaled with `ulimit -s`, which is what identified it as stack exhaustion
+    /// rather than a leak. The entry block runs once per frame, so a buffer
+    /// allocated there costs the same whether the call runs once or ten million
+    /// times. `handler_bufs` in [`lower_body`] follows the same rule for the
+    /// same reason.
+    ///
+    /// **Sharing is sound because no two of these buffers are ever live at
+    /// once.** Every site fills the buffer from register slots — plain loads,
+    /// which emit no call — and hands it straight to the call that consumes it,
+    /// so one site's fill can never interleave with another's. Re-entrancy is
+    /// not a hazard either: an `alloca` belongs to the frame, so a recursive or
+    /// concurrent call marshals into its own copy. The one pairing that must
+    /// *not* share is a buffer the callee writes back into while reading
+    /// another — `Join` passes its futures and its results together — which is
+    /// why the `tag` is part of the key.
+    ///
+    /// The alloca is emitted before the entry block's terminator with a private
+    /// builder, so the caller's insertion point is untouched.
+    pub(super) fn entry_buf(
+        &self,
+        tag: &'static str,
+        n: usize,
+    ) -> Result<PointerValue<'ctx>, String> {
+        if let Some(p) = self.entry_bufs.borrow().get(&(tag, n)) {
+            return Ok(*p);
+        }
+        let entry = self
+            .builder
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .and_then(|f| f.get_first_basic_block())
+            .ok_or("entry_buf: no entry block to allocate in")?;
+        let eb = self.ctx.create_builder();
+        match entry.get_terminator() {
+            Some(t) => eb.position_before(&t),
+            None => eb.position_at_end(entry),
+        }
+        let buf = eb
+            .build_alloca(self.i64t().array_type(n as u32), &format!("{tag}{n}"))
+            .map_err(|e| e.to_string())?;
+        self.entry_bufs.borrow_mut().insert((tag, n), buf);
+        Ok(buf)
+    }
+
     // ── Reference counting (B4.2; all no-ops unless `self.refcount`) ──────────
 
     // ── Dynamic (Unknown-operand) ops → tag-dispatching runtime (A7) ─────────
@@ -712,6 +770,7 @@ fn lower_body<'ctx>(
         refcount: fnctx.refcount,
         n_params,
         exc_depth_slot,
+        entry_bufs: RefCell::new(HashMap::new()),
     };
     let call_builtins = resolve_builtin_calls(code);
     let (user_calls, skip_getfields) = resolve_user_calls(code, fn_defs, fnctx)?;

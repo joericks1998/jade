@@ -810,7 +810,12 @@ fn compile_shim(
     // comes back truncated to 32 bits, and the crash lands several calls later
     // with nothing pointing at the cause. It means the manifest names a symbol
     // whose header is missing from `headers`, so the error says that.
+    // The owned-string helper releases its per-thread buffer through a pthread
+    // key, which is the only thread-exit hook C has. Harmless where pthreads
+    // already live in libc — every macOS build, and glibc from 2.34 — and
+    // required where they do not.
     cc.arg("-Werror=implicit-function-declaration")
+        .arg("-pthread")
         .arg("-fPIC")
         .arg(shim_c)
         .arg("-o")

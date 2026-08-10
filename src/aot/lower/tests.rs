@@ -546,18 +546,107 @@ fn array_make_index_and_set_lower_to_kind_runtime() {
 ///
 /// Nothing covered this path before, so the slot indices could be changed
 /// silently — a wrong index compiles cleanly and corrupts at runtime.
+///
+/// The box is a link-time constant rather than a `malloc` now (it used to leak
+/// one per FFI call), so the layout is pinned by reading its initializer rather
+/// than the stores that used to fill it. That pins the slot *order* too, which
+/// the old form could not.
 #[test]
 fn native_fn_value_carries_an_objkind_at_offset_8() {
     // `let f = <native ref>` — loading the ref as a value (not calling it)
     // is what materializes the box.
     let ir = ir_of(&[GetGlobal(0, "__native$0$somefn".into()), Return(Some(0))], 2);
-    // 24-byte box, and the kind constant stored into it.
-    assert!(ir.contains("native_fn_val"), "native fn box allocated:\n{ir}");
+    let line = ir
+        .lines()
+        .find(|l| l.contains(r#"@"native_fnval$0$somefn" = "#))
+        .unwrap_or_else(|| panic!("native fn value emitted as a global:\n{ir}"));
+    assert!(line.contains("internal constant"), "shared and unwritable: {line}");
     assert!(
-        ir.contains(&format!("store i64 {OBJKIND_FN}")),
-        "ObjKind::Fn written at offset 8 — without it jrt_decref misreads the env pointer as a kind:\n{ir}"
+        line.contains(&format!(
+            r#"{{ ptr @jrt_native_call, i64 {OBJKIND_FN}, ptr @"native_env$0$somefn" }}"#
+        )),
+        "slots are {{ sentinel, ObjKind::Fn, env }} in that order — with the kind at offset 8, \
+         where jrt_decref would otherwise misread the env pointer as a kind: {line}"
+    );
+    assert!(
+        line.contains("align 8"),
+        "8-aligned, because TAG_PTR lives in the low three bits untag_ptr masks off: {line}"
     );
     assert!(ir.contains("tagptr"), "native fn value tagged TAG_PTR:\n{ir}");
+}
+
+/// A buffer a call site needs belongs in the entry block, because the lowered
+/// code puts calls inside loops.
+///
+/// LLVM does not reclaim an `alloca` until the function returns, so marshalling
+/// arguments into a fresh one at the call site walked the stack down 16 bytes
+/// per iteration: an FFI call in a `while` loop died at a fixed count, and the
+/// count scaled exactly with `ulimit -s`, which is what named it stack
+/// exhaustion rather than a leak. The entry block runs once per frame, so
+/// placement is the whole fix — and it is visible without a loop, since a
+/// call-site alloca lands in the body block either way.
+#[test]
+fn native_call_argv_is_allocated_in_the_entry_block() {
+    let ir = ir_of(
+        &[
+            GetGlobal(0, "__native$0$somefn".into()),
+            LoadInt(1, 55),
+            Call(2, 0, vec![1]),
+            Return(Some(2)),
+        ],
+        3,
+    );
+    assert!(ir.contains("jrt_native_call"), "the call really is a native one:\n{ir}");
+    let (entry, body) = ir.split_once("\nbb0:").expect("an entry block precedes the body:\n{ir}");
+    assert!(entry.contains("nargv"), "the argv buffer is in the entry block:\n{ir}");
+    assert!(!body.contains("alloca"), "and nothing allocas inside the body:\n{ir}");
+}
+
+/// A native fn value costs no allocation, so calling one in a loop does not grow
+/// the heap.
+///
+/// `GetGlobal` materializes the value and `emit_native_fn_value` used to
+/// `malloc` a box and its env each time, on the stated assumption that a
+/// reference immediately called would be dead-code-eliminated. It is not — the
+/// tagged word is stored into the register-file alloca, so LLVM must keep it —
+/// and nothing frees it either, because the `ObjKind::Fn` that makes the box
+/// safe for `jrt_decref` to skip is exactly what stops anything reclaiming it.
+/// A compiled binary leaked 48 bytes per FFI call while `jade run` leaked none.
+/// The value depends only on `(pkgid, fname)`, so it is now one shared constant.
+#[test]
+fn a_native_call_in_a_loop_allocates_nothing() {
+    // i = 0; while i < 3 { somefn(55); i = i + 1 }
+    // A jump's target is its own index + 1 + offset.
+    let ir = ir_of(
+        &[
+            LoadInt(0, 0),                                 // 0: i
+            LoadInt(1, 3),                                 // 1: limit
+            CmpLtInt(2, 0, 1),                             // 2: i < limit
+            JumpIfFalse(2, 6),                             // 3: → 10
+            GetGlobal(3, "__native$0$somefn".to_string()), // 4
+            LoadInt(4, 55),                                // 5
+            Call(5, 3, vec![4]),                           // 6
+            LoadInt(6, 1),                                 // 7
+            AddInt(0, 0, 6),                               // 8: i = i + 1
+            Jump(-8),                                      // 9: → 2
+            Return(Some(5)),                               // 10
+        ],
+        7,
+    );
+    assert!(ir.contains("jrt_native_call"), "the loop really does call a native fn:\n{ir}");
+    assert!(!ir.contains("call ptr @malloc"), "and allocates nothing to do it:\n{ir}");
+    // The box and its env are link-time constants instead. `internal constant`
+    // is the part worth pinning: a mutable global would be a shared object any
+    // write could corrupt, and the whole reason one may be shared is that the
+    // refcount ops skip it and nobody writes.
+    assert!(
+        ir.contains("@\"native_fnval$0$somefn\" = internal constant"),
+        "the fn value is a shared constant:\n{ir}"
+    );
+    assert!(
+        ir.contains("@\"native_env$0$somefn\" = internal constant"),
+        "and so is its env:\n{ir}"
+    );
 }
 
 #[test]

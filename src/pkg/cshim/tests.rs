@@ -968,7 +968,90 @@ fn a_copied_owned_string_is_not_truncated() {
     s.frees_with = Some("free".to_string());
     let src = generate("z", &symbols(&[("f", s)])).unwrap();
     assert!(!src.contains("char buf[4096]"), "should not be fixed:\n{src}");
-    assert!(src.contains("realloc(buf, n)"), "should grow to fit:\n{src}");
+    assert!(src.contains("realloc(b->buf, n)"), "should grow to fit:\n{src}");
+}
+
+#[test]
+fn a_copied_owned_string_is_released_when_the_thread_ends() {
+    // A _Thread_local pointer has no destructor in C11, so the buffer a thread
+    // held last used to be lost when the thread went. Both engines retire idle
+    // pool workers after ten seconds, so threads come and go for as long as the
+    // program runs and the lost buffers add up. A pthread key is the hook.
+    let mut s = sym(&["str"], "alloc_str");
+    s.frees_with = Some("free".to_string());
+    let src = generate("z", &symbols(&[("f", s)])).unwrap();
+    assert!(src.contains("#include <pthread.h>"), "should include it:\n{src}");
+    assert!(
+        src.contains("pthread_key_create(&jade_owned_key, jade_owned_release)"),
+        "should register a destructor:\n{src}"
+    );
+
+    // The destructor takes the buffer through its argument. It must not read a
+    // _Thread_local: on macOS the thread's thread-local storage is already torn
+    // down when key destructors run, so that spelling frees a null pointer and
+    // reclaims nothing — the hook runs and the leak stays exactly as it was.
+    // This was written the wrong way first, and only measuring caught it.
+    let at = src.find("static void jade_owned_release").expect("a release hook");
+    let hook = &src[at..at + src[at..].find("\n}").expect("a body") + 2];
+    assert!(hook.contains("(JadeOwnedBuf*)p;"), "should take the buffer as an argument:\n{hook}");
+    assert!(!hook.contains("_Thread_local"), "a destructor cannot read one:\n{hook}");
+
+    // And what the key holds is the holder, never the buffer: realloc moves the
+    // buffer, and a key still naming the released block would be a double free
+    // at thread exit. The holder is allocated once per thread and never moves.
+    assert!(src.contains("pthread_setspecific(jade_owned_key, b)"), "should hold it:\n{src}");
+    assert!(src.contains("free(b->buf);") && src.contains("free(b);"), "frees both:\n{src}");
+
+    // The key is created once for the process, and a creation that failed leaves
+    // an indeterminate key that must not be used.
+    assert!(src.contains("pthread_once(&jade_owned_once"), "should arm once:\n{src}");
+    assert!(src.contains("if (!jade_owned_key_ok) return NULL;"), "no unusable key:\n{src}");
+}
+
+/// The branch a failed copy takes, from its test to the `return` that ends it.
+///
+/// Bounded at the `return` rather than by a character count: the line right
+/// after the branch assigns the string into its target, and a window wide enough
+/// to catch it would make "the error is not written into a field" pass for the
+/// wrong reason.
+fn failed_copy_branch(src: &str) -> &str {
+    let at = src.find("if (!r_c)").expect("a failed-copy branch");
+    let branch = &src[at..];
+    let end = branch.find("return 1;").expect("the branch fails the call") + "return 1;".len();
+    &branch[..end]
+}
+
+#[test]
+fn a_failed_copy_of_an_owned_string_says_what_went_wrong() {
+    // It used to be a bare `return 1` leaving `out` untouched, and neither
+    // engine can read a cause that is not there: the compiled runtime said
+    // "returned a non-zero status" and the VM "returned error code 1", for what
+    // is simply out of memory.
+    let mut s = sym(&["str"], "alloc_str");
+    s.frees_with = Some("g_free".to_string());
+    let src = generate("glib", &symbols(&[("dup_it", s)])).unwrap();
+    let branch = failed_copy_branch(&src);
+    assert!(branch.contains("out->tag = JADE_FFI_ERROR;"), "should be an error:\n{branch}");
+    assert!(branch.contains("dup_it: out of memory"), "should name the cause:\n{branch}");
+    assert!(branch.contains("return 1;"), "should still fail the call:\n{branch}");
+}
+
+#[test]
+fn a_failed_copy_reports_through_out_even_when_the_string_lands_in_a_struct() {
+    // Two results mean the string lands in a struct field, so `target` is that
+    // field — but a failure is always reported through the top-level `out`, and
+    // writing an error tag into a field of a half-built tree would say nothing
+    // to either engine.
+    let mut s = sym(&["str", "out_scalar:int"], "alloc_str");
+    s.frees_with = Some("g_free".to_string());
+    let src = generate("glib", &symbols(&[("f", s)])).unwrap();
+    let branch = failed_copy_branch(&src);
+    assert!(branch.contains("out->tag = JADE_FFI_ERROR;"), "should report on out:\n{branch}");
+    assert!(branch.contains("out->data.as_str = \"f: out of memory"), "on out:\n{branch}");
+    // The string's own target is a field of the result struct, and nothing about
+    // the failure belongs there — that is the half that was easy to get wrong.
+    assert!(src.contains("res->vals["), "the string should land in a field:\n{src}");
+    assert!(!branch.contains("res->vals["), "the error is not a field:\n{branch}");
 }
 
 #[test]

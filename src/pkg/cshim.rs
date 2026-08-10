@@ -968,6 +968,8 @@ static JadeArr* jade_shim_array(size_t n) {
 
 /// Emitted only when some symbol hands back a string the caller must release.
 const OWNED_HELPER: &str = r#"
+#include <pthread.h>
+
 /* Take a copy of a string the library allocated, so the original can be freed
  * before this call returns.
  *
@@ -978,26 +980,66 @@ const OWNED_HELPER: &str = r#"
  * anyone's to release.
  *
  * One buffer per thread, reused and grown to fit, which is what makes it nobody's
- * to release: the next call on this thread reclaims it, and the thread ending
+ * to release: the next call on this thread reclaims it, and the thread exiting
  * reclaims the last one. Only the longest string ever returned is held, not one
  * per call. It used to be a fixed 4096 and truncated, which is the worst answer
  * available — a URL-escaped path or a formatted size came back silently short,
  * and nothing anywhere said so.
  *
+ * Reclaiming it at thread exit takes a pthread key, and that is not decoration.
+ * A _Thread_local pointer has no destructor in C11, so on its own the last buffer
+ * a thread held is simply lost when the thread goes. Both engines run Jade tasks
+ * on a worker pool whose idle workers retire after ten seconds, so a long-lived
+ * program creates and destroys threads for as long as it runs — the lost buffers
+ * add up rather than staying capped at one per pool slot. The shim is Unix-only,
+ * so pthreads are always there.
+ *
+ * The buffer lives in the key rather than in a _Thread_local, and that is the
+ * whole reason this compiles to a struct. A destructor cannot read a
+ * _Thread_local: on macOS the thread's thread-local storage is already torn down
+ * by the time key destructors run, so one written that way frees a null pointer
+ * and reclaims nothing — it runs, and the leak stays exactly as it was. What the
+ * destructor is handed is the key's own value, so that is where the buffer has to
+ * be. It cannot be the buffer itself either, because realloc moves that and the
+ * key would be left naming a block already released; hence a holder, allocated
+ * once per thread and never moved, with the buffer hanging off it.
+ *
  * NULL on allocation failure, which the caller turns into a failed call. */
+typedef struct { char* buf; size_t cap; } JadeOwnedBuf;
+
+static pthread_key_t  jade_owned_key;
+static pthread_once_t jade_owned_once = PTHREAD_ONCE_INIT;
+static int            jade_owned_key_ok = 0;
+
+static void jade_owned_release(void* p) {
+    JadeOwnedBuf* b = (JadeOwnedBuf*)p;
+    free(b->buf);
+    free(b);
+}
+
+static void jade_owned_init(void) {
+    jade_owned_key_ok = (pthread_key_create(&jade_owned_key, jade_owned_release) == 0);
+}
+
 static const char* jade_shim_owned(const void* s) {
-    static _Thread_local char*  buf = NULL;
-    static _Thread_local size_t cap = 0;
     if (!s) return "";
-    size_t n = strlen((const char*)s) + 1;
-    if (n > cap) {
-        char* grown = (char*)realloc(buf, n);
-        if (!grown) return NULL;
-        buf = grown;
-        cap = n;
+    pthread_once(&jade_owned_once, jade_owned_init);
+    if (!jade_owned_key_ok) return NULL;
+    JadeOwnedBuf* b = (JadeOwnedBuf*)pthread_getspecific(jade_owned_key);
+    if (!b) {
+        b = (JadeOwnedBuf*)calloc(1, sizeof *b);
+        if (!b) return NULL;
+        if (pthread_setspecific(jade_owned_key, b) != 0) { free(b); return NULL; }
     }
-    memcpy(buf, s, n);
-    return buf;
+    size_t n = strlen((const char*)s) + 1;
+    if (n > b->cap) {
+        char* grown = (char*)realloc(b->buf, n);
+        if (!grown) return NULL;
+        b->buf = grown;
+        b->cap = n;
+    }
+    memcpy(b->buf, s, n);
+    return b->buf;
 }
 "#;
 
@@ -1328,7 +1370,21 @@ fn parse_symbol(
 /// A null answer is nil, which is how a library says it had nothing. A failed
 /// copy is a failed call, because a string that could not be copied is not one
 /// Jade can be handed.
-fn emit_owned_str(target: &str, var: &str, free_fn: &str) -> String {
+///
+/// The only way the copy fails is that the allocation did, so the failure says
+/// that. It used to be a bare `return 1` leaving `out` as it found it, and
+/// neither engine can read a cause that is not there: the compiled runtime said
+/// "returned a non-zero status" and the VM said "returned error code 1", for what
+/// is simply out of memory.
+///
+/// The error lands on `out->` rather than on `target`, because `target` is a
+/// field of the result struct in the multi-result case and a failure is always
+/// reported through the top-level `out`. A string literal is what belongs there:
+/// both engines leave a top-level string or error alone when they release the
+/// call's trees — `jade_ffi_free` and `ffi_free` reclaim only containers, bytes
+/// and handles — which is the same contract that lets `jade_shim_errmsg` hand
+/// back a pointer into a `_Thread_local` buffer.
+fn emit_owned_str(sym: &str, target: &str, var: &str, free_fn: &str) -> String {
     let copy = if target == "out->" {
         format!("jade_shim_owned({var})")
     } else {
@@ -1341,7 +1397,11 @@ fn emit_owned_str(target: &str, var: &str, free_fn: &str) -> String {
          \x20   }} else {{\n\
          \x20       const char* {var}_c = {copy};\n\
          \x20       {free_fn}({var});\n\
-         \x20       if (!{var}_c) return 1;\n\
+         \x20       if (!{var}_c) {{\n\
+         \x20           out->tag = JADE_FFI_ERROR;\n\
+         \x20           out->data.as_str = \"{sym}: out of memory copying the string the library returned\";\n\
+         \x20           return 1;\n\
+         \x20       }}\n\
          \x20       {target}tag = JADE_FFI_STR;\n\
          \x20       {target}data.as_str = {var}_c;\n\
          \x20   }}\n"
@@ -2617,7 +2677,7 @@ fn wrapper(
             // leaving it is a leak on every call.
             RetSpec::AllocStr => {
                 let free_fn = spec.frees_with.as_deref().expect("validated by parse_symbol");
-                emit_owned_str(target, "r", free_fn)
+                emit_owned_str(sym, target, "r", free_fn)
             }
             // The pointer belongs to the library, or to the caller's own blob,
             // and neither is Jade's to hold — so it is copied out. A NULL return
@@ -2785,7 +2845,7 @@ fn wrapper(
             }
             ArgSpec::OutAllocStr { .. } => {
                 let free_fn = spec.frees_with.as_deref().expect("validated by parse_symbol");
-                body.push_str(&emit_owned_str(target, &format!("oastr{i}"), free_fn));
+                body.push_str(&emit_owned_str(sym, target, &format!("oastr{i}"), free_fn));
             }
             ArgSpec::SizedBuffer { elem, .. } => {
                 // All of it. The call reports a status rather than a count, so
