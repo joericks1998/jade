@@ -108,7 +108,14 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
         let i32_ty = self.ctx.i32_type();
         let bytes = s.as_bytes();
         let mut data: Vec<u8> = Vec::with_capacity(bytes.len() + 9);
-        data.extend_from_slice(&[0u8; 7]);
+        // The header's first four bytes are the refcount, and a literal's is the
+        // immortal marker. It has to be baked in rather than written at startup:
+        // the global is `constant`, so it lives in read-only memory and a store
+        // to it would fault. `jade_runtime::string::decref` checks for the
+        // marker before touching the word, which is what lets a slot holding a
+        // literal be released at scope exit like any other string.
+        data.extend_from_slice(&jade_runtime::string::IMMORTAL.to_ne_bytes());
+        data.extend_from_slice(&[0u8; 3]);
         data.push(TRUSTED as u8);
         data.extend_from_slice(bytes);
         data.push(0);

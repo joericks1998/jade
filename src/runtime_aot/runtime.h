@@ -179,12 +179,19 @@ uint32_t     jrt_abi_version(void);
  * 8-byte header precedes it) so its low 3 bits are free for the value tag (see
  * "Tagged value ABI" above — a string is a JRT_TAG_PTR value). Layout:
  *
- *   [7 pad bytes][trust:1 byte][data:N bytes][NUL:1 byte]
- *                              ^
+ *   [refcount:4 bytes][pad:3][trust:1 byte][data:N bytes][NUL:1 byte]
+ *                                          ^
  *                              returned pointer (8-aligned); trust at data[-1]
  *
- * jrt_str_new returns malloc+8; jrt_str_free frees data-8. Codegen literals use
- * the same 8-byte header on an 8-aligned global.
+ * jrt_str_new returns malloc+8 with the count at 1; jrt_str_free frees data-8.
+ * Codegen literals use the same 8-byte header on an 8-aligned global, with the
+ * count set to UINT32_MAX — they live in read-only memory, so the count cannot
+ * be written, and jade_runtime's incref/decref check for that marker before
+ * touching it. Releasing a slot is therefore safe whatever string it holds.
+ *
+ * The count is what makes a string reclaimable at all. It is a leaf — it owns
+ * bytes and no child words, so it cannot form a cycle — and was left out of
+ * refcounting on those grounds, which meant a compiled program never freed one.
  *
  * 0 = TRUSTED  (literal in source, derived purely from trusted data)
  * 1 = TAINTED  (originated from an LLM, network, file, shell, or stdin)
