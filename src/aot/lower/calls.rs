@@ -643,7 +643,19 @@ pub(super) fn resolve_user_calls(
                         );
                         skip_getfields.insert(gf_idx);
                     } else {
-                        return Err("lower.rs: method call (GetField result) is unsupported".into());
+                        // Names the method, because that is what a reader can
+                        // search for and what is almost always misspelled. It
+                        // used to name `lower.rs` and call the construct
+                        // "unsupported", which reads as "Jade cannot compile
+                        // method calls" — alarming, and untrue. The receiver's
+                        // type is a run-time thing, so unlike the interpreter
+                        // this cannot say *which* type lacks it.
+                        return Err(format!(
+                            "no method named `{mname}`. Method calls compile fine — this one \
+                             does not name a method any type defines, so check the spelling \
+                             against the type it is called on. `jade run` on the same file \
+                             will name that type."
+                        ));
                     }
                 } else {
                     let kind = if let Some(&uid) = reg_fn.get(callee) {
@@ -744,8 +756,13 @@ pub(super) fn resolve_user_calls(
             // runtime function value doesn't carry) — anything else declines.
             Instr::CallNamed(d, callee, pairs) => {
                 if reg_getfield.contains_key(callee) {
+                    // This one really is a limitation rather than a mistake, so
+                    // it says so — and says what to write instead, which the
+                    // old wording did not.
                     return Err(
-                        "lower.rs: keyword method call (GetField result) is unsupported".into()
+                        "a method call with named arguments is not compiled yet. Pass them \
+                         positionally, or run the file with `jade run`."
+                            .into(),
                     );
                 }
                 if let Some((module, method, gf_idx)) = reg_getfield_module.get(callee).cloned() {

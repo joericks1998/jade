@@ -163,6 +163,13 @@ pub enum JadeError {
     /// An error that originated inside an imported file.
     /// Wraps the inner error and records the import path for traceback display.
     InFile { file: String, cause: Box<JadeError> },
+
+    /// A call chain recursed past the interpreter's call-depth limit. Raised
+    /// instead of letting the native stack simply run out, which used to abort
+    /// the process with an uncatchable Rust panic (`thread 'main' has
+    /// overflowed its stack`) at a depth of roughly 700-750 — see
+    /// `vm::MAX_CALL_DEPTH` and the AOT runtime's matching `JRT_RECUR_MAX_DEPTH`.
+    RecursionLimitExceeded { span: Span },
 }
 
 impl std::fmt::Display for JadeError {
@@ -373,6 +380,9 @@ impl std::fmt::Display for JadeError {
                 write!(f, "[{}:{}] I/O error: {}", span.line, span.col, message)
             }
             JadeError::InFile { file, cause } => write!(f, "in \"{}\": {}", file, cause),
+            JadeError::RecursionLimitExceeded { span } => {
+                write!(f, "[{}:{}] recursion limit exceeded", span.line, span.col)
+            }
         }
     }
 }

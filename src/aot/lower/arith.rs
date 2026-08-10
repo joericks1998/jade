@@ -44,6 +44,40 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
         Ok(self.tag_int(res))
     }
 
+    /// Float divide, with the VM's catchable zero-divisor behavior: a raw LLVM
+    /// `fdiv` by `0.0` is well-defined IEEE 754 (`inf`/`-inf`/`NaN`), but the
+    /// language doesn't want that — the VM's `DivFloat` raises the same
+    /// `division by zero` a float divisor of 0 raises through the dynamic
+    /// (`Op::Div`) path, so the statically-typed fast path has to match rather
+    /// than let a well-typed program produce a silent `NaN` compiled that
+    /// would have raised interpreted. Branches on a zero divisor and `raise`s
+    /// instead of dividing. Leaves the builder on the non-zero ("ok") block
+    /// and returns the boxed result.
+    pub(super) fn float_div(&self, l: Reg, r: Reg) -> Result<IntValue<'ctx>, String> {
+        let (a, c) = self.float_operands(l, r);
+        let func = self
+            .builder
+            .get_insert_block()
+            .and_then(|bb| bb.get_parent())
+            .ok_or("float_div outside a function")?;
+        let is_zero = self
+            .builder
+            .build_float_compare(FloatPredicate::OEQ, c, self.f64t().const_zero(), "fdivz")
+            .map_err(|e| e.to_string())?;
+        let throw_bb = self.ctx.append_basic_block(func, "fdivzero_throw");
+        let ok_bb = self.ctx.append_basic_block(func, "fdivzero_ok");
+        self.builder
+            .build_conditional_branch(is_zero, throw_bb, ok_bb)
+            .map_err(|e| e.to_string())?;
+
+        self.builder.position_at_end(throw_bb);
+        self.throw_runtime("division by zero")?;
+
+        self.builder.position_at_end(ok_bb);
+        let res = self.builder.build_float_div(a, c, "divf").map_err(|e| e.to_string())?;
+        Ok(self.box_float(res))
+    }
+
     /// Compute a checked integer result: do the arithmetic in i128, verify it
     /// fits the 63-bit tagged range, and raise "integer overflow" if not.
     ///

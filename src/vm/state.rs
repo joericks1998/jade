@@ -73,6 +73,15 @@ pub struct VmState {
     /// here instead of stdout so tests can assert on the printed output.
     #[cfg(test)]
     pub test_stdout: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
+    /// Live Jade call depth, checked against `call::MAX_CALL_DEPTH` on every
+    /// entry to `call_fn`. Reset to 0 for a spawned task (`new_for_spawn`),
+    /// since that runs on its own OS thread with its own native stack — a
+    /// deep chain on one task must not spend the budget of an unrelated one.
+    pub(crate) call_depth: u32,
+    /// The depth `call_depth` is checked against. `call::MAX_CALL_DEPTH` in
+    /// every real run; a test may lower it so the limit's behaviour can be
+    /// covered without the stack cost of reaching the real one.
+    pub(crate) max_call_depth: u32,
 }
 
 impl VmState {
@@ -98,6 +107,8 @@ impl VmState {
             active_module_scope: None,
             #[cfg(test)]
             test_stdout: None,
+            call_depth: 0,
+            max_call_depth: crate::vm::call::MAX_CALL_DEPTH,
         }
     }
 
@@ -112,6 +123,9 @@ impl VmState {
         #[cfg(test)]
         {
             self.test_stdout = opts.test_stdout;
+            if let Some(d) = opts.max_call_depth {
+                self.max_call_depth = d;
+            }
         }
     }
 
@@ -156,6 +170,11 @@ impl VmState {
             active_module_scope: None,
             #[cfg(test)]
             test_stdout: self.test_stdout.clone(),
+            // Fresh budget: a spawned task runs on its own OS thread and pays
+            // for its own stack, so it does not inherit the parent's depth.
+            call_depth: 0,
+            // The ceiling is inherited, though: it is one program's rule.
+            max_call_depth: self.max_call_depth,
         }
     }
 }
@@ -173,6 +192,16 @@ pub struct VmOpts {
     /// Test-only stdout capture buffer. See `VmState::test_stdout`.
     #[cfg(test)]
     pub test_stdout: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
+    /// Test-only override for `call::MAX_CALL_DEPTH`.
+    ///
+    /// The real limit is 10,000, and a test that reached it by actually
+    /// recursing would touch over a gigabyte of stack in a debug build — the
+    /// unoptimized async state machines are ~137 KB per frame — with several
+    /// such tests running in parallel. The limit's *behaviour* is what needs
+    /// covering, not its magnitude, so a test sets a small one and exercises
+    /// the same three paths in milliseconds.
+    #[cfg(test)]
+    pub max_call_depth: Option<u32>,
 }
 
 impl Default for VmOpts {
@@ -184,6 +213,8 @@ impl Default for VmOpts {
             libraries: HashMap::new(),
             #[cfg(test)]
             test_stdout: None,
+            #[cfg(test)]
+            max_call_depth: None,
         }
     }
 }

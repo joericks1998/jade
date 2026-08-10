@@ -1222,6 +1222,41 @@ void jade_exc_throw(int64_t value) { jade_exc_throw_typed(value, NULL); }
 int64_t     jade_exc_value(void) { return exc_thrown_value; }
 const char* jade_exc_type(void)  { return exc_thrown_type;  }
 
+/* ── Recursion depth ──────────────────────────────────────────────────── */
+/*
+ * 10000 matches the VM's own MAX_CALL_DEPTH (src/vm/call.rs) so a program
+ * that recurses past the limit fails identically under `jade run` and a
+ * compiled binary, rather than one engine accepting a depth the other
+ * aborts on (TOOLCHAIN-BUGS #10). This backend was already clean at 10000+
+ * frames before this limit existed — native calls cost far less stack per
+ * frame than the VM's dispatch loop — so the number is set for parity with
+ * the VM, not because this engine needed the headroom.
+ *
+ * Thread-local for the same reason the exception stack is: `spawn` runs each
+ * task on its own OS thread, and a deep call chain on one must not count
+ * against the budget of an unrelated one.
+ */
+#define JRT_RECUR_MAX_DEPTH 10000
+
+static _Thread_local int32_t recur_depth = 0;
+
+void jrt_recur_enter(void) {
+    if (recur_depth >= JRT_RECUR_MAX_DEPTH) {
+        throw_msg("recursion limit exceeded");
+        /* unreachable: throw_msg longjmps or, with no active handler, exits. */
+    }
+    recur_depth++;
+}
+
+int32_t jrt_recur_depth(void) { return recur_depth; }
+
+/* Only ever unwinds — see jade_exc_restore, whose reasoning this mirrors: a
+ * restore that would *raise* the depth means some caller's own decrement
+ * already ran, and letting it move backwards would double-count. */
+void jrt_recur_restore(int32_t depth) {
+    if (depth >= 0 && depth < recur_depth) recur_depth = depth;
+}
+
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>

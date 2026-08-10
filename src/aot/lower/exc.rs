@@ -87,6 +87,26 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
         Ok(())
     }
 
+    /// Restore the recursion-depth counter to this function's entry snapshot.
+    /// Unlike [`Self::emit_exc_restore`] this runs unconditionally — every
+    /// function opened a frame in its prologue (`jrt_recur_enter`), not just
+    /// ones with a `try` — on every return path *and* every exception landing
+    /// pad, so a caught raise from deep in a call chain does not leave the
+    /// counter stuck high from callee frames a longjmp skipped past.
+    pub(super) fn emit_recur_restore(&self) -> Result<(), String> {
+        let Some(slot) = self.recur_depth_slot else { return Ok(()) };
+        let i32_ty = self.ctx.i32_type();
+        let saved = self
+            .builder
+            .build_load(i32_ty, slot, "recur_saved")
+            .map_err(|e| e.to_string())?
+            .into_int_value();
+        let f = self
+            .runtime_fn("jrt_recur_restore", self.ctx.void_type().fn_type(&[i32_ty.into()], false));
+        self.builder.build_call(f, &[saved.into()], "").map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     pub(super) fn pop_frame(&self) {
         let f = self.runtime_fn("jade_exc_pop", self.ctx.void_type().fn_type(&[], false));
         self.builder.build_call(f, &[], "").unwrap();

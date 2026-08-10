@@ -102,7 +102,7 @@ fn str_encode(args: &[VmValue]) -> Result<VmValue> {
     }
 }
 
-static STR_METHODS: &[BuiltinFn] = &[
+pub(crate) static STR_METHODS: &[BuiltinFn] = &[
     BuiltinFn { name: "encode", vm_impl: str_encode },
     BuiltinFn { name: "len", vm_impl: str_len },
     BuiltinFn { name: "upper", vm_impl: str_upper },

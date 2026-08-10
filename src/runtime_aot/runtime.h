@@ -86,6 +86,14 @@ typedef int64_t jade_value_t;
  * with `& ~7`. Used to decide whether a value can be dereferenced as a ptr. */
 #define jrt_is_heap(v)    (jrt_is_ptr(v) || jrt_is_float(v) || jrt_is_str(v))
 
+/* What a tagged word can hold: one bit goes to the tag, so the range is 63-bit
+ * and not 64. Mirrors `JadeValue::INT_MAX`/`INT_MIN` in src/runtime/src/value.rs
+ * — a C value outside it cannot cross the FFI, and both engines refuse it there
+ * rather than one truncating and the other keeping a number it cannot add to.
+ * See TOOLCHAIN-BUGS #3. */
+#define JRT_INT_MAX ((int64_t)((1LL << 62) - 1))
+#define JRT_INT_MIN ((int64_t)(-(1LL << 62)))
+
 #define jrt_box_int(i)    ((jade_value_t)((uint64_t)(int64_t)(i) << 1))
 #define jrt_unbox_int(v)  ((int64_t)(v) >> 1)
 #define jrt_box_bool(b)   ((jade_value_t)((((uint64_t)((b)!=0)) << 4) | 0xfu))
@@ -171,12 +179,19 @@ uint32_t     jrt_abi_version(void);
  * 8-byte header precedes it) so its low 3 bits are free for the value tag (see
  * "Tagged value ABI" above — a string is a JRT_TAG_PTR value). Layout:
  *
- *   [7 pad bytes][trust:1 byte][data:N bytes][NUL:1 byte]
- *                              ^
+ *   [refcount:4 bytes][pad:3][trust:1 byte][data:N bytes][NUL:1 byte]
+ *                                          ^
  *                              returned pointer (8-aligned); trust at data[-1]
  *
- * jrt_str_new returns malloc+8; jrt_str_free frees data-8. Codegen literals use
- * the same 8-byte header on an 8-aligned global.
+ * jrt_str_new returns malloc+8 with the count at 1; jrt_str_free frees data-8.
+ * Codegen literals use the same 8-byte header on an 8-aligned global, with the
+ * count set to UINT32_MAX — they live in read-only memory, so the count cannot
+ * be written, and jade_runtime's incref/decref check for that marker before
+ * touching it. Releasing a slot is therefore safe whatever string it holds.
+ *
+ * The count is what makes a string reclaimable at all. It is a leaf — it owns
+ * bytes and no child words, so it cannot form a cycle — and was left out of
+ * refcounting on those grounds, which meant a compiled program never freed one.
  *
  * 0 = TRUSTED  (literal in source, derived purely from trusted data)
  * 1 = TAINTED  (originated from an LLM, network, file, shell, or stdin)
@@ -319,6 +334,21 @@ void    jrt_throw_io(const char* detail);
 void    jrt_throw_runtime(const char* msg);
 int64_t jade_exc_value(void);
 const char* jade_exc_type(void);         /* thrown struct type name, or NULL */
+
+/* ── Recursion depth ──────────────────────────────────────────────────── */
+/* jrt_recur_enter / jrt_recur_depth / jrt_recur_restore — bound the number of
+ * live Jade call frames so a runaway recursive function raises a catchable
+ * `RuntimeError` instead of the native stack simply running out, the way
+ * `jade run` used to abort with an uncatchable Rust panic (TOOLCHAIN-BUGS #10).
+ * Codegen calls jrt_recur_enter in every function's prologue (it raises
+ * itself, via jrt_throw_runtime, if the limit is exceeded) and snapshots
+ * jrt_recur_depth() there; every return path and every exception landing pad
+ * restores that snapshot, the same scoping jade_exc_restore gives the handler
+ * stack and for the same reason — a longjmp out of a deep call unwinds the
+ * native stack without running the intervening frames' own decrements. */
+void    jrt_recur_enter(void);
+int32_t jrt_recur_depth(void);
+void    jrt_recur_restore(int32_t depth);
 
 /* ── LLM Inference ────────────────────────────────────────────────────── */
 /* Opens the inference daemon socket, sends a stateless inference request,

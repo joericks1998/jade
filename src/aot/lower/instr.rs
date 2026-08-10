@@ -199,9 +199,8 @@ pub(super) fn lower_instr<'ctx>(
             Ok(false)
         }
         DivFloat(d, l, r) => {
-            let (a, c) = low.float_operands(*l, *r);
-            let s = b.build_float_div(a, c, "divf").map_err(|e| e.to_string())?;
-            low.store(*d, low.box_float(s));
+            let res = low.float_div(*l, *r)?;
+            low.store(*d, res);
             Ok(false)
         }
         NegFloat(d, s) => {
@@ -1076,6 +1075,13 @@ pub(super) fn lower_instr<'ctx>(
                 .map_err(|e| e.to_string())?;
             // Landing: bind the caught value, then enter the handler body.
             b.position_at_end(landing);
+            // The longjmp that brought us here unwound the native stack
+            // without running the intervening callees' own `emit_recur_restore`
+            // calls, so the counter is still counting frames that no longer
+            // exist. Reset it to what it was when *this* function was entered —
+            // correct regardless of how many frames were skipped, since this
+            // function's own frame is all that is left.
+            low.emit_recur_restore()?;
             let caught = low.exc_value();
             low.store(*caught_reg, caught);
             b.build_unconditional_branch(block_of(target(*off))).map_err(|e| e.to_string())?;
@@ -1141,6 +1147,8 @@ pub(super) fn lower_instr<'ctx>(
             // Drop any handler this function opened but did not fall out of —
             // `return` inside a `try` skips the emitter's PopHandler.
             low.emit_exc_restore()?;
+            // Close the recursion frame this function's prologue opened.
+            low.emit_recur_restore()?;
             b.build_return(Some(&v)).map_err(|e| e.to_string())?;
             Ok(true)
         }
@@ -1149,6 +1157,7 @@ pub(super) fn lower_instr<'ctx>(
         Halt => {
             low.emit_scope_exit();
             low.emit_exc_restore()?;
+            low.emit_recur_restore()?;
             b.build_return(Some(&i64_ty.const_int(NIL, false))).map_err(|e| e.to_string())?;
             Ok(true)
         }

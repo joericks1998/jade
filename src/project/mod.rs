@@ -812,18 +812,25 @@ pub fn find_project_root() -> Option<PathBuf> {
 /// Like [`find_project_root`] but starts from `start` instead of the current
 /// working directory. Used by the AOT build daemon, which resolves a project
 /// relative to the source file it was handed rather than its own CWD.
+///
+/// **A `jade.toml` that cannot be read stops the walk.** It used to be stepped
+/// over, on the reasoning that only a manifest we could see a `[project]` in was
+/// a project — which turned every typo in a manifest into "there is no project
+/// here", said by a command standing in the project's own root directory. The
+/// question a broken file cannot answer is whether it has a `[project]`
+/// section, and answering it "no" is a guess that is wrong far more often than
+/// it is right. Stopping here hands the directory to [`load_project`], which is
+/// what every caller reaches for next and is the one place that can name the
+/// line.
 pub fn find_project_root_from(start: &Path) -> Option<PathBuf> {
     let mut dir = start.to_path_buf();
     loop {
-        let candidate = dir.join("jade.toml");
-        if candidate.exists() {
-            if let Ok(content) = std::fs::read_to_string(&candidate) {
-                if let Ok(manifest) = toml::from_str::<ProjectManifest>(&content) {
-                    if manifest.is_project() {
-                        return Some(dir);
-                    }
-                }
-            }
+        match read_manifest(&dir) {
+            Ok(manifest) if manifest.is_project() => return Some(dir),
+            // Not a project: a `jade.toml` that parses and declares no
+            // `[project]`, or no `jade.toml` at all. Keep walking up.
+            Ok(_) | Err(ManifestError::Missing(_)) => {}
+            Err(_) => return Some(dir),
         }
         if !dir.pop() {
             return None;
@@ -831,12 +838,74 @@ pub fn find_project_root_from(start: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Why a `jade.toml` could not be turned into a [`ProjectManifest`].
+///
+/// The distinction that matters is *absent* versus *present and broken*. Both
+/// used to collapse into one string, and every caller that could only act on
+/// "there is no project here" therefore acted on it for a manifest sitting right
+/// in front of them — see [`find_project_root_from`].
+#[derive(Debug)]
+pub enum ManifestError {
+    /// No `jade.toml` in that directory. Not an error on its own: plenty of
+    /// directories are not projects.
+    Missing(PathBuf),
+    /// A `jade.toml` is there and could not be read — permissions, most often.
+    Unreadable(PathBuf, std::io::Error),
+    /// A `jade.toml` is there and is not valid TOML. The inner error carries the
+    /// line and column, which is the whole reason this is worth keeping typed.
+    Malformed(PathBuf, Box<toml::de::Error>),
+}
+
+impl ManifestError {
+    /// Whether the file exists and this is a complaint about its contents.
+    ///
+    /// A caller that falls back to a default manifest — `jade run` with no
+    /// argument, which may legitimately be outside a project — must not do that
+    /// silently for a manifest the user wrote and got wrong.
+    pub fn is_present(&self) -> bool {
+        !matches!(self, ManifestError::Missing(_))
+    }
+}
+
+impl std::fmt::Display for ManifestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ManifestError::Missing(p) => write!(f, "no jade.toml at {}", p.display()),
+            ManifestError::Unreadable(p, e) => write!(f, "cannot read {}: {e}", p.display()),
+            // The path first, because the error's own text names a line and not
+            // a file, and the file it names is rarely the one the user was
+            // looking at when the command failed.
+            ManifestError::Malformed(p, e) => {
+                write!(
+                    f,
+                    "{} is not valid TOML\n{e}\nFix the line above, then re-run.",
+                    p.display()
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for ManifestError {}
+
 /// Load the project manifest from the given root directory.
-pub fn load_project(root: &Path) -> Result<ProjectManifest, String> {
-    let path = root.join("jade.toml");
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| format!("cannot read {}: {}", path.display(), e))?;
-    toml::from_str::<ProjectManifest>(&content).map_err(|e| format!("invalid jade.toml: {}", e))
+pub fn load_project(root: &Path) -> Result<ProjectManifest, ManifestError> {
+    read_manifest(root)
+}
+
+/// The shared read, so root discovery and loading cannot come to disagree about
+/// what a readable manifest is.
+fn read_manifest(dir: &Path) -> Result<ProjectManifest, ManifestError> {
+    let path = dir.join("jade.toml");
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ManifestError::Missing(path));
+        }
+        Err(e) => return Err(ManifestError::Unreadable(path, e)),
+    };
+    toml::from_str::<ProjectManifest>(&content)
+        .map_err(|e| ManifestError::Malformed(path, Box::new(e)))
 }
 
 // ── Test file discovery ───────────────────────────────────────────────────────

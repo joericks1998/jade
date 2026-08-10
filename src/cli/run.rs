@@ -14,12 +14,18 @@ pub async fn run_entry(verbose: bool) {
         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
     });
 
+    // A jade.toml that is simply not there is the fallback above doing its job:
+    // `jade run` outside a project runs `main.jde` in the current directory. One
+    // that is there and broken is not — it is the file that says which entry to
+    // run, so carrying on with the default would run something the user did not
+    // ask for while their real mistake goes unmentioned.
     let manifest = match crate::project::load_project(&root) {
         Ok(m) => m,
-        Err(e) => {
-            eprintln!("warning: could not read jade.toml: {}", e);
-            crate::project::ProjectManifest::default()
+        Err(e) if e.is_present() => {
+            eprintln!("error: {e}");
+            process::exit(1);
         }
+        Err(_) => crate::project::ProjectManifest::default(),
     };
     let entry = root.join(manifest.entry_file());
 
@@ -164,7 +170,15 @@ pub async fn run_file(path: &str, verbose: bool) {
     let libraries = project_root
         .as_ref()
         .and_then(|root| {
-            let manifest = crate::project::load_project(root).ok()?;
+            // A manifest that will not parse is reported here rather than
+            // skipped. Skipping it meant the project's dependencies silently
+            // vanished, and the first complaint came from the `use` that could
+            // no longer be resolved — a span in a `.jde` file, for a mistake one
+            // directory up in jade.toml.
+            let manifest = crate::project::load_project(root).unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
             // Fetch anything jade.lock pins but libs/ is missing, so a fresh
             // clone runs without a separate `jade pkg install` step.
             if let Err(e) = crate::pkg::ensure_ready(root, &manifest) {
@@ -182,6 +196,8 @@ pub async fn run_file(path: &str, verbose: bool) {
         libraries,
         #[cfg(test)]
         test_stdout: None,
+        #[cfg(test)]
+        max_call_depth: None,
     };
 
     // Execute.

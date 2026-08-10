@@ -695,6 +695,13 @@ struct FnCtx<'a> {
     counts: &'a HashMap<String, usize>,
     /// How many parameters the function has. A lone `void *` is a deallocator.
     n_params: usize,
+    /// How many of them are callbacks.
+    ///
+    /// One context slot cannot serve two of them — the library hands the same
+    /// value back to both, so neither can say which registration it belongs to,
+    /// and the shim refuses the combination. `g_child_watch_add_full` takes a
+    /// handler and a destroy-notify with a single `gpointer` between them.
+    n_callbacks: usize,
 }
 
 fn map_param(
@@ -705,7 +712,7 @@ fn map_param(
     next_name: Option<&str>,
     cx: &FnCtx<'_>,
 ) -> Mapped {
-    let FnCtx { env, ret, produced, counts, n_params } = *cx;
+    let FnCtx { env, ret, produced, counts, n_params, n_callbacks } = *cx;
     // Expanded before anything is decided, so a library's own typedefs read as
     // the types they stand for. `const` comes from the expansion, not the
     // written parameter, because a typedef can introduce it.
@@ -723,17 +730,30 @@ fn map_param(
             // collide unless the library offers a context parameter to route
             // through. Reported rather than guessed, because filling that slot
             // means the library must hand back exactly what it was given.
-            Some(spec) => Mapped::Assumed(
-                spec,
-                concat!(
-                    "takes a callback. The library may store it and call back later, which ",
-                    "works — but the shim keeps one registration per symbol, so calling ",
-                    "this twice with different functions sends both answers to the ",
-                    "second. If the library has a context parameter beside the callback, ",
-                    "write `callback_data` for it instead of `null_ptr` and each gets its own"
+            Some(spec) => {
+                // Whether the aliasing is already dealt with depends on what
+                // comes next: a `void *` beside the callback is bound
+                // `callback_data`, which routes each registration separately.
+                // Without one there is nothing to route through and the warning
+                // stands.
+                let routed = n_callbacks == 1
+                    && next.is_some_and(|n| squash(&normalize(&env.expand(n))) == "void*");
+                if routed {
+                    return Mapped::One(spec);
+                }
+                Mapped::Assumed(
+                    spec,
+                    concat!(
+                        "takes a callback with no context parameter beside it. The library may ",
+                        "store it and call back later, which works — but the shim keeps one ",
+                        "registration per symbol, and with nothing to route through, calling ",
+                        "this twice with different functions sends both answers to the second. ",
+                        "A library that keys its callbacks some other way — by an int id, a ",
+                        "channel, a file descriptor — has no remedy here; register one at a time"
+                    )
+                    .to_string(),
                 )
-                .to_string(),
-            ),
+            }
             None => Mapped::Reject(
                 "takes a callback whose own signature the FFI cannot carry. If the library \
                  accepts a null pointer there — brotli's allocator hooks do, and fall back on \
@@ -750,8 +770,23 @@ fn map_param(
     // Decided by position rather than by name, because the position is the
     // convention: `ares_set_socket_callback(ch, cb, void *data)`,
     // `BrotliDecoderSetMetadataCallbacks(state, start, chunk, void *opaque)`.
+    // `callback_data` rather than `null_ptr`, which is what this used to write.
+    // Both pass something the library hands back untouched; the difference is
+    // that `callback_data` makes it a per-registration cookie, so two callbacks
+    // registered through one symbol stay apart. `null_ptr` left them sharing the
+    // shim's single slot, so `reg(0, double)` then `reg(1, triple)` sent both
+    // answers to `triple` — a plausible number, not a crash. Jade already knew
+    // the slot was there, since it emitted `null_ptr` for this very parameter;
+    // it just picked the aliasing form. Nothing is lost by filling it: a library
+    // that ignores its context slot is unaffected either way.
     if squash(&t) == "void*" && prev.is_some_and(|p| is_fn_ptr(&env.expand(p))) {
-        return Mapped::One("null_ptr".to_string());
+        // Only where there is exactly one callback to route. With two, a single
+        // slot tells them apart no better than a null does, and the generator
+        // refuses the pair outright — which took the whole of glib down over
+        // `g_child_watch_add_full`.
+        return Mapped::One(
+            if n_callbacks == 1 { "callback_data" } else { "null_ptr" }.to_string(),
+        );
     }
 
     if let Some(s) = scalar_of(&t) {
@@ -769,9 +804,31 @@ fn map_param(
         // nothing has to be released — which is the whole difference between
         // this and the pointers a library mallocs for you.
         //
-        // `const` is what says which of the two it is.
+        // `const` is what says nothing was allocated. It does not say which
+        // *direction* the parameter runs, and that is a separate guess: the
+        // identical `const char **` is an input list of strings just as often.
+        // libarchive has both, one line apart —
+        // `archive_read_open_filenames(struct archive *, const char **, size_t)`
+        // takes filenames to open, and
+        // `archive_match_path_unmatched_inclusions_next(struct archive *, const char **)`
+        // yields the next path. Read as an out-parameter the input one takes no
+        // Jade argument at all, so the list can never be passed and the call
+        // returns a plausible zero.
+        //
+        // Out is the better default — it is what the shape usually means, and
+        // it is the one the FFI can actually carry. But it is a guess, so it is
+        // disclosed rather than made silently.
         if is_const && squash(inner) == "char" {
-            return Mapped::Out(format!("out_str:{inner}"), None);
+            return Mapped::Out(
+                format!("out_str:{inner}"),
+                Some(
+                    "a `const char **` was read as a string the call points at. The same C is \
+                     also how a library takes a list of strings *in* — if this one does, it \
+                     cannot be bound: read as an out-parameter it takes no argument, so the \
+                     list is never passed and the call answers as though it were empty"
+                        .to_string(),
+                ),
+            );
         }
         // And a writable `char **` is the allocating shape, with the same C.
         // Which it is, and who then releases it, are things the header does not
@@ -984,7 +1041,41 @@ fn map_param(
             return Mapped::Held(format!("handle<{}>", env.c_name(inner)));
         }
 
-        return Mapped::Out(format!("out_struct:{}", env.c_name(inner)), None);
+        // `const` settles it: the library only reads this one. The same signal
+        // is already honoured for plain buffers — `const void *` becomes a
+        // read-only `bytes` — and a struct is no different.
+        if is_const {
+            return Mapped::One(format!("in_struct:{}", env.c_name(inner)));
+        }
+
+        // Otherwise it is a guess, and until now a silent one. `out_struct` is
+        // out-*only*: it takes no Jade argument at all, so a struct that flows
+        // the other way cannot be passed even by hand. Two ways that bites, both
+        // reported from the userland:
+        //
+        // A purely-input struct answers as though it were zeroed —
+        // `libusb_handle_events_timeout(ctx, struct timeval *tv)` gets a zero
+        // timeout and returns instantly, so an event loop busy-spins instead of
+        // blocking, and reports success while doing it.
+        //
+        // A struct the caller threads through a sequence is worse. libsodium's
+        // `crypto_hash_sha256_init`/`_update`/`_final` each got a fresh zeroed
+        // state, so `_update`'s work was discarded and `_final` digested a state
+        // that had never been initialised — a wrong hash, from a call that
+        // returned 0, of a value nothing downstream can sanity-check.
+        return Mapped::Out(
+            format!("out_struct:{}", env.c_name(inner)),
+            Some(format!(
+                "a `{} *` was read as a struct the call fills. The header does not say which \
+                 way it flows: if the call only reads it write `in_struct:{}`, and if it reads \
+                 *and* writes it — an `init`/`update`/`final` state — write `inout_struct:{}`. \
+                 Left as an out-parameter it takes no argument, so a struct flowing in is \
+                 replaced by a zeroed one on every call",
+                env.c_name(inner),
+                env.c_name(inner),
+                env.c_name(inner)
+            )),
+        );
     }
 
     // A read-only byte pointer with no count beside it. Some libraries take a
@@ -1024,11 +1115,23 @@ fn map_param(
         // the type says which of the two it is, so the one-argument shape is
         // refused and the multi-argument one — every `libfdt` writer, which
         // takes the tree plus what to do to it — is not.
-        if squashed == "void" && n_params == 1 && normalize(&env.expand(ret)) == "void" {
+        // The return type says nothing about which it is. This used to also
+        // require `void`, so `int cap_free(void *)` — libcap's real signature,
+        // and the shape most free functions actually have — walked straight
+        // past and was bound as a buffer: the shim allocated a copy, handed it
+        // over to be freed, then read it back and freed it again. Valgrind
+        // called that four errors; running it printed a result and exited 0.
+        // libcap escaped only because it validates its argument and returns -1
+        // rather than freeing a pointer it does not recognise.
+        if squashed == "void" && n_params == 1 {
             return Mapped::Reject(
-                "takes a `void *` on its own and reports nothing, which is the shape of a call \
-                 that frees what it is given. Passing it a buffer would leave the shim freeing \
-                 memory the library already released"
+                "takes a `void *` on its own, which is the shape of a call that frees what it is \
+                 given — `cap_free`, `ares_free_string`, `g_free`. Passing it a buffer would \
+                 leave the library releasing the shim's scratch and the shim releasing it again. \
+                 A status code back does not settle it, since most free functions return one. \
+                 Two spellings reach the ones that are not deallocators: `inout_bytes` if the \
+                 call really does revise a buffer in place, and `null_ptr` if the pointer is a \
+                 cookie the library only stores or ignores — `g_node_new(NULL)` is a whole node"
                     .to_string(),
             );
         }
@@ -1741,7 +1844,8 @@ fn map_function(
     let mut out_at: Vec<(usize, usize)> = Vec::new();
     let mut skip_next = false;
 
-    let cx = FnCtx { env, ret: &raw_ret, produced, counts, n_params: raw.len() };
+    let n_callbacks = raw.iter().filter(|t| is_fn_ptr(&env.expand(t))).count();
+    let cx = FnCtx { env, ret: &raw_ret, produced, counts, n_params: raw.len(), n_callbacks };
 
     for (i, t) in raw.iter().enumerate() {
         if skip_next {
@@ -1927,12 +2031,108 @@ mod tests;
 /// export is the wrong header, and that is worth catching before the shim fails
 /// to link.
 ///
+/// The names come back as C wrote them, with whatever the object format spelled
+/// them with taken off — see [`plain_name`]. That is what every caller is
+/// comparing against: a header's declaration, `jade_pkg_init`, or a symbol the
+/// generated shim is about to write into a C identifier.
+///
 /// `None` means the symbol table could not be read, which is a reason to skip
 /// the check rather than to fail: an unreadable table proves nothing.
 pub fn exported_symbols(lib: &Path) -> Option<std::collections::HashSet<String>> {
     let syms = nm_symbols(lib)?;
     let out: std::collections::HashSet<String> = syms.into_iter().map(|(_, name)| name).collect();
     (!out.is_empty()).then_some(out)
+}
+
+/// The object format a library is in.
+///
+/// Only two things about reading a symbol table depend on it, but both are the
+/// difference between a binding and a false "not exported" — see
+/// [`plain_name`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectFormat {
+    /// Mach-O, including a universal ("fat") archive of them.
+    MachO,
+    /// ELF.
+    Elf,
+}
+
+/// Which format a file is, read from its first four bytes.
+///
+/// Read from the file rather than from `cfg!(target_os)`, because the two
+/// answer different questions. `cfg!` says which platform this build of `jade`
+/// runs on; what matters here is what the *file* is. Jade is Unix-only and a
+/// Mac being handed a `.so` is ordinary — a checked-in Linux artifact, a
+/// container's `/usr/lib` mounted to look at — and a host-shaped guess reads
+/// every one of its names wrongly. Four bytes are the only source that is right
+/// in both cases.
+///
+/// `None` for anything that is not an object file, which is not the same as an
+/// error: an archive or a linker stub can still have a readable symbol table.
+pub fn object_format(lib: &Path) -> Option<ObjectFormat> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(lib).ok()?;
+    let mut magic = [0u8; 4];
+    f.read_exact(&mut magic).ok()?;
+    magic_format(&magic)
+}
+
+/// The same test against bytes already in hand.
+fn magic_format(bytes: &[u8]) -> Option<ObjectFormat> {
+    let magic = bytes.get(..4)?;
+    match [magic[0], magic[1], magic[2], magic[3]] {
+        // Mach-O, 64- and 32-bit, either byte order.
+        [0xcf, 0xfa, 0xed, 0xfe] | [0xfe, 0xed, 0xfa, 0xcf]
+        | [0xce, 0xfa, 0xed, 0xfe] | [0xfe, 0xed, 0xfa, 0xce]
+        // Mach-O universal ("fat") binary.
+        | [0xca, 0xfe, 0xba, 0xbe] | [0xbe, 0xba, 0xfe, 0xca] => Some(ObjectFormat::MachO),
+        [0x7f, b'E', b'L', b'F'] => Some(ObjectFormat::Elf),
+        _ => None,
+    }
+}
+
+/// The format to read `lib`'s names by, with a fallback for the files the magic
+/// number does not classify.
+///
+/// A file `nm` can read and the magic cannot name is, in practice, a static
+/// archive — and an archive on this machine was built for this machine, so the
+/// host is the best answer available. This is the one place `cfg!` is right:
+/// the file has been asked first and had nothing to say.
+fn symbol_format(lib: &Path) -> ObjectFormat {
+    object_format(lib).unwrap_or(if cfg!(target_os = "macos") {
+        ObjectFormat::MachO
+    } else {
+        ObjectFormat::Elf
+    })
+}
+
+/// The name a symbol table entry stands for, with what the format spelled it
+/// with taken back off.
+///
+/// Two rules, and only one of them depends on the format.
+///
+/// **A version suffix is never part of the name.** A library built with a
+/// version script exports `lzma_version_number@@XZ_5.0`; `@@` is the default
+/// version and a single `@` a non-default one, and both forms sit in the same
+/// table. Nothing downstream asks for the suffixed string: `dlsym` and the
+/// linker both resolve the plain name to the default version, and `@` is not a
+/// character a C identifier may contain, so a name carrying one cannot even be
+/// written into the shim. Cutting at the first `@` is safe whatever the format,
+/// because no format puts one in a C function's name.
+///
+/// **The leading underscore is Mach-O's, and only Mach-O's.** There a C
+/// function `foo` is `_foo` in the table, so removing one is reading the name
+/// back. ELF adds no prefix, and applying the rule there is wrong in both
+/// directions: `__gmpz_init` — the whole of GMP's public API — stops matching
+/// the header that declares it, and a library exporting `_alpha` starts
+/// matching a header declaring `alpha`, which binds cleanly and then cannot
+/// load.
+fn plain_name(name: &str, format: ObjectFormat) -> &str {
+    let bare = name.split('@').next().unwrap_or(name);
+    match format {
+        ObjectFormat::MachO => bare.strip_prefix('_').unwrap_or(bare),
+        ObjectFormat::Elf => bare,
+    }
 }
 
 /// Everything `nm` reports as defined in `lib`, as (type letter, name) pairs.
@@ -1971,6 +2171,13 @@ fn nm_symbols(lib: &Path) -> Option<Vec<(String, String)>> {
         return None;
     }
 
+    // Read from the artifact, not from the platform this build runs on: the
+    // rule for a leading underscore is the file's, and the file may not be
+    // native. `--with-symbol-versions` is deliberately not asked for — the
+    // versions are stripped either way, and the flag is GNU-only, so requesting
+    // it would only add noise on Linux and a rejected invocation on a Mac.
+    let format = symbol_format(lib);
+
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
     for line in text.lines() {
@@ -1982,10 +2189,14 @@ fn nm_symbols(lib: &Path) -> Option<Vec<(String, String)>> {
         if !matches!(kind, "T" | "t" | "D" | "S" | "B" | "W" | "i") {
             continue;
         }
-        // Mach-O prefixes every C symbol with an underscore; ELF does not.
-        let name = name.strip_prefix('_').unwrap_or(name).to_string();
+        let name = plain_name(name, format).to_string();
+        if name.is_empty() {
+            continue;
+        }
         // Unioning several listings means the same symbol arrives more than
         // once; callers count these, so a duplicate would inflate the total.
+        // Several *versions* of one symbol arrive that way too, now that the
+        // version is not part of the name.
         if seen.insert((kind.to_string(), name.clone())) {
             out.push((kind.to_string(), name));
         }
@@ -2003,9 +2214,8 @@ fn nm_symbols(lib: &Path) -> Option<Vec<(String, String)>> {
 ///
 /// Only *code* symbols are listed. A data export cannot be called, so offering
 /// it as something to write a prototype for would be an invitation to a
-/// mistake. Names that keep a leading underscore after the Mach-O one is
-/// stripped are dropped too: those are the compiler's own (`__stack_chk_fail`)
-/// or C++ mangled (`_Z3fooi`), and neither is bindable.
+/// mistake. Beyond that the list is what the library exports — see
+/// [`is_callable_name`] for the little that is left out and why.
 ///
 /// Empty when `nm` is missing or the library exports nothing bindable, which
 /// the caller reports rather than treating as a table.
@@ -2013,9 +2223,33 @@ pub fn placeholder_symbols(lib: &Path) -> BTreeMap<String, CSymbol> {
     let Some(syms) = nm_symbols(lib) else { return Default::default() };
     syms.into_iter()
         .filter(|(kind, _)| matches!(kind.as_str(), "T" | "t" | "W"))
-        .filter(|(_, name)| !name.starts_with('_'))
+        .filter(|(_, name)| is_callable_name(name))
         .map(|(_, name)| (name, CSymbol::unresolved()))
         .collect()
+}
+
+/// Whether a name is worth offering as something to write a prototype for.
+///
+/// The rule used to be "no leading underscore", which is the Mach-O prefix rule
+/// applied a second time and wrong on ELF for the same reason: `__gmpz_init` is
+/// not a private name, it is the whole of GMP's public API. An underscore says
+/// who reserved a name, not whether it can be called — and a placeholder is
+/// inert, since it lands in `jade.toml` as `"?"` and every command that would
+/// use the binding refuses it by name. So an extra entry costs a line in a list
+/// the user reads, while a missing one is exactly the false "not exported by
+/// the library" this path exists to stop producing.
+///
+/// What is left out is what no prototype could rescue. A C++ mangled name
+/// (`_Z3fooi`) is not a C function: the shim would declare it `extern "C"` and
+/// call it with the wrong ABI. And `_init`, `_fini` and `_start` belong to the
+/// loader rather than to the library's API.
+fn is_callable_name(name: &str) -> bool {
+    // Itanium mangling is `_Z` then a digit or an upper-case tag letter, which
+    // is what keeps a C name like `_Zebra` out of the test.
+    let mangled = name.strip_prefix("_Z").is_some_and(|rest| {
+        rest.starts_with(|c: char| c.is_ascii_digit() || c.is_ascii_uppercase())
+    });
+    !mangled && !matches!(name, "_init" | "_fini" | "_start")
 }
 
 /// Whether a file is a shared library this platform could load.
@@ -2030,29 +2264,39 @@ pub fn placeholder_symbols(lib: &Path) -> BTreeMap<String, CSymbol> {
 /// header, not a library) reads as an ordinary file with an ordinary name, and
 /// every stage before `dlopen` is happy to pass it along.
 pub fn is_loadable_object(lib: &Path) -> bool {
-    use std::io::Read;
-    let Ok(mut f) = std::fs::File::open(lib) else { return false };
-    let mut magic = [0u8; 4];
-    if f.read_exact(&mut magic).is_err() {
-        return false;
-    }
-    bytes_are_loadable_object(&magic)
+    object_format(lib).is_some()
 }
 
 /// The same test against bytes already in hand, for `pkg::materialize`, which
 /// has read the artifact and is about to write it into `libs/`.
 pub fn bytes_are_loadable_object(bytes: &[u8]) -> bool {
-    let Some(magic) = bytes.get(..4) else { return false };
-    matches!(
-        [magic[0], magic[1], magic[2], magic[3]],
-        // Mach-O, 64- and 32-bit, either byte order.
-        [0xcf, 0xfa, 0xed, 0xfe] | [0xfe, 0xed, 0xfa, 0xcf]
-        | [0xce, 0xfa, 0xed, 0xfe] | [0xfe, 0xed, 0xfa, 0xce]
-        // Mach-O universal ("fat") binary.
-        | [0xca, 0xfe, 0xba, 0xbe] | [0xbe, 0xba, 0xfe, 0xca]
-        // ELF.
-        | [0x7f, b'E', b'L', b'F']
-    )
+    magic_format(bytes).is_some()
+}
+
+/// The library a macOS `.tbd` stub stands for, if that is what this file is.
+///
+/// A `.tbd` is a text stub the linker reads — YAML, not Mach-O — so it fails the
+/// loadable test above, correctly. It is worth telling apart from a corrupt file
+/// because on a modern macOS the SDK ships *only* these for system libraries:
+/// the real ones live in the dyld shared cache and have no file on disk at all.
+/// So a user who points at one has not made a mistake, and "this is not a shared
+/// library" is the wrong thing to tell them.
+///
+/// Parsed by hand rather than with a YAML crate. One scalar off the top of a
+/// file this shape does not justify the dependency, and a stub Jade cannot make
+/// use of either way is a poor reason to carry one.
+pub fn tbd_install_name(bytes: &[u8]) -> Option<String> {
+    // `min`, not `get(..4096)?` — a stub shorter than the window is the common
+    // case, and a bare range would answer `None` for every one of them.
+    let head = &bytes[..bytes.len().min(4096)];
+    let text = std::str::from_utf8(head.split(|b| *b == 0).next()?).ok()?;
+    if !text.starts_with("--- !tapi-tbd") {
+        return None;
+    }
+    text.lines()
+        .find_map(|l| l.trim().strip_prefix("install-name:"))
+        .map(|v| v.trim().trim_matches(['\'', '"']).to_string())
+        .filter(|v| !v.is_empty())
 }
 
 /// Header names a library called `lib` might plausibly ship.

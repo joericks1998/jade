@@ -160,6 +160,28 @@ fn package_vm_dict_value_exposes_fns() {
 // ── Primitive method lookup ───────────────────────────────────────────────────
 
 #[test]
+fn primitive_methods_all_declare_an_arity() {
+    // The tripwire for `primitive_method_arity`. A method added to one of the
+    // four tables and not to that list would silently go back to accepting any
+    // number of arguments, which is the defect it exists to close.
+    let tables: [(&str, &[crate::builtins::BuiltinFn]); 4] = [
+        ("str", crate::string::STR_METHODS),
+        ("array", crate::array::ARRAY_METHODS),
+        ("dict", crate::dict::DICT_METHODS),
+        ("bytes", crate::bytes::BYTES_METHODS),
+    ];
+    for (kind, table) in tables {
+        for m in table {
+            assert!(
+                crate::builtins::primitive_method_arity(m.name).is_some(),
+                "{kind}.{} has no declared arity — add it to primitive_method_arity",
+                m.name
+            );
+        }
+    }
+}
+
+#[test]
 fn find_primitive_method_str() {
     for m in ["len", "upper", "lower", "trim", "split", "contains", "replace"] {
         let f = find_primitive_method(PrimType::Str, m);

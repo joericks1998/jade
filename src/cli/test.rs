@@ -120,7 +120,13 @@ async fn run_test_file(path: &std::path::Path, _verbose: bool) -> Result<(), Str
     let libraries = project_root
         .as_ref()
         .and_then(|root| {
-            let manifest = crate::project::load_project(root).ok()?;
+            // Reported rather than skipped: a manifest that will not parse
+            // takes the project's `[lib]` entries and dependencies with it, and
+            // every test then fails on an import instead of on the real cause.
+            let manifest = crate::project::load_project(root).unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
             if let Err(e) = crate::pkg::ensure_ready(root, &manifest) {
                 eprintln!("error: {e}");
                 std::process::exit(1);
@@ -136,6 +142,8 @@ async fn run_test_file(path: &std::path::Path, _verbose: bool) -> Result<(), Str
         libraries,
         #[cfg(test)]
         test_stdout: None,
+        #[cfg(test)]
+        max_call_depth: None,
     };
 
     vm::run(compiled, opts).await.map_err(|e| e.to_string())?;

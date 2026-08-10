@@ -72,7 +72,7 @@ fn arr_reverse(args: &[VmValue]) -> Result<VmValue> {
     }
 }
 
-static ARRAY_METHODS: &[BuiltinFn] = &[
+pub(crate) static ARRAY_METHODS: &[BuiltinFn] = &[
     BuiltinFn { name: "len", vm_impl: arr_len },
     BuiltinFn { name: "push", vm_impl: arr_push },
     BuiltinFn { name: "pop", vm_impl: arr_pop },

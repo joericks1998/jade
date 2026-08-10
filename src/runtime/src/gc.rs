@@ -223,6 +223,13 @@ unsafe fn is_collection(p: *const c_void) -> bool {
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_incref(word: W) {
     let v = JadeValue::from_bits(word as u64);
+    // Balances the release in `decref_word`. A borrowed read retains before it
+    // stores, and a container retains each element it takes in, so a string
+    // reached through either now carries a count that matches.
+    if v.is_str() {
+        crate::string::incref(v.as_ptr() as *const u8);
+        return;
+    }
     if v.is_ptr() {
         let p = v.as_ptr() as *mut c_void;
         unsafe {
@@ -252,9 +259,19 @@ pub extern "C" fn jrt_decref(word: W) {
 #[inline]
 unsafe fn decref_word(word: W) {
     let v = JadeValue::from_bits(word as u64);
+    // A string is a leaf — it owns bytes and no child words, so it cannot form
+    // a cycle — but it is still an allocation somebody has to release. It used
+    // to be skipped here, which is why a loop building strings grew without
+    // bound whether or not any FFI was involved: nothing escaped the body and
+    // nothing was ever reclaimed. A literal is immortal and `decref` leaves it
+    // alone, which is what makes releasing a slot safe whatever it holds.
+    if v.is_str() {
+        crate::string::decref(v.as_ptr() as *mut u8);
+        return;
+    }
     if !v.is_ptr() {
-        // Ints/bools/nil carry no allocation; strings/floats are non-refcounted
-        // leaves (a separate leak-reclamation concern — they cannot form cycles).
+        // Ints/bools/nil carry no allocation; a boxed float is a non-refcounted
+        // leaf.
         return;
     }
     let p = v.as_ptr() as *mut c_void;
