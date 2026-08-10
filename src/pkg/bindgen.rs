@@ -695,6 +695,13 @@ struct FnCtx<'a> {
     counts: &'a HashMap<String, usize>,
     /// How many parameters the function has. A lone `void *` is a deallocator.
     n_params: usize,
+    /// How many of them are callbacks.
+    ///
+    /// One context slot cannot serve two of them — the library hands the same
+    /// value back to both, so neither can say which registration it belongs to,
+    /// and the shim refuses the combination. `g_child_watch_add_full` takes a
+    /// handler and a destroy-notify with a single `gpointer` between them.
+    n_callbacks: usize,
 }
 
 fn map_param(
@@ -705,7 +712,7 @@ fn map_param(
     next_name: Option<&str>,
     cx: &FnCtx<'_>,
 ) -> Mapped {
-    let FnCtx { env, ret, produced, counts, n_params } = *cx;
+    let FnCtx { env, ret, produced, counts, n_params, n_callbacks } = *cx;
     // Expanded before anything is decided, so a library's own typedefs read as
     // the types they stand for. `const` comes from the expansion, not the
     // written parameter, because a typedef can introduce it.
@@ -723,17 +730,30 @@ fn map_param(
             // collide unless the library offers a context parameter to route
             // through. Reported rather than guessed, because filling that slot
             // means the library must hand back exactly what it was given.
-            Some(spec) => Mapped::Assumed(
-                spec,
-                concat!(
-                    "takes a callback. The library may store it and call back later, which ",
-                    "works — but the shim keeps one registration per symbol, so calling ",
-                    "this twice with different functions sends both answers to the ",
-                    "second. If the library has a context parameter beside the callback, ",
-                    "write `callback_data` for it instead of `null_ptr` and each gets its own"
+            Some(spec) => {
+                // Whether the aliasing is already dealt with depends on what
+                // comes next: a `void *` beside the callback is bound
+                // `callback_data`, which routes each registration separately.
+                // Without one there is nothing to route through and the warning
+                // stands.
+                let routed = n_callbacks == 1
+                    && next.is_some_and(|n| squash(&normalize(&env.expand(n))) == "void*");
+                if routed {
+                    return Mapped::One(spec);
+                }
+                Mapped::Assumed(
+                    spec,
+                    concat!(
+                        "takes a callback with no context parameter beside it. The library may ",
+                        "store it and call back later, which works — but the shim keeps one ",
+                        "registration per symbol, and with nothing to route through, calling ",
+                        "this twice with different functions sends both answers to the second. ",
+                        "A library that keys its callbacks some other way — by an int id, a ",
+                        "channel, a file descriptor — has no remedy here; register one at a time"
+                    )
+                    .to_string(),
                 )
-                .to_string(),
-            ),
+            }
             None => Mapped::Reject(
                 "takes a callback whose own signature the FFI cannot carry. If the library \
                  accepts a null pointer there — brotli's allocator hooks do, and fall back on \
@@ -750,8 +770,23 @@ fn map_param(
     // Decided by position rather than by name, because the position is the
     // convention: `ares_set_socket_callback(ch, cb, void *data)`,
     // `BrotliDecoderSetMetadataCallbacks(state, start, chunk, void *opaque)`.
+    // `callback_data` rather than `null_ptr`, which is what this used to write.
+    // Both pass something the library hands back untouched; the difference is
+    // that `callback_data` makes it a per-registration cookie, so two callbacks
+    // registered through one symbol stay apart. `null_ptr` left them sharing the
+    // shim's single slot, so `reg(0, double)` then `reg(1, triple)` sent both
+    // answers to `triple` — a plausible number, not a crash. Jade already knew
+    // the slot was there, since it emitted `null_ptr` for this very parameter;
+    // it just picked the aliasing form. Nothing is lost by filling it: a library
+    // that ignores its context slot is unaffected either way.
     if squash(&t) == "void*" && prev.is_some_and(|p| is_fn_ptr(&env.expand(p))) {
-        return Mapped::One("null_ptr".to_string());
+        // Only where there is exactly one callback to route. With two, a single
+        // slot tells them apart no better than a null does, and the generator
+        // refuses the pair outright — which took the whole of glib down over
+        // `g_child_watch_add_full`.
+        return Mapped::One(
+            if n_callbacks == 1 { "callback_data" } else { "null_ptr" }.to_string(),
+        );
     }
 
     if let Some(s) = scalar_of(&t) {
@@ -769,9 +804,31 @@ fn map_param(
         // nothing has to be released — which is the whole difference between
         // this and the pointers a library mallocs for you.
         //
-        // `const` is what says which of the two it is.
+        // `const` is what says nothing was allocated. It does not say which
+        // *direction* the parameter runs, and that is a separate guess: the
+        // identical `const char **` is an input list of strings just as often.
+        // libarchive has both, one line apart —
+        // `archive_read_open_filenames(struct archive *, const char **, size_t)`
+        // takes filenames to open, and
+        // `archive_match_path_unmatched_inclusions_next(struct archive *, const char **)`
+        // yields the next path. Read as an out-parameter the input one takes no
+        // Jade argument at all, so the list can never be passed and the call
+        // returns a plausible zero.
+        //
+        // Out is the better default — it is what the shape usually means, and
+        // it is the one the FFI can actually carry. But it is a guess, so it is
+        // disclosed rather than made silently.
         if is_const && squash(inner) == "char" {
-            return Mapped::Out(format!("out_str:{inner}"), None);
+            return Mapped::Out(
+                format!("out_str:{inner}"),
+                Some(
+                    "a `const char **` was read as a string the call points at. The same C is \
+                     also how a library takes a list of strings *in* — if this one does, it \
+                     cannot be bound: read as an out-parameter it takes no argument, so the \
+                     list is never passed and the call answers as though it were empty"
+                        .to_string(),
+                ),
+            );
         }
         // And a writable `char **` is the allocating shape, with the same C.
         // Which it is, and who then releases it, are things the header does not
@@ -984,7 +1041,41 @@ fn map_param(
             return Mapped::Held(format!("handle<{}>", env.c_name(inner)));
         }
 
-        return Mapped::Out(format!("out_struct:{}", env.c_name(inner)), None);
+        // `const` settles it: the library only reads this one. The same signal
+        // is already honoured for plain buffers — `const void *` becomes a
+        // read-only `bytes` — and a struct is no different.
+        if is_const {
+            return Mapped::One(format!("in_struct:{}", env.c_name(inner)));
+        }
+
+        // Otherwise it is a guess, and until now a silent one. `out_struct` is
+        // out-*only*: it takes no Jade argument at all, so a struct that flows
+        // the other way cannot be passed even by hand. Two ways that bites, both
+        // reported from the userland:
+        //
+        // A purely-input struct answers as though it were zeroed —
+        // `libusb_handle_events_timeout(ctx, struct timeval *tv)` gets a zero
+        // timeout and returns instantly, so an event loop busy-spins instead of
+        // blocking, and reports success while doing it.
+        //
+        // A struct the caller threads through a sequence is worse. libsodium's
+        // `crypto_hash_sha256_init`/`_update`/`_final` each got a fresh zeroed
+        // state, so `_update`'s work was discarded and `_final` digested a state
+        // that had never been initialised — a wrong hash, from a call that
+        // returned 0, of a value nothing downstream can sanity-check.
+        return Mapped::Out(
+            format!("out_struct:{}", env.c_name(inner)),
+            Some(format!(
+                "a `{} *` was read as a struct the call fills. The header does not say which \
+                 way it flows: if the call only reads it write `in_struct:{}`, and if it reads \
+                 *and* writes it — an `init`/`update`/`final` state — write `inout_struct:{}`. \
+                 Left as an out-parameter it takes no argument, so a struct flowing in is \
+                 replaced by a zeroed one on every call",
+                env.c_name(inner),
+                env.c_name(inner),
+                env.c_name(inner)
+            )),
+        );
     }
 
     // A read-only byte pointer with no count beside it. Some libraries take a
@@ -1024,11 +1115,23 @@ fn map_param(
         // the type says which of the two it is, so the one-argument shape is
         // refused and the multi-argument one — every `libfdt` writer, which
         // takes the tree plus what to do to it — is not.
-        if squashed == "void" && n_params == 1 && normalize(&env.expand(ret)) == "void" {
+        // The return type says nothing about which it is. This used to also
+        // require `void`, so `int cap_free(void *)` — libcap's real signature,
+        // and the shape most free functions actually have — walked straight
+        // past and was bound as a buffer: the shim allocated a copy, handed it
+        // over to be freed, then read it back and freed it again. Valgrind
+        // called that four errors; running it printed a result and exited 0.
+        // libcap escaped only because it validates its argument and returns -1
+        // rather than freeing a pointer it does not recognise.
+        if squashed == "void" && n_params == 1 {
             return Mapped::Reject(
-                "takes a `void *` on its own and reports nothing, which is the shape of a call \
-                 that frees what it is given. Passing it a buffer would leave the shim freeing \
-                 memory the library already released"
+                "takes a `void *` on its own, which is the shape of a call that frees what it is \
+                 given — `cap_free`, `ares_free_string`, `g_free`. Passing it a buffer would \
+                 leave the library releasing the shim's scratch and the shim releasing it again. \
+                 A status code back does not settle it, since most free functions return one. \
+                 Two spellings reach the ones that are not deallocators: `inout_bytes` if the \
+                 call really does revise a buffer in place, and `null_ptr` if the pointer is a \
+                 cookie the library only stores or ignores — `g_node_new(NULL)` is a whole node"
                     .to_string(),
             );
         }
@@ -1741,7 +1844,8 @@ fn map_function(
     let mut out_at: Vec<(usize, usize)> = Vec::new();
     let mut skip_next = false;
 
-    let cx = FnCtx { env, ret: &raw_ret, produced, counts, n_params: raw.len() };
+    let n_callbacks = raw.iter().filter(|t| is_fn_ptr(&env.expand(t))).count();
+    let cx = FnCtx { env, ret: &raw_ret, produced, counts, n_params: raw.len(), n_callbacks };
 
     for (i, t) in raw.iter().enumerate() {
         if skip_next {

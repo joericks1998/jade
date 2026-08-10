@@ -583,14 +583,25 @@ fn a_callbacks_user_data_parameter_does_not_make_it_unbindable() {
 }
 
 #[test]
-fn the_void_pointer_beside_a_callback_is_context_and_is_passed_as_null() {
+fn the_void_pointer_beside_a_callback_is_context_and_routes_each_registration() {
     // `ares_set_socket_callback(ch, cb, void *data)`. Decided by position,
     // because the position is the convention.
+    //
+    // Bound `callback_data`, not `null_ptr`. Both hand the library something it
+    // gives back untouched; only this one makes it a per-registration cookie, so
+    // two callbacks registered through one symbol stay apart instead of both
+    // resolving to whichever was passed last.
     let b = bind(
         "typedef struct chan chan;\n\
          void set_cb(chan* c, int (*cb)(int, void*), void* data);\n",
     );
-    assert_eq!(args(&b, "set_cb"), ["handle<chan>", "callback:int(int, void *)", "null_ptr"]);
+    assert_eq!(args(&b, "set_cb"), ["handle<chan>", "callback:int(int, void *)", "callback_data"]);
+    // And with the slot filled there is nothing left to warn about.
+    assert!(
+        !b.assumed.iter().any(|(s, _)| s == "set_cb"),
+        "a routed callback needs no warning: {:?}",
+        b.assumed
+    );
 }
 
 // ── A pointer to a pointer ───────────────────────────────────────────────
@@ -1494,15 +1505,18 @@ fn the_user_data_slot_is_not_mistaken_for_a_blob() {
 }
 
 #[test]
-fn a_callback_says_which_registration_an_answer_belongs_to_is_assumed() {
-    // A stored callback works now. What is still assumed is *which* function an
-    // answer is for: one slot per symbol, so two outstanding registrations
-    // collide unless the library offers a context parameter to route through.
+fn a_callback_with_no_context_slot_says_registrations_will_collide() {
+    // Only warned about where it is actually true. A library that keys its
+    // callbacks some other way — by an int id, a channel, a file descriptor —
+    // offers nothing to route through, so the one-slot-per-symbol behaviour
+    // stands and `reg(0, double)` then `reg(1, triple)` sends both answers to
+    // `triple`. There is no spelling that fixes it, so the warning says so
+    // rather than naming a remedy that does not apply.
     let b = bind("void go(int (*cb)(int));\n");
     let why = b.assumed.iter().find(|(s, _)| s == "go").map(|(_, w)| w.clone());
     assert!(
-        why.is_some_and(|w| w.contains("callback_data")),
-        "should name the spelling that separates them: {:?}",
+        why.is_some_and(|w| w.contains("no context parameter")),
+        "should say why they collide: {:?}",
         b.assumed
     );
 }
