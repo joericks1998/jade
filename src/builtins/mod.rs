@@ -162,6 +162,29 @@ static PACKAGES: &[&Package] = &[
 
 // ── Primitive method tables ───────────────────────────────────────────────────
 
+/// How many arguments a primitive method takes, not counting the receiver.
+///
+/// `BuiltinFn` carries none, and each implementation simply reads the arguments
+/// it wants — so a surplus one was dropped in silence. `"abc".upper(1, 2, 3)`
+/// answered `ABC` under `jade run` and was a build error compiled, and a stray
+/// argument is exactly what gets left behind when a call is edited. Too *few*
+/// was already caught, because the implementations pattern-match on what they
+/// need and fall through to a type error.
+///
+/// Keyed by name alone: the four tables share `len` and `contains` across every
+/// receiver kind, and neither differs in arity by kind. `primitive_methods_all_declare_an_arity`
+/// fails if a method is added to one of those tables and not to this list.
+pub fn primitive_method_arity(method: &str) -> Option<usize> {
+    Some(match method {
+        "len" | "upper" | "lower" | "trim" | "encode" | "pop" | "sort" | "reverse" | "keys"
+        | "values" | "decode" => 0,
+        "split" | "contains" | "starts_with" | "ends_with" | "push" | "map" | "filter" | "has"
+        | "get" | "merge" => 1,
+        "replace" | "slice" => 2,
+        _ => return None,
+    })
+}
+
 pub fn find_primitive_method(ty: PrimType, method: &str) -> Option<BuiltinFn> {
     match ty {
         PrimType::Str => string::find_str_method(method),

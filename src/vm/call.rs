@@ -126,6 +126,15 @@ pub(crate) async fn call_value(
             }
         }
         VmValue::NativeBoundMethod(nbm) => {
+            // Checked here rather than inside each implementation, which reads
+            // the arguments it wants and never sees the rest. The compiler
+            // rejects a surplus argument, so accepting it here made the two
+            // engines disagree about whether the program was valid at all.
+            if let Some(want) = builtins::primitive_method_arity(nbm.method.name) {
+                if args.len() != want {
+                    return Err(JadeError::ArityMismatch { expected: want, got: args.len(), span });
+                }
+            }
             let mut full_args = Vec::with_capacity(args.len() + 1);
             full_args.push(nbm.receiver.clone());
             full_args.extend(args);

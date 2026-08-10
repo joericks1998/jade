@@ -59,7 +59,7 @@ fn dict_get(args: &[VmValue]) -> Result<VmValue> {
     }
 }
 
-static DICT_METHODS: &[BuiltinFn] = &[
+pub(crate) static DICT_METHODS: &[BuiltinFn] = &[
     BuiltinFn { name: "len", vm_impl: dict_len },
     BuiltinFn { name: "keys", vm_impl: dict_keys },
     BuiltinFn { name: "values", vm_impl: dict_values },

@@ -70,7 +70,7 @@ fn bytes_slice(args: &[VmValue]) -> Result<VmValue> {
     }
 }
 
-static BYTES_METHODS: &[BuiltinFn] = &[
+pub(crate) static BYTES_METHODS: &[BuiltinFn] = &[
     BuiltinFn { name: "len", vm_impl: bytes_len },
     BuiltinFn { name: "decode", vm_impl: bytes_decode },
     BuiltinFn { name: "slice", vm_impl: bytes_slice },
