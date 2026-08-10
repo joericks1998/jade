@@ -2273,6 +2273,32 @@ pub fn bytes_are_loadable_object(bytes: &[u8]) -> bool {
     magic_format(bytes).is_some()
 }
 
+/// The library a macOS `.tbd` stub stands for, if that is what this file is.
+///
+/// A `.tbd` is a text stub the linker reads — YAML, not Mach-O — so it fails the
+/// loadable test above, correctly. It is worth telling apart from a corrupt file
+/// because on a modern macOS the SDK ships *only* these for system libraries:
+/// the real ones live in the dyld shared cache and have no file on disk at all.
+/// So a user who points at one has not made a mistake, and "this is not a shared
+/// library" is the wrong thing to tell them.
+///
+/// Parsed by hand rather than with a YAML crate. One scalar off the top of a
+/// file this shape does not justify the dependency, and a stub Jade cannot make
+/// use of either way is a poor reason to carry one.
+pub fn tbd_install_name(bytes: &[u8]) -> Option<String> {
+    // `min`, not `get(..4096)?` — a stub shorter than the window is the common
+    // case, and a bare range would answer `None` for every one of them.
+    let head = &bytes[..bytes.len().min(4096)];
+    let text = std::str::from_utf8(head.split(|b| *b == 0).next()?).ok()?;
+    if !text.starts_with("--- !tapi-tbd") {
+        return None;
+    }
+    text.lines()
+        .find_map(|l| l.trim().strip_prefix("install-name:"))
+        .map(|v| v.trim().trim_matches(['\'', '"']).to_string())
+        .filter(|v| !v.is_empty())
+}
+
 /// Header names a library called `lib` might plausibly ship.
 ///
 /// `libsqlite3.dylib` → `sqlite3.h` is close to universal, and a wrong guess is

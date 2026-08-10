@@ -607,6 +607,30 @@ fn the_void_pointer_beside_a_callback_is_context_and_routes_each_registration() 
 // ── A pointer to a pointer ───────────────────────────────────────────────
 
 #[test]
+fn a_tbd_stub_is_told_apart_from_a_corrupt_file() {
+    // The shape Apple's SDK actually ships. Worth telling apart because a user
+    // who points at one has not made a mistake — on a modern macOS it is the
+    // only handle the SDK offers for a system library.
+    let stub = b"--- !tapi-tbd\ntbd-version:     4\ntargets:         [ arm64e-macos ]\n\
+                 install-name:    '/usr/lib/libz.1.dylib'\ncurrent-version: 1.2.12\n";
+    assert_eq!(
+        super::tbd_install_name(stub).as_deref(),
+        Some("/usr/lib/libz.1.dylib"),
+        "should read the library it stands for"
+    );
+    // Shorter than the window it reads, which is the common case — a bare
+    // `get(..4096)` answered None for every real stub.
+    assert!(
+        super::tbd_install_name(b"--- !tapi-tbd\ninstall-name: '/usr/lib/libc.dylib'\n").is_some()
+    );
+    // And it is not a loadable object, which is why the plain check refuses it.
+    assert!(!super::bytes_are_loadable_object(stub));
+    // Anything else is not a stub, however broken.
+    assert!(super::tbd_install_name(b"\x7fELF\x02\x01\x01").is_none());
+    assert!(super::tbd_install_name(b"--- !tapi-tbd\nno install name here\n").is_none());
+}
+
+#[test]
 fn a_name_pointed_at_inside_the_callers_own_data_comes_back_as_a_string() {
     // `fdt_getprop_by_offset` points `namep` into the device tree it was handed,
     // so nothing was allocated and nothing has to be released.

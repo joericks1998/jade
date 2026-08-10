@@ -215,6 +215,26 @@ pub fn run_add(
         // copied into libs/, resolved, linked and built, and first refused by
         // the dynamic loader when the finished program runs.
         if !pkg::bindgen::is_loadable_object(&full) {
+            // A `.tbd` is not a mistake, so it does not get the mistake's
+            // message. On a modern macOS the SDK ships only these for system
+            // libraries — the real ones are inside the dyld shared cache and
+            // have no file on disk — so there is nothing here for Jade to copy
+            // into `libs/`, and saying "this is not a shared library" sends the
+            // reader looking for a corrupt file instead of a different library.
+            if let Some(install) =
+                std::fs::read(&full).ok().and_then(|b| pkg::bindgen::tbd_install_name(&b))
+            {
+                eprintln!("error: {p} is a linker stub, not a library Jade can load");
+                eprintln!(
+                    "       It stands for {install}, which on this macOS lives in the dyld\n       \
+                     shared cache and has no file on disk — so there is nothing to copy into\n       \
+                     libs/. Jade materializes every dependency as a real file, so an SDK stub\n       \
+                     cannot be one yet.\n\n       \
+                     Point at a library that exists on disk instead — Homebrew ships real\n       \
+                     .dylib files under /opt/homebrew/lib."
+                );
+                std::process::exit(1);
+            }
             eprintln!("error: {p} is not a shared library");
             eprintln!(
                 "       A dependency is a prebuilt .dylib or .so. This file does not start with\n       \
