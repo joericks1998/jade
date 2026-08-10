@@ -4,6 +4,30 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.3.16
+
+**Twenty bugs the userland found, mostly bindings that looked like they worked.** JADE OS keeps a list of what it has hit in the toolchain; this is most of it. The common shape is a binding `jade pkg add` wrote by itself that ran, returned a plausible value, and exited 0 — with the wrong answer.
+
+**Binding a real library.**
+
+- **A versioned ELF symbol is matched by its plain name.** A library built with a version script exports `lzma_version_number@@XZ_5.0`, and the header's plain name was compared against that string verbatim. 56 of an ordinary Linux image's libraries would not bind at all — `libc`, `libcrypto`, `libcurl`, `libxml2`, `libsystemd` among them — and 14 more, zlib included, bound *successfully* while silently dropping exactly their versioned half. Names are cut at the first `@` now, whatever the format.
+- **A leading underscore is Mach-O's, and only Mach-O's.** Applying it to ELF broke GMP's entire public API (`__gmpz_*`) in one direction, and in the other bound a symbol that does not exist — a clean `add` with nothing skipped, and an `undefined symbol` only when the program ran. The object format is read from the file's magic bytes rather than assumed from the host.
+- **A macOS SDK `.tbd` is recognised as a linker stub** rather than reported as a corrupt file, and names the library it stands for. Loading one is still not supported: the real library lives in the dyld shared cache with no file on disk, and Jade materializes every dependency as a file.
+
+**Inferences that were wrong, and silent about it.**
+
+- **A lone `void *` is a deallocator, whatever it returns.** The guard existed and required the return to be `void`, so `int cap_free(void *)` — the shape most free functions actually have — was bound as a buffer the call revises in place. The shim allocated a copy, handed it over to be freed, read it back, and freed it again: four valgrind errors, from a program that printed its result and exited 0.
+- **`inout_struct:<Type>` exists**, and a struct parameter's direction is no longer guessed in silence. `const` binds as an input outright; the rest still default to `out_struct` but say so, naming both alternatives. It needed saying — read as out-only the parameter takes no argument at all, so libusb's `struct timeval` became a zero timeout that busy-spun while reporting success, and libsodium's streaming SHA-256 digested a state that had never been initialised.
+- **A `void *` beside a callback is a context slot, so it is filled.** Two callbacks registered through one symbol now stay apart instead of both resolving to whichever was passed last.
+- **A returned string is copied before the wrapper frees anything.** `uriEscapeA` returns a pointer *into* the caller's own out-buffer, which the header cannot disclose — handing that back read freed memory.
+- **`nil` marshals to `NULL`**, so `g_uri_escape_string(s, NULL, TRUE)` can be written at all, and a failed tag check names the parameter and what was expected.
+
+**The two engines agree about three more programs.** Float division by zero raised under `jade run` and returned `inf` compiled, so a guard written against the interpreter was absent from the binary that ships; both raise now, catchably. A call chain past ~700 frames aborted the interpreter outright — uncatchable, with no Jade file or line — while the compiled engine ran to 10,000; both enforce one limit now, raised as an ordinary catchable error. And a C `int64_t` outside Jade's 63-bit range came back correct from `jade run` and **± 2^63** from the compiled binary; both refuse it at the boundary rather than one truncating.
+
+**Messages that were wrong rather than merely thin.** A malformed `jade.toml` was reported as a missing one, and `jade init` then refused to create the file it had just been told did not exist. A misspelled method compiled to `lower.rs: method call (GetField result) is unsupported`, which named an internal Rust file and read as "Jade cannot compile method calls". The "supported types" list omitted six types the generator itself writes. A refusal claimed it had recorded the header when it had recorded nothing.
+
+**Smaller things.** `jade pkg add` grew `--only`, and both `add` and `bind` grew `-D`/`--define`, without which a header wanting `-DPCRE2_CODE_UNIT_WIDTH=8` could not be read. A bound header's own directory no longer goes on the include path, where `netlink/errno.h` shadowed the shim's own `<errno.h>` and made the compiler advise an include that was already there. The lock now covers the artifact that actually loads, and `jade pkg install` compares it rather than regenerating it. The interpreter no longer accepts surplus arguments to a builtin method. And the generated shim source no longer ships in the bundle that goes to the device.
+
 ## v1.3.15
 
 **Fixed: a hand-written binding with no header declared C functions at Jade's widths, not the library's.** With no header the shim writes its own `extern` for each bound symbol, and `int` there became `int64_t`, `float` became `double`, and `bool` became `uint8_t`. Someone binding `g_uri_escape_string` by hand got `extern char* g_uri_escape_string(const char*, const char*, int64_t)` against glib's real third parameter, a 32-bit `gboolean`. Nothing caught it: the manifest is valid, the shim compiles, and the program runs.
