@@ -373,6 +373,30 @@ is inferred. The second was malloc'd for you; that is `out_alloc_str`, it needs
 spelling named. Guessing one way leaks on every call and the other frees memory
 that was never allocated.
 
+The *return value* is the same question and by far the bigger one: 125 of glib's
+symbols come back as a `gchar *`, which is more than any other refusal in the
+library. `g_basename` points into its argument and `g_strdup` mallocs, and both
+are spelled that way, so `const` cannot decide it — glib is disciplined about the
+qualifier and plenty of libraries are not. `str` is the borrowed answer and
+`alloc_str` the owned one, the latter requiring `frees_with`; a non-const `char *`
+return is refused with both spellings named. Until v1.3.14 only `str` existed, so
+the owning shape was reachable only by declaring it borrowed, which leaked the
+allocation on every call.
+
+`emit_owned_str` is the one place either spelling is emitted, so the two positions
+cannot drift. Where the copy lands decides who owns it: inside a container it is
+`strdup` and Jade's `ffi_free` reclaims it with the rest of the tree; at top level
+the ABI says a string is borrowed, so it goes into `jade_shim_owned` — one buffer
+per thread, grown to fit and reused by the next call. That buffer used to be a
+fixed 4096 and truncated, which is the worst answer available: a URL-escaped path
+came back silently short and nothing anywhere said so.
+
+`frees_with` names a function the shim calls directly, and it is deliberately not
+required to be a bound symbol — it usually cannot be one. A call taking a lone
+`void *` and reporting nothing is refused as a binding, because that is the shape
+of a call that frees what it is given, and that is exactly `g_free`. With headers
+the header declares it; without them the shim writes its own `extern`.
+
 **A pointer that cannot be carried at all.** Brotli's allocator hooks hand back
 `void *`, which Jade cannot produce, and passing null is what tells brotli to
 fall back on `malloc`. `null_ptr` says so, and is never inferred: a library that

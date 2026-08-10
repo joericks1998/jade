@@ -114,7 +114,26 @@ else
     # The whole header, not a narrowed slice: a slice would bind only the
     # shapes we already handle, which is the opposite of what this is for.
     "$JADE" pkg add glib --path "$glib_lib" --header "$hdr" "${incs[@]}" > add.txt 2> add.err
-    echo $? > add.status
+    status=$?
+    # A string the caller owns is the one shape a header cannot express:
+    # `g_basename` points into its argument and `g_strdup` mallocs, and both are
+    # written `gchar *`. So the generator refuses all 125 of them and names the
+    # spelling, and this is a user writing that spelling — by hand, in jade.toml,
+    # exactly as the message says to.
+    cat >> jade.toml <<'TOML'
+
+[dependencies.glib.symbols.g_strdup]
+args = ["str"]
+ret = "alloc_str"
+frees_with = "g_free"
+
+[dependencies.glib.symbols.g_ascii_strup]
+args = ["str", "int"]
+ret = "alloc_str"
+frees_with = "g_free"
+TOML
+    "$JADE" pkg install >> add.txt 2>> add.err || status=$?
+    echo $status > add.status
   )
   if [ "$(cat "$proj/add.status")" != 0 ]; then
     echo "  FAIL  glib does not install:"

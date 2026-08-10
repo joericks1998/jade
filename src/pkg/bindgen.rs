@@ -1171,6 +1171,23 @@ fn map_ret(raw_in: &str, env: &TypeEnv) -> Result<String, String> {
         if matches!(squash(inner).as_str(), "char" | "unsignedchar" | "signedchar") && is_const {
             return Ok("str".to_string());
         }
+        // A writable `char *` is the allocating spelling, and it is the single
+        // largest thing a header refuses: 125 of glib's symbols come back this
+        // way, `g_strdup` and `g_uri_escape_string` among them. Whether the
+        // caller owns it is documentation rather than type — `g_basename` points
+        // into its argument and `g_strdup` mallocs, and both are `gchar *` — so
+        // the choice is named rather than guessed. Guessing "borrowed" leaks on
+        // every call, which is what a hand-written `ret = "str"` does today, and
+        // guessing "owned" frees a static string.
+        if squash(inner) == "char" {
+            return Err(
+                "returns a string the caller may own, and the header does not say whether they \
+                 do. If the library allocated it for you, write `ret = \"alloc_str\"` in \
+                 jade.toml with `frees_with` naming the library's own free function. If the \
+                 library keeps it, `ret = \"str\"`"
+                    .to_string(),
+            );
+        }
         if env.opaque.contains(inner) || env.complete.contains_key(inner) {
             return Ok(format!("handle<{}>", env.c_name(inner)));
         }

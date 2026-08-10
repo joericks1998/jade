@@ -868,6 +868,109 @@ fn a_string_out_parameter_shim_compiles() {
     }
 }
 
+// ── Strings handed back as the return value ──────────────────────────────
+
+#[test]
+fn a_returned_string_is_lent_when_the_library_keeps_it_and_released_when_it_does_not() {
+    // The same C and the opposite ownership. `g_basename` points into its
+    // argument, `g_strdup` mallocs, and both are written `gchar *` — so the two
+    // spellings differ and only one of them frees.
+    let lent = generate("glib", &symbols(&[("f", sym(&["str"], "str"))])).unwrap();
+    assert!(lent.contains("out->data.as_str = r;"), "should lend:\n{lent}");
+    assert!(!lent.contains("jade_shim_owned"), "nothing to release:\n{lent}");
+
+    let mut owned = sym(&["str"], "alloc_str");
+    owned.frees_with = Some("g_free".to_string());
+    let src = generate("glib", &symbols(&[("f", owned)])).unwrap();
+    assert!(src.contains("jade_shim_owned(r)"), "should copy before freeing:\n{src}");
+    assert!(src.contains("g_free(r);"), "should release:\n{src}");
+    // The copy, not the library's pointer, is what Jade is handed.
+    assert!(src.contains("out->data.as_str = r_c;"), "should hand back the copy:\n{src}");
+}
+
+#[test]
+fn a_returned_string_the_caller_owns_needs_a_free_function() {
+    let bare = sym(&["str"], "alloc_str");
+    let err = generate("glib", &symbols(&[("f", bare)])).unwrap_err();
+    assert!(err.contains("who releases it"), "should ask: {err}");
+}
+
+#[test]
+fn an_owned_string_return_is_released_on_the_failure_path_too() {
+    // A raise must not leak. `fails_when = "null"` leaves nothing to free, but
+    // it is not the only convention a pointer return can carry.
+    let mut s = failing_sym(&["str"], "alloc_str", crate::project::CFailure::Null);
+    s.frees_with = Some("g_free".to_string());
+    let src = generate("glib", &symbols(&[("f", s)])).unwrap();
+    let fail_at = src.find("out->tag = JADE_FFI_ERROR;").expect("a failure branch");
+    assert!(src[..fail_at].contains("if (r) g_free(r);"), "should release first:\n{src}");
+}
+
+#[test]
+fn an_owned_string_return_is_refused_where_the_return_value_is_already_spoken_for() {
+    // An out_buffer reads the return as its element count, so the string would
+    // be allocated and then dropped.
+    let mut s = sym(&["out_buffer:char"], "alloc_str");
+    s.frees_with = Some("free".to_string());
+    let err = generate("z", &symbols(&[("f", s)])).unwrap_err();
+    assert!(err.contains("already reads the return value"), "should refuse: {err}");
+}
+
+#[test]
+fn an_owned_string_return_is_copied_into_a_result_struct_beside_another_value() {
+    // Two results mean a struct, and a string inside a container is
+    // container-owned — `strdup`, which Jade's `ffi_free` reclaims.
+    let mut s = sym(&["str", "out_scalar:int"], "alloc_str");
+    s.frees_with = Some("g_free".to_string());
+    let src = generate("glib", &symbols(&[("f", s)])).unwrap();
+    assert!(src.contains("strdup((const char*)r)"), "should copy into the tree:\n{src}");
+    assert!(src.contains("g_free(r);"), "should still release:\n{src}");
+}
+
+#[test]
+fn an_owned_string_return_shim_compiles() {
+    let header = "extern char* dup_it(const char* s);\n\
+                  extern void lib_free(void* p);\n";
+    let mut s = sym(&["str"], "alloc_str");
+    s.frees_with = Some("lib_free".to_string());
+    let src = generate_with("z", &symbols(&[("dup_it", s)]), &[], &["fixture.h"]).unwrap();
+    if let Err(e) = compiles(&src, &[("fixture.h", header)]) {
+        panic!("owned string return shim does not compile:\n{e}\n--- source ---\n{src}");
+    }
+}
+
+#[test]
+fn a_free_function_is_declared_when_the_dependency_has_no_header() {
+    // The shim calls it by name and nothing else declares it: a call taking a
+    // lone `void *` and reporting nothing is refused as a binding, which is
+    // exactly a free function's shape.
+    let mut s = sym(&["str"], "alloc_str");
+    s.frees_with = Some("lib_free".to_string());
+    let src = generate("z", &symbols(&[("f", s)])).unwrap();
+    assert!(src.contains("extern void lib_free(void*);"), "should declare it:\n{src}");
+    if let Err(e) = compiles(&src, &[]) {
+        panic!("headerless owned string shim does not compile:\n{e}\n--- source ---\n{src}");
+    }
+
+    // libc's own is already declared by <stdlib.h>, and a second one is noise.
+    let mut plain = sym(&["str"], "alloc_str");
+    plain.frees_with = Some("free".to_string());
+    let src = generate("z", &symbols(&[("f", plain)])).unwrap();
+    assert!(!src.contains("extern void free(void*);"), "stdlib.h has it:\n{src}");
+}
+
+#[test]
+fn a_copied_owned_string_is_not_truncated() {
+    // It used to land in a fixed 4096 buffer, which is the worst answer
+    // available: a URL-escaped path came back silently short and nothing said
+    // so. The buffer grows to fit now, and is reused rather than leaked.
+    let mut s = sym(&["str"], "alloc_str");
+    s.frees_with = Some("free".to_string());
+    let src = generate("z", &symbols(&[("f", s)])).unwrap();
+    assert!(!src.contains("char buf[4096]"), "should not be fixed:\n{src}");
+    assert!(src.contains("realloc(buf, n)"), "should grow to fit:\n{src}");
+}
+
 #[test]
 fn a_symbol_that_would_shadow_a_shim_helper_is_refused_by_name() {
     // Every wrapper is `jade_shim_<symbol>`, and so is every helper. A library

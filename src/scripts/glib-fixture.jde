@@ -26,3 +26,11 @@ print(f"utf8 strlen = {glib.g_utf8_strlen("héllo wörld", -1)}")
 // int in, int out, and a string glib keeps a copy of.
 print(f"digit value = {glib.g_ascii_digit_value(55)}")
 print(f"interned    = {glib.g_intern_static_string("jade")}")
+
+// A string glib allocated and the caller now owns, declared `alloc_str` with
+// `frees_with = "g_free"` in jade.toml. The whole point is what does not show
+// up here: the shim copies the string out and hands the original back to
+// g_free, so the answer is right *and* nothing accumulates. Bound as a plain
+// `str` instead, each of these leaks its allocation on every call.
+print(f"strdup      = {glib.g_strdup("jade")}")
+print(f"strup       = {glib.g_ascii_strup("jade", -1)}")
