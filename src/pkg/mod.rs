@@ -662,16 +662,23 @@ pub fn unresolved_report(name: &str, entry: &crate::project::DependencyEntry) ->
     }
     let example = missing[0];
 
+    // Without a header the shim writes its own declaration of each symbol, and
+    // `int` there is Jade's width rather than the library's — which `cshim`
+    // refuses, so an example writing it would send the reader to a second
+    // error. `scalar:<ctype>` is what that case takes, and it is legal with a
+    // header too; the plain spelling is shown only where it is the easier one.
+    let scalar = if entry.headers.is_none() { "scalar:<ctype>" } else { "int" };
+
     Some(format!(
         "dependency '{name}' has {n} symbol{s} with no signature yet: {listed}\n  \
          A shared library says what it exports and nothing more — C keeps no argument or return \
          types in\n  a compiled artifact — so these went into jade.toml as \"?\" for you to fill \
-         in, e.g.\n    \
+         in.\n  Point at the library's header and they are generated for you, all at once:\n    \
+         jade pkg bind {name} --header <its header.h>\n  \
+         Or write each one out, naming the C type the library declares:\n    \
          [dependencies.{name}.symbols.{example}]\n    \
-         args = [\"int\", \"int\"]\n    \
-         ret  = \"int\"\n  \
-         Or point at the library's header and let them be generated:\n    \
-         jade pkg bind {name} --header <its header.h>",
+         args = [\"{scalar}\", \"{scalar}\"]\n    \
+         ret  = \"{scalar}\"",
         n = missing.len(),
         s = if missing.len() == 1 { "" } else { "s" },
     ))

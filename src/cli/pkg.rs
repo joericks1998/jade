@@ -251,16 +251,21 @@ pub fn run_add(
                 names.len(),
                 summarize(&names)
             );
+            // The header leads, because it answers this for every symbol at
+            // once and cannot be got wrong. The hand-written form names the C
+            // type rather than a Jade one: with no header the shim writes each
+            // declaration itself, so `int` there would be Jade's width standing
+            // in for the library's, which `cshim` refuses by name.
             eprintln!(
-                "note: replace each \"?\" under [dependencies.{name}.symbols] with the \
-                 prototype, e.g.\n    \
+                "note: A shared library says what it exports and nothing more — C keeps no \
+                 argument or return\n  types in a compiled artifact — so no header was found to \
+                 read them from. If you have\n  one, this generates the whole table:\n    \
+                 jade pkg bind {name} --header <its header.h>\n  \
+                 Otherwise replace each \"?\" under [dependencies.{name}.symbols] by hand, \
+                 naming the C\n  type the library declares:\n    \
                  [dependencies.{name}.symbols.{}]\n    \
-                 args = [\"int\", \"int\"]\n    \
-                 ret  = \"int\"\n  \
-                 A shared library says what it exports and nothing more — C keeps no argument \
-                 or return\n  types in a compiled artifact — so no header was found to read \
-                 them from. If you have\n  one, this generates the whole table:\n    \
-                 jade pkg bind {name} --header <its header.h>",
+                 args = [\"scalar:<ctype>\", \"scalar:<ctype>\"]\n    \
+                 ret  = \"scalar:<ctype>\"",
                 names[0]
             );
             return;

@@ -191,11 +191,29 @@ A `"?"` means *the name is known and the prototype is not*. Replace it with the 
 
 ```toml
 [dependencies.demo.symbols.demo_add]
-args = ["int", "int"]
-ret  = "int"
+args = ["scalar:int", "scalar:int"]
+ret  = "scalar:int"
 ```
 
 Filling in blanks in a file that already lists every function beats going to look for a header, which is why Jade writes the names rather than nothing.
+
+**Write the C type here, not the Jade one.** `scalar:int` rather than plain `int`, and that is the one thing this case asks of you that the header case does not. With a header, `int` means only "carry this as a Jade integer" and the header's own prototype settles how wide it is. With no header there is no such prototype, so the shim writes one — and `int` there would become `int64_t`, `float` would become `double`, and `bool` would become `uint8_t`, which are Jade's widths and not the library's.
+
+That is why the three of them are refused outright in a headerless dependency. Nothing catches a width the library never agreed to: the manifest is valid, the shim compiles, and the program runs. Reading is where it hurts most — a function that returned four bytes declared as returning eight hands back whatever was left in the upper half of the register — and a `float` read as a `double` is not an approximate number but a meaningless one, on every machine rather than on unlucky ones.
+
+So `scalar:<ctype>` takes the library's own spelling — `int`, `unsigned`, `long`, `size_t`, `int32_t`, `uint64_t`, `float`, `double`, `bool`, and the rest — and the shim converts to and from Jade's width at the boundary. Your side of the call does not change: an argument is still an ordinary Jade int, float or bool. Everything else in the vocabulary crosses as an address, and an address is one width, so nothing else needs saying.
+
+```
+$ jade run app.jde
+dependency 'demo': symbol 'demo_add' declares `int` in args and `int` as its return, and demo
+has no header. …
+  Point at the library's header, which settles every symbol at once:
+    jade pkg bind demo --header <its header.h>
+  Or name the C type this one really has:
+    [dependencies.demo.symbols.demo_add]
+    args = ["scalar:<ctype>", "scalar:<ctype>"]
+    ret  = "scalar:<ctype>"
+```
 
 **Why it can't just read the types out of the library.** A shared library carries an export table of *names*. C keeps no argument or return types in a compiled artifact, so `demo_add` in that table says only "there is a `demo_add`". Types survive in DWARF, which release builds strip and which the macOS linker leaves behind in the `.o` files rather than the library. So the half that is missing is genuinely gone, and Jade will not guess at it: a wrong prototype is a corrupted stack several calls later, with nothing pointing back at the manifest.
 
@@ -302,10 +320,11 @@ If you write or correct a symbol by hand, these are the spellings `args` and `re
 
 | Spelling | Meaning |
 |---|---|
-| `int`, `float`, `bool`, `str`, `nil` | Scalars. `nil` is a return only. A C `enum` is an `int` — status-code enums are how most libraries report failure, and on liblzma alone they account for 60 of 114 symbols. |
+| `int`, `float`, `bool`, `str`, `nil` | Scalars. `nil` is a return only. A C `enum` is an `int` — status-code enums are how most libraries report failure, and on liblzma alone they account for 60 of 114 symbols. The first three say only how Jade carries the value, so they need a header to settle the width; without one they are refused and `scalar:<ctype>` is what to write. |
+| `scalar:<ctype>` | The same value, with the library's own C type named — `scalar:int`, `scalar:size_t`, `scalar:float`. The shim declares that type and converts at the boundary; your side of the call is still an ordinary Jade int, float or bool. Required in a dependency with no header, and legal in one with a header. Takes any numeric or boolean C spelling. |
 | `bytes` | Binary data. As an argument it is one Jade value and the two C parameters `(const void*, size_t)`. |
 | `handle<T>` | An opaque pointer the library owns — a `sqlite3*`, a `SNDFILE*`. Jade holds it, hands it back, and never looks inside. The type name is checked, so passing a statement where a connection belongs is a readable error rather than a crash inside the library. `T` is written the way C writes it, so a struct with no typedef of its own keeps the keyword: `handle<struct ZSTD_CCtx_s>`. |
-| `out_buffer:<ctype>` | A buffer the call fills. It consumes **no** Jade argument: `x_read(handle, buf, n)` is called as `x_read(handle, n)` and hands back the bytes. Its size comes from the next declared argument, which must be an `int`. |
+| `out_buffer:<ctype>` | A buffer the call fills. It consumes **no** Jade argument: `x_read(handle, buf, n)` is called as `x_read(handle, n)` and hands back the bytes. Its size comes from the next declared argument, which must be an integer — `int`, or `scalar:<ctype>` naming one. |
 | `bytes_ptr` | The same, without the count, for a library that takes a blob whose extent is written inside it — every `libfdt` call takes `const void *fdt` alone. Borrowed for the call, like a `str`. |
 | `inout_bytes` | A buffer the call revises in place. Your blob is copied into scratch the shim owns, and the edited copy comes back as a result — a Jade blob is immutable, so there is nothing to lend out to be written into. |
 | `sized_buffer:<ctype>` | A buffer the call fills whose size only the documentation gives. You pass the count, the shim allocates it, and the whole buffer comes back. `lzma_stream_header_encode` writes exactly twelve bytes and says so nowhere a generator can read. |

@@ -52,6 +52,7 @@ The integration surface with the rest of the compiler is one function, `dependen
 
   - `bytes` as an argument expands to the C pair `(const void*, size_t)`.
   - `out_buffer:<ctype>` and `out_struct:<Type>` are out-parameters. They consume **no** Jade argument: the shim owns the memory, so `x_read(handle, buf, n)` is called from Jade as `x_read(handle, n)` and hands back the bytes. The rewrite rules are below.
+  - `scalar:<ctype>` is the same value with the library's own C type named, for the case where the shim writes the declaration itself. See *A width the library never agreed to* below.
 
   A symbol may also declare `fails_when` — `null`, `negative`, `nonzero`, or `never`. The shim then clears `errno`, tests the return against that convention, and on failure hands back a `JADE_FFI_ERROR` carrying `strerror` text and the number, which both engines already turn into a catchable Jade raise. Without it a failed call returns its raw sentinel and the reason the library *had already recorded* is simply thrown away: the program sees `-1` and nothing else. There is no universal convention to infer, which is why the binding names the one its symbol uses; the default is "cannot fail", because reading a convention that is not there would turn every legitimate `-1` into a raise.
 - **`bindgen.rs`** — generates a dependency's `symbols` and `structs` tables from its C header, driven by `jade pkg add --header`, `jade pkg install`, and `jade pkg bind`. This is what makes "bind any `.so`" true in practice: the ABI could express handles, blobs and structs, but every signature still had to be transcribed by hand, and SQLite has around 200 entry points.
@@ -360,6 +361,71 @@ and is the main read call in libfdt. Only inferred when the header *names* the
 parameter like a length, because nothing in the types tells `int *lenp` from the
 second value a call happens to write back.
 
+### A width the library never agreed to
+
+`map_type` answers "how does Jade carry this", and its C spelling is Jade's own
+width: `int` is `int64_t`, `float` is `double`, `bool` is `uint8_t`. With a
+header that is only a marshalling tag, because the header's prototype is what
+the compiler generates code against and a hand-written `int` that disagrees with
+it is a compile error. `declare` returns an empty string in that case, and the
+whole of this section is about the other one.
+
+Without a header the shim writes the `extern` itself, and there the same three
+spellings *are* the prototype. Someone hand-binding `g_uri_escape_string` got
+
+```c
+extern char* g_uri_escape_string(const char*, const char*, int64_t);
+```
+
+against glib's real third parameter, a 32-bit `gboolean`. Nothing catches that:
+the manifest is valid, the shim compiles, the program runs.
+
+**The return is the dangerous half.** Passing a value that is too wide usually
+survives, because the callee reads only the part it wants. Reading one is the
+reverse — the shim believes its own declaration and reads eight bytes where the
+function wrote four, so the upper half is whatever was left in the register. And
+a `float` declared as a `double` is not a slightly wrong number but a
+meaningless one, because the two are different representations rather than two
+sizes of one, which makes it wrong on every machine rather than on unlucky ones.
+
+So `int`, `float` and `bool` are refused in `args` and in `ret` when the
+dependency has no header, and `scalar:<ctype>` is what gets past. The shim
+declares the named C type and converts to and from Jade's width at the boundary;
+Jade's side does not change, because the shim is the translation layer and it
+should speak whatever C demands. This is the same reasoning the callback
+signatures already ran on — `int` must be `int` and not the `int64_t` Jade
+widens it to — reaching the one position that had not had it applied.
+
+Only those three. Every other type in the vocabulary crosses as an address, and
+an address is one width.
+
+`parse_c_scalar` is the one place either position resolves a `<ctype>`, and
+`check_declared_widths` is the one place either position is refused, so the two
+cannot come to disagree — the rule `emit_owned_str` follows for the two
+owned-string positions. The accepted set is exactly `c_scalar`'s, which is what
+`out_scalar` and `inout_scalar` already resolve through, so `scalar:uint32_t`
+and `out_scalar:uint32_t` name the same C type by construction.
+
+One thing the spelling opens up and has to close again: **`fails_when =
+"negative"` on a return the library declares unsigned can never fire.** `(r) < 0`
+on an unsigned type compiles to `false`, so the symbol binds, compiles, runs, and
+hands every failure back as an ordinary result — the exact shape of failure this
+generator exists to refuse. A Jade `int` is always signed, so nothing could reach
+it before. Refused by name, and plain `char` is refused too rather than allowed:
+its signedness is the platform's choice, so the test would fire on x86 Linux and
+not on ARM macOS.
+
+The out-parameter shapes were never exposed to this, because each already
+carries the library's own C type for the reason given above: `out_scalar` and
+`inout_scalar` declare a real local, `out_buffer` and `sized_buffer` size an
+allocation with `sizeof`, and `handle` and `out_handle` are pointers. What *was*
+exposed is an `out_buffer`'s element **count**, which is an ordinary `int`
+argument sitting next to the buffer — the refusal reaches it like any other.
+The rule that a buffer is followed by an integer now asks the tag rather than
+the variant, so `scalar:size_t` satisfies it exactly as `int` does; a rule
+written against one spelling is a rule the second spelling of the same thing
+stops satisfying, silently.
+
 ### What the header does not say
 
 Three refusals survive on purpose, and each names the spelling that gets past it
@@ -539,6 +605,8 @@ Without an artifact there is nothing to test against: a header with its own decl
 **A C `enum` is an `int`, and recording that belongs in the type environment.** Putting it in the mapper would have to be repeated at every site a type is looked up — return, parameter, struct field — so it goes in `build_env` as an alias, and every path resolves through `expand`. Both spellings clang gives have to be checked: for `typedef enum { ... } lzma_ret;` the `qualType` is `enum lzma_ret` while the `desugaredQualType` is the bare `lzma_ret`, and `underlying` prefers the desugared one — which is the spelling with the keyword already gone. Missing this cost 60 of liblzma's 114 symbols, `lzma_code` among them.
 
 **A normalized type name is a lookup key, not source text.** `normalize` drops `struct`, `union` and `enum` so a type can be found however it was written, and the stripped name was then also written into the generated shim. For `typedef struct sqlite3 sqlite3;` that is harmless, because the bare name really is a type — and every fixture in the suite used that shape, which is why nothing caught it. For the far more common `typedef struct X_s X;`, or a bare `struct X_s;`, `X_s` alone is not a type in C and the shim would not compile. `TypeEnv::c_name` puts the keyword back; `TypeEnv::tagged` is what knows whether it is needed. Anything new that turns a resolved type into shim text needs the same treatment.
+
+**The two hints that tell a user what to write have to agree with what the generator accepts.** `unresolved_report` and `jade pkg add`'s note both showed `args = ["int", "int"]` as the shape to replace a `"?"` with — and a `"?"` means no header was read, which is exactly where `int` is now refused. Following the hint landed on a second error. Both lead with `--header` and then show `scalar:<ctype>`; `unresolved_report` still shows plain `int` when the dependency *does* carry headers, which is the case where it is the easier spelling and is correct.
 
 **A placeholder has to be refused everywhere the binding is used, not just where it is generated.** `"?"` passes `resolve` — the table is non-empty, which is all resolution asks — so the refusal lives in `build_c_shims` and in `ensure_ready` ahead of the lock read. The second one matters: without it `jade run` on a fresh project answers "there is no jade.lock, run `jade pkg install`", and the user spends a command to arrive at the message they should have had first. `cli/check.rs` runs the same check against the manifest alone, which costs a read it was already doing and keeps `jade check` an honest predictor of `jade run` without installing anything.
 
