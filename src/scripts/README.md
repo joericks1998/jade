@@ -57,6 +57,8 @@ Two checks, catching different classes.
 
 The whole header is bound, never a narrowed slice. A slice would cover only the shapes already handled, which is the opposite of the point. The fixture program itself (`glib-fixture.jde`) is deliberately dull: what is under test is that a large real header produces a shim that compiles, installs, and gives both engines the same answer.
 
+Two symbols are then added to `jade.toml` by hand and the package reinstalled. That is not a shortcut around the generator — it is the other half of the workflow. A string the caller owns is the one thing a header cannot express, so the generator refuses all 125 of glib's and names the spelling, and this step is a user writing that spelling. Nothing else in the suite runs an `alloc_str` binding end to end, and `examples/` cannot: a real C library has to be installed for there to be anything to bind.
+
 Missing glib or a missing C compiler is a *skip*, reported rather than silent, so the script is safe to run anywhere.
 
 ```sh

@@ -4,6 +4,17 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.3.14
+
+**A string a C library allocated for you can now be bound, and it is released rather than leaked.** This was the largest gap left in the FFI: 125 of glib's symbols come back as a `gchar *` — `g_strdup`, `g_uri_escape_string`, `g_find_program_in_path` — and none of them could be bound at all. `curl_easy_escape` is the same shape.
+
+- **`ret = "alloc_str"` is the new spelling**, and like `out_alloc_str` it requires `frees_with` naming the library's own free function. The shim copies the string out and hands the original straight back to that function, so the answer is right and nothing accumulates. Measured on 200,000 calls returning an 80-byte string: 62 MB held before, 42 MB after, which is exactly the figure for a call that allocates nothing.
+- **Jade asks rather than guesses, because the header does not say.** `g_basename` points into its argument and `g_strdup` mallocs, and both are written `gchar *`. Reading one as the other either leaks on every call or frees a static string, so a non-const `char *` return is refused with both spellings named — the message says what to write.
+- **Writing `ret = "str"` for one of these was the only way to reach it before**, and it leaked the allocation on every call. That is the defect this release fixes.
+- **A copied string is no longer truncated.** The buffer it lands in was a fixed 4096 bytes and silently cut anything longer, which affected `out_alloc_str` as well. It grows to fit now, and is reused by the next call on that thread rather than held.
+- **`frees_with` does not have to name a bound symbol.** It usually cannot: a call taking a lone `void *` and reporting nothing is refused as a binding, since that is the shape of a call that frees what it is given — which is precisely `g_free`. Without a header the shim declares it itself.
+- **The FFI gate runs one end to end on both engines.** Two glib symbols are declared by hand and reinstalled, which is the other half of the workflow the refusal message describes.
+
 ## v1.3.13
 
 **glib binds and runs, and CI binds it on every push.** Pointed at glib — 1890 exported symbols, written the way widely-used C libraries actually are — the binding generator produced a table of 1357 symbols that could not be used at all. Two separate faults, each of which refuses the whole dependency rather than the symbol.

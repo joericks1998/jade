@@ -318,6 +318,7 @@ If you write or correct a symbol by hand, these are the spellings `args` and `re
 | `array<elem>:<count>` | A struct *field* only: a fixed-size row. `array<char>:32` reads as characters, `array<int>:24` as numbers. Not legal in an `args` list. |
 | `out_str:<ctype>` | A string the call points at inside data you already gave it — `fdt_getprop_by_offset`'s `const char **namep`. Nothing was allocated, so nothing has to be released. |
 | `out_alloc_str:<ctype>` | A string the library allocated and you now own. Requires `frees_with` on the symbol, naming the function that releases it. |
+| `alloc_str` | A return only: the same thing as the return value rather than through a pointer — `g_strdup`, `curl_easy_escape`. Requires `frees_with`. The shim copies the string out and hands the original straight back to that function, so nothing accumulates. |
 | `ret_len:<ctype>` | Marks the parameter that says how long a returned pointer is. The return type is then `bytes`. `fdt_getprop` is this shape. |
 | `callback:<ret>(<args>)` | A Jade function the library may call **while the call runs**. A parameter may be written `category:spelling` — `int:ares_bool_t` — where the spelling is what the library declared and the category is what Jade marshals it as. A pointer written `bytes:<ctype>` takes the next parameter as its length and arrives as one blob. The signature is written in the library's own C types, e.g. `callback:int(int, const char*)`. A `void *` in it is the user-data slot C uses instead of closures; the shim accepts it and does not pass it on, because a Jade function carries its own environment. |
 | `callback_data` | The library's own context slot, filled with the callback's own pointer so two outstanding registrations do not collide. Needs a `callback:` beside it. |
@@ -335,6 +336,36 @@ print(d.rem)                   // 2
 ```
 
 A whole symbol may also be written as the single string `"?"` — the name is known, the prototype is not. That is what `jade pkg add` writes when it finds no header, and every command that would use the binding refuses it by name.
+
+### Who frees a string
+
+This is the one thing a C header genuinely cannot tell you, and it is the largest single class of symbol the generator declines to guess at — 125 of glib's, `g_strdup` and `g_uri_escape_string` among them.
+
+Compare two functions that are written identically:
+
+```c
+const gchar *g_basename  (const gchar *file_name);   // points into its argument
+gchar       *g_strdup    (const gchar *str);         // mallocs a new one for you
+```
+
+The first hands back a pointer into memory you already had. Nothing was allocated, so nothing has to be released, and Jade copies the text and walks away. The second allocated it for you, and if nobody hands it back to `g_free` it is gone for the life of the process. Both are a pointer to characters. Only the documentation says which is which, and `const` is a convention here rather than a rule.
+
+So Jade asks you, and the two answers are one word apart:
+
+```toml
+[dependencies.glib.symbols.g_basename]
+args = ["str"]
+ret  = "str"                 # the library keeps it
+
+[dependencies.glib.symbols.g_strdup]
+args = ["str"]
+ret  = "alloc_str"           # you now own it
+frees_with = "g_free"
+```
+
+With `alloc_str`, the shim copies the string before returning and hands the original straight to `frees_with`. Nothing leaks and nothing is held past the call. `frees_with` names any function that takes a pointer — `free` when the library documents plain malloc, `g_free`, `curl_free`, `ares_free_string`. It does not have to be a symbol Jade bound; the shim calls it directly.
+
+Guessing either way is worse than asking. Reading `g_strdup` as borrowed leaks its allocation on every call, and reading `g_basename` as owned frees memory the library never gave you.
 
 ### Fixed-size array fields
 

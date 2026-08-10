@@ -55,7 +55,7 @@ fn map_type(t: &str) -> Option<CType> {
 
 const SUPPORTED_TYPES: &str = "int, float, bool, str, bytes, handle<Type>, in_struct:<Type>, out_buffer:<ctype>, \
      out_struct:<Type>, out_handle:<Type>, out_scalar:<ctype>, inout_scalar:<ctype> \
-     (and nil for a return type)";
+     (and nil, plus alloc_str for a string the caller owns, as a return type)";
 
 /// What one entry of a symbol's `args` list means.
 ///
@@ -523,6 +523,14 @@ enum RetSpec {
     /// far it runs. Copied out, because the memory is the library's or the
     /// caller's blob and neither is Jade's to hold.
     Bytes,
+    /// `alloc_str` — a string the call allocated and the caller now owns.
+    ///
+    /// The same C as a plain `str` return and the opposite ownership, which is
+    /// why it has a spelling of its own rather than being inferred: `g_basename`
+    /// points into its argument and `g_strdup` mallocs, and both are written
+    /// `gchar *`. Requires `frees_with` naming the library's own free function,
+    /// which is the one thing the header never says.
+    AllocStr,
     /// `struct:<Type>` — the call returns the struct itself, not a pointer to
     /// one. `ZSTD_bounds ZSTD_cParam_getBounds(ZSTD_cParameter)` is this.
     ///
@@ -542,6 +550,9 @@ impl RetSpec {
             RetSpec::Nil => "void".to_string(),
             RetSpec::Scalar(t) => t.decl.to_string(),
             RetSpec::Bytes => "const void*".to_string(),
+            // Writable, because the free function takes it back and a library's
+            // own free is not declared to take a `const char*`.
+            RetSpec::AllocStr => "char*".to_string(),
             RetSpec::Struct(name) => name.clone(),
             RetSpec::Handle { 0: name } => format!("{name}*"),
         }
@@ -554,6 +565,9 @@ fn parse_ret(pkg: &str, sym: &str, spec: &str) -> Result<RetSpec, String> {
     }
     if spec == "bytes" {
         return Ok(RetSpec::Bytes);
+    }
+    if spec == "alloc_str" {
+        return Ok(RetSpec::AllocStr);
     }
     if let Some(name) = spec.strip_prefix("struct:") {
         return check_c_ident(pkg, sym, name, "struct").map(|_| RetSpec::Struct(name.to_string()));
@@ -961,14 +975,28 @@ const OWNED_HELPER: &str = r#"
  * before the native call returns — which is exactly the wrong lifetime here: the
  * pointer stops being valid on the next line, when the library's own free runs.
  * So the copy has to exist first, and it has to outlive the return without being
- * anyone's to release. _Thread_local for the reason the errno buffer is.
+ * anyone's to release.
  *
- * Truncates rather than allocating without bound, because an allocation nothing
- * owns is a leak on every call. */
+ * One buffer per thread, reused and grown to fit, which is what makes it nobody's
+ * to release: the next call on this thread reclaims it, and the thread ending
+ * reclaims the last one. Only the longest string ever returned is held, not one
+ * per call. It used to be a fixed 4096 and truncated, which is the worst answer
+ * available — a URL-escaped path or a formatted size came back silently short,
+ * and nothing anywhere said so.
+ *
+ * NULL on allocation failure, which the caller turns into a failed call. */
 static const char* jade_shim_owned(const void* s) {
-    static _Thread_local char buf[4096];
+    static _Thread_local char*  buf = NULL;
+    static _Thread_local size_t cap = 0;
     if (!s) return "";
-    snprintf(buf, sizeof buf, "%s", (const char*)s);
+    size_t n = strlen((const char*)s) + 1;
+    if (n > cap) {
+        char* grown = (char*)realloc(buf, n);
+        if (!grown) return NULL;
+        buf = grown;
+        cap = n;
+    }
+    memcpy(buf, s, n);
     return buf;
 }
 "#;
@@ -1089,7 +1117,9 @@ fn parse_symbol(
     // says so has to have one. Both halves are refused, because a `frees_with`
     // with nothing to free reads as an ownership rule that is in force and is
     // not.
-    let owns = args.iter().any(|a| matches!(a, ArgSpec::OutAllocStr { .. }));
+    let ret_t = parse_ret(pkg, sym, &spec.ret)?;
+    let ret_owns = matches!(ret_t, RetSpec::AllocStr);
+    let owns = ret_owns || args.iter().any(|a| matches!(a, ArgSpec::OutAllocStr { .. }));
     match (&spec.frees_with, owns) {
         (None, true) => {
             return Err(format!(
@@ -1102,10 +1132,26 @@ fn parse_symbol(
         (Some(_), false) => {
             return Err(format!(
                 "dependency '{pkg}': symbol '{sym}' declares `frees_with` but hands nothing back \
-                 that the caller owns. It applies to `out_alloc_str`, and to nothing else."
+                 that the caller owns. It applies to `out_alloc_str` and to an `alloc_str` \
+                 return, and to nothing else."
             ));
         }
         (None, false) => {}
+    }
+
+    // An `alloc_str` return has to survive to be handed back, and two out-shapes
+    // swallow the return value instead: an `out_buffer` reads it as an element
+    // count and an `out_handle` folds it into the failure convention. Either one
+    // would leave the string allocated with nothing left holding it — a leak on
+    // every call, which is the whole thing this spelling exists to prevent.
+    let outs_refs: Vec<&ArgSpec> = outs.iter().map(|&i| &args[i]).collect();
+    if ret_owns && !ret_is_a_key(&ret_t, &outs_refs, spec.fails_when) {
+        return Err(format!(
+            "dependency '{pkg}': symbol '{sym}' returns an `alloc_str`, but an out-parameter \
+             already reads the return value — an `out_buffer` as its element count, an \
+             `out_handle` through `fails_when`. The string would be allocated and then dropped. \
+             Bind the return one way or the other."
+        ));
     }
 
     // Without a header the shim writes its own `extern` for the symbol, and a
@@ -1266,6 +1312,42 @@ fn parse_symbol(
     Ok(Parsed { args, outs })
 }
 
+/// Copy a string the caller owns into `target`, then release the original.
+///
+/// Shared by the two places a library hands one back: through a `char **`
+/// out-parameter, and as the return value itself. Both have the same problem —
+/// the pointer stops being valid the moment the library's own free runs, and
+/// Jade has not read it yet.
+///
+/// So the copy comes first, and who owns the copy depends on where it lands.
+/// Inside a container it is `strdup` and Jade's `ffi_free` reclaims it with the
+/// rest of the tree. At top level the ABI says a string is borrowed, so it goes
+/// to the shim's own per-thread buffer, which the next call on that thread
+/// reuses — nobody frees it and nothing accumulates.
+///
+/// A null answer is nil, which is how a library says it had nothing. A failed
+/// copy is a failed call, because a string that could not be copied is not one
+/// Jade can be handed.
+fn emit_owned_str(target: &str, var: &str, free_fn: &str) -> String {
+    let copy = if target == "out->" {
+        format!("jade_shim_owned({var})")
+    } else {
+        format!("strdup((const char*){var})")
+    };
+    format!(
+        "    if (!{var}) {{\n\
+         \x20       {target}tag = JADE_FFI_NIL;\n\
+         \x20       {target}data.as_nil = 0;\n\
+         \x20   }} else {{\n\
+         \x20       const char* {var}_c = {copy};\n\
+         \x20       {free_fn}({var});\n\
+         \x20       if (!{var}_c) return 1;\n\
+         \x20       {target}tag = JADE_FFI_STR;\n\
+         \x20       {target}data.as_str = {var}_c;\n\
+         \x20   }}\n"
+    )
+}
+
 /// Whether the C return value becomes a key of its own.
 ///
 /// Two out shapes consume it instead: an `out_buffer` reads it as the element
@@ -1383,7 +1465,11 @@ pub fn generate(
     // `jade_shim_field` has a caller only where a struct's fields are actually
     // read out of a Jade value, which a held struct with nothing carryable does
     // not do. An unused static function is a `-Wall -Werror` build failure.
-    if parsed.iter().any(|p| p.args.iter().any(|a| matches!(a, ArgSpec::OutAllocStr { .. }))) {
+    // A string the caller owns arrives either through a `char **` out-parameter
+    // or as the return value, and both go through the same helper.
+    if parsed.iter().any(|p| p.args.iter().any(|a| matches!(a, ArgSpec::OutAllocStr { .. })))
+        || names.iter().any(|s| symbols[*s].ret == "alloc_str")
+    {
         out.push_str(OWNED_HELPER);
     }
     if parsed.iter().any(|p| p.args.iter().any(|a| matches!(a, ArgSpec::InStruct { .. })))
@@ -1440,6 +1526,28 @@ pub fn generate(
 
     for sym in &names {
         out.push_str(&declare(name, sym, &symbols[*sym], structs, headers)?);
+    }
+    // The free functions `frees_with` names. The shim calls them by name and
+    // nothing else declares them: they are not bound symbols — a call that takes
+    // a lone `void *` and reports nothing is refused as a binding, which is
+    // exactly the shape a free function has. With a header the header declares
+    // them, and a second declaration that disagrees would be a compile error, so
+    // this only runs without one.
+    if headers.is_empty() {
+        let mut frees: Vec<&str> = names
+            .iter()
+            .filter_map(|s| symbols[*s].frees_with.as_deref())
+            // libc's own, already declared by <stdlib.h> in the preamble.
+            .filter(|f| *f != "free")
+            .collect();
+        frees.sort_unstable();
+        frees.dedup();
+        for f in frees {
+            // `void*` rather than the real parameter type, which is not
+            // recorded anywhere. Every pointer has one representation on the
+            // targets Jade builds for, so the call is right either way.
+            out.push_str(&format!("extern void {f}(void*);\n"));
+        }
     }
     for sym in &names {
         // The trampoline first: the wrapper names it as the C argument.
@@ -2461,9 +2569,14 @@ fn wrapper(
     }
 
     let ret_t = parse_ret(pkg, sym, &spec.ret)?;
+    let ret_owns = matches!(ret_t, RetSpec::AllocStr);
 
     match &ret_t {
         RetSpec::Nil => body.push_str(&format!("    {call};\n")),
+        // The cast is only on the owning string: the free function takes its
+        // pointer back, so `r` is writable, and a library that returns a `const
+        // char *` the caller must release would otherwise discard the qualifier.
+        RetSpec::AllocStr => body.push_str(&format!("    char* r = (char*){call};\n")),
         other => body.push_str(&format!("    {} r = {call};\n", other.c_decl())),
     }
     if let Some(test) = fail_test {
@@ -2473,6 +2586,13 @@ fn wrapper(
         body.push_str(&format!("    if ({test}) {{\n"));
         if !cleanup.is_empty() {
             body.push_str(&format!("       {cleanup}\n"));
+        }
+        // A failed call that still allocated. `fails_when = "null"` leaves
+        // nothing to release, but it is not the only convention a pointer
+        // return can carry, and a raise must not leak.
+        if ret_owns {
+            let free_fn = spec.frees_with.as_deref().expect("validated by parse_symbol");
+            body.push_str(&format!("        if (r) {free_fn}(r);\n"));
         }
         body.push_str("        out->tag = JADE_FFI_ERROR;\n");
         body.push_str("        out->data.as_str = jade_shim_errmsg();\n");
@@ -2490,6 +2610,14 @@ fn wrapper(
             }
             RetSpec::Scalar(t) => {
                 format!("    {target}tag = {};\n    {target}data.{} = r;\n", t.tag, t.field)
+            }
+            // Copied out and the original released, which is the difference
+            // between this and a plain `str` return. A `str` is the library's
+            // and stays the library's; this one was malloc'd for the caller, so
+            // leaving it is a leak on every call.
+            RetSpec::AllocStr => {
+                let free_fn = spec.frees_with.as_deref().expect("validated by parse_symbol");
+                emit_owned_str(target, "r", free_fn)
             }
             // The pointer belongs to the library, or to the caller's own blob,
             // and neither is Jade's to hold — so it is copied out. A NULL return
@@ -2656,25 +2784,8 @@ fn wrapper(
                 ));
             }
             ArgSpec::OutAllocStr { .. } => {
-                // Copied in both positions, and the original released either
-                // way. Borrowing at top level is only safe while the pointer
-                // stays valid, and this one stops being valid on the next line.
                 let free_fn = spec.frees_with.as_deref().expect("validated by parse_symbol");
-                let copy = if target == "out->" {
-                    format!("jade_shim_owned(oastr{i})")
-                } else {
-                    format!("strdup((const char*)oastr{i})")
-                };
-                body.push_str(&format!(
-                    "    if (!oastr{i}) {{\n\
-                     \x20       {target}tag = JADE_FFI_NIL;\n\
-                     \x20       {target}data.as_nil = 0;\n\
-                     \x20   }} else {{\n\
-                     \x20       {target}tag = JADE_FFI_STR;\n\
-                     \x20       {target}data.as_str = {copy};\n\
-                     \x20       {free_fn}(oastr{i});\n\
-                     \x20   }}\n"
-                ));
+                body.push_str(&emit_owned_str(target, &format!("oastr{i}"), free_fn));
             }
             ArgSpec::SizedBuffer { elem, .. } => {
                 // All of it. The call reports a status rather than a count, so
