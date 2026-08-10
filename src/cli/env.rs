@@ -27,18 +27,23 @@ pub fn run_env(json: bool) {
     let installed_providers: Vec<String> =
         crate::providers::installed().into_iter().map(|p| p.name).collect();
 
-    // Project info
+    // Project info.
+    //
+    // A manifest that will not parse is said out loud here rather than reported
+    // as "no project", but it does not stop the command: `jade env` is what
+    // someone runs to find out where they are, and the rest of the report is
+    // still true. The error goes to stderr so `--json` stays parseable.
     let project_info = crate::project::find_project_root().and_then(|root| {
-        crate::project::load_project(&root).ok().and_then(|m| {
-            let entry = m.entry_file().to_string();
-            let p = m.project?;
-            Some((
-                root.join("jade.toml").display().to_string(),
-                p.name,
-                p.version.unwrap_or_else(|| "?".to_string()),
-                entry,
-            ))
-        })
+        let manifest =
+            crate::project::load_project(&root).inspect_err(|e| eprintln!("error: {e}")).ok()?;
+        let entry = manifest.entry_file().to_string();
+        let p = manifest.project?;
+        Some((
+            root.join("jade.toml").display().to_string(),
+            p.name,
+            p.version.unwrap_or_else(|| "?".to_string()),
+            entry,
+        ))
     });
 
     if json {

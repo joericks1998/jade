@@ -1927,12 +1927,108 @@ mod tests;
 /// export is the wrong header, and that is worth catching before the shim fails
 /// to link.
 ///
+/// The names come back as C wrote them, with whatever the object format spelled
+/// them with taken off — see [`plain_name`]. That is what every caller is
+/// comparing against: a header's declaration, `jade_pkg_init`, or a symbol the
+/// generated shim is about to write into a C identifier.
+///
 /// `None` means the symbol table could not be read, which is a reason to skip
 /// the check rather than to fail: an unreadable table proves nothing.
 pub fn exported_symbols(lib: &Path) -> Option<std::collections::HashSet<String>> {
     let syms = nm_symbols(lib)?;
     let out: std::collections::HashSet<String> = syms.into_iter().map(|(_, name)| name).collect();
     (!out.is_empty()).then_some(out)
+}
+
+/// The object format a library is in.
+///
+/// Only two things about reading a symbol table depend on it, but both are the
+/// difference between a binding and a false "not exported" — see
+/// [`plain_name`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectFormat {
+    /// Mach-O, including a universal ("fat") archive of them.
+    MachO,
+    /// ELF.
+    Elf,
+}
+
+/// Which format a file is, read from its first four bytes.
+///
+/// Read from the file rather than from `cfg!(target_os)`, because the two
+/// answer different questions. `cfg!` says which platform this build of `jade`
+/// runs on; what matters here is what the *file* is. Jade is Unix-only and a
+/// Mac being handed a `.so` is ordinary — a checked-in Linux artifact, a
+/// container's `/usr/lib` mounted to look at — and a host-shaped guess reads
+/// every one of its names wrongly. Four bytes are the only source that is right
+/// in both cases.
+///
+/// `None` for anything that is not an object file, which is not the same as an
+/// error: an archive or a linker stub can still have a readable symbol table.
+pub fn object_format(lib: &Path) -> Option<ObjectFormat> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(lib).ok()?;
+    let mut magic = [0u8; 4];
+    f.read_exact(&mut magic).ok()?;
+    magic_format(&magic)
+}
+
+/// The same test against bytes already in hand.
+fn magic_format(bytes: &[u8]) -> Option<ObjectFormat> {
+    let magic = bytes.get(..4)?;
+    match [magic[0], magic[1], magic[2], magic[3]] {
+        // Mach-O, 64- and 32-bit, either byte order.
+        [0xcf, 0xfa, 0xed, 0xfe] | [0xfe, 0xed, 0xfa, 0xcf]
+        | [0xce, 0xfa, 0xed, 0xfe] | [0xfe, 0xed, 0xfa, 0xce]
+        // Mach-O universal ("fat") binary.
+        | [0xca, 0xfe, 0xba, 0xbe] | [0xbe, 0xba, 0xfe, 0xca] => Some(ObjectFormat::MachO),
+        [0x7f, b'E', b'L', b'F'] => Some(ObjectFormat::Elf),
+        _ => None,
+    }
+}
+
+/// The format to read `lib`'s names by, with a fallback for the files the magic
+/// number does not classify.
+///
+/// A file `nm` can read and the magic cannot name is, in practice, a static
+/// archive — and an archive on this machine was built for this machine, so the
+/// host is the best answer available. This is the one place `cfg!` is right:
+/// the file has been asked first and had nothing to say.
+fn symbol_format(lib: &Path) -> ObjectFormat {
+    object_format(lib).unwrap_or(if cfg!(target_os = "macos") {
+        ObjectFormat::MachO
+    } else {
+        ObjectFormat::Elf
+    })
+}
+
+/// The name a symbol table entry stands for, with what the format spelled it
+/// with taken back off.
+///
+/// Two rules, and only one of them depends on the format.
+///
+/// **A version suffix is never part of the name.** A library built with a
+/// version script exports `lzma_version_number@@XZ_5.0`; `@@` is the default
+/// version and a single `@` a non-default one, and both forms sit in the same
+/// table. Nothing downstream asks for the suffixed string: `dlsym` and the
+/// linker both resolve the plain name to the default version, and `@` is not a
+/// character a C identifier may contain, so a name carrying one cannot even be
+/// written into the shim. Cutting at the first `@` is safe whatever the format,
+/// because no format puts one in a C function's name.
+///
+/// **The leading underscore is Mach-O's, and only Mach-O's.** There a C
+/// function `foo` is `_foo` in the table, so removing one is reading the name
+/// back. ELF adds no prefix, and applying the rule there is wrong in both
+/// directions: `__gmpz_init` — the whole of GMP's public API — stops matching
+/// the header that declares it, and a library exporting `_alpha` starts
+/// matching a header declaring `alpha`, which binds cleanly and then cannot
+/// load.
+fn plain_name(name: &str, format: ObjectFormat) -> &str {
+    let bare = name.split('@').next().unwrap_or(name);
+    match format {
+        ObjectFormat::MachO => bare.strip_prefix('_').unwrap_or(bare),
+        ObjectFormat::Elf => bare,
+    }
 }
 
 /// Everything `nm` reports as defined in `lib`, as (type letter, name) pairs.
@@ -1971,6 +2067,13 @@ fn nm_symbols(lib: &Path) -> Option<Vec<(String, String)>> {
         return None;
     }
 
+    // Read from the artifact, not from the platform this build runs on: the
+    // rule for a leading underscore is the file's, and the file may not be
+    // native. `--with-symbol-versions` is deliberately not asked for — the
+    // versions are stripped either way, and the flag is GNU-only, so requesting
+    // it would only add noise on Linux and a rejected invocation on a Mac.
+    let format = symbol_format(lib);
+
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
     for line in text.lines() {
@@ -1982,10 +2085,14 @@ fn nm_symbols(lib: &Path) -> Option<Vec<(String, String)>> {
         if !matches!(kind, "T" | "t" | "D" | "S" | "B" | "W" | "i") {
             continue;
         }
-        // Mach-O prefixes every C symbol with an underscore; ELF does not.
-        let name = name.strip_prefix('_').unwrap_or(name).to_string();
+        let name = plain_name(name, format).to_string();
+        if name.is_empty() {
+            continue;
+        }
         // Unioning several listings means the same symbol arrives more than
         // once; callers count these, so a duplicate would inflate the total.
+        // Several *versions* of one symbol arrive that way too, now that the
+        // version is not part of the name.
         if seen.insert((kind.to_string(), name.clone())) {
             out.push((kind.to_string(), name));
         }
@@ -2003,9 +2110,8 @@ fn nm_symbols(lib: &Path) -> Option<Vec<(String, String)>> {
 ///
 /// Only *code* symbols are listed. A data export cannot be called, so offering
 /// it as something to write a prototype for would be an invitation to a
-/// mistake. Names that keep a leading underscore after the Mach-O one is
-/// stripped are dropped too: those are the compiler's own (`__stack_chk_fail`)
-/// or C++ mangled (`_Z3fooi`), and neither is bindable.
+/// mistake. Beyond that the list is what the library exports — see
+/// [`is_callable_name`] for the little that is left out and why.
 ///
 /// Empty when `nm` is missing or the library exports nothing bindable, which
 /// the caller reports rather than treating as a table.
@@ -2013,9 +2119,33 @@ pub fn placeholder_symbols(lib: &Path) -> BTreeMap<String, CSymbol> {
     let Some(syms) = nm_symbols(lib) else { return Default::default() };
     syms.into_iter()
         .filter(|(kind, _)| matches!(kind.as_str(), "T" | "t" | "W"))
-        .filter(|(_, name)| !name.starts_with('_'))
+        .filter(|(_, name)| is_callable_name(name))
         .map(|(_, name)| (name, CSymbol::unresolved()))
         .collect()
+}
+
+/// Whether a name is worth offering as something to write a prototype for.
+///
+/// The rule used to be "no leading underscore", which is the Mach-O prefix rule
+/// applied a second time and wrong on ELF for the same reason: `__gmpz_init` is
+/// not a private name, it is the whole of GMP's public API. An underscore says
+/// who reserved a name, not whether it can be called — and a placeholder is
+/// inert, since it lands in `jade.toml` as `"?"` and every command that would
+/// use the binding refuses it by name. So an extra entry costs a line in a list
+/// the user reads, while a missing one is exactly the false "not exported by
+/// the library" this path exists to stop producing.
+///
+/// What is left out is what no prototype could rescue. A C++ mangled name
+/// (`_Z3fooi`) is not a C function: the shim would declare it `extern "C"` and
+/// call it with the wrong ABI. And `_init`, `_fini` and `_start` belong to the
+/// loader rather than to the library's API.
+fn is_callable_name(name: &str) -> bool {
+    // Itanium mangling is `_Z` then a digit or an upper-case tag letter, which
+    // is what keeps a C name like `_Zebra` out of the test.
+    let mangled = name.strip_prefix("_Z").is_some_and(|rest| {
+        rest.starts_with(|c: char| c.is_ascii_digit() || c.is_ascii_uppercase())
+    });
+    !mangled && !matches!(name, "_init" | "_fini" | "_start")
 }
 
 /// Whether a file is a shared library this platform could load.
@@ -2030,29 +2160,13 @@ pub fn placeholder_symbols(lib: &Path) -> BTreeMap<String, CSymbol> {
 /// header, not a library) reads as an ordinary file with an ordinary name, and
 /// every stage before `dlopen` is happy to pass it along.
 pub fn is_loadable_object(lib: &Path) -> bool {
-    use std::io::Read;
-    let Ok(mut f) = std::fs::File::open(lib) else { return false };
-    let mut magic = [0u8; 4];
-    if f.read_exact(&mut magic).is_err() {
-        return false;
-    }
-    bytes_are_loadable_object(&magic)
+    object_format(lib).is_some()
 }
 
 /// The same test against bytes already in hand, for `pkg::materialize`, which
 /// has read the artifact and is about to write it into `libs/`.
 pub fn bytes_are_loadable_object(bytes: &[u8]) -> bool {
-    let Some(magic) = bytes.get(..4) else { return false };
-    matches!(
-        [magic[0], magic[1], magic[2], magic[3]],
-        // Mach-O, 64- and 32-bit, either byte order.
-        [0xcf, 0xfa, 0xed, 0xfe] | [0xfe, 0xed, 0xfa, 0xcf]
-        | [0xce, 0xfa, 0xed, 0xfe] | [0xfe, 0xed, 0xfa, 0xce]
-        // Mach-O universal ("fat") binary.
-        | [0xca, 0xfe, 0xba, 0xbe] | [0xbe, 0xba, 0xfe, 0xca]
-        // ELF.
-        | [0x7f, b'E', b'L', b'F']
-    )
+    magic_format(bytes).is_some()
 }
 
 /// Header names a library called `lib` might plausibly ship.

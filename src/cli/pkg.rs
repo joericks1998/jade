@@ -117,6 +117,50 @@ fn relock_and_fetch(
     Ok(resolved)
 }
 
+// ── reading a header ──────────────────────────────────────────────────────────
+
+/// Everything that says *how* to read a header, rather than which one.
+///
+/// One value instead of three parameters because `add`, `bind` and `install`
+/// each take the same three and pass them straight through to the same place.
+/// They travel together, so a fourth one arrives in one signature rather than
+/// four.
+#[derive(Clone, Copy, Default)]
+pub struct HeaderOptions<'a> {
+    /// Extra `-I` directories, in the order the user gave them.
+    pub include: &'a [String],
+    /// `-D` macros, defined before the header is read. Some headers require
+    /// one: `pcre2.h` raises `#error` unless `PCRE2_CODE_UNIT_WIDTH` is set,
+    /// and `fuse.h` unless `FUSE_USE_VERSION` is.
+    pub defines: &'a [String],
+    /// Bind only the symbols whose name contains this. A large header can then
+    /// be bound a piece at a time, or a single symbol taken out of it.
+    pub only: Option<&'a str>,
+}
+
+/// Refuse a `-D` value that is not a macro definition.
+///
+/// The string reaches two compilers — clang, when the header is read, and `cc`,
+/// when the shim is built — so it is checked once here, where the user typed
+/// it, rather than being discovered as a compiler diagnostic much later. The
+/// accepted shape is C's own: a name, optionally `=` and a value.
+pub(crate) fn check_defines(defines: &[String]) -> Result<(), String> {
+    for d in defines {
+        let name = d.split('=').next().unwrap_or(d);
+        let ok = !name.is_empty()
+            && !name.starts_with(|c: char| c.is_ascii_digit())
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !ok {
+            return Err(format!(
+                "'{d}' is not a macro definition. -D takes a name, and optionally a value:\n  \
+                 -D PCRE2_CODE_UNIT_WIDTH=8      the header's own configuration macro\n  \
+                 -D NDEBUG                       a name on its own"
+            ));
+        }
+    }
+    Ok(())
+}
+
 // ── add ───────────────────────────────────────────────────────────────────────
 
 /// `jade pkg add <name> --path <p> | --url <u> [--version <v>] [--header <h.h>]`
@@ -132,9 +176,13 @@ pub fn run_add(
     version: Option<&str>,
     c_abi: bool,
     header: Option<&str>,
-    include: &[String],
+    opts: HeaderOptions<'_>,
 ) {
     let root = root_or_exit();
+
+    // Before the manifest is touched, since a bad -D is a typo to fix rather
+    // than a state to roll back.
+    check_defines(opts.defines).unwrap_or_else(|e| fail(e));
 
     let source = match (path, url) {
         (Some(p), None) => manifest::Source::Path(p),
@@ -222,9 +270,47 @@ pub fn run_add(
     });
 
     if let Some(h) = found {
-        bind_header(&root, name, &h.to_string_lossy(), include, None, false, lib_path.as_deref())
-            .unwrap_or_else(|e| fail_new_dependency(&root, name, existed, e));
+        match bind_header(&root, name, &h.to_string_lossy(), opts, false, lib_path.as_deref()) {
+            Ok(()) => {}
+            // Nothing was written, so there is nothing here that a later command
+            // could use — the entry goes with it.
+            Err(e @ BindFailure::Unwritten(_)) => fail_new_dependency(&root, name, existed, e),
+            // The header was read and is now recorded on the dependency, and
+            // that is precisely why the entry stays. Rolling it back would
+            // delete the header the skip report just said was recorded, and
+            // send the user off to write a table with no header behind it —
+            // where `int` is Jade's width standing in for the library's.
+            //
+            // Nothing is locked or installed, because a C dependency with no
+            // symbols does not resolve: the table the user is being asked to
+            // write is the missing half, and `jade pkg install` is what
+            // completes the rest once it is there. Said out loud rather than
+            // left to be discovered, since until then every other `pkg` command
+            // reports the same gap.
+            Err(e @ BindFailure::NothingBound(_)) => {
+                eprintln!("{e}");
+                println!("added {name} to jade.toml, with its header and no symbols");
+                eprintln!(
+                    "note: nothing bound, so {name} has no binding yet. Write the table\n  \
+                     [dependencies.{name}.symbols] by hand — the reasons above name the spelling \
+                     each\n  symbol needs, and the header is recorded, so what you write is \
+                     checked against\n  the library's own prototypes — then run\n    \
+                     jade pkg install"
+                );
+                return;
+            }
+        }
     } else if abi == Abi::C {
+        // `--only` narrows a header, and there is no header here. Said out
+        // loud, because a filter that was quietly dropped reads afterwards as
+        // one that matched nothing.
+        if opts.only.is_some() {
+            eprintln!(
+                "note: --only had nothing to narrow — it selects declarations out of a header, \
+                 and none was read."
+            );
+        }
+
         // No header, but the library still says what it exports. Write those
         // names with `"?"` for the prototype rather than nothing at all: the
         // user fills in blanks in a file that already lists every function,
@@ -485,35 +571,179 @@ fn detect_abi(lib: &std::path::Path) -> Option<Abi> {
 /// wherever the command was run — a relative `-I` resolves against the wrong
 /// directory, and the failure is a "file not found" from cc at install time,
 /// well away from the cause.
-fn header_locations(header: &std::path::Path, include: &[String]) -> (Vec<String>, Vec<String>) {
-    let headers = vec![
-        header
-            .file_name()
-            .map(|f| f.to_string_lossy().into_owned())
-            .unwrap_or_else(|| header.to_string_lossy().into_owned()),
-    ];
-
+///
+/// **A header is recorded the way it was written wherever that is possible, and
+/// by its bare name only when it is not.** Recording `netlink/netlink.h` as
+/// `netlink.h` makes it resolvable only by putting `/usr/include/libnl3/netlink`
+/// on the include path — and libnl ships `netlink/errno.h`, so the shim's own
+/// `#include <errno.h>` five lines from the top then binds to a file of `NLE_*`
+/// constants. The shim fails to compile on `errno`, and the compiler's note says
+/// to include `<errno.h>`, which is already there. Nineteen headers on an
+/// ordinary Linux image can shadow one the shim includes — `uv/errno.h`,
+/// `linux/string.h`, all of `bsd/` — and each needs only one fallible symbol in
+/// the binding to bring `errno` into the shim and trip it.
+///
+/// Keeping the nested spelling means the *root* goes on the path and the leaf
+/// directory never does, which removes the whole class rather than one header of
+/// it. So exactly one directory is dropped: the header's own. Its parent stays,
+/// because that is what `brotli/encode.h`'s `#include <brotli/port.h>` resolves
+/// against.
+///
+/// This is the one place where what clang was given and what `cc` will be given
+/// deliberately differ, and only by that leaf. Reading the header keeps the
+/// wider list, so nothing the parse could reach becomes unreachable; the shim
+/// compile reaches the same neighbours through the nested spelling.
+pub(crate) fn header_locations(
+    header: &std::path::Path,
+    include: &[String],
+) -> (Vec<String>, Vec<String>) {
     // The same list clang was given, so the shim compile cannot be missing a
     // directory the parse needed. The two used to be computed separately, and
     // the parse got the smaller set.
-    (headers, pkg::bindgen::include_roots(header, include))
+    let mut dirs = pkg::bindgen::include_roots(header, include);
+
+    let Some((spelling, root)) = nested_spelling(header, include, std::path::Path::new(".")) else {
+        let bare = header
+            .file_name()
+            .map(|f| f.to_string_lossy().into_owned())
+            .unwrap_or_else(|| header.to_string_lossy().into_owned());
+        return (vec![bare], dirs);
+    };
+
+    if let Some(own) = header.parent().filter(|p| !p.as_os_str().is_empty()).map(absolute) {
+        dirs.retain(|d| *d != own);
+    }
+    if !dirs.contains(&root) {
+        // The directory the spelling resolves against. Only reached when the
+        // header was written relative to the working directory, since a root
+        // the user named with -I is already in the list.
+        dirs.push(root);
+    }
+    (vec![spelling], dirs)
+}
+
+/// How to spell a header so a directory-qualified `#include` finds it, and the
+/// directory that has to be on the include path for that to work.
+///
+/// `None` when there is no such spelling — a header sitting directly in an
+/// include root, which is the common case and needs nothing done to it.
+///
+/// Two ways to arrive at one, and both are the user's own words rather than a
+/// guess. A relative path is taken as written: `--header inc/mylib.h` becomes
+/// `#include <inc/mylib.h>` against the working directory. An absolute path is
+/// spelled relative to the deepest `-I` directory that contains it, because
+/// naming a directory with `-I` is the user saying it is an include root.
+///
+/// A path derived from the header rather than named by the user is deliberately
+/// not a candidate. `/opt/homebrew/include/libfdt.h` sits under `/opt/homebrew`
+/// as `include/libfdt.h`, and taking that spelling would drop
+/// `/opt/homebrew/include` from the path — where `libfdt.h`'s own
+/// `#include <libfdt_env.h>` has to find its neighbour.
+///
+/// `cwd` is what a relative header is relative *to*. It is a parameter so the
+/// tests can name a directory of their own: `cargo test` runs in parallel, so
+/// nothing here may change the process's working directory.
+pub(crate) fn nested_spelling(
+    header: &std::path::Path,
+    include: &[String],
+    cwd: &std::path::Path,
+) -> Option<(String, String)> {
+    use std::path::{Component, Path};
+
+    let has_dir =
+        |p: &Path| p.parent().is_some_and(|d| !d.as_os_str().is_empty() && d != Path::new("."));
+
+    // Written relative, with a directory in it. `..` is excluded: it spells the
+    // same file from the working directory only, and the recorded path is
+    // replayed from `libs/<dep>/`.
+    if header.is_relative() && has_dir(header) {
+        let plain = header.components().all(|c| matches!(c, Component::Normal(_)));
+        if plain {
+            return Some((slashed(header), absolute(cwd)));
+        }
+    }
+
+    // Under a directory the user named with -I. The deepest one wins: it gives
+    // the shortest spelling, and it is the directory the library's own headers
+    // include each other through.
+    let full = std::fs::canonicalize(header).ok()?;
+    let mut best: Option<(String, String)> = None;
+    for dir in include {
+        let Ok(root) = std::fs::canonicalize(dir) else { continue };
+        let Ok(rel) = full.strip_prefix(&root) else { continue };
+        if !has_dir(rel) {
+            continue;
+        }
+        let better = best.as_ref().is_none_or(|(s, _)| slashed(rel).len() < s.len());
+        if better {
+            best = Some((slashed(rel), root.to_string_lossy().into_owned()));
+        }
+    }
+    best
+}
+
+/// A path as an `#include` spells it, with forward slashes.
+fn slashed(p: &std::path::Path) -> String {
+    p.components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// The same absolute spelling `bindgen::include_roots` produces, so the two
+/// lists can be compared string against string.
+fn absolute(p: &std::path::Path) -> String {
+    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()).to_string_lossy().into_owned()
+}
+
+/// Why a header produced no symbol table, and what `jade.toml` holds because of
+/// it.
+///
+/// The two are not the same failure and must not be reported as one. A header
+/// that could not be read leaves the manifest untouched; a header that was read
+/// and every symbol of which was skipped leaves the header *recorded*, which is
+/// the state a hand-written table needs — without it `int` in that table means
+/// Jade's 64-bit width rather than whatever the library declared, which is
+/// exactly the trap the width check exists to catch.
+///
+/// So `jade pkg add` has to tell them apart before deciding whether to roll its
+/// entry back. It used to roll back on both, which deleted the header the
+/// message in the same breath said had been recorded.
+pub(crate) enum BindFailure {
+    /// Nothing was written. The header could not be read, or it describes some
+    /// other library.
+    Unwritten(String),
+    /// The header was read and recorded on the dependency; no symbol survived
+    /// binding.
+    NothingBound(String),
+}
+
+impl std::fmt::Display for BindFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BindFailure::Unwritten(m) | BindFailure::NothingBound(m) => f.write_str(m),
+        }
+    }
 }
 
 /// Read a header and write the tables into `jade.toml`. Shared by `add`,
 /// `install` and `bind`, so all three produce the same manifest.
-fn bind_header(
+pub(crate) fn bind_header(
     root: &std::path::Path,
     name: &str,
     header: &str,
-    include: &[String],
-    only: Option<&str>,
+    opts: HeaderOptions<'_>,
     quiet: bool,
     lib: Option<&std::path::Path>,
-) -> Result<(), String> {
+) -> Result<(), BindFailure> {
     let header_path = std::path::Path::new(header);
     if !header_path.exists() {
-        return Err(format!("no such header: {header}"));
+        return Err(BindFailure::Unwritten(format!("no such header: {header}")));
     }
+    check_defines(opts.defines).map_err(BindFailure::Unwritten)?;
 
     // Read the export table first: it is both the check below and, for an
     // umbrella header that declares nothing itself, what decides which of the
@@ -524,7 +754,7 @@ fn bind_header(
     // to pass `--path`, which you just did — and every other header quietly
     // binds less, since what it includes has nothing to be selected against.
     if lib.is_some() && exported.is_none() {
-        return Err(format!(
+        return Err(BindFailure::Unwritten(format!(
             "could not read the export table of {}. Nothing is wrong with the header — the \
              library's symbols are what say which of its declarations to bind, and `nm` reported \
              none.\n  A stripped static archive does that, as does a file that is not a library at \
@@ -532,9 +762,11 @@ fn bind_header(
              something.",
             lib.map(|l| l.display().to_string()).unwrap_or_default(),
             lib.map(|l| l.display().to_string()).unwrap_or_default()
-        ));
+        )));
     }
-    let binding = pkg::bindgen::from_header(header_path, include, only, exported.as_ref())?;
+    let binding =
+        pkg::bindgen::from_header(header_path, opts.include, opts.only, exported.as_ref())
+            .map_err(BindFailure::Unwritten)?;
 
     // Check the header against the library it is supposed to describe. A header
     // declaring symbols the library does not export is the wrong header, and
@@ -543,27 +775,39 @@ fn bind_header(
     if let Some(exported) = &exported {
         let (covered, total) = pkg::bindgen::coverage(&binding, exported);
         if covered == 0 && !binding.symbols.is_empty() {
-            return Err(format!(
+            return Err(BindFailure::Unwritten(format!(
                 "{header} declares none of the {total} symbols {} exports — it looks like the \
                  wrong header for this library.",
                 lib.map(|l| l.display().to_string()).unwrap_or_default()
-            ));
+            )));
         }
         if !quiet {
             println!("covers {covered} of the {total} symbols the library exports");
         }
     }
 
-    if binding.symbols.is_empty() {
-        return Err(format!(
-            "{}\nnothing in {header} could be bound. The reasons above say why; a symbol table \
-             written by hand can still cover what this could not.",
-            binding.report()
-        ));
-    }
+    // Where the header is gets recorded even when nothing came out of it, and
+    // that is the whole point of writing it before the check below. `--only` on
+    // a symbol the generator refuses is an ordinary way to arrive here: the skip
+    // report says to write the stanza by hand, and a stanza written against a
+    // dependency with no `headers` is a *headerless* binding, where `int` means
+    // Jade's 64-bit width rather than whatever the library declared. Following
+    // the instruction landed the user in exactly the trap the width check exists
+    // to catch. A header clang could read is a fact about the dependency,
+    // whether or not any symbol survived it.
+    let (headers, dirs) = header_locations(header_path, opts.include);
+    manifest::set_bindings(root, name, &binding.symbols, &binding.structs, &headers, &dirs)
+        .map_err(BindFailure::Unwritten)?;
 
-    let (headers, dirs) = header_locations(header_path, include);
-    manifest::set_bindings(root, name, &binding.symbols, &binding.structs, &headers, &dirs)?;
+    if binding.symbols.is_empty() {
+        return Err(BindFailure::NothingBound(format!(
+            "{}\nnothing in {header} could be bound. The reasons above say why; a symbol table \
+             written by hand can still cover what this could not — and [dependencies.{name}] now \
+             records the header, so what you write is checked against the library's own \
+             prototypes rather than standing in for them.",
+            binding.report()
+        )));
+    }
 
     if !quiet {
         println!("{}", binding.report());
@@ -580,8 +824,9 @@ fn bind_header(
 /// hand. What it *could not* bind is printed, with reasons: a generator that
 /// silently covers two thirds of an API is how the missing third is found at
 /// run time.
-pub fn run_bind(name: &str, header: &str, include: &[String], only: Option<&str>, dry_run: bool) {
+pub fn run_bind(name: &str, header: &str, opts: HeaderOptions<'_>, dry_run: bool) {
     let root = root_or_exit();
+    check_defines(opts.defines).unwrap_or_else(|e| fail(e));
 
     if dry_run {
         // Report only. Useful for looking at a large header before committing
@@ -600,8 +845,9 @@ pub fn run_bind(name: &str, header: &str, include: &[String], only: Option<&str>
             .map(|p| root.join(p))
             .filter(|p| p.exists())
             .and_then(|p| pkg::bindgen::exported_symbols(&p));
-        let binding = pkg::bindgen::from_header(header_path, include, only, exported.as_ref())
-            .unwrap_or_else(|e| fail(e));
+        let binding =
+            pkg::bindgen::from_header(header_path, opts.include, opts.only, exported.as_ref())
+                .unwrap_or_else(|e| fail(e));
         println!("{}", binding.report());
         println!("\n(dry run — jade.toml unchanged)");
         return;
@@ -617,8 +863,7 @@ pub fn run_bind(name: &str, header: &str, include: &[String], only: Option<&str>
         .map(|p| root.join(p))
         .filter(|p| p.exists());
 
-    bind_header(&root, name, header, include, only, false, lib.as_deref())
-        .unwrap_or_else(|e| fail(e));
+    bind_header(&root, name, header, opts, false, lib.as_deref()).unwrap_or_else(|e| fail(e));
     println!("\nwrote [dependencies.{name}.symbols] to jade.toml");
 
     // Build it too. Re-binding and then leaving the shim stale is never what
@@ -640,8 +885,9 @@ fn bind_missing_symbols(root: &std::path::Path, manifest: &ProjectManifest) -> b
         }
         let Some(headers) = entry.headers.as_ref().filter(|h| !h.is_empty()) else { continue };
 
-        // The manifest records a bare filename plus the directories to find it
-        // in, so the lookup is the same one the shim compile will do.
+        // The manifest records the header the way an `#include` spells it, plus
+        // the directories to find it in, so the lookup here is the same one the
+        // shim compile will do.
         let dirs = entry.include_dirs.clone().unwrap_or_default();
         let found = dirs
             .iter()
@@ -660,7 +906,8 @@ fn bind_missing_symbols(root: &std::path::Path, manifest: &ProjectManifest) -> b
         };
 
         println!("binding {name} from {}", headers[0]);
-        match bind_header(root, name, &path.to_string_lossy(), &dirs, None, false, lib.as_deref()) {
+        let opts = HeaderOptions { include: &dirs, ..Default::default() };
+        match bind_header(root, name, &path.to_string_lossy(), opts, false, lib.as_deref()) {
             Ok(()) => changed = true,
             Err(e) => eprintln!("note: could not bind '{name}': {e}"),
         }

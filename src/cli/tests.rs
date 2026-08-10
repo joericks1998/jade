@@ -738,3 +738,206 @@ mod package_sources {
         assert!(err.contains("a.jde") && err.contains("b.jde"), "both should appear: {err}");
     }
 }
+
+// ── pkg (cli/pkg.rs) ──────────────────────────────────────────────────────────
+
+mod pkg {
+    use super::TempDir;
+    use crate::cli::pkg::{
+        BindFailure, bind_header, check_defines, header_locations, nested_spelling,
+    };
+
+    fn defines(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_macro_with_a_value_is_accepted() {
+        assert!(check_defines(&defines(&["PCRE2_CODE_UNIT_WIDTH=8"])).is_ok());
+    }
+
+    #[test]
+    fn a_bare_macro_name_is_accepted() {
+        assert!(check_defines(&defines(&["NDEBUG", "_GNU_SOURCE"])).is_ok());
+    }
+
+    #[test]
+    fn a_value_may_be_anything_the_compiler_takes() {
+        // Only the name is Jade's business; the replacement text is C's.
+        assert!(check_defines(&defines(&["FOO=(1 + 2)", "BAR="])).is_ok());
+    }
+
+    #[test]
+    fn something_that_is_not_a_macro_name_is_refused_with_the_shape() {
+        let err = check_defines(&defines(&["-DFOO"])).unwrap_err();
+        assert!(err.contains("-DFOO"), "should quote what was given: {err}");
+        assert!(err.contains("PCRE2_CODE_UNIT_WIDTH=8"), "should show the shape: {err}");
+
+        assert!(check_defines(&defines(&["9LIVES"])).is_err(), "a name cannot start with a digit");
+        assert!(check_defines(&defines(&["A B=1"])).is_err(), "a name cannot hold a space");
+        assert!(check_defines(&defines(&["=1"])).is_err(), "a definition needs a name");
+    }
+
+    /// The ordinary case: a header sitting directly in an include root keeps its
+    /// bare name, and every directory clang was given is recorded.
+    #[test]
+    fn a_header_in_the_root_is_recorded_by_name() {
+        let t = TempDir::new("hdr_flat");
+        let h = t.write("include/glib.h", "int g_free(void *p);\n");
+        let inc = vec![t.path().join("include").to_string_lossy().into_owned()];
+
+        let (headers, dirs) = header_locations(&h, &inc);
+        assert_eq!(headers, vec!["glib.h".to_string()]);
+        assert!(
+            dirs.iter().any(|d| d.ends_with("/include")),
+            "the root belongs on the path: {dirs:?}"
+        );
+    }
+
+    /// A header one directory below a root the user named with -I keeps that
+    /// directory in the `#include`, so the directory itself never goes on the
+    /// include path — where libnl's `netlink/errno.h` would shadow the shim's
+    /// own `#include <errno.h>`.
+    #[test]
+    fn a_nested_header_keeps_its_directory_and_leaves_it_off_the_path() {
+        let t = TempDir::new("hdr_nested");
+        let h = t.write("libnl3/netlink/netlink.h", "int nl_connect(void);\n");
+        t.write("libnl3/netlink/errno.h", "#define NLE_SUCCESS 0\n");
+        let root = t.path().join("libnl3");
+        let inc = vec![root.to_string_lossy().into_owned()];
+
+        let (headers, dirs) = header_locations(&h, &inc);
+        assert_eq!(headers, vec!["netlink/netlink.h".to_string()]);
+        assert!(
+            !dirs.iter().any(|d| d.ends_with("netlink")),
+            "the shadowing directory must stay off the include path: {dirs:?}"
+        );
+        assert!(
+            dirs.iter().any(|d| d.ends_with("libnl3")),
+            "the root the spelling resolves against has to be there: {dirs:?}"
+        );
+    }
+
+    /// A relative header is recorded as the user wrote it, and the working
+    /// directory is what makes that spelling resolve. That is the isolated
+    /// repro from the bug report: `inc/mylib.h` beside an `inc/errno.h` that has
+    /// nothing to do with the C header of the same name.
+    #[test]
+    fn a_relative_header_is_recorded_the_way_it_was_written() {
+        let t = TempDir::new("hdr_rel");
+        t.write("inc/mylib.h", "int twice(int x);\n");
+        t.write("inc/errno.h", "#define MYLIB_E_BADNESS 1\n");
+
+        let (spelling, root) =
+            nested_spelling(std::path::Path::new("inc/mylib.h"), &[], t.path()).expect("nested");
+        assert_eq!(spelling, "inc/mylib.h");
+        assert!(root.ends_with(t.path().file_name().unwrap().to_str().unwrap()), "root: {root}");
+    }
+
+    /// A bare filename has no directory to keep, so nothing changes.
+    #[test]
+    fn a_bare_relative_header_has_no_nested_spelling() {
+        let t = TempDir::new("hdr_bare");
+        assert!(nested_spelling(std::path::Path::new("mylib.h"), &[], t.path()).is_none());
+    }
+
+    /// `..` spells the file from the working directory and from nowhere else,
+    /// and the recorded path is replayed from `libs/<dep>/`.
+    #[test]
+    fn a_header_reached_through_a_parent_directory_is_not_taken_as_written() {
+        let t = TempDir::new("hdr_dots");
+        assert!(nested_spelling(std::path::Path::new("../inc/mylib.h"), &[], t.path()).is_none());
+    }
+
+    /// `/opt/homebrew/include/libfdt.h` is `include/libfdt.h` under
+    /// `/opt/homebrew`, and taking that spelling would drop
+    /// `/opt/homebrew/include` — where `libfdt.h`'s own
+    /// `#include <libfdt_env.h>` finds its neighbour. Only a directory the user
+    /// named with -I counts as a root.
+    #[test]
+    fn a_directory_nobody_named_is_not_treated_as_an_include_root() {
+        let t = TempDir::new("hdr_guess");
+        let h = t.write("include/libfdt.h", "int fdt_check_header(const void *fdt);\n");
+        t.write("include/libfdt_env.h", "typedef int fdt32_t;\n");
+
+        let (headers, dirs) = header_locations(&h, &[]);
+        assert_eq!(headers, vec!["libfdt.h".to_string()]);
+        assert!(
+            dirs.iter().any(|d| d.ends_with("/include")),
+            "the header's own directory has to stay for a sibling include: {dirs:?}"
+        );
+    }
+
+    /// With two roots containing the header, the deepest wins: it gives the
+    /// spelling the library's own headers use to include each other.
+    #[test]
+    fn the_deepest_named_root_decides_the_spelling() {
+        let t = TempDir::new("hdr_deep");
+        let h = t.write("usr/include/libnl3/netlink/netlink.h", "int nl_connect(void);\n");
+        let inc = vec![
+            t.path().join("usr/include").to_string_lossy().into_owned(),
+            t.path().join("usr/include/libnl3").to_string_lossy().into_owned(),
+        ];
+
+        let (headers, _) = header_locations(&h, &inc);
+        assert_eq!(headers, vec!["netlink/netlink.h".to_string()]);
+    }
+
+    /// A project with one C dependency and nothing bound yet.
+    fn project_with_dependency(t: &TempDir) {
+        t.write(
+            "jade.toml",
+            "[project]\nname = \"p\"\nversion = \"0.1.0\"\n\n\
+             [dependencies.u]\npath = \"libu.dylib\"\nabi = \"c\"\n",
+        );
+    }
+
+    fn manifest_of(t: &TempDir) -> String {
+        std::fs::read_to_string(t.path().join("jade.toml")).expect("read jade.toml")
+    }
+
+    /// A header every symbol of which is skipped still records itself. The skip
+    /// report tells the user to write the stanza by hand, and a stanza written
+    /// against a dependency with no `headers` is a headerless binding — where
+    /// `int` is Jade's 64-bit width rather than whatever the library declared.
+    /// Following the instruction used to land in exactly the trap the width
+    /// check exists to catch.
+    #[test]
+    fn a_header_that_binds_nothing_still_records_itself() {
+        let t = TempDir::new("bind_nothing");
+        project_with_dependency(&t);
+        // Non-const `char *`: the header does not say who frees it, so it is
+        // refused with `str` and `alloc_str` named.
+        let h = t.write("u.h", "char *give(void);\n");
+
+        let err = bind_header(t.path(), "u", &h.to_string_lossy(), Default::default(), true, None)
+            .expect_err("nothing should bind");
+        assert!(
+            matches!(err, BindFailure::NothingBound(_)),
+            "the header was read, so the manifest holds it: {err}"
+        );
+
+        let toml = manifest_of(&t);
+        assert!(toml.contains("headers = [\"u.h\"]"), "the header belongs in the manifest: {toml}");
+        assert!(toml.contains("include_dirs"), "and the directories to find it in: {toml}");
+    }
+
+    /// The other half of the same rule: a header that could not be read records
+    /// nothing, so `jade pkg add` can still take its entry back out.
+    #[test]
+    fn a_header_that_could_not_be_read_records_nothing() {
+        let t = TempDir::new("bind_unreadable");
+        project_with_dependency(&t);
+        let h = t.write("u.h", "#include <a_header_that_is_not_installed.h>\nint f(void);\n");
+
+        let err = bind_header(t.path(), "u", &h.to_string_lossy(), Default::default(), true, None)
+            .expect_err("clang cannot read it");
+        assert!(
+            matches!(err, BindFailure::Unwritten(_)),
+            "nothing was written, so nothing is recorded: {err}"
+        );
+
+        let toml = manifest_of(&t);
+        assert!(!toml.contains("headers"), "a header that was not read is not a fact: {toml}");
+    }
+}

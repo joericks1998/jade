@@ -309,18 +309,26 @@ fn load_project_reads_manifest() {
 #[test]
 fn load_project_missing_file_errors() {
     let tmp = TempDir::new("loadmiss");
-    let err = load_project(tmp.path());
-    assert!(err.is_err());
-    assert!(err.unwrap_err().contains("cannot read"));
+    let err = load_project(tmp.path()).expect_err("no manifest to load");
+    // Absent, and it says so as a variant rather than as prose: a caller that
+    // falls back to a default manifest is entitled to do that here, and only
+    // here.
+    assert!(matches!(err, ManifestError::Missing(_)), "should be Missing: {err}");
+    assert!(!err.is_present());
 }
 
 #[test]
 fn load_project_invalid_toml_errors() {
     let tmp = TempDir::new("loadbad");
     std::fs::write(tmp.path().join("jade.toml"), "[project\nname =").unwrap();
-    let err = load_project(tmp.path());
-    assert!(err.is_err());
-    assert!(err.unwrap_err().contains("invalid jade.toml"));
+    let err = load_project(tmp.path()).expect_err("the manifest is not valid TOML");
+    // Present and broken, which is the distinction the type exists for. The
+    // message has to carry the parse error, because the line it names is the
+    // only part that says what to fix.
+    assert!(matches!(err, ManifestError::Malformed(..)), "should be Malformed: {err}");
+    assert!(err.is_present());
+    let msg = err.to_string();
+    assert!(msg.contains("is not valid TOML"), "should name the fault: {msg}");
 }
 
 // ── Test-file discovery ───────────────────────────────────────────────────────

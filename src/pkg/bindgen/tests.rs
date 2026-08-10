@@ -1506,3 +1506,183 @@ fn a_callback_says_which_registration_an_answer_belongs_to_is_assumed() {
         b.assumed
     );
 }
+
+// ── Reading the export table ─────────────────────────────────────────────
+//
+// Everything downstream compares a header's declaration against a name from
+// this table, so a name read wrongly is a symbol reported as missing from a
+// library that has it — or, worse, a symbol matched that the library does not
+// have, which binds clean and fails at load. Both directions are pinned here.
+
+/// A scratch directory of this test's own.
+fn scratch(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "jade-symtab-{tag}-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// Compile a real shared library, so the whole path — `nm`, the format, the
+/// names — is exercised rather than only the string rules.
+fn compile_lib(dir: &std::path::Path, name: &str, source: &str) -> Option<std::path::PathBuf> {
+    let src = dir.join(format!("{name}.c"));
+    std::fs::write(&src, source).unwrap();
+    let ext = if cfg!(target_os = "macos") { "dylib" } else { "so" };
+    let out = dir.join(format!("lib{name}.{ext}"));
+
+    let mut cc = std::process::Command::new("cc");
+    if cfg!(target_os = "macos") {
+        cc.arg("-dynamiclib");
+    } else {
+        cc.arg("-shared");
+    }
+    let done = cc.arg("-fPIC").arg(&src).arg("-o").arg(&out).output().ok()?;
+    done.status.success().then_some(out)
+}
+
+#[test]
+fn a_versioned_symbol_is_the_plain_name_the_header_declares() {
+    // liblzma exports `lzma_version_number@@XZ_5.0` and declares
+    // `lzma_version_number`. Compared raw, the library "does not export" a
+    // symbol it plainly does, and 56 of the bench image's libraries bind
+    // nothing at all for this one reason.
+    assert_eq!(plain_name("lzma_version_number@@XZ_5.0", ObjectFormat::Elf), "lzma_version_number");
+}
+
+#[test]
+fn a_non_default_version_is_cut_at_its_single_at_sign() {
+    // Both forms sit in the same dynsym: `@@` is the default version, `@` an
+    // older one kept for compatibility.
+    assert_eq!(plain_name("memcpy@GLIBC_2.2.5", ObjectFormat::Elf), "memcpy");
+}
+
+#[test]
+fn a_symbol_and_its_older_version_are_one_name() {
+    // The two spellings of the same function must collapse, or the coverage
+    // count says a library has more entry points than it has.
+    let names: std::collections::HashSet<&str> =
+        ["memcpy@@GLIBC_2.14", "memcpy@GLIBC_2.2.5", "memcpy"]
+            .iter()
+            .map(|n| plain_name(n, ObjectFormat::Elf))
+            .collect();
+    assert_eq!(names.len(), 1, "one function, one name: {names:?}");
+}
+
+#[test]
+fn a_partly_versioned_library_keeps_all_of_its_symbols() {
+    // zlib is the dangerous case rather than the loud one: it bound, printed
+    // `added zlib`, and dropped exactly the 40 versioned symbols, with nothing
+    // in the exit status or the manifest saying half the API was missing.
+    let table = ["adler32", "deflateBound@@ZLIB_1.2.0", "crc32_z@@ZLIB_1.2.9", "inflate"];
+    let names: std::collections::HashSet<&str> =
+        table.iter().map(|n| plain_name(n, ObjectFormat::Elf)).collect();
+    for declared in ["adler32", "deflateBound", "crc32_z", "inflate"] {
+        assert!(names.contains(declared), "{declared} is declared and exported: {names:?}");
+    }
+}
+
+#[test]
+fn an_elf_name_keeps_every_leading_underscore() {
+    // GMP's whole public API is `__gmpz_*`; the familiar `mpz_init` names are
+    // `#define`s onto them. Stripping here skipped all 371 declarations as
+    // "not exported by the library".
+    for name in ["_one", "__two", "___three", "__gmpz_init"] {
+        assert_eq!(plain_name(name, ObjectFormat::Elf), name);
+    }
+}
+
+#[test]
+fn an_elf_library_exporting_an_underscored_name_does_not_answer_to_the_bare_one() {
+    // The reverse direction, and the worse one: stripping on the export side
+    // made a header declaring `alpha` match a library exporting `_alpha`.
+    // Nothing was skipped, nothing was assumed, and the program died at load
+    // with `undefined symbol: alpha`.
+    assert_ne!(plain_name("_alpha", ObjectFormat::Elf), "alpha");
+}
+
+#[test]
+fn a_mach_o_name_loses_exactly_one_underscore() {
+    // The prefix Mach-O adds, and nothing beyond it: a C function really named
+    // `_one` is `__one` in the table and must read back as `_one`.
+    assert_eq!(plain_name("_foo", ObjectFormat::MachO), "foo");
+    assert_eq!(plain_name("__one", ObjectFormat::MachO), "_one");
+    assert_eq!(plain_name("_mid_dle", ObjectFormat::MachO), "mid_dle");
+}
+
+#[test]
+fn the_format_is_read_from_the_file_rather_than_the_host() {
+    // A Mac handed a `.so` is ordinary — a checked-in Linux artifact, a
+    // container's /usr/lib mounted to look at — and the host's rule reads every
+    // one of its names wrongly. So the artifact is asked, and this test says
+    // the same thing whichever platform it runs on.
+    let dir = scratch("magic");
+    let elf = dir.join("elf.so");
+    std::fs::write(&elf, b"\x7fELF\x02\x01\x01\x00").unwrap();
+    let macho = dir.join("macho.dylib");
+    std::fs::write(&macho, b"\xcf\xfa\xed\xfe\x0c\x00\x00\x01").unwrap();
+
+    assert_eq!(object_format(&elf), Some(ObjectFormat::Elf));
+    assert_eq!(symbol_format(&elf), ObjectFormat::Elf);
+    assert_eq!(object_format(&macho), Some(ObjectFormat::MachO));
+    assert_eq!(symbol_format(&macho), ObjectFormat::MachO);
+
+    // Not an object file at all, which the loadable-object check still reads
+    // from the same four bytes.
+    let text = dir.join("notes.txt");
+    std::fs::write(&text, b"just a file").unwrap();
+    assert_eq!(object_format(&text), None);
+    assert!(!is_loadable_object(&text));
+    assert!(is_loadable_object(&elf) && is_loadable_object(&macho));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_placeholder_list_keeps_underscored_api_and_drops_what_cannot_be_called() {
+    // `__gmpz_init` is public API; `_Z3fooi` is a C++ function that no C
+    // prototype can reach; `_init` belongs to the loader. A leading underscore
+    // decides none of that, which is why it is no longer the test.
+    assert!(is_callable_name("__gmpz_init"));
+    assert!(is_callable_name("_one"));
+    assert!(is_callable_name("_Zebra"), "a C name that happens to start _Z");
+    assert!(!is_callable_name("_Z3fooi"));
+    assert!(!is_callable_name("_ZN3foo3barEv"));
+    assert!(!is_callable_name("_init"));
+}
+
+#[test]
+fn a_real_library_reports_its_underscored_symbols_as_exported() {
+    // The repro from the field, built here: five functions, only the leading
+    // position varying. Two of the five used to bind.
+    let dir = scratch("under");
+    let Some(lib) = compile_lib(
+        &dir,
+        "us",
+        "int plain(int x){return x+1;}\n\
+         int _one(int x){return x+2;}\n\
+         int __two(int x){return x+3;}\n\
+         int ___three(int x){return x+4;}\n\
+         int mid_dle(int x){return x+5;}\n",
+    ) else {
+        eprintln!("skipping: no C compiler");
+        return;
+    };
+
+    let exported = exported_symbols(&lib).expect("a freshly built library has a symbol table");
+    for name in ["plain", "_one", "__two", "___three", "mid_dle"] {
+        assert!(exported.contains(name), "{name} is exported: {exported:?}");
+    }
+
+    // And the same names are offered for a prototype when no header is found,
+    // which is the half a user without a header sees.
+    let placeholders = placeholder_symbols(&lib);
+    for name in ["plain", "_one", "__two", "___three", "mid_dle"] {
+        assert!(placeholders.contains_key(name), "{name} should be listed: {placeholders:?}");
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

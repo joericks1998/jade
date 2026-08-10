@@ -1740,6 +1740,134 @@ fn test_vm_empty_struct_raised_and_caught() {
     run_src(src).unwrap();
 }
 
+// ── Recursion limit (TOOLCHAIN-BUGS #10) ────────────────────────────────────
+//
+// `jade run` used to interpret directly on the calling thread's default ~8
+// MiB stack, so a call chain past roughly 700 frames overflowed the *process*
+// — an uncatchable abort with no Jade file or line, well short of what the
+// compiled engine allowed (10000+). `call::MAX_CALL_DEPTH` is the counter
+// that now stops a runaway recursion with an ordinary, catchable
+// `JadeError::RecursionLimitExceeded` before the native stack becomes a
+// factor at all — see `vm::run`'s `VM_STACK_SIZE` for the other half (giving
+// the interpreter enough native stack to actually reach that counter).
+
+fn depth_src(n: u32) -> String {
+    format!(
+        "fn depth(n) {{\n  if n <= 0 {{ return 0 }}\n  return 1 + depth(n - 1)\n}}\nlet d = depth({n})"
+    )
+}
+
+/// The limit these tests use, which is deliberately not the real one.
+///
+/// Reaching 10,000 by actually recursing costs over a gigabyte of stack in a
+/// debug build — the unoptimized async state machines run ~137 KB a frame —
+/// and `cargo test` runs these in parallel. What needs covering is the
+/// limit's behaviour, and that is identical at any depth.
+const TEST_DEPTH: u32 = 24;
+
+/// Run on a thread with a stack sized for the frames these tests actually
+/// make, and with a runtime of its own.
+///
+/// Two reasons it is not the plain `run_src`. A nested `call_fn` costs ~137 KB
+/// of native stack in a debug build, so even a couple of dozen frames outruns
+/// the ~2 MiB the test harness gives a thread. And the runtime is built
+/// *inside* the thread rather than borrowed from outside: a thread that takes
+/// the caller's `Handle` and calls `block_on` deadlocks against a
+/// current-thread runtime, because the caller is parked in `join()` and
+/// nothing is left driving the reactor.
+fn run_at_depth(src: &str, max_call_depth: u32) -> Result<VmState> {
+    let tokens = lexer::tokenize(src)?;
+    let program = parser::parse(tokens)?;
+    let tprogram = type_infer::infer(program)?;
+    let compiled = emit::emit(tprogram)?;
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(move || {
+            let opts = VmOpts { max_call_depth: Some(max_call_depth), ..VmOpts::default() };
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime")
+                .block_on(run(compiled, opts))
+        })
+        .expect("spawn the deep-stack test thread")
+        .join()
+        .expect("the deep-stack test thread panicked")
+}
+
+#[test]
+fn test_vm_recursion_limit_matches_the_compiled_engine() {
+    // The number itself is the fix: a program that fails must fail at the same
+    // depth under both engines, or `jade run` and the binary disagree about
+    // whether it is valid. The AOT side is `JRT_RECUR_MAX_DEPTH` in
+    // `src/runtime_aot/common.c`, and nothing but this test ties them together.
+    let c = include_str!("../runtime_aot/common.c");
+    let want = format!("#define JRT_RECUR_MAX_DEPTH {MAX_CALL_DEPTH}");
+    assert!(c.contains(&want), "the two engines must share one limit; expected `{want}`");
+}
+
+#[test]
+fn test_vm_recursion_exactly_at_limit_succeeds() {
+    // The limit counts *live* nested calls, so a chain of exactly the limit
+    // is still allowed — `depth(0)` is itself the first call.
+    let s = run_at_depth(&depth_src(TEST_DEPTH - 1), TEST_DEPTH).unwrap();
+    assert_eq!(get_int(&s, "d"), (TEST_DEPTH - 1) as i64);
+}
+
+#[test]
+fn test_vm_recursion_one_past_limit_raises_recursion_limit_exceeded() {
+    let err = run_at_depth(&depth_src(TEST_DEPTH), TEST_DEPTH).err().expect("expected error");
+    assert!(
+        matches!(err, JadeError::RecursionLimitExceeded { .. }),
+        "expected RecursionLimitExceeded, got {err:?}"
+    );
+    assert!(err.to_string().contains("recursion limit exceeded"), "should name it: {err}");
+}
+
+#[test]
+fn test_vm_recursion_limit_is_catchable_and_execution_continues() {
+    // Uncatchable before the fix: the process aborted before any Jade handler
+    // ran. Raising rather than overflowing is the whole point.
+    let src = format!(
+        "fn depth(n) {{\n  if n <= 0 {{ return 0 }}\n  return 1 + depth(n - 1)\n}}\n\
+         let msg = \"\"\nlet after = false\n\
+         try {{\n  depth({TEST_DEPTH})\n}} catch e {{\n  msg = e.message\n}}\nafter = true"
+    );
+    let s = run_at_depth(&src, TEST_DEPTH).unwrap();
+    assert!(get_str(&s, "msg").contains("recursion limit exceeded"));
+    assert!(get_bool(&s, "after"), "execution should continue past the catch");
+}
+
+#[test]
+fn test_vm_recursion_limit_is_a_runtime_error_struct() {
+    // The shape every other built-in error raises through
+    // `make_vm_runtime_error` — see exceptions/error_values/ in `examples/`.
+    let src = format!(
+        "fn depth(n) {{\n  if n <= 0 {{ return 0 }}\n  return 1 + depth(n - 1)\n}}\n\
+         let kind = \"\"\n\
+         try {{\n  depth({TEST_DEPTH})\n}} catch RuntimeError e {{\n  kind = \"RuntimeError\"\n}} \
+         catch e {{\n  kind = \"untyped\"\n}}"
+    );
+    let s = run_at_depth(&src, TEST_DEPTH).unwrap();
+    assert_eq!(get_str(&s, "kind"), "RuntimeError");
+}
+
+#[test]
+fn test_vm_mutual_recursion_counts_toward_the_same_limit() {
+    // The limit bounds call *depth*, not self-recursion by name — two functions
+    // calling each other burn the same counter a direct recursive call would.
+    let pingpong = "fn ping(n) {\n  if n <= 0 { return 0 }\n  return pong(n - 1)\n}\n\
+                    fn pong(n) {\n  if n <= 0 { return 0 }\n  return ping(n - 1)\n}\n";
+    let s =
+        run_at_depth(&format!("{pingpong}let ok = ping({})", TEST_DEPTH - 1), TEST_DEPTH).unwrap();
+    assert_eq!(get_int(&s, "ok"), 0);
+
+    let err = run_at_depth(&format!("{pingpong}let ok = ping({TEST_DEPTH})"), TEST_DEPTH)
+        .err()
+        .expect("expected error");
+    assert!(matches!(err, JadeError::RecursionLimitExceeded { .. }));
+}
+
 // ── std/fs tests ──────────────────────────────────────────────────────────
 
 #[test]

@@ -227,6 +227,12 @@ enum PkgCommands {
         /// Extra include directory for the header; repeatable
         #[arg(short = 'I', long = "include", value_name = "DIR")]
         include: Vec<String>,
+        /// Macro to define before the header is read, as clang's -D; repeatable
+        #[arg(short = 'D', long = "define", value_name = "NAME[=VALUE]")]
+        define: Vec<String>,
+        /// Only bind symbols whose name contains this
+        #[arg(long, value_name = "TEXT")]
+        only: Option<String>,
     },
     /// Re-generate a C dependency's symbol table from its header
     ///
@@ -241,6 +247,9 @@ enum PkgCommands {
         /// Extra include directory; repeatable
         #[arg(short = 'I', long = "include", value_name = "DIR")]
         include: Vec<String>,
+        /// Macro to define before the header is read, as clang's -D; repeatable
+        #[arg(short = 'D', long = "define", value_name = "NAME[=VALUE]")]
+        define: Vec<String>,
         /// Only bind symbols whose name contains this
         #[arg(long, value_name = "TEXT")]
         only: Option<String>,
@@ -277,11 +286,28 @@ fn main() {
     let cli = Cli::parse();
     publish_libs_root(&cli);
 
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime")
-        .block_on(run_cli(cli));
+    // The whole CLI runs on a thread with a stack sized for the interpreter: a
+    // Jade call chain is a native call chain, and `call::MAX_CALL_DEPTH` is
+    // meant to be what stops a runaway recursion rather than the OS. See
+    // `vm::chunk::VM_STACK_SIZE`.
+    //
+    // The runtime is built *inside* that thread on purpose. `block_on` drives
+    // its future on the calling thread, so setting `thread_stack_size` on the
+    // worker pool would not cover it — the workers only run what is `spawn`ed.
+    std::thread::Builder::new()
+        .name("jade-main".to_string())
+        .stack_size(jade::vm::VM_STACK_SIZE)
+        .spawn(move || {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .thread_stack_size(jade::vm::VM_STACK_SIZE)
+                .build()
+                .expect("tokio runtime")
+                .block_on(run_cli(cli));
+        })
+        .expect("failed to spawn the main execution thread")
+        .join()
+        .expect("the main execution thread panicked");
 
     #[cfg(feature = "alloc-profile")]
     if std::env::var_os("JADE_ALLOC_PROFILE").is_some() {
@@ -408,7 +434,7 @@ async fn run_cli(cli: Cli) {
 
         // ── upgrade ───────────────────────────────────────────────────────────
         Commands::Pkg(subcommand) => match subcommand {
-            PkgCommands::Add { name, path, url, version, c_abi, header, include } => {
+            PkgCommands::Add { name, path, url, version, c_abi, header, include, define, only } => {
                 cli::pkg::run_add(
                     &name,
                     path.as_deref(),
@@ -416,11 +442,24 @@ async fn run_cli(cli: Cli) {
                     version.as_deref(),
                     c_abi,
                     header.as_deref(),
-                    &include,
+                    cli::pkg::HeaderOptions {
+                        include: &include,
+                        defines: &define,
+                        only: only.as_deref(),
+                    },
                 )
             }
-            PkgCommands::Bind { name, header, include, only, dry_run } => {
-                cli::pkg::run_bind(&name, &header, &include, only.as_deref(), dry_run)
+            PkgCommands::Bind { name, header, include, define, only, dry_run } => {
+                cli::pkg::run_bind(
+                    &name,
+                    &header,
+                    cli::pkg::HeaderOptions {
+                        include: &include,
+                        defines: &define,
+                        only: only.as_deref(),
+                    },
+                    dry_run,
+                )
             }
             PkgCommands::Remove { name } => cli::pkg::run_remove(&name),
             PkgCommands::Install { locked } => cli::pkg::run_install(locked),

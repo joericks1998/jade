@@ -1,0 +1,81 @@
+// A call chain deeper than the interpreter's native stack used to abort the
+// whole process — `thread 'main' has overflowed its stack`, uncatchable, at a
+// depth of roughly 700 frames on `jade run`, while the compiled binary of the
+// same program ran 10000+ frames clean. See TOOLCHAIN-BUGS #10.
+//
+// Both engines now enforce the same call-depth limit (10000) and raise an
+// ordinary, catchable `RuntimeError` instead of letting the native stack run
+// out. This fixture pins that: an ordinary deep call still returns the right
+// answer, a chain that alternates between two functions counts the same way
+// a direct self-call does, and going over the limit is catchable and lets
+// the program keep running afterward.
+
+fn depth(n) {
+    if n <= 0 {
+        return 0
+    }
+    return 1 + depth(n - 1)
+}
+
+// Comfortably below the limit: an ordinary recursive function just works.
+print(depth(5000)) // 5000
+
+// Exactly at the limit: the 10000th nested call is still allowed.
+print(depth(9999)) // 9999
+
+// Mutual recursion counts frames the same way direct recursion does — the
+// limit is about call depth, not about a function calling itself by name.
+fn ping(n) {
+    if n <= 0 {
+        return "done"
+    }
+    return pong(n - 1)
+}
+
+fn pong(n) {
+    if n <= 0 {
+        return "done"
+    }
+    return ping(n - 1)
+}
+
+print(ping(5000)) // done
+
+// Past the limit, `try`/`catch` sees an ordinary `RuntimeError`, matching the
+// shape every other built-in error uses (see exceptions/error_values/).
+fn too_deep() {
+    return depth(50000)
+}
+
+fn kind_of(f) {
+    try {
+        f()
+        return "no raise"
+    } catch RuntimeError e {
+        return "RuntimeError"
+    } catch e {
+        return "untyped"
+    }
+}
+
+print(kind_of(too_deep)) // RuntimeError
+
+fn message_of(f) {
+    try {
+        f()
+        return ""
+    } catch e {
+        return e.message
+    }
+}
+
+print(message_of(too_deep).contains("recursion limit exceeded")) // true
+
+// The process is still alive afterward — a caught recursion limit is not
+// fatal, and code after the `try` still runs.
+try {
+    too_deep()
+} catch e {
+    print("caught")
+}
+print("after")

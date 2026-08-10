@@ -289,12 +289,20 @@ pub fn run_build(
         // silently links whatever `libs/` was last left holding, and a fresh
         // clone builds against nothing at all. The project is found from the
         // source file's directory because that is how `aot/imports.rs` finds it.
-        if let Some(root) = abs_source.parent().and_then(crate::project::find_project_root_from)
-            && let Ok(manifest) = crate::project::load_project(&root)
-            && let Err(e) = crate::pkg::ensure_ready(&root, &manifest)
-        {
-            eprintln!("error: {e}");
-            process::exit(1);
+        //
+        // A manifest that will not parse is reported here, not skipped. Skipped,
+        // the dependencies it declares simply did not exist for this build, and
+        // the first thing to notice was the AOT import resolver failing on a
+        // `use` — a span in the source file, for a mistake in jade.toml.
+        if let Some(root) = abs_source.parent().and_then(crate::project::find_project_root_from) {
+            let manifest = crate::project::load_project(&root).unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                process::exit(1);
+            });
+            if let Err(e) = crate::pkg::ensure_ready(&root, &manifest) {
+                eprintln!("error: {e}");
+                process::exit(1);
+            }
         }
 
         let out = output_path(path, output, lib);

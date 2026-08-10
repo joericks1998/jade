@@ -267,8 +267,22 @@ pub fn materialize(root: &Path, lock: &Lockfile, fetcher: &dyn Fetcher) -> Resul
         // Present and matching → nothing to do. Present but wrong — a corrupted
         // download, a partial write, a swapped file — falls through to a
         // re-fetch, which is the only safe response.
-        if std::fs::read(&dest).is_ok_and(|b| fetch::sha256_hex(&b) == artifact.sha256) {
+        let present = std::fs::read(&dest);
+        if present.as_ref().is_ok_and(|b| fetch::sha256_hex(b) == artifact.sha256) {
             continue;
+        }
+
+        // Replacing a file that was there and did not match is worth a line.
+        // Without one the strongest check in the package manager is also the
+        // quietest: a swapped artifact is repaired, `installed N dependencies`
+        // is printed, and the only record that anything was wrong is a
+        // timestamp. Someone who did not swap it themselves needs to know.
+        if present.is_ok() {
+            eprintln!(
+                "note: {} in libs/ did not match jade.lock and is being reinstalled \
+                 (dependency '{}')",
+                artifact.file, pkg.name
+            );
         }
 
         let bytes = match &artifact.url {
@@ -539,6 +553,9 @@ pub fn bundle_beside_artifact(artifact: &Path, libs_root: &Path) -> Result<Vec<S
                 continue;
             }
             let from = entry.path();
+            if !is_runtime_file(&from) {
+                continue;
+            }
             let to = dest_dir.join(entry.file_name());
             let bytes = std::fs::read(&from)
                 .map_err(|e| format!("cannot read {} ({e})", from.display()))?;
@@ -605,6 +622,29 @@ pub fn declared_dependencies(artifact: &Path) -> Option<Vec<LockedPackage>> {
     (!lock.packages.is_empty()).then_some(lock.packages)
 }
 
+/// Whether a file in `libs/` is something the finished artifact needs, as
+/// opposed to something the install left behind.
+///
+/// A bundle is what ships. `<name>_shim.c` is the C the binding was generated
+/// from — read by `cc` at install time and by nothing afterwards — and it was
+/// going into the release tarball that reaches a device. `.jade-shim.toml` is
+/// the same story, and `.jade-install-<pid>` is a half-written artifact a
+/// concurrent install is in the middle of renaming into place, which is worse
+/// than useless to copy.
+///
+/// The rule is stated as "what runs" rather than as a list of what to drop:
+/// `libs/` is the package manager's directory, so anything in it that is not a
+/// loadable module is by construction build residue.
+fn is_runtime_file(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    if name.starts_with('.') {
+        return false;
+    }
+    !matches!(path.extension().and_then(|e| e.to_str()), Some("c" | "h"))
+}
+
 /// Whether two directories are the same place, following symlinks.
 ///
 /// A plain path comparison would miss a symlinked `libs/`, and copying a
@@ -629,13 +669,101 @@ pub fn shim_filename(name: &str) -> String {
 
 /// The file that actually gets `dlopen`ed for a package.
 ///
-/// For a Jade-ABI package that is the artifact itself; for a C library it is the
-/// generated shim, since the raw library exports no `jade_pkg_init`.
+/// For a Jade-ABI package that is the artifact itself, which `jade.lock` pins
+/// and [`materialize`] verifies on every install. For a C library it is the
+/// generated shim — see [`ShimRecord`] for what stands in for a lock entry
+/// there, and why it cannot be one.
 fn module_file(pkg: &LockedPackage, artifact: &LockedArtifact) -> String {
     if pkg.abi == crate::project::Abi::C.as_str() {
         shim_filename(&pkg.name)
     } else {
         artifact.file.clone()
+    }
+}
+
+/// What the last successful build of a C dependency's shim produced.
+///
+/// **Why this is not in `jade.lock`.** The lock pins every byte that comes from
+/// outside the project, and it is committed, so every line in it has to mean the
+/// same thing on every machine. A binding shim is neither: it does not exist
+/// until the host compiles it, its filename is the host's (`v.dylib` here,
+/// `v.so` there), and its bytes are whatever the host's `cc` made of the same
+/// source. Pinning it would put a digest in a shared file that no second machine
+/// could ever reproduce.
+///
+/// What *is* the same everywhere are the two things the shim is derived from —
+/// the artifact, pinned in the lock, and the symbol table, committed in
+/// `jade.toml`. So this file records the derivation instead: the shim as built,
+/// beside the artifact digest it was built against. It lives in `libs/`, next to
+/// the thing it describes, and is regenerated rather than committed.
+///
+/// **What it is worth, stated plainly.** It catches a stale shim, a corrupted
+/// one, and a substituted one, which is what [`build_c_shims`] used to miss
+/// entirely — its freshness test was "the shim is newer than the library", which
+/// a swapped file passes trivially. It is not a defence against someone who can
+/// write to `libs/`, because they can write this too. Nothing built on the host
+/// can be, and saying otherwise would be the more dangerous mistake.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct ShimRecord {
+    /// Format version, so a future field is additive rather than a misread.
+    /// A record this jade does not recognise is treated as absent, which costs
+    /// one rebuild.
+    version: u32,
+    /// The shim's filename, for a reader looking at the directory.
+    file: String,
+    /// SHA-256 of the shim as it was written.
+    sha256: String,
+    /// SHA-256 of the library it was linked against — the lock's own digest for
+    /// this platform's artifact. A rebuilt local dependency changes it, which is
+    /// what makes the shim rebuild.
+    target_sha256: String,
+}
+
+/// Current record format. [`SHIM_RECORD`] is rewritten on every build, so a bump
+/// costs one recompile of each shim and never a stale read.
+const SHIM_RECORD_VERSION: u32 = 1;
+
+/// Filename of the record, inside the dependency's `libs/` directory.
+///
+/// Leading dot so it is not mistaken for a module — imports resolve by stem
+/// over the directory, and it is also what keeps it out of a built bundle.
+const SHIM_RECORD: &str = ".jade-shim.toml";
+
+/// Read the record beside a shim, or `None` when there is nothing usable there.
+///
+/// Every failure answers `None`: absent, unreadable, malformed, or written by a
+/// jade that recorded a shape this one does not know. The cost of being wrong is
+/// a rebuild that was not needed, and the cost of trusting a record that cannot
+/// be read is loading a shim nothing checked.
+fn read_shim_record(dir: &Path) -> Option<ShimRecord> {
+    let text = std::fs::read_to_string(dir.join(SHIM_RECORD)).ok()?;
+    let record: ShimRecord = toml::from_str(&text).ok()?;
+    (record.version == SHIM_RECORD_VERSION).then_some(record)
+}
+
+/// Write the record for a shim that was just built.
+///
+/// A failure here is reported and not fatal: the shim itself is built and
+/// correct, and the only consequence is that the next install rebuilds it
+/// instead of confirming it.
+fn write_shim_record(dir: &Path, file: &str, shim: &Path, target_sha256: &str) {
+    let Ok(bytes) = std::fs::read(shim) else {
+        eprintln!("warning: cannot read {} to record what was built", shim.display());
+        return;
+    };
+    let record = ShimRecord {
+        version: SHIM_RECORD_VERSION,
+        file: file.to_string(),
+        sha256: fetch::sha256_hex(&bytes),
+        target_sha256: target_sha256.to_string(),
+    };
+    match toml::to_string_pretty(&record) {
+        Ok(text) => {
+            if let Err(e) = std::fs::write(dir.join(SHIM_RECORD), text) {
+                eprintln!("warning: cannot write {} ({e})", dir.join(SHIM_RECORD).display());
+            }
+        }
+        Err(e) => eprintln!("warning: cannot serialize the shim record ({e})"),
     }
 }
 
@@ -753,13 +881,44 @@ pub fn build_c_shims(
         let source = cshim::generate(&pkg.name, symbols, structs, headers)?;
 
         // Skip the compile when nothing changed — reinstalls are common and cc
-        // is not cheap. "Nothing changed" means both the declared symbols and
-        // the library being bound: a rebuilt artifact may no longer export what
-        // the existing shim was linked against, so an out-of-date shim has to be
-        // relinked even though its source is identical.
-        let unchanged = std::fs::read_to_string(&shim_c).is_ok_and(|s| s == source);
-        if unchanged && is_newer(&shim_out, &dir.join(&artifact.file)) {
+        // is not cheap. Three things have to still hold, and each one used to be
+        // checked more weakly or not at all:
+        //
+        //   the source we would generate is the source on disk — the declared
+        //   symbols and structs have not moved;
+        //
+        //   the shim on disk is the one this project built — byte for byte,
+        //   against the record beside it. The old test was "the shim is newer
+        //   than the library", which any substituted file passes: swapping in
+        //   another package's shim survived every install and ran its symbols
+        //   under this dependency's name;
+        //
+        //   it was linked against the library the lock now pins. That used to be
+        //   a timestamp comparison too, and a rebuilt local dependency whose
+        //   mtime went backwards kept the old shim.
+        let same_source = std::fs::read_to_string(&shim_c).is_ok_and(|s| s == source);
+        let record = read_shim_record(&dir);
+        let built_here = record.as_ref().is_some_and(|r| {
+            r.target_sha256 == artifact.sha256
+                && std::fs::read(&shim_out).is_ok_and(|b| fetch::sha256_hex(&b) == r.sha256)
+        });
+        if same_source && built_here {
             continue;
+        }
+
+        // A shim that exists, was recorded, and no longer matches its record is
+        // not a stale build — it is a different file in the place the loader
+        // will open. Rebuilding fixes it either way; saying so is what tells
+        // someone their `libs/` was written to behind them.
+        if let Some(r) = &record
+            && shim_out.exists()
+            && std::fs::read(&shim_out).is_ok_and(|b| fetch::sha256_hex(&b) != r.sha256)
+        {
+            eprintln!(
+                "note: {} did not match what was built for dependency '{}' and is being rebuilt",
+                shim_filename(&pkg.name),
+                pkg.name
+            );
         }
 
         std::fs::write(&shim_c, &source).map_err(|e| {
@@ -774,22 +933,11 @@ pub fn build_c_shims(
             &artifact.file,
             entry.include_dirs.as_deref().unwrap_or(&[]),
         )?;
+
+        write_shim_record(&dir, &shim_filename(&pkg.name), &shim_out, &artifact.sha256);
     }
 
     Ok(())
-}
-
-/// Whether `out` is at least as new as `input`.
-///
-/// Answers `false` when either timestamp is unreadable — including when `out`
-/// does not exist at all — so every uncertain case falls through to a rebuild
-/// rather than to a stale artifact.
-fn is_newer(out: &Path, input: &Path) -> bool {
-    let stamp = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
-    match (stamp(out), stamp(input)) {
-        (Some(o), Some(i)) => o >= i,
-        _ => false,
-    }
 }
 
 /// Link the shim against the target library.

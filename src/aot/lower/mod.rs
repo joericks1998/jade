@@ -109,6 +109,14 @@ struct Lowerer<'a, 'ctx> {
     /// outlive the stack frame holding its `jmp_buf` — see `emit_exc_restore`.
     /// `None` when the function has no handler and its depth cannot change.
     exc_depth_slot: Option<PointerValue<'ctx>>,
+    /// Slot holding the recursion-depth counter on entry — every *ordinary*
+    /// function call counts against the recursion limit (not just one inside a
+    /// `try`, unlike `exc_depth_slot`), so this is `Some` far more often. Every
+    /// return and every exception landing pad restores it; see
+    /// `emit_recur_restore`. `None` for a body lowered with `track_recursion =
+    /// false` (`jade_toplevel`, `lower_chunk`'s isolated bodies) — a body that
+    /// never opened a frame must not close one either.
+    recur_depth_slot: Option<PointerValue<'ctx>>,
     /// Whether this function is a `yield`ing stream producer. When true a
     /// `Return` discards the body's value and hands back the generator's buffer
     /// instead — that is what makes calling a generator give you a stream.
@@ -495,11 +503,23 @@ pub fn lower_program<'ctx>(
             cf.params.len(),
             &fnctx,
             cf.is_generator,
+            true,
         )?;
     }
 
     let top_fn = module.add_function("jade_toplevel", i64_ty.fn_type(&[], false), None);
-    lower_body(context, module, top_fn, &top.code, &top.fn_defs, top_n_slots, 0, &fnctx, false)?;
+    lower_body(
+        context,
+        module,
+        top_fn,
+        &top.code,
+        &top.fn_defs,
+        top_n_slots,
+        0,
+        &fnctx,
+        false,
+        false,
+    )?;
 
     // Turn on runtime reference counting for a collections-only program, once, at
     // the very start of `jade_toplevel` (before any collection is allocated). This
@@ -655,13 +675,23 @@ pub fn lower_chunk<'ctx>(
     n_slots: u32,
 ) -> Result<FunctionValue<'ctx>, String> {
     let function = module.add_function(name, context.i64_type().fn_type(&[], false), None);
-    lower_body(context, module, function, code, &[], n_slots, 0, &FnCtx::empty(), false)?;
+    lower_body(context, module, function, code, &[], n_slots, 0, &FnCtx::empty(), false, false)?;
     Ok(function)
 }
 
 /// Lower `code` into an already-declared `function`. `n_params` incoming i64
 /// parameters are copied into slots `0..n_params` (the VM frame convention);
 /// `fn_defs` are this chunk's nested function literals (for `LoadFn`).
+///
+/// `track_recursion` opts this body into the `jrt_recur_enter`/`_restore`
+/// prologue-and-restore pair that counts it against the recursion limit. It is
+/// false only for `jade_toplevel` (and the `lower_chunk` test helper, which
+/// lowers an isolated body the same way): the VM's counterpart, `execute_chunk`
+/// running the top-level script, is not itself a call through `call_fn` and so
+/// never increments `VmState::call_depth` either — see `vm::call::MAX_CALL_DEPTH`.
+/// Counting it here and not there would let a program pass on `jade run` at
+/// exactly the depth it failed on under `jade build`, the same one-past-the-cap
+/// disagreement TOOLCHAIN-BUGS #10 is about, just moved to a different frame.
 fn lower_body<'ctx>(
     context: &'ctx Context,
     module: &Module<'ctx>,
@@ -672,6 +702,7 @@ fn lower_body<'ctx>(
     n_params: usize,
     fnctx: &FnCtx<'ctx>,
     is_generator: bool,
+    track_recursion: bool,
 ) -> Result<(), String> {
     let i64_ty = context.i64_type();
     let builder = context.create_builder();
@@ -750,16 +781,42 @@ fn lower_body<'ctx>(
         Some(slot)
     };
 
-    // One LLVM block per reconstructed basic block; entry branches to the first.
-    let graph = cfg::build(code);
-    if graph.blocks.is_empty() {
-        builder.build_return(Some(&i64_ty.const_int(NIL, false))).map_err(|e| e.to_string())?;
-        return Ok(());
-    }
-    let llblocks: Vec<LlvmBlock> = (0..graph.blocks.len())
-        .map(|bi| context.append_basic_block(function, &format!("bb{bi}")))
-        .collect();
-    builder.build_unconditional_branch(llblocks[0]).map_err(|e| e.to_string())?;
+    // Snapshot the recursion-depth counter on entry and bump it — unlike
+    // `exc_depth_slot` this runs for every *ordinary* function, since every
+    // call counts against the limit, not just ones inside a `try`.
+    // `jrt_recur_enter` raises (via `jrt_throw_runtime`) on its own if the
+    // limit is already at its cap, so there is nothing to branch on here —
+    // see runtime_aot's `common.c`.
+    //
+    // `jade_toplevel` (and `lower_chunk`'s isolated test bodies) opt out via
+    // `track_recursion` — see this function's doc comment for why counting
+    // them would disagree with the VM by exactly one frame.
+    let recur_depth_slot = if track_recursion {
+        let i32_ty = context.i32_type();
+        let recur_depth_fn = match module.get_function("jrt_recur_depth") {
+            Some(f) => f,
+            None => module.add_function("jrt_recur_depth", i32_ty.fn_type(&[], false), None),
+        };
+        let recur_depth0 = builder
+            .build_call(recur_depth_fn, &[], "recur_depth0")
+            .map_err(|e| e.to_string())?
+            .as_any_value_enum()
+            .into_int_value();
+        let slot = builder.build_alloca(i32_ty, "recur_depth_entry").map_err(|e| e.to_string())?;
+        builder.build_store(slot, recur_depth0).map_err(|e| e.to_string())?;
+        let recur_enter_fn = match module.get_function("jrt_recur_enter") {
+            Some(f) => f,
+            None => module.add_function(
+                "jrt_recur_enter",
+                context.void_type().fn_type(&[], false),
+                None,
+            ),
+        };
+        builder.build_call(recur_enter_fn, &[], "").map_err(|e| e.to_string())?;
+        Some(slot)
+    } else {
+        None
+    };
 
     let low = Lowerer {
         is_generator,
@@ -770,8 +827,22 @@ fn lower_body<'ctx>(
         refcount: fnctx.refcount,
         n_params,
         exc_depth_slot,
+        recur_depth_slot,
         entry_bufs: RefCell::new(HashMap::new()),
     };
+
+    // One LLVM block per reconstructed basic block; entry branches to the first.
+    let graph = cfg::build(code);
+    if graph.blocks.is_empty() {
+        // An empty body still opened a recursion frame above and must close it.
+        low.emit_recur_restore()?;
+        builder.build_return(Some(&i64_ty.const_int(NIL, false))).map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    let llblocks: Vec<LlvmBlock> = (0..graph.blocks.len())
+        .map(|bi| context.append_basic_block(function, &format!("bb{bi}")))
+        .collect();
+    builder.build_unconditional_branch(llblocks[0]).map_err(|e| e.to_string())?;
     let call_builtins = resolve_builtin_calls(code);
     let (user_calls, skip_getfields) = resolve_user_calls(code, fn_defs, fnctx)?;
 
@@ -810,6 +881,7 @@ fn lower_body<'ctx>(
                     // the local slots first, matching an explicit `Return`.
                     low.emit_scope_exit();
                     low.emit_exc_restore()?;
+                    low.emit_recur_restore()?;
                     builder
                         .build_return(Some(&i64_ty.const_int(NIL, false)))
                         .map_err(|e| e.to_string())?;

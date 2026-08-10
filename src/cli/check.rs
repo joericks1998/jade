@@ -48,9 +48,6 @@ fn check_imports(tprogram: &crate::compiler::tir::TProgram, path: &str) -> Resul
             _ => None,
         })
         .collect();
-    if paths.is_empty() {
-        return Ok(());
-    }
 
     let source_dir = Path::new(path)
         .canonicalize()
@@ -59,7 +56,20 @@ fn check_imports(tprogram: &crate::compiler::tir::TProgram, path: &str) -> Resul
         .unwrap_or_else(|| std::path::PathBuf::from("."));
 
     let project_root = crate::project::find_project_root_from(&source_dir);
-    let manifest = project_root.as_ref().and_then(|root| crate::project::load_project(root).ok());
+    // A manifest error is a check failure, and it is read before the imports
+    // are counted. `jade check` claims to predict what `jade run` will do, and
+    // `jade run` reads jade.toml whether or not the file it was handed imports
+    // anything — so returning early on a file with no `use` would have `check`
+    // pass a file `run` refuses.
+    let manifest = match project_root.as_ref().map(|root| crate::project::load_project(root)) {
+        Some(Ok(m)) => Some(m),
+        Some(Err(e)) => return Err(e.to_string()),
+        None => None,
+    };
+
+    if paths.is_empty() {
+        return Ok(());
+    }
 
     // A dependency whose prototypes are still `"?"` is one `jade run` refuses,
     // and reading the manifest for it costs nothing beyond the read that just

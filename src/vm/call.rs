@@ -358,6 +358,22 @@ pub(crate) async fn call_value(
     }
 }
 
+/// How many nested Jade calls `call_fn` allows before it raises rather than
+/// recursing further.
+///
+/// Matches the AOT backend's `JRT_RECUR_MAX_DEPTH` (`src/runtime_aot/common.c`)
+/// so a call chain fails at the same depth under `jade run` and a compiled
+/// binary — see `JadeError::RecursionLimitExceeded` and TOOLCHAIN-BUGS #10.
+/// 10,000 is where the compiled engine already ran clean, and measurement
+/// showed the interpreter's own stack (see `vm::chunk::VM_STACK_SIZE`) has
+/// comfortable headroom past it: a release build overflowed its native stack
+/// at ~673 frames on an 8 MiB stack (~12.4 KB/frame); a debug build, with its
+/// larger unoptimized async state machines, overflowed at ~61 frames on the
+/// same 8 MiB (~137 KB/frame). Either way the point of this counter is that
+/// it trips *before* the native stack would — the OS should never be the
+/// thing that stops a runaway recursion.
+pub(crate) const MAX_CALL_DEPTH: u32 = 10_000;
+
 /// Standalone version of `call_value` that owns its `VmState`, suitable for
 /// passing to `tokio::spawn` where borrowed state cannot cross thread boundaries.
 /// Always returns `(result, raised_exception)` so the parent can propagate the
@@ -365,6 +381,30 @@ pub(crate) async fn call_value(
 #[async_recursion::async_recursion]
 
 pub(crate) async fn call_fn(
+    cf: &CompiledFn,
+    args: Vec<VmValue>,
+    state: &mut VmState,
+    span: Span,
+) -> Result<VmValue> {
+    // Every call counts against the recursion limit, checked before any of
+    // the (comparatively expensive) frame setup below runs. `state.call_depth`
+    // is what the AOT backend's per-function `jrt_recur_enter`/`_restore` pair
+    // mirrors — see `MAX_CALL_DEPTH` for why the two engines share one number.
+    if state.call_depth >= state.max_call_depth {
+        return Err(JadeError::RecursionLimitExceeded { span });
+    }
+    state.call_depth += 1;
+    let result = call_fn_body(cf, args, state, span).await;
+    state.call_depth -= 1;
+    result
+}
+
+/// The actual body of a call: arity/defaults, frame setup, running the
+/// compiled body, and generator buffering. Split out of `call_fn` so the
+/// depth-counter increment in that function has exactly one place to
+/// decrement from — a `?` anywhere in here still runs the caller's
+/// decrement, because it returns to `call_fn` rather than out of it.
+async fn call_fn_body(
     cf: &CompiledFn,
     args: Vec<VmValue>,
     state: &mut VmState,

@@ -22,7 +22,7 @@ fn ir_of_rc(code: &[Instr], n_slots: u32) -> String {
     let function = module.add_function("f", context.i64_type().fn_type(&[], false), None);
     let mut ctx = FnCtx::empty();
     ctx.refcount = true;
-    lower_body(&context, &module, function, code, &[], n_slots, 0, &ctx, false)
+    lower_body(&context, &module, function, code, &[], n_slots, 0, &ctx, false, false)
         .expect("lowering failed");
     module.verify().expect("module failed LLVM verification");
     module.print_to_string().to_string()

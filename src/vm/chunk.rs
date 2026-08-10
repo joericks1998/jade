@@ -45,6 +45,30 @@ pub(crate) fn resolve_user_import(
     }
 }
 
+/// Native stack the interpreter needs, applied to the tokio worker threads
+/// `main` builds its runtime with.
+///
+/// `call::MAX_CALL_DEPTH` (10,000) is meant to be what stops a runaway
+/// recursion — never the OS underneath it — so the stack has to hold that many
+/// frames with room to spare. Measured on this crate: a release build spends
+/// ~12.4 KB of native stack per nested `call_fn`, a debug build ~137 KB, since
+/// debug's async state machines carry unoptimized locals the optimizer
+/// otherwise collapses. So the two builds need very different numbers, and
+/// each is sized to double what its own rate demands.
+///
+/// Reserving address space costs nothing until it is touched: a 64-bit process
+/// does not commit stack pages it never writes.
+///
+/// This is set on the *runtime's* threads rather than by spawning a thread of
+/// our own here. Interpretation is async, and a thread that borrows the
+/// caller's `Handle` and calls `block_on` deadlocks against a current-thread
+/// runtime — the caller is parked in `join()` and so nothing is left driving
+/// the reactor, which hangs every prompt-stream test outright.
+#[cfg(debug_assertions)]
+pub const VM_STACK_SIZE: usize = 3 * 1024 * 1024 * 1024;
+#[cfg(not(debug_assertions))]
+pub const VM_STACK_SIZE: usize = 256 * 1024 * 1024;
+
 /// Execute a compiled program and return the populated global state.
 pub async fn run(program: CompiledProgram, opts: VmOpts) -> Result<VmState> {
     let mut state = VmState::new();

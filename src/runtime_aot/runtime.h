@@ -320,6 +320,21 @@ void    jrt_throw_runtime(const char* msg);
 int64_t jade_exc_value(void);
 const char* jade_exc_type(void);         /* thrown struct type name, or NULL */
 
+/* ── Recursion depth ──────────────────────────────────────────────────── */
+/* jrt_recur_enter / jrt_recur_depth / jrt_recur_restore — bound the number of
+ * live Jade call frames so a runaway recursive function raises a catchable
+ * `RuntimeError` instead of the native stack simply running out, the way
+ * `jade run` used to abort with an uncatchable Rust panic (TOOLCHAIN-BUGS #10).
+ * Codegen calls jrt_recur_enter in every function's prologue (it raises
+ * itself, via jrt_throw_runtime, if the limit is exceeded) and snapshots
+ * jrt_recur_depth() there; every return path and every exception landing pad
+ * restores that snapshot, the same scoping jade_exc_restore gives the handler
+ * stack and for the same reason — a longjmp out of a deep call unwinds the
+ * native stack without running the intervening frames' own decrements. */
+void    jrt_recur_enter(void);
+int32_t jrt_recur_depth(void);
+void    jrt_recur_restore(int32_t depth);
+
 /* ── LLM Inference ────────────────────────────────────────────────────── */
 /* Opens the inference daemon socket, sends a stateless inference request,
  * reads TOKEN frames until DONE, returns heap-allocated NUL-terminated
