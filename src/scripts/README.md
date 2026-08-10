@@ -49,7 +49,7 @@ JADE_PROVIDER_ACTIVE=/tmp/slot JADE_FAKE_REPLY="hello" jade run your.jde
 
 `backend-parity.sh` covers the language. This covers the part of the toolchain whose correctness depends on code nobody here wrote: someone else's header, someone else's macros, and a C compiler's opinion of the shim generated from them.
 
-Two checks, catching different classes.
+Three checks, catching different classes.
 
 **The C runtime, compiled optimised.** glibc's `realpath` writes up to `PATH_MAX` bytes into the buffer it is handed and aborts the process when that buffer is smaller — but the check only exists in an optimised build, so `cargo test` and the parity gate both miss it. Every FFI package in a compiled binary died at startup on Linux for two releases. glibc says what is wrong at compile time, so compiling with `-O2 -D_FORTIFY_SOURCE=3 -Werror=attribute-warning` is enough, and it takes seconds rather than the minutes a release build of the toolchain would. This half only bites on glibc: Apple's headers carry no such attribute, so on a Mac it passes on code that aborts on Linux. That asymmetry is how the bug shipped, and it is why CI is the run that counts.
 
@@ -59,8 +59,24 @@ The whole header is bound, never a narrowed slice. A slice would cover only the 
 
 Two symbols are then added to `jade.toml` by hand and the package reinstalled. That is not a shortcut around the generator — it is the other half of the workflow. A string the caller owns is the one thing a header cannot express, so the generator refuses all 125 of glib's and names the spelling, and this step is a user writing that spelling. Nothing else in the suite runs an `alloc_str` binding end to end, and `examples/` cannot: a real C library has to be installed for there to be anything to bind.
 
+**One `alloc_str` binding, called until something breaks.** The step above calls each binding once, which proves the answer is right and nothing else. What `alloc_str` actually promises is about many calls: the shim copies the string out and hands the original to the library's free function, so a long run should hold no more memory than a short one — 62 MB held before the release was added and 42 MB after, over 200,000 calls. One call cannot tell a correct release from a leak, and cannot tell either from a crash that only appears under sustained churn. A user hit exactly that, a compiled binary taking SIGSEGV at roughly 300,000 iterations over `g_uri_escape_string`.
+
+So `alloc-str-loop.jde` calls `g_strdup` in a tight loop and compares every result against the string it asked for, because a string released before it is copied out comes back as garbage of the right length rather than as a short answer. The gate builds it and runs it twice, at 200,000 and 600,000 calls, and asserts two things: that the process survives both and answers correctly, and that the larger run does not hold appreciably more memory than the smaller one. Growth in proportion to calls made is the signature of a leak.
+
+Three notes on how it is set up.
+
+It runs *compiled only*, not on both engines. The VM is far slower per FFI call, so matching these counts there would cost minutes rather than the two seconds it costs compiled; and the failure being chased is a compiled one. Step 2 already covers the two engines agreeing about `alloc_str`.
+
+It is a separate file from `glib-fixture.jde` because that fixture's output is diffed line by line between the engines, and a run this long has no business in a file being compared that way.
+
+It reuses the glib project step 2 already built. Binding the whole header is nearly all of this script's runtime; binding it a second time would roughly double the gate.
+
+The memory half needs a peak-RSS tool — `/usr/bin/time -v` on GNU coreutils, `-l` on macOS — and neither is guaranteed present, so the script probes for both and *skips that half with a reported reason* when there is none. Survival is asserted either way. The 16 MB allowance between the two runs is anchored on the measurement above rather than tuned to a machine: a leak costs about 100 bytes a call, so the 400,000 extra calls cost roughly 40 MB if they leak, against a few MB of ordinary allocator churn if they do not.
+
 Missing glib or a missing C compiler is a *skip*, reported rather than silent, so the script is safe to run anywhere.
 
 ```sh
 ./src/scripts/ffi-gate.sh                    # or pass a path to a jade binary
 ```
+
+To drive the loop by hand at a different size, `JADE_FFI_LOOP_ITERS` sets the call count and the fixture defaults to 100,000 without it.

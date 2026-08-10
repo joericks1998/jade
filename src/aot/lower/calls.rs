@@ -959,7 +959,13 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
                 .map_err(e)?
         };
         let env = b.build_load(ptrt, env_slot, "env").map_err(e)?.into_pointer_value();
-        let handle = b.build_load(ptrt, env, "nh").map_err(e)?.into_pointer_value();
+        // env[0] is the *address of* `@native_pkg$<pkgid>`, not the handle, so
+        // reaching the handle takes a second load. That indirection is what lets
+        // the whole env be a link-time constant — a `dlopen` result cannot be one
+        // — and so what lets a native fn value cost no allocation. See
+        // `emit_native_fn_value`.
+        let handle_cell = b.build_load(ptrt, env, "nhc").map_err(e)?.into_pointer_value();
+        let handle = b.build_load(ptrt, handle_cell, "nh").map_err(e)?.into_pointer_value();
         let name_slot = unsafe {
             b.build_in_bounds_gep(ptrt, env, &[i64_ty.const_int(1, false)], "nns").map_err(e)?
         };
@@ -967,9 +973,9 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
         let argv = if args.is_empty() {
             ptrt.const_null()
         } else {
-            let arr = b
-                .build_array_alloca(i64_ty, i64_ty.const_int(args.len() as u64, false), "iargv")
-                .map_err(e)?;
+            // Entry-block buffer, not an alloca here: this call can sit inside
+            // a loop. See `Lowerer::entry_buf`.
+            let arr = self.entry_buf("iargv", args.len())?;
             for (i, a) in args.iter().enumerate() {
                 let slot = unsafe {
                     b.build_in_bounds_gep(i64_ty, arr, &[i64_ty.const_int(i as u64, false)], "ia")

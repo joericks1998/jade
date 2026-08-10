@@ -1028,7 +1028,8 @@ fn a_generated_shim_makes_a_plain_c_library_loadable() {
 
     let m = manifest(&format!(
         "[project]\nname = \"app\"\n[dependencies.plain]\nversion = \"1.0.0\"\npath = \"{rel}\"\n\
-         abi = \"c\"\n[dependencies.plain.symbols.square]\nargs = [\"int\"]\nret = \"int\"\n"
+         abi = \"c\"\n[dependencies.plain.symbols.square]\nargs = [\"scalar:int64_t\"]\n\
+         ret = \"scalar:int64_t\"\n"
     ));
 
     let lock = resolve(tmp.path(), &m, &MockFetcher::new()).unwrap();
@@ -1058,7 +1059,8 @@ fn a_shim_rebuild_is_skipped_when_nothing_changed() {
 
     let m = manifest(&format!(
         "[project]\nname = \"app\"\n[dependencies.plain]\nversion = \"1.0.0\"\npath = \"{rel}\"\n\
-         abi = \"c\"\n[dependencies.plain.symbols.square]\nargs = [\"int\"]\nret = \"int\"\n"
+         abi = \"c\"\n[dependencies.plain.symbols.square]\nargs = [\"scalar:int64_t\"]\n\
+         ret = \"scalar:int64_t\"\n"
     ));
     let lock = resolve(tmp.path(), &m, &MockFetcher::new()).unwrap();
     materialize(tmp.path(), &lock, &MockFetcher::new()).unwrap();
@@ -1095,7 +1097,8 @@ fn a_shim_is_relinked_when_its_library_is_rebuilt() {
 
     let m = manifest(&format!(
         "[project]\nname = \"app\"\n[dependencies.plain]\nversion = \"1.0.0\"\npath = \"{rel}\"\n\
-         abi = \"c\"\n[dependencies.plain.symbols.square]\nargs = [\"int\"]\nret = \"int\"\n"
+         abi = \"c\"\n[dependencies.plain.symbols.square]\nargs = [\"scalar:int64_t\"]\n\
+         ret = \"scalar:int64_t\"\n"
     ));
     let mut lock = resolve(tmp.path(), &m, &MockFetcher::new()).unwrap();
     materialize(tmp.path(), &lock, &MockFetcher::new()).unwrap();

@@ -1,0 +1,43 @@
+// One `alloc_str` binding, called until something breaks.
+//
+// `glib-fixture.jde` calls each binding once, which proves the answer is right
+// and nothing else. The whole claim of `alloc_str` is about what happens over
+// many calls: the shim copies the string out and hands the original to
+// `g_free`, so a long run holds no more memory than a short one. One call
+// cannot tell a correct release from a leak, and it cannot tell either from a
+// crash that only appears under sustained churn — a user hit exactly that,
+// SIGSEGV at roughly 300,000 iterations over `g_uri_escape_string`.
+//
+// So this file does one thing many times. It is separate from `glib-fixture.jde`
+// because that fixture's output is diffed line by line between the two engines,
+// and a loop this long does not belong in a file being compared that way.
+//
+// The gate sets JADE_FFI_LOOP_ITERS and runs this twice at different counts, to
+// see whether held memory tracks the number of calls. The default keeps the
+// file runnable by hand.
+use std::env
+use glib
+
+let iters = 100000
+let from_env = env.get("JADE_FFI_LOOP_ITERS")
+if from_env != nil {
+    iters = from_env |> int
+}
+
+// Compared on every iteration rather than counted, because the failure this
+// guards against is the shim releasing the string before it is copied out.
+// That gives back garbage, not a short answer, so the length would still look
+// right while the contents would not.
+let word = "jade"
+let i = 0
+let bad = 0
+while i < iters {
+    let s = glib.g_strdup(word)
+    if s != word {
+        bad = bad + 1
+    }
+    i = i + 1
+}
+
+print(f"calls      = {iters}")
+print(f"mismatched = {bad}")

@@ -76,7 +76,9 @@ fn generate_held(
 
 #[test]
 fn generates_a_pkg_init_and_binding_table() {
-    let src = generate("zlib", &symbols(&[("crc32", sym(&["int", "str"], "int"))])).unwrap();
+    let src =
+        generate("zlib", &symbols(&[("crc32", sym(&["scalar:int64_t", "str"], "scalar:int64_t"))]))
+            .unwrap();
 
     assert!(src.contains("int jade_pkg_init(JadeNativePkg* out)"), "no init:\n{src}");
     assert!(src.contains(r#"out->name = "zlib";"#), "package name missing:\n{src}");
@@ -85,13 +87,17 @@ fn generates_a_pkg_init_and_binding_table() {
 
 #[test]
 fn declares_the_target_symbol_with_its_prototype() {
-    let src = generate("m", &symbols(&[("hypot", sym(&["float", "float"], "float"))])).unwrap();
+    let src = generate(
+        "m",
+        &symbols(&[("hypot", sym(&["scalar:double", "scalar:double"], "scalar:double"))]),
+    )
+    .unwrap();
     assert!(src.contains("extern double hypot(double, double);"), "bad decl:\n{src}");
 }
 
 #[test]
 fn a_zero_arg_function_declares_void() {
-    let src = generate("t", &symbols(&[("now", sym(&[], "int"))])).unwrap();
+    let src = generate("t", &symbols(&[("now", sym(&[], "scalar:int64_t"))])).unwrap();
     assert!(src.contains("extern int64_t now(void);"), "bad decl:\n{src}");
     assert!(src.contains("if (argc != 0) return 1;"), "missing arity check:\n{src}");
 }
@@ -100,7 +106,8 @@ fn a_zero_arg_function_declares_void() {
 fn wrappers_check_arity_and_tags_before_calling() {
     // Without the tag check the union would reinterpret the bytes and hand the
     // C function garbage.
-    let src = generate("z", &symbols(&[("f", sym(&["int", "str"], "bool"))])).unwrap();
+    let src =
+        generate("z", &symbols(&[("f", sym(&["scalar:int64_t", "str"], "scalar:bool"))])).unwrap();
 
     assert!(src.contains("if (argc != 2) return 1;"), "missing arity check:\n{src}");
     assert!(
@@ -111,12 +118,15 @@ fn wrappers_check_arity_and_tags_before_calling() {
         src.contains("if (argv[1].tag != JADE_FFI_STR) return 1;"),
         "missing tag check:\n{src}"
     );
-    assert!(src.contains("(f)(argv[0].data.as_int, argv[1].data.as_str)"), "bad call:\n{src}");
+    assert!(
+        src.contains("(f)((int64_t)argv[0].data.as_int, argv[1].data.as_str)"),
+        "bad call:\n{src}"
+    );
 }
 
 #[test]
 fn a_nil_return_calls_without_capturing_a_result() {
-    let src = generate("z", &symbols(&[("reset", sym(&["int"], "nil"))])).unwrap();
+    let src = generate("z", &symbols(&[("reset", sym(&["scalar:int64_t"], "nil"))])).unwrap();
     assert!(src.contains("extern void reset(int64_t);"), "bad decl:\n{src}");
     assert!(src.contains("out->tag = JADE_FFI_NIL;"), "should return nil:\n{src}");
     assert!(!src.contains("= reset("), "void call must not be assigned:\n{src}");
@@ -126,7 +136,7 @@ fn a_nil_return_calls_without_capturing_a_result() {
 fn rejects_an_unrepresentable_argument_type() {
     // The FFI has no array; silently marshalling it to nil is exactly the
     // failure mode this generator exists to avoid.
-    let err = generate("z", &symbols(&[("f", sym(&["array"], "int"))])).unwrap_err();
+    let err = generate("z", &symbols(&[("f", sym(&["array"], "scalar:int64_t"))])).unwrap_err();
     assert!(err.contains("'f'"), "error should name the symbol: {err}");
     assert!(err.contains("array"), "error should name the type: {err}");
     assert!(err.contains("Supported types"), "error should list what works: {err}");
@@ -141,7 +151,7 @@ fn rejects_an_unrepresentable_return_type() {
 #[test]
 fn rejects_nil_as_an_argument_type() {
     // `nil` is meaningful only as "returns nothing".
-    assert!(generate("z", &symbols(&[("f", sym(&["nil"], "int"))])).is_err());
+    assert!(generate("z", &symbols(&[("f", sym(&["nil"], "scalar:int64_t"))])).is_err());
 }
 
 #[test]
@@ -155,9 +165,9 @@ fn output_is_deterministic() {
     // HashMap iteration order must not leak into the generated file, or every
     // reinstall would recompile and churn the shim.
     let syms = symbols(&[
-        ("zeta", sym(&["int"], "int")),
-        ("alpha", sym(&["str"], "bool")),
-        ("mid", sym(&[], "float")),
+        ("zeta", sym(&["scalar:int64_t"], "scalar:int64_t")),
+        ("alpha", sym(&["str"], "scalar:bool")),
+        ("mid", sym(&[], "scalar:double")),
     ]);
     let first = generate("z", &syms).unwrap();
     for _ in 0..5 {
@@ -188,9 +198,11 @@ use crate::project::CFailure;
 
 #[test]
 fn a_null_convention_tests_the_return_and_reports_errno() {
-    let src =
-        generate("z", &symbols(&[("gzopen", failing_sym(&["str", "str"], "int", CFailure::Null))]))
-            .unwrap();
+    let src = generate(
+        "z",
+        &symbols(&[("gzopen", failing_sym(&["str", "str"], "scalar:int64_t", CFailure::Null))]),
+    )
+    .unwrap();
     assert!(src.contains("errno = 0;"), "errno must be cleared before the call:\n{src}");
     assert!(src.contains("if (!(r)) {"), "missing null test:\n{src}");
     assert!(src.contains("out->tag = JADE_FFI_ERROR;"), "failure must raise:\n{src}");
@@ -205,7 +217,11 @@ fn each_convention_emits_its_own_test() {
         (CFailure::Nonzero, "if ((r) != 0) {"),
     ];
     for (conv, expect) in cases {
-        let src = generate("l", &symbols(&[("f", failing_sym(&["int"], "int", conv))])).unwrap();
+        let src = generate(
+            "l",
+            &symbols(&[("f", failing_sym(&["scalar:int64_t"], "scalar:int64_t", conv))]),
+        )
+        .unwrap();
         assert!(src.contains(expect), "{conv:?} should emit `{expect}`:\n{src}");
     }
 }
@@ -214,16 +230,24 @@ fn each_convention_emits_its_own_test() {
 fn a_symbol_that_cannot_fail_does_not_touch_errno() {
     // Every call paying for an errno read would be a cost on the common path,
     // and a symbol with no convention has no sentinel to test anyway.
-    let src = generate("m", &symbols(&[("hypot", sym(&["float", "float"], "float"))])).unwrap();
+    let src = generate(
+        "m",
+        &symbols(&[("hypot", sym(&["scalar:double", "scalar:double"], "scalar:double"))]),
+    )
+    .unwrap();
     assert!(!src.contains("errno = 0;"), "no convention means no errno handling:\n{src}");
     assert!(!src.contains("JADE_FFI_ERROR;"), "nothing should raise:\n{src}");
 }
 
 #[test]
 fn never_is_the_same_as_omitting_the_key() {
-    let never =
-        generate("m", &symbols(&[("f", failing_sym(&["int"], "int", CFailure::Never))])).unwrap();
-    let absent = generate("m", &symbols(&[("f", sym(&["int"], "int"))])).unwrap();
+    let never = generate(
+        "m",
+        &symbols(&[("f", failing_sym(&["scalar:int64_t"], "scalar:int64_t", CFailure::Never))]),
+    )
+    .unwrap();
+    let absent =
+        generate("m", &symbols(&[("f", sym(&["scalar:int64_t"], "scalar:int64_t"))])).unwrap();
     assert_eq!(never, absent);
 }
 
@@ -231,14 +255,18 @@ fn never_is_the_same_as_omitting_the_key() {
 fn a_void_symbol_cannot_declare_a_failure_convention() {
     // There is no return value to test, so the declaration could only be
     // silently ignored. Naming it is better.
-    let err = generate("l", &symbols(&[("f", failing_sym(&["int"], "nil", CFailure::Negative))]))
-        .expect_err("nil + fails_when should be refused");
+    let err = generate(
+        "l",
+        &symbols(&[("f", failing_sym(&["scalar:int64_t"], "nil", CFailure::Negative))]),
+    )
+    .expect_err("nil + fails_when should be refused");
     assert!(err.contains("returns nil"), "message should say why: {err}");
     assert!(err.contains("drop `fails_when`"), "message should name a fix: {err}");
 
     // `never` on a void symbol is fine — it asserts what is already true.
     assert!(
-        generate("l", &symbols(&[("f", failing_sym(&["int"], "nil", CFailure::Never))])).is_ok()
+        generate("l", &symbols(&[("f", failing_sym(&["scalar:int64_t"], "nil", CFailure::Never))]))
+            .is_ok()
     );
 }
 
@@ -249,10 +277,17 @@ fn the_generated_shim_compiles() {
     // string check cannot reach — an unbalanced brace or a missing include
     // passes every assertion above and fails at install time.
     let syms = symbols(&[
-        ("gzopen", failing_sym(&["str", "str"], "int", CFailure::Null)),
-        ("gzread", failing_sym(&["int", "int"], "int", CFailure::Negative)),
-        ("gzclose", failing_sym(&["int"], "int", CFailure::Nonzero)),
-        ("crc32", sym(&["int", "str"], "int")),
+        ("gzopen", failing_sym(&["str", "str"], "scalar:int64_t", CFailure::Null)),
+        (
+            "gzread",
+            failing_sym(
+                &["scalar:int64_t", "scalar:int64_t"],
+                "scalar:int64_t",
+                CFailure::Negative,
+            ),
+        ),
+        ("gzclose", failing_sym(&["scalar:int64_t"], "scalar:int64_t", CFailure::Nonzero)),
+        ("crc32", sym(&["scalar:int64_t", "str"], "scalar:int64_t")),
         ("noop", sym(&[], "nil")),
     ]);
     let src = generate("z", &syms).unwrap();
@@ -286,7 +321,7 @@ fn the_generated_shim_compiles() {
 
 #[test]
 fn an_input_blob_becomes_a_pointer_and_a_length() {
-    let src = generate("z", &symbols(&[("put", sym(&["bytes"], "int"))])).unwrap();
+    let src = generate("z", &symbols(&[("put", sym(&["bytes"], "scalar:int64_t"))])).unwrap();
     assert!(src.contains("extern int64_t put(const void*, size_t);"), "bad decl:\n{src}");
     assert!(
         src.contains("if (argv[0].tag != JADE_FFI_BYTES) return 1;"),
@@ -302,7 +337,8 @@ fn an_input_blob_becomes_a_pointer_and_a_length() {
 fn a_blob_with_no_length_becomes_one_pointer() {
     // The libfdt shape: the extent is written inside the blob, so there is
     // nowhere to pass a size and the pointer goes on its own.
-    let src = generate("fdt", &symbols(&[("check", sym(&["bytes_ptr"], "int"))])).unwrap();
+    let src =
+        generate("fdt", &symbols(&[("check", sym(&["bytes_ptr"], "scalar:int64_t"))])).unwrap();
     assert!(src.contains("extern int64_t check(const void*);"), "bad decl:\n{src}");
     assert!(src.contains("if (argv[0].tag != JADE_FFI_BYTES) return 1;"), "no tag check:\n{src}");
     assert!(src.contains("(check)(argv[0].data.as_bytes"), "should pass the pointer:\n{src}");
@@ -312,8 +348,8 @@ fn a_blob_with_no_length_becomes_one_pointer() {
 #[test]
 fn a_lengthless_blob_shim_compiles() {
     let syms = symbols(&[
-        ("check", sym(&["bytes_ptr"], "int")),
-        ("at", sym(&["bytes_ptr", "str"], "int")),
+        ("check", sym(&["bytes_ptr"], "scalar:int64_t")),
+        ("at", sym(&["bytes_ptr", "str"], "scalar:int64_t")),
     ]);
     let src = generate("fdt", &syms).unwrap();
     if let Err(e) = compiles(&src, &[]) {
@@ -325,7 +361,11 @@ fn a_lengthless_blob_shim_compiles() {
 fn a_blob_revised_in_place_is_copied_and_handed_back() {
     // A Jade blob is immutable, so the library gets scratch of the caller's
     // bytes rather than the caller's bytes, and the edit comes back as a return.
-    let src = generate("fdt", &symbols(&[("nop", sym(&["inout_bytes", "int"], "int"))])).unwrap();
+    let src = generate(
+        "fdt",
+        &symbols(&[("nop", sym(&["inout_bytes", "scalar:int64_t"], "scalar:int64_t"))]),
+    )
+    .unwrap();
     assert!(src.contains("extern int64_t nop(void*, int64_t);"), "bad decl:\n{src}");
     assert!(
         src.contains("memcpy(iobuf0, argv[0].data.as_bytes->data, iolen0);"),
@@ -341,7 +381,7 @@ fn a_blob_revised_in_place_is_copied_and_handed_back() {
 fn two_revised_blobs_free_both_when_the_call_raises() {
     // The cleanup string used to be assigned rather than appended, so whichever
     // buffer was declared first leaked on the raise path.
-    let s = failing_sym(&["inout_bytes@a", "inout_bytes@b"], "int", CFailure::Nonzero);
+    let s = failing_sym(&["inout_bytes@a", "inout_bytes@b"], "scalar:int64_t", CFailure::Nonzero);
     let src = generate("fdt", &symbols(&[("apply", s)])).unwrap();
     let raise = src.split("out->tag = JADE_FFI_ERROR").next().unwrap_or_default();
     assert!(raise.contains("free(iobuf0);") && raise.contains("free(iobuf1);"), "leak:\n{src}");
@@ -349,7 +389,8 @@ fn two_revised_blobs_free_both_when_the_call_raises() {
 
 #[test]
 fn a_revised_blob_shim_compiles() {
-    let syms = symbols(&[("nop", sym(&["inout_bytes", "int", "str"], "int"))]);
+    let syms =
+        symbols(&[("nop", sym(&["inout_bytes", "scalar:int64_t", "str"], "scalar:int64_t"))]);
     let src = generate("fdt", &syms).unwrap();
     if let Err(e) = compiles(&src, &[]) {
         panic!("in-place blob shim does not compile:\n{e}\n--- source ---\n{src}");
@@ -358,13 +399,17 @@ fn a_revised_blob_shim_compiles() {
 
 #[test]
 fn a_null_blob_passes_null_and_zero_rather_than_dereferencing() {
-    let src = generate("z", &symbols(&[("put", sym(&["bytes"], "int"))])).unwrap();
+    let src = generate("z", &symbols(&[("put", sym(&["bytes"], "scalar:int64_t"))])).unwrap();
     assert!(src.contains("? (const void*)argv[0].data.as_bytes->data : NULL"), "unguarded:\n{src}");
 }
 
 #[test]
 fn an_out_buffer_takes_no_jade_argument_and_returns_bytes() {
-    let s = failing_sym(&["int", "out_buffer:short", "int"], "int", CFailure::Negative);
+    let s = failing_sym(
+        &["scalar:int64_t", "out_buffer:short", "scalar:int64_t"],
+        "scalar:int64_t",
+        CFailure::Negative,
+    );
     let src = generate("snd", &symbols(&[("sf_read_short", s)])).unwrap();
 
     // Three C parameters, two Jade arguments: the buffer is the shim's.
@@ -391,7 +436,11 @@ fn an_out_buffer_takes_no_jade_argument_and_returns_bytes() {
 fn a_failing_out_buffer_call_frees_its_scratch_before_raising() {
     // A raise that leaks the scratch would leak once per failed call, which on
     // a read loop hitting EOF is every iteration.
-    let s = failing_sym(&["int", "out_buffer:char", "int"], "int", CFailure::Negative);
+    let s = failing_sym(
+        &["scalar:int64_t", "out_buffer:char", "scalar:int64_t"],
+        "scalar:int64_t",
+        CFailure::Negative,
+    );
     let src = generate("z", &symbols(&[("rd", s)])).unwrap();
     let fail_block = &src[src.find("if ((r) < 0)").expect("failure test")..];
     let raise_at = fail_block.find("JADE_FFI_ERROR").unwrap();
@@ -403,14 +452,14 @@ fn a_failing_out_buffer_call_frees_its_scratch_before_raising() {
 fn a_short_read_is_clamped_to_what_was_allocated() {
     // A library reporting more than it was given would otherwise make the copy
     // read past the scratch.
-    let s = sym(&["int", "out_buffer:char", "int"], "int");
+    let s = sym(&["scalar:int64_t", "out_buffer:char", "scalar:int64_t"], "scalar:int64_t");
     let src = generate("z", &symbols(&[("rd", s)])).unwrap();
     assert!(src.contains("r > n_elem1 ? n_elem1 : r"), "missing clamp:\n{src}");
 }
 
 #[test]
 fn an_out_buffer_needs_a_count_after_it() {
-    let s = sym(&["int", "out_buffer:char"], "int");
+    let s = sym(&["scalar:int64_t", "out_buffer:char"], "scalar:int64_t");
     let err = generate("z", &symbols(&[("rd", s)])).unwrap_err();
     assert!(err.contains("followed by an `int`"), "unexpected: {err}");
     assert!(err.contains("how many"), "should say what the count is for: {err}");
@@ -418,7 +467,7 @@ fn an_out_buffer_needs_a_count_after_it() {
 
 #[test]
 fn an_out_buffer_symbol_must_return_the_count() {
-    let s = sym(&["out_buffer:char", "int"], "str");
+    let s = sym(&["out_buffer:char", "scalar:int64_t"], "str");
     let err = generate("z", &symbols(&[("rd", s)])).unwrap_err();
     assert!(err.contains("number of elements written"), "unexpected: {err}");
 }
@@ -427,7 +476,10 @@ fn an_out_buffer_symbol_must_return_the_count() {
 fn at_most_one_out_parameter_may_read_the_c_return_value() {
     // Two out_buffers would both want the return value as their element count,
     // and there is only one of it.
-    let s = sym(&["out_buffer:char", "int", "out_buffer:char", "int"], "int");
+    let s = sym(
+        &["out_buffer:char", "scalar:int64_t", "out_buffer:char", "scalar:int64_t"],
+        "scalar:int64_t",
+    );
     let err = generate("z", &symbols(&[("rd", s)])).unwrap_err();
     assert!(err.contains("both read the C return value"), "unexpected: {err}");
 }
@@ -448,7 +500,7 @@ fn two_out_parameters_may_not_share_a_name() {
 
 #[test]
 fn ret_is_reserved_as_an_out_parameter_name() {
-    let s = sym(&["out_scalar:int@ret", "out_scalar:int@b"], "int");
+    let s = sym(&["out_scalar:int@ret", "out_scalar:int@b"], "scalar:int64_t");
     let err = generate("z", &symbols(&[("f", s)])).unwrap_err();
     assert!(err.contains("reserved"), "unexpected: {err}");
 }
@@ -458,7 +510,7 @@ fn a_c_type_that_is_not_an_identifier_is_refused() {
     // The text goes straight into generated C, so this is an injection guard as
     // much as a typo guard.
     for bad in ["short; evil()", "char*", "1int", ""] {
-        let s = sym(&[format!("out_buffer:{bad}").as_str(), "int"], "int");
+        let s = sym(&[format!("out_buffer:{bad}").as_str(), "scalar:int64_t"], "scalar:int64_t");
         assert!(generate("z", &symbols(&[("rd", s)])).is_err(), "should refuse out_buffer:{bad}");
     }
 }
@@ -574,7 +626,7 @@ fn a_returned_pointer_that_is_null_or_negative_comes_back_as_nil() {
 
 #[test]
 fn a_returned_blob_and_its_length_only_mean_anything_together() {
-    let lone = sym(&["bytes_ptr", "ret_len:int"], "int");
+    let lone = sym(&["bytes_ptr", "ret_len:int"], "scalar:int64_t");
     let err = generate("fdt", &symbols(&[("f", lone)])).unwrap_err();
     assert!(err.contains("must be `bytes`"), "should refuse a stray length: {err}");
 
@@ -589,7 +641,10 @@ fn a_returned_blob_and_its_length_only_mean_anything_together() {
 
 #[test]
 fn a_returned_blob_shim_compiles() {
-    let syms = symbols(&[("getprop", sym(&["bytes_ptr", "int", "str", "ret_len:int"], "bytes"))]);
+    let syms = symbols(&[(
+        "getprop",
+        sym(&["bytes_ptr", "scalar:int64_t", "str", "ret_len:int"], "bytes"),
+    )]);
     let src = generate("fdt", &syms).unwrap();
     if let Err(e) = compiles(&src, &[]) {
         panic!("returned blob shim does not compile:\n{e}\n--- source ---\n{src}");
@@ -674,11 +729,19 @@ fn a_header_name_that_is_not_a_path_is_refused() {
 
 #[test]
 fn helpers_are_emitted_only_when_something_uses_them() {
-    let plain = generate("m", &symbols(&[("hypot", sym(&["float", "float"], "float"))])).unwrap();
+    let plain = generate(
+        "m",
+        &symbols(&[("hypot", sym(&["scalar:double", "scalar:double"], "scalar:double"))]),
+    )
+    .unwrap();
     assert!(!plain.contains("jade_shim_bytes"), "unused helper emitted:\n{plain}");
     assert!(!plain.contains("jade_shim_struct"), "unused helper emitted:\n{plain}");
 
-    let buf = generate("z", &symbols(&[("rd", sym(&["out_buffer:char", "int"], "int"))])).unwrap();
+    let buf = generate(
+        "z",
+        &symbols(&[("rd", sym(&["out_buffer:char", "scalar:int64_t"], "scalar:int64_t"))]),
+    )
+    .unwrap();
     assert!(buf.contains("static JadeBytes* jade_shim_bytes"), "helper missing:\n{buf}");
     assert!(!buf.contains("jade_shim_struct"), "struct helper not needed:\n{buf}");
 }
@@ -724,8 +787,15 @@ fn compiles(src: &str, extra: &[(&str, &str)]) -> Result<(), String> {
 #[test]
 fn a_buffer_shim_compiles() {
     let syms = symbols(&[
-        ("rd", failing_sym(&["int", "out_buffer:short", "int"], "int", CFailure::Negative)),
-        ("put", sym(&["bytes", "int"], "int")),
+        (
+            "rd",
+            failing_sym(
+                &["scalar:int64_t", "out_buffer:short", "scalar:int64_t"],
+                "scalar:int64_t",
+                CFailure::Negative,
+            ),
+        ),
+        ("put", sym(&["bytes", "scalar:int64_t"], "scalar:int64_t")),
         ("put2", sym(&["bytes"], "nil")),
     ]);
     let src = generate("z", &syms).unwrap();
@@ -792,8 +862,11 @@ fn a_caller_sized_buffer_allocates_what_it_was_asked_for_and_hands_it_all_back()
     // For the writes whose extent only the documentation gives.
     // `lzma_stream_header_encode(const lzma_stream_flags *, uint8_t *out)`
     // writes exactly twelve bytes and says so nowhere a generator can read.
-    let src =
-        generate("lz", &symbols(&[("enc", sym(&["sized_buffer:unsigned char"], "int"))])).unwrap();
+    let src = generate(
+        "lz",
+        &symbols(&[("enc", sym(&["sized_buffer:unsigned char"], "scalar:int64_t"))]),
+    )
+    .unwrap();
     assert!(src.contains("if (argv[0].tag != JADE_FFI_INT) return 1;"), "no count check:\n{src}");
     assert!(src.contains("calloc((size_t)(n_want0 ? n_want0 : 1)"), "not allocated:\n{src}");
     // All of it: the call reports a status, so there is nothing to trim by.
@@ -803,14 +876,20 @@ fn a_caller_sized_buffer_allocates_what_it_was_asked_for_and_hands_it_all_back()
 
 #[test]
 fn a_negative_or_absurd_count_is_refused_before_anything_is_allocated() {
-    let src =
-        generate("lz", &symbols(&[("enc", sym(&["sized_buffer:unsigned char"], "int"))])).unwrap();
+    let src = generate(
+        "lz",
+        &symbols(&[("enc", sym(&["sized_buffer:unsigned char"], "scalar:int64_t"))]),
+    )
+    .unwrap();
     assert!(src.contains("if (n_want0 < 0)"), "unguarded:\n{src}");
 }
 
 #[test]
 fn a_caller_sized_buffer_shim_compiles() {
-    let syms = symbols(&[("enc", sym(&["int", "sized_buffer:unsigned char"], "int"))]);
+    let syms = symbols(&[(
+        "enc",
+        sym(&["scalar:int64_t", "sized_buffer:unsigned char"], "scalar:int64_t"),
+    )]);
     let src = generate("lz", &syms).unwrap();
     if let Err(e) = compiles(&src, &[]) {
         panic!("sized buffer shim does not compile:\n{e}\n--- source ---\n{src}");
@@ -827,7 +906,8 @@ fn a_borrowed_string_is_copied_inside_a_struct_and_lent_at_the_top() {
     let alone = generate("fdt", &symbols(&[("f", sym(&["out_str:char"], "nil"))])).unwrap();
     assert!(alone.contains("out->data.as_str = (const char*)ostr0;"), "should lend:\n{alone}");
 
-    let paired = generate("fdt", &symbols(&[("f", sym(&["out_str:char"], "int"))])).unwrap();
+    let paired =
+        generate("fdt", &symbols(&[("f", sym(&["out_str:char"], "scalar:int64_t"))])).unwrap();
     assert!(paired.contains("strdup((const char*)ostr0)"), "should copy:\n{paired}");
 }
 
@@ -968,7 +1048,90 @@ fn a_copied_owned_string_is_not_truncated() {
     s.frees_with = Some("free".to_string());
     let src = generate("z", &symbols(&[("f", s)])).unwrap();
     assert!(!src.contains("char buf[4096]"), "should not be fixed:\n{src}");
-    assert!(src.contains("realloc(buf, n)"), "should grow to fit:\n{src}");
+    assert!(src.contains("realloc(b->buf, n)"), "should grow to fit:\n{src}");
+}
+
+#[test]
+fn a_copied_owned_string_is_released_when_the_thread_ends() {
+    // A _Thread_local pointer has no destructor in C11, so the buffer a thread
+    // held last used to be lost when the thread went. Both engines retire idle
+    // pool workers after ten seconds, so threads come and go for as long as the
+    // program runs and the lost buffers add up. A pthread key is the hook.
+    let mut s = sym(&["str"], "alloc_str");
+    s.frees_with = Some("free".to_string());
+    let src = generate("z", &symbols(&[("f", s)])).unwrap();
+    assert!(src.contains("#include <pthread.h>"), "should include it:\n{src}");
+    assert!(
+        src.contains("pthread_key_create(&jade_owned_key, jade_owned_release)"),
+        "should register a destructor:\n{src}"
+    );
+
+    // The destructor takes the buffer through its argument. It must not read a
+    // _Thread_local: on macOS the thread's thread-local storage is already torn
+    // down when key destructors run, so that spelling frees a null pointer and
+    // reclaims nothing — the hook runs and the leak stays exactly as it was.
+    // This was written the wrong way first, and only measuring caught it.
+    let at = src.find("static void jade_owned_release").expect("a release hook");
+    let hook = &src[at..at + src[at..].find("\n}").expect("a body") + 2];
+    assert!(hook.contains("(JadeOwnedBuf*)p;"), "should take the buffer as an argument:\n{hook}");
+    assert!(!hook.contains("_Thread_local"), "a destructor cannot read one:\n{hook}");
+
+    // And what the key holds is the holder, never the buffer: realloc moves the
+    // buffer, and a key still naming the released block would be a double free
+    // at thread exit. The holder is allocated once per thread and never moves.
+    assert!(src.contains("pthread_setspecific(jade_owned_key, b)"), "should hold it:\n{src}");
+    assert!(src.contains("free(b->buf);") && src.contains("free(b);"), "frees both:\n{src}");
+
+    // The key is created once for the process, and a creation that failed leaves
+    // an indeterminate key that must not be used.
+    assert!(src.contains("pthread_once(&jade_owned_once"), "should arm once:\n{src}");
+    assert!(src.contains("if (!jade_owned_key_ok) return NULL;"), "no unusable key:\n{src}");
+}
+
+/// The branch a failed copy takes, from its test to the `return` that ends it.
+///
+/// Bounded at the `return` rather than by a character count: the line right
+/// after the branch assigns the string into its target, and a window wide enough
+/// to catch it would make "the error is not written into a field" pass for the
+/// wrong reason.
+fn failed_copy_branch(src: &str) -> &str {
+    let at = src.find("if (!r_c)").expect("a failed-copy branch");
+    let branch = &src[at..];
+    let end = branch.find("return 1;").expect("the branch fails the call") + "return 1;".len();
+    &branch[..end]
+}
+
+#[test]
+fn a_failed_copy_of_an_owned_string_says_what_went_wrong() {
+    // It used to be a bare `return 1` leaving `out` untouched, and neither
+    // engine can read a cause that is not there: the compiled runtime said
+    // "returned a non-zero status" and the VM "returned error code 1", for what
+    // is simply out of memory.
+    let mut s = sym(&["str"], "alloc_str");
+    s.frees_with = Some("g_free".to_string());
+    let src = generate("glib", &symbols(&[("dup_it", s)])).unwrap();
+    let branch = failed_copy_branch(&src);
+    assert!(branch.contains("out->tag = JADE_FFI_ERROR;"), "should be an error:\n{branch}");
+    assert!(branch.contains("dup_it: out of memory"), "should name the cause:\n{branch}");
+    assert!(branch.contains("return 1;"), "should still fail the call:\n{branch}");
+}
+
+#[test]
+fn a_failed_copy_reports_through_out_even_when_the_string_lands_in_a_struct() {
+    // Two results mean the string lands in a struct field, so `target` is that
+    // field — but a failure is always reported through the top-level `out`, and
+    // writing an error tag into a field of a half-built tree would say nothing
+    // to either engine.
+    let mut s = sym(&["str", "out_scalar:int"], "alloc_str");
+    s.frees_with = Some("g_free".to_string());
+    let src = generate("glib", &symbols(&[("f", s)])).unwrap();
+    let branch = failed_copy_branch(&src);
+    assert!(branch.contains("out->tag = JADE_FFI_ERROR;"), "should report on out:\n{branch}");
+    assert!(branch.contains("out->data.as_str = \"f: out of memory"), "on out:\n{branch}");
+    // The string's own target is a field of the result struct, and nothing about
+    // the failure belongs there — that is the half that was easy to get wrong.
+    assert!(src.contains("res->vals["), "the string should land in a field:\n{src}");
+    assert!(!branch.contains("res->vals["), "the error is not a field:\n{branch}");
 }
 
 #[test]
@@ -977,7 +1140,8 @@ fn a_symbol_that_would_shadow_a_shim_helper_is_refused_by_name() {
     // exporting `bytes` would define one of them twice, and the C compiler
     // reports that against generated source hundreds of lines from anything the
     // reader wrote.
-    let err = generate("z", &symbols(&[("bytes", sym(&["int"], "int"))])).unwrap_err();
+    let err = generate("z", &symbols(&[("bytes", sym(&["scalar:int64_t"], "scalar:int64_t"))]))
+        .unwrap_err();
     assert!(err.contains("defined twice"), "should say why: {err}");
     assert!(err.contains("'bytes'"), "should name it: {err}");
 }
@@ -988,7 +1152,7 @@ fn a_symbol_that_would_shadow_a_shim_helper_is_refused_by_name() {
 fn a_callbacks_user_data_is_accepted_and_not_forwarded() {
     // The library will pass one, so the C signature must have it. Jade has
     // nothing to do with it, so nothing is forwarded.
-    let s = sym(&["callback:int(int, void*)"], "int");
+    let s = sym(&["callback:int(int, void*)"], "scalar:int64_t");
     let src = generate("ar", &symbols(&[("go", s)])).unwrap();
     assert!(src.contains("static int jade_cbt_go_0(int a0, void* a1)"), "bad signature:\n{src}");
     assert!(src.contains("(void)a1;"), "should be explicitly unused:\n{src}");
@@ -1009,7 +1173,8 @@ fn a_null_pointer_stands_in_for_what_cannot_be_carried() {
 fn a_null_pointer_needs_a_header_to_stand_in_against() {
     // Without one the shim declares the symbol itself, and it does not know what
     // type the null is standing in for.
-    let err = generate("br", &symbols(&[("go", sym(&["null_ptr"], "int"))])).unwrap_err();
+    let err =
+        generate("br", &symbols(&[("go", sym(&["null_ptr"], "scalar:int64_t"))])).unwrap_err();
     assert!(err.contains("headers"), "should ask for a header: {err}");
 }
 
@@ -1146,7 +1311,8 @@ fn a_field_the_struct_does_not_have_fails_at_compile_time() {
 
 #[test]
 fn a_handle_argument_is_unwrapped_with_its_type_checked() {
-    let src = generate("db", &symbols(&[("close", sym(&["handle<sqlite3>"], "int"))])).unwrap();
+    let src = generate("db", &symbols(&[("close", sym(&["handle<sqlite3>"], "scalar:int64_t"))]))
+        .unwrap();
     assert!(
         src.contains(r#"jade_shim_unwrap(&argv[0], "sqlite3", &h0)"#),
         "missing unwrap:\n{src}"
@@ -1161,7 +1327,9 @@ fn a_handle_argument_is_unwrapped_with_its_type_checked() {
 #[test]
 fn the_wrong_handle_type_is_refused_rather_than_dereferenced() {
     // The check is the entire reason a handle carries a name.
-    let src = generate("db", &symbols(&[("step", sym(&["handle<sqlite3_stmt>"], "int"))])).unwrap();
+    let src =
+        generate("db", &symbols(&[("step", sym(&["handle<sqlite3_stmt>"], "scalar:int64_t"))]))
+            .unwrap();
     assert!(src.contains(r#""sqlite3_stmt""#), "must check the exact type:\n{src}");
     assert!(src.contains("return 1;"), "a mismatch must fail the call:\n{src}");
 }
@@ -1177,7 +1345,7 @@ fn a_handle_return_is_wrapped_with_its_type() {
 #[test]
 fn an_out_handle_takes_no_jade_argument_and_returns_the_handle() {
     // sqlite3_open(path, &db) — the shape of every SQLite connection.
-    let s = failing_sym(&["str", "out_handle:sqlite3"], "int", CFailure::Nonzero);
+    let s = failing_sym(&["str", "out_handle:sqlite3"], "scalar:int64_t", CFailure::Nonzero);
     let src = generate("db", &symbols(&[("sqlite3_open", s)])).unwrap();
 
     assert!(
@@ -1199,7 +1367,7 @@ fn an_out_handle_takes_no_jade_argument_and_returns_the_handle() {
 fn an_out_handle_that_was_never_written_comes_back_nil() {
     // With a failure convention, which is the shape the generator emits: the
     // return is a status, so the handle is the whole result.
-    let s = failing_sym(&["out_handle:T"], "int", CFailure::Nonzero);
+    let s = failing_sym(&["out_handle:T"], "scalar:int64_t", CFailure::Nonzero);
     let src = generate("db", &symbols(&[("op", s)])).unwrap();
     assert!(src.contains("if (!ohandle0) {"), "must check it was written:\n{src}");
     assert!(src.contains("out->tag = JADE_FFI_NIL;"), "should be nil, not a null handle:\n{src}");
@@ -1215,7 +1383,9 @@ fn a_count_returned_beside_a_handle_is_not_swallowed() {
     //
     // A failure convention is what says the return is a status. Without one it
     // is a value, and comes back beside the handle.
-    let src = generate("cs", &symbols(&[("disasm", sym(&["out_handle:cs_insn"], "int"))])).unwrap();
+    let src =
+        generate("cs", &symbols(&[("disasm", sym(&["out_handle:cs_insn"], "scalar:int64_t"))]))
+            .unwrap();
     assert!(src.contains(r#"jade_shim_struct("disasm_result", 2)"#), "should pair:\n{src}");
     assert!(src.contains(r#"res->keys[0] = strdup("ret");"#), "count missing:\n{src}");
 }
@@ -1224,23 +1394,26 @@ fn a_count_returned_beside_a_handle_is_not_swallowed() {
 fn a_handle_and_a_scalar_keep_their_argument_positions() {
     // The unwrap uses the Jade index, which is easy to get wrong once some
     // arguments consume a slot and others do not.
-    let s = sym(&["int", "handle<sqlite3>", "str"], "int");
+    let s = sym(&["scalar:int64_t", "handle<sqlite3>", "str"], "scalar:int64_t");
     let src = generate("db", &symbols(&[("f", s)])).unwrap();
     assert!(src.contains(r#"jade_shim_unwrap(&argv[1], "sqlite3", &h1)"#), "wrong index:\n{src}");
     assert!(
-        src.contains("(f)(argv[0].data.as_int, (sqlite3*)h1, argv[2].data.as_str)"),
+        src.contains("(f)((int64_t)argv[0].data.as_int, (sqlite3*)h1, argv[2].data.as_str)"),
         "bad call:\n{src}"
     );
 }
 
 #[test]
 fn the_handle_helper_is_emitted_for_any_of_the_three_forms() {
-    let plain = generate("m", &symbols(&[("f", sym(&["int"], "int"))])).unwrap();
+    let plain =
+        generate("m", &symbols(&[("f", sym(&["scalar:int64_t"], "scalar:int64_t"))])).unwrap();
     assert!(!plain.contains("jade_shim_handle"), "unused helper emitted:\n{plain}");
 
-    for spec in
-        [sym(&["handle<T>"], "int"), sym(&["int"], "handle<T>"), sym(&["out_handle:T"], "int")]
-    {
+    for spec in [
+        sym(&["handle<T>"], "scalar:int64_t"),
+        sym(&["scalar:int64_t"], "handle<T>"),
+        sym(&["out_handle:T"], "scalar:int64_t"),
+    ] {
         let src = generate("z", &symbols(&[("f", spec)])).unwrap();
         assert!(src.contains("static JadeHandle* jade_shim_handle"), "helper missing:\n{src}");
     }
@@ -1292,7 +1465,7 @@ extern int sqlite3_close(sqlite3* db);
 
 #[test]
 fn a_callback_becomes_a_static_function_of_the_declared_shape() {
-    let s = sym(&["int", "callback:int(int, const char*)"], "int");
+    let s = sym(&["scalar:int64_t", "callback:int(int, const char*)"], "scalar:int64_t");
     let src = generate("z", &symbols(&[("each", s)])).unwrap();
     // The library's own C types, not Jade's widened ones: this declares a
     // function pointer the library will store and call, so `int` must be `int`.
@@ -1306,7 +1479,7 @@ fn a_callback_becomes_a_static_function_of_the_declared_shape() {
         "bad decl:\n{src}"
     );
     assert!(
-        src.contains("(each)(argv[0].data.as_int, jade_cbt_each_1)"),
+        src.contains("(each)((int64_t)argv[0].data.as_int, jade_cbt_each_1)"),
         "should pass the trampoline:\n{src}"
     );
 }
@@ -1316,7 +1489,7 @@ fn a_registration_outlives_the_call_that_made_it() {
     // A library that stores the callback invokes it from a later call entirely:
     // `ares_search` registers and the answer arrives during `ares_process`.
     // Clearing the slot on return is what made that never fire.
-    let s = sym(&["callback:int(int)"], "int");
+    let s = sym(&["callback:int(int)"], "scalar:int64_t");
     let src = generate("z", &symbols(&[("go", s)])).unwrap();
     assert!(src.contains("jade_cb_go_0 = argv[0].data.as_fn;"), "should register:\n{src}");
     // The declaration says `= NULL` too, so look only at the wrapper body.
@@ -1330,7 +1503,7 @@ fn the_registration_slot_is_not_thread_local() {
     // Under the VM every native call runs on its own worker thread, so a slot
     // set while `ares_search` ran would read empty during `ares_process` even
     // if nothing ever cleared it.
-    let s = sym(&["callback:int(int)"], "int");
+    let s = sym(&["callback:int(int)"], "scalar:int64_t");
     let src = generate("z", &symbols(&[("go", s)])).unwrap();
     let decl = src.lines().find(|l| l.contains("jade_cb_go_0 = NULL")).unwrap_or("");
     assert!(!decl.contains("_Thread_local"), "the slot must be shared across threads: {decl}");
@@ -1340,7 +1513,7 @@ fn the_registration_slot_is_not_thread_local() {
 fn a_raise_inside_a_callback_is_deferred_rather_than_unwound() {
     // Longjmping out of the trampoline would unwind through the C library's
     // own frames, past whatever it was in the middle of.
-    let s = sym(&["callback:int(int)"], "int");
+    let s = sym(&["callback:int(int)"], "scalar:int64_t");
     let src = generate("z", &symbols(&[("go", s)])).unwrap();
     assert!(src.contains("jade_cb_failed = 1;"), "should record the failure:\n{src}");
     assert!(src.contains("if (jade_cb_failed) {"), "should check after the call:\n{src}");
@@ -1357,8 +1530,10 @@ fn every_wrapper_reports_a_raise_even_if_it_took_no_callback() {
     // the symbol that was running when the callback raised. A function given to
     // `ares_search` raises during `ares_process`, and that is the call that has
     // to report it — so the flag is one per shim and every wrapper checks it.
-    let syms =
-        symbols(&[("go", sym(&["callback:int(int)"], "int")), ("pump", sym(&["int"], "int"))]);
+    let syms = symbols(&[
+        ("go", sym(&["callback:int(int)"], "scalar:int64_t")),
+        ("pump", sym(&["scalar:int64_t"], "scalar:int64_t")),
+    ]);
     let src = generate("z", &syms).unwrap();
     let pump = &src[src.find("jade_shim_pump").unwrap()..];
     assert!(pump.contains("if (jade_cb_failed) {"), "a pumping call must report:\n{pump}");
@@ -1366,7 +1541,8 @@ fn every_wrapper_reports_a_raise_even_if_it_took_no_callback() {
 
 #[test]
 fn a_shim_with_no_callbacks_declares_no_raised_flag() {
-    let src = generate("z", &symbols(&[("f", sym(&["int"], "int"))])).unwrap();
+    let src =
+        generate("z", &symbols(&[("f", sym(&["scalar:int64_t"], "scalar:int64_t"))])).unwrap();
     assert!(!src.contains("jade_cb_failed"), "nothing to check:\n{src}");
 }
 
@@ -1375,8 +1551,8 @@ fn a_void_callback_and_a_zero_argument_callback_both_work() {
     let src = generate(
         "z",
         &symbols(&[
-            ("a", sym(&["callback:void(int)"], "int")),
-            ("b", sym(&["callback:int()"], "int")),
+            ("a", sym(&["callback:void(int)"], "scalar:int64_t")),
+            ("b", sym(&["callback:int()"], "scalar:int64_t")),
         ]),
     )
     .unwrap();
@@ -1389,7 +1565,7 @@ fn a_malformed_or_unrepresentable_callback_is_refused() {
     for bad in
         ["callback:int", "callback:int(", "callback:int(struct foo)", "callback:double*(int)"]
     {
-        let s = sym(&[bad], "int");
+        let s = sym(&[bad], "scalar:int64_t");
         assert!(generate("z", &symbols(&[("f", s)])).is_err(), "should refuse {bad}");
     }
 }
@@ -1414,7 +1590,8 @@ fn a_callback_shim_compiles() {
 #[test]
 fn an_out_scalar_takes_no_jade_argument_and_is_the_result() {
     let src =
-        generate("z", &symbols(&[("f", sym(&["int", "out_scalar:uint32_t"], "nil"))])).unwrap();
+        generate("z", &symbols(&[("f", sym(&["scalar:int64_t", "out_scalar:uint32_t"], "nil"))]))
+            .unwrap();
     assert!(src.contains("extern void f(int64_t, uint32_t*);"), "bad decl:\n{src}");
     assert!(
         src.contains("if (argc != 1) return 1;"),
@@ -1436,7 +1613,9 @@ fn an_out_scalar_keeps_the_librarys_own_c_type() {
 
 #[test]
 fn an_inout_scalar_consumes_an_argument_and_is_seeded_from_it() {
-    let src = generate("z", &symbols(&[("f", sym(&["int", "inout_scalar:int"], "nil"))])).unwrap();
+    let src =
+        generate("z", &symbols(&[("f", sym(&["scalar:int64_t", "inout_scalar:int"], "nil"))]))
+            .unwrap();
     assert!(src.contains("if (argc != 2) return 1;"), "it does take an argument:\n{src}");
     assert!(
         src.contains("if (argv[1].tag != JADE_FFI_INT) return 1;"),
@@ -1474,7 +1653,7 @@ fn two_named_outs_come_back_under_their_own_keys() {
 
 #[test]
 fn a_return_value_joins_named_outs_under_ret() {
-    let s = sym(&["int", "out_scalar:int@quot", "out_scalar:int@rem"], "int");
+    let s = sym(&["scalar:int64_t", "out_scalar:int@quot", "out_scalar:int@rem"], "scalar:int64_t");
     let src = generate("z", &symbols(&[("divmod", s)])).unwrap();
     assert!(src.contains(r#"jade_shim_struct("divmod_result", 3)"#), "three keys:\n{src}");
     assert!(src.contains(r#"strdup("ret")"#), "missing ret:\n{src}");
@@ -1483,7 +1662,7 @@ fn a_return_value_joins_named_outs_under_ret() {
 #[test]
 fn one_out_beside_a_return_still_comes_back_as_ret_and_out() {
     // The shape that existed before multiple outs, unchanged.
-    let s = sym(&["int", "out_scalar:int"], "int");
+    let s = sym(&["scalar:int64_t", "out_scalar:int"], "scalar:int64_t");
     let src = generate("z", &symbols(&[("f", s)])).unwrap();
     assert!(src.contains(r#"jade_shim_struct("f_result", 2)"#), "{src}");
     assert!(src.contains(r#"strdup("out")"#), "the lone out keeps the name `out`:\n{src}");
@@ -1507,7 +1686,7 @@ fn two_out_structs_declare_two_distinct_locals() {
 
 #[test]
 fn a_multi_out_wrapper_compiles() {
-    let s = sym(&["out_scalar:int@quot", "out_scalar:int@rem"], "int");
+    let s = sym(&["out_scalar:int@quot", "out_scalar:int@rem"], "scalar:int64_t");
     let src = generate("z", &symbols(&[("divmod", s)])).unwrap();
     compiles(&src, &[]).expect("the generated C must compile");
 }
@@ -1589,7 +1768,8 @@ fn an_array_field_shim_compiles_against_a_real_header() {
 fn an_array_spelling_is_not_legal_as_an_argument() {
     // Field types and argument types are separate vocabularies on purpose: the
     // wrapper has nothing to do with a fixed-size row in an `args` list.
-    let err = generate("z", &symbols(&[("f", sym(&["array<char>:32"], "int"))])).unwrap_err();
+    let err =
+        generate("z", &symbols(&[("f", sym(&["array<char>:32"], "scalar:int64_t"))])).unwrap_err();
     assert!(err.contains("array<char>:32"), "should name it: {err}");
 }
 
@@ -1669,4 +1849,162 @@ fn a_routed_callback_shim_compiles() {
     if let Err(e) = compiles(&src, &[("fixture.h", header)]) {
         panic!("routed callback shim does not compile:\n{e}\n--- source ---\n{src}");
     }
+}
+
+// ── A scalar in the library's own C type ─────────────────────────────────
+//
+// Without a header the shim writes the declaration itself, and `int`, `float`
+// and `bool` are Jade's widths rather than the library's. Where the two
+// disagree the declaration is a lie the compiler believes, and nothing reports
+// it — so those three are refused there, and `scalar:<ctype>` is what gets past.
+
+#[test]
+fn a_jade_width_is_refused_where_the_shim_writes_the_declaration() {
+    for t in ["int", "float", "bool"] {
+        let in_args = generate("glib", &symbols(&[("f", sym(&[t], "str"))]))
+            .expect_err("`{t}` in args should be refused with no header");
+        assert!(in_args.contains("'f'"), "should name the symbol: {in_args}");
+        assert!(in_args.contains(&format!("`{t}`")), "should name the type: {in_args}");
+
+        let in_ret = generate("glib", &symbols(&[("f", sym(&["str"], t))]))
+            .expect_err("`{t}` as a return should be refused with no header");
+        assert!(in_ret.contains("as its return"), "should say where: {in_ret}");
+    }
+}
+
+#[test]
+fn a_header_leaves_the_jade_widths_exactly_as_they_were() {
+    // With a header the spelling is only a marshalling tag: the real prototype
+    // governs the widths, so nothing here has to change and nothing does.
+    let syms = symbols(&[
+        ("f", sym(&["int", "float", "bool"], "int")),
+        ("g", sym(&["str"], "float")),
+        ("h", sym(&[], "bool")),
+    ]);
+    let src = generate_with("glib", &syms, &[], &["glib.h"]).unwrap();
+    assert!(!src.contains("extern"), "a header declares the symbols, not the shim:\n{src}");
+    assert!(src.contains("(f)(argv[0].data.as_int"), "should still marshal as before:\n{src}");
+}
+
+#[test]
+fn the_width_refusal_points_at_a_header_before_it_offers_a_spelling() {
+    // A header answers the question for every symbol at once and cannot be got
+    // wrong, and most people who land here have one. The explicit spelling is
+    // the fallback, filled in with the symbol's own arguments so that what is
+    // left to supply is exactly what Jade could not work out.
+    let s = sym(&["str", "str", "int"], "str");
+    let err = generate("glib", &symbols(&[("g_uri_escape_string", s)])).unwrap_err();
+
+    assert!(
+        err.contains("jade pkg bind glib --header"),
+        "the header comes first, and settles every symbol: {err}"
+    );
+    assert!(
+        err.contains(r#"args = ["str", "str", "scalar:<ctype>"]"#),
+        "the stanza should carry the symbol's own arguments: {err}"
+    );
+    assert!(err.contains(r#"ret  = "str""#), "a sound return should be left alone: {err}");
+    assert!(err.contains("size_t"), "the accepted C types should be named: {err}");
+}
+
+#[test]
+fn a_named_c_type_is_declared_and_converted_at_the_boundary() {
+    // glib's third parameter is a 32-bit `gboolean`, and the shim used to
+    // declare it `int64_t`.
+    let s = sym(&["str", "scalar:int"], "str");
+    let src = generate("glib", &symbols(&[("g_uri_escape_string", s)])).unwrap();
+
+    assert!(
+        src.contains("extern const char* g_uri_escape_string(const char*, int);"),
+        "the declaration should carry the library's own type:\n{src}"
+    );
+    // Jade's side is unchanged: still an ordinary int, checked as one.
+    assert!(src.contains("if (argv[1].tag != JADE_FFI_INT) return 1;"), "no tag check:\n{src}");
+    assert!(
+        src.contains("(g_uri_escape_string)(argv[0].data.as_str, (int)argv[1].data.as_int)"),
+        "the conversion belongs to the shim:\n{src}"
+    );
+}
+
+#[test]
+fn a_named_c_type_return_is_read_at_the_width_the_function_wrote() {
+    // The dangerous half. A value passed too wide usually survives, because the
+    // callee reads only the part it wants; a `float` read as a `double` is not
+    // an approximate number but a meaningless one.
+    let src =
+        generate("m", &symbols(&[("scalef", sym(&["scalar:float"], "scalar:float"))])).unwrap();
+    assert!(src.contains("extern float scalef(float);"), "bad decl:\n{src}");
+    assert!(src.contains("    float r = (scalef)"), "should read a float:\n{src}");
+    assert!(src.contains("out->tag = JADE_FFI_FLOAT;"), "Jade still gets a float:\n{src}");
+    assert!(src.contains("out->data.as_float = r;"), "and it widens on the way out:\n{src}");
+}
+
+#[test]
+fn a_named_c_type_shim_compiles() {
+    let syms = symbols(&[
+        ("escape", sym(&["str", "scalar:int"], "str")),
+        ("scalef", sym(&["scalar:float", "scalar:unsigned long"], "scalar:float")),
+        ("flag", sym(&["scalar:bool"], "scalar:_Bool")),
+        ("count", failing_sym(&["scalar:size_t"], "scalar:int32_t", CFailure::Negative)),
+    ]);
+    let src = generate("g", &syms).unwrap();
+    if let Err(e) = compiles(&src, &[]) {
+        panic!("named-C-type shim does not compile:\n{e}\n--- source ---\n{src}");
+    }
+}
+
+#[test]
+fn a_c_type_the_shim_cannot_convert_is_refused_by_name() {
+    // The accepted set is exactly what `c_scalar` knows, which is what
+    // `out_scalar` and `inout_scalar` already resolve through — so the two
+    // cannot come to mean different things by the same spelling.
+    let err = generate("g", &symbols(&[("f", sym(&["scalar:gboolean"], "str"))])).unwrap_err();
+    assert!(err.contains("scalar:gboolean"), "should name it: {err}");
+    assert!(err.contains("double"), "should list what works: {err}");
+
+    // And a pointer is not a scalar. `str` is the spelling for a string,
+    // because who owns it is a question a width cannot answer.
+    let e = generate("g", &symbols(&[("f", sym(&["scalar:char*"], "str"))])).unwrap_err();
+    assert!(e.contains("plain identifier"), "the text goes straight into the shim: {e}");
+}
+
+#[test]
+fn an_out_buffers_count_may_be_spelled_as_a_c_type() {
+    // The count is an ordinary `int` argument, so the headerless refusal reaches
+    // it too — and the rule that the buffer is followed by an integer has to
+    // hold for either spelling of one. Asked by tag rather than by variant.
+    let s = failing_sym(
+        &["scalar:int", "out_buffer:char", "scalar:size_t"],
+        "scalar:int",
+        CFailure::Negative,
+    );
+    let src = generate("z", &symbols(&[("rd", s)])).unwrap();
+    assert!(src.contains("extern int rd(int, char*, size_t);"), "bad decl:\n{src}");
+    assert!(src.contains("int64_t n_elem1 = argv[1].data.as_int;"), "count not read:\n{src}");
+    if let Err(e) = compiles(&src, &[]) {
+        panic!("counted-buffer shim does not compile:\n{e}\n--- source ---\n{src}");
+    }
+}
+
+#[test]
+fn a_negative_convention_on_an_unsigned_return_can_never_fire() {
+    // `(r) < 0` on an unsigned type compiles to `false`, so the symbol binds,
+    // runs, and hands every failure back as an ordinary result. A Jade `int` is
+    // always signed, so nothing could reach this before `scalar:` let a return
+    // name a C type of its own.
+    let s = failing_sym(&["str"], "scalar:size_t", CFailure::Negative);
+    let err = generate("z", &symbols(&[("f", s)])).unwrap_err();
+    assert!(err.contains("never negative"), "should say why: {err}");
+    assert!(err.contains("nonzero"), "should name a fix: {err}");
+
+    // Plain `char` is the one spelling C leaves to the platform — signed on x86
+    // Linux, unsigned on ARM macOS — so the test would fire on one and not the
+    // other.
+    let c = failing_sym(&["str"], "scalar:char", CFailure::Negative);
+    let err = generate("z", &symbols(&[("f", c)])).unwrap_err();
+    assert!(err.contains("signed char"), "should name the spelling that works: {err}");
+
+    // A signed return is exactly what the convention is for.
+    let ok = failing_sym(&["str"], "scalar:int32_t", CFailure::Negative);
+    assert!(generate("z", &symbols(&[("f", ok)])).is_ok());
 }

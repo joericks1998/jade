@@ -81,15 +81,27 @@ pub(super) fn lower_instr<'ctx>(
         GetGlobal(d, name) => {
             // A native package reference used as a value materializes a first-class
             // native function value (a jade_fn sentinel); an ordinary global loads
-            // its cell. (When immediately called, the `Call` devirtualizes to a
-            // NativeCall and this materialized value is dead-code-eliminated.)
+            // its cell.
+            //
+            // This used to claim the materialized value is dead-code-eliminated
+            // when the reference is immediately called. It is not: the `Call`
+            // does devirtualize, but the store just below puts the tagged word
+            // in the register-file alloca, and a word that is dead to Jade is
+            // still live to LLVM. Whatever this emits stays in the loop body
+            // beside the call, which is why `emit_native_fn_value` must not
+            // allocate — when it did, every FFI call leaked its box.
             let v = if let Some((pkgid, fname)) = parse_native_ref(name) {
                 emit_native_fn_value(low, pkgid, fname)?
             } else {
                 let g = low.global_slot(name);
                 b.build_load(i64_ty, g, "gld").map_err(|e| e.to_string())?.into_int_value()
             };
-            low.retain(v); // borrowed from the global cell (native path is a fn value, but refcount is off then)
+            // Borrowed from the global cell → the dest slot becomes a new owner.
+            // On the native path this is a no-op whatever the mode, because
+            // `jrt_incref` is gated on the kind and a fn box is not a collection
+            // — the same gate that makes a shared, immutable, statically
+            // allocated fn value safe to hand out.
+            low.retain(v);
             low.store(*d, v);
             Ok(false)
         }
@@ -890,9 +902,12 @@ pub(super) fn lower_instr<'ctx>(
                 // defaults (the task wrapper unpacks exactly that many).
                 let cf = &fnctx.defs[*uid];
                 let n = cf.params.len();
-                let count = i64_ty.const_int(n.max(1) as u64, false);
-                let arr =
-                    b.build_array_alloca(i64_ty, count, "spawn_args").map_err(|e| e.to_string())?;
+                // Entry-block buffer, not an alloca here: spawning in a loop is
+                // ordinary. Reuse across iterations is safe because `jrt_spawn`
+                // copies the array into the task before it returns — the header
+                // on `jade_spawn` says so, and `task.rs` does it. See
+                // `Lowerer::entry_buf`.
+                let arr = low.entry_buf("spawn_args", n.max(1))?;
                 let store_slot = |slot_i: usize, val: IntValue| -> Result<(), String> {
                     let slot = unsafe {
                         b.build_in_bounds_gep(
@@ -964,9 +979,11 @@ pub(super) fn lower_instr<'ctx>(
         }
         Join(dest, futs) => {
             let n = futs.len();
-            let cnt = i64_ty.const_int(n.max(1) as u64, false);
-            let futarr =
-                b.build_array_alloca(i64_ty, cnt, "join_futs").map_err(|e| e.to_string())?;
+            // Two entry-block buffers, not allocas here: a join can sit inside a
+            // loop. They must stay distinct — `jade_join_words` reads one while
+            // writing the other — which is what the differing tags buy. See
+            // `Lowerer::entry_buf`.
+            let futarr = low.entry_buf("join_futs", n.max(1))?;
             for (i, r) in futs.iter().enumerate() {
                 let slot = unsafe {
                     b.build_in_bounds_gep(
@@ -979,8 +996,7 @@ pub(super) fn lower_instr<'ctx>(
                 };
                 b.build_store(slot, low.load(*r)).map_err(|e| e.to_string())?;
             }
-            let resarr =
-                b.build_array_alloca(i64_ty, cnt, "join_res").map_err(|e| e.to_string())?;
+            let resarr = low.entry_buf("join_res", n.max(1))?;
             let join_f = low.runtime_fn(
                 "jade_join_words",
                 low.ctx.void_type().fn_type(

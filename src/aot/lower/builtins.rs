@@ -178,19 +178,23 @@ pub(super) fn emit_dynamic_method<'ctx>(
 /// Load a native package's `dlopen` handle from its `native_pkg$<pkgid>` global.
 /// `compile()` creates + fills this in `main`'s prologue for the real module; it
 /// is created lazily (nil) if missing so the throwaway probe module also lowers.
-pub(super) fn native_pkg_handle<'ctx>(
-    low: &Lowerer<'_, 'ctx>,
-    pkgid: u32,
-) -> Result<PointerValue<'ctx>, String> {
+pub(super) fn native_pkg_global<'ctx>(low: &Lowerer<'_, 'ctx>, pkgid: u32) -> GlobalValue<'ctx> {
     let gname = format!("native_pkg${pkgid}");
-    let g = low.module.get_global(&gname).unwrap_or_else(|| {
+    low.module.get_global(&gname).unwrap_or_else(|| {
         let g = low.module.add_global(low.ptrt(), None, &gname);
         g.set_initializer(&low.ptrt().const_null());
         g.set_linkage(inkwell::module::Linkage::Internal);
         g
-    });
+    })
+}
+
+/// Load a package's handle out of that cell, at the point of use.
+pub(super) fn native_pkg_handle<'ctx>(
+    low: &Lowerer<'_, 'ctx>,
+    pkgid: u32,
+) -> Result<PointerValue<'ctx>, String> {
     low.builder
-        .build_load(low.ptrt(), g.as_pointer_value(), "nhandle")
+        .build_load(low.ptrt(), native_pkg_global(low, pkgid).as_pointer_value(), "nhandle")
         .map_err(|e| e.to_string())
         .map(|v| v.into_pointer_value())
 }
@@ -214,9 +218,9 @@ pub(super) fn emit_native_call<'ctx>(
     let argv = if args.is_empty() {
         ptrt.const_null()
     } else {
-        let arr = b
-            .build_array_alloca(i64_ty, i64_ty.const_int(args.len() as u64, false), "nargv")
-            .map_err(err)?;
+        // Entry-block buffer, not an alloca here: this call can sit inside a
+        // loop. See `Lowerer::entry_buf`.
+        let arr = low.entry_buf("nargv", args.len())?;
         for (i, r) in args.iter().enumerate() {
             let slot = unsafe {
                 b.build_in_bounds_gep(i64_ty, arr, &[i64_ty.const_int(i as u64, false)], "na")
@@ -246,10 +250,9 @@ pub(super) fn emit_native_call<'ctx>(
     .into_int_value())
 }
 
-/// Materialize a first-class native function value: a heap
-/// `{ fn_ptr@0, kind@8, env@16 }` where `fn_ptr` is the `jrt_native_call`
-/// address used purely as a sentinel (a real `jf_<uid>` box never holds this
-/// symbol), and `env = { handle, name }`. `indirect_call` recognizes the
+/// Materialize a first-class native function value: `{ fn_ptr@0, kind@8, env@16 }`
+/// where `fn_ptr` is the `jrt_native_call` address used purely as a sentinel (a
+/// real `jf_<uid>` box never holds this symbol). `indirect_call` recognizes the
 /// sentinel and routes through `jrt_native_call`. Returned as a `TAG_PTR` word.
 ///
 /// The `kind` word at offset 8 holds `ObjKind::Fn`, aligned with
@@ -263,44 +266,63 @@ pub(super) fn emit_native_call<'ctx>(
 ///
 /// The third slot used to hold `name`, which nothing ever read (`env` already
 /// carries it), so the kind word costs no extra space.
+///
+/// ## Both objects are link-time constants, not allocations
+///
+/// This used to `malloc` the box and its env on every evaluation, on the stated
+/// assumption that a reference immediately called would be dead-code-eliminated.
+/// It is not: `GetGlobal` stores the tagged word into the register-file alloca,
+/// which is dead to Jade but live to LLVM, so both allocations stayed in the
+/// loop body next to the call. Nothing freed them either — the `ObjKind::Fn` at
+/// offset 8 is exactly what makes `is_collection` false and `jrt_decref` return
+/// early — so a compiled binary leaked 48 bytes per FFI call, growing without
+/// bound, while `jade run` did not.
+///
+/// The value has no identity and no mutable state: it is a pure function of
+/// `(pkgid, fname)`. So there is one of each per binding, emitted once as an
+/// internal constant and shared by every evaluation. `set_constant` is not
+/// decoration — nothing may write to these, and a linker-enforced fault is a
+/// better outcome than silent corruption of an object the whole program shares.
+/// 8-byte alignment is required, because `TAG_PTR` lives in the low three bits
+/// and `untag_ptr` masks them off.
+///
+/// **`env` holds the *address of* the package's handle cell, not the handle.**
+/// The handle is a `dlopen` result that only exists once `jade_mod_init` has
+/// run, so it cannot appear in a static initializer. Storing it into the global
+/// on each evaluation would be a data race between concurrent tasks — benign in
+/// practice, undefined in the abstract machine, and a real report under TSan —
+/// and it would create an initialization-order rule for someone to break later.
+/// Pointing at `@native_pkg$<pkgid>` instead leaves nothing to initialize: the
+/// env is correct before `main` starts, and `indirect_call` pays one extra load
+/// to reach through it.
 pub(super) fn emit_native_fn_value<'ctx>(
     low: &Lowerer<'_, 'ctx>,
     pkgid: u32,
     fname: &str,
 ) -> Result<IntValue<'ctx>, String> {
-    let b = low.builder;
     let i64_ty = low.i64t();
     let ptrt = low.ptrt();
-    let err = |e: inkwell::builder::BuilderError| e.to_string();
-    let malloc = low.runtime_fn("malloc", ptrt.fn_type(&[i64_ty.into()], false));
-    let alloc = |n: u64, name: &str| -> Result<PointerValue<'ctx>, String> {
-        Ok(b.build_call(malloc, &[i64_ty.const_int(n, false).into()], name)
-            .map_err(err)?
-            .as_any_value_enum()
-            .into_pointer_value())
-    };
-    let store_ptr = |base: PointerValue<'ctx>,
-                     idx: u64,
-                     val: BasicMetadataValueEnum<'ctx>|
-     -> Result<(), String> {
-        let slot = unsafe {
-            b.build_in_bounds_gep(ptrt, base, &[i64_ty.const_int(idx, false)], "fslot")
-                .map_err(err)?
-        };
-        let v: inkwell::values::BasicValueEnum = match val {
-            BasicMetadataValueEnum::PointerValue(p) => p.into(),
-            _ => return Err("native fn value: expected pointer".into()),
-        };
-        b.build_store(slot, v).map_err(err)?;
-        Ok(())
-    };
+    let boxname = format!("native_fnval${pkgid}${fname}");
+    if let Some(g) = low.module.get_global(&boxname) {
+        return Ok(low.tag_ptr(g.as_pointer_value()));
+    }
 
-    let handle = native_pkg_handle(low, pkgid)?;
-    let name_ptr = b.build_global_string_ptr(fname, "nfname").map_err(err)?.as_pointer_value();
-    // env = { handle, name }
-    let env = alloc(16, "native_env")?;
-    store_ptr(env, 0, handle.into())?;
-    store_ptr(env, 1, name_ptr.into())?;
+    // env = { &@native_pkg$<pkgid>, "<fname>" }
+    let name_ptr = low
+        .builder
+        .build_global_string_ptr(fname, &format!("nfname${pkgid}${fname}"))
+        .map_err(|e| e.to_string())?
+        .as_pointer_value();
+    let env_ty = low.ctx.struct_type(&[ptrt.into(), ptrt.into()], false);
+    let env = low.module.add_global(env_ty, None, &format!("native_env${pkgid}${fname}"));
+    env.set_initializer(&env_ty.const_named_struct(&[
+        native_pkg_global(low, pkgid).as_pointer_value().into(),
+        name_ptr.into(),
+    ]));
+    env.set_linkage(inkwell::module::Linkage::Internal);
+    env.set_constant(true);
+    env.set_alignment(8);
+
     // fn value = { sentinel, kind, env }
     let sentinel = low
         .runtime_fn(
@@ -309,15 +331,17 @@ pub(super) fn emit_native_fn_value<'ctx>(
         )
         .as_global_value()
         .as_pointer_value();
-    let fnval = alloc(24, "native_fn_val")?;
-    store_ptr(fnval, 0, sentinel.into())?;
-    // kind word at offset 8 — see the doc comment.
-    let kind_slot = unsafe {
-        b.build_in_bounds_gep(i64_ty, fnval, &[i64_ty.const_int(1, false)], "nkind").map_err(err)?
-    };
-    b.build_store(kind_slot, i64_ty.const_int(OBJKIND_FN, false)).map_err(err)?;
-    store_ptr(fnval, 2, env.into())?;
-    Ok(low.tag_ptr(fnval))
+    let box_ty = low.ctx.struct_type(&[ptrt.into(), i64_ty.into(), ptrt.into()], false);
+    let fnval = low.module.add_global(box_ty, None, &boxname);
+    fnval.set_initializer(&box_ty.const_named_struct(&[
+        sentinel.into(),
+        i64_ty.const_int(OBJKIND_FN, false).into(),
+        env.as_pointer_value().into(),
+    ]));
+    fnval.set_linkage(inkwell::module::Linkage::Internal);
+    fnval.set_constant(true);
+    fnval.set_alignment(8);
+    Ok(low.tag_ptr(fnval.as_pointer_value()))
 }
 
 /// Emit an array/dict primitive method `recv.method(args)` via the ObjHeader-aware

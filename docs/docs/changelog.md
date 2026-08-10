@@ -4,6 +4,37 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.3.15
+
+**Fixed: a hand-written binding with no header declared C functions at Jade's widths, not the library's.** With no header the shim writes its own `extern` for each bound symbol, and `int` there became `int64_t`, `float` became `double`, and `bool` became `uint8_t`. Someone binding `g_uri_escape_string` by hand got `extern char* g_uri_escape_string(const char*, const char*, int64_t)` against glib's real third parameter, a 32-bit `gboolean`. Nothing caught it: the manifest is valid, the shim compiles, and the program runs.
+
+- **The return is the dangerous half.** Passing a value that is too wide usually survives, because the callee reads only the part it wants. Reading one is the reverse — the shim believes its own declaration and reads eight bytes where the function wrote four, so the upper half is whatever was left in the register. A `float` declared as a `double` is worse still and worse everywhere: the two are different representations, so the answer is not slightly wrong but meaningless, on every machine rather than on unlucky ones.
+- **`scalar:<ctype>` names the library's own C type** — `scalar:int`, `scalar:size_t`, `scalar:float`. The shim declares that type and converts to and from Jade's width at the boundary. Your side of the call does not change: an argument is still an ordinary Jade int, float or bool, and the conversion is the shim's job, which is what a shim is for. Spelled to match `out_scalar:<ctype>` and `inout_scalar:<ctype>`, and resolved through the same table, so the three cannot come to mean different things.
+- **`int`, `float` and `bool` are now refused in a headerless binding**, in `args` and in `ret`, and the message leads with `jade pkg bind <name> --header <path>` — a header answers this for every symbol at once and cannot be got wrong. It then offers the explicit spelling with the symbol's own arguments already filled in, so what is left to supply is exactly what Jade could not work out.
+- **Only those three.** Every other type in the vocabulary crosses as an address, and an address is one width. An `out_scalar`, an `out_buffer` and a `callback` were never exposed to this, because each already carries the library's own C type.
+- **Nothing changes when a header is present.** The header's prototype governs, so `int` there is only a marshalling tag and is correct as it stands.
+- **The two hints that tell you what to write now agree with what is accepted.** `jade pkg add` and the "no signature yet" error both showed `args = ["int", "int"]` as the shape to replace a `"?"` with — and a `"?"` means no header was read, so following the hint landed on a second error.
+- **`fails_when = "negative"` is refused on a return the library declares unsigned.** Naming the C type makes the combination reachable for the first time, and `(r) < 0` on an unsigned type compiles to `false` — the symbol would bind, run, and hand every failure back as an ordinary result. Plain `char` is refused for the same test, because its signedness is the platform's choice and the test would fire on x86 Linux and not on ARM macOS.
+
+**Fixed: a compiled binary that called into C in a loop ran out of stack and died.** Every FFI call took a few bytes of scratch space to lay its arguments out in and never gave them back — that space is only reclaimed when the surrounding function returns, and a loop does not return until it has finished. One argument cost 16 bytes and three cost 32, so an 8 MB stack ran out after 524,288 calls or 262,144 of them. The count was fixed and the callee was irrelevant: a binding that returns an int and allocates nothing on the C side died in exactly the same place as one returning a freshly allocated string.
+
+- **The same mistake was in four other places, and `spawn` and `join` are the two that matter as much.** A loop that spawned tasks died the same way, with nothing to do with the FFI at all. All five now take their buffer once in the function's entry block and reuse it, which is what a `try` handler's `jmp_buf` has always done — the rule was written down and these five missed it.
+- **None of the five sizes was ever dynamic.** Every one is the length of a list known while lowering, so a static buffer serves; `llvm.stacksave` and a heap fallback were both considered and neither was needed.
+- **`join` keeps two buffers rather than sharing one**, because `jade_join_words` reads one while writing the other. Sharing everywhere else is sound because a buffer is filled from register slots with nothing in between, so two sites cannot interleave in one frame.
+
+**Fixed: every FFI call in a compiled binary leaked 48 bytes.** Naming a bound function built a small heap object standing for the function itself, separate from calling it, on the assumption that the optimiser would delete it once the call resolved to a direct one. It does not: the value is stored into the register file, so it is dead to Jade and alive to LLVM. Nothing could free it either, since the object deliberately carries `ObjKind::Fn` where a reference count would go, so the reference counter steps over it by design. The leak was that decision's unpaid cost.
+
+- **It is a constant now, not an allocation.** A native function value depends only on its package and its name, so it lives in read-only data as a pair of globals per binding and is never built at runtime. A loop of 1,600,000 calls holds exactly what a loop of 100,000 holds, and a compiled FFI program now ends with one fewer outstanding block than a program that makes no FFI call at all.
+- **The environment holds the address of the package cell rather than the handle**, which is what makes the whole thing a link-time constant with nothing to initialise — and therefore nothing to race on when two threads evaluate the same reference.
+- **`jade run` never had this**, so it is compiled binaries only.
+
+**The FFI gate calls a binding 600,000 times and checks what it holds.** `glib-fixture.jde` calls each binding once, which proves the answer is right and nothing else. Both defects above only appear over many calls, and one call cannot tell a correct release from a leak. The new step fails if the binary does not survive the loop, and fails again if peak memory tracks the number of calls; it is what turned up the stack exhaustion.
+
+**Two fixes to `alloc_str` itself, from reading the code that shipped in v1.3.14.**
+
+- **A copy that could not be made now says so.** The shim reported a bare failure with no message attached, so a caller was told the call "returned a non-zero status" when the truth was that it ran out of memory.
+- **The buffer a copied string lands in is released when its thread exits.** The comment claimed this already happened. It did not — a `_Thread_local` pointer has no destructor — so every worker that retired took its buffer with it, and workers retire after ten seconds idle for as long as a program runs. Now held through a `pthread_key` destructor, which cut 3,200 threads' worth from 511 MB to 5 MB.
+
 ## v1.3.14
 
 **A string a C library allocated for you can now be bound, and it is released rather than leaked.** This was the largest gap left in the FFI: 125 of glib's symbols come back as a `gchar *` — `g_strdup`, `g_uri_escape_string`, `g_find_program_in_path` — and none of them could be bound at all. `curl_easy_escape` is the same shape.

@@ -357,7 +357,7 @@ impl Abi {
 ///
 /// ```toml
 /// [dependencies.zlib.symbols]
-/// crc32 = { args = ["int", "str"], ret = "int" }
+/// crc32 = { args = ["scalar:unsigned long", "str"], ret = "scalar:unsigned long" }
 /// deflate = "?"
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -543,8 +543,8 @@ impl CFailure {
 /// path    = "vendor/libz.so"
 /// abi     = "c"
 /// [dependencies.zlib.symbols.crc32]
-/// args = ["int", "str"]
-/// ret  = "int"
+/// args = ["scalar:unsigned long", "str"]
+/// ret  = "scalar:unsigned long"
 /// ```
 ///
 /// Exactly one of `path` or `url` names the source. A `url` may contain the
