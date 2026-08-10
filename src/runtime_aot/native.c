@@ -575,7 +575,22 @@ static JadeVal to_ffi(jade_value_t v) { return to_ffi_val(v, 0); }
 static jade_value_t from_ffi(const JadeVal* v) {
     switch (v->tag) {
         case JADE_FFI_NIL:   return JRT_NIL;
-        case JADE_FFI_INT:   return jrt_box_int(v->data.as_int);
+        case JADE_FFI_INT:
+            /* `jrt_box_int` drops the high bits, so a full-range C value came
+             * back as a plausible integer of the wrong sign and magnitude —
+             * silently, and differing from what the interpreter printed for the
+             * same call. Refused instead: a hash or a nanosecond timestamp that
+             * does not fit is not a number Jade can be handed. */
+            if (v->data.as_int > JRT_INT_MAX || v->data.as_int < JRT_INT_MIN) {
+                char detail[160];
+                snprintf(detail, sizeof detail,
+                         "%lld, which is outside the range a Jade integer can hold "
+                         "(%lld to %lld)",
+                         (long long)v->data.as_int,
+                         (long long)JRT_INT_MIN, (long long)JRT_INT_MAX);
+                native_raise("native call returned %s", detail);
+            }
+            return jrt_box_int(v->data.as_int);
         case JADE_FFI_FLOAT: return jrt_box_float(v->data.as_float);
         case JADE_FFI_BOOL:  return jrt_box_bool(v->data.as_bool);
         /* TAINTED whatever the package said, as the string and bytes cases

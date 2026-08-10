@@ -929,7 +929,30 @@ pub fn vm_to_ffi(val: &VmValue, scratch: &mut Vec<CString>) -> JadeVal {
 pub fn ffi_to_vm(val: &JadeVal, span: Span) -> Result<VmValue> {
     match val.tag {
         JADE_TAG_NIL => Ok(VmValue::Nil),
-        JADE_TAG_INT => Ok(VmValue::Int(unsafe { val.data.as_int })),
+        // Refused rather than carried. The interpreter's `VmValue::Int` is a
+        // plain `i64`, so it *could* hold this — and did, which is why a hash
+        // printed correctly here and came back off by 2^63 from the compiled
+        // binary for the same call. But it was inert either way: Jade's own
+        // arithmetic is 63-bit, so adding zero to it raised, and the value could
+        // not even be written back into the source to test against, because the
+        // lexer caps a literal at the same bound. A number you can print and
+        // nothing else is worse than a refusal, and worse still when the two
+        // engines disagree about which number it is. See TOOLCHAIN-BUGS #3.
+        JADE_TAG_INT => {
+            let i = unsafe { val.data.as_int };
+            if !jade_runtime::JadeValue::int_fits(i) {
+                return Err(JadeError::IoError {
+                    message: format!(
+                        "native call returned {i}, which is outside the range a Jade integer \
+                         can hold ({} to {})",
+                        jade_runtime::JadeValue::INT_MIN,
+                        jade_runtime::JadeValue::INT_MAX
+                    ),
+                    span,
+                });
+            }
+            Ok(VmValue::Int(i))
+        }
         JADE_TAG_FLOAT => Ok(VmValue::Float(unsafe { val.data.as_float })),
         JADE_TAG_BOOL => Ok(VmValue::Bool(unsafe { val.data.as_bool } != 0)),
         JADE_TAG_CHAR => {

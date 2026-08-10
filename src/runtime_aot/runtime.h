@@ -86,6 +86,14 @@ typedef int64_t jade_value_t;
  * with `& ~7`. Used to decide whether a value can be dereferenced as a ptr. */
 #define jrt_is_heap(v)    (jrt_is_ptr(v) || jrt_is_float(v) || jrt_is_str(v))
 
+/* What a tagged word can hold: one bit goes to the tag, so the range is 63-bit
+ * and not 64. Mirrors `JadeValue::INT_MAX`/`INT_MIN` in src/runtime/src/value.rs
+ * — a C value outside it cannot cross the FFI, and both engines refuse it there
+ * rather than one truncating and the other keeping a number it cannot add to.
+ * See TOOLCHAIN-BUGS #3. */
+#define JRT_INT_MAX ((int64_t)((1LL << 62) - 1))
+#define JRT_INT_MIN ((int64_t)(-(1LL << 62)))
+
 #define jrt_box_int(i)    ((jade_value_t)((uint64_t)(int64_t)(i) << 1))
 #define jrt_unbox_int(v)  ((int64_t)(v) >> 1)
 #define jrt_box_bool(b)   ((jade_value_t)((((uint64_t)((b)!=0)) << 4) | 0xfu))
