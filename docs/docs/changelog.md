@@ -6,6 +6,11 @@ sidebar_label: Changelog
 
 ## v1.3.17
 
+**Fixed: an f-string could double-free, aborting a compiled binary inside the allocator.** A regression from 1.3.16, reported from the userland as `malloc(): unaligned tcache chunk detected` on glibc — and reproducible on macOS too, as a silent abort. `f"{x}"` has no literal text, so nothing is concatenated and the template produces the value's own string; rendering handed back that very pointer, so the destination became a second owner of one allocation. Inert while strings were never freed, a double free once they were.
+
+- **The cause was an ownership contract that depended on the value's type.** `jrt_str_of_any` allocated for an int and borrowed for a string, so a fold over parts of both kinds had to get one of them wrong — and did, both ways: the borrowed case double-freed, and the allocated case leaked one string per interpolation. It always copies now, which is what `runtime.h` has always said it does, and trust travels with the copy.
+- **The shape is an example now**, so the parity gate runs it on both engines every time. One round trip cannot tell a shared pointer from an owned one, so it runs in a loop.
+
 **Fixed: a method called with the wrong number of arguments was reported as a method that does not exist.** `"abc".upper(1, 2, 3)` answered *no method named `upper`* — and `upper` plainly does exist, it takes no arguments. The predicate the compiler asks returns false both for a name no type defines and for a real method called wrongly, and 1.3.16 read every false as the first. It asks the arity table now, so the two mistakes are told apart: `` `upper` takes 0 arguments, but 3 were given ``.
 
 - **A macOS system library can be bound.** 1.3.16 recognised a `.tbd` and explained why it could not be used; it can be used now. A stub is not Mach-O and never will be, but it is exactly what a linker wants — linking the shim against it records the real library as the shim's own dependency, which dyld resolves from the shared cache at load time. Nothing is copied and nothing is opened by hand. `jade pkg add zlib --path <sdk>/usr/lib/libz.tbd --header <sdk>/usr/include/zlib.h` binds and runs on both engines. The macOS install-name fixup skips a stub, because the name it carries is precisely the one the shim should keep asking for.

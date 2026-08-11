@@ -299,7 +299,18 @@ char* jrt_str_of_any(int64_t val) {
      * "<object>" placeholder — the same ObjKind gap the Chunk backend
      * documents.) */
     jade_value_t v = (jade_value_t)val;
-    if (jrt_is_str(v)) return (char*)jrt_unbox_ptr(v);
+    if (jrt_is_str(v)) {
+        /* A *copy*, not the caller's pointer. This used to hand back the string
+         * itself, which made the result's ownership depend on the value's type
+         * — fresh for an int, borrowed for a string — and there is no way for a
+         * caller to fold parts of both kinds without getting one of them wrong.
+         * It did: an f-string whose only part was a string stored that very
+         * pointer as a second owner, and once strings became reference-counted
+         * that was a double free. The header says "freshly-allocated"; now it
+         * is. Trust travels with the copy. */
+        char* s = (char*)jrt_unbox_ptr(v);
+        return jrt_str_dup(s, jrt_trust_of(s));
+    }
     if (jrt_is_ptr(v) || jrt_is_float(v)) {
         /* Render a kind-tagged collection into a fresh TRUSTED tagged string.
          * A float takes the same path: str(48000.0) is "48000.0", from the one

@@ -540,19 +540,46 @@ pub(super) fn lower_instr<'ctx>(
         // global, or `jrt_str_of_any(value)` for an interpolated register. An
         // empty template yields the empty string.
         BuildFStr(d, parts) => {
-            let mut acc: Option<PointerValue> = None;
+            // Ownership is per part and uniform now. A literal is a `constant`
+            // global — borrowed, immortal, never freed. An interpolated register
+            // goes through `jrt_str_of_any`, which allocates: it used to hand
+            // back the caller's own pointer when the value was already a string,
+            // so whether the result was owned depended on the value's *type*,
+            // and a fold over parts of both kinds had to get one of them wrong.
+            //
+            // It got both. `f"{x}"` on a string stored that pointer as a second
+            // owner — a double free once strings became reference-counted — and
+            // `f"{a}-{i}"` leaked the fresh string rendered for the int. Neither
+            // was visible before 1.3.16, when nothing was ever released.
+            //
+            // So each part says whether it is owned, and every owned pointer is
+            // released exactly where it is consumed.
+            let mut acc: Option<(PointerValue, bool)> = None;
             for part in parts {
-                let p_ptr = match part {
-                    FStrPart::Literal(s) => low.str_literal_ptr(s)?,
-                    FStrPart::Reg(r) => low.str_of_any(*r),
+                let (p_ptr, p_owned) = match part {
+                    FStrPart::Literal(s) => (low.str_literal_ptr(s)?, false),
+                    FStrPart::Reg(r) => (low.str_of_any(*r), true),
                 };
                 acc = Some(match acc {
-                    None => p_ptr,
-                    Some(prev) => low.concat_ptrs(prev, p_ptr),
+                    None => (p_ptr, p_owned),
+                    Some((prev, prev_owned)) => {
+                        let joined = low.concat_ptrs(prev, p_ptr);
+                        if prev_owned {
+                            low.free_str_ptr(prev);
+                        }
+                        if p_owned {
+                            low.free_str_ptr(p_ptr);
+                        }
+                        (joined, true)
+                    }
                 });
             }
             let ptr = match acc {
-                Some(p) => p,
+                Some((p, true)) => p,
+                // The only way to be here is a template that is one literal and
+                // nothing else. A literal global is immortal, so storing it is
+                // what `LoadStr` does anyway — no copy needed.
+                Some((p, false)) => p,
                 None => low.str_literal_ptr("")?,
             };
             low.store(*d, low.tag_str(ptr));

@@ -34,3 +34,26 @@ print(bool_msg)
 print(point)
 print(desc)
 print(full)
+
+// A template whose only part is an interpolation, built many times over.
+//
+// This shape has no literal text, so nothing is concatenated and the value's
+// own string is what the template produces. Rendering used to hand back that
+// very pointer, so the destination became a second owner of one allocation —
+// inert while strings were never freed, and a double free once they were.
+// glibc caught it as `malloc(): unaligned tcache chunk detected`; macOS aborted
+// too, silently. Kept in a loop because one round trip cannot tell a shared
+// pointer from an owned one.
+fn echo(v) { return f"{v}" }
+let rounds = 0
+let last = ""
+while rounds < 50 {
+    let made = "round-" + str(rounds)
+    last = echo(echo(made))
+    // Mixed parts alongside it: rendering a non-string allocates, and treating
+    // that as borrowed leaked one string per interpolation.
+    let mixed = f"{made}-{rounds}-{true}"
+    rounds = rounds + 1
+}
+print(last)
+print(f"{name}")
