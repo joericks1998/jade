@@ -10,12 +10,17 @@ use super::*;
 /// Replace zero-span placeholders from built-in error paths with the actual call-site span.
 pub(crate) fn patch_builtin_span(mut e: JadeError, call_span: Span) -> JadeError {
     match &mut e {
+        // The guard reads as the condition it is: only a placeholder span gets
+        // replaced. It is equivalent to testing inside the arm *because* of the
+        // catch-all below — an error whose span is already real falls through to
+        // it and is left alone, which is what the inner `if` did by doing
+        // nothing.
         JadeError::ArityMismatch { span, .. }
         | JadeError::TypeError { span, .. }
-        | JadeError::IoError { span, .. } => {
-            if span.line == 0 {
-                *span = call_span;
-            }
+        | JadeError::IoError { span, .. }
+            if span.line == 0 =>
+        {
+            *span = call_span;
         }
         _ => {}
     }
