@@ -497,8 +497,7 @@ pub fn lower_program<'ctx>(
             context,
             module,
             fnctx.funcs[uid],
-            &cf.chunk.code,
-            &cf.chunk.fn_defs,
+            &cf.chunk,
             cf.n_slots,
             cf.params.len(),
             &fnctx,
@@ -508,18 +507,7 @@ pub fn lower_program<'ctx>(
     }
 
     let top_fn = module.add_function("jade_toplevel", i64_ty.fn_type(&[], false), None);
-    lower_body(
-        context,
-        module,
-        top_fn,
-        &top.code,
-        &top.fn_defs,
-        top_n_slots,
-        0,
-        &fnctx,
-        false,
-        false,
-    )?;
+    lower_body(context, module, top_fn, top, top_n_slots, 0, &fnctx, false, false)?;
 
     // Turn on runtime reference counting for a collections-only program, once, at
     // the very start of `jade_toplevel` (before any collection is allocated). This
@@ -675,7 +663,15 @@ pub fn lower_chunk<'ctx>(
     n_slots: u32,
 ) -> Result<FunctionValue<'ctx>, String> {
     let function = module.add_function(name, context.i64_type().fn_type(&[], false), None);
-    lower_body(context, module, function, code, &[], n_slots, 0, &FnCtx::empty(), false, false)?;
+    // An isolated body with no spans: the helper is handed bare instructions,
+    // so a diagnostic from it carries no position, exactly as before.
+    let chunk = Chunk {
+        name: name.to_string(),
+        code: code.to_vec(),
+        spans: Vec::new(),
+        fn_defs: Vec::new(),
+    };
+    lower_body(context, module, function, &chunk, n_slots, 0, &FnCtx::empty(), false, false)?;
     Ok(function)
 }
 
@@ -696,14 +692,18 @@ fn lower_body<'ctx>(
     context: &'ctx Context,
     module: &Module<'ctx>,
     function: FunctionValue<'ctx>,
-    code: &[Instr],
-    fn_defs: &[Arc<CompiledFn>],
+    // The whole chunk rather than its `code` and `fn_defs` separately: it also
+    // carries `spans`, one per instruction, which is what lets a build error
+    // name a line. That was the only thing standing between the resolver and a
+    // position — and it costs a parameter rather than adding one.
+    chunk: &Chunk,
     n_slots: u32,
     n_params: usize,
     fnctx: &FnCtx<'ctx>,
     is_generator: bool,
     track_recursion: bool,
 ) -> Result<(), String> {
+    let (code, fn_defs) = (&chunk.code[..], &chunk.fn_defs[..]);
     let i64_ty = context.i64_type();
     let builder = context.create_builder();
 
@@ -844,7 +844,7 @@ fn lower_body<'ctx>(
         .collect();
     builder.build_unconditional_branch(llblocks[0]).map_err(|e| e.to_string())?;
     let call_builtins = resolve_builtin_calls(code);
-    let (user_calls, skip_getfields) = resolve_user_calls(code, fn_defs, fnctx)?;
+    let (user_calls, skip_getfields) = resolve_user_calls(code, &chunk.spans, fn_defs, fnctx)?;
 
     for (bi, block) in graph.blocks.iter().enumerate() {
         builder.position_at_end(llblocks[bi]);

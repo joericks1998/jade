@@ -18,7 +18,7 @@ fn bind_filtered(src: &str, only: Option<&str>) -> Binding {
     std::fs::create_dir_all(&dir).unwrap();
     let h = dir.join("probe.h");
     std::fs::write(&h, src).unwrap();
-    let out = from_header(&h, &[], only, None);
+    let out = from_header(&h, &[], &[], only, None);
     let _ = std::fs::remove_dir_all(&dir);
     out.expect("binding should succeed")
 }
@@ -373,7 +373,7 @@ fn a_header_that_does_not_parse_is_an_error_not_a_partial_binding() {
     std::fs::create_dir_all(&dir).unwrap();
     let h = dir.join("bad.h");
     std::fs::write(&h, "#include <no_such_header_anywhere.h>\nint f(int);\n").unwrap();
-    let err = from_header(&h, &[], None, None).expect_err("should refuse");
+    let err = from_header(&h, &[], &[], None, None).expect_err("should refuse");
     assert!(err.contains("clang could not parse"), "unexpected: {err}");
     assert!(err.contains("-I"), "should suggest the fix: {err}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -399,7 +399,7 @@ fn round_trip(header_src: &str) -> Result<String, String> {
     let h = dir.join("lib.h");
     std::fs::write(&h, header_src).unwrap();
 
-    let b = from_header(&h, &[], None, None).map_err(|e| format!("bind failed: {e}"))?;
+    let b = from_header(&h, &[], &[], None, None).map_err(|e| format!("bind failed: {e}"))?;
     let symbols: std::collections::HashMap<String, CSymbol> =
         b.symbols.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
     let structs: std::collections::HashMap<String, CStruct> =
@@ -678,7 +678,7 @@ fn bind_tree(files: &[(&str, &str)], exported: Option<&[&str]>) -> Result<Bindin
     }
     let set = exported
         .map(|e| e.iter().map(|s| s.to_string()).collect::<std::collections::HashSet<String>>());
-    let out = from_header(&dir.join(files[0].0), &[], None, set.as_ref());
+    let out = from_header(&dir.join(files[0].0), &[], &[], None, set.as_ref());
     let _ = std::fs::remove_dir_all(&dir);
     out
 }

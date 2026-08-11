@@ -341,7 +341,7 @@ pub fn run_add(
         if !found.is_empty() {
             let names: Vec<&str> = found.keys().map(String::as_str).collect();
             let empty = std::collections::BTreeMap::new();
-            manifest::set_bindings(&root, name, &found, &empty, &[], &[])
+            manifest::set_bindings(&root, name, &found, &empty, &[], &[], &[])
                 .unwrap_or_else(|e| fail_new_dependency(&root, name, existed, e));
 
             // Lock and copy the artifact, but do not try to bind it — filling
@@ -784,9 +784,14 @@ pub(crate) fn bind_header(
             lib.map(|l| l.display().to_string()).unwrap_or_default()
         )));
     }
-    let binding =
-        pkg::bindgen::from_header(header_path, opts.include, opts.only, exported.as_ref())
-            .map_err(BindFailure::Unwritten)?;
+    let binding = pkg::bindgen::from_header(
+        header_path,
+        opts.include,
+        opts.defines,
+        opts.only,
+        exported.as_ref(),
+    )
+    .map_err(BindFailure::Unwritten)?;
 
     // Check the header against the library it is supposed to describe. A header
     // declaring symbols the library does not export is the wrong header, and
@@ -816,8 +821,16 @@ pub(crate) fn bind_header(
     // to catch. A header clang could read is a fact about the dependency,
     // whether or not any symbol survived it.
     let (headers, dirs) = header_locations(header_path, opts.include);
-    manifest::set_bindings(root, name, &binding.symbols, &binding.structs, &headers, &dirs)
-        .map_err(BindFailure::Unwritten)?;
+    manifest::set_bindings(
+        root,
+        name,
+        &binding.symbols,
+        &binding.structs,
+        &headers,
+        &dirs,
+        opts.defines,
+    )
+    .map_err(BindFailure::Unwritten)?;
 
     if binding.symbols.is_empty() {
         return Err(BindFailure::NothingBound(format!(
@@ -865,9 +878,14 @@ pub fn run_bind(name: &str, header: &str, opts: HeaderOptions<'_>, dry_run: bool
             .map(|p| root.join(p))
             .filter(|p| p.exists())
             .and_then(|p| pkg::bindgen::exported_symbols(&p));
-        let binding =
-            pkg::bindgen::from_header(header_path, opts.include, opts.only, exported.as_ref())
-                .unwrap_or_else(|e| fail(e));
+        let binding = pkg::bindgen::from_header(
+            header_path,
+            opts.include,
+            opts.defines,
+            opts.only,
+            exported.as_ref(),
+        )
+        .unwrap_or_else(|e| fail(e));
         println!("{}", binding.report());
         println!("\n(dry run — jade.toml unchanged)");
         return;

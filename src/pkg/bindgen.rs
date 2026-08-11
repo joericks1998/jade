@@ -192,11 +192,19 @@ pub fn include_roots(header: &Path, extra: &[String]) -> Vec<String> {
 }
 
 /// Run clang over `header` and return the translation unit as JSON.
-fn ast_of(header: &Path, include_dirs: &[String]) -> Result<Value, String> {
+fn ast_of(header: &Path, include_dirs: &[String], defines: &[String]) -> Result<Value, String> {
     let mut cmd = std::process::Command::new("clang");
     cmd.args(["-Xclang", "-ast-dump=json", "-fsyntax-only"]);
     for inc in include_dirs {
         cmd.arg(format!("-I{inc}"));
+    }
+    // Before the header, which is the whole point: `pcre2.h` raises `#error`
+    // unless `PCRE2_CODE_UNIT_WIDTH` is set, and `fuse.h` unless
+    // `FUSE_USE_VERSION` is. The same list reaches `cc` when the shim is built,
+    // because the shim includes the same header and would otherwise hit the
+    // same `#error` one stage later.
+    for d in defines {
+        cmd.arg(format!("-D{d}"));
     }
     cmd.arg(header);
 
@@ -1471,6 +1479,7 @@ fn bindable<'a>(
 pub fn from_header(
     header: &Path,
     include_dirs: &[String],
+    defines: &[String],
     only: Option<&str>,
     exported: Option<&std::collections::HashSet<String>>,
 ) -> Result<Binding, String> {
@@ -1478,7 +1487,7 @@ pub fn from_header(
     // passes no directories at all, so a candidate needing one was silently
     // demoted to a fallback instead of being read.
     let dirs = include_roots(header, include_dirs);
-    let ast = ast_of(header, &dirs)?;
+    let ast = ast_of(header, &dirs, defines)?;
 
     let empty = Vec::new();
     let top = ast.get("inner").and_then(Value::as_array).unwrap_or(&empty);
@@ -2383,7 +2392,7 @@ pub fn discover_header(lib: &Path, root: &Path, dep_name: &str) -> Option<std::p
                 // Nothing to check against; first hit wins.
                 return Some(path);
             };
-            match from_header(&path, &[], None, Some(exported)) {
+            match from_header(&path, &[], &[], None, Some(exported)) {
                 Ok(b) if b.symbols.keys().any(|s| exported.contains(s)) => return Some(path),
                 // Parsed, but describes some other library of the same name.
                 Ok(_) => fallback.get_or_insert(path),

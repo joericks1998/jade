@@ -932,6 +932,7 @@ pub fn build_c_shims(
             &dir,
             &artifact.file,
             entry.include_dirs.as_deref().unwrap_or(&[]),
+            entry.defines.as_deref().unwrap_or(&[]),
         )?;
 
         write_shim_record(&dir, &shim_filename(&pkg.name), &shim_out, &artifact.sha256);
@@ -948,6 +949,7 @@ fn compile_shim(
     dir: &Path,
     target_file: &str,
     include_dirs: &[String],
+    defines: &[String],
 ) -> Result<(), String> {
     let mut cc = std::process::Command::new("cc");
     if cfg!(target_os = "macos") {
@@ -958,6 +960,13 @@ fn compile_shim(
     // A header that is not on the default search path — Homebrew's, most often.
     for inc in include_dirs {
         cc.arg(format!("-I{inc}"));
+    }
+    // The same macros the header was *read* with. The shim includes it too, so
+    // one that raises `#error` without `PCRE2_CODE_UNIT_WIDTH` would bind
+    // cleanly and then fail to compile a stage later, which is a worse place to
+    // find out.
+    for d in defines {
+        cc.arg(format!("-D{d}"));
     }
     // C lets a function be called with no declaration in scope, assuming it
     // returns `int` and taking the arguments at face value. For this shim that

@@ -403,8 +403,26 @@ pub(super) enum CallKind {
 /// frontend guarantees a `Call`'s callee is callable and non-user-fn callables
 /// (builtins/methods) arrive via `GetGlobal(reserved)`/`GetField` — the former
 /// handled here, the latter an unsupported opcode that already forces fallback.
+/// Prefix a build diagnostic with the source position of instruction `i`.
+///
+/// The interpreter's errors all read `[line:col] …`, and a build error that
+/// named neither a line nor a file gave a large program nothing to search for.
+/// `spans` is parallel to `code`; when it is empty — the isolated-body test
+/// helper hands over bare instructions — the message goes out unprefixed rather
+/// than carrying a position that would be a guess.
+fn at(spans: &[crate::frontend::error::Span], i: usize, msg: String) -> String {
+    match spans.get(i) {
+        Some(sp) => format!("[{}:{}] {msg}", sp.line, sp.col),
+        None => msg,
+    }
+}
+
 pub(super) fn resolve_user_calls(
     code: &[Instr],
+    // One per instruction, parallel to `code`. Empty when the caller had none
+    // (the isolated-body test helper), in which case a diagnostic goes out
+    // without a position rather than with a wrong one.
+    spans: &[crate::frontend::error::Span],
     fn_defs: &[Arc<CompiledFn>],
     fnctx: &FnCtx,
 ) -> Result<(HashMap<usize, CallKind>, std::collections::HashSet<usize>), String> {
@@ -659,37 +677,50 @@ pub(super) fn resolve_user_calls(
                         // arity table separates them, so `"abc".upper(1, 2, 3)`
                         // is told its arity rather than that `upper` does not
                         // exist — which it plainly does.
-                        return Err(match crate::builtins::primitive_method_arity(&mname) {
-                            Some(want) => format!(
-                                "`{mname}` takes {want} argument{}, but {} were given.",
-                                if want == 1 { "" } else { "s" },
-                                args.len()
-                            ),
-                            None => format!(
-                                "no method named `{mname}`. Method calls compile fine — this \
+                        return Err(at(
+                            spans,
+                            i,
+                            match crate::builtins::primitive_method_arity(&mname) {
+                                Some(want) => format!(
+                                    "`{mname}` takes {want} argument{}, but {} were given.",
+                                    if want == 1 { "" } else { "s" },
+                                    args.len()
+                                ),
+                                None => format!(
+                                    "no method named `{mname}`. Method calls compile fine — this \
                                  one does not name a method any type defines, so check the \
                                  spelling against the type it is called on. `jade run` on the \
                                  same file will name that type."
-                            ),
-                        });
+                                ),
+                            },
+                        ));
                     }
                 } else {
                     let kind = if let Some(&uid) = reg_fn.get(callee) {
                         // Statically-known function → direct call (fill defaults).
                         let cf = &fnctx.defs[uid];
                         if args.len() > cf.params.len() {
-                            return Err(format!(
-                                "this call passes {} arguments, but the function takes {}.",
-                                args.len(),
-                                cf.params.len()
+                            return Err(at(
+                                spans,
+                                i,
+                                format!(
+                                    "this call passes {} arguments, but the function takes {}.",
+                                    args.len(),
+                                    cf.params.len()
+                                ),
                             ));
                         }
                         for j in args.len()..cf.params.len() {
                             if cf.defaults.get(j).and_then(|x| x.as_ref()).is_none() {
-                                return Err(format!(
-                                    "this call omits argument {} (`{}`), which has no default.",
-                                    j + 1,
-                                    cf.params.get(j).map(|p| p.as_str()).unwrap_or("?")
+                                return Err(at(
+                                    spans,
+                                    i,
+                                    format!(
+                                        "this call omits argument {} (`{}`), which has no \
+                                         default.",
+                                        j + 1,
+                                        cf.params.get(j).map(|p| p.as_str()).unwrap_or("?")
+                                    ),
                                 ));
                             }
                         }
@@ -781,11 +812,13 @@ pub(super) fn resolve_user_calls(
                     // This one really is a limitation rather than a mistake, so
                     // it says so — and says what to write instead, which the
                     // old wording did not.
-                    return Err(
+                    return Err(at(
+                        spans,
+                        i,
                         "a method call with named arguments is not compiled yet. Pass them \
                          positionally, or run the file with `jade run`."
-                            .into(),
-                    );
+                            .to_string(),
+                    ));
                 }
                 if let Some((module, method, gf_idx)) = reg_getfield_module.get(callee).cloned() {
                     // The one supported keyword module call: fs.read(path, trust=<bool>).

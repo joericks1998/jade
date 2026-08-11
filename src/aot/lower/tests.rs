@@ -22,7 +22,15 @@ fn ir_of_rc(code: &[Instr], n_slots: u32) -> String {
     let function = module.add_function("f", context.i64_type().fn_type(&[], false), None);
     let mut ctx = FnCtx::empty();
     ctx.refcount = true;
-    lower_body(&context, &module, function, code, &[], n_slots, 0, &ctx, false, false)
+    // No spans: an isolated body, so a diagnostic from it goes out without a
+    // position rather than with a guessed one.
+    let chunk = crate::bytecode::Chunk {
+        name: "t".to_string(),
+        code: code.to_vec(),
+        spans: Vec::new(),
+        fn_defs: Vec::new(),
+    };
+    lower_body(&context, &module, function, &chunk, n_slots, 0, &ctx, false, false)
         .expect("lowering failed");
     module.verify().expect("module failed LLVM verification");
     module.print_to_string().to_string()
@@ -924,4 +932,39 @@ fn print_falls_back_when_shadowed_by_a_user_global() {
     )
     .unwrap_err();
     assert!(err.contains("unsupported call"), "got: {err}");
+}
+
+/// A build error names the line it happened on, like every interpreter error.
+///
+/// The position was the last thing missing from TOOLCHAIN-BUGS #19: the message
+/// named `lower.rs` and the construct rather than the mistake, and gave a large
+/// file nothing to search for. `Chunk` has always carried a span per
+/// instruction; it just never reached the resolver.
+#[test]
+fn a_build_error_from_the_resolver_names_its_line() {
+    use crate::frontend::error::Span;
+    let mut chunk = crate::bytecode::Chunk::new("t");
+    // `x.nosuchmethod()` — a GetField result that is then called.
+    chunk.code = vec![
+        LoadStr(0, "hi".to_string()),
+        GetField(1, 0, "nosuchmethod".to_string()),
+        Call(2, 1, vec![]),
+        Return(Some(2)),
+    ];
+    chunk.spans = vec![
+        Span { line: 1, col: 1 },
+        Span { line: 7, col: 3 },
+        Span { line: 7, col: 3 },
+        Span { line: 8, col: 1 },
+    ];
+    let context = Context::create();
+    let module = context.create_module("t");
+    let function = module.add_function("f", context.i64_type().fn_type(&[], false), None);
+    let err = lower_body(&context, &module, function, &chunk, 3, 0, &FnCtx::empty(), false, false)
+        .expect_err("a method no type defines should be refused");
+
+    assert!(err.starts_with("[7:3]"), "should name the line: {err}");
+    assert!(err.contains("nosuchmethod"), "should name the method: {err}");
+    assert!(!err.contains("lower.rs"), "should not name a Rust source file: {err}");
+    assert!(!err.contains("unsupported"), "method calls are not unsupported: {err}");
 }
