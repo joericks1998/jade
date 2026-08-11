@@ -690,13 +690,12 @@ pub fn compile_with_mode(
         }
         cc.arg("-fPIC");
     }
-    if cfg!(target_os = "macos") {
-        if let Ok(ver) = std::process::Command::new("sw_vers").args(["-productVersion"]).output() {
-            if let Ok(s) = std::str::from_utf8(&ver.stdout) {
-                let short = s.trim().splitn(3, '.').take(2).collect::<Vec<_>>().join(".");
-                cc.arg(format!("-mmacosx-version-min={short}"));
-            }
-        }
+    if cfg!(target_os = "macos")
+        && let Ok(ver) = std::process::Command::new("sw_vers").args(["-productVersion"]).output()
+        && let Ok(s) = std::str::from_utf8(&ver.stdout)
+    {
+        let short = s.trim().splitn(3, '.').take(2).collect::<Vec<_>>().join(".");
+        cc.arg(format!("-mmacosx-version-min={short}"));
     }
     // Always link the runtime archive. Previously this was gated on a hand-kept
     // set of feature flags (uses_runtime/uses_async/uses_dicts/uses_exceptions/

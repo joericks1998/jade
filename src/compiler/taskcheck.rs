@@ -316,32 +316,33 @@ fn step(
         // ── Calls: mutating methods, and effects inherited from the callee ──
         Call(d, callee, args) => {
             // `recv.push(x)` — a mutating method on a shared receiver.
-            if let Some((recv, name)) = t.getfield.get(callee) {
-                if MUTATING_METHODS.contains(&name.as_str()) && t.regs.contains(recv) {
-                    e.mutates_shared = true;
-                    found.push((format!("calls `{name}()` on a shared collection"), span));
-                }
+            if let Some((recv, name)) = t.getfield.get(callee)
+                && MUTATING_METHODS.contains(&name.as_str())
+                && t.regs.contains(recv)
+            {
+                e.mutates_shared = true;
+                found.push((format!("calls `{name}()` on a shared collection"), span));
             }
             // A statically-known callee contributes its own effects.
-            if let Some(&uid) = t.reg_fn.get(callee) {
-                if let Some(callee_eff) = eff.get(uid) {
-                    if callee_eff.writes_global {
-                        e.writes_global = true;
-                        found.push((
-                            format!("calls `{}`, which writes a global", table.fns[uid].chunk.name),
-                            span,
-                        ));
-                    }
-                    if callee_eff.mutates_shared && args.iter().any(|a| t.regs.contains(a)) {
-                        e.mutates_shared = true;
-                        found.push((
-                            format!(
-                                "passes a shared value to `{}`, which mutates it",
-                                table.fns[uid].chunk.name
-                            ),
-                            span,
-                        ));
-                    }
+            if let Some(&uid) = t.reg_fn.get(callee)
+                && let Some(callee_eff) = eff.get(uid)
+            {
+                if callee_eff.writes_global {
+                    e.writes_global = true;
+                    found.push((
+                        format!("calls `{}`, which writes a global", table.fns[uid].chunk.name),
+                        span,
+                    ));
+                }
+                if callee_eff.mutates_shared && args.iter().any(|a| t.regs.contains(a)) {
+                    e.mutates_shared = true;
+                    found.push((
+                        format!(
+                            "passes a shared value to `{}`, which mutates it",
+                            table.fns[uid].chunk.name
+                        ),
+                        span,
+                    ));
                 }
             }
             clear(t, d);

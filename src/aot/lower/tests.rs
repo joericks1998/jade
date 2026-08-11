@@ -30,8 +30,15 @@ fn ir_of_rc(code: &[Instr], n_slots: u32) -> String {
         spans: Vec::new(),
         fn_defs: Vec::new(),
     };
-    lower_body(&context, &module, function, &chunk, n_slots, 0, &ctx, false, false)
-        .expect("lowering failed");
+    lower_body(
+        &context,
+        &module,
+        function,
+        &chunk,
+        &ctx,
+        BodyOpts { n_slots, n_params: 0, is_generator: false, track_recursion: false },
+    )
+    .expect("lowering failed");
     module.verify().expect("module failed LLVM verification");
     module.print_to_string().to_string()
 }
@@ -198,7 +205,7 @@ fn string_literal_and_concat() {
         3,
     );
     // Two pre-tagged, 8-aligned internal literal globals.
-    assert_eq!(ir.matches("str_lit_t").count() >= 2, true, "two literal globals:\n{ir}");
+    assert!(ir.matches("str_lit_t").count() >= 2, "two literal globals:\n{ir}");
     assert!(ir.contains("align 8"), "literal globals 8-aligned:\n{ir}");
     // The literal payload keeps a 7-byte pad + trust header before the bytes.
     assert!(ir.contains("jrt_str_concat"), "concat via runtime:\n{ir}");
@@ -960,8 +967,15 @@ fn a_build_error_from_the_resolver_names_its_line() {
     let context = Context::create();
     let module = context.create_module("t");
     let function = module.add_function("f", context.i64_type().fn_type(&[], false), None);
-    let err = lower_body(&context, &module, function, &chunk, 3, 0, &FnCtx::empty(), false, false)
-        .expect_err("a method no type defines should be refused");
+    let err = lower_body(
+        &context,
+        &module,
+        function,
+        &chunk,
+        &FnCtx::empty(),
+        BodyOpts { n_slots: 3, n_params: 0, is_generator: false, track_recursion: false },
+    )
+    .expect_err("a method no type defines should be refused");
 
     assert!(err.starts_with("[7:3]"), "should name the line: {err}");
     assert!(err.contains("nosuchmethod"), "should name the method: {err}");

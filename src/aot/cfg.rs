@@ -122,8 +122,8 @@ pub fn build(code: &[Instr]) -> Cfg {
     }
 
     // ── Pass 3: wire successors from each block's terminator ───────────────
-    for bi in 0..blocks.len() {
-        let end = blocks[bi].end;
+    for block in blocks.iter_mut() {
+        let end = block.end;
         let last = end - 1;
         let mut succs = Vec::new();
         match control_of(&code[last], last) {
@@ -133,10 +133,10 @@ pub fn build(code: &[Instr]) -> Cfg {
                         succs.push(b);
                     }
                 }
-                if cf.fallthrough {
-                    if let Some(&b) = block_at.get(&end) {
-                        succs.push(b);
-                    }
+                if cf.fallthrough
+                    && let Some(&b) = block_at.get(&end)
+                {
+                    succs.push(b);
                 }
             }
             // A block whose last instruction is not a control transfer simply
@@ -147,7 +147,7 @@ pub fn build(code: &[Instr]) -> Cfg {
                 }
             }
         }
-        blocks[bi].succs = succs;
+        block.succs = succs;
     }
 
     Cfg { blocks, block_at }

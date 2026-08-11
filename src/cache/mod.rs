@@ -152,12 +152,12 @@ pub fn write_ast_cache(hash: &[u8; 32], source_path: &str, program: &Program) {
         format_version: CACHE_FORMAT_VERSION,
     };
 
-    if let Ok(meta_json) = serde_json::to_vec(&meta) {
-        if let Err(e) = fs::write(dir.join("meta.json"), meta_json) {
-            #[cfg(debug_assertions)]
-            eprintln!("jade cache: failed to write meta.json: {e}");
-            let _ = e;
-        }
+    if let Ok(meta_json) = serde_json::to_vec(&meta)
+        && let Err(e) = fs::write(dir.join("meta.json"), meta_json)
+    {
+        #[cfg(debug_assertions)]
+        eprintln!("jade cache: failed to write meta.json: {e}");
+        let _ = e;
     }
 
     match bincode::serialize(program) {
@@ -295,12 +295,12 @@ pub fn write_tir_cache(hash: &[u8; 32], source_path: &str, tprogram: &TProgram) 
         hash: hex(hash),
         format_version: CACHE_FORMAT_VERSION,
     };
-    if let Ok(meta_json) = serde_json::to_vec(&meta) {
-        if let Err(e) = fs::write(dir.join("meta.json"), meta_json) {
-            #[cfg(debug_assertions)]
-            eprintln!("jade cache: failed to write meta.json: {e}");
-            let _ = e;
-        }
+    if let Ok(meta_json) = serde_json::to_vec(&meta)
+        && let Err(e) = fs::write(dir.join("meta.json"), meta_json)
+    {
+        #[cfg(debug_assertions)]
+        eprintln!("jade cache: failed to write meta.json: {e}");
+        let _ = e;
     }
 
     match bincode::serialize(tprogram) {

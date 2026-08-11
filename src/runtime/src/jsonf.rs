@@ -195,27 +195,29 @@ mod tests {
     use super::*;
 
     unsafe fn read(p: *const c_char) -> String {
-        let n = strlen(p as *const u8);
-        String::from_utf8_lossy(core::slice::from_raw_parts(p as *const u8, n)).into_owned()
+        unsafe {
+            let n = strlen(p as *const u8);
+            String::from_utf8_lossy(core::slice::from_raw_parts(p as *const u8, n)).into_owned()
+        }
     }
 
     #[test]
     fn roundtrip_object() {
         let _g = crate::gc::test_support::lock_counter();
-        let w = jrt_json_parse_chunk(b"{\"b\": 2, \"a\": 1}\0".as_ptr() as *const c_char);
+        let w = jrt_json_parse_chunk(c"{\"b\": 2, \"a\": 1}".as_ptr());
         let s = jrt_json_stringify_chunk(w, 0);
         // serde sorts keys.
         assert_eq!(unsafe { read(s) }, r#"{"a":1,"b":2}"#);
-        unsafe { string::free_str(s as *mut u8) };
+        string::free_str(s as *mut u8);
     }
 
     #[test]
     fn pretty_and_nested() {
         let _g = crate::gc::test_support::lock_counter();
-        let w = jrt_json_parse_chunk(b"{\"a\": {\"b\": 7}}\0".as_ptr() as *const c_char);
+        let w = jrt_json_parse_chunk(c"{\"a\": {\"b\": 7}}".as_ptr());
         let s = jrt_json_stringify_chunk(w, 1);
         assert_eq!(unsafe { read(s) }, "{\n  \"a\": {\n    \"b\": 7\n  }\n}");
-        unsafe { string::free_str(s as *mut u8) };
+        string::free_str(s as *mut u8);
     }
 
     #[test]

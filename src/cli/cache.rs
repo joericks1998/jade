@@ -28,11 +28,11 @@ pub fn run_cache_clean(older_than_days: Option<u64>, dry_run: bool) {
                 return true;
             }
             // Optionally remove entries older than N days.
-            if let Some(days) = older_than_days {
-                if let Some(modified) = entry.modified {
-                    let age = now.duration_since(modified).unwrap_or(Duration::ZERO);
-                    return age > Duration::from_secs(days * 86_400);
-                }
+            if let Some(days) = older_than_days
+                && let Some(modified) = entry.modified
+            {
+                let age = now.duration_since(modified).unwrap_or(Duration::ZERO);
+                return age > Duration::from_secs(days * 86_400);
             }
             false
         },

@@ -49,7 +49,6 @@ pub(crate) async fn vm_prompt_deref(
                 grammar: grammar.clone(),
                 anchor: grammar_anchor.clone(),
                 stop_anchor: grammar_stop.clone(),
-                ..Default::default()
             },
             span,
         )
@@ -161,7 +160,6 @@ async fn start_inference(ts: &Arc<JadeTokenStream>, state: &mut VmState, span: S
                 grammar: ts.grammar.clone(),
                 anchor: ts.region_start.first().cloned(),
                 stop_anchor: ts.region_stop.first().cloned(),
-                ..Default::default()
             },
             span,
         )
@@ -270,7 +268,7 @@ pub(crate) async fn drain_tokens_with_mute<W: std::io::Write + Send>(
                 // Scanning for region_start to enter muted mode.
                 if let Some((pos, len)) = first_match(region_start, &pending) {
                     if pos > 0 {
-                        let _ = out.write_all(pending[..pos].as_bytes());
+                        let _ = out.write_all(&pending.as_bytes()[..pos]);
                         let _ = out.flush();
                     }
                     pending.drain(..pos + len);

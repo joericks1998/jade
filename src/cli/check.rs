@@ -50,7 +50,7 @@ fn check_imports(tprogram: &crate::compiler::tir::TProgram, path: &str) -> Resul
         .iter()
         .filter_map(|s| match s {
             TStmt::Use { path, span, .. } | TStmt::FromUse { path, span, .. } => {
-                Some((path.clone(), span.clone()))
+                Some((path.clone(), *span))
             }
             _ => None,
         })
@@ -122,19 +122,19 @@ pub fn run_check(path: &str) {
     // hash, so an entry written before a new check existed would skip that check
     // forever. Re-run the post-TIR checks against the cached tree rather than
     // returning early — they are cheap next to the stages the cache saves.
-    if let Some(ref h) = hash {
-        if let Some(tprogram) = crate::cache::read_tir_cache(h) {
-            if let Err(e) = post_tir_checks(&tprogram, path) {
-                eprintln!("{}: {}", path, e);
-                process::exit(1);
-            }
-            println!("{}: ok", path);
-            return;
+    if let Some(ref h) = hash
+        && let Some(tprogram) = crate::cache::read_tir_cache(h)
+    {
+        if let Err(e) = post_tir_checks(&tprogram, path) {
+            eprintln!("{}: {}", path, e);
+            process::exit(1);
         }
+        println!("{}: ok", path);
+        return;
     }
 
     // L1: try to skip lex + parse.
-    let cached_ast = hash.as_ref().and_then(|h| crate::cache::read_ast_cache(h));
+    let cached_ast = hash.as_ref().and_then(crate::cache::read_ast_cache);
     let program = match cached_ast {
         Some(p) => p,
         None => {

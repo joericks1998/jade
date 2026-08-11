@@ -124,14 +124,12 @@ async fn eval_snippet_vm(src: &str, state: &mut VmState) -> Result<Option<String
             Some(Stmt::Expr(e)) if prints_own_output(e)
         );
 
-    if capture {
-        if let Some(Stmt::Expr(expr)) = program.stmts.pop() {
-            program.stmts.push(Stmt::Let {
-                name: vm::REPL_CAPTURE.to_string(),
-                value: expr,
-                span: Span { line: 0, col: 0 },
-            });
-        }
+    if capture && let Some(Stmt::Expr(expr)) = program.stmts.pop() {
+        program.stmts.push(Stmt::Let {
+            name: vm::REPL_CAPTURE.to_string(),
+            value: expr,
+            span: Span { line: 0, col: 0 },
+        });
     }
 
     // Pre-seed the type context with globals from previous REPL runs so that
@@ -144,20 +142,21 @@ async fn eval_snippet_vm(src: &str, state: &mut VmState) -> Result<Option<String
     vm::run_incremental(compiled, state).await.map_err(|e| e.to_string())?;
 
     let captured = state.repl_capture.take();
-    if capture && !suppress_echo {
-        if let Some(val) = captured {
-            // Don't echo a void result — e.g. `print(...)` returns nil, and
-            // echoing "nil" after its output is noise.
-            if !matches!(val, vm::VmValue::Nil) {
-                // Echo strings quoted (REPL convention), but Debug the *contents* —
-                // `{:?}` on the JStr itself would print its struct form
-                // (`JStr { text: …, trust: 0 }`) into user output.
-                let display = match &val {
-                    vm::VmValue::Str(s) => format!("{:?}", s.as_str()),
-                    other => value_to_display(other),
-                };
-                return Ok(Some(display));
-            }
+    if capture
+        && !suppress_echo
+        && let Some(val) = captured
+    {
+        // Don't echo a void result — e.g. `print(...)` returns nil, and
+        // echoing "nil" after its output is noise.
+        if !matches!(val, vm::VmValue::Nil) {
+            // Echo strings quoted (REPL convention), but Debug the *contents* —
+            // `{:?}` on the JStr itself would print its struct form
+            // (`JStr { text: …, trust: 0 }`) into user output.
+            let display = match &val {
+                vm::VmValue::Str(s) => format!("{:?}", s.as_str()),
+                other => value_to_display(other),
+            };
+            return Ok(Some(display));
         }
     }
 

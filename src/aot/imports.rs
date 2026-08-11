@@ -26,6 +26,7 @@
 //! existing name-splitting conventions:
 //!   * `rsplit_once('.')` — type / decorator namespace stripping
 //!   * `split_once("__")` — `Type__method` extend-method keys
+//!
 //! so `Foo$2` stays intact and methods key as `Foo$2__method`.
 //!
 //! ## Coverage
@@ -169,6 +170,12 @@ pub struct NativePkg {
     pub rel: Option<String>,
     pub abs: String,
 }
+
+/// One decorator on a TIR item: its name, and its positional arguments.
+///
+/// The AST spells the same shape as `ast::DecoratorList`; this is the TIR's,
+/// over `TExpr`.
+type TDecorator = (String, Vec<(Option<String>, TExpr)>);
 
 impl Registry {
     fn new() -> Self {
@@ -477,10 +484,10 @@ impl Renamer {
         if let Some(m) = self.from_value.get(name) {
             return Some(m.clone());
         }
-        if let Some(id) = self.self_id {
-            if self.self_values.contains(name) {
-                return Some(mangle(name, id));
-            }
+        if let Some(id) = self.self_id
+            && self.self_values.contains(name)
+        {
+            return Some(mangle(name, id));
         }
         None
     }
@@ -522,10 +529,10 @@ impl Renamer {
         if let Some(m) = self.from_type.get(tn) {
             return Some(m.clone());
         }
-        if let Some(id) = self.self_id {
-            if self.self_types.contains(tn) {
-                return Some(mangle(tn, id));
-            }
+        if let Some(id) = self.self_id
+            && self.self_types.contains(tn)
+        {
+            return Some(mangle(tn, id));
         }
         // Fallback: a *bare* imported type whose `alias.` qualifier was stripped by
         // type inference. `let G = tools.ToolGroup {}` reaches codegen as a bare
@@ -558,10 +565,10 @@ impl Renamer {
         if let Some(m) = self.from_value.get(name) {
             return Some(m.clone());
         }
-        if let Some(id) = self.self_id {
-            if self.self_values.contains(name) {
-                return Some(mangle(name, id));
-            }
+        if let Some(id) = self.self_id
+            && self.self_values.contains(name)
+        {
+            return Some(mangle(name, id));
         }
         None
     }
@@ -629,17 +636,13 @@ impl Renamer {
                         StructFieldDef::Required(_) => {}
                     }
                 }
-                if top {
-                    if let Some(m) = self.def_type(name) {
-                        *name = m;
-                    }
+                if top && let Some(m) = self.def_type(name) {
+                    *name = m;
                 }
             }
             TStmt::InterfaceDef { name, .. } => {
-                if top {
-                    if let Some(m) = self.def_type(name) {
-                        *name = m;
-                    }
+                if top && let Some(m) = self.def_type(name) {
+                    *name = m;
                 }
             }
             TStmt::ExtendBlock { type_name, interface_name, methods, decorators, .. } => {
@@ -647,10 +650,10 @@ impl Renamer {
                 if let Some(m) = self.ref_type(type_name) {
                     *type_name = m;
                 }
-                if let Some(iname) = interface_name.as_mut() {
-                    if let Some(m) = self.ref_type(iname) {
-                        *iname = m;
-                    }
+                if let Some(iname) = interface_name.as_mut()
+                    && let Some(m) = self.ref_type(iname)
+                {
+                    *iname = m;
                 }
                 // Methods are FnDefs; their names are NOT globals (they key as
                 // `Type$id__method` off the already-mangled type_name).
@@ -728,10 +731,10 @@ impl Renamer {
             TStmt::TryCatch { body, arms, .. } => {
                 self.block(body);
                 for arm in arms.iter_mut() {
-                    if let Some(ct) = arm.catch_type.as_mut() {
-                        if let Some(m) = self.ref_type(ct) {
-                            *ct = m;
-                        }
+                    if let Some(ct) = arm.catch_type.as_mut()
+                        && let Some(m) = self.ref_type(ct)
+                    {
+                        *ct = m;
                     }
                     self.push_scope();
                     self.bind_local(&arm.binding);
@@ -751,7 +754,7 @@ impl Renamer {
         }
     }
 
-    fn block(&mut self, stmts: &mut Vec<TStmt>) {
+    fn block(&mut self, stmts: &mut [TStmt]) {
         self.push_scope();
         for s in stmts.iter_mut() {
             self.rename_stmt(s, false);
@@ -759,7 +762,7 @@ impl Renamer {
         self.pop_scope();
     }
 
-    fn rename_decorators(&mut self, decorators: &mut [(String, Vec<(Option<String>, TExpr)>)]) {
+    fn rename_decorators(&mut self, decorators: &mut [TDecorator]) {
         for (dname, dargs) in decorators.iter_mut() {
             if let Some(m) = self.ref_decorator(dname) {
                 *dname = m;
@@ -840,10 +843,10 @@ impl Renamer {
             }
             TExprKind::PromptDeref { expr, output_type, grammar_expr } => {
                 self.rename_expr(expr);
-                if let Some(ot) = output_type.as_mut() {
-                    if let Some(m) = self.ref_type(ot) {
-                        *ot = m;
-                    }
+                if let Some(ot) = output_type.as_mut()
+                    && let Some(m) = self.ref_type(ot)
+                {
+                    *ot = m;
                 }
                 if let Some(g) = grammar_expr {
                     self.rename_expr(g);

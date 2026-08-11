@@ -947,10 +947,10 @@ fn collect_test_files(dir: &Path, pattern: Option<&str>, out: &mut Vec<PathBuf>)
             let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
             let is_test = stem.starts_with("test_") || stem.ends_with("_test");
             if is_test {
-                if let Some(pat) = pattern {
-                    if !stem.contains(pat) {
-                        continue;
-                    }
+                if let Some(pat) = pattern
+                    && !stem.contains(pat)
+                {
+                    continue;
                 }
                 out.push(path);
             }

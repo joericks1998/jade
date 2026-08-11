@@ -107,6 +107,13 @@ impl Chunk {
     pub fn len(&self) -> usize {
         self.code.len()
     }
+
+    /// Whether the chunk has no instructions. A body that lowers to nothing —
+    /// an empty function, a module with only declarations — is an ordinary
+    /// thing, so this is asked rather than inferred from `len() == 0`.
+    pub fn is_empty(&self) -> bool {
+        self.code.is_empty()
+    }
 }
 
 /// Single bytecode instruction.

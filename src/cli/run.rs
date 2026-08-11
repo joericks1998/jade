@@ -90,7 +90,7 @@ pub async fn run_file(path: &str, verbose: bool) {
     let hash = crate::cache::file_hash(Path::new(path));
 
     // L1 cache: try to skip lex + parse.
-    let cached_ast = hash.as_ref().and_then(|h| crate::cache::read_ast_cache(h));
+    let cached_ast = hash.as_ref().and_then(crate::cache::read_ast_cache);
     let program = match cached_ast {
         Some(p) => p,
         None => {
@@ -169,7 +169,7 @@ pub async fn run_file(path: &str, verbose: bool) {
     let project_root = crate::project::find_project_root_from(&source_dir);
     let libraries = project_root
         .as_ref()
-        .and_then(|root| {
+        .map(|root| {
             // A manifest that will not parse is reported here rather than
             // skipped. Skipping it meant the project's dependencies silently
             // vanished, and the first complaint came from the `use` that could
@@ -185,7 +185,7 @@ pub async fn run_file(path: &str, verbose: bool) {
                 eprintln!("error: {e}");
                 std::process::exit(1);
             }
-            Some(crate::pkg::resolved_libraries(root, &manifest))
+            crate::pkg::resolved_libraries(root, &manifest)
         })
         .unwrap_or_default();
 

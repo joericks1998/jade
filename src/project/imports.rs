@@ -108,7 +108,7 @@ pub fn program_import_paths(program: &Program) -> Vec<(String, Span)> {
         .iter()
         .filter_map(|s| match s {
             Stmt::Use { path, span, .. } | Stmt::FromUse { path, span, .. } => {
-                Some((path.clone(), span.clone()))
+                Some((path.clone(), *span))
             }
             _ => None,
         })

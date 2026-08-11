@@ -49,10 +49,10 @@ fn bundled_provider_dir() -> Option<PathBuf> {
 /// First match by name wins.
 fn source_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    if let Ok(dir) = std::env::var(ENV_PROVIDERS_DIR) {
-        if !dir.is_empty() {
-            dirs.push(PathBuf::from(dir));
-        }
+    if let Ok(dir) = std::env::var(ENV_PROVIDERS_DIR)
+        && !dir.is_empty()
+    {
+        dirs.push(PathBuf::from(dir));
     }
     dirs.push(pool_dir());
     if let Some(bundle) = bundled_provider_dir() {
@@ -212,10 +212,10 @@ pub fn remove_credential(name: &str) -> io::Result<()> {
 
 /// Whether a credential is reachable for a provider (env var or stored file).
 pub fn has_credential(name: &str) -> bool {
-    if let Ok(key) = std::env::var(credential_env_var(name)) {
-        if !key.is_empty() {
-            return true;
-        }
+    if let Ok(key) = std::env::var(credential_env_var(name))
+        && !key.is_empty()
+    {
+        return true;
     }
     credential_path(name).exists()
 }

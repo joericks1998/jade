@@ -1174,6 +1174,13 @@ unsafe fn ffi_free_node(v: &JadeVal) {
 /// Release a marshalled `JadeVal` tree. Only container roots own libc heap;
 /// scalars (including top-level non-owning strings) are left untouched, so this
 /// is safe to call on any `JadeVal`.
+///
+/// # Safety
+///
+/// `v` must be a value a native call produced and no one has released yet: the
+/// owning kinds are freed here, so calling this twice on one value is a double
+/// free. A value the caller built itself is fine as long as its payload came
+/// from the same allocator the shim uses.
 pub unsafe fn ffi_free(v: &JadeVal) {
     if matches!(
         v.tag,

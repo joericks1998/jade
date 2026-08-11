@@ -55,7 +55,7 @@ fn arr_sort(args: &[VmValue]) -> Result<VmValue> {
     match &args[0] {
         VmValue::Array(arc) => {
             let mut guard = arc.lock();
-            guard.sort_by(|a, b| vm_cmp_for_sort(a, b));
+            guard.sort_by(vm_cmp_for_sort);
             Ok(VmValue::Nil)
         }
         _ => Err(JadeError::TypeError { message: "array.sort".to_string(), span: ZERO }),
@@ -106,7 +106,7 @@ fn pkg_sort(args: &[VmValue]) -> Result<VmValue> {
             let guard = arc.lock();
             let mut v: Vec<VmValue> = guard.as_slice().to_vec();
             drop(guard);
-            v.sort_by(|a, b| vm_cmp_for_sort(a, b));
+            v.sort_by(vm_cmp_for_sort);
             Ok(make_array(v))
         }
         _ => Err(JadeError::TypeError { message: "array.sort".to_string(), span: ZERO }),

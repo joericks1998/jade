@@ -77,11 +77,11 @@ pub fn run_init(template: &str) {
 
     if toml_path.exists() {
         // Check if it already has a [project] section.
-        if let Ok(content) = fs::read_to_string(&toml_path) {
-            if content.contains("[project]") {
-                eprintln!("error: jade.toml already contains a [project] section");
-                process::exit(1);
-            }
+        if let Ok(content) = fs::read_to_string(&toml_path)
+            && content.contains("[project]")
+        {
+            eprintln!("error: jade.toml already contains a [project] section");
+            process::exit(1);
         }
     }
 

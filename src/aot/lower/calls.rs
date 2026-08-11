@@ -237,9 +237,9 @@ pub(super) fn collect_method_fns(
     // BFS the method bodies' nested function literals.
     while let Some(f) = queue.pop_front() {
         for c in &f.chunk.fn_defs {
-            if !ptr2uid.contains_key(&Arc::as_ptr(c)) {
+            if let std::collections::hash_map::Entry::Vacant(e) = ptr2uid.entry(Arc::as_ptr(c)) {
                 let u = defs.len();
-                ptr2uid.insert(Arc::as_ptr(c), u);
+                e.insert(u);
                 defs.push(c.clone());
                 queue.push_back(c.clone());
             }
@@ -874,10 +874,8 @@ pub(super) fn resolve_user_calls(
                         }
                         arg_slots[slot] = Some(*reg);
                     }
-                    for i in 0..p {
-                        if arg_slots[i].is_none()
-                            && cf.defaults.get(i).and_then(|x| x.as_ref()).is_none()
-                        {
+                    for (i, slot) in arg_slots.iter().enumerate().take(p) {
+                        if slot.is_none() && cf.defaults.get(i).and_then(|x| x.as_ref()).is_none() {
                             return Err("lower.rs: keyword call omits a required argument".into());
                         }
                     }
@@ -972,7 +970,7 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
             .build_int_compare(
                 inkwell::IntPredicate::EQ,
                 kind,
-                i64_ty.const_int(OBJKIND_BOUND_METHOD as u64, false),
+                i64_ty.const_int(OBJKIND_BOUND_METHOD, false),
                 "isbm",
             )
             .map_err(e)?;

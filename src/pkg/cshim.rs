@@ -1715,60 +1715,6 @@ fn emit_owned_str(sym: &str, target: &str, var: &str, free_fn: Option<&str>) -> 
 /// them — `uriEscapeA(in, out, …)` returns a pointer to the terminating NUL of
 /// its `out` argument, and plenty of C is written that way.
 ///
-/// The header cannot say whether a particular return aliases, so the shim does
-/// not try to find out. Copying the string before the buffer goes is right
-/// whether it aliased or not, and costs one copy on a path that already
-/// allocated a buffer.
-fn frees_scratch(args: &[ArgSpec]) -> bool {
-    args.iter().any(|a| {
-        matches!(
-            a,
-            ArgSpec::OutBuffer { .. } | ArgSpec::SizedBuffer { .. } | ArgSpec::InoutBytes { .. }
-        )
-    })
-}
-
-/// What has to happen to a borrowed `str` return before Jade is handed it.
-#[derive(Clone, Copy, PartialEq)]
-enum StrRet {
-    /// Handed over as it stands. The ABI says a top-level string is borrowed and
-    /// both engines copy it before the native call returns, so the library's own
-    /// pointer is exactly right — and nothing on this path shortens its life.
-    Lend,
-    /// Copied into the shim's per-thread buffer first, because the pointer stops
-    /// being valid before Jade reads it: it may point into scratch this call
-    /// frees. Still borrowed as far as the ABI is concerned — the buffer is
-    /// nobody's to release, the next call on the thread reuses it, and the
-    /// thread exiting reclaims the last one.
-    LendACopy,
-    /// `strdup`, because the value lands inside a container, and a container owns
-    /// its strings: Jade's `ffi_free` walks the tree and releases them. Handing
-    /// over the library's own pointer there is a free of memory the shim never
-    /// allocated, which is what `free(): invalid pointer` was.
-    GiveACopy,
-}
-
-/// Which of the three a symbol's `str` return needs.
-///
-/// One function, read by the wrapper that emits the copy *and* by the gate that
-/// decides whether `jade_shim_owned` is emitted at all. The helper is a static
-/// function and `-Wall -Werror` is on, so a gate that disagreed with the emitter
-/// would either fail to compile the shim or leave a call to a function that is
-/// not there. Asking once is what keeps the two from drifting.
-///
-/// As the vocabulary stands, `LendACopy` cannot come up: every shape that
-/// allocates scratch is also a result, so a `str` return beside one is always a
-/// key of a result struct and lands in a container. That is an emergent property
-/// of three `produces_result` answers rather than something either caller
-/// assumes, which is why the case is written out rather than argued away.
-fn str_ret(in_container: bool, frees_scratch: bool) -> StrRet {
-    match (in_container, frees_scratch) {
-        (true, _) => StrRet::GiveACopy,
-        (false, true) => StrRet::LendACopy,
-        (false, false) => StrRet::Lend,
-    }
-}
-
 /// The Jade type a tag stands for, with its article, for a message saying what
 /// an argument should have been.
 ///

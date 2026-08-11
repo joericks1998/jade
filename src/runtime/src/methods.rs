@@ -175,7 +175,7 @@ mod tests {
         let b = bind(recv, "greet");
         assert!(!b.is_null());
         let bm = unsafe { &*(b as *const BoundMethodObj) };
-        assert_eq!(bm.fn_ptr, dummy as usize);
+        assert_eq!(bm.fn_ptr, dummy as *const () as usize);
         assert_eq!(bm.self_word, recv, "the receiver is what will be passed as self");
     }
 

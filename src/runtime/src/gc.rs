@@ -516,6 +516,6 @@ mod tests {
             record_free();
         }
         // Reached here without the underflow debug-assert firing.
-        let _ = jrt_heap_report(); // exercises the report path (no-op unless env set)
+        jrt_heap_report(); // exercises the report path (no-op unless env set)
     }
 }

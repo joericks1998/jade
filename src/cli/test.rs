@@ -71,7 +71,7 @@ async fn run_test_file(path: &std::path::Path, _verbose: bool) -> Result<(), Str
 
     // Lex + parse (with cache).
     let hash = crate::cache::file_hash(path);
-    let cached_ast = hash.as_ref().and_then(|h| crate::cache::read_ast_cache(h));
+    let cached_ast = hash.as_ref().and_then(crate::cache::read_ast_cache);
     let program = match cached_ast {
         Some(p) => p,
         None => {
@@ -119,7 +119,7 @@ async fn run_test_file(path: &std::path::Path, _verbose: bool) -> Result<(), Str
     let project_root = crate::project::find_project_root_from(&source_dir);
     let libraries = project_root
         .as_ref()
-        .and_then(|root| {
+        .map(|root| {
             // Reported rather than skipped: a manifest that will not parse
             // takes the project's `[lib]` entries and dependencies with it, and
             // every test then fails on an import instead of on the real cause.
@@ -131,7 +131,7 @@ async fn run_test_file(path: &std::path::Path, _verbose: bool) -> Result<(), Str
                 eprintln!("error: {e}");
                 std::process::exit(1);
             }
-            Some(crate::pkg::resolved_libraries(root, &manifest))
+            crate::pkg::resolved_libraries(root, &manifest)
         })
         .unwrap_or_default();
 

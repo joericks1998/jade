@@ -215,16 +215,26 @@ fn is_line_terminator(kind: &TokenKind) -> bool {
 
 /// Scan the content of a plain string after the opening quote(s) have been consumed.
 /// `quote` is either `'"'` or `'\''`.  Advances `i`, `col`, and `line` in-place.
-fn scan_str_content(
-    chars: &[char],
-    i: &mut usize,
-    col: &mut usize,
-    line: &mut usize,
+/// Where the lexer is, and where the literal it is reading began.
+///
+/// The two string scanners took the same seven parameters — a cursor triple to
+/// advance, the position the quote opened at for the error message, and the
+/// quote's own shape. Passing them as one value is what they always were.
+struct StrScan<'a> {
+    chars: &'a [char],
+    i: &'a mut usize,
+    col: &'a mut usize,
+    line: &'a mut usize,
+    /// Where the opening quote was, so an unterminated literal is reported
+    /// there rather than at the end of the file.
     start_line: usize,
     start_col: usize,
     triple: bool,
     quote: char,
-) -> Result<String> {
+}
+
+fn scan_str_content(sc: StrScan<'_>) -> Result<String> {
+    let StrScan { chars, i, col, line, start_line, start_col, triple, quote } = sc;
     let mut content = String::new();
     loop {
         if *i >= chars.len() {
@@ -311,16 +321,8 @@ fn scan_str_content(
 /// Scan the content of an f-string after the opening quote(s) have been consumed.
 /// `quote` is either `'"'` or `'\''`.  Returns the raw parts (literal segments and
 /// expression source texts).  Advances `i`, `col`, and `line` in-place.
-fn scan_fstr_content(
-    chars: &[char],
-    i: &mut usize,
-    col: &mut usize,
-    line: &mut usize,
-    start_line: usize,
-    start_col: usize,
-    triple: bool,
-    quote: char,
-) -> Result<Vec<RawFStrPart>> {
+fn scan_fstr_content(sc: StrScan<'_>) -> Result<Vec<RawFStrPart>> {
+    let StrScan { chars, i, col, line, start_line, start_col, triple, quote } = sc;
     let mut parts: Vec<RawFStrPart> = Vec::new();
     let mut literal = String::new();
     loop {
@@ -485,15 +487,11 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
         match ch {
             // Newline: possibly insert a semicolon, then advance to next line
             '\n' => {
-                if bracket_depth == 0 {
-                    if let Some(last) = tokens.last() {
-                        if is_line_terminator(&last.kind) {
-                            tokens.push(Token {
-                                kind: TokenKind::Semicolon,
-                                span: Span { line, col },
-                            });
-                        }
-                    }
+                if bracket_depth == 0
+                    && let Some(last) = tokens.last()
+                    && is_line_terminator(&last.kind)
+                {
+                    tokens.push(Token { kind: TokenKind::Semicolon, span: Span { line, col } });
                 }
                 line += 1;
                 col = 1;
@@ -519,9 +517,16 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
                     col += 1;
                     i += 1;
                 }
-                let content = scan_str_content(
-                    &chars, &mut i, &mut col, &mut line, start_line, start_col, triple, quote,
-                )?;
+                let content = scan_str_content(StrScan {
+                    chars: &chars,
+                    i: &mut i,
+                    col: &mut col,
+                    line: &mut line,
+                    start_line,
+                    start_col,
+                    triple,
+                    quote,
+                })?;
                 tokens.push(Token {
                     kind: TokenKind::Str(content),
                     span: Span { line: start_line, col: start_col },
@@ -626,10 +631,16 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
                             col += 1;
                             i += 1;
                         }
-                        let parts = scan_fstr_content(
-                            &chars, &mut i, &mut col, &mut line, start_line, start_col, triple,
+                        let parts = scan_fstr_content(StrScan {
+                            chars: &chars,
+                            i: &mut i,
+                            col: &mut col,
+                            line: &mut line,
+                            start_line,
+                            start_col,
+                            triple,
                             quote,
-                        )?;
+                        })?;
                         TokenKind::FStr(parts)
                     }
                     _ => TokenKind::Identifier(name),
@@ -856,12 +867,11 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
     }
 
     // Apply semicolon insertion for the final line (no trailing newline case)
-    if bracket_depth == 0 {
-        if let Some(last) = tokens.last() {
-            if is_line_terminator(&last.kind) {
-                tokens.push(Token { kind: TokenKind::Semicolon, span: Span { line, col } });
-            }
-        }
+    if bracket_depth == 0
+        && let Some(last) = tokens.last()
+        && is_line_terminator(&last.kind)
+    {
+        tokens.push(Token { kind: TokenKind::Semicolon, span: Span { line, col } });
     }
 
     tokens.push(Token { kind: TokenKind::Eof, span: Span { line, col } });

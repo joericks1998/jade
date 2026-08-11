@@ -47,10 +47,10 @@ pub fn jade_home() -> PathBuf {
 /// path (dev/testing), which is what lets the parity gate point both engines at
 /// a stand-in provider.
 pub fn active_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("JADE_PROVIDER_ACTIVE") {
-        if !dir.is_empty() {
-            return PathBuf::from(dir);
-        }
+    if let Ok(dir) = std::env::var("JADE_PROVIDER_ACTIVE")
+        && !dir.is_empty()
+    {
+        return PathBuf::from(dir);
     }
     jade_home().join("provider").join("active")
 }

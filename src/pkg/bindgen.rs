@@ -1800,13 +1800,20 @@ fn buffer_fields(fields: &[(String, String)], env: &TypeEnv) -> Vec<crate::proje
 }
 
 /// Map one `FunctionDecl`. Returns the symbol, the struct types it needs, and
+/// What mapping one C function yields: the symbol itself, the out-parameters it
+/// produces as `(name, is_owned)`, and the assumptions worth reporting.
+///
+/// Three lists in a tuple read as three anonymous things at every call site;
+/// naming it says which is which once.
+type MappedFunction = (CSymbol, Vec<(String, bool)>, Vec<String>);
+
 /// anything that was assumed.
 fn map_function(
     node: &Value,
     env: &TypeEnv,
     produced: &std::collections::HashSet<String>,
     counts: &HashMap<String, usize>,
-) -> Result<(CSymbol, Vec<(String, bool)>, Vec<String>), String> {
+) -> Result<MappedFunction, String> {
     let raw_ret = ret_type_of(node)?;
     // A returned pointer whose length arrives through a parameter cannot be
     // decided from the return type alone, so the refusal is held until the

@@ -89,7 +89,7 @@ fn seed_globals_registers_grammar_global() {
 #[test]
 fn seed_globals_does_not_register_arbitrary_names() {
     let g = seeded();
-    assert!(g.get("no_such_builtin").is_none());
+    assert!(!g.contains_key("no_such_builtin"));
 }
 
 // ── Package lookup ────────────────────────────────────────────────────────────
@@ -230,7 +230,7 @@ fn native_bound_method_captures_receiver_and_method() {
         other => panic!("expected Str receiver, got {other:?}"),
     }
     // The captured method actually runs: receiver is prepended as args[0].
-    let out = (bound.method.vm_impl)(&[bound.receiver.clone()]).unwrap();
+    let out = (bound.method.vm_impl)(std::slice::from_ref(&bound.receiver)).unwrap();
     match out {
         VmValue::Str(s) => assert_eq!(s, "HI"),
         other => panic!("expected uppercased Str, got {other:?}"),

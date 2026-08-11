@@ -18,20 +18,6 @@ fn v(w: i64) -> JadeValue {
     JadeValue::from_bits(w as u64)
 }
 #[inline]
-fn is_int(w: i64) -> bool {
-    v(w).is_int()
-}
-#[inline]
-fn as_int(w: i64) -> i64 {
-    v(w).as_int()
-}
-/// Coerce a numeric word to `f64` (int → widened, float → unboxed).
-#[inline]
-fn as_f64(w: i64) -> f64 {
-    let x = v(w);
-    if x.is_int() { x.as_int() as f64 } else { unbox_float(x) }
-}
-#[inline]
 fn int_word(i: i64) -> i64 {
     JadeValue::from_int(i).bits() as i64
 }
@@ -76,10 +62,6 @@ impl Num {
             Num::Int(i) => i as f64,
             Num::Float(f) => f,
         }
-    }
-    #[inline]
-    fn is_int(self) -> bool {
-        matches!(self, Num::Int(_))
     }
 }
 

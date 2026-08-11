@@ -254,7 +254,7 @@ pub(crate) fn eval_binop_dynamic(
         },
         Shl => match (l, r) {
             (VmValue::Int(a), VmValue::Int(b)) => {
-                if b < 0 || b >= 64 {
+                if !(0..64).contains(&b) {
                     Err(JadeError::InvalidShift { amount: b, span })
                 } else {
                     Ok(VmValue::Int(a << b as u32))
@@ -267,7 +267,7 @@ pub(crate) fn eval_binop_dynamic(
         },
         Shr => match (l, r) {
             (VmValue::Int(a), VmValue::Int(b)) => {
-                if b < 0 || b >= 64 {
+                if !(0..64).contains(&b) {
                     Err(JadeError::InvalidShift { amount: b, span })
                 } else {
                     Ok(VmValue::Int(a >> b as u32))
