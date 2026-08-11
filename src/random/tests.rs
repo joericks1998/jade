@@ -113,7 +113,7 @@ fn choice_is_reproducible_for_fixed_seed() {
     let arr =
         make_array(vec![VmValue::Int(10), VmValue::Int(20), VmValue::Int(30), VmValue::Int(40)]);
     seed(123);
-    let a = random_choice(&[arr.clone()]).unwrap();
+    let a = random_choice(std::slice::from_ref(&arr)).unwrap();
     seed(123);
     let b = random_choice(&[arr]).unwrap();
     assert_eq!(format!("{:?}", a), format!("{:?}", b));
@@ -125,7 +125,7 @@ fn choice_returns_member() {
     seed(5);
     let arr = make_array(vec![VmValue::Int(1), VmValue::Int(2), VmValue::Int(3)]);
     for _ in 0..100 {
-        match random_choice(&[arr.clone()]).unwrap() {
+        match random_choice(std::slice::from_ref(&arr)).unwrap() {
             VmValue::Int(n) => assert!((1..=3).contains(&n)),
             other => panic!("expected Int member, got {:?}", other),
         }
@@ -172,7 +172,7 @@ fn shuffle_preserves_length_and_multiset() {
     let _g = TEST_LOCK.lock();
     seed(17);
     let arr = make_array((0..20).map(VmValue::Int).collect());
-    let out = random_shuffle(&[arr.clone()]).unwrap();
+    let out = random_shuffle(std::slice::from_ref(&arr)).unwrap();
     assert!(matches!(out, VmValue::Nil));
     let mut after = snapshot(&arr);
     assert_eq!(after.len(), 20);
@@ -185,12 +185,12 @@ fn shuffle_is_reproducible_for_fixed_seed() {
     let _g = TEST_LOCK.lock();
     let a = make_array((0..10).map(VmValue::Int).collect());
     seed(2024);
-    random_shuffle(&[a.clone()]).unwrap();
+    random_shuffle(std::slice::from_ref(&a)).unwrap();
     let ordering_a = snapshot(&a);
 
     let b = make_array((0..10).map(VmValue::Int).collect());
     seed(2024);
-    random_shuffle(&[b.clone()]).unwrap();
+    random_shuffle(std::slice::from_ref(&b)).unwrap();
     let ordering_b = snapshot(&b);
 
     assert_eq!(ordering_a, ordering_b);

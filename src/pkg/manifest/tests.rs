@@ -265,6 +265,7 @@ fn bind_headers(root: &Path, name: &str, headers: &[&str], dirs: &[&str]) {
         &std::collections::BTreeMap::new(),
         &headers.iter().map(|h| h.to_string()).collect::<Vec<_>>(),
         &dirs.iter().map(|d| d.to_string()).collect::<Vec<_>>(),
+        &[],
     )
     .unwrap();
 }

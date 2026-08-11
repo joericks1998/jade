@@ -237,9 +237,9 @@ pub(super) fn collect_method_fns(
     // BFS the method bodies' nested function literals.
     while let Some(f) = queue.pop_front() {
         for c in &f.chunk.fn_defs {
-            if !ptr2uid.contains_key(&Arc::as_ptr(c)) {
+            if let std::collections::hash_map::Entry::Vacant(e) = ptr2uid.entry(Arc::as_ptr(c)) {
                 let u = defs.len();
-                ptr2uid.insert(Arc::as_ptr(c), u);
+                e.insert(u);
                 defs.push(c.clone());
                 queue.push_back(c.clone());
             }
@@ -403,8 +403,26 @@ pub(super) enum CallKind {
 /// frontend guarantees a `Call`'s callee is callable and non-user-fn callables
 /// (builtins/methods) arrive via `GetGlobal(reserved)`/`GetField` — the former
 /// handled here, the latter an unsupported opcode that already forces fallback.
+/// Prefix a build diagnostic with the source position of instruction `i`.
+///
+/// The interpreter's errors all read `[line:col] …`, and a build error that
+/// named neither a line nor a file gave a large program nothing to search for.
+/// `spans` is parallel to `code`; when it is empty — the isolated-body test
+/// helper hands over bare instructions — the message goes out unprefixed rather
+/// than carrying a position that would be a guess.
+fn at(spans: &[crate::frontend::error::Span], i: usize, msg: String) -> String {
+    match spans.get(i) {
+        Some(sp) => format!("[{}:{}] {msg}", sp.line, sp.col),
+        None => msg,
+    }
+}
+
 pub(super) fn resolve_user_calls(
     code: &[Instr],
+    // One per instruction, parallel to `code`. Empty when the caller had none
+    // (the isolated-body test helper), in which case a diagnostic goes out
+    // without a position rather than with a wrong one.
+    spans: &[crate::frontend::error::Span],
     fn_defs: &[Arc<CompiledFn>],
     fnctx: &FnCtx,
 ) -> Result<(HashMap<usize, CallKind>, std::collections::HashSet<usize>), String> {
@@ -574,11 +592,13 @@ pub(super) fn resolve_user_calls(
                 if let Some(&uid) = reg_fn.get(callee) {
                     let cf = &fnctx.defs[uid];
                     if args.len() > cf.params.len() {
-                        return Err("lower.rs: spawn passes more arguments than parameters".into());
+                        return Err(
+                            "this spawn passes more arguments than the function takes.".into()
+                        );
                     }
                     for j in args.len()..cf.params.len() {
                         if cf.defaults.get(j).and_then(|x| x.as_ref()).is_none() {
-                            return Err("lower.rs: spawn omits a required argument".into());
+                            return Err("this spawn omits an argument that has no default.".into());
                         }
                     }
                     out.insert(i, CallKind::Spawn { uid, args: args.clone() });
@@ -650,11 +670,29 @@ pub(super) fn resolve_user_calls(
                         // method calls" — alarming, and untrue. The receiver's
                         // type is a run-time thing, so unlike the interpreter
                         // this cannot say *which* type lacks it.
-                        return Err(format!(
-                            "no method named `{mname}`. Method calls compile fine — this one \
-                             does not name a method any type defines, so check the spelling \
-                             against the type it is called on. `jade run` on the same file \
-                             will name that type."
+                        // `chunk_*_method_supported` answers false both for a
+                        // name no type defines and for a real method called
+                        // with the wrong number of arguments, and those are
+                        // very different mistakes to be told about. Asking the
+                        // arity table separates them, so `"abc".upper(1, 2, 3)`
+                        // is told its arity rather than that `upper` does not
+                        // exist — which it plainly does.
+                        return Err(at(
+                            spans,
+                            i,
+                            match crate::builtins::primitive_method_arity(&mname) {
+                                Some(want) => format!(
+                                    "`{mname}` takes {want} argument{}, but {} were given.",
+                                    if want == 1 { "" } else { "s" },
+                                    args.len()
+                                ),
+                                None => format!(
+                                    "no method named `{mname}`. Method calls compile fine — this \
+                                 one does not name a method any type defines, so check the \
+                                 spelling against the type it is called on. `jade run` on the \
+                                 same file will name that type."
+                                ),
+                            },
                         ));
                     }
                 } else {
@@ -662,13 +700,28 @@ pub(super) fn resolve_user_calls(
                         // Statically-known function → direct call (fill defaults).
                         let cf = &fnctx.defs[uid];
                         if args.len() > cf.params.len() {
-                            return Err(
-                                "lower.rs: call passes more arguments than parameters".into()
-                            );
+                            return Err(at(
+                                spans,
+                                i,
+                                format!(
+                                    "this call passes {} arguments, but the function takes {}.",
+                                    args.len(),
+                                    cf.params.len()
+                                ),
+                            ));
                         }
                         for j in args.len()..cf.params.len() {
                             if cf.defaults.get(j).and_then(|x| x.as_ref()).is_none() {
-                                return Err("lower.rs: call omits a required argument".into());
+                                return Err(at(
+                                    spans,
+                                    i,
+                                    format!(
+                                        "this call omits argument {} (`{}`), which has no \
+                                         default.",
+                                        j + 1,
+                                        cf.params.get(j).map(|p| p.as_str()).unwrap_or("?")
+                                    ),
+                                ));
                             }
                         }
                         Some(CallKind::Direct { uid, args: args.clone() })
@@ -759,11 +812,13 @@ pub(super) fn resolve_user_calls(
                     // This one really is a limitation rather than a mistake, so
                     // it says so — and says what to write instead, which the
                     // old wording did not.
-                    return Err(
+                    return Err(at(
+                        spans,
+                        i,
                         "a method call with named arguments is not compiled yet. Pass them \
                          positionally, or run the file with `jade run`."
-                            .into(),
-                    );
+                            .to_string(),
+                    ));
                 }
                 if let Some((module, method, gf_idx)) = reg_getfield_module.get(callee).cloned() {
                     // The one supported keyword module call: fs.read(path, trust=<bool>).
@@ -819,10 +874,8 @@ pub(super) fn resolve_user_calls(
                         }
                         arg_slots[slot] = Some(*reg);
                     }
-                    for i in 0..p {
-                        if arg_slots[i].is_none()
-                            && cf.defaults.get(i).and_then(|x| x.as_ref()).is_none()
-                        {
+                    for (i, slot) in arg_slots.iter().enumerate().take(p) {
+                        if slot.is_none() && cf.defaults.get(i).and_then(|x| x.as_ref()).is_none() {
                             return Err("lower.rs: keyword call omits a required argument".into());
                         }
                     }
@@ -917,7 +970,7 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
             .build_int_compare(
                 inkwell::IntPredicate::EQ,
                 kind,
-                i64_ty.const_int(OBJKIND_BOUND_METHOD as u64, false),
+                i64_ty.const_int(OBJKIND_BOUND_METHOD, false),
                 "isbm",
             )
             .map_err(e)?;

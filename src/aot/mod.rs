@@ -58,6 +58,61 @@ fn try_chunk_toplevel<'ctx>(
     )
 }
 
+/// Lower the program into a throwaway module to see whether it would build.
+///
+/// The same probe `try_chunk_toplevel` runs before it touches the real module,
+/// exposed so `jade check` can run it too. Everything the backend refuses is a
+/// hard build error — there is no fallback path — so a program that survives
+/// this is one `jade build` will accept.
+///
+/// This is what `jade check` was missing. It ran the frontend and `emit`, and
+/// stopped: every call-shaped mistake — a method no type defines, the wrong
+/// number of arguments, a surplus argument to a builtin — is caught here, in
+/// the resolver, and so `check` reported `ok` for programs that then failed to
+/// build. A clean `ok` followed by a build failure is the wrong way round for
+/// the command whose whole job is to predict one.
+///
+/// It is affordable because lowering is not the expensive part of a build:
+/// optimisation and linking are, and neither runs here. Measured on this
+/// repo's examples, `jade check` and a full `jade build` are within a few
+/// milliseconds of each other, both dominated by process startup.
+pub fn would_build(
+    program: &TProgram,
+    source_path: Option<&std::path::Path>,
+) -> Result<(), String> {
+    // The same two passes `compile_with_mode` runs before it lowers anything.
+    // Without them the probe sees `ImportFile` opcodes the backend never has to
+    // handle — imports are inlined into one stream first — and would report an
+    // unsupported opcode for a program that builds perfectly well.
+    //
+    // An import that cannot be resolved is *not* reported from here. It means a
+    // dependency has not been installed yet, which `check_imports` has already
+    // said in the words that name the actual problem; probing on top of that
+    // would bury it under a backend message about an opcode.
+    let mut program = match source_path {
+        Some(src) => match imports::resolve_and_namespace(program.stmts.clone(), src) {
+            Ok(r) => crate::compiler::tir::TProgram { stmts: r.stmts },
+            Err(_) => return Ok(()),
+        },
+        None => program.clone(),
+    };
+    crate::compiler::type_infer::fill_struct_literal_defaults(&mut program)
+        .map_err(|e| e.to_string())?;
+
+    let cp = crate::compiler::emit::emit(program).map_err(|e| e.to_string())?;
+    let ctx = Context::create();
+    let module = ctx.create_module("probe");
+    lower::lower_program(
+        &ctx,
+        &module,
+        &cp.top,
+        cp.top_n_slots,
+        &cp.struct_defs,
+        &cp.extend_methods,
+    )
+    .map(|_| ())
+}
+
 /// What `compile` produces.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum CompileMode {
@@ -635,13 +690,12 @@ pub fn compile_with_mode(
         }
         cc.arg("-fPIC");
     }
-    if cfg!(target_os = "macos") {
-        if let Ok(ver) = std::process::Command::new("sw_vers").args(["-productVersion"]).output() {
-            if let Ok(s) = std::str::from_utf8(&ver.stdout) {
-                let short = s.trim().splitn(3, '.').take(2).collect::<Vec<_>>().join(".");
-                cc.arg(format!("-mmacosx-version-min={short}"));
-            }
-        }
+    if cfg!(target_os = "macos")
+        && let Ok(ver) = std::process::Command::new("sw_vers").args(["-productVersion"]).output()
+        && let Ok(s) = std::str::from_utf8(&ver.stdout)
+    {
+        let short = s.trim().splitn(3, '.').take(2).collect::<Vec<_>>().join(".");
+        cc.arg(format!("-mmacosx-version-min={short}"));
     }
     // Always link the runtime archive. Previously this was gated on a hand-kept
     // set of feature flags (uses_runtime/uses_async/uses_dicts/uses_exceptions/

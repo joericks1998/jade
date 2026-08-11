@@ -231,10 +231,10 @@ pub fn request_bytes(
         }
         req.push_str("\r\n");
         let mut wire = req.into_bytes();
-        if verb_has_body(&method) {
-            if let Some(b) = body.as_deref() {
-                wire.extend_from_slice(b);
-            }
+        if verb_has_body(&method)
+            && let Some(b) = body.as_deref()
+        {
+            wire.extend_from_slice(b);
         }
         stream.write_all(&wire).map_err(|e| e.to_string())?;
         stream.flush().map_err(|e| e.to_string())?;
@@ -326,12 +326,11 @@ impl Stream {
             if header.is_empty() {
                 break;
             }
-            if let Some((name, value)) = header.split_once(':') {
-                if name.trim().eq_ignore_ascii_case("transfer-encoding")
-                    && value.to_ascii_lowercase().contains("chunked")
-                {
-                    chunked = true;
-                }
+            if let Some((name, value)) = header.split_once(':')
+                && name.trim().eq_ignore_ascii_case("transfer-encoding")
+                && value.to_ascii_lowercase().contains("chunked")
+            {
+                chunked = true;
             }
         }
 

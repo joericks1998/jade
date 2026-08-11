@@ -77,11 +77,11 @@ fn load_and_configure(lib_path: &Path, config_json: &[u8], span: Span) -> Result
     // Stored config (`{"api_key":…}` and any extra params) → the package's
     // `configure`. If there's no stored config, the package resolves the key
     // itself (its own env var), so we skip configuring.
-    if !config_json.is_empty() {
-        if let Some(configure) = export(&exports, "configure") {
-            let cfg = config_value(config_json, span)?;
-            configure.call(&[cfg], span)?;
-        }
+    if !config_json.is_empty()
+        && let Some(configure) = export(&exports, "configure")
+    {
+        let cfg = config_value(config_json, span)?;
+        configure.call(&[cfg], span)?;
     }
     Ok(infer)
 }

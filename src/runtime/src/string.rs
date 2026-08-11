@@ -259,8 +259,8 @@ mod tests {
 
     #[test]
     fn concat_joins_and_maxes_trust() {
-        let a = dup(b"foo\0".as_ptr(), TRUSTED);
-        let b = dup(b"bar\0".as_ptr(), TAINTED);
+        let a = dup(c"foo".to_bytes_with_nul().as_ptr(), TRUSTED);
+        let b = dup(c"bar".to_bytes_with_nul().as_ptr(), TAINTED);
         let c = concat(a, b);
         unsafe {
             assert_eq!(as_str(c), "foobar");

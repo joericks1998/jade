@@ -134,10 +134,10 @@ pub unsafe fn dealloc(ptr: *mut u8, size: usize, align: usize) {
 #[inline]
 pub unsafe fn realloc(ptr: *mut u8, old_size: usize, align: usize, new_size: usize) -> *mut u8 {
     // If both sizes land in the same class the block already fits — reuse it.
-    if let (Some(a), Some(b)) = (pooled_class(old_size, align), pooled_class(new_size, align)) {
-        if a == b {
-            return ptr;
-        }
+    if let (Some(a), Some(b)) = (pooled_class(old_size, align), pooled_class(new_size, align))
+        && a == b
+    {
+        return ptr;
     }
     let new = alloc(new_size, align);
     if !new.is_null() {

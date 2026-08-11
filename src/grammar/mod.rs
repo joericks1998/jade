@@ -8,7 +8,7 @@ use crate::builtins::BuiltinFn;
 const ZERO: Span = Span { line: 0, col: 0 };
 
 fn grammar_new(args: &[VmValue]) -> Result<VmValue> {
-    let pattern = match args.get(0) {
+    let pattern = match args.first() {
         Some(VmValue::Str(s)) => s.clone(),
         Some(other) => {
             return Err(JadeError::TypeMismatch {

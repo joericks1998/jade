@@ -224,27 +224,26 @@ pub fn run_add(
             if let Some(install) =
                 std::fs::read(&full).ok().and_then(|b| pkg::bindgen::tbd_install_name(&b))
             {
-                eprintln!("error: {p} is a linker stub, not a library Jade can load");
+                // Accepted. A stub is not Mach-O and never will be, but it is
+                // exactly what a linker wants: linking the shim against it
+                // records `install` as the shim's own dependency, and dyld
+                // resolves that from the shared cache at load time. Nothing has
+                // to be copied and nothing has to be opened by hand — which is
+                // the whole reason a system library can be bound at all now.
+                println!("  stub for {install}, resolved from the dyld shared cache");
+            } else {
+                eprintln!("error: {p} is not a shared library");
                 eprintln!(
-                    "       It stands for {install}, which on this macOS lives in the dyld\n       \
-                     shared cache and has no file on disk — so there is nothing to copy into\n       \
-                     libs/. Jade materializes every dependency as a real file, so an SDK stub\n       \
-                     cannot be one yet.\n\n       \
-                     Point at a library that exists on disk instead — Homebrew ships real\n       \
-                     .dylib files under /opt/homebrew/lib."
+                    "       A dependency is a prebuilt .dylib or .so. This file does not start \
+                     with\n       a Mach-O or ELF header, so nothing could load it.\n\n       \
+                     The usual cause is compiling the header instead of the source:\n         \
+                     clang -o lib{0}.dylib {0}.h      # makes a precompiled header, not a \
+                     library\n         \
+                     clang -dynamiclib -o lib{0}.dylib {0}.c",
+                    name
                 );
                 std::process::exit(1);
             }
-            eprintln!("error: {p} is not a shared library");
-            eprintln!(
-                "       A dependency is a prebuilt .dylib or .so. This file does not start with\n       \
-                 a Mach-O or ELF header, so nothing could load it.\n\n       \
-                 The usual cause is compiling the header instead of the source:\n         \
-                 clang -o lib{0}.dylib {0}.h      # makes a precompiled header, not a library\n         \
-                 clang -dynamiclib -o lib{0}.dylib {0}.c",
-                name
-            );
-            std::process::exit(1);
         }
     }
 
@@ -341,7 +340,7 @@ pub fn run_add(
         if !found.is_empty() {
             let names: Vec<&str> = found.keys().map(String::as_str).collect();
             let empty = std::collections::BTreeMap::new();
-            manifest::set_bindings(&root, name, &found, &empty, &[], &[])
+            manifest::set_bindings(&root, name, &found, &empty, &[], &[], &[])
                 .unwrap_or_else(|e| fail_new_dependency(&root, name, existed, e));
 
             // Lock and copy the artifact, but do not try to bind it — filling
@@ -784,9 +783,14 @@ pub(crate) fn bind_header(
             lib.map(|l| l.display().to_string()).unwrap_or_default()
         )));
     }
-    let binding =
-        pkg::bindgen::from_header(header_path, opts.include, opts.only, exported.as_ref())
-            .map_err(BindFailure::Unwritten)?;
+    let binding = pkg::bindgen::from_header(
+        header_path,
+        opts.include,
+        opts.defines,
+        opts.only,
+        exported.as_ref(),
+    )
+    .map_err(BindFailure::Unwritten)?;
 
     // Check the header against the library it is supposed to describe. A header
     // declaring symbols the library does not export is the wrong header, and
@@ -816,8 +820,16 @@ pub(crate) fn bind_header(
     // to catch. A header clang could read is a fact about the dependency,
     // whether or not any symbol survived it.
     let (headers, dirs) = header_locations(header_path, opts.include);
-    manifest::set_bindings(root, name, &binding.symbols, &binding.structs, &headers, &dirs)
-        .map_err(BindFailure::Unwritten)?;
+    manifest::set_bindings(
+        root,
+        name,
+        &binding.symbols,
+        &binding.structs,
+        &headers,
+        &dirs,
+        opts.defines,
+    )
+    .map_err(BindFailure::Unwritten)?;
 
     if binding.symbols.is_empty() {
         return Err(BindFailure::NothingBound(format!(
@@ -865,9 +877,14 @@ pub fn run_bind(name: &str, header: &str, opts: HeaderOptions<'_>, dry_run: bool
             .map(|p| root.join(p))
             .filter(|p| p.exists())
             .and_then(|p| pkg::bindgen::exported_symbols(&p));
-        let binding =
-            pkg::bindgen::from_header(header_path, opts.include, opts.only, exported.as_ref())
-                .unwrap_or_else(|e| fail(e));
+        let binding = pkg::bindgen::from_header(
+            header_path,
+            opts.include,
+            opts.defines,
+            opts.only,
+            exported.as_ref(),
+        )
+        .unwrap_or_else(|e| fail(e));
         println!("{}", binding.report());
         println!("\n(dry run — jade.toml unchanged)");
         return;

@@ -202,11 +202,11 @@ impl Emitter {
 
     /// Emit instructions to store `src` into `name` (local or global).
     fn emit_store_var(&mut self, name: &str, src: Reg, span: Span) {
-        if let Some(locals) = &self.locals {
-            if let Some(&slot) = locals.get(name) {
-                self.chunk.emit(Instr::SetLocal(slot, src), span);
-                return;
-            }
+        if let Some(locals) = &self.locals
+            && let Some(&slot) = locals.get(name)
+        {
+            self.chunk.emit(Instr::SetLocal(slot, src), span);
+            return;
         }
         self.chunk.emit(Instr::SetGlobal(name.to_string(), src), span);
     }
@@ -605,7 +605,7 @@ fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
             let mut end_jumps: Vec<usize> = Vec::new();
 
             let _n_arms = arms.len();
-            for (_i, arm) in arms.into_iter().enumerate() {
+            for arm in arms.into_iter() {
                 let TCatchArm { catch_type, binding, body: arm_body } = arm;
 
                 // For typed arms, check the caught value's type name.
@@ -1031,16 +1031,16 @@ fn emit_call(
     let span = full_expr.span;
 
     // `join` is async-specific and stays as a dedicated opcode.
-    if let TExprKind::Identifier(name) = &callee.kind {
-        if name == "join" {
-            let mut arg_regs = Vec::with_capacity(args.len());
-            for a in args {
-                arg_regs.push(emit_expr(a, em, ctx)?);
-            }
-            let dest = em.alloc_reg();
-            em.chunk.emit(Instr::Join(dest, arg_regs), span);
-            return Ok(dest);
+    if let TExprKind::Identifier(name) = &callee.kind
+        && name == "join"
+    {
+        let mut arg_regs = Vec::with_capacity(args.len());
+        for a in args {
+            arg_regs.push(emit_expr(a, em, ctx)?);
         }
+        let dest = em.alloc_reg();
+        em.chunk.emit(Instr::Join(dest, arg_regs), span);
+        return Ok(dest);
     }
 
     // Async fn call → emit Spawn instead of Call.

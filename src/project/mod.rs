@@ -585,6 +585,14 @@ pub struct DependencyEntry {
     /// Extra `-I` directories for the shim compile, for a header that is not on
     /// the default search path.
     pub include_dirs: Option<Vec<String>>,
+    /// `-D` macros the header needs before it will parse, as clang's `-D`.
+    ///
+    /// Recorded rather than only passed on the command line, because the header
+    /// is read again — `jade pkg install` on a fresh clone re-binds one whose
+    /// symbols are absent, and the shim compile includes the same header. A
+    /// macro given once to `jade pkg add` and then forgotten would leave both of
+    /// those failing on the `#error` the flag exists to get past.
+    pub defines: Option<Vec<String>>,
 }
 
 /// One entry of a `[dependencies.<name>.structs]` table: the fields of a C
@@ -939,10 +947,10 @@ fn collect_test_files(dir: &Path, pattern: Option<&str>, out: &mut Vec<PathBuf>)
             let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
             let is_test = stem.starts_with("test_") || stem.ends_with("_test");
             if is_test {
-                if let Some(pat) = pattern {
-                    if !stem.contains(pat) {
-                        continue;
-                    }
+                if let Some(pat) = pattern
+                    && !stem.contains(pat)
+                {
+                    continue;
                 }
                 out.push(path);
             }

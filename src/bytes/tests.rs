@@ -56,7 +56,7 @@ fn trust_survives_an_encode() {
 fn a_blob_round_trips_through_a_nul_and_invalid_utf8() {
     let raw = vec![b'a', 0, b'b', 0xFF];
     let b = blob(raw.clone(), TRUSTED);
-    match bytes_len(&[b.clone()]).expect("len") {
+    match bytes_len(std::slice::from_ref(&b)).expect("len") {
         VmValue::Int(n) => assert_eq!(n, 4, "a NUL must not shorten the blob"),
         v => panic!("expected Int, got {v:?}"),
     }

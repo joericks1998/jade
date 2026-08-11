@@ -497,13 +497,14 @@ pub fn lower_program<'ctx>(
             context,
             module,
             fnctx.funcs[uid],
-            &cf.chunk.code,
-            &cf.chunk.fn_defs,
-            cf.n_slots,
-            cf.params.len(),
+            &cf.chunk,
             &fnctx,
-            cf.is_generator,
-            true,
+            BodyOpts {
+                n_slots: cf.n_slots,
+                n_params: cf.params.len(),
+                is_generator: cf.is_generator,
+                track_recursion: true,
+            },
         )?;
     }
 
@@ -512,13 +513,9 @@ pub fn lower_program<'ctx>(
         context,
         module,
         top_fn,
-        &top.code,
-        &top.fn_defs,
-        top_n_slots,
-        0,
+        top,
         &fnctx,
-        false,
-        false,
+        BodyOpts { n_slots: top_n_slots, n_params: 0, is_generator: false, track_recursion: false },
     )?;
 
     // Turn on runtime reference counting for a collections-only program, once, at
@@ -675,8 +672,38 @@ pub fn lower_chunk<'ctx>(
     n_slots: u32,
 ) -> Result<FunctionValue<'ctx>, String> {
     let function = module.add_function(name, context.i64_type().fn_type(&[], false), None);
-    lower_body(context, module, function, code, &[], n_slots, 0, &FnCtx::empty(), false, false)?;
+    // An isolated body with no spans: the helper is handed bare instructions,
+    // so a diagnostic from it carries no position, exactly as before.
+    let chunk = Chunk {
+        name: name.to_string(),
+        code: code.to_vec(),
+        spans: Vec::new(),
+        fn_defs: Vec::new(),
+    };
+    lower_body(
+        context,
+        module,
+        function,
+        &chunk,
+        &FnCtx::empty(),
+        BodyOpts { n_slots, n_params: 0, is_generator: false, track_recursion: false },
+    )?;
     Ok(function)
+}
+
+/// How a body is lowered, as opposed to what is in it.
+///
+/// Four scalars that always travel together and are always read together, on a
+/// function that has plenty of arguments already.
+#[derive(Clone, Copy)]
+struct BodyOpts {
+    n_slots: u32,
+    /// Incoming parameters, copied into slots `0..n_params`.
+    n_params: usize,
+    is_generator: bool,
+    /// Whether this body counts against the recursion limit. False for
+    /// `jade_toplevel`, which is not itself a call — see `MAX_CALL_DEPTH`.
+    track_recursion: bool,
 }
 
 /// Lower `code` into an already-declared `function`. `n_params` incoming i64
@@ -696,14 +723,16 @@ fn lower_body<'ctx>(
     context: &'ctx Context,
     module: &Module<'ctx>,
     function: FunctionValue<'ctx>,
-    code: &[Instr],
-    fn_defs: &[Arc<CompiledFn>],
-    n_slots: u32,
-    n_params: usize,
+    // The whole chunk rather than its `code` and `fn_defs` separately: it also
+    // carries `spans`, one per instruction, which is what lets a build error
+    // name a line. That was the only thing standing between the resolver and a
+    // position — and it costs a parameter rather than adding one.
+    chunk: &Chunk,
     fnctx: &FnCtx<'ctx>,
-    is_generator: bool,
-    track_recursion: bool,
+    opts: BodyOpts,
 ) -> Result<(), String> {
+    let BodyOpts { n_slots, n_params, is_generator, track_recursion } = opts;
+    let (code, fn_defs) = (&chunk.code[..], &chunk.fn_defs[..]);
     let i64_ty = context.i64_type();
     let builder = context.create_builder();
 
@@ -739,12 +768,12 @@ fn lower_body<'ctx>(
     // Copy incoming parameters into slots 0..n_params (params are the first
     // locals; see `emit_fn`). Callers fill any omitted defaults, so every
     // parameter slot receives an argument.
-    for i in 0..n_params {
+    for (i, slot) in slots.iter().enumerate().take(n_params) {
         let p = function
             .get_nth_param(i as u32)
             .ok_or("lower_body: missing parameter")?
             .into_int_value();
-        builder.build_store(slots[i], p).map_err(|e| e.to_string())?;
+        builder.build_store(*slot, p).map_err(|e| e.to_string())?;
     }
     // One jmp_buf per SetupHandler, allocated *in the entry block* so a handler
     // inside a loop reuses one stable buffer instead of growing the stack each
@@ -844,29 +873,32 @@ fn lower_body<'ctx>(
         .collect();
     builder.build_unconditional_branch(llblocks[0]).map_err(|e| e.to_string())?;
     let call_builtins = resolve_builtin_calls(code);
-    let (user_calls, skip_getfields) = resolve_user_calls(code, fn_defs, fnctx)?;
+    let (user_calls, skip_getfields) = resolve_user_calls(code, &chunk.spans, fn_defs, fnctx)?;
+
+    let body = instr::BodyCtx {
+        llblocks: &llblocks,
+        graph: &graph,
+        handler_bufs: &handler_bufs,
+        call_builtins: &call_builtins,
+        user_calls: &user_calls,
+        fn_defs,
+        fnctx,
+    };
 
     for (bi, block) in graph.blocks.iter().enumerate() {
         builder.position_at_end(llblocks[bi]);
         let mut terminated = false;
+        // Indexed on purpose: `idx` is the instruction's absolute position, which
+        // `lower_instr` and `skip_getfields` both need. Iterating the slice would
+        // mean carrying the offset separately to rebuild the same number.
+        #[allow(clippy::needless_range_loop)]
         for idx in block.start..block.end {
             // Skip a GetField whose only use is a devirtualized method call (its
             // field is a method, so lowering it would raise "undefined field").
             if skip_getfields.contains(&idx) {
                 continue;
             }
-            terminated = lower_instr(
-                &low,
-                &code[idx],
-                idx,
-                &llblocks,
-                &graph,
-                &handler_bufs,
-                &call_builtins,
-                &user_calls,
-                fn_defs,
-                fnctx,
-            )?;
+            terminated = lower_instr(&low, &code[idx], idx, &body)?;
         }
         // A block whose last instruction wasn't a terminator falls through.
         if !terminated {

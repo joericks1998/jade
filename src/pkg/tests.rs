@@ -1370,7 +1370,7 @@ fn a_row_of_structs_is_readable_end_to_end() {
     )
     .unwrap();
 
-    let b = crate::pkg::bindgen::from_header(&header, &[], None, None).expect("bind");
+    let b = crate::pkg::bindgen::from_header(&header, &[], &[], None, None).expect("bind");
 
     // The count must not have been read as a status, or every successful call
     // raises.

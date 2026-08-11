@@ -69,6 +69,14 @@ pub struct ArrayObj<T, A: Allocator = Global> {
     data: AVec<T, A>,
 }
 
+/// `set` was given an index past the end of the collection.
+///
+/// A named type rather than `Err(())`, which says a call failed and nothing
+/// about why — every caller has to read the function to find out which failure
+/// it was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutOfBounds;
+
 impl<T: Clone, A: Allocator> ArrayObj<T, A> {
     /// A fresh empty array backed by `alloc`.
     #[inline]
@@ -112,15 +120,15 @@ impl<T: Clone, A: Allocator> ArrayObj<T, A> {
         r
     }
 
-    /// Overwrite element `i` in place; `Err(())` if out of bounds.
+    /// Overwrite element `i` in place, or report that `i` is past the end.
     #[inline]
-    pub fn set(&mut self, i: usize, v: T) -> Result<(), ()> {
+    pub fn set(&mut self, i: usize, v: T) -> Result<(), OutOfBounds> {
         match self.data.get_mut(i) {
             Some(slot) => {
                 *slot = v;
                 Ok(())
             }
-            None => Err(()),
+            None => Err(OutOfBounds),
         }
     }
 

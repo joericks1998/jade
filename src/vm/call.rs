@@ -10,12 +10,17 @@ use super::*;
 /// Replace zero-span placeholders from built-in error paths with the actual call-site span.
 pub(crate) fn patch_builtin_span(mut e: JadeError, call_span: Span) -> JadeError {
     match &mut e {
+        // The guard reads as the condition it is: only a placeholder span gets
+        // replaced. It is equivalent to testing inside the arm *because* of the
+        // catch-all below — an error whose span is already real falls through to
+        // it and is left alone, which is what the inner `if` did by doing
+        // nothing.
         JadeError::ArityMismatch { span, .. }
         | JadeError::TypeError { span, .. }
-        | JadeError::IoError { span, .. } => {
-            if span.line == 0 {
-                *span = call_span;
-            }
+        | JadeError::IoError { span, .. }
+            if span.line == 0 =>
+        {
+            *span = call_span;
         }
         _ => {}
     }
@@ -130,10 +135,10 @@ pub(crate) async fn call_value(
             // the arguments it wants and never sees the rest. The compiler
             // rejects a surplus argument, so accepting it here made the two
             // engines disagree about whether the program was valid at all.
-            if let Some(want) = builtins::primitive_method_arity(nbm.method.name) {
-                if args.len() != want {
-                    return Err(JadeError::ArityMismatch { expected: want, got: args.len(), span });
-                }
+            if let Some(want) = builtins::primitive_method_arity(nbm.method.name)
+                && args.len() != want
+            {
+                return Err(JadeError::ArityMismatch { expected: want, got: args.len(), span });
             }
             let mut full_args = Vec::with_capacity(args.len() + 1);
             full_args.push(nbm.receiver.clone());

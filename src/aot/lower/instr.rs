@@ -6,18 +6,29 @@ use super::*;
 
 /// Lower one instruction. Returns `Ok(true)` if it emitted a block terminator
 /// (`Return`/`Jump`/conditional jump), `Ok(false)` otherwise.
+/// Everything about the body being lowered that an instruction may need.
+///
+/// All of it is computed once, before the first instruction, and read by many —
+/// so it travelled as six separate parameters through a function that already
+/// had four of its own. One value says what it is: the shape of this body.
+pub(super) struct BodyCtx<'a, 'ctx> {
+    pub llblocks: &'a [LlvmBlock<'ctx>],
+    pub graph: &'a cfg::Cfg,
+    pub handler_bufs: &'a HashMap<usize, PointerValue<'ctx>>,
+    pub call_builtins: &'a HashMap<usize, BuiltinCall>,
+    pub user_calls: &'a HashMap<usize, CallKind>,
+    pub fn_defs: &'a [Arc<CompiledFn>],
+    pub fnctx: &'a FnCtx<'ctx>,
+}
+
 pub(super) fn lower_instr<'ctx>(
     low: &Lowerer<'_, 'ctx>,
     instr: &Instr,
     idx: usize,
-    llblocks: &[LlvmBlock<'ctx>],
-    graph: &cfg::Cfg,
-    handler_bufs: &HashMap<usize, PointerValue<'ctx>>,
-    call_builtins: &HashMap<usize, BuiltinCall>,
-    user_calls: &HashMap<usize, CallKind>,
-    fn_defs: &[Arc<CompiledFn>],
-    fnctx: &FnCtx<'ctx>,
+    body: &BodyCtx<'_, 'ctx>,
 ) -> Result<bool, String> {
+    let BodyCtx { llblocks, graph, handler_bufs, call_builtins, user_calls, fn_defs, fnctx } =
+        *body;
     use Instr::*;
     let b = low.builder;
     let i64_ty = low.i64t();
@@ -41,7 +52,7 @@ pub(super) fn lower_instr<'ctx>(
                      (the compiled representation holds {INT_MIN}..={INT_MAX})"
                 ));
             }
-            let tagged = (*v as i64).wrapping_shl(1) as u64;
+            let tagged = (*v).wrapping_shl(1) as u64;
             low.store(*d, i64_ty.const_int(tagged, false));
             Ok(false)
         }
@@ -540,19 +551,46 @@ pub(super) fn lower_instr<'ctx>(
         // global, or `jrt_str_of_any(value)` for an interpolated register. An
         // empty template yields the empty string.
         BuildFStr(d, parts) => {
-            let mut acc: Option<PointerValue> = None;
+            // Ownership is per part and uniform now. A literal is a `constant`
+            // global — borrowed, immortal, never freed. An interpolated register
+            // goes through `jrt_str_of_any`, which allocates: it used to hand
+            // back the caller's own pointer when the value was already a string,
+            // so whether the result was owned depended on the value's *type*,
+            // and a fold over parts of both kinds had to get one of them wrong.
+            //
+            // It got both. `f"{x}"` on a string stored that pointer as a second
+            // owner — a double free once strings became reference-counted — and
+            // `f"{a}-{i}"` leaked the fresh string rendered for the int. Neither
+            // was visible before 1.3.16, when nothing was ever released.
+            //
+            // So each part says whether it is owned, and every owned pointer is
+            // released exactly where it is consumed.
+            let mut acc: Option<(PointerValue, bool)> = None;
             for part in parts {
-                let p_ptr = match part {
-                    FStrPart::Literal(s) => low.str_literal_ptr(s)?,
-                    FStrPart::Reg(r) => low.str_of_any(*r),
+                let (p_ptr, p_owned) = match part {
+                    FStrPart::Literal(s) => (low.str_literal_ptr(s)?, false),
+                    FStrPart::Reg(r) => (low.str_of_any(*r), true),
                 };
                 acc = Some(match acc {
-                    None => p_ptr,
-                    Some(prev) => low.concat_ptrs(prev, p_ptr),
+                    None => (p_ptr, p_owned),
+                    Some((prev, prev_owned)) => {
+                        let joined = low.concat_ptrs(prev, p_ptr);
+                        if prev_owned {
+                            low.free_str_ptr(prev);
+                        }
+                        if p_owned {
+                            low.free_str_ptr(p_ptr);
+                        }
+                        (joined, true)
+                    }
                 });
             }
             let ptr = match acc {
-                Some(p) => p,
+                Some((p, true)) => p,
+                // The only way to be here is a template that is one literal and
+                // nothing else. A literal global is immortal, so storing it is
+                // what `LoadStr` does anyway — no copy needed.
+                Some((p, false)) => p,
                 None => low.str_literal_ptr("")?,
             };
             low.store(*d, low.tag_str(ptr));

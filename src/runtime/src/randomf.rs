@@ -28,7 +28,7 @@ fn splitmix64(x: &mut u64) -> u64 {
 
 #[inline]
 fn rotl(x: u64, k: u32) -> u64 {
-    (x << k) | (x >> (64 - k))
+    x.rotate_left(k)
 }
 
 impl Rng {

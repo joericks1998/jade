@@ -76,7 +76,7 @@ fn push_wrong_receiver() {
 #[test]
 fn pop_returns_last() {
     let a = arr(vec![VmValue::Int(1), VmValue::Int(9)]);
-    assert!(matches!(arr_pop(&[a.clone()]), Ok(VmValue::Int(9))));
+    assert!(matches!(arr_pop(std::slice::from_ref(&a)), Ok(VmValue::Int(9))));
     assert_eq!(ints(&a), vec![1]);
 }
 
@@ -126,7 +126,7 @@ fn contains_missing_needle() {
 #[test]
 fn sort_ints_in_place() {
     let a = arr(vec![VmValue::Int(3), VmValue::Int(1), VmValue::Int(2)]);
-    let r = arr_sort(&[a.clone()]).unwrap();
+    let r = arr_sort(std::slice::from_ref(&a)).unwrap();
     assert!(matches!(r, VmValue::Nil));
     assert_eq!(ints(&a), vec![1, 2, 3]);
 }
@@ -141,7 +141,7 @@ fn sort_wrong_type() {
 #[test]
 fn reverse_in_place() {
     let a = arr(vec![VmValue::Int(1), VmValue::Int(2), VmValue::Int(3)]);
-    let r = arr_reverse(&[a.clone()]).unwrap();
+    let r = arr_reverse(std::slice::from_ref(&a)).unwrap();
     assert!(matches!(r, VmValue::Nil));
     assert_eq!(ints(&a), vec![3, 2, 1]);
 }
@@ -156,7 +156,7 @@ fn reverse_wrong_type() {
 #[test]
 fn pkg_sort_returns_new_sorted() {
     let a = arr(vec![VmValue::Int(2), VmValue::Int(1)]);
-    let sorted = pkg_sort(&[a.clone()]).unwrap();
+    let sorted = pkg_sort(std::slice::from_ref(&a)).unwrap();
     assert_eq!(ints(&sorted), vec![1, 2]);
     // original unchanged
     assert_eq!(ints(&a), vec![2, 1]);
@@ -165,7 +165,7 @@ fn pkg_sort_returns_new_sorted() {
 #[test]
 fn pkg_reverse_returns_new() {
     let a = arr(vec![VmValue::Int(1), VmValue::Int(2)]);
-    let rev = pkg_reverse(&[a.clone()]).unwrap();
+    let rev = pkg_reverse(std::slice::from_ref(&a)).unwrap();
     assert_eq!(ints(&rev), vec![2, 1]);
     assert_eq!(ints(&a), vec![1, 2]);
 }
@@ -180,7 +180,7 @@ fn pkg_sort_wrong_type() {
 #[test]
 fn sort_mixed_numeric() {
     let a = arr(vec![VmValue::Float(2.5), VmValue::Int(1), VmValue::Int(3)]);
-    arr_sort(&[a.clone()]).unwrap();
+    arr_sort(std::slice::from_ref(&a)).unwrap();
     let guard = match &a {
         VmValue::Array(arc) => arc.lock().clone(),
         _ => unreachable!(),

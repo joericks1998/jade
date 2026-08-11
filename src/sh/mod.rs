@@ -31,13 +31,13 @@ fn require_str<'a>(args: &'a [VmValue], pos: usize, fn_name: &str) -> Result<&'a
 /// command under `jade run` and was refused under `jade build`. The message
 /// comes from the shared runtime so both engines word it identically.
 fn refuse_if_tainted(args: &[VmValue], pos: usize, sink: &str) -> Result<()> {
-    if let Some(VmValue::Str(s)) = args.get(pos) {
-        if s.is_tainted() {
-            return Err(JadeError::Exception {
-                message: jade_runtime::trust::refusal_message(sink),
-                span: ZERO,
-            });
-        }
+    if let Some(VmValue::Str(s)) = args.get(pos)
+        && s.is_tainted()
+    {
+        return Err(JadeError::Exception {
+            message: jade_runtime::trust::refusal_message(sink),
+            span: ZERO,
+        });
     }
     Ok(())
 }

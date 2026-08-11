@@ -121,7 +121,7 @@ pub(crate) async fn execute_chunk(
                     let canon_str = canon.to_string_lossy().into_owned();
                     let hash = crate::cache::file_hash(&canon);
 
-                    let cached_ast = hash.as_ref().and_then(|h| crate::cache::read_ast_cache(h));
+                    let cached_ast = hash.as_ref().and_then(crate::cache::read_ast_cache);
                     let program = match cached_ast {
                         Some(p) => p,
                         None => {
@@ -576,14 +576,14 @@ pub(crate) async fn execute_chunk(
             }
             Instr::Shl(d, l, r) => {
                 let (a, b) = vm_try!(int2(slots, *l, *r, span));
-                if b < 0 || b >= 64 {
+                if !(0..64).contains(&b) {
                     vm_err!(JadeError::InvalidShift { amount: b, span });
                 }
                 set(slots, *d, VmValue::Int(a << b as u32));
             }
             Instr::Shr(d, l, r) => {
                 let (a, b) = vm_try!(int2(slots, *l, *r, span));
-                if b < 0 || b >= 64 {
+                if !(0..64).contains(&b) {
                     vm_err!(JadeError::InvalidShift { amount: b, span });
                 }
                 set(slots, *d, VmValue::Int(a >> b as u32));
@@ -951,21 +951,21 @@ pub(crate) async fn execute_chunk(
                     for def_field in &def_fields {
                         match def_field {
                             StructFieldDef::Let { name, default } => {
-                                if sobj.get_field(name).is_none() {
-                                    if let Some(v) = eval_literal_default(default) {
-                                        sobj.set_field(name, v);
-                                    }
+                                if sobj.get_field(name).is_none()
+                                    && let Some(v) = eval_literal_default(default)
+                                {
+                                    sobj.set_field(name, v);
                                 }
                             }
                             StructFieldDef::Prompt { name, default } => {
-                                if sobj.get_field(name).is_none() {
-                                    if let Some(v) = eval_literal_default(default) {
-                                        let v = match v {
-                                            VmValue::Str(s) => VmValue::Prompt(s.to_string()),
-                                            other => other,
-                                        };
-                                        sobj.set_field(name, v);
-                                    }
+                                if sobj.get_field(name).is_none()
+                                    && let Some(v) = eval_literal_default(default)
+                                {
+                                    let v = match v {
+                                        VmValue::Str(s) => VmValue::Prompt(s.to_string()),
+                                        other => other,
+                                    };
+                                    sobj.set_field(name, v);
                                 }
                             }
                             StructFieldDef::Required(_) => {}
@@ -1388,7 +1388,7 @@ pub(crate) fn get_jstr(slots: &[VmValue], r: Reg, span: Span) -> Result<JStr> {
 /// Borrow a string slot by reference.  Use this when the caller only needs to
 /// read the string (e.g. for comparisons) and does not need an owned `String`.
 /// Avoids a heap allocation per comparison.
-pub(crate) fn get_str_ref<'a>(slots: &'a [VmValue], r: Reg, span: Span) -> Result<&'a str> {
+pub(crate) fn get_str_ref(slots: &[VmValue], r: Reg, span: Span) -> Result<&str> {
     match get(slots, r) {
         VmValue::Str(s) => Ok(s.as_str()),
         _ => Err(JadeError::TypeError { message: "expected str".to_string(), span }),
@@ -1409,12 +1409,7 @@ pub(crate) fn bool2(slots: &[VmValue], l: Reg, r: Reg, span: Span) -> Result<(bo
 
 /// Borrow both string slots for comparison.  Returns `(&str, &str)` to avoid
 /// cloning both `String`s when only an equality or ordering check is needed.
-pub(crate) fn str2<'a>(
-    slots: &'a [VmValue],
-    l: Reg,
-    r: Reg,
-    span: Span,
-) -> Result<(&'a str, &'a str)> {
+pub(crate) fn str2(slots: &[VmValue], l: Reg, r: Reg, span: Span) -> Result<(&str, &str)> {
     Ok((get_str_ref(slots, l, span)?, get_str_ref(slots, r, span)?))
 }
 

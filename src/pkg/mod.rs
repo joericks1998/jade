@@ -303,7 +303,13 @@ pub fn materialize(root: &Path, lock: &Lockfile, fetcher: &dyn Fetcher) -> Resul
         // a URL serving the wrong file, and an `install` on a fresh clone —
         // none of which go through `add` at all. Without it the first complaint
         // comes from `dlopen`, in a finished program, having built cleanly.
-        if !bindgen::bytes_are_loadable_object(&bytes) {
+        // A macOS SDK stub is not Mach-O and never will be, but it is a
+        // perfectly good thing to link against — and the library it names is
+        // resolved by dyld from the shared cache, which is where every macOS
+        // system library now lives. See `tbd_install_name`.
+        if !bindgen::bytes_are_loadable_object(&bytes)
+            && bindgen::tbd_install_name(&bytes).is_none()
+        {
             return Err(format!(
                 "dependency '{}': {} is not a shared library\n  \
                  It does not start with a Mach-O or ELF header, so nothing could load it. \
@@ -932,6 +938,7 @@ pub fn build_c_shims(
             &dir,
             &artifact.file,
             entry.include_dirs.as_deref().unwrap_or(&[]),
+            entry.defines.as_deref().unwrap_or(&[]),
         )?;
 
         write_shim_record(&dir, &shim_filename(&pkg.name), &shim_out, &artifact.sha256);
@@ -948,6 +955,7 @@ fn compile_shim(
     dir: &Path,
     target_file: &str,
     include_dirs: &[String],
+    defines: &[String],
 ) -> Result<(), String> {
     let mut cc = std::process::Command::new("cc");
     if cfg!(target_os = "macos") {
@@ -958,6 +966,13 @@ fn compile_shim(
     // A header that is not on the default search path — Homebrew's, most often.
     for inc in include_dirs {
         cc.arg(format!("-I{inc}"));
+    }
+    // The same macros the header was *read* with. The shim includes it too, so
+    // one that raises `#error` without `PCRE2_CODE_UNIT_WIDTH` would bind
+    // cleanly and then fail to compile a stage later, which is a worse place to
+    // find out.
+    for d in defines {
+        cc.arg(format!("-D{d}"));
     }
     // C lets a function be called with no declaration in scope, assuming it
     // returns `int` and taking the arguments at face value. For this shim that
@@ -1039,6 +1054,18 @@ fn retarget_macos_load_path(
     dir: &Path,
     target_file: &str,
 ) -> Result<(), String> {
+    // A stub is left alone. The install name it carries — `/usr/lib/libz.1.dylib`
+    // — is exactly what the shim should keep asking for, because dyld resolves
+    // it from the shared cache. Rewriting it to `@loader_path/libz.tbd` would
+    // point the shim at a text file that is not loadable by anything.
+    if std::fs::read(dir.join(target_file))
+        .ok()
+        .and_then(|b| crate::pkg::bindgen::tbd_install_name(&b))
+        .is_some()
+    {
+        return Ok(());
+    }
+
     // `otool -D` prints the target's install name — exactly the string the
     // linker recorded, so the -change below matches precisely.
     let out = std::process::Command::new("otool")

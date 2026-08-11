@@ -227,8 +227,6 @@ fn cmp_for_sort(a: W, b: W) -> core::cmp::Ordering {
     Equal
 }
 
-/// Borrow a NUL-terminated string's bytes (no trailing NUL). NULL → `&[]`.
-#[inline]
 /// `str.split(s, sep)`: split `s` on `sep` into a new array of substrings
 /// (Rust `str::split` semantics, matching the VM). Each part inherits the
 /// source string's trust byte (taint propagates).
@@ -541,17 +539,17 @@ mod tests {
         assert_eq!(jrt_kind_of(d), ObjKind::Dict as i64);
 
         let mut out: W = 0;
-        assert_eq!(jrt_coll_dict_get(d, b"k\0".as_ptr() as *const c_char, &mut out), 1);
+        assert_eq!(jrt_coll_dict_get(d, c"k".as_ptr(), &mut out), 1);
         assert_eq!(out, int_word(1));
-        assert_eq!(jrt_coll_dict_get(d, b"x\0".as_ptr() as *const c_char, &mut out), 0);
+        assert_eq!(jrt_coll_dict_get(d, c"x".as_ptr(), &mut out), 0);
 
         // value_copy is independent.
         let d2 = jrt_coll_dict_copy(d);
         jrt_kdict_set(d2, key_word, int_word(999));
         let mut o1: W = 0;
         let mut o2: W = 0;
-        jrt_coll_dict_get(d, b"k\0".as_ptr() as *const c_char, &mut o1);
-        jrt_coll_dict_get(d2, b"k\0".as_ptr() as *const c_char, &mut o2);
+        jrt_coll_dict_get(d, c"k".as_ptr(), &mut o1);
+        jrt_coll_dict_get(d2, c"k".as_ptr(), &mut o2);
         assert_eq!(o1, int_word(1)); // original unchanged
         assert_eq!(o2, int_word(999));
 
@@ -567,17 +565,17 @@ mod tests {
     #[test]
     fn struct_type_name_and_fields_through_ffi() {
         let _g = crate::gc::test_support::lock_counter();
-        let s = jrt_kstruct_new(b"Point\0".as_ptr() as *const c_char);
-        jrt_kstruct_set(s, b"x\0".as_ptr() as *const c_char, int_word(7));
+        let s = jrt_kstruct_new(c"Point".as_ptr());
+        jrt_kstruct_set(s, c"x".as_ptr(), int_word(7));
         let obj_word = JadeValue::from_ptr(s as *const ()).bits() as i64;
 
         let name = jrt_get_type_name(obj_word);
         assert_eq!(unsafe { cstr::borrow(name as *const c_char) }, "Point");
 
         let mut out: W = 0;
-        assert_eq!(jrt_coll_struct_get(s, b"x\0".as_ptr() as *const c_char, &mut out), 1);
+        assert_eq!(jrt_coll_struct_get(s, c"x".as_ptr(), &mut out), 1);
         assert_eq!(out, int_word(7));
-        assert_eq!(jrt_coll_struct_get(s, b"z\0".as_ptr() as *const c_char, &mut out), 0);
+        assert_eq!(jrt_coll_struct_get(s, c"z".as_ptr(), &mut out), 0);
 
         // type name of a non-struct value is empty.
         let empty = jrt_get_type_name(int_word(5));

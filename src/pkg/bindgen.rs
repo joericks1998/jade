@@ -192,11 +192,19 @@ pub fn include_roots(header: &Path, extra: &[String]) -> Vec<String> {
 }
 
 /// Run clang over `header` and return the translation unit as JSON.
-fn ast_of(header: &Path, include_dirs: &[String]) -> Result<Value, String> {
+fn ast_of(header: &Path, include_dirs: &[String], defines: &[String]) -> Result<Value, String> {
     let mut cmd = std::process::Command::new("clang");
     cmd.args(["-Xclang", "-ast-dump=json", "-fsyntax-only"]);
     for inc in include_dirs {
         cmd.arg(format!("-I{inc}"));
+    }
+    // Before the header, which is the whole point: `pcre2.h` raises `#error`
+    // unless `PCRE2_CODE_UNIT_WIDTH` is set, and `fuse.h` unless
+    // `FUSE_USE_VERSION` is. The same list reaches `cc` when the shim is built,
+    // because the shim includes the same header and would otherwise hit the
+    // same `#error` one stage later.
+    for d in defines {
+        cmd.arg(format!("-D{d}"));
     }
     cmd.arg(header);
 
@@ -1471,6 +1479,7 @@ fn bindable<'a>(
 pub fn from_header(
     header: &Path,
     include_dirs: &[String],
+    defines: &[String],
     only: Option<&str>,
     exported: Option<&std::collections::HashSet<String>>,
 ) -> Result<Binding, String> {
@@ -1478,7 +1487,7 @@ pub fn from_header(
     // passes no directories at all, so a candidate needing one was silently
     // demoted to a fallback instead of being read.
     let dirs = include_roots(header, include_dirs);
-    let ast = ast_of(header, &dirs)?;
+    let ast = ast_of(header, &dirs, defines)?;
 
     let empty = Vec::new();
     let top = ast.get("inner").and_then(Value::as_array).unwrap_or(&empty);
@@ -1791,13 +1800,20 @@ fn buffer_fields(fields: &[(String, String)], env: &TypeEnv) -> Vec<crate::proje
 }
 
 /// Map one `FunctionDecl`. Returns the symbol, the struct types it needs, and
+/// What mapping one C function yields: the symbol itself, the out-parameters it
+/// produces as `(name, is_owned)`, and the assumptions worth reporting.
+///
+/// Three lists in a tuple read as three anonymous things at every call site;
+/// naming it says which is which once.
+type MappedFunction = (CSymbol, Vec<(String, bool)>, Vec<String>);
+
 /// anything that was assumed.
 fn map_function(
     node: &Value,
     env: &TypeEnv,
     produced: &std::collections::HashSet<String>,
     counts: &HashMap<String, usize>,
-) -> Result<(CSymbol, Vec<(String, bool)>, Vec<String>), String> {
+) -> Result<MappedFunction, String> {
     let raw_ret = ret_type_of(node)?;
     // A returned pointer whose length arrives through a parameter cannot be
     // decided from the return type alone, so the refusal is held until the
@@ -2383,7 +2399,7 @@ pub fn discover_header(lib: &Path, root: &Path, dep_name: &str) -> Option<std::p
                 // Nothing to check against; first hit wins.
                 return Some(path);
             };
-            match from_header(&path, &[], None, Some(exported)) {
+            match from_header(&path, &[], &[], None, Some(exported)) {
                 Ok(b) if b.symbols.keys().any(|s| exported.contains(s)) => return Some(path),
                 // Parsed, but describes some other library of the same name.
                 Ok(_) => fallback.get_or_insert(path),

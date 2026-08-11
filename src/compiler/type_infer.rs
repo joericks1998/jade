@@ -41,6 +41,12 @@ pub struct TypeContext {
     has_imports: bool,
 }
 
+impl Default for TypeContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TypeContext {
     pub fn new() -> Self {
         let mut ctx = TypeContext {
@@ -759,20 +765,17 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
         Stmt::FieldAssign { object, field, value, span } => {
             let tval = infer_expr(value, ctx)?;
             // Check the target object is a known struct with this field.
-            match ctx.get(object) {
-                Some(JadeType::Struct(tn)) => {
-                    if let Some(defs) = ctx.struct_defs.get(&tn).cloned() {
-                        if !defs.iter().any(|f| f.name() == field) {
-                            return Err(JadeError::UndefinedField {
-                                type_name: tn,
-                                field: field.clone(),
-                                span: *span,
-                            });
-                        }
-                    }
-                }
-                // Unknown or undefined → conservative, skip check.
-                _ => {}
+            // Anything else — unknown, or not a struct — is left alone: the
+            // check is conservative on purpose.
+            if let Some(JadeType::Struct(tn)) = ctx.get(object)
+                && let Some(defs) = ctx.struct_defs.get(&tn).cloned()
+                && !defs.iter().any(|f| f.name() == field)
+            {
+                return Err(JadeError::UndefinedField {
+                    type_name: tn,
+                    field: field.clone(),
+                    span: *span,
+                });
             }
             Ok(TStmt::FieldAssign {
                 object: object.clone(),
@@ -789,10 +792,10 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
             // dict value type makes the dict heterogeneous — clear the tracking
             // so `d[k]` falls back to `Unknown` rather than a now-wrong concrete
             // type. (A matching insert keeps the tracking intact.)
-            if let Some(tracked) = ctx.dict_value_type(name) {
-                if tval.ty != tracked {
-                    ctx.assign_dict_vt(name, None);
-                }
+            if let Some(tracked) = ctx.dict_value_type(name)
+                && tval.ty != tracked
+            {
+                ctx.assign_dict_vt(name, None);
             }
             Ok(TStmt::IndexAssign { name: name.clone(), index: tidx, value: tval, span: *span })
         }
@@ -989,16 +992,16 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
             // all agree: the AOT backend rejects this at build time, so letting
             // `jade check` pass it would mean a program that checks clean and
             // then fails to compile.
-            if let Expr::Identifier { name, .. } = callee.as_ref() {
-                if ctx.struct_defs.contains_key(name) {
-                    return Err(JadeError::TypeError {
-                        message: format!(
-                            "'{}' is a struct type, not a function — build one with {} {{ ... }}",
-                            name, name
-                        ),
-                        span: *span,
-                    });
-                }
+            if let Expr::Identifier { name, .. } = callee.as_ref()
+                && ctx.struct_defs.contains_key(name)
+            {
+                return Err(JadeError::TypeError {
+                    message: format!(
+                        "'{}' is a struct type, not a function — build one with {} {{ ... }}",
+                        name, name
+                    ),
+                    span: *span,
+                });
             }
 
             let tcallee = infer_expr(callee, ctx)?;
@@ -1109,10 +1112,10 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
 
             // Required fields check.
             for def_field in &def_fields {
-                if let StructFieldDef::Required(req) = def_field {
-                    if !fields.iter().any(|(n, _)| n == req) {
-                        return Err(JadeError::MissingField { field: req.clone(), span: *span });
-                    }
+                if let StructFieldDef::Required(req) = def_field
+                    && !fields.iter().any(|(n, _)| n == req)
+                {
+                    return Err(JadeError::MissingField { field: req.clone(), span: *span });
                 }
             }
 
@@ -1765,7 +1768,7 @@ fn infer_unaryop(op: &UnaryOpKind, ty: &JadeType, span: Span) -> Result<JadeType
 
 /// Infer types for decorator argument lists, preserving `(name, args)` pairs.
 fn infer_decorators(
-    decorators: &[(String, Vec<(Option<String>, crate::frontend::ast::Expr)>)],
+    decorators: &crate::frontend::ast::DecoratorList,
     ctx: &mut TypeContext,
 ) -> Result<TDecorators> {
     decorators

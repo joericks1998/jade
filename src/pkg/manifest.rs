@@ -127,6 +127,7 @@ pub fn set_bindings(
     structs: &std::collections::BTreeMap<String, crate::project::CStruct>,
     headers: &[String],
     include_dirs: &[String],
+    defines: &[String],
 ) -> Result<(), String> {
     let mut doc = document(root)?;
 
@@ -166,6 +167,11 @@ pub fn set_bindings(
     };
     merge_list("headers", headers);
     merge_list("include_dirs", include_dirs);
+    // Recorded like the include list and for the same reason: the header is
+    // read again on a fresh clone, and the shim compile includes it too. A
+    // macro given once on the command line and then forgotten leaves both of
+    // those failing on the `#error` the flag exists to get past.
+    merge_list("defines", defines);
 
     if !structs.is_empty() {
         let structs_tbl = dep

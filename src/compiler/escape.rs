@@ -157,12 +157,13 @@ fn scan_expr(e: &TExpr, name: &str, ok: &mut usize, bad: &mut usize) {
         }
         TExprKind::Index { object, index } => {
             // The one allowed context: `name[index]` yielding a scalar.
-            if let TExprKind::Identifier(n) = &object.kind {
-                if n == name && is_immediate_scalar(&e.ty) {
-                    *ok += 1;
-                    scan_expr(index, name, ok, bad); // `name` inside `index` is not OK
-                    return;
-                }
+            if let TExprKind::Identifier(n) = &object.kind
+                && n == name
+                && is_immediate_scalar(&e.ty)
+            {
+                *ok += 1;
+                scan_expr(index, name, ok, bad); // `name` inside `index` is not OK
+                return;
             }
             scan_expr(object, name, ok, bad);
             scan_expr(index, name, ok, bad);

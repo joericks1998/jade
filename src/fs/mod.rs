@@ -35,15 +35,14 @@ fn fs_read(args: &[VmValue]) -> Result<VmValue> {
     // A tainted path is refused unless the caller explicitly vouches for it
     // with `trust=true` — the same rule as the AOT forwarder in common.c.
     let vouched = matches!(args.get(1), Some(VmValue::Bool(true)));
-    if !vouched {
-        if let Some(VmValue::Str(s)) = args.first() {
-            if s.is_tainted() {
-                return Err(JadeError::Exception {
-                    message: jade_runtime::trust::refusal_message("fs.read(path)"),
-                    span: ZERO,
-                });
-            }
-        }
+    if !vouched
+        && let Some(VmValue::Str(s)) = args.first()
+        && s.is_tainted()
+    {
+        return Err(JadeError::Exception {
+            message: jade_runtime::trust::refusal_message("fs.read(path)"),
+            span: ZERO,
+        });
     }
     let path = require_str(args, 0, "fs.read")?;
     jade_runtime::fsf::read(path)
@@ -119,15 +118,14 @@ fn fs_read_bytes(args: &[VmValue]) -> Result<VmValue> {
         return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: ZERO });
     }
     let vouched = matches!(args.get(1), Some(VmValue::Bool(true)));
-    if !vouched {
-        if let Some(VmValue::Str(s)) = args.first() {
-            if s.is_tainted() {
-                return Err(JadeError::Exception {
-                    message: jade_runtime::trust::refusal_message("fs.read_bytes(path)"),
-                    span: ZERO,
-                });
-            }
-        }
+    if !vouched
+        && let Some(VmValue::Str(s)) = args.first()
+        && s.is_tainted()
+    {
+        return Err(JadeError::Exception {
+            message: jade_runtime::trust::refusal_message("fs.read_bytes(path)"),
+            span: ZERO,
+        });
     }
     let path = require_str(args, 0, "fs.read_bytes")?;
     jade_runtime::fsf::read_bytes(path)

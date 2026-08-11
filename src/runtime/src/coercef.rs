@@ -147,17 +147,17 @@ pub fn extract_json(text: &str) -> String {
     let bytes = t.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'{' || bytes[i] == b'[' {
-            if let Some(end) = find_end(&t[i..]) {
-                let candidate = &t[i..i + end];
-                if serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
-                    return candidate.to_owned();
-                }
-                // Try normalizing: quote unquoted keys, remove commas inside numbers.
-                let normalized = normalize(candidate);
-                if serde_json::from_str::<serde_json::Value>(&normalized).is_ok() {
-                    return normalized;
-                }
+        if (bytes[i] == b'{' || bytes[i] == b'[')
+            && let Some(end) = find_end(&t[i..])
+        {
+            let candidate = &t[i..i + end];
+            if serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
+                return candidate.to_owned();
+            }
+            // Try normalizing: quote unquoted keys, remove commas inside numbers.
+            let normalized = normalize(candidate);
+            if serde_json::from_str::<serde_json::Value>(&normalized).is_ok() {
+                return normalized;
             }
         }
         i += 1;

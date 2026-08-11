@@ -388,11 +388,11 @@ mod tests {
         }
         assert_eq!(jrt_kind_of(d), ObjKind::Dict as i64);
         let mut out: W = 0;
-        assert_eq!(jrt_coll_dict_get(d, b"id\0".as_ptr() as *const c_char, &mut out), 1);
+        assert_eq!(jrt_coll_dict_get(d, c"id".as_ptr(), &mut out), 1);
         assert_eq!(out, int_word(7));
-        assert_eq!(jrt_coll_dict_get(d, b"n\0".as_ptr() as *const c_char, &mut out), 1);
+        assert_eq!(jrt_coll_dict_get(d, c"n".as_ptr(), &mut out), 1);
         assert_eq!(out, int_word(42));
-        assert_eq!(jrt_coll_dict_get(d, b"x\0".as_ptr() as *const c_char, &mut out), 0);
+        assert_eq!(jrt_coll_dict_get(d, c"x".as_ptr(), &mut out), 0);
         unsafe { reset(m) };
     }
 

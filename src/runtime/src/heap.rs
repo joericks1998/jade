@@ -74,8 +74,8 @@ pub enum ObjKind {
 ///  * `Gray`   — provisionally visited during trial deletion.
 ///  * `White`  — proven garbage (member of a dead cycle), awaiting free.
 ///  * `Purple` — a candidate root: decref'd without reaching zero, so it might
-///               be the entry point of a cycle. Purple objects are the roots
-///               the collector scans.
+///    be the entry point of a cycle. Purple objects are the roots the collector
+///    scans.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
 pub enum Color {

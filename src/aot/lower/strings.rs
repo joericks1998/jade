@@ -169,6 +169,13 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
         self.tag_str(self.concat_ptrs(lp, rp))
     }
 
+    /// Release a tagged-string data pointer this frame owns outright.
+    pub(super) fn free_str_ptr(&self, p: PointerValue<'ctx>) {
+        let f = self
+            .runtime_fn("jrt_str_free", self.ctx.void_type().fn_type(&[self.ptrt().into()], false));
+        self.builder.build_call(f, &[p.into()], "").unwrap();
+    }
+
     /// Render a value word to a tagged-string **data pointer** via the runtime's
     /// `jrt_str_of_any` (VM-faithful for scalars/strings; preserves trust). Used
     /// to interpolate an f-string part.

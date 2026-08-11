@@ -4,6 +4,13 @@ use serde::{Deserialize, Serialize};
 /// A method signature within an `interface` definition.
 /// The type checker uses `name` for missing-method checks; `params` is parsed
 /// for documentation and future type inference.
+/// A decorator and its positional arguments, as `@name(arg, key: arg)` parses.
+///
+/// Named once because it travels: the AST holds it, type inference reads it,
+/// and the import pass renames through it, and three spellings of the same
+/// nested tuple is three places to get it subtly different.
+pub type DecoratorList = Vec<(String, Vec<(Option<String>, Expr)>)>;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InterfaceMethod {
     pub name: String,
@@ -78,7 +85,7 @@ pub enum Stmt {
         params: Vec<(String, Option<Expr>)>,
         body: Vec<Stmt>,
         /// Each entry is `(decorator_name, positional_args)`.
-        decorators: Vec<(String, Vec<(Option<String>, Expr)>)>,
+        decorators: DecoratorList,
         #[allow(dead_code)] // reserved for future error reporting
         span: Span,
     },
@@ -127,7 +134,7 @@ pub enum Stmt {
         name: String,
         fields: Vec<StructFieldDef>,
         /// Each entry is `(decorator_name, positional_args)`.
-        decorators: Vec<(String, Vec<(Option<String>, Expr)>)>,
+        decorators: DecoratorList,
         #[allow(dead_code)]
         span: Span,
     },
@@ -147,7 +154,7 @@ pub enum Stmt {
         /// The interface this extend block claims to implement, if any.
         interface_name: Option<String>,
         methods: Vec<Stmt>,
-        decorators: Vec<(String, Vec<(Option<String>, Expr)>)>,
+        decorators: DecoratorList,
         #[allow(dead_code)]
         span: Span,
     },
@@ -197,7 +204,7 @@ pub enum Stmt {
         params: Vec<(String, Option<Expr>)>,
         body: Vec<Stmt>,
         /// Each entry is `(decorator_name, positional_args)`.
-        decorators: Vec<(String, Vec<(Option<String>, Expr)>)>,
+        decorators: DecoratorList,
         span: Span,
     },
 
