@@ -941,3 +941,44 @@ mod pkg {
         assert!(!toml.contains("headers"), "a header that was not read is not a fact: {toml}");
     }
 }
+
+/// `jade check` predicts what `jade build` will do about a call.
+///
+/// It used to run the frontend and `emit` and stop, so every call-shaped
+/// mistake — an unknown method, the wrong arity, a surplus argument to a
+/// builtin — reported `ok` and then failed to build. A clean `ok` followed by a
+/// build failure is the wrong way round for the command whose job is to predict
+/// one. TOOLCHAIN-BUGS #18.
+#[test]
+fn check_agrees_with_build_about_calls() {
+    let dir = std::env::temp_dir().join("jade_check_calls");
+    let _ = std::fs::create_dir_all(&dir);
+    let cases = [
+        ("unknown_method", "print(str(\"abc\".bogus()))\n", "no method named `bogus`"),
+        ("surplus_args", "print(str(\"abc\".upper(1, 2, 3)))\n", "takes 0 arguments"),
+        ("short_call", "fn f(a, b) { return a }\nprint(str(f(1)))\n", "omits argument 2"),
+    ];
+    for (name, src, want) in cases {
+        let path = dir.join(format!("{name}.jde"));
+        std::fs::write(&path, src).unwrap();
+        let program = crate::compiler::type_infer::infer(
+            crate::frontend::parser::parse(crate::frontend::lexer::tokenize(src).unwrap()).unwrap(),
+        )
+        .unwrap();
+        let err = crate::aot::would_build(&program, Some(&path))
+            .expect_err("the backend refuses this, so check must too");
+        assert!(err.contains(want), "{name}: expected {want:?}, got {err:?}");
+        // And it names where, like every interpreter error does.
+        assert!(err.starts_with('['), "{name}: should carry a position: {err}");
+    }
+
+    // A program that builds still passes.
+    let ok_src = "print(\"ok\")\nprint(str(\"abc\".upper()))\n";
+    let path = dir.join("fine.jde");
+    std::fs::write(&path, ok_src).unwrap();
+    let program = crate::compiler::type_infer::infer(
+        crate::frontend::parser::parse(crate::frontend::lexer::tokenize(ok_src).unwrap()).unwrap(),
+    )
+    .unwrap();
+    assert!(crate::aot::would_build(&program, Some(&path)).is_ok(), "a good program should pass");
+}

@@ -20,7 +20,14 @@ use crate::{
 /// reported `ok` and then failed at run time.
 fn post_tir_checks(tprogram: &crate::compiler::tir::TProgram, path: &str) -> Result<(), String> {
     crate::compiler::emit::emit(tprogram.clone()).map_err(|e| e.to_string())?;
-    check_imports(tprogram, path)
+    check_imports(tprogram, path)?;
+    // Everything call-shaped is decided in the backend's resolver, not in type
+    // inference: an unknown method, the wrong arity, a surplus argument to a
+    // builtin. Without this, `check` answered `ok` for every one of them and
+    // the build then refused — the wrong way round for the command that exists
+    // to predict the build. Lowering into a throwaway module is what `jade
+    // build` already does as its own probe, and it costs milliseconds.
+    crate::aot::would_build(tprogram, Some(Path::new(path)))
 }
 
 /// Resolve every import reachable from this file, without loading any of them.
