@@ -224,27 +224,26 @@ pub fn run_add(
             if let Some(install) =
                 std::fs::read(&full).ok().and_then(|b| pkg::bindgen::tbd_install_name(&b))
             {
-                eprintln!("error: {p} is a linker stub, not a library Jade can load");
+                // Accepted. A stub is not Mach-O and never will be, but it is
+                // exactly what a linker wants: linking the shim against it
+                // records `install` as the shim's own dependency, and dyld
+                // resolves that from the shared cache at load time. Nothing has
+                // to be copied and nothing has to be opened by hand — which is
+                // the whole reason a system library can be bound at all now.
+                println!("  stub for {install}, resolved from the dyld shared cache");
+            } else {
+                eprintln!("error: {p} is not a shared library");
                 eprintln!(
-                    "       It stands for {install}, which on this macOS lives in the dyld\n       \
-                     shared cache and has no file on disk — so there is nothing to copy into\n       \
-                     libs/. Jade materializes every dependency as a real file, so an SDK stub\n       \
-                     cannot be one yet.\n\n       \
-                     Point at a library that exists on disk instead — Homebrew ships real\n       \
-                     .dylib files under /opt/homebrew/lib."
+                    "       A dependency is a prebuilt .dylib or .so. This file does not start \
+                     with\n       a Mach-O or ELF header, so nothing could load it.\n\n       \
+                     The usual cause is compiling the header instead of the source:\n         \
+                     clang -o lib{0}.dylib {0}.h      # makes a precompiled header, not a \
+                     library\n         \
+                     clang -dynamiclib -o lib{0}.dylib {0}.c",
+                    name
                 );
                 std::process::exit(1);
             }
-            eprintln!("error: {p} is not a shared library");
-            eprintln!(
-                "       A dependency is a prebuilt .dylib or .so. This file does not start with\n       \
-                 a Mach-O or ELF header, so nothing could load it.\n\n       \
-                 The usual cause is compiling the header instead of the source:\n         \
-                 clang -o lib{0}.dylib {0}.h      # makes a precompiled header, not a library\n         \
-                 clang -dynamiclib -o lib{0}.dylib {0}.c",
-                name
-            );
-            std::process::exit(1);
         }
     }
 
