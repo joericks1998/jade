@@ -4,6 +4,12 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.3.18
+
+**Fixed: a dozen `ar` warnings on every macOS build, including the release job.** `cc` does not know in advance whether the archiver takes `-D` (deterministic mode), so it probes: it runs `ar cqD`, and when that fails it retries with `ZERO_AR_DATE=1 ar cq`. Apple's `ar` rejects the flag, so the archive was always built correctly — but the failed probe printed its usage text into the build log twelve lines at a time, which buries anything worth reading.
+
+- **The runtime archive is built with `llvm-ar`**, which takes the flag, so the probe succeeds first time and there is nothing to print. Not a new dependency: `jade build` links LLVM 18 in-process, so `LLVM_SYS_180_PREFIX` already has to point at an install for the crate to compile. Where it does not resolve, or `AR` is set, `cc` is left to probe as before rather than being handed a path that is not there.
+
 ## v1.3.17
 
 **Fixed: an f-string could double-free, aborting a compiled binary inside the allocator.** A regression from 1.3.16, reported from the userland as `malloc(): unaligned tcache chunk detected` on glibc — and reproducible on macOS too, as a silent abort. `f"{x}"` has no literal text, so nothing is concatenated and the template produces the value's own string; rendering handed back that very pointer, so the destination became a second owner of one allocation. Inert while strings were never freed, a double free once they were.

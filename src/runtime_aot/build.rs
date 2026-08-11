@@ -32,7 +32,29 @@ fn main() {
     let rt = PathBuf::from("src/runtime_aot");
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR");
 
-    cc::Build::new()
+    // Apple's `ar` rejects `-D` (deterministic mode). `cc` does not know that in
+    // advance: it *probes*, running `ar cqD` and falling back to
+    // `ZERO_AR_DATE=1 ar cq` when that fails. The archive it ends up with is
+    // correct and deterministic either way — but the failed probe's usage text
+    // reaches the build log as a dozen `cargo:warning=` lines on every macOS
+    // build, including the release job, which buries anything worth reading.
+    //
+    // `llvm-ar` takes the flag, so the probe succeeds first time and there is
+    // nothing to print. It is not a new dependency: `jade build` links LLVM 18
+    // in-process, so `LLVM_SYS_180_PREFIX` already has to point at an install
+    // for this crate to compile at all. If it does not resolve, `cc` is left to
+    // probe as before rather than being handed a path that is not there.
+    let mut build = cc::Build::new();
+    if std::env::var_os("AR").is_none()
+        && let Some(prefix) = std::env::var_os("LLVM_SYS_180_PREFIX")
+    {
+        let llvm_ar = PathBuf::from(prefix).join("bin/llvm-ar");
+        if llvm_ar.is_file() {
+            build.archiver(&llvm_ar);
+        }
+    }
+
+    build
         .file(rt.join("common.c"))
         .file(rt.join("native.c"))
         .file(rt.join("posix.c"))
