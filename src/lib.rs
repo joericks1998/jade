@@ -36,11 +36,11 @@ pub mod builtins;
 /// which is why it sits between them rather than inside `compiler`.
 pub mod bytecode;
 pub mod cache;
+pub mod cli;
 /// Code generation: bytecode `Chunk` → LLVM IR. The half of `jade build` that
 /// is about the language rather than about producing a file, which is why it
 /// sits beside `aot` rather than inside it.
 pub mod codegen;
-pub mod cli;
 pub mod compiler;
 /// Bytecode interpreter — one of the two execution engines, peer to `aot`
 /// rather than a phase of `compiler`. `jade run` uses this; `jade build` uses

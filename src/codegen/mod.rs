@@ -152,11 +152,7 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
     ///
     /// The alloca is emitted before the entry block's terminator with a private
     /// builder, so the caller's insertion point is untouched.
-    fn entry_buf(
-        &self,
-        tag: &'static str,
-        n: usize,
-    ) -> Result<PointerValue<'ctx>, String> {
+    fn entry_buf(&self, tag: &'static str, n: usize) -> Result<PointerValue<'ctx>, String> {
         if let Some(p) = self.entry_bufs.borrow().get(&(tag, n)) {
             return Ok(*p);
         }
