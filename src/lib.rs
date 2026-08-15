@@ -23,18 +23,23 @@ compile_error!(
 /// dlopen'd package the way mimalloc did.
 pub mod alloc;
 
-/// AOT backend: bytecode `Chunk` → LLVM → object → linked artifact. `jade build`
-/// calls straight into this, so LLVM 18 is a build-time requirement for the
-/// toolchain (locate it with `LLVM_SYS_180_PREFIX`). The C runtime that emitted
-/// binaries link against is `src/runtime_aot/` (C), built by this crate's `build.rs`.
+/// AOT driver: import resolution, then `codegen`, then object and link. `jade
+/// build` calls straight into this, so LLVM 18 is a build-time requirement for
+/// the toolchain (locate it with `LLVM_SYS_180_PREFIX`). The C runtime that
+/// emitted binaries link against is `src/runtime_aot/` (C), built by this
+/// crate's `build.rs`.
 pub mod aot;
 pub mod build;
 pub mod builtins;
 /// The instruction set both engines consume: the compiler emits a `Chunk`, the
-/// VM interprets it and `aot` lowers it. It belongs to neither engine, which
-/// is why it sits between them rather than inside `compiler`.
+/// VM interprets it and `codegen` lowers it. It belongs to neither engine,
+/// which is why it sits between them rather than inside `compiler`.
 pub mod bytecode;
 pub mod cache;
+/// Code generation: bytecode `Chunk` → LLVM IR. The half of `jade build` that
+/// is about the language rather than about producing a file, which is why it
+/// sits beside `aot` rather than inside it.
+pub mod codegen;
 pub mod cli;
 pub mod compiler;
 /// Bytecode interpreter — one of the two execution engines, peer to `aot`

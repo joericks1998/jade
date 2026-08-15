@@ -18,7 +18,7 @@ like on either side of it.
 
 That split is why a change here is usually a change in three places at once: the
 function below, the `jrt_*` wrapper in `httpf.rs`, and the lowering arm in
-`src/aot/lower/builtins.rs`. Missing the third is not a silent failure but it is
+`src/codegen/builtins.rs`. Missing the third is not a silent failure but it is
 a late one — `jade check` passes and `jade build` reports "unsupported module
 call", so a program discovers it at packaging time. That is what happened to
 `get_bytes` and `post_bytes` between v1.2.2 and v1.2.5.
@@ -49,7 +49,7 @@ trusted.
 ## Who uses this
 
 The import system (`src/project/`) resolves `use std::http` to `HTTP_PKG`. The
-AOT backend never touches this directory; see `src/aot/lower/builtins.rs` for
+AOT backend never touches this directory; see `src/codegen/builtins.rs` for
 its half, and `src/runtime/src/httpf.rs` for the part they share.
 
 `src/uhttp/` is this package again over a Unix domain socket, and the two are

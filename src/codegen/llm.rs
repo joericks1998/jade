@@ -1,6 +1,6 @@
 //! Prompt values and dereferences, including streaming.
 //!
-//! Split out of the former monolithic `lower.rs`; see this directory's README.
+//! See this directory's README.
 
 use super::*;
 

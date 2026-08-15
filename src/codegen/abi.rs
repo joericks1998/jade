@@ -1,6 +1,6 @@
 //! Tagged-value ABI: boxing, unboxing, and register slot access.
 //!
-//! Split out of the former monolithic `lower.rs`; see this directory's README.
+//! See this directory's README.
 
 use super::*;
 
@@ -60,7 +60,7 @@ pub(super) fn default_word_const<'ctx>(
             let iv = b.build_ptr_to_int(raw, i64_ty, "dsi").map_err(|e| e.to_string())?;
             b.build_or(iv, i64_ty.const_int(TAG_STR, false), "dstag").map_err(|e| e.to_string())?
         }
-        other => return Err(format!("lower.rs: unsupported struct field default {other:?}")),
+        other => return Err(format!("codegen: unsupported struct field default {other:?}")),
     })
 }
 
@@ -239,7 +239,7 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
             VmValue::Nil => self.i64t().const_int(NIL, false),
             VmValue::Float(f) => self.box_float(self.f64t().const_float(*f)),
             VmValue::Str(s) => self.str_literal_word(s)?,
-            other => return Err(format!("lower.rs: unsupported default value {other:?}")),
+            other => return Err(format!("codegen: unsupported default value {other:?}")),
         })
     }
 }

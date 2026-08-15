@@ -6,7 +6,7 @@
 //!
 //! The AOT backend used to erase all of that. `MakePrompt` simply moved the
 //! underlying string into the destination slot, on the reasoning — written down
-//! in `aot/lower.rs` — that "a prompt only ever flows to `PromptDeref`". It does
+//! in `src/codegen/` — that "a prompt only ever flows to `PromptDeref`". It does
 //! not. A prompt can be printed, stored in a struct field, passed to a function,
 //! or returned from one, and at each of those points a compiled binary saw a
 //! string where the VM saw a prompt. The visible half was `print(p)`, which gave

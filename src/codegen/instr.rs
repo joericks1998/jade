@@ -1,6 +1,6 @@
 //! The per-instruction lowering match.
 //!
-//! Split out of the former monolithic `lower.rs`; see this directory's README.
+//! See this directory's README.
 
 use super::*;
 
@@ -123,15 +123,12 @@ pub(super) fn lower_instr<'ctx>(
             // whatever the cell held before (globals are never scope-exit-released,
             // so their final value intentionally lives until process end).
             low.retain(v);
-            if low.refcount {
-                let old =
-                    b.build_load(i64_ty, g, "gold").map_err(|e| e.to_string())?.into_int_value();
-                let f = low.runtime_fn(
-                    "jrt_rc_replace",
-                    low.ctx.void_type().fn_type(&[i64_ty.into(), i64_ty.into()], false),
-                );
-                b.build_call(f, &[old.into(), v.into()], "").map_err(|e| e.to_string())?;
-            }
+            let old = b.build_load(i64_ty, g, "gold").map_err(|e| e.to_string())?.into_int_value();
+            let f = low.runtime_fn(
+                "jrt_rc_replace",
+                low.ctx.void_type().fn_type(&[i64_ty.into(), i64_ty.into()], false),
+            );
+            b.build_call(f, &[old.into(), v.into()], "").map_err(|e| e.to_string())?;
             b.build_store(g, v).map_err(|e| e.to_string())?;
             Ok(false)
         }
@@ -457,7 +454,7 @@ pub(super) fn lower_instr<'ctx>(
                     low.store(*d, low.i32cmp_word(present, pred));
                 }
                 // And/Or are emitted as short-circuit jumps, never a BinOp opcode.
-                _ => return Err(format!("lower.rs: unsupported dynamic BinOp {op:?}")),
+                _ => return Err(format!("codegen: unsupported dynamic BinOp {op:?}")),
             }
             Ok(false)
         }
@@ -962,13 +959,13 @@ pub(super) fn lower_instr<'ctx>(
                     store_slot(i, low.load(*r))?;
                 }
                 for j in args.len()..n {
-                    let dv = cf.defaults[j].as_ref().ok_or("lower.rs: missing spawn default")?;
+                    let dv = cf.defaults[j].as_ref().ok_or("codegen: missing spawn default")?;
                     store_slot(j, low.default_word(dv)?)?;
                 }
                 let task = low
                     .module
                     .get_function(&format!("jf_task_{uid}"))
-                    .ok_or("lower.rs: missing task wrapper")?;
+                    .ok_or("codegen: missing task wrapper")?;
                 let spawn_f = low.runtime_fn(
                     "jade_spawn",
                     low.ptrt().fn_type(
@@ -998,7 +995,7 @@ pub(super) fn lower_instr<'ctx>(
                 low.store(*dest, low.tag_ptr(fut));
                 Ok(false)
             }
-            _ => Err(format!("lower.rs: unsupported spawn at {idx}")),
+            _ => Err(format!("codegen: unsupported spawn at {idx}")),
         },
         Await(dest, fut) => {
             // Pass the tagged word through: the runtime checks the tag and the
@@ -1207,7 +1204,7 @@ pub(super) fn lower_instr<'ctx>(
         LoadFn(d, idx) | MakeClosure(d, idx) => {
             match fnctx.uid_of(fn_defs, *idx) {
                 Some(uid) => low.store(*d, low.fn_box_word(uid, fnctx.funcs[uid])),
-                None => return Err(format!("lower.rs: unknown fn_def index {idx}")),
+                None => return Err(format!("codegen: unknown fn_def index {idx}")),
             }
             Ok(false)
         }
@@ -1228,7 +1225,7 @@ pub(super) fn lower_instr<'ctx>(
                     for j in dargs.len()..cf.params.len() {
                         let dv = cf.defaults[j]
                             .as_ref()
-                            .ok_or("lower.rs: missing default at call site")?;
+                            .ok_or("codegen: missing default at call site")?;
                         argv.push(low.default_word(dv)?.into());
                     }
                     let ret = b
@@ -1256,7 +1253,7 @@ pub(super) fn lower_instr<'ctx>(
                     for j in (1 + margs.len())..cf.params.len() {
                         let dv = cf.defaults[j]
                             .as_ref()
-                            .ok_or("lower.rs: missing method default at call site")?;
+                            .ok_or("codegen: missing method default at call site")?;
                         argv.push(low.default_word(dv)?.into());
                     }
                     let ret = b
@@ -1358,7 +1355,7 @@ pub(super) fn lower_instr<'ctx>(
                     low.store(*dest, low.tag_int(count));
                     Ok(false)
                 }
-                _ => Err(format!("lower.rs: unsupported call at {idx}")),
+                _ => Err(format!("codegen: unsupported call at {idx}")),
             }
         }
 
@@ -1374,7 +1371,7 @@ pub(super) fn lower_instr<'ctx>(
                         None => {
                             let dv = cf.defaults[i]
                                 .as_ref()
-                                .ok_or("lower.rs: missing default in keyword call")?;
+                                .ok_or("codegen: missing default in keyword call")?;
                             low.default_word(dv)?
                         }
                     };
@@ -1398,11 +1395,11 @@ pub(super) fn lower_instr<'ctx>(
                 low.store(*dest, ret);
                 Ok(false)
             }
-            _ => Err(format!("lower.rs: unsupported keyword call at {idx}")),
+            _ => Err(format!("codegen: unsupported keyword call at {idx}")),
         },
 
         // Everything else is added in later bricks; until then the daemon falls
         // back to the legacy lowering for programs that use it.
-        other => Err(format!("lower.rs: unsupported opcode {other:?}")),
+        other => Err(format!("codegen: unsupported opcode {other:?}")),
     }
 }

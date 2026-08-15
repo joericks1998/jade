@@ -1,44 +1,20 @@
-//! Tests for the AOT lowering. Moved verbatim out of the former `lower.rs`.
+//! Tests for the lowering.
 
 use super::*;
 use crate::bytecode::Instr::*;
 
+/// Lower an isolated body and hand back its IR to assert against.
+///
+/// There used to be a second helper beside this one, because reference
+/// counting was a per-program decision and `lower_chunk` built an `FnCtx` with
+/// it switched off — so a retain was invisible in the IR this returned. The
+/// decision is gone and the rc ops always emit, so one helper covers both.
 fn ir_of(code: &[Instr], n_slots: u32) -> String {
     let context = Context::create();
     let module = context.create_module("t");
     lower_chunk(&context, &module, "f", code, n_slots).expect("lowering failed");
     // Verify catches malformed IR (unterminated blocks, type errors) — the
-    // real correctness gate for a lowering brick before it's wired up.
-    module.verify().expect("module failed LLVM verification");
-    module.print_to_string().to_string()
-}
-
-/// `ir_of` with reference counting on. `lower_chunk` builds an empty `FnCtx`,
-/// where `refcount` is false and every rc op is a no-op, so a retain is
-/// invisible in its IR — this is the path that shows one.
-fn ir_of_rc(code: &[Instr], n_slots: u32) -> String {
-    let context = Context::create();
-    let module = context.create_module("t");
-    let function = module.add_function("f", context.i64_type().fn_type(&[], false), None);
-    let mut ctx = FnCtx::empty();
-    ctx.refcount = true;
-    // No spans: an isolated body, so a diagnostic from it goes out without a
-    // position rather than with a guessed one.
-    let chunk = crate::bytecode::Chunk {
-        name: "t".to_string(),
-        code: code.to_vec(),
-        spans: Vec::new(),
-        fn_defs: Vec::new(),
-    };
-    lower_body(
-        &context,
-        &module,
-        function,
-        &chunk,
-        &ctx,
-        BodyOpts { n_slots, n_params: 0, is_generator: false, track_recursion: false },
-    )
-    .expect("lowering failed");
+    // real correctness gate for a lowering before it is wired up.
     module.verify().expect("module failed LLVM verification");
     module.print_to_string().to_string()
 }
@@ -49,7 +25,7 @@ fn dict_get_retains_the_borrowed_value() {
     // still owns it), so the destination must take its own reference. It
     // did not, so a nested `TABLE.get(k)["f"]` read correct values twice,
     // then double-freed the inner dict.
-    let ir = ir_of_rc(
+    let ir = ir_of(
         &[
             MakeDict(0, vec![]),
             LoadStr(1, "k".to_string()),

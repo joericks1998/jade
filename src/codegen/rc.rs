@@ -1,6 +1,25 @@
 //! Reference counting and scope exit.
 //!
-//! Split out of the former monolithic `lower.rs`; see this directory's README.
+//! ## The invariant every `TAG_PTR` value has to hold up
+//!
+//! `jrt_incref` / `jrt_decref` (and the destructor's child cascade) dispatch on
+//! the `ObjKind` byte at offset 8, so **anything that puts a new kind of value
+//! in a `TAG_PTR` word must put an `ObjKind` there.** Today every producer
+//! does: collections (Array/Dict/Struct) and futures carry a real `ObjHeader`,
+//! grammar objects carry `ObjKind::Grammar`, and ordinary fn boxes
+//! (`fn_box_word`) and native fn values (`emit_native_fn_value`) carry
+//! `ObjKind::Fn` so the refcount ops recognise them and no-op. A prompt is not
+//! a heap kind at all — `MakePrompt` stores the underlying string, and a
+//! `TAG_STR` word is rejected by tag before any header is read.
+//!
+//! Get it wrong and the failure is silent: the last holdout was the native fn
+//! value, whose offset 8 held the `env` pointer, and a heap address whose low
+//! byte happened to be 2/3/4 would have sent `free_obj` off to reclaim it as an
+//! Array/Dict/Struct.
+//!
+//! Codegen used to scan each program for a value it could not account for and
+//! turn refcounting off for the whole program when it found one. Nothing fails
+//! that scan anymore, so it is gone and these ops always emit.
 
 use super::*;
 
@@ -44,9 +63,6 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
 
     /// Emit `jrt_incref(w)` — retain a reference. No-op on non-collection words.
     pub(super) fn incref(&self, w: IntValue<'ctx>) {
-        if !self.refcount {
-            return;
-        }
         self.if_heap(w, || {
             let f = self.runtime_fn(
                 "jrt_incref",
@@ -58,9 +74,6 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
 
     /// Emit `jrt_decref(w)` — release a reference (frees at zero, cascading).
     pub(super) fn decref(&self, w: IntValue<'ctx>) {
-        if !self.refcount {
-            return;
-        }
         self.if_heap(w, || {
             let f = self.runtime_fn(
                 "jrt_decref",
@@ -80,11 +93,8 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
 
     /// Before slot `i` is overwritten with `new`, release whatever reference it
     /// held (via `jrt_rc_replace`, which skips the release when `old == new` — the
-    /// in-place array-mutation case). No-op unless refcounting is on.
+    /// in-place array-mutation case).
     pub(super) fn rc_replace_slot(&self, i: usize, new: IntValue<'ctx>) {
-        if !self.refcount {
-            return;
-        }
         let old =
             self.builder.build_load(self.i64t(), self.slots[i], "rcold").unwrap().into_int_value();
         // `jrt_rc_replace` decrefs `old` and increfs `new`; both no-op unless the
@@ -111,9 +121,6 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
     /// cleanup, emitted immediately before each `return`. Parameter slots
     /// (`0..n_params`) are borrowed from the caller and left untouched.
     pub(super) fn emit_scope_exit(&self) {
-        if !self.refcount {
-            return;
-        }
         for i in self.n_params..self.slots.len() {
             let v = self.load_idx(i);
             self.decref(v);

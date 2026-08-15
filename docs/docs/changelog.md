@@ -4,6 +4,13 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.3.19
+
+**Changed: code generation moved to its own place in the source tree.** The half of `jade build` that translates bytecode into LLVM IR used to sit inside the half that resolves imports and runs the linker, as `src/aot/lower/`. Those are not related that way — lowering is where the interpreter and the compiled path have to agree on what an opcode means, so it is a peer of the VM rather than a detail of linking. It is now `src/codegen/`, one level flatter and named for what it produces.
+
+- **A handful of build errors stopped naming `lower.rs`**, a file that no longer exists. They carry a `codegen:` prefix instead, continuing the cleanup 1.3.16 started.
+- **Nothing about a compiled program changed.** Every example that emits IR emits byte-identical IR, and the backend parity gate is unmoved at 86 ok, 10 skipped, 0 failed.
+
 ## v1.3.18
 
 **Fixed: a dozen `ar` warnings on every macOS build, including the release job.** `cc` does not know in advance whether the archiver takes `-D` (deterministic mode), so it probes: it runs `ar cqD`, and when that fails it retries with `ZERO_AR_DATE=1 ar cq`. Apple's `ar` rejects the flag, so the archive was always built correctly — but the failed probe printed its usage text into the build log twelve lines at a time, which buries anything worth reading.

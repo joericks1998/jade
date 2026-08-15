@@ -1,6 +1,6 @@
 //! Builtin dispatch: native packages, stdlib modules, and dynamic methods.
 //!
-//! Split out of the former monolithic `lower.rs`; see this directory's README.
+//! See this directory's README.
 
 use super::*;
 
@@ -497,7 +497,7 @@ pub(super) fn emit_val_method<'ctx>(
                 Ok(res)
             }
         }
-        _ => Err(format!("lower.rs: emit_val_method: unhandled {method}")),
+        _ => Err(format!("codegen: emit_val_method: unhandled {method}")),
     }
 }
 
@@ -918,7 +918,7 @@ pub(super) fn emit_module_call<'ctx>(
                 .into_pointer_value();
             Ok(low.tag_ptr(g))
         }
-        _ => Err(format!("lower.rs: emit_module_call: unhandled {module}.{method}")),
+        _ => Err(format!("codegen: emit_module_call: unhandled {module}.{method}")),
     }
 }
 

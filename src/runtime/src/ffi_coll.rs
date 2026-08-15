@@ -4,7 +4,7 @@
 //! (`runtime_aot/common.c`). The object *storage* now lives once in
 //! [`crate::coll`] behind an [`crate::heap::ObjHeader`], and these
 //! `#[no_mangle]` shims are what the AOT backend's emitted `jrt_*` calls
-//! resolve against. `lower.rs` is unchanged — only the implementation behind the
+//! resolve against. `src/codegen/` is unchanged — only the implementation behind the
 //! symbols moved from C to Rust.
 //!
 //! ## Non-raising vs raising

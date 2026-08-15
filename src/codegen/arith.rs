@@ -1,6 +1,6 @@
 //! Integer, float, and bitwise arithmetic, plus the comparison family.
 //!
-//! Split out of the former monolithic `lower.rs`; see this directory's README.
+//! See this directory's README.
 
 use super::*;
 

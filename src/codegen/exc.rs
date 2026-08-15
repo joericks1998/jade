@@ -1,6 +1,6 @@
 //! Exception frames: throw, setjmp, and frame push/pop.
 //!
-//! Split out of the former monolithic `lower.rs`; see this directory's README.
+//! See this directory's README.
 
 use super::*;
 
