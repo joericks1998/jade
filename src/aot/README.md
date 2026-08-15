@@ -1,12 +1,14 @@
-# `src/aot/` — the LLVM ahead-of-time backend
+# `src/aot/` — the `jade build` driver
 
 ## What this subtree is
 
-The other execution engine. `jade build` runs the same frontend and compiler as `jade run`, then lowers the resulting bytecode `Chunk` through LLVM 18 into an object file and links it into a native binary or shared library.
+The other execution engine, from the outside. `jade build` runs the same frontend and compiler as `jade run`, then turns the resulting bytecode `Chunk` into a native binary or shared library.
 
 ```
-Chunk → cfg (basic blocks) → lower (LLVM IR) → object → link
+Chunk → codegen (LLVM IR) → object → link
 ```
+
+This directory owns the first and last steps and nothing in between. It resolves imports into one namespaced stream, hands the `Chunk` to [`src/codegen/`](../codegen/README.md), wraps what comes back in a `main()` (or a `jade_pkg_init`), writes the object file, and drives `cc`. The translation itself — an LLVM IR sequence per opcode — lives in `codegen` and used to live here as `aot/lower/`.
 
 It is a peer of `src/vm/`, not a phase of `src/compiler/`. Both consume the same `Chunk`, and the language is defined by where they agree.
 
@@ -25,14 +27,14 @@ Two design choices are worth knowing before you edit:
 ## What each file does
 
 - **`mod.rs`** — the public entry point. Sets up the LLVM context and target machine, runs the probe, emits a thin `main()`, writes the object file, and drives the linker. `CompileMode` selects a binary or a `jade_pkg_init`-exporting shared library.
-- **`cfg.rs`** — control-flow-graph reconstruction. `emit.rs` produces a flat `Vec<Instr>` with PC-relative jumps; LLVM needs basic blocks with explicit edges. This file computes block boundaries and edges and holds no LLVM state at all, so it is unit-testable in isolation.
-- **[`lower/`](lower/README.md)** — the bulk of the backend: one LLVM IR translation per opcode, plus the calls into `jade-runtime`'s `jrt_*` C-ABI surface for anything that needs the heap, collections, strings, tasks, or inference. Split by concern across eleven files (`abi`, `arith`, `strings`, `rc`, `exc`, `calls`, `builtins`, `llm`, `instr`); read that directory's README before adding a lowering.
 - **`imports.rs`** — import resolution and module namespacing. The VM gives every imported file its own namespace; LLVM has no runtime namespaces, so this file mangles imported symbols to keep two modules that both define `greet` distinct. **The VM is the source of truth for what a namespace means** — read this file's header before changing import behavior.
-- **`tests.rs`** — backend tests.
+- **`tests.rs`** — driver tests.
+
+The translation this directory drives is [`src/codegen/`](../codegen/README.md) — one LLVM IR sequence per opcode, split by concern across ten files. Read that directory's README before adding a lowering.
 
 ## Who uses it
 
-*Depends on:* `compiler/` for the `TProgram` and `emit`, `bytecode/` for the instruction set, `project/` for library resolution, `inkwell` for LLVM, and the two runtimes it links against — `jade-runtime` (Rust, `src/runtime/`) and `libJadeRuntime.a` (C, `src/runtime_aot/`, built by `build.rs`).
+*Depends on:* `codegen/` for the whole `Chunk` → LLVM IR translation, `compiler/` for the `TProgram` and `emit`, `bytecode/` for the instruction set, `project/` for library resolution, `inkwell` for LLVM, and the two runtimes it links against — `jade-runtime` (Rust, `src/runtime/`) and `libJadeRuntime.a` (C, `src/runtime_aot/`, built by `build.rs`).
 
 *Used by:* `src/build/`, which is the thin layer `cli/build.rs` calls.
 
@@ -56,7 +58,7 @@ Two design choices are worth knowing before you edit:
 
 **A borrowed value word must be retained at the point it becomes owned.** The runtime's collection reads hand back the value word without incrementing anything, and the *caller* retains — `GetIndex` does so with a comment saying why. The `dict.get` arm did not, so each call decremented the entry until the collection it named was freed under the table. If you add a lowering that stores a word the runtime handed you, decide explicitly whether it arrived owned (a producer like `jrt_coll_dict_keys`) or borrowed (a lookup), because the two need opposite treatment and both compile.
 
-**A buffer a call site needs is allocated in the entry block, not at the call.** LLVM does not reclaim an `alloca` until the function returns, so a call that marshals its arguments into a fresh one grows the stack every time it runs — and this backend puts calls inside loops. An FFI call in a `while` loop died at a fixed iteration count for that reason, with the count scaling exactly with `ulimit -s`. `Lowerer::entry_buf` is how a lowering asks for such a buffer; [`lower/README.md`](lower/README.md) has the rule and why sharing one is sound.
+**A buffer a call site needs is allocated in the entry block, not at the call.** LLVM does not reclaim an `alloca` until the function returns, so a call that marshals its arguments into a fresh one grows the stack every time it runs — and this backend puts calls inside loops. An FFI call in a `while` loop died at a fixed iteration count for that reason, with the count scaling exactly with `ulimit -s`. `Lowerer::entry_buf` is how a lowering asks for such a buffer; [`../codegen/README.md`](../codegen/README.md) has the rule and why sharing one is sound.
 
 **The handler stack is thread-wide here, not per frame.** The VM keeps its `handlers` in a local of the dispatch call frame, so a function's handlers die with it. `jade_exc_push_frame` pushes onto one `_Thread_local` stack that only codegen unwinds, and the emitter emits `PopHandler` solely on a try body's normal fall-through — which `try { …; return x } catch e { … }` never reaches. Each function containing a `try` therefore snapshots `jade_exc_depth()` in its prologue and calls `jade_exc_restore` on every return path (explicit `Return`, `Halt`, and the implicit run-off-the-end). Miss one of those paths and a dead `jmp_buf` outlives its stack frame, which shows up as a segfault, an infinite spin, or a raise landing in the wrong handler depending on what overwrote the stack.
 
@@ -66,7 +68,7 @@ The linker line is `-L target/<profile> -ljade_runtime`, which only works becaus
 
 ```sh
 export LLVM_SYS_180_PREFIX=/opt/homebrew/opt/llvm@18   # or your install
-cargo test aot::
+cargo test aot:: codegen::
 ./target/debug/jade build examples/arithmatic/arithmetic/arithmetic.jde -o /tmp/a && /tmp/a
 ./target/debug/jade build file.jde --emit ir           # inspect the IR
 ./src/scripts/backend-parity.sh                            # diff against the VM

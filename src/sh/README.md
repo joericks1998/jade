@@ -53,7 +53,7 @@ cycle: run a command, take its stdout, feed it back in. `exec` returns a
 `JStr` and the refusal message, and `builtins::Package` to register.
 
 *Used by:* `builtins/` mounts `SH_PKG` under `std/sh`. The compiled backend does
-not go through here at all — `aot/lower/builtins.rs` lowers to `jrt_sh_exec`,
+not go through here at all — `src/codegen/builtins.rs` lowers to `jrt_sh_exec`,
 `jrt_sh_run` and `jrt_sh_output` in `runtime_aot/common.c`, which are thin
 forwarders doing the same refusal before calling the same shared implementation.
 

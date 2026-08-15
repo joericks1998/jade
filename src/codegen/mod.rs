@@ -1,4 +1,9 @@
-//! Bytecode `Instr` → LLVM IR lowering (brick 2 of the Chunk→LLVM backend).
+//! Bytecode `Chunk` → LLVM IR.
+//!
+//! The whole translation, and nothing about producing a file: `cfg` turns the
+//! flat instruction stream into basic blocks, and the rest lowers one opcode at
+//! a time. `aot/` is the caller — it resolves imports, wraps what comes out of
+//! here in a `main()`, and drives the linker.
 //!
 //! ## Model: tagged register slots
 //!
@@ -9,13 +14,11 @@
 //! than tracking a static type per register (the emitter reuses register slots
 //! across types), and LLVM's `mem2reg` + `instcombine` promote the allocas to
 //! SSA and fold the `untag(tag(x))` round-trips away, so the tag arithmetic is
-//! mostly free after optimization. Boxed floats and calls still hit the runtime
-//! (added in later bricks).
+//! mostly free after optimization. Boxed floats and calls hit the runtime.
 //!
-//! This brick handles the no-exception, no-call, no-heap subset: constant loads,
-//! `Move`, integer arithmetic, control flow, and `Return`. Unsupported opcodes
-//! return an `Err` so the daemon can fall back to the legacy `expr.rs` path
-//! while this backend grows (the migration never runs an incomplete lowering).
+//! An opcode with no lowering here returns an `Err`, which is a hard build
+//! error. There is no second backend to fall back to, so anything `emit.rs`
+//! can produce has to be handled in this directory.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
@@ -36,12 +39,11 @@ use crate::bytecode::{Chunk, CompiledFn, FStrPart, Instr, Reg};
 use crate::frontend::ast::{BinOpKind, Expr, StructFieldDef, UnaryOpKind};
 use crate::vm::VmValue;
 
-use super::cfg;
-
 mod abi;
 mod arith;
 mod builtins;
 mod calls;
+pub mod cfg;
 mod exc;
 mod instr;
 mod llm;
@@ -96,10 +98,6 @@ struct Lowerer<'a, 'ctx> {
     module: &'a Module<'ctx>,
     builder: &'a Builder<'ctx>,
     slots: &'a [PointerValue<'ctx>],
-    /// Reference-counting enabled for this program (collections-only; see
-    /// `FnCtx::refcount`). When false every rc method below is a no-op, so the
-    /// emitted IR is byte-identical to the pre-B4.2 backend.
-    refcount: bool,
     /// Parameter count of the function being lowered. Parameter slots (`0..n_params`)
     /// hold references the *caller* owns (borrowed), so scope-exit release covers
     /// only the locals (`n_params..`).
@@ -120,7 +118,7 @@ struct Lowerer<'a, 'ctx> {
     /// Whether this function is a `yield`ing stream producer. When true a
     /// `Return` discards the body's value and hands back the generator's buffer
     /// instead — that is what makes calling a generator give you a stream.
-    pub(super) is_generator: bool,
+    is_generator: bool,
     /// Scratch stack buffers a call site needs, keyed by purpose and length and
     /// allocated once in the entry block. See [`Lowerer::entry_buf`].
     entry_bufs: RefCell<HashMap<(&'static str, usize), PointerValue<'ctx>>>,
@@ -154,11 +152,7 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
     ///
     /// The alloca is emitted before the entry block's terminator with a private
     /// builder, so the caller's insertion point is untouched.
-    pub(super) fn entry_buf(
-        &self,
-        tag: &'static str,
-        n: usize,
-    ) -> Result<PointerValue<'ctx>, String> {
+    fn entry_buf(&self, tag: &'static str, n: usize) -> Result<PointerValue<'ctx>, String> {
         if let Some(p) = self.entry_bufs.borrow().get(&(tag, n)) {
             return Ok(*p);
         }
@@ -179,14 +173,6 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
         self.entry_bufs.borrow_mut().insert((tag, n), buf);
         Ok(buf)
     }
-
-    // ── Reference counting (B4.2; all no-ops unless `self.refcount`) ──────────
-
-    // ── Dynamic (Unknown-operand) ops → tag-dispatching runtime (A7) ─────────
-    // Operands are tagged words in slots, so — unlike the legacy static-SSA
-    // backend — we pass the slot words straight to the `jrt_*_any` helpers (the
-    // same decision core the VM runs via `dynop`). Arithmetic returns a tagged
-    // word; comparisons return an i32 that we fold into a bool word.
 }
 
 // ── User-function lowering (A6b) ───────────────────────────────────────────────
@@ -246,12 +232,6 @@ struct FnCtx<'ctx> {
     /// call — even when `name` happens to be a reserved module name (`let sh = []`
     /// shadows `use std::sh`). Guards `module.method` recognition against shadowing.
     user_globals: std::collections::HashSet<String>,
-    /// Whether the whole program is "collections-only" (no first-class functions,
-    /// no async): if so, every `TAG_PTR` word is guaranteed to be an `ObjHeader`
-    /// collection, so codegen emits reference-counting (incref/decref/scope-exit)
-    /// and turns the runtime's `RC_ACTIVE` on via `jrt_rc_enable`. Otherwise no rc
-    /// is emitted and heap objects leak (the pre-B4.2 behavior). See `gc.rs`.
-    refcount: bool,
 }
 
 impl<'ctx> FnCtx<'ctx> {
@@ -265,7 +245,6 @@ impl<'ctx> FnCtx<'ctx> {
             struct_field_names: HashMap::new(),
             method_candidates: HashMap::new(),
             user_globals: std::collections::HashSet::new(),
-            refcount: false,
         }
     }
 
@@ -337,32 +316,6 @@ fn build_struct_defaults(
         }
     }
     out
-}
-
-/// Whether the whole program is **refcount-safe**: every heap value it can put
-/// in a `TAG_PTR` word is header-carrying, so `jrt_incref`/`jrt_decref` (and the
-/// destructor's child cascade) can dispatch on the `ObjKind` byte at offset 8
-/// and never touch a header-less allocation.
-///
-/// This is now unconditionally true, and the scan is gone. Every `TAG_PTR`
-/// producer accounts for offset 8:
-///
-///  * collections (Array/Dict/Struct) and futures carry a real `ObjHeader`;
-///  * grammar objects carry `ObjKind::Grammar` (`grammarf.rs`);
-///  * ordinary fn boxes (`fn_box_word`) and native fn values
-///    (`emit_native_fn_value`) carry `ObjKind::Fn` there, so the refcount ops
-///    recognise them and no-op;
-///  * a prompt is not a heap kind at all — `MakePrompt` stores the underlying
-///    string, and a `TAG_STR` word is rejected by tag before any header is read.
-///
-/// It is kept as a named predicate rather than inlined as `true` so that the
-/// invariant has somewhere to live: **anything that introduces a new `TAG_PTR`
-/// value must put an `ObjKind` at offset 8, or re-introduce a veto here.** The
-/// last holdout was the native fn value, whose offset 8 held the `env` pointer —
-/// a heap address whose low byte, if it happened to be 2/3/4, would have sent
-/// `free_obj` off to reclaim it as an Array/Dict/Struct.
-fn program_collections_only(_top: &Chunk, _defs: &[Arc<CompiledFn>]) -> bool {
-    true
 }
 
 /// A lowered program: its top-level entry plus the named functions it defines.
@@ -478,7 +431,6 @@ pub fn lower_program<'ctx>(
     for d in &defs {
         collect_setglobals(&d.chunk);
     }
-    let refcount = program_collections_only(top, &defs);
     let fnctx = FnCtx {
         funcs,
         defs,
@@ -488,7 +440,6 @@ pub fn lower_program<'ctx>(
         struct_field_names,
         method_candidates,
         user_globals,
-        refcount,
     };
 
     for uid in 0..fnctx.defs.len() {
@@ -518,17 +469,17 @@ pub fn lower_program<'ctx>(
         BodyOpts { n_slots: top_n_slots, n_params: 0, is_generator: false, track_recursion: false },
     )?;
 
-    // Turn on runtime reference counting for a collections-only program, once, at
-    // the very start of `jade_toplevel` (before any collection is allocated). This
-    // flips `RC_ACTIVE` so the runtime builders retain inserted/copy-shared
-    // elements; codegen has already emitted the matching incref/decref/scope-exit
-    // under the same `fnctx.refcount` decision. See gc.rs / program_collections_only.
-    if fnctx.refcount {
+    // Turn on runtime reference counting once, at the very start of
+    // `jade_toplevel` (before any collection is allocated). This flips
+    // `RC_ACTIVE` so the runtime builders retain inserted/copy-shared elements,
+    // matching the incref/decref/scope-exit codegen has already emitted around
+    // them. See gc.rs, and rc.rs for what every heap value owes this.
+    {
         let en = module.get_function("jrt_rc_enable").unwrap_or_else(|| {
             module.add_function("jrt_rc_enable", context.void_type().fn_type(&[], false), None)
         });
         let entry =
-            top_fn.get_first_basic_block().ok_or("lower.rs: jade_toplevel has no entry block")?;
+            top_fn.get_first_basic_block().ok_or("codegen: jade_toplevel has no entry block")?;
         let eb = context.create_builder();
         match entry.get_first_instruction() {
             Some(first) => eb.position_before(&first),
@@ -564,7 +515,7 @@ pub fn lower_program<'ctx>(
             )
         });
         let entry =
-            top_fn.get_first_basic_block().ok_or("lower.rs: jade_toplevel has no entry block")?;
+            top_fn.get_first_basic_block().ok_or("codegen: jade_toplevel has no entry block")?;
         let rb = context.create_builder();
         match entry.get_first_instruction() {
             Some(first) => rb.position_before(&first),
@@ -606,7 +557,7 @@ pub fn lower_program<'ctx>(
             )
         });
         let entry =
-            top_fn.get_first_basic_block().ok_or("lower.rs: jade_toplevel has no entry block")?;
+            top_fn.get_first_basic_block().ok_or("codegen: jade_toplevel has no entry block")?;
         let rb = context.create_builder();
         match entry.get_first_instruction() {
             Some(first) => rb.position_before(&first),
@@ -744,11 +695,11 @@ fn lower_body<'ctx>(
     for i in 0..n {
         slots.push(builder.build_alloca(i64_ty, &format!("r{i}")).map_err(|e| e.to_string())?);
     }
-    // In refcount mode, nil-initialize every slot so the release-old-value logic
-    // in `store`/`store_idx` (and scope-exit `decref`) never reads uninitialized
+    // Nil-initialize every slot so the release-old-value logic in
+    // `store`/`store_idx` (and scope-exit `decref`) never reads uninitialized
     // stack: a first store releases nil (a no-op), and an unwritten slot decref's
     // nil at scope exit. Done before the param copies so params overwrite the nil.
-    if fnctx.refcount {
+    {
         let nil = i64_ty.const_int(NIL, false);
         for s in &slots {
             builder.build_store(*s, nil).map_err(|e| e.to_string())?;
@@ -853,7 +804,6 @@ fn lower_body<'ctx>(
         module,
         builder: &builder,
         slots: &slots,
-        refcount: fnctx.refcount,
         n_params,
         exc_depth_slot,
         recur_depth_slot,

@@ -65,5 +65,5 @@ not control.
 ## Who uses this
 
 The import system resolves `use std::uhttp` to `UHTTP_PKG`. The compiled backend
-never reads this directory; its half is in `src/aot/lower/builtins.rs`, and the
+never reads this directory; its half is in `src/codegen/builtins.rs`, and the
 shared transport is `src/runtime/src/uhttpf.rs`.

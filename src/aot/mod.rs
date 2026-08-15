@@ -1,12 +1,12 @@
-// Chunk→LLVM path — the sole AOT lowering. `cfg` reconstructs basic blocks from
-// the bytecode; `lower` translates each opcode into LLVM IR. `compile()` inlines
-// imports, emits a thin `main()`, and lowers the bytecode `Chunk` (the same one
-// the VM runs); an opcode it can't lower is a hard build error.
-pub mod cfg;
+// The `jade build` driver. `compile()` inlines imports, hands the bytecode
+// `Chunk` (the same one the VM runs) to `crate::codegen` for translation into
+// LLVM IR, emits a thin `main()` around the result, writes an object file and
+// drives the linker. An opcode codegen can't lower is a hard build error.
 pub mod imports;
-pub mod lower;
 
 use std::path::{Path, PathBuf};
+
+use crate::codegen;
 
 use inkwell::{
     AddressSpace, OptimizationLevel,
@@ -34,12 +34,12 @@ fn try_chunk_toplevel<'ctx>(
     context: &'ctx Context,
     module: &Module<'ctx>,
     program: &TProgram,
-) -> Result<lower::LoweredProgram<'ctx>, String> {
+) -> Result<codegen::LoweredProgram<'ctx>, String> {
     let cp = crate::compiler::emit::emit(program.clone()).map_err(|e| e.to_string())?;
     {
         let probe_ctx = Context::create();
         let probe_mod = probe_ctx.create_module("probe");
-        lower::lower_program(
+        codegen::lower_program(
             &probe_ctx,
             &probe_mod,
             &cp.top,
@@ -48,7 +48,7 @@ fn try_chunk_toplevel<'ctx>(
             &cp.extend_methods,
         )?;
     }
-    lower::lower_program(
+    codegen::lower_program(
         context,
         module,
         &cp.top,
@@ -102,7 +102,7 @@ pub fn would_build(
     let cp = crate::compiler::emit::emit(program).map_err(|e| e.to_string())?;
     let ctx = Context::create();
     let module = ctx.create_module("probe");
-    lower::lower_program(
+    codegen::lower_program(
         &ctx,
         &module,
         &cp.top,
@@ -139,7 +139,7 @@ fn emit_pkg_init<'ctx>(
     module: &Module<'ctx>,
     builder: &inkwell::builder::Builder<'ctx>,
     init_fn: inkwell::values::FunctionValue<'ctx>,
-    lowered: &lower::LoweredProgram<'ctx>,
+    lowered: &codegen::LoweredProgram<'ctx>,
     exports: &[String],
     output_path: &Path,
     deps_toml: Option<&str>,
@@ -478,7 +478,7 @@ pub fn compile_with_mode(
     // ── Native package handle globals ─────────────────────────────────────
     // One `@native_pkg$<id>: ptr = null` per dlopen'd native library, filled in
     // main's prologue below. A `__native$<id>$<fn>` reference (lowered in
-    // lower.rs) loads its handle from this by-name global.
+    // `codegen/builtins.rs`) loads its handle from this by-name global.
     for pkg in &native_pkgs {
         let pkgid = pkg.id;
         let g = module.add_global(ptr_ty, None, &format!("native_pkg${pkgid}"));

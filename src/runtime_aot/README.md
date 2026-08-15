@@ -71,7 +71,7 @@ A handle is the one payload whose ownership splits: `jade_ffi_free` releases its
 
 **Nothing in this directory formats a value for display any more.** `jrt_snprintf_float` was the last holdout and is gone: it used `"%.*g"`, which switches to exponent form exactly when a float needs trailing zeros before the decimal point, so a compiled binary printed `1e+01` for `10.0` while the VM printed `10.0`. Value text comes from `jrt_render_any` in `jade-runtime`, and a second implementation here will drift the same way. Note also that float and string text are unbounded — `1e300` is 301 digits — so neither may be formatted into a fixed scratch buffer.
 
-Any change to the tagged value layout has three homes: `runtime.h`, `jade-runtime`'s `value.rs`, and the tag arithmetic in `aot/lower.rs`.
+Any change to the tagged value layout has three homes: `runtime.h`, `jade-runtime`'s `value.rs`, and the tag arithmetic in `src/codegen/`.
 
 The exception stack (`exc_stack` / `exc_depth` in `common.c`) is `_Thread_local` and **nothing unwinds it automatically**. A `longjmp` needs its `jmp_buf` to live in a stack frame that has not returned, so the depth is scoped by codegen: `jade_exc_depth` in a function's prologue, `jade_exc_restore` on each of its return paths. `jade_exc_restore` only ever lowers the depth — raising it would resurrect a buffer whose frame is gone. If you add a path out of a lowered function, it needs the restore too.
 

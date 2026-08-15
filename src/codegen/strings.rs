@@ -1,6 +1,6 @@
 //! String literals, concatenation, comparison, and string methods.
 //!
-//! Split out of the former monolithic `lower.rs`; see this directory's README.
+//! See this directory's README.
 
 use super::*;
 
@@ -88,7 +88,7 @@ pub(super) fn emit_str_method<'ctx>(
                 .into_pointer_value();
             Ok(low.tag_ptr(p))
         }
-        _ => Err(format!("lower.rs: emit_str_method: unhandled {method}")),
+        _ => Err(format!("codegen: emit_str_method: unhandled {method}")),
     }
 }
 

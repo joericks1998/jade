@@ -472,7 +472,7 @@ pub unsafe fn destroy(fut: *mut FutureObj) {
 
 // ── AOT C-ABI surface ────────────────────────────────────────────────────────
 //
-// These keep the *shapes* the C implementations had, so `lower.rs` needs no
+// These keep the *shapes* the C implementations had, so `src/codegen/` needs no
 // change in this increment: a future is still an opaque pointer that only flows
 // to await/join. Making it a tagged, refcounted first-class value — which is
 // what finally lets `program_collections_only` stop disabling refcounting for

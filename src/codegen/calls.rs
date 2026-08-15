@@ -1,6 +1,6 @@
 //! Call resolution and emission: direct, indirect, and function boxing.
 //!
-//! Split out of the former monolithic `lower.rs`; see this directory's README.
+//! See this directory's README.
 
 use super::*;
 
@@ -603,7 +603,7 @@ pub(super) fn resolve_user_calls(
                     }
                     out.insert(i, CallKind::Spawn { uid, args: args.clone() });
                 } else {
-                    return Err("lower.rs: spawn of a non-static function".into());
+                    return Err("codegen: spawn of a non-static function".into());
                 }
                 reg_fn.remove(d);
                 reg_global.remove(d);
@@ -618,7 +618,7 @@ pub(super) fn resolve_user_calls(
                         out.insert(i, CallKind::ModuleCall { module, method, args: args.clone() });
                         skip_getfields.insert(gf_idx);
                     } else {
-                        return Err(format!("lower.rs: unsupported module call {module}.{method}"));
+                        return Err(format!("codegen: unsupported module call {module}.{method}"));
                     }
                 } else if let Some((self_reg, mname, gf_idx)) = reg_getfield.get(callee).cloned() {
                     // A method call `obj.mname(args)`. Devirtualize to the one
@@ -776,7 +776,7 @@ pub(super) fn resolve_user_calls(
                             if lowered {
                                 None
                             } else if RESERVED_BUILTINS.contains(&name.as_str()) {
-                                return Err(format!("lower.rs: unsupported builtin call `{name}`"));
+                                return Err(format!("codegen: unsupported builtin call `{name}`"));
                             } else if fnctx.struct_field_names.contains_key(name) {
                                 // A struct type is not callable — `City { .. }` is
                                 // the one way to build one. This still has to be
@@ -785,7 +785,7 @@ pub(super) fn resolve_user_calls(
                                 // would load a fn pointer from a global cell codegen
                                 // never assigns and jump through it.
                                 return Err(format!(
-                                    "lower.rs: `{name}` is a struct type, not a function — build one with `{name} {{ ... }}`"
+                                    "codegen: `{name}` is a struct type, not a function — build one with `{name} {{ ... }}`"
                                 ));
                             } else {
                                 Some(CallKind::Indirect)
@@ -843,7 +843,7 @@ pub(super) fn resolve_user_calls(
                             out.insert(i, CallKind::ModuleCall { module, method, args });
                             skip_getfields.insert(gf_idx);
                         }
-                        None => return Err("lower.rs: unsupported keyword module call".into()),
+                        None => return Err("codegen: unsupported keyword module call".into()),
                     }
                     reg_fn.remove(d);
                     reg_global.remove(d);
@@ -867,26 +867,26 @@ pub(super) fn resolve_user_calls(
                                 .params
                                 .iter()
                                 .position(|param| param == n)
-                                .ok_or_else(|| format!("lower.rs: no parameter `{n}`"))?,
+                                .ok_or_else(|| format!("codegen: no parameter `{n}`"))?,
                         };
                         if slot >= p || arg_slots[slot].is_some() {
-                            return Err("lower.rs: bad keyword-argument call".into());
+                            return Err("codegen: bad keyword-argument call".into());
                         }
                         arg_slots[slot] = Some(*reg);
                     }
                     for (i, slot) in arg_slots.iter().enumerate().take(p) {
                         if slot.is_none() && cf.defaults.get(i).and_then(|x| x.as_ref()).is_none() {
-                            return Err("lower.rs: keyword call omits a required argument".into());
+                            return Err("codegen: keyword call omits a required argument".into());
                         }
                     }
                     out.insert(i, CallKind::DirectNamed { uid, arg_slots });
                 } else if let Some(name) = reg_global.get(callee) {
                     if RESERVED_BUILTINS.contains(&name.as_str()) {
-                        return Err(format!("lower.rs: unsupported builtin kwarg call `{name}`"));
+                        return Err(format!("codegen: unsupported builtin kwarg call `{name}`"));
                     }
-                    return Err("lower.rs: indirect keyword-argument call".into());
+                    return Err("codegen: indirect keyword-argument call".into());
                 } else {
-                    return Err("lower.rs: indirect keyword-argument call".into());
+                    return Err("codegen: indirect keyword-argument call".into());
                 }
                 reg_fn.remove(d);
                 reg_global.remove(d);

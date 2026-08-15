@@ -1,40 +1,51 @@
-# `src/aot/lower/` — bytecode → LLVM IR
+# `src/codegen/` — bytecode → LLVM IR
 
 ## What this subtree is
 
-The translation itself: one LLVM IR sequence per bytecode `Instr`, plus the calls into `jade-runtime`'s `jrt_*` C-ABI surface for anything needing the heap, collections, strings, tasks, or inference. `cfg.rs` has already turned the flat instruction stream into basic blocks by the time this code runs; `aot/mod.rs` takes the module it produces and hands it to the linker.
+The translation, and only the translation: a bytecode `Chunk` in, an LLVM module out. `cfg.rs` turns the flat instruction stream into basic blocks, and the rest of the directory lowers one opcode at a time, calling into `jade-runtime`'s `jrt_*` C-ABI surface for anything that needs the heap, collections, strings, tasks, or inference.
 
-## Why it is split this way
+Nothing here writes a file, runs a linker, or knows what a project is. [`src/aot/`](../aot/README.md) does all of that: it resolves imports, calls `lower_program`, wraps the result in a `main()`, and drives `cc`.
+
+## Why it sits beside `aot` rather than inside it
+
+It used to be `src/aot/lower/`, one level down inside the backend that calls it. That put the half of `jade build` that is about *the language* underneath the half that is about *producing a file*, and the two are not related that way. Lowering is where the VM and the compiled path have to agree on what an opcode means — it is a peer of `src/vm/`, in the same sense `src/vm/` is a peer of the AOT driver. Sitting a level down made it look like an implementation detail of linking.
+
+The move also flattened one level of nesting and fixed a name: "lower" says how the code is written, "codegen" says what it produces.
+
+`cfg.rs` came along because its only consumer is the lowering. Leaving it in `aot/` would have had the two directories referencing each other in both directions; now the dependency runs one way, `aot` → `codegen`.
+
+## Why the directory is split this way
 
 Until v1.2.0 all of it was a single `lower.rs` of 5,224 lines, a third of which was one `lower_instr` match. It was the largest file in the repo by a wide margin and the only place that ignored the "one concern per file" rule the rest of the tree follows.
 
-The split is *purely mechanical*: every item moved verbatim, and the only edits were adding `pub(super)` where a call now crosses a module line. Nothing was rewritten, reordered, or optimized. That mattered, because it is what let the change be verified rather than reviewed — see "Building and testing".
+The split was *purely mechanical*: every item moved verbatim, and the only edits were adding `pub(super)` where a call now crosses a module line. Nothing was rewritten, reordered, or optimized. That mattered, because it is what let the change be verified rather than reviewed — see "Building and testing".
 
 `Lowerer` is defined in `mod.rs` and each file adds its own `impl` block, so a helper lives beside the operations that use it. The submodules are peers that call freely into one another, so `mod.rs` lifts their `pub(super)` items into the shared parent scope and each file opens with `use super::*`. That keeps every call site spelled exactly as it was written when it all lived in one file.
 
 ## What each file does
 
 - **`mod.rs`** — the tagged-value constants, `struct Lowerer` and `FnCtx`, struct-default construction, the entry-block frame layout (register slots, handler `jmp_buf`s, and `Lowerer::entry_buf` for call-site scratch buffers), and the three entry points: `lower_program` (a whole program), `lower_chunk` (one chunk, used by tests), and `lower_body` (a single function body).
+- **`cfg.rs`** — control-flow-graph reconstruction. `emit.rs` produces a flat `Vec<Instr>` with PC-relative jumps; LLVM needs basic blocks with explicit edges. This file computes block boundaries and edges and holds no LLVM state at all, so it is unit-testable in isolation.
 - **`abi.rs`** — the tagged-value ABI: int/bool/float boxing and unboxing, pointer tagging, register slot load and store, global slots. Everything else is written in terms of these.
 - **`arith.rs`** — integer, float, and bitwise arithmetic, plus the comparison family. Includes the dynamic paths (`any2`, `eq_any`, `cmp_any`) taken when a register's type is not statically known.
 - **`strings.rs`** — string literals and interning, concatenation, ordering, and the primitive string methods.
-- **`rc.rs`** — reference counting: `incref`, `decref`, `retain`, slot replacement, and scope exit.
-- **`exc.rs`** — exception frames: `throw`, the `setjmp` shim, and frame push/pop. Read the handler-stack gotcha in `../README.md` before touching it.
+- **`rc.rs`** — reference counting: `incref`, `decref`, `retain`, slot replacement, and scope exit. Its header carries the invariant every new `TAG_PTR` value has to satisfy; read it before adding one.
+- **`exc.rs`** — exception frames: `throw`, the `setjmp` shim, and frame push/pop. Read the handler-stack gotcha in [`../aot/README.md`](../aot/README.md) before touching it.
 - **`calls.rs`** — call resolution and emission. `resolve_user_calls` decides, per call site, which `CallKind` applies (direct, method, module, native, spawn, stream); the emission side covers indirect calls and function boxing.
 - **`builtins.rs`** — builtin dispatch: native package calls, stdlib module calls, primitive value methods, and runtime-dispatched struct methods. The `chunk_*_supported` predicates that gate them live here too.
-- **`llm.rs`** — prompt values and dereferences, including the `stream(?p)` lowering. The smallest file, and the one the 1.2.0 streaming work will grow.
-- **`instr.rs`** — the `lower_instr` match. Now a dispatcher: each arm either inlines a couple of lines or delegates to one of the files above.
-- **`tests.rs`** — the backend's unit tests, moved verbatim.
+- **`llm.rs`** — prompt values and dereferences, including the `stream(?p)` lowering. The smallest file.
+- **`instr.rs`** — the `lower_instr` match. A dispatcher: each arm either inlines a couple of lines or delegates to one of the files above.
+- **`tests.rs`** — unit tests, which assert against emitted IR.
 
 ## Who uses it
 
-*Depends on:* `bytecode/` for the instruction set, `vm::VmValue` for compile-time constants, `frontend::ast` for struct-default expressions, `aot::cfg` for basic blocks, and `inkwell` for LLVM.
+*Depends on:* `bytecode/` for the instruction set, `vm::VmValue` for compile-time constants, `frontend::ast` for struct-default expressions, and `inkwell` for LLVM.
 
-*Used by:* `aot/mod.rs` only, through `lower_program`.
+*Used by:* `aot/mod.rs` only, through `lower_program` and `LoweredProgram`.
 
 ## Gotchas
 
-**The gotchas that matter here are in the parent's README**, not this one: refcount ownership on borrowed value words, `jrt_require_kind` before untagging a receiver, the thread-wide handler stack, and the rule that any new opcode or builtin must be lowered here or the two engines quietly disagree. Read [`../README.md`](../README.md) before editing.
+**Several of the gotchas that matter here are in the caller's README**, not this one: refcount ownership on borrowed value words, `jrt_require_kind` before untagging a receiver, the thread-wide handler stack, and the rule that any new opcode or builtin must be lowered here or the two engines quietly disagree. Read [`../aot/README.md`](../aot/README.md) before editing.
 
 **A buffer a call site needs goes in the entry block, because the lowered code puts calls inside loops.** A call that marshals its arguments into memory needs somewhere to put them, and the obvious spelling — an `alloca` right where the call is emitted — is wrong. LLVM does not reclaim an `alloca` until the function returns, so a call inside a loop walks the stack down once per iteration until it hits the guard page. An FFI call in a `while` loop died at a fixed iteration count for exactly that reason, and the count scaled with `ulimit -s`, which is what named it stack exhaustion rather than a leak or an index overflow. The argv buffers for a native call, an indirect call, a `Spawn`, and a `Join` all had it; the `jmp_buf` for a `try` never did, and its comment in `lower_body` is where the rule was already written down. `Lowerer::entry_buf` is the one way to ask for such a buffer now, and it hands the same buffer to every site that wants the same purpose and length — safe because each site fills its buffer from register slots (plain loads, no call) and hands it straight to the call that consumes it, so no two are ever live at once. Two buffers a single callee reads and writes together, like `Join`'s futures and results, must ask under different names.
 
@@ -51,7 +62,7 @@ The split is *purely mechanical*: every item moved verbatim, and the only edits 
 ## Building and testing
 
 ```sh
-cargo test aot::
+cargo test codegen::
 ./src/scripts/backend-parity.sh
 ```
 
@@ -64,4 +75,4 @@ done
 # ... make the change, rebuild, emit again into after/, then diff the two trees
 ```
 
-For a refactor that is meant to be behavior-preserving, every file should come out byte-identical. That is how the original split was verified: 71 of the 74 examples emit IR, all 71 were unchanged, and the parity gate stayed at 68 ok / 6 skipped / 0 failed.
+For a refactor that is meant to be behavior-preserving, every file should come out byte-identical. That is how both the original split and the move out of `aot/` were verified: 88 of the 95 examples emit IR, all 88 were unchanged, and the parity gate stayed at 86 ok / 10 skipped / 0 failed.

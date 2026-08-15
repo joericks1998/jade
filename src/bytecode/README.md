@@ -21,10 +21,10 @@ The instructions are largely *monomorphic* — `AddInt` and `AddFloat` rather th
 
 *Depends on:* `frontend/` for `BinOpKind`, `UnaryOpKind`, and `Span`; `vm::VmValue` for the constants stored in `CompiledFn::defaults`.
 
-*Used by:* `compiler/emit.rs` writes chunks. `vm/dispatch.rs` decodes and runs them. `aot/cfg.rs` reconstructs a control-flow graph from the flat instruction stream and `aot/lower.rs` translates each opcode into LLVM IR.
+*Used by:* `compiler/emit.rs` writes chunks. `vm/dispatch.rs` decodes and runs them. `codegen/cfg.rs` reconstructs a control-flow graph from the flat instruction stream and the rest of `codegen/` translates each opcode into LLVM IR.
 
 ## Gotchas
 
-Adding an opcode is a three-place change: emit it in `compiler/emit.rs`, interpret it in `vm/dispatch.rs`, and lower it in `aot/lower.rs`. **The AOT backend treats an opcode it cannot lower as a hard build error** — there is no fallback path — so skipping the third step breaks `jade build` for any program that reaches the new instruction.
+Adding an opcode is a three-place change: emit it in `compiler/emit.rs`, interpret it in `vm/dispatch.rs`, and lower it in `src/codegen/`. **The AOT backend treats an opcode it cannot lower as a hard build error** — there is no fallback path — so skipping the third step breaks `jade build` for any program that reaches the new instruction.
 
 The jump-offset convention is easy to get wrong by one. Use `patch_jump` rather than computing offsets by hand.
