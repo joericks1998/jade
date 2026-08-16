@@ -168,6 +168,17 @@ pub(super) fn emit_str_method<'ctx>(
                 .into_pointer_value();
             Ok(low.tag_str(r))
         }
+        // (s) -> a new array of lines. Same shape as split, minus the
+        // separator; a trailing newline yields no empty final element.
+        "lines" => {
+            let f = low.runtime_fn("jrt_coll_str_lines", ptrt.fn_type(&[ptrt.into()], false));
+            let p = b
+                .build_call(f, &[sp(recv).into()], "lines")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_pointer_value();
+            Ok(low.tag_ptr(p))
+        }
         "split" => {
             // (s, sep) -> new array of substrings (tagged ptr).
             let f = low

@@ -179,9 +179,9 @@ pub fn primitive_method_arity(method: &str) -> Option<usize> {
         "len" | "upper" | "lower" | "trim" | "encode" | "pop" | "sort" | "reverse" | "keys"
         | "values" | "decode" => 0,
         "split" | "contains" | "starts_with" | "ends_with" | "push" | "map" | "filter" | "has"
-        | "get" | "merge" | "index_of" | "last_index_of" | "count" | "repeat" => 1,
+        | "get" | "merge" | "index_of" | "last_index_of" | "count" | "repeat" | "join" => 1,
         "replace" | "slice" | "pad_start" | "pad_end" => 2,
-        "trim_start" | "trim_end" | "capitalize" | "is_empty" => 0,
+        "trim_start" | "trim_end" | "capitalize" | "is_empty" | "lines" => 0,
         _ => return None,
     })
 }

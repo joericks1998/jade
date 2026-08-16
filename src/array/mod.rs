@@ -72,6 +72,42 @@ fn arr_reverse(args: &[VmValue]) -> Result<VmValue> {
     }
 }
 
+/// `a.join(sep)` — the elements rendered and joined.
+///
+/// Non-string elements render the way `print` renders them, so
+/// `[1, 2].join("-")` is `"1-2"` rather than an error. Trust is the union of
+/// every part's: joining a tainted string into a literal separator must not
+/// launder it.
+///
+/// It lives on `std::array` rather than `std::string` because a package
+/// function's first argument is the type the package is named for — the rule
+/// the codegen bridge between the two spellings depends on.
+fn arr_join(args: &[VmValue]) -> Result<VmValue> {
+    match (&args[0], args.get(1)) {
+        (VmValue::Array(arc), Some(VmValue::Str(sep))) => {
+            let guard = arc.lock();
+            let mut trust = sep.trust();
+            let mut parts: Vec<String> = Vec::with_capacity(guard.len());
+            for v in guard.iter() {
+                if let VmValue::Str(s) = v {
+                    trust = jade_runtime::trust::combine(trust, s.trust());
+                }
+                parts.push(crate::vm::value_to_display(v));
+            }
+            let joined = parts.join(sep.as_str());
+            Ok(VmValue::Str(match jade_runtime::trust::is_tainted(trust) {
+                true => jade_runtime::trust::JStr::tainted(joined),
+                false => jade_runtime::trust::JStr::trusted(joined),
+            }))
+        }
+        _ => Err(JadeError::TypeError { message: "array.join".to_string(), span: ZERO }),
+    }
+}
+
+fn pkg_join(args: &[VmValue]) -> Result<VmValue> {
+    arr_join(args)
+}
+
 pub(crate) static ARRAY_METHODS: &[BuiltinFn] = &[
     BuiltinFn { name: "len", vm_impl: arr_len },
     BuiltinFn { name: "push", vm_impl: arr_push },
@@ -79,6 +115,7 @@ pub(crate) static ARRAY_METHODS: &[BuiltinFn] = &[
     BuiltinFn { name: "contains", vm_impl: arr_contains },
     BuiltinFn { name: "sort", vm_impl: arr_sort },
     BuiltinFn { name: "reverse", vm_impl: arr_reverse },
+    BuiltinFn { name: "join", vm_impl: arr_join },
 ];
 
 pub fn find_array_method(name: &str) -> Option<BuiltinFn> {
@@ -131,6 +168,7 @@ static ARRAY_PKG_FNS: &[BuiltinFn] = &[
     BuiltinFn { name: "filter", vm_impl: pkg_filter },
     BuiltinFn { name: "sort", vm_impl: pkg_sort },
     BuiltinFn { name: "reverse", vm_impl: pkg_reverse },
+    BuiltinFn { name: "join", vm_impl: pkg_join },
 ];
 
 fn register_array_pkg_types(ctx: &mut TypeContext) {

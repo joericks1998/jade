@@ -223,6 +223,25 @@ fn pkg_pad_end(args: &[VmValue]) -> Result<VmValue> {
     str_pad_end(args)
 }
 
+/// `s.lines()` — split on newlines, tolerating both line endings.
+///
+/// A trailing newline does not produce an empty final element, which is the
+/// difference from `split("\n")` and the whole point: a file read off disk
+/// almost always ends in one, and `split` gives a phantom empty line every time.
+fn str_lines(args: &[VmValue]) -> Result<VmValue> {
+    match &args[0] {
+        VmValue::Str(s) => {
+            let parts: Vec<VmValue> = s.lines().map(|l| VmValue::Str(s.derive(l))).collect();
+            Ok(make_array(parts))
+        }
+        _ => Err(JadeError::TypeError { message: "str.lines".to_string(), span: ZERO }),
+    }
+}
+
+fn pkg_lines(args: &[VmValue]) -> Result<VmValue> {
+    str_lines(args)
+}
+
 pub(crate) static STR_METHODS: &[BuiltinFn] = &[
     BuiltinFn { name: "encode", vm_impl: str_encode },
     BuiltinFn { name: "len", vm_impl: str_len },
@@ -245,6 +264,7 @@ pub(crate) static STR_METHODS: &[BuiltinFn] = &[
     BuiltinFn { name: "repeat", vm_impl: str_repeat },
     BuiltinFn { name: "pad_start", vm_impl: str_pad_start },
     BuiltinFn { name: "pad_end", vm_impl: str_pad_end },
+    BuiltinFn { name: "lines", vm_impl: str_lines },
 ];
 
 pub fn find_str_method(name: &str) -> Option<BuiltinFn> {
@@ -340,6 +360,7 @@ static STRING_PKG_FNS: &[BuiltinFn] = &[
     BuiltinFn { name: "repeat", vm_impl: pkg_repeat },
     BuiltinFn { name: "pad_start", vm_impl: pkg_pad_start },
     BuiltinFn { name: "pad_end", vm_impl: pkg_pad_end },
+    BuiltinFn { name: "lines", vm_impl: pkg_lines },
 ];
 
 fn register_string_pkg_types(ctx: &mut TypeContext) {
@@ -387,6 +408,7 @@ pub fn register_str_method_types(ctx: &mut TypeContext) {
         ("slice", JadeType::Fn { params: vec![JadeType::Int, JadeType::Int], ret: ret_str() }),
         ("pad_start", JadeType::Fn { params: vec![JadeType::Int, JadeType::Str], ret: ret_str() }),
         ("pad_end", JadeType::Fn { params: vec![JadeType::Int, JadeType::Str], ret: ret_str() }),
+        ("lines", JadeType::Fn { params: vec![], ret: ret_arr() }),
     ];
     for (name, ty) in methods {
         ctx.define_primitive_method("str", name, ty.clone());

@@ -214,6 +214,12 @@ pub(super) fn chunk_module_supported(module: &str, method: &str, argc: usize) ->
         ("array", "map" | "filter") => argc == 2,
         // The functional style: a sorted/reversed copy, not the in-place method.
         ("array", "sort" | "reverse") => argc == 1,
+        // Unlike sort/reverse, `join` is pure — the two spellings really are the
+        // same function, so this lowers to the symbol the method uses. It gets
+        // an explicit arm rather than going through `package_fn_is_the_method`
+        // because that bridge deliberately excludes `std::array`, whose other
+        // package functions are *not* their methods.
+        ("array", "join") => argc == 2,
         ("random", "int") => argc == 2,
         ("random", "seed") => argc == 1,
         ("random", "float") => argc == 0,
@@ -232,6 +238,7 @@ pub(super) fn chunk_str_method_supported(method: &str, argc: usize) -> bool {
     match method {
         "trim" | "upper" | "lower" | "encode" => argc == 0,
         "trim_start" | "trim_end" | "capitalize" | "is_empty" => argc == 0,
+        "lines" => argc == 0,
         "starts_with" | "ends_with" => argc == 1,
         "index_of" | "last_index_of" | "count" | "repeat" => argc == 1,
         "replace" => argc == 2,
@@ -249,6 +256,7 @@ pub(super) fn chunk_val_method_supported(method: &str, argc: usize) -> bool {
         "push" => argc == 1,                     // array
         "pop" | "sort" | "reverse" => argc == 0, // array
         "map" | "filter" => argc == 1,           // array
+        "join" => argc == 1,                     // array
         "keys" | "values" => argc == 0,          // dict
         "has" | "get" => argc == 1,              // dict
         "contains" => argc == 1,                 // str / array (runtime-dispatched)
@@ -498,7 +506,7 @@ pub(super) fn emit_val_method<'ctx>(
     // / `jrt_in_any`, which dispatch on the tag themselves and are already safe
     // on a scalar. Every other arm untags to a pointer and trusts the kind.
     match method {
-        "push" | "pop" | "sort" | "reverse" | "map" | "filter" => {
+        "push" | "pop" | "sort" | "reverse" | "map" | "filter" | "join" => {
             low.require_kind(low.load(recv), WANT_ARRAY, method)?
         }
         "keys" | "values" | "has" | "get" => low.require_kind(low.load(recv), WANT_DICT, method)?,
@@ -521,6 +529,22 @@ pub(super) fn emit_val_method<'ctx>(
                 .map_err(err)?
                 .as_any_value_enum()
                 .into_int_value())
+        }
+        // (arr, sep) -> a tagged string. Trust is the union of the parts', so
+        // joining a tainted element into a literal separator does not launder
+        // it — the runtime does that fold, not this arm.
+        "join" => {
+            let f = low.runtime_fn(
+                "jrt_coll_array_join",
+                ptrt.fn_type(&[ptrt.into(), ptrt.into()], false),
+            );
+            let sep = low.untag_ptr(low.load(args[0]));
+            let r = b
+                .build_call(f, &[recv_p.into(), sep.into()], "join")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_pointer_value();
+            Ok(low.tag_str(r))
         }
         // ── bytes ─────────────────────────────────────────────────────────
         // Both untag the receiver to a BytesObj pointer. `decode` goes through
@@ -915,6 +939,18 @@ pub(super) fn emit_module_call<'ctx>(
                 .map_err(err)?
                 .as_any_value_enum()
                 .into_int_value())
+        }
+        ("array", "join") => {
+            let f = low.runtime_fn(
+                "jrt_coll_array_join",
+                ptrt.fn_type(&[ptrt.into(), ptrt.into()], false),
+            );
+            let r = b
+                .build_call(f, &[strp(0).into(), strp(1).into()], "join")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_pointer_value();
+            Ok(low.tag_str(r))
         }
         ("array", "sort" | "reverse") => {
             // (arr) -> a NEW array word. Deliberately not the in-place symbol
