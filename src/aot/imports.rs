@@ -54,6 +54,7 @@ use std::path::{Path, PathBuf};
 
 use crate::compiler::tir::{JadeType, TExpr, TExprKind, TFStrPart, TStmt};
 use crate::frontend::ast::{Expr, FStrPart, StructFieldDef};
+use crate::frontend::error::{JadeError, Span};
 
 /// Mangle a module-global `name` into module `id`'s namespace.
 fn mangle(name: &str, id: u32) -> String {
@@ -81,7 +82,7 @@ fn is_stdlib(path: &str) -> bool {
 pub fn resolve_and_namespace(
     stmts: Vec<TStmt>,
     source_path: &Path,
-) -> Result<ResolvedImports, String> {
+) -> Result<ResolvedImports, ResolveError> {
     let main_canon =
         source_path.canonicalize().map_err(|e| format!("{}: {e}", source_path.display()))?;
     let main_dir = main_canon.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
@@ -96,6 +97,7 @@ pub fn resolve_and_namespace(
         .and_then(|r| crate::project::load_project(&r).ok().map(|m| (r, m)))
     {
         reg.libraries = crate::pkg::resolved_libraries(&root, &manifest);
+        reg.dep_symbols = declared_c_symbols(&manifest);
         reg.lib_root = Some(root);
     }
 
@@ -113,6 +115,41 @@ pub fn resolve_and_namespace(
     let mut out = reg.out;
     out.extend(main_stmts);
     Ok(ResolvedImports { stmts: out, libs_root, native_pkgs: reg.native_pkgs })
+}
+
+/// Why import resolution failed.
+///
+/// The two cases need telling apart because `aot::would_build` probes a program
+/// and must stay quiet about the first: an import that does not resolve means a
+/// dependency has not been installed yet, and `check_imports` already says so in
+/// words that name the real problem.
+///
+/// A `Program` error is the opposite. Nothing else reports it, so swallowing it
+/// is exactly how a mistyped FFI symbol used to reach run time — `jade check`
+/// probed the build, threw the answer away, and reported `ok`.
+#[derive(Debug)]
+pub enum ResolveError {
+    /// An import did not name anything on disk.
+    Unresolved(String),
+    /// The program is wrong in a way this pass can see.
+    Program(String),
+}
+
+impl std::fmt::Display for ResolveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            ResolveError::Unresolved(m) | ResolveError::Program(m) => write!(f, "{m}"),
+        }
+    }
+}
+
+/// Anything reported as a bare string is a resolution failure. The program
+/// errors are raised explicitly, at the two places that can find one, so `?` on
+/// the path-resolving helpers keeps meaning what it always did.
+impl From<String> for ResolveError {
+    fn from(m: String) -> Self {
+        ResolveError::Unresolved(m)
+    }
 }
 
 /// What one resolution pass produced.
@@ -151,6 +188,18 @@ struct Registry {
     native_ids: HashMap<PathBuf, u32>,
     native_next_id: u32,
     native_pkgs: Vec<NativePkg>,
+    /// Declared C-ABI symbols by dependency name, from
+    /// `[dependencies.<name>.symbols]` in the project's `jade.toml`.
+    ///
+    /// Only `abi = "c"` dependencies appear. A Jade-ABI package declares its
+    /// exports in *its own* project, which this manifest cannot see — so there
+    /// is nothing here to check it against, and checking it against an empty set
+    /// would reject every call it has ever served.
+    dep_symbols: HashMap<String, HashSet<String>>,
+    /// The same sets, keyed by the pkgid the import was assigned. This is the
+    /// form the renamer needs, since an alias resolves to a pkgid and not to a
+    /// dependency name.
+    native_symbols: HashMap<u32, HashSet<String>>,
 }
 
 /// A native package the artifact will load at startup.
@@ -191,6 +240,8 @@ impl Registry {
             native_ids: HashMap::new(),
             native_next_id: 0,
             native_pkgs: Vec::new(),
+            dep_symbols: HashMap::new(),
+            native_symbols: HashMap::new(),
         }
     }
 
@@ -202,13 +253,21 @@ impl Registry {
 
     /// Assign (or reuse) the pkgid for a native library's canonical path,
     /// recording what codegen's startup loader needs to find it again.
-    fn native_pkg_id(&mut self, canon: &Path) -> u32 {
+    ///
+    /// `import_path` is the `use` path that reached this library, which is also
+    /// the dependency's name in `jade.toml` — that is how the declared symbol
+    /// table finds its way to the pkgid the renamer will look up.
+    fn native_pkg_id(&mut self, canon: &Path, import_path: &str) -> u32 {
         if let Some(&id) = self.native_ids.get(canon) {
             return id;
         }
         let id = self.native_next_id;
         self.native_next_id += 1;
         self.native_ids.insert(canon.to_path_buf(), id);
+        // A native library has no submodules, so the whole path is the name.
+        if let Some(symbols) = self.dep_symbols.get(import_path) {
+            self.native_symbols.insert(id, symbols.clone());
+        }
         self.native_pkgs.push(NativePkg {
             id,
             rel: self.libs_relative(canon),
@@ -240,7 +299,7 @@ impl Registry {
 }
 
 /// Parse + type-infer an imported file, returning its TIR statements.
-fn parse_and_infer(canon: &Path) -> Result<Vec<TStmt>, String> {
+fn parse_and_infer(canon: &Path) -> Result<Vec<TStmt>, ResolveError> {
     let src =
         std::fs::read_to_string(canon).map_err(|e| format!("import '{}': {e}", canon.display()))?;
     let tokens = crate::frontend::lexer::tokenize(&src).map_err(|e| e.to_string())?;
@@ -273,7 +332,7 @@ fn collect_globals(stmts: &[TStmt]) -> (HashSet<String>, HashSet<String>) {
 
 /// Ensure `dep_canon` is loaded: parse, assign an id, record its globals, mangle
 /// its body, and append it to `reg.out`. Idempotent (diamond imports inline once).
-fn load_dep(reg: &mut Registry, dep_canon: &Path) -> Result<(), String> {
+fn load_dep(reg: &mut Registry, dep_canon: &Path) -> Result<(), ResolveError> {
     if reg.loaded.contains(dep_canon) {
         return Ok(());
     }
@@ -305,7 +364,7 @@ fn process_file(
     self_id: Option<u32>,
     self_values: HashSet<String>,
     self_types: HashSet<String>,
-) -> Result<Vec<TStmt>, String> {
+) -> Result<Vec<TStmt>, ResolveError> {
     let mut aliases: HashMap<String, (u32, HashSet<String>, HashSet<String>)> = HashMap::new();
     let mut from_value: HashMap<String, String> = HashMap::new();
     let mut from_type: HashMap<String, String> = HashMap::new();
@@ -326,7 +385,7 @@ fn process_file(
                 }
                 match resolve_use(reg, dir, &path)? {
                     Resolved::Native(canon) => {
-                        let pkgid = reg.native_pkg_id(&canon);
+                        let pkgid = reg.native_pkg_id(&canon, &path);
                         let alias = as_name.unwrap_or_else(|| stem(&path));
                         native_aliases.insert(alias, pkgid);
                         // No body to inline — the lib is dlopen'd at runtime.
@@ -350,7 +409,24 @@ fn process_file(
                 }
                 match resolve_use(reg, dir, &path)? {
                     Resolved::Native(canon) => {
-                        let pkgid = reg.native_pkg_id(&canon);
+                        let pkgid = reg.native_pkg_id(&canon, &path);
+                        // The name is right here, so an undeclared one is caught
+                        // now rather than waiting for a reference to it.
+                        if let Some(declared) = reg.native_symbols.get(&pkgid) {
+                            for n in &names {
+                                if !declared.contains(n) {
+                                    return Err(ResolveError::Program(
+                                        JadeError::UnknownFfiSymbol {
+                                            module: path.clone(),
+                                            symbol: n.clone(),
+                                            suggestion: closest_symbol(n, declared.iter()),
+                                            span,
+                                        }
+                                        .to_string(),
+                                    ));
+                                }
+                            }
+                        }
                         for n in &names {
                             native_from.insert(n.clone(), pkgid);
                         }
@@ -384,10 +460,18 @@ fn process_file(
         from_type,
         native_aliases,
         native_from,
+        native_symbols: reg.native_symbols.clone(),
+        errors: Vec::new(),
         locals: Vec::new(),
     };
     for s in kept.iter_mut() {
         renamer.rename_stmt(s, true);
+    }
+    // Report the first undeclared FFI symbol, in source order. One at a time
+    // rather than all of them: they are usually the same typo, and the message
+    // names the fix.
+    if let Some(first) = renamer.errors.into_iter().next() {
+        return Err(ResolveError::Program(first));
     }
     Ok(kept)
 }
@@ -431,6 +515,65 @@ fn stem(path: &str) -> String {
     Path::new(path).file_stem().and_then(|s| s.to_str()).unwrap_or(path).to_string()
 }
 
+/// Every `abi = "c"` dependency's declared symbol names, by dependency name.
+///
+/// A dependency with an empty table is skipped rather than recorded as an empty
+/// set: the two mean different things here, and an empty set would reject every
+/// call into it. `[symbols]` is required for `abi = "c"`, so an empty one means
+/// a manifest still being filled in, not a library with no functions.
+fn declared_c_symbols(
+    manifest: &crate::project::ProjectManifest,
+) -> HashMap<String, HashSet<String>> {
+    let Some(deps) = &manifest.dependencies else { return HashMap::new() };
+    deps.iter()
+        .filter(|(_, d)| d.abi == crate::project::Abi::C)
+        // A `[lib.<name>]` of the same name wins the import (see
+        // `pkg::resolved_libraries`), so the dependency's table describes a
+        // library this build is not using. Checking against it would reject
+        // calls into whatever the `[lib]` actually points at.
+        .filter(|(name, _)| !manifest.lib.as_ref().is_some_and(|l| l.contains_key(*name)))
+        .filter_map(|(name, d)| {
+            let symbols = d.symbols.as_ref()?;
+            if symbols.is_empty() {
+                return None;
+            }
+            Some((name.clone(), symbols.keys().cloned().collect()))
+        })
+        .collect()
+}
+
+/// The declared symbol closest to `wanted`, when one is close enough to name.
+///
+/// Bounded edit distance rather than a prefix match, because the mistakes this
+/// catches are typos and stale names — `jade_gfx_key_press` for
+/// `jade_gfx_key_pressed` — which share a prefix with half the table. The
+/// threshold scales with the name's length so a short symbol cannot match
+/// something unrelated, and a long one still tolerates a dropped word.
+fn closest_symbol<'a>(wanted: &str, declared: impl Iterator<Item = &'a String>) -> Option<String> {
+    let budget = (wanted.len() / 3).clamp(1, 8);
+    declared
+        .map(|s| (edit_distance(wanted, s), s))
+        .filter(|(d, _)| *d <= budget)
+        .min_by_key(|(d, s)| (*d, s.len()))
+        .map(|(_, s)| s.clone())
+}
+
+/// Levenshtein distance, two rows at a time.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        cur[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let substitute = prev[j] + usize::from(ca != cb);
+            cur[j + 1] = substitute.min(prev[j + 1] + 1).min(cur[j] + 1);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
 // ── Renamer ───────────────────────────────────────────────────────────────────
 
 /// Walks one module's statements, mangling references to module-globals (its own,
@@ -449,6 +592,16 @@ struct Renamer {
     /// name → pkgid. References through these rewrite to `__native$<pkgid>$<fn>`.
     native_aliases: HashMap<String, u32>,
     native_from: HashMap<String, u32>,
+    /// pkgid → the symbols that package's `[symbols]` table declares. A pkgid
+    /// that is absent is one with nothing to check against, and its references
+    /// pass through as they always did.
+    native_symbols: HashMap<u32, HashSet<String>>,
+    /// Undeclared symbols found while renaming, reported after the walk.
+    ///
+    /// Collected rather than returned because renaming a tree cannot fail — the
+    /// walk has no `Result` to thread an error back through, and giving it one
+    /// would touch every arm to carry a case that only this check produces.
+    errors: Vec<String>,
     /// Lexical local-binding stack; an identifier shadowed here is never mangled.
     locals: Vec<HashSet<String>>,
 }
@@ -494,11 +647,30 @@ impl Renamer {
 
     /// Resolve `alias.field` where `alias` is a native package import → the
     /// canonical `__native$<pkgid>$<field>` ref, unless `alias` is shadowed.
-    fn ref_native_qual(&self, alias: &str, field: &str) -> Option<String> {
+    ///
+    /// This is also where a call into a C-ABI dependency is checked against the
+    /// symbols its manifest declares. Its `.jde` sibling [`ref_value_qual`] has
+    /// always asked whether the module exports the field; the native path never
+    /// did, which is the whole reason a mistyped symbol reached run time.
+    fn ref_native_qual(&mut self, alias: &str, field: &str, span: Span) -> Option<String> {
         if self.is_shadowed(alias) {
             return None;
         }
-        self.native_aliases.get(alias).map(|id| native_ref(*id, field))
+        let id = *self.native_aliases.get(alias)?;
+        if let Some(declared) = self.native_symbols.get(&id)
+            && !declared.contains(field)
+        {
+            self.errors.push(
+                JadeError::UnknownFfiSymbol {
+                    module: alias.to_string(),
+                    symbol: field.to_string(),
+                    suggestion: closest_symbol(field, declared.iter()),
+                    span,
+                }
+                .to_string(),
+            );
+        }
+        Some(native_ref(id, field))
     }
 
     /// Resolve a bare `from lib use name` native binding → `__native$<pkgid>$<name>`,
@@ -780,15 +952,19 @@ impl Renamer {
 
         // `alias.foo` → `foo$<id>` (.jde) or `__native$<pkgid>$foo` (native),
         // before walking children so the bare alias isn't independently rewritten.
-        let collapse = if let TExprKind::FieldAccess { object, field } = &e.kind {
-            if let TExprKind::Identifier(alias) = &object.kind {
-                self.ref_native_qual(alias, field).or_else(|| self.ref_value_qual(alias, field))
-            } else {
-                None
-            }
-        } else {
-            None
+        // Cloned rather than borrowed: the native arm reports an undeclared
+        // symbol, so it needs `&mut self` while `e.kind` is still in hand.
+        let qualified = match &e.kind {
+            TExprKind::FieldAccess { object, field } => match &object.kind {
+                TExprKind::Identifier(alias) => Some((alias.clone(), field.clone())),
+                _ => None,
+            },
+            _ => None,
         };
+        let collapse = qualified.and_then(|(alias, field)| {
+            self.ref_native_qual(&alias, &field, e.span)
+                .or_else(|| self.ref_value_qual(&alias, &field))
+        });
         if let Some(m) = collapse {
             e.kind = TExprKind::Identifier(m);
             return;
@@ -907,17 +1083,20 @@ impl Renamer {
 
     fn rename_ast_expr(&mut self, e: &mut Expr) {
         // `alias.foo` collapse (native + .jde), same as the TIR path.
-        let repl = if let Expr::FieldAccess { object, field, span } = &*e {
-            if let Expr::Identifier { name: alias, .. } = object.as_ref() {
-                self.ref_native_qual(alias, field)
-                    .or_else(|| self.ref_value_qual(alias, field))
-                    .map(|m| (m, *span))
-            } else {
-                None
-            }
-        } else {
-            None
+        // Cloned for the same reason as the TIR path: the native arm needs
+        // `&mut self` to report an undeclared symbol.
+        let qualified = match &*e {
+            Expr::FieldAccess { object, field, span } => match object.as_ref() {
+                Expr::Identifier { name: alias, .. } => Some((alias.clone(), field.clone(), *span)),
+                _ => None,
+            },
+            _ => None,
         };
+        let repl = qualified.and_then(|(alias, field, span)| {
+            self.ref_native_qual(&alias, &field, span)
+                .or_else(|| self.ref_value_qual(&alias, &field))
+                .map(|m| (m, span))
+        });
         if let Some((m, span)) = repl {
             *e = Expr::Identifier { name: m, span };
             return;
@@ -1019,6 +1198,8 @@ mod tests {
             from_type: HashMap::new(),
             native_aliases: HashMap::new(),
             native_from: HashMap::new(),
+            native_symbols: HashMap::new(),
+            errors: Vec::new(),
             locals: Vec::new(),
         }
     }
@@ -1058,9 +1239,12 @@ mod tests {
     fn native_alias_qual_rewrites() {
         let mut r = renamer(None, &[]);
         r.native_aliases.insert("m".to_string(), 0);
-        assert_eq!(r.ref_native_qual("m", "add").as_deref(), Some("__native$0$add"));
+        assert_eq!(
+            r.ref_native_qual("m", "add", Span { line: 1, col: 1 }).as_deref(),
+            Some("__native$0$add")
+        );
         // a non-native alias is left to the .jde path (None here)
-        assert_eq!(r.ref_native_qual("other", "add"), None);
+        assert_eq!(r.ref_native_qual("other", "add", Span { line: 1, col: 1 }), None);
     }
 
     // A `from lib use add` native binding rewrites a bare `add` ref.
@@ -1080,7 +1264,7 @@ mod tests {
         r.push_scope();
         r.bind_local("m");
         r.bind_local("add");
-        assert_eq!(r.ref_native_qual("m", "add"), None);
+        assert_eq!(r.ref_native_qual("m", "add", Span { line: 1, col: 1 }), None);
         assert_eq!(r.ref_native_value("add"), None);
     }
 
@@ -1093,5 +1277,241 @@ mod tests {
         assert_eq!(r.ref_type("Local").as_deref(), Some("Local$7"));
         // and the imported bare name still resolves to the import, not self
         assert_eq!(r.ref_type("ToolGroup").as_deref(), Some("ToolGroup$3"));
+    }
+}
+
+#[cfg(test)]
+mod ffi_symbol_tests {
+    use super::*;
+    use crate::project::{Abi, CSymbol, DependencyEntry, LibraryEntry, ProjectManifest};
+
+    const SPAN: Span = Span { line: 4, col: 7 };
+
+    fn sym() -> CSymbol {
+        CSymbol { args: vec![], ret: "int".to_string(), fails_when: None, frees_with: None }
+    }
+
+    /// A renamer holding one native import under `gfx` (pkgid 0) that declares
+    /// exactly `names`.
+    fn native_renamer(names: &[&str]) -> Renamer {
+        let mut native_aliases = HashMap::new();
+        native_aliases.insert("gfx".to_string(), 0u32);
+        let mut native_symbols = HashMap::new();
+        native_symbols.insert(0u32, names.iter().map(|s| s.to_string()).collect::<HashSet<_>>());
+        Renamer {
+            self_id: None,
+            self_values: HashSet::new(),
+            self_types: HashSet::new(),
+            aliases: HashMap::new(),
+            from_value: HashMap::new(),
+            from_type: HashMap::new(),
+            native_aliases,
+            native_from: HashMap::new(),
+            native_symbols,
+            errors: Vec::new(),
+            locals: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_declared_symbol_rewrites_and_reports_nothing() {
+        let mut r = native_renamer(&["jade_gfx_init", "jade_gfx_key_pressed"]);
+        assert_eq!(
+            r.ref_native_qual("gfx", "jade_gfx_init", SPAN).as_deref(),
+            Some("__native$0$jade_gfx_init")
+        );
+        assert!(r.errors.is_empty());
+    }
+
+    /// The bug this whole check exists for: a symbol nothing declares used to
+    /// rewrite silently and fail the first time the line ran.
+    #[test]
+    fn an_undeclared_symbol_is_reported() {
+        let mut r = native_renamer(&["jade_gfx_init", "jade_gfx_key_pressed"]);
+        r.ref_native_qual("gfx", "jade_gfx_nope", SPAN);
+        assert_eq!(r.errors.len(), 1);
+        let msg = &r.errors[0];
+        assert!(msg.contains("[4:7]"), "no span in: {msg}");
+        assert!(msg.contains("jade_gfx_nope"), "no symbol name in: {msg}");
+        assert!(msg.contains("gfx"), "no module name in: {msg}");
+    }
+
+    #[test]
+    fn a_near_miss_suggests_the_real_symbol() {
+        let mut r = native_renamer(&["jade_gfx_init", "jade_gfx_key_pressed"]);
+        r.ref_native_qual("gfx", "jade_gfx_key_press", SPAN);
+        assert!(
+            r.errors[0].contains("did you mean 'jade_gfx_key_pressed'?"),
+            "no suggestion in: {}",
+            r.errors[0]
+        );
+    }
+
+    /// A name nothing resembles gets the manifest instruction instead of a
+    /// suggestion — proposing an unrelated symbol would be worse than silence.
+    #[test]
+    fn a_wild_miss_names_the_manifest_instead_of_guessing() {
+        let mut r = native_renamer(&["jade_gfx_init"]);
+        r.ref_native_qual("gfx", "totally_unrelated_thing", SPAN);
+        assert!(!r.errors[0].contains("did you mean"), "guessed: {}", r.errors[0]);
+        assert!(r.errors[0].contains("[dependencies.gfx.symbols]"), "{}", r.errors[0]);
+    }
+
+    /// A local of the same name is not the import, so nothing about it is
+    /// checked — the same rule the rewrite itself has always followed.
+    #[test]
+    fn a_shadowed_alias_is_left_alone() {
+        let mut r = native_renamer(&["jade_gfx_init"]);
+        r.push_scope();
+        r.bind_local("gfx");
+        assert_eq!(r.ref_native_qual("gfx", "anything_at_all", SPAN), None);
+        assert!(r.errors.is_empty());
+    }
+
+    /// A package with no declared table is one there is nothing to check
+    /// against. It must pass through, or every Jade-ABI package breaks.
+    #[test]
+    fn a_package_with_no_declared_symbols_is_not_checked() {
+        let mut r = native_renamer(&["x"]);
+        r.native_symbols.remove(&0);
+        assert_eq!(
+            r.ref_native_qual("gfx", "anything_at_all", SPAN).as_deref(),
+            Some("__native$0$anything_at_all")
+        );
+        assert!(r.errors.is_empty());
+    }
+
+    // ── declared_c_symbols ────────────────────────────────────────────────────
+
+    fn manifest_with(deps: Vec<(&str, DependencyEntry)>) -> ProjectManifest {
+        ProjectManifest {
+            dependencies: Some(deps.into_iter().map(|(n, d)| (n.to_string(), d)).collect()),
+            ..Default::default()
+        }
+    }
+
+    fn c_dep(names: &[&str]) -> DependencyEntry {
+        DependencyEntry {
+            abi: Abi::C,
+            symbols: Some(names.iter().map(|n| (n.to_string(), sym())).collect()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn c_dependencies_contribute_their_symbol_names() {
+        let m = manifest_with(vec![("gfx", c_dep(&["a", "b"]))]);
+        let out = declared_c_symbols(&m);
+        assert_eq!(out["gfx"], ["a", "b"].iter().map(|s| s.to_string()).collect::<HashSet<_>>());
+    }
+
+    /// A Jade-ABI package declares its exports in its own project, which this
+    /// manifest cannot see. Recording an empty set for it would reject every
+    /// call it has ever served.
+    #[test]
+    fn a_jade_abi_dependency_contributes_nothing() {
+        let d = DependencyEntry { abi: Abi::Jade, ..Default::default() };
+        assert!(declared_c_symbols(&manifest_with(vec![("pkg", d)])).is_empty());
+    }
+
+    #[test]
+    fn an_empty_symbol_table_contributes_nothing() {
+        let d = DependencyEntry {
+            abi: Abi::C,
+            symbols: Some(std::collections::HashMap::new()),
+            ..Default::default()
+        };
+        assert!(declared_c_symbols(&manifest_with(vec![("gfx", d)])).is_empty());
+    }
+
+    /// `pkg::resolved_libraries` lets a `[lib]` of the same name win the import,
+    /// so the dependency's table describes a library this build is not using.
+    #[test]
+    fn a_lib_shadowing_a_dependency_disables_the_check() {
+        let mut m = manifest_with(vec![("gfx", c_dep(&["a"]))]);
+        let mut libs = HashMap::new();
+        libs.insert(
+            "gfx".to_string(),
+            LibraryEntry { path: "other.dylib".to_string(), files: None },
+        );
+        m.lib = Some(libs);
+        assert!(declared_c_symbols(&m).is_empty());
+    }
+
+    // ── Registry: dependency name → pkgid ─────────────────────────────────────
+
+    /// The glue between the manifest and the renamer. `native_pkg_id` is handed
+    /// the `use` path, and that is the only place the dependency's name and its
+    /// pkgid are both in scope — get the keying wrong and the table is built
+    /// correctly and then never consulted.
+    #[test]
+    fn registering_a_native_package_carries_its_symbols_to_the_pkgid() {
+        let mut reg = Registry::new();
+        reg.dep_symbols
+            .insert("gfx".to_string(), ["jade_gfx_init"].iter().map(|s| s.to_string()).collect());
+
+        let id = reg.native_pkg_id(Path::new("/tmp/gfx.dylib"), "gfx");
+        assert_eq!(reg.native_symbols[&id], ["jade_gfx_init".to_string()].into_iter().collect());
+
+        // A library with no declared table records nothing, so the renamer has
+        // nothing to check it against and lets its references through.
+        let other = reg.native_pkg_id(Path::new("/tmp/other.dylib"), "other");
+        assert!(!reg.native_symbols.contains_key(&other));
+    }
+
+    /// A second import of the same library reuses the pkgid, and must not lose
+    /// the symbols the first one recorded.
+    #[test]
+    fn reimporting_a_package_keeps_its_symbols() {
+        let mut reg = Registry::new();
+        reg.dep_symbols.insert("gfx".to_string(), ["a".to_string()].into_iter().collect());
+        let first = reg.native_pkg_id(Path::new("/tmp/gfx.dylib"), "gfx");
+        let second = reg.native_pkg_id(Path::new("/tmp/gfx.dylib"), "gfx");
+        assert_eq!(first, second);
+        assert!(reg.native_symbols.contains_key(&first));
+    }
+
+    // ── closest_symbol ────────────────────────────────────────────────────────
+
+    #[test]
+    fn a_one_character_slip_is_matched() {
+        let declared = ["jade_gfx_key_pressed".to_string()];
+        assert_eq!(
+            closest_symbol("jade_gfx_key_presed", declared.iter()).as_deref(),
+            Some("jade_gfx_key_pressed")
+        );
+    }
+
+    /// The budget scales with length, so a short name cannot drag in an
+    /// unrelated one that merely happens to be a few edits away.
+    #[test]
+    fn a_short_name_does_not_match_something_unrelated() {
+        let declared = ["quit".to_string()];
+        assert_eq!(closest_symbol("draw", declared.iter()), None);
+    }
+
+    #[test]
+    fn the_nearest_of_several_wins() {
+        let declared: Vec<String> = ["gfx_draw_rect", "gfx_draw_line", "gfx_draw_text"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            closest_symbol("gfx_draw_rec", declared.iter()).as_deref(),
+            Some("gfx_draw_rect")
+        );
+    }
+
+    #[test]
+    fn nothing_declared_suggests_nothing() {
+        assert_eq!(closest_symbol("anything", std::iter::empty()), None);
+    }
+
+    #[test]
+    fn edit_distance_is_symmetric_and_zero_on_equality() {
+        assert_eq!(edit_distance("abc", "abc"), 0);
+        assert_eq!(edit_distance("abc", "abd"), 1);
+        assert_eq!(edit_distance("kitten", "sitting"), 3);
+        assert_eq!(edit_distance("", "abc"), 3);
     }
 }

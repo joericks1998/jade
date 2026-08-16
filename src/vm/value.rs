@@ -67,7 +67,19 @@ pub enum VmValue {
     /// re-derive it from `.pattern` at the use site, which is how the two
     /// engines drifted apart in the first place.
     Grammar(Arc<GrammarObj>),
-    Dict(DictObj<VmValue>),
+    /// A dict, behind an `Arc` for copy-on-write.
+    ///
+    /// A dict is a *value* in Jade — assigning one, passing one, or reading one
+    /// out of another gives you an independent copy, unlike an array or a
+    /// struct. The `Arc` does not change that. It defers the copy until someone
+    /// actually writes through a shared handle (`Arc::make_mut`), which is
+    /// unobservable and is the difference between O(1) and O(n) on every read.
+    ///
+    /// It used to be a bare `DictObj`, so `VmValue::clone` deep-copied every
+    /// entry — and the VM clones on `GetGlobal`, on `SetGlobal` and on each
+    /// argument. Filling a dict by assignment was quadratic: 4,000 keys took
+    /// four seconds where the same number of array pushes was a rounding error.
+    Dict(Arc<DictObj<VmValue>>),
     /// A pure Rust-backed callable (no VM state mutation). Used for builtin
     /// core built-ins (print, len, write, input) and package functions.
     BuiltinFn(BuiltinFn),
@@ -100,6 +112,25 @@ pub enum VmValue {
     /// `int("3")` → 3, `City(dict)` → City struct, etc.
     TypeRef(String),
     Nil,
+}
+
+impl VmValue {
+    /// A dict value from an owned [`DictObj`]. The `Arc` is an implementation
+    /// detail of copy-on-write, so construction sites should not have to know
+    /// about it; use [`VmValue::dict_mut`] to write to one.
+    pub fn dict(d: DictObj<VmValue>) -> VmValue {
+        VmValue::Dict(Arc::new(d))
+    }
+}
+
+/// The dict behind an `Arc`, ready to write to — copied first if, and only if,
+/// something else is holding it.
+///
+/// This is what keeps a dict a *value* while making reads free: sharing the
+/// `Arc` is unobservable precisely because any write through a shared handle
+/// takes its own copy first.
+pub fn dict_mut(d: &mut Arc<DictObj<VmValue>>) -> &mut DictObj<VmValue> {
+    Arc::make_mut(d)
 }
 
 pub struct VmBoundMethod {

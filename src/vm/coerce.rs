@@ -83,7 +83,7 @@ pub(crate) fn json_to_vm_value(json: &serde_json::Value) -> std::result::Result<
                     .map_err(|e| format!("field '{}': {}", k, e))
             })
             .collect::<std::result::Result<DictObj<VmValue>, String>>()
-            .map(VmValue::Dict),
+            .map(VmValue::dict),
     }
 }
 
@@ -434,7 +434,7 @@ pub(crate) fn coerce(
                                 .map_err(|e| format!("field '{}': {}", k, e))
                         })
                         .collect::<std::result::Result<DictObj<VmValue>, String>>()
-                        .map(VmValue::Dict)
+                        .map(VmValue::dict)
                         .map_err(|e| {
                             format!(
                                 "Your response dict could not be fully converted: {}. \

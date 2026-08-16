@@ -132,7 +132,7 @@ impl Package {
         for (name, id) in self.natives {
             map.insert((*name).to_string(), VmValue::NativeFn(id.clone()));
         }
-        VmValue::Dict(map)
+        VmValue::dict(map)
     }
 }
 
@@ -179,8 +179,9 @@ pub fn primitive_method_arity(method: &str) -> Option<usize> {
         "len" | "upper" | "lower" | "trim" | "encode" | "pop" | "sort" | "reverse" | "keys"
         | "values" | "decode" => 0,
         "split" | "contains" | "starts_with" | "ends_with" | "push" | "map" | "filter" | "has"
-        | "get" | "merge" => 1,
-        "replace" | "slice" => 2,
+        | "get" | "merge" | "index_of" | "last_index_of" | "count" | "repeat" | "join" => 1,
+        "replace" | "slice" | "pad_start" | "pad_end" => 2,
+        "trim_start" | "trim_end" | "capitalize" | "is_empty" | "lines" => 0,
         _ => return None,
     })
 }
@@ -197,6 +198,13 @@ pub fn find_primitive_method(ty: PrimType, method: &str) -> Option<BuiltinFn> {
 }
 
 // ── Public lookup API ─────────────────────────────────────────────────────────
+
+/// Every stdlib package, for callers that need to walk the whole set rather
+/// than look one up. The tripwire tying these tables to the AOT backend's
+/// lowering predicate uses it — see `codegen::tests`.
+pub fn all_packages() -> &'static [&'static Package] {
+    PACKAGES
+}
 
 pub fn find_package(import_name: &str) -> Option<&'static Package> {
     PACKAGES.iter().find(|p| p.import_name == import_name).copied()
@@ -233,7 +241,7 @@ pub fn seed_globals<S: std::hash::BuildHasher>(globals: &mut HashMap<String, VmV
     // Grammar global: Grammar.new(pattern) → VmValue::Grammar(pattern)
     let mut grammar_fields = DictObj::new();
     grammar_fields.insert("new".to_string(), VmValue::BuiltinFn(grammar::GRAMMAR_NEW));
-    globals.insert("Grammar".to_string(), VmValue::Dict(grammar_fields));
+    globals.insert("Grammar".to_string(), VmValue::dict(grammar_fields));
 }
 
 /// Register type signatures for all core built-ins into the type checker.

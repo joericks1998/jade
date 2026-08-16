@@ -92,7 +92,12 @@ pub fn would_build(
     let mut program = match source_path {
         Some(src) => match imports::resolve_and_namespace(program.stmts.clone(), src) {
             Ok(r) => crate::compiler::tir::TProgram { stmts: r.stmts },
-            Err(_) => return Ok(()),
+            // An unresolved import is not this probe's to report (see above).
+            // A *program* error is: nothing downstream of here looks at the
+            // import graph, so staying quiet is what let a mistyped FFI symbol
+            // pass `jade check` and fail at run time.
+            Err(imports::ResolveError::Unresolved(_)) => return Ok(()),
+            Err(imports::ResolveError::Program(m)) => return Err(m),
         },
         None => program.clone(),
     };
@@ -453,7 +458,7 @@ pub fn compile_with_mode(
     // never collide — matching the bytecode VM (the source of truth), which keeps
     // imports namespaced. `main` keeps bare names. See `imports.rs`.
     let (mut program, native_pkgs, _libs_root) = if let Some(src) = source_path {
-        let r = imports::resolve_and_namespace(program.stmts, src)?;
+        let r = imports::resolve_and_namespace(program.stmts, src).map_err(|e| e.to_string())?;
         (crate::compiler::tir::TProgram { stmts: r.stmts }, r.native_pkgs, r.libs_root)
     } else {
         (program, Vec::new(), None)

@@ -475,9 +475,20 @@ int64_t jrt_val_set_index(int64_t obj, int64_t idx, int64_t val) {
             return obj;
         }
         if (kind == JK_DICT) {
-            /* Dicts are value-semantic (VM clones on mutation): copy then set,
-             * and return the new container so the caller rebinds the variable. */
+            /* Dicts are value-semantic, so a write has to leave any alias of
+             * this dict alone — the caller rebinds its variable to whatever
+             * comes back. That used to mean copying on every single write,
+             * which made filling a dict quadratic in its size.
+             *
+             * The copy is only observable when someone else is holding the
+             * dict, and the refcount answers precisely that. Sole owner, write
+             * in place and hand the same container back; shared, copy exactly
+             * as before. Identical semantics either way. */
             if (!jrt_is_str((jade_value_t)idx)) throw_msg("dict index must be str");
+            if (jrt_obj_unique(p)) {
+                jrt_kdict_set(p, idx, val);
+                return obj;
+            }
             void* d = jrt_coll_dict_copy(p);
             jrt_kdict_set(d, idx, val);
             return (int64_t)jrt_box_ptr(d);
@@ -852,6 +863,28 @@ int64_t jk_fs_read_bytes(const char* path, int32_t trust) {
     fs_throw_pending();
     return (int64_t)jrt_box_ptr(p);
 }
+/* copy/rename/rmdir/size — the Rust half records a pending error and returns a
+ * neutral value, and these are what turn it into a Jade raise. Without the
+ * forwarder the compiled program answers success where the interpreter raises,
+ * and the two agree on every *passing* run, so only a failing case can see it. */
+void jrt_fs_copy(const char* src, const char* dst) {
+    jrt_fs_copy_impl(src, dst);
+    fs_throw_pending();
+}
+void jrt_fs_rename(const char* src, const char* dst) {
+    jrt_fs_rename_impl(src, dst);
+    fs_throw_pending();
+}
+void jrt_fs_rmdir(const char* path) {
+    jrt_fs_rmdir_impl(path);
+    fs_throw_pending();
+}
+int64_t jrt_fs_size(const char* path) {
+    int64_t n = jrt_fs_size_impl(path);
+    fs_throw_pending();
+    return n;
+}
+
 void jk_fs_write_bytes(const char* path, int64_t blob) {
     const void* b = jrt_unbox_ptr((jade_value_t)blob);
     jrt_fs_write_bytes_impl(path, jrt_bytes_data(b), (size_t)jrt_bytes_len(b));

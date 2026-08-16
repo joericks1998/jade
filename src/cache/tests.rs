@@ -220,6 +220,9 @@ fn purge_predicate_filters() {
 
 #[test]
 fn cache_format_version_is_stable() {
-    assert_eq!(CACHE_FORMAT_VERSION, 8);
+    // Bumped to 9 in v1.3.22: `Instr::SetIndexGlobal` is a new opcode, so a
+    // TIR cached by an older build would deserialize into a Chunk this one
+    // cannot run.
+    assert_eq!(CACHE_FORMAT_VERSION, 9);
     assert!(!JADE_VERSION.is_empty());
 }

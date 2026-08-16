@@ -27,7 +27,7 @@ Every import uses `::` notation (or a bare name) that names a module — there a
 | `use std::array` | `array` | Higher-order array functions |
 | `use std::dict` | `dict` | Dict utilities |
 | `use std::fs` | `fs` | File system I/O |
-| `use std::time` | `time` | Clock and sleep |
+| `use std::time` | `time` | Clocks, sleep, and calendar conversion |
 | `use std::http` | `http` | HTTP client |
 | `use std::uhttp` | `uhttp` | HTTP client over a Unix domain socket |
 | `use std::sh` | `sh` | Shell command execution |
@@ -52,7 +52,27 @@ use std::math
 | `math.sqrt(x)` | `float` | Square root |
 | `math.min(a, b)` | number | Smaller of two numbers |
 | `math.max(a, b)` | number | Larger of two numbers |
-| `math.pow(base, exp)` | `float` | base raised to exp |
+| `math.pow(base, exp)` | number | base raised to exp; an int base and non-negative int exp stay an int |
+| `math.round(x)` | `int` | Nearest integer; ties go away from zero, so `round(2.5)` is 3 |
+| `math.trunc(x)` | `int` | Toward zero — differs from `floor` only for negatives |
+| `math.sign(x)` | same as input | -1, 0 or 1. `sign(nan())` is NaN |
+| `math.clamp(x, lo, hi)` | number | `x` held between the bounds; a reversed range answers `hi` |
+| `math.ln(x)` | `float` | Natural log |
+| `math.log2(x)` | `float` | Base-2 log |
+| `math.log10(x)` | `float` | Base-10 log |
+| `math.exp(x)` | `float` | e raised to x |
+| `math.sin(x)` `math.cos(x)` `math.tan(x)` | `float` | Radians |
+| `math.asin(x)` `math.acos(x)` `math.atan(x)` | `float` | Radians; NaN outside the domain |
+| `math.atan2(y, x)` | `float` | Quadrant-correct angle. Note the argument order |
+| `math.hypot(a, b)` | `float` | `sqrt(a² + b²)` without the intermediate overflow |
+| `math.is_nan(x)` | `bool` | An int is never NaN |
+| `math.is_inf(x)` | `bool` | An int is never infinite |
+| `math.pi()` `math.e()` `math.tau()` | `float` | The constants |
+| `math.inf()` `math.nan()` | `float` | Reachable no other way — the lexer caps a numeric literal |
+
+The constants are spelled as calls, with the parentheses. A package namespace is
+only ever read as a field a call immediately consumes, so `math.pi` on its own
+has no meaning yet.
 
 ```jade
 use std::math
@@ -83,9 +103,24 @@ The `std/string` package exposes functions that take the target string as the fi
 | `string.lower(s)` | `s.lower()` | `str` | Lowercase |
 | `string.trim(s)` | `s.trim()` | `str` | Strip leading and trailing whitespace |
 | `string.contains(s, sub)` | `s.contains(sub)` | `bool` | True if `sub` appears in `s` |
-| `string.replace(s, from, to)` | `s.replace(from, to)` | `str` | Replace first occurrence of `from` with `to` |
+| `string.replace(s, from, to)` | `s.replace(from, to)` | `str` | Replace **every** occurrence of `from` with `to` |
 | `string.starts_with(s, prefix)` | `s.starts_with(prefix)` | `bool` | True if `s` starts with `prefix` |
 | `string.ends_with(s, suffix)` | `s.ends_with(suffix)` | `bool` | True if `s` ends with `suffix` |
+| `string.trim_start(s)` | `s.trim_start()` | `str` | Strip leading whitespace only |
+| `string.trim_end(s)` | `s.trim_end()` | `str` | Strip trailing whitespace only |
+| `string.capitalize(s)` | `s.capitalize()` | `str` | First character upper, the rest lower |
+| `string.is_empty(s)` | `s.is_empty()` | `bool` | True for the empty string |
+| `string.index_of(s, sub)` | `s.index_of(sub)` | `int` | Character index of the first occurrence, or -1 |
+| `string.last_index_of(s, sub)` | `s.last_index_of(sub)` | `int` | Character index of the last occurrence, or -1 |
+| `string.count(s, sub)` | `s.count(sub)` | `int` | Non-overlapping occurrences; an empty `sub` is 0 |
+| `string.repeat(s, n)` | `s.repeat(n)` | `str` | `n` copies; zero or negative gives `""` |
+| `string.slice(s, start, end)` | `s.slice(start, end)` | `str` | Characters `[start, end)`, clamped rather than raising |
+| `string.pad_start(s, width, pad)` | `s.pad_start(width, pad)` | `str` | Left-pad to `width` characters; never truncates |
+| `string.pad_end(s, width, pad)` | `s.pad_end(width, pad)` | `str` | Right-pad to `width` characters |
+| `string.lines(s)` | `s.lines()` | `array` | Split on newlines. A trailing newline yields no empty final element, which is the difference from `split("\n")` |
+
+**Every index is a character index**, not a byte offset — the same unit `len()`
+counts and `s[i]` walks. `"café!".index_of("!")` is 4.
 
 `str` also has `len()` and `encode()`, neither of which needs a package import. `encode()` gives the string's UTF-8 as a `bytes` value, and `bytes.decode()` goes back the other way — see [Types](types#bytes).
 
@@ -119,6 +154,7 @@ The `std/array` package adds higher-order functions (`map`, `filter`) that are n
 | `array.filter(arr, fn)` | Keep elements for which `fn` returns true; return new array |
 | `array.sort(arr)` | Return a new sorted copy of `arr` (does not mutate) |
 | `array.reverse(arr)` | Return a new reversed copy of `arr` (does not mutate) |
+| `array.join(arr, sep)` | Join the elements into a `str`, separated by `sep`. Also `arr.join(sep)` |
 
 **Primitive methods** (available without import):
 
@@ -224,6 +260,16 @@ use std::fs
 | `fs.delete(path)` | `nil` | Delete a file |
 | `fs.list_dir(path)` | `array` | List entries in a directory (names only, not full paths) |
 | `fs.mkdir(path)` | `nil` | Create directory (and all parents) |
+| `fs.is_file(path)` | `bool` | True for a regular file. False for a directory, and false if absent |
+| `fs.is_dir(path)` | `bool` | True for a directory. False if absent |
+| `fs.size(path)` | `int` | Size in bytes. Raises if the path is absent |
+| `fs.copy(src, dst)` | `nil` | Copy, creating or truncating `dst` |
+| `fs.rename(src, dst)` | `nil` | Rename or move |
+| `fs.rmdir(path)` | `nil` | Remove an **empty** directory. Deliberately not recursive |
+
+`is_file` and `is_dir` answer questions, so an absent path is `false` rather
+than an error — matching `fs.exists`. Everything else here raises catchably when
+it fails, on both engines.
 
 ```jade
 use std::fs
@@ -261,17 +307,72 @@ use std::time
 |----------|---------|-------------|
 | `time.now()` | `int` | Current Unix timestamp in seconds |
 | `time.now_ms()` | `int` | Current Unix timestamp in milliseconds |
+| `time.monotonic()` | `float` | Seconds from a fixed point in this process. Never jumps; only the difference between two readings means anything. |
 | `time.sleep(secs)` | `nil` | Block execution for `secs` seconds (int or float) |
 | `time.local(tz)` | `str` | Formatted local time string. Pass a timezone name (e.g. `"America/Denver"`) or `nil` for the system timezone. |
+| `time.utc(ts)` | `str` | A timestamp as ISO 8601 UTC, e.g. `2026-08-16T14:03:22Z` |
+| `time.parts(ts)` | `dict` | A timestamp broken into UTC calendar fields |
+| `time.stamp(y, mo, d[, h[, mi[, s]]])` | `int` | UTC calendar fields back to a timestamp |
+
+### Measuring how long something took
+
+Use `time.monotonic()`, not `time.now_ms()`. The wall clock can move while your program runs — NTP corrects it, and a person can set it — so subtracting two readings of it can hand you a negative duration. The monotonic clock only ever moves forward.
 
 ```jade
 use std::time
 
-let start = time.now_ms()
+let start = time.monotonic()
 time.sleep(0.1)
-let elapsed = time.now_ms() - start
-print(f"elapsed: {elapsed}ms")   // elapsed: ~100ms
+print(f"took {time.monotonic() - start}s")   // took ~0.1s
 ```
+
+Its absolute value is meaningless, and it is not comparable between two processes. When you want a moment rather than a duration, that is `time.now()`.
+
+### Calendar fields
+
+`time.parts(ts)` splits a timestamp into a dict with eight keys, all `int`:
+
+| Key | Range | |
+|-----|-------|--|
+| `year` | | |
+| `month` | 1–12 | |
+| `day` | 1–31 | |
+| `hour` | 0–23 | |
+| `minute` | 0–59 | |
+| `second` | 0–59 | |
+| `weekday` | 0–6 | 0 is Sunday, matching `date +%w` |
+| `yearday` | 1–366 | matching `date +%j` |
+
+```jade
+use std::time
+
+let p = time.parts(1786889002)
+print(f"{p["year"]}-{p["month"]}-{p["day"]}")   // 2026-8-16
+print(time.utc(1786889002))                     // 2026-08-16T14:03:22Z
+```
+
+`time.stamp` is the exact inverse, so a round trip returns what it started with. The three time-of-day arguments are optional and default to zero, so three arguments mean midnight.
+
+```jade
+use std::time
+
+print(time.stamp(2026, 8, 16, 14, 3, 22))       // 1786889002
+print(time.utc(time.stamp(2026, 8, 16)))        // 2026-08-16T00:00:00Z
+```
+
+Out-of-range fields **carry** rather than fail, which is what makes date arithmetic a single call. Month 13 is next January, day 0 is the last day of the previous month, and adding 45 to a day crosses the month end on its own:
+
+```jade
+use std::time
+
+print(time.utc(time.stamp(2026, 13, 1)))        // 2027-01-01T00:00:00Z
+print(time.utc(time.stamp(2026, 3, 0)))         // 2026-02-28T00:00:00Z
+print(time.utc(time.stamp(2026, 8, 16 + 45)))   // 2026-09-30T00:00:00Z
+```
+
+:::note These three are UTC, not local
+`parts`, `stamp`, and `utc` are all UTC. Converting to a local calendar needs the IANA timezone database, which Jade does not carry — `time.local(tz)` is the local-time answer, and it gives you a formatted string rather than fields.
+:::
 
 ---
 

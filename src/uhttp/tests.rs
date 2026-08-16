@@ -15,12 +15,12 @@ fn extract_headers_variants() {
 
     let mut map = DictObj::new();
     map.insert("X-Test".to_string(), VmValue::Str("1".to_string().into()));
-    let hs = extract_headers(Some(&VmValue::Dict(map))).unwrap();
+    let hs = extract_headers(Some(&VmValue::dict(map))).unwrap();
     assert_eq!(hs, vec![("X-Test".to_string(), "1".to_string())]);
 
     let mut bad = DictObj::new();
     bad.insert("X".to_string(), VmValue::Int(1));
-    assert!(extract_headers(Some(&VmValue::Dict(bad))).is_err());
+    assert!(extract_headers(Some(&VmValue::dict(bad))).is_err());
     assert!(extract_headers(Some(&VmValue::Int(0))).is_err());
 }
 

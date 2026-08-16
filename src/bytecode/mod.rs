@@ -264,6 +264,18 @@ pub enum Instr {
     GetIndex(Reg, Reg, Reg),
     /// obj_reg[idx_reg] ← val_reg  (value semantics: modifies the slot)
     SetIndex(Reg, Reg, Reg),
+    /// `<global>[idx_reg] ← val_reg`, where the instruction owns the global for
+    /// the duration of the write.
+    ///
+    /// The same operation as [`SetIndex`](Instr::SetIndex), and it exists for
+    /// one reason: a dict is value-semantic and copy-on-write, so a write has to
+    /// copy whenever anything else is holding the dict. Loading a global into a
+    /// register first makes the register a second holder, so *every* write
+    /// copied and filling a global dict was quadratic in its size. Taking the
+    /// global out for the write leaves one holder and the write happens in
+    /// place. A local needs no equivalent — a local *is* a register slot, so the
+    /// emitter hands `SetIndex` the binding directly.
+    SetIndexGlobal(String, Reg, Reg),
 
     // ── Struct ─────────────────────────────────────────────────────────────
     /// (dest, type_name, [(field_name, val_reg, is_prompt), …])

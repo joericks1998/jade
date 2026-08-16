@@ -14,7 +14,7 @@ fn prim_type_from_value_covers_all_primitives() {
     assert_eq!(PrimType::from_value(&VmValue::Int(1)), Some(PrimType::Int));
     assert_eq!(PrimType::from_value(&VmValue::Float(1.0)), Some(PrimType::Float));
     assert_eq!(PrimType::from_value(&make_array(vec![VmValue::Int(1)])), Some(PrimType::Array));
-    assert_eq!(PrimType::from_value(&VmValue::Dict(DictObj::new())), Some(PrimType::Dict));
+    assert_eq!(PrimType::from_value(&VmValue::dict(DictObj::new())), Some(PrimType::Dict));
 }
 
 #[test]

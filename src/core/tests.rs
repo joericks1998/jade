@@ -37,7 +37,7 @@ fn len_array() {
 fn len_dict() {
     let mut m = DictObj::new();
     m.insert("a".to_string(), VmValue::Int(1));
-    assert!(matches!(native_len(&[VmValue::Dict(m)]), Ok(VmValue::Int(1))));
+    assert!(matches!(native_len(&[VmValue::dict(m)]), Ok(VmValue::Int(1))));
 }
 
 #[test]

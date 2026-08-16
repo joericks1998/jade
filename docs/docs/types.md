@@ -271,14 +271,63 @@ print(d["name"])   // jade   (unchanged)
 print(d2["name"])  // copy
 ```
 
-Arrays go the other way — assigning one shares the same storage, so writing through the second name is visible through the first. The two containers genuinely differ here; do not carry a habit from one to the other.
+Arrays go the other way — assigning one shares the same storage, so writing through the second name is visible through the first. Structs go the array way too. The three containers genuinely differ here; do not carry a habit from one to the other.
+
+| | assigning it | passing it to a function that writes to it |
+|---|---|---|
+| `dict` | copies | the caller does **not** see the write |
+| `array` | shares | the caller sees the write |
+| `struct` | shares | the caller sees the write |
+
+### Passing a dict to a function
+
+This is the same rule, and it is the one that costs people an afternoon. A
+parameter is an assignment, so a function receives its own copy of a dict — and
+a write to it is invisible to the caller. The identical code on an array or a
+struct does reach the caller:
+
+```jade
+fn set_it(d) { d["x"] = 99 }
+fn push_it(a) { a.push(99) }
+
+let d = {"x": 1}
+set_it(d)
+print(d["x"])    // 1   — unchanged, the function wrote to its own copy
+
+let a = [1]
+push_it(a)
+print(a.len())   // 2   — changed
+```
+
+Nothing warns, and the call reports success, so the search usually starts
+wherever the stale value is read rather than at the write.
+
+**Use a struct when a function needs to change something the caller can see.**
+That is the shape the language is built for: declare the fields, and the change
+travels back.
+
+```jade
+struct Cursor { x, y }
+
+fn advance(c, dy) { c.y = c.y + dy }
+
+let cur = Cursor { x: 0, y: 0 }
+advance(cur, 10)
+print(cur.y)     // 10
+```
 
 ### Nested dicts
+
+Reading a dict out of a dict is an assignment too, so it copies. Writing to what
+you read back does not reach the outer dict:
 
 ```jade
 let outer = {"inner": {"x": 42}}
 let inner = outer["inner"]
 print(inner["x"])  // 42
+
+inner["x"] = 1
+print(outer["inner"]["x"])  // 42 — the outer dict still holds its own copy
 ```
 
 :::note

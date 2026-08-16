@@ -1012,3 +1012,40 @@ fn runtime_builtins_and_package_globals_are_bound() {
     check_globals_bound(&top, &[], &HashMap::new(), &HashMap::new())
         .expect("builtins and package globals are bound");
 }
+
+// ── The VM's package tables and this backend's lowering ───────────────────────
+
+/// Every stdlib package function the interpreter exposes must be lowerable here
+/// at some arity.
+///
+/// A module call this backend declines is a *hard build error*, not a fallback,
+/// so a function present in a package's `fns` table and absent from
+/// `chunk_module_supported` is a program `jade run` accepts and `jade build`
+/// refuses. That is not hypothetical: `string.upper(s)`, `dict.keys(d)` and a
+/// dozen more sat in exactly that state until v1.3.21, and nothing prevented it
+/// happening again. This is what prevents it.
+///
+/// Arity is not checked, only that *some* arity lowers — the predicate is the
+/// authority on which, and the VM does its own arity checking per function.
+#[test]
+fn every_package_fn_lowers_in_the_chunk_backend() {
+    let mut missing = Vec::new();
+    for pkg in crate::builtins::all_packages() {
+        let names = pkg.fns.iter().map(|f| f.name).chain(pkg.natives.iter().map(|(n, _)| *n));
+        for name in names {
+            if !(0..=4).any(|argc| chunk_module_supported(pkg.global_name, name, argc)) {
+                missing.push(format!("{}.{name}", pkg.global_name));
+            }
+        }
+    }
+    missing.sort();
+    missing.dedup();
+    assert!(
+        missing.is_empty(),
+        "{} package function(s) the VM accepts have no lowering, so `jade build` \
+         refuses a program `jade run` runs:\n  {}\n\
+         Add an arm to `chunk_module_supported` and `emit_module_call`.",
+        missing.len(),
+        missing.join("\n  ")
+    );
+}

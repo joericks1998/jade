@@ -4,6 +4,79 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.3.24
+
+**Fixed: a mistyped FFI symbol reached run time.** `gfx.jade_gfx_key_presed` passed `jade check`, built, linked, packaged and shipped, then failed the first time that line executed with "dict has no key or method". It was not a link error, because nothing links the name — the generated shim binds the symbols in the manifest's table and no others, so a name that is not in it is simply absent when the runtime looks it up.
+
+The project's own `jade.toml` had the answer the whole time. An `abi = "c"` dependency must declare a `[symbols]` table, and that table is the complete list of what the shim binds. `jade check` and `jade build` now check every call against it:
+
+```
+main.jde: [4:7] 'gfx' has no symbol 'jade_gfx_key_press' — did you mean 'jade_gfx_key_pressed'?
+```
+
+When nothing is close enough to name, the message points at the manifest rather than guessing, since a confidently wrong suggestion is worse than none. `from gfx use <name>` is checked too, and reported at the import line.
+
+The check lives where `alias.field` becomes a native reference, so it inherits that rewrite's scope rules for free: a local named `gfx` shadows the import and is not checked, exactly as it is not rewritten. Two things switch it off, both because there is nothing to check against rather than because checking would be inconvenient — a package with no declared table (a Jade-ABI package declares its exports in its own project, which this manifest cannot see, and an empty set would reject every call it has ever served), and a `[lib]` shadowing a dependency of the same name, whose table then describes a library the build is not using.
+
+**Why `check` was silent when the machinery was already there.** The rewrite that catches this runs inside the build probe `jade check` performs — and that probe discarded *every* error import resolution produced, on the reasoning that an unresolved import means an uninstalled dependency, which `check_imports` already reports in better words. True for that case, and it swallowed this one with it. Resolution failures now carry which kind they are: an unresolved import is still dropped, a wrong program is reported.
+
+**Added: a monotonic clock and UTC calendar conversion in `std::time`.** The package could read the wall clock and sleep, and that was all — so a program that wanted to know what day a timestamp fell on had to shell out to `date` and parse the text back.
+
+**`time.monotonic()`** returns seconds from a fixed point in the process, as a float. It is the clock to measure a duration with, and `time.now_ms()` is not: the wall clock moves while a program runs, since NTP corrects it and a person can set it, so subtracting two readings of it can hand you a negative duration. The monotonic clock only moves forward. Its absolute value means nothing on its own.
+
+**`time.parts(ts)`** breaks a timestamp into a dict of eight UTC fields — `year`, `month`, `day`, `hour`, `minute`, `second`, `weekday`, `yearday`. `weekday` is 0 for Sunday and `yearday` starts at 1, matching what `date +%w` and `date +%j` print, so nothing here needs a second numbering learned.
+
+**`time.stamp(y, mo, d[, h[, mi[, s]]])`** is the exact inverse, and the time-of-day arguments default to zero. Out-of-range fields **carry** rather than fail, which is what turns date arithmetic into a single call: month 13 is next January, day 0 is the last day of the previous month, and `time.stamp(2026, 8, 16 + 45)` is September 30th.
+
+**`time.utc(ts)`** formats a timestamp as ISO 8601 — `2026-08-16T14:03:22Z`. Fixed width and sortable as text, which is why it is here alongside `time.local`, whose human format is neither. Unlike `local` it is *trusted*: it is computed from an integer in process rather than read back from a subprocess.
+
+All three calendar functions are UTC, deliberately. A local calendar needs the IANA timezone database, which is a dependency the runtime does not carry; `time.local(tz)` remains the local-time answer, and it gives a formatted string rather than fields.
+
+The conversion is Howard Hinnant's `civil_from_days` — integer arithmetic on the proleptic Gregorian calendar, with no dependency and no `libc` call. It is tested against dates checked with `date -u`, over a round trip across four centuries on both sides of the epoch, and on the three leap-year cases that separate a correct implementation from a plausible one: 2024 has a February 29th, 2100 does not, and 2000 does.
+
+`time.sleep` was already present and is unchanged.
+
+## v1.3.23
+
+**Added: 42 functions across `std::math`, `std::string`, `std::fs` and `std::array`.**
+
+**`std::math`** gains `round`, `trunc`, `sign`, `clamp`; `ln`, `log2`, `log10`, `exp`; `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `hypot`; `is_nan`, `is_inf`; and the constants `pi`, `e`, `tau`, `inf`, `nan`. Two rules worth knowing without running the code: `round` breaks ties away from zero, so `round(2.5)` is 3, and `clamp` on a reversed range answers `hi` rather than aborting the way the standard library's does. The constants are spelled as calls — `math.pi()` — because a package namespace is only ever read as a field a call immediately consumes. `inf` and `nan` are reachable no other way at all, since the lexer caps a numeric literal.
+
+**`std::string`** gains `trim_start`, `trim_end`, `capitalize`, `is_empty`, `index_of`, `last_index_of`, `count`, `repeat`, `slice`, `pad_start`, `pad_end` and `lines` — each in both spellings, so `s.index_of(x)` and `string.index_of(s, x)` are the same function.
+
+- **Every index is a character index**, the same unit `len()` counts and `s[i]` walks. `"café!".index_of("!")` is 4. Rust's own `find` answers a byte offset, so the obvious implementation would have agreed with `len` on ASCII and disagreed on everything else.
+- **`lines` is not `split("\n")`.** A trailing newline yields no empty final element, which matters because a file read off disk almost always ends in one.
+
+**`std::fs`** gains `is_file`, `is_dir`, `size`, `copy`, `rename` and `rmdir`. `list_dir` gave you names with no way to tell a file from a directory, and there was no way to ask how big something was or to move it. `is_file` and `is_dir` answer questions, so an absent path is `false` rather than an error, matching `fs.exists`. `rmdir` removes an empty directory only — deliberately not recursive, since `fs.delete` is non-recursive on files and a recursive delete behind a five-character name is a foot-gun.
+
+**`std::array`** gains `join`, in both spellings. Non-string elements render the way `print` renders them, so `[1, 2].join("-")` is `"1-2"`. It lives on `std::array` rather than `std::string` because a package function's first argument is the type the package is named for.
+
+**Added: a test that stops half of a stdlib function from shipping.** Nothing tied a package's function table to the compiled backend's lowering, and a module call the backend declines is a hard build error rather than a fallback — so a function present in one and absent from the other is a program `jade run` accepts and `jade build` refuses. A dozen sat in that state until 1.3.21. The new test walks every package and names each function with no lowering; it went red for all 23 math functions before their arms were written, which is how we know it works.
+
+**Fixed: two lines of `stdlib.md` that described the code wrongly.** `string.replace` replaces every occurrence, not the first, and `math.pow` returns an int when both operands are ints and the exponent is non-negative.
+
+## v1.3.22
+
+**Fixed: dicts were quadratic to build and linear to look up.** A dict is a value in Jade — assigning one, passing one to a function, or reading one out of another gives you an independent copy — and paying for that was costing far more than the rule itself. Three separate things, each O(n) where it should have been O(1). A dict now behaves like the hash map it always looked like: **O(n) to build, O(1) to look up.**
+
+| | before | after |
+|---|---|---|
+| build a dict of 8,000 keys (`jade run`) | ~9s | 0.04s |
+| build a dict of 8,000 keys (compiled) | ~5.4s | 0.21s |
+| pass a 400-key dict to a function 20,000 times | 8.1s | 0.15s |
+| 200,000 lookups, dict of 8,000 keys (compiled) | grew with the dict | flat |
+
+- **Lookup was a linear scan.** Entries lived in one vector and every `get` and `set` walked it, so a lookup was O(n) and building a dict was O(n²). It is a compact hash map now: the same insertion-ordered vector of entries, plus an open-addressed table from a key's hash to its position. Small dicts skip the table entirely, because below a handful of entries scanning a contiguous vector wins and most dicts really are that size.
+- **Reading a dict deep-copied it.** The interpreter took "value" literally, so `GetGlobal`, `SetGlobal` and every argument copied every entry. A dict now sits behind a copy-on-write handle: sharing it is a refcount bump, and the copy happens only when something writes through a handle another holder can see — exactly when a copy could be observed.
+- **Every write copied, even with nobody else holding the dict.** Both engines copied on each `d[k] = v` to stay safe against an alias that usually was not there. Compiled code now asks the refcount first and writes in place when it is the sole owner. And index-assignment takes ownership of its variable for the duration — a local is handed to `SetIndex` directly, and a global goes through the new `SetIndexGlobal` — so the binding is not itself the second holder that forces the copy.
+
+**None of the semantics moved.** A dict is still a value, an array and a struct are still references, and `examples/collections/container_semantics/` pins all three on both engines.
+
+**Changed: the docs now cover the two shapes that actually catch people out.** The value-versus-reference rule was written down, but only for plain assignment.
+
+- **Passing a dict to a function that writes to it.** The caller does not see the write, while the same code on an array or a struct does. There is a table of all three containers now, and the answer when a function has to hand a change back: use a struct, which is the shape the language is built for.
+- **Reading a dict out of a dict.** That is an assignment too, so it copies, and writing to what you read back does not reach the outer dict.
+
 ## v1.3.21
 
 **Fixed: a stdlib function you could call one way but not the other.** Most collection functions have two spellings — `string.upper(s)` and `s.upper()` are the same function — and several combinations did not work. `array.map(a, f)` ran and compiled, but `a.map(f)` existed on neither engine. `string.upper(s)`, `dict.keys(d)`, `array.sort(a)` and a dozen more ran under `jade run` and were refused by `jade build` as an *unsupported module call*, though nothing was missing: the symbol each one needs is the symbol its method spelling was already calling. Both spellings of every one of them now work on both engines.

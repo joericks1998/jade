@@ -27,7 +27,7 @@ Two design choices are worth knowing before you edit:
 ## What each file does
 
 - **`mod.rs`** — the public entry point. Sets up the LLVM context and target machine, runs the probe, emits a thin `main()`, writes the object file, and drives the linker. `CompileMode` selects a binary or a `jade_pkg_init`-exporting shared library.
-- **`imports.rs`** — import resolution and module namespacing. The VM gives every imported file its own namespace; LLVM has no runtime namespaces, so this file mangles imported symbols to keep two modules that both define `greet` distinct. **The VM is the source of truth for what a namespace means** — read this file's header before changing import behavior.
+- **`imports.rs`** — import resolution and module namespacing. The VM gives every imported file its own namespace; LLVM has no runtime namespaces, so this file mangles imported symbols to keep two modules that both define `greet` distinct. **The VM is the source of truth for what a namespace means** — read this file's header before changing import behavior. It is also where a call into a C-ABI dependency is checked against the symbols its manifest declares; see the gotcha below.
 - **`tests.rs`** — driver tests.
 
 The translation this directory drives is [`src/codegen/`](../codegen/README.md) — one LLVM IR sequence per opcode, split by concern across ten files. Read that directory's README before adding a lowering.
@@ -39,6 +39,12 @@ The translation this directory drives is [`src/codegen/`](../codegen/README.md) 
 *Used by:* `src/build/`, which is the thin layer `cli/build.rs` calls.
 
 ## Gotchas
+
+**A mistyped FFI symbol is nobody's link error, so this pass has to be the one that catches it.** `gfx.jade_gfx_key_presed` used to pass `jade check`, build, link, package and ship, then fail the first time that line executed as "dict has no key or method". Nothing linked the name, so no linker could object to it, and the runtime only discovers the gap when it looks the symbol up. The answer was in the project's own `jade.toml` the whole time: an `abi = "c"` dependency must declare a `[symbols]` table, and that table is the complete list of what the generated shim binds. `Renamer::ref_native_qual` — the one place `alias.field` becomes `__native$<pkgid>$<field>` — now checks the field against it, exactly as its `.jde` sibling `ref_value_qual` has always checked whether the module exports the name.
+
+Two rules keep it from rejecting anything real. A package with **no** declared table is not checked at all, because a Jade-ABI package declares its exports in its own project, which this manifest cannot see — an empty set would reject every call it has ever served. And a `[lib]` of the same name as a dependency wins the import, so the dependency's table describes a library the build is not using, and the check turns itself off.
+
+**`would_build` has to tell an unresolved import from a wrong program.** It probes a build for `jade check` and deliberately stays silent about an import that does not resolve, since that means a dependency is not installed and `check_imports` says so in better words. That silence used to swallow *every* resolver error — which is precisely why `check` reported `ok` for a program with a bad FFI symbol. `ResolveError` splits the two: `Unresolved` is still dropped, `Program` is reported.
 
 **An artifact must not name a dependency by where it was when it was built.** It used to: `jade_mod_init` embedded an absolute path per native package and `dlopen`'d it, so a binary ran in the directory that produced it and nowhere else, and said so only at run time on someone else's machine. Each is now named twice — by a `libs/`-relative key, which is what a moved artifact resolves against the root its host published, and by the build-time absolute path, which is the answer for a hand-written `[lib]` that is not a dependency and has no relative spelling. A null key means the second is all there is.
 

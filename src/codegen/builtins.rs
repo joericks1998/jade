@@ -173,11 +173,24 @@ pub(super) fn chunk_module_supported(module: &str, method: &str, argc: usize) ->
     match (module, method) {
         ("math", "floor" | "ceil" | "abs" | "sqrt") => argc == 1,
         ("math", "min" | "max" | "pow") => argc == 2,
+        // Rounding, sign, the transcendentals, and the two predicates. None can
+        // fail, so each calls the Rust symbol directly with no error drain.
+        (
+            "math",
+            "round" | "trunc" | "sign" | "ln" | "log2" | "log10" | "exp" | "sin" | "cos" | "tan"
+            | "asin" | "acos" | "atan" | "is_nan" | "is_inf",
+        ) => argc == 1,
+        ("math", "atan2" | "hypot") => argc == 2,
+        ("math", "clamp") => argc == 3,
+        // The constants, spelled as calls — see `mathf::pi`.
+        ("math", "pi" | "e" | "tau" | "inf" | "nan") => argc == 0,
         ("path", "basename" | "ext" | "dirname" | "stem" | "abs") => argc == 1,
         ("path", "is_abs") => argc == 1,
         ("path", "join") => argc >= 1,
         ("fs", "read") => argc == 1 || argc == 2, // read(path) or read(path, trust)
         ("fs", "exists" | "delete" | "mkdir") => argc == 1,
+        ("fs", "is_file" | "is_dir" | "rmdir" | "size") => argc == 1,
+        ("fs", "copy" | "rename") => argc == 2,
         ("fs", "write" | "append") => argc == 2,
         ("fs", "read_bytes") => argc == 1 || argc == 2,
         ("fs", "write_bytes" | "append_bytes") => argc == 2,
@@ -190,9 +203,11 @@ pub(super) fn chunk_module_supported(module: &str, method: &str, argc: usize) ->
         ("env", "get") => argc == 1,
         ("env", "set") => argc == 2,
         ("env", "args") => argc == 0,
-        ("time", "now" | "now_ms") => argc == 0,
+        ("time", "now" | "now_ms" | "monotonic") => argc == 0,
         ("time", "sleep") => argc == 1,
-        ("time", "local") => argc == 1,
+        ("time", "local" | "utc" | "parts") => argc == 1,
+        // stamp(y, mo, d[, h[, mi[, s]]]) — time of day defaults to midnight.
+        ("time", "stamp") => (3..=6).contains(&argc),
         ("http", "get" | "delete" | "head" | "get_bytes") => argc == 1 || argc == 2,
         ("http", "post" | "put" | "post_bytes") => argc == 2 || argc == 3,
         ("uhttp", "get" | "delete" | "head" | "get_bytes") => argc == 1 || argc == 2,
@@ -201,6 +216,12 @@ pub(super) fn chunk_module_supported(module: &str, method: &str, argc: usize) ->
         ("array", "map" | "filter") => argc == 2,
         // The functional style: a sorted/reversed copy, not the in-place method.
         ("array", "sort" | "reverse") => argc == 1,
+        // Unlike sort/reverse, `join` is pure — the two spellings really are the
+        // same function, so this lowers to the symbol the method uses. It gets
+        // an explicit arm rather than going through `package_fn_is_the_method`
+        // because that bridge deliberately excludes `std::array`, whose other
+        // package functions are *not* their methods.
+        ("array", "join") => argc == 2,
         ("random", "int") => argc == 2,
         ("random", "seed") => argc == 1,
         ("random", "float") => argc == 0,
@@ -218,8 +239,12 @@ pub(super) fn chunk_module_supported(module: &str, method: &str, argc: usize) ->
 pub(super) fn chunk_str_method_supported(method: &str, argc: usize) -> bool {
     match method {
         "trim" | "upper" | "lower" | "encode" => argc == 0,
+        "trim_start" | "trim_end" | "capitalize" | "is_empty" => argc == 0,
+        "lines" => argc == 0,
         "starts_with" | "ends_with" => argc == 1,
+        "index_of" | "last_index_of" | "count" | "repeat" => argc == 1,
         "replace" => argc == 2,
+        "pad_start" | "pad_end" => argc == 2,
         "split" => argc == 1,
         _ => false,
     }
@@ -233,6 +258,7 @@ pub(super) fn chunk_val_method_supported(method: &str, argc: usize) -> bool {
         "push" => argc == 1,                     // array
         "pop" | "sort" | "reverse" => argc == 0, // array
         "map" | "filter" => argc == 1,           // array
+        "join" => argc == 1,                     // array
         "keys" | "values" => argc == 0,          // dict
         "has" | "get" => argc == 1,              // dict
         "contains" => argc == 1,                 // str / array (runtime-dispatched)
@@ -482,7 +508,7 @@ pub(super) fn emit_val_method<'ctx>(
     // / `jrt_in_any`, which dispatch on the tag themselves and are already safe
     // on a scalar. Every other arm untags to a pointer and trusts the kind.
     match method {
-        "push" | "pop" | "sort" | "reverse" | "map" | "filter" => {
+        "push" | "pop" | "sort" | "reverse" | "map" | "filter" | "join" => {
             low.require_kind(low.load(recv), WANT_ARRAY, method)?
         }
         "keys" | "values" | "has" | "get" => low.require_kind(low.load(recv), WANT_DICT, method)?,
@@ -506,6 +532,22 @@ pub(super) fn emit_val_method<'ctx>(
                 .as_any_value_enum()
                 .into_int_value())
         }
+        // (arr, sep) -> a tagged string. Trust is the union of the parts', so
+        // joining a tainted element into a literal separator does not launder
+        // it — the runtime does that fold, not this arm.
+        "join" => {
+            let f = low.runtime_fn(
+                "jrt_coll_array_join",
+                ptrt.fn_type(&[ptrt.into(), ptrt.into()], false),
+            );
+            let sep = low.untag_ptr(low.load(args[0]));
+            let r = b
+                .build_call(f, &[recv_p.into(), sep.into()], "join")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_pointer_value();
+            Ok(low.tag_str(r))
+        }
         // ── bytes ─────────────────────────────────────────────────────────
         // Both untag the receiver to a BytesObj pointer. `decode` goes through
         // the raising C wrapper rather than the Rust entry point directly: a
@@ -519,19 +561,22 @@ pub(super) fn emit_val_method<'ctx>(
                 .into_int_value();
             Ok(r)
         }
+        // The one method name that does not settle its receiver's kind: a blob
+        // and a string both have `slice`. So the whole tagged word goes to the
+        // runtime, which reads the tag and picks — the same treatment `len` and
+        // `contains` already get, and for the same reason. Picking here from
+        // the method name would read a tagged string as a `BytesObj` pointer.
         "slice" => {
             let f = low.runtime_fn(
-                "jrt_bytes_slice",
-                ptrt.fn_type(&[ptrt.into(), i64_ty.into(), i64_ty.into()], false),
+                "jrt_slice_any",
+                i64_ty.fn_type(&[i64_ty.into(), i64_ty.into(), i64_ty.into()], false),
             );
             let s = low.untag_int(low.load(args[0]));
             let e = low.untag_int(low.load(args[1]));
-            let p = b
-                .build_call(f, &[recv_p.into(), s.into(), e.into()], "slice")
+            Ok(b.build_call(f, &[low.load(recv).into(), s.into(), e.into()], "slice")
                 .map_err(err)?
                 .as_any_value_enum()
-                .into_pointer_value();
-            Ok(low.tag_ptr(p))
+                .into_int_value())
         }
         "push" => {
             let f = low
@@ -726,6 +771,16 @@ pub(super) fn emit_module_call<'ctx>(
         ("math", "pow") => math_fn("jade_math_pow", 2),
         ("math", "floor" | "ceil" | "sqrt") => math_fn(&format!("jrt_math_{method}"), 1),
         ("math", "min" | "max") => math_fn(&format!("jrt_math_{method}"), 2),
+        // The predicates answer a tagged bool word, which `math_fn` returns
+        // unchanged — nothing here has to know the difference.
+        (
+            "math",
+            "round" | "trunc" | "sign" | "ln" | "log2" | "log10" | "exp" | "sin" | "cos" | "tan"
+            | "asin" | "acos" | "atan" | "is_nan" | "is_inf",
+        ) => math_fn(&format!("jrt_math_{method}"), 1),
+        ("math", "atan2" | "hypot") => math_fn(&format!("jrt_math_{method}"), 2),
+        ("math", "clamp") => math_fn("jrt_math_clamp", 3),
+        ("math", "pi" | "e" | "tau" | "inf" | "nan") => math_fn(&format!("jrt_math_{method}"), 0),
         ("path", "basename" | "ext" | "dirname" | "stem" | "abs") => {
             tag_str_or_nil(str_fn(&format!("jrt_path_{method}"), 1)?)
         }
@@ -810,6 +865,16 @@ pub(super) fn emit_module_call<'ctx>(
             Ok(i64_ty.const_int(NIL, false))
         }
         ("fs", "exists") => bool_ptr_fn("jrt_fs_exists"),
+        ("fs", "is_file") => bool_ptr_fn("jrt_fs_is_file"),
+        ("fs", "is_dir") => bool_ptr_fn("jrt_fs_is_dir"),
+        // Each of these goes through the C forwarder, not the Rust `_impl`:
+        // the forwarder is what drains the pending error and raises. Calling
+        // the impl directly would answer success in a compiled program where
+        // the interpreter raises.
+        ("fs", "copy") => void_ptr_fn("jrt_fs_copy", 2),
+        ("fs", "rename") => void_ptr_fn("jrt_fs_rename", 2),
+        ("fs", "rmdir") => void_ptr_fn("jrt_fs_rmdir", 1),
+        ("fs", "size") => int_fn("jrt_fs_size", 1),
         ("fs", "write") => void_ptr_fn("jrt_fs_write", 2),
         ("fs", "append") => void_ptr_fn("jrt_fs_append", 2),
         ("fs", "delete") => void_ptr_fn("jrt_fs_delete", 1),
@@ -867,6 +932,51 @@ pub(super) fn emit_module_call<'ctx>(
             b.build_call(f, &[d.into()], "").map_err(err)?;
             Ok(nil)
         }
+        ("time", "monotonic") => {
+            // () -> raw f64, boxed into a float word (same shape as random.float).
+            let f = low.runtime_fn("jrt_time_monotonic", f64_ty.fn_type(&[], false));
+            let d =
+                b.build_call(f, &[], "mono").map_err(err)?.as_any_value_enum().into_float_value();
+            let boxf = low.runtime_fn("jrt_box_float", i64_ty.fn_type(&[f64_ty.into()], false));
+            Ok(b.build_call(boxf, &[d.into()], "boxf")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_int_value())
+        }
+        ("time", "utc") => {
+            // (raw i64 seconds) -> char*. Not `str_fn`: the argument is an int
+            // word to untag, not a data pointer.
+            let f = low.runtime_fn("jrt_time_utc", ptrt.fn_type(&[i64_ty.into()], false));
+            let p = b
+                .build_call(f, &[low.untag_int(low.load(args[0])).into()], "utc")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_pointer_value();
+            Ok(low.tag_str(p))
+        }
+        ("time", "parts") => {
+            // (raw i64 seconds) -> already-tagged dict word.
+            let f = low.runtime_fn("jrt_time_parts", i64_ty.fn_type(&[i64_ty.into()], false));
+            Ok(b.build_call(f, &[low.untag_int(low.load(args[0])).into()], "parts")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_int_value())
+        }
+        ("time", "stamp") => {
+            // Six raw i64 fields in, raw i64 out. The trailing time-of-day
+            // arguments are optional in the source, so pad the call with zeros
+            // rather than giving the runtime a second signature to match.
+            let f = low.runtime_fn("jrt_time_stamp", i64_ty.fn_type(&[i64_ty.into(); 6], false));
+            let argv: Vec<BasicMetadataValueEnum> = (0..6)
+                .map(|k| match args.get(k) {
+                    Some(a) => low.untag_int(low.load(*a)).into(),
+                    None => i64_ty.const_zero().into(),
+                })
+                .collect();
+            let r =
+                b.build_call(f, &argv, "stamp").map_err(err)?.as_any_value_enum().into_int_value();
+            Ok(low.tag_int(r))
+        }
         ("array", "map" | "filter") => {
             // (arr word, fn word) -> new array word. Both args are tagged words.
             let cname =
@@ -876,6 +986,18 @@ pub(super) fn emit_module_call<'ctx>(
                 .map_err(err)?
                 .as_any_value_enum()
                 .into_int_value())
+        }
+        ("array", "join") => {
+            let f = low.runtime_fn(
+                "jrt_coll_array_join",
+                ptrt.fn_type(&[ptrt.into(), ptrt.into()], false),
+            );
+            let r = b
+                .build_call(f, &[strp(0).into(), strp(1).into()], "join")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_pointer_value();
+            Ok(low.tag_str(r))
         }
         ("array", "sort" | "reverse") => {
             // (arr) -> a NEW array word. Deliberately not the in-place symbol

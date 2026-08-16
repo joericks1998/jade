@@ -570,6 +570,9 @@ int64_t jrt_coll_array_get(void* p, int64_t i);
 void    jrt_coll_array_set(void* p, int64_t i, int64_t val);
 int32_t jrt_coll_dict_get(void* p, const char* key, int64_t* out);
 void*   jrt_coll_dict_copy(void* p);
+/* jrt_obj_unique — 1 when `p` has exactly one owner, so a value-semantic write
+ * can happen in place instead of copying. See jk_set_index. */
+int32_t jrt_obj_unique(const void* p);
 /* jrt_coll_dict_keys — new ObjHeader array of the dict's keys as TRUSTED tagged
  * strings, sorted ascending (matches the VM's dict.keys). */
 void*   jrt_coll_dict_keys(void* p);
@@ -755,19 +758,35 @@ void    jrt_fs_write_impl(const char* path, const char* content);
 void    jrt_fs_append_impl(const char* path, const char* content);
 void    jrt_fs_delete_impl(const char* path);
 void    jrt_fs_mkdir_impl(const char* path);
+/* Predicates: answer a question, so no error channel and no forwarder. */
+int32_t jrt_fs_is_file(const char* path);
+int32_t jrt_fs_is_dir(const char* path);
+void    jrt_fs_copy_impl(const char* src, const char* dst);
+void    jrt_fs_rename_impl(const char* src, const char* dst);
+void    jrt_fs_rmdir_impl(const char* path);
+int64_t jrt_fs_size_impl(const char* path);
 /* Codegen-facing raising forwarders (common.c). */
 char*   jrt_fs_read(const char* path, int32_t trust);
 void    jrt_fs_write(const char* path, const char* content);
 void    jrt_fs_append(const char* path, const char* content);
 void    jrt_fs_delete(const char* path);
 void    jrt_fs_mkdir(const char* path);
+void    jrt_fs_copy(const char* src, const char* dst);
+void    jrt_fs_rename(const char* src, const char* dst);
+void    jrt_fs_rmdir(const char* path);
+int64_t jrt_fs_size(const char* path);
 
 /* time (std::time) is implemented in Rust now (jade-runtime, src/timef.rs) —
  * no C leaf. Declared here for ABI reference. None raise. */
 int64_t jrt_time_now(void);
 int64_t jrt_time_now_ms(void);
+double  jrt_time_monotonic(void);
 void    jrt_time_sleep(double secs);
 char*   jrt_time_local(const char* tz);
+char*   jrt_time_utc(int64_t ts);
+int64_t jrt_time_parts(int64_t ts);
+int64_t jrt_time_stamp(int64_t y, int64_t mo, int64_t d,
+                       int64_t h, int64_t mi, int64_t s);
 
 /* random (std::random) is implemented in Rust now (jade-runtime, src/randomf.rs).
  * jrt_random_int is a C forwarder (common.c) that throws on min>max, then calls

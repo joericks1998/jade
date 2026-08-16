@@ -20,6 +20,8 @@ pub(super) fn dest_reg(instr: &Instr) -> Option<Reg> {
     match instr {
         // A yield writes to the generator's buffer and produces no register.
         Instr::Yield(_) => None,
+        // Writes through a named global, not a register.
+        Instr::SetIndexGlobal(..) => None,
         LoadInt(d, _)
         | LoadFloat(d, _)
         | LoadBool(d, _)

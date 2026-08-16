@@ -66,7 +66,11 @@ Skipping that arrangement is the standing failure mode, and it is invisible: the
 
 **Non-raising versus raising.** Functions in `ffi_coll.rs` never raise: a Jade-catchable error cannot be a `longjmp`. Read that file's header before adding an entry point.
 
+**A dict is a compact hash map.** `DictObj` keeps entries in one insertion-ordered vector and, once past `DICT_SCAN_MAX`, an open-addressed table from a key's hash to its position in it. Insertion order is what `entries()` hands back, so rendering and `value_copy` are unaffected; the index only answers "where is this key". It was a bare vector searched by scan until v1.3.22, which made every lookup O(n) and building a dict O(n²). Small dicts still skip the table — a scan of a contiguous vector wins there, and most dicts are that size.
+
 **Mutating versus copying.** Some collection functions exist in both forms, and the pair has to keep its meanings straight: `jrt_coll_array_sort` sorts in place for `a.sort()`, while `jrt_coll_array_sorted` returns a new array for `array.sort(a)`. They are not interchangeable, and using one where the other belongs is a silent behaviour change rather than an error — see `codegen`'s `package_fn_is_the_method`.
+
+`jrt_obj_unique` is the third case: a dict is value-semantic, so a write has to leave any alias alone, but a copy is only observable when somebody else is holding the dict. The refcount answers exactly that, which is what lets the compiled `d[k] = v` path write in place instead of copying on every write.
 
 Anything here that changes user-visible behavior needs checking on *both* engines, because both link it.
 

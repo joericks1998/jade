@@ -76,6 +76,21 @@ pub extern "C" fn jrt_kind_of(p: *const c_void) -> i64 {
     unsafe { kind_of(p) as i64 }
 }
 
+/// Whether `p` has exactly one owner, so a write to it can happen in place.
+///
+/// This is what makes a *value-semantic* dict affordable. A dict copies on
+/// assignment, so the compiled `d[k] = v` path copied on every write to be safe
+/// against an alias — which made building a dict quadratic. But a copy is only
+/// observable when somebody else is holding the dict, and the refcount is
+/// exactly that question. One owner, no copy, same semantics.
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_obj_unique(p: *const c_void) -> i32 {
+    if p.is_null() {
+        return 0;
+    }
+    i32::from(unsafe { (*(p as *const ObjHeader)).rc() } == 1)
+}
+
 /// The element/field count from the object header (O(1)). Used by the Chunk
 /// backend's `len()` on a collection.
 #[unsafe(no_mangle)]
@@ -281,6 +296,53 @@ pub extern "C" fn jrt_coll_str_split(s: *const c_char, sep: *const c_char) -> *m
             arr.push(JadeValue::from_str_ptr(ts as *const ()).bits() as i64);
         }
         crate::gc::leak_obj(arr)
+    }
+}
+
+/// `s.lines()` — split on newlines, tolerating both line endings.
+///
+/// A trailing newline does *not* produce an empty final element, which is the
+/// difference from `split("\n")` and the whole reason this exists: a file read
+/// off disk almost always ends in one, and `split` gives you a phantom empty
+/// line at the end of every such read.
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_coll_str_lines(s: *const c_char) -> *mut c_void {
+    unsafe {
+        let trust = string::trust_of(s as *const u8);
+        let mut arr = ArrayObj::<W>::new();
+        for line in cstr::borrow(s).lines() {
+            let ts = tagged_string(line.as_bytes(), trust);
+            arr.push(JadeValue::from_str_ptr(ts as *const ()).bits() as i64);
+        }
+        crate::gc::leak_obj(arr)
+    }
+}
+
+/// `a.join(sep)` — the elements rendered and joined.
+///
+/// Non-string elements are rendered the way `print` renders them, so
+/// `[1, 2].join("-")` is `"1-2"` rather than an error. Trust is the *union* of
+/// every element's: joining a tainted string into a literal separator must not
+/// launder it, and the result is only trusted when every part was.
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_coll_array_join(arr: *const c_void, sep: *const c_char) -> *mut c_char {
+    unsafe {
+        let a = &*(arr as *const ArrayObj<W>);
+        let sepv = cstr::borrow(sep);
+        let mut out = String::new();
+        let mut trust = string::trust_of(sep as *const u8);
+        for (i, w) in a.as_slice().iter().enumerate() {
+            if i > 0 {
+                out.push_str(sepv);
+            }
+            let rendered = render_word(*w);
+            out.push_str(&rendered);
+            let v = JadeValue::from_bits(*w as u64);
+            if v.is_str() {
+                trust = crate::trust::combine(trust, string::trust_of(v.as_ptr() as *const u8));
+            }
+        }
+        tagged_string(out.as_bytes(), trust)
     }
 }
 

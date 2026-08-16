@@ -19,7 +19,7 @@ A third rule applies to the whole tree: it stays formatted, and CI runs `jade fm
 
 One directory per language area, each with a subdirectory per case:
 
-`arithmatic/` (arithmetic, bitwise, unary) · `arrays/` · `assignment/` · `async/` · `closures/` · `collections/` · `control_flow/` · `decorators/` · `dicts/` · `exceptions/` · `for_loop/` · `fs/` · `functions/` · `http/` · `imports/` · `interfaces/` · `llm/` · `llvm/` · `numbers/` · `pipe/` · `streams/` · `strings/` · `structs/` · `trust/` · `uhttp/`
+`arithmatic/` (arithmetic, bitwise, unary) · `arrays/` · `assignment/` · `async/` · `closures/` · `collections/` · `control_flow/` · `decorators/` · `dicts/` · `exceptions/` · `for_loop/` · `fs/` · `functions/` · `http/` · `imports/` · `interfaces/` · `llm/` · `llvm/` · `numbers/` · `pipe/` · `streams/` · `strings/` · `structs/` · `time/` · `trust/` · `uhttp/`
 
 Three fixtures pin the v1.3.3 fixes, and each fails on the pre-fix build. `trust/sh_sinks/` feeds a shell command's own output back into all three `sh` functions; `sh.output` used to run it. `dicts/dot_access/` reads dict entries with a dot, which raised "value has no fields" compiled and worked interpreted. `async/nested_async_error.jde` nests an `async fn`, which used to parse and then fail at run time on a variable the inner function could not see.
 
