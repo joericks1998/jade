@@ -198,6 +198,13 @@ pub fn find_primitive_method(ty: PrimType, method: &str) -> Option<BuiltinFn> {
 
 // ── Public lookup API ─────────────────────────────────────────────────────────
 
+/// Every stdlib package, for callers that need to walk the whole set rather
+/// than look one up. The tripwire tying these tables to the AOT backend's
+/// lowering predicate uses it — see `codegen::tests`.
+pub fn all_packages() -> &'static [&'static Package] {
+    PACKAGES
+}
+
 pub fn find_package(import_name: &str) -> Option<&'static Package> {
     PACKAGES.iter().find(|p| p.import_name == import_name).copied()
 }

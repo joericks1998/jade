@@ -157,3 +157,39 @@ fn pow_float_base_int_exp() {
 fn pow_missing_arg() {
     assert!(matches!(math_pow(&[VmValue::Int(2)]), Err(JadeError::TypeError { .. })));
 }
+
+// ── v1.3.23 additions ─────────────────────────────────────────────────────────
+
+#[test]
+fn round_and_sign_marshal_the_kind_back() {
+    assert!(matches!(math_round(&[VmValue::Float(2.5)]), Ok(VmValue::Int(3))));
+    assert!(matches!(math_round(&[VmValue::Int(7)]), Ok(VmValue::Int(7))));
+    assert!(matches!(math_sign(&[VmValue::Int(-7)]), Ok(VmValue::Int(-1))));
+    assert!(matches!(math_sign(&[VmValue::Float(-0.5)]), Ok(VmValue::Float(f)) if f == -1.0));
+}
+
+#[test]
+fn clamp_takes_three() {
+    assert!(matches!(
+        math_clamp(&[VmValue::Int(15), VmValue::Int(0), VmValue::Int(10)]),
+        Ok(VmValue::Int(10))
+    ));
+    assert!(matches!(math_clamp(&[VmValue::Int(1)]), Err(JadeError::TypeError { .. })));
+}
+
+#[test]
+fn the_predicates_answer_a_bool() {
+    assert!(matches!(math_is_nan(&[VmValue::Float(f64::NAN)]), Ok(VmValue::Bool(true))));
+    assert!(matches!(math_is_nan(&[VmValue::Int(1)]), Ok(VmValue::Bool(false))));
+    assert!(matches!(math_is_inf(&[VmValue::Float(f64::INFINITY)]), Ok(VmValue::Bool(true))));
+}
+
+/// A constant is spelled as a call, so it takes no arguments — and says so
+/// rather than quietly ignoring one.
+#[test]
+fn a_constant_refuses_an_argument() {
+    assert!(matches!(math_pi(&[]), Ok(VmValue::Float(_))));
+    assert!(matches!(math_pi(&[VmValue::Int(1)]), Err(JadeError::ArityMismatch { .. })));
+    assert!(matches!(math_inf(&[]), Ok(VmValue::Float(f)) if f.is_infinite()));
+    assert!(matches!(math_nan(&[]), Ok(VmValue::Float(f)) if f.is_nan()));
+}

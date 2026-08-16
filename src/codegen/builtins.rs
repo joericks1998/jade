@@ -173,6 +173,17 @@ pub(super) fn chunk_module_supported(module: &str, method: &str, argc: usize) ->
     match (module, method) {
         ("math", "floor" | "ceil" | "abs" | "sqrt") => argc == 1,
         ("math", "min" | "max" | "pow") => argc == 2,
+        // Rounding, sign, the transcendentals, and the two predicates. None can
+        // fail, so each calls the Rust symbol directly with no error drain.
+        (
+            "math",
+            "round" | "trunc" | "sign" | "ln" | "log2" | "log10" | "exp" | "sin" | "cos" | "tan"
+            | "asin" | "acos" | "atan" | "is_nan" | "is_inf",
+        ) => argc == 1,
+        ("math", "atan2" | "hypot") => argc == 2,
+        ("math", "clamp") => argc == 3,
+        // The constants, spelled as calls — see `mathf::pi`.
+        ("math", "pi" | "e" | "tau" | "inf" | "nan") => argc == 0,
         ("path", "basename" | "ext" | "dirname" | "stem" | "abs") => argc == 1,
         ("path", "is_abs") => argc == 1,
         ("path", "join") => argc >= 1,
@@ -726,6 +737,16 @@ pub(super) fn emit_module_call<'ctx>(
         ("math", "pow") => math_fn("jade_math_pow", 2),
         ("math", "floor" | "ceil" | "sqrt") => math_fn(&format!("jrt_math_{method}"), 1),
         ("math", "min" | "max") => math_fn(&format!("jrt_math_{method}"), 2),
+        // The predicates answer a tagged bool word, which `math_fn` returns
+        // unchanged — nothing here has to know the difference.
+        (
+            "math",
+            "round" | "trunc" | "sign" | "ln" | "log2" | "log10" | "exp" | "sin" | "cos" | "tan"
+            | "asin" | "acos" | "atan" | "is_nan" | "is_inf",
+        ) => math_fn(&format!("jrt_math_{method}"), 1),
+        ("math", "atan2" | "hypot") => math_fn(&format!("jrt_math_{method}"), 2),
+        ("math", "clamp") => math_fn("jrt_math_clamp", 3),
+        ("math", "pi" | "e" | "tau" | "inf" | "nan") => math_fn(&format!("jrt_math_{method}"), 0),
         ("path", "basename" | "ext" | "dirname" | "stem" | "abs") => {
             tag_str_or_nil(str_fn(&format!("jrt_path_{method}"), 1)?)
         }

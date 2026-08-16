@@ -1,0 +1,70 @@
+// Everything std::math gained in v1.3.23, printed so the parity gate diffs it.
+//
+// A fixture that computes without printing is invisible to that gate, so every
+// call below prints. The cases chosen are the ones where the two engines could
+// plausibly disagree: negatives, zero, ties, reversed ranges, and the
+// non-finite values.
+
+use std::math
+
+// Rounding. `round` breaks ties away from zero, so 2.5 is 3 and -2.5 is -3.
+// `trunc` and `floor` differ only for negatives, which is why both are here.
+print(math.round(2.5))
+print(math.round(-2.5))
+print(math.round(2.4))
+print(math.trunc(-1.9))
+print(math.floor(-1.9))
+print(math.trunc(1.9))
+
+// Sign keeps the operand's kind, and keeps NaN as NaN rather than inventing an
+// order for it the way f64::signum does.
+print(math.sign(-7))
+print(math.sign(0))
+print(math.sign(7))
+print(math.sign(-0.5))
+print(math.is_nan(math.sign(math.nan())))
+
+// Clamp is an int only when all three arguments are. A reversed range does not
+// raise: the trailing min wins, so the answer is hi.
+print(math.clamp(15, 0, 10))
+print(math.clamp(-5, 0, 10))
+print(math.clamp(5, 0, 10))
+print(math.clamp(1.5, 0, 10))
+print(math.clamp(5, 10, 0))
+
+// Logs and exponentials, always float.
+print(math.exp(0))
+print(math.ln(1))
+print(math.log2(8))
+print(math.log10(1000))
+
+// Trigonometry, in radians. atan2 takes (y, x) in that order.
+print(math.sin(0))
+print(math.cos(0))
+print(math.tan(0))
+print(math.asin(0))
+print(math.acos(1))
+print(math.atan(0))
+print(math.atan2(1, 1))
+print(math.hypot(3, 4))
+
+// The predicates. An int is never NaN and never infinite.
+print(math.is_nan(math.nan()))
+print(math.is_nan(1.0))
+print(math.is_nan(1))
+print(math.is_inf(math.inf()))
+print(math.is_inf(1.0))
+print(math.is_inf(1))
+
+// The constants, spelled as calls. `inf` and `nan` are reachable no other way:
+// the lexer caps a numeric literal, so neither can be written down.
+print(math.pi())
+print(math.e())
+print(math.tau())
+print(math.inf())
+print(math.nan())
+
+// Out-of-domain input answers NaN rather than raising, which is what IEEE says
+// and what both engines print identically.
+print(math.is_nan(math.asin(2)))
+print(math.is_nan(math.ln(-1)))
