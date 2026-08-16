@@ -29,7 +29,7 @@ A third choice worth knowing before you add syntax: *prefer desugaring*. If new 
 - **`lexer.rs`** — source text to `Vec<Token>`. Handles Jade's string forms (plain, single-quoted, triple-quoted, f-strings), numeric literals with overflow detection, and the prompt-related sigils. It *strips comments*, which is why `cli/fmt.rs` formats source text directly rather than reprinting the token stream.
 - **`parser.rs`** — tokens to `Program`. The largest file here. Operator precedence lives in its call chain (`parse_or` → `parse_and` → … → `parse_primary`); add a precedence level by inserting a function at the right spot rather than special-casing inside an existing one.
 - **`ast.rs`** — the AST node types, plus the small enums (`BinOpKind`, `UnaryOpKind`, `StructFieldDef`, `FStrPart`) shared with later stages. These are serde-serializable because the on-disk cache stores them.
-- **`error.rs`** — `JadeError`, `Span`, and the `Result` alias used across the whole crate. Every variant carries a span.
+- **`error.rs`** — `JadeError`, `Span`, and the `Result` alias used across the whole crate. Every variant carries a span. `undefined_variable_hint` also lives here rather than beside either engine, because the AOT backend reports the same thing about programs type inference had to let through and the two should say it the same way.
 - **`mod.rs`** — module declarations only.
 - **`tests.rs`** — parser and lexer tests. Helpers: `parse_src(src)` returns a `Program`, `parse_src_err(src)` returns the `JadeError` a bad program produces.
 

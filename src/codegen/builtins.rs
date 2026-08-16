@@ -20,6 +20,73 @@ pub(super) const RESERVED_BUILTINS: &[&str] = &[
     "path", "random",
 ];
 
+/// Reject a program that reads a global nothing ever binds.
+///
+/// A `GetGlobal` of an unbound name has no lowering to decline — `global_slot`
+/// happily creates the cell, initialized to nil, and the program builds. Calling
+/// one then traps in the runtime with no message at all, so a name that does not
+/// exist produces a binary that compiles clean and dies silently. The VM has
+/// always raised `undefined variable` for the same program, so this is also the
+/// two engines agreeing again.
+///
+/// Type inference catches most of these first. What reaches here is the case it
+/// has to stay lenient about: a file importing a user module, where a bare name
+/// may well be one of that module's globals. By this point every import is
+/// inlined, so the question is finally answerable — the program's own bindings
+/// plus the runtime's are all there is.
+///
+/// Deliberately conservative. Only `GetGlobal` is checked, only against names
+/// nothing anywhere in the program stores to, and native refs are exempt because
+/// they resolve through `jrt_native_call` rather than a cell.
+pub(super) fn check_globals_bound(
+    top: &Chunk,
+    defs: &[Arc<CompiledFn>],
+    struct_defs: &HashMap<String, Vec<StructFieldDef>>,
+    extend_methods: &HashMap<String, HashMap<String, Arc<CompiledFn>>>,
+) -> Result<(), String> {
+    let mut bound: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // The runtime's own globals, read from `seed_globals` rather than restated,
+    // so a new builtin cannot make valid programs stop building.
+    let mut seeded: HashMap<String, VmValue> = HashMap::new();
+    crate::builtins::seed_globals(&mut seeded);
+    bound.extend(seeded.into_keys());
+
+    // A type name reaches here as a `GetGlobal` that nothing ever stores to —
+    // it lives in these side tables, not in the instruction stream. Counting it
+    // as bound is also what leaves the better diagnostic in place: calling one
+    // has its own error saying a struct is not a function.
+    bound.extend(struct_defs.keys().cloned());
+    bound.extend(extend_methods.keys().cloned());
+
+    let chunks = std::iter::once(top).chain(defs.iter().map(|f| &f.chunk));
+    for c in chunks.clone() {
+        for instr in &c.code {
+            if let Instr::SetGlobal(name, _) = instr {
+                bound.insert(name.clone());
+            }
+        }
+    }
+
+    for c in chunks {
+        for (i, instr) in c.code.iter().enumerate() {
+            let Instr::GetGlobal(_, name) = instr else { continue };
+            if bound.contains(name)
+                || parse_native_ref(name).is_some()
+                || crate::builtins::is_package_global_name(name)
+            {
+                continue;
+            }
+            let (line, col) = c.spans.get(i).map_or((0, 0), |s| (s.line, s.col));
+            return Err(format!(
+                "[{line}:{col}] undefined variable '{name}'{}",
+                crate::frontend::error::undefined_variable_hint(name)
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Parse a native package reference `__native$<pkgid>$<fn>` (produced by import
 /// namespacing) into `(pkgid, fn_name)`. `None` for ordinary names.
 pub(super) fn parse_native_ref(name: &str) -> Option<(u32, &str)> {

@@ -410,6 +410,41 @@ mod type_infer {
         assert!(matches!(err, JadeError::UndefinedVariable { .. }));
     }
 
+    /// A stdlib import must not turn the check off.
+    ///
+    /// It used to: any `use` at all made every unknown name `Unknown`, so
+    /// `exit(main())` type-checked, emitted a read of a nil global, and built a
+    /// binary that did nothing. A stdlib package registers everything it
+    /// contributes, so after one there is still nothing this pass cannot
+    /// account for.
+    #[test]
+    fn test_infer_stdlib_import_does_not_excuse_undefined_variable() {
+        let err = infer_err("use std::env\nfn main() { return 0 }\nexit(main())");
+        assert!(
+            matches!(&err, JadeError::UndefinedVariable { name, .. } if name == "exit"),
+            "expected undefined 'exit', got {err}"
+        );
+        assert!(
+            err.to_string().contains("raise"),
+            "the message should name what to write instead: {err}"
+        );
+    }
+
+    /// The other half: leniency is kept where it is actually needed. A user
+    /// module's top-level names only exist once the importer merges the
+    /// modules, well after this pass, so a bare name has to be allowed through
+    /// here. The backend catches an unbound one after inlining.
+    #[test]
+    fn test_infer_user_module_import_stays_lenient() {
+        infer_ok("use some_helper\nlet x = whatever_it_exports()");
+    }
+
+    /// `from … use a, b` binds bare names this pass never sees, stdlib or not.
+    #[test]
+    fn test_infer_from_use_stays_lenient() {
+        infer_ok("from std::env use args\nlet x = args()");
+    }
+
     // ── Unknown propagation ───────────────────────────────────────────────────
 
     #[test]

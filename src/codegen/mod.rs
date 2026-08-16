@@ -351,6 +351,11 @@ pub fn lower_program<'ctx>(
     // it decline (`resolve_user_calls`).
     let method_candidates = collect_method_fns(extend_methods, &mut defs, &mut ptr2uid);
 
+    // Before anything is emitted, because the failure this catches is a program
+    // that lowers perfectly and then does nothing. Extend-block methods are in
+    // `defs` by now, so every chunk the program has is in scope.
+    check_globals_bound(top, &defs, struct_defs, extend_methods)?;
+
     // Native (C-ABI FFI) references — `__native$<pkgid>$<fn>` globals produced by
     // import namespacing — are lowered directly: a `Call` on one dispatches through
     // `jrt_native_call` (against the package `dlopen`'d in main's prologue), and a
