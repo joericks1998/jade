@@ -104,7 +104,7 @@ fn dict_frame(pairs: &[(&str, VmValue)]) -> VmValue {
     for (k, v) in pairs {
         d.insert((*k).to_owned(), v.clone());
     }
-    VmValue::Dict(d)
+    VmValue::dict(d)
 }
 
 fn struct_frame(type_name: &str, pairs: &[(&str, VmValue)]) -> VmValue {

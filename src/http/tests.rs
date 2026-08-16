@@ -50,7 +50,7 @@ fn extract_headers_nil_is_empty() {
 fn extract_headers_dict_of_strings() {
     let mut map = DictObj::new();
     map.insert("Accept".to_string(), VmValue::Str("application/json".to_string().into()));
-    let hs = extract_headers(Some(&VmValue::Dict(map))).unwrap();
+    let hs = extract_headers(Some(&VmValue::dict(map))).unwrap();
     assert_eq!(hs.len(), 1);
     assert_eq!(hs[0], ("Accept".to_string(), "application/json".to_string()));
 }
@@ -59,7 +59,7 @@ fn extract_headers_dict_of_strings() {
 fn extract_headers_non_str_value_errors() {
     let mut map = DictObj::new();
     map.insert("X".to_string(), VmValue::Int(1));
-    match extract_headers(Some(&VmValue::Dict(map))).unwrap_err() {
+    match extract_headers(Some(&VmValue::dict(map))).unwrap_err() {
         JadeError::TypeError { message, .. } => assert!(message.contains("header value")),
         other => panic!("expected TypeError, got {:?}", other),
     }

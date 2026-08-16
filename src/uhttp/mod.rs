@@ -76,7 +76,7 @@ fn make_response(status: i64, body: String) -> VmValue {
     let mut map = DictObj::new();
     map.insert("status".to_string(), VmValue::Int(status));
     map.insert("body".to_string(), VmValue::Str(body.into()));
-    VmValue::Dict(map)
+    VmValue::dict(map)
 }
 
 /// The same dict with an undecoded `bytes` body.
@@ -93,7 +93,7 @@ fn make_bytes_response(status: i64, body: Vec<u8>) -> VmValue {
             jade_runtime::trust::TAINTED,
         ))),
     );
-    VmValue::Dict(map)
+    VmValue::dict(map)
 }
 
 /// Run one request through the shared `uhttpf` core, mapping its `(status, body)`

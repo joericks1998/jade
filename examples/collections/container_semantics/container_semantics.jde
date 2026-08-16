@@ -1,0 +1,61 @@
+// A dict is a value; an array and a struct are references.
+//
+// The three containers behave differently when a function writes to one, and
+// the difference is not guessable. A dict parameter is a copy, so the write is
+// invisible to the caller — the call succeeds, the function does exactly what
+// it says, and the caller reads the old value. It cost two bugs in one
+// afternoon in the userland: a layout cursor whose `y` never advanced, and a
+// keyboard that forgot a held shift the instant the function returned.
+//
+// The rule is deliberate. A dict is for data you pass around; a struct is for
+// state something else needs to change. Reach for a struct when a function has
+// to hand a change back — that is what the bottom of this file shows.
+//
+// The copy is not paid for on a read. v1.3.22 put the dict behind a
+// copy-on-write handle, so passing one is a refcount bump and the copy happens
+// only when someone writes through a shared handle. The semantics below are
+// exactly what they were; only the cost changed.
+
+struct Cursor { x, y }
+
+fn write_dict(d) { d["x"] = 99 }
+fn push_array(a) { a.push(99) }
+fn write_struct(s) { s.x = 99 }
+
+// A dict parameter is a copy — the caller is untouched.
+let d = {"x": 1}
+write_dict(d)
+print(d["x"])
+
+// An array parameter is the caller's array.
+let a = [1]
+push_array(a)
+print(a.len())
+
+// A struct parameter is the caller's struct.
+let s = Cursor { x: 1, y: 0 }
+write_struct(s)
+print(s.x)
+
+// Plain assignment follows the same three rules, with no function involved.
+let d2 = d
+d2["x"] = 7
+print(d["x"])
+
+let a2 = a
+a2.push(7)
+print(a.len())
+
+// Reading a dict out of a dict is an assignment, so it copies too.
+let outer = {"inner": {"y": 1}}
+let inner = outer["inner"]
+inner["y"] = 42
+print(outer["inner"]["y"])
+
+// What to write when the caller has to see the change: a struct.
+fn advance(c, dy) { c.y = c.y + dy }
+
+let cur = Cursor { x: 0, y: 0 }
+advance(cur, 10)
+advance(cur, 10)
+print(cur.y)

@@ -201,10 +201,23 @@ impl<T, A: Allocator> core::ops::DerefMut for ArrayObj<T, A> {
 /// values are shared words. Mirrors the VM's `HashMap<String, VmValue>` (cloned
 /// on mutation) and the C `JKDict` + `jk_dict_copy`.
 ///
-/// Lookup is a linear probe over an insertion-ordered slot vector — dicts are
-/// small, and preserving insertion order keeps `value_copy` output stable
-/// (rendering sorts keys separately). Keys are unique; setting an existing key
-/// updates in place.
+/// **A compact hash map.** Entries live in one insertion-ordered vector, and a
+/// separate open-addressed table maps a key's hash to its position in it. So a
+/// lookup is O(1) expected, insertion order is still what `entries()` hands
+/// back, and `value_copy` output stays stable (rendering sorts keys separately).
+/// Keys are unique; setting an existing key updates in place.
+///
+/// It was a bare slot vector until v1.3.22, searched by linear scan. That made
+/// every `get` and every `set` O(n) and therefore building a dict O(n²) — 4,000
+/// keys took seconds against a rounding error for the same number of array
+/// pushes. Nothing about a dict's behaviour depended on the scan, which is why
+/// this could change underneath both engines at once.
+///
+/// **Small dicts skip the index entirely.** Below [`DICT_SCAN_MAX`] a scan of a
+/// contiguous vector beats hashing, and most dicts in real programs are that
+/// size — a config, an options bag, an HTTP header set. The index is built the
+/// first time a dict grows past it, so nothing pays for a table it would not
+/// use.
 ///
 /// Generic over the backing allocator `A` (defaults to [`Global`]); an
 /// arena-backed instance is built with [`DictObj::new_in`].
@@ -212,14 +225,115 @@ impl<T, A: Allocator> core::ops::DerefMut for ArrayObj<T, A> {
 pub struct DictObj<T, A: Allocator = Global> {
     /// Kind = [`ObjKind::Dict`]; `len` tracks the entry count.
     pub header: ObjHeader,
+    /// The entries, in insertion order. `entries()` hands this out directly.
     slots: AVec<(String, T), A>,
+    /// Open-addressed table of positions in `slots`, or empty while the dict is
+    /// small enough to scan. Length is always a power of two so the probe can
+    /// mask rather than divide; [`EMPTY_SLOT`] marks a free bucket.
+    index: AVec<u32, A>,
 }
 
-impl<T: Clone, A: Allocator> DictObj<T, A> {
+/// Entry count below which a linear scan beats hashing, so no index is built.
+pub const DICT_SCAN_MAX: usize = 8;
+
+/// A free bucket in the index. `u32::MAX` rather than a sentinel of its own:
+/// a dict with 4 billion entries is not the case being optimised for, and one
+/// this big would have exhausted memory long before.
+const EMPTY_SLOT: u32 = u32::MAX;
+
+/// FNV-1a over the key's bytes.
+///
+/// Deliberately not `std`'s `RandomState`: the two engines share this file, a
+/// dict's iteration order is its insertion order, and `keys()` sorts — so the
+/// hash never reaches anything observable, and a small deterministic one keeps
+/// the runtime free of a `std::collections` dependency it does not otherwise
+/// need.
+fn hash_key(key: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in key.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x1000_0000_01b3);
+    }
+    h
+}
+
+impl<T: Clone, A: Allocator + Clone> DictObj<T, A> {
     /// A fresh empty dict backed by `alloc`.
     #[inline]
     pub fn new_in(alloc: A) -> Self {
-        DictObj { header: ObjHeader::new(ObjKind::Dict, 0), slots: AVec::new_in(alloc) }
+        DictObj {
+            header: ObjHeader::new(ObjKind::Dict, 0),
+            slots: AVec::new_in(alloc.clone()),
+            index: AVec::new_in(alloc),
+        }
+    }
+
+    // ── The index ─────────────────────────────────────────────────────────────
+
+    /// Position of `key` in `slots`, or `None`.
+    ///
+    /// Scans while the dict is small and probes once it is not. Both answer the
+    /// same question; only the cost differs.
+    fn find(&self, key: &str) -> Option<usize> {
+        if self.index.is_empty() {
+            return self.slots.iter().position(|(k, _)| k == key);
+        }
+        let mask = self.index.len() - 1;
+        let mut i = (hash_key(key) as usize) & mask;
+        // Terminates because the table is never allowed to fill: `reindex`
+        // keeps it at least twice the entry count, so an empty bucket exists.
+        loop {
+            let slot = self.index[i];
+            if slot == EMPTY_SLOT {
+                return None;
+            }
+            if self.slots[slot as usize].0 == key {
+                return Some(slot as usize);
+            }
+            i = (i + 1) & mask;
+        }
+    }
+
+    /// Rebuild the index from `slots`, sized for the current entry count.
+    ///
+    /// Called after any change that moves entries — a growth past the scan
+    /// threshold, or a `remove`, which shifts every position after it. Rebuilding
+    /// rather than patching is right for `remove` specifically: the shift already
+    /// costs O(n), so a tombstone would buy nothing and would need compaction of
+    /// its own.
+    fn reindex(&mut self) {
+        if self.slots.len() <= DICT_SCAN_MAX {
+            self.index.clear();
+            return;
+        }
+        // Load factor 0.5: enough headroom that linear probing stays short.
+        let cap = (self.slots.len() * 2).next_power_of_two();
+        self.index.clear();
+        self.index.resize(cap, EMPTY_SLOT);
+        let mask = cap - 1;
+        for (pos, (k, _)) in self.slots.iter().enumerate() {
+            let mut i = (hash_key(k) as usize) & mask;
+            while self.index[i] != EMPTY_SLOT {
+                i = (i + 1) & mask;
+            }
+            self.index[i] = pos as u32;
+        }
+    }
+
+    /// Record a newly appended entry, growing the index if it is filling up.
+    fn index_appended(&mut self) {
+        self.sync_len();
+        if self.index.is_empty() || self.slots.len() * 2 > self.index.len() {
+            self.reindex();
+            return;
+        }
+        let mask = self.index.len() - 1;
+        let pos = self.slots.len() - 1;
+        let mut i = (hash_key(&self.slots[pos].0) as usize) & mask;
+        while self.index[i] != EMPTY_SLOT {
+            i = (i + 1) & mask;
+        }
+        self.index[i] = pos as u32;
     }
 
     /// Number of entries.
@@ -236,36 +350,33 @@ impl<T: Clone, A: Allocator> DictObj<T, A> {
     /// Set `key → val`, updating in place if the key is present, else appending
     /// (unique keys, insertion order preserved). The key is copied.
     pub fn set(&mut self, key: &str, val: T) {
-        for (k, v) in &mut self.slots {
-            if k == key {
-                *v = val;
-                return;
-            }
+        if let Some(i) = self.find(key) {
+            self.slots[i].1 = val;
+            return;
         }
         self.slots.push((key.to_owned(), val));
-        self.sync_len();
+        self.index_appended();
     }
 
     /// Value for `key`, or `None` if absent.
     pub fn get(&self, key: &str) -> Option<&T> {
-        self.slots.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+        self.find(key).map(|i| &self.slots[i].1)
     }
 
     /// Whether `key` is present.
     pub fn contains(&self, key: &str) -> bool {
-        self.slots.iter().any(|(k, _)| k == key)
+        self.find(key).is_some()
     }
 
     /// Remove `key`, returning its value if it was present (preserving the order
     /// of the remaining entries).
     pub fn remove(&mut self, key: &str) -> Option<T> {
-        if let Some(i) = self.slots.iter().position(|(k, _)| k == key) {
-            let (_, v) = self.slots.remove(i);
-            self.sync_len();
-            Some(v)
-        } else {
-            None
-        }
+        let i = self.find(key)?;
+        let (_, v) = self.slots.remove(i);
+        self.sync_len();
+        // Every position after `i` just moved, so the index is stale wholesale.
+        self.reindex();
+        Some(v)
     }
 
     /// A shallow value-copy with a fresh header: keys are re-owned so the copies
@@ -279,8 +390,10 @@ impl<T: Clone, A: Allocator> DictObj<T, A> {
     pub fn value_copy(&self) -> DictObj<T, Global> {
         let slots: AVec<(String, T), Global> =
             self.slots.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        let mut d = DictObj { header: ObjHeader::new(ObjKind::Dict, 0), slots };
+        let mut d = DictObj { header: ObjHeader::new(ObjKind::Dict, 0), slots, index: AVec::new() };
         d.sync_len();
+        // Cheaper than copying the table, and the copy is already O(n).
+        d.reindex();
         d
     }
 
@@ -303,13 +416,11 @@ impl<T: Clone, A: Allocator> DictObj<T, A> {
     /// key was present, else `None`. Accepts an owned `String` or a `&str`.
     pub fn insert(&mut self, key: impl Into<String>, val: T) -> Option<T> {
         let key = key.into();
-        for (k, v) in &mut self.slots {
-            if *k == key {
-                return Some(core::mem::replace(v, val));
-            }
+        if let Some(i) = self.find(&key) {
+            return Some(core::mem::replace(&mut self.slots[i].1, val));
         }
         self.slots.push((key, val));
-        self.sync_len();
+        self.index_appended();
         None
     }
 
@@ -342,7 +453,7 @@ impl<T: Clone> DictObj<T, Global> {
     /// A fresh empty dict (heap-allocated).
     #[inline]
     pub fn new() -> Self {
-        DictObj { header: ObjHeader::new(ObjKind::Dict, 0), slots: AVec::new() }
+        DictObj { header: ObjHeader::new(ObjKind::Dict, 0), slots: AVec::new(), index: AVec::new() }
     }
 }
 
@@ -458,6 +569,95 @@ impl<T: Clone> StructObj<T, Global> {
             header: ObjHeader::new(ObjKind::Struct, 0),
             type_name: type_name.to_owned(),
             fields: AVec::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod dict_index_tests {
+    use super::*;
+
+    /// The index has to agree with a scan for every key, including keys that
+    /// are absent — a probe that walked past its run would answer `None` for a
+    /// key that is present, and the dict would silently lose entries.
+    #[test]
+    fn the_index_agrees_with_a_scan_across_the_threshold() {
+        let mut d: DictObj<i64> = DictObj::new();
+        for i in 0..(DICT_SCAN_MAX as i64 * 40) {
+            d.insert(format!("k{i}"), i);
+            assert_eq!(d.len(), (i + 1) as usize);
+            // Every key inserted so far is still findable, and nothing else is.
+            for j in 0..=i {
+                assert_eq!(d.get(&format!("k{j}")), Some(&j), "lost k{j} after inserting k{i}");
+            }
+            assert_eq!(d.get("absent"), None);
+        }
+    }
+
+    /// Entries stay in insertion order whether or not an index exists — that is
+    /// what `entries()` promises and what rendering and `value_copy` rely on.
+    #[test]
+    fn insertion_order_survives_the_index() {
+        let mut d: DictObj<i64> = DictObj::new();
+        let n = DICT_SCAN_MAX * 3;
+        for i in 0..n {
+            d.insert(format!("k{i}"), i as i64);
+        }
+        let order: Vec<&str> = d.entries().iter().map(|(k, _)| k.as_str()).collect();
+        let want: Vec<String> = (0..n).map(|i| format!("k{i}")).collect();
+        assert_eq!(order, want.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+    }
+
+    /// A remove shifts every later entry, so the index is rebuilt. If it were
+    /// not, the stale positions would read the wrong key's value.
+    #[test]
+    fn remove_keeps_the_rest_findable() {
+        let mut d: DictObj<i64> = DictObj::new();
+        let n = DICT_SCAN_MAX * 4;
+        for i in 0..n {
+            d.insert(format!("k{i}"), i as i64);
+        }
+        for i in (0..n).step_by(3) {
+            assert_eq!(d.remove(&format!("k{i}")), Some(i as i64));
+        }
+        for i in 0..n {
+            let want = if i % 3 == 0 { None } else { Some(i as i64) };
+            assert_eq!(d.get(&format!("k{i}")), want.as_ref(), "wrong answer for k{i}");
+        }
+    }
+
+    /// Overwriting a key updates in place and does not grow the dict — the path
+    /// that finds an existing key has to be the same one `get` uses.
+    #[test]
+    fn overwriting_a_key_updates_in_place() {
+        let mut d: DictObj<i64> = DictObj::new();
+        let n = DICT_SCAN_MAX * 5;
+        for i in 0..n {
+            d.insert(format!("k{i}"), i as i64);
+        }
+        for i in 0..n {
+            assert_eq!(d.insert(format!("k{i}"), -(i as i64)), Some(i as i64));
+        }
+        assert_eq!(d.len(), n);
+        for i in 0..n {
+            assert_eq!(d.get(&format!("k{i}")), Some(&-(i as i64)));
+        }
+    }
+
+    /// A copy is an independent dict with a working index of its own.
+    #[test]
+    fn value_copy_carries_a_working_index() {
+        let mut d: DictObj<i64> = DictObj::new();
+        let n = DICT_SCAN_MAX * 3;
+        for i in 0..n {
+            d.insert(format!("k{i}"), i as i64);
+        }
+        let mut c = d.value_copy();
+        c.insert("k0".to_string(), 999);
+        assert_eq!(c.get("k0"), Some(&999));
+        assert_eq!(d.get("k0"), Some(&0), "the copy must not write through to the source");
+        for i in 1..n {
+            assert_eq!(c.get(&format!("k{i}")), Some(&(i as i64)));
         }
     }
 }

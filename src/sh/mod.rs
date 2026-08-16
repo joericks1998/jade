@@ -85,7 +85,7 @@ fn sh_output(args: &[VmValue]) -> Result<VmValue> {
     map.insert("stdout".to_string(), VmValue::Str(stdout.into()));
     map.insert("stderr".to_string(), VmValue::Str(stderr.into()));
     map.insert("code".to_string(), VmValue::Int(code));
-    Ok(VmValue::Dict(map))
+    Ok(VmValue::dict(map))
 }
 
 static SH_PKG_FNS: &[BuiltinFn] = &[
