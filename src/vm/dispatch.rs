@@ -7,6 +7,23 @@
 //! slot accessors it relies on live at the bottom of the file.
 
 use super::*;
+use crate::frontend::error::FieldOwner;
+
+/// The two array methods whose implementation lives behind a `NativeFnId`
+/// rather than a `BuiltinFn`, because each runs a Jade function per element.
+///
+/// They are the same functions as `array.map` / `array.filter`; only the
+/// spelling differs, and only this spelling was missing.
+fn array_fn_method(ty: PrimType, field: &str) -> Option<NativeFnId> {
+    if ty != PrimType::Array {
+        return None;
+    }
+    match field {
+        "map" => Some(NativeFnId::ArrayMap),
+        "filter" => Some(NativeFnId::ArrayFilter),
+        _ => None,
+    }
+}
 
 /// Execute `chunk` with the provided register frame.  Returns `Some(value)` if
 /// a `Return` instruction was executed, `None` if execution ended normally.
@@ -1011,6 +1028,7 @@ pub(crate) async fn execute_chunk(
                                 vm_err!(JadeError::UndefinedField {
                                     type_name,
                                     field: field.clone(),
+                                    owner: FieldOwner::Struct,
                                     span
                                 });
                             }
@@ -1018,6 +1036,7 @@ pub(crate) async fn execute_chunk(
                             vm_err!(JadeError::UndefinedField {
                                 type_name,
                                 field: field.clone(),
+                                owner: FieldOwner::Struct,
                                 span
                             });
                         }
@@ -1041,6 +1060,7 @@ pub(crate) async fn execute_chunk(
                             vm_err!(JadeError::UndefinedField {
                                 type_name: "dict".to_string(),
                                 field: field.clone(),
+                                owner: FieldOwner::Dict,
                                 span,
                             });
                         }
@@ -1052,7 +1072,19 @@ pub(crate) async fn execute_chunk(
                     | VmValue::Int(_)
                     | VmValue::Float(_)) => {
                         if let Some(ty) = PrimType::from_value(prim) {
-                            if let Some(method) = builtins::find_primitive_method(ty, field) {
+                            // `a.map(f)` / `a.filter(f)`. Not reachable through
+                            // `find_primitive_method`, which returns a pure
+                            // `BuiltinFn` — these two run a Jade function per
+                            // element and need the VM's call context, so they
+                            // bind the receiver to the native id instead.
+                            if let Some(id) = array_fn_method(ty, field) {
+                                set(
+                                    slots,
+                                    *dest,
+                                    VmValue::BoundNativeFn(Arc::new((id, prim.clone()))),
+                                );
+                            } else if let Some(method) = builtins::find_primitive_method(ty, field)
+                            {
                                 set(
                                     slots,
                                     *dest,
@@ -1065,6 +1097,7 @@ pub(crate) async fn execute_chunk(
                                 vm_err!(JadeError::UndefinedField {
                                     type_name: ty.type_name().to_string(),
                                     field: field.clone(),
+                                    owner: FieldOwner::Value,
                                     span,
                                 });
                             }
@@ -1085,8 +1118,9 @@ pub(crate) async fn execute_chunk(
                                 VmValue::Array(Arc::new(Mutex::new(ArrayObj::from_vec(arr))))
                             }
                             _ => vm_err!(JadeError::UndefinedField {
-                                type_name: "fn".to_string(),
+                                type_name: "a function".to_string(),
                                 field: field.clone(),
+                                owner: FieldOwner::Value,
                                 span,
                             }),
                         };
@@ -1114,6 +1148,7 @@ pub(crate) async fn execute_chunk(
                             vm_err!(JadeError::UndefinedField {
                                 type_name,
                                 field: field.clone(),
+                                owner: FieldOwner::Struct,
                                 span,
                             });
                         }

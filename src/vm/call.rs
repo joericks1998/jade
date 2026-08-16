@@ -130,6 +130,16 @@ pub(crate) async fn call_value(
                 nfn.call(&args, span)
             }
         }
+        VmValue::BoundNativeFn(bound) => {
+            // `a.map(f)` is `array.map(a, f)`: put the receiver back at the
+            // front and dispatch the one implementation. Arity is checked
+            // there, against the package form's count.
+            let (id, receiver) = (bound.0.clone(), bound.1.clone());
+            let mut full_args = Vec::with_capacity(args.len() + 1);
+            full_args.push(receiver);
+            full_args.extend(args);
+            Box::pin(call_value(VmValue::NativeFn(id), full_args, state, span)).await
+        }
         VmValue::NativeBoundMethod(nbm) => {
             // Checked here rather than inside each implementation, which reads
             // the arguments it wants and never sees the rest. The compiler

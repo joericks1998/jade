@@ -119,12 +119,57 @@ pub(super) fn is_stdlib_module(name: &str) -> bool {
     )
 }
 
+/// Whether `module.method(recv, …)` is exactly `recv.method(…)`, so the package
+/// spelling can lower as the method.
+///
+/// **Only where the two really are the same function.** `std/string` and
+/// `std/dict` expose each of theirs both ways and both are pure, so the spelling
+/// carries no meaning. `std/array` does *not*: its package functions are the
+/// functional style, and `array.sort(a)` returns a sorted copy where `a.sort()`
+/// sorts in place. Routing those two together would have quietly changed what a
+/// compiled program does, which is why this asks the package table for the name
+/// rather than assuming any `module.method` with a receiver first is the method.
+///
+/// The table is the authority for a second reason: `len` is a method on both
+/// types and a package function on neither, so `dict.len(d)` is not a call the
+/// interpreter accepts either. It reads the length of the *namespace* — a
+/// package is a dict at run time — and reports `expected 0, got 1`. Accepting it
+/// here would have built a program `jade run` refuses.
+fn package_fn_is_the_method(module: &str, method: &str) -> bool {
+    let import = match module {
+        "string" => "std/string",
+        "dict" => "std/dict",
+        _ => return false,
+    };
+    crate::builtins::find_package(import).is_some_and(|p| p.fns.iter().any(|f| f.name == method))
+}
+
+/// The receiver and remaining arguments of a package-form collection call.
+fn as_receiver_first<'a>(module: &str, method: &str, args: &'a [Reg]) -> Option<(Reg, &'a [Reg])> {
+    if !package_fn_is_the_method(module, method) {
+        return None;
+    }
+    let (&recv, rest) = args.split_first()?;
+    let supported = chunk_str_method_supported(method, rest.len())
+        || chunk_val_method_supported(method, rest.len());
+    supported.then_some((recv, rest))
+}
+
 /// Whether the Chunk backend can lower `module.method` with `argc` explicit args.
-/// Restricted to **layout-safe** methods — string/scalar I/O whose runtime symbols
-/// don't produce or consume the legacy `JrtArrayHdr`/`JadeDict` collection layouts
-/// (those need ObjHeader-aware runtime helpers, a later brick). Everything else
-/// declines to the legacy path. Keep in lockstep with `emit_module_call`.
+///
+/// Keep in lockstep with `emit_module_call`. A name this answers `false` for is
+/// a hard build error, so the set has to match what `jade run` accepts — the two
+/// engines disagreeing about whether a program is valid at all is the failure
+/// this predicate is most likely to cause, and it is how `string.upper(s)` came
+/// to run under `jade run` and refuse to build until v1.3.21.
 pub(super) fn chunk_module_supported(module: &str, method: &str, argc: usize) -> bool {
+    // The package spelling of a collection method, which lowers as the method.
+    if argc >= 1 && package_fn_is_the_method(module, method) {
+        let rest = argc - 1;
+        if chunk_str_method_supported(method, rest) || chunk_val_method_supported(method, rest) {
+            return true;
+        }
+    }
     match (module, method) {
         ("math", "floor" | "ceil" | "abs" | "sqrt") => argc == 1,
         ("math", "min" | "max" | "pow") => argc == 2,
@@ -154,6 +199,8 @@ pub(super) fn chunk_module_supported(module: &str, method: &str, argc: usize) ->
         ("uhttp", "post" | "put" | "post_bytes") => argc == 2 || argc == 3,
         ("uhttp", "stream") => argc == 2 || argc == 3, // url, handler[, headers]
         ("array", "map" | "filter") => argc == 2,
+        // The functional style: a sorted/reversed copy, not the in-place method.
+        ("array", "sort" | "reverse") => argc == 1,
         ("random", "int") => argc == 2,
         ("random", "seed") => argc == 1,
         ("random", "float") => argc == 0,
@@ -185,6 +232,7 @@ pub(super) fn chunk_val_method_supported(method: &str, argc: usize) -> bool {
     match method {
         "push" => argc == 1,                     // array
         "pop" | "sort" | "reverse" => argc == 0, // array
+        "map" | "filter" => argc == 1,           // array
         "keys" | "values" => argc == 0,          // dict
         "has" | "get" => argc == 1,              // dict
         "contains" => argc == 1,                 // str / array (runtime-dispatched)
@@ -434,7 +482,7 @@ pub(super) fn emit_val_method<'ctx>(
     // / `jrt_in_any`, which dispatch on the tag themselves and are already safe
     // on a scalar. Every other arm untags to a pointer and trusts the kind.
     match method {
-        "push" | "pop" | "sort" | "reverse" => {
+        "push" | "pop" | "sort" | "reverse" | "map" | "filter" => {
             low.require_kind(low.load(recv), WANT_ARRAY, method)?
         }
         "keys" | "values" | "has" | "get" => low.require_kind(low.load(recv), WANT_DICT, method)?,
@@ -445,6 +493,19 @@ pub(super) fn emit_val_method<'ctx>(
     let nil = i64_ty.const_int(NIL, false);
 
     match method {
+        // ── array, taking a function ──────────────────────────────────────
+        // `a.map(f)` is `array.map(a, f)`, and both reach the same symbol.
+        // Only the package spelling worked until v1.3.21, which made these the
+        // one pair of array functions with a single spelling.
+        "map" | "filter" => {
+            let cname =
+                if method == "map" { "jrt_coll_array_map" } else { "jrt_coll_array_filter" };
+            let f = low.runtime_fn(cname, i64_ty.fn_type(&[i64_ty.into(), i64_ty.into()], false));
+            Ok(b.build_call(f, &[low.load(recv).into(), low.load(args[0]).into()], "mapf")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_int_value())
+        }
         // ── bytes ─────────────────────────────────────────────────────────
         // Both untag the receiver to a BytesObj pointer. `decode` goes through
         // the raising C wrapper rather than the Rust entry point directly: a
@@ -568,18 +629,28 @@ pub(super) fn emit_val_method<'ctx>(
     }
 }
 
-/// Emit a layout-safe stdlib `module.method(args)` call, returning the tagged
-/// result word. Only methods `chunk_module_supported` accepts reach here; each
-/// reuses the same runtime `jrt_*` symbol the legacy path calls. String returns
+/// Emit a stdlib `module.method(args)` call, returning the tagged result word.
+/// Only calls `chunk_module_supported` accepts reach here; each reuses the same
+/// runtime `jrt_*` symbol the interpreter's implementation calls. String returns
 /// are null-checked → tagged nil (covers `path.ext`/`env.get`); scalar returns
-/// tag directly. Collection-producing/consuming methods are excluded (they use
-/// the legacy `JrtArrayHdr`/`JadeDict` layout, not the Chunk path's ObjHeader).
+/// tag directly.
 pub(super) fn emit_module_call<'ctx>(
     low: &Lowerer<'_, 'ctx>,
     module: &str,
     method: &str,
     args: &[Reg],
 ) -> Result<IntValue<'ctx>, String> {
+    // `string.upper(s)` is `s.upper()`, so it lowers as one. Before the two
+    // spellings anything else, because a collection method reached this far only
+    // by being written the other way round.
+    if let Some((recv, rest)) = as_receiver_first(module, method, args) {
+        return if chunk_str_method_supported(method, rest.len()) {
+            emit_str_method(low, recv, method, rest)
+        } else {
+            emit_val_method(low, recv, method, rest)
+        };
+    }
+
     let b = low.builder;
     let i64_ty = low.i64t();
     let ptrt = low.ptrt();
@@ -805,6 +876,20 @@ pub(super) fn emit_module_call<'ctx>(
                 .map_err(err)?
                 .as_any_value_enum()
                 .into_int_value())
+        }
+        ("array", "sort" | "reverse") => {
+            // (arr) -> a NEW array word. Deliberately not the in-place symbol
+            // `a.sort()` uses: the package spelling answers with a copy and
+            // leaves its argument alone. See `jrt_coll_array_sorted`.
+            let cname =
+                if method == "sort" { "jrt_coll_array_sorted" } else { "jrt_coll_array_reversed" };
+            let f = low.runtime_fn(cname, ptrt.fn_type(&[ptrt.into()], false));
+            let p = b
+                .build_call(f, &[strp(0).into()], "arrcopy")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_pointer_value();
+            Ok(low.tag_ptr(p))
         }
         ("random", "int") => {
             // Raw (untagged) i64 bounds; raises if lo > hi.

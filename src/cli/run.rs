@@ -275,6 +275,7 @@ pub(crate) fn format_global(name: &str, val: &vm::VmValue) -> Option<String> {
         vm::VmValue::Future(_) => format!("{name} = <future>"),
         vm::VmValue::TokenStream(_) => format!("{name} = <token stream>"),
         vm::VmValue::NativeFn(_)
+        | vm::VmValue::BoundNativeFn(_)
         | vm::VmValue::BuiltinFn(_)
         | vm::VmValue::NativeBoundMethod(_)
         | vm::VmValue::NativeLibFn(_)

@@ -4,6 +4,19 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.3.21
+
+**Fixed: a stdlib function you could call one way but not the other.** Most collection functions have two spellings — `string.upper(s)` and `s.upper()` are the same function — and several combinations did not work. `array.map(a, f)` ran and compiled, but `a.map(f)` existed on neither engine. `string.upper(s)`, `dict.keys(d)`, `array.sort(a)` and a dozen more ran under `jade run` and were refused by `jade build` as an *unsupported module call*, though nothing was missing: the symbol each one needs is the symbol its method spelling was already calling. Both spellings of every one of them now work on both engines.
+
+- **`map` and `filter` are methods now.** They were the only array functions without a method spelling, because they run a Jade function per element and the method path could reach pure builtins only. `nums.filter(is_odd).map(double)` reads the way people expect it to.
+- **One pair stays deliberately different, and now says so.** `std/array`'s package functions are the functional style: `array.sort(a)` answers with a sorted copy and leaves `a` alone, while `a.sort()` sorts in place. Compiled code had neither, and lowering the two together would have made a built binary mutate an array the interpreter does not touch.
+
+**Fixed: error messages that named the wrong type, or no type at all.** Three of them, all reached by an ordinary typo.
+
+- **A missing function on a stdlib module named neither the module nor the function's real home.** `math.round(2.5)` reported `struct 'dict' has no field 'round'` — a package is a dict at run time, and that leaked. It is refused at compile time now, on both engines: `std::math has no function 'round'`, followed by the list of what it does provide. There is no registry to go and read, so the list is the answer.
+- **A missing method said "struct" whatever it was called on.** `a.map(f)` reported `struct 'array' has no field 'map'`, which is wrong three times over: an array is not a struct, it has no fields, and `map` is a method. It reads `array has no method 'map'` now, `dict has no key or method 'k'` for a dict, and still `struct 'Point' has no field 'z'` for a real struct. Which one applies is carried rather than guessed from the name, because `struct array {}` is a legal declaration.
+- **The compiled runtime had its own copy of that wording**, so the fix landed twice. The parity fixture that asserts the two engines word it identically is what caught it.
+
 ## v1.3.20
 
 **Fixed: `exit()` compiled clean, did nothing, and left the program running.** Jade has no `exit`. Calling one anyway was accepted, so `jade build` printed `built: ./prog` for a program that could not work — and what happened next pointed everywhere except the cause. The call was silently skipped, so a top-level `exit(main())` looked like `main` had returned and execution had carried on, which reads like a `return` failing to leave a loop rather than a name that was never there.

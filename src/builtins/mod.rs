@@ -202,6 +202,11 @@ pub fn find_package(import_name: &str) -> Option<&'static Package> {
     PACKAGES.iter().find(|p| p.import_name == import_name).copied()
 }
 
+/// The package a stdlib global name belongs to (`"math"` → `std/math`).
+pub fn package_by_global_name(name: &str) -> Option<&'static Package> {
+    PACKAGES.iter().find(|p| p.global_name == name).copied()
+}
+
 /// Returns true if `name` is the global binding name of any stdlib package
 /// (e.g. "fs", "http", "json"). Used to separate stdlib imports from
 /// user-defined exports when packaging module globals.

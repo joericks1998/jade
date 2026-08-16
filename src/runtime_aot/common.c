@@ -550,8 +550,12 @@ static int32_t value_want_bit(jade_value_t v) {
 void jrt_require_kind(int64_t recv, int32_t want, const char* method) {
     jade_value_t v = (jade_value_t)recv;
     if (value_want_bit(v) & want) return;
+    /* Word for word what the interpreter raises. It said "struct" for every
+     * receiver until v1.3.21 — an int is not a struct and has no fields — and
+     * the two engines have to agree on the text, which the parity fixture
+     * `examples/exceptions/error_values` asserts by substring. */
     char msg[256];
-    snprintf(msg, sizeof msg, "struct '%s' has no field '%s'",
+    snprintf(msg, sizeof msg, "%s has no method '%s'",
              value_kind_name(v), method ? method : "");
     throw_msg(msg);
 }

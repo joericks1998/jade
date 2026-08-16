@@ -1,0 +1,62 @@
+// Every collection function has two spellings, and both work on both engines.
+//
+// Until v1.3.21 several combinations did not. `array.map(a, f)` ran and built,
+// but `a.map(f)` existed on neither engine — those two were the only array
+// functions with no method spelling, because they run a Jade function per
+// element and the method path could only reach pure builtins. Meanwhile
+// `string.upper(s)` and `dict.keys(d)` ran under `jade run` and were refused by
+// `jade build` as an "unsupported module call", though the symbol each needs is
+// the one the method spelling was already calling.
+//
+// The two spellings are the same function — with one deliberate exception,
+// checked at the bottom.
+
+use std::array
+use std::string
+use std::dict
+
+fn double(x) { return x * 2 }
+fn is_odd(x) { return x % 2 == 1 }
+
+let nums = [1, 2, 3, 4]
+
+// map / filter, both ways.
+print(array.map(nums, double))
+print(nums.map(double))
+print(array.filter(nums, is_odd))
+print(nums.filter(is_odd))
+print(nums.filter(is_odd).map(double))
+
+// string, both ways.
+print(string.upper("jade"))
+print("jade".upper())
+print(string.replace("a-b", "-", "+"))
+print("a-b".replace("-", "+"))
+print(string.split("a,b", ","))
+print("a,b".split(","))
+print(string.contains("abc", "b"))
+print("abc".contains("b"))
+
+// dict, both ways.
+let ages = {"ada": 36, "alan": 41}
+print(dict.keys(ages))
+print(ages.keys())
+print(dict.values(ages))
+print(ages.values())
+print(dict.get(ages, "ada"))
+print(ages.get("ada"))
+print(dict.has(ages, "alan"))
+print(ages.has("alan"))
+
+// The exception. `std/array`'s package functions are the functional style, so
+// `array.sort(a)` answers with a sorted copy and leaves `a` alone, while
+// `a.sort()` sorts in place. Compiled code had neither until v1.3.21, and
+// lowering the package form to the in-place symbol would have made a built
+// binary mutate an array the interpreter does not touch.
+let original = [3, 1, 2]
+let sorted = array.sort(original)
+print(sorted)
+print(original)
+
+original.sort()
+print(original)

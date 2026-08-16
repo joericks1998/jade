@@ -27,6 +27,22 @@ pub fn undefined_variable_hint(name: &str) -> &'static str {
     }
 }
 
+/// What a failed field access was reaching into.
+///
+/// Carried rather than inferred from the type name, because `struct array {}`
+/// is a legal declaration — so the name alone cannot tell a user's struct from
+/// the built-in array, and guessing produces a confidently wrong message.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FieldOwner {
+    /// A declared struct. Has fields; may have `extend` methods.
+    Struct,
+    /// A dict. Has keys, and the `dict` methods.
+    Dict,
+    /// Anything else — a str, an array, a number, a function. No fields at all,
+    /// so the only thing a name here could have been is a method.
+    Value,
+}
+
 /// Every error Jade can produce.
 #[derive(Debug)]
 pub enum JadeError {
@@ -38,6 +54,9 @@ pub enum JadeError {
 
     /// Parser hit the end of the token stream unexpectedly.
     UnexpectedEof { span: Span },
+
+    /// A stdlib package was asked for a function it does not have.
+    UnknownPackageFn { package: String, name: String, available: Vec<String>, span: Span },
 
     /// Evaluator tried to look up a name that was never declared.
     UndefinedVariable { name: String, span: Span },
@@ -89,7 +108,7 @@ pub enum JadeError {
     NotAStruct { span: Span },
 
     /// Tried to access a field that does not exist on the struct type.
-    UndefinedField { type_name: String, field: String, span: Span },
+    UndefinedField { type_name: String, field: String, owner: FieldOwner, span: Span },
 
     /// Struct literal used an unknown type name.
     UndefinedType { name: String, span: Span },
@@ -212,6 +231,20 @@ impl std::fmt::Display for JadeError {
                 "[{}:{}] syntax error: unexpected end of file — did you forget a closing `}}`?",
                 span.line, span.col
             ),
+            JadeError::UnknownPackageFn { package, name, available, span } => {
+                // Listing what the package *does* have is the whole value here:
+                // there is no registry to go and read, the set is small, and the
+                // mistake is nearly always a name from another language.
+                write!(
+                    f,
+                    "[{}:{}] {} has no function '{}'\n  It provides: {}.",
+                    span.line,
+                    span.col,
+                    package,
+                    name,
+                    available.join(", ")
+                )
+            }
             JadeError::UndefinedVariable { name, span } => {
                 write!(
                     f,
@@ -277,11 +310,26 @@ impl std::fmt::Display for JadeError {
             JadeError::NotAStruct { span } => {
                 write!(f, "[{}:{}] value is not a struct", span.line, span.col)
             }
-            JadeError::UndefinedField { type_name, field, span } => write!(
-                f,
-                "[{}:{}] struct '{}' has no field '{}'",
-                span.line, span.col, type_name, field
-            ),
+            // Said "struct" for everything until v1.3.21, so a missing method
+            // on an array reported `struct 'array' has no field 'map'` — three
+            // wrong words about a value that is not a struct and has no fields.
+            JadeError::UndefinedField { type_name, field, owner, span } => match owner {
+                FieldOwner::Struct => write!(
+                    f,
+                    "[{}:{}] struct '{}' has no field '{}'",
+                    span.line, span.col, type_name, field
+                ),
+                FieldOwner::Dict => {
+                    write!(f, "[{}:{}] dict has no key or method '{}'", span.line, span.col, field)
+                }
+                FieldOwner::Value => {
+                    write!(
+                        f,
+                        "[{}:{}] {} has no method '{}'",
+                        span.line, span.col, type_name, field
+                    )
+                }
+            },
             JadeError::UndefinedType { name, span } => {
                 write!(f, "[{}:{}] undefined struct type '{}'", span.line, span.col, name)
             }

@@ -6,6 +6,30 @@ The registry that makes Rust functions callable from Jade. It owns the shared ty
 
 The packages themselves are *flat top-level modules* — `src/array/`, `src/math/`, `src/string/`, and so on — rather than children of this directory. This file is the table of contents; each of those is one entry.
 
+## Every function has two spellings
+
+`string.upper(s)` and `s.upper()` are the same function, and a package function
+whose first argument is the receiver has to work written either way, on both
+engines. Until v1.3.21 several did not: `a.map(f)` existed nowhere, and
+`string.upper(s)` / `dict.keys(d)` ran under `jade run` while `jade build`
+refused them as an *unsupported module call*. Nothing was missing from the
+runtime in either direction — the symbol the package form needs is the one the
+method form already called — so the fix was to route one to the other rather
+than to write anything twice.
+
+Two things to keep in mind when adding a function:
+
+- **Register both spellings.** A package entry goes in the package's `fns`
+  table; the method goes in the primitive-method table *and* in
+  `register_*_method_types`, or the type checker will not know it. `codegen`
+  reads the package table to decide which package calls lower as the method, so
+  a name missing from it silently keeps the old behaviour.
+- **Say so if the two differ.** `std/array` is the exception on purpose, and it
+  is the reason the codegen bridge asks the package table for a name rather than
+  assuming every receiver-first call is the method. Routing `array.sort` to the
+  in-place symbol would have made a compiled program mutate an array the
+  interpreter leaves alone — a silent miscompile, not a build error.
+
 ## Why it was built this way
 
 The registry is a boundary, and the value of a boundary is that crossing it is cheap and nothing leaks through. Adding a package should touch the package's own files plus one line here. If a new package needs anything *else* changed, the boundary has sprung a leak, and that is worth fixing rather than working around.
@@ -25,7 +49,7 @@ Each is a sibling top-level module with a `mod.rs` and a `tests.rs`. Most are th
 |---|---|---|
 | `src/core/` | *(globals)* | `write`, `len`, `input`. `print` and `route` are stateful and go through `NativeFnId`. (`stream` was a third until v1.2.5 removed it.) |
 | `src/string/` | `std/string` | Also supplies the `str` primitive methods (`upper`, `split`, `trim`, …). |
-| `src/array/` | `std/array` | `map` and `filter` are stateful — they call a user function per element. |
+| `src/array/` | `std/array` | `map` and `filter` are stateful — they call a user function per element. Its package functions are the *functional* style: `array.sort(a)` returns a sorted copy where `a.sort()` sorts in place. |
 | `src/dict/` | `std/dict` | Also supplies the `dict` primitive methods. |
 | `src/math/` | `std/math` | |
 | `src/json/` | `std/json` | |
