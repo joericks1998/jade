@@ -229,8 +229,11 @@ pub(super) fn chunk_module_supported(module: &str, method: &str, argc: usize) ->
 pub(super) fn chunk_str_method_supported(method: &str, argc: usize) -> bool {
     match method {
         "trim" | "upper" | "lower" | "encode" => argc == 0,
+        "trim_start" | "trim_end" | "capitalize" | "is_empty" => argc == 0,
         "starts_with" | "ends_with" => argc == 1,
+        "index_of" | "last_index_of" | "count" | "repeat" => argc == 1,
         "replace" => argc == 2,
+        "pad_start" | "pad_end" => argc == 2,
         "split" => argc == 1,
         _ => false,
     }
@@ -530,19 +533,22 @@ pub(super) fn emit_val_method<'ctx>(
                 .into_int_value();
             Ok(r)
         }
+        // The one method name that does not settle its receiver's kind: a blob
+        // and a string both have `slice`. So the whole tagged word goes to the
+        // runtime, which reads the tag and picks — the same treatment `len` and
+        // `contains` already get, and for the same reason. Picking here from
+        // the method name would read a tagged string as a `BytesObj` pointer.
         "slice" => {
             let f = low.runtime_fn(
-                "jrt_bytes_slice",
-                ptrt.fn_type(&[ptrt.into(), i64_ty.into(), i64_ty.into()], false),
+                "jrt_slice_any",
+                i64_ty.fn_type(&[i64_ty.into(), i64_ty.into(), i64_ty.into()], false),
             );
             let s = low.untag_int(low.load(args[0]));
             let e = low.untag_int(low.load(args[1]));
-            let p = b
-                .build_call(f, &[recv_p.into(), s.into(), e.into()], "slice")
+            Ok(b.build_call(f, &[low.load(recv).into(), s.into(), e.into()], "slice")
                 .map_err(err)?
                 .as_any_value_enum()
-                .into_pointer_value();
-            Ok(low.tag_ptr(p))
+                .into_int_value())
         }
         "push" => {
             let f = low
