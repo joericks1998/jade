@@ -180,7 +180,11 @@ TOML
     fi
     if [ "$vm_rc" -ne 0 ] || [ ! -s "$proj/vm.txt" ] || grep -q "error" "$proj/vm.txt"; then
       echo "  FAIL  glib under the VM (exit $vm_rc):"
-      head -5 "$proj/vm.txt" | sed 's/^/        /'
+      # The *last* lines, not the first. When the failure is a crash, the one
+      # thing worth knowing is which call it got to, and `head` shows the calls
+      # that already succeeded instead — the fixture prints in call order, so
+      # the tail names the suspect and the head never can.
+      tail -5 "$proj/vm.txt" | sed 's/^/        /'
       fail=$((fail + 1))
     elif [ "$build_rc" -ne 0 ] || [ ! -f "$proj/aot.txt" ]; then
       echo "  FAIL  glib would not compile:"
