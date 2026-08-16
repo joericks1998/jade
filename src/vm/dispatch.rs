@@ -895,6 +895,83 @@ pub(crate) async fn execute_chunk(
                 let result = vm_try!(vm_index(obj, idx, span));
                 set(slots, *dest, result);
             }
+            // `d[k] = v` where `d` is a global. Taking the dict out of the
+            // binding for the write is the whole point: a dict is copy-on-write,
+            // so leaving the global holding it would make every write copy the
+            // whole dict, and filling one quadratic. Nothing can observe the gap
+            // — the value is put back before the next instruction runs, and a
+            // raise restores it on the way out.
+            Instr::SetIndexGlobal(name, idx_reg, val_reg) => {
+                let idx = get(slots, *idx_reg).clone();
+                let val = get(slots, *val_reg).clone();
+                let taken = state
+                    .active_module_scope
+                    .as_ref()
+                    .and_then(|sc| sc.lock().remove(name))
+                    .or_else(|| state.globals.remove(name));
+                let Some(obj) = taken else {
+                    vm_err!(JadeError::UndefinedVariable { name: name.clone(), span });
+                };
+                let put_back = |state: &mut VmState, v: VmValue| {
+                    let scoped = state
+                        .active_module_scope
+                        .as_ref()
+                        .is_some_and(|sc| sc.lock().contains_key(name));
+                    match scoped {
+                        true => {
+                            if let Some(sc) = &state.active_module_scope {
+                                sc.lock().insert(name.clone(), v);
+                            }
+                        }
+                        false => {
+                            state.globals.insert(name.clone(), v);
+                        }
+                    }
+                };
+                match obj {
+                    VmValue::Dict(mut m) => {
+                        let VmValue::Str(k) = idx else {
+                            put_back(state, VmValue::Dict(m));
+                            vm_err!(JadeError::TypeError {
+                                message: format!(
+                                    "dict index must be str, got {}",
+                                    value_type_name(&idx)
+                                ),
+                                span
+                            });
+                        };
+                        dict_mut(&mut m).insert(k.into_string(), val);
+                        put_back(state, VmValue::Dict(m));
+                    }
+                    // An array has reference semantics, so the write goes
+                    // straight through and the same value goes back.
+                    VmValue::Array(arc) => {
+                        put_back(state, VmValue::Array(Arc::clone(&arc)));
+                        let VmValue::Int(i) = idx else {
+                            vm_err!(JadeError::TypeError {
+                                message: format!(
+                                    "array index must be int, got {}",
+                                    value_type_name(&idx)
+                                ),
+                                span
+                            });
+                        };
+                        let len = arc.lock().len();
+                        if i < 0 || i as usize >= len {
+                            vm_err!(JadeError::IndexOutOfBounds { index: i, len, span });
+                        }
+                        arc.lock()[i as usize] = val;
+                    }
+                    other => {
+                        let name = value_type_name(&other).to_string();
+                        put_back(state, other);
+                        vm_err!(JadeError::TypeError {
+                            message: format!("cannot index-assign into {name}"),
+                            span
+                        });
+                    }
+                }
+            }
             Instr::SetIndex(obj_reg, idx_reg, val_reg) => {
                 let idx = get(slots, *idx_reg).clone();
                 let val = get(slots, *val_reg).clone();
@@ -1497,6 +1574,7 @@ pub(crate) fn eval_literal_default(expr: &crate::frontend::ast::Expr) -> Option<
 
 pub(crate) fn instr_max_reg(instr: &Instr) -> u32 {
     match instr {
+        Instr::SetIndexGlobal(_, i, v) => (*i).max(*v),
         Instr::LoadInt(d, _)
         | Instr::LoadFloat(d, _)
         | Instr::LoadBool(d, _)

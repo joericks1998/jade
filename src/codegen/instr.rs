@@ -705,6 +705,41 @@ pub(super) fn lower_instr<'ctx>(
             Ok(false)
         }
 
+        // The same call, reading and writing the global cell directly.
+        //
+        // Loading the cell *without* a retain is the whole point. A dict is
+        // copy-on-write, so `jk_set_index` copies whenever anything else holds
+        // the dict — and going through `GetGlobal`, which retains into a
+        // register, made the register that second holder, so every write copied
+        // and filling a global dict was quadratic. With the cell as sole owner
+        // the write lands in place and hands the same pointer back;
+        // `jrt_rc_replace` no-ops when old and new are equal, so storing it back
+        // is correct whether the runtime mutated or copied.
+        SetIndexGlobal(name, idx, val) => {
+            let g = low.global_slot(name);
+            let old = b.build_load(i64_ty, g, "gld").map_err(|e| e.to_string())?.into_int_value();
+            let f = low.runtime_fn(
+                "jrt_val_set_index",
+                i64_ty.fn_type(&[i64_ty.into(), i64_ty.into(), i64_ty.into()], false),
+            );
+            let new_word = b
+                .build_call(
+                    f,
+                    &[old.into(), low.load(*idx).into(), low.load(*val).into()],
+                    "setidx",
+                )
+                .map_err(|e| e.to_string())?
+                .as_any_value_enum()
+                .into_int_value();
+            let rc = low.runtime_fn(
+                "jrt_rc_replace",
+                low.ctx.void_type().fn_type(&[i64_ty.into(), i64_ty.into()], false),
+            );
+            b.build_call(rc, &[old.into(), new_word.into()], "").map_err(|e| e.to_string())?;
+            b.build_store(g, new_word).map_err(|e| e.to_string())?;
+            Ok(false)
+        }
+
         // ── Structs (data fields only; methods decline in resolve_user_calls) ──
         // MakeStruct: kind-tagged struct carrying the type name + explicit fields,
         // then fill any omitted optional field from its scalar default (the VM

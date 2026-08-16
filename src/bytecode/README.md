@@ -27,4 +27,8 @@ The instructions are largely *monomorphic* — `AddInt` and `AddFloat` rather th
 
 Adding an opcode is a three-place change: emit it in `compiler/emit.rs`, interpret it in `vm/dispatch.rs`, and lower it in `src/codegen/`. **The AOT backend treats an opcode it cannot lower as a hard build error** — there is no fallback path — so skipping the third step breaks `jade build` for any program that reaches the new instruction.
 
+It is a *four*-place change if the instruction changes the serialized shape at all: bump `CACHE_FORMAT_VERSION` in `src/cache/mod.rs`, or a TIR cached by the previous build deserializes into a chunk this one cannot run. A tripwire test pins the number.
+
 The jump-offset convention is easy to get wrong by one. Use `patch_jump` rather than computing offsets by hand.
+
+**Why there are two index-assign opcodes.** `SetIndex` takes a register; `SetIndexGlobal` takes a name. They do the same thing, and the split exists because of what a dict is: a value, held copy-on-write, so a write copies whenever anything *else* is holding the dict. Loading a global into a register first makes that register a second holder, so every write copied and filling a dict was quadratic in its size. `SetIndexGlobal` owns the binding for the write instead. A local needs no equivalent — a local *is* a register slot, so the emitter hands `SetIndex` the binding directly rather than a copy of it.

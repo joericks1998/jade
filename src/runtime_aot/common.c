@@ -475,9 +475,20 @@ int64_t jrt_val_set_index(int64_t obj, int64_t idx, int64_t val) {
             return obj;
         }
         if (kind == JK_DICT) {
-            /* Dicts are value-semantic (VM clones on mutation): copy then set,
-             * and return the new container so the caller rebinds the variable. */
+            /* Dicts are value-semantic, so a write has to leave any alias of
+             * this dict alone — the caller rebinds its variable to whatever
+             * comes back. That used to mean copying on every single write,
+             * which made filling a dict quadratic in its size.
+             *
+             * The copy is only observable when someone else is holding the
+             * dict, and the refcount answers precisely that. Sole owner, write
+             * in place and hand the same container back; shared, copy exactly
+             * as before. Identical semantics either way. */
             if (!jrt_is_str((jade_value_t)idx)) throw_msg("dict index must be str");
+            if (jrt_obj_unique(p)) {
+                jrt_kdict_set(p, idx, val);
+                return obj;
+            }
             void* d = jrt_coll_dict_copy(p);
             jrt_kdict_set(d, idx, val);
             return (int64_t)jrt_box_ptr(d);

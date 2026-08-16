@@ -536,12 +536,25 @@ fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
         }
 
         TStmt::IndexAssign { name, index, value, span } => {
-            let obj = em.emit_load_var(&name, span);
+            // A local *is* a register slot, so hand `SetIndex` the binding
+            // itself rather than a copy of it. That is what lets the write
+            // happen in place: a dict is copy-on-write, and loading it into a
+            // second register would leave two holders, so every write would copy
+            // the whole dict and building one would be quadratic. There is
+            // nothing to write back afterwards either — the instruction already
+            // wrote to the slot the variable lives in.
+            if let Some(slot) = em.lookup_local(&name) {
+                let idx = emit_expr(&index, em, ctx)?;
+                let val = emit_expr(&value, em, ctx)?;
+                em.chunk.emit(Instr::SetIndex(slot, idx, val), span);
+                return Ok(());
+            }
+            // A global lives in a map (VM) or an LLVM cell (AOT), not a
+            // register, so the instruction takes the name and owns the binding
+            // for the write — same reason as the local case above.
             let idx = emit_expr(&index, em, ctx)?;
             let val = emit_expr(&value, em, ctx)?;
-            em.chunk.emit(Instr::SetIndex(obj, idx, val), span);
-            // Write the (value-semantics) modified collection back.
-            em.emit_store_var(&name, obj, span);
+            em.chunk.emit(Instr::SetIndexGlobal(name, idx, val), span);
         }
 
         TStmt::PromptDecl { name, body, span } => {

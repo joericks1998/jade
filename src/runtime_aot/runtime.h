@@ -570,6 +570,9 @@ int64_t jrt_coll_array_get(void* p, int64_t i);
 void    jrt_coll_array_set(void* p, int64_t i, int64_t val);
 int32_t jrt_coll_dict_get(void* p, const char* key, int64_t* out);
 void*   jrt_coll_dict_copy(void* p);
+/* jrt_obj_unique — 1 when `p` has exactly one owner, so a value-semantic write
+ * can happen in place instead of copying. See jk_set_index. */
+int32_t jrt_obj_unique(const void* p);
 /* jrt_coll_dict_keys — new ObjHeader array of the dict's keys as TRUSTED tagged
  * strings, sorted ascending (matches the VM's dict.keys). */
 void*   jrt_coll_dict_keys(void* p);

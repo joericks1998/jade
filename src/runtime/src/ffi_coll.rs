@@ -76,6 +76,21 @@ pub extern "C" fn jrt_kind_of(p: *const c_void) -> i64 {
     unsafe { kind_of(p) as i64 }
 }
 
+/// Whether `p` has exactly one owner, so a write to it can happen in place.
+///
+/// This is what makes a *value-semantic* dict affordable. A dict copies on
+/// assignment, so the compiled `d[k] = v` path copied on every write to be safe
+/// against an alias — which made building a dict quadratic. But a copy is only
+/// observable when somebody else is holding the dict, and the refcount is
+/// exactly that question. One owner, no copy, same semantics.
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_obj_unique(p: *const c_void) -> i32 {
+    if p.is_null() {
+        return 0;
+    }
+    i32::from(unsafe { (*(p as *const ObjHeader)).rc() } == 1)
+}
+
 /// The element/field count from the object header (O(1)). Used by the Chunk
 /// backend's `len()` on a collection.
 #[unsafe(no_mangle)]

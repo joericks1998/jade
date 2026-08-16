@@ -6,16 +6,25 @@ sidebar_label: Changelog
 
 ## v1.3.22
 
-**Fixed: reading a dict copied the whole thing, every time.** A dict is a value in Jade — assigning one, passing one to a function, or reading one out of another gives you an independent copy. The interpreter took that literally and deep-copied every entry on each of those, so *reading* a dict cost as much as building it. Passing a 400-key dict to a function 20,000 times took 8.1 seconds; it now takes 0.15, a 54x difference on the same program.
+**Fixed: dicts were quadratic to build and linear to look up.** A dict is a value in Jade — assigning one, passing one to a function, or reading one out of another gives you an independent copy — and paying for that was costing far more than the rule itself. Three separate things, each O(n) where it should have been O(1). A dict now behaves like the hash map it always looked like: **O(n) to build, O(1) to look up.**
 
-- **The copy is deferred, not removed.** A dict now sits behind a copy-on-write handle: sharing it is a refcount bump, and the copy happens only when something writes through a handle someone else is holding — which is exactly when a copy could be observed. Every semantic is unchanged, and the example suite proves it on both engines.
-- **Writing to a dict in a loop is still quadratic.** The variable holding the dict keeps its reference while the write runs, so the write always sees a shared handle and copies. Fixing that means letting an index-assignment own its variable for the duration, which is a change to the instruction set rather than a tuning fix, so it is not in this release.
+| | before | after |
+|---|---|---|
+| build a dict of 8,000 keys (`jade run`) | ~9s | 0.04s |
+| build a dict of 8,000 keys (compiled) | ~5.4s | 0.21s |
+| pass a 400-key dict to a function 20,000 times | 8.1s | 0.15s |
+| 200,000 lookups, dict of 8,000 keys (compiled) | grew with the dict | flat |
 
-**Changed: the docs now cover the two shapes that actually catch people out.** The value-versus-reference rule was written down, but only for plain assignment — and the two shapes that cost real time were missing.
+- **Lookup was a linear scan.** Entries lived in one vector and every `get` and `set` walked it, so a lookup was O(n) and building a dict was O(n²). It is a compact hash map now: the same insertion-ordered vector of entries, plus an open-addressed table from a key's hash to its position. Small dicts skip the table entirely, because below a handful of entries scanning a contiguous vector wins and most dicts really are that size.
+- **Reading a dict deep-copied it.** The interpreter took "value" literally, so `GetGlobal`, `SetGlobal` and every argument copied every entry. A dict now sits behind a copy-on-write handle: sharing it is a refcount bump, and the copy happens only when something writes through a handle another holder can see — exactly when a copy could be observed.
+- **Every write copied, even with nobody else holding the dict.** Both engines copied on each `d[k] = v` to stay safe against an alias that usually was not there. Compiled code now asks the refcount first and writes in place when it is the sole owner. And index-assignment takes ownership of its variable for the duration — a local is handed to `SetIndex` directly, and a global goes through the new `SetIndexGlobal` — so the binding is not itself the second holder that forces the copy.
+
+**None of the semantics moved.** A dict is still a value, an array and a struct are still references, and `examples/collections/container_semantics/` pins all three on both engines.
+
+**Changed: the docs now cover the two shapes that actually catch people out.** The value-versus-reference rule was written down, but only for plain assignment.
 
 - **Passing a dict to a function that writes to it.** The caller does not see the write, while the same code on an array or a struct does. There is a table of all three containers now, and the answer when a function has to hand a change back: use a struct, which is the shape the language is built for.
 - **Reading a dict out of a dict.** That is an assignment too, so it copies, and writing to what you read back does not reach the outer dict.
-- **`examples/collections/container_semantics/`** demonstrates all three containers side by side, and runs identically on both engines.
 
 ## v1.3.21
 
