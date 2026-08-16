@@ -7,6 +7,22 @@ use super::*;
 /// Emit a string primitive method `recv.method(args)` via the shared `jrt_str_*`
 /// symbol (the receiver and any args are strings; results are tagged strings or
 /// bool words). Only methods `chunk_str_method_supported` accepts reach here.
+/// Which argument positions of a string method hold strings.
+///
+/// The guard this drives untags an argument to `char*`, so pointing it at an
+/// int would read a small integer as a pointer — which is why the default is
+/// "every position" and the exceptions are listed rather than the other way
+/// round.
+fn str_arg_positions(method: &str) -> &'static [usize] {
+    match method {
+        // (width, pad): the pad is a string, the width is not.
+        "pad_start" | "pad_end" => &[1],
+        // (start, end) and (n): no string arguments at all.
+        "slice" | "repeat" => &[],
+        _ => &[0, 1, 2],
+    }
+}
+
 pub(super) fn emit_str_method<'ctx>(
     low: &Lowerer<'_, 'ctx>,
     recv: Reg,
@@ -18,11 +34,16 @@ pub(super) fn emit_str_method<'ctx>(
     let i32_ty = low.ctx.i32_type();
     let err = |e: inkwell::builder::BuilderError| e.to_string();
 
-    // Every arm here untags the receiver *and* its arguments to `char*`, so all
-    // of them need a str. Guard before `sp` is applied to anything.
+    // Every arm here untags the receiver to `char*`, so it always needs a str.
     low.require_kind(low.load(recv), WANT_STR, method)?;
-    for a in args {
-        low.require_str_arg(low.load(*a), method)?;
+    // Most arms untag their arguments too, but not all: the ones added in
+    // v1.3.23 take a width or a count, and guarding an int as a string would
+    // reject every correct call. Only the string-valued positions are checked,
+    // which is why this is a per-method list rather than a blanket loop.
+    for (i, a) in args.iter().enumerate() {
+        if str_arg_positions(method).contains(&i) {
+            low.require_str_arg(low.load(*a), method)?;
+        }
     }
 
     let sp = |r: Reg| low.untag_ptr(low.load(r));
@@ -40,7 +61,7 @@ pub(super) fn emit_str_method<'ctx>(
                 .into_pointer_value();
             Ok(low.tag_ptr(p))
         }
-        "trim" | "upper" | "lower" => {
+        "trim" | "upper" | "lower" | "trim_start" | "trim_end" | "capitalize" => {
             let f =
                 low.runtime_fn(&format!("jrt_str_{method}"), ptrt.fn_type(&[ptrt.into()], false));
             let r = b
@@ -76,6 +97,87 @@ pub(super) fn emit_str_method<'ctx>(
                 .build_int_compare(inkwell::IntPredicate::NE, r, i32_ty.const_zero(), "b")
                 .map_err(err)?;
             Ok(low.bool_word(bit))
+        }
+        // (s, sub) -> a character index or -1. `jrt_str_index_of` and friends
+        // answer i64 directly, so there is no bool fold here.
+        "index_of" | "last_index_of" | "count" => {
+            let f = low.runtime_fn(
+                &format!("jrt_str_{method}"),
+                low.i64t().fn_type(&[ptrt.into(), ptrt.into()], false),
+            );
+            let r = b
+                .build_call(f, &[sp(recv).into(), sp(args[0]).into()], "stridx")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_int_value();
+            Ok(low.tag_int(r))
+        }
+        "is_empty" => {
+            let f = low.runtime_fn("jrt_str_is_empty", i32_ty.fn_type(&[ptrt.into()], false));
+            let r = b
+                .build_call(f, &[sp(recv).into()], "stre")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_int_value();
+            let bit = b
+                .build_int_compare(inkwell::IntPredicate::NE, r, i32_ty.const_zero(), "b")
+                .map_err(err)?;
+            Ok(low.bool_word(bit))
+        }
+        // (s, start, end) — character indices, so the two bounds are untagged
+        // as ints rather than as pointers. `str_arg_positions` is what keeps the
+        // receiver guard from rejecting them.
+        "slice" => {
+            let f = low.runtime_fn(
+                "jrt_str_slice",
+                ptrt.fn_type(&[ptrt.into(), low.i64t().into(), low.i64t().into()], false),
+            );
+            let start = low.untag_int(low.load(args[0]));
+            let end = low.untag_int(low.load(args[1]));
+            let r = b
+                .build_call(f, &[sp(recv).into(), start.into(), end.into()], "strsl")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_pointer_value();
+            Ok(low.tag_str(r))
+        }
+        "repeat" => {
+            let f = low.runtime_fn(
+                "jrt_str_repeat",
+                ptrt.fn_type(&[ptrt.into(), low.i64t().into()], false),
+            );
+            let n = low.untag_int(low.load(args[0]));
+            let r = b
+                .build_call(f, &[sp(recv).into(), n.into()], "strrep")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_pointer_value();
+            Ok(low.tag_str(r))
+        }
+        // (s, width, pad): argument 0 is an int, argument 1 a string.
+        "pad_start" | "pad_end" => {
+            let f = low.runtime_fn(
+                &format!("jrt_str_{method}"),
+                ptrt.fn_type(&[ptrt.into(), low.i64t().into(), ptrt.into()], false),
+            );
+            let w = low.untag_int(low.load(args[0]));
+            let r = b
+                .build_call(f, &[sp(recv).into(), w.into(), sp(args[1]).into()], "strpad")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_pointer_value();
+            Ok(low.tag_str(r))
+        }
+        // (s) -> a new array of lines. Same shape as split, minus the
+        // separator; a trailing newline yields no empty final element.
+        "lines" => {
+            let f = low.runtime_fn("jrt_coll_str_lines", ptrt.fn_type(&[ptrt.into()], false));
+            let p = b
+                .build_call(f, &[sp(recv).into()], "lines")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_pointer_value();
+            Ok(low.tag_ptr(p))
         }
         "split" => {
             // (s, sep) -> new array of substrings (tagged ptr).

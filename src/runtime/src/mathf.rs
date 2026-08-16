@@ -129,6 +129,162 @@ pub fn pow(a: Num, b: Num) -> Result<Num, MathErr> {
     }
 }
 
+/// `math.round(x)`: float → nearest int, ties away from zero; int → unchanged.
+///
+/// Ties away from zero rather than Rust's default-for-`f64` (which is the same
+/// thing) stated explicitly, because the other obvious choice — banker's
+/// rounding — differs at exactly the values people test with, and a reader
+/// should not have to run it to find out. `round(2.5)` is 3.
+pub fn round(x: Num) -> Num {
+    match x {
+        Num::Int(i) => Num::Int(i),
+        Num::Float(f) => Num::Int(f.round() as i64),
+    }
+}
+
+/// `math.trunc(x)`: float → toward zero; int → unchanged. The difference from
+/// [`floor`] is only visible for negatives: `floor(-1.5)` is -2, `trunc` is -1.
+pub fn trunc(x: Num) -> Num {
+    match x {
+        Num::Int(i) => Num::Int(i),
+        Num::Float(f) => Num::Int(f.trunc() as i64),
+    }
+}
+
+/// `math.sign(x)`: -1, 0 or 1, preserving the operand's kind.
+///
+/// A float answers with a float so the kind rule is the same one every other
+/// `math.*` follows. `sign(NaN)` is NaN, which is what `f64::signum` does not
+/// do — it answers 1.0 — so this special-cases it rather than inventing an
+/// order for a value that has none.
+pub fn sign(x: Num) -> Num {
+    match x {
+        Num::Int(i) => Num::Int(i.signum()),
+        Num::Float(f) if f.is_nan() => Num::Float(f),
+        Num::Float(f) if f == 0.0 => Num::Float(0.0),
+        Num::Float(f) => Num::Float(f.signum()),
+    }
+}
+
+/// `math.clamp(x, lo, hi)`: int only when all three are ints, matching
+/// [`min`]/[`max`].
+///
+/// A `lo` above `hi` is not rejected: the result is `x.max(lo).min(hi)`, so the
+/// `min` wins and the answer is `hi`. Deliberately not a panic — the standard
+/// library's `clamp` panics on a reversed range, and a Jade `math.*` call has no
+/// business aborting the process over an argument order.
+pub fn clamp(x: Num, lo: Num, hi: Num) -> Num {
+    match (x, lo, hi) {
+        (Num::Int(a), Num::Int(l), Num::Int(h)) => Num::Int(a.max(l).min(h)),
+        _ => Num::Float(x.as_f64().max(lo.as_f64()).min(hi.as_f64())),
+    }
+}
+
+/// `math.ln(x)` — natural log. Always a float, following [`sqrt`].
+pub fn ln(x: Num) -> Num {
+    Num::Float(x.as_f64().ln())
+}
+
+/// `math.log2(x)`. Always a float.
+pub fn log2(x: Num) -> Num {
+    Num::Float(x.as_f64().log2())
+}
+
+/// `math.log10(x)`. Always a float.
+pub fn log10(x: Num) -> Num {
+    Num::Float(x.as_f64().log10())
+}
+
+/// `math.exp(x)` — e to the x. Always a float.
+pub fn exp(x: Num) -> Num {
+    Num::Float(x.as_f64().exp())
+}
+
+/// `math.sin(x)`, in radians. Always a float.
+pub fn sin(x: Num) -> Num {
+    Num::Float(x.as_f64().sin())
+}
+
+/// `math.cos(x)`, in radians. Always a float.
+pub fn cos(x: Num) -> Num {
+    Num::Float(x.as_f64().cos())
+}
+
+/// `math.tan(x)`, in radians. Always a float.
+pub fn tan(x: Num) -> Num {
+    Num::Float(x.as_f64().tan())
+}
+
+/// `math.asin(x)`. Always a float; outside [-1, 1] the answer is NaN, which is
+/// what IEEE says and what both engines will print identically.
+pub fn asin(x: Num) -> Num {
+    Num::Float(x.as_f64().asin())
+}
+
+/// `math.acos(x)`. Always a float; NaN outside [-1, 1].
+pub fn acos(x: Num) -> Num {
+    Num::Float(x.as_f64().acos())
+}
+
+/// `math.atan(x)`. Always a float.
+pub fn atan(x: Num) -> Num {
+    Num::Float(x.as_f64().atan())
+}
+
+/// `math.atan2(y, x)` — the angle of the point, quadrant-correct. Always a
+/// float. Argument order is `(y, x)`, matching C and every other language that
+/// has it; the reverse is a classic silent bug, so the parameter names say so.
+pub fn atan2(y: Num, x: Num) -> Num {
+    Num::Float(y.as_f64().atan2(x.as_f64()))
+}
+
+/// `math.hypot(a, b)` — `sqrt(a² + b²)` without the intermediate overflow.
+/// Always a float.
+pub fn hypot(a: Num, b: Num) -> Num {
+    Num::Float(a.as_f64().hypot(b.as_f64()))
+}
+
+/// `math.is_nan(x)`. An int is never NaN.
+pub fn is_nan(x: Num) -> bool {
+    matches!(x, Num::Float(f) if f.is_nan())
+}
+
+/// `math.is_inf(x)`. An int is never infinite.
+pub fn is_inf(x: Num) -> bool {
+    matches!(x, Num::Float(f) if f.is_infinite())
+}
+
+/// `math.pi()` / `math.e()` / `math.tau()` / `math.inf()` / `math.nan()`.
+///
+/// Spelled as calls rather than as values because a package namespace is only
+/// ever reached as a field access that a call immediately consumes — there is
+/// no lowering for reading one in value position, so `math.pi` has nowhere to
+/// go. See the changelog entry for v1.3.23.
+pub fn pi() -> Num {
+    Num::Float(core::f64::consts::PI)
+}
+
+/// See [`pi`].
+pub fn e() -> Num {
+    Num::Float(core::f64::consts::E)
+}
+
+/// See [`pi`]. Two pi, for the turn-based trigonometry that wants it.
+pub fn tau() -> Num {
+    Num::Float(core::f64::consts::TAU)
+}
+
+/// See [`pi`]. Positive infinity — reachable no other way, since the lexer
+/// caps a numeric literal.
+pub fn inf() -> Num {
+    Num::Float(f64::INFINITY)
+}
+
+/// See [`pi`]. Not-a-number — likewise unwritable as a literal.
+pub fn nan() -> Num {
+    Num::Float(f64::NAN)
+}
+
 // ── AOT word wrappers ────────────────────────────────────────────────────────
 
 #[inline]
@@ -149,6 +305,12 @@ fn from_num(n: Num) -> i64 {
 /// forwarder raises Jade's `integer overflow` when it is non-zero.
 pub const JRT_MATH_OK: u32 = 0;
 pub const JRT_MATH_OVERFLOW: u32 = 1;
+
+/// A tagged bool word, for the predicate wrappers.
+#[inline]
+fn bool_word(b: bool) -> i64 {
+    JadeValue::from_bool(b).bits() as i64
+}
 
 /// `math.floor(x)`: float → floored int; int → unchanged.
 #[unsafe(no_mangle)]
@@ -208,6 +370,144 @@ pub extern "C" fn jrt_math_pow(a: i64, b: i64, err: *mut u32) -> i64 {
             0
         }
     }
+}
+
+/// `math.round(x)`. See [`round`].
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_math_round(w: i64) -> i64 {
+    from_num(round(to_num(w)))
+}
+
+/// `math.trunc(x)`. See [`trunc`].
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_math_trunc(w: i64) -> i64 {
+    from_num(trunc(to_num(w)))
+}
+
+/// `math.sign(x)`. See [`sign`].
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_math_sign(w: i64) -> i64 {
+    from_num(sign(to_num(w)))
+}
+
+/// `math.ln(x)`. See [`ln`].
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_math_ln(w: i64) -> i64 {
+    from_num(ln(to_num(w)))
+}
+
+/// `math.log2(x)`. See [`log2`].
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_math_log2(w: i64) -> i64 {
+    from_num(log2(to_num(w)))
+}
+
+/// `math.log10(x)`. See [`log10`].
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_math_log10(w: i64) -> i64 {
+    from_num(log10(to_num(w)))
+}
+
+/// `math.exp(x)`. See [`exp`].
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_math_exp(w: i64) -> i64 {
+    from_num(exp(to_num(w)))
+}
+
+/// `math.sin(x)`. See [`sin`].
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_math_sin(w: i64) -> i64 {
+    from_num(sin(to_num(w)))
+}
+
+/// `math.cos(x)`. See [`cos`].
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_math_cos(w: i64) -> i64 {
+    from_num(cos(to_num(w)))
+}
+
+/// `math.tan(x)`. See [`tan`].
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_math_tan(w: i64) -> i64 {
+    from_num(tan(to_num(w)))
+}
+
+/// `math.asin(x)`. See [`asin`].
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_math_asin(w: i64) -> i64 {
+    from_num(asin(to_num(w)))
+}
+
+/// `math.acos(x)`. See [`acos`].
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_math_acos(w: i64) -> i64 {
+    from_num(acos(to_num(w)))
+}
+
+/// `math.atan(x)`. See [`atan`].
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_math_atan(w: i64) -> i64 {
+    from_num(atan(to_num(w)))
+}
+
+/// `math.atan2(a, b)`. See [`atan2`].
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_math_atan2(a: i64, b: i64) -> i64 {
+    from_num(atan2(to_num(a), to_num(b)))
+}
+
+/// `math.hypot(a, b)`. See [`hypot`].
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_math_hypot(a: i64, b: i64) -> i64 {
+    from_num(hypot(to_num(a), to_num(b)))
+}
+
+/// `math.clamp(x, lo, hi)`. See [`clamp`].
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_math_clamp(x: i64, lo: i64, hi: i64) -> i64 {
+    from_num(clamp(to_num(x), to_num(lo), to_num(hi)))
+}
+
+/// `math.is_nan(x)`. Answers a tagged bool word. See [`is_nan`].
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_math_is_nan(w: i64) -> i64 {
+    bool_word(is_nan(to_num(w)))
+}
+
+/// `math.is_inf(x)`. Answers a tagged bool word. See [`is_inf`].
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_math_is_inf(w: i64) -> i64 {
+    bool_word(is_inf(to_num(w)))
+}
+
+/// `math.pi()`. See [`pi`].
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_math_pi() -> i64 {
+    from_num(pi())
+}
+
+/// `math.e()`. See [`e`].
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_math_e() -> i64 {
+    from_num(e())
+}
+
+/// `math.tau()`. See [`tau`].
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_math_tau() -> i64 {
+    from_num(tau())
+}
+
+/// `math.inf()`. See [`inf`].
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_math_inf() -> i64 {
+    from_num(inf())
+}
+
+/// `math.nan()`. See [`nan`].
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_math_nan() -> i64 {
+    from_num(nan())
 }
 
 #[cfg(test)]
@@ -309,5 +609,72 @@ mod tests {
         assert!(JadeValue::try_from_int(JadeValue::INT_MAX + 1).is_none());
         // The core checks independently of the representation.
         assert_eq!(abs(Num::Int(i64::MIN)), Err(MathErr::Overflow));
+    }
+
+    /// Rounding follows the same kind rule as `floor`: an int passes through
+    /// untouched, a float answers an int.
+    #[test]
+    fn round_and_trunc_preserve_kind() {
+        assert_eq!(round(Num::Int(7)), Num::Int(7));
+        assert_eq!(trunc(Num::Int(-7)), Num::Int(-7));
+        assert_eq!(round(Num::Float(2.5)), Num::Int(3), "ties go away from zero");
+        assert_eq!(round(Num::Float(-2.5)), Num::Int(-3));
+        // The one place trunc and floor differ.
+        assert_eq!(trunc(Num::Float(-1.9)), Num::Int(-1));
+        assert_eq!(floor(Num::Float(-1.9)), Num::Int(-2));
+    }
+
+    /// `f64::signum` answers 1.0 for NaN, which would invent an order for a
+    /// value that has none.
+    #[test]
+    fn sign_keeps_nan_as_nan() {
+        assert_eq!(sign(Num::Int(-3)), Num::Int(-1));
+        assert_eq!(sign(Num::Int(0)), Num::Int(0));
+        assert_eq!(sign(Num::Float(-0.5)), Num::Float(-1.0));
+        assert_eq!(sign(Num::Float(0.0)), Num::Float(0.0));
+        assert!(matches!(sign(Num::Float(f64::NAN)), Num::Float(f) if f.is_nan()));
+    }
+
+    /// Int only when all three are, matching `min`/`max`.
+    #[test]
+    fn clamp_is_int_only_when_all_three_are() {
+        assert_eq!(clamp(Num::Int(15), Num::Int(0), Num::Int(10)), Num::Int(10));
+        assert_eq!(clamp(Num::Int(-5), Num::Int(0), Num::Int(10)), Num::Int(0));
+        assert!(matches!(clamp(Num::Float(1.5), Num::Int(0), Num::Int(10)), Num::Float(_)));
+        // A reversed range does not panic the way the standard library's
+        // `clamp` does; the trailing `min` wins, so the answer is `hi`.
+        assert_eq!(clamp(Num::Int(5), Num::Int(10), Num::Int(0)), Num::Int(0));
+    }
+
+    /// The transcendentals are float whatever they are handed, following sqrt.
+    #[test]
+    fn transcendentals_are_always_float() {
+        for n in [ln(Num::Int(1)), exp(Num::Int(0)), sin(Num::Int(0)), atan(Num::Int(0))] {
+            assert!(matches!(n, Num::Float(_)), "expected a float, got {n:?}");
+        }
+        assert_eq!(log2(Num::Int(8)), Num::Float(3.0));
+        assert_eq!(log10(Num::Int(1000)), Num::Float(3.0));
+        assert_eq!(hypot(Num::Int(3), Num::Int(4)), Num::Float(5.0));
+    }
+
+    /// An int is never NaN and never infinite, so the predicates answer for a
+    /// kind that cannot hold either.
+    #[test]
+    fn predicates_answer_for_every_kind() {
+        assert!(is_nan(Num::Float(f64::NAN)));
+        assert!(!is_nan(Num::Float(1.0)));
+        assert!(!is_nan(Num::Int(1)));
+        assert!(is_inf(Num::Float(f64::INFINITY)));
+        assert!(is_inf(Num::Float(f64::NEG_INFINITY)));
+        assert!(!is_inf(Num::Int(i64::MAX)));
+    }
+
+    /// `inf` and `nan` are reachable no other way — the lexer caps a numeric
+    /// literal, so neither can be written down in Jade source.
+    #[test]
+    fn the_constants_are_the_only_way_to_write_them() {
+        assert!(matches!(inf(), Num::Float(f) if f.is_infinite() && f > 0.0));
+        assert!(matches!(nan(), Num::Float(f) if f.is_nan()));
+        assert_eq!(tau(), Num::Float(core::f64::consts::TAU));
     }
 }

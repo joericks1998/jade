@@ -88,6 +88,44 @@ pub fn mkdir(path: &str) -> std::io::Result<()> {
     std::fs::create_dir_all(path)
 }
 
+/// Whether `path` names a regular file. False for a directory, and false for a
+/// path that does not exist — the same shape as [`exists`], which answers a
+/// question rather than raising.
+pub fn is_file(path: &str) -> bool {
+    std::path::Path::new(path).is_file()
+}
+
+/// Whether `path` names a directory. See [`is_file`].
+pub fn is_dir(path: &str) -> bool {
+    std::path::Path::new(path).is_dir()
+}
+
+/// Copy `src` over `dst`, creating or truncating it.
+pub fn copy(src: &str, dst: &str) -> std::io::Result<()> {
+    std::fs::copy(src, dst).map(|_| ())
+}
+
+/// Rename or move `src` to `dst`.
+pub fn rename(src: &str, dst: &str) -> std::io::Result<()> {
+    std::fs::rename(src, dst)
+}
+
+/// Remove an **empty** directory.
+///
+/// Deliberately not recursive, even though `mkdir` maps to `create_dir_all` and
+/// symmetry would argue for `remove_dir_all`. `fs.delete` is non-recursive on
+/// files, and a recursive delete behind a five-character name is a foot-gun: the
+/// cost of getting it wrong is unbounded and silent, and the cost of it being
+/// non-recursive is one error message.
+pub fn rmdir(path: &str) -> std::io::Result<()> {
+    std::fs::remove_dir(path)
+}
+
+/// Size of `path` in bytes.
+pub fn size(path: &str) -> std::io::Result<i64> {
+    Ok(std::fs::metadata(path)?.len() as i64)
+}
+
 /// Directory entry names (OS enumeration order).
 pub fn list_dir(path: &str) -> std::io::Result<Vec<String>> {
     let mut names = Vec::new();
@@ -125,6 +163,63 @@ pub extern "C" fn jrt_fs_take_error() -> *mut c_char {
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_fs_exists(path: *const c_char) -> i32 {
     i32::from(exists(unsafe { cstr::borrow(path) }))
+}
+
+/// `fs.is_file(path)`. Answers a question, so no error channel.
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_fs_is_file(path: *const c_char) -> i32 {
+    i32::from(is_file(unsafe { cstr::borrow(path) }))
+}
+
+/// `fs.is_dir(path)`. See [`jrt_fs_is_file`].
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_fs_is_dir(path: *const c_char) -> i32 {
+    i32::from(is_dir(unsafe { cstr::borrow(path) }))
+}
+
+/// `fs.copy(src, dst)` core. Records a pending error; `jrt_fs_copy` in
+/// `common.c` is what turns it into a Jade raise — a core without that
+/// forwarder answers success in a compiled program and raises in the
+/// interpreter, which is the standing failure mode this file's header warns
+/// about.
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_fs_copy_impl(src: *const c_char, dst: *const c_char) {
+    let (s, d) = unsafe { (cstr::borrow(src), cstr::borrow(dst)) };
+    if let Err(e) = copy(s, d) {
+        set_err("copy", s, &e);
+    }
+}
+
+/// `fs.rename(src, dst)` core. See [`jrt_fs_copy_impl`].
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_fs_rename_impl(src: *const c_char, dst: *const c_char) {
+    let (s, d) = unsafe { (cstr::borrow(src), cstr::borrow(dst)) };
+    if let Err(e) = rename(s, d) {
+        set_err("rename", s, &e);
+    }
+}
+
+/// `fs.rmdir(path)` core. See [`jrt_fs_copy_impl`].
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_fs_rmdir_impl(path: *const c_char) {
+    let p = unsafe { cstr::borrow(path) };
+    if let Err(e) = rmdir(p) {
+        set_err("rmdir", p, &e);
+    }
+}
+
+/// `fs.size(path)` core. Answers 0 and records the error on failure, so the
+/// forwarder can raise before the 0 is ever seen.
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_fs_size_impl(path: *const c_char) -> i64 {
+    let p = unsafe { cstr::borrow(path) };
+    match size(p) {
+        Ok(n) => n,
+        Err(e) => {
+            set_err("size", p, &e);
+            0
+        }
+    }
 }
 
 /// `fs.read(path, trust)` core (the forwarder handles the tainted-path refusal).

@@ -4,6 +4,25 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.3.23
+
+**Added: 42 functions across `std::math`, `std::string`, `std::fs` and `std::array`.**
+
+**`std::math`** gains `round`, `trunc`, `sign`, `clamp`; `ln`, `log2`, `log10`, `exp`; `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `hypot`; `is_nan`, `is_inf`; and the constants `pi`, `e`, `tau`, `inf`, `nan`. Two rules worth knowing without running the code: `round` breaks ties away from zero, so `round(2.5)` is 3, and `clamp` on a reversed range answers `hi` rather than aborting the way the standard library's does. The constants are spelled as calls — `math.pi()` — because a package namespace is only ever read as a field a call immediately consumes. `inf` and `nan` are reachable no other way at all, since the lexer caps a numeric literal.
+
+**`std::string`** gains `trim_start`, `trim_end`, `capitalize`, `is_empty`, `index_of`, `last_index_of`, `count`, `repeat`, `slice`, `pad_start`, `pad_end` and `lines` — each in both spellings, so `s.index_of(x)` and `string.index_of(s, x)` are the same function.
+
+- **Every index is a character index**, the same unit `len()` counts and `s[i]` walks. `"café!".index_of("!")` is 4. Rust's own `find` answers a byte offset, so the obvious implementation would have agreed with `len` on ASCII and disagreed on everything else.
+- **`lines` is not `split("\n")`.** A trailing newline yields no empty final element, which matters because a file read off disk almost always ends in one.
+
+**`std::fs`** gains `is_file`, `is_dir`, `size`, `copy`, `rename` and `rmdir`. `list_dir` gave you names with no way to tell a file from a directory, and there was no way to ask how big something was or to move it. `is_file` and `is_dir` answer questions, so an absent path is `false` rather than an error, matching `fs.exists`. `rmdir` removes an empty directory only — deliberately not recursive, since `fs.delete` is non-recursive on files and a recursive delete behind a five-character name is a foot-gun.
+
+**`std::array`** gains `join`, in both spellings. Non-string elements render the way `print` renders them, so `[1, 2].join("-")` is `"1-2"`. It lives on `std::array` rather than `std::string` because a package function's first argument is the type the package is named for.
+
+**Added: a test that stops half of a stdlib function from shipping.** Nothing tied a package's function table to the compiled backend's lowering, and a module call the backend declines is a hard build error rather than a fallback — so a function present in one and absent from the other is a program `jade run` accepts and `jade build` refuses. A dozen sat in that state until 1.3.21. The new test walks every package and names each function with no lowering; it went red for all 23 math functions before their arms were written, which is how we know it works.
+
+**Fixed: two lines of `stdlib.md` that described the code wrongly.** `string.replace` replaces every occurrence, not the first, and `math.pow` returns an int when both operands are ints and the exponent is non-negative.
+
 ## v1.3.22
 
 **Fixed: dicts were quadratic to build and linear to look up.** A dict is a value in Jade — assigning one, passing one to a function, or reading one out of another gives you an independent copy — and paying for that was costing far more than the rule itself. Three separate things, each O(n) where it should have been O(1). A dict now behaves like the hash map it always looked like: **O(n) to build, O(1) to look up.**

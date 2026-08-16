@@ -451,14 +451,18 @@ mod type_infer {
     /// have is settled here. It used to survive to run time and surface as
     /// `struct 'dict' has no field 'round'` — a package is a dict at run time,
     /// so the report named neither the module nor a type the reader would know.
+    ///
+    /// The example used to be `math.round`, which v1.3.23 added — so the name
+    /// here is deliberately one nothing will ever provide, rather than one that
+    /// is merely missing today.
     #[test]
     fn test_infer_unknown_package_fn_names_the_module() {
-        let err = infer_err("use std::math\nlet v = 2.5\nlet r = math.round(v)");
+        let err = infer_err("use std::math\nlet v = 2.5\nlet r = math.frobnicate(v)");
         let JadeError::UnknownPackageFn { package, name, available, .. } = &err else {
             panic!("expected UnknownPackageFn, got {err}");
         };
         assert_eq!(package, "std::math");
-        assert_eq!(name, "round");
+        assert_eq!(name, "frobnicate");
         assert!(available.contains(&"floor".to_string()), "lists what it does have: {available:?}");
     }
 

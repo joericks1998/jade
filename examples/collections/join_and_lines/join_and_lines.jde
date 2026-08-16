@@ -1,0 +1,42 @@
+// `join` and `lines`, the two collection-returning additions in v1.3.23.
+//
+// `join` lives on std::array, not std::string. A package function's first
+// argument is the type the package is named for, and the receiver here is an
+// array — that rule is what the bridge between the two spellings depends on.
+//
+// `lines` exists because `split("\n")` is not it. A file read off disk almost
+// always ends in a newline, and split gives you a phantom empty element for it
+// every time. The last two prints below are the whole difference.
+
+use std::array
+use std::string
+use std::fs
+
+// join renders non-string elements the way print does, so a mixed array works
+// rather than raising.
+print(["a", "b", "c"].join("-"))
+print([1, 2, 3].join(", "))
+print([].join("-"))
+print(["solo"].join("-"))
+print(array.join(["x", "y"], "+"))
+
+// lines tolerates both line endings and drops no content.
+print("a\nb\nc".lines())
+print("a\r\nb".lines())
+print("".lines())
+print(string.lines("p\nq"))
+
+// The reason lines is not split. A trailing newline yields no empty element.
+print("a\nb\n".lines())
+print("a\nb\n".split("\n"))
+
+// Which is what makes reading a file back sane — `fs.read` hands over content
+// ending in a newline, and this composes to exactly what `read_lines` would be.
+let path = "/tmp/jade_eval_join_lines.txt"
+fs.write(path, "one\ntwo\nthree\n")
+print(fs.read(path).lines())
+print(fs.read(path).lines().len())
+fs.delete(path)
+
+// Round trip: join undoes lines.
+print("alpha\nbeta".lines().join(" | "))
