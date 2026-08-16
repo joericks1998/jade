@@ -32,7 +32,7 @@ fn json_to_vm(val: serde_json::Value) -> VmValue {
             for (k, v) in map {
                 d.insert(k, json_to_vm(v));
             }
-            VmValue::Dict(d)
+            VmValue::dict(d)
         }
     }
 }

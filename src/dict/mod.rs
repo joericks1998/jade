@@ -89,11 +89,11 @@ fn pkg_get(args: &[VmValue]) -> Result<VmValue> {
 fn pkg_merge(args: &[VmValue]) -> Result<VmValue> {
     match (&args[0], args.get(1)) {
         (VmValue::Dict(d1), Some(VmValue::Dict(d2))) => {
-            let mut merged = d1.clone();
+            let mut merged = (**d1).clone();
             for (k, v) in d2.iter() {
                 merged.insert(k.clone(), v.clone());
             }
-            Ok(VmValue::Dict(merged))
+            Ok(VmValue::dict(merged))
         }
         _ => Err(JadeError::TypeError { message: "dict.merge".to_string(), span: ZERO }),
     }

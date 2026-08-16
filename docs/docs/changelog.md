@@ -4,6 +4,19 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.3.22
+
+**Fixed: reading a dict copied the whole thing, every time.** A dict is a value in Jade — assigning one, passing one to a function, or reading one out of another gives you an independent copy. The interpreter took that literally and deep-copied every entry on each of those, so *reading* a dict cost as much as building it. Passing a 400-key dict to a function 20,000 times took 8.1 seconds; it now takes 0.15, a 54x difference on the same program.
+
+- **The copy is deferred, not removed.** A dict now sits behind a copy-on-write handle: sharing it is a refcount bump, and the copy happens only when something writes through a handle someone else is holding — which is exactly when a copy could be observed. Every semantic is unchanged, and the example suite proves it on both engines.
+- **Writing to a dict in a loop is still quadratic.** The variable holding the dict keeps its reference while the write runs, so the write always sees a shared handle and copies. Fixing that means letting an index-assignment own its variable for the duration, which is a change to the instruction set rather than a tuning fix, so it is not in this release.
+
+**Changed: the docs now cover the two shapes that actually catch people out.** The value-versus-reference rule was written down, but only for plain assignment — and the two shapes that cost real time were missing.
+
+- **Passing a dict to a function that writes to it.** The caller does not see the write, while the same code on an array or a struct does. There is a table of all three containers now, and the answer when a function has to hand a change back: use a struct, which is the shape the language is built for.
+- **Reading a dict out of a dict.** That is an assignment too, so it copies, and writing to what you read back does not reach the outer dict.
+- **`examples/collections/container_semantics/`** demonstrates all three containers side by side, and runs identically on both engines.
+
 ## v1.3.21
 
 **Fixed: a stdlib function you could call one way but not the other.** Most collection functions have two spellings — `string.upper(s)` and `s.upper()` are the same function — and several combinations did not work. `array.map(a, f)` ran and compiled, but `a.map(f)` existed on neither engine. `string.upper(s)`, `dict.keys(d)`, `array.sort(a)` and a dozen more ran under `jade run` and were refused by `jade build` as an *unsupported module call*, though nothing was missing: the symbol each one needs is the symbol its method spelling was already calling. Both spellings of every one of them now work on both engines.

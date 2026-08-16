@@ -78,7 +78,7 @@ fn vm_to_ffi_unsupported_kind_becomes_nil() {
 #[test]
 fn vm_to_ffi_dict_tag() {
     let mut scratch = Vec::new();
-    let v = vm_to_ffi(&VmValue::Dict(DictObj::new()), &mut scratch);
+    let v = vm_to_ffi(&VmValue::dict(DictObj::new()), &mut scratch);
     assert_eq!(v.tag, JADE_TAG_DICT);
     unsafe { ffi_free(&v) };
 }
@@ -183,7 +183,7 @@ fn roundtrip_dict() {
     let mut d = DictObj::new();
     d.insert("a".to_string(), VmValue::Int(1));
     d.insert("b".to_string(), VmValue::Str("x".to_string().into()));
-    let original = VmValue::Dict(d);
+    let original = VmValue::dict(d);
 
     let mut scratch = Vec::new();
     let ffi = vm_to_ffi(&original, &mut scratch);
@@ -211,7 +211,7 @@ fn roundtrip_array_nested() {
     let original = make_array(vec![
         VmValue::Int(1),
         VmValue::Str("two".to_string().into()),
-        VmValue::Dict(inner),
+        VmValue::dict(inner),
     ]);
 
     let mut scratch = Vec::new();
@@ -305,7 +305,7 @@ fn a_struct_nested_in_a_dict_round_trips() {
     let mut d: DictObj<VmValue> = DictObj::new();
     d.insert("req", sample_struct());
     let mut scratch = Vec::new();
-    let v = vm_to_ffi(&VmValue::Dict(d), &mut scratch);
+    let v = vm_to_ffi(&VmValue::dict(d), &mut scratch);
     let back = ffi_to_vm(&v, ZERO).expect("dict should convert back");
     unsafe { ffi_free(&v) };
 
@@ -448,7 +448,7 @@ fn bytes_nested_in_an_array_and_a_dict_round_trip() {
     let mut d: DictObj<VmValue> = DictObj::new();
     d.insert("blob", sample_bytes());
     let mut scratch = Vec::new();
-    let v = vm_to_ffi(&VmValue::Dict(d), &mut scratch);
+    let v = vm_to_ffi(&VmValue::dict(d), &mut scratch);
     let back = ffi_to_vm(&v, ZERO).expect("dict should convert back");
     unsafe { ffi_free(&v) };
     let VmValue::Dict(out) = back else { panic!("expected a dict back") };

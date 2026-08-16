@@ -142,7 +142,7 @@ fn stringify_arity() {
 fn roundtrip_object() {
     let mut m = DictObj::new();
     m.insert("n".to_string(), VmValue::Int(5));
-    let orig = VmValue::Dict(m);
+    let orig = VmValue::dict(m);
     let text = stringify(orig);
     let back = parse(&text);
     match back {
@@ -162,7 +162,7 @@ fn roundtrip_nested() {
     let inner = make_array(vec![VmValue::Bool(true), VmValue::Nil]);
     let mut m = DictObj::new();
     m.insert("list".to_string(), inner);
-    let text = stringify(VmValue::Dict(m));
+    let text = stringify(VmValue::dict(m));
     let back = parse(&text);
     match back {
         VmValue::Dict(m) => match m.get("list") {

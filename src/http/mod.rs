@@ -47,7 +47,7 @@ fn make_response(status: u16, body: String) -> VmValue {
     let mut map = DictObj::new();
     map.insert("status".to_string(), VmValue::Int(status as i64));
     map.insert("body".to_string(), VmValue::Str(body.into()));
-    VmValue::Dict(map)
+    VmValue::dict(map)
 }
 
 /// A response whose body is raw octets rather than decoded text.
@@ -64,7 +64,7 @@ fn make_bytes_response(status: u16, body: Vec<u8>) -> VmValue {
             jade_runtime::trust::TAINTED,
         ))),
     );
-    VmValue::Dict(map)
+    VmValue::dict(map)
 }
 
 /// `http.get_bytes(url[, headers])` — a response whose body is not decoded.

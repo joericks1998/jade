@@ -111,7 +111,7 @@ pub(crate) async fn execute_chunk(
                         let fns = crate::native::load_native_package(&lib_path, span)?;
                         state
                             .globals
-                            .insert(namespace.clone(), VmValue::Dict(fns.into_iter().collect()));
+                            .insert(namespace.clone(), VmValue::dict(fns.into_iter().collect()));
                         continue;
                     }
                     ResolvedImport::File(p) => p,
@@ -240,7 +240,7 @@ pub(crate) async fn execute_chunk(
                             }
                             state.globals.insert(
                                 namespace.clone(),
-                                VmValue::Dict(module_globals.into_iter().collect()),
+                                VmValue::dict(module_globals.into_iter().collect()),
                             );
 
                             // Merge struct_defs under both the namespaced and the
@@ -887,7 +887,7 @@ pub(crate) async fn execute_chunk(
                     let val = get(slots, vr).clone();
                     map.insert(key.into_string(), val);
                 }
-                set(slots, *dest, VmValue::Dict(map));
+                set(slots, *dest, VmValue::dict(map));
             }
             Instr::GetIndex(dest, obj_reg, idx_reg) => {
                 let obj = get(slots, *obj_reg).clone();
@@ -898,9 +898,30 @@ pub(crate) async fn execute_chunk(
             Instr::SetIndex(obj_reg, idx_reg, val_reg) => {
                 let idx = get(slots, *idx_reg).clone();
                 let val = get(slots, *val_reg).clone();
-                // Clone the object first to avoid holding a mutable borrow on slots
-                // (needed because vm_err! may re-borrow slots via `set`).
-                let obj = get(slots, *obj_reg).clone();
+                // Take the object out of its slot rather than cloning it. The
+                // borrow is what has to go — `vm_err!` re-borrows `slots` via
+                // `set` — and taking gives that up just as well as copying did.
+                //
+                // For a dict the difference is the whole cost of the opcode. A
+                // dict is a value in Jade, so `VmValue::clone` deep-copies every
+                // entry, and cloning here made a write O(n) in the dict's size:
+                // filling one by assignment was quadratic, 4,000 keys taking 4s
+                // against a rounding error for the same number of array pushes.
+                // Nothing could observe the copy — a register's dict is owned by
+                // that register, since anything that shared it copied on the way
+                // in — so the value semantics are unchanged and only the cost is
+                // gone. The array arm is unaffected either way: an array is an
+                // `Arc`, and cloning one is a refcount bump.
+                //
+                // Only the dict arm is taken, and it is the only one that writes
+                // a value back. Everything else still clones, so a raise out of
+                // an error arm leaves the slot holding what it always held.
+                let obj = match get(slots, *obj_reg) {
+                    VmValue::Dict(_) => {
+                        std::mem::replace(&mut slots[*obj_reg as usize], VmValue::Nil)
+                    }
+                    other => other.clone(),
+                };
                 match obj {
                     VmValue::Array(arc) => {
                         let i = match idx {
@@ -934,7 +955,10 @@ pub(crate) async fn execute_chunk(
                                 });
                             }
                         };
-                        m.insert(k.into_string(), val);
+                        // Copy-on-write: `dict_mut` clones only if something
+                        // else is holding this dict, which is exactly when a
+                        // caller could tell the difference.
+                        dict_mut(&mut m).insert(k.into_string(), val);
                         slots[*obj_reg as usize] = VmValue::Dict(m);
                     }
                     ref other => {
@@ -1466,7 +1490,7 @@ pub(crate) fn eval_literal_default(expr: &crate::frontend::ast::Expr) -> Option<
         Expr::Array { elements, .. } if elements.is_empty() => {
             Some(VmValue::Array(Arc::new(Mutex::new(ArrayObj::from_vec(vec![])))))
         }
-        Expr::Dict { entries, .. } if entries.is_empty() => Some(VmValue::Dict(DictObj::new())),
+        Expr::Dict { entries, .. } if entries.is_empty() => Some(VmValue::dict(DictObj::new())),
         _ => None,
     }
 }

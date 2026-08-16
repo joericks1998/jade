@@ -1009,7 +1009,7 @@ pub fn ffi_to_vm(val: &JadeVal, span: Span) -> Result<VmValue> {
                     d.insert(key, value);
                 }
             }
-            Ok(VmValue::Dict(d))
+            Ok(VmValue::dict(d))
         }
         JADE_TAG_BYTES => {
             let bp = unsafe { val.data.as_bytes };

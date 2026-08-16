@@ -132,7 +132,7 @@ impl Package {
         for (name, id) in self.natives {
             map.insert((*name).to_string(), VmValue::NativeFn(id.clone()));
         }
-        VmValue::Dict(map)
+        VmValue::dict(map)
     }
 }
 
@@ -233,7 +233,7 @@ pub fn seed_globals<S: std::hash::BuildHasher>(globals: &mut HashMap<String, VmV
     // Grammar global: Grammar.new(pattern) → VmValue::Grammar(pattern)
     let mut grammar_fields = DictObj::new();
     grammar_fields.insert("new".to_string(), VmValue::BuiltinFn(grammar::GRAMMAR_NEW));
-    globals.insert("Grammar".to_string(), VmValue::Dict(grammar_fields));
+    globals.insert("Grammar".to_string(), VmValue::dict(grammar_fields));
 }
 
 /// Register type signatures for all core built-ins into the type checker.

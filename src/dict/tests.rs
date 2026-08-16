@@ -6,7 +6,7 @@ fn dict(pairs: &[(&str, VmValue)]) -> VmValue {
     for (k, v) in pairs {
         m.insert(k.to_string(), v.clone());
     }
-    VmValue::Dict(m)
+    VmValue::dict(m)
 }
 
 fn strs(v: &VmValue) -> Vec<String> {
@@ -163,4 +163,42 @@ fn find_method_known() {
 #[test]
 fn find_method_unknown() {
     assert!(find_dict_method("nope").is_none());
+}
+
+// ── Copy-on-write ─────────────────────────────────────────────────────────────
+
+/// A dict is a value in Jade, and it stays one — the `Arc` added in v1.3.22 is
+/// there to defer the copy until a write through a shared handle, not to make
+/// dicts share.
+#[test]
+fn a_shared_dict_copies_on_write_and_not_before() {
+    use std::sync::Arc;
+    let mut a = DictObj::new();
+    a.insert("k".to_string(), VmValue::Int(1));
+    let one = VmValue::dict(a);
+
+    // Cloning the value shares the allocation — this is the part that used to
+    // deep-copy every entry, on every `GetGlobal` and every argument pass.
+    let two = one.clone();
+    let (VmValue::Dict(p), VmValue::Dict(q)) = (&one, &two) else { panic!() };
+    assert!(Arc::ptr_eq(p, q), "cloning a dict value must not copy the entries");
+
+    // Writing through one of them takes its own copy, so the other is untouched.
+    let VmValue::Dict(mut w) = two.clone() else { panic!() };
+    crate::vm::dict_mut(&mut w).insert("k".to_string(), VmValue::Int(99));
+    let VmValue::Dict(orig) = &one else { panic!() };
+    assert!(matches!(orig.get("k"), Some(VmValue::Int(1))), "the original must not change");
+    assert!(matches!(w.get("k"), Some(VmValue::Int(99))), "the writer must see its write");
+}
+
+/// The other half: when nothing else holds the dict, the write is in place and
+/// no copy happens at all. That is what makes filling one linear rather than
+/// quadratic.
+#[test]
+fn an_unshared_dict_is_written_in_place() {
+    use std::sync::Arc;
+    let VmValue::Dict(mut only) = VmValue::dict(DictObj::new()) else { panic!() };
+    let before = Arc::as_ptr(&only);
+    crate::vm::dict_mut(&mut only).insert("k".to_string(), VmValue::Int(1));
+    assert_eq!(before, Arc::as_ptr(&only), "an unshared dict must not be copied to write it");
 }
