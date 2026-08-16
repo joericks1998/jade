@@ -156,15 +156,39 @@ TOML
   else
     loop_proj="$proj"
     bound="$(grep -m1 -oE '^[0-9]+ bound' "$proj/add.txt" || echo '? bound')"
-    ( cd "$proj" && "$JADE" run main.jde > vm.txt 2>&1 )
-    ( cd "$proj" && "$JADE" build main.jde -o app > build.txt 2>&1 && ./app > aot.txt 2>&1 )
-    if [ ! -s "$proj/vm.txt" ] || grep -q "error" "$proj/vm.txt"; then
-      echo "  FAIL  glib under the VM:"
+    # Every one of these keeps its exit status, and that is not a detail.
+    #
+    # A process killed by a signal *after* it has printed everything leaves an
+    # output file that looks perfectly correct, and the two engines then agree
+    # about it because both printed the same correct thing. This step used to
+    # check only that the file was non-empty and free of the word "error", so a
+    # SIGSEGV in the VM was reported as `ok` from v1.3.19 until v1.3.24 — the
+    # crash was visible in the CI log the whole time, as a line the *shell*
+    # printed, while the gate below it said 4 ok, 0 failed.
+    #
+    # Each runs through an inner shell for the reason `run_loop` documents: the
+    # shell that waits on a signalled child announces it, and that line is noise
+    # on top of a FAIL that already says the same thing.
+    bash -c 'cd "$1" && "$2" run main.jde > vm.txt 2>&1' _ "$proj" "$JADE" 2>/dev/null
+    vm_rc=$?
+    bash -c 'cd "$1" && "$2" build main.jde -o app > build.txt 2>&1' _ "$proj" "$JADE" 2>/dev/null
+    build_rc=$?
+    aot_rc=0
+    if [ "$build_rc" -eq 0 ]; then
+      bash -c 'cd "$1" && ./app > aot.txt 2>&1' _ "$proj" 2>/dev/null
+      aot_rc=$?
+    fi
+    if [ "$vm_rc" -ne 0 ] || [ ! -s "$proj/vm.txt" ] || grep -q "error" "$proj/vm.txt"; then
+      echo "  FAIL  glib under the VM (exit $vm_rc):"
       head -5 "$proj/vm.txt" | sed 's/^/        /'
       fail=$((fail + 1))
-    elif [ ! -f "$proj/aot.txt" ]; then
+    elif [ "$build_rc" -ne 0 ] || [ ! -f "$proj/aot.txt" ]; then
       echo "  FAIL  glib would not compile:"
       tail -5 "$proj/build.txt" | sed 's/^/        /'
+      fail=$((fail + 1))
+    elif [ "$aot_rc" -ne 0 ]; then
+      echo "  FAIL  the compiled glib program did not survive its own run (exit $aot_rc):"
+      tail -5 "$proj/aot.txt" | sed 's/^/        /'
       fail=$((fail + 1))
     elif ! diff -q "$proj/vm.txt" "$proj/aot.txt" >/dev/null; then
       echo "  FAIL  glib: the two engines disagree:"

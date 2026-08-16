@@ -24,8 +24,18 @@ print(f"strcasecmp  = {glib.g_ascii_strcasecmp("Jade", "jade")}")
 print(f"utf8 strlen = {glib.g_utf8_strlen("héllo wörld", -1)}")
 
 // int in, int out, and a string glib keeps a copy of.
+//
+// `g_intern_string`, not `g_intern_static_string`. The two differ in exactly the
+// thing that matters here: the `static` one does not copy, so glib's global
+// intern table keeps *the caller's pointer* forever, and its documentation says
+// the string must never be freed. Jade owns the buffer it passes into a native
+// call and frees it after, so binding that function leaves a dangling pointer in
+// a table glib walks at exit — which is the SIGSEGV this gate reported as `ok`
+// from v1.3.19 to v1.3.24. `g_intern_string` copies, so there is nothing to
+// dangle. Nothing about the FFI was wrong; the fixture was calling a function
+// whose contract Jade's argument ownership cannot satisfy.
 print(f"digit value = {glib.g_ascii_digit_value(55)}")
-print(f"interned    = {glib.g_intern_static_string("jade")}")
+print(f"interned    = {glib.g_intern_string("jade")}")
 
 // A string glib allocated and the caller now owns, declared `alloc_str` with
 // `frees_with = "g_free"` in jade.toml. The whole point is what does not show
