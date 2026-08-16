@@ -5,6 +5,28 @@ pub struct Span {
     pub col: usize,
 }
 
+/// The one undefined name worth a sentence of its own.
+///
+/// Jade has no `exit`, and what happens when someone reaches for it is
+/// misleading enough to be worth heading off. The name resolves to nothing, so
+/// the call does nothing, so the program appears to run its function and then
+/// carry on — which reads like broken control flow rather than a name that was
+/// never there. An uncaught `raise` at the top level is the whole exit-code
+/// mechanism the language has.
+///
+/// Shared with the AOT backend, which reports the same thing about a program
+/// type inference had to stay lenient on (see `codegen::check_globals_bound`),
+/// so the two say it the same way.
+pub fn undefined_variable_hint(name: &str) -> &'static str {
+    match name {
+        "exit" => {
+            "\n  Jade has no `exit`. An uncaught `raise` at the top level exits 1, \
+             so write `if code != 0 { raise \"failed\" }`."
+        }
+        _ => "",
+    }
+}
+
 /// Every error Jade can produce.
 #[derive(Debug)]
 pub enum JadeError {
@@ -191,7 +213,14 @@ impl std::fmt::Display for JadeError {
                 span.line, span.col
             ),
             JadeError::UndefinedVariable { name, span } => {
-                write!(f, "[{}:{}] undefined variable '{}'", span.line, span.col, name)
+                write!(
+                    f,
+                    "[{}:{}] undefined variable '{}'{}",
+                    span.line,
+                    span.col,
+                    name,
+                    undefined_variable_hint(name)
+                )
             }
             JadeError::DivisionByZero { span } => {
                 write!(f, "[{}:{}] division by zero", span.line, span.col)

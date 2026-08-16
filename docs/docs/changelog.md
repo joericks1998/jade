@@ -4,6 +4,15 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.3.20
+
+**Fixed: `exit()` compiled clean, did nothing, and left the program running.** Jade has no `exit`. Calling one anyway was accepted, so `jade build` printed `built: ./prog` for a program that could not work — and what happened next pointed everywhere except the cause. The call was silently skipped, so a top-level `exit(main())` looked like `main` had returned and execution had carried on, which reads like a `return` failing to leave a loop rather than a name that was never there.
+
+- **A single import used to turn off the undefined-variable check for the whole file.** Any `use` at all, on the theory that an import might be what defines the name. A stdlib import defines nothing of the sort — `use std::env` contributes `env` and nothing else — so the check now stays on for one, and every undefined name in such a file is a compile error again, not just `exit`.
+- **Where leniency is still needed, the backend catches it instead.** A user module's top-level names really are invisible to type inference, and so are the bare names a `from … use` binds. By the time code generation runs every import is inlined, so reading a global that nothing anywhere in the program binds is a build error there, naming the line. It used to lower to a read of a nil cell, which the runtime then called — a binary that built cleanly and died with no message at all.
+- **The error says what to write instead.** An uncaught `raise` at the top level exits 1, and that is the whole exit-code mechanism the language has.
+- **The two engines agree again.** `jade run` has always raised `undefined variable` for these programs; only `jade build` accepted them.
+
 ## v1.3.19
 
 **Changed: code generation moved to its own place in the source tree.** The half of `jade build` that translates bytecode into LLVM IR used to sit inside the half that resolves imports and runs the linker, as `src/aot/lower/`. Those are not related that way — lowering is where the interpreter and the compiled path have to agree on what an opcode means, so it is a peer of the VM rather than a detail of linking. It is now `src/codegen/`, one level flatter and named for what it produces.

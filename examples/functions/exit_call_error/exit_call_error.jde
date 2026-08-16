@@ -1,0 +1,24 @@
+// Jade has no `exit`, and until v1.3.20 this file compiled clean.
+//
+// A single `use` — any `use`, this one included — turned off the
+// undefined-variable check for the whole file, on the theory that an import
+// might be what defines the name. `exit` is not defined by anything, so the
+// call lowered to a read of a nil global, and `jade build` printed
+// `built: ./prog` for a program that then died in the runtime with no message.
+//
+// The check now stays on for a stdlib import, which registers everything it
+// contributes and therefore leaves nothing unaccounted for. Leniency is kept
+// only for imports that really are opaque to type inference — a user module or
+// a `from … use` — and those are caught after inlining instead (see
+// `codegen::check_globals_bound`).
+//
+// What to write instead is in the error message: an uncaught top-level `raise`
+// exits 1, and that is the whole exit-code mechanism the language has.
+use std::env
+
+fn main() {
+    print(f"running as {env.args()[0]}")
+    return 0
+}
+
+exit(main())

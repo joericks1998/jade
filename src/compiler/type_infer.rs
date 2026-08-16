@@ -35,10 +35,23 @@ pub struct TypeContext {
     /// Primitive type methods: type_name → method_name → JadeType.
     /// E.g. "str" → {"upper" → Fn { .. }}, "array" → {"push" → Fn { .. }}.
     pub primitive_methods: HashMap<String, HashMap<String, JadeType>>,
-    /// True if this program contains any `use` statements. When true, unknown
-    /// identifiers are treated as `Unknown` (resolved at VM runtime) rather
-    /// than hard errors — symbols may be provided by the imports.
-    has_imports: bool,
+    /// True if this program imports names this pass cannot see. When true,
+    /// unknown identifiers become `Unknown` (resolved later) rather than hard
+    /// errors, because an import may be what defines them.
+    ///
+    /// **Only imports that are actually opaque count.** A `use std::fs` is not:
+    /// a stdlib package registers everything it contributes (its module name,
+    /// and nothing else), so after one there is still no name this pass cannot
+    /// account for. Letting it turn the check off cost more than it sounds
+    /// like — every undefined name in a file with a single stdlib import went
+    /// through, and a call to one compiles to a nil global that the AOT backend
+    /// then calls, which is a program that builds clean and does nothing.
+    /// `exit()` is the one people reach for; it has never existed in Jade.
+    ///
+    /// What stays lenient is what genuinely is: a `use` of a user module or a
+    /// `[lib]`, whose top-level names arrive at codegen time, and every
+    /// `from … use a, b`, which binds bare names this pass never sees.
+    opaque_imports: bool,
 }
 
 impl Default for TypeContext {
@@ -56,7 +69,7 @@ impl TypeContext {
             interface_defs: HashMap::new(),
             extend_methods: HashMap::new(),
             primitive_methods: HashMap::new(),
-            has_imports: false,
+            opaque_imports: false,
         };
         builtins::register_core_types(&mut ctx);
         builtins::register_primitive_method_types(&mut ctx);
@@ -294,9 +307,9 @@ pub fn fill_struct_literal_defaults(program: &mut TProgram) -> Result<()> {
 
     // Set up an inference context that knows about every struct in the merged
     // program so default expressions referencing other structs type-check.
-    // `has_imports = true` keeps it lenient for any unresolved identifiers.
+    // `opaque_imports = true` keeps it lenient for any unresolved identifiers.
     let mut ctx = TypeContext::new();
-    ctx.has_imports = true;
+    ctx.opaque_imports = true;
     for (n, fs) in &defs {
         ctx.struct_defs.insert(n.clone(), fs.clone());
         ctx.define(
@@ -513,12 +526,26 @@ fn pre_pass(stmts: &[Stmt], ctx: &mut TypeContext) {
                     }
                 }
             }
-            Stmt::Use { .. } | Stmt::FromUse { .. } => {
-                ctx.has_imports = true;
+            Stmt::Use { path, .. } => {
+                ctx.opaque_imports |= import_is_opaque(path);
+            }
+            Stmt::FromUse { .. } => {
+                ctx.opaque_imports = true;
             }
             _ => {}
         }
     }
+}
+
+/// Does `use <path>` bring in names this pass cannot see?
+///
+/// Only a non-stdlib path does. A stdlib package's `register_types` runs during
+/// this same pass and defines everything the package contributes, so `use
+/// std::fs` leaves nothing unaccounted for. Anything else — a sibling `.jde`, a
+/// subdir module, a `[lib]` or a dependency — contributes top-level names that
+/// only exist once the importer merges the modules, well after this runs.
+fn import_is_opaque(path: &str) -> bool {
+    builtins::find_package(path).is_none()
 }
 
 // ── Pass 2: check_stmts / check_stmt ─────────────────────────────────────────
@@ -817,7 +844,7 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
 
         // ── Imports ───────────────────────────────────────────────────────────
         Stmt::Use { path, as_name, path_is_string, span } => {
-            ctx.has_imports = true;
+            ctx.opaque_imports |= import_is_opaque(path);
             // One unified import form: `::` notation (or a bare name) that names a
             // module — a stdlib package, a sibling `.jde` file, a subdir module
             // (`sub::name`), or a registered `[lib]`/dependency. Quoted file paths
@@ -835,7 +862,7 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
         }
 
         Stmt::FromUse { path, names, path_is_string, span } => {
-            ctx.has_imports = true;
+            ctx.opaque_imports = true;
             if *path_is_string {
                 return Err(JadeError::QuotedImport { path: path.clone(), span: *span });
             }
@@ -921,7 +948,7 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
             }
             let ty = match ctx.get(name) {
                 Some(t) => t,
-                None if ctx.has_imports => JadeType::Unknown,
+                None if ctx.opaque_imports => JadeType::Unknown,
                 None => {
                     return Err(JadeError::UndefinedVariable { name: name.clone(), span: *span });
                 }
@@ -1075,7 +1102,7 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
             // Clone field defs to release the borrow on ctx before calling infer_expr.
             // If the type is unknown but imports are present, fall back gracefully.
             let def_fields_opt = ctx.struct_defs.get(type_name).cloned();
-            if def_fields_opt.is_none() && ctx.has_imports {
+            if def_fields_opt.is_none() && ctx.opaque_imports {
                 // Type may be defined in an imported file; skip static checks.
                 // Normalize the type name to its bare form (strip any module
                 // prefix like "messages.Session" → "Session") so the literal
@@ -1180,7 +1207,7 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
                     // resolved in a separate file (and therefore aren't in this
                     // file's ctx.struct_defs).  Fields/methods can't be checked
                     // until the importer merges TIRs at codegen time.
-                    let is_imported = ctx.has_imports && !ctx.struct_defs.contains_key(&tn);
+                    let is_imported = ctx.opaque_imports && !ctx.struct_defs.contains_key(&tn);
                     if !is_imported {
                         let has_field = ctx
                             .struct_defs

@@ -958,3 +958,57 @@ fn a_build_error_from_the_resolver_names_its_line() {
     assert!(!err.contains("lower.rs"), "should not name a Rust source file: {err}");
     assert!(!err.contains("unsupported"), "method calls are not unsupported: {err}");
 }
+
+// ── Unbound globals ───────────────────────────────────────────────────────────
+
+/// Build a top-level chunk with spans, for the whole-program checks.
+fn top_chunk(code: Vec<Instr>) -> Chunk {
+    use crate::frontend::error::Span;
+    let spans = (0..code.len()).map(|i| Span { line: i + 1, col: 1 }).collect();
+    Chunk { name: "<top>".to_string(), code, spans, fn_defs: vec![] }
+}
+
+#[test]
+fn reading_a_global_nothing_binds_is_a_build_error() {
+    // `exit(0)` — the call type inference has to let through in a file that
+    // imports a user module. It used to lower to a read of a nil global and
+    // build a binary that trapped in the runtime with nothing printed.
+    let chunk =
+        top_chunk(vec![GetGlobal(0, "exit".to_string()), LoadInt(1, 0), Call(2, 0, vec![1]), Halt]);
+    let err = check_globals_bound(&chunk, &[], &HashMap::new(), &HashMap::new())
+        .expect_err("an unbound global should be refused");
+
+    assert!(err.starts_with("[1:1]"), "should name the line: {err}");
+    assert!(err.contains("undefined variable 'exit'"), "should name the variable: {err}");
+    assert!(err.contains("raise"), "should name what to write instead: {err}");
+}
+
+#[test]
+fn a_global_the_program_binds_is_fine_in_either_order() {
+    // Forward reference: a function body reads a global the top level stores to
+    // later. Checking per-chunk would reject this, so the scan is whole-program.
+    let body = top_chunk(vec![GetGlobal(0, "later".to_string()), Return(Some(0))]);
+    let f = std::sync::Arc::new(CompiledFn {
+        params: vec![],
+        defaults: vec![],
+        chunk: body,
+        n_slots: 1,
+        source_file: String::new(),
+        module_scope: None,
+        is_generator: false,
+    });
+    let top = top_chunk(vec![LoadInt(0, 1), SetGlobal("later".to_string(), 0), Halt]);
+    check_globals_bound(&top, &[f], &HashMap::new(), &HashMap::new())
+        .expect("a global bound anywhere in the program is bound");
+}
+
+#[test]
+fn runtime_builtins_and_package_globals_are_bound() {
+    // Neither is a `SetGlobal` target, and both are legal to read. The allowed
+    // set is read from `builtins` rather than restated, so adding a builtin
+    // cannot make a valid program stop building.
+    let top =
+        top_chunk(vec![GetGlobal(0, "print".to_string()), GetGlobal(1, "fs".to_string()), Halt]);
+    check_globals_bound(&top, &[], &HashMap::new(), &HashMap::new())
+        .expect("builtins and package globals are bound");
+}
