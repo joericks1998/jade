@@ -75,6 +75,14 @@ pub enum VmValue {
     NativeBoundMethod(Arc<NativeBoundMethod>),
     /// A Rust-backed callable returned by a built-in module (e.g. `array.map`).
     NativeFn(NativeFnId),
+    /// A [`NativeFn`](VmValue::NativeFn) pre-loaded with its receiver, so
+    /// `a.map(f)` reaches the same implementation as `array.map(a, f)`.
+    ///
+    /// [`NativeBoundMethod`] cannot do this job: it binds a *pure* `BuiltinFn`,
+    /// and `map`/`filter` call a Jade function per element, which needs the VM's
+    /// call context. That is the whole reason those two were the only array
+    /// functions with no method spelling until v1.3.21.
+    BoundNativeFn(Arc<(NativeFnId, VmValue)>),
     /// A function loaded from a native shared library registered as a `[lib]`
     /// module whose file is a `.dylib`/`.so`/`.dll`.
     NativeLibFn(Arc<NativeLibFn>),
@@ -126,6 +134,7 @@ impl std::fmt::Debug for VmValue {
             VmValue::BuiltinFn(bf) => write!(f, "BuiltinFn({})", bf.name),
             VmValue::NativeBoundMethod(nbm) => write!(f, "NativeBoundMethod({})", nbm.method.name),
             VmValue::NativeFn(nf) => write!(f, "NativeFn({:?})", nf),
+            VmValue::BoundNativeFn(b) => write!(f, "BoundNativeFn({:?})", b.0),
             VmValue::NativeLibFn(nfn) => write!(f, "NativeLibFn({})", nfn.name),
             VmValue::Future(_) => write!(f, "Future"),
             VmValue::TokenStream(_) => write!(f, "TokenStream"),
@@ -166,6 +175,7 @@ pub fn value_to_display(v: &VmValue) -> String {
         VmValue::Prompt(_) => "<prompt>".to_string(),
         VmValue::Grammar(_) => "<grammar>".to_string(),
         VmValue::NativeFn(_) => "<native fn>".to_string(),
+        VmValue::BoundNativeFn(_) => "<builtin method>".to_string(),
         VmValue::NativeLibFn(nfn) => format!("<native lib fn {}>", nfn.name),
         VmValue::Future(_) => "<future>".to_string(),
         VmValue::TokenStream(_) => "<token stream>".to_string(),
@@ -201,6 +211,7 @@ pub fn value_type_name(v: &VmValue) -> &'static str {
         VmValue::BoundMethod(_) | VmValue::NativeBoundMethod(_) => "method",
         VmValue::BuiltinFn(_) => "builtin",
         VmValue::NativeFn(_) => "native fn",
+        VmValue::BoundNativeFn(_) => "method",
         VmValue::NativeLibFn(_) => "native fn",
         VmValue::Future(_) => "future",
         VmValue::TokenStream(_) => "token stream",

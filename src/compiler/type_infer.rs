@@ -5,7 +5,7 @@ use crate::{
     builtins,
     frontend::{
         ast::{BinOpKind, Expr, FStrPart, Program, Stmt, StructFieldDef, UnaryOpKind},
-        error::{JadeError, Result, Span},
+        error::{FieldOwner, JadeError, Result, Span},
     },
 };
 
@@ -52,6 +52,18 @@ pub struct TypeContext {
     /// `[lib]`, whose top-level names arrive at codegen time, and every
     /// `from … use a, b`, which binds bare names this pass never sees.
     opaque_imports: bool,
+    /// Stdlib packages this file imported, by the name they bind (`math`,
+    /// `fs`). A package is a fixed set of functions known at compile time, so
+    /// `math.round(2.5)` can be refused here — naming the module and the
+    /// function — instead of surviving to run time.
+    ///
+    /// Without it the report was actively misleading. A package is a dict at
+    /// run time, so a missing entry came back as `struct 'dict' has no field
+    /// 'round'`: not a struct, not called `dict` by the person who wrote it,
+    /// and no mention of `math` at all. An entry is dropped the moment anything
+    /// else binds the name, so a local that shadows a package is not checked
+    /// against it.
+    imported_packages: HashSet<String>,
 }
 
 impl Default for TypeContext {
@@ -70,6 +82,7 @@ impl TypeContext {
             extend_methods: HashMap::new(),
             primitive_methods: HashMap::new(),
             opaque_imports: false,
+            imported_packages: HashSet::new(),
         };
         builtins::register_core_types(&mut ctx);
         builtins::register_primitive_method_types(&mut ctx);
@@ -98,6 +111,9 @@ impl TypeContext {
 
     /// Bind `name` in the innermost (current) scope — used for `let` and fn params.
     pub fn define(&mut self, name: String, ty: JadeType) {
+        // Anything that binds the name is now what the name means, so it is no
+        // longer the package's namespace and must not be checked against it.
+        self.imported_packages.remove(&name);
         if let Some(scope) = self.scopes.last_mut() {
             scope.insert(name, ty);
         }
@@ -801,6 +817,7 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
                 return Err(JadeError::UndefinedField {
                     type_name: tn,
                     field: field.clone(),
+                    owner: FieldOwner::Struct,
                     span: *span,
                 });
             }
@@ -856,7 +873,10 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
                 return Err(JadeError::ImportAlias { span: *span });
             }
             if let Some(pkg) = builtins::find_package(path) {
+                // After `register_types`, which calls `define` for the module
+                // name and would otherwise clear the association it just made.
                 (pkg.register_types)(ctx);
+                ctx.imported_packages.insert(pkg.global_name.to_string());
             }
             Ok(TStmt::Use { path: path.clone(), as_name: None, path_is_string: false, span: *span })
         }
@@ -1132,6 +1152,7 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
                     return Err(JadeError::UndefinedField {
                         type_name: type_name.clone(),
                         field: fname.clone(),
+                        owner: FieldOwner::Struct,
                         span: fspan,
                     });
                 }
@@ -1199,6 +1220,23 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
 
         // ── Field access ──────────────────────────────────────────────────────
         Expr::FieldAccess { object, field, span } => {
+            // `math.round` — a stdlib package's contents are fixed and known
+            // now, so a name it does not have is settled here rather than at
+            // run time, where the namespace is just a dict and the report named
+            // neither the module nor a type the user recognised.
+            if let Expr::Identifier { name, .. } = object.as_ref()
+                && ctx.imported_packages.contains(name)
+                && let Some(pkg) = builtins::package_by_global_name(name)
+                && !pkg.fns.iter().any(|f| f.name == field)
+                && !pkg.natives.iter().any(|(n, _)| n == field)
+            {
+                return Err(JadeError::UnknownPackageFn {
+                    package: pkg.import_name.replace('/', "::"),
+                    name: field.clone(),
+                    available: pkg.fns.iter().map(|f| f.name.to_string()).collect(),
+                    span: *span,
+                });
+            }
             let tobj = infer_expr(object, ctx)?;
             let ty = match &tobj.ty {
                 JadeType::Struct(tn) => {
@@ -1223,6 +1261,7 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
                             return Err(JadeError::UndefinedField {
                                 type_name: tn,
                                 field: field.clone(),
+                                owner: FieldOwner::Struct,
                                 span: *span,
                             });
                         }

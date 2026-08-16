@@ -203,3 +203,56 @@ fn find_method_known() {
 fn find_method_unknown() {
     assert!(find_array_method("nope").is_none());
 }
+
+// ── Both spellings ────────────────────────────────────────────────────────────
+
+/// `map`/`filter` are the only array functions whose implementation sits behind
+/// a `NativeFnId` rather than a `BuiltinFn`, because each runs a Jade function
+/// per element. That is why they were the only two with no method spelling
+/// until v1.3.21 — the primitive-method path could reach pure builtins only.
+#[test]
+fn map_and_filter_are_reachable_as_methods() {
+    use crate::builtins::PrimType;
+    for name in ["map", "filter"] {
+        assert!(
+            crate::builtins::find_primitive_method(PrimType::Array, name).is_none(),
+            "{name} is not a pure BuiltinFn — if it becomes one, drop the bound-native path"
+        );
+    }
+}
+
+/// The type checker has to know the method spelling too, or `a.map(f)` is a
+/// call on a type with no such method.
+#[test]
+fn the_method_spelling_is_registered_for_type_inference() {
+    let mut ctx = crate::compiler::type_infer::TypeContext::new();
+    register_array_method_types(&mut ctx);
+    for name in ["map", "filter", "sort", "push", "len"] {
+        assert!(
+            ctx.primitive_methods.get("array").is_some_and(|m| m.contains_key(name)),
+            "array method '{name}' is not registered"
+        );
+    }
+}
+
+/// The one pair that is deliberately *not* the same function. `std/array`'s
+/// package entries are the functional style, so `array.sort(a)` answers with a
+/// sorted copy while `a.sort()` sorts in place. Lowering the package form to
+/// the in-place symbol would have made a compiled program mutate an array the
+/// interpreter leaves alone.
+#[test]
+fn the_package_sort_copies_and_the_method_sorts_in_place() {
+    let arr = make_array(vec![VmValue::Int(3), VmValue::Int(1)]);
+
+    let sorted = pkg_sort(&[arr.clone()]).expect("array.sort");
+    let VmValue::Array(out) = &sorted else { panic!("expected an array") };
+    assert_eq!(out.lock().len(), 2);
+    let VmValue::Array(src) = &arr else { panic!() };
+    assert!(
+        matches!(src.lock().as_slice()[0], VmValue::Int(3)),
+        "array.sort(a) must leave its argument alone"
+    );
+
+    arr_sort(&[arr.clone()]).expect("a.sort()");
+    assert!(matches!(src.lock().as_slice()[0], VmValue::Int(1)), "a.sort() must sort in place");
+}

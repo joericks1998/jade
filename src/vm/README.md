@@ -17,7 +17,7 @@ The file was once a monolith and has been split incrementally. `mod.rs` re-expor
 ## What each file does
 
 - **`mod.rs`** — the shared import preamble, submodule declarations, and re-exports. Little logic.
-- **`value.rs`** — `VmValue`, the enum the interpreter dispatches on, plus the display and type-name projections. Also `NativeFnId`: the id of a native function that needs `VmState` access and so cannot be a pure `BuiltinFn`.
+- **`value.rs`** — `VmValue`, the enum the interpreter dispatches on, plus the display and type-name projections. Also `NativeFnId`: the id of a native function that needs `VmState` access and so cannot be a pure `BuiltinFn`, and `BoundNativeFn`, which is one of those with its receiver already attached so it can be reached as a method.
 - **`state.rs`** — `VmState` (globals, struct and method tables, the import cycle guard, the inference backend, the REPL capture slot) and `VmOpts`, the per-run configuration. Globals use `FxHashMap` because variable names are short internal keys hashed on every `GetGlobal`.
 - **`dispatch.rs`** — the interpreter loop. `execute_chunk` decodes each `Instr`, drives control flow and the exception handler stack, and delegates value work to `jade-runtime` and the sibling submodules. The register slot accessors live at the bottom of the file.
 - **`call.rs`** — call dispatch. `call_value` is the single entry point for calling anything callable: user functions and closures, bound methods, native and library functions, stateful `NativeFnId` package methods, and type constructors. `call_fn` runs a compiled body in a fresh register frame.
@@ -42,6 +42,8 @@ The file was once a monolith and has been split incrementally. `mod.rs` re-expor
 **No panics on the interpreter path.** Every failure returns a `JadeError` carrying a span, including anything derived from user input.
 
 Adding a stateful package function means adding a `NativeFnId` variant in `value.rs` and a match arm in `call_value`.
+
+If it should also be callable as a *method*, that is a second step. `find_primitive_method` hands back a pure `BuiltinFn`, which a stateful function is not — so `GetField` binds the receiver to the id instead and produces a `VmValue::BoundNativeFn`, which `call_value` unpacks by putting the receiver back at the front. `array_fn_method` in `dispatch.rs` is the whole list of these. Missing that step is why `array.map(a, f)` worked and `a.map(f)` did not until v1.3.21.
 
 ## Building and testing
 

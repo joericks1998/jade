@@ -8,6 +8,11 @@
 // `catch RuntimeError e` never matched at all. A program that only reported the
 // error looked fine; one that inspected it broke when you shipped it.
 //
+// The receiver wording is checked here too. Both engines said `struct 'int'
+// has no field 'upper'` until v1.3.21 — an int is not a struct and has no
+// fields — and the fix had to land in two places, since compiled code raises
+// from `jrt_require_kind` in the C runtime rather than from `JadeError`.
+//
 // The one part that stays different is the `[line:col]` prefix the VM puts in
 // the message — compiled code has no span at runtime. So this fixture asserts
 // the *shape* and the type, and checks the message by substring rather than
@@ -57,7 +62,7 @@ fn message_of(f) {
 }
 
 print(message_of(divzero).contains("division by zero"))            // true
-print(message_of(bad_method).contains("has no field 'upper'"))     // true
+print(message_of(bad_method).contains("int has no method 'upper'"))  // true
 print(message_of(overflow).contains("integer overflow"))           // true
 
 // A user's `raise x` is NOT wrapped: the value thrown is the value written, so

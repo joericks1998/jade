@@ -197,6 +197,46 @@ pub extern "C" fn jrt_coll_array_sort(arr: *mut c_void) {
     unsafe { (*(arr as *mut ArrayObj<W>)).sort_by(|a, b| cmp_for_sort(*a, *b)) }
 }
 
+/// `array.sort(a)`: a **new** sorted array, leaving `a` alone.
+///
+/// The package spelling and the method spelling of this one are deliberately
+/// different functions — `std/array`'s package entries are the functional style,
+/// so `array.sort(a)` answers with a sorted copy where `a.sort()` sorts in
+/// place. Compiled code had neither: the package form was refused as an
+/// unsupported module call until v1.3.21, and lowering it to the in-place symbol
+/// instead would have made a compiled program mutate an array the interpreter
+/// leaves untouched.
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_coll_array_sorted(arr: *const c_void) -> *mut c_void {
+    unsafe {
+        let mut out = copy_of(arr);
+        out.sort_by(|a, b| cmp_for_sort(*a, *b));
+        crate::gc::leak_obj(out)
+    }
+}
+
+/// `array.reverse(a)`: a **new** reversed array. See [`jrt_coll_array_sorted`].
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_coll_array_reversed(arr: *const c_void) -> *mut c_void {
+    unsafe {
+        let mut out = copy_of(arr);
+        out.reverse();
+        crate::gc::leak_obj(out)
+    }
+}
+
+/// A shallow copy of an array's words. Each element is retained, because the
+/// copy is a second owner of every heap value it now points at.
+unsafe fn copy_of(arr: *const c_void) -> ArrayObj<W> {
+    let src = unsafe { &*(arr as *const ArrayObj<W>) };
+    let mut out = ArrayObj::<W>::new();
+    for w in src.as_slice() {
+        crate::gc::retain(*w);
+        out.push(*w);
+    }
+    out
+}
+
 /// Total order over tagged words matching the VM's `vm_cmp_for_sort`.
 fn cmp_for_sort(a: W, b: W) -> core::cmp::Ordering {
     use core::cmp::Ordering::Equal;

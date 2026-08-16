@@ -66,6 +66,8 @@ Skipping that arrangement is the standing failure mode, and it is invisible: the
 
 **Non-raising versus raising.** Functions in `ffi_coll.rs` never raise: a Jade-catchable error cannot be a `longjmp`. Read that file's header before adding an entry point.
 
+**Mutating versus copying.** Some collection functions exist in both forms, and the pair has to keep its meanings straight: `jrt_coll_array_sort` sorts in place for `a.sort()`, while `jrt_coll_array_sorted` returns a new array for `array.sort(a)`. They are not interchangeable, and using one where the other belongs is a silent behaviour change rather than an error — see `codegen`'s `package_fn_is_the_method`.
+
 Anything here that changes user-visible behavior needs checking on *both* engines, because both link it.
 
 ## Building and testing

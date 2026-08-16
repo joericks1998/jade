@@ -445,6 +445,40 @@ mod type_infer {
         infer_ok("from std::env use args\nlet x = args()");
     }
 
+    // ── Stdlib package contents ───────────────────────────────────────────────
+
+    /// A package's functions are known at compile time, so a name it does not
+    /// have is settled here. It used to survive to run time and surface as
+    /// `struct 'dict' has no field 'round'` — a package is a dict at run time,
+    /// so the report named neither the module nor a type the reader would know.
+    #[test]
+    fn test_infer_unknown_package_fn_names_the_module() {
+        let err = infer_err("use std::math\nlet v = 2.5\nlet r = math.round(v)");
+        let JadeError::UnknownPackageFn { package, name, available, .. } = &err else {
+            panic!("expected UnknownPackageFn, got {err}");
+        };
+        assert_eq!(package, "std::math");
+        assert_eq!(name, "round");
+        assert!(available.contains(&"floor".to_string()), "lists what it does have: {available:?}");
+    }
+
+    /// A local that shadows the package name is not checked against it.
+    #[test]
+    fn test_infer_a_shadowed_package_is_not_checked() {
+        infer_ok("use std::math\nlet math = {\"round\": 1}\nlet r = math.round");
+    }
+
+    /// Only an imported package. A bare `math.round` with no `use` is an
+    /// undefined variable, which is a different mistake and already reported.
+    #[test]
+    fn test_infer_package_check_needs_the_import() {
+        let err = infer_err("let r = math.round(2.5)");
+        assert!(
+            matches!(&err, JadeError::UndefinedVariable { name, .. } if name == "math"),
+            "expected undefined 'math', got {err}"
+        );
+    }
+
     // ── Unknown propagation ───────────────────────────────────────────────────
 
     #[test]

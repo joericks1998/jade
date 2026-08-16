@@ -1994,9 +1994,52 @@ mod error {
         let e = JadeError::UndefinedField {
             type_name: "Point".into(),
             field: "z".into(),
+            owner: crate::frontend::error::FieldOwner::Struct,
             span: span(2, 2),
         };
         assert_eq!(e.to_string(), "[2:2] struct 'Point' has no field 'z'");
+    }
+
+    /// The same variant reports a non-struct differently, because it used to
+    /// say "struct" for every one of them: a missing method on an array read
+    /// `struct 'array' has no field 'map'`, which is wrong three times over.
+    /// The owner is carried rather than guessed from the name — `struct array
+    /// {}` is a legal declaration, so the name cannot settle it.
+    #[test]
+    fn test_display_undefined_field_on_a_value() {
+        use crate::frontend::error::FieldOwner;
+        let arr = JadeError::UndefinedField {
+            type_name: "array".into(),
+            field: "map".into(),
+            owner: FieldOwner::Value,
+            span: span(2, 2),
+        };
+        assert_eq!(arr.to_string(), "[2:2] array has no method 'map'");
+
+        let d = JadeError::UndefinedField {
+            type_name: "dict".into(),
+            field: "k".into(),
+            owner: FieldOwner::Dict,
+            span: span(1, 1),
+        };
+        assert_eq!(d.to_string(), "[1:1] dict has no key or method 'k'");
+    }
+
+    /// A stdlib package names itself and lists what it has. The namespace is a
+    /// dict at run time, so this used to surface as `struct 'dict' has no field
+    /// 'round'` — naming neither the module nor a type the reader would know.
+    #[test]
+    fn test_display_unknown_package_fn() {
+        let e = JadeError::UnknownPackageFn {
+            package: "std::math".into(),
+            name: "round".into(),
+            available: vec!["floor".into(), "ceil".into()],
+            span: span(3, 7),
+        };
+        assert_eq!(
+            e.to_string(),
+            "[3:7] std::math has no function 'round'\n  It provides: floor, ceil."
+        );
     }
 
     #[test]

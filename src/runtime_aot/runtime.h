@@ -502,7 +502,7 @@ int64_t jrt_bool_any(int64_t val);
 /* jrt_require_kind — the receiver guard the Chunk backend emits ahead of a
  * primitive method call (`recv.push(x)`, `recv.keys()`, `recv.upper()`, …).
  * `want` is a bitmask of the kinds that method accepts; a receiver outside it
- * RAISES the VM's "struct '<kind>' has no field '<method>'" rather than being
+ * RAISES the VM's "<kind> has no method '<method>'" rather than being
  * untagged and dereferenced as a kind it is not. Returns normally on a match.
  * A method name never proves its receiver's kind — see common.c for why the
  * frontend cannot settle this and the VM checks at runtime too. */
