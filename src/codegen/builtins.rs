@@ -203,9 +203,11 @@ pub(super) fn chunk_module_supported(module: &str, method: &str, argc: usize) ->
         ("env", "get") => argc == 1,
         ("env", "set") => argc == 2,
         ("env", "args") => argc == 0,
-        ("time", "now" | "now_ms") => argc == 0,
+        ("time", "now" | "now_ms" | "monotonic") => argc == 0,
         ("time", "sleep") => argc == 1,
-        ("time", "local") => argc == 1,
+        ("time", "local" | "utc" | "parts") => argc == 1,
+        // stamp(y, mo, d[, h[, mi[, s]]]) — time of day defaults to midnight.
+        ("time", "stamp") => (3..=6).contains(&argc),
         ("http", "get" | "delete" | "head" | "get_bytes") => argc == 1 || argc == 2,
         ("http", "post" | "put" | "post_bytes") => argc == 2 || argc == 3,
         ("uhttp", "get" | "delete" | "head" | "get_bytes") => argc == 1 || argc == 2,
@@ -929,6 +931,51 @@ pub(super) fn emit_module_call<'ctx>(
             let f = low.runtime_fn("jrt_time_sleep", void_ty.fn_type(&[f64_ty.into()], false));
             b.build_call(f, &[d.into()], "").map_err(err)?;
             Ok(nil)
+        }
+        ("time", "monotonic") => {
+            // () -> raw f64, boxed into a float word (same shape as random.float).
+            let f = low.runtime_fn("jrt_time_monotonic", f64_ty.fn_type(&[], false));
+            let d =
+                b.build_call(f, &[], "mono").map_err(err)?.as_any_value_enum().into_float_value();
+            let boxf = low.runtime_fn("jrt_box_float", i64_ty.fn_type(&[f64_ty.into()], false));
+            Ok(b.build_call(boxf, &[d.into()], "boxf")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_int_value())
+        }
+        ("time", "utc") => {
+            // (raw i64 seconds) -> char*. Not `str_fn`: the argument is an int
+            // word to untag, not a data pointer.
+            let f = low.runtime_fn("jrt_time_utc", ptrt.fn_type(&[i64_ty.into()], false));
+            let p = b
+                .build_call(f, &[low.untag_int(low.load(args[0])).into()], "utc")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_pointer_value();
+            Ok(low.tag_str(p))
+        }
+        ("time", "parts") => {
+            // (raw i64 seconds) -> already-tagged dict word.
+            let f = low.runtime_fn("jrt_time_parts", i64_ty.fn_type(&[i64_ty.into()], false));
+            Ok(b.build_call(f, &[low.untag_int(low.load(args[0])).into()], "parts")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_int_value())
+        }
+        ("time", "stamp") => {
+            // Six raw i64 fields in, raw i64 out. The trailing time-of-day
+            // arguments are optional in the source, so pad the call with zeros
+            // rather than giving the runtime a second signature to match.
+            let f = low.runtime_fn("jrt_time_stamp", i64_ty.fn_type(&[i64_ty.into(); 6], false));
+            let argv: Vec<BasicMetadataValueEnum> = (0..6)
+                .map(|k| match args.get(k) {
+                    Some(a) => low.untag_int(low.load(*a)).into(),
+                    None => i64_ty.const_zero().into(),
+                })
+                .collect();
+            let r =
+                b.build_call(f, &argv, "stamp").map_err(err)?.as_any_value_enum().into_int_value();
+            Ok(low.tag_int(r))
         }
         ("array", "map" | "filter") => {
             // (arr word, fn word) -> new array word. Both args are tagged words.

@@ -780,8 +780,13 @@ int64_t jrt_fs_size(const char* path);
  * no C leaf. Declared here for ABI reference. None raise. */
 int64_t jrt_time_now(void);
 int64_t jrt_time_now_ms(void);
+double  jrt_time_monotonic(void);
 void    jrt_time_sleep(double secs);
 char*   jrt_time_local(const char* tz);
+char*   jrt_time_utc(int64_t ts);
+int64_t jrt_time_parts(int64_t ts);
+int64_t jrt_time_stamp(int64_t y, int64_t mo, int64_t d,
+                       int64_t h, int64_t mi, int64_t s);
 
 /* random (std::random) is implemented in Rust now (jade-runtime, src/randomf.rs).
  * jrt_random_int is a C forwarder (common.c) that throws on min>max, then calls

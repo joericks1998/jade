@@ -1,0 +1,70 @@
+// Everything std::time gained in v1.3.24: a monotonic clock and UTC calendar
+// conversion in both directions.
+//
+// The parity gate diffs the two engines' output, so nothing here may print a
+// value that changes between runs. The clocks are therefore checked by asking a
+// question with a fixed answer ("is it after 2023?"), while the calendar math is
+// printed outright — it is pure arithmetic on the timestamp it is given.
+
+use std::time
+
+// ── The two clocks ────────────────────────────────────────────────────────────
+
+// The wall clock reads seconds since 1970. Any real machine is well past 2023.
+print(time.now() > 1700000000)
+print(time.now_ms() > time.now())
+
+// The monotonic clock has no epoch — only the gap between two readings means
+// anything. It never goes backwards, which is why it, and not `now_ms`, is what
+// you measure a duration with.
+let start = time.monotonic()
+time.sleep(0.01)
+let elapsed = time.monotonic() - start
+print(elapsed >= 0.01)
+
+// ── A timestamp to calendar fields ────────────────────────────────────────────
+
+// 2026-08-16 14:03:22 UTC. A Sunday, and day 228 of the year.
+let ts = 1786889002
+
+print(time.utc(ts))
+
+let p = time.parts(ts)
+print(p["year"])
+print(p["month"])
+print(p["day"])
+print(p["hour"])
+print(p["minute"])
+print(p["second"])
+print(p["weekday"])
+print(p["yearday"])
+
+// ── Calendar fields back to a timestamp ───────────────────────────────────────
+
+// `stamp` is the exact inverse, so a round trip returns what it started with.
+print(time.stamp(2026, 8, 16, 14, 3, 22) == ts)
+
+// Three arguments mean midnight UTC on that date.
+print(time.utc(time.stamp(2026, 8, 16)))
+
+// Out-of-range fields carry instead of failing, which is what makes date
+// arithmetic a single call: month 13 is next January, and day 0 is the last day
+// of the month before.
+print(time.utc(time.stamp(2026, 13, 1)))
+print(time.utc(time.stamp(2026, 3, 0)))
+
+// Adding 45 days to a date is the same trick, and it crosses the month end on
+// its own.
+print(time.utc(time.stamp(2026, 8, 16 + 45)))
+
+// The leap-day cases the calendar has to get right: 2024 has a February 29th,
+// 2100 does not, and 2000 does.
+print(time.utc(time.stamp(2024, 2, 29)))
+print(time.utc(time.stamp(2100, 2, 29)))
+print(time.utc(time.stamp(2000, 2, 29)))
+
+// The epoch itself, and a moment before it. A negative timestamp has to floor
+// rather than truncate, or it lands a day late.
+print(time.utc(0))
+print(time.utc(-1))
+print(time.parts(0)["weekday"])

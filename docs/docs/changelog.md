@@ -4,6 +4,24 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.3.24
+
+**Added: a monotonic clock and UTC calendar conversion in `std::time`.** The package could read the wall clock and sleep, and that was all — so a program that wanted to know what day a timestamp fell on had to shell out to `date` and parse the text back.
+
+**`time.monotonic()`** returns seconds from a fixed point in the process, as a float. It is the clock to measure a duration with, and `time.now_ms()` is not: the wall clock moves while a program runs, since NTP corrects it and a person can set it, so subtracting two readings of it can hand you a negative duration. The monotonic clock only moves forward. Its absolute value means nothing on its own.
+
+**`time.parts(ts)`** breaks a timestamp into a dict of eight UTC fields — `year`, `month`, `day`, `hour`, `minute`, `second`, `weekday`, `yearday`. `weekday` is 0 for Sunday and `yearday` starts at 1, matching what `date +%w` and `date +%j` print, so nothing here needs a second numbering learned.
+
+**`time.stamp(y, mo, d[, h[, mi[, s]]])`** is the exact inverse, and the time-of-day arguments default to zero. Out-of-range fields **carry** rather than fail, which is what turns date arithmetic into a single call: month 13 is next January, day 0 is the last day of the previous month, and `time.stamp(2026, 8, 16 + 45)` is September 30th.
+
+**`time.utc(ts)`** formats a timestamp as ISO 8601 — `2026-08-16T14:03:22Z`. Fixed width and sortable as text, which is why it is here alongside `time.local`, whose human format is neither. Unlike `local` it is *trusted*: it is computed from an integer in process rather than read back from a subprocess.
+
+All three calendar functions are UTC, deliberately. A local calendar needs the IANA timezone database, which is a dependency the runtime does not carry; `time.local(tz)` remains the local-time answer, and it gives a formatted string rather than fields.
+
+The conversion is Howard Hinnant's `civil_from_days` — integer arithmetic on the proleptic Gregorian calendar, with no dependency and no `libc` call. It is tested against dates checked with `date -u`, over a round trip across four centuries on both sides of the epoch, and on the three leap-year cases that separate a correct implementation from a plausible one: 2024 has a February 29th, 2100 does not, and 2000 does.
+
+`time.sleep` was already present and is unchanged.
+
 ## v1.3.23
 
 **Added: 42 functions across `std::math`, `std::string`, `std::fs` and `std::array`.**

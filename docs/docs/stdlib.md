@@ -27,7 +27,7 @@ Every import uses `::` notation (or a bare name) that names a module — there a
 | `use std::array` | `array` | Higher-order array functions |
 | `use std::dict` | `dict` | Dict utilities |
 | `use std::fs` | `fs` | File system I/O |
-| `use std::time` | `time` | Clock and sleep |
+| `use std::time` | `time` | Clocks, sleep, and calendar conversion |
 | `use std::http` | `http` | HTTP client |
 | `use std::uhttp` | `uhttp` | HTTP client over a Unix domain socket |
 | `use std::sh` | `sh` | Shell command execution |
@@ -307,17 +307,72 @@ use std::time
 |----------|---------|-------------|
 | `time.now()` | `int` | Current Unix timestamp in seconds |
 | `time.now_ms()` | `int` | Current Unix timestamp in milliseconds |
+| `time.monotonic()` | `float` | Seconds from a fixed point in this process. Never jumps; only the difference between two readings means anything. |
 | `time.sleep(secs)` | `nil` | Block execution for `secs` seconds (int or float) |
 | `time.local(tz)` | `str` | Formatted local time string. Pass a timezone name (e.g. `"America/Denver"`) or `nil` for the system timezone. |
+| `time.utc(ts)` | `str` | A timestamp as ISO 8601 UTC, e.g. `2026-08-16T14:03:22Z` |
+| `time.parts(ts)` | `dict` | A timestamp broken into UTC calendar fields |
+| `time.stamp(y, mo, d[, h[, mi[, s]]])` | `int` | UTC calendar fields back to a timestamp |
+
+### Measuring how long something took
+
+Use `time.monotonic()`, not `time.now_ms()`. The wall clock can move while your program runs — NTP corrects it, and a person can set it — so subtracting two readings of it can hand you a negative duration. The monotonic clock only ever moves forward.
 
 ```jade
 use std::time
 
-let start = time.now_ms()
+let start = time.monotonic()
 time.sleep(0.1)
-let elapsed = time.now_ms() - start
-print(f"elapsed: {elapsed}ms")   // elapsed: ~100ms
+print(f"took {time.monotonic() - start}s")   // took ~0.1s
 ```
+
+Its absolute value is meaningless, and it is not comparable between two processes. When you want a moment rather than a duration, that is `time.now()`.
+
+### Calendar fields
+
+`time.parts(ts)` splits a timestamp into a dict with eight keys, all `int`:
+
+| Key | Range | |
+|-----|-------|--|
+| `year` | | |
+| `month` | 1–12 | |
+| `day` | 1–31 | |
+| `hour` | 0–23 | |
+| `minute` | 0–59 | |
+| `second` | 0–59 | |
+| `weekday` | 0–6 | 0 is Sunday, matching `date +%w` |
+| `yearday` | 1–366 | matching `date +%j` |
+
+```jade
+use std::time
+
+let p = time.parts(1786889002)
+print(f"{p["year"]}-{p["month"]}-{p["day"]}")   // 2026-8-16
+print(time.utc(1786889002))                     // 2026-08-16T14:03:22Z
+```
+
+`time.stamp` is the exact inverse, so a round trip returns what it started with. The three time-of-day arguments are optional and default to zero, so three arguments mean midnight.
+
+```jade
+use std::time
+
+print(time.stamp(2026, 8, 16, 14, 3, 22))       // 1786889002
+print(time.utc(time.stamp(2026, 8, 16)))        // 2026-08-16T00:00:00Z
+```
+
+Out-of-range fields **carry** rather than fail, which is what makes date arithmetic a single call. Month 13 is next January, day 0 is the last day of the previous month, and adding 45 to a day crosses the month end on its own:
+
+```jade
+use std::time
+
+print(time.utc(time.stamp(2026, 13, 1)))        // 2027-01-01T00:00:00Z
+print(time.utc(time.stamp(2026, 3, 0)))         // 2026-02-28T00:00:00Z
+print(time.utc(time.stamp(2026, 8, 16 + 45)))   // 2026-09-30T00:00:00Z
+```
+
+:::note These three are UTC, not local
+`parts`, `stamp`, and `utc` are all UTC. Converting to a local calendar needs the IANA timezone database, which Jade does not carry — `time.local(tz)` is the local-time answer, and it gives you a formatted string rather than fields.
+:::
 
 ---
 
