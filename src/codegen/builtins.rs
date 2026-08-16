@@ -189,6 +189,8 @@ pub(super) fn chunk_module_supported(module: &str, method: &str, argc: usize) ->
         ("path", "join") => argc >= 1,
         ("fs", "read") => argc == 1 || argc == 2, // read(path) or read(path, trust)
         ("fs", "exists" | "delete" | "mkdir") => argc == 1,
+        ("fs", "is_file" | "is_dir" | "rmdir" | "size") => argc == 1,
+        ("fs", "copy" | "rename") => argc == 2,
         ("fs", "write" | "append") => argc == 2,
         ("fs", "read_bytes") => argc == 1 || argc == 2,
         ("fs", "write_bytes" | "append_bytes") => argc == 2,
@@ -837,6 +839,16 @@ pub(super) fn emit_module_call<'ctx>(
             Ok(i64_ty.const_int(NIL, false))
         }
         ("fs", "exists") => bool_ptr_fn("jrt_fs_exists"),
+        ("fs", "is_file") => bool_ptr_fn("jrt_fs_is_file"),
+        ("fs", "is_dir") => bool_ptr_fn("jrt_fs_is_dir"),
+        // Each of these goes through the C forwarder, not the Rust `_impl`:
+        // the forwarder is what drains the pending error and raises. Calling
+        // the impl directly would answer success in a compiled program where
+        // the interpreter raises.
+        ("fs", "copy") => void_ptr_fn("jrt_fs_copy", 2),
+        ("fs", "rename") => void_ptr_fn("jrt_fs_rename", 2),
+        ("fs", "rmdir") => void_ptr_fn("jrt_fs_rmdir", 1),
+        ("fs", "size") => int_fn("jrt_fs_size", 1),
         ("fs", "write") => void_ptr_fn("jrt_fs_write", 2),
         ("fs", "append") => void_ptr_fn("jrt_fs_append", 2),
         ("fs", "delete") => void_ptr_fn("jrt_fs_delete", 1),

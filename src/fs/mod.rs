@@ -108,6 +108,63 @@ fn fs_mkdir(args: &[VmValue]) -> Result<VmValue> {
     jade_runtime::fsf::mkdir(path).map(|_| VmValue::Nil).map_err(|e| io_err("mkdir", path, e))
 }
 
+/// `fs.is_file(path)` / `fs.is_dir(path)`.
+///
+/// Neither refuses a tainted path. `fs.exists` does not either, and a rule
+/// applied to two of the three questions you can ask about a path is worse than
+/// one applied to none — the read sinks are where the refusal earns its keep.
+fn fs_is_file(args: &[VmValue]) -> Result<VmValue> {
+    if args.len() != 1 {
+        return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: ZERO });
+    }
+    Ok(VmValue::Bool(jade_runtime::fsf::is_file(require_str(args, 0, "fs.is_file")?)))
+}
+
+/// See [`fs_is_file`].
+fn fs_is_dir(args: &[VmValue]) -> Result<VmValue> {
+    if args.len() != 1 {
+        return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: ZERO });
+    }
+    Ok(VmValue::Bool(jade_runtime::fsf::is_dir(require_str(args, 0, "fs.is_dir")?)))
+}
+
+/// `fs.copy(src, dst)` — creating or truncating `dst`.
+fn fs_copy(args: &[VmValue]) -> Result<VmValue> {
+    if args.len() != 2 {
+        return Err(JadeError::ArityMismatch { expected: 2, got: args.len(), span: ZERO });
+    }
+    let (src, dst) = (require_str(args, 0, "fs.copy")?, require_str(args, 1, "fs.copy")?);
+    jade_runtime::fsf::copy(src, dst).map(|_| VmValue::Nil).map_err(|e| io_err("copy", src, e))
+}
+
+/// `fs.rename(src, dst)` — rename or move.
+fn fs_rename(args: &[VmValue]) -> Result<VmValue> {
+    if args.len() != 2 {
+        return Err(JadeError::ArityMismatch { expected: 2, got: args.len(), span: ZERO });
+    }
+    let (src, dst) = (require_str(args, 0, "fs.rename")?, require_str(args, 1, "fs.rename")?);
+    jade_runtime::fsf::rename(src, dst).map(|_| VmValue::Nil).map_err(|e| io_err("rename", src, e))
+}
+
+/// `fs.rmdir(path)` — an **empty** directory only. Deliberately not recursive;
+/// see [`jade_runtime::fsf::rmdir`].
+fn fs_rmdir(args: &[VmValue]) -> Result<VmValue> {
+    if args.len() != 1 {
+        return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: ZERO });
+    }
+    let path = require_str(args, 0, "fs.rmdir")?;
+    jade_runtime::fsf::rmdir(path).map(|_| VmValue::Nil).map_err(|e| io_err("rmdir", path, e))
+}
+
+/// `fs.size(path)` — bytes.
+fn fs_size(args: &[VmValue]) -> Result<VmValue> {
+    if args.len() != 1 {
+        return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: ZERO });
+    }
+    let path = require_str(args, 0, "fs.size")?;
+    jade_runtime::fsf::size(path).map(VmValue::Int).map_err(|e| io_err("size", path, e))
+}
+
 /// `fs.read_bytes(path)` — a file as raw octets.
 ///
 /// The content is *tainted*, exactly as `fs.read` is: it comes from outside the
@@ -211,6 +268,12 @@ static FS_PKG_FNS: &[BuiltinFn] = &[
     BuiltinFn { name: "delete", vm_impl: fs_delete },
     BuiltinFn { name: "list_dir", vm_impl: fs_list_dir },
     BuiltinFn { name: "mkdir", vm_impl: fs_mkdir },
+    BuiltinFn { name: "is_file", vm_impl: fs_is_file },
+    BuiltinFn { name: "is_dir", vm_impl: fs_is_dir },
+    BuiltinFn { name: "copy", vm_impl: fs_copy },
+    BuiltinFn { name: "rename", vm_impl: fs_rename },
+    BuiltinFn { name: "rmdir", vm_impl: fs_rmdir },
+    BuiltinFn { name: "size", vm_impl: fs_size },
 ];
 
 fn register_fs_pkg_types(ctx: &mut TypeContext) {

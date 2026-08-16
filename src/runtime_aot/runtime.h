@@ -758,12 +758,23 @@ void    jrt_fs_write_impl(const char* path, const char* content);
 void    jrt_fs_append_impl(const char* path, const char* content);
 void    jrt_fs_delete_impl(const char* path);
 void    jrt_fs_mkdir_impl(const char* path);
+/* Predicates: answer a question, so no error channel and no forwarder. */
+int32_t jrt_fs_is_file(const char* path);
+int32_t jrt_fs_is_dir(const char* path);
+void    jrt_fs_copy_impl(const char* src, const char* dst);
+void    jrt_fs_rename_impl(const char* src, const char* dst);
+void    jrt_fs_rmdir_impl(const char* path);
+int64_t jrt_fs_size_impl(const char* path);
 /* Codegen-facing raising forwarders (common.c). */
 char*   jrt_fs_read(const char* path, int32_t trust);
 void    jrt_fs_write(const char* path, const char* content);
 void    jrt_fs_append(const char* path, const char* content);
 void    jrt_fs_delete(const char* path);
 void    jrt_fs_mkdir(const char* path);
+void    jrt_fs_copy(const char* src, const char* dst);
+void    jrt_fs_rename(const char* src, const char* dst);
+void    jrt_fs_rmdir(const char* path);
+int64_t jrt_fs_size(const char* path);
 
 /* time (std::time) is implemented in Rust now (jade-runtime, src/timef.rs) —
  * no C leaf. Declared here for ABI reference. None raise. */

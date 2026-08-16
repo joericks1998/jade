@@ -173,3 +173,79 @@ fn exists_type_error() {
     let err = fs_exists(&[VmValue::Int(1)]).unwrap_err();
     assert!(matches!(err, JadeError::TypeError { .. }));
 }
+
+// ── v1.3.23: metadata, copy, rename, rmdir ────────────────────────────────────
+
+#[test]
+fn is_file_and_is_dir_tell_the_three_cases_apart() {
+    let path = unique_path("isf");
+    fs_write(&[s(&path), s("x")]).unwrap();
+    assert!(matches!(fs_is_file(&[s(&path)]), Ok(VmValue::Bool(true))));
+    assert!(matches!(fs_is_dir(&[s(&path)]), Ok(VmValue::Bool(false))));
+
+    let dir = unique_path("isd");
+    fs_mkdir(&[s(&dir)]).unwrap();
+    assert!(matches!(fs_is_dir(&[s(&dir)]), Ok(VmValue::Bool(true))));
+    assert!(matches!(fs_is_file(&[s(&dir)]), Ok(VmValue::Bool(false))));
+
+    // Absent is false for both, matching `fs.exists` rather than raising.
+    let gone = unique_path("isg");
+    assert!(matches!(fs_is_file(&[s(&gone)]), Ok(VmValue::Bool(false))));
+    assert!(matches!(fs_is_dir(&[s(&gone)]), Ok(VmValue::Bool(false))));
+
+    let _ = fs_delete(&[s(&path)]);
+    let _ = fs_rmdir(&[s(&dir)]);
+}
+
+#[test]
+fn size_reports_bytes_and_raises_when_absent() {
+    let path = unique_path("sz");
+    fs_write(&[s(&path), s("hello")]).unwrap();
+    assert!(matches!(fs_size(&[s(&path)]), Ok(VmValue::Int(5))));
+    let _ = fs_delete(&[s(&path)]);
+    assert!(fs_size(&[s(&path)]).is_err(), "a missing path must raise, not answer 0");
+}
+
+#[test]
+fn copy_and_rename_move_the_content() {
+    let src = unique_path("cpsrc");
+    let dst = unique_path("cpdst");
+    let moved = unique_path("cpmv");
+    fs_write(&[s(&src), s("payload")]).unwrap();
+
+    fs_copy(&[s(&src), s(&dst)]).unwrap();
+    assert!(matches!(fs_size(&[s(&dst)]), Ok(VmValue::Int(7))));
+    assert!(matches!(fs_exists(&[s(&src)]), Ok(VmValue::Bool(true))), "copy leaves the source");
+
+    fs_rename(&[s(&dst), s(&moved)]).unwrap();
+    assert!(matches!(fs_exists(&[s(&moved)]), Ok(VmValue::Bool(true))));
+    assert!(matches!(fs_exists(&[s(&dst)]), Ok(VmValue::Bool(false))), "rename removes the source");
+
+    assert!(fs_copy(&[s(&unique_path("cpgone")), s(&dst)]).is_err());
+
+    let _ = fs_delete(&[s(&src)]);
+    let _ = fs_delete(&[s(&moved)]);
+}
+
+/// Deliberately not recursive: a non-empty directory is an error, not a
+/// silent recursive delete.
+#[test]
+fn rmdir_refuses_a_non_empty_directory() {
+    let dir = unique_path("rmd");
+    fs_mkdir(&[s(&dir)]).unwrap();
+    let inner = format!("{dir}/f.txt");
+    fs_write(&[s(&inner), s("x")]).unwrap();
+
+    assert!(fs_rmdir(&[s(&dir)]).is_err(), "a non-empty directory must not be removed");
+
+    fs_delete(&[s(&inner)]).unwrap();
+    assert!(matches!(fs_rmdir(&[s(&dir)]), Ok(VmValue::Nil)));
+    assert!(matches!(fs_exists(&[s(&dir)]), Ok(VmValue::Bool(false))));
+}
+
+#[test]
+fn the_new_fs_fns_check_their_arity() {
+    assert!(matches!(fs_size(&[]), Err(JadeError::ArityMismatch { .. })));
+    assert!(matches!(fs_copy(&[s("a")]), Err(JadeError::ArityMismatch { .. })));
+    assert!(matches!(fs_is_dir(&[s("a"), s("b")]), Err(JadeError::ArityMismatch { .. })));
+}

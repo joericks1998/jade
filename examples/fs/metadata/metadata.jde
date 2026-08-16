@@ -1,0 +1,73 @@
+// Everything std::fs gained in v1.3.23: is_file, is_dir, size, copy, rename,
+// rmdir.
+//
+// The `try`/`catch` block near the bottom is the important half. A fallible fs
+// operation has a Rust core that records an error and returns a neutral value,
+// and a C forwarder that turns that record into a Jade raise. Forget the
+// forwarder and the compiled program answers *success* where the interpreter
+// raises — and the two agree on every passing run, so only a failing call can
+// tell them apart. A fixture that exercises the happy path alone would pass
+// this gate with the bug in it.
+//
+// Paths are under /tmp with a name nothing else uses, and the file cleans up
+// after itself: the parity gate runs it twice in the same directory, so
+// anything left behind changes the second run's output.
+
+use std::fs
+
+let dir = "/tmp/jade_eval_metadata"
+let file = "/tmp/jade_eval_metadata/a.txt"
+let copied = "/tmp/jade_eval_metadata/b.txt"
+let moved = "/tmp/jade_eval_metadata/c.txt"
+let absent = "/tmp/jade_eval_metadata_absent"
+
+fs.mkdir(dir)
+fs.write(file, "hello")
+
+// Telling the three apart, which fs.list_dir alone could not do.
+print(fs.is_file(file))
+print(fs.is_dir(dir))
+print(fs.is_dir(file))
+print(fs.is_file(dir))
+
+// A path that is not there is false rather than an error, matching fs.exists.
+print(fs.is_file(absent))
+print(fs.is_dir(absent))
+
+print(fs.size(file))
+
+fs.copy(file, copied)
+print(fs.exists(copied))
+print(fs.size(copied))
+
+fs.rename(copied, moved)
+print(fs.exists(moved))
+print(fs.exists(copied))
+
+// The failure paths. Each has to raise catchably on both engines.
+try {
+    fs.size(absent)
+    print("size did not raise")
+} catch e {
+    print("size raised")
+}
+
+try {
+    fs.copy(absent, "/tmp/jade_eval_metadata_x")
+    print("copy did not raise")
+} catch e {
+    print("copy raised")
+}
+
+try {
+    fs.rmdir(dir)
+    print("rmdir did not raise on a non-empty directory")
+} catch e {
+    print("rmdir raised")
+}
+
+// Clean up, and prove rmdir works once the directory is empty.
+fs.delete(file)
+fs.delete(moved)
+fs.rmdir(dir)
+print(fs.exists(dir))

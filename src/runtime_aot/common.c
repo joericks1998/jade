@@ -863,6 +863,28 @@ int64_t jk_fs_read_bytes(const char* path, int32_t trust) {
     fs_throw_pending();
     return (int64_t)jrt_box_ptr(p);
 }
+/* copy/rename/rmdir/size — the Rust half records a pending error and returns a
+ * neutral value, and these are what turn it into a Jade raise. Without the
+ * forwarder the compiled program answers success where the interpreter raises,
+ * and the two agree on every *passing* run, so only a failing case can see it. */
+void jrt_fs_copy(const char* src, const char* dst) {
+    jrt_fs_copy_impl(src, dst);
+    fs_throw_pending();
+}
+void jrt_fs_rename(const char* src, const char* dst) {
+    jrt_fs_rename_impl(src, dst);
+    fs_throw_pending();
+}
+void jrt_fs_rmdir(const char* path) {
+    jrt_fs_rmdir_impl(path);
+    fs_throw_pending();
+}
+int64_t jrt_fs_size(const char* path) {
+    int64_t n = jrt_fs_size_impl(path);
+    fs_throw_pending();
+    return n;
+}
+
 void jk_fs_write_bytes(const char* path, int64_t blob) {
     const void* b = jrt_unbox_ptr((jade_value_t)blob);
     jrt_fs_write_bytes_impl(path, jrt_bytes_data(b), (size_t)jrt_bytes_len(b));
