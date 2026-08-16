@@ -219,6 +219,30 @@ has no header. …
 
 `jade check`, `jade run` and `jade build` all refuse a dependency that still has a `"?"` in it, and name the symbols.
 
+### Calling a symbol that is not there
+
+The `symbols` table is the complete list of what the shim binds, so `jade check` and `jade build` use it to check your calls. A name the table does not declare is a compile error, with the line and a suggestion:
+
+```
+$ jade check main.jde
+main.jde: [4:7] 'gfx' has no symbol 'jade_gfx_key_press' — did you mean 'jade_gfx_key_pressed'?
+```
+
+When nothing is close enough to suggest, the message names the manifest instead of guessing:
+
+```
+[4:7] 'gfx' has no symbol 'jade_gfx_render'. Add it to [dependencies.gfx.symbols] in
+jade.toml, or re-run `jade pkg bind gfx --header <h>`
+```
+
+The same check covers `from gfx use <name>`, which is reported at the import line.
+
+:::note Why this needs its own check
+A mistyped symbol is not a link error, because nothing links it. The shim binds the names in the table and no others, so a name that is not there is simply absent at run time — and until v1.3.24 that meant a typo compiled, built, linked, packaged, shipped, and failed the first time that line executed, as "dict has no key or method". The manifest lists what the library provides, so the answer was always available; nothing was reading it.
+:::
+
+This applies to `abi = "c"` dependencies, which are the ones whose manifest declares a symbol table. A Jade package declares its exports in its own project, which your manifest cannot see, so its calls are not checked this way.
+
 ### Libraries split across several headers
 
 Plenty of libraries do not have one header. libarchive declares its readers in `archive.h` and its entries in `archive_entry.h`; libgit2 puts its types in `git2/types.h` and its functions in twenty other files. Two things make that work.

@@ -6,6 +6,20 @@ sidebar_label: Changelog
 
 ## v1.3.24
 
+**Fixed: a mistyped FFI symbol reached run time.** `gfx.jade_gfx_key_presed` passed `jade check`, built, linked, packaged and shipped, then failed the first time that line executed with "dict has no key or method". It was not a link error, because nothing links the name — the generated shim binds the symbols in the manifest's table and no others, so a name that is not in it is simply absent when the runtime looks it up.
+
+The project's own `jade.toml` had the answer the whole time. An `abi = "c"` dependency must declare a `[symbols]` table, and that table is the complete list of what the shim binds. `jade check` and `jade build` now check every call against it:
+
+```
+main.jde: [4:7] 'gfx' has no symbol 'jade_gfx_key_press' — did you mean 'jade_gfx_key_pressed'?
+```
+
+When nothing is close enough to name, the message points at the manifest rather than guessing, since a confidently wrong suggestion is worse than none. `from gfx use <name>` is checked too, and reported at the import line.
+
+The check lives where `alias.field` becomes a native reference, so it inherits that rewrite's scope rules for free: a local named `gfx` shadows the import and is not checked, exactly as it is not rewritten. Two things switch it off, both because there is nothing to check against rather than because checking would be inconvenient — a package with no declared table (a Jade-ABI package declares its exports in its own project, which this manifest cannot see, and an empty set would reject every call it has ever served), and a `[lib]` shadowing a dependency of the same name, whose table then describes a library the build is not using.
+
+**Why `check` was silent when the machinery was already there.** The rewrite that catches this runs inside the build probe `jade check` performs — and that probe discarded *every* error import resolution produced, on the reasoning that an unresolved import means an uninstalled dependency, which `check_imports` already reports in better words. True for that case, and it swallowed this one with it. Resolution failures now carry which kind they are: an unresolved import is still dropped, a wrong program is reported.
+
 **Added: a monotonic clock and UTC calendar conversion in `std::time`.** The package could read the wall clock and sleep, and that was all — so a program that wanted to know what day a timestamp fell on had to shell out to `date` and parse the text back.
 
 **`time.monotonic()`** returns seconds from a fixed point in the process, as a float. It is the clock to measure a duration with, and `time.now_ms()` is not: the wall clock moves while a program runs, since NTP corrects it and a person can set it, so subtracting two readings of it can hand you a negative duration. The monotonic clock only moves forward. Its absolute value means nothing on its own.

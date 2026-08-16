@@ -171,6 +171,23 @@ pub enum JadeError {
     /// `use "path"` could not find the referenced file.
     ImportNotFound { path: String, span: Span },
 
+    /// A call into a C-ABI dependency names a symbol its `[symbols]` table does
+    /// not declare.
+    ///
+    /// This is the one FFI mistake that used to survive every stage. A symbol
+    /// the shim never bound is not a link error — nothing links it — so a typo
+    /// compiled, built, packaged, shipped, and failed the first time that line
+    /// ran, as "dict has no key or method". The manifest already lists every
+    /// symbol the dependency provides, so the answer was there to be read.
+    UnknownFfiSymbol {
+        /// The name the import bound, as written before the dot.
+        module: String,
+        symbol: String,
+        /// The closest declared symbol, when one is close enough to suggest.
+        suggestion: Option<String>,
+        span: Span,
+    },
+
     /// A spawned function mutates state its spawner can still reach. Tasks run
     /// concurrently on a shared heap with no lock on collection payloads, so
     /// this is a data race; see `compiler::taskcheck`.
@@ -419,6 +436,19 @@ impl std::fmt::Display for JadeError {
                 "[{}:{}] cannot find import '{}': file not found",
                 span.line, span.col, path
             ),
+            JadeError::UnknownFfiSymbol { module, symbol, suggestion, span } => {
+                write!(f, "[{}:{}] '{}' has no symbol '{}'", span.line, span.col, module, symbol)?;
+                match suggestion {
+                    Some(s) => write!(f, " — did you mean '{}'?", s)?,
+                    None => write!(
+                        f,
+                        ". Add it to [dependencies.{}.symbols] in jade.toml, \
+                         or re-run `jade pkg bind {} --header <h>`",
+                        module, module
+                    )?,
+                }
+                Ok(())
+            }
             JadeError::SharedMutation { task, what, span } => write!(
                 f,
                 "[{}:{}] async function '{}' {}\n  \
