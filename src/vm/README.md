@@ -1,33 +1,39 @@
-# `src/vm/` — the bytecode interpreter
+# `src/vm/`: the bytecode interpreter
 
 ## What this subtree is
 
-One of Jade's two execution engines. `jade run` compiles a program to a `Chunk` and interprets it here. `jade build` lowers the same chunk to LLVM in `src/aot/`.
+This is one of Jade's two execution engines. `jade run` compiles a program to a `Chunk` and interprets it here. `jade build` lowers the same chunk to LLVM in `src/aot/`.
 
-Neither engine is the reference implementation of the other. `src/scripts/backend-parity.sh` runs every example through both and diffs the output, because they have silently disagreed before and the language is defined by what they agree on.
+Neither engine is the reference implementation of the other. `src/scripts/backend-parity.sh` runs every example through both and diffs the output. The two have silently disagreed before, and the language is defined by what they agree on.
 
 ## Why it is shaped this way
 
-The important structural decision: *value semantics do not live here*. Arithmetic, formatting, coercion rules, collection payloads, the trust model — all of it is in the shared `jade-runtime` crate, which the VM links as an rlib and AOT binaries link as a C-ABI staticlib. That is a deliberate fix for a real history: the VM (Rust, `VmValue` + `Arc`) and the AOT backend (C, `jrt_*`) used to be two independent implementations of the same language, and every divergence between them was a bug found after the fact.
+The important structural decision is that *value semantics do not live here*. Arithmetic, formatting, coercion rules, collection payloads, and the trust model all live in the shared `jade-runtime` crate. The VM links that crate as an rlib, and AOT binaries link it as a C-ABI static library.
+
+That split fixes a real history. The VM, written in Rust around `VmValue` and `Arc`, and the AOT backend, written in C around `jrt_*`, used to be two independent implementations of the same language. Every place they diverged became a bug found after the fact.
 
 What remains in this directory is *interpretation*: the dispatch loop, the call protocol, and the async and prompt machinery that has no compiled counterpart.
 
-The file was once a monolith and has been split incrementally. `mod.rs` re-exports the shared import set at `pub(crate)` so each submodule can pull it all in with a single `use super::*;` — that is why the submodules have almost no import preamble.
+This was once a single large file, split up a piece at a time. `mod.rs` re-exports the shared import set at `pub(crate)`, so each submodule can pull it all in with one `use super::*;`. That is why the submodules have almost no import preamble.
 
 ## What each file does
 
-- **`mod.rs`** — the shared import preamble, submodule declarations, and re-exports. Little logic.
-- **`value.rs`** — `VmValue`, the enum the interpreter dispatches on, plus the display and type-name projections. Also `NativeFnId`: the id of a native function that needs `VmState` access and so cannot be a pure `BuiltinFn`, and `BoundNativeFn`, which is one of those with its receiver already attached so it can be reached as a method.
-- **`state.rs`** — `VmState` (globals, struct and method tables, the import cycle guard, the inference backend, the REPL capture slot) and `VmOpts`, the per-run configuration. Globals use `FxHashMap` because variable names are short internal keys hashed on every `GetGlobal`.
-- **`dispatch.rs`** — the interpreter loop. `execute_chunk` decodes each `Instr`, drives control flow and the exception handler stack, and delegates value work to `jade-runtime` and the sibling submodules. The register slot accessors live at the bottom of the file.
-- **`call.rs`** — call dispatch. `call_value` is the single entry point for calling anything callable: user functions and closures, bound methods, native and library functions, stateful `NativeFnId` package methods, and type constructors. `call_fn` runs a compiled body in a fresh register frame.
-- **`chunk.rs`** — program entry points (`run`, `run_incremental`) and user-import resolution. An imported file runs in a sub-state that shares globals, struct definitions, and methods with its importer. `resolve_user_import` is a thin adapter over `project::resolve_import`, which is also what `jade check` walks the import graph with — sharing the function is what stops `check` from accepting a `use` the VM cannot then find.
-- **`coerce.rs`** — turning model replies and values into typed Jade values, plus calling a type as a constructor (`City(dict)`, `int("3")`), struct decorators, and the JSON-to-`VmValue` bridge.
-- **`llm_prompt.rs`** — prompt dereference. `?p` and `?p |> Type` lower to `vm_prompt_deref`: send the request, optionally constrain sampling with a grammar, coerce the reply, retry on failure. Also drains live token streams, with optional anchor-based muting.
-- **`async_tasks.rs`** — the `JadeFuture` and token-stream handle types, and the task body a spawned task runs on its own `VmState`. The `spawn`/`await`/`join` opcodes themselves are dispatched inline in `dispatch.rs` because they manipulate register slots.
-- **`ops.rs`** — dynamic (runtime-typed) operators, for when inference could not specialize. Decisions route through `jade_runtime::dynop` so the two engines cannot diverge; what is owned here is the VM-specific set — bitwise and shift, `in`, indexing, unary. `vm_scalar_eq` is membership equality, which answers `false` across kinds where `==` raises; its AOT counterpart is `jrt_core_eq_total`.
-- **`exceptions.rs`** — shaping a built-in error into a catchable Jade value. The `try`/`catch`/`raise` control flow itself is inline in `dispatch.rs`.
-- **`tests.rs`** — the largest test file in the repo. Helpers: `run_src(src)` runs the whole pipeline, `run_src_with_mock(src, responses)` stubs the inference backend, `run_src_with_stdout_capture` checks printed output.
+- *`mod.rs`* holds the shared import preamble, the submodule declarations, and the re-exports. Very little logic.
+- *`value.rs`* holds `VmValue`, the enum the interpreter dispatches on, plus its display and type-name projections. It also holds `NativeFnId`, the id of a native function that needs `VmState` access and therefore cannot be a plain `BuiltinFn`, and `BoundNativeFn`, which is one of those with its receiver already attached so it can be called as a method.
+- *`state.rs`* holds `VmState`, which carries the globals, the struct and method tables, the import cycle guard, the inference backend, and the REPL capture slot. It also holds `VmOpts`, the per-run configuration. Globals use an `FxHashMap`, because variable names are short internal keys that get hashed on every `GetGlobal`.
+- *`dispatch.rs`* is the interpreter loop. `execute_chunk` decodes each `Instr`, drives control flow and the exception handler stack, and hands value work to `jade-runtime` and the sibling submodules. The register slot accessors sit at the bottom of the file.
+- *`call.rs`* handles call dispatch. `call_value` is the one entry point for calling anything callable, covering user functions and closures, bound methods, native and library functions, stateful `NativeFnId` package methods, and type constructors. `call_fn` runs a compiled body in a fresh register frame.
+- *`chunk.rs`* holds the program entry points, `run` and `run_incremental`, plus user-import resolution. An imported file runs in a sub-state that shares globals, struct definitions, and methods with its importer.
+
+  `resolve_user_import` is a thin adapter over `project::resolve_import`, which is also what `jade check` uses to walk the import graph. Sharing that one function is what stops `check` from accepting a `use` the VM then cannot find.
+- *`coerce.rs`* turns model replies and other values into typed Jade values. It also handles calling a type as a constructor, such as `City(dict)` or `int("3")`, plus struct decorators and the bridge from JSON to `VmValue`.
+- *`llm_prompt.rs`* handles prompt dereference. Both `?p` and `?p |> Type` lower to `vm_prompt_deref`, which sends the request, optionally constrains sampling with a grammar, coerces the reply, and retries on failure. It also drains live token streams, with optional anchor-based muting.
+- *`async_tasks.rs`* holds the `JadeFuture` and token-stream handle types, plus the task body a spawned task runs on its own `VmState`. The `spawn`, `await`, and `join` opcodes are dispatched inline in `dispatch.rs`, because they manipulate register slots directly.
+- *`ops.rs`* holds the dynamic operators, meaning the runtime-typed ones used when inference could not specialize. Decisions route through `jade_runtime::dynop` so the two engines cannot diverge. What this file owns is the VM-specific set: bitwise and shift, `in`, indexing, and unary operators.
+
+  `vm_scalar_eq` is membership equality. It answers `false` across kinds where `==` raises. Its AOT counterpart is `jrt_core_eq_total`.
+- *`exceptions.rs`* shapes a built-in error into a catchable Jade value. The `try`, `catch`, and `raise` control flow itself sits inline in `dispatch.rs`.
+- *`tests.rs`* is the largest test file in the repo. Three helpers: `run_src(src)` runs the whole pipeline, `run_src_with_mock(src, responses)` stubs the inference backend, and `run_src_with_stdout_capture` checks printed output.
 
 ## Who uses it
 
@@ -37,13 +43,13 @@ The file was once a monolith and has been split incrementally. `mod.rs` re-expor
 
 ## Gotchas
 
-**Do not mutate process-global state in tests.** `cargo test` is heavily parallel, so `std::env::set_var` races against every other thread calling `getenv` — a genuine data race, and why `set_var` is `unsafe` as of the 2024 edition. Inject a path or use a `#[cfg(test)]` thread-local with an RAII guard instead.
+*Do not mutate process-global state in tests.* `cargo test` is heavily parallel, so `std::env::set_var` races against every other thread calling `getenv`. That is a genuine data race, and it is why `set_var` is `unsafe` as of the 2024 edition. Inject a path instead, or use a `#[cfg(test)]` thread-local with an RAII guard.
 
-**No panics on the interpreter path.** Every failure returns a `JadeError` carrying a span, including anything derived from user input.
+*No panics on the interpreter path.* Every failure returns a `JadeError` carrying a span, including anything derived from user input.
 
 Adding a stateful package function means adding a `NativeFnId` variant in `value.rs` and a match arm in `call_value`.
 
-If it should also be callable as a *method*, that is a second step. `find_primitive_method` hands back a pure `BuiltinFn`, which a stateful function is not — so `GetField` binds the receiver to the id instead and produces a `VmValue::BoundNativeFn`, which `call_value` unpacks by putting the receiver back at the front. `array_fn_method` in `dispatch.rs` is the whole list of these. Missing that step is why `array.map(a, f)` worked and `a.map(f)` did not until v1.3.21.
+Making it callable as a *method* is a second step. `find_primitive_method` hands back a plain `BuiltinFn`, which a stateful function is not. So `GetField` binds the receiver to the id instead, producing a `VmValue::BoundNativeFn`, and `call_value` unpacks that by putting the receiver back at the front of the arguments. `array_fn_method` in `dispatch.rs` is the complete list of these. Missing that step is why `array.map(a, f)` worked while `a.map(f)` did not, until v1.3.21.
 
 ## Building and testing
 
