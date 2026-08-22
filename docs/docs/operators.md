@@ -15,11 +15,11 @@ sidebar_label: Operators
 | `%` | Remainder | `10 % 3` | `1` |
 | `-` | Unary negation | `-5` | `-5` |
 
-Two ints divide to an int, truncated toward zero: `10 / 4` is `2` and `-7 / 2` is `-3`. If either side is a float the result is a float, so `10 / 4.0` is `2.5`.
+Two ints divide to an int, truncated toward zero, so `10 / 4` is `2` and `-7 / 2` is `-3`. If either side is a float, the result is a float, so `10 / 4.0` is `2.5`.
 
-`%` takes its sign from the left operand, matching C: `-7 % 2` is `-1` and `7 % -2` is `1`.
+`%` takes its sign from the left operand, the same as C. So `-7 % 2` is `-1` and `7 % -2` is `1`.
 
-Integer arithmetic is checked. A result outside the 63-bit `int` range raises `integer overflow` rather than wrapping.
+Integer arithmetic is checked. A result outside the 63-bit `int` range raises `integer overflow` rather than wrapping around.
 
 ## Bitwise
 
@@ -40,9 +40,9 @@ Integer arithmetic is checked. A result outside the 63-bit `int` range raises `i
 | `\|\|` or `or` | Logical OR (short-circuit) | `false \|\| true` | `true` |
 | `!` or `not` | Logical NOT (unary) | `!true` | `false` |
 
-`&&` and `||` are short-circuit: the right operand is not evaluated if the left operand decides the result. Both operands must be `bool`; mixing types is a type error.
+`&&` and `||` short-circuit. If the left operand already decides the answer, the right operand is never evaluated. Both operands must be `bool`, and mixing types is a type error.
 
-The word forms are exact aliases of the symbols, not separate operators, so `a and b` and `a && b` compile to the same thing and bind at the same level. Pick one style and stay with it.
+The word forms are exact aliases of the symbols, not separate operators. `a and b` and `a && b` compile to the same thing and bind at the same level. Pick one style and stay with it.
 
 ## Comparison
 
@@ -55,11 +55,11 @@ The word forms are exact aliases of the symbols, not separate operators, so `a a
 | `<=` | Less than or equal | `2 <= 2` | `true` |
 | `>=` | Greater than or equal | `3 >= 2` | `true` |
 
-Equality (`==`, `!=`) requires both operands to be the same type — mixing `int` and `float` is a type error, caught by `jade check`. The one exception is `char` against `str`, which is explained in [Types](types#the-one-exception-char-and-str).
+Equality, meaning `==` and `!=`, requires both operands to be the same type. Mixing `int` and `float` is a type error that `jade check` catches. The one exception is `char` against `str`, explained in [Types](types#the-one-exception-char-and-str).
 
-Ordering (`<`, `>`, `<=`, `>=`) works on two ints, two floats, an int against a float, two bools (`false` is below `true`), and two strings (character by character). Anything else is a type error.
+Ordering, meaning `<`, `>`, `<=`, and `>=`, works on five combinations: two ints, two floats, an int against a float, two bools where `false` sorts below `true`, and two strings compared character by character. Anything else is a type error.
 
-Comparisons do not chain. `1 < 2 < 3` groups as `(1 < 2) < 3`, which then compares a `bool` to an `int` and fails. Write `1 < 2 && 2 < 3`.
+Comparisons do not chain. `1 < 2 < 3` groups as `(1 < 2) < 3`, which compares a `bool` to an `int` and fails. Write `1 < 2 && 2 < 3` instead.
 
 ## Membership
 
@@ -68,7 +68,7 @@ Comparisons do not chain. `1 < 2 < 3` groups as `(1 < 2) < 3`, which then compar
 | `in` | Contains | `2 in [1, 2]` | `true` |
 | `not in` | Does not contain | `3 not in [1, 2]` | `true` |
 
-`in` works on an array (is any element this value), a string (is this a substring), and a dict (is this a key — never a value). It always produces a `bool` and never raises on a type mismatch: an element of another type simply answers `false`.
+`in` works on three kinds of value. On an array it asks whether any element equals the value. On a string it asks whether the text is a substring. On a dict it asks whether the text is a key, never a value. It always produces a `bool` and never raises on a type mismatch, because an element of another type simply answers `false`.
 
 ```jade
 print(2 in [1, 2, 3])            // true
@@ -81,9 +81,9 @@ print("x" not in {"name": 1})    // true
 
 | Operator | Name | Description |
 |----------|------|-------------|
-| `\|>` | Pipe | Pass left-hand value as the first argument to the right-hand function |
+| `\|>` | Pipe | Pass the left-hand value as the first argument to the right-hand function |
 
-The pipe operator threads a value through a chain of function calls left-to-right. `x |> f` is equivalent to `f(x)`. When the right-hand side is a call expression with arguments, the piped value is inserted as the *first* argument: `5 |> add(3)` is equivalent to `add(5, 3)`.
+The pipe operator passes a value through a chain of function calls, from left to right. `x |> f` means the same as `f(x)`. When the right side is already a call with arguments, the piped value goes in as the *first* argument, so `5 |> add(3)` means `add(5, 3)`.
 
 ```jade
 fn double(x) { return x * 2 }
@@ -92,10 +92,10 @@ fn add(a, b) { return a + b }
 // Simple pipe
 let n = 5 |> double          // 10
 
-// Chained pipes — left-associative
+// Chained pipes, left-associative
 let m = 3 |> double |> double  // 12
 
-// Pipe with extra arguments (value inserted as first arg)
+// Pipe with extra arguments; the value goes in first
 let r = 5 |> add(3)          // add(5, 3) = 8
 
 // Pipe to print
@@ -107,18 +107,18 @@ let x = (2 + 3) |> double   // 10
 
 ### What a stage can be
 
-A stage is the thing to the right of a `|>`. There are three kinds, and which one applies depends on what the name refers to, not on where the `|>` appears:
+A stage is whatever sits to the right of a `|>`. There are three kinds. Which one applies depends on what the name refers to, not on where the `|>` appears:
 
 | Stage | Meaning |
 |-------|---------|
 | A function | Applied to the value, which becomes its first argument |
-| A type name | On a prompt dereference, constrains generation with a grammar and coerces the reply; elsewhere it is the ordinary type constructor, so `x \|> int` is `int(x)` |
+| A type name | On a prompt dereference, it constrains generation with a grammar and coerces the reply. Anywhere else it is the ordinary type constructor, so `x \|> int` means `int(x)` |
 | A `Grammar` value | Constrains sampling on a prompt dereference |
 
-Two rules settle a name that could be more than one thing, and they only matter on a prompt dereference:
+Two rules settle a name that could mean more than one thing. They only matter on a prompt dereference:
 
-- A builtin type keyword is always a type, never a function. `int`, `float`, `bool`, `char` and `str` are also callable constructors, so without this rule `?p |> int` would stop constraining the model and merely try to convert whatever came back.
-- A `struct` you declared is always a type. A struct registers a constructor under its own name, so by callability alone every struct looks like a function; `?p |> City` would have become `City(?p)`.
+- A builtin type keyword is always a type, never a function. `int`, `float`, `bool`, `char`, and `str` are also callable constructors. Without this rule, `?p |> int` would stop constraining the model and merely try to convert whatever came back.
+- A `struct` you declared is always a type. A struct registers a constructor under its own name, so judged on callability alone, every struct looks like a function. Without this rule, `?p |> City` would have become `City(?p)`.
 
 Everything else prefers a function.
 
@@ -131,10 +131,10 @@ let a = ?p |> g               // constrain sampling with a grammar
 ```
 
 :::note
-Until v1.2.0 this was really two operators sharing a spelling. `|>` after a prompt dereference was read by a different parse rule that accepted exactly one constraint and could not chain, and a typed dereference was banned inside `print(...)`. Both restrictions are gone, and a stage that is none of the three above is now an `InvalidPipeStage` type error naming what it found rather than a parse error talking about tokens.
+Until v1.2.0, this was really two operators sharing one spelling. A `|>` after a prompt dereference went through a different parse rule, which accepted exactly one constraint and could not chain, and a typed dereference was banned inside `print(...)`. Both restrictions are gone. A stage that is none of the three kinds above now produces an `InvalidPipeStage` type error naming what it found, rather than a parse error talking about tokens.
 :::
 
-Pipes are left-associative and have lower precedence than all other operators, so the entire expression to the left of `|>` is fully evaluated before being passed to the function on the right.
+Pipes are left-associative and bind more loosely than every other operator. So the whole expression to the left of `|>` is evaluated first, and the result is what gets passed to the function on the right.
 
 ## Precedence
 
@@ -150,9 +150,9 @@ Operators bind from tightest to loosest in this order:
 8. Comparison and membership: `==`, `!=`, `<`, `>`, `<=`, `>=`, `in`, `not in`
 9. Logical AND: `&&` / `and`
 10. Logical OR: `||` / `or`
-11. Pipe: `|>` (lowest — entire left expression is the piped value)
+11. Pipe: `|>`, the loosest of all. The entire left expression becomes the piped value.
 
-Note that comparison is *looser* than the bitwise operators, unlike C. `1 << 2 & 15` is `(1 << 2) & 15`, and `a & b == c` is `(a & b) == c`.
+Note that comparison binds *more loosely* than the bitwise operators, which is the opposite of C. So `1 << 2 & 15` groups as `(1 << 2) & 15`, and `a & b == c` groups as `(a & b) == c`.
 
 ```jade
 let x = 2 + 3 * 4
@@ -162,16 +162,16 @@ let z = 1 < 2 && 3 > 0
 
 ## When an operator fails
 
-Operator failures split cleanly by when they are found, and the split is worth knowing because only one half can be caught with `try`.
+Operator failures divide into two groups by when Jade finds them. The split matters, because only one group can be caught with `try`.
 
-**Caught by `jade check`, before anything runs.** These are type errors. The program does not start, so no output appears at all.
+*Caught by `jade check`, before anything runs.* These are type errors. The program never starts, so it produces no output at all.
 
 - Mismatched operands: `1 + true`, `1.0 & 2`
 - Cross-type equality: `1 == 1.0`
 - Non-bool logic: `1 && true`
 - A pipe stage that cannot be applied: `5 |> 3`
 
-**Raised while the program runs.** These depend on values, not types, so the checker cannot see them coming. Each is catchable with `try` / `catch`.
+*Raised while the program runs.* These depend on values rather than types, so the checker cannot see them coming. You can catch each one with `try` and `catch`.
 
 - Division by zero: `x / 0`
 - Remainder by zero: `x % 0`
@@ -180,7 +180,7 @@ Operator failures split cleanly by when they are found, and the split is worth k
 - Index out of bounds: `[1, 2][5]`
 - A missing dict key: `d["nope"]`
 
-An operator on a value whose type the checker could not work out — an element of a mixed array, a value from an imported package — also lands in the second group. The check is deferred to run time rather than skipped:
+An operator on a value whose type the checker could not work out also lands in the second group. An element of a mixed array and a value from an imported package are both examples. The check is delayed until the program runs, not skipped:
 
 ```jade
 let mixed = [1, "two"]
