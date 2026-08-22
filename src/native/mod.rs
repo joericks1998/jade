@@ -650,6 +650,36 @@ fn check_package_abi(lib: &libloading::Library, lib_path: &Path, span: Span) -> 
     })
 }
 
+/// Every library this process has `dlopen`ed, kept alive until it exits.
+///
+/// **A native package is never unloaded, and that is deliberate.** `_lib` on
+/// `NativeLibFn` keeps the image mapped while any of its functions are alive,
+/// which is the right rule for a *call* and the wrong one for a process: when
+/// the last binding drops at shutdown, `dlclose` unmaps the library — and a
+/// thread that has not finished exiting still has the library's thread-local
+/// destructors queued against it.
+///
+/// glibc runs those from `__nptl_deallocate_tsd` as the thread winds down, by
+/// then jumping into an address that is no longer mapped. glib registers such a
+/// destructor, so the FFI gate's fixture printed all nine of its answers and
+/// then took SIGSEGV during teardown, on Linux only, under the VM only.
+///
+/// The compiled runtime never had the bug because it never unloads: there is no
+/// `dlclose` anywhere in `runtime_aot/native.c`. This is the VM adopting the
+/// same rule rather than a workaround for one library's destructor. Nothing is
+/// lost by it — Jade has no API to unload a package, so an image released here
+/// could never be re-loaded by anything, and the process is ending regardless.
+///
+/// `RTLD_NODELETE` at open would say the same thing to the loader, but
+/// `libloading` does not export it and its value differs per platform.
+static LOADED_LIBS: std::sync::OnceLock<parking_lot::Mutex<Vec<Arc<libloading::Library>>>> =
+    std::sync::OnceLock::new();
+
+/// Park a clone of the handle where nothing will drop it before `exit`.
+fn retain_for_process(lib: &Arc<libloading::Library>) {
+    LOADED_LIBS.get_or_init(Default::default).lock().push(Arc::clone(lib));
+}
+
 pub fn load_native_package(lib_path: &Path, span: Span) -> Result<HashMap<String, VmValue>> {
     // Canonicalized first, and that is load-bearing rather than tidy. `dlopen`
     // keys a loaded image by the path it was asked for, so two spellings of one
@@ -664,6 +694,7 @@ pub fn load_native_package(lib_path: &Path, span: Span) -> Result<HashMap<String
     })?;
 
     let lib = Arc::new(lib);
+    retain_for_process(&lib);
 
     check_package_abi(&lib, lib_path, span)?;
 

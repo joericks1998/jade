@@ -4,6 +4,18 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.3.25
+
+**Fixed: a native package crashed the VM at exit on Linux.** A program that called into a C dependency printed every one of its answers correctly and then died with SIGSEGV during shutdown. It only happened under `jade run`, and only on Linux.
+
+`NativeLibFn` keeps a library mapped while any of its functions are alive, which is the right rule for a call and the wrong one for a process. When the last binding dropped at shutdown, `dlclose` unmapped the library — while a thread that had not finished exiting still had that library's thread-local destructors queued against it. glibc runs those from `__nptl_deallocate_tsd` as the thread winds down, jumping into an address no longer mapped. glib registers such a destructor, which is why the FFI gate's fixture hit it.
+
+A loaded package is now kept until the process exits. The compiled runtime never had the bug because it never unloads — there is no `dlclose` anywhere in `runtime_aot/native.c` — so this is the VM adopting the rule the other engine already followed. Nothing is given up: Jade has no API to unload a package, so an image released at shutdown could not be re-loaded by anything.
+
+**Fixed: the FFI gate reported `ok` on a segfault.** A process killed by a signal *after* it has printed everything leaves an output file that looks perfectly correct, and both engines then agree about it because both printed the same correct thing. The gate's glib step asserted only that the VM's output was non-empty and free of the word "error", never its exit status — so a SIGSEGV was reported as a pass from v1.3.19 to v1.3.24, visible in every CI log as a `Segmentation fault` line the *shell* printed, directly above `4 ok, 0 failed`. Every run in that step now keeps its status, and a crash fails the gate.
+
+What was crashing was the fixture, not the toolchain. It called `g_intern_static_string`, which does not copy: glib's global intern table keeps *the caller's pointer*, and its documentation says the string must never be freed. Jade owns the buffer it passes into a native call and frees it afterwards, so the table was left holding a dangling pointer into reused memory and glib faulted walking it at exit. It surfaced only on Linux and only under the VM — compiled, the literal sits in read-only static data and satisfies the contract by accident. The fixture now calls `g_intern_string`, which copies. Worth knowing when binding a library by hand: a binding has no way to say "the callee keeps this pointer forever", so a function with that contract is one Jade's argument ownership cannot satisfy.
+
 ## v1.3.24
 
 **Fixed: a mistyped FFI symbol reached run time.** `gfx.jade_gfx_key_presed` passed `jade check`, built, linked, packaged and shipped, then failed the first time that line executed with "dict has no key or method". It was not a link error, because nothing links the name — the generated shim binds the symbols in the manifest's table and no others, so a name that is not in it is simply absent when the runtime looks it up.
