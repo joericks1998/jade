@@ -10,7 +10,7 @@ The site also serves two things that are not documentation. `static/install.sh` 
 
 ## What each part does
 
-- *`docs/`* holds the content, one Markdown file per topic: `index`, `quickstart`, `cli`, `variables`, `types`, `expressions`, `operators`, `control-flow`, `functions`, `structs`, `exceptions`, `async`, `imports`, `llm`, `packages`, and `changelog`.
+- *`docs/`* holds the content, one Markdown file per topic: `index`, `quickstart`, `cli`, `variables`, `types`, `expressions`, `operators`, `control-flow`, `functions`, `structs`, `exceptions`, `async`, `imports`, `llm`, `packages`, `stdlib`, and `changelog`.
 - *`docusaurus.config.js`* holds the site configuration.
 - *`sidebars.js`* sets the navigation order.
 - *`src/css/`* holds the theme overrides.
