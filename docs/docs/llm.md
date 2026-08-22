@@ -69,7 +69,7 @@ Each `?` dereference is an *independent, stateless request*. The language sends 
 prompt p1 = "My name is Alice. What is 2 + 2?"
 let _ = ?p1
 
-// p2 does NOT see p1 — include the context you need in the prompt itself.
+// p2 does NOT see p1. Include the context you need in the prompt itself.
 prompt p2 = "My name is Alice. What is my name?"
 let name = ?p2       // "Alice"
 print(name)

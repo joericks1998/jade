@@ -4,7 +4,7 @@ title: Standard Library
 sidebar_label: Standard Library
 ---
 
-Jade ships a standard library of built-in packages. Import any package with **`::` notation** — `use std::<name>` — and it becomes a global variable in scope for the rest of the file.
+Jade ships a standard library of built-in packages. Import one with `::` notation, written `use std::<name>`, and it becomes a global variable in scope for the rest of the file.
 
 ```jade
 use std::json
@@ -17,7 +17,7 @@ let n = random.int(1, 100)
 ```
 
 :::warning
-Every import uses `::` notation (or a bare name) that names a module — there are no quoted file paths and no `as` alias. `use "std/json"` and `use "lib.jde" as lib` are **rejected at compile time** (`QuotedImport` / `ImportAlias`). See [Imports](imports).
+Every import names a module, using `::` notation or a bare name. There are no quoted file paths and no `as` alias. Jade rejects both `use "std/json"` and `use "lib.jde" as lib` at compile time, with a `QuotedImport` or `ImportAlias` error. See [Imports](imports).
 :::
 
 | Import | Global name | Description |
@@ -54,7 +54,7 @@ use std::math
 | `math.max(a, b)` | number | Larger of two numbers |
 | `math.pow(base, exp)` | number | base raised to exp; an int base and non-negative int exp stay an int |
 | `math.round(x)` | `int` | Nearest integer; ties go away from zero, so `round(2.5)` is 3 |
-| `math.trunc(x)` | `int` | Toward zero — differs from `floor` only for negatives |
+| `math.trunc(x)` | `int` | Rounds toward zero. It differs from `floor` only for negative numbers |
 | `math.sign(x)` | same as input | -1, 0 or 1. `sign(nan())` is NaN |
 | `math.clamp(x, lo, hi)` | number | `x` held between the bounds; a reversed range answers `hi` |
 | `math.ln(x)` | `float` | Natural log |
@@ -68,11 +68,9 @@ use std::math
 | `math.is_nan(x)` | `bool` | An int is never NaN |
 | `math.is_inf(x)` | `bool` | An int is never infinite |
 | `math.pi()` `math.e()` `math.tau()` | `float` | The constants |
-| `math.inf()` `math.nan()` | `float` | Reachable no other way — the lexer caps a numeric literal |
+| `math.inf()` `math.nan()` | `float` | The only way to reach these values, because the lexer caps a numeric literal |
 
-The constants are spelled as calls, with the parentheses. A package namespace is
-only ever read as a field a call immediately consumes, so `math.pi` on its own
-has no meaning yet.
+Write the constants as calls, with the parentheses. Jade only reads a package namespace as a field that a call consumes right away, so `math.pi` on its own has no meaning yet.
 
 ```jade
 use std::math
@@ -94,7 +92,7 @@ print(math.pow(2.0, 10.0)) // 1024.0
 use std::string
 ```
 
-The `std/string` package exposes functions that take the target string as the first argument. The same operations are also available as **primitive methods** directly on any `str` value — see the method form in the table below.
+The `std/string` package holds functions that take the target string as their first argument. The same operations are also available as *primitive methods* directly on any `str` value. The table below shows both forms.
 
 | Function | Method form | Returns | Description |
 |----------|-------------|---------|-------------|
@@ -103,7 +101,7 @@ The `std/string` package exposes functions that take the target string as the fi
 | `string.lower(s)` | `s.lower()` | `str` | Lowercase |
 | `string.trim(s)` | `s.trim()` | `str` | Strip leading and trailing whitespace |
 | `string.contains(s, sub)` | `s.contains(sub)` | `bool` | True if `sub` appears in `s` |
-| `string.replace(s, from, to)` | `s.replace(from, to)` | `str` | Replace **every** occurrence of `from` with `to` |
+| `string.replace(s, from, to)` | `s.replace(from, to)` | `str` | Replace *every* occurrence of `from` with `to` |
 | `string.starts_with(s, prefix)` | `s.starts_with(prefix)` | `bool` | True if `s` starts with `prefix` |
 | `string.ends_with(s, suffix)` | `s.ends_with(suffix)` | `bool` | True if `s` ends with `suffix` |
 | `string.trim_start(s)` | `s.trim_start()` | `str` | Strip leading whitespace only |
@@ -119,15 +117,14 @@ The `std/string` package exposes functions that take the target string as the fi
 | `string.pad_end(s, width, pad)` | `s.pad_end(width, pad)` | `str` | Right-pad to `width` characters |
 | `string.lines(s)` | `s.lines()` | `array` | Split on newlines. A trailing newline yields no empty final element, which is the difference from `split("\n")` |
 
-**Every index is a character index**, not a byte offset — the same unit `len()`
-counts and `s[i]` walks. `"café!".index_of("!")` is 4.
+*Every index is a character index*, not a byte offset. It is the same unit `len()` counts and `s[i]` walks. So `"café!".index_of("!")` is 4.
 
-`str` also has `len()` and `encode()`, neither of which needs a package import. `encode()` gives the string's UTF-8 as a `bytes` value, and `bytes.decode()` goes back the other way — see [Types](types#bytes).
+`str` also has `len()` and `encode()`, and neither needs a package import. `encode()` gives the string's UTF-8 as a `bytes` value, and `bytes.decode()` converts back. See [Types](types#bytes).
 
 ```jade
 let s = "Hello, Jade!"
 print(s.len())                          // 12
-print(s.encode().len())                 // 12 — bytes, not characters
+print(s.encode().len())                 // 12 bytes, not characters
 print(s.upper())                        // HELLO, JADE!
 print(s.lower())                        // hello, jade!
 print(s.trim())                         // Hello, Jade!  (no change here)
@@ -146,7 +143,7 @@ print(s.ends_with("!"))                // true
 use std::array
 ```
 
-The `std/array` package adds higher-order functions (`map`, `filter`) that are not available as primitive methods, plus standalone versions of `sort` and `reverse` that return new arrays.
+The `std/array` package adds two higher-order functions, `map` and `filter`, which are not available as primitive methods. It also has standalone versions of `sort` and `reverse` that return new arrays.
 
 | Function | Description |
 |----------|-------------|
@@ -156,7 +153,7 @@ The `std/array` package adds higher-order functions (`map`, `filter`) that are n
 | `array.reverse(arr)` | Return a new reversed copy of `arr` (does not mutate) |
 | `array.join(arr, sep)` | Join the elements into a `str`, separated by `sep`. Also `arr.join(sep)` |
 
-**Primitive methods** (available without import):
+*Primitive methods*, available with no import:
 
 | Method | Returns | Description |
 |--------|---------|-------------|
@@ -192,7 +189,7 @@ print(nums)             // [1, 1, 3, 4, 5, 9]
 ```
 
 :::note
-`arr.sort()` and `arr.reverse()` mutate the array in place and return `nil`. `array.sort(arr)` and `array.reverse(arr)` return a **new** array and leave the original unchanged.
+`arr.sort()` and `arr.reverse()` change the array in place and return `nil`. `array.sort(arr)` and `array.reverse(arr)` return a *new* array and leave the original alone.
 :::
 
 ---
@@ -203,7 +200,7 @@ print(nums)             // [1, 1, 3, 4, 5, 9]
 use std::dict
 ```
 
-The `std/dict` package adds a `merge` function plus standalone versions of the primitive dict methods.
+The `std/dict` package adds a `merge` function, plus standalone versions of the primitive dict methods.
 
 | Function | Description |
 |----------|-------------|
@@ -213,7 +210,7 @@ The `std/dict` package adds a `merge` function plus standalone versions of the p
 | `dict.get(d, key)` | Value at `key`, or `nil` if absent |
 | `dict.merge(d1, d2)` | Return new dict combining both; `d2` wins on duplicate keys |
 
-**Primitive methods** (available without import):
+*Primitive methods*, available with no import:
 
 | Method | Returns | Description |
 |--------|---------|-------------|
@@ -265,11 +262,9 @@ use std::fs
 | `fs.size(path)` | `int` | Size in bytes. Raises if the path is absent |
 | `fs.copy(src, dst)` | `nil` | Copy, creating or truncating `dst` |
 | `fs.rename(src, dst)` | `nil` | Rename or move |
-| `fs.rmdir(path)` | `nil` | Remove an **empty** directory. Deliberately not recursive |
+| `fs.rmdir(path)` | `nil` | Remove an *empty* directory. Deliberately not recursive |
 
-`is_file` and `is_dir` answer questions, so an absent path is `false` rather
-than an error — matching `fs.exists`. Everything else here raises catchably when
-it fails, on both engines.
+`is_file` and `is_dir` answer questions, so a path that does not exist gives `false` rather than an error. That matches `fs.exists`. Everything else in this package raises a catchable error when it fails, on both engines.
 
 ```jade
 use std::fs
@@ -292,7 +287,7 @@ fs.delete("hello.txt")
 ```
 
 :::note
-`fs.read` raises an `IoError` if the file does not exist. Use `fs.exists` to check first when the file may be absent.
+`fs.read` raises an `IoError` if the file does not exist. Call `fs.exists` first when the file might be missing.
 :::
 
 ---
@@ -316,7 +311,7 @@ use std::time
 
 ### Measuring how long something took
 
-Use `time.monotonic()`, not `time.now_ms()`. The wall clock can move while your program runs — NTP corrects it, and a person can set it — so subtracting two readings of it can hand you a negative duration. The monotonic clock only ever moves forward.
+Use `time.monotonic()` rather than `time.now_ms()`. The wall clock can move while your program runs, because NTP corrects it and a person can set it by hand. Subtracting two readings of the wall clock can therefore give you a negative duration. The monotonic clock only ever moves forward.
 
 ```jade
 use std::time
@@ -326,7 +321,7 @@ time.sleep(0.1)
 print(f"took {time.monotonic() - start}s")   // took ~0.1s
 ```
 
-Its absolute value is meaningless, and it is not comparable between two processes. When you want a moment rather than a duration, that is `time.now()`.
+A monotonic reading has no meaning on its own, and two processes cannot compare their readings. When you want a moment in time rather than a duration, use `time.now()`.
 
 ### Calendar fields
 
@@ -351,7 +346,7 @@ print(f"{p["year"]}-{p["month"]}-{p["day"]}")   // 2026-8-16
 print(time.utc(1786889002))                     // 2026-08-16T14:03:22Z
 ```
 
-`time.stamp` is the exact inverse, so a round trip returns what it started with. The three time-of-day arguments are optional and default to zero, so three arguments mean midnight.
+`time.stamp` is the exact reverse of `time.parts`, so a round trip gives back what it started with. The three time-of-day arguments are optional and default to zero, so passing only three arguments means midnight.
 
 ```jade
 use std::time
@@ -360,7 +355,7 @@ print(time.stamp(2026, 8, 16, 14, 3, 22))       // 1786889002
 print(time.utc(time.stamp(2026, 8, 16)))        // 2026-08-16T00:00:00Z
 ```
 
-Out-of-range fields **carry** rather than fail, which is what makes date arithmetic a single call. Month 13 is next January, day 0 is the last day of the previous month, and adding 45 to a day crosses the month end on its own:
+A field outside its normal range *carries* into the next unit rather than failing, which is what turns date arithmetic into a single call. Month 13 is next January. Day 0 is the last day of the previous month. Adding 45 to a day crosses the end of the month on its own:
 
 ```jade
 use std::time
@@ -371,7 +366,7 @@ print(time.utc(time.stamp(2026, 8, 16 + 45)))   // 2026-09-30T00:00:00Z
 ```
 
 :::note These three are UTC, not local
-`parts`, `stamp`, and `utc` are all UTC. Converting to a local calendar needs the IANA timezone database, which Jade does not carry — `time.local(tz)` is the local-time answer, and it gives you a formatted string rather than fields.
+`parts`, `stamp`, and `utc` all work in UTC. Converting to a local calendar needs the IANA timezone database, which Jade does not carry. `time.local(tz)` is the local-time answer, and it gives you a formatted string rather than separate fields.
 :::
 
 ---
@@ -389,12 +384,12 @@ All HTTP functions return a `dict` with two keys:
 | `status` | `int` | HTTP status code (e.g. `200`) |
 | `body` | `str` | Response body as a string |
 
-An optional `headers` dict may be passed as the last argument to any function. Keys and values must be strings.
+You can pass an optional `headers` dict as the last argument to any function. Its keys and values must be strings.
 
 :::caution A `str` body is not safe for binary
-A `str` is UTF-8 and NUL-terminated, so a response body read as text loses two things: an invalid UTF-8 sequence becomes `�`, and **everything from the first NUL byte onward is dropped**. An image, an audio frame, or a gzip stream hits both.
+A `str` is UTF-8 and NUL-terminated, so reading a response body as text loses two things. An invalid UTF-8 sequence becomes `�`, and *everything from the first NUL byte onward is dropped*. An image, an audio frame, and a gzip stream all hit both problems.
 
-Use `get_bytes` / `post_bytes` for those. `.body` is then a `bytes` value, which holds any octet. Both spellings exist on `std::http` and `std::uhttp`, and both work under `jade run` and `jade build` as of v1.2.5.
+Use `get_bytes` or `post_bytes` for those. `.body` is then a `bytes` value, which holds any octet. Both spellings exist on `std::http` and `std::uhttp`, and both have worked under `jade run` and `jade build` since v1.2.5.
 :::
 
 | Function | Description |
@@ -427,9 +422,9 @@ let result = json.parse(resp2["body"])
 ```
 
 :::note
-HTTP errors (non-2xx status) do **not** raise — check `resp["status"]` yourself. Only a transport failure raises an `IoError`: DNS failure, connection refused, a TLS handshake that fails, or a timeout.
+An HTTP error status, meaning anything outside the 200s, does *not* raise. Check `resp["status"]` yourself. Only a transport failure raises an `IoError`, which covers a DNS failure, a refused connection, a failed TLS handshake, and a timeout.
 
-`std/http` runs requests through the `curl` binary, which has to be on `PATH` — a missing one is reported as a transport failure. Two consequences follow from that: there is no overall request timeout beyond curl's own defaults, and **redirects are not followed**, so a 301 comes back as `status` 301 with the redirect page as its body.
+`std/http` runs requests through the `curl` binary, which has to be on your `PATH`. A missing `curl` is reported as a transport failure. Two things follow. There is no overall request timeout beyond curl's own defaults, and *redirects are not followed*, so a 301 comes back as `status` 301 with the redirect page as its body.
 :::
 
 ---
@@ -440,7 +435,7 @@ HTTP errors (non-2xx status) do **not** raise — check `resp["status"]` yoursel
 use std::uhttp
 ```
 
-Speaks HTTP/1.1 over a **Unix domain socket** instead of a TCP host — for talking to local daemons such as the Docker Engine API (`/var/run/docker.sock`) or other socket-backed OS services. The API mirrors `std/http`: every function returns the same `{status, body}` dict, and an optional `headers` dict may be passed as the last argument.
+This package speaks HTTP/1.1 over a *Unix domain socket* rather than a TCP host. Use it to talk to a local daemon, such as the Docker Engine API at `/var/run/docker.sock`, or another socket-backed operating system service. The API mirrors `std/http`. Every function returns the same `{status, body}` dict, and you can pass an optional `headers` dict as the last argument.
 
 The target is a single pseudo-URL string of the form:
 
@@ -448,7 +443,7 @@ The target is a single pseudo-URL string of the form:
 unix://<socket-path>:<request-path>
 ```
 
-The socket path runs up to the **first** `:` after the `unix://` scheme; everything after it is the request path (so colons inside a query string are preserved). If no request path is given it defaults to `/`.
+The socket path runs up to the *first* `:` after the `unix://` scheme. Everything after that colon is the request path, so colons inside a query string survive. With no request path given, it defaults to `/`.
 
 | Function | Description |
 |----------|-------------|
@@ -473,9 +468,9 @@ let containers = json.parse(resp["body"])
 
 ### Streaming endpoints
 
-`uhttp.stream` consumes a response that stays open indefinitely — Docker's `/events`, `/logs?follow=1`, or image-pull progress — one line at a time. It calls `handler(line)` for each newline-delimited line of the body (the newline is stripped) and returns the HTTP status code once the stream ends. The framing is decoded incrementally, so `Transfer-Encoding: chunked` responses work.
+`uhttp.stream` reads a response that stays open indefinitely, one line at a time. Docker's `/events`, its `/logs?follow=1`, and its image-pull progress are all this shape. It calls `handler(line)` for each newline-delimited line of the body, with the newline stripped, and returns the HTTP status code once the stream ends. It decodes the framing as it goes, so a `Transfer-Encoding: chunked` response works.
 
-A handler that returns `false` **stops** the stream early and closes the socket; any other return value continues.
+A handler that returns `false` *stops* the stream early and closes the socket. Any other return value continues it.
 
 ```jade
 use std::uhttp
@@ -492,7 +487,7 @@ uhttp.stream("unix:///var/run/docker.sock:/v1.43/events", on_event)
 ```
 
 :::note
-One-shot requests (`get`/`post`/…) time out after 30 seconds and send `Connection: close`; `stream` keeps the connection open with no read timeout (events may be sparse). Response framing honors `Content-Length`, `Transfer-Encoding: chunked` (de-chunked), and read-to-EOF on connection close. HTTP errors (non-2xx status) do **not** raise — check `resp["status"]` yourself. A missing socket, a malformed pseudo-URL, or a connection failure raises an `IoError`.
+A one-shot request, such as `get` or `post`, times out after 30 seconds and sends `Connection: close`. `stream` keeps the connection open with no read timeout, because events can be sparse. Response framing honors `Content-Length` and `Transfer-Encoding: chunked`, which it de-chunks, and it reads to end of file when the connection closes. An HTTP error status does *not* raise, so check `resp["status"]` yourself. A missing socket, a malformed pseudo-URL, or a connection failure raises an `IoError`.
 :::
 
 ---
@@ -503,7 +498,7 @@ One-shot requests (`get`/`post`/…) time out after 30 seconds and send `Connect
 use std::sh
 ```
 
-All three functions run commands through `sh -c`, so shell features like pipes, redirection, and globbing work.
+All three functions run commands through `sh -c`, so shell features such as pipes, redirection, and globbing work.
 
 | Function | Returns | Description |
 |----------|---------|-------------|
@@ -514,29 +509,29 @@ All three functions run commands through `sh -c`, so shell features like pipes, 
 ```jade
 use std::sh
 
-// exec — great for capturing output of simple commands
+// exec is best for capturing the output of a simple command
 let branch = sh.exec("git rev-parse --abbrev-ref HEAD")
 print(f"current branch: {branch}")
 
-// run — when you want the command's output to go directly to the terminal
+// run sends the command's output straight to the terminal
 let code = sh.run("npm test")
 if code != 0 {
     raise "tests failed"
 }
 
-// output — when you need full control
+// output gives you full control
 let result = sh.output("ls -la nonexistent 2>&1")
 print(result["code"])    // 1 or 2
 print(result["stderr"])  // ls: cannot access...
 ```
 
 :::warning
-`sh.exec` raises an `IoError` if the command exits with a non-zero code. Use `sh.run` or `sh.output` when you expect failure or need to inspect the exit code.
+`sh.exec` raises an `IoError` if the command exits with a non-zero code. Use `sh.run` or `sh.output` when you expect a failure, or when you need to read the exit code.
 :::
 
 ### Untrusted strings cannot become commands
 
-Jade tracks where a string came from. Anything read from outside the program — a model reply, an HTTP body, a file, stdin — is *tainted*, and the taint spreads through concatenation, f-strings, indexing, and `.encode()` / `.decode()`.
+Jade tracks where a string came from. Anything read from outside the program is *tainted*, which covers a model reply, an HTTP body, a file, and stdin. The taint spreads through concatenation, f-strings, indexing, `.encode()`, and `.decode()`.
 
 `sh.exec` and `sh.run` refuse a tainted command rather than running it:
 
@@ -551,11 +546,11 @@ sh.exec(cmd)
 // code-execution sink
 ```
 
-Catch it, or build the command from string literals and interpolate only the parts you have checked yourself.
+Either catch the error, or build the command from string literals and interpolate only the parts you have checked yourself.
 
-The output of a shell command is itself tainted, so you cannot launder a value by running it through `sh` and feeding the result back in.
+The output of a shell command is itself tainted, so you cannot clean a value by running it through `sh` and feeding the result back in.
 
-All three functions check, because all three reach the same `sh -c`. Until v1.3.3 `sh.output` did not, which did not narrow what an untrusted command could do — it only meant it had to be written as `sh.output(x).stdout`.
+All three functions check, because all three reach the same `sh -c`. Until v1.3.3, `sh.output` did not check. That never limited what an untrusted command could do. It only meant the command had to be written as `sh.output(x).stdout`.
 
 ---
 
@@ -571,7 +566,7 @@ use std::json
 | `json.stringify(val)` | `str` | Serialize a Jade value to compact JSON |
 | `json.stringify_pretty(val)` | `str` | Serialize to indented (pretty-printed) JSON |
 
-**Type mapping:**
+*Type mapping:*
 
 | JSON type | Jade type |
 |-----------|-----------|
@@ -610,7 +605,7 @@ print(back[2]["x"])     // 3
 ```
 
 :::note
-`json.parse` raises an `IoError` if the input is not valid JSON. Numbers with a decimal point become `float`; numbers without one become `int`.
+`json.parse` raises an `IoError` if the input is not valid JSON. A number with a decimal point becomes a `float`, and a number without one becomes an `int`.
 :::
 
 ---
@@ -637,7 +632,7 @@ if key == nil {
     raise "API_KEY is not set"
 }
 
-// Set a variable (visible to child processes spawned via std/sh)
+// Set a variable, which child processes started by std/sh will see
 env.set("DEBUG", "1")
 
 // Inspect command-line arguments
@@ -652,11 +647,11 @@ print(env.cwd())   // /home/user/myproject
 ```
 
 :::note What `args[0]` is
-`env.args()` is the *process's* argument list, so it depends on how the program was started.
+`env.args()` gives the *process's* argument list, so what you see depends on how the program was started.
 
-A compiled binary run as `./app one two` gives `["./app", "one", "two"]` — the shape you would expect.
+A compiled binary run as `./app one two` gives `["./app", "one", "two"]`, which is the shape you would expect.
 
-Under the interpreter the process is `jade`, so the list starts with the jade binary and includes the subcommand: `jade run app.jde` gives `["…/jade", "run", "app.jde"]`. `jade run` also takes no arguments of its own beyond the file, so there is no way to pass any through it. The old shorthand does accept them — `jade app.jde one two` gives `["…/jade", "app.jde", "one", "two"]` — but the positions still differ from the built program's.
+Under the interpreter, the process is `jade`, so the list starts with the jade binary and includes the subcommand. `jade run app.jde` gives `["…/jade", "run", "app.jde"]`. `jade run` also takes no arguments of its own beyond the file, so there is no way to pass any through it. The old shorthand does accept them, and `jade app.jde one two` gives `["…/jade", "app.jde", "one", "two"]`, but the positions still differ from a built program's.
 
 Build the program when argument positions have to be stable.
 :::
@@ -698,7 +693,7 @@ print(path.abs(rel))        // /current/working/dir/src/main.jde
 ```
 
 :::note
-`path.join` accepts two or more arguments. If any component is an absolute path it resets the result (same behaviour as Python's `os.path.join`). `path.abs` does not resolve symlinks and does not require the path to exist.
+`path.join` accepts two or more arguments. If any component is an absolute path, it resets the result, which is how Python's `os.path.join` behaves too. `path.abs` does not follow symlinks, and it does not require the path to exist.
 :::
 
 ---
@@ -709,7 +704,7 @@ print(path.abs(rel))        // /current/working/dir/src/main.jde
 use std::random
 ```
 
-Jade uses a single global RNG (seeded from OS entropy at first use). Calling `random.seed` replaces it with a deterministic seed.
+Jade uses one global random number generator, seeded from operating system entropy the first time you use it. Calling `random.seed` replaces that with a seed of your own, which makes the sequence repeatable.
 
 | Function | Returns | Description |
 |----------|---------|-------------|
@@ -725,7 +720,7 @@ use std::random
 // Reproducible output
 random.seed(42)
 
-let n = random.int(1, 6)          // simulated die roll, 1–6
+let n = random.int(1, 6)          // a simulated die roll, 1 to 6
 print(n)
 
 let f = random.float()            // 0.0 ≤ f < 1.0
@@ -744,11 +739,7 @@ print(deck)
 
 ## LLM inference
 
-There is no `llm` package. Running inference is language *syntax*, not a package:
-declare a prompt and dereference it (`?p`, `?p |> Type`). Everything a program
-used to reach for through `use llm` — the model, token budget/accounting, anchor
-handling, retries, health, model profiles, and tool-call parsing — is owned by
-the provider package now. See [LLM Integration](llm).
+There is no `llm` package. Running inference is language *syntax* rather than a package: you declare a prompt and dereference it, written `?p` or `?p |> Type`. The provider package now owns everything a program used to reach for through `use llm`, including the model, the token budget and accounting, anchor handling, retries, health, model profiles, and tool-call parsing. See [LLM Integration](llm).
 
 ```jade
 prompt p = "Write a one-sentence summary of Jade."

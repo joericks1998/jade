@@ -24,6 +24,7 @@ const ORDER = [
   'async',
   'structs',
   'imports',
+  'packages',
   'exceptions',
   'llm',
   'stdlib',
