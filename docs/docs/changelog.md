@@ -4,6 +4,20 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.3.26
+
+*Rewrote every page of this site, and every `README.md` in the repository, for clarity.* The content is the same. What changed is how it reads.
+
+The target is a 10th-grade reading level: sentences of 15 to 20 words on average, one idea per sentence, active voice, and the simplest verb that works. Punctuation is now limited to periods, commas, apostrophes, colons, and semicolons, so a long sentence held together by an em dash became two or three sentences instead. Emphasis is italics rather than bold. Every code block, table, heading, and link is unchanged, and so is every technical claim.
+
+*The repository `README.md` gained the two things it was missing.* It now opens with a reading order, naming which directory README to read first and in what sequence, because every directory in the repo has one and nothing said where to start. And its build-from-source section is now complete: both the debug and release builds, the extra Debian packages, what `LLVM_SYS_180_PREFIX` is for, and why the checkout has to stay after building, since `jade build` links two runtime archives out of `target/`.
+
+Three stale facts in that README were corrected along the way. Its pipeline diagram named `compiler/vm.rs` and `build/mod.rs`, which are now `vm/` and `aot/`. Its feature checklist repeated the same stale path. And it claimed CI runs no formatting or clippy gate, when CI runs `cargo clippy --all-targets`, `cargo fmt --all --check`, and `jade fmt --check examples`.
+
+*One real defect fixed.* `docs/plugins/llms-txt.js` never listed the packages page in its `ORDER` array, so `llms.txt` appended it after the changelog instead of placing it between imports and exceptions. It is now in sidebar order.
+
+Past changelog entries are left as they were written. A shipped release is a record of what shipped, and rewriting one changes what a version is documented to have contained.
+
 ## v1.3.25
 
 **Fixed: a native package crashed the VM at exit on Linux.** A program that called into a C dependency printed every one of its answers correctly and then died with SIGSEGV during shutdown. It only happened under `jade run`, and only on Linux.
