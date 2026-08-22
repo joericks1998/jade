@@ -1,6 +1,6 @@
 # Jade Benchmark Results
 
-Newest run first. Each run gets its own dated header; numbers are never edited in place under an old one, because a timing only means something next to the platform and version that produced it.
+Newest run first. Each run gets its own dated header. Numbers are never edited in place under an old header, because a timing only means something next to the platform and version that produced it.
 
 ---
 
