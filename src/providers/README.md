@@ -8,7 +8,7 @@ Everything lives per-user under `$HOME/.jade/`:
 
 | Path | Contents |
 |---|---|
-| `provider/<name>.<ext>` | the installed pool — every provider the user has added |
+| `provider/<name>.<ext>` | the installed pool, meaning every provider the user has added |
 | `provider/active/<name>.<ext>` | exactly one `.so`: the active provider both engines load |
 | `provider/active/config.json` | the active provider's opaque credential blob |
 | `credentials/<name>.json` | per-provider key backups, so switching does not re-prompt |
@@ -25,8 +25,8 @@ Credentials are backed up per provider rather than only stored in the active slo
 
 ## What each file does
 
-- **`mod.rs`** — pool and credential path helpers (`pool_dir`, `credential_path`, `bundled_provider_dir`), discovery across the three search locations, and the add / select / configure operations that write the active slot.
-- **`tests.rs`** — registry tests.
+- *`mod.rs`* holds the pool and credential path helpers `pool_dir`, `credential_path`, and `bundled_provider_dir`. It also handles discovery across the three search locations, plus the add, select, and configure operations that write the active slot.
+- *`tests.rs`* holds the registry tests.
 
 ## What a provider actually is
 
