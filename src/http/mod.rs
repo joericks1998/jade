@@ -57,13 +57,7 @@ fn make_response(status: u16, body: String) -> VmValue {
 fn make_bytes_response(status: u16, body: Vec<u8>) -> VmValue {
     let mut map = DictObj::new();
     map.insert("status".to_string(), VmValue::Int(status as i64));
-    map.insert(
-        "body".to_string(),
-        VmValue::Bytes(std::sync::Arc::new(jade_runtime::bytesf::BytesObj::new(
-            body,
-            jade_runtime::trust::TAINTED,
-        ))),
-    );
+    map.insert("body".to_string(), crate::builtins::make_bytes(body, jade_runtime::trust::TAINTED));
     VmValue::dict(map)
 }
 
@@ -90,7 +84,7 @@ fn http_post_bytes(args: &[VmValue]) -> Result<VmValue> {
     }
     let url = require_str_owned(args, 0, "http.post_bytes")?;
     let body = match args.get(1) {
-        Some(VmValue::Bytes(b)) => b.as_slice().to_vec(),
+        Some(VmValue::Bytes(b)) => b.lock().as_slice().to_vec(),
         Some(other) => {
             return Err(JadeError::TypeError {
                 message: format!(

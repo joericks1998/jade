@@ -4,6 +4,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
+use jade_runtime::bytesf::BytesObj;
 use jade_runtime::coll::{ArrayObj, DictObj};
 use parking_lot::Mutex;
 
@@ -158,6 +159,7 @@ static PACKAGES: &[&Package] = &[
     &env::ENV_PKG,
     &path::PATH_PKG,
     &random::RANDOM_PKG,
+    &bytes::BYTES_PKG,
 ];
 
 // ── Primitive method tables ───────────────────────────────────────────────────
@@ -262,6 +264,21 @@ pub fn register_primitive_method_types(ctx: &mut TypeContext) {
 /// Wrap a `Vec<VmValue>` as the standard Jade array value.
 pub fn make_array(v: Vec<VmValue>) -> VmValue {
     VmValue::Array(Arc::new(Mutex::new(ArrayObj::from_vec(v))))
+}
+
+/// Wrap octets as the standard Jade `bytes` value, carrying `trust`.
+///
+/// Every blob the VM builds goes through here. The wrapping is three layers
+/// deep and it changed once already, in v1.3.27, when a blob became mutable;
+/// nine sites across seven files spelled it out by hand at the time.
+pub fn make_bytes(data: Vec<u8>, trust: u8) -> VmValue {
+    VmValue::Bytes(Arc::new(Mutex::new(BytesObj::new(data, trust))))
+}
+
+/// The same, for octets the program built itself rather than read from
+/// anywhere. See [`jade_runtime::trust`].
+pub fn make_trusted_bytes(data: Vec<u8>) -> VmValue {
+    make_bytes(data, jade_runtime::trust::TRUSTED)
 }
 
 #[cfg(test)]

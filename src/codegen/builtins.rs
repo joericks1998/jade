@@ -17,7 +17,7 @@ pub(super) const RESERVED_BUILTINS: &[&str] = &[
     // stdlib package globals (accessed via `use`; a bare call is invalid, but
     // reserving them keeps a stray Call from mis-lowering to an indirect call)
     "llm", "string", "math", "array", "dict", "fs", "time", "http", "uhttp", "sh", "json", "env",
-    "path", "random",
+    "path", "random", "bytes",
 ];
 
 /// Reject a program that reads a global nothing ever binds.
@@ -115,6 +115,7 @@ pub(super) fn is_stdlib_module(name: &str) -> bool {
             | "dict"
             | "array"
             | "string"
+            | "bytes"
             | "Grammar"
     )
 }
@@ -228,6 +229,8 @@ pub(super) fn chunk_module_supported(module: &str, method: &str, argc: usize) ->
         ("dict", "merge") => argc == 2,
         ("json", "parse" | "stringify" | "stringify_pretty") => argc == 1,
         ("Grammar", "new") => (1..=3).contains(&argc), // pattern[, anchor[, stop]]
+        ("bytes", "zeros" | "from_ints") => argc == 1,
+        ("bytes", "concat") => argc == 2,
         _ => false,
     }
 }
@@ -1191,6 +1194,40 @@ pub(super) fn emit_module_call<'ctx>(
                 .as_any_value_enum()
                 .into_pointer_value();
             Ok(low.tag_ptr(g))
+        }
+        // ── std::bytes ─────────────────────────────────────────────────────
+        //
+        // All three can raise — a bad length, an element that is not an octet,
+        // an argument that is not a blob — so each goes through a `jk_*` C
+        // forwarder rather than calling the Rust entry point directly: a Jade
+        // raise is a longjmp and must not unwind through a Rust frame. Each
+        // hands back an already-tagged word.
+        ("bytes", "zeros") => {
+            let f = low.runtime_fn("jk_bytes_zeros", i64_ty.fn_type(&[i64_ty.into()], false));
+            Ok(b.build_call(f, &[low.load(args[0]).into()], "bzeros")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_int_value())
+        }
+        ("bytes", "from_ints") => {
+            // The whole tagged word, not `strp(0)`: nothing upstream proves the
+            // argument is an array, so the forwarder reads the tag and reports
+            // rather than reading a dict as an `ArrayObj`.
+            let f = low.runtime_fn("jk_bytes_from_ints", i64_ty.fn_type(&[i64_ty.into()], false));
+            Ok(b.build_call(f, &[low.load(args[0]).into()], "bfrom")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_int_value())
+        }
+        ("bytes", "concat") => {
+            let f = low.runtime_fn(
+                "jk_bytes_concat",
+                i64_ty.fn_type(&[i64_ty.into(), i64_ty.into()], false),
+            );
+            Ok(b.build_call(f, &[low.load(args[0]).into(), low.load(args[1]).into()], "bcat")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_int_value())
         }
         _ => Err(format!("codegen: emit_module_call: unhandled {module}.{method}")),
     }

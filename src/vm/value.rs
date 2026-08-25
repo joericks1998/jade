@@ -38,7 +38,16 @@ pub enum VmValue {
     /// A binary blob. Distinct from `Str`: Jade strings are UTF-8 and
     /// NUL-terminated and arbitrary bytes are neither, so conversion is
     /// explicit in both directions. Shares `BytesObj` with the AOT heap.
-    Bytes(Arc<jade_runtime::bytesf::BytesObj>),
+    ///
+    /// Behind a `Mutex` because `b[i] = v` writes an octet in place, which
+    /// makes a blob reference-semantic exactly as an `Array` is: two names for
+    /// one buffer see the same write. The lock lives here and not inside
+    /// `BytesObj`, because that type is `repr(C)` and shares its layout with
+    /// the compiled heap and the native package ABI, neither of which has one.
+    /// Nothing synchronises the payload on the AOT path either; what keeps two
+    /// tasks off one buffer is `compiler::taskcheck`, the same rule that covers
+    /// an array.
+    Bytes(Arc<Mutex<jade_runtime::bytesf::BytesObj>>),
     /// An opaque pointer handed over by a native package — a `sqlite3*`, a
     /// `SNDFILE*`. Jade holds it and passes it back; it never looks inside and
     /// never frees the pointee. Carries the C type it came from so a
@@ -145,7 +154,7 @@ impl std::fmt::Debug for VmValue {
             VmValue::Float(v) => write!(f, "Float({})", v),
             VmValue::Bool(b) => write!(f, "Bool({})", b),
             VmValue::Char(c) => write!(f, "Char({:?})", c.ch()),
-            VmValue::Bytes(b) => write!(f, "Bytes[{} byte(s)]", b.len()),
+            VmValue::Bytes(b) => write!(f, "Bytes[{} byte(s)]", b.lock().len()),
             VmValue::Handle(h) => write!(f, "{:?}", h),
             VmValue::Str(s) => write!(f, "Str({:?})", s),
             VmValue::Fn(cf) => write!(f, "Fn({})", cf.params.join(", ")),
@@ -215,7 +224,10 @@ pub fn value_to_display(v: &VmValue) -> String {
             jade_runtime::render::render_array(&parts)
         }
         VmValue::Char(c) => c.ch().to_string(),
-        VmValue::Bytes(b) => jade_runtime::render::render_bytes(b.as_slice()),
+        VmValue::Bytes(b) => {
+            let g = b.lock();
+            jade_runtime::render::render_bytes(g.as_slice())
+        }
         VmValue::Handle(h) => jade_runtime::handle::render(h),
         VmValue::TypeRef(t) => format!("<type {}>", t),
         VmValue::Nil => "nil".to_string(),

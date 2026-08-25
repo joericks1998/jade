@@ -147,6 +147,7 @@ void jrt_write_any(int64_t val) {
 #include <errno.h>
 #include <strings.h>            /* strcasecmp */
 static void throw_msg(const char* m);   /* defined below; used by int()/float() */
+static void bytes_throw_pending(const char* fallback); /* defined below; used by set-index */
 
 /* Trim ASCII whitespace in place by returning adjusted [start,end). Caller owns
  * the buffer; we only compute bounds. */
@@ -474,6 +475,23 @@ int64_t jrt_val_set_index(int64_t obj, int64_t idx, int64_t val) {
             jrt_coll_array_set(p, i, val);
             return obj;
         }
+        if (kind == JK_BYTES) {
+            /* A blob is reference-semantic like an array, so the write lands in
+             * place and the SAME container word goes back. Handing back a fresh
+             * pointer would make codegen decref the original and free a buffer
+             * the program still holds.
+             *
+             * The range checks live in the Rust half (jade-runtime,
+             * src/bytesf.rs `set`) so the two engines word them identically; a
+             * program can catch this, which makes the text part of the language. */
+            if (!jrt_is_int((jade_value_t)idx)) throw_msg("bytes index must be int");
+            if (!jrt_is_int((jade_value_t)val)) throw_msg("bytes value must be int");
+            if (!jrt_bytes_set(p, jrt_unbox_int((jade_value_t)idx),
+                               jrt_unbox_int((jade_value_t)val))) {
+                bytes_throw_pending("bytes index assignment failed");
+            }
+            return obj;
+        }
         if (kind == JK_DICT) {
             /* Dicts are value-semantic, so a write has to leave any alias of
              * this dict alone — the caller rebinds its variable to whatever
@@ -533,6 +551,7 @@ static const char* value_kind_name(jade_value_t v) {
         switch (jrt_kind_of(p)) {
             case JK_ARRAY:  return "array";
             case JK_DICT:   return "dict";
+            case JK_BYTES:  return "bytes";
             case JK_PROMPT: return "prompt";
             case JK_STRUCT: {
                 /* A fresh tagged string; leaked deliberately — this path raises
@@ -843,6 +862,43 @@ char* jrt_fs_read(const char* path, int32_t trust) {
     fs_throw_pending();
     return r;
 }
+/* Turn whatever the Rust half recorded into a catchable raise.
+ *
+ * throw_msg and NOT jrt_throw_io: the latter prepends "I/O error: ", and none of
+ * these is an I/O failure. The wording has to match what the VM raises, because
+ * a Jade program can catch it. (The message leaks on this path, exactly as the
+ * fs forwarders' does — throw_msg longjmps, so nothing after it runs.) */
+static void bytes_throw_pending(const char* fallback) {
+    char* e = jrt_bytes_take_error();
+    if (e) throw_msg(e);
+    throw_msg(fallback);
+}
+
+/* bytes.zeros(n) — n zeroed octets. Raises on a negative or oversized length. */
+int64_t jk_bytes_zeros(int64_t n) {
+    if (!jrt_is_int((jade_value_t)n)) throw_msg("bytes.zeros() expects an int");
+    void* p = jrt_bytes_zeros(jrt_unbox_int((jade_value_t)n));
+    if (!p) bytes_throw_pending("bytes.zeros() failed");
+    return (int64_t)jrt_box_ptr(p);
+}
+
+/* bytes.from_ints(arr) — a blob from an array of octet values. Takes the whole
+ * tagged word: the Rust half checks the tag and the object kind, so a dict or a
+ * struct is reported rather than read as an ArrayObj. */
+int64_t jk_bytes_from_ints(int64_t arr_word) {
+    void* p = jrt_bytes_from_ints(arr_word);
+    if (!p) bytes_throw_pending("bytes.from_ints() failed");
+    return (int64_t)jrt_box_ptr(p);
+}
+
+/* bytes.concat(a, b) — a new blob, tainted if either input is. */
+int64_t jk_bytes_concat(int64_t a, int64_t b) {
+    require_bytes_body(a, "bytes.concat");
+    require_bytes_body(b, "bytes.concat");
+    void* p = jrt_bytes_concat(jrt_unbox_ptr((jade_value_t)a), jrt_unbox_ptr((jade_value_t)b));
+    return (int64_t)jrt_box_ptr(p);
+}
+
 /* `b.decode()` — raise on invalid UTF-8 rather than substituting replacement
  * characters. Same pending-error shape as the fs wrappers above: the Rust side
  * cannot longjmp, so it records and returns NULL and the throw happens here. */

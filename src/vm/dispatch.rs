@@ -962,6 +962,14 @@ pub(crate) async fn execute_chunk(
                         }
                         arc.lock()[i as usize] = val;
                     }
+                    // A blob has reference semantics too, so the same value
+                    // goes back and the octet lands in place.
+                    VmValue::Bytes(arc) => {
+                        put_back(state, VmValue::Bytes(Arc::clone(&arc)));
+                        if let Err(e) = write_octet(&arc, &idx, &val, span) {
+                            vm_err!(e);
+                        }
+                    }
                     other => {
                         let name = value_type_name(&other).to_string();
                         put_back(state, other);
@@ -1018,6 +1026,11 @@ pub(crate) async fn execute_chunk(
                             vm_err!(JadeError::IndexOutOfBounds { index: i, len, span });
                         }
                         arc.lock()[i as usize] = val;
+                    }
+                    VmValue::Bytes(arc) => {
+                        if let Err(e) = write_octet(&arc, &idx, &val, span) {
+                            vm_err!(e);
+                        }
                     }
                     VmValue::Dict(mut m) => {
                         let k = match idx {
@@ -1481,6 +1494,45 @@ pub(crate) fn set(slots: &mut Vec<VmValue>, r: Reg, v: VmValue) {
 }
 
 #[inline]
+/// `b[i] = v` on a blob, for both write opcodes.
+///
+/// One place, because `SetIndex` and `SetIndexGlobal` are separate instructions
+/// — the emitter picks between them by whether the binding is a local — and a
+/// blob arm added to only one of them makes `b[0] = 1` work inside a function
+/// and raise at the top level.
+///
+/// The index error is `IndexOutOfBounds`, matching the read side at
+/// `vm::ops::vm_index`, and the octet-range wording comes from
+/// `jade_runtime::bytesf` so the compiled backend raises the same sentence.
+pub(crate) fn write_octet(
+    arc: &Arc<Mutex<jade_runtime::bytesf::BytesObj>>,
+    idx: &VmValue,
+    val: &VmValue,
+    span: Span,
+) -> Result<()> {
+    let VmValue::Int(i) = idx else {
+        return Err(JadeError::TypeError {
+            message: format!("bytes index must be int, got {}", value_type_name(idx)),
+            span,
+        });
+    };
+    let VmValue::Int(v) = val else {
+        return Err(JadeError::TypeError {
+            message: format!("bytes value must be int, got {}", value_type_name(val)),
+            span,
+        });
+    };
+    // One guard for the bounds check and the write; `parking_lot::Mutex` is not
+    // reentrant, so a second `lock()` inside this scope would hang.
+    let mut g = arc.lock();
+    let len = g.len();
+    if *i < 0 || *i as usize >= len {
+        return Err(JadeError::IndexOutOfBounds { index: *i, len, span });
+    }
+    jade_runtime::bytesf::set(&mut g, *i, *v)
+        .map_err(|message| JadeError::TypeError { message, span })
+}
+
 pub(crate) fn ensure_slot(slots: &mut Vec<VmValue>, r: Reg) {
     if r as usize >= slots.len() {
         slots.resize(r as usize + 1, VmValue::Nil);

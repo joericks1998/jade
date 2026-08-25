@@ -1,0 +1,47 @@
+// Joining two blobs keeps the taint of either one.
+//
+// `bytes.concat` is the first operation that builds one blob out of two, so it
+// is the first that has to pick a trust for the result. It picks the more
+// restrictive of the two: a buffer the program built itself is trusted, but
+// the moment anything read off a disk is joined to it, the whole thing is
+// tainted. Picking the other way would make concatenation a way to launder,
+// which is the hole `bytes_taint.jde` in this directory exists to close.
+
+use std::bytes
+use std::fs
+use std::sh
+
+fs.write_bytes("/tmp/jade_concat_taint.bin", "echo pwned".encode())
+let tainted = fs.read_bytes("/tmp/jade_concat_taint.bin")
+
+// A blob the program built from literal octets is trusted, so `sh.exec` runs
+// it. This is the control: it proves the refusals below are about provenance
+// and not about the contents.
+sh.exec(bytes.from_ints([116, 114, 117, 101]).decode())
+print("trusted ran")
+
+// Tainted on the right.
+try {
+    sh.exec(bytes.concat(bytes.zeros(0), tainted).decode())
+    print("LAUNDERED — concat lost the taint")
+} catch e {
+    print("refused")
+}
+
+// Tainted on the left.
+try {
+    sh.exec(bytes.concat(tainted, bytes.zeros(0)).decode())
+    print("LAUNDERED — concat lost the taint")
+} catch e {
+    print("refused")
+}
+
+// A slice of a tainted blob is tainted, and so is a slice of the join.
+try {
+    sh.exec(bytes.concat(tainted, tainted).slice(0, 10).decode())
+    print("LAUNDERED — slice lost the taint")
+} catch e {
+    print("refused")
+}
+
+fs.delete("/tmp/jade_concat_taint.bin")

@@ -429,11 +429,15 @@ pub(crate) fn vm_index(obj: VmValue, idx: VmValue, span: Span) -> Result<VmValue
         // making `b[0]` look like `s[0]` would hide that they differ on any
         // non-ASCII input.
         (VmValue::Bytes(b), VmValue::Int(i)) => {
-            let len = b.len();
+            // One guard for the length and the read. `parking_lot::Mutex` is not
+            // reentrant, so taking a second while this one is alive would hang
+            // the process with no panic and no message.
+            let g = b.lock();
+            let len = g.len();
             if i < 0 || i as usize >= len {
                 Err(JadeError::IndexOutOfBounds { index: i, len, span })
             } else {
-                Ok(VmValue::Int(b.as_slice()[i as usize] as i64))
+                Ok(VmValue::Int(g.as_slice()[i as usize] as i64))
             }
         }
         // A stream indexes like the buffer it is.

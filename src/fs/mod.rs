@@ -186,19 +186,17 @@ fn fs_read_bytes(args: &[VmValue]) -> Result<VmValue> {
     }
     let path = require_str(args, 0, "fs.read_bytes")?;
     jade_runtime::fsf::read_bytes(path)
-        .map(|d| {
-            VmValue::Bytes(std::sync::Arc::new(jade_runtime::bytesf::BytesObj::new(
-                d,
-                jade_runtime::trust::TAINTED,
-            )))
-        })
+        .map(|d| crate::builtins::make_bytes(d, jade_runtime::trust::TAINTED))
         .map_err(|e| io_err("read_bytes", path, e))
 }
 
 /// The octets a `bytes` argument carries, for the write paths.
-fn require_bytes<'a>(args: &'a [VmValue], pos: usize, who: &str) -> Result<&'a [u8]> {
+///
+/// Copied out rather than borrowed. A blob lives behind a lock now, and a
+/// borrow of the payload cannot outlive the guard that made it safe to read.
+fn require_bytes(args: &[VmValue], pos: usize, who: &str) -> Result<Vec<u8>> {
     match args.get(pos) {
-        Some(VmValue::Bytes(b)) => Ok(b.as_slice()),
+        Some(VmValue::Bytes(b)) => Ok(b.lock().as_slice().to_vec()),
         Some(other) => Err(JadeError::TypeError {
             message: format!("{who} expects bytes, got {}", crate::vm::value_type_name(other)),
             span: ZERO,
@@ -213,7 +211,7 @@ fn fs_write_bytes(args: &[VmValue]) -> Result<VmValue> {
     }
     let path = require_str(args, 0, "fs.write_bytes")?;
     let data = require_bytes(args, 1, "fs.write_bytes")?;
-    jade_runtime::fsf::write_bytes(path, data)
+    jade_runtime::fsf::write_bytes(path, &data)
         .map(|_| VmValue::Nil)
         .map_err(|e| io_err("write_bytes", path, e))
 }
@@ -224,7 +222,7 @@ fn fs_append_bytes(args: &[VmValue]) -> Result<VmValue> {
     }
     let path = require_str(args, 0, "fs.append_bytes")?;
     let data = require_bytes(args, 1, "fs.append_bytes")?;
-    jade_runtime::fsf::append_bytes(path, data)
+    jade_runtime::fsf::append_bytes(path, &data)
         .map(|_| VmValue::Nil)
         .map_err(|e| io_err("append_bytes", path, e))
 }
@@ -235,12 +233,7 @@ fn fs_read_stdin_bytes(args: &[VmValue]) -> Result<VmValue> {
         return Err(JadeError::ArityMismatch { expected: 0, got: args.len(), span: ZERO });
     }
     jade_runtime::fsf::read_stdin_bytes()
-        .map(|d| {
-            VmValue::Bytes(std::sync::Arc::new(jade_runtime::bytesf::BytesObj::new(
-                d,
-                jade_runtime::trust::TAINTED,
-            )))
-        })
+        .map(|d| crate::builtins::make_bytes(d, jade_runtime::trust::TAINTED))
         .map_err(|e| io_err("read_stdin_bytes", "<stdin>", e))
 }
 
@@ -250,7 +243,7 @@ fn fs_write_stdout_bytes(args: &[VmValue]) -> Result<VmValue> {
         return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: ZERO });
     }
     let data = require_bytes(args, 0, "fs.write_stdout_bytes")?;
-    jade_runtime::fsf::write_stdout_bytes(data)
+    jade_runtime::fsf::write_stdout_bytes(&data)
         .map(|_| VmValue::Nil)
         .map_err(|e| io_err("write_stdout_bytes", "<stdout>", e))
 }

@@ -1311,6 +1311,15 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
                     .and_then(|m| m.get(field.as_str()))
                     .cloned()
                     .unwrap_or(JadeType::Unknown),
+                // `register_bytes_method_types` filled this table in from the
+                // start and nothing read it, so `s.encode().len()` typed as
+                // Unknown while `s.len()` typed as Int.
+                JadeType::Bytes => ctx
+                    .primitive_methods
+                    .get("bytes")
+                    .and_then(|m| m.get(field.as_str()))
+                    .cloned()
+                    .unwrap_or(JadeType::Unknown),
                 JadeType::Unknown => JadeType::Unknown,
                 _ => JadeType::Unknown,
             };

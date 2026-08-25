@@ -12,10 +12,7 @@
 #[cfg(test)]
 mod tests;
 
-use jade_runtime::bytesf::BytesObj;
-use std::sync::Arc;
-
-use crate::builtins::BuiltinFn;
+use crate::builtins::{BuiltinFn, Package, make_bytes, make_trusted_bytes};
 use crate::compiler::{tir::JadeType, type_infer::TypeContext};
 use crate::frontend::error::{JadeError, Result, Span};
 use crate::vm::VmValue;
@@ -25,7 +22,7 @@ const ZERO: Span = Span { line: 0, col: 0 };
 /// `b.len()` — octet count.
 fn bytes_len(args: &[VmValue]) -> Result<VmValue> {
     match &args[0] {
-        VmValue::Bytes(b) => Ok(VmValue::Int(b.len() as i64)),
+        VmValue::Bytes(b) => Ok(VmValue::Int(b.lock().len() as i64)),
         _ => Err(JadeError::TypeError { message: "bytes.len".to_string(), span: ZERO }),
     }
 }
@@ -42,13 +39,23 @@ fn bytes_len(args: &[VmValue]) -> Result<VmValue> {
 /// in `sh.exec` that `fs.read(p)` cannot.
 fn bytes_decode(args: &[VmValue]) -> Result<VmValue> {
     match &args[0] {
-        VmValue::Bytes(b) => match std::str::from_utf8(b.as_slice()) {
-            Ok(s) => Ok(VmValue::Str(jade_runtime::trust::JStr::with_trust(s, b.trust))),
-            Err(e) => Err(JadeError::Exception {
-                message: format!("bytes.decode(): not valid UTF-8 at byte {}", e.valid_up_to()),
-                span: ZERO,
-            }),
-        },
+        VmValue::Bytes(b) => {
+            let g = b.lock();
+            match std::str::from_utf8(g.as_slice()) {
+                Ok(s) => Ok(VmValue::Str(jade_runtime::trust::JStr::with_trust(s, g.trust))),
+                // A `TypeError`, not an `Exception`. `Exception` means a `raise`
+                // the program wrote, and the VM answers one by handing the catch
+                // block `state.raised_exception` — which a built-in never sets,
+                // so a caught `bytes.decode()` used to bind the bare string
+                // "unknown exception" while the compiled backend bound a proper
+                // `RuntimeError`. Every other variant routes through
+                // `make_vm_runtime_error`, which is what the two engines agree on.
+                Err(e) => Err(JadeError::TypeError {
+                    message: format!("bytes.decode(): not valid UTF-8 at byte {}", e.valid_up_to()),
+                    span: ZERO,
+                }),
+            }
+        }
         _ => Err(JadeError::TypeError { message: "bytes.decode".to_string(), span: ZERO }),
     }
 }
@@ -61,14 +68,146 @@ fn bytes_decode(args: &[VmValue]) -> Result<VmValue> {
 fn bytes_slice(args: &[VmValue]) -> Result<VmValue> {
     match (&args[0], args.get(1), args.get(2)) {
         (VmValue::Bytes(b), Some(VmValue::Int(s)), Some(VmValue::Int(e))) => {
-            let len = b.len() as i64;
+            let g = b.lock();
+            let len = g.len() as i64;
             let start = (*s).clamp(0, len) as usize;
             let end = (*e).clamp(start as i64, len) as usize;
-            Ok(VmValue::Bytes(Arc::new(BytesObj::new(b.as_slice()[start..end].to_vec(), b.trust))))
+            Ok(make_bytes(g.as_slice()[start..end].to_vec(), g.trust))
         }
         _ => Err(JadeError::TypeError { message: "bytes.slice".to_string(), span: ZERO }),
     }
 }
+
+// ── std::bytes ────────────────────────────────────────────────────────────────
+//
+// The three ways to *make* a blob. They are package functions and not methods
+// because they have no receiver, and because the method surface above is three
+// on purpose: `bytes` carries data through a program, it is not a second string
+// type with a parallel set of operations.
+
+/// `bytes.zeros(n)` — `n` zeroed octets, trusted.
+///
+/// Trusted because the program wrote them. Nothing here came from a file, a
+/// socket, or an argument.
+fn pkg_zeros(args: &[VmValue]) -> Result<VmValue> {
+    let n = match args.first() {
+        Some(VmValue::Int(n)) => *n,
+        Some(other) => {
+            return Err(JadeError::TypeError {
+                message: format!(
+                    "bytes.zeros() expects an int, got {}",
+                    crate::vm::value_type_name(other)
+                ),
+                span: ZERO,
+            });
+        }
+        None => return Err(JadeError::ArityMismatch { expected: 1, got: 0, span: ZERO }),
+    };
+    jade_runtime::bytesf::zeros(n)
+        .map(make_trusted_bytes)
+        .map_err(|message| JadeError::TypeError { message, span: ZERO })
+}
+
+/// `bytes.from_ints(arr)` — a blob from an array of octet values.
+///
+/// The one way to build a blob holding octets a string cannot carry: a zero
+/// terminates a Jade string, and anything above 127 encodes as two octets
+/// through `str.encode()` rather than one.
+///
+/// The result is trusted, and an int carries no trust anywhere in Jade, so a
+/// program that walks a tainted blob out into ints and back gets a trusted one.
+/// That edge is real and documented rather than closed: trust follows values,
+/// and an int is not one that holds any.
+fn pkg_from_ints(args: &[VmValue]) -> Result<VmValue> {
+    let arr = match args.first() {
+        Some(VmValue::Array(a)) => a,
+        Some(_) => {
+            return Err(JadeError::TypeError {
+                message: jade_runtime::bytesf::not_an_array(),
+                span: ZERO,
+            });
+        }
+        None => return Err(JadeError::ArityMismatch { expected: 1, got: 0, span: ZERO }),
+    };
+    let guard = arr.lock();
+    let mut data = Vec::with_capacity(guard.len());
+    for (i, el) in guard.as_slice().iter().enumerate() {
+        let VmValue::Int(n) = el else {
+            return Err(JadeError::TypeError {
+                message: jade_runtime::bytesf::non_int_element(i),
+                span: ZERO,
+            });
+        };
+        match jade_runtime::bytesf::octet(i, *n) {
+            Ok(b) => data.push(b),
+            Err(message) => return Err(JadeError::TypeError { message, span: ZERO }),
+        }
+    }
+    Ok(make_trusted_bytes(data))
+}
+
+/// `bytes.concat(a, b)` — the octets of `a` then those of `b`, in a new blob.
+///
+/// Trust is the more restrictive of the two. See `jade_runtime::bytesf::concat`
+/// for why the other choice would be a laundering path.
+fn pkg_concat(args: &[VmValue]) -> Result<VmValue> {
+    match (args.first(), args.get(1)) {
+        (Some(VmValue::Bytes(a)), Some(VmValue::Bytes(b))) => {
+            // Two guards, and they must not be the same lock. `bytes.concat(b, b)`
+            // is a legal program, and `parking_lot::Mutex` is not reentrant, so
+            // taking the second guard on one blob would hang with no message.
+            if std::sync::Arc::ptr_eq(a, b) {
+                let g = a.lock();
+                return Ok(make_bytes(
+                    [g.as_slice(), g.as_slice()].concat(),
+                    jade_runtime::trust::combine(g.trust, g.trust),
+                ));
+            }
+            let (ga, gb) = (a.lock(), b.lock());
+            let out = jade_runtime::bytesf::concat(&ga, &gb);
+            Ok(make_bytes(out.data, out.trust))
+        }
+        // One argument at a time, and the first failure wins. The wording is
+        // `require_bytes_body`'s in `src/runtime_aot/common.c`, because both
+        // engines have to answer a bad argument the same way.
+        (Some(a), Some(b)) => {
+            let bad = if matches!(a, VmValue::Bytes(_)) { b } else { a };
+            Err(JadeError::TypeError {
+                message: format!(
+                    "bytes.concat expects bytes, got {}",
+                    crate::vm::value_type_name(bad)
+                ),
+                span: ZERO,
+            })
+        }
+        _ => Err(JadeError::ArityMismatch { expected: 2, got: args.len(), span: ZERO }),
+    }
+}
+
+static BYTES_PKG_FNS: &[BuiltinFn] = &[
+    BuiltinFn { name: "zeros", vm_impl: pkg_zeros },
+    BuiltinFn { name: "from_ints", vm_impl: pkg_from_ints },
+    BuiltinFn { name: "concat", vm_impl: pkg_concat },
+];
+
+fn register_bytes_pkg_types(ctx: &mut TypeContext) {
+    ctx.define("bytes".to_string(), JadeType::Unknown);
+}
+
+/// The package binds a global named `bytes`, which is also the name of the
+/// type. The two do not collide, because `bytes` is not a type *constructor*:
+/// `int`, `float`, `bool`, `str`, `char` and `func` are seeded as `TypeRef`
+/// globals and callable, and `bytes` deliberately is not. Keep it that way. If
+/// `bytes` ever joins that list, importing the package would silently overwrite
+/// the constructor and `bytes(x)` would work only in files that did *not*
+/// import it.
+pub static BYTES_PKG: Package = Package {
+    import_name: "std/bytes",
+    global_name: "bytes",
+    fns: BYTES_PKG_FNS,
+    natives: &[],
+    register_types: register_bytes_pkg_types,
+};
 
 pub(crate) static BYTES_METHODS: &[BuiltinFn] = &[
     BuiltinFn { name: "len", vm_impl: bytes_len },

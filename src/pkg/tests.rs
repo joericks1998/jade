@@ -1428,10 +1428,7 @@ fn a_row_of_structs_is_readable_end_to_end() {
     let disasm = callable("d_disasm");
     let at = callable("insn_at");
 
-    let code = crate::vm::VmValue::Bytes(std::sync::Arc::new(jade_runtime::bytesf::BytesObj::new(
-        vec![0x55, 0x48, 0xc3],
-        jade_runtime::trust::TRUSTED,
-    )));
+    let code = crate::builtins::make_trusted_bytes(vec![0x55, 0x48, 0xc3]);
     let result = disasm.call(&[code], span).expect("the call must not raise on success");
 
     // Two things back: how many, and the row.
