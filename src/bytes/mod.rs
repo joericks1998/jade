@@ -153,19 +153,41 @@ fn pkg_from_ints(args: &[VmValue]) -> Result<VmValue> {
 fn pkg_concat(args: &[VmValue]) -> Result<VmValue> {
     match (args.first(), args.get(1)) {
         (Some(VmValue::Bytes(a)), Some(VmValue::Bytes(b))) => {
-            // Two guards, and they must not be the same lock. `bytes.concat(b, b)`
-            // is a legal program, and `parking_lot::Mutex` is not reentrant, so
-            // taking the second guard on one blob would hang with no message.
-            if std::sync::Arc::ptr_eq(a, b) {
+            // One guard at a time, never two.
+            //
+            // The obvious spelling, `let (ga, gb) = (a.lock(), b.lock())`, takes
+            // the two locks in *argument* order, and that is a deadlock. Tasks
+            // run on real threads over one heap, so `concat(x, y)` on one thread
+            // and `concat(y, x)` on another each end up holding what the other
+            // is waiting for. `parking_lot` parks with no timeout, no panic and
+            // no message, so the process simply stops. Ordering the two
+            // acquisitions by address would fix that too, but taking one at a
+            // time leaves no ordering rule for anyone to get wrong later, and it
+            // costs nothing: each guard is held for one append.
+            //
+            // It also removes the `concat(b, b)` special case this used to
+            // need. Two guards on one blob would have hung on the spot, since
+            // `parking_lot::Mutex` is not reentrant.
+            //
+            // The lengths are read before the payloads and are not re-read.
+            // Nothing in the language changes a blob's length: there is no
+            // `push` and no `truncate`, only `b[i] = v`, which writes in place.
+            let a_len = a.lock().len();
+            let b_len = b.lock().len();
+            let n = jade_runtime::bytesf::joined_len(a_len, b_len)
+                .map_err(|message| JadeError::TypeError { message, span: ZERO })?;
+            let mut data = Vec::with_capacity(n);
+            let a_trust = {
                 let g = a.lock();
-                return Ok(make_bytes(
-                    [g.as_slice(), g.as_slice()].concat(),
-                    jade_runtime::trust::combine(g.trust, g.trust),
-                ));
-            }
-            let (ga, gb) = (a.lock(), b.lock());
-            let out = jade_runtime::bytesf::concat(&ga, &gb);
-            Ok(make_bytes(out.data, out.trust))
+                data.extend_from_slice(g.as_slice());
+                g.trust
+            };
+            let b_trust = {
+                let g = b.lock();
+                data.extend_from_slice(g.as_slice());
+                g.trust
+            };
+            Ok(make_bytes(data, jade_runtime::bytesf::concat_trust(a_trust, b_trust)))
         }
         // One argument at a time, and the first failure wins. The wording is
         // `require_bytes_body`'s in `src/runtime_aot/common.c`, because both

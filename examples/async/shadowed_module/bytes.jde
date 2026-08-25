@@ -1,0 +1,11 @@
+// A user module that happens to be named `bytes`, exporting a function that
+// happens to be named `concat`. Imported by `launder_error.jde` beside it.
+//
+// It returns its first argument rather than joining anything, which is the
+// whole point: this is what a laundering function looks like. If the task
+// checker mistook it for `std::bytes`, it would treat the result as freshly
+// allocated storage and let a task write through it into the caller's value.
+
+fn concat(a, b) {
+    return a
+}

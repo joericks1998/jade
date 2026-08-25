@@ -342,10 +342,17 @@ fn step(
             }
         }
         SetIndexGlobal(name, _, _) => {
-            // Writing *into* a global collection is a write to shared state for
-            // the same reason `SetGlobal` is. The only difference is that the
-            // binding survives, which is not the part that races.
-            e.mutates_shared = true;
+            // `writes_global` and not `mutates_shared`, because this *is* a
+            // write to a global: the only difference from `SetGlobal` is that
+            // the binding survives, which is not the part that races.
+            //
+            // The flag decides how the effect travels. `writes_global` reaches a
+            // caller unconditionally, while `mutates_shared` reaches one only
+            // when a shared value is passed in as an argument. Marked the wrong
+            // way, a task calling a *zero-argument* helper that wrote a global
+            // collection was not rejected, though the same write spelled inline
+            // was.
+            e.writes_global = true;
             found.push((format!("assigns into the global `{name}`"), span));
         }
         SetField(o, field, _) => {
@@ -455,15 +462,33 @@ pub fn check(
     let table = FnTable::collect(top, extend_methods);
     let n = table.fns.len();
 
-    // Every global the program assigns anywhere. A user variable shadows a
-    // stdlib module name, so `bytes.zeros(n)` stops counting as a constructor
-    // call the moment a program binds a global called `bytes`. Mirrors the
-    // `user_globals` set `codegen` builds for the same reason.
+    // Every global name the program binds itself, whether by assigning it or by
+    // importing under it. A user binding shadows a stdlib module name, so
+    // `bytes.zeros(n)` stops counting as a constructor call the moment the
+    // program binds `bytes` of its own.
+    //
+    // `ImportFile` matters as much as `SetGlobal` here, and is easier to miss:
+    // `use bytes` next to a user file named `bytes.jde` binds the global with no
+    // assignment anywhere. A `concat` exported from that file returning one of
+    // its arguments would then have been read as a fresh allocation, handing
+    // back a live alias with its taint stripped. `jade run` accepted a program
+    // that mutated the spawner's array from two tasks at once.
     let mut user_globals: HashSet<String> = HashSet::new();
     for chunk in std::iter::once(top).chain(table.fns.iter().map(|f| &f.chunk)) {
         for instr in &chunk.code {
-            if let Instr::SetGlobal(n, _) = instr {
-                user_globals.insert(n.clone());
+            match instr {
+                Instr::SetGlobal(n, _) => {
+                    user_globals.insert(n.clone());
+                }
+                // A *user* file only. `use std::bytes` is an `ImportFile` too,
+                // with the package's own import name as its path, and counting
+                // that one would make the package permanently shadow itself.
+                Instr::ImportFile(path, namespace) => {
+                    if crate::builtins::find_package(path).is_none() {
+                        user_globals.insert(namespace.clone());
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -651,6 +676,24 @@ mod tests {
             "#,
         );
         assert!(e.contains("shared"), "a passed buffer is not the task's: {e}");
+    }
+
+    /// The flag a violation sets decides how far it travels. `writes_global`
+    /// reaches a caller unconditionally; `mutates_shared` reaches one only when
+    /// a shared value is passed as an argument. So a `SetIndexGlobal` marked as
+    /// shared mutation was invisible through a zero-argument helper, though the
+    /// same write spelled inline was caught.
+    #[test]
+    fn writing_a_global_collection_through_a_helper_is_rejected() {
+        let e = rejection(
+            r#"
+            let d = {}
+            fn helper() { d["k"] = 1 }
+            async fn worker() { helper() }
+            await worker()
+            "#,
+        );
+        assert!(e.contains("helper"), "should name the helper it travelled through: {e}");
     }
 
     #[test]

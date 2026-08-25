@@ -208,6 +208,51 @@ fn concat_of_a_blob_with_itself_does_not_deadlock() {
     assert_eq!(octets(&out), vec![7, 8, 7, 8]);
 }
 
+/// The deadlock the reentrant guard above did *not* cover: two threads joining
+/// the same pair of blobs in opposite orders. Holding both guards at once takes
+/// them in argument order, so each thread ends up waiting on what the other
+/// holds, and `parking_lot` parks with no timeout and no message.
+///
+/// It hangs rather than fails if that returns, which is what the watchdog is
+/// for: the assertion has to run on this thread, because a hung worker can
+/// never report anything.
+#[test]
+fn two_threads_joining_one_pair_in_opposite_orders_do_not_deadlock() {
+    use std::sync::mpsc;
+
+    let a = blob(vec![1, 2], TRUSTED);
+    let b = blob(vec![3, 4], TRUSTED);
+    let (tx, rx) = mpsc::channel();
+
+    for (l, r) in [(a.clone(), b.clone()), (b, a)] {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            for _ in 0..20_000 {
+                let _ = pkg_concat(&[l.clone(), r.clone()]);
+            }
+            let _ = tx.send(());
+        });
+    }
+    drop(tx);
+
+    for _ in 0..2 {
+        rx.recv_timeout(std::time::Duration::from_secs(30))
+            .expect("bytes.concat deadlocked: two threads took its two locks in argument order");
+    }
+}
+
+/// Two blobs that each fit in the header's `u32` can add up to one that does
+/// not, and the compiled backend reads `len()` off that header while the VM
+/// reads the vector. Refusing is what keeps the two answering the same thing.
+///
+/// Checked through the length arithmetic rather than by allocating 4 GiB.
+#[test]
+fn concat_refuses_a_result_past_the_header_limit() {
+    use jade_runtime::bytesf::{MAX_LEN, joined_len};
+    assert!(joined_len(MAX_LEN, 1).is_err());
+    assert_eq!(joined_len(2, 3).expect("small"), 5);
+}
+
 /// A blob is reference-semantic now, so two names for one buffer see one write.
 /// Cloning a `VmValue::Bytes` is a refcount bump and never a copy.
 #[test]

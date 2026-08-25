@@ -190,13 +190,20 @@ fn fs_read_bytes(args: &[VmValue]) -> Result<VmValue> {
         .map_err(|e| io_err("read_bytes", path, e))
 }
 
-/// The octets a `bytes` argument carries, for the write paths.
+/// Run `f` over the octets a `bytes` argument carries, for the write paths.
 ///
-/// Copied out rather than borrowed. A blob lives behind a lock now, and a
-/// borrow of the payload cannot outlive the guard that made it safe to read.
-fn require_bytes(args: &[VmValue], pos: usize, who: &str) -> Result<Vec<u8>> {
+/// A callback rather than a returned slice, because a blob lives behind a lock
+/// and a borrow of the payload cannot outlive the guard that made it safe to
+/// read. Returning an owned `Vec` would compile just as well and would copy the
+/// whole buffer on every call, which is the wrong shape for a function whose
+/// entire job is writing a large one to disk.
+///
+/// The guard is held across `f`, so `f` must not touch the same blob again:
+/// `parking_lot::Mutex` is not reentrant. Every caller here hands the octets
+/// straight to `jade_runtime::fsf`, which knows nothing about Jade values.
+fn with_bytes<R>(args: &[VmValue], pos: usize, who: &str, f: impl FnOnce(&[u8]) -> R) -> Result<R> {
     match args.get(pos) {
-        Some(VmValue::Bytes(b)) => Ok(b.lock().as_slice().to_vec()),
+        Some(VmValue::Bytes(b)) => Ok(f(b.lock().as_slice())),
         Some(other) => Err(JadeError::TypeError {
             message: format!("{who} expects bytes, got {}", crate::vm::value_type_name(other)),
             span: ZERO,
@@ -210,8 +217,7 @@ fn fs_write_bytes(args: &[VmValue]) -> Result<VmValue> {
         return Err(JadeError::ArityMismatch { expected: 2, got: args.len(), span: ZERO });
     }
     let path = require_str(args, 0, "fs.write_bytes")?;
-    let data = require_bytes(args, 1, "fs.write_bytes")?;
-    jade_runtime::fsf::write_bytes(path, &data)
+    with_bytes(args, 1, "fs.write_bytes", |data| jade_runtime::fsf::write_bytes(path, data))?
         .map(|_| VmValue::Nil)
         .map_err(|e| io_err("write_bytes", path, e))
 }
@@ -221,8 +227,7 @@ fn fs_append_bytes(args: &[VmValue]) -> Result<VmValue> {
         return Err(JadeError::ArityMismatch { expected: 2, got: args.len(), span: ZERO });
     }
     let path = require_str(args, 0, "fs.append_bytes")?;
-    let data = require_bytes(args, 1, "fs.append_bytes")?;
-    jade_runtime::fsf::append_bytes(path, &data)
+    with_bytes(args, 1, "fs.append_bytes", |data| jade_runtime::fsf::append_bytes(path, data))?
         .map(|_| VmValue::Nil)
         .map_err(|e| io_err("append_bytes", path, e))
 }
@@ -242,8 +247,7 @@ fn fs_write_stdout_bytes(args: &[VmValue]) -> Result<VmValue> {
     if args.len() != 1 {
         return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: ZERO });
     }
-    let data = require_bytes(args, 0, "fs.write_stdout_bytes")?;
-    jade_runtime::fsf::write_stdout_bytes(&data)
+    with_bytes(args, 0, "fs.write_stdout_bytes", jade_runtime::fsf::write_stdout_bytes)?
         .map(|_| VmValue::Nil)
         .map_err(|e| io_err("write_stdout_bytes", "<stdout>", e))
 }

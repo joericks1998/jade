@@ -823,6 +823,18 @@ async fn render(n) {
 }
 ```
 
+"Allocated itself" means one of the three functions above. A blob from `str.encode()` or from `b.slice()` is just as fresh, but the checker cannot tell those apart from a method of the same name on some other type, so it refuses rather than guess. Inside a task, join the blob to an empty one first, which gives you a buffer the checker knows is yours:
+
+```jade
+async fn patch(text) {
+    let buf = bytes.concat(text.encode(), bytes.zeros(0))
+    buf[0] = 65
+    return buf
+}
+```
+
+None of this applies outside a task. An ordinary function may write into any blob it can reach.
+
 ---
 
 ## LLM inference
