@@ -1,0 +1,100 @@
+// A bytes value is a buffer a program can write into.
+//
+// Reading an octet was always spelled `b[i]`, so writing one is spelled
+// `b[i] = v`. An octet is an int in 0 to 255 and never a char: a byte is not a
+// Unicode scalar, and `b[0]` and `s[0]` mean different things on any input that
+// is not ASCII.
+//
+// Both write paths appear below on purpose. A module-level binding compiles to
+// `SetIndexGlobal` and a local inside a function compiles to `SetIndex`, and
+// they are separate instructions in both engines. A fixture that only wrote to
+// one of them would leave the other untested.
+
+use std::bytes
+
+// The module-level path.
+let buf = bytes.zeros(4)
+buf[0] = 255
+buf[3] = 1
+print(buf)
+print(buf[0])
+print(buf[3])
+
+// The local path: `dst` is a parameter, so the write is a different opcode.
+fn fill(dst, value) {
+    let i = 0
+    while i < len(dst) {
+        dst[i] = value
+        i = i + 1
+    }
+    return dst
+}
+
+print(fill(bytes.zeros(3), 7))
+
+// A blob is reference-semantic, the same as an array, so a function that writes
+// into its argument changes what the caller still holds.
+let shared = bytes.zeros(3)
+fill(shared, 2)
+print(shared)
+
+// Two names for one buffer see the same write.
+let alias = shared
+shared[1] = 9
+print(alias)
+
+// Writing into a blob that came from `from_ints` works the same way.
+let px = bytes.from_ints([1, 2, 3])
+px[1] = 200
+print(px)
+
+// Build a buffer octet by octet, then read it back as text.
+let word = bytes.zeros(4)
+word[0] = 106
+word[1] = 97
+word[2] = 100
+word[3] = 101
+print(word.decode())
+
+// A slice copies, so writing into the copy leaves the original alone.
+let copy = word.slice(0, 2)
+copy[0] = 74
+print(copy.decode())
+print(word.decode())
+
+// Every failure is catchable. As in `construct.jde`, these print a literal
+// rather than the caught message.
+try {
+    buf[9] = 1
+    print("NOT RAISED: an index past the end")
+} catch e {
+    print("refused an index past the end")
+}
+
+try {
+    buf[-1] = 1
+    print("NOT RAISED: a negative index")
+} catch e {
+    print("refused a negative index")
+}
+
+try {
+    buf[0] = 256
+    print("NOT RAISED: a value above 255")
+} catch e {
+    print("refused a value above 255")
+}
+
+try {
+    buf[0] = -1
+    print("NOT RAISED: a negative value")
+} catch e {
+    print("refused a negative value")
+}
+
+try {
+    buf[0] = "x"
+    print("NOT RAISED: a value that is not an int")
+} catch e {
+    print("refused a value that is not an int")
+}

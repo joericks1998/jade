@@ -65,6 +65,15 @@ use crate::frontend::error::Span;
 const MUTATING_METHODS: &[&str] =
     &["push", "pop", "insert", "remove", "clear", "sort", "reverse", "extend", "set", "update"];
 
+/// `std/bytes` functions that build a blob rather than hand one back.
+///
+/// Each returns storage nothing else points at, so taint stops at the call the
+/// same way it stops at `MakeArray` — which is what lets a task allocate its own
+/// buffer and write octets into it. Without this a task that does
+/// `let buf = bytes.zeros(64)` and then writes to `buf` is rejected for
+/// assigning into a shared collection, which is the opposite of true.
+const BYTES_CONSTRUCTORS: &[&str] = &["zeros", "from_ints", "concat"];
+
 /// What a function does to state it does not exclusively own.
 ///
 /// Both flags are "does this happen anywhere in the call tree", so they compose
@@ -169,22 +178,38 @@ struct Taint {
     /// reg holding a `GetField` result → (receiver reg, field name). Needed to
     /// recognize `arr.push(x)`, which emits `GetField` then `Call`.
     getfield: HashMap<Reg, (Reg, String)>,
+    /// reg → the global name it was loaded from. `bytes.zeros(n)` and
+    /// `buf.zeros(n)` are the same three opcodes, so where the receiver came
+    /// from is the only thing that tells the stdlib module from a user value.
+    reg_global: HashMap<Reg, String>,
     /// reg → the function it statically holds, for resolving call targets.
     reg_fn: HashMap<Reg, usize>,
+    /// Every global the *program* binds. Immutable and program-wide, but it
+    /// rides here rather than as a ninth argument to `step`: a user variable
+    /// shadows a stdlib module name, and the only question it answers is
+    /// whether `bytes` still means the module.
+    user_globals: HashSet<String>,
 }
 
 /// Analyze one function: what it does to shared state, and where.
 ///
 /// `eff` is the current (possibly incomplete) effect map for callees; the
 /// caller iterates this to a fixed point.
-fn analyze(f: &CompiledFn, table: &FnTable, eff: &[Effects]) -> (Effects, Vec<(String, Span)>) {
+fn analyze(
+    f: &CompiledFn,
+    table: &FnTable,
+    eff: &[Effects],
+    user_globals: &HashSet<String>,
+) -> (Effects, Vec<(String, Span)>) {
     let n_params = f.params.len() as u32;
     let mut t = Taint {
         regs: HashSet::new(),
         // Parameters arrive in slots 0..n and alias whatever the caller passed.
         slots: (0..n_params).collect(),
         getfield: HashMap::new(),
+        reg_global: HashMap::new(),
         reg_fn: HashMap::new(),
+        user_globals: user_globals.clone(),
     };
     let mut effects = Effects::default();
     let mut found: Vec<(String, Span)> = Vec::new();
@@ -225,6 +250,7 @@ fn step(
     // Any instruction writing `d` invalidates what `d` previously held.
     let clear = |t: &mut Taint, d: &Reg| {
         t.getfield.remove(d);
+        t.reg_global.remove(d);
         t.reg_fn.remove(d);
     };
 
@@ -232,6 +258,7 @@ fn step(
         // ── Sources of sharing ──────────────────────────────────────────────
         GetGlobal(d, name) => {
             clear(t, d);
+            t.reg_global.insert(*d, name.clone());
             // A global holds an object the whole program can see.
             t.regs.insert(*d);
             if let Some(&idx) = table.by_name.get(name) {
@@ -301,10 +328,32 @@ fn step(
             found.push((format!("writes to the global `{name}`"), span));
         }
         SetIndex(o, _, _) => {
-            if t.regs.contains(o) {
+            // `o` is the *slot* of the binding being written, not a register
+            // holding a copy of it: the emitter hands the instruction the
+            // binding so the write lands in place (see `TStmt::IndexAssign`).
+            // Slot taint lives in `slots`, so reading `regs` alone matched
+            // nothing at all, and `async fn f(arr) { arr[0] = 9 }` compiled
+            // clean while `arr.push(9)` next to it was correctly rejected.
+            // Slots and registers are drawn from one counter, so the two sets
+            // cannot borrow each other's numbers.
+            if t.slots.contains(o) || t.regs.contains(o) {
                 e.mutates_shared = true;
                 found.push(("assigns into a shared collection".to_string(), span));
             }
+        }
+        SetIndexGlobal(name, _, _) => {
+            // `writes_global` and not `mutates_shared`, because this *is* a
+            // write to a global: the only difference from `SetGlobal` is that
+            // the binding survives, which is not the part that races.
+            //
+            // The flag decides how the effect travels. `writes_global` reaches a
+            // caller unconditionally, while `mutates_shared` reaches one only
+            // when a shared value is passed in as an argument. Marked the wrong
+            // way, a task calling a *zero-argument* helper that wrote a global
+            // collection was not rejected, though the same write spelled inline
+            // was.
+            e.writes_global = true;
+            found.push((format!("assigns into the global `{name}`"), span));
         }
         SetField(o, field, _) => {
             if t.regs.contains(o) {
@@ -346,6 +395,13 @@ fn step(
                 }
             }
             clear(t, d);
+            // A `std/bytes` constructor is the one call whose result is not an
+            // alias of anything the caller holds: it returns storage it just
+            // made. Same reasoning as the `MakeArray` arm above.
+            if is_bytes_constructor(t, callee) {
+                t.regs.remove(d);
+                return;
+            }
             // An unresolved callee may return anything, including an alias of an
             // argument. Assume the worst so nothing launders taint through it.
             t.regs.insert(*d);
@@ -360,6 +416,24 @@ fn step(
             }
         }
     }
+}
+
+/// Whether `callee` holds `bytes.zeros`, `bytes.from_ints` or `bytes.concat`
+/// read off the stdlib module rather than off a user value.
+///
+/// `bytes.zeros(4)` and `buf.zeros(4)` compile to the same `GetGlobal` +
+/// `GetField` + `Call` triple, so the receiver's origin is what decides: it has
+/// to have come from `GetGlobal("bytes")`, and the program must not bind a
+/// global of that name itself. That is the same test `codegen::calls` uses to
+/// tell a module call from a value method, so the two passes cannot disagree
+/// about what `bytes.zeros` means.
+fn is_bytes_constructor(t: &Taint, callee: &Reg) -> bool {
+    let Some((recv, name)) = t.getfield.get(callee) else {
+        return false;
+    };
+    BYTES_CONSTRUCTORS.contains(&name.as_str())
+        && t.reg_global.get(recv).is_some_and(|g| g == "bytes")
+        && !t.user_globals.contains("bytes")
 }
 
 /// The register an instruction writes, for the catch-all taint-clearing arm.
@@ -388,6 +462,37 @@ pub fn check(
     let table = FnTable::collect(top, extend_methods);
     let n = table.fns.len();
 
+    // Every global name the program binds itself, whether by assigning it or by
+    // importing under it. A user binding shadows a stdlib module name, so
+    // `bytes.zeros(n)` stops counting as a constructor call the moment the
+    // program binds `bytes` of its own.
+    //
+    // `ImportFile` matters as much as `SetGlobal` here, and is easier to miss:
+    // `use bytes` next to a user file named `bytes.jde` binds the global with no
+    // assignment anywhere. A `concat` exported from that file returning one of
+    // its arguments would then have been read as a fresh allocation, handing
+    // back a live alias with its taint stripped. `jade run` accepted a program
+    // that mutated the spawner's array from two tasks at once.
+    let mut user_globals: HashSet<String> = HashSet::new();
+    for chunk in std::iter::once(top).chain(table.fns.iter().map(|f| &f.chunk)) {
+        for instr in &chunk.code {
+            match instr {
+                Instr::SetGlobal(n, _) => {
+                    user_globals.insert(n.clone());
+                }
+                // A *user* file only. `use std::bytes` is an `ImportFile` too,
+                // with the package's own import name as its path, and counting
+                // that one would make the package permanently shadow itself.
+                Instr::ImportFile(path, namespace) => {
+                    if crate::builtins::find_package(path).is_none() {
+                        user_globals.insert(namespace.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     // Fixed point over the call graph. Effects only ever turn on, so this
     // terminates; the bound guards against a bug in that reasoning rather than
     // against a real program.
@@ -396,7 +501,7 @@ pub fn check(
     for _ in 0..n.max(1) + 2 {
         let mut changed = false;
         for i in 0..n {
-            let (new_eff, new_sites) = analyze(&table.fns[i], &table, &eff);
+            let (new_eff, new_sites) = analyze(&table.fns[i], &table, &eff, &user_globals);
             if new_eff != eff[i] {
                 changed = true;
                 eff[i] = new_eff;
@@ -487,6 +592,108 @@ mod tests {
             Err(e) => e,
             Ok(()) => panic!("expected rejection, but the program compiled:\n{src}"),
         }
+    }
+
+    /// The hole that made `SetIndex` a no-op check. `arr[0] = 9` on a caller's
+    /// array compiled clean while `arr.push(9)` beside it was rejected, because
+    /// the emitter hands `SetIndex` the *slot* of the binding and the arm was
+    /// reading the register set. A real data race on both engines.
+    #[test]
+    fn task_assigning_into_a_passed_collection_is_rejected() {
+        let e = rejection(
+            r#"
+            async fn f(arr) { arr[0] = 9 }
+            let a = [1, 2]
+            await f(a)
+            "#,
+        );
+        assert!(e.contains("shared"), "should name the sharing: {e}");
+    }
+
+    /// The other half of the same hole: `SetIndexGlobal` had no arm at all, so
+    /// a task writing into a global collection was never rejected even though
+    /// rebinding that same global was.
+    #[test]
+    fn task_assigning_into_a_global_collection_is_rejected() {
+        let e = rejection(
+            r#"
+            let a = [1, 2]
+            async fn g() { a[0] = 9 }
+            await g()
+            "#,
+        );
+        assert!(e.contains('a'), "should name the global: {e}");
+    }
+
+    /// The bytes twin of `task_mutating_its_own_array_is_allowed`. A buffer a
+    /// task allocated itself is aliased by nothing, so writing octets into it
+    /// races with nothing either. Without the constructor exemption this is
+    /// rejected, which would leave `std::bytes` unusable inside a task.
+    #[test]
+    fn task_writing_into_a_buffer_it_allocated_is_allowed() {
+        compile(
+            r#"
+            use std::bytes
+            async fn build(n) {
+                let b = bytes.zeros(4)
+                b[0] = n
+                return b
+            }
+            let r = await build(7)
+            "#,
+        )
+        .expect("a task may write into a buffer it allocated itself");
+    }
+
+    /// `concat` takes two shared inputs and returns storage neither points at,
+    /// so its result is writable even when both arguments came from outside.
+    #[test]
+    fn task_writing_into_a_concat_result_is_allowed() {
+        compile(
+            r#"
+            use std::bytes
+            async fn join(a, b) {
+                let out = bytes.concat(a, b)
+                out[0] = 1
+                return out
+            }
+            let r = await join("a".encode(), "b".encode())
+            "#,
+        )
+        .expect("concat returns a fresh blob");
+    }
+
+    /// A caller's blob is still the caller's. The exemption is for what the
+    /// constructor returns, not for every blob in sight.
+    #[test]
+    fn task_writing_into_a_passed_buffer_is_rejected() {
+        let e = rejection(
+            r#"
+            use std::bytes
+            async fn f(b) { b[0] = 1 }
+            let buf = bytes.zeros(2)
+            await f(buf)
+            "#,
+        );
+        assert!(e.contains("shared"), "a passed buffer is not the task's: {e}");
+    }
+
+    /// The flag a violation sets decides how far it travels. `writes_global`
+    /// reaches a caller unconditionally; `mutates_shared` reaches one only when
+    /// a shared value is passed as an argument. So a `SetIndexGlobal` marked as
+    /// shared mutation was invisible through a zero-argument helper, though the
+    /// same write spelled inline was caught.
+    #[test]
+    fn writing_a_global_collection_through_a_helper_is_rejected() {
+        let e = rejection(
+            r#"
+            let d = {}
+            fn helper() { d["k"] = 1 }
+            async fn worker() { helper() }
+            await worker()
+            "#,
+        );
+        assert!(e.contains("helper"), "should name the helper it travelled through: {e}");
     }
 
     #[test]

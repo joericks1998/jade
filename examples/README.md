@@ -1,53 +1,61 @@
-# `examples/` — the language fixture suite
+# `examples/`: the language fixture suite
 
 ## What this subtree is
 
-Every `.jde` file here is a test fixture, not a demo. CI type-checks all of them on every pull request and runs most of them through *both* execution engines, diffing the output. Together they are the closest thing Jade has to a specification of its own surface.
+Every `.jde` file here is a test fixture, not a demo. CI type-checks all of them on every pull request, and runs most of them through *both* execution engines, diffing the output. Together they are the closest thing Jade has to a specification of its own surface.
 
-They are also the intended starting point for a language change. The established workflow is: **write the `.jde` fixture first, then make the Rust match it.** Doing it in that order tends to surface design problems before you have built on top of them.
+They are also where a language change should start. The established workflow is simple: *write the `.jde` fixture first, then make the Rust match it*. Working in that order tends to surface design problems before you have built on top of them.
 
 ## How the naming works
 
 Two rules, both enforced by CI:
 
-- `<name>.jde` must **pass** `jade check`.
-- `<name>_error.jde` must **fail** `jade check`. These document programs the language deliberately rejects, so one that quietly starts passing is a CI failure too.
+- `<name>.jde` must *pass* `jade check`.
+- `<name>_error.jde` must *fail* `jade check`. These document programs the language deliberately rejects, so one that quietly starts passing is also a CI failure.
 
-A third rule applies to the whole tree: it stays formatted, and CI runs `jade fmt --check examples` to hold it there. That is as much a test of the formatter as of the fixtures. `jade fmt` is the one command nothing else here exercises, and it rotted badly enough by v1.1.34 to be reindenting the inside of multi-line strings — changing what a program printed, in place. Run `jade fmt examples` before committing a new fixture. Four spaces per level.
+A third rule applies to the whole tree: it stays formatted, and CI runs `jade fmt --check examples` to hold it there. That is as much a test of the formatter as of the fixtures. `jade fmt` is the one command nothing else here exercises, and by v1.1.34 it had rotted badly enough to reindent the inside of multi-line strings, changing what a program printed. Run `jade fmt examples` before committing a new fixture. Four spaces per level.
 
 ## What is in here
 
-One directory per language area, each with a subdirectory per case:
+There is one directory per language area, and one subdirectory inside it per case:
 
 `arithmatic/` (arithmetic, bitwise, unary) · `arrays/` · `assignment/` · `async/` · `closures/` · `collections/` · `control_flow/` · `decorators/` · `dicts/` · `exceptions/` · `for_loop/` · `fs/` · `functions/` · `http/` · `imports/` · `interfaces/` · `llm/` · `llvm/` · `numbers/` · `pipe/` · `streams/` · `strings/` · `structs/` · `time/` · `trust/` · `uhttp/`
 
-Three fixtures pin the v1.3.3 fixes, and each fails on the pre-fix build. `trust/sh_sinks/` feeds a shell command's own output back into all three `sh` functions; `sh.output` used to run it. `dicts/dot_access/` reads dict entries with a dot, which raised "value has no fields" compiled and worked interpreted. `async/nested_async_error.jde` nests an `async fn`, which used to parse and then fail at run time on a variable the inner function could not see.
+Three fixtures pin the v1.3.3 fixes, and each one fails on a build from before those fixes. `trust/sh_sinks/` feeds a shell command's own output back into all three `sh` functions, and `sh.output` used to run it. `dicts/dot_access/` reads dict entries with a dot, which raised "value has no fields" when compiled and worked when interpreted. `async/nested_async_error.jde` nests an `async fn`, which used to parse and then fail at run time on a variable the inner function could not see.
 
-`decorators/` covers `@dec` on a `let` and on a `prompt`, which the parser rewrites into a call. `prompt_tags/` has its wrapper print what it built, because there is otherwise nothing to assert against: a prompt renders as `<prompt>`, so a fixture cannot observe its text any other way. Decorators on `fn`, `struct` and `extend` are older and are exercised by unit tests in `src/frontend/tests.rs` rather than here.
+`decorators/` covers `@dec` on a `let` and on a `prompt`, both of which the parser rewrites into a call. In `prompt_tags/`, the wrapper prints what it built, because there is otherwise nothing to assert against. A prompt renders as `<prompt>`, so a fixture cannot observe its text any other way. Decorators on `fn`, `struct`, and `extend` are older, and unit tests in `src/frontend/tests.rs` exercise those rather than fixtures here.
 
-`llm/` is worth calling out. Those fixtures do real prompt dereferences, and they are still deterministic in CI because `src/scripts/backend-parity.sh` installs `src/scripts/fake-provider.jde` as a stand-in inference provider answering with a canned reply. An example supplies its own reply as a `responses.txt` beside the `.jde`; without one it gets the default. Pointing the parity gate at these turned up a VM muting bug and an AOT segfault immediately.
+`llm/` is worth calling out. Those fixtures do real prompt dereferences, and they still give the same answer every time in CI, because `src/scripts/backend-parity.sh` installs `src/scripts/fake-provider.jde` as a stand-in inference provider that answers with a canned reply. An example supplies its own reply as a `responses.txt` beside the `.jde`, and gets the default without one. Pointing the parity gate at these turned up a VM muting bug and an AOT segfault immediately.
 
-`exceptions/error_values/` pins the *shape* of a caught error: a `RuntimeError` struct with a `message` field, matching on a typed catch. The compiled backend used to raise the bare message string, so `e.message` worked interpreted and raised compiled. It checks messages by substring, not equality, because the interpreter prefixes `[line:col]` and a compiled binary has no span at runtime — the one difference that remains on purpose.
+`exceptions/error_values/` pins the *shape* of a caught error: a `RuntimeError` struct with a `message` field, matched by a typed catch. The compiled backend used to raise the bare message string, so `e.message` worked when interpreted and raised when compiled. The fixture checks messages by substring rather than by equality, because the interpreter adds a `[line:col]` prefix and a compiled binary has no source position at run time. That is the one difference that remains on purpose.
 
-`control_flow/break_continue/` and `exceptions/break_from_catch/` cover the two halves of `break`, added in v1.3.6. The first is the ordinary shape — leaving a `for`, leaving a `while true`, and leaving only the innermost of two nested loops. The second is the one with a trap in it: leaving through a `catch` arm, and leaving from the `try` body itself. Both have to pop the handler the jump escapes, so both end by raising again and catching it, which fails loudly if a stale frame was left installed.
+`control_flow/break_continue/` and `exceptions/break_from_catch/` cover the two halves of `break`, added in v1.3.6. The first is the ordinary shape: leaving a `for`, leaving a `while true`, and leaving only the innermost of two nested loops. The second is the one with a trap in it: leaving through a `catch` arm, and leaving from the `try` body itself. Both have to pop the handler the jump escapes, so both end by raising again and catching it, which fails loudly if a stale frame was left installed.
 
-Three fixtures exist to pin the AOT memory bugs fixed in v1.1.34, and each one *fails on the pre-fix backend* — that is what makes them worth keeping. `dicts/nested_get/` reads a module-level dict of dicts through `.get()` until a missing retain double-frees the inner dict. `collections/method_type_guard/` calls primitive methods on receivers of the wrong kind, which used to segfault instead of raising. `exceptions/return_inside_try/` returns out of a `try`, which leaked a handler frame pointing at dead stack; before the fix that fixture does not crash, it *spins forever*, so run it under a timeout if you ever test against an old binary. All three are ordinary parity examples — nothing about them is special-cased in the gate.
+Three more fixtures pin the AOT memory bugs fixed in v1.1.34, and each one *fails on the backend from before those fixes*. That is what makes them worth keeping.
 
-`imports/missing_error/` names a module that does not exist. It is the fixture for the gap v1.1.33 closed: `jade check` used to accept it and let it fail at run time instead, because import resolution was not a compile stage. The `*_error` convention it follows now covers imports, since the harness in `cli/check.rs` checks a fixture *by path* rather than by source text — a `use` cannot be resolved without knowing which file asked for it.
+`dicts/nested_get/` reads a module-level dict of dicts through `.get()` until a missing retain double-frees the inner dict. `collections/method_type_guard/` calls primitive methods on receivers of the wrong kind, which used to segfault rather than raise. `exceptions/return_inside_try/` returns out of a `try`, which leaked a handler frame pointing at dead stack. Before the fix, that fixture does not crash, it *spins forever*, so run it under a timeout if you ever test against an old binary.
 
-`imports/project_lib/` is the other odd one: it carries its own `jade.toml`, making it a project inside the fixture tree. That is deliberate. The gate runs every example from the repo root, so a fixture whose imports depend on *its own* project root is the only way to catch the two engines disagreeing about where that root is — which they did until v1.1.31, the VM reading it from the shell's directory and the AOT from the source file's. Its importing file sits under `app/` so the target directory is out of relative-path reach and the `[lib]` entry is genuinely exercised.
+All three are ordinary parity examples. The gate special-cases none of them.
+
+`imports/missing_error/` names a module that does not exist. It is the fixture for the gap v1.1.33 closed. `jade check` used to accept it and let it fail at run time instead, because import resolution was not a compile stage. The `*_error` convention now covers imports too, because the harness in `cli/check.rs` checks a fixture *by path* rather than by source text. A `use` cannot be resolved without knowing which file asked for it.
+
+`imports/project_lib/` is the other odd one. It carries its own `jade.toml`, which makes it a project inside the fixture tree, and that is deliberate.
+
+The gate runs every example from the repository root. So a fixture whose imports depend on *its own* project root is the only way to catch the two engines disagreeing about where that root is. They did disagree until v1.1.31, with the VM reading it from the shell's directory and the AOT path reading it from the source file's.
+
+Its importing file sits under `app/`, so the target directory is out of relative-path reach and the `[lib]` entry is genuinely exercised.
 
 ## Who uses it
 
-*Used by:* `.github/workflows/ci.yml` runs `jade check` over every fixture, and `jade fmt --check` over the tree. `src/scripts/backend-parity.sh` runs each one on the VM and the AOT backend and diffs stdout. The `docs/` site draws on several of them for its examples.
+*Used by:* `.github/workflows/ci.yml`, which runs `jade check` over every fixture and `jade fmt --check` over the tree. `src/scripts/backend-parity.sh` runs each fixture on the VM and on the AOT backend and diffs stdout. The `docs/` site draws on several of them for its examples.
 
 *Depends on:* only the `jade` binary. Fixtures never import from the Rust tree.
 
 ## Gotchas
 
-**Fixtures are type-checked, never run, by the `jade check` gate.** That is what lets them depend on a network or an API key at run time. The flip side is that a fixture can type-check happily while printing something its own comments contradict. If the *behavior* matters, write a Rust test as well — `run_src` and `run_src_with_mock` in `src/vm/tests.rs` are the helpers for that.
+*The `jade check` gate type-checks fixtures and never runs them.* That is what lets them depend on a network or an API key at run time. The tradeoff is that a fixture can type-check happily while printing something its own comments contradict. When the *behavior* matters, write a Rust test as well. `run_src` and `run_src_with_mock` in `src/vm/tests.rs` are the helpers for that.
 
-The parity script maintains a skip list for examples that cannot run identically on both engines. Check its header before assuming an example is covered.
+The parity script keeps a skip list for examples that cannot run identically on both engines. Check its header before assuming an example is covered.
 
 ## Running them
 

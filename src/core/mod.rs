@@ -40,7 +40,7 @@ fn native_len(args: &[VmValue]) -> Result<VmValue> {
         // A character has length 1, the same answer `len` gave when indexing a
         // string produced a one-character string.
         VmValue::Char(_) => 1,
-        VmValue::Bytes(b) => b.len() as i64,
+        VmValue::Bytes(b) => b.lock().len() as i64,
         VmValue::Stream(b) => b.lock().len() as i64,
         VmValue::Array(a) => a.lock().len() as i64,
         VmValue::Dict(d) => d.len() as i64,

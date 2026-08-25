@@ -4,6 +4,48 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.3.27
+
+*A program can build a `bytes` value now, and write into one.* Until this release the only ways to get a blob were `str.encode()` and reading one off a disk or a socket. Neither builds an arbitrary buffer: a Jade string is UTF-8 and NUL-terminated, so a zero byte truncates it and any value above 127 encodes as two octets rather than one. Everything downstream already worked, including the FFI shim's pointer-and-length mapping, so a Jade program could receive a pixel buffer from a C library and never make one.
+
+`std::bytes` is the new package, with three functions:
+
+```jade
+use std::bytes
+
+let buf = bytes.zeros(1024)
+let mask = bytes.from_ints([255, 128, 0, 255])
+let atlas = bytes.concat(buf, mask)
+```
+
+Writing one octet is spelled `b[i] = v`, the same way an array works, and the value is an int from 0 to 255. Construction is a package rather than three more methods because a constructor has no receiver, and because the method surface is three on purpose. See [`std/bytes`](stdlib#stdbytes).
+
+*A blob is now reference-semantic.* Two names for one buffer see the same write, and a function that writes into its argument changes what the caller still holds. That is how an array already behaves and it is what makes a buffer useful, but it is a change to an existing type: a blob taken out of a dict or an array is shared with what it came from rather than copied. `slice` still copies.
+
+*Two data races in the concurrency checker are closed.* Both are older than this release, and both got much easier to reach now that a buffer is the obvious thing to write into. `SetIndex` was reading the wrong taint set, so `async fn f(arr) { arr[0] = 9 }` compiled clean while `arr.push(9)` beside it was correctly rejected. `SetIndexGlobal` had no check at all, so a task writing into a global collection was never refused even though rebinding that same global was. And a write to a global collection reached a caller only when a shared value was passed with it, so the same write behind a zero-argument helper was invisible. All three are now rejected at compile time. A program that was relying on any of them will stop compiling, which is the point.
+
+A task may still write into a buffer it allocated itself. The three `std::bytes` constructors return storage nothing else points at, so the checker treats them the way it already treats an array literal. It recognises them by the module they came from rather than by the spelling, so a user file named `bytes.jde` exporting its own `concat` gets no exemption.
+
+Two shapes that used to compile no longer do, both inside a task and neither of them about blobs in particular: rebinding a parameter to a fresh collection and then writing into it, and writing into a blob that came from `str.encode()` or `b.slice()`. Both really are freshly allocated, and the checker cannot prove it, so it refuses rather than guess. Joining to an empty blob with `bytes.concat` gives you one it can prove. Nothing changes outside a task.
+
+*Fixed: a caught built-in error was a different type on each engine.* `JadeError::Exception` means a `raise` the program wrote, and the VM answers one by handing the catch block the value that was raised, which a built-in never sets. `bytes.decode()` was raising it, so catching an invalid-UTF-8 failure bound the bare string `"unknown exception"` under `jade run` and a `RuntimeError` struct under `jade build`. Reading `e.message` worked on one engine and failed on the other. It now raises what every other built-in raises, and a test pins the rule for the whole type.
+
+*Also:* `s.encode().len()` types as `int` rather than `unknown`. The table of `bytes` method signatures had been filled in from the start and nothing ever read it. And `bytes.concat` refuses a result past the 4,294,967,295 octet limit `bytes.zeros` already refused, since the object header holds a length in 32 bits and the two engines read that length from different places.
+
+## v1.3.26
+
+*Rewrote every page of this site, and every `README.md` in the repository, for clarity.* The content is the same. What changed is how it reads.
+
+The target is a 10th-grade reading level: sentences of 15 to 20 words on average, one idea per sentence, active voice, and the simplest verb that works. Punctuation is now limited to periods, commas, apostrophes, colons, and semicolons, so a long sentence held together by an em dash became two or three sentences instead. Emphasis is italics rather than bold. Every code block, table, heading, and link is unchanged, and so is every technical claim.
+
+*The repository `README.md` gained the two things it was missing.* It now opens with a reading order, naming which directory README to read first and in what sequence, because every directory in the repo has one and nothing said where to start. And its build-from-source section is now complete: both the debug and release builds, the extra Debian packages, what `LLVM_SYS_180_PREFIX` is for, and why the checkout has to stay after building, since `jade build` links two runtime archives out of `target/`.
+
+Three stale facts in that README were corrected along the way. Its pipeline diagram named `compiler/vm.rs` and `build/mod.rs`, which are now `vm/` and `aot/`. Its feature checklist repeated the same stale path. And it claimed CI runs no formatting or clippy gate, when CI runs `cargo clippy --all-targets`, `cargo fmt --all --check`, and `jade fmt --check examples`.
+
+*One real defect fixed.* `docs/plugins/llms-txt.js` never listed the packages page in its `ORDER` array, so `llms.txt` appended it after the changelog instead of placing it between imports and exceptions. It is now in sidebar order.
+
+Past changelog entries are left as they were written. A shipped release is a record of what shipped, and rewriting one changes what a version is documented to have contained.
+
 ## v1.3.25
 
 **Fixed: a native package crashed the VM at exit on Linux.** A program that called into a C dependency printed every one of its answers correctly and then died with SIGSEGV during shutdown. It only happened under `jade run`, and only on Linux.

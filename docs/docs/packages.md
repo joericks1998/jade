@@ -4,7 +4,7 @@ title: Packages
 sidebar_label: Packages
 ---
 
-Jade projects depend on **prebuilt native shared libraries**. A dependency is declared in `jade.toml`, pinned in `jade.lock`, and installed into a project-local `libs/` directory.
+A Jade project depends on *prebuilt native shared libraries*. You declare a dependency in `jade.toml`, Jade pins it in `jade.lock`, and installs it into a project-local `libs/` directory.
 
 ```sh
 jade pkg add fastmath --url 'https://example.com/fastmath-{platform}.so' --version 1.2.0
@@ -18,11 +18,13 @@ print(fastmath.triple(14))
 
 ## There is no registry
 
-A dependency names **where it lives** — a URL or a local path — rather than an entry in a central index. That is a deliberate choice, and it has consequences worth knowing up front:
+A dependency names *where it lives*, either a URL or a local path, rather than an entry in a central index. That is deliberate, and it has three consequences worth knowing up front.
 
-- **No transitive resolution.** A `.so` carries no manifest, so Jade cannot discover that one package needs another. `jade.lock` is a flat list. A package with its own dependencies must say so in its documentation.
-- **No version ranges.** With no index to resolve `^1.2` against, a dependency names one exact version. `version = "^1.2"` is rejected at parse time rather than silently treated as a literal.
-- **`jade pkg update` reconciles, it does not discover.** It re-resolves the lock against the manifest and re-fetches. To move to a new version, edit `jade.toml` (or re-run `jade pkg add` with a new `--version`).
+*No transitive resolution.* A `.so` carries no manifest, so Jade cannot discover that one package needs another. `jade.lock` is a flat list. A package with its own dependencies has to say so in its documentation.
+
+*No version ranges.* With no index to resolve `^1.2` against, a dependency names one exact version. Writing `version = "^1.2"` is rejected when the file is parsed, rather than quietly treated as a literal string.
+
+*`jade pkg update` reconciles, it does not discover.* It resolves the lock against the manifest again and re-fetches. To move to a new version, edit `jade.toml`, or run `jade pkg add` again with a new `--version`.
 
 ## Commands
 
@@ -37,19 +39,19 @@ A dependency names **where it lives** — a URL or a local path — rather than 
 | `jade pkg remove <name>` | Drop it from the manifest, the lock, and `libs/` |
 | `jade pkg list` | Show what is locked and whether it is installed here |
 
-`jade run`, `jade test`, and `jade build` install anything missing automatically, so a fresh clone needs no separate step.
+`jade run`, `jade test`, and `jade build` install anything missing on their own, so a fresh clone needs no separate step.
 
 :::warning The package commands are nested
 Every one of them is `jade pkg <something>`. There is no bare `jade add`, `jade install`, or `jade update`.
 :::
 
 :::note
-`jade pkg update` manages **dependencies**. `jade upgrade` updates the **jade toolchain itself**. They are unrelated. See the [CLI reference](cli#jade-upgrade).
+`jade pkg update` manages *dependencies*. `jade upgrade` updates the *jade toolchain itself*. The two are unrelated. See the [CLI reference](cli#jade-upgrade).
 :::
 
 ## Platforms
 
-A shared library is built for one OS and architecture, so a lockfile naming a single artifact would only be valid on the machine that wrote it. Instead, a `{platform}` URL is expanded across every supported platform when the lock is generated, and **all** of their checksums are recorded:
+A shared library is built for one operating system and one architecture. A lockfile naming a single artifact would therefore only be valid on the machine that wrote it. So when Jade generates the lock, it expands a `{platform}` URL across every supported platform and records *all* of their checksums:
 
 ```toml
 [[package]]
@@ -69,30 +71,30 @@ file = "fastmath.so"
 sha256 = "9c1f0a72…"
 ```
 
-**Only the artifact matching your machine is ever downloaded.** The other entries are a few hundred bytes of text apiece, and they are what let a lock committed from a Mac be installed *and verified* on Linux CI — with no registry to ask for the Linux checksum at install time. A Homebrew formula's `bottle` block works the same way.
+*Jade downloads only the artifact matching your machine.* The other entries are a few hundred bytes of text each. They are what lets a lock committed from a Mac be installed *and verified* on Linux CI, with no registry to ask for the Linux checksum at install time. A Homebrew formula's `bottle` block works the same way.
 
-A package that ships for only some platforms is fine; the missing ones are simply absent from the lock, and installing on one of them fails with a message naming what *is* available.
+A package that ships for only some platforms is fine. The missing ones are simply absent from the lock, and installing on one of them fails with a message naming what *is* available.
 
 Supported tags: `darwin-aarch64`, `darwin-x86_64`, `linux-aarch64`, `linux-x86_64`.
 
 ## Integrity
 
-Every artifact is verified against its SHA-256 in `jade.lock` on **every** install, not only on first download. A `.so` is `dlopen`ed — that is arbitrary code execution before any Jade code runs — so an artifact that is merely *present* is not thereby trusted. A mismatch is refused and nothing is written to `libs/`.
+Jade verifies every artifact against its SHA-256 in `jade.lock` on *every* install, not only on the first download. Loading a `.so` means calling `dlopen`, which runs arbitrary code before any Jade code starts. So an artifact being *present* is not a reason to trust it. A checksum mismatch is refused, and nothing is written to `libs/`.
 
-Checksums live in the lock, not the manifest: `jade pkg add` computes them on first fetch, exactly as Cargo does.
+Checksums live in the lock rather than the manifest. `jade pkg add` computes them on the first fetch, exactly as Cargo does.
 
 ## Local `path` dependencies
 
-A `path` dependency points at a file you build, so it is the one source that legitimately changes while the lock stays correct. It is treated differently for that reason: **the source file is re-hashed on every install and every run**, and if it has changed, the lock is re-pinned and the new artifact copied into `libs/`.
+A `path` dependency points at a file you build yourself. It is the one source that can legitimately change while the lock stays correct, so Jade treats it differently. *It re-hashes the source file on every install and every run.* If the file has changed, Jade re-pins the lock and copies the new artifact into `libs/`.
 
-`--version` is optional here, and the lock records `local` when you leave it out. A `--url` dependency must name one, because that is what makes its directory under `libs/` unique.
+`--version` is optional here, and the lock records `local` when you leave it out. A `--url` dependency must name a version, because the version is what makes its directory under `libs/` unique.
 
 ```
 $ jade run main.jde
 note: re-pinned engine (local source changed)
 ```
 
-A URL dependency is never re-pinned. It either serves the bytes the lock names or it does not, and quietly re-pinning it would defeat the point of having a lock. Moving a URL dependency to different bytes is what `jade pkg update` is for.
+A URL dependency is never re-pinned. It either serves the bytes the lock names or it does not, and quietly re-pinning it would defeat the point of a lock. Moving a URL dependency to different bytes is what `jade pkg update` is for.
 
 `jade pkg list` marks a local dependency whose source has moved ahead of its pin:
 
@@ -100,7 +102,7 @@ A URL dependency is never re-pinned. It either serves the bytes the lock names o
 engine 1.0.0  [jade]  installed (local source changed — run `jade pkg install`)
 ```
 
-Under `--locked` the same drift is an error rather than a fixup, because a rebuilt library means the committed lock is stale:
+Under `--locked`, that same drift is an error rather than a fix, because a rebuilt library means the committed lock is stale:
 
 ```
 $ jade pkg install --locked
@@ -112,16 +114,16 @@ or rebuild the source to match.
 ```
 
 :::note
-Before v1.1.35 a rebuilt local dependency was ignored: installing compared `libs/` against the lock, found a match, and kept loading the copy taken when the dependency was added. Only re-running `jade pkg add` picked up the new build.
+Before v1.1.35, Jade ignored a rebuilt local dependency. Installing compared `libs/` against the lock, found a match, and kept loading the copy taken when the dependency was first added. Only running `jade pkg add` again picked up the new build.
 :::
 
 ## Committing
 
-Commit `jade.lock`. Do not commit `libs/` — `jade new` adds it to `.gitignore`. The lock is what travels; the binaries are rebuilt from it.
+Commit `jade.lock`. Do not commit `libs/`, which `jade new` already adds to `.gitignore`. The lock is what travels between machines, and the binaries are fetched again from it.
 
 ## Using a plain C library
 
-A library like `libsqlite3` exports no `jade_pkg_init`, so the loader cannot take it directly. Jade generates a small binding shim that wraps it into an ordinary Jade package — and since v1.3.0 that is not a step you have to know about. Adding a C library is the same command as adding a Jade one:
+A library such as `libsqlite3` exports no `jade_pkg_init`, so the loader cannot take it directly. Jade generates a small binding shim that wraps it into an ordinary Jade package. Since v1.3.0 that happens on its own, so adding a C library uses the same command as adding a Jade one:
 
 :::note
 Build the library from the `.c`, with `-dynamiclib` on macOS or `-shared` on Linux:
@@ -131,7 +133,7 @@ clang -dynamiclib -o libdemo.dylib demo.c    # macOS
 cc -shared -fPIC -o libdemo.so demo.c        # Linux
 ```
 
-Naming the header instead — `clang -o libdemo.dylib demo.h` — produces a precompiled header, which is a perfectly ordinary file with a perfectly ordinary name and nothing the loader can open. Jade refuses it when you add it and says so.
+Naming the header instead, as in `clang -o libdemo.dylib demo.h`, produces a precompiled header. That is an ordinary file with an ordinary name, and nothing the loader can open. Jade refuses it when you add it, and says why.
 :::
 
 ```sh
@@ -145,11 +147,13 @@ covers 3 of the 5 symbols the library exports
 3 bound, 1 assumed, 2 skipped
 ```
 
-Three things happened there, and none of them needed a flag:
+Three things happened there, and none of them needed a flag.
 
-- **The kind of library came from the artifact.** A Jade package exports `jade_pkg_init` and a C library does not. Both are a `.dylib`, so the filename could never have told you — and this is the same symbol the loader requires at run time, so what is detected here is exactly what `use` will later accept.
-- **The header was found.** `libdemo` implies `demo.h`, and the search covers pkg-config, the usual include roots, and the macOS SDK. The candidate is accepted only if the library actually exports what the header declares, so a header belonging to some other library of the same name is refused now rather than surfacing later as a linker error.
-- **The symbol table was generated and the shim built.** `use demo` works immediately.
+*The kind of library came from the artifact.* A Jade package exports `jade_pkg_init` and a C library does not. Both are a `.dylib`, so the filename could never tell you which is which. This is also the same symbol the loader requires at run time, so what Jade detects here is exactly what `use` will accept later.
+
+*The header was found.* The name `libdemo` implies `demo.h`, and the search covers pkg-config, the usual include roots, and the macOS SDK. Jade accepts a candidate only if the library really exports what the header declares. So a header belonging to some other library of the same name is refused now, rather than showing up later as a linker error.
+
+*The symbol table was generated and the shim was built.* `use demo` works right away.
 
 The manifest it writes is ordinary TOML you can read and edit:
 
@@ -172,7 +176,7 @@ ret  = "int"
 
 ### When there is no header at all
 
-Sometimes there isn't one to find — a library someone handed you, or one whose headers were never installed. Jade still writes a manifest, because the library always says what it *exports*:
+Sometimes there is no header to find, either because someone handed you the library or because its headers were never installed. Jade still writes a manifest, because a library always lists what it *exports*:
 
 ```
 $ jade pkg add demo --path libdemo.dylib
@@ -187,7 +191,7 @@ demo_add = "?"
 demo_scale = "?"
 ```
 
-A `"?"` means *the name is known and the prototype is not*. Replace it with the real one and the dependency works:
+A `"?"` means *the name is known and the prototype is not*. Replace it with the real prototype and the dependency works:
 
 ```toml
 [dependencies.demo.symbols.demo_add]
@@ -195,13 +199,17 @@ args = ["scalar:int", "scalar:int"]
 ret  = "scalar:int"
 ```
 
-Filling in blanks in a file that already lists every function beats going to look for a header, which is why Jade writes the names rather than nothing.
+Filling in blanks in a file that already lists every function is easier than hunting for a header. That is why Jade writes the names rather than writing nothing.
 
-**Write the C type here, not the Jade one.** `scalar:int` rather than plain `int`, and that is the one thing this case asks of you that the header case does not. With a header, `int` means only "carry this as a Jade integer" and the header's own prototype settles how wide it is. With no header there is no such prototype, so the shim writes one — and `int` there would become `int64_t`, `float` would become `double`, and `bool` would become `uint8_t`, which are Jade's widths and not the library's.
+*Write the C type here, not the Jade one.* Use `scalar:int` rather than plain `int`. That is the one thing this case asks of you that the header case does not.
 
-That is why the three of them are refused outright in a headerless dependency. Nothing catches a width the library never agreed to: the manifest is valid, the shim compiles, and the program runs. Reading is where it hurts most — a function that returned four bytes declared as returning eight hands back whatever was left in the upper half of the register — and a `float` read as a `double` is not an approximate number but a meaningless one, on every machine rather than on unlucky ones.
+With a header, `int` means only "carry this as a Jade integer", and the header's own prototype settles how wide the value is. With no header there is no such prototype, so the shim has to write one. In that case `int` would become `int64_t`, `float` would become `double`, and `bool` would become `uint8_t`. Those are Jade's widths, not the library's.
 
-So `scalar:<ctype>` takes the library's own spelling — `int`, `unsigned`, `long`, `size_t`, `int32_t`, `uint64_t`, `float`, `double`, `bool`, and the rest — and the shim converts to and from Jade's width at the boundary. Your side of the call does not change: an argument is still an ordinary Jade int, float or bool. Everything else in the vocabulary crosses as an address, and an address is one width, so nothing else needs saying.
+That is why Jade refuses all three outright in a dependency with no header. Nothing would catch a width the library never agreed to. The manifest would be valid, the shim would compile, and the program would run.
+
+Reading is where a wrong width hurts most. A function that returned four bytes, declared as returning eight, hands back whatever was left in the upper half of the register. A `float` read as a `double` is not an approximate number, it is a meaningless one, and that happens on every machine rather than only on unlucky ones.
+
+So `scalar:<ctype>` takes the library's own spelling, such as `int`, `unsigned`, `long`, `size_t`, `int32_t`, `uint64_t`, `float`, `double`, or `bool`. The shim converts to and from Jade's width at the boundary. Your side of the call does not change, and an argument is still an ordinary Jade int, float, or bool. Everything else in the vocabulary crosses as an address, and an address has one width, so nothing else needs to be spelled out.
 
 ```
 $ jade run app.jde
@@ -215,20 +223,20 @@ has no header. …
     ret  = "scalar:<ctype>"
 ```
 
-**Why it can't just read the types out of the library.** A shared library carries an export table of *names*. C keeps no argument or return types in a compiled artifact, so `demo_add` in that table says only "there is a `demo_add`". Types survive in DWARF, which release builds strip and which the macOS linker leaves behind in the `.o` files rather than the library. So the half that is missing is genuinely gone, and Jade will not guess at it: a wrong prototype is a corrupted stack several calls later, with nothing pointing back at the manifest.
+*Why Jade cannot just read the types out of the library.* A shared library carries an export table of *names*. C keeps no argument or return types in a compiled artifact, so `demo_add` in that table says only that a `demo_add` exists. Types survive in DWARF debug information, which release builds strip, and which the macOS linker leaves in the `.o` files rather than in the library. The missing half is therefore genuinely gone, and Jade will not guess. A wrong prototype shows up as a corrupted stack several calls later, with nothing pointing back at the manifest.
 
-`jade check`, `jade run` and `jade build` all refuse a dependency that still has a `"?"` in it, and name the symbols.
+`jade check`, `jade run`, and `jade build` all refuse a dependency that still holds a `"?"`, and they name the symbols involved.
 
 ### Calling a symbol that is not there
 
-The `symbols` table is the complete list of what the shim binds, so `jade check` and `jade build` use it to check your calls. A name the table does not declare is a compile error, with the line and a suggestion:
+The `symbols` table is the complete list of what the shim binds, so `jade check` and `jade build` use it to check your calls. A name the table does not declare is a compile error, reported with the line and a suggestion:
 
 ```
 $ jade check main.jde
 main.jde: [4:7] 'gfx' has no symbol 'jade_gfx_key_press' — did you mean 'jade_gfx_key_pressed'?
 ```
 
-When nothing is close enough to suggest, the message names the manifest instead of guessing:
+When no declared name is close enough to suggest, the message names the manifest instead of guessing:
 
 ```
 [4:7] 'gfx' has no symbol 'jade_gfx_render'. Add it to [dependencies.gfx.symbols] in
@@ -238,16 +246,16 @@ jade.toml, or re-run `jade pkg bind gfx --header <h>`
 The same check covers `from gfx use <name>`, which is reported at the import line.
 
 :::note Why this needs its own check
-A mistyped symbol is not a link error, because nothing links it. The shim binds the names in the table and no others, so a name that is not there is simply absent at run time — and until v1.3.24 that meant a typo compiled, built, linked, packaged, shipped, and failed the first time that line executed, as "dict has no key or method". The manifest lists what the library provides, so the answer was always available; nothing was reading it.
+A mistyped symbol is not a link error, because nothing links it. The shim binds the names in the table and no others, so a name that is not in the table is simply missing at run time. Until v1.3.24 that meant a typo compiled, built, linked, packaged, shipped, and then failed the first time that line ran, reported as "dict has no key or method". The manifest lists what the library provides, so the answer was always there. Nothing was reading it.
 :::
 
-This applies to `abi = "c"` dependencies, which are the ones whose manifest declares a symbol table. A Jade package declares its exports in its own project, which your manifest cannot see, so its calls are not checked this way.
+The check applies to `abi = "c"` dependencies, which are the ones whose manifest declares a symbol table. A Jade package declares its exports inside its own project, which your manifest cannot see, so its calls are not checked this way.
 
 ### Libraries split across several headers
 
-Plenty of libraries do not have one header. libarchive declares its readers in `archive.h` and its entries in `archive_entry.h`; libgit2 puts its types in `git2/types.h` and its functions in twenty other files. Two things make that work.
+Plenty of libraries have more than one header. libarchive declares its readers in `archive.h` and its entries in `archive_entry.h`. libgit2 puts its types in `git2/types.h` and its functions across twenty other files. Two things make those work.
 
-**Bind each header in turn.** `jade pkg bind` merges, so a second run adds to the table rather than replacing it, and the header list grows with it.
+*Bind each header in turn.* `jade pkg bind` merges its results, so a second run adds to the table rather than replacing it, and the header list grows alongside.
 
 ```sh
 jade pkg add archive --path libarchive.dylib --header /opt/homebrew/include/archive.h
@@ -258,17 +266,17 @@ jade pkg bind archive --header /opt/homebrew/include/archive_entry.h
 headers = ["archive.h", "archive_entry.h"]
 ```
 
-Every header in that list is `#include`d by the shim. If one were missing while its symbols stayed in the table, C would let the shim call them undeclared — assuming each returns `int` — and a call that really returns a pointer would come back truncated. The shim is compiled with `-Werror=implicit-function-declaration` so that cannot happen quietly; you get an error naming the missing header instead.
+The shim `#include`s every header in that list. Suppose one went missing while its symbols stayed in the table. C would let the shim call them undeclared, assuming each returns `int`, and a call that really returns a pointer would come back truncated. The shim is compiled with `-Werror=implicit-function-declaration`, so that cannot happen quietly. You get an error naming the missing header instead.
 
-**Types are read from the whole include tree, and so are functions the library exports.** A function in `archive.h` written in terms of a type from `archive_entry.h` binds fine. `archive.h` also includes `stdio.h`, and binding `fopen` along with it would be wrong — so what a header includes is filtered by the library's own export table. `fopen` belongs to nobody; `archive_entry_new` is in the artifact, so it is bound. The header you name always contributes its own declarations, export table or not.
+*Types are read from the whole include tree, and so are functions the library exports.* A function in `archive.h` written in terms of a type from `archive_entry.h` binds without trouble. `archive.h` also includes `stdio.h`, and binding `fopen` along with it would be wrong. So Jade filters everything a header includes through the library's own export table. `fopen` belongs to no library here, while `archive_entry_new` is in the artifact and gets bound. The header you name always contributes its own declarations, export table or not.
 
-Point at the top header of a library that splits its API up and you get the whole library. `ares.h` declares seventy-odd symbols and includes `ares_dns_record.h`, which declares sixty-three more.
+Point at the top header of a library that splits its API across files, and you get the whole library. `ares.h` declares about seventy symbols and includes `ares_dns_record.h`, which declares sixty-three more.
 
 ### Umbrella headers
 
-Some libraries only have a header that declares nothing at all. `lzma.h`, `git2.h` and `alsa/asoundlib.h` exist to include the twenty files that do the declaring. Point at one and there is nothing in it to bind, while pointing at a sub-header usually fails because a sub-header on its own does not compile.
+Some libraries offer only a header that declares nothing at all. `lzma.h`, `git2.h`, and `alsa/asoundlib.h` exist to include the twenty files that do the real declaring. Point at one of those and there is nothing in it to bind. Pointing at a sub-header usually fails too, because a sub-header on its own does not compile.
 
-The same rule covers them, which is why they work: everything is swept in from the includes, and the umbrella stays the header the shim includes. It is the one case that *needs* the artifact — with no export table there is nothing exact to test an include against, so a header with declarations of its own binds those alone and an umbrella is an error naming `--path`.
+The same rule handles them, which is why they work. Everything is swept in from the includes, and the umbrella stays the header the shim includes. This is the one case that *needs* the artifact. With no export table, there is nothing exact to test an include against, so a header with declarations of its own binds only those, and an umbrella header gives an error asking for `--path`.
 
 ```
 $ jade pkg add lzma --path /opt/homebrew/lib/liblzma.dylib --header /opt/homebrew/include/lzma.h
@@ -279,21 +287,21 @@ that header declares nothing itself, so the 114 declarations it includes that
 the library also exports were bound instead.
 ```
 
-This needs the artifact, so `--path` has to be there too. An export table is an exact test rather than a guess about which directories count as system ones: `fopen` is declared in that translation unit and is not in liblzma, so it is not bound.
+This needs the artifact, so `--path` has to be there too. An export table is an exact test, rather than a guess about which directories count as system ones. `fopen` is declared in that translation unit and is not in liblzma, so Jade does not bind it.
 
 ### Headers that include their neighbours
 
-Almost no header stands alone, and the two ways one reaches its neighbours need two different directories. Both are searched for you.
+Almost no header stands alone. A header reaches its neighbours in two ways, and each way needs a different directory. Jade searches both for you.
 
 ```c
-/* libfdt.h — the file sits right beside this one */
+/* libfdt.h: the file sits right beside this one */
 #include <libfdt_env.h>
 
-/* brotli/encode.h — resolved against the directory above this one */
+/* brotli/encode.h: resolved against the directory above this one */
 #include <brotli/port.h>
 ```
 
-An angled include does not search the including file's own directory, so the header's directory is passed explicitly; and the second form needs the parent as well. Both are recorded in `include_dirs`, so the shim compile gets exactly what reading the header got.
+An angled include does not search the including file's own directory, so Jade passes that directory explicitly. The second form needs the parent directory as well. Both go into `include_dirs`, so compiling the shim sees exactly what reading the header saw.
 
 ### When you do need a flag
 
@@ -303,22 +311,22 @@ An angled include does not search the including file's own directory, so the hea
 | A header lives somewhere neither rule above finds | `-I <dir>` (repeatable) |
 | The dependency comes from `--url`, so there is no local file to read | `--c-abi` |
 
-A directory you name with `-I` is searched before either guessed one, since a wide root can otherwise shadow the header you meant.
+A directory you name with `-I` is searched before either of the guessed ones, because a broad include root can otherwise hide the header you meant.
 
 ### Where binding happens
 
-Binding runs on `add` and on `install`, not only on `bind`:
+Binding runs during `add` and `install`, not only during `bind`.
 
-- **`jade pkg add`** binds when it finds or is given a header.
-- **`jade pkg install`** fills in any dependency that names a header but has no `symbols` yet. A manifest that already carries its symbols is left alone, so a fresh clone installs without clang.
-- **`jade pkg install --locked`** never binds, because a reproducible install must not depend on what the local clang makes of a header.
-- **`jade pkg bind`** is for the cases with a real decision in them: re-running after a header changes, or narrowing a large header with `--only`. It merges into the existing table rather than replacing it, and `--dry-run` shows the report without touching `jade.toml`.
+- *`jade pkg add`* binds whenever it finds a header or you give it one.
+- *`jade pkg install`* fills in any dependency that names a header but has no `symbols` yet. It leaves a manifest that already carries its symbols alone, so a fresh clone installs without needing clang.
+- *`jade pkg install --locked`* never binds, because a reproducible install must not depend on what the local clang makes of a header.
+- *`jade pkg bind`* is for the cases with a real decision behind them: re-running after a header changes, or narrowing a large header with `--only`. It merges into the existing table rather than replacing it, and `--dry-run` shows the report without touching `jade.toml`.
 
-Binding a C library needs `clang` on `PATH` to read the header, and a C compiler (`cc`) to build the shim.
+Binding a C library needs `clang` on your `PATH` to read the header, and a C compiler called `cc` to build the shim.
 
 ### The report is the feature
 
-No generator binds everything, and one that quietly covers two thirds of an API is how the missing third gets found at run time. So the output says what it dropped and why:
+No generator binds everything. One that quietly covers two thirds of an API is how the missing third gets discovered at run time. So the output says what it dropped, and why:
 
 ```
 assumed (check these):
@@ -326,51 +334,51 @@ assumed (check these):
              if the library reads it instead, change it to `bytes`
 
 skipped:
-  1 — returns an unsupported type `void *`
+  1: returns an unsupported type `void *`
       demo_raw
-  1 — takes varargs
+  1: takes varargs
       demo_printf
 ```
 
-Coverage is quoted against the library's own export table — "covers 181 of the 194 symbols the library exports" — because a bare "181 bound" reads as success whether the library has 190 entry points or 900.
+Coverage is quoted against the library's own export table, as in "covers 181 of the 194 symbols the library exports". A bare "181 bound" would read as success whether the library has 190 entry points or 900.
 
-A symbol the header declares but the library does not export is dropped too. A header is written for the newest version while the artifact you have may have been built without some of it — libbrotlienc's header declares two such functions. Binding one produces a shim that compiles and then fails to *link*, and the linker takes the whole dependency down over it.
+A symbol the header declares but the library does not export is dropped too. A header is written for the newest version, while the artifact you have may have been built without part of it. libbrotlienc's header declares two such functions. Binding one produces a shim that compiles and then fails to *link*, and the linker takes the whole dependency down with it.
 
-A symbol that cannot be bound is dropped on its own. It used to be able to take the whole dependency with it: the generator would emit a symbol filling a struct while dropping that struct's field table, and the shim refuses a reference to a table that is not there — so one opaque blob among two hundred good symbols made a library uninstallable. `sqlite3_snapshot_free` and `zip_file_attributes_init` are both that shape.
+A symbol that cannot be bound is dropped by itself. It used to take the whole dependency down with it. The generator would emit a symbol that fills a struct while dropping that struct's field table, and the shim refuses a reference to a table that is not there. So one opaque blob among two hundred good symbols made a library impossible to install. `sqlite3_snapshot_free` and `zip_file_attributes_init` are both that shape.
 
 ### The binding vocabulary
 
-If you write or correct a symbol by hand, these are the spellings `args` and `ret` accept.
+If you write or correct a symbol by hand, these are the spellings that `args` and `ret` accept.
 
 | Spelling | Meaning |
 |---|---|
-| `int`, `float`, `bool`, `str`, `nil` | Scalars. `nil` is a return only. A C `enum` is an `int` — status-code enums are how most libraries report failure, and on liblzma alone they account for 60 of 114 symbols. The first three say only how Jade carries the value, so they need a header to settle the width; without one they are refused and `scalar:<ctype>` is what to write. |
-| `scalar:<ctype>` | The same value, with the library's own C type named — `scalar:int`, `scalar:size_t`, `scalar:float`. The shim declares that type and converts at the boundary; your side of the call is still an ordinary Jade int, float or bool. Required in a dependency with no header, and legal in one with a header. Takes any numeric or boolean C spelling. |
+| `int`, `float`, `bool`, `str`, `nil` | Scalars. `nil` is a return only. A C `enum` is an `int`. Status-code enums are how most libraries report failure, and on liblzma alone they account for 60 of 114 symbols. The first three say only how Jade carries the value, so they need a header to settle the width. Without a header they are refused, and `scalar:<ctype>` is what to write instead. |
+| `scalar:<ctype>` | The same value, with the library's own C type named, such as `scalar:int`, `scalar:size_t`, or `scalar:float`. The shim declares that type and converts at the boundary. Your side of the call is still an ordinary Jade int, float, or bool. Required in a dependency with no header, and allowed in one with a header. Takes any numeric or boolean C spelling. |
 | `bytes` | Binary data. As an argument it is one Jade value and the two C parameters `(const void*, size_t)`. |
-| `handle<T>` | An opaque pointer the library owns — a `sqlite3*`, a `SNDFILE*`. Jade holds it, hands it back, and never looks inside. The type name is checked, so passing a statement where a connection belongs is a readable error rather than a crash inside the library. `T` is written the way C writes it, so a struct with no typedef of its own keeps the keyword: `handle<struct ZSTD_CCtx_s>`. |
-| `out_buffer:<ctype>` | A buffer the call fills. It consumes **no** Jade argument: `x_read(handle, buf, n)` is called as `x_read(handle, n)` and hands back the bytes. Its size comes from the next declared argument, which must be an integer — `int`, or `scalar:<ctype>` naming one. |
-| `bytes_ptr` | The same, without the count, for a library that takes a blob whose extent is written inside it — every `libfdt` call takes `const void *fdt` alone. Borrowed for the call, like a `str`. |
-| `inout_bytes` | A buffer the call revises in place. Your blob is copied into scratch the shim owns, and the edited copy comes back as a result — a Jade blob is immutable, so there is nothing to lend out to be written into. |
+| `handle<T>` | An opaque pointer the library owns, such as a `sqlite3*` or a `SNDFILE*`. Jade holds it, hands it back, and never looks inside. The type name is checked, so passing a statement where a connection belongs gives a readable error rather than a crash inside the library. Write `T` the way C writes it, so a struct with no typedef of its own keeps the keyword, as in `handle<struct ZSTD_CCtx_s>`. |
+| `out_buffer:<ctype>` | A buffer the call fills. It consumes *no* Jade argument, so `x_read(handle, buf, n)` is called as `x_read(handle, n)` and hands back the bytes. Its size comes from the next declared argument, which must be an integer, written either as `int` or as a `scalar:<ctype>` naming one. |
+| `bytes_ptr` | The same thing without the count, for a library that takes a blob whose length is written inside it. Every `libfdt` call takes `const void *fdt` alone. Borrowed for the call, like a `str`. |
+| `inout_bytes` | A buffer the call revises in place. Your blob is copied into scratch memory the shim owns, and the edited copy comes back as a result. Jade never lends a live blob to a library, so the copy is what the library gets. |
 | `sized_buffer:<ctype>` | A buffer the call fills whose size only the documentation gives. You pass the count, the shim allocates it, and the whole buffer comes back. `lzma_stream_header_encode` writes exactly twelve bytes and says so nowhere a generator can read. |
 | `in_struct:<Type>` | A struct the call only reads. You build it, the shim copies it into a real local of the library's type. Needs the header. A field you leave out is zero, as in C; a field the type does not have is an error. |
-| `out_struct:<Type>` | A struct the call fills through a pointer. Needs the library's real header in `headers`. Only for a record *one call* fills — a struct the caller allocates and the library keeps between calls is a `held` struct instead. |
-| `inout_struct:<Type>` | A struct the call reads *and* writes — the `init` / `update` / `final` shape, where each call carries the last one's work. Consumes one Jade argument and comes back, exactly as `inout_scalar` does. Needs the header. Binding one of these as `out_struct` hands every call a fresh zeroed state and throws the previous call's work away, while every call still reports success. |
+| `out_struct:<Type>` | A struct the call fills through a pointer. Needs the library's real header in `headers`. Use it only for a record that *one call* fills. A struct the caller allocates and the library keeps between calls is a `held` struct instead. |
+| `inout_struct:<Type>` | A struct the call reads *and* writes. This is the `init`, `update`, `final` shape, where each call carries forward the last one's work. It consumes one Jade argument and comes back, exactly as `inout_scalar` does. Needs the header. Binding one of these as `out_struct` hands every call a fresh zeroed state and throws the previous call's work away, while every call still reports success. |
 | `struct:<Type>` | A return only: the call hands the struct back by value. Needs the header. |
-| `out_scalar:<ctype>` | A single value the call writes through a pointer — `int *count`. Consumes no Jade argument; comes back as part of the result. |
-| `inout_scalar:<ctype>` | The same, but the caller supplies the starting value — a position the library advances. Consumes one Jade argument *and* comes back. |
-| `out_handle:<T>` | A handle written through a pointer — `sqlite3_open(path, &db)`. When the symbol declares a `fails_when`, the C return is that status and the handle is the whole result; without one the return is a value and comes back beside the handle, which is how a count like `cs_disasm`'s survives. |
+| `out_scalar:<ctype>` | A single value the call writes through a pointer, such as `int *count`. It consumes no Jade argument and comes back as part of the result. |
+| `inout_scalar:<ctype>` | The same, except the caller supplies the starting value, such as a position the library advances. It consumes one Jade argument *and* comes back. |
+| `out_handle:<T>` | A handle written through a pointer, as in `sqlite3_open(path, &db)`. When the symbol declares a `fails_when`, the C return is that status and the handle is the whole result. Without one, the return is a value and comes back beside the handle, which is how a count like the one from `cs_disasm` survives. |
 | `array<elem>:<count>` | A struct *field* only: a fixed-size row. `array<char>:32` reads as characters, `array<int>:24` as numbers. Not legal in an `args` list. |
-| `out_str:<ctype>` | A string the call points at inside data you already gave it — `fdt_getprop_by_offset`'s `const char **namep`. Nothing was allocated, so nothing has to be released. |
+| `out_str:<ctype>` | A string the call points at, inside data you already gave it. The `const char **namep` in `fdt_getprop_by_offset` is one. Nothing was allocated, so nothing has to be released. |
 | `out_alloc_str:<ctype>` | A string the library allocated and you now own. Requires `frees_with` on the symbol, naming the function that releases it. |
-| `alloc_str` | A return only: the same thing as the return value rather than through a pointer — `g_strdup`, `curl_easy_escape`. Requires `frees_with`. The shim copies the string out and hands the original straight back to that function, so nothing accumulates. |
+| `alloc_str` | A return only. The same thing as the return value rather than through a pointer, as in `g_strdup` and `curl_easy_escape`. Requires `frees_with`. The shim copies the string out and hands the original straight back to that function, so nothing accumulates. |
 | `ret_len:<ctype>` | Marks the parameter that says how long a returned pointer is. The return type is then `bytes`. `fdt_getprop` is this shape. |
-| `callback:<ret>(<args>)` | A Jade function the library may call **while the call runs**. A parameter may be written `category:spelling` — `int:ares_bool_t` — where the spelling is what the library declared and the category is what Jade marshals it as. A pointer written `bytes:<ctype>` takes the next parameter as its length and arrives as one blob. The signature is written in the library's own C types, e.g. `callback:int(int, const char*)`. A `void *` in it is the user-data slot C uses instead of closures; the shim accepts it and does not pass it on, because a Jade function carries its own environment. |
+| `callback:<ret>(<args>)` | A Jade function the library may call *while the call runs*. Write a parameter as `category:spelling`, such as `int:ares_bool_t`, where the spelling is what the library declared and the category is how Jade marshals it. A pointer written `bytes:<ctype>` takes the next parameter as its length and arrives as one blob. Write the signature in the library's own C types, such as `callback:int(int, const char*)`. A `void *` in that signature is the user-data slot C uses in place of closures. The shim accepts it and does not pass it on, because a Jade function carries its own environment. |
 | `callback_data` | The library's own context slot, filled with the callback's own pointer so two outstanding registrations do not collide. Needs a `callback:` beside it. |
-| `null_ptr` | A null pointer, always. For a parameter the FFI cannot carry in a position the library documents as optional — brotli's allocator hooks, where null means "use malloc". Never inferred, because a library that needs a real pointer there crashes with no diagnostic. |
+| `null_ptr` | Always a null pointer. Use it for a parameter the FFI cannot carry, in a position the library documents as optional. Brotli's allocator hooks are one, where null means "use malloc". Never inferred, because a library that needs a real pointer there crashes with no diagnostic. |
 
-A symbol may have more than one out-parameter. When it does, each needs a name to come back under, written as an `@` suffix — `out_scalar:uint64_t@progress_in`. The generator takes those from the header's own parameter names. With one out-parameter the name is optional, since there is nothing to tell it apart from.
+A symbol may have more than one out-parameter. When it does, each one needs a name to come back under, written as an `@` suffix, such as `out_scalar:uint64_t@progress_in`. The generator takes those names from the header's own parameter names. With a single out-parameter the name is optional, because there is nothing to tell it apart from.
 
-How many things come back decides the shape of the result. Count the out-parameters, plus the C return value unless something consumed it — an `out_buffer` reads it as an element count, an `out_handle` folds it into `fails_when`. One thing is the result directly; two or more come back as a struct, with `ret` first when it is a key and then one key per out-parameter.
+How many things come back decides the shape of the result. Count the out-parameters, and add the C return value unless something already consumed it. An `out_buffer` reads the return as an element count, and an `out_handle` folds it into `fails_when`. If one thing comes back, that is the result. If two or more come back, they arrive as a struct, with `ret` first when it is a key, and then one key for each out-parameter.
 
 ```jade
 let d = lib.divmod(17, 5)     // int divmod(int, int, int *quot, int *rem)
@@ -379,11 +387,11 @@ print(d.quot)                  // 3
 print(d.rem)                   // 2
 ```
 
-A whole symbol may also be written as the single string `"?"` — the name is known, the prototype is not. That is what `jade pkg add` writes when it finds no header, and every command that would use the binding refuses it by name.
+A whole symbol may also be written as the single string `"?"`, meaning the name is known and the prototype is not. That is what `jade pkg add` writes when it finds no header, and every command that would use the binding refuses it by name.
 
 ### Who frees a string
 
-This is the one thing a C header genuinely cannot tell you, and it is the largest single class of symbol the generator declines to guess at — 125 of glib's, `g_strdup` and `g_uri_escape_string` among them.
+This is the one thing a C header genuinely cannot tell you, and it is the largest single group of symbols the generator refuses to guess at. Glib alone has 125 of them, including `g_strdup` and `g_uri_escape_string`.
 
 Compare two functions that are written identically:
 
@@ -392,9 +400,9 @@ const gchar *g_basename  (const gchar *file_name);   // points into its argument
 gchar       *g_strdup    (const gchar *str);         // mallocs a new one for you
 ```
 
-The first hands back a pointer into memory you already had. Nothing was allocated, so nothing has to be released, and Jade copies the text and walks away. The second allocated it for you, and if nobody hands it back to `g_free` it is gone for the life of the process. Both are a pointer to characters. Only the documentation says which is which, and `const` is a convention here rather than a rule.
+The first hands back a pointer into memory you already had. Nothing was allocated, so nothing has to be released. Jade copies the text and walks away. The second allocated memory for you, and if nobody hands it back to `g_free`, it is lost for the life of the process. Both are a pointer to characters. Only the documentation says which is which, and `const` is a convention here rather than a rule.
 
-So Jade asks you, and the two answers are one word apart:
+So Jade asks you. The two answers are one word apart:
 
 ```toml
 [dependencies.glib.symbols.g_basename]
@@ -407,15 +415,15 @@ ret  = "alloc_str"           # you now own it
 frees_with = "g_free"
 ```
 
-With `alloc_str`, the shim copies the string before returning and hands the original straight to `frees_with`. Nothing leaks and nothing is held past the call. `frees_with` names any function that takes a pointer — `free` when the library documents plain malloc, `g_free`, `curl_free`, `ares_free_string`. It does not have to be a symbol Jade bound; the shim calls it directly.
+With `alloc_str`, the shim copies the string before returning and hands the original straight to `frees_with`. Nothing leaks, and nothing is held past the call. `frees_with` names any function that takes a pointer, such as `free` when the library documents plain malloc, or `g_free`, `curl_free`, or `ares_free_string`. It does not have to be a symbol Jade bound, because the shim calls it directly.
 
-Guessing either way is worse than asking. Reading `g_strdup` as borrowed leaks its allocation on every call, and reading `g_basename` as owned frees memory the library never gave you.
+Guessing either way is worse than asking. Reading `g_strdup` as borrowed leaks its allocation on every call. Reading `g_basename` as owned frees memory the library never gave you.
 
 ### Fixed-size array fields
 
-A C struct often holds a fixed-size row rather than a pointer — `char mnemonic[32]`, `uint8_t bytes[24]`, `int reserved[4]`. Those come back as a Jade array, and the element type decides what is in it: plain `char` is characters, everything else is numbers.
+A C struct often holds a fixed-size row rather than a pointer, such as `char mnemonic[32]`, `uint8_t bytes[24]`, or `int reserved[4]`. Those come back as a Jade array, and the element type decides what is inside. Plain `char` gives characters, and everything else gives numbers.
 
-Nothing is trimmed. A `char[32]` holding `push` arrives as thirty-two characters, the NUL padding included, because trimming would be guessing where the text stops. `int(c) == 0` is how you find that yourself:
+Nothing is trimmed. A `char[32]` holding `push` arrives as thirty-two characters, NUL padding included, because trimming would mean guessing where the text stops. Test `int(c) == 0` to find the end yourself:
 
 ```jade
 fn text(row) {
@@ -430,11 +438,11 @@ fn text(row) {
 }
 ```
 
-Writing one back is bounded. A row longer than the field is an error naming the field rather than a silent truncation; a shorter one fills the rest with zeros, which is what leaving a field out already does. A character that does not fit in a byte is refused too — every byte is a character, but not every character is a byte.
+Writing a row back is bounded. A row longer than the field gives an error naming the field, rather than a silent truncation. A shorter row fills the rest with zeros, which is what leaving a field out already does. A character that does not fit in one byte is refused too. Every byte is a character, but not every character is a byte.
 
 ### Reading a row of structs
 
-A library that produces many structs hands back a pointer to the first and says how many. `<T>_at(handle, i)` reads one of them:
+A library that produces many structs hands back a pointer to the first one and says how many there are. `<T>_at(handle, i)` reads one of them:
 
 ```jade
 use capstone
@@ -451,15 +459,15 @@ while i < r.ret {
 capstone.cs_free(r.out, r.ret)
 ```
 
-The index is not checked against the count, and cannot be — the count came back on the Jade side, and reading past it is the same trust the library already asks of a C caller.
+Jade does not check the index against the count, and it cannot. The count came back on the Jade side, and reading past it asks for the same trust the library already expects from a C caller.
 
 ### A struct Jade holds
 
-Some structs cannot be passed by value in either direction. `lzma_stream`, `ZSTD_outBuffer` and `fd_set` are allocated by the caller and kept by the library between calls, so a fresh zeroed local each time would throw away the state the last call left.
+Some structs cannot be passed by value in either direction. `lzma_stream`, `ZSTD_outBuffer`, and `fd_set` are allocated by the caller and kept by the library between calls. A fresh zeroed local on each call would throw away the state the previous call left behind.
 
-Marking one `held = true` in its struct table gives you four extra calls in the package: `<T>_new`, `<T>_free`, `<T>_get` and `<T>_set`. The struct is allocated once and every call gets the same pointer.
+Marking one `held = true` in its struct table gives you four extra calls in the package: `<T>_new`, `<T>_free`, `<T>_get`, and `<T>_set`. The struct is allocated once, and every call gets the same pointer.
 
-The pointer fields such a struct keeps its position in are the reason it exists, so they can be filled too. A read-only one gets `<T>_set_<field>`, taking a blob. A writable one gets `<T>_alloc_<field>`, taking a size, and `<T>_take_<field>`, taking how many bytes to read back — two calls, because how much of the buffer became real is something only you can work out from the fields.
+Such a struct exists to hold its position in a set of pointer fields, so you can fill those too. A read-only field gets `<T>_set_<field>`, which takes a blob. A writable field gets two calls instead: `<T>_alloc_<field>`, which takes a size, and `<T>_take_<field>`, which takes how many bytes to read back. It takes two calls because only you can work out, from the other fields, how much of the buffer became real.
 
 ```jade
 use lzma
@@ -476,17 +484,19 @@ lzma.lzma_end(s)
 lzma.lzma_stream_free(s)
 ```
 
-A symbol may also declare `fails_when`, naming how it reports failure: `null`, `negative`, `nonzero`, `zero`, or `never`. The shim then clears `errno`, tests the return, and turns a failure into a catchable Jade error carrying the reason. Without it a failed call gives back its raw sentinel and the reason the library already recorded is thrown away — the program sees `-1` and nothing else. The default is "cannot fail", because reading a convention that is not there would turn every legitimate `-1` into a raise.
+A symbol may also declare `fails_when`, which names how it reports failure. The choices are `null`, `negative`, `nonzero`, `zero`, and `never`. The shim then clears `errno`, tests the return value, and turns a failure into a catchable Jade error carrying the reason.
 
-Some rules worth knowing before you hand-write one:
+Without `fails_when`, a failed call hands back its raw sentinel and throws away the reason the library already recorded. The program sees `-1` and nothing more. The default is "cannot fail", because assuming a convention that is not there would turn every legitimate `-1` into a raise.
 
-- **At most one out-parameter per symbol.** Two would have to come back as a pair with no obvious names.
-- **A symbol with both an out-parameter and a return value comes back as `.ret` and `.out`.** When the C function returns `void` there is no pair to make, and the filled value is the result directly.
-- **Jade never closes a handle for you.** It reclaims its own wrapper and leaves the pointer alone, because it cannot know what the pointer is or which allocator made it. Closing is a call the binding exposes.
-- **A handle cannot cross into a task.** Jade cannot tell a thread-safe library from an unsafe one, so this is refused at compile time rather than racing quietly. Open one inside the task and close it before returning.
-- **A callback is live only while the call that passed it is running.** A library that stores one and invokes it later is not supported. A raise inside a callback is deferred: the library finishes cleanly and the error reaches your `catch` afterwards.
+Five rules are worth knowing before you write a symbol by hand.
 
-A symbol using anything outside this vocabulary is rejected **by name** at install time rather than silently marshalled to nil.
+- *At most one out-parameter per symbol.* Two would have to come back as a pair with no obvious names.
+- *A symbol with both an out-parameter and a return value comes back as `.ret` and `.out`.* When the C function returns `void` there is no pair to make, so the filled value is the result directly.
+- *Jade never closes a handle for you.* It reclaims its own wrapper and leaves the pointer alone, because it cannot know what the pointer is or which allocator made it. Closing is a call the binding exposes.
+- *A handle cannot cross into a task.* Jade cannot tell a thread-safe library from an unsafe one, so it refuses at compile time rather than letting a race happen quietly. Open the handle inside the task and close it before returning.
+- *A callback is live only while the call that passed it is running.* A library that stores one and invokes it later is not supported. A raise inside a callback is delayed, so the library finishes cleanly and the error reaches your `catch` afterwards.
+
+A symbol using anything outside this vocabulary is rejected *by name* at install time, rather than quietly turned into nil.
 
 ## Publishing a Jade package
 
@@ -497,16 +507,16 @@ jade build mathlib.jde --lib               # -> mathlib.dylib (or .so)
 jade build mathlib.jde --lib --export add  # bind only `add`
 ```
 
-Jade has no `pub` keyword — every top-level function is public — so the default is to export all of them. `--export` narrows that.
+Jade has no `pub` keyword, and every top-level function is public, so the default is to export all of them. `--export` narrows the list.
 
-Publish the result wherever you like (GitHub Releases is the natural home), one build per platform, named so a `{platform}` URL finds them. Consumers then `jade pkg add` it like any other dependency.
+Publish the result wherever you like, and GitHub Releases is the natural home. Ship one build per platform, named so a `{platform}` URL finds each of them. Users then run `jade pkg add` on it like any other dependency.
 
 ### A package of several files
 
-A package is not limited to one file. Every module the entry `use`s is compiled into the same artifact, each in its own namespace, so a package can be organized like any other program:
+A package is not limited to one file. Every module the entry `use`s is compiled into the same artifact, each in its own namespace. So you can organize a package like any other program:
 
 ```jade
-// mathlib.jde — the entry module
+// mathlib.jde is the entry module
 use geometry
 use text
 
@@ -514,11 +524,11 @@ fn area(w, h) { return geometry.area(w, h) }
 fn shout(s) { return text.shout(s) }
 ```
 
-**The entry module is the package's API.** Only its top-level functions become bindings; everything the imported modules define stays internal, which is why `area` above is a one-line forwarder. That is the same rule as a single-file package, and it means adding a helper to `geometry.jde` never silently widens what consumers can call.
+*The entry module is the package's API.* Only its top-level functions become bindings. Everything the imported modules define stays internal, which is why `area` above is a one-line forwarder. That is the same rule a single-file package follows, and it means adding a helper to `geometry.jde` never silently widens what users can call.
 
 ### Declaring the package in `jade.toml`
 
-Rather than passing the entry and the exports on the command line every time, a package can describe itself:
+Instead of passing the entry and the exports on the command line every time, a package can describe itself:
 
 ```toml
 [package]
@@ -535,9 +545,9 @@ Then, from anywhere in the project:
 jade build --lib          # -> mathlib.dylib, exporting the three named functions
 ```
 
-`name` becomes the artifact's filename and the name consumers `use`, so it has to be a usable identifier — letters, digits, and underscores.
+`name` becomes the artifact's filename and the name users write in `use`, so it has to be a usable identifier made of letters, digits, and underscores.
 
-`sources` is optional, and it is the reason to write a `[package]` at all rather than a shell alias. The build finds a package's files by following `use` from the entry, so the list is not what makes the build work. What it buys is the two errors the import graph cannot raise on its own:
+`sources` is optional, and it is the reason to write a `[package]` section at all rather than a shell alias. The build already finds a package's files by following `use` from the entry, so the list is not what makes the build work. What the list buys you is two errors the import graph cannot raise on its own:
 
 - a file you meant to ship but forgot to import, which would silently vanish from the artifact;
 - a file that got pulled in without you deciding to ship it.
@@ -550,13 +560,13 @@ error: [package] sources in jade.toml does not match what the package imports
     nothing reaches these from 'mathlib.jde', so they would not be in the artifact
 ```
 
-Omit `sources` and the import graph is taken at its word.
+Leave `sources` out and Jade takes the import graph at its word.
 
 :::note
-`[package]` describes a project that **is** a package. `[dependencies]` describes packages a project **uses**. A project can have both: a package that depends on another package.
+`[package]` describes a project that *is* a package. `[dependencies]` describes packages a project *uses*. A project can have both, which is simply a package that depends on another package.
 :::
 
-Nothing changes for consumers. The artifact is an ordinary Jade package, added and locked exactly as before:
+Nothing changes for the people using it. The artifact is an ordinary Jade package, added and locked exactly as before:
 
 ```sh
 jade pkg add mathlib --url 'https://example.com/mathlib-{platform}.so' --version 1.2.0
@@ -564,31 +574,31 @@ jade pkg add mathlib --url 'https://example.com/mathlib-{platform}.so' --version
 
 ## Shipping what you build
 
-`jade build` writes a `libs/` directory beside the artifact holding the dependencies it needs, and the pair travels together:
+`jade build` writes a `libs/` directory beside the artifact, holding the dependencies the program needs. The two travel together:
 
 ```sh
 jade build main.jde -o dist/app
 # built: dist/app (with fastmath-1.2.0 in dist/libs/)
 ```
 
-Move `dist/` anywhere, onto any machine of the same platform, and it runs. Copy `dist/app` on its own and it will not — the dependencies are beside it, not inside it.
+Move `dist/` anywhere, onto any machine of the same platform, and it runs. Copy `dist/app` by itself and it will not, because the dependencies sit beside the binary rather than inside it.
 
-That is worth stating plainly because `-o` names a file and now produces a directory's worth of them. If your release process copies one path, copy the directory.
+That is worth saying plainly, because `-o` names a single file and now produces a directory's worth of them. If your release process copies one path, make it copy the directory.
 
-A program with no dependencies writes no `libs/` and is a single file, exactly as before.
+A program with no dependencies writes no `libs/` at all, and stays a single file, exactly as before.
 
 ### One copy of a dependency, per program
 
-Two packages that both use `fastmath` share one copy of it. Not as an optimisation — as a rule.
+Two packages that both use `fastmath` share one copy of it. That is a rule, not an optimisation.
 
-A second copy would be a second instance: its own globals, its own module top level run a second time. For a library that owns a device, a graphics context, or a connection pool, two instances is two devices, and the resulting bug lives in the operating system rather than in your program.
+A second copy would be a second instance, with its own globals and its own module top level run a second time. For a library that owns a device, a graphics context, or a connection pool, two instances means two devices. The resulting bug then lives in the operating system rather than in your program.
 
-Jade guarantees one copy by giving the whole program one libraries directory to resolve against, rather than letting each package look beside itself. The program's host — a compiled binary, or the `jade` CLI — decides which directory that is before anything loads.
+Jade guarantees one copy by giving the whole program a single libraries directory to resolve against, rather than letting each package look beside itself. The program's host, meaning either a compiled binary or the `jade` CLI, picks that directory before anything loads.
 
 Two consequences follow, and both are deliberate:
 
-- **Two versions of one dependency is an error**, not a silent pick. `jade.lock` records one version per name, and a program that somehow reaches two copies raises rather than loading both.
-- **A dependency your program cannot find fails loudly**, naming the directory it searched and where that directory came from. There is no second place to look, because a second place is a second copy.
+- *Two versions of one dependency is an error*, not a silent pick. `jade.lock` records one version per name, and a program that somehow reaches two copies raises rather than loading both.
+- *A dependency your program cannot find fails loudly*, naming the directory it searched and where that directory came from. There is no second place to look, because a second place would mean a second copy.
 
 ### A package brings its own dependencies
 
@@ -600,11 +610,11 @@ jade pkg add plotting --url https://example.com/plotting.dylib --version 2.1.0
 # plotting also needs fastmath
 ```
 
-A `jade build --lib` artifact carries the lock it was built against, so a package can say what it depends on and `jade pkg add` reads it. The entries go into your `jade.toml` as ordinary dependencies — a transitive dependency is a real dependency, and the manifest is what you read to know what your project uses.
+A `jade build --lib` artifact carries the lock it was built against, so a package can state what it depends on and `jade pkg add` reads that. The entries go into your `jade.toml` as ordinary dependencies. A transitive dependency is a real dependency, and the manifest is what you read to know what your project uses.
 
 ### When two packages disagree about a version
 
-One version of a dependency is loaded per program, so two packages naming different versions have to become one. The higher of the two wins:
+A program loads one version of each dependency, so two packages naming different versions have to be reduced to one. The higher of the two wins:
 
 ```sh
 jade pkg add charts --url https://example.com/charts.dylib --version 1.0.0
@@ -612,21 +622,21 @@ jade pkg add charts --url https://example.com/charts.dylib --version 1.0.0
 # using fastmath 2.1.0 over the 1.9.0 this project had
 ```
 
-That is the only choice available without a registry. There is no third version to go and fetch — Jade has never been told one exists — so the pick is between the two already named. Go resolves versions the same way and for the same reason.
+That is the only choice available without a registry. There is no third version to fetch, because nothing ever told Jade one exists, so the pick is between the two already named. Go resolves versions the same way, for the same reason.
 
-It is always said out loud, never done quietly, because one of the two packages is now running against something other than what it asked for. If that version removed something the package uses, you get a missing symbol when it loads. Naming the substitution is what makes that traceable back here.
+Jade always says so out loud, and never makes the swap quietly, because one of the two packages is now running against something other than what it asked for. If that version removed something the package uses, you get a missing symbol when it loads. Naming the substitution is what lets you trace the failure back to this decision.
 
-Two versions are only ordered when both come from a URL and both are written as dotted numbers. `2.0-beta` orders against nothing, and neither does the `local` a path dependency carries — those are refused, naming both, and you decide.
+Jade can only order two versions when both come from a URL and both are written as dotted numbers. `2.0-beta` orders against nothing, and neither does the `local` marker a path dependency carries. Those cases are refused with both versions named, and you decide.
 
-This is a *choice between two*, not version solving. Solving searches a space of candidates to satisfy a set of ranges, which needs ranges and a registry to enumerate. Jade has neither, and a range in a `version` is rejected outright.
+This is a *choice between two*, not version solving. Solving searches a space of candidates to satisfy a set of ranges, which needs both ranges and a registry to enumerate them. Jade has neither, and a range written in a `version` is rejected outright.
 
-Only a `url` dependency travels this way. A `path` names a file on the machine that built the package, and that path means nothing on yours — those are named for you to add yourself, rather than written as a reference that resolves to the wrong file or to none.
+Only a `url` dependency travels this way. A `path` names a file on the machine that built the package, and that path means nothing on yours. So Jade names those for you to add yourself, rather than writing a reference that would resolve to the wrong file or to nothing.
 
-Reading the record does not run any of the package's code. A Jade package runs its module top level from `jade_pkg_init`, and `jade pkg add` never calls it.
+Reading that record runs none of the package's code. A Jade package runs its module top level from `jade_pkg_init`, and `jade pkg add` never calls it.
 
 ### A library can keep your callback
 
-A Jade function given to a C library stays valid after the call that handed it over, so a library that *stores* it and calls back later works — an async request, a watcher, an event handler:
+A Jade function given to a C library stays valid after the call that handed it over. So a library that *stores* the function and calls back later works. An async request, a watcher, and an event handler are all this shape:
 
 ```jade
 use cares
@@ -648,15 +658,15 @@ while cares.ares_fds(ch, r, w) > 0 {
 }
 ```
 
-Three things are worth knowing about it.
+Three things are worth knowing about how that works.
 
-**Your callback runs while some native call is in flight.** The interpreter services it from the call it is parked in — `ares_process` above. A library that calls back from a thread of its own, with no Jade call running, gets a neutral answer instead: that is not supported, and it fails rather than hanging.
+*Your callback runs while some native call is in flight.* The interpreter services it from whichever call it is parked in, which is `ares_process` above. A library that calls back from a thread of its own, with no Jade call running, gets a neutral answer instead. That case is not supported, and it fails rather than hanging.
 
-**A registration lasts until the program ends.** Nothing in C says when a library is finished with a stored callback, so there is no moment at which releasing it would be safe. The cost is one small allocation per call that passes a function, not per invocation.
+*A registration lasts until the program ends.* Nothing in C says when a library is finished with a stored callback, so there is no moment at which releasing it would be safe. The cost is one small allocation for each call that passes a function, not for each time the function runs.
 
-**One registration per symbol, unless the library offers somewhere to put a cookie.** Calling `ares_search` twice with two different Jade functions sends both answers to the second. Where the library has a context parameter beside the callback — most do — write `callback_data` for it in place of `null_ptr` and each registration gets its own function back. The binding report says so against any symbol taking a callback.
+*One registration per symbol, unless the library gives you somewhere to store a cookie.* Calling `ares_search` twice with two different Jade functions sends both answers to the second one. Most libraries have a context parameter beside the callback. Where one does, write `callback_data` for it in place of `null_ptr`, and each registration gets its own function back. The binding report notes this against any symbol that takes a callback.
 
-A callback registered in one task is not serviced in another: a spawned task has its own registrations, so a cross-task callback finds nothing and gets the neutral answer rather than running against another task's variables.
+A callback registered in one task is never serviced in another. A spawned task keeps its own registrations, so a cross-task callback finds nothing and gets the neutral answer, rather than running against another task's variables.
 
 ### `JADE_LIBS`
 
@@ -666,14 +676,14 @@ Set it to point a program at a different libraries directory:
 JADE_LIBS=/opt/jade-libs ./app
 ```
 
-A value you set always wins, and nothing overwrites it. That matters for the case with no Jade program in it at all: a C or Python process that loads a Jade package has no `jade` host to decide a root, so setting the variable is the only way to give that process one.
+A value you set always wins, and nothing overwrites it. That matters most when there is no Jade program involved at all. A C or Python process that loads a Jade package has no `jade` host to pick a root, so setting the variable is the only way to give that process one.
 
-The cost of winning is that it also has to be right. A `JADE_LIBS` missing a dependency fails rather than quietly falling back to the bundle — falling back would mean two directories in play, which is the two-copies bug.
+The cost of always winning is that the value also has to be right. A `JADE_LIBS` directory missing a dependency fails, rather than quietly falling back to the bundled one. Falling back would put two directories in play, which is exactly the two-copies bug.
 
 ## The FFI's limits
 
-The native ABI carries `int`, `float`, `bool`, `str`, and `nil`; arrays, dicts, and structs since v1.1.31; `bytes` since v1.2.2; and opaque handles since v1.3.0 — all in both directions. A struct crosses with its type name attached, so the receiving side can tell a `Config` from anything else shaped like one.
+The native ABI carries `int`, `float`, `bool`, `str`, and `nil`. It has carried arrays, dicts, and structs since v1.1.31, `bytes` since v1.2.2, and opaque handles since v1.3.0. All of them cross in both directions. A struct crosses with its type name attached, so the receiving side can tell a `Config` from anything else shaped the same way.
 
-A **function** crosses in one direction only. You can pass one in as a callback, and the library invokes it while your call runs. A package cannot hand one back, because a C function is not something a Jade program can hold.
+A *function* crosses in one direction only. You can pass one in as a callback, and the library invokes it while your call runs. A package cannot hand a function back, because a C function is not something a Jade program can hold.
 
-What still does not cross: **futures and prompts**, which arrive as `nil`.
+Two things still do not cross: *futures and prompts*. Both arrive as `nil`.

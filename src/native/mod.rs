@@ -895,7 +895,12 @@ fn vm_to_ffi_owned(val: &VmValue) -> JadeVal {
             // Counted, and copied into libc heap: the far side may free it, and
             // this process holds two mimalloc instances that must not free each
             // other's allocations. Same rule as JadeArr/JadeMap above.
-            let src = b.as_slice();
+            //
+            // The guard is held only for the copy. Nothing below it calls into
+            // the package, so a blob passed to C is never locked while the
+            // library runs.
+            let g = b.lock();
+            let src = g.as_slice();
             let n = src.len();
             let data = unsafe { malloc(n.max(1)) } as *mut u8;
             if data.is_null() {
@@ -1055,10 +1060,7 @@ pub fn ffi_to_vm(val: &JadeVal, span: Span) -> Result<VmValue> {
             };
             // Data from a native package is from outside the program, exactly
             // as a file read is.
-            Ok(VmValue::Bytes(std::sync::Arc::new(jade_runtime::bytesf::BytesObj::new(
-                slice,
-                jade_runtime::trust::TAINTED,
-            ))))
+            Ok(crate::builtins::make_bytes(slice, jade_runtime::trust::TAINTED))
         }
         // A JadeFn only ever travels *outward*. A package handing one back
         // would be offering the program a C function to call, which is the

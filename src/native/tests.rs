@@ -367,10 +367,7 @@ fn sample_bytes() -> VmValue {
     // Deliberately not text: an embedded NUL, a high byte, an invalid UTF-8
     // lead byte. Every one of these survives a counted blob and none survives a
     // C string.
-    VmValue::Bytes(Arc::new(jade_runtime::bytesf::BytesObj::new(
-        vec![0x00, 0xFF, 0x41, 0x00, 0x80],
-        jade_runtime::trust::TRUSTED,
-    )))
+    crate::builtins::make_trusted_bytes(vec![0x00, 0xFF, 0x41, 0x00, 0x80])
 }
 
 #[test]
@@ -395,7 +392,7 @@ fn bytes_survive_a_round_trip() {
     unsafe { ffi_free(&v) };
 
     let VmValue::Bytes(b) = back else { panic!("expected bytes back") };
-    assert_eq!(b.as_slice(), [0x00, 0xFF, 0x41, 0x00, 0x80]);
+    assert_eq!(b.lock().as_slice(), [0x00, 0xFF, 0x41, 0x00, 0x80]);
 }
 
 /// Data from a native package is from outside the program, exactly as a file
@@ -408,7 +405,7 @@ fn inbound_bytes_are_tainted() {
     unsafe { ffi_free(&v) };
 
     let VmValue::Bytes(b) = back else { panic!("expected bytes back") };
-    assert_eq!(b.trust, jade_runtime::trust::TAINTED);
+    assert_eq!(b.lock().trust, jade_runtime::trust::TAINTED);
 }
 
 /// Zero-length is the case a length-carrying ABI has to get right on its own:
@@ -416,10 +413,7 @@ fn inbound_bytes_are_tainted() {
 /// which the free path cannot tell from a failed allocation.
 #[test]
 fn empty_bytes_round_trip() {
-    let empty = VmValue::Bytes(Arc::new(jade_runtime::bytesf::BytesObj::new(
-        Vec::new(),
-        jade_runtime::trust::TRUSTED,
-    )));
+    let empty = crate::builtins::make_trusted_bytes(Vec::new());
     let mut scratch = Vec::new();
     let v = vm_to_ffi(&empty, &mut scratch);
     assert_eq!(v.tag, JADE_TAG_BYTES);
@@ -429,7 +423,7 @@ fn empty_bytes_round_trip() {
     unsafe { ffi_free(&v) };
 
     let VmValue::Bytes(b) = back else { panic!("expected bytes back") };
-    assert!(b.as_slice().is_empty());
+    assert!(b.lock().as_slice().is_empty());
 }
 
 /// Nested in a container, bytes are one more node the deep copy has to own and
@@ -443,7 +437,7 @@ fn bytes_nested_in_an_array_and_a_dict_round_trip() {
     unsafe { ffi_free(&v) };
     let VmValue::Array(out) = back else { panic!("expected an array back") };
     let Some(VmValue::Bytes(b)) = out.lock().get(1).cloned() else { panic!("nested bytes lost") };
-    assert_eq!(b.as_slice(), [0x00, 0xFF, 0x41, 0x00, 0x80]);
+    assert_eq!(b.lock().as_slice(), [0x00, 0xFF, 0x41, 0x00, 0x80]);
 
     let mut d: DictObj<VmValue> = DictObj::new();
     d.insert("blob", sample_bytes());
@@ -453,7 +447,7 @@ fn bytes_nested_in_an_array_and_a_dict_round_trip() {
     unsafe { ffi_free(&v) };
     let VmValue::Dict(out) = back else { panic!("expected a dict back") };
     let Some(VmValue::Bytes(b)) = out.get("blob") else { panic!("nested bytes lost") };
-    assert_eq!(b.as_slice(), [0x00, 0xFF, 0x41, 0x00, 0x80]);
+    assert_eq!(b.lock().as_slice(), [0x00, 0xFF, 0x41, 0x00, 0x80]);
 }
 
 /// End to end: a mangled struct arrives under the name the receiver knows.

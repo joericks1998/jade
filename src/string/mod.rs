@@ -95,9 +95,7 @@ fn str_ends_with(args: &[VmValue]) -> Result<VmValue> {
 /// program says when it means to. The trust byte travels with the octets.
 fn str_encode(args: &[VmValue]) -> Result<VmValue> {
     match &args[0] {
-        VmValue::Str(s) => Ok(VmValue::Bytes(std::sync::Arc::new(
-            jade_runtime::bytesf::BytesObj::new(s.as_bytes().to_vec(), s.trust()),
-        ))),
+        VmValue::Str(s) => Ok(crate::builtins::make_bytes(s.as_bytes().to_vec(), s.trust())),
         _ => Err(JadeError::TypeError { message: "str.encode".to_string(), span: ZERO }),
     }
 }

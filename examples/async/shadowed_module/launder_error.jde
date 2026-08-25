@@ -1,0 +1,27 @@
+// A user module cannot borrow `std::bytes`'s exemption by taking its name.
+//
+// The task checker treats `bytes.zeros`, `bytes.from_ints` and `bytes.concat`
+// as fresh allocations, because each returns storage nothing else points at.
+// That is what lets a task build its own buffer and write octets into it.
+//
+// The exemption has to belong to the *module* and not to the spelling. A user
+// file named `bytes.jde` binds a global called `bytes` with no assignment
+// anywhere, so a check that only watched assignments missed it, and the
+// `concat` below laundered a caller's array into something a task would write
+// through. Two tasks then mutated one array at the same time, on a shared heap,
+// which is the race the whole pass exists to refuse.
+
+use bytes
+
+async fn f(buf) {
+    let out = bytes.concat(buf, buf)
+    out[0] = 77
+    return out
+}
+
+let shared = [1, 2, 3]
+let one = f(shared)
+let two = f(shared)
+let a = await one
+let b = await two
+print(shared)

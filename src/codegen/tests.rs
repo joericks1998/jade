@@ -884,6 +884,74 @@ fn the_byte_bodied_http_pair_lowers_on_both_modules() {
 }
 
 #[test]
+fn the_bytes_constructors_lower_to_their_raising_forwarders() {
+    // The package tripwire below only checks `chunk_module_supported`. Two other
+    // lists have to name a module too, and a green `cargo test` says nothing
+    // about either: without `is_stdlib_module`, `bytes.zeros(4)` is classified
+    // as a method call on a dict and declines; without `RESERVED_BUILTINS`, a
+    // bare `bytes(...)` becomes an indirect call through a nil global cell.
+    // Both are hard `jade build` failures on a real program, so assert the
+    // symbols by name.
+    let zeros = ir_of(
+        &[
+            GetGlobal(0, "bytes".to_string()),
+            GetField(1, 0, "zeros".to_string()),
+            LoadInt(2, 4),
+            Call(3, 1, vec![2]),
+            Return(Some(3)),
+        ],
+        4,
+    );
+    assert!(zeros.contains("jk_bytes_zeros"), "bytes.zeros:\n{zeros}");
+
+    let from_ints = ir_of(
+        &[
+            GetGlobal(0, "bytes".to_string()),
+            GetField(1, 0, "from_ints".to_string()),
+            LoadInt(2, 1),
+            MakeArray(3, vec![2]),
+            Call(4, 1, vec![3]),
+            Return(Some(4)),
+        ],
+        5,
+    );
+    assert!(from_ints.contains("jk_bytes_from_ints"), "bytes.from_ints:\n{from_ints}");
+
+    let concat = ir_of(
+        &[
+            GetGlobal(0, "bytes".to_string()),
+            GetField(1, 0, "concat".to_string()),
+            LoadStr(2, "a".to_string()),
+            LoadStr(3, "b".to_string()),
+            Call(4, 1, vec![2, 3]),
+            Return(Some(4)),
+        ],
+        5,
+    );
+    assert!(concat.contains("jk_bytes_concat"), "bytes.concat:\n{concat}");
+}
+
+/// `b[i] = v` goes through the same runtime entry point every index assignment
+/// does, so the blob arm lives in one C function rather than in codegen.
+#[test]
+fn writing_an_octet_lowers_through_the_shared_set_index() {
+    let ir = ir_of(
+        &[
+            GetGlobal(0, "bytes".to_string()),
+            GetField(1, 0, "zeros".to_string()),
+            LoadInt(2, 2),
+            Call(3, 1, vec![2]),
+            LoadInt(4, 0),
+            LoadInt(5, 65),
+            SetIndex(3, 4, 5),
+            Return(Some(3)),
+        ],
+        6,
+    );
+    assert!(ir.contains("jrt_val_set_index"), "octet write via runtime dispatch:\n{ir}");
+}
+
+#[test]
 fn str_builtin_devirtualizes_to_str_of_any() {
     // GetGlobal str ; LoadInt r1,42 ; Call r2 = str(r1) ; Return r2
     let ir = ir_of(

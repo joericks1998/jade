@@ -4,20 +4,20 @@ title: Functions
 sidebar_label: Functions
 ---
 
-Jade functions are defined with `fn`, accept zero or more parameters, and return a value either with an explicit `return` statement or via implicit return (the last bare expression in the body). Functions are first-class values and can be passed to other functions or assigned to variables.
+You define a Jade function with `fn`. It takes zero or more parameters and returns a value in one of two ways: an explicit `return` statement, or an implicit return of the last bare expression in the body. Functions are first-class values, so you can pass one to another function or assign it to a variable.
 
 ## Overview
 
-A function is a named, reusable block of statements. It is introduced with the `fn` keyword, followed by a name, a parenthesized parameter list, and a brace-delimited body. Calling a function evaluates its body in a new scope and returns a value.
+A function is a named, reusable block of statements. Write the `fn` keyword, then a name, then a parameter list in parentheses, then a body in braces. Calling a function runs its body in a new scope and produces a value.
 
 There are two ways to return a value from a function:
 
-- **Explicit return:** `return <expr>` exits immediately and produces that value.
-- **Implicit return:** if the last statement in the body is a bare expression (no `return` keyword), that expression's value is returned automatically.
+- *Explicit return.* `return <expr>` exits at once and produces that value.
+- *Implicit return.* If the last statement in the body is a bare expression, with no `return` keyword, Jade returns that expression's value for you.
 
-If execution reaches the end of the body without hitting a `return` statement and without a final bare expression, the function returns `nil`. A bare `return` with no expression also produces `nil`.
+If the body ends with neither a `return` statement nor a final bare expression, the function returns `nil`. A bare `return` with no expression also produces `nil`.
 
-Functions are first-class values in Jade. A function definition binds the name to a `fn` value in the current environment, just like `let` binds a name to an integer or float. That value can be stored in a variable, passed as an argument, and called through any expression that evaluates to a function.
+Functions are first-class values in Jade. A function definition binds the name to a `fn` value in the current scope, the same way `let` binds a name to an integer or a float. You can store that value in a variable, pass it as an argument, and call it through any expression that produces a function.
 
 ## Syntax
 
@@ -30,10 +30,10 @@ fn <name>(<param>, <param>, ...) {
 }
 ```
 
-- `<name>` — an identifier naming the function; binds it in the enclosing scope.
-- `<param>` — zero or more parameter names separated by commas; each becomes a local variable inside the body. A parameter may carry a default (`<param> = <expr>`), which makes it optional at the call site.
-- `<body statements>` — any sequence of statements. If the last statement is a bare expression, its value is returned implicitly.
-- `return <expr>` — exits immediately and produces the given value. A bare `return` produces `nil`.
+- `<name>` is an identifier naming the function. It binds the name in the enclosing scope.
+- `<param>` is a parameter name, and you can list several separated by commas. Each becomes a local variable inside the body. A parameter may carry a default, written `<param> = <expr>`, which makes it optional at the call site.
+- `<body statements>` is any sequence of statements. If the last one is a bare expression, its value is returned implicitly.
+- `return <expr>` exits at once and produces the given value. A bare `return` produces `nil`.
 
 ### Function Call
 
@@ -41,8 +41,8 @@ fn <name>(<param>, <param>, ...) {
 <expr>(<arg>, <arg>, ...)
 ```
 
-- `<expr>` — any expression that evaluates to a function value.
-- `<arg>` — zero or more argument expressions evaluated left-to-right in the caller's scope.
+- `<expr>` is any expression that produces a function value.
+- `<arg>` is an argument expression. Jade evaluates the arguments left to right, in the caller's scope.
 
 ## Basic Examples
 
@@ -56,7 +56,7 @@ fn add(a, b) {
 let sum = add(3, 4)
 ```
 
-### Implicit return (last expression)
+### Implicit return of the last expression
 
 ```jade
 fn double(x) {
@@ -66,7 +66,7 @@ fn double(x) {
 print(double(5))  // 10
 ```
 
-The last statement is the bare expression `x * 2`. Because it is not a `let`, `if`, or other statement, its value is automatically returned. This is equivalent to writing `return x * 2`.
+The last statement is the bare expression `x * 2`. It is not a `let`, an `if`, or any other statement, so Jade returns its value. Writing `return x * 2` would mean the same thing.
 
 ### A function with no parameters
 
@@ -78,11 +78,11 @@ fn get_answer() {
 let answer = get_answer()
 ```
 
-The empty parameter list `()` is required even when there are no parameters.
+Write the empty parameter list `()` even when the function takes nothing.
 
 ### Default parameter values
 
-A parameter with a default may be left out by the caller. The default expression is used in its place.
+A caller can leave out a parameter that has a default. Jade uses the default expression in its place.
 
 ```jade
 fn greet(name, greeting = "Hello") {
@@ -93,7 +93,7 @@ print(greet("Joe"))         // Hello, Joe
 print(greet("Joe", "Hi"))   // Hi, Joe
 ```
 
-Parameters without a default stay required — omitting one is still an `ArityMismatch`.
+Parameters without a default stay required. Leaving one out is still an `ArityMismatch`.
 
 ### Chaining calls
 
@@ -105,11 +105,11 @@ fn square(x) {
 let chained = add(square(2), square(3))
 ```
 
-Call expressions can be nested. `square(2)` evaluates to `4`, `square(3)` evaluates to `9`, and `add(4, 9)` returns `13`.
+Calls nest freely. `square(2)` gives `4`, `square(3)` gives `9`, and `add(4, 9)` returns `13`.
 
 ## Advanced Examples
 
-### Recursion — factorial
+### Recursion, with factorial
 
 ```jade
 fn factorial(n) {
@@ -122,9 +122,9 @@ fn factorial(n) {
 let f5 = factorial(5)
 ```
 
-Functions can call themselves. `factorial(5)` computes `5 * 4 * 3 * 2 * 1 = 120`. Mutual recursion also works because function definitions are bound before either is called.
+A function can call itself. `factorial(5)` computes `5 * 4 * 3 * 2 * 1`, which is `120`. Mutual recursion works too, because Jade binds both definitions before either one is called.
 
-### First-class functions — higher-order functions
+### First-class and higher-order functions
 
 ```jade
 fn double(x) {
@@ -145,9 +145,9 @@ let b = apply(double, 6)
 let d = compose(double, double, 3)
 ```
 
-`double` is assigned to `f`, which can then be called as `f(5)`. `apply` receives a function as its first argument and calls it with the second. `compose(double, double, 3)` returns `12`.
+Assigning `double` to `f` lets you call `f(5)`. `apply` takes a function as its first argument and calls it with the second. `compose(double, double, 3)` returns `12`.
 
-### Fibonacci — two recursive calls
+### Fibonacci, with two recursive calls
 
 ```jade
 fn fib(n) {
@@ -164,7 +164,7 @@ let fib10 = fib(10)
 
 ## Error Conditions
 
-*When* a failure is found matters, because only the runtime ones can be handled with `try`/`catch`. A compile-time error means `jade check` rejects the file and nothing runs at all.
+*When* Jade finds a failure matters, because only the runtime ones can be handled with `try` and `catch`. A compile-time error means `jade check` rejects the file, and nothing runs at all.
 
 ### Found at compile time
 
@@ -181,31 +181,31 @@ let fib10 = fib(10)
 
 ### Found at runtime
 
-These happen while the program runs, and a `try`/`catch` can handle them.
+These happen while the program runs, so a `try` and `catch` can handle them.
 
 | Error | Trigger | Example |
 |-------|---------|---------|
 | `ArityMismatch` | Wrong number of arguments | `fn add(a, b) { return a + b }` then `add(1)` |
-| `UndefinedVariable` | A closure reads a name that was not a top-level variable | A closure written inside a function that reads that function's parameter — see the closure warning below |
+| `UndefinedVariable` | A closure reads a name that was not a top-level variable | A closure written inside a function, reading that function's parameter. See the closure warning below |
 
 :::note
-Neither `fn` nor `async fn` may nest. Declare both at the top level. Until v1.3.3 the rule applied only to `fn`, so a nested `async fn` parsed and ran — and then failed at run time when it tried to read the enclosing function's parameters, which it cannot see.
+Neither `fn` nor `async fn` may nest. Declare both at the top level. Until v1.3.3 the rule covered only `fn`, so a nested `async fn` parsed and ran. It then failed at run time when it tried to read the enclosing function's parameters, which it cannot see.
 :::
 
 ## Built-in Functions
 
-Jade provides a small set of global built-in functions that are always in scope.
+Jade has a small set of global built-in functions that are always in scope.
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
 | `print` | `print(value)` | Writes `value` to stdout followed by a newline. Accepts any type. |
-| `write` | `write(str)` | Writes a string to stdout **without** a trailing newline and flushes immediately. |
+| `write` | `write(str)` | Writes a string to stdout with *no* trailing newline, and flushes immediately. |
 | `len` | `len(value)` | Returns the length of a `str` (in characters), `array`, `dict`, `bytes`, stream, or `char` (always 1). |
-| `input` | `input()` / `input(prompt)` | Reads one line from stdin and returns it as a `str`. If `prompt` is given, prints it to stdout (no newline) before reading. Returns `""` on EOF. |
+| `input` | `input()` or `input(prompt)` | Reads one line from stdin and returns it as a `str`. With a `prompt`, it first prints that to stdout with no newline. Returns `""` at end of input. |
 | `join` | `join(future, future, ...)` | Waits for several async calls at once and returns their results as an array, in argument order. See [Async / Await](async). |
 
 ```jade
-// print vs write
+// print compared to write
 print("hello")       // hello\n
 write("hello")       // hello  (no newline, flushed immediately)
 
@@ -216,7 +216,7 @@ print(len(s))        // 4
 let arr = [1, 2, 3]
 print(len(arr))      // 3
 
-// input — read from stdin
+// input reads from stdin
 let name = input("Enter your name: ")
 print("Hello, " + name)
 
@@ -226,7 +226,7 @@ let line = input()
 
 ## Closures
 
-A closure is an anonymous function written inline using the `|params| body` syntax. It captures a snapshot of the variables visible at the point it is created, so it can reference those variables even when called later from a different scope.
+A closure is an anonymous function written inline as `|params| body`. It captures a snapshot of the variables visible where you wrote it, so it can still read them when it is called later from somewhere else.
 
 ### Syntax
 
@@ -239,7 +239,7 @@ A closure is an anonymous function written inline using the `|params| body` synt
 ### Basic examples
 
 ```jade
-// Single-expression body — implicitly returns the expression
+// Single-expression body, which returns the expression
 let double = |x| x * 2
 print(double(5))   // 10
 
@@ -254,7 +254,7 @@ print(greet())   // hello
 
 ### Capturing outer variables
 
-A closure captures a snapshot of the *top-level* variables that exist when it is created. It carries its own copy, so it can still read them after the surrounding code has moved on.
+A closure captures a snapshot of the *top-level* variables that exist when you create it. It carries its own copy, so it can still read them after the surrounding code has moved on.
 
 ```jade
 let multiplier = 3
@@ -263,7 +263,7 @@ print(triple(5))   // 15
 ```
 
 :::warning
-**A closure only captures top-level variables.** It cannot see the locals or the parameters of a function it was written inside. Reading one is an error at the moment the closure runs:
+*A closure captures top-level variables only.* It cannot see the locals or the parameters of a function it was written inside. Reading one is an error at the moment the closure runs:
 
 ```jade
 fn make_adder(n) {
@@ -298,7 +298,7 @@ print(abs_val(4))    // 4
 
 ### Closures as arguments
 
-Closures are first-class values and can be passed to higher-order functions:
+Closures are first-class values, so you can pass one to a higher-order function:
 
 ```jade
 fn apply(f, x) {
@@ -309,12 +309,12 @@ let result = apply(|x| x * x, 6)   // 36
 ```
 
 :::note
-The `|` symbol that opens a closure is only treated as a closure delimiter when it appears at the start of an expression (primary position). In all other positions it remains the bitwise OR operator. The empty-param form uses `||`, which is distinct from the logical OR operator because `||` only appears as logical OR in an infix position, never at the start of an expression.
+Jade reads `|` as the start of a closure only when it appears at the start of an expression. Everywhere else it stays the bitwise OR operator. The no-parameter form uses `||`, which never collides with logical OR, because logical OR only appears between two operands and never at the start of an expression.
 :::
 
 ## Streams: functions that yield
 
-A function whose body contains `yield` returns a **stream** instead of a single value. Every `yield` appends to the stream, the body runs to completion, and the caller receives the finished result.
+A function whose body contains `yield` returns a *stream* instead of a single value. Every `yield` adds to the stream, the body runs all the way through, and the caller receives the finished result.
 
 ```jade
 fn doubles(n) {
@@ -331,7 +331,7 @@ print(s)   // [0, 2, 4, 6]
 
 ### A stream is a buffer
 
-That single fact settles most of the questions you might have. A stream holds all its values at once, so:
+That one fact answers most questions about streams. A stream holds all its values at once, so:
 
 - `len(s)` gives the count.
 - `s[0]` indexes it.
@@ -372,7 +372,7 @@ print(upto(3))   // [0, 1, 2]
 ```
 
 :::warning
-**A function that yields cannot also return a value.** `return x` inside a generator asks it to be a stream producer and a plain function at once, which is a compile error:
+*A function that yields cannot also return a value.* Writing `return x` inside a generator asks it to be a stream producer and a plain function at the same time, which is a compile error:
 
 ```
 a function that yields cannot also return a value — it produces a stream,
@@ -394,14 +394,14 @@ print(mixed())   // [1, two]
 ```
 
 :::note
-`yield` needs a function to belong to. At the top level it is rejected for the same reason a top-level `return` is — there is no stream for the value to join.
+`yield` needs a function to belong to. Jade rejects it at the top level for the same reason it rejects a top-level `return`: there is no stream for the value to join.
 :::
 
 ## Decorators
 
-A decorator is a function applied to a declaration, written on the line above it with a leading `@`. It works on `fn`, `async fn`, `struct`, `extend`, `let`, and `prompt`.
+A decorator is a function applied to a declaration. Write it on the line above, with a leading `@`. Decorators work on `fn`, `async fn`, `struct`, `extend`, `let`, and `prompt`.
 
-For a `let`, `@f let x = v` is exactly `let x = f(v)`. The point is not that it saves characters — the wrapping sits above the declaration instead of around the thing being declared, so what the value actually *is* stays readable.
+On a `let`, `@f let x = v` means exactly `let x = f(v)`. The point is not to save characters. The wrapping sits above the declaration instead of around it, which keeps the value itself easy to read.
 
 ```jade
 fn shout(s) {
@@ -416,7 +416,7 @@ print(greeting)   // HELLO
 
 ### Decorators with arguments
 
-A decorator may take its own arguments. The decorated value is passed first, and the written arguments follow.
+A decorator may take its own arguments. The decorated value goes in first, and the arguments you wrote follow it.
 
 ```jade
 fn fence(s, tag) {
@@ -431,7 +431,7 @@ print(body)   // <note>keep it short</note>
 
 ### Stacking
 
-Decorators stack. *The one written first is applied first*, so the outermost wrapper is written last. That is the reverse of Python's rule.
+Decorators stack. *The one written first is applied first*, so you write the outermost wrapper last. That is the reverse of Python's rule.
 
 ```jade
 fn a(s) { return s + "-a" }
@@ -466,12 +466,12 @@ print(inc(41))         // 42
 ```
 
 :::note
-A `fn` decorator that *wraps* the function — returning a closure that calls it — does not work today, because a closure cannot capture the decorator's own parameter. See the closure warning above. Decorators that register, tag, or inspect a function and hand it back unchanged work fine.
+A `fn` decorator that *wraps* the function, meaning it returns a closure that calls the original, does not work today. A closure cannot capture the decorator's own parameter. See the closure warning above. Decorators that register, tag, or inspect a function and hand it back unchanged work fine.
 :::
 
 ### On a struct
 
-A `struct` decorator runs on **every instance** the program builds, not once on the type. Its extra arguments must be literals — numbers, strings, booleans, or `nil`.
+A `struct` decorator runs on *every instance* the program builds, not once on the type. Its extra arguments must be literals: numbers, strings, booleans, or `nil`.
 
 ```jade
 fn seen(p) {
@@ -488,5 +488,5 @@ let p = Point { x: 1, y: 2 }   // prints: built one
 ### One trap
 
 :::warning
-**On an `extend` block, only `@route` means anything.** Any other decorator on `extend` compiles and does nothing at all.
+*On an `extend` block, only `@route` means anything.* Any other decorator on `extend` compiles and then does nothing at all.
 :::

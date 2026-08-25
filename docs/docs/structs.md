@@ -4,15 +4,15 @@ title: Structs
 sidebar_label: Structs
 ---
 
-Structs are named record types that group related values under named fields. Methods can be attached to any struct type using `extend` blocks.
+A struct is a named record type. It groups related values under named fields. You attach methods to a struct type with an `extend` block.
 
 ## Overview
 
-A `struct` definition introduces a new named type with an ordered list of field names. Once defined, a `struct` type can be instantiated by providing values for every field in a struct literal. The resulting value is a struct instance that holds those field values and can be stored in a variable.
+A `struct` definition creates a new named type with an ordered list of field names. Once defined, you build an instance by giving a value for every field in a struct literal. The result is a struct instance holding those values, and you can store it in a variable.
 
-Individual fields are read with dot syntax (`obj.field`) and updated with field assignment syntax (`obj.field = expr`). Field assignment mutates the existing instance in place — all variables that hold a reference to the same instance see the updated value immediately.
+Read a field with dot syntax, written `obj.field`. Write one with field assignment, written `obj.field = expr`. Field assignment changes the existing instance in place, so every variable pointing at that instance sees the new value right away.
 
-Methods are defined separately from the struct using an `extend` block. Each method receives the instance it was called on as its first parameter, conventionally named `self`. Calling a method through dot syntax (`obj.method(args)`) automatically supplies the instance as `self`; the caller does not pass it explicitly.
+You define methods separately from the struct, inside an `extend` block. Each method receives the instance it was called on as its first parameter, named `self` by convention. Calling a method with dot syntax, written `obj.method(args)`, supplies the instance as `self` for you. The caller never passes it.
 
 ## Syntax
 
@@ -26,10 +26,10 @@ struct <TypeName> {
 }
 ```
 
-- `<TypeName>` — an identifier naming the type; registered in the global struct registry.
-- `<field>` — zero or more field names separated by commas. Fields have no type annotation — they hold any value at runtime. A struct with no fields (`struct Unit {}`) is legal and useful as a marker or an exception type.
+- `<TypeName>` is an identifier naming the type. Jade registers it in the global struct registry.
+- `<field>` is a field name, and you can list several separated by commas. Fields carry no type annotation, so each one holds any value at run time. A struct with no fields at all, such as `struct Unit {}`, is legal and useful as a marker or an exception type.
 
-A field may instead be written as `let <field> = <expr>`, which gives it a default and makes it optional at construction. Defaulted fields do not need a trailing comma.
+You can instead write a field as `let <field> = <expr>`. That gives it a default and makes it optional when you build an instance. A field with a default needs no trailing comma.
 
 ### Struct Instantiation
 
@@ -37,9 +37,9 @@ A field may instead be written as `let <field> = <expr>`, which gives it a defau
 <TypeName> { <field>: <expr>, <field>: <expr>, ... }
 ```
 
-- Every field *without a default* must be present in the literal. Omitting one raises `MissingField`.
-- Fields with a default may be omitted, or given a value to override the default.
-- Extra fields not declared in the definition raise an `UndefinedField` error.
+- Every field *without a default* must appear in the literal. Leaving one out raises `MissingField`.
+- A field with a default can be left out, or given a value to override the default.
+- A field that the definition never declared raises `UndefinedField`.
 
 ### Field Access
 
@@ -47,7 +47,7 @@ A field may instead be written as `let <field> = <expr>`, which gives it a defau
 <expr>.<field>
 ```
 
-Evaluates `<expr>` to a struct instance, then returns the value of the named field. If the named field does not exist, raises `UndefinedField`. If `<expr>` does not evaluate to a struct, raises `NotAStruct`.
+Jade evaluates `<expr>` to a struct instance, then returns the value of the named field. A field that does not exist raises `UndefinedField`. An `<expr>` that is not a struct raises `NotAStruct`.
 
 ### Field Assignment
 
@@ -55,7 +55,7 @@ Evaluates `<expr>` to a struct instance, then returns the value of the named fie
 <variable>.<field> = <expr>
 ```
 
-Updates the named field on the struct instance held by `<variable>`. The field must already exist on the instance.
+This updates the named field on the struct instance held by `<variable>`. The field must already exist on that instance.
 
 ### Extend Block
 
@@ -69,7 +69,7 @@ extend <TypeName> {
 }
 ```
 
-Each method is a `fn` definition where the first parameter receives the receiver instance. Conventionally named `self`.
+Each method is a `fn` definition whose first parameter receives the instance it was called on. Name that parameter `self` by convention.
 
 ### Method Call
 
@@ -77,7 +77,7 @@ Each method is a `fn` definition where the first parameter receives the receiver
 <expr>.<method>(<arg>, ...)
 ```
 
-Field access on a struct first checks instance fields, then checks the method table for the struct type. When a method is found, a bound method value is returned. Calling it automatically passes the receiver as the first argument (`self`). The caller supplies only the arguments after `self`.
+Field access on a struct checks the instance fields first, then the method table for that struct type. When it finds a method, it produces a bound method value. Calling that value passes the instance in as the first argument, `self`. You supply only the arguments that come after `self`.
 
 ## Basic Examples
 
@@ -109,7 +109,7 @@ p.x = 99
 let updated_x = p.x
 ```
 
-`p.x = 99` overwrites the `x` field on the existing instance. After the assignment, `p.x` evaluates to `99`. The instance is mutated in place.
+`p.x = 99` overwrites the `x` field on the existing instance, so afterwards `p.x` gives `99`. The change happens in place.
 
 ### Fields with defaults
 
@@ -125,10 +125,10 @@ print(c.port)    // 8080
 
 let c2 = Config { host: "example.com" }
 print(c2.host)   // example.com
-print(c2.port)   // 8080 — default still used
+print(c2.port)   // 8080, still the default
 ```
 
-Defaulted and required fields can be mixed in one struct:
+One struct can mix fields with defaults and fields without them:
 
 ```jade
 struct Mixed {
@@ -143,7 +143,7 @@ print(m.label)   // origin
 
 ### Empty structs
 
-A struct with no fields works as a marker type or a bare exception type.
+A struct with no fields works as a marker type, or as a bare exception type.
 
 ```jade
 struct Done {}
@@ -181,7 +181,7 @@ c.increment()
 let v = c.value()
 ```
 
-After two calls to `c.increment()`, `c.value()` returns `2`. Mutations through `self` inside a method are visible on the original instance because `self` and the caller's variable share the same underlying struct object.
+After two calls to `c.increment()`, `c.value()` returns `2`. A change made through `self` inside a method shows up on the original instance, because `self` and the caller's variable point at the same struct object.
 
 ## Advanced Examples
 
@@ -208,11 +208,11 @@ acc.add(3)
 let sum = acc.result()
 ```
 
-`add` takes `self` and an extra parameter `n`. When called as `acc.add(10)`, the evaluator binds `self` to the receiver and `n` to `10`. After three calls, `acc.result()` returns `18`.
+`add` takes `self` and one more parameter, `n`. In the call `acc.add(10)`, Jade binds `self` to the instance and `n` to `10`. After three calls, `acc.result()` returns `18`.
 
 ### Methods as values
 
-A method can be used as a value, not just called. Reading `obj.method` without parentheses binds the receiver, so calling it later still knows its `self`.
+A method is a value, not just something to call. Reading `obj.method` without parentheses binds the instance to it, so calling it later still knows its `self`.
 
 ```jade
 struct Counter {
@@ -231,14 +231,14 @@ let c = Counter { count: 10 }
 let bump = c.bump
 print(bump(5))    // 15
 print(bump(1))    // 16
-print(c.count)    // 16 — the binding kept the receiver
+print(c.count)    // 16. The binding kept the instance.
 ```
 
-Data fields win over methods of the same name, so a field named `bump` would shadow the method.
+A data field beats a method of the same name, so a field called `bump` would hide the method.
 
 ## Interfaces
 
-An `interface` names a set of methods a type must provide. An `extend` block can declare that it satisfies one, and the compiler checks it.
+An `interface` names a set of methods a type must provide. An `extend` block can declare that it satisfies an interface, and the compiler checks the claim.
 
 ```jade
 interface Displayable {
@@ -260,7 +260,7 @@ let p = Point { x: 3, y: 4 }
 print(p.to_str())   // (3, 4)
 ```
 
-An interface body lists method signatures only — `fn <name>(self, <params>)` with no body. Naming an interface after the colon is what turns the check on; a plain `extend Point { … }` is never checked against anything.
+An interface body lists method signatures only, written `fn <name>(self, <params>)` with no body. Naming an interface after the colon is what turns the check on. A plain `extend Point { … }` is never checked against anything.
 
 If a required method is missing, the program does not compile:
 
@@ -270,7 +270,7 @@ type 'Bad' does not implement interface 'Displayable': missing method 'to_str'
 
 ## Decorators on a struct
 
-A `struct` can carry a decorator. It runs on **every instance** the program builds, not once on the type, and its extra arguments must be literals.
+A `struct` can carry a decorator. The decorator runs on *every instance* the program builds, not once on the type, and its extra arguments must be literals.
 
 ```jade
 fn seen(p) {
@@ -292,24 +292,24 @@ See [Functions](functions#decorators) for decorator syntax, stacking, and applic
 |-------|---------|---------|
 | `UndefinedType` | Struct literal uses a type name that has not been defined | `let p = Foo { x: 1 }` when no `struct Foo` exists |
 | `MissingField` | Struct literal omits a field that has no default | `struct Point { x, y }` then `let p = Point { x: 1 }` |
-| `UndefinedField` | Struct literal includes an undeclared field, or dot access targets a field the value does not have | `struct Point { x, y }` then `Point { x: 1, y: 2, z: 3 }` |
+| `UndefinedField` | A struct literal names a field that was never declared, or dot access names a field the value does not have | `struct Point { x, y }` then `Point { x: 1, y: 2, z: 3 }` |
 | `NotAStruct` | Field *assignment* on a non-struct value | `let x = 5` then `x.foo = 1` |
 | `ArityMismatch` | Method called with the wrong number of arguments | `extend Counter { fn add(self, n) { … } }` then `c.add(1, 2)` |
 
 :::note
-Reading a field off a non-struct is `UndefinedField`, not `NotAStruct` — `let x = 5` then `x.foo` reports `struct 'int' has no field 'foo'`. `NotAStruct` is reserved for *writing* a field on something that is not a struct.
+Reading a field off a non-struct gives `UndefinedField`, not `NotAStruct`. Writing `let x = 5` then `x.foo` reports `struct 'int' has no field 'foo'`. `NotAStruct` is reserved for *writing* a field on something that is not a struct.
 :::
 
 :::note
-The arity numbers in a method-call error **include** `self`, even though you do not pass it. Calling `c.add(1, 2)` on `fn add(self, n)` reports `expected 2, got 3`.
+The argument counts in a method-call error *include* `self`, even though you never pass it. Calling `c.add(1, 2)` on `fn add(self, n)` reports `expected 2, got 3`.
 :::
 
 ## Implementation Notes
 
 :::note
-Struct instances are shared by reference. Assigning a struct instance to a new variable does not copy it — both variables reference the same object. A field mutation through one variable is immediately visible through the other.
+Struct instances are shared by reference. Assigning one to a new variable does not copy it, so both variables point at the same object. A field change made through one variable is visible through the other right away.
 :::
 
 :::note
-Struct literals are disallowed in `if` and `while` conditions. The parser sets `struct_literal_allowed = false` while parsing a condition so that `while running { … }` does not try to interpret `running {…}` as a struct literal.
+Struct literals are not allowed inside an `if` or `while` condition. The parser sets `struct_literal_allowed = false` while reading a condition, so `while running { … }` does not get read as a struct literal named `running`.
 :::

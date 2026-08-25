@@ -13,7 +13,7 @@ let a = 0
 let b = 1000000
 ```
 
-An `int` is a signed 63-bit integer, so the digits of a literal must not exceed `4611686018427387903`. More than that is refused when the file is read, with a "numeric literal overflows its type" error. There is no hex, octal, binary, or underscore-separated form.
+An `int` is a signed 63-bit integer, so the digits of a literal cannot exceed `4611686018427387903`. Anything larger is refused when the file is read, with a "numeric literal overflows its type" error. There is no hex, octal, binary, or underscore-separated form.
 
 ## Float Literals
 
@@ -22,7 +22,7 @@ let pi = 3.14
 let half = 0.5
 ```
 
-Float literals require at least one digit on each side of the decimal point. `3.14` is valid; `.5` and `3.` are not. There is no exponent form, so write `1000.0` rather than `1e3`.
+A float literal needs at least one digit on each side of the decimal point. `3.14` is valid, while `.5` and `3.` are not. There is no exponent form, so write `1000.0` rather than `1e3`.
 
 A float always prints with a decimal point, so `print(6.0)` shows `6.0` and never `6`.
 
@@ -46,7 +46,7 @@ let doubled = base * 2
 
 ## Parenthesized Expressions
 
-Any expression can be wrapped in parentheses to override default precedence:
+Wrap an expression in parentheses to override the default precedence:
 
 ```jade
 let a = (2 + 3) * 4
@@ -94,9 +94,9 @@ This evaluates as `(10 - 3) - 2 = 5`.
 
 Jade has three unary prefix operators:
 
-- `~` — bitwise NOT (integers only)
-- `!` — logical NOT (booleans only)
-- `-` — arithmetic negation (integers and floats)
+- `~` is bitwise NOT, for integers only.
+- `!` is logical NOT, for booleans only.
+- `-` is arithmetic negation, for integers and floats.
 
 ```jade
 let inv   = ~0
@@ -104,11 +104,11 @@ let neg   = -5
 let nflag = !true
 ```
 
-`!` may also be spelled `not`, and `&&` and `||` may be spelled `and` and `or`. The word forms mean exactly the same thing and bind the same way.
+You can also spell `!` as `not`, `&&` as `and`, and `||` as `or`. The word forms mean exactly the same thing and bind the same way.
 
 ## String Literals
 
-String literals may be delimited by double quotes (`"…"`) or single quotes (`'…'`) — both forms are identical. Triple-quoted strings (`"""…"""` or `'''…'''`) span multiple lines. The `+` operator concatenates two strings.
+A string literal can use double quotes or single quotes. The two forms are identical. Triple quotes, written `"""…"""` or `'''…'''`, span multiple lines. The `+` operator joins two strings.
 
 ```jade
 let hello = "hello"
@@ -126,15 +126,15 @@ line two
 '''
 ```
 
-The only escapes a string recognises are `\\`, `\n`, `\t`, `\r`, and the quote character that opened it. Any other backslash is an error rather than a literal backslash, so there is no `\u` or `\0` form.
+A string recognises five escapes: `\\`, `\n`, `\t`, `\r`, and the quote character that opened it. Any other backslash is an error rather than a literal backslash, so there is no `\u` or `\0` form.
 
-Indexing a string with `[i]` gives a [`char`](types#char), a single Unicode scalar — not a one-character string. Indexes are zero-based and count characters, so a two-byte character still counts once. An index outside the string is a runtime error; there is no negative indexing.
+Indexing a string with `[i]` gives a [`char`](types#char), which is a single Unicode scalar rather than a one-character string. Indexes start at zero and count characters, so a two-byte character still counts once. An index outside the string is a runtime error, and there is no negative indexing.
 
 ```jade
 let s = "café"
 print(s[0])          // c
 print(len(s))        // 4, not 5
-print(s[0] == "c")   // true — a char compares equal to the string spelling it
+print(s[0] == "c")   // true. A char compares equal to the string spelling it.
 ```
 
 A string also iterates, one `char` per step:
@@ -147,7 +147,7 @@ for c in "café" {
 
 ## F-String Interpolation
 
-An f-string is prefixed with `f` before the opening quote. Any expression inside `{ }` is evaluated and its value is converted to a string and embedded in place. Both quote styles are supported.
+An f-string starts with `f` before the opening quote. Jade evaluates any expression inside `{ }`, converts the result to a string, and drops it in place. Both quote styles work.
 
 ```jade
 let name = "Jade"
@@ -158,7 +158,7 @@ let msg2 = f'hello, {name}! answer is {n}'
 
 Triple-quoted f-strings are written as `f"""…"""` or `f'''…'''` and behave the same way.
 
-To put a literal brace in an f-string, escape it with a backslash. Doubling it does not work — `{{` opens a nested expression, not an escape.
+To put a literal brace in an f-string, escape it with a backslash. Doubling the brace does not work, because `{{` opens a nested expression rather than an escape.
 
 ```jade
 print(f"a \{literal\} brace")   // a {literal} brace
@@ -166,7 +166,7 @@ print(f"a \{literal\} brace")   // a {literal} brace
 
 ## Array Literals
 
-An array is written as a comma-separated list inside square brackets. Arrays may be empty and may hold values of any type.
+An array is a comma-separated list inside square brackets. An array may be empty, and it may hold values of any type.
 
 ```jade
 let a     = [1, 2, 3]
@@ -174,26 +174,26 @@ let empty = []
 let mixed = [1, 2.0, true, "hello"]
 ```
 
-Elements are accessed with `arr[i]` (zero-based). Elements can be assigned with `arr[i] = expr`. Arrays have reference semantics — assigning an array creates an alias that shares the same backing store.
+Read an element with `arr[i]`, counting from zero, and write one with `arr[i] = expr`. Arrays have reference semantics, so assigning an array creates a second name for the same storage.
 
-When every element is the same type, the compiler knows the element type and can check what you do with `arr[i]`. When they differ it knows nothing more specific, and operations on elements are checked as the program runs instead. So a mixed array costs you compile-time errors, not correctness:
+When every element has the same type, the compiler knows that type and can check what you do with `arr[i]`. When the elements differ, the compiler knows nothing more specific, so it checks operations on elements while the program runs instead. A mixed array costs you compile-time errors, not correctness:
 
 ```jade
 let mixed = [1, "two"]
 print(mixed[0] + mixed[1])   // runs, then fails: '+' requires numeric operands
 ```
 
-`arr.contains(x)` is the one place where a type mismatch is not an error. Membership asks whether any element *is* `x`, and an element of another type answers that with `false`:
+`arr.contains(x)` is the one place where a type mismatch is not an error. Membership asks whether any element *is* `x`, and an element of another type simply answers `false`:
 
 ```jade
 let mixed = [1, "two", true]
 print(mixed.contains("two"))   // true
-print(mixed.contains(9))       // false — not an error
+print(mixed.contains(9))       // false, not an error
 ```
 
-That is deliberately different from `==`, which rejects a comparison across types rather than quietly answering it. Note that `1` and `1.0` are different values to both.
+That is deliberately different from `==`, which rejects a comparison across types rather than quietly answering it. Note that both treat `1` and `1.0` as different values.
 
-`in` and `not in` ask the same question as an infix operator, and also work on a string and on a dict's keys:
+`in` and `not in` ask the same question as an infix operator. They also work on a string and on a dict's keys:
 
 ```jade
 print(2 in [1, 2, 3])          // true
@@ -227,7 +227,7 @@ See [Functions](functions) for the full reference.
 
 ## Pipe Operator
 
-The `|>` operator passes the left-hand value as the first argument to the right-hand function. Pipes chain left-to-right.
+The `|>` operator passes the value on its left as the first argument to the function on its right. Pipes chain from left to right.
 
 ```jade
 fn double(x) { return x * 2 }
@@ -235,14 +235,14 @@ let n = 5 |> double            // double(5) → 10
 let m = 3 |> double |> double  // double(double(3)) → 12
 ```
 
-When the right-hand side is a call expression, the left value is inserted as the first argument before those already listed:
+When the right side is already a call, the left value goes in as the first argument, before the ones you wrote:
 
 ```jade
 fn add(a, b) { return a + b }
 let r = 5 |> add(3)           // add(5, 3) → 8
 ```
 
-A prompt dereference pipes like any other value. A type name as a stage constrains what the model generates and coerces the reply; a function stage after it receives the coerced value. See [Operators](operators#what-a-stage-can-be) for the full rule.
+A prompt dereference pipes like any other value. A type name used as a stage limits what the model generates and coerces the reply. A function stage placed after it receives the coerced value. See [Operators](operators#what-a-stage-can-be) for the full rule.
 
 ```jade
 prompt p = "What is 21 + 21? Respond with only the number."

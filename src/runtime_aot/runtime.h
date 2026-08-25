@@ -455,8 +455,21 @@ void*    jrt_bytes_encode(const unsigned char* s);
 char*    jrt_bytes_decode(const void* p);
 void*    jrt_bytes_slice(const void* p, int64_t s, int64_t e);
 char*    jrt_bytes_take_error(void);
+/* Construction, added in v1.3.27. A program could not build a blob before it:
+ * str.encode() cannot carry a NUL or a byte above 127 as one octet, so the only
+ * blobs a program could hold were ones it read from somewhere. All three report
+ * through the pending-error channel. */
+void*    jrt_bytes_zeros(int64_t n);
+void*    jrt_bytes_from_ints(int64_t arr_word);
+void*    jrt_bytes_concat(const void* a, const void* b);
+/* Write one octet. 0 means the pending channel holds the reason: the index was
+ * past the end, or the value was not an octet in 0 to 255. */
+int32_t  jrt_bytes_set(void* p, int64_t i, int64_t v);
 /* Raising wrappers used by codegen. */
 int64_t  jk_bytes_decode(int64_t recv);
+int64_t  jk_bytes_zeros(int64_t n);
+int64_t  jk_bytes_from_ints(int64_t arr_word);
+int64_t  jk_bytes_concat(int64_t a, int64_t b);
 /* fs byte I/O. Mirrors jrt_fs_read/write/append but over blobs: `read` goes
  * through read_to_string and so cannot read a PNG at all. The content is
  * TAINTED for the same reason fs.read's is — it comes from outside. */

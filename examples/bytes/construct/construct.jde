@@ -1,0 +1,96 @@
+// std::bytes — building a blob the program did not read from anywhere.
+//
+// Until now a `bytes` value could only come from `str.encode()` or from reading
+// one off a disk or a socket. Neither builds an arbitrary buffer. A Jade string
+// is UTF-8 and NUL-terminated, so a zero byte truncates it and any value above
+// 127 encodes as two octets rather than one. A program that wanted to hand a
+// pixel buffer to a C library had no way to make one.
+//
+// `std::bytes` is that way in. Most of the octets below are out of reach of
+// `str.encode()`, which is the point of the package.
+//
+// The `try` blocks print a literal rather than the caught message, the way
+// every fixture here does. The VM prefixes a message with its source span and a
+// compiled binary has no span at run time, so printing one would fail the
+// parity gate on plumbing rather than on behavior.
+
+use std::bytes
+
+// A zeroed buffer of a known size.
+let buf = bytes.zeros(4)
+print(len(buf))
+print(buf[0])
+print(buf)
+
+// Zero length is allowed and gives an empty blob.
+print(len(bytes.zeros(0)))
+
+// A blob from explicit octet values.
+let px = bytes.from_ints([255, 0, 128, 64])
+print(len(px))
+print(px[0])
+print(px[1])
+print(px[2])
+print(px)
+
+// An empty array gives an empty blob.
+print(len(bytes.from_ints([])))
+
+// Joining two blobs gives a third, and neither input changes.
+let head = bytes.from_ints([137, 80])
+let body = bytes.from_ints([1, 2, 3])
+let whole = bytes.concat(head, body)
+print(len(whole))
+print(whole)
+print(len(head))
+
+// Concatenating an empty blob is the identity, and a blob may be joined to
+// itself.
+print(len(bytes.concat(whole, bytes.zeros(0))))
+print(bytes.concat(head, head))
+
+// A blob built this way decodes when the octets happen to be text.
+print(bytes.from_ints([106, 97, 100, 101]).decode())
+
+// Every failure is catchable.
+try {
+    bytes.zeros(-1)
+    print("NOT RAISED: a negative length")
+} catch e {
+    print("refused a negative length")
+}
+
+try {
+    bytes.from_ints([1, 300, 3])
+    print("NOT RAISED: an element above 255")
+} catch e {
+    print("refused an element above 255")
+}
+
+try {
+    bytes.from_ints([1, -5, 3])
+    print("NOT RAISED: a negative element")
+} catch e {
+    print("refused a negative element")
+}
+
+try {
+    bytes.from_ints([1, "two"])
+    print("NOT RAISED: an element that is not an int")
+} catch e {
+    print("refused an element that is not an int")
+}
+
+try {
+    bytes.from_ints(5)
+    print("NOT RAISED: an argument that is not an array")
+} catch e {
+    print("refused an argument that is not an array")
+}
+
+try {
+    bytes.concat(whole, 5)
+    print("NOT RAISED: joining something that is not a blob")
+} catch e {
+    print("refused joining something that is not a blob")
+}
