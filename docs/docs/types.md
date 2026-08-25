@@ -117,13 +117,23 @@ let back = fs.read_bytes("out.bin")
 
 Indexing gives an `int` from 0 to 255 rather than a `char`. A byte is not a Unicode scalar. Making `b[0]` behave like `s[0]` would hide the fact that the two give different answers on any non-ASCII input.
 
-A blob has exactly three methods: `len()`, `decode()`, and `slice(start, end)`. `slice` clamps its bounds rather than raising, so you can take the tail of a buffer without checking its length first.
+A blob has three methods: `len()`, `decode()`, and `slice(start, end)`. `slice` clamps its bounds rather than raising, so you can take the tail of a buffer without checking its length first.
 
 ```jade
 let raw = "hello".encode()
 print(raw.len())            // 5
 print(raw.slice(0, 2))      // b"he"
 print(raw.slice(3, 99))     // b"lo". The end clamps to the length.
+```
+
+Writing an octet is spelled `b[i] = v`, the same way an array works, and the value is an int from 0 to 255. A blob is *reference-semantic*: two names for one buffer see the same write. Building a blob from nothing is what [`std::bytes`](stdlib#stdbytes) is for.
+
+```jade
+use std::bytes
+
+let buf = bytes.zeros(3)
+buf[0] = 255
+print(buf)                  // b"\xff\x00\x00"
 ```
 
 `bytes` is deliberately not a second string type, so there is no way to compare two blobs directly. Using `==` on them is an error. Decode both first, or compare a slice.

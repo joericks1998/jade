@@ -142,7 +142,7 @@ To measure again, run `jade pkg add <name> --path <lib> --header <hdr>` and read
 
 *An out-parameter consumes no Jade argument at all.* That is the rewrite which makes `x_read(handle, buf, n)` callable as `x_read(handle, n)`.
 
-*An `out_buffer` is the shim's memory, never Jade's.* A Jade `bytes` is immutable, with three methods and none of them writing. Letting a C library write into one would break that guarantee for the FFI's convenience. So the shim allocates the scratch memory, the library fills it, and Jade only ever sees the finished blob.
+*An `out_buffer` is the shim's memory, never Jade's.* A blob is writable from Jade as of v1.3.27, but only from Jade: nothing else in the runtime knows when a library is holding a pointer into one, so lending a live blob out would mean a C call could resize or free the buffer under a running program. So the shim allocates the scratch memory, the library fills it, and Jade only ever sees the finished blob.
 
 Its size comes from *the next declared argument*, which must be an `int`. Nearly every buffer-filling C function has that shape, including `read(fd, buf, n)`, `gzread`, `fread`, and `sf_read_short`. The shim has to know how much to allocate before it can call anything. The alternative, a separate key naming which argument holds the count, buys nothing for the cases that actually exist.
 
@@ -256,7 +256,7 @@ Fields named `reserved*` are excluded. `lzma_stream` ends in four `void *reserve
 
 It is borrowed for the call, exactly as a `str` is. It is listed as an assumption, because Jade cannot check the length, and a truncated blob reads past the end. That is the library's contract with its caller, and not something Jade can improve on.
 
-*`inout_bytes` is for the buffers a library revises in place.* Every `libfdt` writer edits the device tree where it sits. A Jade blob is immutable, so there is nothing to lend out to be written into.
+*`inout_bytes` is for the buffers a library revises in place.* Every `libfdt` writer edits the device tree where it sits. Jade does not lend a live blob to a library, for the reason above, so there is nothing to write into directly.
 
 The shim copies the caller's bytes into scratch memory it owns, lets the library work on that, and hands the result back as a fresh blob. The edit comes back as a return value, rather than as a mutation nothing declared.
 

@@ -737,6 +737,94 @@ print(deck)
 
 ---
 
+## `std/bytes`
+
+```jade
+use std::bytes
+```
+
+Building a blob from nothing. Everything else that produces one reads it from somewhere: `str.encode()` converts text you already have, and `fs.read_bytes`, `http.get_bytes` and `uhttp.get_bytes` all read from outside the program. This package is how a program makes octets of its own, which is what you need to hand a pixel buffer, a header, or a mask to a C library.
+
+`str.encode()` is not a substitute. A Jade string is UTF-8 and NUL-terminated, so a zero byte cuts it short and any value above 127 encodes as two octets rather than one. Neither is a defect; both are what a string *is*.
+
+| Function | Returns | Description |
+|----------|---------|-------------|
+| `bytes.zeros(n)` | `bytes` | A buffer of `n` zeroed octets. Raises if `n` is negative. |
+| `bytes.from_ints(arr)` | `bytes` | A blob from an array of ints. Each must be an octet, 0 to 255, or it raises and names the position. |
+| `bytes.concat(a, b)` | `bytes` | A new blob holding `a` then `b`. Neither input changes. |
+
+```jade
+use std::bytes
+
+let buf = bytes.zeros(4)
+print(buf)                          // b"\x00\x00\x00\x00"
+
+let px = bytes.from_ints([255, 0, 128, 64])
+print(len(px))                      // 4
+print(px[2])                        // 128
+
+let whole = bytes.concat(px, buf)
+print(len(whole))                   // 8
+```
+
+### Writing an octet
+
+A blob is a buffer you can write into. Reading one octet was always spelled `b[i]`, so writing one is spelled `b[i] = v`, the same way an array works.
+
+```jade
+use std::bytes
+
+let buf = bytes.zeros(4)
+buf[0] = 255
+buf[3] = 1
+print(buf)                          // b"\xff\x00\x00\x01"
+```
+
+The value is an int from 0 to 255. Anything else raises, and so does an index past the end.
+
+A blob is *reference-semantic*, like an array and unlike a dict. Two names for one buffer see the same write, and a function that writes into its argument changes what the caller still holds.
+
+```jade
+use std::bytes
+
+fn fill(dst, value) {
+    let i = 0
+    while i < len(dst) {
+        dst[i] = value
+        i = i + 1
+    }
+    return dst
+}
+
+let buf = bytes.zeros(3)
+fill(buf, 7)
+print(buf)                          // b"\x07\x07\x07". fill wrote into the caller's buffer.
+```
+
+`slice` copies, so writing into a slice leaves the original alone.
+
+### Trust
+
+A blob the program built is trusted, because nothing about it came from outside. `bytes.concat` takes the more restrictive of its two inputs: joining anything to a blob read off a disk gives a tainted result, so `sh.exec` still refuses it. See [the trust rules](stdlib#untrusted-strings-cannot-become-commands).
+
+One edge is worth knowing about. An int carries no trust anywhere in Jade, so a program that walks a tainted blob out into an int array and back through `bytes.from_ints` gets a trusted blob holding the same octets. That is deliberate rather than an oversight: trust follows values that hold it, and a number is not one. If you need the original marker, keep the blob rather than its octet values.
+
+### Tasks
+
+A task may write into a buffer it allocated itself, and may not write into one it was handed. The rule is the same one that covers arrays: tasks run on a shared heap, so writing through a value the caller still holds is a data race and does not compile.
+
+```jade
+use std::bytes
+
+async fn render(n) {
+    let buf = bytes.zeros(n)        // allocated here, so writing is fine
+    buf[0] = 255
+    return buf
+}
+```
+
+---
+
 ## LLM inference
 
 There is no `llm` package. Running inference is language *syntax* rather than a package: you declare a prompt and dereference it, written `?p` or `?p |> Type`. The provider package now owns everything a program used to reach for through `use llm`, including the model, the token budget and accounting, anchor handling, retries, health, model profiles, and tool-call parsing. See [LLM Integration](llm).

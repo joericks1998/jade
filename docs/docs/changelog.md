@@ -4,6 +4,32 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.3.27
+
+*A program can build a `bytes` value now, and write into one.* Until this release the only ways to get a blob were `str.encode()` and reading one off a disk or a socket. Neither builds an arbitrary buffer: a Jade string is UTF-8 and NUL-terminated, so a zero byte truncates it and any value above 127 encodes as two octets rather than one. Everything downstream already worked, including the FFI shim's pointer-and-length mapping, so a Jade program could receive a pixel buffer from a C library and never make one.
+
+`std::bytes` is the new package, with three functions:
+
+```jade
+use std::bytes
+
+let buf = bytes.zeros(1024)
+let mask = bytes.from_ints([255, 128, 0, 255])
+let atlas = bytes.concat(buf, mask)
+```
+
+Writing one octet is spelled `b[i] = v`, the same way an array works, and the value is an int from 0 to 255. Construction is a package rather than three more methods because a constructor has no receiver, and because the method surface is three on purpose. See [`std/bytes`](stdlib#stdbytes).
+
+*A blob is now reference-semantic.* Two names for one buffer see the same write, and a function that writes into its argument changes what the caller still holds. That is how an array already behaves and it is what makes a buffer useful, but it is a change to an existing type: a blob taken out of a dict or an array is shared with what it came from rather than copied. `slice` still copies.
+
+*Two data races in the concurrency checker are closed.* Both are older than this release, and both got much easier to reach now that a buffer is the obvious thing to write into. `SetIndex` was reading the wrong taint set, so `async fn f(arr) { arr[0] = 9 }` compiled clean while `arr.push(9)` beside it was correctly rejected. `SetIndexGlobal` had no check at all, so a task writing into a global collection was never refused even though rebinding that same global was. Both are now rejected at compile time. A program that was relying on either will stop compiling, which is the point.
+
+A task may still write into a buffer it allocated itself. The three `std::bytes` constructors return storage nothing else points at, so the checker treats them the way it already treats an array literal.
+
+*Fixed: a caught built-in error was a different type on each engine.* `JadeError::Exception` means a `raise` the program wrote, and the VM answers one by handing the catch block the value that was raised, which a built-in never sets. `bytes.decode()` was raising it, so catching an invalid-UTF-8 failure bound the bare string `"unknown exception"` under `jade run` and a `RuntimeError` struct under `jade build`. Reading `e.message` worked on one engine and failed on the other. It now raises what every other built-in raises, and a test pins the rule for the whole type.
+
+*Also:* `s.encode().len()` types as `int` rather than `unknown`. The table of `bytes` method signatures had been filled in from the start and nothing ever read it.
+
 ## v1.3.26
 
 *Rewrote every page of this site, and every `README.md` in the repository, for clarity.* The content is the same. What changed is how it reads.

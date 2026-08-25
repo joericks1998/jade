@@ -178,6 +178,7 @@ Jade rejects quoted-string imports of every kind at compile time, with a `Quoted
 | `use std::env` | `env` | `get`, `set`, `args`, `cwd` |
 | `use std::path` | `path` | `join`, `basename`, `dirname`, `ext`, `stem`, `abs`, `is_abs` |
 | `use std::random` | `random` | `int`, `float`, `choice`, `shuffle`, `seed` |
+| `use std::bytes` | `bytes` | `zeros`, `from_ints`, `concat` |
 
 See the [Standard Library](stdlib) reference for full API documentation.
 
