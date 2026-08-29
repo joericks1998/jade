@@ -1154,8 +1154,7 @@ mod parser {
     /// "expected `{`, found `:`", which explains nothing.
     #[test]
     fn an_extend_conformance_claim_is_refused_by_name() {
-        let e =
-            parse_src_err("extend Foo: Bar {\n    fn go(self) {\n        return 1\n    }\n}");
+        let e = parse_src_err("extend Foo: Bar {\n    fn go(self) {\n        return 1\n    }\n}");
         assert!(e.to_string().contains("conformance claim was removed"), "got: {e}");
     }
 
@@ -1645,7 +1644,9 @@ mod parser {
     /// `@route` went for the same reason, and on the same terms.
     #[test]
     fn a_route_decorator_is_refused_by_name() {
-        let e = parse_src_err("@route(\"kind\")\nextend Foo {\n    fn go(self) {\n        return 1\n    }\n}");
+        let e = parse_src_err(
+            "@route(\"kind\")\nextend Foo {\n    fn go(self) {\n        return 1\n    }\n}",
+        );
         assert!(e.to_string().contains("`@route` was removed"), "got: {e}");
     }
 

@@ -54,7 +54,10 @@ print(p.legs)
 print(p.breed)
 print(p.weeks)
 
-// Methods are inherited the same way.
+// Methods are inherited the same way. An `extend` block is collected before
+// anything runs, so where it sits in the file does not matter; all three below
+// are in effect for the whole program.
+
 extend Animal {
     fn speak(self) {
         return "..."
@@ -65,31 +68,26 @@ extend Animal {
     }
 }
 
-print(c.speak())
-print(d.describe())
-print(p.describe())
-
-// A child's method wins over the one it would have inherited. `describe` is
-// not overridden, so `Dog` still uses `Animal`'s.
+// A child's method wins over the one it would have inherited.
 extend Dog {
     fn speak(self) {
         return "woof"
     }
 }
 
-print(d.speak())
-print(d.describe())
-
-// The override is inherited in turn, so `Puppy` gets `Dog`'s `speak` rather
-// than `Animal`'s. The nearest declaration wins.
-print(p.speak())
-
-// And a grandchild can override again.
+// And a grandchild can override again. `Puppy` is nearer to itself than `Dog`
+// is, and `Dog` is nearer than `Animal`, so the nearest declaration wins.
 extend Puppy {
     fn speak(self) {
         return "yip"
     }
 }
 
+print(c.speak())
+print(d.speak())
 print(p.speak())
-print(Dog { name: "rex", breed: "corgi" }.speak())
+
+// `describe` is overridden nowhere, so every one of them uses `Animal`'s.
+print(c.describe())
+print(d.describe())
+print(p.describe())

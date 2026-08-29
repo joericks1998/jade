@@ -218,8 +218,10 @@ pub enum TStmt {
     StructDef {
         name: String,
         fields: Vec<StructFieldDef>,
-        /// Fully flattened: a parent's fields are folded in before the struct's
-        /// own by `resolve_inheritance`, so nothing downstream walks a chain.
+        /// Direct parents as written, renamed by the AOT import pass the way
+        /// any type reference is. `fields` above is already flattened, so this
+        /// is read for one thing: working out each struct's full ancestry, which
+        /// a typed `catch` arm needs at run time.
         parents: Vec<String>,
         span: Span,
     },

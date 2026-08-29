@@ -36,6 +36,43 @@ pub struct CompiledProgram {
 
 // ── Internal state ────────────────────────────────────────────────────────────
 
+/// Every struct each type inherits, nearest first, transitively.
+///
+/// Nearest-first order is what makes an override readable: a `Puppy` that
+/// inherits `Dog` which inherits `Animal` lists `Dog` before `Animal`, so the
+/// first entry that supplies something is the one that wins. Cycles cannot reach
+/// here — `resolve_inheritance` refuses them — but the visited set keeps this
+/// terminating anyway rather than trusting a caller two passes away.
+fn flatten_ancestry(parents: &HashMap<String, Vec<String>>) -> HashMap<String, Vec<String>> {
+    fn walk(
+        name: &str,
+        parents: &HashMap<String, Vec<String>>,
+        out: &mut Vec<String>,
+        seen: &mut Vec<String>,
+    ) {
+        if seen.iter().any(|s| s == name) {
+            return;
+        }
+        seen.push(name.to_string());
+        for p in parents.get(name).into_iter().flatten() {
+            if !out.iter().any(|o| o == p) {
+                out.push(p.clone());
+            }
+            walk(p, parents, out, seen);
+        }
+    }
+    let mut all = HashMap::new();
+    for name in parents.keys() {
+        let mut out = Vec::new();
+        let mut seen = Vec::new();
+        walk(name, parents, &mut out, &mut seen);
+        if !out.is_empty() {
+            all.insert(name.clone(), out);
+        }
+    }
+    all
+}
+
 /// Shared context threaded through the whole compilation.
 struct EmitCtx {
     struct_defs: HashMap<String, Vec<StructFieldDef>>,
@@ -268,6 +305,12 @@ pub fn emit(program: TProgram) -> Result<CompiledProgram> {
         }
     }
 
+    // Ancestry, worked out here rather than in the checker because this is where
+    // the final name set is known: the AOT backend inlines every imported module
+    // into one stream and mangles the names first, so a parent written
+    // `shapes.Animal` has already become whatever it is going to be.
+    ctx.struct_ancestors = flatten_ancestry(&ctx.struct_parents);
+
     // Second pass: emit all statements into the top-level chunk.
     let mut em = Emitter::new_top();
     for stmt in program.stmts {
@@ -291,6 +334,29 @@ pub fn emit(program: TProgram) -> Result<CompiledProgram> {
             what: v.what,
             span: v.span,
         });
+    }
+
+    // Fold each parent's compiled methods into its children, nearest first, a
+    // child's own entry standing. Doing it here rather than in the checker is
+    // what keeps both engines out of it: `extend_methods` is already the flat
+    // `type_name -> method_name -> CompiledFn` table each of them looks a method
+    // up in, and after this it simply holds more entries.
+    let inherited: Vec<(String, HashMap<String, Arc<CompiledFn>>)> = ctx
+        .struct_ancestors
+        .iter()
+        .map(|(name, chain)| {
+            let mut merged = ctx.extend_methods.get(name).cloned().unwrap_or_default();
+            for ancestor in chain {
+                for (method, f) in ctx.extend_methods.get(ancestor).into_iter().flatten() {
+                    merged.entry(method.clone()).or_insert_with(|| Arc::clone(f));
+                }
+            }
+            (name.clone(), merged)
+        })
+        .filter(|(_, m)| !m.is_empty())
+        .collect();
+    for (name, merged) in inherited {
+        ctx.extend_methods.insert(name, merged);
     }
 
     Ok(CompiledProgram {

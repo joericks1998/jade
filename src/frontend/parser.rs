@@ -1,7 +1,6 @@
 use super::{
     ast::{
-        BinOpKind, CatchArm, DerefStyle, Expr, FStrPart, Program, Stmt,
-        StructFieldDef, UnaryOpKind,
+        BinOpKind, CatchArm, DerefStyle, Expr, FStrPart, Program, Stmt, StructFieldDef, UnaryOpKind,
     },
     error::{JadeError, Result, Span},
     lexer::{RawFStrPart, Token, TokenKind, token_kind_desc},

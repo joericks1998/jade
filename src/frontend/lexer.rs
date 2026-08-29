@@ -604,7 +604,7 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
                     "continue" => TokenKind::Continue,
                     "struct" => TokenKind::Struct,
                     "extend" => TokenKind::Extend,
-        "interface" => TokenKind::Interface,
+                    "interface" => TokenKind::Interface,
                     "prompt" => TokenKind::Prompt,
                     "use" => TokenKind::Use,
                     "raise" => TokenKind::Raise,
