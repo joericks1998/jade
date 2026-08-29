@@ -96,6 +96,8 @@ pub enum TokenKind {
     Comma,
     Semicolon,
     Dot,
+    /// `...`, the base of a copy-with struct literal: `Config { ...c, port: 9090 }`.
+    DotDotDot,
     Colon,
     ColonColon,
 
@@ -174,6 +176,7 @@ pub fn token_kind_desc(kind: &TokenKind) -> String {
         TokenKind::Comma => "`,`".to_string(),
         TokenKind::Semicolon => "`;`".to_string(),
         TokenKind::Dot => "`.`".to_string(),
+        TokenKind::DotDotDot => "`...`".to_string(),
         TokenKind::Colon => "`:`".to_string(),
         TokenKind::ColonColon => "`::`".to_string(),
         TokenKind::LParen => "`(`".to_string(),
@@ -741,9 +744,18 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
                 i += 1;
             }
             '.' => {
-                tokens.push(Token { kind: TokenKind::Dot, span: Span { line, col } });
-                col += 1;
-                i += 1;
+                // `...` is the copy-with base marker. Only the three-dot run is
+                // special; `..` has no meaning, so it lexes as two dots and the
+                // parser reports what it expected.
+                if i + 2 < chars.len() && chars[i + 1] == '.' && chars[i + 2] == '.' {
+                    tokens.push(Token { kind: TokenKind::DotDotDot, span: Span { line, col } });
+                    col += 3;
+                    i += 3;
+                } else {
+                    tokens.push(Token { kind: TokenKind::Dot, span: Span { line, col } });
+                    col += 1;
+                    i += 1;
+                }
             }
             ':' => {
                 if i + 1 < chars.len() && chars[i + 1] == ':' {

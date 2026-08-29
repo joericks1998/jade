@@ -693,7 +693,7 @@ fn struct_make_field_and_typename_lower_to_runtime() {
     let ir = ir_of(
         &[
             LoadInt(0, 10),
-            MakeStruct(1, "Point".to_string(), vec![("x".to_string(), 0, false)]),
+            MakeStruct(1, "Point".to_string(), vec![("x".to_string(), 0, false)], None),
             GetField(2, 1, "x".to_string()),
             LoadInt(3, 20),
             SetField(1, "x".to_string(), 3),

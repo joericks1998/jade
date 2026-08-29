@@ -287,7 +287,15 @@ pub enum Instr {
 
     // ── Struct ─────────────────────────────────────────────────────────────
     /// (dest, type_name, [(field_name, val_reg, is_prompt), …])
-    MakeStruct(Reg, String, Vec<(String, Reg, bool)>),
+    /// `dest = TypeName { fields… }`, optionally copying every field the type
+    /// declares and the literal did not name out of a base struct.
+    ///
+    /// The copy happens here, at run time, rather than being expanded into
+    /// field reads by the emitter. A struct that inherits a parent from another
+    /// file does not have its full field list until the engine merges the
+    /// import, which is after this program was emitted; both engines do know it
+    /// by the time the instruction runs.
+    MakeStruct(Reg, String, Vec<(String, Reg, bool)>, Option<Reg>),
     /// dest ← obj_reg.field_name
     GetField(Reg, Reg, String),
     /// obj_reg.field_name ← val_reg

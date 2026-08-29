@@ -1088,7 +1088,7 @@ pub(crate) async fn execute_chunk(
             }
 
             // ── Struct ────────────────────────────────────────────────────────
-            Instr::MakeStruct(dest, type_name, field_specs) => {
+            Instr::MakeStruct(dest, type_name, field_specs, base_reg) => {
                 let mut sobj = StructObj::<VmValue>::new(type_name);
                 for (fname, freg, is_prompt) in field_specs {
                     let mut val = get(slots, *freg).clone();
@@ -1099,6 +1099,51 @@ pub(crate) async fn execute_chunk(
                         };
                     }
                     sobj.set_field(fname, val);
+                }
+                // `...base`: every field the type declares and the literal did
+                // not name is copied off the base. Explicit fields are already
+                // in, and `set_field` is not called for a name they hold, so a
+                // named field always wins over the base. A field the base does
+                // not carry falls through to the default fill below.
+                if let Some(breg) = base_reg {
+                    let base_val = get(slots, *breg).clone();
+                    let VmValue::Struct(brc) = base_val else {
+                        vm_err!(JadeError::NotAStruct { span });
+                    };
+                    let declared = state.struct_defs.get(type_name.as_str()).cloned();
+                    let guard = brc.lock();
+                    match declared.as_deref() {
+                        Some(defs) => {
+                            for d in defs {
+                                let name = d.name();
+                                if sobj.get_field(name).is_some() {
+                                    continue;
+                                }
+                                if let Some(v) = guard.get_field(name) {
+                                    sobj.set_field(name, v.clone());
+                                }
+                            }
+                        }
+                        // Defensive only: every struct is declared at the top
+                        // level, so a type reaching `MakeStruct` is in
+                        // `struct_defs` by then, imported ones included — they
+                        // are merged when the import lands, which is before any
+                        // literal of theirs can run.
+                        //
+                        // With no declared list there is nothing to filter by,
+                        // so this copies whatever the base holds. That is not
+                        // quite the walk above, which copies only the fields the
+                        // type declares; the two agree exactly when the base is
+                        // the same type, and that is the case worth being right
+                        // about if this is ever reached.
+                        None => {
+                            for (name, v) in guard.fields() {
+                                if sobj.get_field(name).is_none() {
+                                    sobj.set_field(name, v.clone());
+                                }
+                            }
+                        }
+                    }
                 }
                 // Fill in defaults for any fields omitted from the literal.
                 // Needed when the struct type was unknown at compile time (imported type).
@@ -1824,10 +1869,13 @@ pub(crate) fn instr_max_reg(instr: &Instr) -> u32 {
             }
             m
         }
-        Instr::MakeStruct(d, _, fields) => {
+        Instr::MakeStruct(d, _, fields, base) => {
             let mut m = *d;
             for (_, r, _) in fields {
                 m = m.max(*r);
+            }
+            if let Some(b) = base {
+                m = m.max(*b);
             }
             m
         }

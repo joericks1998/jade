@@ -382,6 +382,47 @@ int64_t jrt_get_field(int64_t obj, const char* field) {
     return JRT_NIL;
 }
 
+/* The `...base` of a copy-with struct literal has to be a struct.
+ *
+ * Called once per literal even when every field is named and there is nothing
+ * left to copy, because the VM checks the base unconditionally and the two
+ * engines have to fail the same way. Message matches JadeError::NotAStruct. */
+void jrt_require_struct(int64_t v) {
+    jade_value_t b = (jade_value_t)v;
+    if (jrt_is_ptr(b) && jrt_kind_of(jrt_unbox_ptr(b)) == JK_STRUCT) { return; }
+    throw_msg("value is not a struct");
+}
+
+/* Copy one field out of a copy-with base into the struct being built.
+ *
+ * A field the base does not carry is not an error: it falls through to the
+ * type's declared default, which the caller sets afterwards. jrt_kstruct_set
+ * retains, so the new struct owns its share of a heap value it now shares. */
+void jrt_kstruct_copy_field(void* dest, int64_t base, const char* field) {
+    jade_value_t b = (jade_value_t)base;
+    if (!jrt_is_ptr(b)) { return; }
+    void* p = jrt_unbox_ptr(b);
+    if (jrt_kind_of(p) != JK_STRUCT) { return; }
+    int64_t out;
+    if (jrt_coll_struct_get(p, field, &out)) { jrt_kstruct_set(dest, field, out); }
+}
+
+/* Set a declared default only where a `...base` left the field empty.
+ *
+ * The plain setter overwrites, and the defaults are written after the base is
+ * copied, so using it here would undo every field the copy just supplied. */
+void jrt_kstruct_set_if_absent(void* s, const char* field, int64_t val) {
+    int64_t out;
+    if (jrt_coll_struct_get(s, field, &out)) {
+        /* The caller built `val` before knowing it would not be wanted — a
+         * prompt, a string, a fresh collection — and nothing else will ever
+         * hold it. Dropping it on the floor here leaked one object per copy. */
+        jrt_decref(val);
+        return;
+    }
+    jrt_kstruct_set(s, field, val);
+}
+
 void jrt_set_field(int64_t obj, const char* field, int64_t val) {
     jade_value_t v = (jade_value_t)obj;
     if (jrt_is_ptr(v)) {

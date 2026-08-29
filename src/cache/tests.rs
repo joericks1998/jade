@@ -220,12 +220,17 @@ fn purge_predicate_filters() {
 
 #[test]
 fn cache_format_version_is_stable() {
+    // Bumped to 11 in v1.4.1. `StructLiteral` gained a `base` field in both the
+    // AST and the TIR, for the `...` of a copy-with literal. An older cache
+    // holds the shape without it, and bincode has no field names to notice the
+    // difference with — it would read the next value as the base and carry on.
+    //
     // Bumped to 10 in v1.4.0. Three shapes changed at once: `Stmt::InterfaceDef`
     // and `TStmt::InterfaceDef` were removed from the middle of their enums, so
     // every later variant renumbers under bincode; `StructDef` swapped its
     // `decorators` field for `parents`; and `Instr::CatchMatches` is a new
     // opcode. A TIR cached by an older build would deserialize into something
     // this one cannot run, and would do it without complaining.
-    assert_eq!(CACHE_FORMAT_VERSION, 10);
+    assert_eq!(CACHE_FORMAT_VERSION, 11);
     assert!(!JADE_VERSION.is_empty());
 }

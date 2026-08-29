@@ -183,7 +183,13 @@ fn scan_expr(e: &TExpr, name: &str, ok: &mut usize, bad: &mut usize) {
             scan_expr(right, name, ok, bad);
         }
         TExprKind::UnaryOp { operand, .. } => scan_expr(operand, name, ok, bad),
-        TExprKind::StructLiteral { fields, .. } => {
+        TExprKind::StructLiteral { base, fields, .. } => {
+            // The `...base` counts as a use like any other. Skipping it would
+            // let a name escape into the copy unseen, and an escaping value
+            // read as arena-eligible is a dangling pointer.
+            if let Some(b) = base {
+                scan_expr(b, name, ok, bad);
+            }
             for (_, v, _) in fields {
                 scan_expr(v, name, ok, bad);
             }
@@ -375,8 +381,9 @@ fn expr_contains_await(e: &TExpr) -> bool {
         }
         TExprKind::FieldAccess { object, .. } => expr_contains_await(object),
         TExprKind::Array { elements } => elements.iter().any(expr_contains_await),
-        TExprKind::StructLiteral { fields, .. } => {
-            fields.iter().any(|(_, v, _)| expr_contains_await(v))
+        TExprKind::StructLiteral { base, fields, .. } => {
+            base.as_ref().is_some_and(|b| expr_contains_await(b))
+                || fields.iter().any(|(_, v, _)| expr_contains_await(v))
         }
         TExprKind::Dict { entries } => {
             entries.iter().any(|(k, v)| expr_contains_await(k) || expr_contains_await(v))

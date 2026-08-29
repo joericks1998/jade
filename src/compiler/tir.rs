@@ -98,10 +98,22 @@ pub enum TExprKind {
     },
     StructLiteral {
         type_name: String,
-        /// All fields in definition order: `(name, value_expr, is_prompt)`.
-        /// Includes defaults for optional fields not provided by the caller,
-        /// resolved at type-inference time so the bytecode emitter sees a
-        /// complete, self-contained field list.
+        /// The `...expr` of a copy-with literal, if there is one.
+        ///
+        /// It is carried through to `MakeStruct` rather than expanded here, so
+        /// the expression is evaluated exactly once. Expanding it into one field
+        /// access per field would run `Config { ...load(), port: 1 }`'s `load()`
+        /// once per field. It also has to wait: the fields to copy are the ones
+        /// the type declares, and a struct inheriting an imported parent does
+        /// not know its own full list until the engine merges the import.
+        base: Option<Box<TExpr>>,
+        /// Fields in definition order: `(name, value_expr, is_prompt)`.
+        ///
+        /// With no `base`, this is the *complete* list: defaults for anything
+        /// the caller omitted are resolved at type-inference time, so the
+        /// emitter sees a self-contained literal. With a `base`, it holds only
+        /// the fields the literal named, because the rest come from the base
+        /// and a default must not be filled over it.
         fields: Vec<(String, TExpr, bool)>,
     },
     FieldAccess {

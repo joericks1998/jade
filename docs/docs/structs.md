@@ -111,6 +111,52 @@ let updated_x = p.x
 
 `p.x = 99` overwrites the `x` field on the existing instance, so afterwards `p.x` gives `99`. The change happens in place.
 
+### Copying a struct with changes
+
+Write `...base` first inside the braces to build a struct out of one you already have. Every field the type declares and the literal does not name is read from the base.
+
+```jade
+struct Config {
+    host,
+    let port = 80,
+    let tls = false,
+    let retries = 3
+}
+
+let base = Config { host: "a", port: 1234, tls: true }
+let staging = Config { ...base, host: "b" }
+
+staging.port      // 1234
+staging.tls       // true
+staging.retries   // 3
+```
+
+Three rules cover it. A field you name wins over the base. The base wins over the field's declared default, so `staging.port` is `1234` and not `80`; a copy that reset everything it did not mention would not be much of a copy. And a field the base does not carry falls back to that default, which is what lets you copy across two related types.
+
+The base is any expression, and it runs exactly once however many fields come across. At most one base per literal, and it comes first, because the fields after it are the ones overriding it.
+
+Inside a method, `...self` is how a struct hands back a changed version of itself:
+
+```jade
+struct Counter {
+    let count = 0,
+    let label = "hits"
+}
+
+extend Counter {
+    fn bump(self) {
+        return Counter { ...self, count: self.count + 1 }
+    }
+}
+
+let c = Counter { label: "clicks" }
+c = c.bump()
+c.count   // 1
+c.label   // "clicks"
+```
+
+The result is a new struct, so changing it leaves the base alone. One thing worth knowing: the *values* are copied, not the objects behind them. If a field holds an array, the copy and the base point at the same array, and a change through either is visible in both.
+
 ### Fields with defaults
 
 ```jade

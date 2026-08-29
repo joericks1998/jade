@@ -4,6 +4,39 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.4.1
+
+*A struct literal can copy another struct.* Write `...base` first inside the braces and every field the type declares that you did not name is read from it.
+
+```jade
+struct Config { host, let port = 80, let tls = false, let retries = 3 }
+
+let base = Config { host: "a", port: 1234, tls: true }
+let staging = Config { ...base, host: "b" }   // port 1234, tls true, retries 3
+```
+
+A field you name beats the base, and the base beats that field's declared default. The second half is the part that matters: filling `port` with its default of `80` because the literal did not mention it would reset a copy to the defaults for everything it left out, which is the opposite of copying. A field the base does not carry does fall back to the default, so copying across two related types works.
+
+The base is an expression, evaluated exactly once no matter how many fields come across. One per literal, and it comes first, since the fields after it are the ones overriding it.
+
+Inside a method, `...self` is how a struct returns a changed version of itself:
+
+```jade
+extend Counter {
+    fn bump(self) { return Counter { ...self, count: self.count + 1 } }
+}
+```
+
+The copy runs when the program does, rather than being expanded while it compiles, and that is not an implementation detail. `self` has no static type, so nothing earlier in the pipeline knows what to copy. Neither does a struct that inherits a parent from another file: it does not have its own full field list until the engine merges the import, which each engine does at a different moment. Both know by the time the instruction runs.
+
+When the base's type is known, every field is settled while the program is checked: the checker sees which fields the base supplies, folds the declared default into the rest, and still refuses a copy whose base cannot supply a required field. So any default expression works, not only the few literal shapes an engine can rebuild while it runs, and a default is still evaluated only where it is needed — `S { ...a }` does not call a `let id = nid()` default that `a` already answered.
+
+*Fixed, and found by building the above: a compiled binary could not make a non-scalar field default.* `let tags = []` and `let seen = {}` were only ever materialized while a program was checked, folded into every struct literal before either backend saw one, so the gap never showed. A copy skips that fold, since a default must not overwrite the base, and asking the compiled side to produce one at run time turned up a table that held scalars only: the field came out missing and reading it ended the program, where `jade run` gave `[]`. Both engines build a fresh collection now, one per struct rather than one shared between them.
+
+The values are copied, not the objects behind them, so a copy and its base share any array a field holds. The task-safety check knows: reaching a shared collection through a copy is refused the same way reaching it directly is.
+
+*Fixed while wiring that up: putting a shared collection into a struct field hid it from the task check.* A struct literal counted as an allocation with nothing shared inside it, which is true of the object and not of what it holds, so `Box { items: shared }` inside a task compiled clean and `b.items.push(3)` reached the spawner's array on both engines. A field takes a value, and a collection put into one is the same collection; it is treated that way now, whether it is named or copied from a base. Older than this release, and worth knowing if a program that compiled before now names a data race.
+
 ## v1.4.0
 
 *A struct can inherit.* Name parents in parentheses after the struct's own name, and it takes their fields, their defaults, and their `extend` methods as if it had written them itself.

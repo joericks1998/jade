@@ -68,6 +68,10 @@ A `continue` lands at the *bottom* of the body rather than the top, so it still 
 
 Both also emit a `PopHandler` first, for every `try` they jump out of, tracked by `Emitter::handler_depth`. A handler frame left installed points into code the loop has already left, and the next exception anywhere in the function would land there.
 
+A struct literal's TIR field list is complete *except* under a `...base`, where it holds only the fields the literal named. Filling a field's declared default there would overwrite the value being copied, so the fill is skipped and the engines resolve the rest when the literal runs. The order they apply is fixed: a named field beats the base, and the base beats a default.
+
+That skip is also what first asked a backend to build a default at run time. Every default used to be materialized here, so neither engine ever had to; the compiled side turned out to handle scalars only, and `let tags = []` came out as a missing field. Both build the collection now, and a default shape one engine knows and the other does not is a difference between the two.
+
 Changing the shape of any TIR type means bumping `CACHE_FORMAT_VERSION` in `src/cache/mod.rs`.
 
 ## Building and testing

@@ -107,7 +107,7 @@ pub(super) fn dest_reg(instr: &Instr) -> Option<Reg> {
         | MakeArrayArena(d, _)
         | ArenaMark(d)
         | MakeDict(d, _)
-        | MakeStruct(d, _, _)
+        | MakeStruct(d, _, _, _)
         | BuildFStr(d, _) => Some(*d),
         // Handler binds its caught register (in the landing block).
         SetupHandler(r, _) => Some(*r),

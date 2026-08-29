@@ -230,7 +230,18 @@ pub enum Expr {
     UnaryOp { op: UnaryOpKind, operand: Box<Expr>, span: Span },
 
     /// A struct literal, e.g. `Point { x: 10, y: 20 }`
-    StructLiteral { type_name: String, fields: Vec<(String, Expr)>, span: Span },
+    /// `Point { x: 1, y: 2 }`, or a copy of an existing value with some fields
+    /// replaced: `Point { ...p, x: 99 }`.
+    ///
+    /// `base` is the `...expr` form. Every field the type declares and the
+    /// literal does not name is read from it, so a wide struct changes one field
+    /// without re-listing the rest. At most one base, and it comes first.
+    StructLiteral {
+        type_name: String,
+        base: Option<Box<Expr>>,
+        fields: Vec<(String, Expr)>,
+        span: Span,
+    },
 
     /// Field access on a struct, e.g. `p.x` or `obj.method`
     FieldAccess { object: Box<Expr>, field: String, span: Span },

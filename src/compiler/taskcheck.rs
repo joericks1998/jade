@@ -317,9 +317,29 @@ fn step(
         }
 
         // ── Fresh allocations are unaliased: taint stops here ───────────────
-        MakeArray(d, _) | MakeDict(d, _) | MakeStruct(d, _, _) => {
+        MakeArray(d, _) | MakeDict(d, _) => {
             clear(t, d);
             t.regs.remove(d);
+        }
+
+        // A struct literal allocates a fresh object, but what it holds may not
+        // be fresh at all. A field takes a *value*, so a collection put into one
+        // is the very same collection, whether it arrives as `{ items: shared }`
+        // or is copied across from a `...base`. Taint travels with it either
+        // way, or a task reaches a shared array through the struct wrapping it.
+        //
+        // The named-field half of the rule is older than copy-with and was
+        // missing: this arm used to sit with `MakeArray` and `MakeDict` as an
+        // unconditionally fresh allocation, so `Box { items: shared }` inside a
+        // task compiled clean and pushed to the spawner's array on both engines.
+        MakeStruct(d, _, fields, base) => {
+            clear(t, d);
+            t.regs.remove(d);
+            let carries_shared = base.is_some_and(|b| t.regs.contains(&b))
+                || fields.iter().any(|(_, r, _)| t.regs.contains(r));
+            if carries_shared {
+                t.regs.insert(*d);
+            }
         }
 
         // ── Violations ──────────────────────────────────────────────────────
@@ -592,6 +612,68 @@ mod tests {
             Err(e) => e,
             Ok(()) => panic!("expected rejection, but the program compiled:\n{src}"),
         }
+    }
+
+    /// The named-field half of the same rule, and older than copy-with. Putting
+    /// a shared collection into a struct field hands the task the collection
+    /// itself, not a copy of it. `MakeStruct` used to count as an unconditionally
+    /// fresh allocation, so this compiled clean and the push reached the
+    /// spawner's array on both engines.
+    #[test]
+    fn task_mutating_a_collection_it_wrapped_in_a_struct_is_rejected() {
+        let e = rejection(
+            r#"
+            struct Box { let items = [] }
+            let shared = [1, 2]
+            async fn worker() {
+                let b = Box { items: shared }
+                b.items.push(3)
+            }
+            await worker()
+            "#,
+        );
+        assert!(e.contains("shared"), "should name the sharing: {e}");
+    }
+
+    /// A copy-with literal copies field *values*, so a collection in one of them
+    /// is the very same collection. Without this, a task reached a shared array
+    /// by copying the struct that held it — `Box { ...shared }` looked like a
+    /// fresh allocation, taint stopped, and `copy.items.push(3)` compiled clean
+    /// while mutating the spawner's array on both engines.
+    #[test]
+    fn task_mutating_a_collection_reached_through_a_copy_with_base_is_rejected() {
+        let e = rejection(
+            r#"
+            struct Box { let items = [] }
+            let shared = Box { items: [1, 2] }
+            async fn worker() {
+                let copy = Box { ...shared }
+                copy.items.push(3)
+            }
+            await worker()
+            "#,
+        );
+        assert!(e.contains("shared"), "should name the sharing: {e}");
+    }
+
+    /// The other half of the rule: a literal with no base really is a fresh
+    /// object, so taint has to stop there or every struct built inside a task
+    /// would be refused.
+    #[test]
+    fn task_mutating_a_collection_in_a_struct_it_built_is_allowed() {
+        compile(
+            r#"
+            struct Box { let items = [] }
+            let shared = Box { items: [1, 2] }
+            async fn worker() {
+                let fresh = Box { items: [9] }
+                fresh.items.push(3)
+                return len(fresh.items)
+            }
+            await worker()
+            "#,
+        )
+        .expect("a struct the task built itself is not shared");
     }
 
     /// The hole that made `SetIndex` a no-op check. `arr[0] = 9` on a caller's

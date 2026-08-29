@@ -569,12 +569,17 @@ fn fill_in_expr(
         }
         TExprKind::Closure { body, .. } => fill_in_stmts(body, defs, ctx)?,
         TExprKind::PromptDeref { expr, .. } => fill_in_expr(expr, defs, ctx)?,
-        TExprKind::StructLiteral { type_name, fields } => {
+        TExprKind::StructLiteral { type_name, base, fields } => {
+            if let Some(b) = base.as_mut() {
+                fill_in_expr(b, defs, ctx)?;
+            }
             for (_, fe, _) in fields.iter_mut() {
                 fill_in_expr(fe, defs, ctx)?;
             }
-            // Patch missing fields with their declared defaults.
-            if let Some(def_fields) = defs.get(type_name.as_str()) {
+            // Patch missing fields with their declared defaults — unless a
+            // `...base` is supplying them, in which case a default here would
+            // overwrite the value being copied.
+            if let Some(def_fields) = defs.get(type_name.as_str()).filter(|_| base.is_none()) {
                 for def_field in def_fields {
                     let already_present = fields.iter().any(|(n, _, _)| n == def_field.name());
                     if already_present {
@@ -1386,7 +1391,13 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
         }
 
         // ── Struct literals ───────────────────────────────────────────────────
-        Expr::StructLiteral { type_name, fields, span } => {
+        Expr::StructLiteral { type_name, base, fields, span } => {
+            // The base is inferred once, here, and every path below carries the
+            // same `TExpr` through. It is never duplicated per field.
+            let tbase = match base {
+                Some(b) => Some(Box::new(infer_expr(b, ctx)?)),
+                None => None,
+            };
             // Clone field defs to release the borrow on ctx before calling infer_expr.
             // If the type is unknown but imports are present, fall back gracefully.
             let def_fields_opt = ctx.struct_defs.get(type_name).cloned();
@@ -1405,7 +1416,11 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
                     .map(|(n, e)| infer_expr(e, ctx).map(|te| (n.clone(), te, false)))
                     .collect::<Result<Vec<_>>>()?;
                 return Ok(TExpr {
-                    kind: TExprKind::StructLiteral { type_name: bare.clone(), fields: tfields },
+                    kind: TExprKind::StructLiteral {
+                        type_name: bare.clone(),
+                        base: tbase,
+                        fields: tfields,
+                    },
                     ty: JadeType::Struct(bare),
                     span: *span,
                 });
@@ -1431,6 +1446,7 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
                 return Ok(TExpr {
                     kind: TExprKind::StructLiteral {
                         type_name: type_name.clone(),
+                        base: tbase,
                         fields: tfields,
                     },
                     ty: JadeType::Struct(type_name.clone()),
@@ -1451,10 +1467,30 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
                 }
             }
 
-            // Required fields check.
+            // What a `...base` can supply, worked out from its static type.
+            //
+            // `Some(names)` means the base's type is known and these are its
+            // fields; `None` means it is not known — `...self` inside an
+            // `extend` block is the usual reason, since `self` is bound as
+            // Unknown. The difference decides everything below: with a known
+            // base every field is settled here, and with an unknown one some of
+            // it has to wait until the copy runs.
+            let base_supplies: Option<Vec<String>> = tbase.as_ref().and_then(|b| {
+                let JadeType::Struct(bn) = &b.ty else { return None };
+                ctx.struct_defs.get(bn).map(|fs| fs.iter().map(|f| f.name().to_string()).collect())
+            });
+            let supplied = |name: &str| -> bool {
+                base_supplies.as_ref().is_some_and(|ns| ns.iter().any(|n| n == name))
+            };
+
+            // Required fields check. A base can stand in for a required field,
+            // but only one that actually carries it: with a known base type this
+            // still catches a missing field, and with an unknown one there is
+            // nothing to check against and the copy answers at run time.
             for def_field in &def_fields {
                 if let StructFieldDef::Required(req) = def_field
                     && !fields.iter().any(|(n, _)| n == req)
+                    && !(tbase.is_some() && (base_supplies.is_none() || supplied(req)))
                 {
                     return Err(JadeError::MissingField { field: req.clone(), span: *span });
                 }
@@ -1480,10 +1516,35 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
             // the bytecode emitter knows to wrap the value in Prompt(…).
             let mut tfields: Vec<(String, TExpr, bool)> = Vec::with_capacity(def_fields.len());
             for def_field in &def_fields {
+                // A field the base supplies is left out of the literal, and the
+                // copy reads it across. Folding the declared default in here
+                // would overwrite the base's value with the default, which is
+                // the opposite of what a copy means.
+                //
+                // A field the base does NOT supply keeps its default, folded in
+                // exactly as it is without a base. That matters for two reasons.
+                // Any default expression works, not only the literal shapes an
+                // engine can rebuild at run time. And a default is evaluated
+                // only when it is actually needed, which is the existing rule:
+                // `S { name: "c", id: 99 }` never calls the `id` default, and a
+                // copy must not start calling it either.
+                //
+                // With an unknown base type neither is decidable here, so every
+                // unnamed field waits and the engines resolve it when the copy
+                // runs.
+                if tbase.is_some()
+                    && !provided.contains_key(def_field.name())
+                    && (base_supplies.is_none() || supplied(def_field.name()))
+                {
+                    continue;
+                }
                 match def_field {
                     StructFieldDef::Required(name) => {
-                        // Already validated above that it is provided.
-                        let e = provided[name.as_str()];
+                        // Provided: either the check above passed, or a base is
+                        // present and `continue` already skipped the absent case.
+                        let Some(e) = provided.get(name.as_str()).copied() else {
+                            continue;
+                        };
                         tfields.push((name.clone(), infer_expr(e, ctx)?, false));
                     }
                     StructFieldDef::Let { name, default } => {
@@ -1505,7 +1566,11 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
             }
 
             Ok(TExpr {
-                kind: TExprKind::StructLiteral { type_name: type_name.clone(), fields: tfields },
+                kind: TExprKind::StructLiteral {
+                    type_name: type_name.clone(),
+                    base: tbase,
+                    fields: tfields,
+                },
                 ty: JadeType::Struct(type_name.clone()),
                 span: *span,
             })
