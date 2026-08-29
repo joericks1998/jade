@@ -220,9 +220,12 @@ fn purge_predicate_filters() {
 
 #[test]
 fn cache_format_version_is_stable() {
-    // Bumped to 9 in v1.3.22: `Instr::SetIndexGlobal` is a new opcode, so a
-    // TIR cached by an older build would deserialize into a Chunk this one
-    // cannot run.
-    assert_eq!(CACHE_FORMAT_VERSION, 9);
+    // Bumped to 10 in v1.4.0. Three shapes changed at once: `Stmt::InterfaceDef`
+    // and `TStmt::InterfaceDef` were removed from the middle of their enums, so
+    // every later variant renumbers under bincode; `StructDef` swapped its
+    // `decorators` field for `parents`; and `Instr::CatchMatches` is a new
+    // opcode. A TIR cached by an older build would deserialize into something
+    // this one cannot run, and would do it without complaining.
+    assert_eq!(CACHE_FORMAT_VERSION, 10);
     assert!(!JADE_VERSION.is_empty());
 }

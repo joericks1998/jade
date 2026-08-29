@@ -4,6 +4,51 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.4.0
+
+*A struct can inherit.* Name parents in parentheses after the struct's own name, and it takes their fields, their defaults, and their `extend` methods as if it had written them itself.
+
+```jade
+struct Animal {
+    name,
+    let legs = 4
+}
+
+struct Dog(Animal, Trainable) {
+    breed
+}
+
+Dog { name: "rex", breed: "corgi" }.legs   // 4
+```
+
+You may name as many parents as you like, inheritance is transitive, and a parent may live in another file: write it qualified, `struct Dog(creatures.Animal)`, the way you write any imported type.
+
+*A field name may appear once across a struct and everything it inherits.* Two parents declaring the same field is an error, and so is a child redeclaring one it already has. Two fields with one name would mean two storage slots and nothing to say which a literal meant.
+
+*Methods go the other way, because there is something to decide between them.* A child's own method overrides the one it would have inherited, and the nearest declaration wins, so a grandchild beats its parent, which beats its grandparent. Two *parents* supplying one method name is still an error: they are the same distance away, so neither is nearer.
+
+*A typed `catch` arm follows inheritance.* `catch Failure e` catches anything inheriting `Failure`, so one arm handles a family of errors and adding a member does not mean editing every caller. It does not run in reverse, and arms are still tried in written order.
+
+There is no `super`, so a child's method cannot call the version it replaced.
+
+### Three things were removed
+
+Each for a reason that stands on its own, and all three are refused by name rather than dropped in silence.
+
+*`interface` is gone.* It was a compile-time conformance check and nothing else. `extend Point: Displayable` verified that Point declared every method Displayable listed, and then no part of the runtime ever heard about it. Method calls already resolved by name on the value, so the same polymorphic loop ran identically with the interface deleted. It could not annotate a parameter, a field, or a return either, so it was not a type. A shared parent covers what it was reached for and means something at run time. A plain `extend Type { … }` is untouched.
+
+*A decorator on a `struct` is gone.* It ran in the VM as a post-construction hook and was never lowered by the compiled backend at all, so `@bump struct Point` gave one answer under `jade run` and another under `jade build`, silently, with no error either way. No fixture covered a decorated struct, which is why the parity gate stayed green over it. There is no replacement hook: call the function where you build the value. Decorators on `let`, `prompt`, `fn` and `async fn` are untouched, since those are rewrites rather than runtime hooks.
+
+*`@route` is gone*, for the identical reason. It reached only the VM, the compiled backend had no lowering for it, and no example exercised it. Removing struct decorators over that and keeping `@route` would not have held up.
+
+### Notes
+
+Inheritance resolves in the type checker, which is what keeps it out of the rest of the toolchain: a child's field list is already complete by the time bytecode is emitted, so `MakeStruct`, field access, and both backends go on treating a struct as a flat list of fields. The one thing either engine learns at run time is a struct's ancestry, and only a typed `catch` arm reads it.
+
+A parent from another file is folded in later, because each file is checked on its own and an imported struct is deliberately out of reach at that point. The compiled backend folds when it inlines every module into one stream; the VM folds when the import lands, since it has no earlier moment. Writing the cross-file fixture turned up a real divergence between the two, which is what fixtures are for.
+
+Inheritance does not work across REPL snippets: the REPL re-runs type inference from a fresh context each time and does not carry struct definitions between them.
+
 ## v1.3.27
 
 *A program can build a `bytes` value now, and write into one.* Until this release the only ways to get a blob were `str.encode()` and reading one off a disk or a socket. Neither builds an arbitrary buffer: a Jade string is UTF-8 and NUL-terminated, so a zero byte truncates it and any value above 127 encodes as two octets rather than one. Everything downstream already worked, including the FFI shim's pointer-and-length mapping, so a Jade program could receive a pixel buffer from a C library and never make one.

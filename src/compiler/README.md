@@ -18,7 +18,7 @@ Type inference exists so the instruction set can be *monomorphic*. Because the c
 
 ## What each file does
 
-- *`type_infer.rs`* is the inference pass. It keeps a `TypeContext`, which holds a scope stack mirroring the evaluator's scoping, plus flat maps for struct definitions, interfaces, `extend` methods, and primitive method types. A built-in package registers its type information here when imported, through `Package::register_types`. *All type errors belong in this file*, because by the time bytecode runs, types are settled.
+- *`type_infer.rs`* is the inference pass. It keeps a `TypeContext`, which holds a scope stack mirroring the evaluator's scoping, plus flat maps for struct definitions, their parents and ancestry, `extend` methods, and primitive method types. `resolve_inheritance` runs here, folding each parent's fields into its children so nothing downstream has to know inheritance exists. A built-in package registers its type information here when imported, through `Package::register_types`. *All type errors belong in this file*, because by the time bytecode runs, types are settled.
 
   It also *resolves* one piece of syntax rather than only checking it. `infer_pipe` decides whether a `|>` stage is a type, a Grammar, or a function, then lowers the pipe to a `Call` or folds it into a `PromptDeref`. Nothing downstream ever sees an `Expr::Pipe`.
 
@@ -28,7 +28,7 @@ Type inference exists so the instruction set can be *monomorphic*. Because the c
 
   Two things stay lenient. A `use` of a user module or a `[lib]`, whose names only exist once the importer merges the modules. And every `from … use`, which binds bare names this pass never sees. `codegen` re-checks both after inlining.
 - *`tir.rs`* holds the typed IR: `JadeType`, `TExpr`, `TStmt`, and `TProgram`. All are serde-serializable, because the cache stores TIR alongside the AST.
-- *`emit.rs`* turns TIR into a `CompiledProgram`. That covers the top-level `Chunk`, struct definitions and decorators, compiled `extend` methods, and `@route` configuration.
+- *`emit.rs`* turns TIR into a `CompiledProgram`. That covers the top-level `Chunk`, struct definitions, each struct's flattened ancestry, and compiled `extend` methods, a parent's folded into each child.
 - *`taskcheck.rs`* rejects shared mutation across task boundaries. Jade tasks run on real operating system threads over one shared heap, so a task that writes a global or mutates a caller's struct is a data race. Rather than locking every collection or deep-copying task arguments, Jade refuses to compile those programs. Read the file header before touching it, because the reasoning is laid out there in full.
 
   It watches four opcodes, and two of them were added in v1.3.27. `SetIndex` was in the list from the start but read the wrong taint set: the emitter hands it the *slot* of the binding being written, and the arm was checking the register set, so it matched nothing and `async fn f(arr) { arr[0] = 9 }` compiled clean beside a correctly rejected `arr.push(9)`. `SetIndexGlobal` had no arm at all. Both were live data races, and both got much easier to reach once a `bytes` buffer became something you write into.

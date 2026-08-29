@@ -203,14 +203,37 @@ With nothing raised, the `try` body runs all the way through and no catch arm ru
 | Operation | Condition | Result |
 |-----------|-----------|--------|
 | `raise <expr>` | Any value | The exception travels outward and the current block stops |
-| `catch TypeName e`, a typed arm | The raised value is a struct whose `type_name` equals `TypeName` | The arm body runs, with `e` bound to the struct instance |
+| `catch TypeName e`, a typed arm | The raised value is a struct of `TypeName`, or of anything that inherits it | The arm body runs, with `e` bound to the struct instance |
 | `catch e`, a catch-all arm | Any raised value, including built-in runtime errors | The arm body runs, with `e` bound to the raised value |
 | A built-in runtime error inside `try` | Any internal error | Wrapped as a `RuntimeError { message }` struct, caught by a catch-all or by `catch RuntimeError e` |
 | No catch arm matches | The raised value matches no typed arm | The exception is re-raised and travels to the nearest enclosing `try` |
 
 :::note
-A typed `catch` arm matches struct values only, because it checks the struct instance's `type_name` at run time. Raising a plain string or integer and then catching it with a typed arm will never match. Use a catch-all arm for anything that is not a struct.
+A typed `catch` arm matches struct values only, because it checks the struct instance's type at run time. Raising a plain string or integer and then catching it with a typed arm will never match. Use a catch-all arm for anything that is not a struct.
 :::
+
+### Matching by type
+
+An arm naming a parent catches its children, so one arm can handle a whole family of errors and adding a new member does not mean editing every caller.
+
+```jade
+struct Failure {
+    reason
+}
+
+struct NotFound(Failure) {
+    path
+}
+
+try {
+    raise NotFound { reason: "gone", path: "/tmp/x" }
+} catch Failure e {
+    print(e.reason)   // gone
+    print(e.path)     // /tmp/x
+}
+```
+
+It does not work in reverse. An arm naming `NotFound` is asking for that type in particular, so a plain `Failure` walks past it. Arms are still tried in written order, so put the narrower one first when you want it to win. See [Structs](structs#inheritance).
 
 ## Interaction with Other Features
 
