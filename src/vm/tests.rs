@@ -3875,3 +3875,67 @@ fn a_collection_default_is_fresh_for_every_copy() {
     assert_eq!(get_int(&st, "a"), 1);
     assert_eq!(get_int(&st, "c"), 0);
 }
+
+/// Any default expression survives a copy, not only the handful of literal
+/// shapes an engine can rebuild at run time.
+///
+/// When the base's type is known, the checker can see which fields it supplies
+/// and folds the rest in exactly as it would with no base at all. `let xs =
+/// [1, 2]` and `let n = 1 + 2` were dropped outright while every unnamed field
+/// was deferred to the copy.
+#[test]
+fn a_copy_with_keeps_a_default_that_is_not_a_plain_literal() {
+    let st = run_src(
+        "struct Bare { name }\n\
+         struct Full { name, let xs = [1, 2], let n = 1 + 2, let s = \"a\" + \"b\" }\n\
+         let b = Bare { name: \"n\" }\n\
+         let f = Full { ...b }\n\
+         let c = len(f.xs)\n\
+         let n = f.n\n\
+         let s = f.s\n",
+    )
+    .expect("should run");
+    assert_eq!(get_int(&st, "c"), 2);
+    assert_eq!(get_int(&st, "n"), 3);
+    assert_eq!(get_str(&st, "s"), "ab");
+}
+
+/// A default is evaluated only where it is needed, and a copy must not change
+/// that. `S { name: "c", id: 99 }` never calls the `id` default today, so
+/// `S { ...a }` must not call it either when `a` already carries an `id`.
+#[test]
+fn a_copy_with_does_not_evaluate_a_default_the_base_supplies() {
+    let st = run_src(
+        "let hits = []\n\
+         fn nid() {\n\
+             hits.push(1)\n\
+             return len(hits)\n\
+         }\n\
+         struct S { name, let id = nid() }\n\
+         let a = S { name: \"a\" }\n\
+         let b = S { ...a, name: \"b\" }\n\
+         let id = b.id\n\
+         let calls = len(hits)\n",
+    )
+    .expect("should run");
+    assert_eq!(get_int(&st, "id"), 1);
+    assert_eq!(get_int(&st, "calls"), 1, "the default ran once, for `a`");
+}
+
+/// A base only stands in for a required field it actually carries. With the
+/// base's type known, a missing one is still caught while the program is
+/// checked rather than becoming a struct with a hole in it.
+#[test]
+fn a_copy_with_still_requires_a_field_a_known_base_lacks() {
+    let src = "struct A { name }\n\
+               struct B { name, email }\n\
+               let a = A { name: \"x\" }\n\
+               let b = B { ...a }\n";
+    let tokens = lexer::tokenize(src).expect("lex failed");
+    let program = parser::parse(tokens).expect("parse failed");
+    let err = match type_infer::infer(program) {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("a base that cannot supply `email` should be refused"),
+    };
+    assert!(err.contains("missing required field 'email'"), "{err}");
+}

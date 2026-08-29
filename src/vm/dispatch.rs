@@ -1137,7 +1137,6 @@ pub(crate) async fn execute_chunk(
                         // the same type, and that is the case worth being right
                         // about if this is ever reached.
                         None => {
-                            eprintln!("[NONE-ARM-FIRED] type={}", type_name);
                             for (name, v) in guard.fields() {
                                 if sobj.get_field(name).is_none() {
                                     sobj.set_field(name, v.clone());

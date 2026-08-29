@@ -29,9 +29,13 @@ extend Counter {
 
 The copy runs when the program does, rather than being expanded while it compiles, and that is not an implementation detail. `self` has no static type, so nothing earlier in the pipeline knows what to copy. Neither does a struct that inherits a parent from another file: it does not have its own full field list until the engine merges the import, which each engine does at a different moment. Both know by the time the instruction runs.
 
+When the base's type is known, every field is settled while the program is checked: the checker sees which fields the base supplies, folds the declared default into the rest, and still refuses a copy whose base cannot supply a required field. So any default expression works, not only the few literal shapes an engine can rebuild while it runs, and a default is still evaluated only where it is needed — `S { ...a }` does not call a `let id = nid()` default that `a` already answered.
+
 *Fixed, and found by building the above: a compiled binary could not make a non-scalar field default.* `let tags = []` and `let seen = {}` were only ever materialized while a program was checked, folded into every struct literal before either backend saw one, so the gap never showed. A copy skips that fold, since a default must not overwrite the base, and asking the compiled side to produce one at run time turned up a table that held scalars only: the field came out missing and reading it ended the program, where `jade run` gave `[]`. Both engines build a fresh collection now, one per struct rather than one shared between them.
 
-The values are copied, not the objects behind them, so a copy and its base share any array a field holds. The task-safety check knows: reaching a shared collection through a copy is refused the same way reaching it directly is, and it was worth pinning with a test, because without it `Box { ...shared }` looked like a fresh allocation and a task could mutate the spawner's array through one.
+The values are copied, not the objects behind them, so a copy and its base share any array a field holds. The task-safety check knows: reaching a shared collection through a copy is refused the same way reaching it directly is.
+
+*Fixed while wiring that up: putting a shared collection into a struct field hid it from the task check.* A struct literal counted as an allocation with nothing shared inside it, which is true of the object and not of what it holds, so `Box { items: shared }` inside a task compiled clean and `b.items.push(3)` reached the spawner's array on both engines. A field takes a value, and a collection put into one is the same collection; it is treated that way now, whether it is named or copied from a base. Older than this release, and worth knowing if a program that compiled before now names a data race.
 
 ## v1.4.0
 

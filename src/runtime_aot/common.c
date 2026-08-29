@@ -413,7 +413,13 @@ void jrt_kstruct_copy_field(void* dest, int64_t base, const char* field) {
  * copied, so using it here would undo every field the copy just supplied. */
 void jrt_kstruct_set_if_absent(void* s, const char* field, int64_t val) {
     int64_t out;
-    if (jrt_coll_struct_get(s, field, &out)) { return; }
+    if (jrt_coll_struct_get(s, field, &out)) {
+        /* The caller built `val` before knowing it would not be wanted — a
+         * prompt, a string, a fresh collection — and nothing else will ever
+         * hold it. Dropping it on the floor here leaked one object per copy. */
+        jrt_decref(val);
+        return;
+    }
     jrt_kstruct_set(s, field, val);
 }
 

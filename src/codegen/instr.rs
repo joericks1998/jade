@@ -766,6 +766,16 @@ pub(super) fn lower_instr<'ctx>(
         // fills these at runtime). GetField/SetField are data-field access on a
         // struct (a missing field / non-struct raises).
         MakeStruct(d, type_name, field_specs, base_reg) => {
+            // Check the `...base` before allocating anything. `jrt_require_struct`
+            // throws, and throwing past a half-built struct that no slot holds
+            // yet strands it, along with every field already retained into it.
+            if let Some(breg) = base_reg {
+                let req_f = low.runtime_fn(
+                    "jrt_require_struct",
+                    low.ctx.void_type().fn_type(&[i64_ty.into()], false),
+                );
+                b.build_call(req_f, &[low.load(*breg).into()], "").map_err(|e| e.to_string())?;
+            }
             let new_f =
                 low.runtime_fn("jrt_kstruct_new", low.ptrt().fn_type(&[low.ptrt().into()], false));
             let tn = low.cstr(type_name);
@@ -808,9 +818,6 @@ pub(super) fn lower_instr<'ctx>(
             // a default — the same order the VM applies.
             if let Some(breg) = base_reg {
                 let bv = low.load(*breg);
-                let req_f = low
-                    .runtime_fn("jrt_require_struct", low.ctx.void_type().fn_type(&[i64_ty.into()], false));
-                b.build_call(req_f, &[bv.into()], "").map_err(|e| e.to_string())?;
                 let copy_f = low.runtime_fn(
                     "jrt_kstruct_copy_field",
                     low.ctx.void_type().fn_type(

@@ -1467,17 +1467,34 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
                 }
             }
 
-            // Required fields check. A `...base` supplies everything the
-            // literal does not name, so with one present there is nothing to
-            // require here; a field the base turns out not to have is caught
-            // when the copy runs.
-            if tbase.is_none() {
-                for def_field in &def_fields {
-                    if let StructFieldDef::Required(req) = def_field
-                        && !fields.iter().any(|(n, _)| n == req)
-                    {
-                        return Err(JadeError::MissingField { field: req.clone(), span: *span });
-                    }
+            // What a `...base` can supply, worked out from its static type.
+            //
+            // `Some(names)` means the base's type is known and these are its
+            // fields; `None` means it is not known — `...self` inside an
+            // `extend` block is the usual reason, since `self` is bound as
+            // Unknown. The difference decides everything below: with a known
+            // base every field is settled here, and with an unknown one some of
+            // it has to wait until the copy runs.
+            let base_supplies: Option<Vec<String>> = tbase.as_ref().and_then(|b| {
+                let JadeType::Struct(bn) = &b.ty else { return None };
+                ctx.struct_defs
+                    .get(bn)
+                    .map(|fs| fs.iter().map(|f| f.name().to_string()).collect())
+            });
+            let supplied = |name: &str| -> bool {
+                base_supplies.as_ref().is_some_and(|ns| ns.iter().any(|n| n == name))
+            };
+
+            // Required fields check. A base can stand in for a required field,
+            // but only one that actually carries it: with a known base type this
+            // still catches a missing field, and with an unknown one there is
+            // nothing to check against and the copy answers at run time.
+            for def_field in &def_fields {
+                if let StructFieldDef::Required(req) = def_field
+                    && !fields.iter().any(|(n, _)| n == req)
+                    && !(tbase.is_some() && (base_supplies.is_none() || supplied(req)))
+                {
+                    return Err(JadeError::MissingField { field: req.clone(), span: *span });
                 }
             }
 
@@ -1501,12 +1518,26 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
             // the bytecode emitter knows to wrap the value in Prompt(…).
             let mut tfields: Vec<(String, TExpr, bool)> = Vec::with_capacity(def_fields.len());
             for def_field in &def_fields {
-                // With a `...base`, a field the literal did not name is left out
-                // entirely and the copy reads it from the base. Filling the
-                // declared default here instead would quietly overwrite the
-                // base's value with the default, which is the opposite of what
-                // a copy means.
-                if tbase.is_some() && !provided.contains_key(def_field.name()) {
+                // A field the base supplies is left out of the literal, and the
+                // copy reads it across. Folding the declared default in here
+                // would overwrite the base's value with the default, which is
+                // the opposite of what a copy means.
+                //
+                // A field the base does NOT supply keeps its default, folded in
+                // exactly as it is without a base. That matters for two reasons.
+                // Any default expression works, not only the literal shapes an
+                // engine can rebuild at run time. And a default is evaluated
+                // only when it is actually needed, which is the existing rule:
+                // `S { name: "c", id: 99 }` never calls the `id` default, and a
+                // copy must not start calling it either.
+                //
+                // With an unknown base type neither is decidable here, so every
+                // unnamed field waits and the engines resolve it when the copy
+                // runs.
+                if tbase.is_some()
+                    && !provided.contains_key(def_field.name())
+                    && (base_supplies.is_none() || supplied(def_field.name()))
+                {
                     continue;
                 }
                 match def_field {
