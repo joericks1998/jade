@@ -528,10 +528,6 @@ fn pre_pass(stmts: &[Stmt], ctx: &mut TypeContext) {
                     },
                 );
             }
-            Stmt::InterfaceDef { name, methods, .. } => {
-                let method_names = methods.iter().map(|m| m.name.clone()).collect();
-                ctx.interface_defs.insert(name.clone(), method_names);
-            }
             Stmt::ExtendBlock { type_name, methods, .. } => {
                 for method in methods {
                     if let Stmt::FnDef { name: mname, .. } = method {
@@ -746,49 +742,14 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
         Stmt::Continue { span } => Ok(TStmt::Continue { span: *span }),
 
         // ── Type definitions ──────────────────────────────────────────────────
-        Stmt::StructDef { name, fields, decorators, span } => {
-            let tdecorators = infer_decorators(decorators, ctx)?;
-            Ok(TStmt::StructDef {
-                name: name.clone(),
-                fields: fields.clone(),
-                decorators: tdecorators,
-                span: *span,
-            })
-        }
+        Stmt::StructDef { name, fields, parents, span } => Ok(TStmt::StructDef {
+            name: name.clone(),
+            fields: fields.clone(),
+            parents: parents.clone(),
+            span: *span,
+        }),
 
-        Stmt::InterfaceDef { name, methods, span } => {
-            Ok(TStmt::InterfaceDef { name: name.clone(), methods: methods.clone(), span: *span })
-        }
-
-        Stmt::ExtendBlock { type_name, interface_name, methods, decorators, span } => {
-            // Verify interface compliance if an interface is named.
-            if let Some(iface_name) = interface_name {
-                let required = ctx.interface_defs.get(iface_name).cloned();
-                match required {
-                    Some(required_methods) => {
-                        for req in &required_methods {
-                            let provided = methods
-                                .iter()
-                                .any(|m| matches!(m, Stmt::FnDef { name, .. } if name == req));
-                            if !provided {
-                                return Err(JadeError::MissingInterfaceMethod {
-                                    type_name: type_name.clone(),
-                                    interface_name: iface_name.clone(),
-                                    method: req.clone(),
-                                    span: *span,
-                                });
-                            }
-                        }
-                    }
-                    None => {
-                        return Err(JadeError::UndefinedInterface {
-                            name: iface_name.clone(),
-                            span: *span,
-                        });
-                    }
-                }
-            }
-
+        Stmt::ExtendBlock { type_name, methods, decorators, span } => {
             // Type-check method bodies. Each FnDef pushes/pops its own scope.
             // The first param (`self`) is bound as Unknown inside the fn scope —
             // field accesses on self return Unknown (conservative for Stage B).
@@ -797,7 +758,6 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
             let tdecorators = infer_decorators(decorators, ctx)?;
             Ok(TStmt::ExtendBlock {
                 type_name: type_name.clone(),
-                interface_name: interface_name.clone(),
                 methods: tmethods,
                 decorators: tdecorators,
                 span: *span,
@@ -2075,7 +2035,7 @@ fn collect_captures_in_stmts(
                 collect_captures_in_expr(body, locals, captures, seen, ctx);
                 locals.insert(name.clone());
             }
-            TStmt::StructDef { .. } | TStmt::InterfaceDef { .. }
+            TStmt::StructDef { .. }
             | TStmt::ExtendBlock { .. } | TStmt::Use { .. } | TStmt::FromUse { .. }
             // Control flow, capturing nothing.
             | TStmt::Break { .. } | TStmt::Continue { .. } => {}

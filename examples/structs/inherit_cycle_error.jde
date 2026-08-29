@@ -1,0 +1,9 @@
+// A struct may not inherit itself, however long the way round.
+
+struct A(B) {
+    x
+}
+
+struct B(A) {
+    y
+}

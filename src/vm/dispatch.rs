@@ -291,16 +291,18 @@ pub(crate) async fn execute_chunk(
                                     .or_default()
                                     .extend(methods);
                             }
-                            // Merge struct_decorators prefixed with the namespace.
-                            for (type_name, decs) in sub_state.struct_decorators.drain() {
-                                if !state.struct_decorators.contains_key(&type_name) {
-                                    state.struct_decorators.insert(type_name.clone(), decs.clone());
+                            // Merge struct_ancestors under both the bare name
+                            // and the namespaced one, the way struct_defs and
+                            // extend_methods above are. A typed `catch` arm can
+                            // name an imported parent either way.
+                            for (type_name, anc) in sub_state.struct_ancestors.drain() {
+                                if !state.struct_ancestors.contains_key(&type_name) {
+                                    state.struct_ancestors.insert(type_name.clone(), anc.clone());
                                 }
                                 state
-                                    .struct_decorators
+                                    .struct_ancestors
                                     .entry(format!("{}.{}", namespace, type_name))
-                                    .or_default()
-                                    .extend(decs);
+                                    .or_insert(anc);
                             }
                         }
                         r.map_err(|e| JadeError::InFile { file: path.clone(), cause: Box::new(e) })
@@ -1103,17 +1105,7 @@ pub(crate) async fn execute_chunk(
                         }
                     }
                 }
-                let mut result = VmValue::Struct(Arc::new(Mutex::new(sobj)));
-                // Call struct decorators: dec(instance, arg1, ...) for each @dec.
-                let decs = state.struct_decorators.get(type_name).cloned().unwrap_or_default();
-                for (dec_name, dec_args) in decs {
-                    if let Some(dec_fn) = resolve_decorator_fn(&dec_name, state) {
-                        let mut call_args = vec![result];
-                        call_args.extend(dec_args);
-                        result = call_value(dec_fn, call_args, state, span).await?;
-                    }
-                }
-                set(slots, *dest, result);
+                set(slots, *dest, VmValue::Struct(Arc::new(Mutex::new(sobj))));
             }
             Instr::GetField(dest, obj_reg, field) => {
                 let obj = get(slots, *obj_reg).clone();

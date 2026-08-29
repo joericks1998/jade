@@ -321,7 +321,7 @@ fn collect_globals(stmts: &[TStmt]) -> (HashSet<String>, HashSet<String>) {
             | TStmt::PromptDecl { name, .. } => {
                 values.insert(name.clone());
             }
-            TStmt::StructDef { name, .. } | TStmt::InterfaceDef { name, .. } => {
+            TStmt::StructDef { name, .. } => {
                 types.insert(name.clone());
             }
             _ => {}
@@ -799,8 +799,15 @@ impl Renamer {
                 }
                 self.pop_scope();
             }
-            TStmt::StructDef { name, fields, decorators, .. } => {
-                self.rename_decorators(decorators);
+            TStmt::StructDef { name, fields, parents, .. } => {
+                // A parent is a type *reference*, so it renames the way an
+                // `extend` target does. Left bare when `ref_type` cannot place
+                // it, which `resolve_inheritance` then reports by name.
+                for parent in parents.iter_mut() {
+                    if let Some(m) = self.ref_type(parent) {
+                        *parent = m;
+                    }
+                }
                 for f in fields.iter_mut() {
                     match f {
                         StructFieldDef::Let { default, .. }
@@ -812,20 +819,10 @@ impl Renamer {
                     *name = m;
                 }
             }
-            TStmt::InterfaceDef { name, .. } => {
-                if top && let Some(m) = self.def_type(name) {
-                    *name = m;
-                }
-            }
-            TStmt::ExtendBlock { type_name, interface_name, methods, decorators, .. } => {
+            TStmt::ExtendBlock { type_name, methods, decorators, .. } => {
                 self.rename_decorators(decorators);
                 if let Some(m) = self.ref_type(type_name) {
                     *type_name = m;
-                }
-                if let Some(iname) = interface_name.as_mut()
-                    && let Some(m) = self.ref_type(iname)
-                {
-                    *iname = m;
                 }
                 // Methods are FnDefs; their names are NOT globals (they key as
                 // `Type$id__method` off the already-mangled type_name).

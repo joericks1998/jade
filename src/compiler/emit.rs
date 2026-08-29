@@ -22,12 +22,16 @@ pub struct CompiledProgram {
     /// Struct field definitions (needed by the VM for struct instantiation and
     /// field-access method fallback).
     pub struct_defs: HashMap<String, Vec<StructFieldDef>>,
-    /// Decorator function names registered on each struct type.
-    pub struct_decorators: HashMap<String, Vec<(String, Vec<crate::vm::VmValue>)>>,
+    /// Every struct a type inherits, nearest first, flattened transitively.
+    ///
+    /// Fields and methods are already folded into the child by the time this
+    /// exists, so neither engine walks it to build a value or to find a method.
+    /// It is here for one thing: a typed `catch` arm matches a struct that
+    /// *inherits* the named type, and that is the only question left at run time.
+    pub struct_ancestors: HashMap<String, Vec<String>>,
     /// Compiled extend-block methods: `type_name → method_name → CompiledFn`.
+    /// A parent's methods are folded into each child, the child's winning.
     pub extend_methods: HashMap<String, HashMap<String, Arc<CompiledFn>>>,
-    /// `@route("field")` on extend blocks: type_name → field_name to read for routing.
-    pub route_configs: HashMap<String, String>,
 }
 
 // ── Internal state ────────────────────────────────────────────────────────────
@@ -35,9 +39,11 @@ pub struct CompiledProgram {
 /// Shared context threaded through the whole compilation.
 struct EmitCtx {
     struct_defs: HashMap<String, Vec<StructFieldDef>>,
-    struct_decorators: HashMap<String, Vec<(String, Vec<crate::vm::VmValue>)>>,
+    /// Written parents per struct, before flattening. Consumed by
+    /// `resolve_inheritance` and not part of `CompiledProgram`.
+    struct_parents: HashMap<String, Vec<String>>,
+    struct_ancestors: HashMap<String, Vec<String>>,
     extend_methods: HashMap<String, HashMap<String, Arc<CompiledFn>>>,
-    route_configs: HashMap<String, String>,
     /// Counter for generating unique closure names (`__closure_0__`, etc.).
     next_closure_id: usize,
 }
@@ -244,51 +250,19 @@ fn eval_literal_expr(
 
 /// Compile a `TProgram` into bytecode ready for the VM.
 pub fn emit(program: TProgram) -> Result<CompiledProgram> {
-    // First pass: collect static metadata (struct/interface definitions).
+    // First pass: collect static metadata (struct definitions and their parents).
     let mut ctx = EmitCtx {
         struct_defs: HashMap::new(),
-        struct_decorators: HashMap::new(),
+        struct_parents: HashMap::new(),
+        struct_ancestors: HashMap::new(),
         extend_methods: HashMap::new(),
-        route_configs: HashMap::new(),
         next_closure_id: 0,
     };
     for stmt in &program.stmts {
         match stmt {
-            TStmt::ExtendBlock { type_name, decorators, .. } => {
-                for (dec_name, args) in decorators {
-                    if dec_name == "route" {
-                        // Accept `on = "field"` kwarg or the first positional arg.
-                        let field_name = args
-                            .iter()
-                            .find(|(kw, _)| kw.as_deref() == Some("on"))
-                            .or_else(|| args.first())
-                            .and_then(|(_, e)| {
-                                if let crate::compiler::tir::TExprKind::Str(s) = &e.kind {
-                                    Some(s.clone())
-                                } else {
-                                    None
-                                }
-                            });
-                        if let Some(field_name) = field_name {
-                            ctx.route_configs.insert(type_name.clone(), field_name);
-                        }
-                    }
-                }
-            }
-            TStmt::StructDef { name, fields, decorators, span } => {
+            TStmt::StructDef { name, fields, parents, .. } => {
                 ctx.struct_defs.insert(name.clone(), fields.clone());
-                if !decorators.is_empty() {
-                    let compiled: crate::frontend::error::Result<Vec<_>> = decorators
-                        .iter()
-                        .map(|(dec_name, args)| {
-                            // Keyword names are stripped — values are passed positionally.
-                            let vals: crate::frontend::error::Result<Vec<_>> =
-                                args.iter().map(|(_, e)| eval_literal_expr(e, *span)).collect();
-                            Ok((dec_name.clone(), vals?))
-                        })
-                        .collect();
-                    ctx.struct_decorators.insert(name.clone(), compiled?);
-                }
+                ctx.struct_parents.insert(name.clone(), parents.clone());
             }
             _ => {}
         }
@@ -323,9 +297,8 @@ pub fn emit(program: TProgram) -> Result<CompiledProgram> {
         top_n_slots: n_slots,
         top: em.chunk,
         struct_defs: ctx.struct_defs,
-        struct_decorators: ctx.struct_decorators,
+        struct_ancestors: ctx.struct_ancestors,
         extend_methods: ctx.extend_methods,
-        route_configs: ctx.route_configs,
     })
 }
 
@@ -511,7 +484,7 @@ fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
         TStmt::Continue { span } => em.emit_loop_jump(false, span),
 
         // Metadata only — already captured in the first pass.
-        TStmt::StructDef { .. } | TStmt::InterfaceDef { .. } => {}
+        TStmt::StructDef { .. } => {}
 
         TStmt::ExtendBlock { type_name, methods, .. } => {
             // Compile all methods first (releasing the ctx borrow from extend_methods),

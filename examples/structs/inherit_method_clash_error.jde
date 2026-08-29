@@ -1,0 +1,29 @@
+// Two parents may not supply the same method.
+//
+// A child's own method wins over an inherited one, because the child is nearer.
+// Two parents are the same distance away, so there is no nearer, and the
+// program has to say which it meant.
+
+struct Swimmer {
+    depth
+}
+
+struct Runner {
+    pace
+}
+
+extend Swimmer {
+    fn go(self) {
+        return "swim"
+    }
+}
+
+extend Runner {
+    fn go(self) {
+        return "run"
+    }
+}
+
+struct Triathlete(Swimmer, Runner) {
+    name
+}

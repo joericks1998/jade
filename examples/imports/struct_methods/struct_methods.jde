@@ -1,7 +1,6 @@
 // A struct imported from another file keeps everything the defining file gave
-// it: field defaults, `extend` methods, and interface conformance. The type is
-// written qualified at the literal (`shapes.Point`) but is the same type the
-// module's own code sees.
+// it: field defaults and `extend` methods. The type is written qualified at the
+// literal (`shapes.Point`) but is the same type the module's own code sees.
 
 use shapes
 

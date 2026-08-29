@@ -1,0 +1,5 @@
+// A parent has to be a struct that exists.
+
+struct Dog(Animal) {
+    breed
+}

@@ -1,0 +1,13 @@
+// A child may not redeclare a field it already inherits.
+//
+// Two storage slots would carry one name, and nothing in the program could say
+// which `name` a `Dog` literal meant. Methods resolve a clash by nearness;
+// fields have no equivalent, so they are refused.
+
+struct Animal {
+    name
+}
+
+struct Dog(Animal) {
+    name
+}

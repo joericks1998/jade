@@ -34,6 +34,8 @@ pub enum TokenKind {
     Continue,
     Struct,
     Extend,
+    /// Reserved only so a removed `interface` block gets an error that names
+    /// the removal. Nothing parses it; see `JadeError::InterfaceRemoved`.
     Interface,
     Prompt,
     Use,
@@ -602,7 +604,7 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
                     "continue" => TokenKind::Continue,
                     "struct" => TokenKind::Struct,
                     "extend" => TokenKind::Extend,
-                    "interface" => TokenKind::Interface,
+        "interface" => TokenKind::Interface,
                     "prompt" => TokenKind::Prompt,
                     "use" => TokenKind::Use,
                     "raise" => TokenKind::Raise,

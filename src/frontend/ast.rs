@@ -1,24 +1,15 @@
 use super::error::Span;
 use serde::{Deserialize, Serialize};
 
-/// A method signature within an `interface` definition.
-/// The type checker uses `name` for missing-method checks; `params` is parsed
-/// for documentation and future type inference.
-/// A decorator and its positional arguments, as `@name(arg, key: arg)` parses.
+/// A decorator and its arguments, as `@name(arg, key = arg)` parses.
 ///
-/// Named once because it travels: the AST holds it, type inference reads it,
-/// and the import pass renames through it, and three spellings of the same
-/// nested tuple is three places to get it subtly different.
+/// Each entry is `(name, args)`, and each argument is `(keyword, expr)` with the
+/// keyword absent for a positional one.
+///
+/// Named once because it travels: the AST holds it, type inference reads it, and
+/// the import pass renames through it, and three spellings of the same nested
+/// tuple is three places to get it subtly different.
 pub type DecoratorList = Vec<(String, Vec<(Option<String>, Expr)>)>;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InterfaceMethod {
-    pub name: String,
-    #[allow(dead_code)] // reserved for future type inference
-    pub params: Vec<String>,
-    #[allow(dead_code)] // reserved for future error reporting
-    pub span: Span,
-}
 
 /// A field declaration inside a `struct` body.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -129,30 +120,21 @@ pub enum Stmt {
         span: Span,
     },
 
-    /// `struct Name { field, … }`
+    /// `struct Name(Parent, …) { field, … }`
     StructDef {
         name: String,
         fields: Vec<StructFieldDef>,
-        /// Each entry is `(decorator_name, positional_args)`.
-        decorators: DecoratorList,
-        #[allow(dead_code)]
-        span: Span,
-    },
-
-    /// `interface Name { fn method(self, …) -> type }`
-    InterfaceDef {
-        name: String,
-        methods: Vec<InterfaceMethod>,
+        /// Structs this one inherits, in written order. A name may be bare
+        /// (`Animal`) or qualified for an imported one (`shapes.Animal`).
+        /// Empty for a struct that inherits nothing.
+        parents: Vec<String>,
         #[allow(dead_code)]
         span: Span,
     },
 
     /// `extend TypeName { fn method(self, …) { … } … }`
-    /// `extend TypeName: InterfaceName { fn method(self, …) { … } … }`
     ExtendBlock {
         type_name: String,
-        /// The interface this extend block claims to implement, if any.
-        interface_name: Option<String>,
         methods: Vec<Stmt>,
         decorators: DecoratorList,
         #[allow(dead_code)]

@@ -956,11 +956,11 @@ mod emit {
     #[test]
     fn emit_empty_program_has_no_user_declarations() {
         let cp = compile_ok("");
-        // An empty program declares no structs, extend methods, or routes; the
+        // An empty program declares no structs, extend methods, or ancestry; the
         // emitter may still append an implicit trailing instruction.
         assert!(cp.struct_defs.is_empty());
         assert!(cp.extend_methods.is_empty());
-        assert!(cp.route_configs.is_empty());
+        assert!(cp.struct_ancestors.is_empty());
     }
 
     #[test]

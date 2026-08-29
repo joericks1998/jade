@@ -1,0 +1,17 @@
+// Two parents may not declare the same field.
+//
+// This is the same rule as `inherit_field_clash_error.jde`, reached from the
+// other direction: a name appears once across a struct and everything it
+// inherits, however many steps away the other declaration is.
+
+struct Winged {
+    span
+}
+
+struct Finned {
+    span
+}
+
+struct Griffin(Winged, Finned) {
+    name
+}

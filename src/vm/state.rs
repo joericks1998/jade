@@ -31,10 +31,10 @@ pub struct VmState {
     pub extend_methods: HashMap<String, HashMap<String, Arc<CompiledFn>>>,
     /// Struct field definitions (needed for struct instantiation validation).
     pub struct_defs: HashMap<String, Vec<StructFieldDef>>,
-    /// Decorator function names registered on each struct type.
-    pub struct_decorators: HashMap<String, Vec<(String, Vec<VmValue>)>>,
-    /// `@route("field")` configs: type_name → field_name to read for routing.
-    pub route_configs: HashMap<String, String>,
+    /// Every struct a type inherits, nearest first, flattened transitively.
+    /// Read by one thing: a typed `catch` arm matching a struct that inherits
+    /// the named type. Fields and methods are already folded into the child.
+    pub struct_ancestors: HashMap<String, Vec<String>>,
     /// Optional LLM inference backend.
     pub inference_backend: Option<std::sync::Arc<dyn llm::InferenceBackend>>,
     /// Jade functions this VM has handed to C libraries, and the way back in.
@@ -94,8 +94,7 @@ impl VmState {
             globals,
             extend_methods: HashMap::new(),
             struct_defs: HashMap::new(),
-            struct_decorators: HashMap::new(),
-            route_configs: HashMap::new(),
+            struct_ancestors: HashMap::new(),
             inference_backend: None,
             callbacks: crate::native::CallbackBus::new(),
             repl_capture: None,
@@ -156,8 +155,7 @@ impl VmState {
             globals: self.globals.clone(),
             extend_methods: self.extend_methods.clone(),
             struct_defs: self.struct_defs.clone(),
-            struct_decorators: self.struct_decorators.clone(),
-            route_configs: self.route_configs.clone(),
+            struct_ancestors: self.struct_ancestors.clone(),
             inference_backend: self.inference_backend.clone(),
             // Deliberately not shared — see the field's note.
             callbacks: crate::native::CallbackBus::new(),
