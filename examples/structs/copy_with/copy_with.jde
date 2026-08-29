@@ -1,0 +1,113 @@
+// Copy-with: build a struct from an existing one, changing some of it.
+//
+// `...base` comes first, and every field the type declares that the literal
+// does not name is read from the base. A named field wins over the base, and
+// the base wins over the field's declared default — otherwise a copy would
+// quietly reset to the defaults everything it did not mention.
+//
+// The base is any expression, and it is evaluated exactly once no matter how
+// many fields come across.
+
+struct Config {
+    host,
+    let port = 80,
+    let tls = false,
+    let retries = 3
+}
+
+let base = Config { host: "a", port: 1234, tls: true }
+
+// One field changes; the other three come across, including the two whose
+// values differ from their defaults.
+let staging = Config { ...base, host: "b" }
+print(staging.host)
+print(staging.port)
+print(staging.tls)
+print(staging.retries)
+
+// Copying nothing but the base is allowed, and gives an equal value.
+let same = Config { ...base }
+print(same.host)
+print(same.port)
+
+// A struct is still reference-semantic, and a copy is a genuinely new one:
+// changing the copy leaves the original alone.
+let moved = Config { ...base, port: 9090 }
+print(base.port)
+print(moved.port)
+
+// The base expression runs once, not once per field.
+let calls = []
+fn source() {
+    calls.push(1)
+    return base
+}
+let once = Config { ...source(), host: "c" }
+print(len(calls))
+print(once.port)
+
+// Inside a method, `...self` is how a struct returns a changed version of
+// itself. `self` has no static type here, which is the reason the copy happens
+// when the program runs rather than when it is compiled.
+struct Counter {
+    let count = 0,
+    let label = "hits"
+}
+
+extend Counter {
+    fn bump(self) {
+        return Counter { ...self, count: self.count + 1 }
+    }
+}
+
+let c = Counter { label: "clicks" }
+c = c.bump()
+c = c.bump()
+print(c.count)
+print(c.label)
+
+// A field the base does not carry falls back to its declared default, which is
+// what makes copying between two related types work. The empty-array default is
+// the one worth having here: with no base it is filled in while the program
+// compiles, and only a copy asks either engine to produce one while it runs.
+struct Bare {
+    name
+}
+
+struct Full {
+    name,
+    let tags = [],
+    let seen = {},
+    let rank = 7
+}
+
+let bare = Bare { name: "n" }
+let full = Full { ...bare }
+print(full.name)
+print(full.tags)
+print(full.seen)
+print(full.rank)
+
+// Each copy gets its own collection rather than sharing one.
+let one = Full { ...bare }
+let two = Full { ...bare }
+one.tags.push("x")
+print(len(one.tags))
+print(len(two.tags))
+
+// Inherited fields come across the same way, because by the time the copy runs
+// they are the child's own fields.
+struct Animal {
+    name,
+    let legs = 4
+}
+
+struct Dog(Animal) {
+    breed
+}
+
+let rex = Dog { name: "rex", breed: "corgi", legs: 3 }
+let pug = Dog { ...rex, breed: "pug" }
+print(pug.name)
+print(pug.legs)
+print(pug.breed)

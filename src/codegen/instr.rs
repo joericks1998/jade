@@ -765,7 +765,7 @@ pub(super) fn lower_instr<'ctx>(
         // then fill any omitted optional field from its scalar default (the VM
         // fills these at runtime). GetField/SetField are data-field access on a
         // struct (a missing field / non-struct raises).
-        MakeStruct(d, type_name, field_specs) => {
+        MakeStruct(d, type_name, field_specs, base_reg) => {
             let new_f =
                 low.runtime_fn("jrt_kstruct_new", low.ptrt().fn_type(&[low.ptrt().into()], false));
             let tn = low.cstr(type_name);
@@ -802,7 +802,54 @@ pub(super) fn lower_instr<'ctx>(
                 b.build_call(set_f, &[s.into(), low.cstr(fname).into(), v.into()], "")
                     .map_err(|e| e.to_string())?;
             }
+            // `...base`: copy every field the type declares and the literal did
+            // not name. Runs after the named fields are in and before the
+            // defaults below, so a named field beats the base and the base beats
+            // a default — the same order the VM applies.
+            if let Some(breg) = base_reg {
+                let bv = low.load(*breg);
+                let req_f = low
+                    .runtime_fn("jrt_require_struct", low.ctx.void_type().fn_type(&[i64_ty.into()], false));
+                b.build_call(req_f, &[bv.into()], "").map_err(|e| e.to_string())?;
+                let copy_f = low.runtime_fn(
+                    "jrt_kstruct_copy_field",
+                    low.ctx.void_type().fn_type(
+                        &[low.ptrt().into(), i64_ty.into(), low.ptrt().into()],
+                        false,
+                    ),
+                );
+                if let Some(names) = fnctx.struct_field_names.get(type_name) {
+                    for fname in names {
+                        if field_specs.iter().any(|(n, _, _)| n == fname) {
+                            continue;
+                        }
+                        b.build_call(
+                            copy_f,
+                            &[s.into(), bv.into(), low.cstr(fname).into()],
+                            "",
+                        )
+                        .map_err(|e| e.to_string())?;
+                    }
+                }
+            }
             // Fill omitted optional fields from their scalar defaults.
+            //
+            // With a `...base` the setter has to be the one that leaves an
+            // occupied field alone: the base was copied in just above, and the
+            // plain setter would overwrite every value it supplied with the
+            // declared default. The VM gets this from its `get_field(..).is_none()`
+            // guard; here it takes a second runtime entry point.
+            let default_setter = if base_reg.is_some() {
+                low.runtime_fn(
+                    "jrt_kstruct_set_if_absent",
+                    low.ctx.void_type().fn_type(
+                        &[low.ptrt().into(), low.ptrt().into(), i64_ty.into()],
+                        false,
+                    ),
+                )
+            } else {
+                set_f
+            };
             if let Some(defaults) = fnctx.struct_defaults.get(type_name) {
                 for (fname, dv, is_prompt) in defaults {
                     if field_specs.iter().all(|(n, _, _)| n != fname) {
@@ -810,8 +857,12 @@ pub(super) fn lower_instr<'ctx>(
                         if *is_prompt {
                             w = box_prompt(w)?;
                         }
-                        b.build_call(set_f, &[s.into(), low.cstr(fname).into(), w.into()], "")
-                            .map_err(|e| e.to_string())?;
+                        b.build_call(
+                            default_setter,
+                            &[s.into(), low.cstr(fname).into(), w.into()],
+                            "",
+                        )
+                        .map_err(|e| e.to_string())?;
                     }
                 }
             }

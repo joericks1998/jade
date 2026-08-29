@@ -1472,6 +1472,7 @@ impl Parser {
     fn parse_struct_literal_body(&mut self, type_name: String, span: Span) -> Result<Expr> {
         self.advance(); // consume `{`
         let mut fields = Vec::new();
+        let mut base: Option<Box<Expr>> = None;
         loop {
             // Skip any auto-inserted semicolons (e.g. after the last field's value)
             while self.peek().kind == TokenKind::Semicolon {
@@ -1479,6 +1480,36 @@ impl Parser {
             }
             if self.peek().kind == TokenKind::RBrace || self.peek().kind == TokenKind::Eof {
                 break;
+            }
+            // `...expr` is the copy-with base. It has to come first, because it
+            // is what the named fields are overriding — reading it after them
+            // would look like it wins, and it does not.
+            if self.peek().kind == TokenKind::DotDotDot {
+                let dspan = self.peek().span;
+                if base.is_some() {
+                    return Err(JadeError::UnexpectedToken {
+                        expected: "a field name; a struct literal copies at most one `...` base"
+                            .to_string(),
+                        got: "a second `...`".to_string(),
+                        span: dspan,
+                    });
+                }
+                if !fields.is_empty() {
+                    return Err(JadeError::UnexpectedToken {
+                        expected: "a field name; `...` comes first, before the fields that \
+                                   override it"
+                            .to_string(),
+                        got: "`...`".to_string(),
+                        span: dspan,
+                    });
+                }
+                self.advance(); // consume `...`
+                base = Some(Box::new(self.parse_pipe()?));
+                if self.peek().kind == TokenKind::Comma || self.peek().kind == TokenKind::Semicolon
+                {
+                    self.advance();
+                }
+                continue;
             }
             let field_name = self.expect_ident("field name")?;
             self.expect(&TokenKind::Colon)?;
@@ -1490,7 +1521,7 @@ impl Parser {
             }
         }
         self.expect(&TokenKind::RBrace)?;
-        Ok(Expr::StructLiteral { type_name, fields, span })
+        Ok(Expr::StructLiteral { type_name, base, fields, span })
     }
 
     /// Parse a primary expression, then handle any trailing `.field` or `(args)` postfix.

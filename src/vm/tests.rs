@@ -3699,3 +3699,179 @@ fn char_of_an_int_is_refused_when_it_is_not_a_character() {
         assert!(err.contains("not a Unicode scalar"), "char({bad}) should be refused: {err}");
     }
 }
+
+// ── copy-with struct literals ─────────────────────────────────────────────────
+
+/// The precedence rule, which is the whole of the feature: a named field beats
+/// the base, and the base beats the field's declared default.
+///
+/// The default case is the one worth pinning. `port` has a default of 80 and the
+/// base carries 1234; filling the default because the literal did not name the
+/// field would reset a copy to the defaults for everything it did not mention,
+/// which is the opposite of copying.
+#[test]
+fn a_copy_with_base_beats_a_default_and_loses_to_a_named_field() {
+    let st = run_src(
+        "struct Config { host, let port = 80, let tls = false }\n\
+         let base = Config { host: \"a\", port: 1234, tls: true }\n\
+         let c = Config { ...base, host: \"b\" }\n\
+         let host = c.host\n\
+         let port = c.port\n\
+         let tls = c.tls\n",
+    )
+    .expect("should run");
+    assert_eq!(get_str(&st, "host"), "b"); // named wins
+    assert_eq!(get_int(&st, "port"), 1234); // base wins over the default
+    assert!(get_bool(&st, "tls")); // base wins over the default
+}
+
+/// A field the base does not carry falls back to its declared default rather
+/// than being left unset, so copying across two types stays usable.
+#[test]
+fn a_field_the_base_lacks_falls_back_to_its_default() {
+    let st = run_src(
+        "struct Animal { name, let legs = 4 }\n\
+         struct Dog(Animal) { breed, let good = true }\n\
+         let a = Animal { name: \"rex\", legs: 3 }\n\
+         let d = Dog { ...a, breed: \"corgi\" }\n\
+         let legs = d.legs\n\
+         let good = d.good\n\
+         let breed = d.breed\n",
+    )
+    .expect("should run");
+    assert_eq!(get_int(&st, "legs"), 3); // came from the base
+    assert!(get_bool(&st, "good")); // base had none, so the default
+    assert_eq!(get_str(&st, "breed"), "corgi");
+}
+
+/// The base expression is evaluated once, not once per field copied. Expanding
+/// `...` into one field read per field would call `source()` three times here.
+#[test]
+fn a_copy_with_base_is_evaluated_exactly_once() {
+    let st = run_src(
+        "struct Config { host, let port = 80, let tls = false }\n\
+         let calls = []\n\
+         fn source() {\n\
+             calls.push(1)\n\
+             return Config { host: \"a\", port: 7, tls: true }\n\
+         }\n\
+         let c = Config { ...source(), host: \"b\" }\n\
+         let n = len(calls)\n\
+         let port = c.port\n",
+    )
+    .expect("should run");
+    assert_eq!(get_int(&st, "n"), 1);
+    assert_eq!(get_int(&st, "port"), 7);
+}
+
+/// A copy is a new struct, so writing to it leaves the base alone. Sharing the
+/// object instead would make `...` a rename rather than a copy.
+#[test]
+fn a_copy_with_result_does_not_alias_its_base() {
+    let st = run_src(
+        "struct P { x, y }\n\
+         let a = P { x: 1, y: 2 }\n\
+         let b = P { ...a, x: 99 }\n\
+         b.y = 50\n\
+         let ax = a.x\n\
+         let ay = a.y\n\
+         let bx = b.x\n\
+         let by = b.y\n",
+    )
+    .expect("should run");
+    assert_eq!(get_int(&st, "ax"), 1);
+    assert_eq!(get_int(&st, "ay"), 2);
+    assert_eq!(get_int(&st, "bx"), 99);
+    assert_eq!(get_int(&st, "by"), 50);
+}
+
+/// `...self` inside a method is the reason the copy happens at run time: `self`
+/// has no static type, so nothing earlier in the pipeline knows what to copy.
+#[test]
+fn a_method_can_copy_self() {
+    let st = run_src(
+        "struct Counter { let count = 0, let label = \"hits\" }\n\
+         extend Counter {\n\
+             fn bump(self) { return Counter { ...self, count: self.count + 1 } }\n\
+         }\n\
+         let c = Counter { label: \"clicks\" }\n\
+         c = c.bump()\n\
+         c = c.bump()\n\
+         let n = c.count\n\
+         let l = c.label\n",
+    )
+    .expect("should run");
+    assert_eq!(get_int(&st, "n"), 2);
+    assert_eq!(get_str(&st, "l"), "clicks");
+}
+
+/// Only a struct has fields to copy, so anything else is refused rather than
+/// quietly contributing nothing.
+#[test]
+fn a_copy_with_base_must_be_a_struct() {
+    let err = match run_src("struct P { x, y }\nlet q = P { ...5, x: 1, y: 2 }\n") {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("a non-struct base should be refused"),
+    };
+    assert!(err.contains("not a struct"), "{err}");
+}
+
+/// A base does not turn off the unknown-field check, which still happens while
+/// the program is being checked rather than when it runs.
+#[test]
+fn a_copy_with_literal_still_refuses_an_undeclared_field() {
+    let src = "struct P { x, y }\nlet a = P { x: 1, y: 2 }\nlet b = P { ...a, z: 3 }\n";
+    let tokens = lexer::tokenize(src).expect("lex failed");
+    let program = parser::parse(tokens).expect("parse failed");
+    let err = match type_infer::infer(program) {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("an undeclared field should be refused"),
+    };
+    assert!(err.contains("has no field 'z'"), "{err}");
+}
+
+/// A non-scalar default has to survive a copy on both engines.
+///
+/// With no base, every default is folded into the literal while the program is
+/// checked, so neither engine ever evaluates one itself. A copy skips that fold
+/// — a default must not overwrite the base — which made this the first time the
+/// backends were asked to produce a default at run time. The compiled side could
+/// only make scalars, so `let tags = []` came out as no field at all and reading
+/// it killed the binary while the VM printed `[]`.
+#[test]
+fn a_copy_with_falls_back_to_a_non_scalar_default() {
+    let st = run_src(
+        "struct Bare { name }\n\
+         struct Full { name, let tags = [], let seen = {}, let rank = 7 }\n\
+         let b = Bare { name: \"n\" }\n\
+         let f = Full { ...b }\n\
+         let n = f.name\n\
+         let t = len(f.tags)\n\
+         let s = len(f.seen)\n\
+         let r = f.rank\n",
+    )
+    .expect("should run");
+    assert_eq!(get_str(&st, "n"), "n");
+    assert_eq!(get_int(&st, "t"), 0);
+    assert_eq!(get_int(&st, "s"), 0);
+    assert_eq!(get_int(&st, "r"), 7);
+}
+
+/// Each copy gets its own collection. A shared one would let a write through
+/// either struct show up in the other.
+#[test]
+fn a_collection_default_is_fresh_for_every_copy() {
+    let st = run_src(
+        "struct Bare { name }\n\
+         struct Full { name, let tags = [] }\n\
+         let b = Bare { name: \"n\" }\n\
+         let one = Full { ...b }\n\
+         let two = Full { ...b }\n\
+         one.tags.push(\"x\")\n\
+         let a = len(one.tags)\n\
+         let c = len(two.tags)\n",
+    )
+    .expect("should run");
+    assert_eq!(get_int(&st, "a"), 1);
+    assert_eq!(get_int(&st, "c"), 0);
+}

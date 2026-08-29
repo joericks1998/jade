@@ -273,8 +273,16 @@ impl<'ctx> FnCtx<'ctx> {
     }
 }
 
-/// A struct field default the backend can materialize (scalar literals only;
-/// mirrors the VM's `eval_literal_default` for the representable subset).
+/// A struct field default the backend can materialize. Mirrors the VM's
+/// `eval_literal_default` case for case, and has to: with a `...base` present
+/// the defaults are no longer folded into the literal at compile time, so this
+/// is the only thing left that can produce one, and a shape the VM knows and
+/// this does not is a difference between the engines.
+///
+/// The two empty collections are the ones that used to be missing. `let xs = []`
+/// went in as nothing at all, which nobody saw while every default was filled
+/// during type inference; a copy-with reads it here instead, and got a struct
+/// with no `xs` field on the compiled side and an empty array on the VM.
 fn eval_scalar_default(e: &Expr) -> Option<VmValue> {
     match e {
         Expr::Str { value, .. } => Some(VmValue::Str(value.clone().into())),
@@ -283,6 +291,14 @@ fn eval_scalar_default(e: &Expr) -> Option<VmValue> {
         Expr::Bool { value, .. } => Some(VmValue::Bool(*value)),
         Expr::Identifier { name, .. } if name == "nil" || name == "None" || name == "null" => {
             Some(VmValue::Nil)
+        }
+        Expr::Array { elements, .. } if elements.is_empty() => {
+            Some(VmValue::Array(std::sync::Arc::new(parking_lot::Mutex::new(
+                jade_runtime::coll::ArrayObj::from_vec(vec![]),
+            ))))
+        }
+        Expr::Dict { entries, .. } if entries.is_empty() => {
+            Some(VmValue::dict(jade_runtime::coll::DictObj::new()))
         }
         _ => None,
     }

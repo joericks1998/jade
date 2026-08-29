@@ -1069,6 +1069,55 @@ mod parser {
         assert_eq!(fields[1].0, "y");
     }
 
+    /// `...base` parses into the literal's `base`, separate from its fields.
+    #[test]
+    fn a_struct_literal_parses_a_copy_with_base() {
+        let p = parse_src("let q = Point { ...p, x: 99 }");
+        let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
+        let Expr::StructLiteral { type_name, base, fields, .. } = value else { panic!() };
+        assert_eq!(type_name, "Point");
+        let Some(b) = base else { panic!("no base") };
+        assert!(matches!(b.as_ref(), Expr::Identifier { name, .. } if name == "p"));
+        // Only the named field is carried; the rest are gathered when it runs.
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].0, "x");
+    }
+
+    /// A literal with no `...` still has no base, and its fields are untouched.
+    #[test]
+    fn a_plain_struct_literal_has_no_base() {
+        let p = parse_src("let p = Point { x: 1, y: 2 }");
+        let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
+        let Expr::StructLiteral { base, fields, .. } = value else { panic!() };
+        assert!(base.is_none());
+        assert_eq!(fields.len(), 2);
+    }
+
+    /// Two bases have no defined order to resolve, so the second is refused
+    /// rather than silently ignored or silently winning.
+    #[test]
+    fn a_struct_literal_refuses_a_second_base() {
+        let e = parse_src_err("let q = Point { ...p, ...r }");
+        assert!(e.to_string().contains("at most one `...` base"), "{e}");
+    }
+
+    /// The base has to come first. Reading it after a field would look like it
+    /// overrides the field, and it does not.
+    #[test]
+    fn a_copy_with_base_must_precede_the_fields() {
+        let e = parse_src_err("let q = Point { x: 1, ...p }");
+        assert!(e.to_string().contains("`...` comes first"), "{e}");
+    }
+
+    /// `...` is one token, and a lone `.` still lexes as a field access. The
+    /// leading-dot self form has to keep working.
+    #[test]
+    fn three_dots_lex_as_one_token_and_one_dot_still_works() {
+        let p = parse_src("let v = p.x");
+        let Stmt::Let { value, .. } = &p.stmts[0] else { panic!() };
+        assert!(matches!(value, Expr::FieldAccess { field, .. } if field == "x"));
+    }
+
     #[test]
     fn test_parse_field_access() {
         let p = parse_src("let v = p.x");

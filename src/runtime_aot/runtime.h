@@ -635,6 +635,13 @@ void*   jrt_bind_method_new(int64_t recv_word, const char* method);
  * Chunk backend declines method-call programs.) */
 int64_t jrt_get_field(int64_t obj, const char* field);
 void    jrt_set_field(int64_t obj, const char* field, int64_t val);
+
+/* jrt_require_struct / jrt_kstruct_copy_field — the `...base` of a copy-with
+ * struct literal. The first rejects a non-struct base; the second copies one
+ * field across when the base has it, leaving the default to fill it otherwise. */
+void    jrt_require_struct(int64_t v);
+void    jrt_kstruct_copy_field(void* dest, int64_t base, const char* field);
+void    jrt_kstruct_set_if_absent(void* s, const char* field, int64_t val);
 /* jrt_get_type_name — the struct type name of `obj` as a fresh tagged string, or
  * the empty string if `obj` is not a struct (VM `GetTypeName` for typed catch). */
 char*   jrt_get_type_name(int64_t obj);

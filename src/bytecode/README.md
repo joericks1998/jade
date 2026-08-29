@@ -33,6 +33,8 @@ It is a change in *four* places if the instruction changes the serialized shape 
 
 The jump-offset convention is easy to get wrong by one. Use `patch_jump` rather than computing offsets by hand.
 
+*Why `MakeStruct` carries an optional base register.* It is the `...` of a copy-with literal, and the copy runs on this instruction rather than being expanded by the emitter. Two things force that. The base expression has to be evaluated exactly once, which one register gives and one field access per field would not. And the fields to copy are the ones the type declares, which a struct inheriting a parent from another file does not know while it is being emitted: the parent arrives when the engine merges the import, which the VM does at `ImportFile` and the AOT does by inlining. Both engines know by the time the instruction runs.
+
 *Why there are two index-assign opcodes.* `SetIndex` takes a register, and `SetIndexGlobal` takes a name. They do the same thing, and the split exists because of what a dict is: a value held copy-on-write, so a write copies whenever anything *else* is also holding the dict.
 
 Loading a global into a register first makes that register a second holder. Every write then copied, and filling a dict cost time proportional to the square of its size. `SetIndexGlobal` owns the binding for the write instead. A local needs no equivalent, because a local *is* a register slot, so the emitter hands `SetIndex` the binding directly rather than a copy.

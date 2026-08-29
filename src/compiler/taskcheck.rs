@@ -317,9 +317,24 @@ fn step(
         }
 
         // ── Fresh allocations are unaliased: taint stops here ───────────────
-        MakeArray(d, _) | MakeDict(d, _) | MakeStruct(d, _, _) => {
+        MakeArray(d, _) | MakeDict(d, _) => {
             clear(t, d);
             t.regs.remove(d);
+        }
+
+        // A struct literal is a fresh object too, with one exception: a
+        // `...base` copies the base's field *values*, so a collection sitting in
+        // one of them is the very same collection. Taint has to travel with it,
+        // or a task could reach a shared array through a copy of the struct
+        // holding it.
+        MakeStruct(d, _, _, base) => {
+            clear(t, d);
+            t.regs.remove(d);
+            if let Some(b) = base
+                && t.regs.contains(b)
+            {
+                t.regs.insert(*d);
+            }
         }
 
         // ── Violations ──────────────────────────────────────────────────────
@@ -592,6 +607,47 @@ mod tests {
             Err(e) => e,
             Ok(()) => panic!("expected rejection, but the program compiled:\n{src}"),
         }
+    }
+
+    /// A copy-with literal copies field *values*, so a collection in one of them
+    /// is the very same collection. Without this, a task reached a shared array
+    /// by copying the struct that held it — `Box { ...shared }` looked like a
+    /// fresh allocation, taint stopped, and `copy.items.push(3)` compiled clean
+    /// while mutating the spawner's array on both engines.
+    #[test]
+    fn task_mutating_a_collection_reached_through_a_copy_with_base_is_rejected() {
+        let e = rejection(
+            r#"
+            struct Box { let items = [] }
+            let shared = Box { items: [1, 2] }
+            async fn worker() {
+                let copy = Box { ...shared }
+                copy.items.push(3)
+            }
+            await worker()
+            "#,
+        );
+        assert!(e.contains("shared"), "should name the sharing: {e}");
+    }
+
+    /// The other half of the rule: a literal with no base really is a fresh
+    /// object, so taint has to stop there or every struct built inside a task
+    /// would be refused.
+    #[test]
+    fn task_mutating_a_collection_in_a_struct_it_built_is_allowed() {
+        compile(
+            r#"
+            struct Box { let items = [] }
+            let shared = Box { items: [1, 2] }
+            async fn worker() {
+                let fresh = Box { items: [9] }
+                fresh.items.push(3)
+                return len(fresh.items)
+            }
+            await worker()
+            "#,
+        )
+        .expect("a struct the task built itself is not shared");
     }
 
     /// The hole that made `SetIndex` a no-op check. `arr[0] = 9` on a caller's

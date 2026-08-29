@@ -60,6 +60,35 @@ pub(super) fn default_word_const<'ctx>(
             let iv = b.build_ptr_to_int(raw, i64_ty, "dsi").map_err(|e| e.to_string())?;
             b.build_or(iv, i64_ty.const_int(TAG_STR, false), "dstag").map_err(|e| e.to_string())?
         }
+        // A fresh empty collection, allocated per instance. It cannot be a
+        // constant: two structs sharing one array would see each other's
+        // writes, and the VM builds a new `ArrayObj` for every literal.
+        VmValue::Array(_) => {
+            let f = module.get_function("jrt_karr_new").unwrap_or_else(|| {
+                module.add_function("jrt_karr_new", ptr_ty.fn_type(&[], false), None)
+            });
+            let p = b
+                .build_call(f, &[], "dfarr")
+                .map_err(|e| e.to_string())?
+                .as_any_value_enum()
+                .into_pointer_value();
+            let iv = b.build_ptr_to_int(p, i64_ty, "dfai").map_err(|e| e.to_string())?;
+            b.build_or(iv, i64_ty.const_int(TAG_PTR, false), "dfatag")
+                .map_err(|e| e.to_string())?
+        }
+        VmValue::Dict(_) => {
+            let f = module.get_function("jrt_kdict_new").unwrap_or_else(|| {
+                module.add_function("jrt_kdict_new", ptr_ty.fn_type(&[], false), None)
+            });
+            let p = b
+                .build_call(f, &[], "dfdict")
+                .map_err(|e| e.to_string())?
+                .as_any_value_enum()
+                .into_pointer_value();
+            let iv = b.build_ptr_to_int(p, i64_ty, "dfdi").map_err(|e| e.to_string())?;
+            b.build_or(iv, i64_ty.const_int(TAG_PTR, false), "dfdtag")
+                .map_err(|e| e.to_string())?
+        }
         other => return Err(format!("codegen: unsupported struct field default {other:?}")),
     })
 }
@@ -239,6 +268,30 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
             VmValue::Nil => self.i64t().const_int(NIL, false),
             VmValue::Float(f) => self.box_float(self.f64t().const_float(*f)),
             VmValue::Str(s) => self.str_literal_word(s)?,
+            // A fresh empty collection per instance, not a shared constant: two
+            // structs holding one array would see each other's writes. Reached
+            // by a struct field default under a `...base`, where the default is
+            // no longer folded into the literal while it compiles.
+            VmValue::Array(_) => {
+                let f = self.runtime_fn("jrt_karr_new", self.ptrt().fn_type(&[], false));
+                let p = self
+                    .builder
+                    .build_call(f, &[], "dfarr")
+                    .map_err(|e| e.to_string())?
+                    .as_any_value_enum()
+                    .into_pointer_value();
+                self.tag_ptr(p)
+            }
+            VmValue::Dict(_) => {
+                let f = self.runtime_fn("jrt_kdict_new", self.ptrt().fn_type(&[], false));
+                let p = self
+                    .builder
+                    .build_call(f, &[], "dfdict")
+                    .map_err(|e| e.to_string())?
+                    .as_any_value_enum()
+                    .into_pointer_value();
+                self.tag_ptr(p)
+            }
             other => return Err(format!("codegen: unsupported default value {other:?}")),
         })
     }

@@ -1056,14 +1056,20 @@ fn emit_expr(expr: &TExpr, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<Reg> {
             Ok(dest)
         }
 
-        TExprKind::StructLiteral { type_name, fields } => {
+        TExprKind::StructLiteral { type_name, base, fields } => {
+            // The base is evaluated first and exactly once, into one register.
+            let base_reg = match base {
+                Some(b) => Some(emit_expr(b, em, ctx)?),
+                None => None,
+            };
             let mut compiled_fields = Vec::with_capacity(fields.len());
             for (name, val_expr, is_prompt) in fields {
                 let r = emit_expr(val_expr, em, ctx)?;
                 compiled_fields.push((name.clone(), r, *is_prompt));
             }
             let dest = em.alloc_reg();
-            em.chunk.emit(Instr::MakeStruct(dest, type_name.clone(), compiled_fields), span);
+            em.chunk
+                .emit(Instr::MakeStruct(dest, type_name.clone(), compiled_fields, base_reg), span);
             Ok(dest)
         }
 

@@ -1,0 +1,23 @@
+// Copying a struct whose parent lives in another file.
+//
+// The fixture exists because it is the case that decides where the copy runs.
+// A child inheriting an imported parent does not know its own full field list
+// while it is being compiled: the parent is deliberately absent until the
+// engine merges the import, and the two engines merge at different moments.
+// So `...` is carried into `MakeStruct` and the fields are gathered when the
+// program runs, which is a point where both engines do know the answer.
+
+use creatures
+
+struct Dog(creatures.Animal) {
+    breed
+}
+
+let rex = Dog { name: "rex", breed: "corgi", legs: 3 }
+
+// `name` and `legs` come from the imported parent, and `legs` keeps the value
+// it was given rather than falling back to the parent's default of 4.
+let pug = Dog { ...rex, breed: "pug" }
+print(pug.name)
+print(pug.legs)
+print(pug.breed)

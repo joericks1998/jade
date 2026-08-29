@@ -569,12 +569,17 @@ fn fill_in_expr(
         }
         TExprKind::Closure { body, .. } => fill_in_stmts(body, defs, ctx)?,
         TExprKind::PromptDeref { expr, .. } => fill_in_expr(expr, defs, ctx)?,
-        TExprKind::StructLiteral { type_name, fields } => {
+        TExprKind::StructLiteral { type_name, base, fields } => {
+            if let Some(b) = base.as_mut() {
+                fill_in_expr(b, defs, ctx)?;
+            }
             for (_, fe, _) in fields.iter_mut() {
                 fill_in_expr(fe, defs, ctx)?;
             }
-            // Patch missing fields with their declared defaults.
-            if let Some(def_fields) = defs.get(type_name.as_str()) {
+            // Patch missing fields with their declared defaults — unless a
+            // `...base` is supplying them, in which case a default here would
+            // overwrite the value being copied.
+            if let Some(def_fields) = defs.get(type_name.as_str()).filter(|_| base.is_none()) {
                 for def_field in def_fields {
                     let already_present = fields.iter().any(|(n, _, _)| n == def_field.name());
                     if already_present {
@@ -1386,7 +1391,13 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
         }
 
         // ── Struct literals ───────────────────────────────────────────────────
-        Expr::StructLiteral { type_name, fields, span } => {
+        Expr::StructLiteral { type_name, base, fields, span } => {
+            // The base is inferred once, here, and every path below carries the
+            // same `TExpr` through. It is never duplicated per field.
+            let tbase = match base {
+                Some(b) => Some(Box::new(infer_expr(b, ctx)?)),
+                None => None,
+            };
             // Clone field defs to release the borrow on ctx before calling infer_expr.
             // If the type is unknown but imports are present, fall back gracefully.
             let def_fields_opt = ctx.struct_defs.get(type_name).cloned();
@@ -1405,7 +1416,11 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
                     .map(|(n, e)| infer_expr(e, ctx).map(|te| (n.clone(), te, false)))
                     .collect::<Result<Vec<_>>>()?;
                 return Ok(TExpr {
-                    kind: TExprKind::StructLiteral { type_name: bare.clone(), fields: tfields },
+                    kind: TExprKind::StructLiteral {
+                        type_name: bare.clone(),
+                        base: tbase,
+                        fields: tfields,
+                    },
                     ty: JadeType::Struct(bare),
                     span: *span,
                 });
@@ -1431,6 +1446,7 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
                 return Ok(TExpr {
                     kind: TExprKind::StructLiteral {
                         type_name: type_name.clone(),
+                        base: tbase,
                         fields: tfields,
                     },
                     ty: JadeType::Struct(type_name.clone()),
@@ -1451,12 +1467,17 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
                 }
             }
 
-            // Required fields check.
-            for def_field in &def_fields {
-                if let StructFieldDef::Required(req) = def_field
-                    && !fields.iter().any(|(n, _)| n == req)
-                {
-                    return Err(JadeError::MissingField { field: req.clone(), span: *span });
+            // Required fields check. A `...base` supplies everything the
+            // literal does not name, so with one present there is nothing to
+            // require here; a field the base turns out not to have is caught
+            // when the copy runs.
+            if tbase.is_none() {
+                for def_field in &def_fields {
+                    if let StructFieldDef::Required(req) = def_field
+                        && !fields.iter().any(|(n, _)| n == req)
+                    {
+                        return Err(JadeError::MissingField { field: req.clone(), span: *span });
+                    }
                 }
             }
 
@@ -1480,10 +1501,21 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
             // the bytecode emitter knows to wrap the value in Prompt(…).
             let mut tfields: Vec<(String, TExpr, bool)> = Vec::with_capacity(def_fields.len());
             for def_field in &def_fields {
+                // With a `...base`, a field the literal did not name is left out
+                // entirely and the copy reads it from the base. Filling the
+                // declared default here instead would quietly overwrite the
+                // base's value with the default, which is the opposite of what
+                // a copy means.
+                if tbase.is_some() && !provided.contains_key(def_field.name()) {
+                    continue;
+                }
                 match def_field {
                     StructFieldDef::Required(name) => {
-                        // Already validated above that it is provided.
-                        let e = provided[name.as_str()];
+                        // Provided: either the check above passed, or a base is
+                        // present and `continue` already skipped the absent case.
+                        let Some(e) = provided.get(name.as_str()).copied() else {
+                            continue;
+                        };
                         tfields.push((name.clone(), infer_expr(e, ctx)?, false));
                     }
                     StructFieldDef::Let { name, default } => {
@@ -1505,7 +1537,11 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
             }
 
             Ok(TExpr {
-                kind: TExprKind::StructLiteral { type_name: type_name.clone(), fields: tfields },
+                kind: TExprKind::StructLiteral {
+                    type_name: type_name.clone(),
+                    base: tbase,
+                    fields: tfields,
+                },
                 ty: JadeType::Struct(type_name.clone()),
                 span: *span,
             })
