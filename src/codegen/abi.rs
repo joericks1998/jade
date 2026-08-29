@@ -73,8 +73,7 @@ pub(super) fn default_word_const<'ctx>(
                 .as_any_value_enum()
                 .into_pointer_value();
             let iv = b.build_ptr_to_int(p, i64_ty, "dfai").map_err(|e| e.to_string())?;
-            b.build_or(iv, i64_ty.const_int(TAG_PTR, false), "dfatag")
-                .map_err(|e| e.to_string())?
+            b.build_or(iv, i64_ty.const_int(TAG_PTR, false), "dfatag").map_err(|e| e.to_string())?
         }
         VmValue::Dict(_) => {
             let f = module.get_function("jrt_kdict_new").unwrap_or_else(|| {
@@ -86,8 +85,7 @@ pub(super) fn default_word_const<'ctx>(
                 .as_any_value_enum()
                 .into_pointer_value();
             let iv = b.build_ptr_to_int(p, i64_ty, "dfdi").map_err(|e| e.to_string())?;
-            b.build_or(iv, i64_ty.const_int(TAG_PTR, false), "dfdtag")
-                .map_err(|e| e.to_string())?
+            b.build_or(iv, i64_ty.const_int(TAG_PTR, false), "dfdtag").map_err(|e| e.to_string())?
         }
         other => return Err(format!("codegen: unsupported struct field default {other:?}")),
     })

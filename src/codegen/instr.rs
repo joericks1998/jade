@@ -820,22 +820,17 @@ pub(super) fn lower_instr<'ctx>(
                 let bv = low.load(*breg);
                 let copy_f = low.runtime_fn(
                     "jrt_kstruct_copy_field",
-                    low.ctx.void_type().fn_type(
-                        &[low.ptrt().into(), i64_ty.into(), low.ptrt().into()],
-                        false,
-                    ),
+                    low.ctx
+                        .void_type()
+                        .fn_type(&[low.ptrt().into(), i64_ty.into(), low.ptrt().into()], false),
                 );
                 if let Some(names) = fnctx.struct_field_names.get(type_name) {
                     for fname in names {
                         if field_specs.iter().any(|(n, _, _)| n == fname) {
                             continue;
                         }
-                        b.build_call(
-                            copy_f,
-                            &[s.into(), bv.into(), low.cstr(fname).into()],
-                            "",
-                        )
-                        .map_err(|e| e.to_string())?;
+                        b.build_call(copy_f, &[s.into(), bv.into(), low.cstr(fname).into()], "")
+                            .map_err(|e| e.to_string())?;
                     }
                 }
             }
@@ -849,10 +844,9 @@ pub(super) fn lower_instr<'ctx>(
             let default_setter = if base_reg.is_some() {
                 low.runtime_fn(
                     "jrt_kstruct_set_if_absent",
-                    low.ctx.void_type().fn_type(
-                        &[low.ptrt().into(), low.ptrt().into(), i64_ty.into()],
-                        false,
-                    ),
+                    low.ctx
+                        .void_type()
+                        .fn_type(&[low.ptrt().into(), low.ptrt().into(), i64_ty.into()], false),
                 )
             } else {
                 set_f

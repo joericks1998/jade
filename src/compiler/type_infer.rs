@@ -1477,9 +1477,7 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
             // it has to wait until the copy runs.
             let base_supplies: Option<Vec<String>> = tbase.as_ref().and_then(|b| {
                 let JadeType::Struct(bn) = &b.ty else { return None };
-                ctx.struct_defs
-                    .get(bn)
-                    .map(|fs| fs.iter().map(|f| f.name().to_string()).collect())
+                ctx.struct_defs.get(bn).map(|fs| fs.iter().map(|f| f.name().to_string()).collect())
             });
             let supplied = |name: &str| -> bool {
                 base_supplies.as_ref().is_some_and(|ns| ns.iter().any(|n| n == name))
