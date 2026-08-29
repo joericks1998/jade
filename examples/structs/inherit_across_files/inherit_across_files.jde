@@ -1,0 +1,35 @@
+// A parent may live in another file.
+//
+// The two engines reach this by different routes, which is why the fixture
+// exists. The compiled backend inlines every imported module into one stream
+// before it emits, so a parent is in reach by then and its fields are folded in
+// at compile time. The VM has no such moment: an import runs during execution,
+// after this program was already emitted, so the same fold happens when the
+// import lands. Both have to end up with the same struct.
+
+use creatures
+
+struct Dog(creatures.Animal, creatures.Trainable) {
+    breed
+}
+
+let d = Dog { name: "rex", breed: "corgi" }
+print(d.name)
+print(d.legs)
+print(d.tricks)
+print(d.breed)
+
+// A parent's default applies, and can still be given a value.
+print(Dog { name: "ace", breed: "mutt", legs: 3 }.legs)
+
+// A parent's methods come too, and a local child still overrides one. An
+// `extend` block is collected before anything runs, so where it sits does not
+// matter.
+extend Dog {
+    fn speak(self) {
+        return "woof"
+    }
+}
+
+print(d.describe())
+print(d.speak())

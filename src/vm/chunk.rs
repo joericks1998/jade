@@ -96,6 +96,9 @@ pub(crate) async fn run_with_state(program: CompiledProgram, state: &mut VmState
     for (type_name, methods) in program.extend_methods {
         state.extend_methods.entry(type_name).or_default().extend(methods);
     }
+    for (k, v) in program.struct_parents {
+        state.struct_parents.insert(k, v);
+    }
     for (k, v) in program.struct_ancestors {
         state.struct_ancestors.insert(k, v);
     }

@@ -31,6 +31,9 @@ pub struct VmState {
     pub extend_methods: HashMap<String, HashMap<String, Arc<CompiledFn>>>,
     /// Struct field definitions (needed for struct instantiation validation).
     pub struct_defs: HashMap<String, Vec<StructFieldDef>>,
+    /// Direct parents per struct. Kept because a cross-file parent only arrives
+    /// when `ImportFile` runs, which is after the importing program was emitted.
+    pub struct_parents: HashMap<String, Vec<String>>,
     /// Every struct a type inherits, nearest first, flattened transitively.
     /// Read by one thing: a typed `catch` arm matching a struct that inherits
     /// the named type. Fields and methods are already folded into the child.
@@ -94,6 +97,7 @@ impl VmState {
             globals,
             extend_methods: HashMap::new(),
             struct_defs: HashMap::new(),
+            struct_parents: HashMap::new(),
             struct_ancestors: HashMap::new(),
             inference_backend: None,
             callbacks: crate::native::CallbackBus::new(),
@@ -155,6 +159,7 @@ impl VmState {
             globals: self.globals.clone(),
             extend_methods: self.extend_methods.clone(),
             struct_defs: self.struct_defs.clone(),
+            struct_parents: self.struct_parents.clone(),
             struct_ancestors: self.struct_ancestors.clone(),
             inference_backend: self.inference_backend.clone(),
             // Deliberately not shared — see the field's note.

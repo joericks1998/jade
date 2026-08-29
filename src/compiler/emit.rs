@@ -22,6 +22,14 @@ pub struct CompiledProgram {
     /// Struct field definitions (needed by the VM for struct instantiation and
     /// field-access method fallback).
     pub struct_defs: HashMap<String, Vec<StructFieldDef>>,
+    /// Direct parents per struct, as written and after any import renaming.
+    ///
+    /// Shipped because the VM resolves a cross-file parent at run time: an
+    /// imported module's structs only reach `VmState` when `ImportFile` runs,
+    /// which is after this program was emitted. The AOT backend has no such
+    /// gap — it inlines every module into one stream first — so it has already
+    /// folded the fields in by the time it gets here.
+    pub struct_parents: HashMap<String, Vec<String>>,
     /// Every struct a type inherits, nearest first, flattened transitively.
     ///
     /// Fields and methods are already folded into the child by the time this
@@ -35,6 +43,43 @@ pub struct CompiledProgram {
 }
 
 // ── Internal state ────────────────────────────────────────────────────────────
+
+/// Fold each ancestor's fields into a child that is still missing them.
+///
+/// The checker already did this for a parent declared in the same file. It could
+/// not for one that came from another, because an imported struct is
+/// deliberately absent from that file's `struct_defs` — so this runs again where
+/// the AOT backend has inlined every module into one stream and the parent is
+/// finally in reach.
+///
+/// Idempotent by name, which is what makes running it twice safe: a field the
+/// child already has is either its own or one the checker folded in, and either
+/// way there is nothing to add. A genuine clash was refused before this ran.
+fn fold_parent_fields(
+    defs: &mut HashMap<String, Vec<StructFieldDef>>,
+    ancestors: &HashMap<String, Vec<String>>,
+) {
+    for (name, chain) in ancestors {
+        let Some(mut fields) = defs.get(name).cloned() else {
+            continue;
+        };
+        let mut added = Vec::new();
+        for ancestor in chain {
+            for f in defs.get(ancestor).into_iter().flatten() {
+                let known = fields.iter().chain(added.iter()).any(|g| g.name() == f.name());
+                if !known {
+                    added.push(f.clone());
+                }
+            }
+        }
+        if !added.is_empty() {
+            // Inherited fields lead, the way they do in the checker, so a
+            // literal reads in the order the declarations were written.
+            added.extend(fields.drain(..));
+            defs.insert(name.clone(), added);
+        }
+    }
+}
 
 /// Every struct each type inherits, nearest first, transitively.
 ///
@@ -310,6 +355,7 @@ pub fn emit(program: TProgram) -> Result<CompiledProgram> {
     // into one stream and mangles the names first, so a parent written
     // `shapes.Animal` has already become whatever it is going to be.
     ctx.struct_ancestors = flatten_ancestry(&ctx.struct_parents);
+    fold_parent_fields(&mut ctx.struct_defs, &ctx.struct_ancestors);
 
     // Second pass: emit all statements into the top-level chunk.
     let mut em = Emitter::new_top();
@@ -363,6 +409,7 @@ pub fn emit(program: TProgram) -> Result<CompiledProgram> {
         top_n_slots: n_slots,
         top: em.chunk,
         struct_defs: ctx.struct_defs,
+        struct_parents: ctx.struct_parents,
         struct_ancestors: ctx.struct_ancestors,
         extend_methods: ctx.extend_methods,
     })

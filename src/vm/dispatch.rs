@@ -304,6 +304,16 @@ pub(crate) async fn execute_chunk(
                                     .entry(format!("{}.{}", namespace, type_name))
                                     .or_insert(anc);
                             }
+                            for (type_name, ps) in sub_state.struct_parents.drain() {
+                                state.struct_parents.entry(type_name.clone()).or_insert(ps);
+                            }
+                            // Everything the module brought is now in reach, so a
+                            // local struct that inherits one of its types can
+                            // finally be completed. The checker could not: an
+                            // imported struct is deliberately absent from the
+                            // importing file's `struct_defs`, and this is the
+                            // first moment it is not.
+                            resolve_imported_parents(state);
                         }
                         r.map_err(|e| JadeError::InFile { file: path.clone(), cause: Box::new(e) })
                     }
@@ -1496,6 +1506,61 @@ pub(crate) fn set(slots: &mut Vec<VmValue>, r: Reg, v: VmValue) {
 /// The index error is `IndexOutOfBounds`, matching the read side at
 /// `vm::ops::vm_index`, and the octet-range wording comes from
 /// `jade_runtime::bytesf` so the compiled backend raises the same sentence.
+/// Complete any struct whose parent only arrived with an import.
+///
+/// The compiled backend never needs this: it inlines every module into one
+/// stream before emitting, so a cross-file parent is already in reach and the
+/// fields were folded in then. The VM has no such moment — `ImportFile` runs
+/// during execution, after the importing program was emitted — so the same fold
+/// happens here instead, and the two engines end up with the same struct.
+///
+/// Idempotent by name, exactly as the emitter's fold is: a field already present
+/// is either the struct's own or one folded in earlier. A genuine clash was
+/// refused at check time and cannot reach this.
+fn resolve_imported_parents(state: &mut VmState) {
+    let names: Vec<String> = state.struct_parents.keys().cloned().collect();
+    for name in names {
+        let parents = state.struct_parents.get(&name).cloned().unwrap_or_default();
+        let Some(mut fields) = state.struct_defs.get(&name).cloned() else {
+            continue;
+        };
+        let mut added: Vec<crate::frontend::ast::StructFieldDef> = Vec::new();
+        let mut methods: Vec<(String, std::sync::Arc<CompiledFn>)> = Vec::new();
+        let mut chain: Vec<String> = Vec::new();
+        let mut queue = parents.clone();
+        while let Some(p) = queue.first().cloned() {
+            queue.remove(0);
+            if chain.contains(&p) {
+                continue;
+            }
+            chain.push(p.clone());
+            queue.extend(state.struct_parents.get(&p).cloned().unwrap_or_default());
+            for f in state.struct_defs.get(&p).into_iter().flatten() {
+                let known = fields.iter().chain(added.iter()).any(|g| g.name() == f.name());
+                if !known {
+                    added.push(f.clone());
+                }
+            }
+            for (m, cf) in state.extend_methods.get(&p).into_iter().flatten() {
+                methods.push((m.clone(), std::sync::Arc::clone(cf)));
+            }
+        }
+        if !added.is_empty() {
+            added.extend(fields.drain(..));
+            state.struct_defs.insert(name.clone(), added);
+        }
+        if !methods.is_empty() {
+            let own = state.extend_methods.entry(name.clone()).or_default();
+            for (m, cf) in methods {
+                own.entry(m).or_insert(cf);
+            }
+        }
+        if !chain.is_empty() {
+            state.struct_ancestors.insert(name, chain);
+        }
+    }
+}
+
 pub(crate) fn write_octet(
     arc: &Arc<Mutex<jade_runtime::bytesf::BytesObj>>,
     idx: &VmValue,

@@ -334,6 +334,20 @@ pub fn fill_struct_literal_defaults(program: &mut TProgram) -> Result<()> {
     let mut defs: HashMap<String, Vec<StructFieldDef>> = HashMap::new();
     collect_struct_defs_into(&program.stmts, &mut defs);
 
+    // Then finish any inheritance that crossed a file boundary.
+    //
+    // `resolve_inheritance` ran while each file was checked on its own, where an
+    // imported parent is deliberately out of reach, so a child of one still
+    // carries only its own fields. This is the first point where every module is
+    // in one stream, which makes it the only place the fold can happen for the
+    // compiled backend. The result is written back into the nodes as well as
+    // into `defs`, because a literal's missing defaults are filled from `defs`
+    // just below while `emit` reads the nodes.
+    let mut parents: HashMap<String, Vec<String>> = HashMap::new();
+    collect_struct_parents_into(&program.stmts, &mut parents);
+    fold_inherited_fields(&mut defs, &parents);
+    write_back_struct_fields(&mut program.stmts, &defs);
+
     // Set up an inference context that knows about every struct in the merged
     // program so default expressions referencing other structs type-check.
     // `opaque_imports = true` keeps it lenient for any unresolved identifiers.
@@ -352,6 +366,76 @@ pub fn fill_struct_literal_defaults(program: &mut TProgram) -> Result<()> {
 
     fill_in_stmts(&mut program.stmts, &defs, &mut ctx)?;
     Ok(())
+}
+
+fn collect_struct_parents_into(stmts: &[TStmt], out: &mut HashMap<String, Vec<String>>) {
+    for s in stmts {
+        match s {
+            TStmt::StructDef { name, parents, .. } => {
+                out.entry(name.clone()).or_insert_with(|| parents.clone());
+            }
+            TStmt::FnDef { body, .. } | TStmt::AsyncFnDef { body, .. } => {
+                collect_struct_parents_into(body, out)
+            }
+            TStmt::ExtendBlock { methods, .. } => collect_struct_parents_into(methods, out),
+            _ => {}
+        }
+    }
+}
+
+/// Fold each ancestor's fields into a child that is still missing them.
+///
+/// Transitive, and idempotent by name: a field the child already has is either
+/// its own or one the checker folded in when the parent was local. A genuine
+/// clash was refused before this ran, so nothing here has to decide anything.
+fn fold_inherited_fields(
+    defs: &mut HashMap<String, Vec<StructFieldDef>>,
+    parents: &HashMap<String, Vec<String>>,
+) {
+    let names: Vec<String> = parents.keys().cloned().collect();
+    for name in names {
+        let Some(own) = defs.get(&name).cloned() else {
+            continue;
+        };
+        let mut inherited: Vec<StructFieldDef> = Vec::new();
+        let mut seen: Vec<String> = vec![name.clone()];
+        let mut queue: Vec<String> = parents.get(&name).cloned().unwrap_or_default();
+        while !queue.is_empty() {
+            let p = queue.remove(0);
+            if seen.contains(&p) {
+                continue;
+            }
+            seen.push(p.clone());
+            queue.extend(parents.get(&p).cloned().unwrap_or_default());
+            for f in defs.get(&p).into_iter().flatten() {
+                let known = own.iter().chain(inherited.iter()).any(|g| g.name() == f.name());
+                if !known {
+                    inherited.push(f.clone());
+                }
+            }
+        }
+        if !inherited.is_empty() {
+            inherited.extend(own);
+            defs.insert(name, inherited);
+        }
+    }
+}
+
+fn write_back_struct_fields(stmts: &mut [TStmt], defs: &HashMap<String, Vec<StructFieldDef>>) {
+    for s in stmts.iter_mut() {
+        match s {
+            TStmt::StructDef { name, fields, .. } => {
+                if let Some(full) = defs.get(name) {
+                    *fields = full.clone();
+                }
+            }
+            TStmt::FnDef { body, .. } | TStmt::AsyncFnDef { body, .. } => {
+                write_back_struct_fields(body, defs)
+            }
+            TStmt::ExtendBlock { methods, .. } => write_back_struct_fields(methods, defs),
+            _ => {}
+        }
+    }
 }
 
 fn collect_struct_defs_into(stmts: &[TStmt], out: &mut HashMap<String, Vec<StructFieldDef>>) {
@@ -1310,6 +1394,31 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
             let def_fields = def_fields_opt
                 .ok_or_else(|| JadeError::UndefinedType { name: type_name.clone(), span: *span })?;
 
+            // A struct whose parent came from another file is not fully known
+            // here: `resolve_inheritance` had nothing to fold in, because an
+            // imported struct is deliberately absent from this file's
+            // `struct_defs`. Its literal is checked at the merge point instead,
+            // which is `imports.rs` for the compiled backend and `ImportFile`
+            // for the VM. Same treatment the imported struct itself gets above.
+            let awaits_a_parent = ctx
+                .struct_parents
+                .get(type_name)
+                .is_some_and(|ps| ps.iter().any(|p| !ctx.struct_defs.contains_key(p)));
+            if awaits_a_parent {
+                let tfields = fields
+                    .iter()
+                    .map(|(n, e)| infer_expr(e, ctx).map(|te| (n.clone(), te, false)))
+                    .collect::<Result<Vec<_>>>()?;
+                return Ok(TExpr {
+                    kind: TExprKind::StructLiteral {
+                        type_name: type_name.clone(),
+                        fields: tfields,
+                    },
+                    ty: JadeType::Struct(type_name.clone()),
+                    span: *span,
+                });
+            }
+
             // Extra fields check.
             for (fname, fexpr) in fields {
                 let fspan = expr_span(fexpr);
@@ -1411,7 +1520,14 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
                     // file's ctx.struct_defs).  Fields/methods can't be checked
                     // until the importer merges TIRs at codegen time.
                     let is_imported = ctx.opaque_imports && !ctx.struct_defs.contains_key(&tn);
-                    if !is_imported {
+                    // And a local struct that inherits an imported one is just
+                    // as unknown here, for the same reason: the parent's fields
+                    // and methods have nothing to be folded in from yet.
+                    let awaits_a_parent = ctx
+                        .struct_parents
+                        .get(&tn)
+                        .is_some_and(|ps| ps.iter().any(|p| !ctx.struct_defs.contains_key(p)));
+                    if !is_imported && !awaits_a_parent {
                         let has_field = ctx
                             .struct_defs
                             .get(&tn)
