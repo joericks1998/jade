@@ -963,6 +963,48 @@ mod emit {
         assert!(cp.struct_ancestors.is_empty());
     }
 
+    /// Inheritance work has to stay linear in what it copies.
+    ///
+    /// Every folding pass here reads *direct* parents and relies on each parent
+    /// being finished first, so a grandparent's fields arrive through the parent.
+    /// Walking the whole ancestor set instead, with a linear membership scan,
+    /// costs a factor of the depth twice over, and it does not look wrong: it is
+    /// the obvious way to write it and it is correct. A chain of 400 structs
+    /// took over a minute to check that way, and 800 took six.
+    ///
+    /// The bound is deliberately loose. This is a tripwire for a change of
+    /// complexity class, not a benchmark, and it should not fail on a busy
+    /// machine. The quadratic floor is the output itself: the last struct in a
+    /// chain of n has n fields, so there are n^2/2 field entries to write down
+    /// however cleverly it is done.
+    #[test]
+    fn a_deep_inheritance_chain_does_not_blow_up() {
+        let n = 300;
+        let mut src = String::from("struct S0 {\n    f0\n}\n");
+        for i in 1..n {
+            src.push_str(&format!("struct S{i}(S{}) {{\n    f{i}\n}}\n", i - 1));
+        }
+        let start = std::time::Instant::now();
+        let cp = compile_ok(&src);
+        let elapsed = start.elapsed();
+
+        // The last struct carries every field declared above it.
+        let last = cp.struct_defs.get(&format!("S{}", n - 1)).expect("last struct");
+        assert_eq!(last.len(), n, "a chain of {n} should leave {n} fields on the last struct");
+        assert_eq!(last[0].name(), "f0", "inherited fields lead, oldest first");
+        assert_eq!(last[n - 1].name(), &format!("f{}", n - 1), "its own field is last");
+
+        // And its ancestry is every struct above it, nearest first.
+        let anc = cp.struct_ancestors.get(&format!("S{}", n - 1)).expect("ancestry");
+        assert_eq!(anc.len(), n - 1);
+        assert_eq!(anc[0], format!("S{}", n - 2), "nearest first");
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(20),
+            "a chain of {n} structs took {elapsed:?}; inheritance folding has gone superquadratic"
+        );
+    }
+
     #[test]
     fn emit_int_let_loads_int_and_sets_global() {
         let cp = compile_ok("let x = 7");

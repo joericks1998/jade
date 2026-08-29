@@ -380,41 +380,56 @@ fn collect_struct_parents_into(stmts: &[TStmt], out: &mut HashMap<String, Vec<St
     }
 }
 
-/// Fold each ancestor's fields into a child that is still missing them.
+/// Fold each parent's fields into a child that is still missing them.
 ///
 /// Transitive, and idempotent by name: a field the child already has is either
 /// its own or one the checker folded in when the parent was local. A genuine
 /// clash was refused before this ran, so nothing here has to decide anything.
+///
+/// Only *direct* parents are read, and every parent is completed before any of
+/// its children, so a parent's list is already whole when a child copies it and
+/// a grandparent arrives through the parent. Walking the full ancestor set with
+/// a linear membership scan instead — which is what this did first — cost a
+/// factor of the depth twice over: `jade check` on a chain of 400 structs spent
+/// 26 of its 27 seconds here.
 fn fold_inherited_fields(
     defs: &mut HashMap<String, Vec<StructFieldDef>>,
     parents: &HashMap<String, Vec<String>>,
 ) {
-    let names: Vec<String> = parents.keys().cloned().collect();
-    for name in names {
-        let Some(own) = defs.get(&name).cloned() else {
-            continue;
+    fn complete(
+        name: &str,
+        defs: &mut HashMap<String, Vec<StructFieldDef>>,
+        parents: &HashMap<String, Vec<String>>,
+        done: &mut HashSet<String>,
+    ) {
+        if !done.insert(name.to_string()) {
+            return;
+        }
+        let ps = parents.get(name).cloned().unwrap_or_default();
+        for p in &ps {
+            complete(p, defs, parents, done);
+        }
+        let Some(own) = defs.get(name).cloned() else {
+            return;
         };
+        let mut known: HashSet<String> = own.iter().map(|f| f.name().to_string()).collect();
         let mut inherited: Vec<StructFieldDef> = Vec::new();
-        let mut seen: Vec<String> = vec![name.clone()];
-        let mut queue: Vec<String> = parents.get(&name).cloned().unwrap_or_default();
-        while !queue.is_empty() {
-            let p = queue.remove(0);
-            if seen.contains(&p) {
-                continue;
-            }
-            seen.push(p.clone());
-            queue.extend(parents.get(&p).cloned().unwrap_or_default());
-            for f in defs.get(&p).into_iter().flatten() {
-                let known = own.iter().chain(inherited.iter()).any(|g| g.name() == f.name());
-                if !known {
+        for p in &ps {
+            for f in defs.get(p).into_iter().flatten() {
+                if known.insert(f.name().to_string()) {
                     inherited.push(f.clone());
                 }
             }
         }
         if !inherited.is_empty() {
             inherited.extend(own);
-            defs.insert(name, inherited);
+            defs.insert(name.to_string(), inherited);
         }
+    }
+
+    let mut done: HashSet<String> = HashSet::new();
+    for name in parents.keys() {
+        complete(name, defs, parents, &mut done);
     }
 }
 
@@ -758,14 +773,21 @@ fn flatten_struct(
     }
 
     // Nearest first: each parent, then what that parent inherited.
+    //
+    // Membership goes through a set rather than a scan of the list being built.
+    // Each parent's own list is already finished, so the work here is linear in
+    // what is being copied; scanning instead made it quadratic in the depth, and
+    // that squared again over a whole file. A chain of 800 structs took six
+    // minutes to check.
     let mut chainlist: Vec<String> = Vec::new();
+    let mut in_chain: HashSet<String> = HashSet::new();
     for parent in &parents {
-        if !chainlist.contains(parent) {
+        if in_chain.insert(parent.clone()) {
             chainlist.push(parent.clone());
         }
-        for a in ancestors.get(parent).cloned().unwrap_or_default() {
-            if !chainlist.contains(&a) {
-                chainlist.push(a);
+        for a in ancestors.get(parent).into_iter().flatten() {
+            if in_chain.insert(a.clone()) {
+                chainlist.push(a.clone());
             }
         }
     }

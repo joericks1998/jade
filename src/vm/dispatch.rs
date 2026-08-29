@@ -1529,47 +1529,66 @@ pub(crate) fn set(slots: &mut Vec<VmValue>, r: Reg, v: VmValue) {
 /// Idempotent by name, exactly as the emitter's fold is: a field already present
 /// is either the struct's own or one folded in earlier. A genuine clash was
 /// refused at check time and cannot reach this.
+///
+/// Direct parents only, each parent completed before its children, so a
+/// grandparent's fields arrive through the parent rather than by re-walking the
+/// chain. The same shape as `emit::fold_parent_fields`, and for the same reason:
+/// scanning the whole ancestor set with a linear membership test is quadratic in
+/// the depth on top of the work it has to do anyway.
 fn resolve_imported_parents(state: &mut VmState) {
-    let names: Vec<String> = state.struct_parents.keys().cloned().collect();
-    for name in names {
-        let parents = state.struct_parents.get(&name).cloned().unwrap_or_default();
-        let Some(mut fields) = state.struct_defs.get(&name).cloned() else {
-            continue;
+    fn complete(name: &str, state: &mut VmState, done: &mut std::collections::HashSet<String>) {
+        if !done.insert(name.to_string()) {
+            return;
+        }
+        let parents = state.struct_parents.get(name).cloned().unwrap_or_default();
+        for p in &parents {
+            complete(p, state, done);
+        }
+        let Some(own) = state.struct_defs.get(name).cloned() else {
+            return;
         };
-        let mut added: Vec<crate::frontend::ast::StructFieldDef> = Vec::new();
-        let mut methods: Vec<(String, std::sync::Arc<CompiledFn>)> = Vec::new();
+        let mut known: std::collections::HashSet<String> =
+            own.iter().map(|f| f.name().to_string()).collect();
+        let mut inherited: Vec<crate::frontend::ast::StructFieldDef> = Vec::new();
         let mut chain: Vec<String> = Vec::new();
-        let mut queue = parents.clone();
-        while let Some(p) = queue.first().cloned() {
-            queue.remove(0);
-            if chain.contains(&p) {
-                continue;
+        let mut in_chain: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut methods: Vec<(String, std::sync::Arc<CompiledFn>)> = Vec::new();
+        for p in &parents {
+            if in_chain.insert(p.clone()) {
+                chain.push(p.clone());
             }
-            chain.push(p.clone());
-            queue.extend(state.struct_parents.get(&p).cloned().unwrap_or_default());
-            for f in state.struct_defs.get(&p).into_iter().flatten() {
-                let known = fields.iter().chain(added.iter()).any(|g| g.name() == f.name());
-                if !known {
-                    added.push(f.clone());
+            for a in state.struct_ancestors.get(p).cloned().unwrap_or_default() {
+                if in_chain.insert(a.clone()) {
+                    chain.push(a);
                 }
             }
-            for (m, cf) in state.extend_methods.get(&p).into_iter().flatten() {
+            for f in state.struct_defs.get(p).into_iter().flatten() {
+                if known.insert(f.name().to_string()) {
+                    inherited.push(f.clone());
+                }
+            }
+            for (m, cf) in state.extend_methods.get(p).into_iter().flatten() {
                 methods.push((m.clone(), std::sync::Arc::clone(cf)));
             }
         }
-        if !added.is_empty() {
-            added.append(&mut fields);
-            state.struct_defs.insert(name.clone(), added);
+        if !inherited.is_empty() {
+            inherited.extend(own);
+            state.struct_defs.insert(name.to_string(), inherited);
         }
         if !methods.is_empty() {
-            let own = state.extend_methods.entry(name.clone()).or_default();
+            let own_methods = state.extend_methods.entry(name.to_string()).or_default();
             for (m, cf) in methods {
-                own.entry(m).or_insert(cf);
+                own_methods.entry(m).or_insert(cf);
             }
         }
         if !chain.is_empty() {
-            state.struct_ancestors.insert(name, chain);
+            state.struct_ancestors.insert(name.to_string(), chain);
         }
+    }
+
+    let mut done = std::collections::HashSet::new();
+    for name in state.struct_parents.keys().cloned().collect::<Vec<_>>() {
+        complete(&name, state, &mut done);
     }
 }
 
