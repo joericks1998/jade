@@ -1,0 +1,64 @@
+// A typed catch arm follows inheritance.
+//
+// `catch Failure e` catches anything that inherits `Failure`, which is what
+// makes a shared parent worth raising through: one arm handles a family of
+// errors, and adding a new member does not mean editing every caller.
+//
+// It does not run the other way. A `NotFound` arm is asking for that type in
+// particular, so a plain `Failure` walks past it.
+//
+// Both engines answer the same question from the same flattened ancestry: the
+// VM reads it out of its own state, and a compiled binary reads a registry
+// filled at program start, because it has no compiler left to ask.
+
+struct Failure {
+    reason
+}
+
+struct NotFound(Failure) {
+    path
+}
+
+struct Timeout(Failure) {
+    let seconds = 30
+}
+
+// The parent's arm catches the child, and the child's own fields are still
+// there once it has.
+try {
+    raise NotFound { reason: "gone", path: "/tmp/x" }
+} catch Failure e {
+    print("parent arm caught it")
+    print(e.reason)
+    print(e.path)
+} catch e {
+    print("WRONG: fell through to the untyped arm")
+}
+
+// A sibling is not a parent, so the first arm does not take it.
+try {
+    raise Timeout { reason: "slow" }
+} catch NotFound e {
+    print("WRONG: a sibling arm caught it")
+} catch Failure e {
+    print("sibling skipped, parent caught")
+    print(e.seconds)
+}
+
+// The exact type still matches, which is what every arm did before.
+try {
+    raise Failure { reason: "plain" }
+} catch NotFound e {
+    print("WRONG: a child arm caught a parent")
+} catch Failure e {
+    print("exact match still works")
+}
+
+// Arms are tried in order, so a child arm placed first takes the child.
+try {
+    raise NotFound { reason: "gone", path: "/tmp/y" }
+} catch NotFound e {
+    print("the nearer arm wins when it is written first")
+} catch Failure e {
+    print("WRONG: the parent arm took it")
+}

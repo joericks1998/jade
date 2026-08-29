@@ -86,6 +86,7 @@ pub(super) fn dest_reg(instr: &Instr) -> Option<Reg> {
         | CmpGtBool(d, ..)
         | CmpLeBool(d, ..)
         | CmpGeBool(d, ..)
+        | CatchMatches(d, ..)
         | CmpEqStr(d, ..)
         | CmpNeStr(d, ..)
         | CmpLtStr(d, ..)

@@ -75,7 +75,7 @@ fn fold_parent_fields(
         if !added.is_empty() {
             // Inherited fields lead, the way they do in the checker, so a
             // literal reads in the order the declarations were written.
-            added.extend(fields.drain(..));
+            added.append(&mut fields);
             defs.insert(name.clone(), added);
         }
     }
@@ -308,26 +308,6 @@ const NO_SPAN: Span = Span { line: 0, col: 0 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// Evaluate a TExpr that must be a literal — used for struct decorator args.
-fn eval_literal_expr(
-    expr: &TExpr,
-    span: crate::frontend::error::Span,
-) -> Result<crate::vm::VmValue> {
-    use crate::compiler::tir::TExprKind;
-    use crate::vm::VmValue;
-    match &expr.kind {
-        TExprKind::Integer(n)  => Ok(VmValue::Int(*n)),
-        TExprKind::Float(f)    => Ok(VmValue::Float(*f)),
-        TExprKind::Bool(b)     => Ok(VmValue::Bool(*b)),
-        TExprKind::Str(s)      => Ok(VmValue::Str(s.clone().into())),
-        TExprKind::Identifier(s) if s == "None" || s == "nil" || s == "null" => Ok(VmValue::Nil),
-        _ => Err(crate::frontend::error::JadeError::Exception {
-            message: "struct decorator arguments must be literals (None, nil, null, numbers, booleans, strings)".to_string(),
-            span,
-        }),
-    }
-}
-
 // ── Public entry point ────────────────────────────────────────────────────────
 
 /// Compile a `TProgram` into bytecode ready for the VM.
@@ -341,12 +321,9 @@ pub fn emit(program: TProgram) -> Result<CompiledProgram> {
         next_closure_id: 0,
     };
     for stmt in &program.stmts {
-        match stmt {
-            TStmt::StructDef { name, fields, parents, .. } => {
-                ctx.struct_defs.insert(name.clone(), fields.clone());
-                ctx.struct_parents.insert(name.clone(), parents.clone());
-            }
-            _ => {}
+        if let TStmt::StructDef { name, fields, parents, .. } = stmt {
+            ctx.struct_defs.insert(name.clone(), fields.clone());
+            ctx.struct_parents.insert(name.clone(), parents.clone());
         }
     }
 
@@ -711,10 +688,8 @@ fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
                 let skip_idx = if let Some(type_name) = catch_type {
                     let type_reg = em.alloc_reg();
                     em.chunk.emit(Instr::GetTypeName(type_reg, caught_reg), span);
-                    let expected_reg = em.alloc_reg();
-                    em.chunk.emit(Instr::LoadStr(expected_reg, type_name), span);
                     let cmp_reg = em.alloc_reg();
-                    em.chunk.emit(Instr::CmpEqStr(cmp_reg, type_reg, expected_reg), span);
+                    em.chunk.emit(Instr::CatchMatches(cmp_reg, type_reg, type_name), span);
                     // If type doesn't match, jump to next arm.
                     let idx = em.chunk.emit(Instr::JumpIfFalse(cmp_reg, 0), span);
                     Some(idx)

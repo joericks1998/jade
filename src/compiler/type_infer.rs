@@ -28,8 +28,6 @@ pub struct TypeContext {
     dict_value_scopes: Vec<HashMap<String, JadeType>>,
     /// Struct type name → field definitions (copied from AST).
     struct_defs: HashMap<String, Vec<StructFieldDef>>,
-    /// Interface name → required method names.
-    interface_defs: HashMap<String, Vec<String>>,
     /// Extend: type_name → method_name → inferred return type.
     extend_methods: HashMap<String, HashMap<String, JadeType>>,
     /// Parents as written, per struct. Consumed by `resolve_inheritance` and
@@ -86,7 +84,6 @@ impl TypeContext {
             scopes: vec![HashMap::new()],
             dict_value_scopes: vec![HashMap::new()],
             struct_defs: HashMap::new(),
-            interface_defs: HashMap::new(),
             extend_methods: HashMap::new(),
             struct_parents: HashMap::new(),
             struct_ancestors: HashMap::new(),
@@ -699,10 +696,10 @@ fn flatten_struct(
     // name both sides.
     let mut fields: Vec<StructFieldDef> = Vec::new();
     let mut owner: HashMap<String, String> = HashMap::new();
-    let mut push = |f: &StructFieldDef,
-                    from: &str,
-                    fields: &mut Vec<StructFieldDef>,
-                    owner: &mut HashMap<String, String>|
+    let push = |f: &StructFieldDef,
+                from: &str,
+                fields: &mut Vec<StructFieldDef>,
+                owner: &mut HashMap<String, String>|
      -> Result<()> {
         if let Some(first) = owner.get(f.name()) {
             return Err(JadeError::InheritedFieldClash {

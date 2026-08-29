@@ -758,6 +758,18 @@ pub(crate) async fn execute_chunk(
             }
 
             // ── Typed comparisons — str ───────────────────────────────────────
+            // A typed `catch` arm matches the named type or anything that
+            // inherits it. The ancestry is flattened nearest-first at compile
+            // time, so this is a membership test and never a walk.
+            Instr::CatchMatches(d, actual, expected) => {
+                let actual = vm_try!(get_str_ref(slots, *actual, span)).to_string();
+                let matched = actual == *expected
+                    || state
+                        .struct_ancestors
+                        .get(&actual)
+                        .is_some_and(|anc| anc.iter().any(|a| a == expected));
+                set(slots, *d, VmValue::Bool(matched));
+            }
             Instr::CmpEqStr(d, l, r) => {
                 let (a, b) = vm_try!(str2(slots, *l, *r, span));
                 set(slots, *d, VmValue::Bool(a == b));
@@ -1546,7 +1558,7 @@ fn resolve_imported_parents(state: &mut VmState) {
             }
         }
         if !added.is_empty() {
-            added.extend(fields.drain(..));
+            added.append(&mut fields);
             state.struct_defs.insert(name.clone(), added);
         }
         if !methods.is_empty() {
@@ -1683,6 +1695,7 @@ pub(crate) fn eval_literal_default(expr: &crate::frontend::ast::Expr) -> Option<
 
 pub(crate) fn instr_max_reg(instr: &Instr) -> u32 {
     match instr {
+        Instr::CatchMatches(d, s, _) => (*d).max(*s),
         Instr::SetIndexGlobal(_, i, v) => (*i).max(*v),
         Instr::LoadInt(d, _)
         | Instr::LoadFloat(d, _)

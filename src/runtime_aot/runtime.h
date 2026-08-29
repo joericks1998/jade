@@ -465,6 +465,12 @@ void*    jrt_bytes_concat(const void* a, const void* b);
 /* Write one octet. 0 means the pending channel holds the reason: the index was
  * past the end, or the value was not an octet in 0 to 255. */
 int32_t  jrt_bytes_set(void* p, int64_t i, int64_t v);
+/* Inheritance. A typed `catch` arm matches the named type or anything that
+ * inherits it, so codegen registers each (child, ancestor) pair at program start
+ * and the arm asks here. Fields and methods were folded into each child at
+ * compile time and need nothing at run time. */
+void     jrt_struct_ancestor(const char* child, const char* ancestor);
+int32_t  jrt_catch_matches(const char* actual, const char* expected);
 /* Raising wrappers used by codegen. */
 int64_t  jk_bytes_decode(int64_t recv);
 int64_t  jk_bytes_zeros(int64_t n);

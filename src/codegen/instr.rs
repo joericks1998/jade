@@ -517,6 +517,26 @@ pub(super) fn lower_instr<'ctx>(
             low.store(*d, low.str_concat(*l, *r));
             Ok(false)
         }
+        // A typed `catch` arm matches the named type or anything that inherits
+        // it, so this is not a string compare. The ancestry lives in the runtime
+        // registry, filled by `jrt_struct_ancestor` calls emitted at program
+        // start, because a compiled binary has no compiler left to ask.
+        CatchMatches(d, actual, expected) => {
+            let f = low.runtime_fn(
+                "jrt_catch_matches",
+                low.ctx.i32_type().fn_type(&[low.ptrt().into(), low.ptrt().into()], false),
+            );
+            let got = low.untag_ptr(low.load(*actual));
+            let want = low.cstr(expected);
+            let r = low
+                .builder
+                .build_call(f, &[got.into(), want.into()], "catchmatch")
+                .map_err(|e| e.to_string())?
+                .as_any_value_enum()
+                .into_int_value();
+            low.store(*d, low.i32cmp_word(r, IntPredicate::NE));
+            Ok(false)
+        }
         CmpEqStr(d, l, r) => {
             low.store(*d, low.str_cmp(*l, *r, IntPredicate::EQ));
             Ok(false)

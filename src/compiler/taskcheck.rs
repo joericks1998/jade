@@ -483,10 +483,10 @@ pub fn check(
                 // A *user* file only. `use std::bytes` is an `ImportFile` too,
                 // with the package's own import name as its path, and counting
                 // that one would make the package permanently shadow itself.
-                Instr::ImportFile(path, namespace) => {
-                    if crate::builtins::find_package(path).is_none() {
-                        user_globals.insert(namespace.clone());
-                    }
+                Instr::ImportFile(path, namespace)
+                    if crate::builtins::find_package(path).is_none() =>
+                {
+                    user_globals.insert(namespace.clone());
                 }
                 _ => {}
             }
