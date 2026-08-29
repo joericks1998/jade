@@ -122,11 +122,37 @@ pub enum JadeError {
     /// String index is out of range.
     IndexOutOfBounds { index: i64, len: usize, span: Span },
 
-    /// `extend Type: Interface` names an interface that was never defined.
-    UndefinedInterface { name: String, span: Span },
+    /// `interface Name { … }` used the removed interface form. An interface only
+    /// ever checked that a type declared a set of methods, and meant nothing at
+    /// run time; inheritance covers what it was reached for.
+    InterfaceRemoved { span: Span },
 
-    /// `extend Type: Interface` is missing a method required by the interface.
-    MissingInterfaceMethod { type_name: String, interface_name: String, method: String, span: Span },
+    /// `extend Type: Interface` used the removed conformance claim. A plain
+    /// `extend Type { … }` still attaches the methods.
+    ExtendConformanceRemoved { span: Span },
+
+    /// `@dec struct Name { … }` used the removed struct-decorator form. It ran
+    /// under `jade run` and was silently skipped under `jade build`, so the two
+    /// engines disagreed about what a literal produced.
+    StructDecoratorRemoved { span: Span },
+
+    /// `@route` on an `extend` block used the removed routing decorator, which
+    /// had the same one-engine problem as a struct decorator.
+    RouteDecoratorRemoved { span: Span },
+
+    /// `struct Child(Parent)` names a parent that is not a struct in scope.
+    UnknownParent { child: String, parent: String, span: Span },
+
+    /// A field name appears twice across a struct and everything it inherits.
+    /// `owner` and `other` name where the two declarations came from.
+    InheritedFieldClash { field: String, owner: String, other: String, span: Span },
+
+    /// Two parents supply a method of the same name, so nothing decides between
+    /// them. A *child* method overriding a parent's is fine; these are siblings.
+    InheritedMethodClash { method: String, first: String, second: String, span: Span },
+
+    /// `struct A(B)` and `struct B(A)`, however many steps round.
+    InheritanceCycle { chain: Vec<String>, span: Span },
 
     /// LLM inference call failed (network error, HTTP error, or unexpected API response).
     InferenceError { message: String, span: Span },
@@ -363,16 +389,49 @@ impl std::fmt::Display for JadeError {
                 "[{}:{}] index {} out of bounds (length {})",
                 span.line, span.col, index, len
             ),
-            JadeError::UndefinedInterface { name, span } => {
-                write!(f, "[{}:{}] interface '{}' is not defined", span.line, span.col, name)
-            }
-            JadeError::MissingInterfaceMethod { type_name, interface_name, method, span } => {
-                write!(
-                    f,
-                    "[{}:{}] type '{}' does not implement interface '{}': missing method '{}'",
-                    span.line, span.col, type_name, interface_name, method
-                )
-            }
+            JadeError::InterfaceRemoved { span } => write!(
+                f,
+                "[{}:{}] `interface` was removed. It only checked that a type declared a set of methods and meant nothing at run time; a shared parent (`struct Child(Parent)`) is what to reach for instead.",
+                span.line, span.col
+            ),
+            JadeError::ExtendConformanceRemoved { span } => write!(
+                f,
+                "[{}:{}] the `extend Type: Interface` conformance claim was removed along with interfaces; write `extend Type {{ … }}` to attach the same methods.",
+                span.line, span.col
+            ),
+            JadeError::StructDecoratorRemoved { span } => write!(
+                f,
+                "[{}:{}] a decorator on a struct was removed. It ran under `jade run` and was skipped under `jade build`, so the two engines disagreed; call the function where the struct is built instead.",
+                span.line, span.col
+            ),
+            JadeError::RouteDecoratorRemoved { span } => write!(
+                f,
+                "[{}:{}] `@route` was removed. It reached only `jade run` and was skipped under `jade build`; dispatch on the field yourself.",
+                span.line, span.col
+            ),
+            JadeError::UnknownParent { child, parent, span } => write!(
+                f,
+                "[{}:{}] struct '{}' inherits '{}', which is not a struct in scope",
+                span.line, span.col, child, parent
+            ),
+            JadeError::InheritedFieldClash { field, owner, other, span } => write!(
+                f,
+                "[{}:{}] field '{}' comes from both '{}' and '{}'; a field name may appear once across a struct and everything it inherits",
+                span.line, span.col, field, owner, other
+            ),
+            JadeError::InheritedMethodClash { method, first, second, span } => write!(
+                f,
+                "[{}:{}] '{}' and '{}' both supply a method named '{}', and neither is nearer; a child's own method may override a parent's, but two parents cannot decide between themselves",
+                span.line, span.col, first, second, method
+            ),
+            JadeError::InheritanceCycle { chain, span } => write!(
+                f,
+                "[{}:{}] '{}' inherits itself: {}",
+                span.line,
+                span.col,
+                chain.first().map(String::as_str).unwrap_or("?"),
+                chain.join(" -> ")
+            ),
             JadeError::InferenceError { message, span } => {
                 write!(f, "[{}:{}] inference error: {}", span.line, span.col, message)
             }

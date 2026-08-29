@@ -307,8 +307,11 @@ mod lexer {
         assert_eq!(kinds("extend"), vec![TokenKind::Extend, TokenKind::Eof]);
     }
 
+    /// `interface` stays reserved even though nothing parses it, so a stale
+    /// block gets an error naming the removal rather than a confusing
+    /// statement-level one. Same reason `use "path"` still lexes.
     #[test]
-    fn test_tokenize_interface_keyword() {
+    fn interface_is_still_reserved_so_the_error_can_name_the_removal() {
         assert_eq!(kinds("interface"), vec![TokenKind::Interface, TokenKind::Eof]);
     }
 
@@ -1045,7 +1048,7 @@ mod parser {
     }
 
     #[test]
-    fn test_parse_extend_block() {
+    fn a_plain_extend_block_still_parses() {
         let p = parse_src("extend Foo {\n    fn get(self) {\n        return 1\n    }\n}");
         let Stmt::ExtendBlock { type_name, methods, .. } = &p.stmts[0] else { panic!() };
         assert_eq!(type_name, "Foo");
@@ -1138,38 +1141,29 @@ mod parser {
 
     // ── interface ─────────────────────────────────────────────────────────────
 
+    /// An old `interface` block no longer parses. The message has to name the
+    /// removal: with `interface` demoted to an identifier, a bare rejection
+    /// would report a confusing statement-level error instead.
     #[test]
-    fn test_parse_interface_def() {
-        let p = parse_src("interface Displayable {\n    fn to_str(self)\n}");
-        let Stmt::InterfaceDef { name, methods, .. } = &p.stmts[0] else { panic!() };
-        assert_eq!(name, "Displayable");
-        assert_eq!(methods.len(), 1);
-        assert_eq!(methods[0].name, "to_str");
-        assert_eq!(methods[0].params, vec!["self"]);
+    fn an_interface_block_is_refused_by_name() {
+        let e = parse_src_err("interface Displayable {\n    fn to_str(self)\n}");
+        assert!(e.to_string().contains("`interface` was removed"), "got: {e}");
+    }
+
+    /// Likewise the conformance claim. Without its own arm the author gets
+    /// "expected `{`, found `:`", which explains nothing.
+    #[test]
+    fn an_extend_conformance_claim_is_refused_by_name() {
+        let e = parse_src_err("extend Foo: Bar {\n    fn go(self) {\n        return 1\n    }\n}");
+        assert!(e.to_string().contains("conformance claim was removed"), "got: {e}");
     }
 
     #[test]
-    fn test_interface_method_rejects_return_annotation() {
-        parse_src_err("interface Displayable {\n    fn to_str(self) -> str\n}");
-    }
-
-    #[test]
-    fn test_parse_extend_with_interface() {
-        let p = parse_src("extend Foo: Bar {\n    fn go(self) {\n        return 1\n    }\n}");
-        let Stmt::ExtendBlock { type_name, interface_name, methods, .. } = &p.stmts[0] else {
-            panic!()
-        };
-        assert_eq!(type_name, "Foo");
-        assert_eq!(interface_name.as_deref(), Some("Bar"));
-        assert_eq!(methods.len(), 1);
-    }
-
-    #[test]
-    fn test_parse_extend_without_interface() {
+    fn test_parse_extend_block() {
         let p = parse_src("extend Foo {\n    fn go(self) {\n        return 1\n    }\n}");
-        let Stmt::ExtendBlock { type_name, interface_name, .. } = &p.stmts[0] else { panic!() };
+        let Stmt::ExtendBlock { type_name, methods, .. } = &p.stmts[0] else { panic!() };
         assert_eq!(type_name, "Foo");
-        assert!(interface_name.is_none());
+        assert_eq!(methods.len(), 1);
     }
 
     #[test]
@@ -1638,35 +1632,29 @@ mod parser {
         assert!(matches!(value, Expr::Call { .. }));
     }
 
+    /// A decorator on a struct ran under `jade run` and was skipped under
+    /// `jade build`, so the two engines disagreed about what a literal produced.
+    /// Refused by name rather than dropped in silence.
     #[test]
-    fn test_parse_struct_decorator_with_arg() {
-        let p = parse_src("@log(\"City\")\nstruct City {\n  name,\n}");
-        let Stmt::StructDef { decorators, .. } = &p.stmts[0] else { panic!() };
-        assert_eq!(decorators.len(), 1);
-        assert_eq!(decorators[0].0, "log");
-        let (kw, expr) = &decorators[0].1[0];
-        assert!(kw.is_none());
-        assert!(matches!(expr, Expr::Str { value, .. } if value == "City"));
+    fn a_decorator_on_a_struct_is_refused_by_name() {
+        let e = parse_src_err("@log(\"City\")\nstruct City {\n  name,\n}");
+        assert!(e.to_string().contains("decorator on a struct was removed"), "got: {e}");
     }
 
+    /// `@route` went for the same reason, and on the same terms.
     #[test]
-    fn test_parse_extend_decorator_route_positional() {
-        let p = parse_src("@route(\"action\")\nextend Cmd {}");
-        let Stmt::ExtendBlock { decorators, type_name, .. } = &p.stmts[0] else { panic!() };
-        assert_eq!(type_name, "Cmd");
-        assert_eq!(decorators[0].0, "route");
-        let (kw, expr) = &decorators[0].1[0];
-        assert!(kw.is_none());
-        assert!(matches!(expr, Expr::Str { value, .. } if value == "action"));
+    fn a_route_decorator_is_refused_by_name() {
+        let e = parse_src_err(
+            "@route(\"kind\")\nextend Foo {\n    fn go(self) {\n        return 1\n    }\n}",
+        );
+        assert!(e.to_string().contains("`@route` was removed"), "got: {e}");
     }
 
+    /// A decorator on a `let` still works; only the struct target went.
     #[test]
-    fn test_parse_extend_decorator_route_kwarg() {
-        let p = parse_src("@route(on = \"field\")\nextend T {}");
-        let Stmt::ExtendBlock { decorators, .. } = &p.stmts[0] else { panic!() };
-        let (kw, expr) = &decorators[0].1[0];
-        assert_eq!(kw.as_deref(), Some("on"));
-        assert!(matches!(expr, Expr::Str { value, .. } if value == "field"));
+    fn a_decorator_on_a_let_still_parses() {
+        let p = parse_src("@shout\nlet greeting = \"hi\"");
+        assert!(!p.stmts.is_empty());
     }
 
     #[test]
@@ -1852,14 +1840,6 @@ mod ast {
         };
         assert_eq!(arm.catch_type.as_deref(), Some("MyError"));
         assert_eq!(arm.body.len(), 1);
-    }
-
-    #[test]
-    fn test_interface_method_fields() {
-        let m =
-            InterfaceMethod { name: "to_str".into(), params: vec!["self".into()], span: span() };
-        assert_eq!(m.name, "to_str");
-        assert_eq!(m.params, vec!["self".to_string()]);
     }
 
     // ── Clone / Debug derives ────────────────────────────────────────────────
@@ -2049,17 +2029,16 @@ mod error {
     }
 
     #[test]
-    fn test_display_missing_interface_method() {
-        let e = JadeError::MissingInterfaceMethod {
-            type_name: "Foo".into(),
-            interface_name: "Bar".into(),
-            method: "run".into(),
+    fn test_display_inherited_field_clash() {
+        let e = JadeError::InheritedFieldClash {
+            field: "name".into(),
+            owner: "Animal".into(),
+            other: "Dog".into(),
             span: span(3, 1),
         };
-        assert_eq!(
-            e.to_string(),
-            "[3:1] type 'Foo' does not implement interface 'Bar': missing method 'run'"
-        );
+        let text = e.to_string();
+        assert!(text.contains("'name'"), "names the field: {text}");
+        assert!(text.contains("Animal") && text.contains("Dog"), "names both sides: {text}");
     }
 
     #[test]

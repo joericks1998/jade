@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::frontend::{
-    ast::{BinOpKind, InterfaceMethod, StructFieldDef, UnaryOpKind},
+    ast::{BinOpKind, StructFieldDef, UnaryOpKind},
     error::Span,
 };
 
@@ -148,7 +148,7 @@ pub enum TExprKind {
 
 /// A type-annotated statement node.
 ///
-/// `StructDef` and `InterfaceDef` re-use their untyped AST equivalents directly
+/// `StructDef` re-uses its untyped AST equivalent directly
 /// because their field/method definitions do not contain typed sub-expressions
 /// that need annotation at this stage.
 /// The `@dec(a, k = v)` lines attached to one definition, in source order, with
@@ -218,17 +218,15 @@ pub enum TStmt {
     StructDef {
         name: String,
         fields: Vec<StructFieldDef>,
-        decorators: TDecorators,
-        span: Span,
-    },
-    InterfaceDef {
-        name: String,
-        methods: Vec<InterfaceMethod>,
+        /// Direct parents as written, renamed by the AOT import pass the way
+        /// any type reference is. `fields` above is already flattened, so this
+        /// is read for one thing: working out each struct's full ancestry, which
+        /// a typed `catch` arm needs at run time.
+        parents: Vec<String>,
         span: Span,
     },
     ExtendBlock {
         type_name: String,
-        interface_name: Option<String>,
         methods: Vec<TStmt>,
         decorators: TDecorators,
         span: Span,

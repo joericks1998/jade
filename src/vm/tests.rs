@@ -1281,31 +1281,11 @@ fn test_vm_len_type_error() {
 
 // ── interfaces (ported from eval.rs) ──────────────────────────────────────
 
+/// Interfaces are gone, so the conformance claim they were written with is now
+/// a parse error naming the removal, not a type error about a missing method.
 #[test]
-fn test_vm_interface_basic() {
+fn an_extend_conformance_claim_is_refused() {
     let src = concat!(
-        "interface Displayable {\n",
-        "    fn to_str(self)\n",
-        "}\n",
-        "struct Point {\n  x,\n  y\n}\n",
-        "extend Point: Displayable {\n",
-        "    fn to_str(self) {\n",
-        "        return \"point\"\n",
-        "    }\n",
-        "}\n",
-        "let p = Point { x: 1, y: 2 }\n",
-        "let sv = p.to_str()\n",
-    );
-    let s = run_src(src).unwrap();
-    assert_eq!(get_str(&s, "sv"), "point");
-}
-
-#[test]
-fn test_vm_interface_missing_method_error() {
-    let src = concat!(
-        "interface Displayable {\n",
-        "    fn to_str(self)\n",
-        "}\n",
         "struct Point {\n  x,\n  y\n}\n",
         "extend Point: Displayable {\n",
         "    fn area(self) {\n",
@@ -1314,21 +1294,10 @@ fn test_vm_interface_missing_method_error() {
         "}\n",
     );
     let err = try_run_src(src).err().expect("expected error");
-    assert!(matches!(err, JadeError::MissingInterfaceMethod { .. }));
-}
-
-#[test]
-fn test_vm_interface_undefined_error() {
-    let src = concat!(
-        "struct Point {\n  x,\n  y\n}\n",
-        "extend Point: Displayable {\n",
-        "    fn to_str(self) {\n",
-        "        return \"point\"\n",
-        "    }\n",
-        "}\n",
+    assert!(
+        err.to_string().contains("conformance claim was removed"),
+        "should name the removal: {err}"
     );
-    let err = try_run_src(src).err().expect("expected error");
-    assert!(matches!(err, JadeError::UndefinedInterface { .. }));
 }
 
 // ── LLM / prompt (ported from eval.rs) ────────────────────────────────────
@@ -2157,18 +2126,6 @@ fn test_imported_extend_method_resolves() {
     assert_eq!(get_int(&s, "v"), 42);
 }
 
-/// The same, through an interface — this is the case the AOT backend already
-/// handled while the VM did not.
-#[test]
-fn test_imported_interface_method_resolves() {
-    let s = run_with_module(
-        "jade_test_imported_iface",
-        "interface Show {\n fn show(self)\n}\nstruct Q {\n n\n}\nextend Q: Show {\n fn show(self) {\n  return \"n=\" + str(self.n)\n }\n}\n",
-        "let q = m.Q { n: 7 }\nlet v = q.show()",
-    );
-    assert_eq!(get_str(&s, "v"), "n=7");
-}
-
 /// A locally-defined type must win over an imported one of the same name:
 /// the importing file's own defs are merged before its imports execute, and
 /// bare keys are registered with `or_insert` so they never overwrite.
@@ -2530,29 +2487,6 @@ fn test_route_non_string_on_errors() {
 }
 
 // ── @route decorator on extend ────────────────────────────────────────────
-
-#[test]
-fn test_route_decorator_positional_field() {
-    let src = "struct Cmd {\n  action,\n}\n@route(\"action\")\nextend Cmd {\n  fn run(self) {\n    return \"running\"\n  }\n  fn stop(self) {\n    return \"stopped\"\n  }\n}\nlet c = Cmd { action: \"run\" }\nlet v = route(c)";
-    let s = run_src(src).unwrap();
-    assert_eq!(get_str(&s, "v"), "running");
-}
-
-#[test]
-fn test_route_decorator_kwarg_on() {
-    // @route(on = "action") is equivalent to @route("action").
-    let src = "struct Cmd {\n  action,\n}\n@route(on = \"action\")\nextend Cmd {\n  fn run(self) {\n    return \"running\"\n  }\n}\nlet c = Cmd { action: \"run\" }\nlet v = route(c)";
-    let s = run_src(src).unwrap();
-    assert_eq!(get_str(&s, "v"), "running");
-}
-
-#[test]
-fn test_route_decorator_dispatches_different_methods() {
-    let src = "struct Op {\n  kind,\n}\n@route(\"kind\")\nextend Op {\n  fn add(self) {\n    return 1\n  }\n  fn sub(self) {\n    return 2\n  }\n}\nlet a = Op { kind: \"add\" }\nlet b = Op { kind: \"sub\" }\nlet va = route(a)\nlet vb = route(b)";
-    let s = run_src(src).unwrap();
-    assert_eq!(get_int(&s, "va"), 1);
-    assert_eq!(get_int(&s, "vb"), 2);
-}
 
 #[test]
 fn test_route_no_config_and_no_on_returns_obj() {

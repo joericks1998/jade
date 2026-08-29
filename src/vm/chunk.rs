@@ -93,14 +93,14 @@ pub(crate) async fn run_with_state(program: CompiledProgram, state: &mut VmState
         state.globals.entry(k.clone()).or_insert_with(|| VmValue::TypeRef(k.clone()));
         state.struct_defs.insert(k, v);
     }
-    for (k, v) in program.struct_decorators {
-        state.struct_decorators.insert(k, v);
-    }
     for (type_name, methods) in program.extend_methods {
         state.extend_methods.entry(type_name).or_default().extend(methods);
     }
-    for (k, v) in program.route_configs {
-        state.route_configs.insert(k, v);
+    for (k, v) in program.struct_parents {
+        state.struct_parents.insert(k, v);
+    }
+    for (k, v) in program.struct_ancestors {
+        state.struct_ancestors.insert(k, v);
     }
 
     let mut slots: Vec<VmValue> = vec![VmValue::Nil; program.top_n_slots as usize];

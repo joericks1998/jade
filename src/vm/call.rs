@@ -205,17 +205,9 @@ pub(crate) async fn call_value(
                 }
                 let mut iter = args.into_iter();
                 let obj = iter.next().unwrap();
-                // If `on` is omitted, try route_configs for this struct's type.
-                let on = iter.next().unwrap_or_else(|| {
-                    if let VmValue::Struct(ref s) = obj {
-                        let type_name = s.lock().type_name().to_string();
-                        if let Some(field_name) = state.route_configs.get(&type_name) {
-                            let fields = s.lock();
-                            return fields.get_field(field_name).cloned().unwrap_or(VmValue::Nil);
-                        }
-                    }
-                    VmValue::Nil
-                });
+                // `@route` is gone, so an omitted `on` has nothing to fall
+                // back to and the value passes through unchanged.
+                let on = iter.next().unwrap_or(VmValue::Nil);
                 match on {
                     VmValue::Nil => Ok(obj),
                     VmValue::Str(method_name) => {

@@ -23,10 +23,9 @@ pub(crate) async fn vm_prompt_deref(
             None => Ok(VmValue::Str(cached.into())),
             Some(type_name) => {
                 let struct_defs = state.struct_defs.clone();
-                let v = coerce(cached.trim(), type_name, &struct_defs).map_err(|_| {
+                coerce(cached.trim(), type_name, &struct_defs).map_err(|_| {
                     JadeError::PromptOverflow { name: "<prompt>".to_string(), attempts: 1, span }
-                })?;
-                apply_struct_decorators(v, type_name, state, span).await
+                })
             }
         };
     }
@@ -68,7 +67,7 @@ pub(crate) async fn vm_prompt_deref(
     match coerce(initial_resp.text.trim(), type_name, &struct_defs) {
         Ok(v) => {
             state.prompt_cache.insert(cache_key, initial_resp.text);
-            apply_struct_decorators(v, type_name, state, span).await
+            Ok(v)
         }
         Err(_) => {
             Err(JadeError::PromptOverflow { name: "<prompt>".to_string(), attempts: 1, span })

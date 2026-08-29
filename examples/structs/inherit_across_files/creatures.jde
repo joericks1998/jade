@@ -1,0 +1,20 @@
+// The module the fixture beside this one inherits from.
+
+struct Animal {
+    name,
+    let legs = 4
+}
+
+struct Trainable {
+    let tricks = []
+}
+
+extend Animal {
+    fn describe(self) {
+        return f"{self.name} has {self.legs} legs"
+    }
+
+    fn speak(self) {
+        return "..."
+    }
+}

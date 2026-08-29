@@ -36,7 +36,8 @@
 //! attempt and finally into a catchable error.
 
 use core::ffi::c_char;
-use std::sync::Mutex;
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
 
 use crate::coll::StructObj;
 use crate::cstr;
@@ -550,5 +551,79 @@ mod tests {
     fn an_unregistered_type_fails() {
         let _c = counted();
         assert!(coerce("{}", "C_never_declared").is_none());
+    }
+}
+
+// ── Inheritance ───────────────────────────────────────────────────────────────
+//
+// A typed `catch` arm matches a struct that *inherits* the named type, so the
+// one question left at run time is whether one type name is an ancestor of
+// another. Fields and methods were folded into each child at compile time and
+// need nothing here.
+//
+// Registered the way struct fields above are: codegen emits one call per
+// (child, ancestor) pair at program start, because a compiled binary has no
+// compiler around to ask later.
+
+static ANCESTRY: LazyLock<Mutex<HashMap<String, Vec<String>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Record that `child` inherits `ancestor`. Order of calls is the order codegen
+/// emits them, which is nearest-first; nothing here depends on it, but a caller
+/// walking the list gets the same answer either engine would give.
+///
+/// # Safety
+/// Both pointers must be NUL-terminated C strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jrt_struct_ancestor(child: *const c_char, ancestor: *const c_char) {
+    let (c, a) = unsafe { (cstr::to_string(child), cstr::to_string(ancestor)) };
+    if let Ok(mut reg) = ANCESTRY.lock() {
+        reg.entry(c).or_default().push(a);
+    }
+}
+
+/// Whether a value whose type is `actual` should be caught by an arm naming
+/// `expected`: the same type, or anything that inherits it.
+///
+/// # Safety
+/// Both pointers must be NUL-terminated C strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jrt_catch_matches(actual: *const c_char, expected: *const c_char) -> i32 {
+    let (a, e) = unsafe { (cstr::to_string(actual), cstr::to_string(expected)) };
+    if a == e {
+        return 1;
+    }
+    // Keyed rather than scanned. The VM answers the same question from a map
+    // (`VmState::struct_ancestors`), and a typed `catch` inside a loop should not
+    // walk every inheriting struct in the program on each pass.
+    match ANCESTRY.lock() {
+        Ok(reg) => reg.get(&a).is_some_and(|anc| anc.contains(&e)) as i32,
+        Err(_) => 0,
+    }
+}
+
+#[cfg(test)]
+mod inheritance_tests {
+    use super::*;
+    use std::ffi::CString;
+
+    /// The exact type still matches, with or without an ancestry entry. A
+    /// program with no inheritance in it must behave as it always did.
+    #[test]
+    fn an_exact_type_matches_with_no_ancestry_registered() {
+        let (a, b) = (CString::new("Solo").unwrap(), CString::new("Solo").unwrap());
+        assert_eq!(unsafe { jrt_catch_matches(a.as_ptr(), b.as_ptr()) }, 1);
+        let other = CString::new("Nothing").unwrap();
+        assert_eq!(unsafe { jrt_catch_matches(a.as_ptr(), other.as_ptr()) }, 0);
+    }
+
+    /// A parent's arm catches a child, and the reverse does not: a `Dog` is an
+    /// `Animal`, and an `Animal` is not a `Dog`.
+    #[test]
+    fn a_parent_arm_catches_a_child_and_not_the_other_way() {
+        let (dog, animal) = (CString::new("Dog9").unwrap(), CString::new("Animal9").unwrap());
+        unsafe { jrt_struct_ancestor(dog.as_ptr(), animal.as_ptr()) };
+        assert_eq!(unsafe { jrt_catch_matches(dog.as_ptr(), animal.as_ptr()) }, 1);
+        assert_eq!(unsafe { jrt_catch_matches(animal.as_ptr(), dog.as_ptr()) }, 0);
     }
 }

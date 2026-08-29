@@ -291,17 +291,29 @@ pub(crate) async fn execute_chunk(
                                     .or_default()
                                     .extend(methods);
                             }
-                            // Merge struct_decorators prefixed with the namespace.
-                            for (type_name, decs) in sub_state.struct_decorators.drain() {
-                                if !state.struct_decorators.contains_key(&type_name) {
-                                    state.struct_decorators.insert(type_name.clone(), decs.clone());
+                            // Merge struct_ancestors under both the bare name
+                            // and the namespaced one, the way struct_defs and
+                            // extend_methods above are. A typed `catch` arm can
+                            // name an imported parent either way.
+                            for (type_name, anc) in sub_state.struct_ancestors.drain() {
+                                if !state.struct_ancestors.contains_key(&type_name) {
+                                    state.struct_ancestors.insert(type_name.clone(), anc.clone());
                                 }
                                 state
-                                    .struct_decorators
+                                    .struct_ancestors
                                     .entry(format!("{}.{}", namespace, type_name))
-                                    .or_default()
-                                    .extend(decs);
+                                    .or_insert(anc);
                             }
+                            for (type_name, ps) in sub_state.struct_parents.drain() {
+                                state.struct_parents.entry(type_name.clone()).or_insert(ps);
+                            }
+                            // Everything the module brought is now in reach, so a
+                            // local struct that inherits one of its types can
+                            // finally be completed. The checker could not: an
+                            // imported struct is deliberately absent from the
+                            // importing file's `struct_defs`, and this is the
+                            // first moment it is not.
+                            resolve_imported_parents(state);
                         }
                         r.map_err(|e| JadeError::InFile { file: path.clone(), cause: Box::new(e) })
                     }
@@ -746,6 +758,18 @@ pub(crate) async fn execute_chunk(
             }
 
             // ── Typed comparisons — str ───────────────────────────────────────
+            // A typed `catch` arm matches the named type or anything that
+            // inherits it. The ancestry is flattened nearest-first at compile
+            // time, so this is a membership test and never a walk.
+            Instr::CatchMatches(d, actual, expected) => {
+                let actual = vm_try!(get_str_ref(slots, *actual, span)).to_string();
+                let matched = actual == *expected
+                    || state
+                        .struct_ancestors
+                        .get(&actual)
+                        .is_some_and(|anc| anc.iter().any(|a| a == expected));
+                set(slots, *d, VmValue::Bool(matched));
+            }
             Instr::CmpEqStr(d, l, r) => {
                 let (a, b) = vm_try!(str2(slots, *l, *r, span));
                 set(slots, *d, VmValue::Bool(a == b));
@@ -1103,17 +1127,7 @@ pub(crate) async fn execute_chunk(
                         }
                     }
                 }
-                let mut result = VmValue::Struct(Arc::new(Mutex::new(sobj)));
-                // Call struct decorators: dec(instance, arg1, ...) for each @dec.
-                let decs = state.struct_decorators.get(type_name).cloned().unwrap_or_default();
-                for (dec_name, dec_args) in decs {
-                    if let Some(dec_fn) = resolve_decorator_fn(&dec_name, state) {
-                        let mut call_args = vec![result];
-                        call_args.extend(dec_args);
-                        result = call_value(dec_fn, call_args, state, span).await?;
-                    }
-                }
-                set(slots, *dest, result);
+                set(slots, *dest, VmValue::Struct(Arc::new(Mutex::new(sobj))));
             }
             Instr::GetField(dest, obj_reg, field) => {
                 let obj = get(slots, *obj_reg).clone();
@@ -1504,6 +1518,80 @@ pub(crate) fn set(slots: &mut Vec<VmValue>, r: Reg, v: VmValue) {
 /// The index error is `IndexOutOfBounds`, matching the read side at
 /// `vm::ops::vm_index`, and the octet-range wording comes from
 /// `jade_runtime::bytesf` so the compiled backend raises the same sentence.
+/// Complete any struct whose parent only arrived with an import.
+///
+/// The compiled backend never needs this: it inlines every module into one
+/// stream before emitting, so a cross-file parent is already in reach and the
+/// fields were folded in then. The VM has no such moment — `ImportFile` runs
+/// during execution, after the importing program was emitted — so the same fold
+/// happens here instead, and the two engines end up with the same struct.
+///
+/// Idempotent by name, exactly as the emitter's fold is: a field already present
+/// is either the struct's own or one folded in earlier. A genuine clash was
+/// refused at check time and cannot reach this.
+///
+/// Direct parents only, each parent completed before its children, so a
+/// grandparent's fields arrive through the parent rather than by re-walking the
+/// chain. The same shape as `emit::fold_parent_fields`, and for the same reason:
+/// scanning the whole ancestor set with a linear membership test is quadratic in
+/// the depth on top of the work it has to do anyway.
+fn resolve_imported_parents(state: &mut VmState) {
+    fn complete(name: &str, state: &mut VmState, done: &mut std::collections::HashSet<String>) {
+        if !done.insert(name.to_string()) {
+            return;
+        }
+        let parents = state.struct_parents.get(name).cloned().unwrap_or_default();
+        for p in &parents {
+            complete(p, state, done);
+        }
+        let Some(own) = state.struct_defs.get(name).cloned() else {
+            return;
+        };
+        let mut known: std::collections::HashSet<String> =
+            own.iter().map(|f| f.name().to_string()).collect();
+        let mut inherited: Vec<crate::frontend::ast::StructFieldDef> = Vec::new();
+        let mut chain: Vec<String> = Vec::new();
+        let mut in_chain: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut methods: Vec<(String, std::sync::Arc<CompiledFn>)> = Vec::new();
+        for p in &parents {
+            if in_chain.insert(p.clone()) {
+                chain.push(p.clone());
+            }
+            for a in state.struct_ancestors.get(p).cloned().unwrap_or_default() {
+                if in_chain.insert(a.clone()) {
+                    chain.push(a);
+                }
+            }
+            for f in state.struct_defs.get(p).into_iter().flatten() {
+                if known.insert(f.name().to_string()) {
+                    inherited.push(f.clone());
+                }
+            }
+            for (m, cf) in state.extend_methods.get(p).into_iter().flatten() {
+                methods.push((m.clone(), std::sync::Arc::clone(cf)));
+            }
+        }
+        if !inherited.is_empty() {
+            inherited.extend(own);
+            state.struct_defs.insert(name.to_string(), inherited);
+        }
+        if !methods.is_empty() {
+            let own_methods = state.extend_methods.entry(name.to_string()).or_default();
+            for (m, cf) in methods {
+                own_methods.entry(m).or_insert(cf);
+            }
+        }
+        if !chain.is_empty() {
+            state.struct_ancestors.insert(name.to_string(), chain);
+        }
+    }
+
+    let mut done = std::collections::HashSet::new();
+    for name in state.struct_parents.keys().cloned().collect::<Vec<_>>() {
+        complete(&name, state, &mut done);
+    }
+}
+
 pub(crate) fn write_octet(
     arc: &Arc<Mutex<jade_runtime::bytesf::BytesObj>>,
     idx: &VmValue,
@@ -1626,6 +1714,7 @@ pub(crate) fn eval_literal_default(expr: &crate::frontend::ast::Expr) -> Option<
 
 pub(crate) fn instr_max_reg(instr: &Instr) -> u32 {
     match instr {
+        Instr::CatchMatches(d, s, _) => (*d).max(*s),
         Instr::SetIndexGlobal(_, i, v) => (*i).max(*v),
         Instr::LoadInt(d, _)
         | Instr::LoadFloat(d, _)

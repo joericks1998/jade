@@ -291,7 +291,6 @@ fn scan_stmt(st: &TStmt, name: &str, ok: &mut usize, bad: &mut usize) {
             }
         }
         TStmt::StructDef { .. }
-        | TStmt::InterfaceDef { .. }
         | TStmt::Use { .. }
         | TStmt::FromUse { .. }
         // Control flow, holding no expression to scan.

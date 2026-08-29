@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use crate::{
     bytecode::{Chunk, CompiledFn, FStrPart, Instr, Reg},
@@ -22,22 +25,146 @@ pub struct CompiledProgram {
     /// Struct field definitions (needed by the VM for struct instantiation and
     /// field-access method fallback).
     pub struct_defs: HashMap<String, Vec<StructFieldDef>>,
-    /// Decorator function names registered on each struct type.
-    pub struct_decorators: HashMap<String, Vec<(String, Vec<crate::vm::VmValue>)>>,
+    /// Direct parents per struct, as written and after any import renaming.
+    ///
+    /// Shipped because the VM resolves a cross-file parent at run time: an
+    /// imported module's structs only reach `VmState` when `ImportFile` runs,
+    /// which is after this program was emitted. The AOT backend has no such
+    /// gap — it inlines every module into one stream first — so it has already
+    /// folded the fields in by the time it gets here.
+    pub struct_parents: HashMap<String, Vec<String>>,
+    /// Every struct a type inherits, nearest first, flattened transitively.
+    ///
+    /// Fields and methods are already folded into the child by the time this
+    /// exists, so neither engine walks it to build a value or to find a method.
+    /// It is here for one thing: a typed `catch` arm matches a struct that
+    /// *inherits* the named type, and that is the only question left at run time.
+    pub struct_ancestors: HashMap<String, Vec<String>>,
     /// Compiled extend-block methods: `type_name → method_name → CompiledFn`.
+    /// A parent's methods are folded into each child, the child's winning.
     pub extend_methods: HashMap<String, HashMap<String, Arc<CompiledFn>>>,
-    /// `@route("field")` on extend blocks: type_name → field_name to read for routing.
-    pub route_configs: HashMap<String, String>,
 }
 
 // ── Internal state ────────────────────────────────────────────────────────────
 
+/// Fold each parent's fields into a child that is still missing them.
+///
+/// The checker already did this for a parent declared in the same file. It could
+/// not for one that came from another, because an imported struct is
+/// deliberately absent from that file's `struct_defs` — so this runs again where
+/// the AOT backend has inlined every module into one stream and the parent is
+/// finally in reach.
+///
+/// Idempotent by name, which is what makes running it twice safe: a field the
+/// child already has is either its own or one the checker folded in, and either
+/// way there is nothing to add. A genuine clash was refused before this ran.
+///
+/// Only *direct* parents are read, and each parent is completed before any of
+/// its children. A parent's list is therefore already flattened when a child
+/// reads it, so a grandparent's fields arrive through the parent rather than by
+/// walking the whole chain again. Walking the chain instead made this
+/// quadratic in the depth on top of the work it actually had to do, which on a
+/// chain of 400 structs was a little over a minute.
+fn fold_parent_fields(
+    defs: &mut HashMap<String, Vec<StructFieldDef>>,
+    parents: &HashMap<String, Vec<String>>,
+) {
+    fn complete(
+        name: &str,
+        defs: &mut HashMap<String, Vec<StructFieldDef>>,
+        parents: &HashMap<String, Vec<String>>,
+        done: &mut HashSet<String>,
+    ) {
+        if !done.insert(name.to_string()) {
+            return;
+        }
+        let ps = parents.get(name).cloned().unwrap_or_default();
+        for p in &ps {
+            complete(p, defs, parents, done);
+        }
+        let Some(own) = defs.get(name).cloned() else {
+            return;
+        };
+        let mut known: HashSet<String> = own.iter().map(|f| f.name().to_string()).collect();
+        let mut inherited: Vec<StructFieldDef> = Vec::new();
+        for p in &ps {
+            for f in defs.get(p).into_iter().flatten() {
+                if known.insert(f.name().to_string()) {
+                    inherited.push(f.clone());
+                }
+            }
+        }
+        if !inherited.is_empty() {
+            // Inherited fields lead, the way they do in the checker, so a
+            // literal reads in the order the declarations were written.
+            inherited.extend(own);
+            defs.insert(name.to_string(), inherited);
+        }
+    }
+
+    let mut done: HashSet<String> = HashSet::new();
+    for name in parents.keys() {
+        complete(name, defs, parents, &mut done);
+    }
+}
+
+/// Every struct each type inherits, nearest first, transitively.
+///
+/// Nearest-first order is what makes an override readable: a `Puppy` that
+/// inherits `Dog` which inherits `Animal` lists `Dog` before `Animal`, so the
+/// first entry that supplies something is the one that wins.
+///
+/// Memoized, and each struct's list is built from its parents' finished ones
+/// rather than by re-walking the graph. Cycles cannot reach here —
+/// `resolve_inheritance` refuses them — but `in_progress` keeps this terminating
+/// anyway rather than trusting a caller two passes away.
+fn flatten_ancestry(parents: &HashMap<String, Vec<String>>) -> HashMap<String, Vec<String>> {
+    fn walk(
+        name: &str,
+        parents: &HashMap<String, Vec<String>>,
+        memo: &mut HashMap<String, Vec<String>>,
+        in_progress: &mut HashSet<String>,
+    ) -> Vec<String> {
+        if let Some(done) = memo.get(name) {
+            return done.clone();
+        }
+        if !in_progress.insert(name.to_string()) {
+            return Vec::new();
+        }
+        let mut out: Vec<String> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        for p in parents.get(name).into_iter().flatten() {
+            if seen.insert(p.clone()) {
+                out.push(p.clone());
+            }
+            for a in walk(p, parents, memo, in_progress) {
+                if seen.insert(a.clone()) {
+                    out.push(a);
+                }
+            }
+        }
+        in_progress.remove(name);
+        memo.insert(name.to_string(), out.clone());
+        out
+    }
+
+    let mut memo: HashMap<String, Vec<String>> = HashMap::new();
+    let mut in_progress: HashSet<String> = HashSet::new();
+    for name in parents.keys() {
+        walk(name, parents, &mut memo, &mut in_progress);
+    }
+    memo.retain(|_, v| !v.is_empty());
+    memo
+}
+
 /// Shared context threaded through the whole compilation.
 struct EmitCtx {
     struct_defs: HashMap<String, Vec<StructFieldDef>>,
-    struct_decorators: HashMap<String, Vec<(String, Vec<crate::vm::VmValue>)>>,
+    /// Written parents per struct, before flattening. Consumed by
+    /// `resolve_inheritance` and not part of `CompiledProgram`.
+    struct_parents: HashMap<String, Vec<String>>,
+    struct_ancestors: HashMap<String, Vec<String>>,
     extend_methods: HashMap<String, HashMap<String, Arc<CompiledFn>>>,
-    route_configs: HashMap<String, String>,
     /// Counter for generating unique closure names (`__closure_0__`, etc.).
     next_closure_id: usize,
 }
@@ -220,79 +347,31 @@ const NO_SPAN: Span = Span { line: 0, col: 0 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// Evaluate a TExpr that must be a literal — used for struct decorator args.
-fn eval_literal_expr(
-    expr: &TExpr,
-    span: crate::frontend::error::Span,
-) -> Result<crate::vm::VmValue> {
-    use crate::compiler::tir::TExprKind;
-    use crate::vm::VmValue;
-    match &expr.kind {
-        TExprKind::Integer(n)  => Ok(VmValue::Int(*n)),
-        TExprKind::Float(f)    => Ok(VmValue::Float(*f)),
-        TExprKind::Bool(b)     => Ok(VmValue::Bool(*b)),
-        TExprKind::Str(s)      => Ok(VmValue::Str(s.clone().into())),
-        TExprKind::Identifier(s) if s == "None" || s == "nil" || s == "null" => Ok(VmValue::Nil),
-        _ => Err(crate::frontend::error::JadeError::Exception {
-            message: "struct decorator arguments must be literals (None, nil, null, numbers, booleans, strings)".to_string(),
-            span,
-        }),
-    }
-}
-
 // ── Public entry point ────────────────────────────────────────────────────────
 
 /// Compile a `TProgram` into bytecode ready for the VM.
 pub fn emit(program: TProgram) -> Result<CompiledProgram> {
-    // First pass: collect static metadata (struct/interface definitions).
+    // First pass: collect static metadata (struct definitions and their parents).
     let mut ctx = EmitCtx {
         struct_defs: HashMap::new(),
-        struct_decorators: HashMap::new(),
+        struct_parents: HashMap::new(),
+        struct_ancestors: HashMap::new(),
         extend_methods: HashMap::new(),
-        route_configs: HashMap::new(),
         next_closure_id: 0,
     };
     for stmt in &program.stmts {
-        match stmt {
-            TStmt::ExtendBlock { type_name, decorators, .. } => {
-                for (dec_name, args) in decorators {
-                    if dec_name == "route" {
-                        // Accept `on = "field"` kwarg or the first positional arg.
-                        let field_name = args
-                            .iter()
-                            .find(|(kw, _)| kw.as_deref() == Some("on"))
-                            .or_else(|| args.first())
-                            .and_then(|(_, e)| {
-                                if let crate::compiler::tir::TExprKind::Str(s) = &e.kind {
-                                    Some(s.clone())
-                                } else {
-                                    None
-                                }
-                            });
-                        if let Some(field_name) = field_name {
-                            ctx.route_configs.insert(type_name.clone(), field_name);
-                        }
-                    }
-                }
-            }
-            TStmt::StructDef { name, fields, decorators, span } => {
-                ctx.struct_defs.insert(name.clone(), fields.clone());
-                if !decorators.is_empty() {
-                    let compiled: crate::frontend::error::Result<Vec<_>> = decorators
-                        .iter()
-                        .map(|(dec_name, args)| {
-                            // Keyword names are stripped — values are passed positionally.
-                            let vals: crate::frontend::error::Result<Vec<_>> =
-                                args.iter().map(|(_, e)| eval_literal_expr(e, *span)).collect();
-                            Ok((dec_name.clone(), vals?))
-                        })
-                        .collect();
-                    ctx.struct_decorators.insert(name.clone(), compiled?);
-                }
-            }
-            _ => {}
+        if let TStmt::StructDef { name, fields, parents, .. } = stmt {
+            ctx.struct_defs.insert(name.clone(), fields.clone());
+            ctx.struct_parents.insert(name.clone(), parents.clone());
         }
     }
+
+    // Ancestry, worked out here rather than in the checker because this is where
+    // the final name set is known: the AOT backend inlines every imported module
+    // into one stream and mangles the names first, so a parent written
+    // `shapes.Animal` has already become whatever it is going to be.
+    ctx.struct_ancestors = flatten_ancestry(&ctx.struct_parents);
+    fold_parent_fields(&mut ctx.struct_defs, &ctx.struct_parents);
 
     // Second pass: emit all statements into the top-level chunk.
     let mut em = Emitter::new_top();
@@ -319,13 +398,36 @@ pub fn emit(program: TProgram) -> Result<CompiledProgram> {
         });
     }
 
+    // Fold each parent's compiled methods into its children, nearest first, a
+    // child's own entry standing. Doing it here rather than in the checker is
+    // what keeps both engines out of it: `extend_methods` is already the flat
+    // `type_name -> method_name -> CompiledFn` table each of them looks a method
+    // up in, and after this it simply holds more entries.
+    let inherited: Vec<(String, HashMap<String, Arc<CompiledFn>>)> = ctx
+        .struct_ancestors
+        .iter()
+        .map(|(name, chain)| {
+            let mut merged = ctx.extend_methods.get(name).cloned().unwrap_or_default();
+            for ancestor in chain {
+                for (method, f) in ctx.extend_methods.get(ancestor).into_iter().flatten() {
+                    merged.entry(method.clone()).or_insert_with(|| Arc::clone(f));
+                }
+            }
+            (name.clone(), merged)
+        })
+        .filter(|(_, m)| !m.is_empty())
+        .collect();
+    for (name, merged) in inherited {
+        ctx.extend_methods.insert(name, merged);
+    }
+
     Ok(CompiledProgram {
         top_n_slots: n_slots,
         top: em.chunk,
         struct_defs: ctx.struct_defs,
-        struct_decorators: ctx.struct_decorators,
+        struct_parents: ctx.struct_parents,
+        struct_ancestors: ctx.struct_ancestors,
         extend_methods: ctx.extend_methods,
-        route_configs: ctx.route_configs,
     })
 }
 
@@ -511,7 +613,7 @@ fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
         TStmt::Continue { span } => em.emit_loop_jump(false, span),
 
         // Metadata only — already captured in the first pass.
-        TStmt::StructDef { .. } | TStmt::InterfaceDef { .. } => {}
+        TStmt::StructDef { .. } => {}
 
         TStmt::ExtendBlock { type_name, methods, .. } => {
             // Compile all methods first (releasing the ctx borrow from extend_methods),
@@ -625,10 +727,8 @@ fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
                 let skip_idx = if let Some(type_name) = catch_type {
                     let type_reg = em.alloc_reg();
                     em.chunk.emit(Instr::GetTypeName(type_reg, caught_reg), span);
-                    let expected_reg = em.alloc_reg();
-                    em.chunk.emit(Instr::LoadStr(expected_reg, type_name), span);
                     let cmp_reg = em.alloc_reg();
-                    em.chunk.emit(Instr::CmpEqStr(cmp_reg, type_reg, expected_reg), span);
+                    em.chunk.emit(Instr::CatchMatches(cmp_reg, type_reg, type_name), span);
                     // If type doesn't match, jump to next arm.
                     let idx = em.chunk.emit(Instr::JumpIfFalse(cmp_reg, 0), span);
                     Some(idx)

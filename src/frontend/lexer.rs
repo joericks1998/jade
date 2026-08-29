@@ -34,6 +34,8 @@ pub enum TokenKind {
     Continue,
     Struct,
     Extend,
+    /// Reserved only so a removed `interface` block gets an error that names
+    /// the removal. Nothing parses it; see `JadeError::InterfaceRemoved`.
     Interface,
     Prompt,
     Use,

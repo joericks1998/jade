@@ -1,7 +1,6 @@
 use super::{
     ast::{
-        BinOpKind, CatchArm, DerefStyle, Expr, FStrPart, InterfaceMethod, Program, Stmt,
-        StructFieldDef, UnaryOpKind,
+        BinOpKind, CatchArm, DerefStyle, Expr, FStrPart, Program, Stmt, StructFieldDef, UnaryOpKind,
     },
     error::{JadeError, Result, Span},
     lexer::{RawFStrPart, Token, TokenKind, token_kind_desc},
@@ -286,7 +285,7 @@ impl Parser {
             TokenKind::Continue => self.parse_continue(),
             TokenKind::Struct => self.parse_struct_def_with_decorators(vec![]),
             TokenKind::Extend => self.parse_extend_block_with_decorators(vec![]),
-            TokenKind::Interface => self.parse_interface_def(),
+            TokenKind::Interface => Err(JadeError::InterfaceRemoved { span: self.peek().span }),
             TokenKind::Prompt => self.parse_prompt_decl_with_decorators(vec![]),
             TokenKind::Use => self.parse_use(),
             TokenKind::From => self.parse_from_use(),
@@ -878,6 +877,13 @@ impl Parser {
         let span = self.peek().span;
         self.advance(); // consume `struct`
         let name = self.expect_ident("struct name")?;
+        // A decorator on a struct ran under `jade run` and was skipped under
+        // `jade build`, so the two engines disagreed about what a literal
+        // produced. Refused by name rather than dropped in silence.
+        if !decorators.is_empty() {
+            return Err(JadeError::StructDecoratorRemoved { span });
+        }
+        let parents = self.parse_parent_list()?;
         self.expect(&TokenKind::LBrace)?;
         let mut fields = Vec::new();
         loop {
@@ -922,22 +928,56 @@ impl Parser {
             }
         }
         self.expect(&TokenKind::RBrace)?;
-        Ok(Stmt::StructDef { name, fields, decorators, span })
+        Ok(Stmt::StructDef { name, fields, parents, span })
+    }
+
+    /// Parse an optional `(Parent, Other)` after a struct's name.
+    ///
+    /// Unambiguous with one token of lookahead: the name has already been taken,
+    /// so what follows is either `(` or the body's `{`. A parent may be dotted
+    /// (`shapes.Animal`), which is how an imported struct is spelled everywhere
+    /// else in the language.
+    ///
+    /// No semicolon-skipping here, unlike the field loop below. The lexer only
+    /// inserts one where `bracket_depth` is 0, and `(` raises that depth, so a
+    /// parent list split across lines never sees one.
+    fn parse_parent_list(&mut self) -> Result<Vec<String>> {
+        if self.peek().kind != TokenKind::LParen {
+            return Ok(Vec::new());
+        }
+        self.advance(); // consume `(`
+        let mut parents = Vec::new();
+        while self.peek().kind != TokenKind::RParen {
+            let mut name = self.expect_ident("parent struct name")?;
+            while self.peek().kind == TokenKind::Dot {
+                self.advance();
+                let seg = self.expect_ident("parent struct name after `.`")?;
+                name = format!("{name}.{seg}");
+            }
+            parents.push(name);
+            if self.peek().kind != TokenKind::Comma {
+                break;
+            }
+            self.advance();
+        }
+        self.expect(&TokenKind::RParen)?;
+        Ok(parents)
     }
 
     /// Parse `extend TypeName { fn method(self, …) { … } … }`
-    /// or    `extend TypeName: InterfaceName { fn method(self, …) { … } … }`
     fn parse_extend_block_with_decorators(&mut self, decorators: Decorators) -> Result<Stmt> {
         let span = self.peek().span;
         self.advance(); // consume `extend`
         let type_name = self.expect_ident("type name")?;
-        // Optional `: InterfaceName`
-        let interface_name = if self.peek().kind == TokenKind::Colon {
-            self.advance(); // consume `:`
-            Some(self.expect_ident("interface name")?)
-        } else {
-            None
-        };
+        // `extend Type: Interface` went with interfaces. Caught here so the
+        // message names the removal; without it the author gets
+        // "expected `{`, found `:`", which explains nothing.
+        if self.peek().kind == TokenKind::Colon {
+            return Err(JadeError::ExtendConformanceRemoved { span: self.peek().span });
+        }
+        if decorators.iter().any(|(n, _)| n == "route") {
+            return Err(JadeError::RouteDecoratorRemoved { span });
+        }
         self.expect(&TokenKind::LBrace)?;
         let mut methods = Vec::new();
         loop {
@@ -960,53 +1000,7 @@ impl Parser {
             }
         }
         self.expect(&TokenKind::RBrace)?;
-        Ok(Stmt::ExtendBlock { type_name, interface_name, methods, decorators, span })
-    }
-
-    /// Parse `interface Name { fn method(self, …) -> type }`
-    /// Method bodies are absent — these are signatures only.
-    fn parse_interface_def(&mut self) -> Result<Stmt> {
-        let span = self.peek().span;
-        self.advance(); // consume `interface`
-        let name = self.expect_ident("interface name")?;
-        self.expect(&TokenKind::LBrace)?;
-        let mut methods = Vec::new();
-        loop {
-            while self.peek().kind == TokenKind::Semicolon {
-                self.advance();
-            }
-            if self.peek().kind == TokenKind::RBrace || self.peek().kind == TokenKind::Eof {
-                break;
-            }
-            // Expect `fn`
-            let method_span = self.peek().span;
-            match self.peek().kind.clone() {
-                TokenKind::Fn => {
-                    self.advance();
-                } // consume `fn`
-                _ => {
-                    let t = self.peek().clone();
-                    return Err(JadeError::UnexpectedToken {
-                        expected: "`fn` method signature".to_string(),
-                        got: token_kind_desc(&t.kind),
-                        span: t.span,
-                    });
-                }
-            }
-            let method_name = self.expect_ident("method name")?;
-            self.expect(&TokenKind::LParen)?;
-            let mut params = Vec::new();
-            while self.peek().kind != TokenKind::RParen && self.peek().kind != TokenKind::Eof {
-                params.push(self.expect_ident("parameter name")?);
-                if self.peek().kind == TokenKind::Comma {
-                    self.advance();
-                }
-            }
-            self.expect(&TokenKind::RParen)?;
-            methods.push(InterfaceMethod { name: method_name, params, span: method_span });
-        }
-        self.expect(&TokenKind::RBrace)?;
-        Ok(Stmt::InterfaceDef { name, methods, span })
+        Ok(Stmt::ExtendBlock { type_name, methods, decorators, span })
     }
 
     /// Parse `object.field = expr ;`

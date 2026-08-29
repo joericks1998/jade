@@ -13,7 +13,7 @@ Around that idea, Jade is an ordinary general-purpose language.
 
 *Control flow.* `if`, `elif`, `else`, `while` and `for` loops, and `try`, `catch`, `raise` for exceptions.
 
-*Functions.* `fn` definitions with `return`, closures written `|x| x * 2`, recursion, and decorators. `extend` blocks add methods to a type, and `interface` definitions describe what a type must provide.
+*Functions.* `fn` definitions with `return`, closures written `|x| x * 2`, recursion, and decorators. `extend` blocks add methods to a type, and a struct can inherit fields and methods from parents it names.
 
 *Concurrency.* `async fn` and `await`, plus `yield` for streams.
 

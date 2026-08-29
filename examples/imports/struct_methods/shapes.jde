@@ -1,13 +1,9 @@
-interface Displayable {
-    fn to_str(self)
-}
-
 struct Point {
     x,
     let y = 10
 }
 
-extend Point: Displayable {
+extend Point {
     fn to_str(self) {
         return f"({self.x}, {self.y})"
     }

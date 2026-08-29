@@ -45,6 +45,7 @@ fn try_chunk_toplevel<'ctx>(
             &cp.top,
             cp.top_n_slots,
             &cp.struct_defs,
+            &cp.struct_ancestors,
             &cp.extend_methods,
         )?;
     }
@@ -54,6 +55,7 @@ fn try_chunk_toplevel<'ctx>(
         &cp.top,
         cp.top_n_slots,
         &cp.struct_defs,
+        &cp.struct_ancestors,
         &cp.extend_methods,
     )
 }
@@ -113,6 +115,7 @@ pub fn would_build(
         &cp.top,
         cp.top_n_slots,
         &cp.struct_defs,
+        &cp.struct_ancestors,
         &cp.extend_methods,
     )
     .map(|_| ())

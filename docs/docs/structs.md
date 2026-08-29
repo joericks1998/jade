@@ -236,55 +236,92 @@ print(c.count)    // 16. The binding kept the instance.
 
 A data field beats a method of the same name, so a field called `bump` would hide the method.
 
-## Interfaces
+## Inheritance
 
-An `interface` names a set of methods a type must provide. An `extend` block can declare that it satisfies an interface, and the compiler checks the claim.
+A struct can name parents in parentheses after its own name. It takes their fields, their defaults, and their `extend` methods as if it had written them itself.
 
 ```jade
-interface Displayable {
-    fn to_str(self)
+struct Animal {
+    name,
+    let legs = 4
 }
 
-struct Point {
-    x,
-    y
+struct Dog(Animal) {
+    breed
 }
 
-extend Point: Displayable {
-    fn to_str(self) {
-        return f"({self.x}, {self.y})"
+let d = Dog { name: "rex", breed: "corgi" }
+print(d.name)    // rex
+print(d.legs)    // 4
+print(d.breed)   // corgi
+```
+
+You may name as many parents as you like, and inheritance is transitive: a grandparent's fields arrive too.
+
+```jade
+struct Trainable {
+    let tricks = []
+}
+
+struct Puppy(Dog, Trainable) {
+    let weeks = 0
+}
+```
+
+### A field name may appear only once
+
+A field name has to be unique across a struct and everything it inherits. Two parents declaring the same field is an error, and so is a child redeclaring a field it already has. Two fields with one name would mean two storage slots and nothing to say which one a literal meant.
+
+```
+field 'name' comes from both 'Animal' and 'Dog'; a field name may appear
+once across a struct and everything it inherits
+```
+
+### A child's method wins
+
+Methods work the other way, because there is something to decide between them. A child's own method overrides the one it would have inherited, which is the main reason to inherit at all. The nearest declaration wins, so a grandchild's method beats its parent's, which beats its grandparent's.
+
+```jade
+extend Animal {
+    fn speak(self) {
+        return "..."
     }
 }
 
-let p = Point { x: 3, y: 4 }
-print(p.to_str())   // (3, 4)
-```
-
-An interface body lists method signatures only, written `fn <name>(self, <params>)` with no body. Naming an interface after the colon is what turns the check on. A plain `extend Point { … }` is never checked against anything.
-
-If a required method is missing, the program does not compile:
-
-```
-type 'Bad' does not implement interface 'Displayable': missing method 'to_str'
-```
-
-## Decorators on a struct
-
-A `struct` can carry a decorator. The decorator runs on *every instance* the program builds, not once on the type, and its extra arguments must be literals.
-
-```jade
-fn seen(p) {
-    print("built one")
-    return p
+extend Dog {
+    fn speak(self) {
+        return "woof"
+    }
 }
 
-@seen
-struct Point { x, y }
-
-let p = Point { x: 1, y: 2 }   // prints: built one
+print(Dog { name: "rex", breed: "corgi" }.speak())   // woof
 ```
 
-See [Functions](functions#decorators) for decorator syntax, stacking, and application order.
+Two *parents* supplying the same method name is an error, though. They are the same distance away, so neither is nearer and the program has to say which it meant.
+
+An `extend` block is collected before anything runs, so where you write it in the file does not matter.
+
+### A parent can live in another file
+
+Write the parent the way you write any imported type, qualified with its module.
+
+```jade
+use creatures
+
+struct Dog(creatures.Animal) {
+    breed
+}
+```
+
+Everything works the same: fields, defaults, and methods all come across, and a local `extend Dog` still overrides an imported parent's method.
+
+### Catching by a parent
+
+A typed `catch` arm matches the named type or anything that inherits it, so one arm can handle a family of errors. See [Exceptions](exceptions#matching-by-type).
+
+### What inheritance is not
+
+There is no `super`, so a child's method cannot call the version it replaced. There is no abstract or required member: a parent is an ordinary struct you can build on its own. And a struct cannot inherit from anything but a struct.
 
 ## Error Conditions
 

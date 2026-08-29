@@ -2,57 +2,10 @@
 //!
 //! `coerce` turns a raw string into an `int`/`float`/`bool`/`str` or a struct;
 //! `vm_type_call` implements calling a type as a constructor (`City(dict)`,
-//! `int("3")`). The struct-decorator application and the JSON→VmValue bridge a
-//! coerced reply travels through live here too.
+//! `int("3")`). The JSON→VmValue bridge a coerced reply travels through lives
+//! here too.
 
 use super::*;
-
-/// Resolve a possibly-dotted decorator name to a callable VmValue.
-/// "tools.on_fail" → GetGlobal("tools") → GetMethod("on_fail") as BoundMethod.
-/// Mirrors what the function-decorator emitter does with bytecode at compile time.
-pub(crate) fn resolve_decorator_fn(dec_name: &str, state: &VmState) -> Option<VmValue> {
-    if let Some(dot) = dec_name.find('.') {
-        let base_name = &dec_name[..dot];
-        let field_name = &dec_name[dot + 1..];
-        match state.globals.get(base_name)?.clone() {
-            VmValue::Struct(arc) => {
-                let (type_name, field_val) = {
-                    let guard = arc.lock();
-                    (guard.type_name().to_string(), guard.get_field(field_name).cloned())
-                };
-                if let Some(v) = field_val {
-                    return Some(v);
-                }
-                let mfn = state.extend_methods.get(&type_name)?.get(field_name)?.clone();
-                Some(VmValue::BoundMethod(Arc::new(VmBoundMethod { receiver: arc, method: mfn })))
-            }
-            VmValue::Dict(map) => map.get(field_name).cloned(),
-            _ => None,
-        }
-    } else {
-        state.globals.get(dec_name).cloned()
-    }
-}
-
-/// Apply any struct decorators registered for `type_name` to a coerced value.
-/// Called after every successful `coerce()` so decorator behaviour is identical
-/// whether the struct came from a literal or from `?p |> Type`.
-pub(crate) async fn apply_struct_decorators(
-    mut v: VmValue,
-    type_name: &str,
-    state: &mut VmState,
-    span: Span,
-) -> Result<VmValue> {
-    let decs = state.struct_decorators.get(type_name).cloned().unwrap_or_default();
-    for (dec_name, dec_args) in decs {
-        if let Some(dec_fn) = resolve_decorator_fn(&dec_name, state) {
-            let mut call_args = vec![v];
-            call_args.extend(dec_args);
-            v = call_value(dec_fn, call_args, state, span).await?;
-        }
-    }
-    Ok(v)
-}
 
 /// Recursively convert a `serde_json::Value` to a `VmValue`.
 pub(crate) fn json_to_vm_value(json: &serde_json::Value) -> std::result::Result<VmValue, String> {

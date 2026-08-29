@@ -338,6 +338,7 @@ pub fn lower_program<'ctx>(
     top: &Chunk,
     top_n_slots: u32,
     struct_defs: &HashMap<String, Vec<StructFieldDef>>,
+    struct_ancestors: &HashMap<String, Vec<String>>,
     extend_methods: &HashMap<String, HashMap<String, Arc<CompiledFn>>>,
 ) -> Result<LoweredProgram<'ctx>, String> {
     let (mut defs, mut ptr2uid) = collect_fns(top);
@@ -602,6 +603,46 @@ pub fn lower_program<'ctx>(
                     "",
                 )
                 .map_err(|e| e.to_string())?;
+            }
+        }
+    }
+
+    // Ancestry, one call per (child, ancestor) pair, in its own scope rather
+    // than beside the field registration above: a struct can inherit without
+    // either it or its parents declaring a field, and hanging this off the
+    // field loop's guard would quietly skip it.
+    //
+    // Only a typed `catch` arm reads this. Fields and methods were folded into
+    // each child at compile time, so nothing else has to know.
+    if !struct_ancestors.is_empty() {
+        let rb = context.create_builder();
+        let entry = top_fn.get_first_basic_block().ok_or("no entry block")?;
+        match entry.get_first_instruction() {
+            Some(i) => rb.position_before(&i),
+            None => rb.position_at_end(entry),
+        }
+        let ptr_ty = context.ptr_type(AddressSpace::default());
+        let reg_anc = module.get_function("jrt_struct_ancestor").unwrap_or_else(|| {
+            module.add_function(
+                "jrt_struct_ancestor",
+                context.void_type().fn_type(&[ptr_ty.into(), ptr_ty.into()], false),
+                None,
+            )
+        });
+        let mut pairs: Vec<(&String, &Vec<String>)> = struct_ancestors.iter().collect();
+        pairs.sort_by(|a, b| a.0.cmp(b.0)); // deterministic IR
+        for (child, chain) in pairs {
+            let ccstr = rb
+                .build_global_string_ptr(child, "anchild")
+                .map_err(|e| e.to_string())?
+                .as_pointer_value();
+            for ancestor in chain {
+                let acstr = rb
+                    .build_global_string_ptr(ancestor, "ancof")
+                    .map_err(|e| e.to_string())?
+                    .as_pointer_value();
+                rb.build_call(reg_anc, &[ccstr.into(), acstr.into()], "")
+                    .map_err(|e| e.to_string())?;
             }
         }
     }

@@ -349,7 +349,7 @@ fn user_function_lowers_to_a_direct_call() {
     let context = Context::create();
     let module = context.create_module("t");
     let top = add_program();
-    lower_program(&context, &module, &top, 5, &HashMap::new(), &HashMap::new())
+    lower_program(&context, &module, &top, 5, &HashMap::new(), &HashMap::new(), &HashMap::new())
         .expect("program lowering failed");
     module.verify().expect("module failed verification");
     let ir = module.print_to_string().to_string();
@@ -385,7 +385,7 @@ fn call_with_omitted_default_is_filled_at_the_call_site() {
     ];
     let context = Context::create();
     let module = context.create_module("t");
-    lower_program(&context, &module, &top, 3, &HashMap::new(), &HashMap::new())
+    lower_program(&context, &module, &top, 3, &HashMap::new(), &HashMap::new(), &HashMap::new())
         .expect("lowering failed");
     module.verify().expect("verification failed");
     let ir = module.print_to_string().to_string();
@@ -412,7 +412,7 @@ fn function_value_is_first_class_and_returnable() {
     top.code = vec![LoadFn(0, 0), Return(Some(0))];
     let context = Context::create();
     let module = context.create_module("t");
-    lower_program(&context, &module, &top, 1, &HashMap::new(), &HashMap::new())
+    lower_program(&context, &module, &top, 1, &HashMap::new(), &HashMap::new(), &HashMap::new())
         .expect("first-class fn value should lower");
     let ir = module.print_to_string().to_string();
     assert!(ir.contains("@jf_box_0"), "boxed function pointer global emitted:\n{ir}");
@@ -451,7 +451,7 @@ fn keyword_call_reorders_args_to_parameter_order() {
     ];
     let context = Context::create();
     let module = context.create_module("t");
-    lower_program(&context, &module, &top, 6, &HashMap::new(), &HashMap::new())
+    lower_program(&context, &module, &top, 6, &HashMap::new(), &HashMap::new(), &HashMap::new())
         .expect("keyword call lowering");
     module.verify().expect("module failed verification");
     let ir = module.print_to_string().to_string();
@@ -479,7 +479,7 @@ fn higher_order_call_lowers_to_indirect_call() {
     top.code = vec![LoadFn(0, 0), SetGlobal("apply".into(), 0), Halt];
     let context = Context::create();
     let module = context.create_module("t");
-    lower_program(&context, &module, &top, 1, &HashMap::new(), &HashMap::new())
+    lower_program(&context, &module, &top, 1, &HashMap::new(), &HashMap::new(), &HashMap::new())
         .expect("higher-order lowering");
     module.verify().expect("module failed verification");
     let ir = module.print_to_string().to_string();
@@ -671,7 +671,7 @@ fn async_spawn_await_lower_to_runtime() {
     ];
     let context = Context::create();
     let module = context.create_module("t");
-    lower_program(&context, &module, &top, 5, &HashMap::new(), &HashMap::new())
+    lower_program(&context, &module, &top, 5, &HashMap::new(), &HashMap::new(), &HashMap::new())
         .expect("async lowering");
     module.verify().expect("module failed verification");
     let ir = module.print_to_string().to_string();
@@ -781,7 +781,15 @@ fn calling_a_struct_type_is_a_named_build_error() {
         vec![MakeDict(0, vec![]), GetGlobal(1, "City".to_string()), Call(2, 1, vec![0]), Halt];
     let context = Context::create();
     let module = context.create_module("t");
-    let err = match lower_program(&context, &module, &top, 3, &struct_defs, &HashMap::new()) {
+    let err = match lower_program(
+        &context,
+        &module,
+        &top,
+        3,
+        &struct_defs,
+        &HashMap::new(),
+        &HashMap::new(),
+    ) {
         Err(e) => e,
         Ok(_) => panic!("calling a struct type should decline"),
     };

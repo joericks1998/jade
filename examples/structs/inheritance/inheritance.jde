@@ -1,0 +1,93 @@
+// Struct inheritance.
+//
+// A struct may name parents in parentheses after its own name. It takes their
+// fields, their defaults, and their `extend` methods as if it had declared them
+// itself.
+//
+// A name may appear once. Two parents declaring the same field is an error, and
+// so is a child redeclaring a field it already inherits: two storage slots with
+// one name leaves nothing to decide between them. Methods are the exception,
+// and the reason is that there *is* something to decide between them. A child's
+// method wins over a parent's, which is the whole point of inheriting one.
+
+struct Animal {
+    name,
+    let legs = 4
+}
+
+struct Trainable {
+    let tricks = []
+}
+
+// One parent.
+struct Cat(Animal) {
+    indoor
+}
+
+let c = Cat { name: "mog", indoor: true }
+print(c.name)
+print(c.legs)
+print(c.indoor)
+
+// Two parents. Neither declares a field the other does.
+struct Dog(Animal, Trainable) {
+    breed
+}
+
+let d = Dog { name: "rex", breed: "corgi" }
+print(d.name)
+print(d.legs)
+print(d.tricks)
+print(d.breed)
+
+// A parent's default is inherited, and can still be given a value.
+print(Dog { name: "ace", breed: "mutt", legs: 3 }.legs)
+
+// Inheritance is transitive: a grandparent's fields arrive too.
+struct Puppy(Dog) {
+    let weeks = 0
+}
+
+let p = Puppy { name: "bit", breed: "corgi", weeks: 6 }
+print(p.name)
+print(p.legs)
+print(p.breed)
+print(p.weeks)
+
+// Methods are inherited the same way. An `extend` block is collected before
+// anything runs, so where it sits in the file does not matter; all three below
+// are in effect for the whole program.
+
+extend Animal {
+    fn speak(self) {
+        return "..."
+    }
+
+    fn describe(self) {
+        return f"{self.name} has {self.legs} legs"
+    }
+}
+
+// A child's method wins over the one it would have inherited.
+extend Dog {
+    fn speak(self) {
+        return "woof"
+    }
+}
+
+// And a grandchild can override again. `Puppy` is nearer to itself than `Dog`
+// is, and `Dog` is nearer than `Animal`, so the nearest declaration wins.
+extend Puppy {
+    fn speak(self) {
+        return "yip"
+    }
+}
+
+print(c.speak())
+print(d.speak())
+print(p.speak())
+
+// `describe` is overridden nowhere, so every one of them uses `Animal`'s.
+print(c.describe())
+print(d.describe())
+print(p.describe())

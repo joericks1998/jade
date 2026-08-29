@@ -214,6 +214,14 @@ pub enum Instr {
     CmpLeBool(Reg, Reg, Reg),
     CmpGeBool(Reg, Reg, Reg),
 
+    /// Whether a caught value's type name matches a typed `catch` arm.
+    ///
+    /// `CatchMatches(dest, actual_type_name_reg, expected)`. Not a `CmpEqStr`,
+    /// because an arm naming a parent catches a child: the comparison has to
+    /// consult what the actual type inherits, which is a question only the
+    /// engine can answer.
+    CatchMatches(Reg, Reg, String),
+
     CmpEqStr(Reg, Reg, Reg),
     CmpNeStr(Reg, Reg, Reg),
     CmpLtStr(Reg, Reg, Reg),

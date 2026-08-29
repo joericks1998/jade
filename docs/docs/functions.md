@@ -399,7 +399,7 @@ print(mixed())   // [1, two]
 
 ## Decorators
 
-A decorator is a function applied to a declaration. Write it on the line above, with a leading `@`. Decorators work on `fn`, `async fn`, `struct`, `extend`, `let`, and `prompt`.
+A decorator is a function applied to a declaration. Write it on the line above, with a leading `@`. Decorators work on `fn`, `async fn`, `let`, and `prompt`.
 
 On a `let`, `@f let x = v` means exactly `let x = f(v)`. The point is not to save characters. The wrapping sits above the declaration instead of around it, which keeps the value itself easy to read.
 
@@ -469,24 +469,8 @@ print(inc(41))         // 42
 A `fn` decorator that *wraps* the function, meaning it returns a closure that calls the original, does not work today. A closure cannot capture the decorator's own parameter. See the closure warning above. Decorators that register, tag, or inspect a function and hand it back unchanged work fine.
 :::
 
-### On a struct
-
-A `struct` decorator runs on *every instance* the program builds, not once on the type. Its extra arguments must be literals: numbers, strings, booleans, or `nil`.
-
-```jade
-fn seen(p) {
-    print("built one")
-    return p
-}
-
-@seen
-struct Point { x, y }
-
-let p = Point { x: 1, y: 2 }   // prints: built one
-```
-
 ### One trap
 
 :::warning
-*On an `extend` block, only `@route` means anything.* Any other decorator on `extend` compiles and then does nothing at all.
+*A decorator on a `struct` or an `extend` block is refused.* Both were removed in v1.4.0, because they ran under `jade run` and were skipped under `jade build`, so the two engines disagreed about what a program did. Call the function where you build the value instead.
 :::

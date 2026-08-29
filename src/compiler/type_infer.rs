@@ -28,10 +28,16 @@ pub struct TypeContext {
     dict_value_scopes: Vec<HashMap<String, JadeType>>,
     /// Struct type name → field definitions (copied from AST).
     struct_defs: HashMap<String, Vec<StructFieldDef>>,
-    /// Interface name → required method names.
-    interface_defs: HashMap<String, Vec<String>>,
     /// Extend: type_name → method_name → inferred return type.
     extend_methods: HashMap<String, HashMap<String, JadeType>>,
+    /// Parents as written, per struct. Consumed by `resolve_inheritance` and
+    /// empty afterwards for anything with no parents.
+    struct_parents: HashMap<String, Vec<String>>,
+    /// Every struct a type inherits, nearest first, flattened transitively.
+    struct_ancestors: HashMap<String, Vec<String>>,
+    /// Where each struct was declared, so an inheritance error points at the
+    /// child rather than at wherever the clash was noticed.
+    struct_spans: HashMap<String, Span>,
     /// Primitive type methods: type_name → method_name → JadeType.
     /// E.g. "str" → {"upper" → Fn { .. }}, "array" → {"push" → Fn { .. }}.
     pub primitive_methods: HashMap<String, HashMap<String, JadeType>>,
@@ -78,8 +84,10 @@ impl TypeContext {
             scopes: vec![HashMap::new()],
             dict_value_scopes: vec![HashMap::new()],
             struct_defs: HashMap::new(),
-            interface_defs: HashMap::new(),
             extend_methods: HashMap::new(),
+            struct_parents: HashMap::new(),
+            struct_ancestors: HashMap::new(),
+            struct_spans: HashMap::new(),
             primitive_methods: HashMap::new(),
             opaque_imports: false,
             imported_packages: HashSet::new(),
@@ -289,6 +297,7 @@ fn pkg_call_return_type(module: &str, method: &str) -> Option<JadeType> {
 pub fn infer(program: Program) -> Result<TProgram> {
     let mut ctx = TypeContext::new();
     pre_pass(&program.stmts, &mut ctx);
+    resolve_inheritance(&mut ctx)?;
     let stmts = check_stmts(&program.stmts, &mut ctx)?;
     Ok(TProgram { stmts })
 }
@@ -303,6 +312,7 @@ pub fn infer_with_globals(program: Program, known_globals: &[String]) -> Result<
         ctx.define(name.clone(), JadeType::Unknown);
     }
     pre_pass(&program.stmts, &mut ctx);
+    resolve_inheritance(&mut ctx)?;
     let stmts = check_stmts(&program.stmts, &mut ctx)?;
     Ok(TProgram { stmts })
 }
@@ -320,6 +330,20 @@ pub fn fill_struct_literal_defaults(program: &mut TProgram) -> Result<()> {
     // Collect every StructDef (from this file and from inlined imports).
     let mut defs: HashMap<String, Vec<StructFieldDef>> = HashMap::new();
     collect_struct_defs_into(&program.stmts, &mut defs);
+
+    // Then finish any inheritance that crossed a file boundary.
+    //
+    // `resolve_inheritance` ran while each file was checked on its own, where an
+    // imported parent is deliberately out of reach, so a child of one still
+    // carries only its own fields. This is the first point where every module is
+    // in one stream, which makes it the only place the fold can happen for the
+    // compiled backend. The result is written back into the nodes as well as
+    // into `defs`, because a literal's missing defaults are filled from `defs`
+    // just below while `emit` reads the nodes.
+    let mut parents: HashMap<String, Vec<String>> = HashMap::new();
+    collect_struct_parents_into(&program.stmts, &mut parents);
+    fold_inherited_fields(&mut defs, &parents);
+    write_back_struct_fields(&mut program.stmts, &defs);
 
     // Set up an inference context that knows about every struct in the merged
     // program so default expressions referencing other structs type-check.
@@ -339,6 +363,91 @@ pub fn fill_struct_literal_defaults(program: &mut TProgram) -> Result<()> {
 
     fill_in_stmts(&mut program.stmts, &defs, &mut ctx)?;
     Ok(())
+}
+
+fn collect_struct_parents_into(stmts: &[TStmt], out: &mut HashMap<String, Vec<String>>) {
+    for s in stmts {
+        match s {
+            TStmt::StructDef { name, parents, .. } => {
+                out.entry(name.clone()).or_insert_with(|| parents.clone());
+            }
+            TStmt::FnDef { body, .. } | TStmt::AsyncFnDef { body, .. } => {
+                collect_struct_parents_into(body, out)
+            }
+            TStmt::ExtendBlock { methods, .. } => collect_struct_parents_into(methods, out),
+            _ => {}
+        }
+    }
+}
+
+/// Fold each parent's fields into a child that is still missing them.
+///
+/// Transitive, and idempotent by name: a field the child already has is either
+/// its own or one the checker folded in when the parent was local. A genuine
+/// clash was refused before this ran, so nothing here has to decide anything.
+///
+/// Only *direct* parents are read, and every parent is completed before any of
+/// its children, so a parent's list is already whole when a child copies it and
+/// a grandparent arrives through the parent. Walking the full ancestor set with
+/// a linear membership scan instead — which is what this did first — cost a
+/// factor of the depth twice over: `jade check` on a chain of 400 structs spent
+/// 26 of its 27 seconds here.
+fn fold_inherited_fields(
+    defs: &mut HashMap<String, Vec<StructFieldDef>>,
+    parents: &HashMap<String, Vec<String>>,
+) {
+    fn complete(
+        name: &str,
+        defs: &mut HashMap<String, Vec<StructFieldDef>>,
+        parents: &HashMap<String, Vec<String>>,
+        done: &mut HashSet<String>,
+    ) {
+        if !done.insert(name.to_string()) {
+            return;
+        }
+        let ps = parents.get(name).cloned().unwrap_or_default();
+        for p in &ps {
+            complete(p, defs, parents, done);
+        }
+        let Some(own) = defs.get(name).cloned() else {
+            return;
+        };
+        let mut known: HashSet<String> = own.iter().map(|f| f.name().to_string()).collect();
+        let mut inherited: Vec<StructFieldDef> = Vec::new();
+        for p in &ps {
+            for f in defs.get(p).into_iter().flatten() {
+                if known.insert(f.name().to_string()) {
+                    inherited.push(f.clone());
+                }
+            }
+        }
+        if !inherited.is_empty() {
+            inherited.extend(own);
+            defs.insert(name.to_string(), inherited);
+        }
+    }
+
+    let mut done: HashSet<String> = HashSet::new();
+    for name in parents.keys() {
+        complete(name, defs, parents, &mut done);
+    }
+}
+
+fn write_back_struct_fields(stmts: &mut [TStmt], defs: &HashMap<String, Vec<StructFieldDef>>) {
+    for s in stmts.iter_mut() {
+        match s {
+            TStmt::StructDef { name, fields, .. } => {
+                if let Some(full) = defs.get(name) {
+                    *fields = full.clone();
+                }
+            }
+            TStmt::FnDef { body, .. } | TStmt::AsyncFnDef { body, .. } => {
+                write_back_struct_fields(body, defs)
+            }
+            TStmt::ExtendBlock { methods, .. } => write_back_struct_fields(methods, defs),
+            _ => {}
+        }
+    }
 }
 
 fn collect_struct_defs_into(stmts: &[TStmt], out: &mut HashMap<String, Vec<StructFieldDef>>) {
@@ -495,6 +604,199 @@ fn fill_in_expr(
 
 /// Register top-level names without descending into bodies.
 /// This allows forward references: a fn call before the definition still resolves.
+/// Fold every parent's fields into its children, and work out each struct's
+/// full ancestry.
+///
+/// Runs once, after `pre_pass` has seen every struct in the file and before any
+/// body is checked. Flattening here is what keeps inheritance out of the rest of
+/// the toolchain: by the time `emit` runs, a child's field list already holds
+/// everything it inherited, so `MakeStruct`, field access, and both backends go
+/// on treating a struct as a flat list of fields and never walk a chain.
+///
+/// Four things are refused, and the first three are the user's rules:
+///
+///  * a parent that is not a struct in scope,
+///  * a field name that appears twice across a struct and all it inherits,
+///  * two *parents* supplying one method name,
+///  * a struct that inherits itself, however long the way round.
+///
+/// A *child's* method overriding a parent's is not a clash: the child is
+/// nearer, so there is something to decide between them. Two parents are the
+/// same distance away, so there is not. Fields have no equivalent notion of
+/// nearer, since two fields with one name means two storage slots and no way to
+/// say which a literal meant, which is why a child redeclaring an inherited
+/// field is refused where a child redeclaring a method is not.
+///
+/// A parent that cannot be found here is only an error when the file has no
+/// imports. With `opaque_imports` set, an imported struct is deliberately absent
+/// from `struct_defs` (see the `is_imported` skip in field access), so the name
+/// is left for the merge point in each engine to resolve.
+fn resolve_inheritance(ctx: &mut TypeContext) -> Result<()> {
+    let names: Vec<String> = ctx.struct_parents.keys().cloned().collect();
+    let mut resolved: HashMap<String, Vec<StructFieldDef>> = HashMap::new();
+    let mut ancestors: HashMap<String, Vec<String>> = HashMap::new();
+    for name in &names {
+        let mut seen = Vec::new();
+        flatten_struct(name, ctx, &mut resolved, &mut ancestors, &mut seen)?;
+    }
+    for (name, fields) in resolved {
+        ctx.struct_defs.insert(name, fields);
+    }
+    // Methods fold in the same way, except that a child's own entry stands:
+    // overriding an inherited method is the point of inheriting one. Walking
+    // nearest-first and only filling a gap gives that for free, and gives a
+    // grandchild the nearest override rather than the oldest.
+    for (name, chain) in &ancestors {
+        let mut merged = ctx.extend_methods.get(name).cloned().unwrap_or_default();
+        for ancestor in chain {
+            for (method, ty) in ctx.extend_methods.get(ancestor).into_iter().flatten() {
+                merged.entry(method.clone()).or_insert_with(|| ty.clone());
+            }
+        }
+        if !merged.is_empty() {
+            ctx.extend_methods.insert(name.clone(), merged);
+        }
+    }
+    ctx.struct_ancestors = ancestors;
+    Ok(())
+}
+
+/// Flatten one struct, recursing into its parents first.
+///
+/// `chain` is the path taken to get here, which is both the cycle check and the
+/// text of the error when one is found: a reader needs the route, not just the
+/// fact that there was one.
+fn flatten_struct(
+    name: &str,
+    ctx: &TypeContext,
+    resolved: &mut HashMap<String, Vec<StructFieldDef>>,
+    ancestors: &mut HashMap<String, Vec<String>>,
+    chain: &mut Vec<String>,
+) -> Result<()> {
+    if resolved.contains_key(name) {
+        return Ok(());
+    }
+    let span = ctx.struct_spans.get(name).copied().unwrap_or(Span { line: 0, col: 0 });
+    if let Some(at) = chain.iter().position(|c| c == name) {
+        let mut cycle: Vec<String> = chain[at..].to_vec();
+        cycle.push(name.to_string());
+        return Err(JadeError::InheritanceCycle { chain: cycle, span });
+    }
+    let Some(own) = ctx.struct_defs.get(name).cloned() else {
+        return Ok(());
+    };
+    let parents = ctx.struct_parents.get(name).cloned().unwrap_or_default();
+
+    chain.push(name.to_string());
+    for parent in &parents {
+        if !ctx.struct_defs.contains_key(parent) {
+            // An imported parent is not in this file's map by design; leave it
+            // for the engine's merge point. Anything else is a real mistake.
+            if ctx.opaque_imports {
+                continue;
+            }
+            chain.pop();
+            return Err(JadeError::UnknownParent {
+                child: name.to_string(),
+                parent: parent.clone(),
+                span,
+            });
+        }
+        flatten_struct(parent, ctx, resolved, ancestors, chain)?;
+    }
+    chain.pop();
+
+    // Fields, parents first and in written order, then the struct's own. Every
+    // name is checked against where it already came from, so the message can
+    // name both sides.
+    let mut fields: Vec<StructFieldDef> = Vec::new();
+    let mut owner: HashMap<String, String> = HashMap::new();
+    let push = |f: &StructFieldDef,
+                from: &str,
+                fields: &mut Vec<StructFieldDef>,
+                owner: &mut HashMap<String, String>|
+     -> Result<()> {
+        if let Some(first) = owner.get(f.name()) {
+            return Err(JadeError::InheritedFieldClash {
+                field: f.name().to_string(),
+                owner: first.clone(),
+                other: from.to_string(),
+                span,
+            });
+        }
+        owner.insert(f.name().to_string(), from.to_string());
+        fields.push(f.clone());
+        Ok(())
+    };
+    for parent in &parents {
+        let inherited = resolved.get(parent).cloned().unwrap_or_default();
+        for f in &inherited {
+            push(f, parent, &mut fields, &mut owner)?;
+        }
+    }
+    for f in &own {
+        push(f, name, &mut fields, &mut owner)?;
+    }
+
+    // Two parents supplying one method name have nothing to decide between
+    // them. The child's own methods are not consulted: a child overriding an
+    // inherited method is the point of inheriting one.
+    let mut from_parent: HashMap<String, String> = HashMap::new();
+    for parent in &parents {
+        let mut supplied: Vec<String> =
+            ctx.extend_methods.get(parent).map(|m| m.keys().cloned().collect()).unwrap_or_default();
+        supplied.extend(
+            ancestors
+                .get(parent)
+                .into_iter()
+                .flatten()
+                .flat_map(|a| {
+                    ctx.extend_methods.get(a).map(|m| m.keys().cloned().collect::<Vec<_>>())
+                })
+                .flatten(),
+        );
+        supplied.sort();
+        supplied.dedup();
+        for method in supplied {
+            if let Some(first) = from_parent.get(&method)
+                && first != parent
+            {
+                return Err(JadeError::InheritedMethodClash {
+                    method,
+                    first: first.clone(),
+                    second: parent.clone(),
+                    span,
+                });
+            }
+            from_parent.insert(method, parent.clone());
+        }
+    }
+
+    // Nearest first: each parent, then what that parent inherited.
+    //
+    // Membership goes through a set rather than a scan of the list being built.
+    // Each parent's own list is already finished, so the work here is linear in
+    // what is being copied; scanning instead made it quadratic in the depth, and
+    // that squared again over a whole file. A chain of 800 structs took six
+    // minutes to check.
+    let mut chainlist: Vec<String> = Vec::new();
+    let mut in_chain: HashSet<String> = HashSet::new();
+    for parent in &parents {
+        if in_chain.insert(parent.clone()) {
+            chainlist.push(parent.clone());
+        }
+        for a in ancestors.get(parent).into_iter().flatten() {
+            if in_chain.insert(a.clone()) {
+                chainlist.push(a.clone());
+            }
+        }
+    }
+
+    resolved.insert(name.to_string(), fields);
+    ancestors.insert(name.to_string(), chainlist);
+    Ok(())
+}
+
 fn pre_pass(stmts: &[Stmt], ctx: &mut TypeContext) {
     for stmt in stmts {
         match stmt {
@@ -517,8 +819,10 @@ fn pre_pass(stmts: &[Stmt], ctx: &mut TypeContext) {
                 );
             }
 
-            Stmt::StructDef { name, fields, .. } => {
+            Stmt::StructDef { name, fields, parents, span } => {
                 ctx.struct_defs.insert(name.clone(), fields.clone());
+                ctx.struct_parents.insert(name.clone(), parents.clone());
+                ctx.struct_spans.insert(name.clone(), *span);
                 // Struct names are callable constructors: `City(dict)`.
                 ctx.define(
                     name.clone(),
@@ -527,10 +831,6 @@ fn pre_pass(stmts: &[Stmt], ctx: &mut TypeContext) {
                         ret: Box::new(JadeType::Struct(name.clone())),
                     },
                 );
-            }
-            Stmt::InterfaceDef { name, methods, .. } => {
-                let method_names = methods.iter().map(|m| m.name.clone()).collect();
-                ctx.interface_defs.insert(name.clone(), method_names);
             }
             Stmt::ExtendBlock { type_name, methods, .. } => {
                 for method in methods {
@@ -746,49 +1046,18 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
         Stmt::Continue { span } => Ok(TStmt::Continue { span: *span }),
 
         // ── Type definitions ──────────────────────────────────────────────────
-        Stmt::StructDef { name, fields, decorators, span } => {
-            let tdecorators = infer_decorators(decorators, ctx)?;
-            Ok(TStmt::StructDef {
-                name: name.clone(),
-                fields: fields.clone(),
-                decorators: tdecorators,
-                span: *span,
-            })
-        }
+        // The *flattened* field list, not the written one. `resolve_inheritance`
+        // folded every parent's fields in already, so nothing downstream — not
+        // `emit`, not either backend — has to know inheritance exists to build a
+        // value or to find a field.
+        Stmt::StructDef { name, fields, parents, span } => Ok(TStmt::StructDef {
+            name: name.clone(),
+            fields: ctx.struct_defs.get(name).cloned().unwrap_or_else(|| fields.clone()),
+            parents: parents.clone(),
+            span: *span,
+        }),
 
-        Stmt::InterfaceDef { name, methods, span } => {
-            Ok(TStmt::InterfaceDef { name: name.clone(), methods: methods.clone(), span: *span })
-        }
-
-        Stmt::ExtendBlock { type_name, interface_name, methods, decorators, span } => {
-            // Verify interface compliance if an interface is named.
-            if let Some(iface_name) = interface_name {
-                let required = ctx.interface_defs.get(iface_name).cloned();
-                match required {
-                    Some(required_methods) => {
-                        for req in &required_methods {
-                            let provided = methods
-                                .iter()
-                                .any(|m| matches!(m, Stmt::FnDef { name, .. } if name == req));
-                            if !provided {
-                                return Err(JadeError::MissingInterfaceMethod {
-                                    type_name: type_name.clone(),
-                                    interface_name: iface_name.clone(),
-                                    method: req.clone(),
-                                    span: *span,
-                                });
-                            }
-                        }
-                    }
-                    None => {
-                        return Err(JadeError::UndefinedInterface {
-                            name: iface_name.clone(),
-                            span: *span,
-                        });
-                    }
-                }
-            }
-
+        Stmt::ExtendBlock { type_name, methods, decorators, span } => {
             // Type-check method bodies. Each FnDef pushes/pops its own scope.
             // The first param (`self`) is bound as Unknown inside the fn scope —
             // field accesses on self return Unknown (conservative for Stage B).
@@ -797,7 +1066,6 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
             let tdecorators = infer_decorators(decorators, ctx)?;
             Ok(TStmt::ExtendBlock {
                 type_name: type_name.clone(),
-                interface_name: interface_name.clone(),
                 methods: tmethods,
                 decorators: tdecorators,
                 span: *span,
@@ -1145,6 +1413,31 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
             let def_fields = def_fields_opt
                 .ok_or_else(|| JadeError::UndefinedType { name: type_name.clone(), span: *span })?;
 
+            // A struct whose parent came from another file is not fully known
+            // here: `resolve_inheritance` had nothing to fold in, because an
+            // imported struct is deliberately absent from this file's
+            // `struct_defs`. Its literal is checked at the merge point instead,
+            // which is `imports.rs` for the compiled backend and `ImportFile`
+            // for the VM. Same treatment the imported struct itself gets above.
+            let awaits_a_parent = ctx
+                .struct_parents
+                .get(type_name)
+                .is_some_and(|ps| ps.iter().any(|p| !ctx.struct_defs.contains_key(p)));
+            if awaits_a_parent {
+                let tfields = fields
+                    .iter()
+                    .map(|(n, e)| infer_expr(e, ctx).map(|te| (n.clone(), te, false)))
+                    .collect::<Result<Vec<_>>>()?;
+                return Ok(TExpr {
+                    kind: TExprKind::StructLiteral {
+                        type_name: type_name.clone(),
+                        fields: tfields,
+                    },
+                    ty: JadeType::Struct(type_name.clone()),
+                    span: *span,
+                });
+            }
+
             // Extra fields check.
             for (fname, fexpr) in fields {
                 let fspan = expr_span(fexpr);
@@ -1246,7 +1539,14 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
                     // file's ctx.struct_defs).  Fields/methods can't be checked
                     // until the importer merges TIRs at codegen time.
                     let is_imported = ctx.opaque_imports && !ctx.struct_defs.contains_key(&tn);
-                    if !is_imported {
+                    // And a local struct that inherits an imported one is just
+                    // as unknown here, for the same reason: the parent's fields
+                    // and methods have nothing to be folded in from yet.
+                    let awaits_a_parent = ctx
+                        .struct_parents
+                        .get(&tn)
+                        .is_some_and(|ps| ps.iter().any(|p| !ctx.struct_defs.contains_key(p)));
+                    if !is_imported && !awaits_a_parent {
                         let has_field = ctx
                             .struct_defs
                             .get(&tn)
@@ -2075,7 +2375,7 @@ fn collect_captures_in_stmts(
                 collect_captures_in_expr(body, locals, captures, seen, ctx);
                 locals.insert(name.clone());
             }
-            TStmt::StructDef { .. } | TStmt::InterfaceDef { .. }
+            TStmt::StructDef { .. }
             | TStmt::ExtendBlock { .. } | TStmt::Use { .. } | TStmt::FromUse { .. }
             // Control flow, capturing nothing.
             | TStmt::Break { .. } | TStmt::Continue { .. } => {}
