@@ -36,7 +36,8 @@
 //! attempt and finally into a catchable error.
 
 use core::ffi::c_char;
-use std::sync::Mutex;
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
 
 use crate::coll::StructObj;
 use crate::cstr;
@@ -564,7 +565,8 @@ mod tests {
 // (child, ancestor) pair at program start, because a compiled binary has no
 // compiler around to ask later.
 
-static ANCESTRY: Mutex<Vec<(String, Vec<String>)>> = Mutex::new(Vec::new());
+static ANCESTRY: LazyLock<Mutex<HashMap<String, Vec<String>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Record that `child` inherits `ancestor`. Order of calls is the order codegen
 /// emits them, which is nearest-first; nothing here depends on it, but a caller
@@ -576,10 +578,7 @@ static ANCESTRY: Mutex<Vec<(String, Vec<String>)>> = Mutex::new(Vec::new());
 pub unsafe extern "C" fn jrt_struct_ancestor(child: *const c_char, ancestor: *const c_char) {
     let (c, a) = unsafe { (cstr::to_string(child), cstr::to_string(ancestor)) };
     if let Ok(mut reg) = ANCESTRY.lock() {
-        match reg.iter_mut().find(|e| e.0 == c) {
-            Some(e) => e.1.push(a),
-            None => reg.push((c, vec![a])),
-        }
+        reg.entry(c).or_default().push(a);
     }
 }
 
@@ -594,8 +593,11 @@ pub unsafe extern "C" fn jrt_catch_matches(actual: *const c_char, expected: *con
     if a == e {
         return 1;
     }
+    // Keyed rather than scanned. The VM answers the same question from a map
+    // (`VmState::struct_ancestors`), and a typed `catch` inside a loop should not
+    // walk every inheriting struct in the program on each pass.
     match ANCESTRY.lock() {
-        Ok(reg) => reg.iter().any(|(c, anc)| *c == a && anc.iter().any(|x| *x == e)) as i32,
+        Ok(reg) => reg.get(&a).is_some_and(|anc| anc.contains(&e)) as i32,
         Err(_) => 0,
     }
 }
