@@ -54,7 +54,7 @@
 //! correct bias — a false positive is a compile error the author can see and
 //! work around, a false negative is a data race nobody sees.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::bytecode::{Chunk, CompiledFn, Instr, Reg};
@@ -78,16 +78,23 @@ const BYTES_CONSTRUCTORS: &[&str] = &["zeros", "from_ints", "concat"];
 ///
 /// Both flags are "does this happen anywhere in the call tree", so they compose
 /// by `|=` up the graph and reach a fixed point.
-#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+#[derive(Clone, Default, PartialEq, Eq, Debug)]
 struct Effects {
     /// Writes a global somewhere in its call tree.
     writes_global: bool,
     /// Mutates an object reachable from one of its parameters.
     mutates_shared: bool,
+    /// User globals it *reads* anywhere in its call tree.
+    ///
+    /// Reading a global is harmless on its own, which is why it is a set rather
+    /// than a flag: what makes it a race is the *spawner* assigning that same
+    /// name while the task is still running. Ordered, so a message naming one
+    /// does not depend on hash order.
+    reads_globals: BTreeSet<String>,
 }
 
 impl Effects {
-    fn is_clean(self) -> bool {
+    fn is_clean(&self) -> bool {
         !self.writes_global && !self.mutates_shared
     }
 }
@@ -264,6 +271,9 @@ fn step(
             t.reg_global.insert(*d, name.clone());
             // A global holds an object the whole program can see.
             t.regs.insert(*d);
+            if t.user_globals.contains(name) {
+                e.reads_globals.insert(name.clone());
+            }
             if let Some(&idx) = table.by_name.get(name) {
                 t.reg_fn.insert(*d, idx);
             }
@@ -423,6 +433,7 @@ fn step(
             if let Some(&uid) = t.reg_fn.get(callee)
                 && let Some(callee_eff) = eff.get(uid)
             {
+                e.reads_globals.extend(callee_eff.reads_globals.iter().cloned());
                 if callee_eff.writes_global {
                     e.writes_global = true;
                     found.push((
@@ -582,7 +593,152 @@ pub fn check(
 
     for chunk in chunks {
         let mut reg_fn: HashMap<Reg, usize> = HashMap::new();
+        // Tasks spawned here and not yet awaited, and where their futures are.
+        // A future is written to a register and then to a local, so both have to
+        // be followed or the await is never recognised and every later
+        // assignment looks like a race.
+        let mut live: Vec<usize> = Vec::new();
+        let mut reg_task: HashMap<Reg, usize> = HashMap::new();
+        let mut slot_task: HashMap<u32, usize> = HashMap::new();
+        // Values handed to a task that is still running, and how to recognise
+        // them again after they have been through a local.
+        let mut shared_regs: HashSet<Reg> = HashSet::new();
+        let mut shared_slots: HashSet<u32> = HashSet::new();
+        // …and by name, because a global is re-read into a fresh register every
+        // time it is used: `read(s)` and `s.push(3)` never share a register, so
+        // following registers alone sees two unrelated values.
+        let mut shared_globals: HashSet<String> = HashSet::new();
+        let mut reg_global: HashMap<Reg, String> = HashMap::new();
+        let mut getfield: HashMap<Reg, (Reg, String)> = HashMap::new();
+        let mut shared_task: usize = 0;
         for (i, instr) in chunk.code.iter().enumerate() {
+            let span = chunk.spans.get(i).copied().unwrap_or(Span { line: 0, col: 0 });
+            // The spawner's own half of the rule. Everything else in this pass
+            // asks what a task does; this asks what the spawner does *while the
+            // task runs*, which is the same race seen from the other side:
+            //
+            //     let k = 2
+            //     async fn read() { return k }
+            //     let f = read()
+            //     k = 10                        // ← here
+            //     print(await f)
+            //
+            // The two engines do not even agree on the answer: the interpreter
+            // gives each task a snapshot of the globals and says 2, a compiled
+            // binary shares one cell and says 10.
+            if let Instr::SetGlobal(name, r) = instr
+                // A function definition or a decorator rebinding one is not what
+                // this is about, and both are ordinary `SetGlobal`s.
+                && !reg_fn.contains_key(r)
+                && let Some(&uid) =
+                    live.iter().find(|&&u| eff[u].reads_globals.contains(name))
+            {
+                return Err(Violation {
+                    task: table.fns[uid].chunk.name.clone(),
+                    what: format!(
+                        "reads the global `{name}`, which is assigned here while the task \
+                         is still running"
+                    ),
+                    span,
+                });
+            }
+            // The other half of the spawner's side: mutating a collection a
+            // running task is holding. `let f = read(s)` then `s.push(3)` before
+            // the await is the same race as mutating it from inside the task,
+            // which the pass has always refused — it just never looked here.
+            if !live.is_empty() {
+                let target = match instr {
+                    Instr::SetIndex(o, _, _) | Instr::SetField(o, _, _) => Some((*o, None)),
+                    Instr::Call(_, callee, _) => getfield
+                        .get(callee)
+                        .filter(|(_, name)| MUTATING_METHODS.contains(&name.as_str()))
+                        .map(|(recv, name)| (*recv, Some(name.clone()))),
+                    _ => None,
+                };
+                if let Some((o, method)) = target
+                    && shared_regs.contains(&o)
+                {
+                    let what = match method {
+                        Some(name) => format!(
+                            "is handed a collection the spawner then calls `{name}()` on, \
+                             here, while the task is still running"
+                        ),
+                        None => "is handed a collection the spawner then assigns into, here, \
+                                 while the task is still running"
+                            .to_string(),
+                    };
+                    return Err(Violation {
+                        task: table.fns[shared_task].chunk.name.clone(),
+                        what,
+                        span,
+                    });
+                }
+            }
+
+            match instr {
+                Instr::Await(_, r) => {
+                    if let Some(u) = reg_task.get(r) {
+                        live.retain(|x| x != u);
+                    }
+                    if live.is_empty() {
+                        shared_regs.clear();
+                        shared_slots.clear();
+                        shared_globals.clear();
+                    }
+                }
+                Instr::Join(_, regs) => {
+                    for r in regs {
+                        if let Some(u) = reg_task.get(r) {
+                            live.retain(|x| x != u);
+                        }
+                    }
+                    if live.is_empty() {
+                        shared_regs.clear();
+                        shared_slots.clear();
+                        shared_globals.clear();
+                    }
+                }
+                Instr::GetField(d, o, name) => {
+                    getfield.insert(*d, (*o, name.clone()));
+                    // Reaching into something a task holds yields something a
+                    // task holds.
+                    if shared_regs.contains(o) {
+                        shared_regs.insert(*d);
+                    }
+                }
+                Instr::GetIndex(d, o, _) => {
+                    if shared_regs.contains(o) {
+                        shared_regs.insert(*d);
+                    }
+                }
+                Instr::SetLocal(slot, r) => {
+                    match reg_task.get(r).copied() {
+                        Some(u) => {
+                            slot_task.insert(*slot, u);
+                        }
+                        None => {
+                            slot_task.remove(slot);
+                        }
+                    }
+                    if shared_regs.contains(r) {
+                        shared_slots.insert(*slot);
+                    }
+                }
+                Instr::GetLocal(d, slot) => {
+                    match slot_task.get(slot).copied() {
+                        Some(u) => {
+                            reg_task.insert(*d, u);
+                        }
+                        None => {
+                            reg_task.remove(d);
+                        }
+                    }
+                    if shared_slots.contains(slot) {
+                        shared_regs.insert(*d);
+                    }
+                }
+                _ => {}
+            }
             match instr {
                 Instr::SetGlobal(name, r) => match reg_fn.get(r).copied() {
                     Some(u) => {
@@ -601,6 +757,10 @@ pub fn check(
                         None => {
                             reg_fn.remove(d);
                         }
+                    }
+                    reg_global.insert(*d, name.clone());
+                    if shared_globals.contains(name) {
+                        shared_regs.insert(*d);
                     }
                 }
                 Instr::LoadFn(d, idx) | Instr::MakeClosure(d, idx) => {
@@ -621,7 +781,22 @@ pub fn check(
                         reg_fn.remove(d);
                     }
                 },
-                Instr::Spawn(_, callee, args) => {
+                Instr::Spawn(dest, callee, args) => {
+                    // Remember it as running, so the spawner-side check above
+                    // knows what is at stake until the matching await.
+                    if let Some(&u) = reg_fn.get(callee) {
+                        reg_task.insert(*dest, u);
+                        if !live.contains(&u) {
+                            live.push(u);
+                        }
+                        shared_regs.extend(args.iter().copied());
+                        for a in args {
+                            if let Some(name) = reg_global.get(a) {
+                                shared_globals.insert(name.clone());
+                            }
+                        }
+                        shared_task = u;
+                    }
                     // The task body itself, and any function handed to it.
                     //
                     // A callback is the other way a task mutates shared state,
@@ -748,6 +923,62 @@ mod tests {
             "#,
         );
         assert!(e.contains("grow"), "should name the method: {e}");
+    }
+
+    /// The spawner's own half of the rule. Every other test here asks what a
+    /// task does; these two ask what the spawner does *while the task runs*,
+    /// which is the same race from the other side.
+    #[test]
+    fn assigning_a_global_a_running_task_reads_is_rejected() {
+        let e = rejection(
+            r#"
+            let limit = 2
+            async fn read() {
+                return limit
+            }
+            let f = read()
+            limit = 10
+            print(await f)
+            "#,
+        );
+        assert!(e.contains("limit"), "should name the global: {e}");
+    }
+
+    #[test]
+    fn mutating_a_collection_a_running_task_holds_is_rejected() {
+        let e = rejection(
+            r#"
+            async fn read(a) {
+                return len(a)
+            }
+            let readings = [1, 2]
+            let f = read(readings)
+            readings.push(3)
+            print(await f)
+            "#,
+        );
+        assert!(e.contains("push"), "should name the mutation: {e}");
+    }
+
+    /// The window closes at the await, so the same two programs are fine once
+    /// the task has finished. Without this the check would refuse every program
+    /// that ever writes a global it also reads from a task.
+    #[test]
+    fn the_same_writes_after_the_await_are_allowed() {
+        compile(
+            r#"
+            let limit = 2
+            async fn read(a) {
+                return len(a) + limit
+            }
+            let readings = [1, 2]
+            print(await read(readings))
+            limit = 10
+            readings.push(3)
+            print(readings)
+            "#,
+        )
+        .expect("writes after the await are not a race");
     }
 
     fn task_mutating_a_collection_it_wrapped_in_a_struct_is_rejected() {

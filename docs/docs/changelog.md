@@ -43,7 +43,17 @@ A function value read back from a global. A closure is bound under the name of t
 
 A user method. `arr.push(x)` was rejected and `batch.grow()` was not, because a method reaches its receiver as `self` rather than as an argument — so an `extend` method mutating the receiver had an empty argument list and looked harmless. The receiver counts now, the same way it does for the built-in methods.
 
-Still not checked, and worth knowing: the pass looks *inside* tasks only, so the spawner mutating something a running task reads is not caught from its side. `let f = read(s)` followed by `s.push(3)` before the await is a race the compiler still accepts, and a task reading a global the spawner then assigns gives the value as of the spawn interpreted and the live value compiled.
+*And the spawner is now held to the same rule as the task.* Every check in this pass asked what a task does. None asked what the spawner does *while the task is running*, which is the same race from the other side:
+
+```jade
+let limit = 2
+async fn read() { return limit }
+let f = read()
+limit = 10                        // ← refused here
+print(await f)
+```
+
+The two engines did not even agree on what that means: the interpreter gives each task a snapshot of the globals and answers 2, a compiled binary shares one cell and answers 10. Refusing the program is the answer rather than picking one. The same goes for mutating a collection a running task was handed. The window opens at the spawn and closes at the await, so both writes are fine once the task has finished.
 
 *Two more leaks on the task paths.* A future nobody awaited never released its result, so a fire-and-forget task returning a collection leaked one object per spawn: 5,000 of them left 5,001 live objects, and now leave 2. And a `join` whose task raised abandoned the results it had already collected, because the rethrow is a jump and the caller's collect-into-an-array loop never runs; those are released before the jump now.
 
