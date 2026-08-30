@@ -1234,6 +1234,15 @@ pub(super) fn lower_instr<'ctx>(
                 let v =
                     b.build_load(i64_ty, slot, "jr").map_err(|e| e.to_string())?.into_int_value();
                 b.build_call(push_f, &[arr.into(), v.into()], "").map_err(|e| e.to_string())?;
+                // `jrt_karr_push` takes the array's own reference, so the one
+                // the join handed over is this frame's to give back. `Await`
+                // above needs no counterpart: its single `store` *is* the
+                // handover. Without this, `join` leaked one object per result
+                // whose value lived on the heap — 10,000 iterations of
+                // `join(mk(i))` left 10,001 live objects where the same loop
+                // written with `await` left 1, so a service that joined in its
+                // request loop grew without bound.
+                low.decref(v);
             }
             low.store(*dest, low.tag_ptr(arr));
             Ok(false)

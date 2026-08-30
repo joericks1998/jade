@@ -35,6 +35,8 @@ print(outer())        // [1, 2] interpreted, [10, 2] compiled
 
 *A task gets the stack the main body gets.* Pool workers ran on the 2 MB Rust hands a thread by default, so the same function succeeded at top level and overflowed inside an `async fn`, taking the process down with no Jade error to read. They get 256 MB now, matching both `jade run` and the compiled main body.
 
+*`join` no longer leaks its results.* Collecting a task's result into the joined array took a reference for the array without giving back the one the join handed over, so every result that lived on the heap leaked one object. 10,000 iterations of `join(mk(i))` left 10,001 live objects where the same loop written with `await` left 1, and a service that joined in its request loop grew without bound: 400,000 joins peaked at 80 MB, and now hold flat at 3 MB.
+
 *Running out of threads no longer wedges the process.* When the OS refused a worker thread, the pool tried to undo its own bookkeeping while still holding the lock it needed to do it, and a `spawn` deadlocked against itself with nothing to wake it. The success path hid the bug completely, since the new thread is what runs the code that would have re-locked, so it only ever fired when the machine was out of threads and the recovery mattered most.
 
 A binary now finishes correctly even when *every* thread creation fails: the work runs on whichever thread awaits it, so a machine out of threads does its tasks one after another instead of hanging. The pool reports how often that happened rather than counting it silently.
