@@ -345,9 +345,24 @@ const char* jade_exc_type(void);         /* thrown struct type name, or NULL */
  * jrt_recur_depth() there; every return path and every exception landing pad
  * restores that snapshot, the same scoping jade_exc_restore gives the handler
  * stack and for the same reason — a longjmp out of a deep call unwinds the
- * native stack without running the intervening frames' own decrements. */
-void    jrt_recur_enter(void);
+ * native stack without running the intervening frames' own decrements.
+ *
+ * The prologue also hands over its *spill* array — a mirror of whatever its
+ * registers hold that is worth releasing — so the throw path can give back what
+ * a skipped frame was holding. Deliberately not the registers themselves: a
+ * register file whose address escapes cannot be promoted out of memory. See
+ * common.c. */
+void    jrt_recur_enter(int64_t* spill, int32_t n_spill);
 int32_t jrt_recur_depth(void);
+/* What every frame deeper than `depth` left behind is released and forgotten.
+ * The throw path calls it before the longjmp, while those frames still exist. */
+void    jade_frame_release_above(int32_t depth);
+/* A landing pad's counterpart to jrt_recur_restore: unwinds to the entry
+ * snapshot and puts *this* frame back, because the function is still running. */
+void    jrt_recur_resume(int32_t saved, int64_t* spill, int32_t n_spill);
+/* Fresh call-chain budget for a task body; see common.c. */
+int32_t jrt_recur_enter_task(void);
+void    jrt_recur_leave_task(int32_t saved);
 void    jrt_recur_restore(int32_t depth);
 
 /* ── LLM Inference ────────────────────────────────────────────────────── */
@@ -533,6 +548,14 @@ int64_t jrt_bool_any(int64_t val);
 #define JRT_FN_TYPEREF   3   /* int, float, str, …       -> <type str>           */
 #define JRT_FN_NATIVEFN  4   /* print                    -> <native fn>          */
 #define JRT_FN_KIND(sub) ((int64_t)JK_FN | ((int64_t)(sub) << JRT_FN_SUB_SHIFT))
+
+/* Set on a box holding an `async fn`. Calling one starts a task and hands back
+ * a future, and whether it does is the *function's* business: a call site that
+ * only has the value has no static type to decide from, which is why `let f =
+ * w`, `[1, 2].map(w)` and an `async fn` imported from a module all arrive at
+ * `jrt_call_value` as ordinary calls. Above the sub-kind byte, so naming a
+ * callable is unaffected. */
+#define JRT_FN_ASYNC ((int64_t)1 << 16)
 
 /* jrt_require_kind — the receiver guard the Chunk backend emits ahead of a
  * primitive method call (`recv.push(x)`, `recv.keys()`, `recv.upper()`, …).

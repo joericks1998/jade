@@ -87,6 +87,9 @@ const OBJKIND_FN: u64 = 5;
 // The byte above the ObjKind in a callable box's kind slot: which sort of
 // callable it is, so a renderer can name it. Mirrors JRT_FN_* in runtime.h.
 const OBJ_FN_NATIVE: u64 = 2;
+// Set on the box of an `async fn`, above the sub-kind byte. Mirrors
+// JRT_FN_ASYNC in runtime.h; see `fn_box_word`.
+const OBJ_FN_ASYNC: u64 = 1 << 16;
 
 // Receiver kinds a primitive method accepts, passed to `jrt_require_kind` as a
 // bitmask. Mirror the JRT_WANT_* macros in runtime_aot/runtime.h.
@@ -139,6 +142,14 @@ struct Lowerer<'a, 'ctx> {
     /// false` (`jade_toplevel`, `lower_chunk`'s isolated bodies) — a body that
     /// never opened a frame must not close one either.
     recur_depth_slot: Option<PointerValue<'ctx>>,
+    /// This function's spill array and its length, or `None` for a body that
+    /// does not register a frame (the top level, and `lower_chunk`'s test
+    /// bodies). See `lower_body` for what it is and why it is not the registers.
+    spill: Option<(PointerValue<'ctx>, usize)>,
+    /// Generator-stack depth on entry, for [`Lowerer::emit_yield_restore`].
+    /// `None` for a body with no `try` in it, which is the only place a frame
+    /// can be left open by a raise that this function then stops.
+    yield_depth_slot: Option<PointerValue<'ctx>>,
     /// Whether this function is a `yield`ing stream producer. When true a
     /// `Return` discards the body's value and hands back the generator's buffer
     /// instead — that is what makes calling a generator give you a stream.
@@ -886,6 +897,26 @@ fn lower_body<'ctx>(
     // inside a loop reuses one stable buffer instead of growing the stack each
     // iteration. 256 bytes is conservative for every x86_64/arm64 jmp_buf.
     let buf_ty = context.i8_type().array_type(256);
+    // Which instructions sit inside a `try` of *this* function. The emitter
+    // brackets a try body with SetupHandler/PopHandler, and a nested try nests
+    // inside that, so counting them in order answers it. A `raise` outside every
+    // one of them is leaving this frame, and the `Raise` arm uses that to decide
+    // whether to run its scope exit on the way out.
+    let mut in_handler: Vec<bool> = Vec::with_capacity(code.len());
+    let mut handler_depth = 0usize;
+    for instr in code {
+        match instr {
+            Instr::SetupHandler(..) => {
+                in_handler.push(true);
+                handler_depth += 1;
+            }
+            Instr::PopHandler => {
+                handler_depth = handler_depth.saturating_sub(1);
+                in_handler.push(handler_depth > 0);
+            }
+            _ => in_handler.push(handler_depth > 0),
+        }
+    }
     let mut handler_bufs: HashMap<usize, PointerValue> = HashMap::new();
     for (idx, instr) in code.iter().enumerate() {
         if matches!(instr, Instr::SetupHandler(..)) {
@@ -917,6 +948,39 @@ fn lower_body<'ctx>(
         Some(slot)
     };
 
+    // Snapshot the generator stack the same way, and for the same reason.
+    //
+    // A `yield`ing function opens a buffer on entry and closes it on return. A
+    // raise between the two never reaches the close, so the buffer stays open
+    // and the next `yield` on this thread lands in it — which is how
+    //
+    //     fn inner() { yield 10; raise Boom { message: "x" } }
+    //     fn outer() { yield 1; try { inner() } catch Boom e { }; yield 2 }
+    //
+    // gave `[10, 2]` compiled against `[1, 2]` interpreted: `outer`'s second
+    // yield went into `inner`'s abandoned buffer, and `outer` handed back the
+    // one on top. Whoever *stops* the raise is the one that knows how far to
+    // unwind, so the landing pad truncates back to here. Taken after the
+    // generator prologue above, so a generator's own buffer survives its own
+    // catch.
+    let yield_depth_slot = if handler_bufs.is_empty() {
+        None
+    } else {
+        let i32_ty = context.i32_type();
+        let f = match module.get_function("jrt_yield_depth") {
+            Some(f) => f,
+            None => module.add_function("jrt_yield_depth", i32_ty.fn_type(&[], false), None),
+        };
+        let d = builder
+            .build_call(f, &[], "yield_depth0")
+            .map_err(|e| e.to_string())?
+            .as_any_value_enum()
+            .into_int_value();
+        let slot = builder.build_alloca(i32_ty, "yield_depth_entry").map_err(|e| e.to_string())?;
+        builder.build_store(slot, d).map_err(|e| e.to_string())?;
+        Some(slot)
+    };
+
     // Snapshot the recursion-depth counter on entry and bump it — unlike
     // `exc_depth_slot` this runs for every *ordinary* function, since every
     // call counts against the limit, not just ones inside a `try`.
@@ -927,6 +991,25 @@ fn lower_body<'ctx>(
     // `jade_toplevel` (and `lower_chunk`'s isolated test bodies) opt out via
     // `track_recursion` — see this function's doc comment for why counting
     // them would disagree with the VM by exactly one frame.
+    // A mirror of whatever the registers hold that is worth releasing, handed to
+    // the runtime so a throw can give back what the frames it erases were
+    // holding. Separate from the registers on purpose: an escaping register file
+    // cannot be promoted out of memory, which costs 41% on a benchmark that is
+    // nothing but calls. This one escapes and the registers do not. Written only
+    // where `rc_replace_slot` has already decided a heap word is involved.
+    let spill = if track_recursion {
+        // Not initialised here. `jrt_recur_enter` fills it, and only on the
+        // path where it actually registers the frame — a frame entered outside
+        // any `try` is never read, and paying N stores per call for it put a
+        // benchmark that is nothing but calls 13% down instead of 4%.
+        let arr = builder
+            .build_alloca(i64_ty.array_type(n.max(1) as u32), "spill")
+            .map_err(|e| e.to_string())?;
+        Some((arr, n))
+    } else {
+        None
+    };
+
     let recur_depth_slot = if track_recursion {
         let i32_ty = context.i32_type();
         let recur_depth_fn = match module.get_function("jrt_recur_depth") {
@@ -940,15 +1023,19 @@ fn lower_body<'ctx>(
             .into_int_value();
         let slot = builder.build_alloca(i32_ty, "recur_depth_entry").map_err(|e| e.to_string())?;
         builder.build_store(slot, recur_depth0).map_err(|e| e.to_string())?;
+        let ptr_ty = context.ptr_type(AddressSpace::default());
+        let (sp, sn) = spill.ok_or("lower_body: tracked recursion without a spill array")?;
         let recur_enter_fn = match module.get_function("jrt_recur_enter") {
             Some(f) => f,
             None => module.add_function(
                 "jrt_recur_enter",
-                context.void_type().fn_type(&[], false),
+                context.void_type().fn_type(&[ptr_ty.into(), i32_ty.into()], false),
                 None,
             ),
         };
-        builder.build_call(recur_enter_fn, &[], "").map_err(|e| e.to_string())?;
+        builder
+            .build_call(recur_enter_fn, &[sp.into(), i32_ty.const_int(sn as u64, false).into()], "")
+            .map_err(|e| e.to_string())?;
         Some(slot)
     } else {
         None
@@ -963,6 +1050,8 @@ fn lower_body<'ctx>(
         exc_depth_slot,
         volatile_slots: exc_depth_slot.is_some(),
         recur_depth_slot,
+        yield_depth_slot,
+        spill,
         entry_bufs: RefCell::new(HashMap::new()),
     };
 
@@ -999,6 +1088,7 @@ fn lower_body<'ctx>(
         llblocks: &llblocks,
         graph: &graph,
         handler_bufs: &handler_bufs,
+        in_handler: &in_handler,
         call_builtins: &call_builtins,
         user_calls: &user_calls,
         fn_defs,

@@ -1,0 +1,23 @@
+// The spawner is held to the same rule as the task.
+//
+// Every other check in this pass asks what a task does. This one asks what the
+// spawner does *while the task is running*, which is the same race from the
+// other side: the window opens at the spawn and closes at the await, and a
+// write inside it reaches a value another thread is reading.
+//
+// The two engines do not even agree on what a global read inside a task means.
+// The interpreter gives each task a snapshot and answers 2; a compiled binary
+// shares one cell and answers 10. Refusing the program is the answer, rather
+// than picking one of those.
+//
+// This file is a fixture: `jade check` must REJECT it.
+
+let limit = 2
+
+async fn read() {
+    return limit
+}
+
+let f = read()
+limit = 10
+print(await f)

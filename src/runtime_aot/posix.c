@@ -95,9 +95,11 @@ const char* jade_realpath(const char* path) {
  * it on the awaiting thread, where the frame actually lives.
  */
 
-extern void  jrt_set_task_invoker(int (*f)(jade_task_fn, jade_value_t*, int,
+extern void  jrt_set_task_invoker(int (*f)(jade_task_fn, jade_value_t*, int, int,
                                            jade_value_t*, jade_value_t*, const char**));
 extern void* jrt_spawn(jade_task_fn fn, const jade_value_t* args, int n);
+extern int32_t jrt_recur_enter_task(void);
+extern void    jrt_recur_leave_task(int32_t saved);
 extern jade_value_t jrt_await_impl(void* fut, int* failed, jade_value_t* err, const char** ty);
 extern jade_value_t jrt_await_word(jade_value_t w, int* failed, jade_value_t* err, const char** ty);
 extern void  jrt_join_words(const jade_value_t* ws, int n, jade_value_t* out,
@@ -110,17 +112,44 @@ extern void  jrt_join_impl(void* const* futs, int n, jade_value_t* out,
  * re-raise with the type intact — typed `catch <Type>` arms over `await` match
  * on that name. */
 static int jade_task_invoke(jade_task_fn fn, jade_value_t* args, int n,
+                            int fresh_budget,
                             jade_value_t* out_result, jade_value_t* out_err,
                             const char** out_type) {
     jmp_buf task_buf;
+    /* Save what belongs to whoever is running this body, because that may be a
+     * thread with work of its own: a pool worker is reused for task after task,
+     * and an awaiting thread now runs a task inline rather than park (see
+     * `await_one` in runtime/src/task.rs). Neither should inherit the body's
+     * leftovers, and the body should not inherit theirs.
+     *
+     * `saved_exc` is a floor to unwind back to, not a slot to start from — the
+     * body's handler frames must sit *above* the caller's, so the throw path
+     * finds the shim's frame before any of theirs. */
+    int32_t saved_exc = jade_exc_depth();
+    /* A fresh budget only where the body really does start a stack: a pool
+     * worker. An awaiting thread running the body inline is genuinely deeper on
+     * a stack already in use, so it keeps counting and the recursion limit stays
+     * the thing that stops a runaway before the OS does. */
+    int32_t saved_recur = fresh_budget ? jrt_recur_enter_task() : jrt_recur_depth();
+
     if (setjmp(task_buf) == 0) {
         jade_exc_push_frame(&task_buf);
         *out_result = fn(args, n);
         jade_exc_pop();
+        jade_exc_restore(saved_exc);
+        if (fresh_budget) jrt_recur_leave_task(saved_recur);
+        else              jrt_recur_restore(saved_recur);
         return 0;
     }
     *out_err  = jade_exc_value();
     *out_type = jade_exc_type();
+    /* A raise unwinds one frame per throw and lands here, so the depth is
+     * already back at `saved_exc` on the ordinary path. A `return` out of a
+     * `try` inside the body can still leave one behind, and that frame's
+     * jmp_buf died with the C frame holding it. */
+    jade_exc_restore(saved_exc);
+    if (fresh_budget) jrt_recur_leave_task(saved_recur);
+    else              jrt_recur_restore(saved_recur);
     return 1;
 }
 
@@ -142,15 +171,17 @@ static void jade_task_rethrow(int failed, jade_value_t err, const char* ty) {
         case 1:
             jade_exc_throw_typed(err, ty);
             break;
+        /* The task machinery's own failures are runtime errors, so they are
+         * `RuntimeError` structs like every other one. Raising them as bare
+         * strings meant `catch e` bound a string and `catch RuntimeError e`
+         * did not match at all, so a program that handled a double await
+         * interpreted died on it compiled. `jrt_throw_runtime` is what every
+         * other runtime failure here already uses. */
         case 2:
-            jade_exc_throw_typed(
-                jrt_box_str(jrt_str_dup("cannot await the same Future more than once",
-                                        JRT_TRUSTED)), NULL);
+            jrt_throw_runtime("cannot await the same Future more than once");
             break;
         case 3:
-            jade_exc_throw_typed(
-                jrt_box_str(jrt_str_dup("'await' applied to a non-Future value",
-                                        JRT_TRUSTED)), NULL);
+            jrt_throw_runtime("'await' applied to a non-Future value");
             break;
         default:
             break;
@@ -178,15 +209,27 @@ jade_value_t jade_await_word(jade_value_t w) {
     return r;
 }
 
+/* A join hands its results to the caller, whose collect-into-an-array loop takes
+ * a reference for the array and gives this one back. On a failure that loop
+ * never runs — the rethrow below is a longjmp — so the results already gathered
+ * had no owner at all. A `try { join(ok(), bad()) } catch` in a loop leaked
+ * every successful sibling's value. Slots for tasks that failed hold 0, which is
+ * an int word and no-ops. */
+static void jade_join_release(jade_value_t* results, int n) {
+    for (int i = 0; i < n; i++) jrt_decref(results[i]);
+}
+
 void jade_join_words(const jade_value_t* ws, int n, jade_value_t* results_out) {
     int failed = 0; jade_value_t err = 0; const char* ty = NULL;
     jrt_join_words(ws, n, results_out, &failed, &err, &ty);
+    if (failed) jade_join_release(results_out, n);
     jade_task_rethrow(failed, err, ty);
 }
 
 void jade_join(jade_future_t* futures, int n, jade_value_t* results_out) {
     int failed = 0; jade_value_t err = 0; const char* ty = NULL;
     jrt_join_impl((void* const*)futures, n, results_out, &failed, &err, &ty);
+    if (failed) jade_join_release(results_out, n);
     jade_task_rethrow(failed, err, ty);
 }
 

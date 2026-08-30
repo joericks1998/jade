@@ -1,0 +1,20 @@
+// A callback a task calls is held to the same rule as the task itself.
+//
+// The task's own body says nothing about a function it was handed: `run(f)`
+// calls a parameter, and a parameter resolves to no definition. So the closure
+// used to reach the task completely unexamined, and mutated the spawner's
+// array with nothing to say so. It is still an ordinary value at the spawn,
+// where its body is as visible as the task's, and that is where this is caught.
+//
+// This file is a fixture: `jade check` must REJECT it.
+
+let readings = [1, 2]
+
+async fn run(f) {
+    f()
+    return 0
+}
+
+let record = || readings.push(3)
+
+print(await run(record))

@@ -451,7 +451,7 @@ fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
         }
 
         TStmt::FnDef { name, params, body, span, decorators, .. } => {
-            let compiled = emit_fn(&name, params, body, span, ctx)?;
+            let compiled = emit_fn(&name, params, body, span, false, ctx)?;
             let rc = Arc::new(compiled);
             let idx = em.chunk.intern_fn(Arc::clone(&rc));
             let dest = em.alloc_reg();
@@ -621,7 +621,7 @@ fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
             let mut compiled_methods: Vec<(String, CompiledFn)> = Vec::new();
             for method_stmt in methods {
                 if let TStmt::FnDef { name, params, body, span, .. } = method_stmt {
-                    let compiled = emit_fn(&name, params, body, span, ctx)?;
+                    let compiled = emit_fn(&name, params, body, span, false, ctx)?;
                     compiled_methods.push((name, compiled));
                 }
             }
@@ -774,9 +774,12 @@ fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
 
         TStmt::AsyncFnDef { name, params, body, span, decorators, .. } => {
             // Compile async fn body as a regular CompiledFn.
-            // Call sites emit Instr::Spawn (instead of Instr::Call) based on
-            // the callee's JadeType::AsyncFn — handled in emit_call below.
-            let compiled = emit_fn(&name, params, body, span, ctx)?;
+            // A call site that can see this declaration emits Instr::Spawn
+            // instead of Instr::Call, from the callee's JadeType::AsyncFn —
+            // handled in emit_call below. One that only has the *value*, which
+            // carries no static type, reads `is_async` off the function at run
+            // time instead.
+            let compiled = emit_fn(&name, params, body, span, true, ctx)?;
             let rc = Arc::new(compiled);
             let idx = em.chunk.intern_fn(Arc::clone(&rc));
             let dest = em.alloc_reg();
@@ -871,6 +874,7 @@ fn emit_fn(
     params: Vec<(String, Option<TExpr>)>,
     mut body: Vec<TStmt>,
     span: Span,
+    is_async: bool,
     ctx: &mut EmitCtx,
 ) -> Result<CompiledFn> {
     let mut fn_em = Emitter::new_fn(name);
@@ -959,6 +963,7 @@ fn emit_fn(
         source_file: String::new(),
         module_scope: None,
         is_generator,
+        is_async,
     })
 }
 
@@ -1120,7 +1125,7 @@ fn emit_expr(expr: &TExpr, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<Reg> {
             let name = ctx.next_closure_name();
             let owned: Vec<(String, Option<TExpr>)> =
                 params.iter().map(|p| (p.clone(), None)).collect();
-            let compiled = emit_fn(&name, owned, body.clone(), span, ctx)?;
+            let compiled = emit_fn(&name, owned, body.clone(), span, false, ctx)?;
             let rc = Arc::new(compiled);
             let idx = em.chunk.intern_fn(Arc::clone(&rc));
             let dest = em.alloc_reg();

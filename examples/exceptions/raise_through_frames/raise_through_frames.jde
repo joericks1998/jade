@@ -1,0 +1,96 @@
+// A raise unwinds past frames that were holding things, and they let go.
+//
+// A `longjmp` runs nothing on its way out, so every frame it skips loses the
+// releases it would have run on the way home. The values those frames were
+// holding used to be stranded, and a loop that raised and caught grew without
+// bound. Each frame now leaves behind a copy of what it holds, and the throw
+// gives back the copies belonging to the frames it erases.
+//
+// Nothing here is visible in the output, which is the point: what this fixture
+// pins is that the values are still correct after the cleanup. The leak itself
+// is measured by `jade-heap` and pinned by a codegen test.
+
+struct Halt {
+    message
+}
+
+fn innermost() {
+    raise Halt { message: "stopped" }
+}
+
+fn middle() {
+    let scratch = [1, 2, 3]
+    let notes = { "where": "middle" }
+    innermost()
+    return scratch
+}
+
+fn outer() {
+    let mine = ["a", "b"]
+    middle()
+    return mine
+}
+
+let caught = 0
+let i = 0
+while i < 50 {
+    try {
+        outer()
+    } catch Halt e {
+        caught = caught + 1
+    }
+    i = i + 1
+}
+print(caught)
+// → 50
+
+
+// The value that was raised survives the cleanup of the frame that built it,
+// which is the one frame guaranteed to be erased.
+
+try {
+    innermost()
+} catch Halt e {
+    print(e.message)
+}
+// → stopped
+
+
+// A frame that catches keeps its own locals: it is staying, not leaving.
+
+fn recovers() {
+    let kept = [7, 8]
+    try {
+        innermost()
+    } catch Halt e {
+    }
+    return kept
+}
+
+print(recovers())
+// → [7, 8]
+
+
+// And a catch that does not match rethrows to the frame above, which cleans up
+// the rethrowing frame on its way past.
+
+struct Other {
+    message
+}
+
+fn wrong_arm() {
+    let temp = ["x"]
+    try {
+        innermost()
+    } catch Other e {
+        return "unreachable"
+    }
+    return temp
+}
+
+try {
+    wrong_arm()
+} catch Halt e {
+    print("rethrown: " + e.message)
+}
+// → rethrown: stopped

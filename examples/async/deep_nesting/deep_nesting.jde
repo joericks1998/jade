@@ -1,0 +1,83 @@
+// A task may await another task, as deep as the call stack allows.
+//
+// `await` blocks a real thread in a compiled binary, so a chain of nested
+// awaits used to pin one thread per level and stop dead at the pool's ceiling —
+// the innermost task had nobody left to run it and every level above waited for
+// it forever. An awaiting thread now runs the task itself when nobody else has
+// claimed it, so the depth costs stack rather than threads, and both engines
+// agree far past where the old ceiling stood.
+
+async fn countdown(n) {
+    if n <= 0 {
+        return 0
+    }
+    return 1 + await countdown(n - 1)
+}
+
+print(await countdown(2000))
+// → 2000
+
+
+// A task is a fresh call chain, so the depth an `await` chain reaches does not
+// come out of the recursion budget an individual task has to spend.
+
+async fn depth_probe(n) {
+    if n <= 0 {
+        return countable(0)
+    }
+    return await depth_probe(n - 1)
+}
+
+fn countable(n) {
+    if n >= 200 {
+        return n
+    }
+    return countable(n + 1)
+}
+
+print(await depth_probe(500))
+// → 200
+
+
+// Tasks that do not wait on each other still run side by side: running a task
+// inline is what an awaiting thread does instead of idling, not a replacement
+// for the pool.
+
+async fn identity(n) {
+    return n
+}
+
+let fanned = join(identity(1), identity(2), identity(3), identity(4))
+print(fanned)
+// → [1, 2, 3, 4]
+
+
+// A generator that raises inside a task leaves its half-filled buffer behind.
+// That buffer belongs to the task, not to whichever thread ran it, so the
+// caller's own `yield`s still land where they should.
+
+struct Halt { message }
+
+fn partial() {
+    yield 10
+    raise Halt { message: "stopped early" }
+}
+
+async fn swallow() {
+    try {
+        partial()
+    } catch Halt e {
+        return e.message
+    }
+    return "no raise"
+}
+
+fn bracket() {
+    yield 1
+    print(await swallow())
+    yield 2
+}
+
+print(bracket())
+// → stopped early
+// → [1, 2]

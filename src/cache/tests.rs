@@ -220,6 +220,11 @@ fn purge_predicate_filters() {
 
 #[test]
 fn cache_format_version_is_stable() {
+    // Bumped to 12 in v1.4.3. `CompiledFn` gained `is_async`, which is what lets
+    // a function reached as a *value* start a task: a call site that cannot see
+    // the declaration has no static type to decide from. An older cache holds
+    // the shape without it, and bincode has no field names to notice with.
+    //
     // Bumped to 11 in v1.4.1. `StructLiteral` gained a `base` field in both the
     // AST and the TIR, for the `...` of a copy-with literal. An older cache
     // holds the shape without it, and bincode has no field names to notice the
@@ -231,6 +236,6 @@ fn cache_format_version_is_stable() {
     // `decorators` field for `parents`; and `Instr::CatchMatches` is a new
     // opcode. A TIR cached by an older build would deserialize into something
     // this one cannot run, and would do it without complaining.
-    assert_eq!(CACHE_FORMAT_VERSION, 11);
+    assert_eq!(CACHE_FORMAT_VERSION, 12);
     assert!(!JADE_VERSION.is_empty());
 }

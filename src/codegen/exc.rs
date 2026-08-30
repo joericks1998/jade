@@ -10,6 +10,29 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
     /// `unreachable` (throw is noreturn — it longjmps to the active handler or
     /// aborts). Callers must not emit anything after this in the same block.
     pub(super) fn throw(&self, value: IntValue<'ctx>) -> Result<(), String> {
+        // Give the exception a reference of its own before it leaves.
+        //
+        // The throw releases the registers of every frame it is about to skip
+        // (`jade_frame_release_above`), and for `raise x` the raiser's own frame
+        // is one of them, with `x` sitting in one of those registers. A store
+        // takes ownership rather than retaining, so that register *is* the
+        // value's only owner: without a reference held by the exception itself,
+        // the value would be freed on the way out and the catch would bind
+        // reclaimed memory.
+        //
+        // The landing pad hands this reference straight to the `catch` binding
+        // and takes none of its own. The runtime's own throwers pass a value
+        // they already own and so retain nothing here — see `jrt_throw_runtime`.
+        self.retain(value);
+        self.throw_owned(value)
+    }
+
+    /// `throw` for a caller that has already taken the exception's reference.
+    ///
+    /// The pair exists because the raiser sometimes has to retain *before* it
+    /// releases its own registers, and doing both here would release the value
+    /// out from under the retain.
+    pub(super) fn throw_owned(&self, value: IntValue<'ctx>) -> Result<(), String> {
         let void = self.ctx.void_type();
         let f = self.runtime_fn(
             "jade_exc_throw_typed",
@@ -93,6 +116,36 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
     /// ones with a `try` — on every return path *and* every exception landing
     /// pad, so a caught raise from deep in a call chain does not leave the
     /// counter stuck high from callee frames a longjmp skipped past.
+    /// The landing-pad form: unwind to the entry snapshot and put *this* frame
+    /// back, because a catch is not a return. The function keeps running and its
+    /// registers stay live, so a later `raise` from the handler body still has
+    /// to be able to release what they hold.
+    pub(super) fn emit_recur_resume(&self) -> Result<(), String> {
+        let (Some(slot), Some((spill, n))) = (self.recur_depth_slot, self.spill) else {
+            return self.emit_recur_restore();
+        };
+        let i32_ty = self.ctx.i32_type();
+        let saved = self
+            .builder
+            .build_load(i32_ty, slot, "recur_saved")
+            .map_err(|e| e.to_string())?
+            .into_int_value();
+        let f = self.runtime_fn(
+            "jrt_recur_resume",
+            self.ctx
+                .void_type()
+                .fn_type(&[i32_ty.into(), self.ptrt().into(), i32_ty.into()], false),
+        );
+        self.builder
+            .build_call(
+                f,
+                &[saved.into(), spill.into(), i32_ty.const_int(n as u64, false).into()],
+                "",
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     pub(super) fn emit_recur_restore(&self) -> Result<(), String> {
         let Some(slot) = self.recur_depth_slot else { return Ok(()) };
         let i32_ty = self.ctx.i32_type();
@@ -103,6 +156,28 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
             .into_int_value();
         let f = self
             .runtime_fn("jrt_recur_restore", self.ctx.void_type().fn_type(&[i32_ty.into()], false));
+        self.builder.build_call(f, &[saved.into()], "").map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Close any generator buffer a caught raise left open.
+    ///
+    /// Runs only on an exception landing pad. On the ordinary path a
+    /// `yield`ing function closes its own buffer when it returns; the landing
+    /// pad is the one place that knows a raise skipped that close, and how far
+    /// back to unwind. See `yield_depth_slot` for the program this fixes.
+    pub(super) fn emit_yield_restore(&self) -> Result<(), String> {
+        let Some(slot) = self.yield_depth_slot else { return Ok(()) };
+        let i32_ty = self.ctx.i32_type();
+        let saved = self
+            .builder
+            .build_load(i32_ty, slot, "yield_saved")
+            .map_err(|e| e.to_string())?
+            .into_int_value();
+        let f = self.runtime_fn(
+            "jrt_yield_truncate",
+            self.ctx.void_type().fn_type(&[i32_ty.into()], false),
+        );
         self.builder.build_call(f, &[saved.into()], "").map_err(|e| e.to_string())?;
         Ok(())
     }

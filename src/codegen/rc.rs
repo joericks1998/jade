@@ -96,9 +96,11 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
     /// in-place array-mutation case).
     pub(super) fn rc_replace_slot(&self, i: usize, new: IntValue<'ctx>) {
         let old = self.slot_load(i, "rcold");
-        // `jrt_rc_replace` decrefs `old` and increfs `new`; both no-op unless the
-        // word is heap. Skip the call when *neither* is heap (the common case for
-        // scalar slots) with an inline guard — `is_heap(old) || is_heap(new)`.
+        // `jrt_rc_replace` releases `old` and does *not* retain `new`: a store
+        // takes ownership. A producer's result therefore needs no retain, and a
+        // borrowed read (`Move`, `GetLocal`, `GetField`, …) needs one, which is
+        // what `retain` above is for. Skip the call when neither word is heap
+        // (the common case for scalar slots) with an inline guard.
         let old_heap = self.is_heap(old);
         let new_heap = self.is_heap(new);
         let either = self.builder.build_or(old_heap, new_heap, "rc_either").unwrap();
@@ -112,6 +114,30 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
             self.ctx.void_type().fn_type(&[self.i64t().into(), self.i64t().into()], false),
         );
         self.builder.build_call(f, &[old.into(), new.into()], "").unwrap();
+        // Mirror the write into the spill array, on this path only.
+        //
+        // The spill is what a throw releases for a frame it erases, so it has to
+        // agree with the register whenever the register holds something worth
+        // releasing — and this branch is exactly where that is true, since it
+        // runs when either word is heap. A scalar written over a scalar skips it
+        // and leaves a stale scalar behind, which releases as nothing. Putting
+        // it here rather than beside every store is what keeps the cost off
+        // arithmetic-only code entirely.
+        if let Some((spill, n)) = self.spill
+            && i < n
+        {
+            let slot = unsafe {
+                self.builder
+                    .build_in_bounds_gep(
+                        self.i64t(),
+                        spill,
+                        &[self.i64t().const_int(i as u64, false)],
+                        "spset",
+                    )
+                    .unwrap()
+            };
+            self.builder.build_store(slot, new).unwrap();
+        }
         self.builder.build_unconditional_branch(cont_bb).unwrap();
         self.builder.position_at_end(cont_bb);
     }

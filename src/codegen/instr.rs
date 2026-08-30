@@ -35,6 +35,10 @@ pub(super) struct BodyCtx<'a, 'ctx> {
     pub llblocks: &'a [LlvmBlock<'ctx>],
     pub graph: &'a cfg::Cfg,
     pub handler_bufs: &'a HashMap<usize, PointerValue<'ctx>>,
+    /// Per instruction: is a handler *of this function* active here? A `raise`
+    /// inside one stays in this frame; a `raise` outside every one is leaving.
+    /// See the `Raise` arm.
+    pub in_handler: &'a [bool],
     pub call_builtins: &'a HashMap<usize, BuiltinCall>,
     pub user_calls: &'a HashMap<usize, CallKind>,
     pub fn_defs: &'a [Arc<CompiledFn>],
@@ -47,8 +51,16 @@ pub(super) fn lower_instr<'ctx>(
     idx: usize,
     body: &BodyCtx<'_, 'ctx>,
 ) -> Result<bool, String> {
-    let BodyCtx { llblocks, graph, handler_bufs, call_builtins, user_calls, fn_defs, fnctx } =
-        *body;
+    let BodyCtx {
+        llblocks,
+        graph,
+        handler_bufs,
+        in_handler,
+        call_builtins,
+        user_calls,
+        fn_defs,
+        fnctx,
+    } = *body;
     use Instr::*;
     let b = low.builder;
     let i64_ty = low.i64t();
@@ -1092,7 +1104,7 @@ pub(super) fn lower_instr<'ctx>(
         // Spawn a known async function: pack args into a stack array and call
         // jade_spawn(jf_task_<uid>, args, n). The future is stored as a raw
         // pointer word (futures only flow to await/join, never generic ops).
-        Spawn(dest, _callee, _args) => match user_calls.get(&idx) {
+        Spawn(dest, dyn_callee, dyn_args) => match user_calls.get(&idx) {
             Some(CallKind::Spawn { uid, args }) => {
                 // Pack `params.len()` slots: provided args, then omitted trailing
                 // defaults (the task wrapper unpacks exactly that many).
@@ -1155,6 +1167,18 @@ pub(super) fn lower_instr<'ctx>(
                 // segfaulted. It now carries TAG_PTR and ObjKind::Future, so
                 // the renderer and the await guard can both recognise it.
                 low.store(*dest, low.tag_ptr(fut));
+                Ok(false)
+            }
+            // A spawn whose callee is not statically known: through a local, a
+            // collection, a function that returns one, or an `async fn` imported
+            // from a module. `jrt_call_value` handles it, because the box says
+            // it is async and starting the task is that function's decision
+            // rather than this site's. The same path carries a wrong argument
+            // count to the callee's own entry, which raises the way the
+            // interpreter does instead of refusing to build.
+            None => {
+                let fut = low.indirect_call(*dyn_callee, dyn_args)?;
+                low.store(*dest, fut);
                 Ok(false)
             }
             _ => Err(format!("codegen: unsupported spawn at {idx}")),
@@ -1234,6 +1258,15 @@ pub(super) fn lower_instr<'ctx>(
                 let v =
                     b.build_load(i64_ty, slot, "jr").map_err(|e| e.to_string())?.into_int_value();
                 b.build_call(push_f, &[arr.into(), v.into()], "").map_err(|e| e.to_string())?;
+                // `jrt_karr_push` takes the array's own reference, so the one
+                // the join handed over is this frame's to give back. `Await`
+                // above needs no counterpart: its single `store` *is* the
+                // handover. Without this, `join` leaked one object per result
+                // whose value lived on the heap — 10,000 iterations of
+                // `join(mk(i))` left 10,001 live objects where the same loop
+                // written with `await` left 1, so a service that joined in its
+                // request loop grew without bound.
+                low.decref(v);
             }
             low.store(*dest, low.tag_ptr(arr));
             Ok(false)
@@ -1245,6 +1278,9 @@ pub(super) fn lower_instr<'ctx>(
         // path. It never returns, so it terminates the block.
         Raise(val) => {
             let v = low.load(*val);
+            // No scope exit here. The throw releases what *every* frame it
+            // erases was holding, this one included — see
+            // `jade_frame_release_above`. Doing both would release twice.
             low.throw(v)?;
             Ok(true)
         }
@@ -1278,17 +1314,25 @@ pub(super) fn lower_instr<'ctx>(
             // exist. Reset it to what it was when *this* function was entered —
             // correct regardless of how many frames were skipped, since this
             // function's own frame is all that is left.
-            low.emit_recur_restore()?;
+            low.emit_recur_resume()?;
+            // Same reasoning one level up: the longjmp skipped the `jrt_yield_pop`
+            // of every generator frame it unwound past, so their buffers are
+            // still open and the next `yield` here would land in one of them.
+            low.emit_yield_restore()?;
+            // The exception carries a reference, and this is where it lands.
+            //
+            // A store takes ownership rather than retaining, so binding the
+            // caught value here is the whole transfer: the `catch` variable
+            // becomes its owner and releases it at scope exit. Retaining as well
+            // would give one reference two owners and leak one per caught raise.
+            //
+            // This pairs exactly with the retain in `throw` and with the frame
+            // release the throw performs, and none of the three works alone. A
+            // raise in *this* frame leaves the raiser's own register owning its
+            // reference, untouched because this frame is not one of the skipped
+            // ones; a raise from deeper had that register released on the way
+            // out. Either way the value arrives with exactly one owner to be.
             let caught = low.exc_value();
-            // `jade_exc_value` hands back a *borrowed* word — the raiser stored
-            // it and did not give up its reference. For a raise in this same
-            // frame that raiser's slot is still live and still owns it, so
-            // binding it here without a retain gives one reference two owners,
-            // and scope exit releases it twice. (A raise from a deeper frame
-            // leaks that frame's reference instead, because the longjmp skipped
-            // its scope exit — a separate problem, and not one a missing retain
-            // here would fix.)
-            low.retain(caught);
             low.store(*caught_reg, caught);
             b.build_unconditional_branch(block_of(target(*off))).map_err(|e| e.to_string())?;
             Ok(true)
@@ -1322,9 +1366,11 @@ pub(super) fn lower_instr<'ctx>(
                 low.ctx.void_type().fn_type(&[i64_ty.into()], false),
             );
             let v = low.load(*src);
-            // The buffer takes a reference: the slot it came from is released
-            // at scope exit, and the caller reads the value long after.
-            low.incref(v);
+            // No retain here. `jrt_yield_append` appends through `jrt_karr_push`,
+            // which takes the buffer's reference itself — the same one every
+            // other array write takes. Retaining as well gave the yielded value
+            // three references and two owners, so `yield [1, 2]` leaked its array
+            // on every pass.
             b.build_call(f, &[v.into()], "").map_err(|e| e.to_string())?;
             Ok(false)
         }
@@ -1333,22 +1379,36 @@ pub(super) fn lower_instr<'ctx>(
             // Closing the frame here rather than at one exit point covers every
             // return path — an explicit `return`, the implicit one at the end,
             // and a `return` inside a `try`.
-            let v = if low.is_generator {
+            // A generator hands back its buffer; everything else hands back a
+            // register. The difference is who owns what: `jrt_yield_pop` gives up
+            // the buffer's one reference, while a register keeps owning its value
+            // until scope exit releases it just below.
+            let (v, borrowed) = if low.is_generator {
                 let f = low.runtime_fn("jrt_yield_pop", i64_ty.fn_type(&[], false));
-                b.build_call(f, &[], "ypop")
+                let popped = b
+                    .build_call(f, &[], "ypop")
                     .map_err(|e| e.to_string())?
                     .as_any_value_enum()
-                    .into_int_value()
+                    .into_int_value();
+                (popped, false)
             } else {
-                match opt {
+                let w = match opt {
                     Some(r) => low.load(*r),
                     None => i64_ty.const_int(NIL, false),
-                }
+                };
+                (w, true)
             };
             // Transfer the returned reference to the caller: retain it, then the
             // scope-exit release (which decrefs the source slot) nets an ownership
             // move rather than a free of a value the caller now holds.
-            low.incref(v);
+            //
+            // Not for a generator's buffer, which arrives already owned and is not
+            // in any register for scope exit to release. Retaining it there gave
+            // the buffer two references and one owner, so every call to a
+            // `yield`ing function leaked its stream.
+            if borrowed {
+                low.incref(v);
+            }
             low.emit_scope_exit();
             // Drop any handler this function opened but did not fall out of —
             // `return` inside a `try` skips the emitter's PopHandler.
@@ -1381,7 +1441,10 @@ pub(super) fn lower_instr<'ctx>(
                         .module
                         .get_function(&format!("jf_ind_{uid}"))
                         .ok_or(format!("codegen: missing indirect entry for fn {uid}"))?;
-                    low.store(*d, low.fn_box_word(uid, entry))
+                    // The box says whether calling it starts a task, because the
+                    // site that eventually calls it will only have the value.
+                    let is_async = fnctx.defs[uid].is_async;
+                    low.store(*d, low.fn_box_word(uid, entry, is_async))
                 }
                 None => return Err(format!("codegen: unknown fn_def index {idx}")),
             }

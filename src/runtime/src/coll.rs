@@ -785,3 +785,34 @@ pub extern "C" fn jrt_yield_pop() -> i64 {
         None => crate::value::NIL_BITS as i64,
     })
 }
+
+/// How many generator frames are open on this thread.
+///
+/// Paired with [`jrt_yield_truncate`] to bracket a body that may leave frames
+/// behind. A `yield`ing function that raises never reaches its `jrt_yield_pop`,
+/// so its buffer stays on the stack and the *next* `yield` on this thread lands
+/// in it instead of where it belongs. That is invisible while a thread runs one
+/// body and dies, and very visible once threads are reused or a task body runs
+/// on a thread that was already inside a generator.
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_yield_depth() -> i32 {
+    YIELD_STACK.with(|s| s.borrow().len() as i32)
+}
+
+/// Drop every generator frame opened above `depth`, releasing their buffers.
+///
+/// A no-op in the ordinary case, where the body popped its own frames.
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_yield_truncate(depth: i32) {
+    let want = if depth < 0 { 0usize } else { depth as usize };
+    let orphaned: Vec<*mut core::ffi::c_void> = YIELD_STACK.with(|s| {
+        let mut v = s.borrow_mut();
+        if v.len() <= want { Vec::new() } else { v.split_off(want) }
+    });
+    // Released outside the `borrow_mut`, because dropping an array can run
+    // arbitrary destructors and one of them must be free to touch this stack.
+    for arr in orphaned {
+        let w = crate::value::JadeValue::from_ptr(arr as *const ()).bits() as i64;
+        crate::gc::jrt_decref(w);
+    }
+}

@@ -6,6 +6,7 @@
 
 #include <assert.h>
 #include <ctype.h>
+#include <pthread.h>
 #include <setjmp.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -101,7 +102,32 @@ int jrt_snprintf_any(char* buf, size_t cap, int64_t val) {
     return snprintf(buf, cap, "<object>");  /* non-string heap pointer */
 }
 
-void jrt_print_any(int64_t val, const char* suffix) {
+/* ── stdout: line-buffered, and one writer at a time ──────────────────────
+ *
+ * Two things a compiled binary got wrong that `jade run` got right, both
+ * invisible at a terminal and both serious for a service.
+ *
+ * stdio picks full buffering for a stream that is not a terminal, so a binary
+ * whose output went to a file or a supervisor produced nothing until 4 KB had
+ * accumulated, and lost whatever was still buffered on SIGTERM. The interpreter
+ * never had this: Rust wraps stdout in a LineWriter, which line-buffers whether
+ * or not it is a terminal. `setvbuf` here says the same thing.
+ *
+ * And a print was several `fputs` calls — the value, then the newline — with
+ * nothing between them, so concurrent tasks spliced their text together. Four
+ * tasks printing 200 lines each produced 56 corrupt lines out of 800. The
+ * interpreter's `println!` takes the stdout lock for the whole write; this is
+ * the compiled half of that. It has to be one lock for the whole of a print,
+ * not one per `fputs`, which is why the body moved into a `_locked` helper that
+ * `write` can share. */
+static pthread_mutex_t jade_out_mu = PTHREAD_MUTEX_INITIALIZER;
+
+__attribute__((constructor))
+static void jade_stdout_line_buffer(void) {
+    setvbuf(stdout, NULL, _IOLBF, 0);
+}
+
+static void jrt_print_any_locked(int64_t val, const char* suffix) {
     /* Print a type-erased value to stdout, then `suffix`. Used by print() for
      * statically-Unknown args. Strings are written directly (unbounded) — unlike
      * routing through jrt_snprintf_any + a fixed scratch buffer, which truncates
@@ -127,6 +153,12 @@ void jrt_print_any(int64_t val, const char* suffix) {
     if (suffix) fputs(suffix, stdout);
 }
 
+void jrt_print_any(int64_t val, const char* suffix) {
+    pthread_mutex_lock(&jade_out_mu);
+    jrt_print_any_locked(val, suffix);
+    pthread_mutex_unlock(&jade_out_mu);
+}
+
 /* jrt_write_any — the `write(x)` builtin: `print` with no newline, flushed.
  *
  * The flush is the whole point and is not optional. `write` exists for output
@@ -136,8 +168,12 @@ void jrt_print_any(int64_t val, const char* suffix) {
  * appears late or, at exit, out of order. The VM's `write` flushes for the same
  * reason (stdio::write_str_flush); this is the compiled half of that. */
 void jrt_write_any(int64_t val) {
-    jrt_print_any(val, NULL);
+    /* The flush is inside the lock, so a `write` cannot be split by a `print`
+     * landing between its text and its flush. */
+    pthread_mutex_lock(&jade_out_mu);
+    jrt_print_any_locked(val, NULL);
     fflush(stdout);
+    pthread_mutex_unlock(&jade_out_mu);
 }
 
 /* ── Dynamic conversion builtins int()/float()/bool() (Chunk backend) ──────
@@ -147,6 +183,7 @@ void jrt_write_any(int64_t val) {
 #include <errno.h>
 #include <strings.h>            /* strcasecmp */
 static void throw_msg(const char* m);   /* defined below; used by int()/float() */
+void jade_frame_release_above(int32_t depth); /* defined below; used by the throw path */
 static void bytes_throw_pending(const char* fallback); /* defined below; used by set-index */
 
 /* Trim ASCII whitespace in place by returning adjusted [start,end). Caller owns
@@ -537,6 +574,17 @@ void jrt_throw_arity(int64_t expected, int64_t got) {
 
 typedef int64_t (*jade_entry_t)(int64_t argc, const int64_t* argv);
 
+extern void* jrt_spawn(int64_t (*fn)(int64_t*, int32_t), const int64_t* args, int n);
+
+/* The body of a task started from a function *value*. `args[0]` is the callee's
+ * box word; the rest are its arguments. Enters the body directly rather than
+ * going back through `jrt_call_value`, which would see the async bit again and
+ * spawn a second task. */
+static int64_t jade_task_entry_shim(int64_t* args, int32_t n) {
+    void** box = (void**)jrt_unbox_ptr((jade_value_t)args[0]);
+    return ((jade_entry_t)box[0])((int64_t)(n - 1), args + 1);
+}
+
 /* No real Jade call comes near this. It exists so a corrupt `argc` cannot turn
  * the receiver-prepending buffer below into an unbounded stack allocation. */
 #define JRT_MAX_CALL_ARGS 256
@@ -558,6 +606,24 @@ int64_t jrt_call_value(int64_t callee, int64_t argc, const int64_t* argv) {
         buf[0] = w[3];
         for (int64_t i = 0; i < argc; i++) { buf[i + 1] = argv[i]; }
         return fn(argc + 1, buf);
+    }
+
+    /* An `async fn` reached as a value. The call site could not know: a value
+     * carries no static type, so `let f = w`, `[1, 2].map(w)` and an `async fn`
+     * imported from a module all arrive here as ordinary calls, where a site
+     * that could see the declaration would have emitted a spawn. The box says
+     * so instead, and this is the one place that reads it.
+     *
+     * The task is handed the box word itself rather than the raw entry, so what
+     * the pool retains is an ordinary tagged value. `jade_task_entry_shim`
+     * unwraps it on the other side and enters the body directly — going back
+     * through this function there would spawn a second task and hand the
+     * awaiter a future where it expects a value. */
+    if (((int64_t*)box)[1] & JRT_FN_ASYNC) {
+        int64_t buf[argc + 1];
+        buf[0] = callee;
+        for (int64_t i = 0; i < argc; i++) { buf[i + 1] = argv[i]; }
+        return (int64_t)jrt_box_ptr(jrt_spawn(jade_task_entry_shim, buf, (int)argc + 1));
     }
 
     /* {entry@0, kind@8, [env@16]}. A native binding is told apart by the
@@ -1633,18 +1699,86 @@ int jrt_eq_any(uint64_t a, uint64_t b) {
 
 /* ── Exceptions ───────────────────────────────────────────────────────── */
 
-#define JADE_EXC_MAX_DEPTH 64
+/* The handler stack grows, because its depth tracks the call stack's.
+ *
+ * It was a fixed 64-slot array, which is not many: a recursive function with a
+ * `try` in it ran out at depth 64, and an `await` chain does the same now that
+ * an awaiting thread runs the task itself and each level pushes a frame. The
+ * interpreter has no such limit — its handlers are a vec owned by the dispatch
+ * call frame (vm/dispatch.rs) — so the ceiling was a backend divergence that
+ * reported "exception stack overflow" for a program the VM ran fine.
+ *
+ * The first 64 frames live in a thread-local array so the common case costs no
+ * allocation at all; past that it doubles on the heap. JADE_EXC_MAX_DEPTH is a
+ * backstop against a runaway, far above any real program, and 8 MB of slots at
+ * the ceiling. The grown buffer is not freed when a worker thread exits; the
+ * pool bounds thread count, so the leak is bounded and one-time per thread. */
+#define JADE_EXC_INIT_DEPTH 64
+#define JADE_EXC_MAX_DEPTH  (1 << 20)
 
-static _Thread_local void*       exc_stack[JADE_EXC_MAX_DEPTH];
+/* A handler remembers how deep the call stack was when it was installed, which
+ * is what tells a throw exactly which frames it is about to erase. */
+typedef struct { void* buf; int32_t frame_depth; } jade_handler_t;
+
+static _Thread_local jade_handler_t  exc_inline[JADE_EXC_INIT_DEPTH];
+static _Thread_local jade_handler_t* exc_stack = NULL;  /* exc_inline until it grows */
+static _Thread_local int             exc_cap   = 0;
 static _Thread_local int64_t     exc_thrown_value;
 static _Thread_local const char* exc_thrown_type;   /* struct type name, or NULL */
 static _Thread_local int         exc_depth = 0;
 
+/* Make room for one more frame. Returns 0 only at the backstop or on OOM. */
+/* A grown stack belongs to its thread, so it has to die with it.
+ *
+ * Pool workers retire after an idle timeout and new ones take their place, so
+ * "one buffer per thread" is not a bounded leak in a long-running process — it
+ * is one buffer per thread the process ever creates, and a service that cycles
+ * between bursts and quiet creates them forever. A pthread key destructor is
+ * what frees thread-owned memory at thread exit; the inline array is not heap
+ * memory and never reaches it. */
+static pthread_key_t  exc_stack_key;
+static pthread_once_t exc_stack_key_once = PTHREAD_ONCE_INIT;
+
+static void jade_exc_free_thread(void* p) { free(p); }
+
+static void jade_exc_key_init(void) {
+    (void)pthread_key_create(&exc_stack_key, jade_exc_free_thread);
+}
+
+static int jade_exc_reserve(void) {
+    if (exc_stack == NULL) {
+        exc_stack = exc_inline;
+        exc_cap   = JADE_EXC_INIT_DEPTH;
+    }
+    if (exc_depth < exc_cap) return 1;
+    if (exc_cap >= JADE_EXC_MAX_DEPTH) return 0;
+
+    int ncap = exc_cap * 2;
+    if (ncap > JADE_EXC_MAX_DEPTH) ncap = JADE_EXC_MAX_DEPTH;
+
+    jade_handler_t* grown;
+    if (exc_stack == exc_inline) {
+        grown = (jade_handler_t*)malloc((size_t)ncap * sizeof(jade_handler_t));
+        if (grown) memcpy(grown, exc_inline, (size_t)exc_cap * sizeof(jade_handler_t));
+    } else {
+        grown = (jade_handler_t*)realloc(exc_stack, (size_t)ncap * sizeof(jade_handler_t));
+    }
+    if (!grown) return 0;
+    exc_stack = grown;
+    exc_cap   = ncap;
+    /* Re-registered on every growth, because realloc may have moved it. */
+    (void)pthread_once(&exc_stack_key_once, jade_exc_key_init);
+    (void)pthread_setspecific(exc_stack_key, grown);
+    return 1;
+}
+
 void jade_exc_push_frame(void* jmpbuf) {
-    if (exc_depth >= JADE_EXC_MAX_DEPTH) {
+    if (!jade_exc_reserve()) {
         jade_rt_fatal("jade: exception stack overflow");
     }
-    exc_stack[exc_depth++] = jmpbuf;
+    exc_stack[exc_depth].buf = jmpbuf;
+    exc_stack[exc_depth].frame_depth = jrt_recur_depth();
+    exc_depth++;
 }
 
 void jade_exc_pop(void) { if (exc_depth > 0) exc_depth--; }
@@ -1721,8 +1855,13 @@ void jade_exc_throw_typed(int64_t value, const char* type) {
     }
     exc_thrown_value = value;
     exc_thrown_type  = type;
-    void* buf = exc_stack[--exc_depth];
-    longjmp(*(jmp_buf*)buf, 1);
+    exc_depth--;
+    /* Let every frame this jump is about to erase give back what it holds,
+     * before the jump, while those frames still exist — afterwards they sit
+     * below the stack pointer and reading them is not allowed. `value` carries
+     * a reference of its own by now, so releasing the raiser cannot free it. */
+    jade_frame_release_above(exc_stack[exc_depth].frame_depth);
+    longjmp(*(jmp_buf*)exc_stack[exc_depth].buf, 1);
 }
 
 void jade_exc_throw(int64_t value) { jade_exc_throw_typed(value, NULL); }
@@ -1748,10 +1887,135 @@ const char* jade_exc_type(void)  { return exc_thrown_type;  }
 
 static _Thread_local int32_t recur_depth = 0;
 
-void jrt_recur_enter(void) {
+/* ── What a frame holds, so a throw can give it back ──────────────────────
+ *
+ * A `longjmp` runs nothing on its way out. Every frame it skips loses its
+ * scope-exit releases, and everything those frames held is leaked:
+ *
+ *     fn c() { raise E { message: "x" } }
+ *     fn b() { let junk = [1, 2, 3]  c() }
+ *     while i < 1000 { try { b() } catch E e { }  i = i + 1 }
+ *
+ * leaked `junk` every pass, so a service with an error path in its request loop
+ * grew without bound. The interpreter has nothing to fix here: its frames are
+ * Rust values, and unwinding drops them.
+ *
+ * So each frame leaves behind a copy of whatever its registers hold that is
+ * worth releasing, and a throw releases the copies belonging to the frames it
+ * erases. The copy — the *spill* — is a separate array from the registers
+ * themselves, and that is the whole trick. Handing the runtime the registers
+ * directly is the obvious design and it costs 41% on `bench/extreme.jde`,
+ * because a register file whose address escapes cannot be promoted out of
+ * memory and every register access becomes a load. A spill array escapes
+ * instead, the registers stay in machine registers, and codegen writes a value
+ * through to the spill only on the path it has already decided is a heap value.
+ *
+ * ## Only inside a `try`
+ *
+ * A frame can only be skipped by a handler that already existed when the frame
+ * was entered — a handler installed deeper cannot unwind past something
+ * shallower, and a raise with no handler at all ends the process. So a frame
+ * entered with `exc_depth == 0` never needs any of this, which is why
+ * registering is gated on it. That is what takes the cost from 12% to 4% on a
+ * benchmark that is nothing but calls, and to nothing at all on the three that
+ * resemble real programs.
+ *
+ * The ownership rule underneath: *a store takes ownership*. `jrt_rc_replace`
+ * releases a slot's old value and does not retain the new one, so a value has
+ * exactly one owner — the register holding it — and releasing that register is
+ * releasing the value. Which is why a thrown value is retained before any of
+ * this runs. */
+static _Thread_local int64_t** frames     = NULL;
+static _Thread_local int32_t*  frame_lens = NULL;
+static _Thread_local int       frames_cap = 0;
+
+static pthread_key_t  frames_key;
+static pthread_key_t  frame_lens_key;
+static pthread_once_t frames_key_once = PTHREAD_ONCE_INIT;
+static void jade_frames_free_thread(void* p) { free(p); }
+static void jade_frames_key_init(void) {
+    (void)pthread_key_create(&frames_key, jade_frames_free_thread);
+    (void)pthread_key_create(&frame_lens_key, jade_frames_free_thread);
+}
+
+/* Room for the frame at `recur_depth`. Doubling, and bounded by
+ * JRT_RECUR_MAX_DEPTH above, so it cannot run away. */
+static int jade_frames_grow(void) {
+    int ncap = frames_cap ? frames_cap * 2 : 64;
+    if (ncap > JRT_RECUR_MAX_DEPTH + 1) ncap = JRT_RECUR_MAX_DEPTH + 1;
+    if (ncap <= frames_cap) return 0;
+
+    int64_t** g1 = (int64_t**)realloc(frames, (size_t)ncap * sizeof(int64_t*));
+    if (!g1) return 0;
+    frames = g1;
+    int32_t* g2 = (int32_t*)realloc(frame_lens, (size_t)ncap * sizeof(int32_t));
+    if (!g2) return 0;
+    frame_lens = g2;
+
+    memset(frames + frames_cap, 0, (size_t)(ncap - frames_cap) * sizeof(int64_t*));
+    frames_cap = ncap;
+    (void)pthread_once(&frames_key_once, jade_frames_key_init);
+    (void)pthread_setspecific(frames_key, frames);
+    (void)pthread_setspecific(frame_lens_key, frame_lens);
+    return 1;
+}
+
+/* Release what every frame deeper than `depth` left behind, and forget it.
+ *
+ * A spill slot holds a tagged word or the nil a prologue put there, so this is
+ * well defined for an untouched slot too. `jrt_is_heap` is the test codegen
+ * emits inline before each of its own releases; keeping it here skips a call
+ * for the scalar slots, which are most of them. */
+void jade_frame_release_above(int32_t depth) {
+    if (depth < 0) depth = 0;
+    for (int32_t d = recur_depth - 1; d >= depth; d--) {
+        if (d >= frames_cap) continue;
+        int64_t* spill = frames[d];
+        if (!spill) continue;
+        int32_t n = frame_lens[d];
+        /* Cleared first, so a destructor that somehow re-enters cannot see this
+         * frame a second time. */
+        frames[d] = NULL;
+        for (int32_t i = 0; i < n; i++) {
+            jade_value_t w = (jade_value_t)spill[i];
+            if (jrt_is_heap(w)) jrt_decref((int64_t)w);
+        }
+    }
+    if (depth < recur_depth) recur_depth = depth;
+}
+
+void jrt_recur_enter(int64_t* spill, int32_t n) {
     if (recur_depth >= JRT_RECUR_MAX_DEPTH) {
         throw_msg("recursion limit exceeded");
         /* unreachable: throw_msg longjmps or, with no active handler, exits. */
+    }
+    /* Only a frame entered while a handler exists can ever be unwound past. */
+    if (exc_depth != 0) {
+        if (recur_depth >= frames_cap && !jade_frames_grow()) {
+            jade_rt_fatal("jade: out of memory");
+        }
+        /* Filled here rather than in the prologue, so a frame outside any `try`
+         * — which is never read — pays nothing for it. Nil, not zero: zero is
+         * the integer 0 and this has to read as "nothing to release" until
+         * codegen writes a real word through. */
+        for (int32_t i = 0; i < n; i++) spill[i] = (int64_t)JRT_NIL;
+        frames[recur_depth]     = spill;
+        frame_lens[recur_depth] = n;
+    }
+    recur_depth++;
+}
+
+/* A landing pad is not a return: this function is still running, so its own
+ * frame goes back on the registry. Restoring to the entry snapshot alone
+ * forgets it while the handler body is still using those registers, and a
+ * `raise` from that body — every rethrow of an unmatched type — could then not
+ * release what this frame holds. */
+void jrt_recur_resume(int32_t saved, int64_t* spill, int32_t n) {
+    jrt_recur_restore(saved);
+    if (recur_depth < JRT_RECUR_MAX_DEPTH
+        && (recur_depth < frames_cap || jade_frames_grow())) {
+        frames[recur_depth]     = spill;
+        frame_lens[recur_depth] = n;
     }
     recur_depth++;
 }
@@ -1762,7 +2026,32 @@ int32_t jrt_recur_depth(void) { return recur_depth; }
  * restore that would *raise* the depth means some caller's own decrement
  * already ran, and letting it move backwards would double-count. */
 void jrt_recur_restore(int32_t depth) {
-    if (depth >= 0 && depth < recur_depth) recur_depth = depth;
+    if (depth < 0 || depth >= recur_depth) return;
+    /* Forget the frames being dropped. They released their own registers on the
+     * way out, and their `alloca`s are about to be reused by the next call at
+     * this depth — a throw that released them again would be dropping references
+     * this frame never took. */
+    for (int32_t d = depth; d < recur_depth && d < frames_cap; d++) frames[d] = NULL;
+    recur_depth = depth;
+}
+
+/* Begin a task body on a fresh budget, returning the depth to hand back.
+ *
+ * The one place the depth legitimately moves *up*, which is why it is a named
+ * pair rather than a raised jrt_recur_restore. A task is a fresh call chain:
+ * the interpreter's `spawn` builds a new VmState whose call_depth starts at 0
+ * (vm/dispatch.rs), and each task used to get a thread of its own here, which
+ * came to the same thing. Neither is true once an awaiting thread runs the task
+ * itself, so without this the awaiter's own depth counts against the task's
+ * budget and a long `await` chain trips a limit the interpreter never trips. */
+int32_t jrt_recur_enter_task(void) {
+    int32_t saved = recur_depth;
+    recur_depth = 0;
+    return saved;
+}
+
+void jrt_recur_leave_task(int32_t saved) {
+    if (saved >= 0) recur_depth = saved;
 }
 
 #include <fcntl.h>

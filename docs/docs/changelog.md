@@ -4,6 +4,95 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.4.3
+
+*Async, one layer at a time.* v1.4.2 stopped a deeply nested `await` from aborting a compiled binary, and left it hanging instead. That is the worse failure of the two, and it needed a design decision rather than a patch, because the ceiling it hit was not the real problem.
+
+*An `await` chain can now be as deep as the call stack allows.* `await` blocks a whole OS thread, so a chain of N nested awaits pins N threads. Every pool has a last thread: past it the innermost task had nobody left to run it and every level above waited for it forever. Raising the ceiling moves the wall without removing it.
+
+So an awaiting thread runs the task itself. A future carries its own body until somebody claims it, and a thread about to park on one takes it and calls it inline instead. The depth then costs stack rather than threads, and it spends the same budget ordinary recursion spends: an inline body keeps counting against the recursion limit, so the chain is bounded by the number that already bounds every other call chain rather than by the pool. Past it a binary says "recursion limit exceeded" where the interpreter, whose tasks live on the heap rather than the stack, keeps going. That is a real difference between the two and a loud one; before this, the binary hung at 512 and said nothing.
+
+Tasks that do not wait on each other still run side by side. Running one inline is what a thread does instead of idling, not a replacement for the pool. The pool's ceiling is now a cap on parallelism alone and can no longer stop a program, and a nested fan-out gives the same answer at `JADE_MAX_TASKS=1` as at 512, where it used to deadlock.
+
+*Nested `try` is no longer capped at 64.* The compiled handler stack was a fixed 64-slot array, so a recursive function with a `try` in it reported "exception stack overflow" for a program `jade run` finished. The interpreter's handlers belong to the call frame and have no ceiling. This one grows now.
+
+*A caught raise closes the generator buffers it skipped past.* A `yield`ing function opens a buffer when it starts and hands it back when it returns, and a raise in between never reaches the return:
+
+```jade
+fn inner()  { yield 10
+              raise Stop { message: "no more" } }
+
+fn outer()  { yield 1
+              try { inner() } catch Stop e { }
+              yield 2 }
+
+print(outer())        // [1, 2] interpreted, [10, 2] compiled
+```
+
+`outer`'s second yield went into the buffer `inner` abandoned, and `outer` handed back the one on top. Whoever stops a raise is the one that knows how far to unwind, so the catch now truncates the generator stack the same way it already truncates the handler stack and the recursion counter. A generator that catches its own raise still keeps its own buffer.
+
+*A task no longer inherits the thread it runs on.* Three things leaked across that boundary, invisibly while each task had a thread to itself and visibly once a bounded pool started reusing workers. A generator that raised inside a task left its half-filled buffer behind, and the next `yield` on that thread landed in it. A `try` left open by a `return` did the same to the handler stack. And the recursion budget carried over, so a long chain of awaits tripped a limit the interpreter never trips. A task is a fresh call chain, as it already was in the interpreter.
+
+*A task gets the stack the main body gets.* Pool workers ran on the 2 MB Rust hands a thread by default, so the same function succeeded at top level and overflowed inside an `async fn`, taking the process down with no Jade error to read. They get 256 MB now, matching both `jade run` and the compiled main body.
+
+*An `async fn` is a value now, everywhere.* Holding one refused to compile at all, and `map` over one ran it inline:
+
+```jade
+async fn double(n) { return n * 2 }
+
+let f = double
+await f(21)                       // build error: spawn of a non-static function
+[1, 2].map(double)                // ran inline, gave [2, 4] rather than futures
+```
+
+Whether a call starts a task was decided at the call site, from the static type of what it was calling. A value carries no static type, so a function reached through a local, a collection, `map`, or an import was an ordinary call. The function carries the fact itself now, and every call reads it. Storing one in an array or a dict, returning one, passing one to `map`, and calling one with a default parameter all work on both engines, and a wrong argument count raises where it used to refuse to build.
+
+The same gap is why `await lib.work(3)` never worked. The type checker cannot see inside an imported module — its names only exist once the importer merges the two, which is long after checking — so an imported `async fn` was called synchronously and the `await` failed with "applied to a non-Future value". That was true of both engines, and needed nothing at the call site to change.
+
+*Three ways a task could reach the spawner's data with nothing to say so.* Jade refuses a program whose task mutates state the spawner can still reach, and three shapes walked straight past that check.
+
+A callback. `async fn run(f) { f() }` calls a parameter, and a parameter resolves to no definition, so `let record = || readings.push(3)` reached the task completely unexamined. It is still an ordinary value at the spawn, where its body is as visible as the task's, and that is where it is caught now.
+
+A function value read back from a global. A closure is bound under the name of the *variable*, not of any definition, so looking it up by definition name found nothing. What the global was last assigned answers it instead.
+
+A user method. `arr.push(x)` was rejected and `batch.grow()` was not, because a method reaches its receiver as `self` rather than as an argument — so an `extend` method mutating the receiver had an empty argument list and looked harmless. The receiver counts now, the same way it does for the built-in methods.
+
+*And the spawner is now held to the same rule as the task.* Every check in this pass asked what a task does. None asked what the spawner does *while the task is running*, which is the same race from the other side:
+
+```jade
+let limit = 2
+async fn read() { return limit }
+let f = read()
+limit = 10                        // ← refused here
+print(await f)
+```
+
+The two engines did not even agree on what that means: the interpreter gives each task a snapshot of the globals and answers 2, a compiled binary shares one cell and answers 10. Refusing the program is the answer rather than picking one. The same goes for mutating a collection a running task was handed. The window opens at the spawn and closes at the await, so both writes are fine once the task has finished.
+
+*Two more leaks on the task paths.* A future nobody awaited never released its result, so a fire-and-forget task returning a collection leaked one object per spawn: 5,000 of them left 5,001 live objects, and now leave 2. And a `join` whose task raised abandoned the results it had already collected, because the rethrow is a jump and the caller's collect-into-an-array loop never runs; those are released before the jump now.
+
+*A compiled binary's output streams, and does not tear.* Two things `jade run` got right that `jade build` did not, both invisible at a terminal and both serious for a service.
+
+stdio picks full buffering for a stream that is not a terminal, so a binary whose output went to a file or a supervisor produced nothing until 4 KB had piled up, and lost whatever was still buffered when it was told to stop. The interpreter never had this, because Rust line-buffers stdout whether or not it is a terminal. A binary does now too.
+
+And a print was several writes with nothing between them, so concurrent tasks spliced their text together: four tasks printing 200 lines each produced 56 corrupt lines out of 800. A print is one write under one lock now, and the same run produces none.
+
+*`join` reports a second failure instead of escaping the `try`.* This one is the interpreter's. `join` dispatches a caught error by popping a handler and jumping, and the jump was written inside the loop over the tasks — where it bound to that loop instead. So the first failure popped a handler and quietly carried on, and the second found the handler stack empty and escaped the enclosing `try` altogether:
+
+```jade
+try { join(bad(1), bad(2), good(3)) } catch E1 e { print(e.message) }
+```
+
+reported an unhandled exception rather than running the catch arm. Every task is awaited first now and the first failure is reported once, at the end, which is what the compiled backend already did and what `join` is documented to do.
+
+*A double `await` is a `RuntimeError` compiled, as it already was interpreted.* Awaiting a future twice, or awaiting something that is not a future, raised a bare string from a binary, so `catch e` bound a string and `catch RuntimeError e` did not match at all. A program that handled it interpreted died on it compiled.
+
+*`join` no longer leaks its results.* Collecting a task's result into the joined array took a reference for the array without giving back the one the join handed over, so every result that lived on the heap leaked one object. 10,000 iterations of `join(mk(i))` left 10,001 live objects where the same loop written with `await` left 1, and a service that joined in its request loop grew without bound: 400,000 joins peaked at 80 MB, and now hold flat at 3 MB.
+
+*Running out of threads no longer wedges the process.* When the OS refused a worker thread, the pool tried to undo its own bookkeeping while still holding the lock it needed to do it, and a `spawn` deadlocked against itself with nothing to wake it. The success path hid the bug completely, since the new thread is what runs the code that would have re-locked, so it only ever fired when the machine was out of threads and the recovery mattered most.
+
+A binary now finishes correctly even when *every* thread creation fails: the work runs on whichever thread awaits it, so a machine out of threads does its tasks one after another instead of hanging. The pool reports how often that happened rather than counting it silently.
+
 ## v1.4.2
 
 *Seven ways a compiled binary could crash or quietly disagree with the interpreter, all fixed.* Every one of them ran correctly under `jade run` and misbehaved under `jade build`, which is the class of bug `src/scripts/backend-parity.sh` exists to catch and none of these were caught, because no fixture happened to combine the right pieces.
@@ -106,6 +195,26 @@ f(a)                       // aborted here
 *Awaiting deeply no longer aborts.* The task pool computed its runnable population by subtracting blocked threads from its own workers, which underflows once a thread that is not one of its workers blocks — the main thread awaiting at the top level is exactly that.
 
 *A shadowed builtin reads as the builtin until it is assigned.* `print(len)` before `let len = 5` printed `nil` compiled where the interpreter still had the builtin.
+
+*A caught raise no longer leaks the value it raised.* A `longjmp` runs nothing on the way out, so a frame it skips never releases what its registers hold — and for the frame that raised, one of those is the raised value itself:
+
+```jade
+fn c() { raise E { message: "x" } }
+let i = 0
+while i < 1000 { try { c() } catch E e { }  i = i + 1 }
+```
+
+leaked one object a pass, and 5,000 of them left 5,001 live objects at exit. Not an async bug and not a new one; the interpreter never had it, because its frames are Rust values that unwinding drops.
+
+The raiser is the one frame that knows it is leaving, so it now cleans up before it goes, exactly as a `return` does. That also settles who owns a thrown value: the throw takes a reference of its own, and the `catch` binding takes that reference rather than a second one. A raise caught in the same frame is left alone, since that frame is staying.
+
+A frame merely *unwound past* is covered too: `fn b() { let junk = [1, 2, 3]  c() }` sitting between the raise and the catch used to drop `junk` on the floor. Every frame now leaves behind a copy of what its registers hold, and the throw releases the copies belonging to the frames it erases.
+
+The copy is a separate array from the registers, which is the whole trick. Handing the runtime the registers themselves is the obvious design and it costs 41% on `bench/extreme.jde`, because a register file whose address escapes cannot be promoted out of memory and every register access turns into a load. A copy escapes instead, the registers stay in machine registers, and it is written only where a store has already worked out that a heap value is involved — so arithmetic pays nothing for it.
+
+Nor does anything outside a `try`. A frame can only be skipped by a handler that already existed when the frame was entered, since a handler installed deeper cannot unwind past something shallower and a raise with no handler ends the process. Registering is gated on that, which is what takes the remaining cost to 6% on a benchmark that is nothing but calls, and to nothing measurable on the three that resemble real programs.
+
+*Two leaks on the `yield` path, found by the same measurement.* `yield x` took two references where the value needed one, because the call site retained and `jrt_karr_push` retained again, so `yield [1, 2]` leaked its array every pass. And a `yield`ing function's `return` retained the buffer it was handing back — right for a value read out of a register, wrong for one the generator already owns — so every call to a generator leaked its stream.
 
 Known and not fixed: an *uncaught* error still prints `jade: <message>` from a binary against `<file>: runtime error: [line:col] <message>` from the interpreter, and caught errors agree apart from that same `[line:col]` prefix on `.message`. A stdlib module function or a primitive method used as a *value* (`let f = math.sqrt`, `let f = s.upper`) still has no compiled form. `await` nests about 512 deep in a binary before the task pool runs out of threads, where the interpreter keeps going. And a callback that mutates the array it is mapping over sees its own writes compiled, where the interpreter walks a snapshot.
 

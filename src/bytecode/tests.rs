@@ -116,6 +116,7 @@ fn intern_fn_returns_sequential_indices() {
             source_file: String::new(),
             module_scope: None,
             is_generator: false,
+            is_async: false,
         })
     };
     let a = c.intern_fn(mk("a"));

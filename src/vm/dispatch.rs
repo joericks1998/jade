@@ -846,7 +846,12 @@ pub(crate) async fn execute_chunk(
                 // cost for call-heavy code once hashing is cheap). The slot borrow
                 // is released before the result is stored back below.
                 let result = match get(slots, *callee_reg) {
-                    VmValue::Fn(cf) => call_fn(cf, args, state, span).await,
+                    // …but not an `async fn`. Calling one starts a task, and
+                    // whether it does is the function's business rather than the
+                    // call site's: a value carries no static type, so `let f =
+                    // w` and `lib.work(3)` reach here as ordinary calls. See
+                    // `call_value`, which is the one place that decides.
+                    VmValue::Fn(cf) if !cf.is_async => call_fn(cf, args, state, span).await,
                     _ => {
                         let callee = get(slots, *callee_reg).clone();
                         call_value(callee, args, state, span).await
@@ -1495,38 +1500,75 @@ pub(crate) async fn execute_chunk(
                     }
                 }
             }
+            // `join` reports the *first* failure after awaiting every task, so a
+            // failing task does not cancel its siblings. That is what the
+            // compiled backend does (`jrt_join_impl`) and what the docs promise.
+            //
+            // Neither `vm_try!` nor `vm_err!` may appear inside the loops below.
+            // They dispatch by popping a handler, setting `ip`, and `continue`-ing
+            // the dispatch loop — and `continue` inside a `for` binds to the
+            // `for`. So a failure popped a handler and then quietly carried on to
+            // the next task instead of jumping, and a second failure found the
+            // handler stack already empty and escaped the enclosing `try`
+            // altogether:
+            //
+            //     try { join(bad(1), bad(2), good(3)) } catch E1 e { }
+            //
+            // reported "unhandled exception" rather than running the catch arm.
+            // So: collect everything first, dispatch exactly once at the end.
             Instr::Join(dest, future_regs) => {
+                let mut first_err: Option<JadeError> = None;
                 let mut handles = Vec::with_capacity(future_regs.len());
                 for &r in future_regs {
-                    match get(slots, r).clone() {
+                    let taken = match get(slots, r).clone() {
+                        // SAFETY: same as Instr::Await — .take() is synchronous.
                         VmValue::Future(jade_fut) => {
-                            // SAFETY: same as Instr::Await — .take() is synchronous.
-                            let handle = vm_try!(
-                                jade_fut
-                                    .handle
-                                    .lock()
-                                    .take()
-                                    .ok_or(JadeError::DoubleAwait { span })
-                            );
-                            handles.push(handle);
+                            jade_fut.handle.lock().take().ok_or(JadeError::DoubleAwait { span })
                         }
-                        _ => {
-                            vm_err!(JadeError::NotAFuture { span });
+                        _ => Err(JadeError::NotAFuture { span }),
+                    };
+                    match taken {
+                        Ok(h) => handles.push(Some(h)),
+                        Err(e) => {
+                            handles.push(None);
+                            first_err.get_or_insert(e);
                         }
                     }
                 }
+
                 let mut results = Vec::with_capacity(handles.len());
                 for handle in handles {
-                    let join_result = handle.await;
-                    let (task_result, child_raised) = vm_try!(
-                        join_result
-                            .map_err(|e| JadeError::AsyncPanic { message: e.to_string(), span })
-                    );
-                    if let Some(v) = child_raised {
-                        state.raised_exception = Some(v);
+                    // A slot that never produced a handle still gets an entry, so
+                    // `results` lines up with the arguments on every path.
+                    let Some(handle) = handle else {
+                        results.push(VmValue::Nil);
+                        continue;
+                    };
+                    match handle.await {
+                        Err(e) => {
+                            results.push(VmValue::Nil);
+                            first_err.get_or_insert(JadeError::AsyncPanic {
+                                message: e.to_string(),
+                                span,
+                            });
+                        }
+                        Ok((Ok(v), _)) => results.push(v),
+                        Ok((Err(e), child_raised)) => {
+                            results.push(VmValue::Nil);
+                            if first_err.is_none() {
+                                // Only the reported failure's value, so a typed
+                                // `catch` matches the arm it should.
+                                if let Some(v) = child_raised {
+                                    state.raised_exception = Some(v);
+                                }
+                                first_err = Some(e);
+                            }
+                        }
                     }
-                    let value = vm_try!(task_result);
-                    results.push(value);
+                }
+
+                if let Some(e) = first_err {
+                    vm_err!(e);
                 }
                 set(
                     slots,

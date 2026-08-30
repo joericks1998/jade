@@ -19,6 +19,71 @@ fn ir_of(code: &[Instr], n_slots: u32) -> String {
     module.print_to_string().to_string()
 }
 
+/// A frame leaves behind a copy of what its registers hold, so a throw can give
+/// it back. A `longjmp` runs nothing on the way out, so the frames it skips
+/// never reach their own releases — `fn b() { let junk = [1, 2, 3]  c() }`
+/// between a raise and its catch leaked `junk` every pass.
+///
+/// The copy is a *separate* array from the registers. Handing the runtime the
+/// registers themselves is the obvious design and costs 41% on a call-heavy
+/// benchmark, because a register file whose address escapes cannot be promoted
+/// out of memory and every register access becomes a load.
+///
+/// Uses a whole program rather than `ir_of`, because the top level and
+/// `lower_chunk`'s test bodies opt out of frame tracking.
+#[test]
+fn a_frame_hands_the_runtime_a_spill_array_not_its_registers() {
+    use std::sync::Arc;
+    // fn f(): let a = []  raise a
+    let f = Arc::new(CompiledFn {
+        params: vec![],
+        defaults: vec![],
+        chunk: Chunk {
+            name: "f".into(),
+            code: vec![MakeArray(0, vec![]), Raise(0)],
+            spans: vec![],
+            fn_defs: vec![],
+        },
+        n_slots: 1,
+        source_file: String::new(),
+        module_scope: None,
+        is_generator: false,
+        is_async: false,
+    });
+    let mut top = Chunk::new("<top>");
+    top.fn_defs.push(f);
+    top.code = vec![LoadFn(0, 0), SetGlobal("f".into(), 0), Halt];
+
+    let context = Context::create();
+    let module = context.create_module("t");
+    lower_program(&context, &module, &top, 2, &HashMap::new(), &HashMap::new(), &HashMap::new())
+        .expect("program lowering failed");
+    module.verify().expect("module failed verification");
+    let ir = module.print_to_string().to_string();
+
+    assert!(ir.contains("%spill = alloca"), "a spill array is allocated:\n{ir}");
+    assert!(
+        ir.contains("@jrt_recur_enter(ptr %spill"),
+        "and it, not the register file, is what the prologue registers:\n{ir}"
+    );
+    // The register file itself stays as individual promotable allocas.
+    assert!(ir.contains("%r0 = alloca i64"), "registers stay separate:\n{ir}");
+    // Written only where a store has already decided a heap word is involved,
+    // which is what keeps the cost off arithmetic-only code entirely.
+    assert!(ir.contains("spset"), "the spill is written on the heap path:\n{ir}");
+}
+
+/// `yield x` takes exactly one reference, and `jrt_karr_push` inside
+/// `jrt_yield_append` is what takes it. Retaining at the call site as well gave
+/// the value three references and two owners, so `yield [1, 2]` leaked its array
+/// every pass.
+#[test]
+fn yield_does_not_retain_on_top_of_the_append() {
+    let ir = ir_of(&[MakeArray(0, vec![]), Yield(0), Return(None)], 1);
+    let append = ir.find("jrt_yield_append").expect("the append is emitted");
+    assert!(!ir[..append].contains("jrt_incref"), "the append takes the only reference:\n{ir}");
+}
+
 #[test]
 fn dict_get_retains_the_borrowed_value() {
     // r1 = TABLE.get(r0) — the value word comes back borrowed (the dict
@@ -326,6 +391,7 @@ fn add_program() -> Chunk {
         source_file: String::new(),
         module_scope: None,
         is_generator: false,
+        is_async: false,
     });
     // top:  LoadFn r0 add ; SetGlobal add r0 ;
     //       GetGlobal r1 add ; LoadInt r2 2 ; LoadInt r3 3 ;
@@ -373,6 +439,7 @@ fn call_with_omitted_default_is_filled_at_the_call_site() {
         source_file: String::new(),
         module_scope: None,
         is_generator: false,
+        is_async: false,
     });
     let mut top = Chunk::new("<top>");
     top.fn_defs.push(greet);
@@ -406,6 +473,7 @@ fn function_value_is_first_class_and_returnable() {
         source_file: String::new(),
         module_scope: None,
         is_generator: false,
+        is_async: false,
     });
     let mut top = Chunk::new("<top>");
     top.fn_defs.push(f);
@@ -435,6 +503,7 @@ fn keyword_call_reorders_args_to_parameter_order() {
         source_file: String::new(),
         module_scope: None,
         is_generator: false,
+        is_async: false,
     });
     let mut top = Chunk::new("<top>");
     top.fn_defs.push(f);
@@ -473,6 +542,7 @@ fn higher_order_call_lowers_to_indirect_call() {
         source_file: String::new(),
         module_scope: None,
         is_generator: false,
+        is_async: false,
     });
     let mut top = Chunk::new("<top>");
     top.fn_defs.push(apply);
@@ -661,6 +731,7 @@ fn async_spawn_await_lower_to_runtime() {
         source_file: String::new(),
         module_scope: None,
         is_generator: false,
+        is_async: false,
     });
     let mut top = Chunk::new("<top>");
     top.fn_defs.push(f);
@@ -1076,6 +1147,7 @@ fn a_global_the_program_binds_is_fine_in_either_order() {
         source_file: String::new(),
         module_scope: None,
         is_generator: false,
+        is_async: false,
     });
     let top = top_chunk(vec![LoadInt(0, 1), SetGlobal("later".to_string(), 0), Halt]);
     check_globals_bound(&top, &[f], &HashMap::new(), &HashMap::new())
