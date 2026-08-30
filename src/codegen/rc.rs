@@ -95,11 +95,32 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
     /// held (via `jrt_rc_replace`, which skips the release when `old == new` — the
     /// in-place array-mutation case).
     pub(super) fn rc_replace_slot(&self, i: usize, new: IntValue<'ctx>) {
+        self.replace_slot(i, new, false);
+    }
+
+    /// The same, for a slot whose new value the caller has *already retained*.
+    ///
+    /// `jrt_rc_replace` skips the release when the slot already holds this very
+    /// object, which is right when nothing was retained — an in-place write-back
+    /// hands its own object straight back — and wrong when something was, since
+    /// the retain is then unbalanced. See [`Lowerer::store_borrowed_idx`].
+    pub(super) fn rc_replace_slot_retained(&self, i: usize, new: IntValue<'ctx>) {
+        self.replace_slot(i, new, true);
+    }
+
+    /// `always_release` picks between the two: unconditional `jrt_decref` of the
+    /// old value, or `jrt_rc_replace`, which skips it when old and new are the
+    /// same object. Everything else — the heap guard and keeping the spill array
+    /// in step — has to happen either way, which is why they share a body. The
+    /// spill in particular: it is what a throw releases for a frame it erases,
+    /// so a store that bypasses this leaves it stale, and the frames unwound
+    /// past hold values nothing gives back.
+    fn replace_slot(&self, i: usize, new: IntValue<'ctx>, always_release: bool) {
         let old = self.slot_load(i, "rcold");
         // `jrt_rc_replace` releases `old` and does *not* retain `new`: a store
         // takes ownership. A producer's result therefore needs no retain, and a
         // borrowed read (`Move`, `GetLocal`, `GetField`, …) needs one, which is
-        // what `retain` above is for. Skip the call when neither word is heap
+        // what `retain` is for. Skip the call when neither word is heap
         // (the common case for scalar slots) with an inline guard.
         let old_heap = self.is_heap(old);
         let new_heap = self.is_heap(new);
@@ -109,11 +130,19 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
         let cont_bb = self.ctx.append_basic_block(func, "rcrep_cont");
         self.builder.build_conditional_branch(either, heap_bb, cont_bb).unwrap();
         self.builder.position_at_end(heap_bb);
-        let f = self.runtime_fn(
-            "jrt_rc_replace",
-            self.ctx.void_type().fn_type(&[self.i64t().into(), self.i64t().into()], false),
-        );
-        self.builder.build_call(f, &[old.into(), new.into()], "").unwrap();
+        if always_release {
+            let f = self.runtime_fn(
+                "jrt_decref",
+                self.ctx.void_type().fn_type(&[self.i64t().into()], false),
+            );
+            self.builder.build_call(f, &[old.into()], "").unwrap();
+        } else {
+            let f = self.runtime_fn(
+                "jrt_rc_replace",
+                self.ctx.void_type().fn_type(&[self.i64t().into(), self.i64t().into()], false),
+            );
+            self.builder.build_call(f, &[old.into(), new.into()], "").unwrap();
+        }
         // Mirror the write into the spill array, on this path only.
         //
         // The spill is what a throw releases for a frame it erases, so it has to

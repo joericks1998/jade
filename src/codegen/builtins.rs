@@ -716,6 +716,18 @@ pub(super) fn emit_val_method<'ctx>(
         "len" => {
             // `recv.len()` == `len(recv)`: jrt_len_chunk tag-dispatches str
             // (byte length) / collection (ObjHeader.len) at runtime → tagged int.
+            //
+            // The guard first, because `jrt_len_chunk` answers -1 for a value
+            // with no length rather than raising — a Rust frame cannot raise —
+            // and this arm used to tag that sentinel and hand back `-1`. So
+            // `x.len()` on an int printed -1 compiled where the interpreter
+            // raised. The function spelling `len(x)` went through `jade_len`
+            // and was right all along; only the method spelling was wrong.
+            low.require_kind(
+                low.load(recv),
+                WANT_STR | WANT_ARRAY | WANT_DICT | WANT_BYTES,
+                "len",
+            )?;
             let f = low.runtime_fn("jrt_len_chunk", i64_ty.fn_type(&[i64_ty.into()], false));
             let n = b
                 .build_call(f, &[low.load(recv).into()], "len")
@@ -727,6 +739,16 @@ pub(super) fn emit_val_method<'ctx>(
         "contains" => {
             // `haystack.contains(needle)` == `needle in haystack`: jrt_in_any
             // dispatches str (substring) / array (element eq) at runtime.
+            //
+            // Str and array *only*, which is narrower than the operator. `in`
+            // also takes a dict, and reusing it unguarded meant
+            // `d.contains("k")` answered `true` compiled where the interpreter
+            // raised — a silent wrong answer, since `contains` is not a dict
+            // method at all and `d.has("k")` is the one that is. A bytes
+            // receiver reached the operator's own wording rather than the
+            // method's. The guard settles both, and gets the interpreter's
+            // "dict has no key or method" phrasing for free.
+            low.require_kind(low.load(recv), WANT_STR | WANT_ARRAY, "contains")?;
             let f = low
                 .runtime_fn("jrt_in_any", i32_ty.fn_type(&[i64_ty.into(), i64_ty.into()], false));
             let r = b
