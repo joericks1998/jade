@@ -136,10 +136,28 @@ pub extern "C" fn jrt_len_chunk(word: i64) -> i64 {
         };
     }
     if v.is_ptr() {
-        return unsafe { (*(v.as_ptr() as *const ObjHeader)).len as i64 };
+        // Only the kinds that have a length. Every heap object carries a `len`
+        // field, so reading it unconditionally answered for things that have no
+        // length at all: `len(some_fn)` said 1 and `len(a_struct)` said however
+        // many fields it had, where the interpreter raises. -1 says "no length",
+        // and the caller raises `type error: len`.
+        let kind = unsafe { (*(v.as_ptr() as *const ObjHeader)).kind };
+        if kind == ObjKind::Array as u8
+            || kind == ObjKind::Dict as u8
+            || kind == ObjKind::Bytes as u8
+        {
+            return unsafe { (*(v.as_ptr() as *const ObjHeader)).len as i64 };
+        }
+        return NO_LENGTH;
     }
-    0
+    // Ints, floats, bools and nil have no length either.
+    NO_LENGTH
 }
+
+/// What [`jrt_len_chunk`] answers for a value with no length, so the C
+/// forwarder can raise the interpreter's `type error: len`. Not a length any
+/// real value can have.
+pub const NO_LENGTH: i64 = -1;
 
 // ── Array ─────────────────────────────────────────────────────────────────────
 

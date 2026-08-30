@@ -4,6 +4,26 @@
 
 use super::*;
 
+/// Core builtin names that have a callable *value*, not just a call lowering.
+///
+/// Keep in step with `jrt_builtin_value` in `runtime_aot/common.c`, which holds
+/// the box for each. A name here with no box there reads as nil; a box there
+/// with no name here is never reached.
+pub(super) const BUILTIN_VALUES: &[&str] =
+    &["len", "str", "int", "float", "bool", "char", "print", "write"];
+
+/// Core names this backend has no value for, so reading one declines the build
+/// rather than quietly loading an empty global cell.
+///
+/// `func` looks a function up by name and `input` reads a line; this backend
+/// lowers neither as a *call* either, so declining the value form too is the
+/// consistent answer.
+///
+/// `Grammar` is deliberately absent even though reading it also yields nil:
+/// `Grammar.new(…)` reaches the namespace through this very instruction, so
+/// refusing it here would refuse a feature that works. `route` likewise.
+const BUILTIN_NO_VALUE: &[&str] = &["func", "input"];
+
 /// Lower one instruction. Returns `Ok(true)` if it emitted a block terminator
 /// (`Return`/`Jump`/conditional jump), `Ok(false)` otherwise.
 /// Everything about the body being lowered that an instruction may need.
@@ -103,6 +123,29 @@ pub(super) fn lower_instr<'ctx>(
             // allocate — when it did, every FFI call leaked its box.
             let v = if let Some((pkgid, fname)) = parse_native_ref(name) {
                 emit_native_fn_value(low, pkgid, fname)?
+            } else if BUILTIN_VALUES.contains(&name.as_str())
+                && !fnctx.user_globals.contains(name.as_str())
+            {
+                // A core builtin read as a value rather than called: `let f = len`,
+                // `xs.map(str)`. There is no global cell for one, so this used to
+                // load nil. `jrt_builtin_value` hands back the static box for it.
+                // Skipped when the program assigns the name itself, since then it
+                // really is an ordinary global.
+                let f = low
+                    .runtime_fn("jrt_builtin_value", i64_ty.fn_type(&[low.ptrt().into()], false));
+                b.build_call(f, &[low.cstr(name).into()], "bival")
+                    .map_err(|e| e.to_string())?
+                    .as_any_value_enum()
+                    .into_int_value()
+            } else if BUILTIN_NO_VALUE.contains(&name.as_str())
+                && !fnctx.user_globals.contains(name.as_str())
+            {
+                // A core name this backend has no value for. Calling one already
+                // declines the build ("unsupported builtin call"), so reading one
+                // has to as well — otherwise it loads the empty global cell and
+                // the program runs with `nil` where the interpreter had a
+                // function, which is the quietest way to be wrong.
+                return Err(format!("codegen: unsupported builtin value `{name}`"));
             } else {
                 let g = low.global_slot(name);
                 b.build_load(i64_ty, g, "gld").map_err(|e| e.to_string())?.into_int_value()
@@ -694,9 +737,18 @@ pub(super) fn lower_instr<'ctx>(
                     .void_type()
                     .fn_type(&[low.ptrt().into(), i64_ty.into(), i64_ty.into()], false),
             );
+            let key_f = low.runtime_fn(
+                "jrt_require_dict_key",
+                low.ctx.void_type().fn_type(&[i64_ty.into()], false),
+            );
             for (kr, vr) in pairs {
                 let k = low.load(*kr);
                 let v = low.load(*vr);
+                // `jrt_kdict_set` reads the key word as a `char*`. A literal
+                // key is a string, but a computed one need not be, and
+                // `{true: "y"}` used to be a segfault rather than the VM's
+                // "dict key must be str, got bool".
+                b.build_call(key_f, &[k.into()], "").map_err(|e| e.to_string())?;
                 b.build_call(set_f, &[dict.into(), k.into(), v.into()], "")
                     .map_err(|e| e.to_string())?;
             }
@@ -880,7 +932,10 @@ pub(super) fn lower_instr<'ctx>(
                 .map_err(|e| e.to_string())?
                 .as_any_value_enum()
                 .into_int_value();
-            low.retain(r); // borrowed field value (still owned by the struct) → retain
+            // `jrt_get_field` hands back an *owned* reference, so there is no
+            // retain here. A method used as a value (`let f = obj.greet`) is a
+            // freshly minted bound method, not a borrow of anything, and
+            // retaining it put it permanently out of reach of the collector.
             low.store(*d, r);
             Ok(false)
         }
@@ -1225,6 +1280,15 @@ pub(super) fn lower_instr<'ctx>(
             // function's own frame is all that is left.
             low.emit_recur_restore()?;
             let caught = low.exc_value();
+            // `jade_exc_value` hands back a *borrowed* word — the raiser stored
+            // it and did not give up its reference. For a raise in this same
+            // frame that raiser's slot is still live and still owns it, so
+            // binding it here without a retain gives one reference two owners,
+            // and scope exit releases it twice. (A raise from a deeper frame
+            // leaks that frame's reference instead, because the longjmp skipped
+            // its scope exit — a separate problem, and not one a missing retain
+            // here would fix.)
+            low.retain(caught);
             low.store(*caught_reg, caught);
             b.build_unconditional_branch(block_of(target(*off))).map_err(|e| e.to_string())?;
             Ok(true)
@@ -1240,14 +1304,14 @@ pub(super) fn lower_instr<'ctx>(
             Ok(true)
         }
         JumpIfFalse(r, off) => {
-            let cond = low.untag_bool(low.load(*r));
+            let cond = low.truthy(low.load(*r));
             // Jump to target when false; fall through (idx+1) when true.
             b.build_conditional_branch(cond, block_of(idx + 1), block_of(target(*off)))
                 .map_err(|e| e.to_string())?;
             Ok(true)
         }
         JumpIfTrue(r, off) => {
-            let cond = low.untag_bool(low.load(*r));
+            let cond = low.truthy(low.load(*r));
             b.build_conditional_branch(cond, block_of(target(*off)), block_of(idx + 1))
                 .map_err(|e| e.to_string())?;
             Ok(true)
@@ -1310,7 +1374,15 @@ pub(super) fn lower_instr<'ctx>(
         // plain function here — it captures only globals, read via GetGlobal.
         LoadFn(d, idx) | MakeClosure(d, idx) => {
             match fnctx.uid_of(fn_defs, *idx) {
-                Some(uid) => low.store(*d, low.fn_box_word(uid, fnctx.funcs[uid])),
+                Some(uid) => {
+                    // The box points at the indirect entry, which checks arity
+                    // and fills defaults, not at the body.
+                    let entry = low
+                        .module
+                        .get_function(&format!("jf_ind_{uid}"))
+                        .ok_or(format!("codegen: missing indirect entry for fn {uid}"))?;
+                    low.store(*d, low.fn_box_word(uid, entry))
+                }
                 None => return Err(format!("codegen: unknown fn_def index {idx}")),
             }
             Ok(false)
@@ -1347,11 +1419,61 @@ pub(super) fn lower_instr<'ctx>(
                     emit_stream_call(low, *dest, *prompt, *grammar)?;
                     return Ok(false);
                 }
-                // A unique struct method → direct call with the receiver as `self`
-                // (param 0), the explicit args next, then omitted trailing defaults.
-                Some(CallKind::MethodDirect { uid, self_reg, args: margs }) => {
+                // A struct method resolved to one implementation → direct call
+                // with the receiver as `self` (param 0), the explicit args next,
+                // then omitted trailing defaults.
+                //
+                // Guarded on the receiver's runtime type first. Resolution picks
+                // by method name and arity, because bytecode carries no types,
+                // so nothing in it establishes that the receiver *is* the type
+                // that declares the method. It usually is, and then this is the
+                // fast path. When it is not — another struct, an inherited
+                // method, an array that happens to share a method name — the
+                // guard falls through to dynamic dispatch, which looks the
+                // implementation up against the type the receiver actually has
+                // and raises if there is none. Without it, `fn call(o) { o.go() }`
+                // ran type A's `go` on a B and answered with a number computed
+                // from another type's fields.
+                Some(CallKind::MethodDirect {
+                    uid,
+                    type_name,
+                    method,
+                    prim,
+                    self_reg,
+                    args: margs,
+                }) => {
                     let f = fnctx.funcs[*uid];
                     let cf = &fnctx.defs[*uid];
+                    let i32_ty = low.ctx.i32_type();
+                    let isty = low.runtime_fn(
+                        "jrt_struct_is_type",
+                        i32_ty.fn_type(&[i64_ty.into(), low.ptrt().into()], false),
+                    );
+                    let same = b
+                        .build_call(
+                            isty,
+                            &[low.load(*self_reg).into(), low.cstr(type_name).into()],
+                            "isty",
+                        )
+                        .map_err(|e| e.to_string())?
+                        .as_any_value_enum()
+                        .into_int_value();
+                    let cond = b
+                        .build_int_compare(
+                            inkwell::IntPredicate::NE,
+                            same,
+                            i32_ty.const_zero(),
+                            "sametype",
+                        )
+                        .map_err(|e| e.to_string())?;
+                    let cur = b.get_insert_block().unwrap().get_parent().unwrap();
+                    let direct_bb = low.ctx.append_basic_block(cur, "m_direct");
+                    let dyn_bb = low.ctx.append_basic_block(cur, "m_dynamic");
+                    let merge_bb = low.ctx.append_basic_block(cur, "m_merge");
+                    b.build_conditional_branch(cond, direct_bb, dyn_bb)
+                        .map_err(|e| e.to_string())?;
+
+                    b.position_at_end(direct_bb);
                     let mut argv: Vec<BasicMetadataValueEnum> = Vec::with_capacity(cf.params.len());
                     argv.push(low.load(*self_reg).into());
                     for a in margs {
@@ -1363,12 +1485,23 @@ pub(super) fn lower_instr<'ctx>(
                             .ok_or("codegen: missing method default at call site")?;
                         argv.push(low.default_word(dv)?.into());
                     }
-                    let ret = b
+                    let direct_ret = b
                         .build_call(f, &argv, "mcallret")
                         .map_err(|e| e.to_string())?
                         .as_any_value_enum()
                         .into_int_value();
-                    low.store(*dest, ret);
+                    b.build_unconditional_branch(merge_bb).map_err(|e| e.to_string())?;
+                    let direct_end = b.get_insert_block().unwrap();
+
+                    b.position_at_end(dyn_bb);
+                    let dyn_ret = emit_method_fallback(low, *self_reg, method, margs, *prim)?;
+                    b.build_unconditional_branch(merge_bb).map_err(|e| e.to_string())?;
+                    let dyn_end = b.get_insert_block().unwrap();
+
+                    b.position_at_end(merge_bb);
+                    let phi = b.build_phi(i64_ty, "mret").map_err(|e| e.to_string())?;
+                    phi.add_incoming(&[(&direct_ret, direct_end), (&dyn_ret, dyn_end)]);
+                    low.store(*dest, phi.as_basic_value().into_int_value());
                     return Ok(false);
                 }
                 Some(CallKind::ModuleCall { module, method, args: margs }) => {
@@ -1391,8 +1524,8 @@ pub(super) fn lower_instr<'ctx>(
                     low.store(*dest, ret);
                     return Ok(false);
                 }
-                Some(CallKind::MethodDynamic { recv, method, args: margs }) => {
-                    let ret = emit_dynamic_method(low, *recv, method, margs)?;
+                Some(CallKind::MethodDynamic { recv, method, prim, args: margs }) => {
+                    let ret = emit_method_fallback(low, *recv, method, margs, *prim)?;
                     low.store(*dest, ret);
                     return Ok(false);
                 }
@@ -1407,7 +1540,50 @@ pub(super) fn lower_instr<'ctx>(
             match call_builtins.get(&idx) {
                 Some(bc) if bc.name == "print" => {
                     let arg = low.load(bc.args[0]);
-                    low.print_value(arg, *dest)?;
+                    match bc.args.get(1) {
+                        // `print(x, end)`: the second argument replaces the
+                        // newline. Routed through the same entry the builtin's
+                        // *value* uses, so both spellings agree.
+                        Some(end) => {
+                            let buf = low.entry_buf("printv", 2)?;
+                            for (i, r) in [arg, low.load(*end)].into_iter().enumerate() {
+                                let slot = unsafe {
+                                    b.build_in_bounds_gep(
+                                        i64_ty,
+                                        buf,
+                                        &[i64_ty.const_int(i as u64, false)],
+                                        "pa",
+                                    )
+                                    .map_err(|e| e.to_string())?
+                                };
+                                b.build_store(slot, r).map_err(|e| e.to_string())?;
+                            }
+                            let f = low.runtime_fn(
+                                "jrt_call_value",
+                                i64_ty.fn_type(
+                                    &[i64_ty.into(), i64_ty.into(), low.ptrt().into()],
+                                    false,
+                                ),
+                            );
+                            let bv = low.runtime_fn(
+                                "jrt_builtin_value",
+                                i64_ty.fn_type(&[low.ptrt().into()], false),
+                            );
+                            let callee = b
+                                .build_call(bv, &[low.cstr("print").into()], "pbv")
+                                .map_err(|e| e.to_string())?
+                                .as_any_value_enum()
+                                .into_int_value();
+                            b.build_call(
+                                f,
+                                &[callee.into(), i64_ty.const_int(2, false).into(), buf.into()],
+                                "pcall",
+                            )
+                            .map_err(|e| e.to_string())?;
+                            low.store(*dest, i64_ty.const_int(NIL, false));
+                        }
+                        None => low.print_value(arg, *dest)?,
+                    }
                     Ok(false)
                 }
                 // write(x) → print with no newline, flushed. Same renderer as
@@ -1451,8 +1627,10 @@ pub(super) fn lower_instr<'ctx>(
                 // len() over them must read the header count — jrt_len_unknown reads
                 // the legacy offset-8 length and would return the kind byte here.
                 Some(bc) if bc.name == "len" => {
-                    let f =
-                        low.runtime_fn("jrt_len_chunk", i64_ty.fn_type(&[i64_ty.into()], false));
+                    // `jade_len`, not `jrt_len_chunk`: the C forwarder is what
+                    // raises for a value with no length, which the Rust core
+                    // cannot do (a raise is a longjmp).
+                    let f = low.runtime_fn("jade_len", i64_ty.fn_type(&[i64_ty.into()], false));
                     let arg = low.load(bc.args[0]);
                     let count = b
                         .build_call(f, &[arg.into()], "len")

@@ -28,3 +28,52 @@ print(c.count)
 // Data fields still win over methods of the same name.
 let show = c.show
 print(show())
+
+// ── The receiver outlives the frame that built it ────────────────────────────
+//
+// A bound method is the one value that owns another value: it holds the
+// receiver it will pass as `self`. So the receiver has to stay alive as long as
+// the binding does, even after the scope that created it is gone. It did not:
+// under `jade build` the struct was freed when `make` returned and calling the
+// binding read released memory, while `jade run` printed the right answer.
+
+struct Tag {
+    id
+}
+
+extend Tag {
+    fn read(self) {
+        return self.id
+    }
+}
+
+fn make(n) {
+    let t = Tag { id: n }
+    return t.read
+}
+
+let escaped = make(42)
+print(escaped())
+
+// Same thing, but the binding leaves through a collection rather than directly.
+fn make_boxed(n) {
+    let t = Tag { id: n }
+    return { "read": t.read }
+}
+
+let boxed = make_boxed(7)
+let read = boxed["read"]
+print(read())
+
+// And in bulk, which is what turns a lifetime mistake into a visible crash
+// rather than a value that happens to still look right.
+let i = 0
+let wrong = 0
+while i < 500 {
+    let f = make(i)
+    if f() != i {
+        wrong = wrong + 1
+    }
+    i = i + 1
+}
+print(wrong)

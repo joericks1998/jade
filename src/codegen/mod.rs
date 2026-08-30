@@ -51,6 +51,7 @@ mod rc;
 mod strings;
 #[cfg(test)]
 mod tests;
+mod trampoline;
 
 // The submodules are peers that call freely into one another: `instr` dispatches
 // to all of them, `calls` reaches `builtins`, and every one of them uses the
@@ -79,17 +80,20 @@ const TRUSTED: u64 = 0;
 // non-collection and no-op on it, while indirect_call still reads fn_ptr at
 // offset 0. See fn_box_word.
 const OBJKIND_FN: u64 = 5;
-// ObjKind::BoundMethod (mirror jade-runtime heap.rs). Same shape as a function
-// box plus the receiver at offset 16; `indirect_call` reads the kind byte to
-// decide whether to prepend it as `self`. Built by jrt_bind_method_new, never
-// by codegen directly.
-const OBJKIND_BOUND_METHOD: u64 = 9;
+// (ObjKind::BoundMethod has no constant here any more: telling a bound method
+// apart from a plain function, and prepending its receiver, moved into
+// `jrt_call_value` when every callable became reachable through one entry
+// signature. Codegen never builds one — `jrt_bind_method_new` does.)
+// The byte above the ObjKind in a callable box's kind slot: which sort of
+// callable it is, so a renderer can name it. Mirrors JRT_FN_* in runtime.h.
+const OBJ_FN_NATIVE: u64 = 2;
 
 // Receiver kinds a primitive method accepts, passed to `jrt_require_kind` as a
 // bitmask. Mirror the JRT_WANT_* macros in runtime_aot/runtime.h.
 const WANT_STR: u64 = 0x1;
 const WANT_ARRAY: u64 = 0x2;
 const WANT_DICT: u64 = 0x4;
+const WANT_BYTES: u64 = 0x8;
 
 /// Per-function lowering helper: bundles the builder, the i64 slot type, and the
 /// register `alloca`s so the instruction handlers stay terse.
@@ -98,15 +102,35 @@ struct Lowerer<'a, 'ctx> {
     module: &'a Module<'ctx>,
     builder: &'a Builder<'ctx>,
     slots: &'a [PointerValue<'ctx>],
-    /// Parameter count of the function being lowered. Parameter slots (`0..n_params`)
-    /// hold references the *caller* owns (borrowed), so scope-exit release covers
-    /// only the locals (`n_params..`).
-    n_params: usize,
     /// Slot holding the exception-handler depth on entry, for functions that
     /// contain a `try`. Every return restores it, so a handler frame cannot
     /// outlive the stack frame holding its `jmp_buf` — see `emit_exc_restore`.
     /// `None` when the function has no handler and its depth cannot change.
     exc_depth_slot: Option<PointerValue<'ctx>>,
+    /// Whether register slots must be read and written *volatile*.
+    ///
+    /// True exactly for a function containing a `try`, because a caught raise
+    /// gets back into the handler through `longjmp`. `longjmp` restores the
+    /// callee-saved registers to what they held at the `setjmp`, so any slot
+    /// LLVM had promoted out of its `alloca` and into one of those registers
+    /// silently reverts every write the try body made:
+    ///
+    ///   fn f() {
+    ///     let a = 0
+    ///     try { a = 1; raise "x" } catch e {}
+    ///     return a          // 1 interpreted, 0 compiled
+    ///   }
+    ///
+    /// It is worse than a wrong number when the slot holds a heap value: the
+    /// reverted word is one the slot no longer owns, and the next overwrite
+    /// releases it a second time — the double free behind three of the crashes
+    /// this flag was added for. A volatile access cannot be promoted, so the
+    /// slot stays in memory, where `longjmp` leaves it alone. `returns_twice`
+    /// on the `setjmp` declaration (see `exc.rs`) constrains control flow only
+    /// and does not stop the promotion; this is the memory half of the same
+    /// rule, and it is why C requires `volatile` on locals modified between
+    /// `setjmp` and `longjmp`. Only functions that can be re-entered pay for it.
+    volatile_slots: bool,
     /// Slot holding the recursion-depth counter on entry — every *ordinary*
     /// function call counts against the recursion limit (not just one inside a
     /// `try`, unlike `exc_depth_slot`), so this is `Some` far more often. Every
@@ -226,7 +250,7 @@ struct FnCtx<'ctx> {
     /// different types disambiguate by arity (`put(a,b)` vs `put(a)`) with no
     /// runtime type dispatch. Two candidates accepting the same `k` (same name +
     /// arity on two types) are genuinely ambiguous → decline.
-    method_candidates: HashMap<String, Vec<(usize, usize, usize)>>,
+    method_candidates: HashMap<String, Vec<calls::MethodCand>>,
     /// Global names the program `SetGlobal`s (assigns) anywhere. A name here is a
     /// user variable, so `name.method(...)` is a value method, NOT a stdlib module
     /// call — even when `name` happens to be a reserved module name (`let sh = []`
@@ -258,15 +282,18 @@ impl<'ctx> FnCtx<'ctx> {
     /// <= total`, both excluding `self`). Returns `None` if no candidate matches
     /// (not a struct method) or more than one does (same name+arity on two types
     /// — genuinely ambiguous, needs runtime type dispatch).
-    fn resolve_method(&self, name: &str, k: usize) -> Option<usize> {
+    /// Returns the implementation and the type that declares it. The type comes
+    /// back because the caller has to guard on it: this picks by name and arity
+    /// only, which says nothing about the receiver actually being that type.
+    fn resolve_method(&self, name: &str, k: usize) -> Option<(usize, String)> {
         let cands = self.method_candidates.get(name)?;
         let mut hit = None;
-        for &(uid, required, total) in cands {
-            if required <= k && k <= total {
+        for c in cands {
+            if c.required <= k && k <= c.total {
                 if hit.is_some() {
                     return None; // ambiguous
                 }
-                hit = Some(uid);
+                hit = Some((c.uid, c.type_name.clone()));
             }
         }
         hit
@@ -434,6 +461,10 @@ pub fn lower_program<'ctx>(
         }
     }
 
+    // The uniform `jf_ind_<uid>(argc, argv)` entry every function value points
+    // at. Declared after `funcs` so each can call its own body.
+    trampoline::emit_indirect_entries(context, module, &defs, &funcs)?;
+
     let struct_defaults = build_struct_defaults(struct_defs);
     let struct_field_names: HashMap<String, Vec<String>> = struct_defs
         .iter()
@@ -552,9 +583,72 @@ pub fn lower_program<'ctx>(
                 .build_global_string_ptr(m, "mname")
                 .map_err(|e| e.to_string())?
                 .as_pointer_value();
-            let fnptr = fnctx.funcs[uid].as_global_value().as_pointer_value();
+            // The registry hands this pointer to `jrt_bind_method_new` and to
+            // `jrt_method_lookup`, and both reach it through `(argc, argv)` —
+            // so a bound method and a runtime-dispatched method get the same
+            // arity check and default filling an ordinary call gets.
+            let entry = module
+                .get_function(&format!("jf_ind_{uid}"))
+                .ok_or(format!("codegen: missing indirect entry for method fn {uid}"))?;
+            let fnptr = entry.as_global_value().as_pointer_value();
             rb.build_call(reg_fn, &[tcstr.into(), mcstr.into(), fnptr.into()], "")
                 .map_err(|e| e.to_string())?;
+        }
+    }
+
+    // Seed the global cell of any core builtin name the program also assigns.
+    //
+    // The interpreter starts with `len`, `str` and the rest already in its
+    // globals, so `let len = 5` *overwrites* one: a read before that line still
+    // finds the builtin. A compiled binary starts its cells at nil, so the same
+    // read found nothing. Writing the builtin in before user code runs makes
+    // the two agree without the read having to know whether the assignment has
+    // happened yet — which, from bytecode, it cannot.
+    //
+    // Only for names the program assigns. A name it merely reads never needs a
+    // cell; `GetGlobal` calls `jrt_builtin_value` for it directly.
+    {
+        let shadowed: Vec<&str> = instr::BUILTIN_VALUES
+            .iter()
+            .copied()
+            .filter(|n| fnctx.user_globals.contains(*n))
+            .collect();
+        if !shadowed.is_empty() {
+            let entry = top_fn
+                .get_first_basic_block()
+                .ok_or("codegen: jade_toplevel has no entry block")?;
+            let sb = context.create_builder();
+            match entry.get_first_instruction() {
+                Some(first) => sb.position_before(&first),
+                None => sb.position_at_end(entry),
+            }
+            let bv = module.get_function("jrt_builtin_value").unwrap_or_else(|| {
+                module.add_function(
+                    "jrt_builtin_value",
+                    i64_ty.fn_type(&[context.ptr_type(AddressSpace::default()).into()], false),
+                    None,
+                )
+            });
+            for name in shadowed {
+                let gname = format!("jgl_{name}");
+                let g =
+                    module.get_global(&gname).map(|g| g.as_pointer_value()).unwrap_or_else(|| {
+                        let g = module.add_global(i64_ty, None, &gname);
+                        g.set_initializer(&i64_ty.const_int(NIL, false));
+                        g.set_linkage(inkwell::module::Linkage::Internal);
+                        g.as_pointer_value()
+                    });
+                let cs = sb
+                    .build_global_string_ptr(name, "bivname")
+                    .map_err(|e| e.to_string())?
+                    .as_pointer_value();
+                let w = sb
+                    .build_call(bv, &[cs.into()], "biv")
+                    .map_err(|e| e.to_string())?
+                    .as_any_value_enum()
+                    .into_int_value();
+                sb.build_store(g, w).map_err(|e| e.to_string())?;
+            }
         }
     }
 
@@ -866,8 +960,8 @@ fn lower_body<'ctx>(
         module,
         builder: &builder,
         slots: &slots,
-        n_params,
         exc_depth_slot,
+        volatile_slots: exc_depth_slot.is_some(),
         recur_depth_slot,
         entry_bufs: RefCell::new(HashMap::new()),
     };
@@ -883,6 +977,20 @@ fn lower_body<'ctx>(
     let llblocks: Vec<LlvmBlock> = (0..graph.blocks.len())
         .map(|bi| context.append_basic_block(function, &format!("bb{bi}")))
         .collect();
+    // A parameter slot owns what it holds, like every other slot.
+    //
+    // It used to borrow — the caller kept the reference and scope exit skipped
+    // slots `0..n_params` — which is only sound while the callee never writes to
+    // the slot. `fn f(s) { s = 0 }` writes to it, and the overwrite released a
+    // reference the frame did not own, so two calls with the same array freed it
+    // twice. Retaining on the way in and releasing every slot on the way out
+    // makes the rule uniform: whatever a slot holds, this frame owns it.
+    //
+    // Emitted after the empty-body early return above, so a function with no
+    // body never retains anything it would then have to release.
+    for i in 0..n_params {
+        low.retain(low.load_idx(i));
+    }
     builder.build_unconditional_branch(llblocks[0]).map_err(|e| e.to_string())?;
     let call_builtins = resolve_builtin_calls(code);
     let (user_calls, skip_getfields) = resolve_user_calls(code, &chunk.spans, fn_defs, fnctx)?;

@@ -1,0 +1,80 @@
+// Functions as values, and what a call site does not know.
+//
+// Calling a name the compiler can see resolves to one function, so it can fill
+// the arguments that call leaves off and check the ones it passes. Calling a
+// *value* cannot: the site does not know which function the value holds. A
+// compiled binary used to guess from the arguments it happened to have, which
+// dropped extras, read missing ones out of uninitialised memory, and never
+// filled a default. Every callable now carries an entry that knows its own
+// parameter list, and that entry does the checking and the filling.
+
+fn scale(n, by = 10) {
+    return n * by
+}
+
+fn apply_one(f) {
+    return f(3)
+}
+
+fn apply_two(f) {
+    return f(3, 2)
+}
+
+// Called directly, then through a value, with and without the default.
+print(scale(3))
+print(scale(3, 2))
+print(apply_one(scale))
+print(apply_two(scale))
+
+// Too few or too many is an error, and the message names the parameter count
+// the function declares, defaults included.
+fn exactly_one(a) {
+    return a
+}
+
+try {
+    apply_two(exactly_one)
+} catch e {
+    print(e.message.contains("wrong number of arguments: expected 1, got 2"))
+}
+
+fn apply_none(f) {
+    return f()
+}
+
+try {
+    apply_none(exactly_one)
+} catch e {
+    print(e.message.contains("wrong number of arguments: expected 1, got 0"))
+}
+
+// A built-in is a value too. There was no value for one at all before: the name
+// read as nil, so printing it said `nil` and calling it crashed.
+let count = len
+print(count([1, 2, 3]))
+// Lengths, so the mapped strings are visibly strings: an array of them renders
+// its values unquoted, and `[1, 22]` would look the same either way.
+print([1, 22, 333].map(str).map(len))
+
+// A method bound to its receiver goes through the same entry, so it can be
+// passed anywhere a function can.
+struct Doubler {
+    factor
+}
+
+extend Doubler {
+    fn of(self, n) {
+        return n * self.factor
+    }
+}
+
+let d = Doubler { factor: 2 }
+let of = d.of
+print(of(4))
+print([1, 2, 3].map(d.of))
+
+// Each kind of callable names itself the way the interpreter does.
+print(len)
+print(str)
+print(scale)
+print(d.of)

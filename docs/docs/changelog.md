@@ -4,6 +4,111 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.4.2
+
+*Seven ways a compiled binary could crash or quietly disagree with the interpreter, all fixed.* Every one of them ran correctly under `jade run` and misbehaved under `jade build`, which is the class of bug `src/scripts/backend-parity.sh` exists to catch and none of these were caught, because no fixture happened to combine the right pieces.
+
+*A caught raise no longer undoes the writes that led to it.* This is the big one, because ordinary code reaches it:
+
+```jade
+fn f() {
+    let a = 0
+    try {
+        a = 1
+        raise "stop"
+    } catch e {
+    }
+    return a          // 1 interpreted, 0 compiled
+}
+```
+
+A compiled binary returns to a handler with `longjmp`, which restores the callee-saved registers to what they held when the matching `setjmp` ran. Any local the optimizer had kept in one of those registers reverted. When the local held a heap value, the reverted word named a value it no longer owned, and releasing it a second time was a double free — a `for` loop with a `try` in the body was enough to abort the process. Slots in a function containing a `try` now stay in memory, which is the same rule C states as needing `volatile` on a local modified between `setjmp` and `longjmp`. Nothing else pays for it, and a `try` in a loop measures the same as before.
+
+*A method used as a value keeps its receiver alive.* `let read = thing.read` holds the thing it will pass as `self`, but it took no reference to it, so a binding that outlived the frame that made it read freed memory:
+
+```jade
+fn make(n) {
+    let t = Tag { id: n }
+    return t.read
+}
+print(make(42)())     // 42 interpreted, a crash compiled
+```
+
+Bound methods are now reference counted like anything else that owns a value. They used to leak as well, one per binding plus its receiver; a loop making 200,000 of them went from 54 MB to 2.4 MB.
+
+*A task keeps its arguments alive.* Calling an async function starts it and hands back a future, so the task usually outlives the frame that spawned it. It was borrowing its arguments from that frame, and reading them after the frame released them.
+
+*Values are checked before they are dereferenced.* Inference is not always precise enough to be trusted with a pointer — a function whose branches return different types takes the first branch's type — so the compiled code now checks the word it actually has, the way the interpreter always did. These were all crashes and are now the interpreter's own error message: calling something that is not a function, `{true: "y"}`, `{"a": 1}.slice(0, 1)`, `[1].decode()`, and arithmetic on a value whose inferred type was wrong.
+
+*Releasing a deeply nested structure no longer overflows the stack.* The destructor walked children by recursing; a chain of arrays about 30,000 deep, which a loop builds by wrapping one array each time, ran out of stack. It walks a worklist now, so depth costs heap instead.
+
+*Two error messages now match the interpreter.* A dict names both a key and a method when neither is there, since `d.name` is a key lookup first.
+
+*Calling a function value works properly.* A call site that jumps at a value does not know which function the value holds, so it cannot know how many parameters that function has. A compiled binary used to guess from the arguments it had:
+
+```jade
+fn scale(n, by = 10) { return n * by }
+fn apply(f) { return f(3) }
+
+print(apply(scale))    // 30 interpreted; garbage compiled, `by` never filled
+```
+
+Extra arguments were dropped, missing ones were read out of uninitialised memory, and a default was never filled. Every callable now carries an entry that knows its own parameter list and does the checking and filling there, so the wrong argument count raises the interpreter's message instead of returning a wrong answer.
+
+*A core builtin is a value.* `let count = len`, `xs.map(str)`, and passing `print` to a function all work; the name used to read as nil, so printing it said `nil` and calling it crashed. Callable values also name themselves the way the interpreter does — `<fn>`, `<builtin len>`, `<type str>`, `<bound method>` — rather than `<object>`. A bound method can now be handed to `map`, to `filter`, and to a C package as a callback.
+
+`func` and `input` still have no compiled form. Both now decline the build for reading the name as well as for calling it, rather than one erroring and the other quietly yielding nil.
+
+*A keyword argument no longer blanks the defaults you did not name.* This one was the interpreter's, not the compiler's:
+
+```jade
+fn tag(name, prefix = "<", suffix = ">") { return prefix + name + suffix }
+
+print(tag("x", suffix = "]"))    // "<x]" compiled; a type error interpreted
+```
+
+Naming any argument made every parameter you did not name arrive as `nil`, defaults included. A parameter with no default and no argument now says which one is missing instead of arriving as `nil` too.
+
+*Grammar values print as `<grammar>`* in a compiled binary rather than `<object>`.
+
+*A method call checks the receiver.* Resolving `obj.go()` picked the one `go` in the program by name and argument count, which says nothing about what `obj` actually is — bytecode carries no types. So a receiver of another type ran the wrong method and answered with a number computed from another type's fields, and one whose type had no such method jumped through a null pointer:
+
+```jade
+struct A { n }
+extend A { fn go(self) { return self.n * 10 } }
+struct B { n }
+
+fn call(o) { return o.go() }
+print(call(B { n: 2 }))    // an error interpreted; 20 compiled
+```
+
+The call site now checks the receiver's type first and dispatches on the real one when it does not match. A data field holding a function wins over a method of the same name, which is the order the interpreter uses, and a struct method named like a built-in one no longer takes `[1, 2].contains(x)` with it.
+
+*Assigning to a parameter no longer frees the caller's value.* A parameter slot borrowed its argument, which held until the callee wrote to it: the overwrite released a reference the frame did not own, so two calls with the same array freed it twice.
+
+```jade
+fn f(s) { s = 0 }
+let a = [1, 2]
+f(a)
+f(a)                       // aborted here
+```
+
+*A compiled program gets the stack the interpreter gets.* `jade run` executes on a thread given 256 MB; a binary ran on the 8 MB a process starts with. Printing an array nested 2,000 deep was enough to segfault one and print fine from the other. A binary now runs its body on a thread of its own, sized to match.
+
+*Values are checked in three more places.* `len` of something with no length raises rather than answering with whatever sat in the object header — `len(some_fn)` was 1 and `len(5)` was 0. `array.map` and `array.filter` reject a first argument that is not an array instead of walking a string as one, and `filter` requires its predicate to answer a bool rather than reading a tag bit as the truth value and quietly dropping every element. `map` also stopped leaking one object per element.
+
+*Anything can be a condition.* `if x` read bit 4 of the word, which is the answer only when `x` really is a bool; a bound method took the false branch while `bool(x)` said true.
+
+*`print(x, end)` works compiled.* The second argument replaces the newline. Fixing `print` at one argument made a compiled call raise where the interpreter printed.
+
+*`math.floor` of a value too large to be an integer raises* instead of aborting. A non-finite float saturates to a whole number no tagged word can hold; the same goes for `ceil`, `round` and `trunc`.
+
+*Awaiting deeply no longer aborts.* The task pool computed its runnable population by subtracting blocked threads from its own workers, which underflows once a thread that is not one of its workers blocks — the main thread awaiting at the top level is exactly that.
+
+*A shadowed builtin reads as the builtin until it is assigned.* `print(len)` before `let len = 5` printed `nil` compiled where the interpreter still had the builtin.
+
+Known and not fixed: an *uncaught* error still prints `jade: <message>` from a binary against `<file>: runtime error: [line:col] <message>` from the interpreter, and caught errors agree apart from that same `[line:col]` prefix on `.message`. A stdlib module function or a primitive method used as a *value* (`let f = math.sqrt`, `let f = s.upper`) still has no compiled form. `await` nests about 512 deep in a binary before the task pool runs out of threads, where the interpreter keeps going. And a callback that mutates the array it is mapping over sees its own writes compiled, where the interpreter walks a snapshot.
+
 ## v1.4.1
 
 *A struct literal can copy another struct.* Write `...base` first inside the braces and every field the type declares that you did not name is read from it.

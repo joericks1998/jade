@@ -191,3 +191,44 @@ void jade_join(jade_future_t* futures, int n, jade_value_t* results_out) {
 }
 
 #endif /* !__JADE_KERNEL__ */
+
+/* ── The program's own stack ──────────────────────────────────────────────
+ *
+ * `jade run` executes on a thread the CLI gives 256 MB of stack (see
+ * `vm::chunk::VM_STACK_SIZE`), because interpreting a deeply recursive program
+ * needs far more native stack than the 8 MB a process gets by default. A
+ * compiled binary ran on that default, so the same program that printed fine
+ * interpreted segfaulted compiled — a 2,000-deep nested array was enough, since
+ * rendering one walks it recursively.
+ *
+ * So a binary runs its body on a thread of its own, sized to match. Every piece
+ * of per-execution state the runtime keeps is already thread-local (the handler
+ * stack, the recursion counter, the generator's yield stack), because async
+ * tasks have always run on other threads, so there is nothing to move.
+ *
+ * Reserving address space costs nothing until it is touched: a 64-bit process
+ * does not commit stack pages it never writes.
+ *
+ * If the thread cannot be created the body still runs, here on the main stack —
+ * a shallower limit is much better than refusing to start. */
+#define JRT_MAIN_STACK_SIZE ((size_t)256 * 1024 * 1024)
+
+static void* jrt_main_trampoline(void* arg) {
+    jade_body_fn body = (jade_body_fn)arg;
+    body();
+    return NULL;
+}
+
+void jrt_run_main(jade_body_fn body) {
+    pthread_attr_t attr;
+    pthread_t t;
+    if (pthread_attr_init(&attr) != 0) { body(); return; }
+    if (pthread_attr_setstacksize(&attr, JRT_MAIN_STACK_SIZE) != 0
+        || pthread_create(&t, &attr, jrt_main_trampoline, (void*)body) != 0) {
+        pthread_attr_destroy(&attr);
+        body();
+        return;
+    }
+    pthread_attr_destroy(&attr);
+    pthread_join(t, NULL);
+}

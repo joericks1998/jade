@@ -1,0 +1,51 @@
+// A task keeps its arguments alive.
+//
+// Calling an async fn starts it and hands back a future, so the task outlives
+// the expression that spawned it — and often the whole frame that spawned it.
+// It therefore cannot borrow its arguments from that frame: the frame releases
+// its locals the moment it returns. A compiled binary used to do exactly that,
+// so `sum_pair` below read a freed array and died on a signal, while `jade run`
+// printed the right answer.
+
+struct Pair {
+    a,
+    b
+}
+
+async fn add_pair(p) {
+    return p.a + p.b
+}
+
+async fn sum_pair(xs) {
+    return xs[0] + xs[1]
+}
+
+// The struct and the array are locals of `start_*`, gone by the time the task
+// is awaited.
+fn start_struct(n) {
+    let p = Pair { a: n, b: n }
+    return add_pair(p)
+}
+
+fn start_array(n) {
+    let xs = [n, n]
+    return sum_pair(xs)
+}
+
+print(await start_struct(21))
+print(await start_array(21))
+
+// In bulk, so a released argument lands on memory something else has already
+// taken, rather than on bytes that happen to still read correctly.
+let i = 0
+let wrong = 0
+while i < 200 {
+    if (await start_struct(i)) != i + i {
+        wrong = wrong + 1
+    }
+    if (await start_array(i)) != i + i {
+        wrong = wrong + 1
+    }
+    i = i + 1
+}
+print(wrong)

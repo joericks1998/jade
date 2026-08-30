@@ -156,7 +156,11 @@ pub(super) fn resolve_builtin_calls(code: &[Instr]) -> HashMap<usize, BuiltinCal
                 if let Some(&b) = reg_builtin.get(callee) {
                     // Only resolve arities this backend lowers; others fall back.
                     let ok = match b {
-                        "print" | "write" | "str" | "int" | "float" | "bool" | "char" | "len" => {
+                        // `print(x, end)` replaces the newline, which is how you
+                        // write without one. Only the one-argument form lowered,
+                        // so a program using the second refused to build.
+                        "print" => args.len() == 1 || args.len() == 2,
+                        "write" | "str" | "int" | "float" | "bool" | "char" | "len" => {
                             args.len() == 1
                         }
                         _ => false,
@@ -202,12 +206,39 @@ pub(super) fn collect_fns(
 /// body is an ordinary `CompiledFn` whose first parameter is `self`, so once it
 /// has a uid the normal forward-declare / lower / task-wrapper loops emit it like
 /// any other function.
+/// One `extend` method a call could resolve to: which function, which type
+/// declares it, and the argument counts it accepts (excluding `self`).
+///
+/// The type name is what a devirtualized call site guards on. Resolution picks
+/// a candidate by name and arity alone, because bytecode carries no types, so
+/// the receiver's type has to be checked where the values actually are.
+/// The primitive method of the same name, when a struct declares one that
+/// collides with a built-in method on strings, arrays or dicts.
+///
+/// Resolution reaches the struct method first, so `[1, 2].contains(x)` in a
+/// program that also has `extend S { fn contains(self, x) { … } }` resolved to
+/// S's — and the receiver is not an S. The call site keeps this so the branch
+/// that discovers the receiver is not a struct has somewhere correct to go.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum PrimFallback {
+    Str,
+    Val,
+}
+
+#[derive(Clone)]
+pub(super) struct MethodCand {
+    pub uid: usize,
+    pub type_name: String,
+    pub required: usize,
+    pub total: usize,
+}
+
 pub(super) fn collect_method_fns(
     extend_methods: &HashMap<String, HashMap<String, Arc<CompiledFn>>>,
     defs: &mut Vec<Arc<CompiledFn>>,
     ptr2uid: &mut HashMap<*const CompiledFn, usize>,
-) -> HashMap<String, Vec<(usize, usize, usize)>> {
-    let mut candidates: HashMap<String, Vec<(usize, usize, usize)>> = HashMap::new();
+) -> HashMap<String, Vec<MethodCand>> {
+    let mut candidates: HashMap<String, Vec<MethodCand>> = HashMap::new();
     let mut queue: VecDeque<Arc<CompiledFn>> = VecDeque::new();
     // Deterministic order: sort by (type, method) so uids are stable across runs.
     let mut types: Vec<&String> = extend_methods.keys().collect();
@@ -234,7 +265,12 @@ pub(super) fn collect_method_fns(
             let required = (1..mfn.params.len())
                 .filter(|&j| mfn.defaults.get(j).and_then(|d| d.as_ref()).is_none())
                 .count();
-            candidates.entry(name.clone()).or_default().push((uid, required, total));
+            candidates.entry(name.clone()).or_default().push(MethodCand {
+                uid,
+                type_name: ty.clone(),
+                required,
+                total,
+            });
         }
     }
     // BFS the method bodies' nested function literals.
@@ -327,6 +363,15 @@ pub(super) enum CallKind {
     /// as `self` (param 0) and omitted trailing defaults filled at the call site.
     MethodDirect {
         uid: usize,
+        /// The struct type that declares this method. The call site checks the
+        /// receiver against it before trusting the resolution — see
+        /// `MethodCand` and `jrt_struct_is_type`.
+        type_name: String,
+        /// The method name, for the dynamic fallback the guard branches to.
+        method: String,
+        /// The primitive method of this name, when one exists — see
+        /// [`PrimFallback`].
+        prim: Option<PrimFallback>,
         self_reg: Reg,
         args: Vec<Reg>,
     },
@@ -338,6 +383,8 @@ pub(super) enum CallKind {
     MethodDynamic {
         recv: Reg,
         method: String,
+        /// See [`PrimFallback`].
+        prim: Option<PrimFallback>,
         args: Vec<Reg>,
     },
     /// `stream(?p)` / `stream(?p, mute_on=[g])` — streaming inference that
@@ -624,12 +671,32 @@ pub(super) fn resolve_user_calls(
                         return Err(format!("codegen: unsupported module call {module}.{method}"));
                     }
                 } else if let Some((self_reg, mname, gf_idx)) = reg_getfield.get(callee).cloned() {
+                    // A struct method wins the resolution below, so remember
+                    // whether the same name also names a primitive method: the
+                    // receiver might be an array or a string at runtime.
+                    let prim = if chunk_str_method_supported(&mname, args.len()) {
+                        Some(PrimFallback::Str)
+                    } else if chunk_val_method_supported(&mname, args.len()) {
+                        Some(PrimFallback::Val)
+                    } else {
+                        None
+                    };
                     // A method call `obj.mname(args)`. Devirtualize to the one
                     // extend-block method named `mname` whose arg range accepts this
                     // call's arg count (disambiguating same-named methods by arity);
                     // otherwise try primitive methods, else decline.
-                    if let Some(uid) = fnctx.resolve_method(&mname, args.len()) {
-                        out.insert(i, CallKind::MethodDirect { uid, self_reg, args: args.clone() });
+                    if let Some((uid, type_name)) = fnctx.resolve_method(&mname, args.len()) {
+                        out.insert(
+                            i,
+                            CallKind::MethodDirect {
+                                uid,
+                                type_name,
+                                method: mname.clone(),
+                                prim,
+                                self_reg,
+                                args: args.clone(),
+                            },
+                        );
                         // The producing GetField is a method lookup (would raise as a
                         // data-field access) and its result is now unused → skip it.
                         skip_getfields.insert(gf_idx);
@@ -641,6 +708,7 @@ pub(super) fn resolve_user_calls(
                             CallKind::MethodDynamic {
                                 recv: self_reg,
                                 method: mname,
+                                prim,
                                 args: args.clone(),
                             },
                         );
@@ -764,18 +832,14 @@ pub(super) fn resolve_user_calls(
                                 continue;
                             }
                             let lowered = LOWERABLE_BUILTINS.contains(&name.as_str())
-                                && matches!(
-                                    name.as_str(),
-                                    "print"
-                                        | "write"
-                                        | "str"
-                                        | "int"
-                                        | "float"
-                                        | "bool"
-                                        | "char"
-                                        | "len"
-                                )
-                                && args.len() == 1;
+                                && match name.as_str() {
+                                    // `print(x, end)` replaces the newline.
+                                    "print" => args.len() == 1 || args.len() == 2,
+                                    "write" | "str" | "int" | "float" | "bool" | "char" | "len" => {
+                                        args.len() == 1
+                                    }
+                                    _ => false,
+                                };
                             if lowered {
                                 None
                             } else if RESERVED_BUILTINS.contains(&name.as_str()) {
@@ -917,6 +981,9 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
     /// (`jrt_incref`/`jrt_decref`) recognise the box as a non-collection and no-op
     /// on it — which is what lets a program that merely *defines* functions still
     /// be treated as collections-only for refcounting.
+    /// `f` must be the function's **indirect entry** (`jf_ind_<uid>`), not its
+    /// body: a value is entered through `jrt_call_value`, which passes
+    /// `(argc, argv)`. See `trampoline.rs`.
     pub(super) fn fn_box_word(&self, uid: usize, f: FunctionValue<'ctx>) -> IntValue<'ctx> {
         let gname = format!("jf_box_{uid}");
         let g = self.module.get_global(&gname).unwrap_or_else(|| {
@@ -940,12 +1007,19 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
         self.builder.build_or(asint, self.i64t().const_int(TAG_PTR, false), "boxtag").unwrap()
     }
 
-    /// Indirect call through a first-class function value: untag the callee box and
-    /// load its `fn_ptr` (field 0). If `fn_ptr` is the `jrt_native_call` sentinel,
-    /// the box is a native function value `{ sentinel, kind, env={handle,name} }` —
-    /// dispatch through `jrt_native_call`. Otherwise it is an ordinary `jf_<uid>`
-    /// box — call it directly with `args` (all tagged i64 words). The callee's arity
-    /// equals `args.len()` (the frontend guarantees it).
+    /// Indirect call through a first-class function value.
+    ///
+    /// Packs the arguments into a buffer and hands the whole thing to
+    /// `jrt_call_value`, which is the one place that knows how to enter a plain
+    /// function, a bound method (receiver prepended) and a native binding.
+    ///
+    /// This used to be built here, in LLVM: read the callee's kind byte, branch
+    /// three ways, and build a fixed-arity call out of the arguments the site
+    /// happened to have. The last part was the problem. A call site does not
+    /// know which function the value holds, so it cannot know how many
+    /// parameters that function has — it dropped extra arguments, read missing
+    /// ones from uninitialised registers, and never filled a default. Arity now
+    /// belongs to the callee's own entry (`trampoline.rs`), which knows it.
     pub(super) fn indirect_call(
         &self,
         callee: Reg,
@@ -956,151 +1030,38 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
         let i64_ty = self.i64t();
         let ptrt = self.ptrt();
 
-        let box_ptr = self.untag_ptr(self.load(callee));
-        let fn_ptr = b.build_load(ptrt, box_ptr, "fnld").map_err(e)?.into_pointer_value();
-
-        // A bound method (`let f = obj.greet`) is a function value carrying the
-        // receiver it will pass as `self`: {fn_ptr@0, kind@8, self@16}. It is
-        // told apart by the ObjKind byte at offset 8 rather than by a sentinel
-        // address at offset 0 (the older native-fn trick) — every TAG_PTR value
-        // must carry that kind byte anyway, so it costs nothing.
-        let kind_slot = unsafe {
-            b.build_in_bounds_gep(i64_ty, box_ptr, &[i64_ty.const_int(1, false)], "kslot")
-                .map_err(e)?
-        };
-        let kind = b.build_load(i64_ty, kind_slot, "kind").map_err(e)?.into_int_value();
-        let is_bound = b
-            .build_int_compare(
-                inkwell::IntPredicate::EQ,
-                kind,
-                i64_ty.const_int(OBJKIND_BOUND_METHOD, false),
-                "isbm",
-            )
-            .map_err(e)?;
-        let outer_fn = b.get_insert_block().unwrap().get_parent().unwrap();
-        let bm_bb = self.ctx.append_basic_block(outer_fn, "icall_bound");
-        let plain_bb = self.ctx.append_basic_block(outer_fn, "icall_plain");
-        let bm_merge_bb = self.ctx.append_basic_block(outer_fn, "icall_bm_merge");
-        b.build_conditional_branch(is_bound, bm_bb, plain_bb).map_err(e)?;
-
-        // ── bound: load self from slot 2, prepend it, call with args+1 ──
-        b.position_at_end(bm_bb);
-        let self_slot = unsafe {
-            b.build_in_bounds_gep(i64_ty, box_ptr, &[i64_ty.const_int(2, false)], "sslot")
-                .map_err(e)?
-        };
-        let self_word = b.build_load(i64_ty, self_slot, "selfw").map_err(e)?.into_int_value();
-        let bm_arg_tys = vec![i64_ty.into(); args.len() + 1];
-        let bm_fn_ty = i64_ty.fn_type(&bm_arg_tys, false);
-        let mut bm_argv: Vec<BasicMetadataValueEnum> = Vec::with_capacity(args.len() + 1);
-        bm_argv.push(self_word.into());
-        for a in args {
-            bm_argv.push(self.load(*a).into());
-        }
-        let bm_ret = b
-            .build_indirect_call(bm_fn_ty, fn_ptr, &bm_argv, "bmcall")
-            .map_err(e)?
-            .as_any_value_enum()
-            .into_int_value();
-        b.build_unconditional_branch(bm_merge_bb).map_err(e)?;
-        let bm_end = b.get_insert_block().unwrap();
-
-        b.position_at_end(plain_bb);
-
-        // Sentinel = the jrt_native_call address.
-        let native_fn = self.runtime_fn(
-            "jrt_native_call",
-            i64_ty.fn_type(&[ptrt.into(), ptrt.into(), ptrt.into(), i64_ty.into()], false),
-        );
-        let sentinel = native_fn.as_global_value().as_pointer_value();
-        let fp_int = b.build_ptr_to_int(fn_ptr, i64_ty, "fpi").map_err(e)?;
-        let sent_int = b.build_ptr_to_int(sentinel, i64_ty, "si").map_err(e)?;
-        let is_native =
-            b.build_int_compare(inkwell::IntPredicate::EQ, fp_int, sent_int, "isnat").map_err(e)?;
-
-        let cur_fn = b.get_insert_block().unwrap().get_parent().unwrap();
-        let nat_bb = self.ctx.append_basic_block(cur_fn, "icall_native");
-        let reg_bb = self.ctx.append_basic_block(cur_fn, "icall_reg");
-        let merge_bb = self.ctx.append_basic_block(cur_fn, "icall_merge");
-        b.build_conditional_branch(is_native, nat_bb, reg_bb).map_err(e)?;
-
-        // ── native: read env {handle, name}, marshal args, jrt_native_call ──
-        // env is at slot 2; slot 1 is the ObjKind word (see emit_native_fn_value).
-        b.position_at_end(nat_bb);
-        let env_slot = unsafe {
-            b.build_in_bounds_gep(ptrt, box_ptr, &[i64_ty.const_int(2, false)], "envs")
-                .map_err(e)?
-        };
-        let env = b.build_load(ptrt, env_slot, "env").map_err(e)?.into_pointer_value();
-        // env[0] is the *address of* `@native_pkg$<pkgid>`, not the handle, so
-        // reaching the handle takes a second load. That indirection is what lets
-        // the whole env be a link-time constant — a `dlopen` result cannot be one
-        // — and so what lets a native fn value cost no allocation. See
-        // `emit_native_fn_value`.
-        let handle_cell = b.build_load(ptrt, env, "nhc").map_err(e)?.into_pointer_value();
-        let handle = b.build_load(ptrt, handle_cell, "nh").map_err(e)?.into_pointer_value();
-        let name_slot = unsafe {
-            b.build_in_bounds_gep(ptrt, env, &[i64_ty.const_int(1, false)], "nns").map_err(e)?
-        };
-        let name = b.build_load(ptrt, name_slot, "nn").map_err(e)?.into_pointer_value();
+        // Entry-block buffer, not an `alloca` here: an indirect call inside a
+        // loop would otherwise walk the stack down once per iteration. See
+        // `Lowerer::entry_buf`.
         let argv = if args.is_empty() {
             ptrt.const_null()
         } else {
-            // Entry-block buffer, not an alloca here: this call can sit inside
-            // a loop. See `Lowerer::entry_buf`.
-            let arr = self.entry_buf("iargv", args.len())?;
+            let buf = self.entry_buf("icallv", args.len())?;
             for (i, a) in args.iter().enumerate() {
                 let slot = unsafe {
-                    b.build_in_bounds_gep(i64_ty, arr, &[i64_ty.const_int(i as u64, false)], "ia")
+                    b.build_in_bounds_gep(i64_ty, buf, &[i64_ty.const_int(i as u64, false)], "ia")
                         .map_err(e)?
                 };
                 b.build_store(slot, self.load(*a)).map_err(e)?;
             }
-            arr
+            buf
         };
-        let nat_ret = b
-            .build_call(
-                native_fn,
-                &[
-                    handle.into(),
-                    name.into(),
-                    argv.into(),
-                    i64_ty.const_int(args.len() as u64, false).into(),
-                ],
-                "natret",
-            )
-            .map_err(e)?
-            .as_any_value_enum()
-            .into_int_value();
-        b.build_unconditional_branch(merge_bb).map_err(e)?;
-        let nat_end = b.get_insert_block().unwrap();
 
-        // ── regular: direct indirect call jf_ptr(args) ──
-        b.position_at_end(reg_bb);
-        let arg_tys = vec![i64_ty.into(); args.len()];
-        let fn_ty = i64_ty.fn_type(&arg_tys, false);
-        let cargv: Vec<BasicMetadataValueEnum> =
-            args.iter().map(|a| self.load(*a).into()).collect();
-        let reg_ret = b
-            .build_indirect_call(fn_ty, fn_ptr, &cargv, "icall")
-            .map_err(e)?
-            .as_any_value_enum()
-            .into_int_value();
-        b.build_unconditional_branch(merge_bb).map_err(e)?;
-        let reg_end = b.get_insert_block().unwrap();
-
-        // ── merge ──
-        b.position_at_end(merge_bb);
-        let phi = b.build_phi(i64_ty, "icall_ret").map_err(e)?;
-        phi.add_incoming(&[(&nat_ret, nat_end), (&reg_ret, reg_end)]);
-        let plain_ret = phi.as_basic_value().into_int_value();
-        b.build_unconditional_branch(bm_merge_bb).map_err(e)?;
-        let plain_end = b.get_insert_block().unwrap();
-
-        // ── merge the bound and plain paths ──
-        b.position_at_end(bm_merge_bb);
-        let outer_phi = b.build_phi(i64_ty, "icall_out").map_err(e)?;
-        outer_phi.add_incoming(&[(&bm_ret, bm_end), (&plain_ret, plain_end)]);
-        Ok(outer_phi.as_basic_value().into_int_value())
+        let f = self.runtime_fn(
+            "jrt_call_value",
+            i64_ty.fn_type(&[i64_ty.into(), i64_ty.into(), ptrt.into()], false),
+        );
+        Ok(b.build_call(
+            f,
+            &[
+                self.load(callee).into(),
+                i64_ty.const_int(args.len() as u64, false).into(),
+                argv.into(),
+            ],
+            "icall",
+        )
+        .map_err(e)?
+        .as_any_value_enum()
+        .into_int_value())
     }
 }

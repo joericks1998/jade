@@ -606,7 +606,17 @@ pub fn compile_with_mode(
                 builder.build_call(publish, &[root_ptr.into()], "").map_err(|e| e.to_string())?;
             }
 
-            builder.build_call(init_fn, &[], "").map_err(|e| e.to_string())?;
+            // Run the body on a thread with a big stack rather than calling it
+            // here. `jade run` gives the interpreter 256 MB (VM_STACK_SIZE); a
+            // binary was left on the process default, so a deeply recursive
+            // program — or merely printing a deeply nested array — segfaulted
+            // compiled and printed fine interpreted. See `jrt_run_main`.
+            let run_main = module.get_function("jrt_run_main").unwrap_or_else(|| {
+                module.add_function("jrt_run_main", void_ty.fn_type(&[ptr_ty.into()], false), None)
+            });
+            builder
+                .build_call(run_main, &[init_fn.as_global_value().as_pointer_value().into()], "")
+                .map_err(|e| e.to_string())?;
 
             // Just before returning, call jrt_heap_report() — a no-op unless
             // JADE_HEAP_REPORT is set, in which case it prints the live

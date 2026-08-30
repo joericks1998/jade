@@ -266,9 +266,25 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
 
     /// Concatenate two tagged-string words; returns a new tagged word.
     pub(super) fn str_concat(&self, l: Reg, r: Reg) -> IntValue<'ctx> {
-        let lp = self.untag_ptr(self.load(l));
-        let rp = self.untag_ptr(self.load(r));
+        // Both operands are about to become `char*`. The static type said they
+        // are strings; check that the words agree before trusting it. See
+        // `jrt_require_str_val` for when inference gets this wrong.
+        let lw = self.load(l);
+        let rw = self.load(r);
+        self.require_str_val(lw);
+        self.require_str_val(rw);
+        let lp = self.untag_ptr(lw);
+        let rp = self.untag_ptr(rw);
         self.tag_str(self.concat_ptrs(lp, rp))
+    }
+
+    /// Raise unless `w` really is a tagged string.
+    pub(super) fn require_str_val(&self, w: IntValue<'ctx>) {
+        let f = self.runtime_fn(
+            "jrt_require_str_val",
+            self.ctx.void_type().fn_type(&[self.i64t().into()], false),
+        );
+        self.builder.build_call(f, &[w.into()], "").unwrap();
     }
 
     /// Release a tagged-string data pointer this frame owns outright.

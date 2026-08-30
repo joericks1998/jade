@@ -211,6 +211,11 @@ unsafe fn is_collection(p: *const c_void) -> bool {
         // Its payload is octets rather than tagged words, so its `free_obj` arm
         // reclaims without a cascade — see the note there.
         || k == ObjKind::Bytes as u8
+        // A bound method owns exactly one child, its receiver. Leaving it out
+        // meant the receiver was released while the bound method still pointed
+        // at it, so calling one after the frame that built it returned read
+        // freed memory. See `methods::BoundMethodObj`.
+        || k == ObjKind::BoundMethod as u8
         // A handle owns its type name, so it is refcounted on the same terms.
         // Note this reclaims the *wrapper* only — the foreign pointer inside is
         // not Jade's to free. See `handle.rs`.
@@ -258,6 +263,21 @@ pub extern "C" fn jrt_decref(word: W) {
 /// `word`, if `TAG_PTR`, must point at a live `ObjHeader`-prefixed collection.
 #[inline]
 unsafe fn decref_word(word: W) {
+    if let Some(p) = unsafe { release_word(word) } {
+        unsafe { free_obj(p) };
+    }
+}
+
+/// Release one reference to `word` and, if that took a collection to zero,
+/// hand back the pointer for the caller to reclaim *instead of reclaiming it
+/// here*. Splitting the release from the reclamation is what lets `free_obj`
+/// walk a nested structure with an explicit worklist rather than by recursing:
+/// a 30,000-deep chain of arrays used to overflow the stack on the way down.
+///
+/// # Safety
+/// `word`, if `TAG_PTR`, must point at a live `ObjHeader`-prefixed collection.
+#[inline]
+unsafe fn release_word(word: W) -> Option<*mut c_void> {
     let v = JadeValue::from_bits(word as u64);
     // A string is a leaf — it owns bytes and no child words, so it cannot form
     // a cycle — but it is still an allocation somebody has to release. It used
@@ -267,27 +287,25 @@ unsafe fn decref_word(word: W) {
     // alone, which is what makes releasing a slot safe whatever it holds.
     if v.is_str() {
         crate::string::decref(v.as_ptr() as *mut u8);
-        return;
+        return None;
     }
     if !v.is_ptr() {
         // Ints/bools/nil carry no allocation; a boxed float is a non-refcounted
         // leaf.
-        return;
+        return None;
     }
     let p = v.as_ptr() as *mut c_void;
     // Skip header-carrying non-collections (a fn-box, kind Fn): they are not
     // refcounted and their allocation is not a collection payload.
     if !unsafe { is_collection(p) } {
-        return;
+        return None;
     }
     // Arena objects are not reference-counted — they are freed only by ArenaReset,
     // so a decref must never touch (or free) them.
     if unsafe { (*(p as *const ObjHeader)).is_arena() } {
-        return;
+        return None;
     }
-    if unsafe { (*(p as *mut ObjHeader)).decref() } {
-        unsafe { free_obj(p) };
-    }
+    if unsafe { (*(p as *mut ObjHeader)).decref() } { Some(p) } else { None }
 }
 
 /// Destroy and free a collection whose strong count has reached zero: cascade a
@@ -298,6 +316,31 @@ unsafe fn decref_word(word: W) {
 /// `ptr` must be a live, `rc == 0`, `ObjHeader`-prefixed collection allocated by
 /// [`leak_obj`] with element word type `i64`; it must not be referenced again.
 pub(crate) unsafe fn free_obj(ptr: *mut c_void) {
+    // Iterative, not recursive. Each object's children are released here; a
+    // child that hits zero is pushed onto `pending` and reclaimed by a later
+    // turn of this loop instead of by a nested call. Depth then costs heap, not
+    // stack, so releasing `[[[[…]]]]` 30,000 deep — which a program builds by
+    // wrapping one array in a loop — no longer overflows.
+    //
+    // `Vec::new` does not allocate, so a leaf object still frees without
+    // touching the allocator.
+    let mut pending: Vec<*mut c_void> = Vec::new();
+    let mut cur = ptr;
+    loop {
+        unsafe { free_one(cur, &mut pending) };
+        match pending.pop() {
+            Some(next) => cur = next,
+            None => break,
+        }
+    }
+}
+
+/// Reclaim exactly one object: release each child (pushing any that reached
+/// zero onto `pending`), then return its block to the pool.
+///
+/// # Safety
+/// Same as [`free_obj`].
+unsafe fn free_one(ptr: *mut c_void, pending: &mut Vec<*mut c_void>) {
     let kind = unsafe { (*(ptr as *const ObjHeader)).kind };
     // Reclaim the box (freeing its `Vec`), decref'ing children first. Reading the
     // children through the reconstructed box before `drop` is sound: nothing else
@@ -310,26 +353,34 @@ pub(crate) unsafe fn free_obj(ptr: *mut c_void) {
     if kind == ObjKind::Array as u8 {
         let a = unsafe { &*(ptr as *const ArrayObj<W>) };
         for &child in a.as_slice() {
-            unsafe { decref_word(child) };
+            if let Some(c) = unsafe { release_word(child) } {
+                pending.push(c);
+            }
         }
         unsafe { free_leaked(ptr as *mut ArrayObj<W>) };
     } else if kind == ObjKind::Dict as u8 {
         let d = unsafe { &*(ptr as *const DictObj<W>) };
         for (_, v) in d.entries() {
-            unsafe { decref_word(*v) };
+            if let Some(c) = unsafe { release_word(*v) } {
+                pending.push(c);
+            }
         }
         unsafe { free_leaked(ptr as *mut DictObj<W>) };
     } else if kind == ObjKind::Struct as u8 {
         let s = unsafe { &*(ptr as *const StructObj<W>) };
         for (_, v) in s.fields() {
-            unsafe { decref_word(*v) };
+            if let Some(c) = unsafe { release_word(*v) } {
+                pending.push(c);
+            }
         }
         unsafe { free_leaked(ptr as *mut StructObj<W>) };
     } else if kind == ObjKind::Prompt as u8 {
         // One owned child — the tagged string holding the prompt's text — so the
-        // cascade is a single decref rather than a walk.
+        // cascade is a single release rather than a walk.
         let p = unsafe { &*(ptr as *const crate::promptf::PromptObj) };
-        unsafe { decref_word(p.text) };
+        if let Some(c) = unsafe { release_word(p.text) } {
+            pending.push(c);
+        }
         unsafe { free_leaked(ptr as *mut crate::promptf::PromptObj) };
     } else if kind == ObjKind::Bytes as u8 {
         // No cascade. The payload is a `Vec<u8>`, not child words, so this must
@@ -343,6 +394,14 @@ pub(crate) unsafe fn free_obj(ptr: *mut c_void) {
         // it here would hand the C library's memory back to the wrong allocator.
         // Closing a handle is an explicit call the binding exposes.
         unsafe { free_leaked(ptr as *mut crate::handle::HandleObj) };
+    } else if kind == ObjKind::BoundMethod as u8 {
+        // One owned child — the receiver it will pass as `self` — so the cascade
+        // is a single release, like the Prompt arm above.
+        let bm = unsafe { &*(ptr as *const crate::methods::BoundMethodObj) };
+        if let Some(c) = unsafe { release_word(bm.self_word) } {
+            pending.push(c);
+        }
+        unsafe { free_leaked(ptr as *mut crate::methods::BoundMethodObj) };
     } else if kind == ObjKind::Future as u8 {
         // A future is header-carrying but not a collection: its payload is a
         // single result word, not a Vec of children, so there is no cascade to

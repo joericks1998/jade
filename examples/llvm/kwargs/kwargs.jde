@@ -3,3 +3,28 @@ fn sub(a, b) {
 }
 let r = sub(b = 1, a = 10)
 print(r)
+
+// A parameter that gets neither a positional nor a named argument takes its
+// declared default. Naming any argument used to blank the defaults of the ones
+// you did not name: the interpreter filled every slot with nil first and then
+// overwrote only what was supplied, so `tag("x", suffix = "]")` lost `prefix`.
+// The compiled backend had it right.
+
+fn tag(name, prefix = "<", suffix = ">") {
+    return prefix + name + suffix
+}
+
+print(tag("x"))
+print(tag("x", suffix = "]"))
+print(tag("x", prefix = "["))
+print(tag(name = "y", prefix = "["))
+print(tag(suffix = "]", name = "z"))
+
+fn triple(a, b = 2, c = 3) {
+    return [a, b, c]
+}
+
+print(triple(1))
+print(triple(1, c = 9))
+print(triple(1, b = 9))
+print(triple(a = 1, c = 9))

@@ -198,6 +198,9 @@ struct Job {
     f: TaskFn,
     args: Vec<i64>,
     future: *mut FutureObj,
+    /// Whether `args` are tagged Jade values this job took a reference to and
+    /// must release when the body is done. See [`spawn`].
+    owns_args: bool,
 }
 
 // The future outlives the job (the awaiter holds a reference), and the args are
@@ -262,11 +265,19 @@ impl Pool {
     ///
     /// `workers - blocked` is the runnable population; blocked workers are
     /// parked in `await` and cannot pick anything up.
+    ///
+    /// Saturating, because `blocked` counts *every* thread parked in `await`
+    /// and `workers` counts only the pool's own. A program that awaits at the
+    /// top level blocks the main thread, which is not a worker — so with a
+    /// deep chain of nested awaits `blocked` passes `workers` and a plain
+    /// subtraction underflows. `await`ing 1,000 deep aborted the binary on it.
+    /// Zero is also the right reading: more threads blocked than the pool has
+    /// means nothing is left to run the queue, which is exactly when to grow.
     fn should_grow(&self, st: &Inner) -> bool {
         if st.idle > 0 || st.queue.is_empty() {
             return false;
         }
-        let runnable = st.workers - st.blocked;
+        let runnable = st.workers.saturating_sub(st.blocked);
         runnable < self.target && st.workers < HARD_MAX_WORKERS
     }
 
@@ -309,7 +320,18 @@ impl Pool {
             };
 
             let mut args = job.args;
+            // Snapshot before invoking: `invoke` hands the wrapper a mutable
+            // pointer, and the words to release are the ones the job took a
+            // reference to, not whatever is left in the buffer afterwards.
+            let owned: Vec<i64> = if job.owns_args { args.clone() } else { Vec::new() };
             let outcome = invoke(job.f, &mut args);
+            // Give back the reference `spawn` took on the job's behalf. The task
+            // body borrowed these — a callee never releases its parameters — so
+            // this is the only release, and it happens after the body is done
+            // reading them.
+            for &a in &owned {
+                gc::jrt_decref(a);
+            }
             // Safety: `spawn` took a reference on the task's behalf, so the
             // future is guaranteed live here even if every other holder dropped
             // it while the body ran.
@@ -355,7 +377,29 @@ impl Pool {
 ///
 /// The returned pointer is `leak_obj`-allocated so the heap instrument counts
 /// it, and header-prefixed so it can be refcounted like any other value.
-pub fn spawn(f: TaskFn, args: Vec<i64>) -> *mut FutureObj {
+pub fn spawn(f: TaskFn, args: Vec<i64>, owns_args: bool) -> *mut FutureObj {
+    // The task outlives the expression that spawned it, so it cannot borrow its
+    // arguments from the spawning frame — that frame releases its slots as soon
+    // as it returns, and the task would then be reading freed memory:
+    //
+    //   fn go(n) { let a = [n, n]; return sum(a) }   // `a` released here
+    //   let f = go(1)                                 // task still holds it
+    //   await f                                       // use-after-free
+    //
+    // So the job takes its own reference to every argument, released in
+    // `worker_loop` once the body has run. Non-heap words (the common case: an
+    // int, a bool) no-op in both directions.
+    //
+    // `owns_args` says whether the words are *tagged Jade values* at all. They
+    // are from `jrt_spawn`, the one entry a compiled program uses. They are not
+    // from this crate's own tests, which hand tasks raw untagged integers —
+    // reading one of those as a value dereferences whatever its low bits
+    // happen to say, which is a null deref for a small odd number.
+    if owns_args {
+        for &a in &args {
+            gc::jrt_incref(a);
+        }
+    }
     let fut = gc::leak_obj(FutureObj::new()) as *mut FutureObj;
     // Two owners, two references. `ObjHeader::new` starts the count at 1 for the
     // caller; the running task needs its own, because the task writes the result
@@ -367,7 +411,7 @@ pub fn spawn(f: TaskFn, args: Vec<i64>) -> *mut FutureObj {
     // reclaimed memory. The worker releases its reference in `worker_loop`
     // immediately after `complete`.
     unsafe { (*fut).header.incref() };
-    pool().submit(Job { f, args, future: fut });
+    pool().submit(Job { f, args, future: fut, owns_args });
     fut
 }
 
@@ -493,7 +537,7 @@ pub unsafe extern "C" fn jrt_spawn(f: TaskFn, args: *const i64, n: i32) -> *mut 
     } else {
         Vec::new()
     };
-    spawn(f, argv)
+    spawn(f, argv, true)
 }
 
 /// Resolve a tagged word to a live future, or `None` if it is not one.
@@ -730,7 +774,7 @@ mod tests {
     #[test]
     fn spawn_and_await_returns_the_result() {
         let _g = exclusive();
-        let f = spawn(double, vec![21]);
+        let f = spawn(double, vec![21], false);
         assert_eq!(unsafe { await_one(f) }, Ok(42));
         unsafe { release(f) };
     }
@@ -738,7 +782,7 @@ mod tests {
     #[test]
     fn second_await_is_an_error() {
         let _g = exclusive();
-        let f = spawn(double, vec![1]);
+        let f = spawn(double, vec![1], false);
         assert_eq!(unsafe { await_one(f) }, Ok(2));
         assert_eq!(
             unsafe { await_one(f) },
@@ -751,7 +795,7 @@ mod tests {
     #[test]
     fn join_returns_results_in_argument_order() {
         let _g = exclusive();
-        let futs: Vec<_> = [1i64, 2, 3].iter().map(|&n| spawn(double, vec![n])).collect();
+        let futs: Vec<_> = [1i64, 2, 3].iter().map(|&n| spawn(double, vec![n], false)).collect();
         assert_eq!(unsafe { join_all(&futs) }, Ok(vec![2, 4, 6]));
         for f in futs {
             unsafe { release(f) };
@@ -765,7 +809,7 @@ mod tests {
         let _g = exclusive();
         ECHO_CALLS.store(0, Ordering::Relaxed);
         const N: usize = 500;
-        let futs: Vec<_> = (0..N as i64).map(|n| spawn(echo_double, vec![n])).collect();
+        let futs: Vec<_> = (0..N as i64).map(|n| spawn(echo_double, vec![n], false)).collect();
         for (i, &f) in futs.iter().enumerate() {
             assert_eq!(unsafe { await_one(f) }, Ok(i as i64 * 2));
         }
@@ -779,7 +823,7 @@ mod tests {
     #[test]
     fn pool_bounds_thread_count() {
         let _g = exclusive();
-        let futs: Vec<_> = (0..200).map(|_| spawn(double, vec![1])).collect();
+        let futs: Vec<_> = (0..200).map(|_| spawn(double, vec![1], false)).collect();
         for &f in &futs {
             let _ = unsafe { await_one(f) };
         }
@@ -801,7 +845,7 @@ mod tests {
         let _g = exclusive();
         CONCURRENT.store(0, Ordering::SeqCst);
         PEAK.store(0, Ordering::SeqCst);
-        let futs: Vec<_> = (0..32).map(|_| spawn(observe_concurrency, vec![])).collect();
+        let futs: Vec<_> = (0..32).map(|_| spawn(observe_concurrency, vec![], false)).collect();
         for &f in &futs {
             let _ = unsafe { await_one(f) };
         }
@@ -822,7 +866,7 @@ mod tests {
     /// backfills a worker when one blocks.
     extern "C" fn outer_awaits_inner(args: *mut i64, _n: i32) -> i64 {
         let n = unsafe { *args };
-        let inner = spawn(double, vec![n]);
+        let inner = spawn(double, vec![n], false);
         let r = unsafe { await_one(inner) }.expect("inner task must resolve");
         unsafe { release(inner) };
         r
@@ -838,7 +882,8 @@ mod tests {
 
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let futs: Vec<_> = (0..OUTER).map(|n| spawn(outer_awaits_inner, vec![n])).collect();
+            let futs: Vec<_> =
+                (0..OUTER).map(|n| spawn(outer_awaits_inner, vec![n], false)).collect();
             let mut sum = 0i64;
             for &f in &futs {
                 sum += unsafe { await_one(f) }.expect("outer task must resolve");
@@ -893,7 +938,7 @@ mod tests {
     #[test]
     fn the_worker_releases_its_reference_after_completing() {
         let _g = exclusive();
-        let f = spawn(double, vec![5]);
+        let f = spawn(double, vec![5], false);
         assert_eq!(unsafe { await_one(f) }.unwrap(), 10);
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);

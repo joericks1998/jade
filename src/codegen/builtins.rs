@@ -272,11 +272,78 @@ pub(super) fn chunk_val_method_supported(method: &str, argc: usize) -> bool {
     }
 }
 
-/// Emit a runtime-dispatched struct method `recv.method(args)`: look up the
-/// implementation by the receiver's runtime type name (`jrt_get_type_name` →
-/// `jrt_method_lookup`), then indirect-call it with `self` (the receiver)
-/// prepended. Used only for genuinely-ambiguous method names (same name+arity on
-/// >1 type); exact-arity, so no default filling.
+/// Emit the path a method call takes when the call site's static guess about
+/// the receiver did not hold.
+///
+/// Two ways it can miss, and they need different answers. The receiver may be
+/// another *struct* — a different type, or one that inherits the method — which
+/// dispatches on its runtime type. Or it may not be a struct at all, which
+/// happens when a struct declares a method named like a built-in one:
+/// resolution reaches the struct's `contains` first, and then somebody calls
+/// `[1, 2].contains(x)`. That one wants the primitive method, which is lowered
+/// inline and so has to be chosen here rather than in the runtime.
+pub(super) fn emit_method_fallback<'ctx>(
+    low: &Lowerer<'_, 'ctx>,
+    recv: Reg,
+    method: &str,
+    args: &[Reg],
+    prim: Option<PrimFallback>,
+) -> Result<IntValue<'ctx>, String> {
+    let Some(kind) = prim else {
+        return emit_dynamic_method(low, recv, method, args);
+    };
+    let b = low.builder;
+    let i64_ty = low.i64t();
+    let i32_ty = low.ctx.i32_type();
+    let err = |e: inkwell::builder::BuilderError| e.to_string();
+
+    let isf = low.runtime_fn("jrt_is_struct", i32_ty.fn_type(&[i64_ty.into()], false));
+    let flag = b
+        .build_call(isf, &[low.load(recv).into()], "isstruct")
+        .map_err(err)?
+        .as_any_value_enum()
+        .into_int_value();
+    let cond = b
+        .build_int_compare(inkwell::IntPredicate::NE, flag, i32_ty.const_zero(), "isstructb")
+        .map_err(err)?;
+    let cur = b.get_insert_block().unwrap().get_parent().unwrap();
+    let struct_bb = low.ctx.append_basic_block(cur, "mf_struct");
+    let prim_bb = low.ctx.append_basic_block(cur, "mf_prim");
+    let merge_bb = low.ctx.append_basic_block(cur, "mf_merge");
+    b.build_conditional_branch(cond, struct_bb, prim_bb).map_err(err)?;
+
+    b.position_at_end(struct_bb);
+    let dyn_ret = emit_dynamic_method(low, recv, method, args)?;
+    b.build_unconditional_branch(merge_bb).map_err(err)?;
+    let struct_end = b.get_insert_block().unwrap();
+
+    b.position_at_end(prim_bb);
+    let prim_ret = match kind {
+        PrimFallback::Str => crate::codegen::strings::emit_str_method(low, recv, method, args)?,
+        PrimFallback::Val => emit_val_method(low, recv, method, args)?,
+    };
+    b.build_unconditional_branch(merge_bb).map_err(err)?;
+    let prim_end = b.get_insert_block().unwrap();
+
+    b.position_at_end(merge_bb);
+    let phi = b.build_phi(i64_ty, "mfret").map_err(err)?;
+    phi.add_incoming(&[(&dyn_ret, struct_end), (&prim_ret, prim_end)]);
+    Ok(phi.as_basic_value().into_int_value())
+}
+
+/// Emit a runtime-dispatched method call `recv.method(args)`.
+///
+/// Used for a genuinely-ambiguous method name (the same name and arity on more
+/// than one type), and as the fallback when a devirtualized call site's type
+/// guard fails.
+///
+/// The whole resolution is one runtime call. It used to be built here — a fresh
+/// tagged type-name string (allocated per call, never freed), a registry lookup,
+/// then a jump through whatever came back, including null. That jump was an
+/// uncatchable segfault whenever the receiver's type had no such method, and
+/// going to the registry at all meant a *data field* holding a function lost to
+/// another type's method of the same name, which the interpreter resolves the
+/// other way round.
 pub(super) fn emit_dynamic_method<'ctx>(
     low: &Lowerer<'_, 'ctx>,
     recv: Reg,
@@ -288,35 +355,38 @@ pub(super) fn emit_dynamic_method<'ctx>(
     let ptrt = low.ptrt();
     let err = |e: inkwell::builder::BuilderError| e.to_string();
 
-    // type_word = tag_str(jrt_get_type_name(recv))
-    let gtn = low.runtime_fn("jrt_get_type_name", ptrt.fn_type(&[i64_ty.into()], false));
-    let tn = b
-        .build_call(gtn, &[low.load(recv).into()], "tname")
-        .map_err(err)?
-        .as_any_value_enum()
-        .into_pointer_value();
-    let type_word = low.tag_str(tn);
-    // fnptr = jrt_method_lookup(type_word, "method")
-    let lookup =
-        low.runtime_fn("jrt_method_lookup", ptrt.fn_type(&[i64_ty.into(), ptrt.into()], false));
-    let fnptr = b
-        .build_call(lookup, &[type_word.into(), low.cstr(method).into()], "mfn")
-        .map_err(err)?
-        .as_any_value_enum()
-        .into_pointer_value();
-    // Indirect call: fnptr(self, args...) — one i64 param per (self + args).
-    let arity = args.len() + 1;
-    let arg_tys = vec![i64_ty.into(); arity];
-    let fn_ty = i64_ty.fn_type(&arg_tys, false);
-    let mut argv: Vec<BasicMetadataValueEnum> = Vec::with_capacity(arity);
-    argv.push(low.load(recv).into());
-    for a in args {
-        argv.push(low.load(*a).into());
-    }
-    Ok(b.build_indirect_call(fn_ty, fnptr, &argv, "dmcall")
-        .map_err(err)?
-        .as_any_value_enum()
-        .into_int_value())
+    // Entry-block buffer, not an `alloca` here: this can sit inside a loop.
+    let argv = if args.is_empty() {
+        ptrt.const_null()
+    } else {
+        let buf = low.entry_buf("dmargv", args.len())?;
+        for (i, a) in args.iter().enumerate() {
+            let slot = unsafe {
+                b.build_in_bounds_gep(i64_ty, buf, &[i64_ty.const_int(i as u64, false)], "dma")
+                    .map_err(err)?
+            };
+            b.build_store(slot, low.load(*a)).map_err(err)?;
+        }
+        buf
+    };
+
+    let f = low.runtime_fn(
+        "jrt_method_fallback",
+        i64_ty.fn_type(&[i64_ty.into(), ptrt.into(), i64_ty.into(), ptrt.into()], false),
+    );
+    Ok(b.build_call(
+        f,
+        &[
+            low.load(recv).into(),
+            low.cstr(method).into(),
+            i64_ty.const_int(args.len() as u64, false).into(),
+            argv.into(),
+        ],
+        "dmcall",
+    )
+    .map_err(err)?
+    .as_any_value_enum()
+    .into_int_value())
 }
 
 /// Load a native package's `dlopen` handle from its `native_pkg$<pkgid>` global.
@@ -479,7 +549,7 @@ pub(super) fn emit_native_fn_value<'ctx>(
     let fnval = low.module.add_global(box_ty, None, &boxname);
     fnval.set_initializer(&box_ty.const_named_struct(&[
         sentinel.into(),
-        i64_ty.const_int(OBJKIND_FN, false).into(),
+        i64_ty.const_int(OBJKIND_FN | (OBJ_FN_NATIVE << 8), false).into(),
         env.as_pointer_value().into(),
     ]));
     fnval.set_linkage(inkwell::module::Linkage::Internal);
@@ -515,6 +585,25 @@ pub(super) fn emit_val_method<'ctx>(
             low.require_kind(low.load(recv), WANT_ARRAY, method)?
         }
         "keys" | "values" | "has" | "get" => low.require_kind(low.load(recv), WANT_DICT, method)?,
+        // `decode` is a blob method only; `slice` belongs to a blob *and* a
+        // string. Both hand the runtime the whole tagged word, so without a
+        // guard here `{"a": 1}.slice(0, 1)` read a `DictObj` as a `BytesObj`
+        // and took the process down, and `[1].decode()` returned a blob from
+        // an array's bytes. The VM raises "<kind> has no method" for both.
+        "decode" => low.require_kind(low.load(recv), WANT_BYTES, method)?,
+        "slice" => low.require_kind(low.load(recv), WANT_STR | WANT_BYTES, method)?,
+        _ => {}
+    }
+    // `map`/`filter` hand their argument to the runtime, which calls it. A word
+    // that is not a function value gets dereferenced there, so it is checked
+    // here for the same reason an indirect call checks its callee.
+    match method {
+        // Deliberately not checked here. `jrt_call_value` checks each time it
+        // enters the callback, so an eager check only changes what happens on an
+        // *empty* array — where the interpreter never looks at the callback at
+        // all and answers `[]`. Checking here made `[].map(5)` raise compiled
+        // and return `[]` interpreted.
+        "map" | "filter" => {}
         _ => {}
     }
 
@@ -768,18 +857,23 @@ pub(super) fn emit_module_call<'ctx>(
     };
 
     match (module, method) {
-        // abs/pow are overflow-checked, so they go through C forwarders that
-        // raise "integer overflow"; the rest cannot fail and call Rust directly.
+        // abs/pow are overflow-checked, and so are the four float -> int
+        // conversions: `math.floor(math.inf())` saturates to a whole number no
+        // tagged word can hold. All six go through C forwarders that raise
+        // "integer overflow"; the rest cannot fail and call Rust directly.
         ("math", "abs") => math_fn("jade_math_abs", 1),
         ("math", "pow") => math_fn("jade_math_pow", 2),
-        ("math", "floor" | "ceil" | "sqrt") => math_fn(&format!("jrt_math_{method}"), 1),
+        ("math", "floor" | "ceil" | "round" | "trunc") => {
+            math_fn(&format!("jade_math_{method}"), 1)
+        }
+        ("math", "sqrt") => math_fn("jrt_math_sqrt", 1),
         ("math", "min" | "max") => math_fn(&format!("jrt_math_{method}"), 2),
         // The predicates answer a tagged bool word, which `math_fn` returns
         // unchanged — nothing here has to know the difference.
         (
             "math",
-            "round" | "trunc" | "sign" | "ln" | "log2" | "log10" | "exp" | "sin" | "cos" | "tan"
-            | "asin" | "acos" | "atan" | "is_nan" | "is_inf",
+            "sign" | "ln" | "log2" | "log10" | "exp" | "sin" | "cos" | "tan" | "asin" | "acos"
+            | "atan" | "is_nan" | "is_inf",
         ) => math_fn(&format!("jrt_math_{method}"), 1),
         ("math", "atan2" | "hypot") => math_fn(&format!("jrt_math_{method}"), 2),
         ("math", "clamp") => math_fn("jrt_math_clamp", 3),

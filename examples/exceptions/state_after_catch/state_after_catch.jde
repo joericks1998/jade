@@ -1,0 +1,95 @@
+// What a caught raise leaves behind.
+//
+// A compiled binary gets back into a handler with `longjmp`, which restores the
+// callee-saved registers to what they held when the matching `setjmp` ran. So
+// any local the optimizer had kept in one of those registers reverted to its
+// pre-`try` value the moment a raise was caught, and every write the try body
+// made was silently undone. `jade run` kept the writes. Worse than a wrong
+// number: a reverted slot still names a heap value it no longer owns, and
+// releasing it a second time is a double free.
+//
+// The fix keeps those slots in memory, the same reason C asks for `volatile` on
+// a local modified between `setjmp` and `longjmp`.
+
+fn writes_then_raises() {
+    let a = 0
+    let b = 0
+    let c = 0
+    try {
+        a = 1
+        b = 2
+        c = 3
+        raise "stop"
+    } catch e {
+    }
+    return a + b + c
+}
+
+print(writes_then_raises())
+
+// The same thing with heap values, which is where the reverted slot turns into
+// a double free rather than a wrong answer.
+fn heap_writes_then_raises() {
+    let xs = [0]
+    let i = 0
+    while i < 50 {
+        xs = [i, i]
+        try {
+            xs = [i, i, i]
+            raise "stop"
+        } catch e {
+        }
+        i = i + 1
+    }
+    return len(xs)
+}
+
+print(heap_writes_then_raises())
+
+// A raise caught in the frame that made it. The raiser's own slot still holds
+// the value, so the handler has to take its own reference rather than sharing
+// that one — otherwise both release it and the second release frees twice.
+struct Payload {
+    items
+}
+
+let round = 0
+let seen = 0
+while round < 200 {
+    try {
+        raise Payload { items: [round, round] }
+    } catch Payload p {
+        seen = seen + p.items[0]
+    }
+    round = round + 1
+}
+print(seen)
+
+// And a raise from deeper in, caught after several frames have been skipped.
+fn level3(n) {
+    raise Payload { items: [n] }
+}
+
+fn level2(n) {
+    let scratch = [n, n, n]
+    level3(n)
+    return len(scratch)
+}
+
+fn level1(n) {
+    let held = [n]
+    level2(n)
+    return len(held)
+}
+
+let deep = 0
+let k = 0
+while k < 200 {
+    try {
+        level1(k)
+    } catch Payload p {
+        deep = deep + p.items[0]
+    }
+    k = k + 1
+}
+print(deep)

@@ -552,11 +552,15 @@ fn native_fn_value_carries_an_objkind_at_offset_8() {
         .find(|l| l.contains(r#"@"native_fnval$0$somefn" = "#))
         .unwrap_or_else(|| panic!("native fn value emitted as a global:\n{ir}"));
     assert!(line.contains("internal constant"), "shared and unwritable: {line}");
+    // The kind slot is a full i64: the low byte is the ObjKind the refcount ops
+    // read, and the byte above it says which sort of callable this is, so the
+    // renderer can print `<native lib fn somefn>` instead of `<object>`.
+    let kind_word = OBJKIND_FN | (OBJ_FN_NATIVE << 8);
     assert!(
         line.contains(&format!(
-            r#"{{ ptr @jrt_native_call, i64 {OBJKIND_FN}, ptr @"native_env$0$somefn" }}"#
+            r#"{{ ptr @jrt_native_call, i64 {kind_word}, ptr @"native_env$0$somefn" }}"#
         )),
-        "slots are {{ sentinel, ObjKind::Fn, env }} in that order — with the kind at offset 8, \
+        "slots are {{ sentinel, kind, env }} in that order — with the kind at offset 8, \
          where jrt_decref would otherwise misread the env pointer as a kind: {line}"
     );
     assert!(
