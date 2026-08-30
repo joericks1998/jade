@@ -210,11 +210,6 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
         self.slot_load(i, "ldl")
     }
 
-    pub(super) fn store_idx(&self, i: usize, v: IntValue<'ctx>) {
-        self.rc_replace_slot(i, v);
-        self.slot_store(i, v);
-    }
-
     /// Store a value the destination is *borrowing* — a `Move`, a local read, an
     /// element read. The source still owns its reference, so the destination
     /// takes one of its own.

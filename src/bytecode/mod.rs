@@ -344,7 +344,13 @@ pub enum Instr {
     /// dest ← block until Future resolves and unwrap result.
     Await(Reg, Reg),
     /// dest ← wait for all Futures in argument order, return Array.
-    Join(Reg, Vec<Reg>),
+    /// `join(a, b, …)` — await every future and collect the results.
+    ///
+    /// The `bool` is `settle = true`: report *every* outcome as a dict rather
+    /// than raising the first failure. A compile-time mode rather than a runtime
+    /// value, because it changes what the call returns, and a caller that cannot
+    /// tell which shape it is getting cannot use either.
+    Join(Reg, Vec<Reg>, bool),
 
     // ── Imports ────────────────────────────────────────────────────────────
     /// Run the full pipeline for the file at `path` and bind its exports under `namespace`.

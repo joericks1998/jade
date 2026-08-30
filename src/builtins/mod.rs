@@ -242,6 +242,8 @@ pub fn seed_globals<S: std::hash::BuildHasher>(globals: &mut HashMap<String, VmV
     // until v1.2.5, when `?p` folded onto the buffered stream and it went away.)
     globals.insert("print".to_string(), VmValue::NativeFn(NativeFnId::Print));
     globals.insert("route".to_string(), VmValue::NativeFn(NativeFnId::Route));
+    // `wait` has to await, so it cannot be a pure BuiltinFn either.
+    globals.insert("wait".to_string(), VmValue::NativeFn(NativeFnId::Wait));
     // Primitive type constructors: callable with one arg like Python's int(), str(), etc.
     for name in &["int", "float", "bool", "str", "char", "func"] {
         globals.insert(name.to_string(), VmValue::TypeRef(name.to_string()));

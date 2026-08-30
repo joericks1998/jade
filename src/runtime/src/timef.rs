@@ -276,6 +276,22 @@ pub extern "C" fn jrt_time_parts(ts: i64) -> W {
         as i64
 }
 
+/// `time.sleep(secs)` taking the tagged word, so an int argument works.
+///
+/// Returns 0 on success and -1 for an argument that is not a number, which the
+/// C forwarder turns into the error the interpreter raises. `jrt_time_sleep`
+/// keeps its `f64` shape for callers that already have one.
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_time_sleep_word(word: i64) -> i32 {
+    match seconds_of(word) {
+        Some(secs) => {
+            jrt_time_sleep(secs);
+            0
+        }
+        None => -1,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -371,21 +387,5 @@ mod tests {
         let b = monotonic();
         assert!(b >= a, "monotonic went backwards: {} then {}", a, b);
         assert!(b - a < 60.0, "implausible gap: {}", b - a);
-    }
-}
-
-/// `time.sleep(secs)` taking the tagged word, so an int argument works.
-///
-/// Returns 0 on success and -1 for an argument that is not a number, which the
-/// C forwarder turns into the error the interpreter raises. `jrt_time_sleep`
-/// keeps its `f64` shape for callers that already have one.
-#[unsafe(no_mangle)]
-pub extern "C" fn jrt_time_sleep_word(word: i64) -> i32 {
-    match seconds_of(word) {
-        Some(secs) => {
-            jrt_time_sleep(secs);
-            0
-        }
-        None => -1,
     }
 }

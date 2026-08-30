@@ -133,6 +133,13 @@ pub fn register_types(ctx: &mut TypeContext) {
         JadeType::Fn { params: vec![], ret: Box::new(JadeType::Bool) },
     );
     ctx.define(
+        "wait".to_string(),
+        JadeType::Fn {
+            params: vec![JadeType::Array(Box::new(JadeType::Unknown))],
+            ret: Box::new(JadeType::Int),
+        },
+    );
+    ctx.define(
         "write".to_string(),
         JadeType::Fn { params: vec![JadeType::Unknown], ret: Box::new(JadeType::Nil) },
     );

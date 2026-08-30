@@ -104,6 +104,8 @@ extern jade_value_t jrt_await_impl(void* fut, int* failed, jade_value_t* err, co
 extern jade_value_t jrt_await_word(jade_value_t w, int* failed, jade_value_t* err, const char** ty);
 extern int          jrt_future_ready(int64_t w);
 extern int          jrt_future_cancel(int64_t w);
+extern int          jrt_wait_any(const int64_t* words, int n);
+extern int          jrt_join_settle(const int64_t* ws, int n, int64_t* out_vals, int* out_ok);
 extern void  jrt_join_words(const jade_value_t* ws, int n, jade_value_t* out,
                             int* failed, jade_value_t* err, const char** ty);
 extern void  jrt_join_impl(void* const* futs, int n, jade_value_t* out,
@@ -236,6 +238,70 @@ void jade_future_cancel(jade_value_t w) {
     if (jrt_future_cancel((int64_t)w) < 0) {
         jrt_require_kind((int64_t)w, JRT_WANT_FUTURE, "cancel");
     }
+}
+
+/* `wait(futures)` — block until one of them is settled, and answer which.
+ *
+ * The index, and it consumes nothing: the caller then awaits the one that is
+ * ready, which costs nothing because it is. A deadline is an ordinary member of
+ * the list, which is why `wait` needs no timeout of its own.
+ *
+ * The messages are the interpreter's, word for word, because the parity gate
+ * diffs stdout and a caught `e.message` is stdout. */
+/* `join(a, b, settle = true)` — every outcome, rather than the first failure.
+ *
+ * A fan-out with one failure should hand back the ones that worked, and plain
+ * `join` throws them away. One dict per task, so the shape needs no new type:
+ * {"ok": true, "value": v} or {"ok": false, "error": e}.
+ *
+ * A member that is not a future, or one already awaited, still raises. `settle`
+ * covers what the tasks did; it does not turn calling `join` wrongly into data. */
+jade_value_t jade_join_settle(const jade_value_t* ws, int n) {
+    if (n < 0) n = 0;
+    if (n > 256) jrt_throw_runtime("join: too many futures");
+    /* VLAs rather than malloc: the raises below are longjmps that would skip a
+     * free. `n == 0` would be a zero-length VLA, so give them a floor. */
+    int64_t vals[n > 0 ? n : 1];
+    int oks[n > 0 ? n : 1];
+
+    int r = jrt_join_settle((const int64_t*)ws, n, vals, oks);
+    if (r == -1) jrt_throw_runtime("'await' applied to a non-Future value");
+    if (r == -3) jrt_throw_runtime("cannot await the same Future more than once");
+    if (r < 0)  jrt_throw_runtime("join: could not await");
+
+    void* out = jrt_karr_new();
+    for (int i = 0; i < n; i++) {
+        void* d = jrt_kdict_new();
+        jrt_kdict_set(d, jrt_box_str(jrt_str_dup("ok", JRT_TRUSTED)), jrt_box_bool(oks[i]));
+        jrt_kdict_set(d,
+                      jrt_box_str(jrt_str_dup(oks[i] ? "value" : "error", JRT_TRUSTED)),
+                      vals[i]);
+        jrt_karr_push(out, jrt_box_ptr(d));
+    }
+    return jrt_box_ptr(out);
+}
+
+jade_value_t jade_wait(jade_value_t arr) {
+    if (!jrt_is_ptr(arr) || jrt_kind_of(jrt_unbox_ptr(arr)) != JK_ARRAY) {
+        jrt_throw_runtime("wait: expects an array of futures");
+    }
+    void* a = jrt_unbox_ptr(arr);
+    int64_t n = jrt_coll_array_len(a);
+    if (n <= 0) jrt_throw_runtime("wait: no futures to wait for");
+    if (n > 256) jrt_throw_runtime("wait: too many futures");
+
+    /* A VLA rather than malloc: `jrt_wait_any` can raise nothing itself, but the
+     * throws above and below are longjmps that would skip a free. */
+    int64_t buf[n];
+    for (int64_t i = 0; i < n; i++) buf[i] = (int64_t)jrt_coll_array_get(a, i);
+
+    int r = jrt_wait_any(buf, (int)n);
+    /* -1 is a member that is not a future, -2 an empty list. The second cannot
+     * happen here, since the count was checked, and is handled anyway because
+     * this is the boundary. */
+    if (r == -1) jrt_throw_runtime("'await' applied to a non-Future value");
+    if (r < 0) jrt_throw_runtime("wait: no futures to wait for");
+    return jrt_box_int(r);
 }
 
 jade_value_t jade_future_ready(jade_value_t w) {

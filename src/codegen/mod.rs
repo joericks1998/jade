@@ -864,7 +864,7 @@ fn lower_body<'ctx>(
         slots.push(builder.build_alloca(i64_ty, &format!("r{i}")).map_err(|e| e.to_string())?);
     }
     // Nil-initialize every slot so the release-old-value logic in
-    // `store`/`store_idx` (and scope-exit `decref`) never reads uninitialized
+    // `store`/`store_borrowed` (and scope-exit `decref`) never reads uninitialized
     // stack: a first store releases nil (a no-op), and an unwritten slot decref's
     // nil at scope exit. Done before the param copies so params overwrite the nil.
     {

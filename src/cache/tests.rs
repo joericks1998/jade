@@ -220,6 +220,10 @@ fn purge_predicate_filters() {
 
 #[test]
 fn cache_format_version_is_stable() {
+    // Bumped to 13 in v1.4.5. `Instr::Join` gained a `settle` flag, so every
+    // later variant renumbers under bincode and an older cache would deserialize
+    // into something this build cannot run, without complaining.
+    //
     // Bumped to 12 in v1.4.3. `CompiledFn` gained `is_async`, which is what lets
     // a function reached as a *value* start a task: a call site that cannot see
     // the declaration has no static type to decide from. An older cache holds
@@ -236,6 +240,6 @@ fn cache_format_version_is_stable() {
     // `decorators` field for `parents`; and `Instr::CatchMatches` is a new
     // opcode. A TIR cached by an older build would deserialize into something
     // this one cannot run, and would do it without complaining.
-    assert_eq!(CACHE_FORMAT_VERSION, 12);
+    assert_eq!(CACHE_FORMAT_VERSION, 13);
     assert!(!JADE_VERSION.is_empty());
 }

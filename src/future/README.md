@@ -28,6 +28,14 @@ while running {
 
 The `await` after a true `ready()` costs nothing — measured at 7µs compiled, 39µs interpreted, on a future that has already finished. It falls straight through the wait. That is what makes the shape work rather than merely read well: without it, the poll would only move the block rather than remove it.
 
+## What it holds now
+
+`ready()` came first and answers one question without blocking. `cancel()` joined it in v1.4.5, and the pair is the whole surface a future has: *is it done*, and *stop waiting for it*.
+
+`cancel` does not stop the work. A compiled task is a real thread running straight-line code with no point at which the runtime could interrupt it, so a cancel that claimed to kill the task would be a promise only one engine could keep. It stops the caller: `await` raises at once, and one already blocked wakes and raises. A task that wants to give up early checks `cancelled()`, which is the only thing that actually stops work, and which is the task's own choice.
+
+Cancelled outranks a result that arrived anyway. The caller said it had stopped waiting, and handing it the answer after that would make `cancel` mean nothing on a task that was about to finish.
+
 ## What each file does
 
 - *`mod.rs`* holds `find_future_method`, `register_future_method_types`, and the `ready` implementation. The interpreter reads the future's join handle; a handle that has already been taken means the task is certainly over.

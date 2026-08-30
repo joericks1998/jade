@@ -473,25 +473,6 @@ impl Pool {
 
 // ── Running a body ───────────────────────────────────────────────────────────
 
-/// Run a task body and publish its outcome on `fut`.
-///
-/// The one place a body runs, reached from two directions: a pool worker that
-/// popped it off the queue, and an awaiter that claimed it rather than park
-/// (see [`await_one`]). Both must clean up identically, which is why neither
-/// does it inline.
-///
-/// `fresh_stack` says whether the body starts at the bottom of a thread's own
-/// stack, which decides whether it gets a fresh recursion budget. A worker does.
-/// An awaiter does not: running the body inline puts it genuinely deeper on a
-/// stack that is already in use, so it has to keep counting, or nothing bounds
-/// an `await` chain and a deep one walks off the end of the stack — a SIGBUS
-/// with no output at all, where the interpreter prints the answer and ordinary
-/// recursion raises. The limit is the honest one either way: past it a compiled
-/// binary says "recursion limit exceeded", where the interpreter, whose tasks
-/// live on the heap rather than the stack, keeps going.
-///
-/// Does not touch `fut`'s reference count. The caller holds one either way —
-/// the worker holds the queue entry's, the awaiter holds the handle's.
 thread_local! {
     /// The future the body running on this thread resolves, so `cancelled()`
     /// can answer without the program having to pass its own handle around.
@@ -511,6 +492,25 @@ pub fn current_is_cancelled() -> bool {
     !f.is_null() && unsafe { is_cancelled(f) }
 }
 
+/// Run a task body and publish its outcome on `fut`.
+///
+/// The one place a body runs, reached from two directions: a pool worker that
+/// popped it off the queue, and an awaiter that claimed it rather than park
+/// (see [`await_one`]). Both must clean up identically, which is why neither
+/// does it inline.
+///
+/// `fresh_stack` says whether the body starts at the bottom of a thread's own
+/// stack, which decides whether it gets a fresh recursion budget. A worker does.
+/// An awaiter does not: running the body inline puts it genuinely deeper on a
+/// stack that is already in use, so it has to keep counting, or nothing bounds
+/// an `await` chain and a deep one walks off the end of the stack — a SIGBUS
+/// with no output at all, where the interpreter prints the answer and ordinary
+/// recursion raises. The limit is the honest one either way: past it a compiled
+/// binary says "recursion limit exceeded", where the interpreter, whose tasks
+/// live on the heap rather than the stack, keeps going.
+///
+/// Does not touch `fut`'s reference count. The caller holds one either way —
+/// the worker holds the queue entry's, the awaiter holds the handle's.
 fn run_job(fut: *mut FutureObj, job: Job, fresh_stack: bool) {
     let mut args = job.args;
     // Snapshot before invoking: `invoke` hands the wrapper a mutable pointer,
@@ -568,10 +568,7 @@ struct Timers {
 
 fn timers() -> &'static Timers {
     static T: OnceLock<Timers> = OnceLock::new();
-    T.get_or_init(|| {
-        let t = Timers { pending: Mutex::new(Vec::new()), cv: Condvar::new() };
-        t
-    })
+    T.get_or_init(|| Timers { pending: Mutex::new(Vec::new()), cv: Condvar::new() })
 }
 
 /// Start the timer thread once, on the first `after`.
@@ -639,8 +636,8 @@ pub fn after(secs: f64) -> *mut FutureObj {
     let mut q = t.pending.lock().unwrap_or_else(|e| e.into_inner());
     let deadline = std::time::Instant::now() + d;
     q.push(Timer { deadline, fut });
-    // Descending by deadline, so the next to fire is at the end.
-    q.sort_by(|a, b| b.deadline.cmp(&a.deadline));
+    // Descending by deadline, so the next to fire is a `pop`.
+    q.sort_by_key(|t| std::cmp::Reverse(t.deadline));
     drop(q);
     t.cv.notify_all();
     fut
@@ -1217,6 +1214,59 @@ pub unsafe extern "C" fn jrt_wait_any(words: *const i64, n: i32) -> i32 {
     }
     unsafe { wait_any(&futs) }
 }
+
+/// Await every future and report each outcome separately, for `settle = true`.
+///
+/// `out_vals[i]` is the value a task returned or the value it raised, and
+/// `out_ok[i]` says which. Nothing raises here: reporting every outcome is the
+/// whole point, and the caller builds the dicts.
+///
+/// The return is for *misuse* rather than outcome — `NOT_A_FUTURE` for a member
+/// that is not one, `DOUBLE_AWAITED` for one already taken. Those are mistakes
+/// in the program rather than things a task did, so `settle` does not turn them
+/// into data; the C forwarder raises.
+///
+/// # Safety
+/// `words` must point at `n` readable words, and both out-params at `n`
+/// writable ones.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jrt_join_settle(
+    words: *const i64,
+    n: i32,
+    out_vals: *mut i64,
+    out_ok: *mut i32,
+) -> i32 {
+    if n <= 0 || words.is_null() {
+        return 0;
+    }
+    let list = unsafe { core::slice::from_raw_parts(words, n as usize) };
+    // Every member checked before any is awaited, so a misuse is reported
+    // without first blocking on tasks whose results are about to be discarded.
+    let mut futs = Vec::with_capacity(list.len());
+    for &w in list {
+        match as_future(w) {
+            Some(f) => futs.push(f),
+            None => return NOT_A_FUTURE,
+        }
+    }
+    for (i, &f) in futs.iter().enumerate() {
+        let (v, ok) = match unsafe { await_one(f) } {
+            Ok(v) => (v, 1),
+            Err(TaskError::Raised(e, _)) => (e, 0),
+            Err(TaskError::Cancelled) => (crate::value::NIL_BITS as i64, 0),
+            Err(TaskError::DoubleAwait) => return DOUBLE_AWAITED,
+            Err(TaskError::NotAFuture) => return NOT_A_FUTURE,
+        };
+        unsafe {
+            *out_vals.add(i) = v;
+            *out_ok.add(i) = ok;
+        }
+    }
+    0
+}
+
+/// `jrt_join_settle`'s answer for a member already awaited.
+pub const DOUBLE_AWAITED: i32 = -3;
 
 /// Release a future. Until futures are refcounted values (next step), codegen
 /// owns this call — which is exactly why they leak today: the old

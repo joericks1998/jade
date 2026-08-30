@@ -1542,7 +1542,7 @@ pub(crate) async fn execute_chunk(
             //
             // reported "unhandled exception" rather than running the catch arm.
             // So: collect everything first, dispatch exactly once at the end.
-            Instr::Join(dest, future_regs) => {
+            Instr::Join(dest, future_regs, settle) => {
                 let mut first_err: Option<JadeError> = None;
                 let mut handles = Vec::with_capacity(future_regs.len());
                 for &r in future_regs {
@@ -1567,24 +1567,38 @@ pub(crate) async fn execute_chunk(
                 }
 
                 let mut results = Vec::with_capacity(handles.len());
+                // What each task actually did, for `settle`. `None` is success.
+                let mut outcomes: Vec<Option<VmValue>> = Vec::with_capacity(handles.len());
                 for handle in handles {
                     // A slot that never produced a handle still gets an entry, so
                     // `results` lines up with the arguments on every path.
                     let Some(handle) = handle else {
                         results.push(VmValue::Nil);
+                        outcomes.push(None);
                         continue;
                     };
                     match handle.await {
                         Err(e) => {
                             results.push(VmValue::Nil);
+                            outcomes.push(Some(VmValue::Str(e.to_string().into())));
                             first_err.get_or_insert(JadeError::AsyncPanic {
                                 message: e.to_string(),
                                 span,
                             });
                         }
-                        Ok((Ok(v), _)) => results.push(v),
+                        Ok((Ok(v), _)) => {
+                            results.push(v);
+                            outcomes.push(None);
+                        }
                         Ok((Err(e), child_raised)) => {
                             results.push(VmValue::Nil);
+                            // The value the task raised, so `settle` hands back
+                            // the struct the program threw rather than its text.
+                            outcomes.push(Some(
+                                child_raised
+                                    .clone()
+                                    .unwrap_or_else(|| VmValue::Str(e.to_string().into())),
+                            ));
                             if first_err.is_none() {
                                 // Only the reported failure's value, so a typed
                                 // `catch` matches the arm it should.
@@ -1597,14 +1611,56 @@ pub(crate) async fn execute_chunk(
                     }
                 }
 
-                if let Some(e) = first_err {
+                // `settle = true` reports every outcome instead of raising the
+                // first failure, which is what a fan-out wants: eight requests
+                // with one failure should hand back the seven that worked, and
+                // plain `join` throws them away. One dict per task, so the shape
+                // needs no new type: `{"ok": true, "value": v}` or
+                // `{"ok": false, "error": e}`.
+                // A member that is not a future, or one already awaited, is a
+                // mistake in the program rather than an outcome of a task.
+                // `settle` covers what the tasks did; it does not turn calling
+                // `join` wrongly into data.
+                if matches!(
+                    first_err,
+                    Some(JadeError::NotAFuture { .. } | JadeError::DoubleAwait { .. })
+                ) {
+                    let e = first_err.take().expect("just matched");
                     vm_err!(e);
                 }
-                set(
-                    slots,
-                    *dest,
-                    VmValue::Array(Arc::new(Mutex::new(ArrayObj::from_vec(results)))),
-                );
+
+                if *settle {
+                    let mut out = Vec::with_capacity(results.len());
+                    let mut outcomes = outcomes;
+                    for (i, r) in results.into_iter().enumerate() {
+                        let mut d = DictObj::new();
+                        match outcomes[i].take() {
+                            Some(err) => {
+                                d.insert("ok".to_string(), VmValue::Bool(false));
+                                d.insert("error".to_string(), err);
+                            }
+                            None => {
+                                d.insert("ok".to_string(), VmValue::Bool(true));
+                                d.insert("value".to_string(), r);
+                            }
+                        }
+                        out.push(VmValue::Dict(Arc::new(d)));
+                    }
+                    set(
+                        slots,
+                        *dest,
+                        VmValue::Array(Arc::new(Mutex::new(ArrayObj::from_vec(out)))),
+                    );
+                } else {
+                    if let Some(e) = first_err {
+                        vm_err!(e);
+                    }
+                    set(
+                        slots,
+                        *dest,
+                        VmValue::Array(Arc::new(Mutex::new(ArrayObj::from_vec(results)))),
+                    );
+                }
             }
         }
     }
@@ -1972,7 +2028,7 @@ pub(crate) fn instr_max_reg(instr: &Instr) -> u32 {
             m
         }
         Instr::Await(d, s) => (*d).max(*s),
-        Instr::Join(d, regs) => {
+        Instr::Join(d, regs, _) => {
             let mut m = *d;
             for &r in regs {
                 m = m.max(r);
