@@ -43,6 +43,10 @@ This was once a single large file, split up a piece at a time. `mod.rs` re-expor
 
 ## Gotchas
 
+*A keyword call has to fill the defaults it skipped, here.* `resolve_named_args` turns a mix of positional and named arguments into one positional list, and that list is the *complete* argument list — `call_fn` gets it and cannot tell a parameter that was omitted from one explicitly given `nil`. So a parameter that got neither kind of argument has to take its declared default before this function returns.
+
+It used to start from a vector of `nil` and overwrite only what was supplied, which meant naming any argument silently blanked the defaults of the ones you did not name: `f(1, c = 9)` on `fn f(a, b = 2, c = 3)` passed `b` as `nil`. The compiled backend fills its defaults at the call site and was right all along, so this only ever went wrong under `jade run`. A parameter with no default and no argument is now a named error rather than another `nil`.
+
 *Do not mutate process-global state in tests.* `cargo test` is heavily parallel, so `std::env::set_var` races against every other thread calling `getenv`. That is a genuine data race, and it is why `set_var` is `unsafe` as of the 2024 edition. Inject a path instead, or use a `#[cfg(test)]` thread-local with an RAII guard.
 
 *No panics on the interpreter path.* Every failure returns a `JadeError` carrying a span, including anything derived from user input.

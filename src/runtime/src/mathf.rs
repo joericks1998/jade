@@ -312,16 +312,40 @@ fn bool_word(b: bool) -> i64 {
     JadeValue::from_bool(b).bits() as i64
 }
 
+/// Box a core result for the AOT backend, reporting a whole number its tagged
+/// word cannot hold instead of truncating it.
+///
+/// The float→int functions are where a value arrives that no 63-bit word can
+/// represent: `f.floor() as i64` saturates a non-finite float to `i64::MAX`,
+/// and `math.floor(math.inf())` handed that straight to `from_int`, which
+/// truncates in release and trips its debug assertion otherwise — the compiled
+/// binary aborted. Raising the backend's own "integer overflow" is the same
+/// answer it already gives for a sum it cannot hold.
+fn checked_int(n: Num, err: *mut u32) -> i64 {
+    match n {
+        Num::Int(i) => match JadeValue::try_from_int(i) {
+            Some(v) => v.bits() as i64,
+            None => {
+                if !err.is_null() {
+                    unsafe { *err = JRT_MATH_OVERFLOW };
+                }
+                0
+            }
+        },
+        Num::Float(f) => float_word(f),
+    }
+}
+
 /// `math.floor(x)`: float → floored int; int → unchanged.
 #[unsafe(no_mangle)]
-pub extern "C" fn jrt_math_floor(w: i64) -> i64 {
-    from_num(floor(to_num(w)))
+pub extern "C" fn jrt_math_floor(w: i64, err: *mut u32) -> i64 {
+    checked_int(floor(to_num(w)), err)
 }
 
 /// `math.ceil(x)`: float → ceiled int; int → unchanged.
 #[unsafe(no_mangle)]
-pub extern "C" fn jrt_math_ceil(w: i64) -> i64 {
-    from_num(ceil(to_num(w)))
+pub extern "C" fn jrt_math_ceil(w: i64, err: *mut u32) -> i64 {
+    checked_int(ceil(to_num(w)), err)
 }
 
 /// `math.abs(x)`. Overflow-checked: see [`abs`].
@@ -374,14 +398,14 @@ pub extern "C" fn jrt_math_pow(a: i64, b: i64, err: *mut u32) -> i64 {
 
 /// `math.round(x)`. See [`round`].
 #[unsafe(no_mangle)]
-pub extern "C" fn jrt_math_round(w: i64) -> i64 {
-    from_num(round(to_num(w)))
+pub extern "C" fn jrt_math_round(w: i64, err: *mut u32) -> i64 {
+    checked_int(round(to_num(w)), err)
 }
 
 /// `math.trunc(x)`. See [`trunc`].
 #[unsafe(no_mangle)]
-pub extern "C" fn jrt_math_trunc(w: i64) -> i64 {
-    from_num(trunc(to_num(w)))
+pub extern "C" fn jrt_math_trunc(w: i64, err: *mut u32) -> i64 {
+    checked_int(trunc(to_num(w)), err)
 }
 
 /// `math.sign(x)`. See [`sign`].
@@ -578,8 +602,8 @@ mod tests {
 
     #[test]
     fn word_wrappers_round_trip_through_the_cores() {
-        assert_eq!(jrt_math_floor(float_word(3.7)), int_word(3));
-        assert_eq!(jrt_math_ceil(float_word(3.2)), int_word(4));
+        assert_eq!(ok(|e| jrt_math_floor(float_word(3.7), e)), int_word(3));
+        assert_eq!(ok(|e| jrt_math_ceil(float_word(3.2), e)), int_word(4));
         assert_eq!(jrt_math_min(int_word(3), int_word(7)), int_word(3));
         assert_eq!(ok(|e| jrt_math_abs(int_word(-4), e)), int_word(4));
         assert_eq!(ok(|e| jrt_math_pow(int_word(2), int_word(10), e)), int_word(1024));
@@ -588,6 +612,18 @@ mod tests {
     #[test]
     fn word_wrappers_report_overflow() {
         overflows(|e| jrt_math_pow(int_word(2), int_word(64), e));
+    }
+
+    // `f.floor() as i64` saturates a non-finite float to `i64::MAX`, which is
+    // outside the 63-bit range a tagged word holds. It used to be handed to
+    // `from_int`, which truncates in release and trips its debug assertion
+    // otherwise — `math.floor(math.inf())` aborted the compiled binary.
+    #[test]
+    fn a_float_too_large_for_a_tagged_int_reports_overflow() {
+        overflows(|e| jrt_math_floor(float_word(f64::INFINITY), e));
+        overflows(|e| jrt_math_ceil(float_word(f64::INFINITY), e));
+        overflows(|e| jrt_math_round(float_word(f64::NEG_INFINITY), e));
+        overflows(|e| jrt_math_trunc(float_word(1e300), e));
     }
 
     /// `abs(i64::MIN)` overflows in the *core*, but cannot be reached through a

@@ -121,7 +121,13 @@ fn both_modes_share_one_initializer() {
     for mode in [CompileMode::Binary, CompileMode::SharedLib { exports: vec![] }] {
         let out = ir(LIB, mode);
         assert!(out.contains("define void @jade_mod_init()"), "missing initializer:\n{out}");
-        assert!(out.contains("call void @jade_mod_init()"), "initializer never called:\n{out}");
+        // A binary hands the initializer to `jrt_run_main`, which runs it on a
+        // thread with a big stack; a package calls it directly. Either way it
+        // has to be reached — the point of the test is that neither mode
+        // forgets it.
+        let reached =
+            out.contains("call void @jade_mod_init()") || out.contains("ptr @jade_mod_init");
+        assert!(reached, "initializer never reached:\n{out}");
     }
 }
 

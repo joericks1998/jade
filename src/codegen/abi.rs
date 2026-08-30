@@ -121,7 +121,16 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
     }
 
     /// Load a boxed float word back to a native f64 via `jrt_unbox_float`.
+    ///
+    /// Checks the tag first: the word is about to be dereferenced as a pointer
+    /// to a double, and the static type that said "float" may have come from a
+    /// function whose branches disagreed. See `jrt_require_float_val`.
     pub(super) fn unbox_float(&self, v: IntValue<'ctx>) -> FloatValue<'ctx> {
+        let req = self.runtime_fn(
+            "jrt_require_float_val",
+            self.ctx.void_type().fn_type(&[self.i64t().into()], false),
+        );
+        self.builder.build_call(req, &[v.into()], "").unwrap();
         let f =
             self.runtime_fn("jrt_unbox_float", self.f64t().fn_type(&[self.i64t().into()], false));
         self.builder
@@ -160,9 +169,31 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
         self.builder.build_or(asint, self.i64t().const_int(TAG_PTR, false), "tagptr").unwrap()
     }
 
+    /// Read one slot, marking the access volatile in a function that contains a
+    /// `try`. Every slot read goes through here — see `Lowerer::volatile_slots`
+    /// for why one non-volatile read would be enough to lose the whole thing.
+    pub(super) fn slot_load(&self, i: usize, name: &str) -> IntValue<'ctx> {
+        let v = self.builder.build_load(self.i64t(), self.slots[i], name).unwrap().into_int_value();
+        if self.volatile_slots
+            && let Some(inst) = v.as_instruction()
+        {
+            let _ = inst.set_volatile(true);
+        }
+        v
+    }
+
+    /// Write one slot, volatile on the same terms as [`Self::slot_load`]. Does
+    /// not touch the refcount — callers pair it with `rc_replace_slot`.
+    pub(super) fn slot_store(&self, i: usize, v: IntValue<'ctx>) {
+        let st = self.builder.build_store(self.slots[i], v).unwrap();
+        if self.volatile_slots {
+            let _ = st.set_volatile(true);
+        }
+    }
+
     /// Load a register's tagged word.
     pub(super) fn load(&self, r: Reg) -> IntValue<'ctx> {
-        self.builder.build_load(self.i64t(), self.slots[r as usize], "ld").unwrap().into_int_value()
+        self.slot_load(r as usize, "ld")
     }
 
     /// Store a tagged word into a register, releasing the reference the slot
@@ -170,18 +201,18 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
     /// block, so the first store to any slot releases nil (a no-op).
     pub(super) fn store(&self, r: Reg, v: IntValue<'ctx>) {
         self.rc_replace_slot(r as usize, v);
-        self.builder.build_store(self.slots[r as usize], v).unwrap();
+        self.slot_store(r as usize, v);
     }
 
     /// Load a slot by raw index (locals share the register array in the VM, so
     /// `GetLocal`/`SetLocal` index the same `slots`).
     pub(super) fn load_idx(&self, i: usize) -> IntValue<'ctx> {
-        self.builder.build_load(self.i64t(), self.slots[i], "ldl").unwrap().into_int_value()
+        self.slot_load(i, "ldl")
     }
 
     pub(super) fn store_idx(&self, i: usize, v: IntValue<'ctx>) {
         self.rc_replace_slot(i, v);
-        self.builder.build_store(self.slots[i], v).unwrap();
+        self.slot_store(i, v);
     }
 
     /// The module-level global cell for `name`, created (initialized to nil) on
@@ -219,6 +250,47 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
         self.builder
             .build_int_compare(IntPredicate::NE, bit, self.i64t().const_zero(), "btrue")
             .unwrap()
+    }
+
+    /// The truth value of a word that is not necessarily a bool.
+    ///
+    /// `untag_bool` reads bit 4, which is the answer only when the word really
+    /// is a bool. Anything else — a heap pointer, an int, nil — has whatever
+    /// happens to sit in that bit, so `if bound_method { … }` took the false
+    /// branch on a value `bool(...)` reported as true. Bools stay on the inline
+    /// path, since the checker turns most conditions into one; everything else
+    /// asks the runtime, which is the same function `bool(x)` calls.
+    pub(super) fn truthy(&self, v: IntValue<'ctx>) -> IntValue<'ctx> {
+        let b = self.builder;
+        let i64_ty = self.i64t();
+        // low4 == 0b1111 marks nil/bool immediates; bool is the 0xf case.
+        let low4 = b.build_and(v, i64_ty.const_int(0xf, false), "tb_low4").unwrap();
+        let is_bool = b
+            .build_int_compare(IntPredicate::EQ, low4, i64_ty.const_int(0xf, false), "tb_isbool")
+            .unwrap();
+        let func = b.get_insert_block().unwrap().get_parent().unwrap();
+        let fast_bb = self.ctx.append_basic_block(func, "tb_bool");
+        let slow_bb = self.ctx.append_basic_block(func, "tb_any");
+        let join_bb = self.ctx.append_basic_block(func, "tb_join");
+        b.build_conditional_branch(is_bool, fast_bb, slow_bb).unwrap();
+
+        b.position_at_end(fast_bb);
+        let fast = self.untag_bool(v);
+        b.build_unconditional_branch(join_bb).unwrap();
+        let fast_end = b.get_insert_block().unwrap();
+
+        b.position_at_end(slow_bb);
+        let f = self.runtime_fn("jrt_bool_any", i64_ty.fn_type(&[i64_ty.into()], false));
+        let w =
+            b.build_call(f, &[v.into()], "tb_any").unwrap().as_any_value_enum().into_int_value();
+        let slow = self.untag_bool(w);
+        b.build_unconditional_branch(join_bb).unwrap();
+        let slow_end = b.get_insert_block().unwrap();
+
+        b.position_at_end(join_bb);
+        let phi = b.build_phi(self.ctx.bool_type(), "tb").unwrap();
+        phi.add_incoming(&[(&fast, fast_end), (&slow, slow_end)]);
+        phi.as_basic_value().into_int_value()
     }
 
     /// Untag both operands of a binary int op.

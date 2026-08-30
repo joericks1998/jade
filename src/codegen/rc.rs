@@ -95,8 +95,7 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
     /// held (via `jrt_rc_replace`, which skips the release when `old == new` — the
     /// in-place array-mutation case).
     pub(super) fn rc_replace_slot(&self, i: usize, new: IntValue<'ctx>) {
-        let old =
-            self.builder.build_load(self.i64t(), self.slots[i], "rcold").unwrap().into_int_value();
+        let old = self.slot_load(i, "rcold");
         // `jrt_rc_replace` decrefs `old` and increfs `new`; both no-op unless the
         // word is heap. Skip the call when *neither* is heap (the common case for
         // scalar slots) with an inline guard — `is_heap(old) || is_heap(new)`.
@@ -117,11 +116,16 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
         self.builder.position_at_end(cont_bb);
     }
 
-    /// Release every local slot's owned reference — the function's scope-exit
-    /// cleanup, emitted immediately before each `return`. Parameter slots
-    /// (`0..n_params`) are borrowed from the caller and left untouched.
+    /// Release every slot's owned reference — the function's scope-exit cleanup,
+    /// emitted immediately before each `return`.
+    ///
+    /// Parameter slots are included. They used to be skipped, on the reasoning
+    /// that the caller still owns the argument, and that held right up until the
+    /// callee assigned to one: the overwrite released a reference this frame
+    /// never took, so the caller's value was freed under it. The prologue now
+    /// retains each parameter (see `lower_body`), and this releases it.
     pub(super) fn emit_scope_exit(&self) {
-        for i in self.n_params..self.slots.len() {
+        for i in 0..self.slots.len() {
             let v = self.load_idx(i);
             self.decref(v);
         }

@@ -343,17 +343,33 @@ char* jrt_str_of_any(int64_t val) {
  * jrt_kind_of for the runtime kind (JK_ARRAY/JK_DICT/JK_STRUCT now equal the
  * ObjKind discriminants — see runtime.h). */
 
+/* Returns an **owned** reference — the caller takes it as-is and must not
+ * retain it again.
+ *
+ * A data field is borrowed from the struct or dict holding it, so it is
+ * increfed on the way out. A method used as a value is not borrowed from
+ * anything: `jrt_bind_method_new` mints a fresh object, already at one. Making
+ * both owned is what lets the one caller (codegen's `GetField`) treat the
+ * result uniformly. It used to retain unconditionally instead, which was right
+ * for a field and wrong for a method — every `let f = obj.method` left an
+ * over-retained bound method that could never be reclaimed. */
 int64_t jrt_get_field(int64_t obj, const char* field) {
     jade_value_t v = (jade_value_t)obj;
     /* A caught runtime error is a bare (message) string in the AOT, whereas the
      * VM models it as a RuntimeError struct with a `.message` field. So
      * `error.message` on a string yields the string itself — matching the VM. */
-    if (jrt_is_str(v) && strcmp(field, "message") == 0) return obj;
+    if (jrt_is_str(v) && strcmp(field, "message") == 0) {
+        jrt_incref(obj);
+        return obj;
+    }
     if (jrt_is_ptr(v)) {
         void* p = jrt_unbox_ptr(v);
         if (jrt_kind_of(p) == JK_STRUCT) {
             int64_t out;
-            if (jrt_coll_struct_get(p, field, &out)) return out;
+            if (jrt_coll_struct_get(p, field, &out)) {
+                jrt_incref(out);
+                return out;
+            }
             /* Not a data field — try an extend method, which yields a bound
              * method value (`let greet = person.greet`). Data fields win, which
              * is the VM's order too (vm.rs GetField: field lookup first, then
@@ -362,7 +378,15 @@ int64_t jrt_get_field(int64_t obj, const char* field) {
              * what arrives is exactly a method used as a value. */
             void* bm = jrt_bind_method_new(obj, field);
             if (bm) return jrt_box_ptr(bm);
-            throw_msg("undefined field");
+            /* Name the type and the field, the way the interpreter does. */
+            {
+                char msg[256];
+                char* tn = jrt_get_type_name(obj);
+                snprintf(msg, sizeof msg, "struct '%s' has no field '%s'",
+                         tn ? tn : "", field ? field : "");
+                jrt_str_free(tn);
+                throw_msg(msg);
+            }
         }
         /* A dict reads `d.key` as `d["key"]`, matching the VM (vm/dispatch.rs
          * GetField, the VmValue::Dict arm). Without this arm every dot-access on
@@ -374,12 +398,293 @@ int64_t jrt_get_field(int64_t obj, const char* field) {
          * data keys. */
         if (jrt_kind_of(p) == JK_DICT) {
             int64_t out;
-            if (jrt_coll_dict_get(p, field, &out)) return out;
+            if (jrt_coll_dict_get(p, field, &out)) {
+                jrt_incref(out);
+                return out;
+            }
             throw_msg("undefined field");
         }
     }
     throw_msg("value has no fields");
     return JRT_NIL;
+}
+
+/* A value reached through an indirect call has to be something callable.
+ *
+ * Codegen used to untag whatever word was in the callee register and load a
+ * function pointer out of it, so `fn go(f) { f(1) }; go(5)` dereferenced the
+ * integer 5 and took the process down with SIGSEGV. The VM raises a catchable
+ * "value is not callable" for the same program, which is the behaviour this
+ * restores — the message matches JadeError::NotCallable, minus the span (a
+ * compiled binary has no span at runtime, the same as every other raise here).
+ *
+ * Callable means a TAG_PTR whose ObjKind byte is Fn (a static fn box or a
+ * native fn value) or BoundMethod. Everything else — an int, nil, a string, an
+ * array, a struct — is not. */
+void jrt_require_callable(int64_t v) {
+    jade_value_t w = (jade_value_t)v;
+    if (jrt_is_ptr(w)) {
+        int64_t k = jrt_kind_of(jrt_unbox_ptr(w));
+        if (k == JK_FN || k == JK_BOUND_METHOD) { return; }
+    }
+    throw_msg("value is not callable");
+}
+
+/* Guards for the places codegen untags a word on the strength of a *static*
+ * type rather than the word's own tag.
+ *
+ * Inference is not always precise enough to make that safe. A function whose
+ * branches return different types takes the first branch's type; an Unknown
+ * value pushed into a typed container keeps the container's element type. When
+ * the static type is then wrong, the compiled binary read an int as a `char*`
+ * or as a boxed double and died, where the interpreter checks the value it
+ * actually has and raises. These restore that check at the two sites that
+ * dereference, wording it the way the VM does. */
+static const char* value_kind_name(jade_value_t v);  /* defined below */
+
+void jrt_require_str_val(int64_t v) {
+    if (jrt_is_str((jade_value_t)v)) { return; }
+    throw_msg("type error: expected str");
+}
+
+void jrt_require_float_val(int64_t v) {
+    if (jrt_is_float((jade_value_t)v)) { return; }
+    throw_msg("type error: expected float");
+}
+
+/* A dict key is used as a `char*`, so a non-string key is the same hazard one
+ * container along. `{true: "y"}` took the process down; the VM names the kind
+ * it got, and so does this. */
+void jrt_require_dict_key(int64_t v) {
+    if (jrt_is_str((jade_value_t)v)) { return; }
+    char msg[128];
+    snprintf(msg, sizeof msg, "type error: dict key must be str, got %s",
+             value_kind_name((jade_value_t)v));
+    throw_msg(msg);
+}
+
+/* Call `recv.name(args)` when the call site's static guess about the receiver
+ * did not hold.
+ *
+ * Deliberately routed through jrt_get_field rather than straight at the method
+ * registry, because that function already implements the interpreter's order: a
+ * *data field* wins over a method of the same name, so a struct with a field
+ * holding a function calls that function. Going to the registry first ran
+ * another type's method instead. What comes back is a value, so jrt_call_value
+ * enters it — a bound method gets its receiver, and arity is checked by the
+ * callee's own entry. */
+int64_t jrt_method_fallback(int64_t recv, const char* name, int64_t argc, const int64_t* argv) {
+    int64_t callee = jrt_get_field(recv, name);   /* raises if there is neither */
+    int64_t r = jrt_call_value(callee, argc, argv);
+    jrt_decref(callee);                           /* jrt_get_field returns owned */
+    return r;
+}
+
+/* Resolve `recv.method` against the receiver's runtime type, raising the way the
+ * interpreter does when there is nothing to call.
+ *
+ * The Rust half reports failure through `status` instead of raising, because a
+ * raise is a longjmp and must not unwind through a Rust frame. So the wording
+ * lives here:
+ *   - a receiver that is not a struct gets the same "<kind> has no method '<m>'"
+ *     that jrt_require_kind raises for a primitive method;
+ *   - a struct whose type declares no such method gets the interpreter's
+ *     "struct '<Type>' has no field '<m>'", since `obj.m` is a field read first.
+ *
+ * Jumping through the null this used to return was a segfault the program could
+ * not catch. */
+void* jrt_method_resolve_or_raise(int64_t recv, const char* method) {
+    int32_t status = 0;
+    void* f = (void*)jrt_method_resolve(recv, method, &status);
+    if (status == 0 && f) { return f; }
+    char msg[256];
+    if (status == 1) {
+        snprintf(msg, sizeof msg, "%s has no method '%s'",
+                 value_kind_name((jade_value_t)recv), method ? method : "");
+    } else {
+        char* tn = jrt_get_type_name(recv);
+        snprintf(msg, sizeof msg, "struct '%s' has no field '%s'",
+                 tn ? tn : "", method ? method : "");
+        jrt_str_free(tn);
+    }
+    throw_msg(msg);
+    return NULL;
+}
+
+/* ── Calling a value ──────────────────────────────────────────────────────
+ *
+ * Every callable a Jade program can hold — a plain function, a bound method, a
+ * native package binding — is entered the same way:
+ *
+ *     int64_t entry(int64_t argc, const int64_t* argv)
+ *
+ * Codegen emits one `jf_ind_<uid>` entry per function that can become a value.
+ * The entry is what checks arity and fills the defaults the caller left off,
+ * because it is the only place that knows the callee's parameter list. A call
+ * site cannot: it does not know which function the value holds.
+ *
+ * Before this, a call site built a fixed-arity call from the *arguments it had*
+ * and jumped straight at the body. So `fn one(a) {…}; f(1, 2)` through a value
+ * silently dropped an argument, `f()` read an uninitialised register as `a`,
+ * and a function with a default parameter got garbage for it. The interpreter
+ * raised on the first two and filled the third. */
+void jrt_throw_arity(int64_t expected, int64_t got) {
+    char m[128];
+    snprintf(m, sizeof m, "wrong number of arguments: expected %lld, got %lld",
+             (long long)expected, (long long)got);
+    throw_msg(m);
+}
+
+typedef int64_t (*jade_entry_t)(int64_t argc, const int64_t* argv);
+
+/* No real Jade call comes near this. It exists so a corrupt `argc` cannot turn
+ * the receiver-prepending buffer below into an unbounded stack allocation. */
+#define JRT_MAX_CALL_ARGS 256
+
+int64_t jrt_call_value(int64_t callee, int64_t argc, const int64_t* argv) {
+    jrt_require_callable(callee);
+    void* box = jrt_unbox_ptr((jade_value_t)callee);
+    if (argc < 0 || argc > JRT_MAX_CALL_ARGS) { throw_msg("too many arguments"); }
+
+    if (jrt_kind_of(box) == JK_BOUND_METHOD) {
+        /* {header@0, fn_ptr@16, self@24} — the receiver goes in front, so a
+         * bound method reaches its implementation with the same `self` a direct
+         * `obj.m(x)` would pass. */
+        int64_t* w = (int64_t*)box;
+        jade_entry_t fn = (jade_entry_t)(void*)(intptr_t)w[2];
+        /* A VLA rather than malloc: the callee may raise, and a raise is a
+         * longjmp that would skip the free. */
+        int64_t buf[argc + 1];
+        buf[0] = w[3];
+        for (int64_t i = 0; i < argc; i++) { buf[i + 1] = argv[i]; }
+        return fn(argc + 1, buf);
+    }
+
+    /* {entry@0, kind@8, [env@16]}. A native binding is told apart by the
+     * sentinel address at offset 0, the way an indirect call always has. */
+    void** slot = (void**)box;
+    if (slot[0] == (void*)jrt_native_call) {
+        void** env = (void**)slot[2];
+        void*  handle = *(void**)env[0];
+        return (int64_t)jrt_native_call(handle, (const char*)env[1],
+                                        (const jade_value_t*)argv, argc);
+    }
+    return ((jade_entry_t)slot[0])(argc, argv);
+}
+
+/* `len(x)`, raising for a value that has no length the way the interpreter does.
+ * jrt_len_chunk answers -1 for those rather than raising, because a raise is a
+ * longjmp and must not cross a Rust frame. Reading the header's `len` field
+ * unconditionally, as this used to, answered for values that have no length:
+ * `len(some_fn)` was 1 and `len(5)` was 0. */
+int64_t jade_len(int64_t w) {
+    int64_t n = jrt_len_chunk(w);
+    if (n < 0) { throw_msg("type error: len"); }
+    return n;
+}
+
+/* ── Core builtins as values ──────────────────────────────────────────────
+ *
+ * `len`, `str` and the rest are ordinary names, so a program can hold one
+ * without calling it: `let f = len`, `xs.map(str)`. The interpreter has a value
+ * for each; a compiled binary had none, so the name loaded an empty global cell
+ * and evaluated to nil. Printing it said `nil` and calling it crashed.
+ *
+ * Each gets the same shape a compiled function gets: an entry with the uniform
+ * `(argc, argv)` signature, in a `{entry, kind}` box. The boxes are static
+ * constants, like the ones codegen emits for a `fn`, so handing one out costs
+ * nothing and the refcount ops skip it on the ObjKind byte.
+ *
+ * The bodies are here rather than in codegen because this is where the symbols
+ * they forward to already live, and because each is one line. Keep the list in
+ * `jrt_builtin_value` and codegen's `BUILTIN_VALUES` in step: a name in one and
+ * not the other either crashes at startup or silently reads a nil global. */
+static void jrt_want_one(int64_t argc) {
+    if (argc != 1) { jrt_throw_arity(1, argc); }
+}
+
+static int64_t jb_len(int64_t argc, const int64_t* argv) {
+    jrt_want_one(argc);
+    return (int64_t)jrt_box_int(jade_len(argv[0]));
+}
+static int64_t jb_str(int64_t argc, const int64_t* argv) {
+    jrt_want_one(argc);
+    return (int64_t)jrt_box_str(jrt_str_of_any(argv[0]));
+}
+static int64_t jb_int(int64_t argc, const int64_t* argv) {
+    jrt_want_one(argc);
+    return jrt_int_any(argv[0]);
+}
+static int64_t jb_float(int64_t argc, const int64_t* argv) {
+    jrt_want_one(argc);
+    return jrt_float_any(argv[0]);
+}
+static int64_t jb_bool(int64_t argc, const int64_t* argv) {
+    jrt_want_one(argc);
+    return jrt_bool_any(argv[0]);
+}
+static int64_t jb_char(int64_t argc, const int64_t* argv) {
+    jrt_want_one(argc);
+    return jrt_char_any(argv[0]);
+}
+/* `print(x)` and `print(x, end)`. The second argument replaces the newline,
+ * which is how `print("a", "")` writes without one. Fixing this at one argument
+ * made a compiled `p("a", "-")` raise where the interpreter printed. The count
+ * in the error is 1, matching what the interpreter reports for its own print. */
+static int64_t jb_print(int64_t argc, const int64_t* argv) {
+    if (argc < 1 || argc > 2) { jrt_throw_arity(1, argc); }
+    if (argc == 1) {
+        jrt_print_any(argv[0], "\n");
+        return JRT_NIL;
+    }
+    jade_value_t end = (jade_value_t)argv[1];
+    if (jrt_is_str(end)) {
+        jrt_print_any(argv[0], (const char*)jrt_unbox_ptr(end));
+    } else {
+        char* r = jrt_render_any(argv[1]);
+        jrt_print_any(argv[0], r ? r : "");
+        free(r);
+    }
+    return JRT_NIL;
+}
+static int64_t jb_write(int64_t argc, const int64_t* argv) {
+    jrt_want_one(argc);
+    jrt_write_any(argv[0]);
+    return JRT_NIL;
+}
+
+/* {entry@0, kind@8, name@16} — codegen's static fn box plus the name, so
+ * `print(len)` can say `<builtin len>` the way the interpreter does. */
+typedef struct { void* entry; int64_t kind; const char* name; } jrt_fnbox_t;
+#define JRT_FN_BOX(sym, fn, sub, nm) \
+    static const jrt_fnbox_t sym = { (void*)(fn), JRT_FN_KIND(sub), nm }
+
+/* The interpreter does not model these alike, and the names it prints say so:
+ * `len` and `write` are plain builtins, the type constructors are type
+ * references, and `print` is a native fn. The sub-kind carries that across. */
+JRT_FN_BOX(jb_box_len,   jb_len,   JRT_FN_BUILTIN,  "len");
+JRT_FN_BOX(jb_box_write, jb_write, JRT_FN_BUILTIN,  "write");
+JRT_FN_BOX(jb_box_str,   jb_str,   JRT_FN_TYPEREF,  "str");
+JRT_FN_BOX(jb_box_int,   jb_int,   JRT_FN_TYPEREF,  "int");
+JRT_FN_BOX(jb_box_float, jb_float, JRT_FN_TYPEREF,  "float");
+JRT_FN_BOX(jb_box_bool,  jb_bool,  JRT_FN_TYPEREF,  "bool");
+JRT_FN_BOX(jb_box_char,  jb_char,  JRT_FN_TYPEREF,  "char");
+JRT_FN_BOX(jb_box_print, jb_print, JRT_FN_NATIVEFN, "print");
+
+int64_t jrt_builtin_value(const char* name) {
+    const jrt_fnbox_t* box = NULL;
+    if      (strcmp(name, "len")   == 0) box = &jb_box_len;
+    else if (strcmp(name, "str")   == 0) box = &jb_box_str;
+    else if (strcmp(name, "int")   == 0) box = &jb_box_int;
+    else if (strcmp(name, "float") == 0) box = &jb_box_float;
+    else if (strcmp(name, "bool")  == 0) box = &jb_box_bool;
+    else if (strcmp(name, "char")  == 0) box = &jb_box_char;
+    else if (strcmp(name, "print") == 0) box = &jb_box_print;
+    else if (strcmp(name, "write") == 0) box = &jb_box_write;
+    else return JRT_NIL;
+    /* Casting the const away is safe: nothing writes to a fn box. It is const
+     * so that a stray write faults instead of corrupting a shared object. */
+    return (int64_t)jrt_box_ptr((void*)(uintptr_t)box);
 }
 
 /* The `...base` of a copy-with struct literal has to be a struct.
@@ -614,6 +919,7 @@ static int32_t value_want_bit(jade_value_t v) {
         if (!p) return 0;
         if (jrt_kind_of(p) == JK_ARRAY) return JRT_WANT_ARRAY;
         if (jrt_kind_of(p) == JK_DICT)  return JRT_WANT_DICT;
+        if (jrt_kind_of(p) == JK_BYTES) return JRT_WANT_BYTES;
     }
     return 0;
 }
@@ -625,9 +931,16 @@ void jrt_require_kind(int64_t recv, int32_t want, const char* method) {
      * receiver until v1.3.21 — an int is not a struct and has no fields — and
      * the two engines have to agree on the text, which the parity fixture
      * `examples/exceptions/error_values` asserts by substring. */
+    /* A dict reads `d.name` as a key lookup before it looks for a method, so
+     * the interpreter names both when neither is there. Every other kind has
+     * only methods to miss. */
     char msg[256];
-    snprintf(msg, sizeof msg, "%s has no method '%s'",
-             value_kind_name(v), method ? method : "");
+    const char* kind = value_kind_name(v);
+    if (strcmp(kind, "dict") == 0) {
+        snprintf(msg, sizeof msg, "dict has no key or method '%s'", method ? method : "");
+    } else {
+        snprintf(msg, sizeof msg, "%s has no method '%s'", kind, method ? method : "");
+    }
     throw_msg(msg);
 }
 
@@ -1023,32 +1336,64 @@ int64_t jrt_random_int(int64_t lo, int64_t hi) {
     return jrt_random_draw(lo, hi);
 }
 
-/* array.map(arr, fn) -> new array of fn(elem). The Chunk backend's function
- * value is a boxed function pointer: the value word (TAG_PTR) points at an
- * 8-byte global holding jf_<uid>'s address, so `*box` is the callable
- * `int64_t(*)(int64_t)` (closures read captured globals via GetGlobal, so they
- * need no environment arg). Elements are tagged words. */
+/* array.map(arr, fn) -> new array of fn(elem). Goes through jrt_call_value
+ * rather than reading a function pointer out of the box itself, so a bound
+ * method (`xs.map(obj.scale)`) and a native binding work here for the same
+ * reason they work at an ordinary call site — and so the callee's arity is
+ * checked once, in one place. Elements are tagged words. */
+/* The package spelling `array.map(a, f)` reaches here with whatever the program
+ * passed; the method spelling `a.map(f)` has already had its receiver checked.
+ * Without this the first untagged a string as an array and walked it. */
+static void jrt_require_array(int64_t w, const char* who) {
+    if (jrt_is_ptr((jade_value_t)w)
+        && jrt_kind_of(jrt_unbox_ptr((jade_value_t)w)) == JK_ARRAY) {
+        return;
+    }
+    char m[128];
+    snprintf(m, sizeof m, "type error: %s: first argument must be an array, got %s",
+             who, value_kind_name((jade_value_t)w));
+    throw_msg(m);
+}
+
 int64_t jrt_coll_array_map(int64_t arr_word, int64_t fn_word) {
+    jrt_require_array(arr_word, "array.map");
     void* arr = jrt_unbox_ptr((jade_value_t)arr_word);
-    void** box = (void**)jrt_unbox_ptr((jade_value_t)fn_word);
-    int64_t (*fn)(int64_t) = (int64_t (*)(int64_t))(*box);
     void* out = jrt_karr_new();
     int64_t n = jrt_coll_array_len(arr);
-    for (int64_t i = 0; i < n; i++)
-        jrt_karr_push(out, fn(jrt_coll_array_get(arr, i)));
+    for (int64_t i = 0; i < n; i++) {
+        int64_t e = jrt_coll_array_get(arr, i);
+        int64_t r = jrt_call_value(fn_word, 1, &e);
+        /* push retains, and the callback already handed back a reference of its
+         * own, so releasing here is what keeps a mapped-to-collection from
+         * leaking one object per element. */
+        jrt_karr_push(out, r);
+        jrt_decref(r);
+    }
     return (int64_t)jrt_box_ptr(out);
 }
 
 /* array.filter(arr, fn) -> elements where fn(elem) is truthy. */
 int64_t jrt_coll_array_filter(int64_t arr_word, int64_t fn_word) {
+    jrt_require_array(arr_word, "array.filter");
     void* arr = jrt_unbox_ptr((jade_value_t)arr_word);
-    void** box = (void**)jrt_unbox_ptr((jade_value_t)fn_word);
-    int64_t (*fn)(int64_t) = (int64_t (*)(int64_t))(*box);
     void* out = jrt_karr_new();
     int64_t n = jrt_coll_array_len(arr);
     for (int64_t i = 0; i < n; i++) {
         int64_t e = jrt_coll_array_get(arr, i);
-        if (jrt_unbox_bool((jade_value_t)fn(e))) jrt_karr_push(out, e);
+        int64_t r = jrt_call_value(fn_word, 1, &e);
+        /* A predicate has to answer a bool. Feeding whatever came back to
+         * jrt_unbox_bool read a tag bit as the truth value, so a predicate
+         * returning `x % 2` quietly dropped every element instead of raising. */
+        if (!jrt_is_bool((jade_value_t)r)) {
+            char m[128];
+            snprintf(m, sizeof m,
+                     "type error: array.filter: predicate must return a bool, got %s",
+                     value_kind_name((jade_value_t)r));
+            jrt_decref(r);
+            throw_msg(m);
+        }
+        if (jrt_unbox_bool((jade_value_t)r)) { jrt_karr_push(out, e); }
+        jrt_decref(r);
     }
     return (int64_t)jrt_box_ptr(out);
 }
@@ -1096,9 +1441,27 @@ void jrt_random_shuffle_chunk(int64_t arr_word) {
  * engines previously failed to do (this one silently wrapped; the VM panicked
  * with a raw Rust overflow message). */
 extern int64_t jrt_math_abs(int64_t w, uint32_t* err);
+/* The float -> int conversions report the same way: `math.floor(math.inf())`
+ * saturates to a whole number no tagged word can hold. */
+extern int64_t jrt_math_floor(int64_t w, uint32_t* err);
+extern int64_t jrt_math_ceil(int64_t w, uint32_t* err);
+extern int64_t jrt_math_round(int64_t w, uint32_t* err);
+extern int64_t jrt_math_trunc(int64_t w, uint32_t* err);
 extern int64_t jrt_math_pow(int64_t a, int64_t b, uint32_t* err);
 
 static void throw_msg(const char* m);
+
+#define JADE_MATH_CHECKED1(name)                       \
+    int64_t jade_math_##name(int64_t w) {               \
+        uint32_t err = 0;                               \
+        int64_t r = jrt_math_##name(w, &err);           \
+        if (err) throw_msg("integer overflow");         \
+        return r;                                       \
+    }
+JADE_MATH_CHECKED1(floor)
+JADE_MATH_CHECKED1(ceil)
+JADE_MATH_CHECKED1(round)
+JADE_MATH_CHECKED1(trunc)
 
 int64_t jade_math_abs(int64_t w) {
     uint32_t err = 0;

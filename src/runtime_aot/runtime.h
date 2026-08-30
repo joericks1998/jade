@@ -517,6 +517,22 @@ int64_t jrt_bool_any(int64_t val);
 /* A first-class function box: the code pointer sits at offset 0, behind the
  * usual header. `jrt_uhttp_stream` reads one the same way. */
 #define JK_FN     5
+#define JK_BOUND_METHOD 9
+
+/* A callable box's kind slot is a full i64 whose low byte is the ObjKind. The
+ * next byte says *which sort* of callable it is, so a renderer can name it the
+ * way the interpreter does — `<fn>`, `<builtin len>`, `<native lib fn open>` —
+ * instead of falling back to `<object>`. The low byte is untouched, so
+ * `jrt_kind_of` and the refcount ops (which read one byte at offset 8) do not
+ * notice. A builtin box carries its name at offset 16; a native binding carries
+ * its env there, and its name is env[1]. */
+#define JRT_FN_SUB_SHIFT 8
+#define JRT_FN_USER      0   /* a compiled `fn`          -> <fn>                 */
+#define JRT_FN_BUILTIN   1   /* len, write               -> <builtin len>        */
+#define JRT_FN_NATIVE    2   /* a package binding        -> <native lib fn open> */
+#define JRT_FN_TYPEREF   3   /* int, float, str, …       -> <type str>           */
+#define JRT_FN_NATIVEFN  4   /* print                    -> <native fn>          */
+#define JRT_FN_KIND(sub) ((int64_t)JK_FN | ((int64_t)(sub) << JRT_FN_SUB_SHIFT))
 
 /* jrt_require_kind — the receiver guard the Chunk backend emits ahead of a
  * primitive method call (`recv.push(x)`, `recv.keys()`, `recv.upper()`, …).
@@ -528,6 +544,7 @@ int64_t jrt_bool_any(int64_t val);
 #define JRT_WANT_STR   0x1
 #define JRT_WANT_ARRAY 0x2
 #define JRT_WANT_DICT  0x4
+#define JRT_WANT_BYTES 0x8
 void    jrt_require_kind(int64_t recv, int32_t want, const char* method);
 /* jrt_require_str_arg — the same guard for a str method's *argument*, which is
  * untagged to a char* just like the receiver. Raises the VM's argument wording
@@ -636,6 +653,52 @@ void*   jrt_bind_method_new(int64_t recv_word, const char* method);
 int64_t jrt_get_field(int64_t obj, const char* field);
 void    jrt_set_field(int64_t obj, const char* field, int64_t val);
 
+/* jrt_struct_is_type — is `recv` a struct of exactly this type? The guard a
+ * devirtualized method call emits before trusting the implementation it picked.
+ * jrt_method_resolve — look `recv.method` up against the receiver's runtime type
+ * (status out-param, no raise). jrt_method_resolve_or_raise wraps it with the
+ * interpreter's wording. */
+/* jrt_run_main — run a compiled program's body on a thread with a big stack, so
+ * deep recursion behaves the same compiled as interpreted. See posix.c. */
+typedef void (*jade_body_fn)(void);
+void    jrt_run_main(jade_body_fn body);
+int32_t jrt_struct_is_type(int64_t recv, const char* type_name);
+/* jrt_is_struct — is this a struct instance at all? Separates "another struct"
+ * (dispatch dynamically) from "an array or a string" (use the primitive method
+ * of that name) when a struct happens to declare a method named like one. */
+int32_t jrt_is_struct(int64_t recv);
+/* jrt_method_fallback — call recv.name(args) through jrt_get_field, so a data
+ * field holding a function wins over a method of the same name, exactly as the
+ * interpreter resolves it. Used when a devirtualized call site's type guard
+ * fails, and for a genuinely ambiguous method name. */
+int64_t jrt_method_fallback(int64_t recv, const char* name, int64_t argc, const int64_t* argv);
+const void* jrt_method_resolve(int64_t recv, const char* method, int32_t* status);
+void*   jrt_method_resolve_or_raise(int64_t recv, const char* method);
+/* jrt_builtin_value — the callable value for a core builtin name (`len`, `str`,
+ * `print`, …), or nil for a name that has none. Each is a static `{entry, kind}`
+ * box entered the same way a compiled function is. Codegen emits a call to this
+ * where a builtin name is *read* rather than called. */
+int64_t jrt_builtin_value(const char* name);
+/* jade_len — `len(x)`, raising `type error: len` for a value that has none.
+ * jrt_len_chunk answers -1 there instead of raising (it is Rust). */
+int64_t jade_len(int64_t w);
+/* jrt_call_value — call any callable value with `argc` tagged words. The one
+ * place that knows how to enter a plain function, a bound method (receiver
+ * prepended) and a native binding. Every callable's entry has the signature
+ * `int64_t(int64_t argc, const int64_t* argv)`; codegen emits one per function
+ * that can become a value, and that entry checks arity and fills defaults.
+ * jrt_throw_arity raises the interpreter's wording when it does not match. */
+int64_t jrt_call_value(int64_t callee, int64_t argc, const int64_t* argv);
+void    jrt_throw_arity(int64_t expected, int64_t got);
+/* jrt_require_str_val / jrt_require_float_val / jrt_require_dict_key — the tag
+ * checks codegen emits where it would otherwise untag a word purely on the
+ * strength of an inferred static type. Each raises the VM's wording. */
+void    jrt_require_str_val(int64_t v);
+void    jrt_require_float_val(int64_t v);
+void    jrt_require_dict_key(int64_t v);
+/* jrt_require_callable — reject an indirect call through a non-function before
+ * its word is dereferenced as a function box. Raises "value is not callable". */
+void    jrt_require_callable(int64_t v);
 /* jrt_require_struct / jrt_kstruct_copy_field — the `...base` of a copy-with
  * struct literal. The first rejects a non-struct base; the second copies one
  * field across when the base has it, leaving the default to fill it otherwise. */

@@ -81,6 +81,12 @@ Skipping that arrangement is the standing failure mode here, and it is invisible
 
 `jrt_obj_unique` is a third case. A dict has value semantics, so a write has to leave any other name for the same dict alone. But a copy is only observable when somebody else is actually holding the dict, and the reference count answers exactly that question. Checking it is what lets the compiled `d[k] = v` path write in place rather than copy on every write.
 
+*A value that owns another value has to retain it, whatever its kind.* `is_collection` decides which `TAG_PTR` words the refcount ops act on, and the list is not "containers" but "things that own a child". A bound method (`let greet = person.greet`) owns its receiver. It was left off the list on the reasoning that it shares a shape with the static fn boxes, which are not refcounted either — but a fn box is an LLVM global constant that owns nothing, so there is nothing there to dangle. A bound method is a real allocation holding a real reference, and leaving it out meant the receiver was freed the moment the frame that built it returned. `fn mk() { let c = C { n: 1 }; return c.get }` then crashed when the binding was called.
+
+The same rule reaches past this crate. A spawned task outlives the expression that started it, so `task::spawn` retains its arguments and the worker releases them once the body has run — its `owns_args` flag says whether the words are tagged Jade values at all, because this crate's own tests hand tasks raw untagged integers.
+
+*The destructor cascade is iterative, not recursive.* `free_obj` walks an explicit worklist: `release_word` drops one reference and hands back a pointer that reached zero rather than reclaiming it on the spot, and the loop reclaims it on a later turn. Depth then costs heap instead of stack. Recursing instead overflowed on a chain of arrays roughly 30,000 deep, which a program builds by wrapping one array in a loop. `Vec::new` does not allocate, so a leaf object still frees without touching the allocator.
+
 Anything here that changes user-visible behavior needs checking on *both* engines, because both link this crate.
 
 ## Building and testing

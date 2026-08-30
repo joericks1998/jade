@@ -150,8 +150,54 @@ pub fn render_word(word: i64) -> String {
         // AOT used to hold a prompt as its bare string, so `print(p)` printed the
         // prompt's text here and `<prompt>` under `jade run`.
         "<prompt>".to_string()
+    } else if kind == ObjKind::Grammar as u8 {
+        // Matches the VM (`VmValue::Grammar` renders as `<grammar>`). Opaque on
+        // both engines: a grammar is a constraint you attach to a deref, not
+        // text to read back.
+        "<grammar>".to_string()
+    } else if kind == ObjKind::BoundMethod as u8 {
+        // Matches the VM's `VmValue::BoundMethod`.
+        "<bound method>".to_string()
+    } else if kind == ObjKind::Fn as u8 {
+        // A callable box: {entry@0, kind@8, …}. The byte above the ObjKind says
+        // which sort, because all three shapes share the same ObjKind — see the
+        // JRT_FN_* notes in runtime_aot/runtime.h.
+        let kw = unsafe { *(p.byte_add(8) as *const i64) };
+        // The name a builtin/typeref box carries at offset 16.
+        let boxed_name = || -> Option<String> {
+            let n = unsafe { *(p.byte_add(16) as *const *const core::ffi::c_char) };
+            if n.is_null() { None } else { Some(unsafe { crate::cstr::to_string(n) }) }
+        };
+        match (kw >> 8) & 0xff {
+            // A core builtin, carrying its name at offset 16.
+            1 => match boxed_name() {
+                Some(n) => format!("<builtin {n}>"),
+                None => "<fn>".to_string(),
+            },
+            // A primitive type constructor. The interpreter holds these as type
+            // references rather than functions, and prints them that way.
+            3 => match boxed_name() {
+                Some(n) => format!("<type {n}>"),
+                None => "<fn>".to_string(),
+            },
+            // `print`, which the interpreter models as a native fn and prints
+            // without naming.
+            4 => "<native fn>".to_string(),
+            // A native package binding: offset 16 is its env, whose second word
+            // is the bound name.
+            2 => {
+                let env = unsafe { *(p.byte_add(16) as *const *const *const core::ffi::c_char) };
+                if env.is_null() {
+                    "<native lib fn>".to_string()
+                } else {
+                    let name = unsafe { *env.add(1) };
+                    format!("<native lib fn {}>", unsafe { crate::cstr::to_string(name) })
+                }
+            }
+            _ => "<fn>".to_string(),
+        }
     } else {
-        // A boxed fn/etc. — the pre-existing "ObjKind gap" placeholder.
+        // A heap kind with no renderer of its own.
         "<object>".to_string()
     }
 }

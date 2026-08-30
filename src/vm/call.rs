@@ -29,6 +29,24 @@ pub(crate) fn patch_builtin_span(mut e: JadeError, call_span: Span) -> JadeError
 
 /// Resolve a mix of positional and named arguments into a positional Vec by
 /// matching named args against the callee's parameter list.
+///
+/// A parameter that gets neither a positional nor a named argument takes its
+/// declared default. Filling it here rather than leaving the slot empty is what
+/// makes the vector this returns a *complete* argument list, which is what the
+/// caller then passes on — and `call_fn` cannot tell an omitted parameter from
+/// one explicitly given `nil`, so it has no chance to fill anything afterwards.
+///
+/// It used to fill every slot with `nil` and overwrite only the ones supplied,
+/// so naming any argument silently blanked the defaults of the ones you did not:
+///
+/// ```text
+///   fn f(a, b = 2, c = 3) { … }
+///   f(1, c = 9)      // [1, nil, 9] interpreted, [1, 2, 9] compiled
+/// ```
+///
+/// A parameter with no default and no argument is a missing argument, and says
+/// so. That case used to pass `nil` too, which is how `f(c = 9)` ran at all —
+/// the compiled backend refuses to build it.
 pub(crate) fn resolve_named_args(
     callee: &VmValue,
     positional: Vec<VmValue>,
@@ -39,21 +57,36 @@ pub(crate) fn resolve_named_args(
         return Ok(positional);
     }
     match callee {
-        VmValue::Fn(cf) => {
+        VmValue::Fn(cf) | VmValue::Closure(cf, _) => {
             let params = &cf.params;
-            let mut result = vec![VmValue::Nil; params.len()];
+            let mut slots: Vec<Option<VmValue>> = vec![None; params.len()];
             for (i, v) in positional.into_iter().enumerate() {
-                if i < result.len() {
-                    result[i] = v;
+                if i < slots.len() {
+                    slots[i] = Some(v);
                 }
             }
             for (name, v) in named {
                 let pos = params.iter().position(|p| p == &name).ok_or_else(|| {
                     JadeError::TypeError { message: format!("unknown parameter '{}'", name), span }
                 })?;
-                result[pos] = v;
+                slots[pos] = Some(v);
             }
-            Ok(result)
+            let mut out = Vec::with_capacity(params.len());
+            for (i, slot) in slots.into_iter().enumerate() {
+                match slot {
+                    Some(v) => out.push(v),
+                    None => match cf.defaults.get(i).and_then(|d| d.as_ref()) {
+                        Some(d) => out.push(d.clone()),
+                        None => {
+                            return Err(JadeError::TypeError {
+                                message: format!("missing required argument '{}'", params[i]),
+                                span,
+                            });
+                        }
+                    },
+                }
+            }
+            Ok(out)
         }
         _ => {
             // For native/builtin/closure callees, append named values positionally.

@@ -60,12 +60,19 @@ static void native_raise(const char* fmt, const char* arg) {
  * no Jade `main`, so an externally set root is the only way that process gets an
  * agreed root at all. Overwriting would break precisely the arrangement this
  * exists to protect. */
-static _Thread_local char jrt_built_root[PATH_MAX];
-static _Thread_local int  jrt_built_root_set = 0;
+/* Process-wide, not thread-local: where this image's bundle sits is a fact
+ * about the program, not about whichever thread happens to ask. They are
+ * written once, by `jrt_libs_root_publish` in `main`, before any thread runs
+ * user code — so a plain static needs no synchronisation, and a thread-local
+ * one loses the answer the moment the body runs somewhere else, which is what
+ * `jrt_run_main` arranged. The failure was quiet: a missing dependency blamed
+ * JADE_LIBS for a root this image had published itself. */
+static char jrt_built_root[PATH_MAX];
+static int  jrt_built_root_set = 0;
 /* Whether *this* image is the one that put the value in the environment.
  * Without it the origin cannot tell a root the user chose from the one we
  * published a moment earlier, and the message would blame the user either way. */
-static _Thread_local int  jrt_root_is_ours = 0;
+static int  jrt_root_is_ours = 0;
 
 /* Where the root in force came from, for the message when a load fails. A wrong
  * root is otherwise indistinguishable from a missing dependency. */
@@ -368,18 +375,17 @@ static jade_value_t from_ffi(const JadeVal* v);
 static int aot_invoke_callback(void* host, size_t argc, const JadeVal* argv, JadeVal* out) {
     out->tag = JADE_FFI_NIL;
     out->data.as_nil = 0;
-    if (argc > 6) return 1;   /* the arity ladder below */
+    /* jrt_call_value's own bound. Nothing a C library passes back comes near
+     * it; the check is here so a corrupt argc cannot size the buffer below. */
+    if (argc > 256) return 1;
 
-    jade_value_t a[6];
+    jade_value_t a[argc ? argc : 1];
     for (size_t i = 0; i < argc; i++) {
         /* An ERROR tag would raise, and raising is precisely what must not
          * happen here — refuse the call instead. */
         if (argv[i].tag == JADE_FFI_ERROR) return 1;
         a[i] = from_ffi(&argv[i]);
     }
-
-    void** box = (void**)host;
-    void* f = *box;
 
     jmp_buf jb;
     int32_t depth = jade_exc_depth();
@@ -391,24 +397,12 @@ static int aot_invoke_callback(void* host, size_t argc, const JadeVal* argv, Jad
         return 1;
     }
 
-    typedef jade_value_t (*F0)(void);
-    typedef jade_value_t (*F1)(jade_value_t);
-    typedef jade_value_t (*F2)(jade_value_t, jade_value_t);
-    typedef jade_value_t (*F3)(jade_value_t, jade_value_t, jade_value_t);
-    typedef jade_value_t (*F4)(jade_value_t, jade_value_t, jade_value_t, jade_value_t);
-    typedef jade_value_t (*F5)(jade_value_t, jade_value_t, jade_value_t, jade_value_t, jade_value_t);
-    typedef jade_value_t (*F6)(jade_value_t, jade_value_t, jade_value_t, jade_value_t, jade_value_t, jade_value_t);
-
-    jade_value_t r = JRT_NIL;
-    switch (argc) {
-        case 0: r = ((F0)f)(); break;
-        case 1: r = ((F1)f)(a[0]); break;
-        case 2: r = ((F2)f)(a[0], a[1]); break;
-        case 3: r = ((F3)f)(a[0], a[1], a[2]); break;
-        case 4: r = ((F4)f)(a[0], a[1], a[2], a[3]); break;
-        case 5: r = ((F5)f)(a[0], a[1], a[2], a[3], a[4]); break;
-        default: r = ((F6)f)(a[0], a[1], a[2], a[3], a[4], a[5]); break;
-    }
+    /* `host` is the untagged callable box; jrt_call_value wants the value word.
+     * Going through it rather than reading a code pointer out of the box means
+     * a bound method works as a callback, the callee's arity is checked, and
+     * the old six-argument ladder is gone. */
+    jade_value_t r = (jade_value_t)jrt_call_value((int64_t)jrt_box_ptr(host),
+                                                  (int64_t)argc, (const int64_t*)a);
 
     jade_exc_pop();
     jade_exc_restore(depth);
@@ -545,10 +539,11 @@ static JadeVal to_ffi_val(jade_value_t v, int owned_str) {
             hx->type_name = ffi_strdup(jrt_handle_type(p));
             out.tag = JADE_FFI_HANDLE;
             out.data.as_handle = hx;
-        } else if (kind == JK_FN) {
-            /* The box pointer is the host: `aot_invoke_callback` reads the code
-             * pointer out of it. Nothing is copied, so nothing is owned beyond
-             * the wrapper. */
+        } else if (kind == JK_FN || kind == JK_BOUND_METHOD) {
+            /* The box pointer is the host: `aot_invoke_callback` re-tags it and
+             * hands it to `jrt_call_value`. Nothing is copied, so nothing is
+             * owned beyond the wrapper. A bound method qualifies for the same
+             * reason it does at any other call site. */
             JadeFn* fx = (JadeFn*)malloc(sizeof(JadeFn));
             if (!fx) jade_rt_fatal("jade: out of memory");
             fx->host = p;
