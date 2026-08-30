@@ -18,7 +18,8 @@ use crate::{
 // registry can refer to them by bare name.
 use crate::uhttp;
 use crate::{
-    array, bytes, core, dict, env, fs, grammar, http, json, math, path, random, sh, string, time,
+    array, bytes, core, dict, env, fs, future, grammar, http, json, math, path, random, sh, string,
+    time,
 };
 
 // ── BuiltinFn ─────────────────────────────────────────────────────────────────
@@ -62,6 +63,7 @@ pub enum PrimType {
     Dict,
     Int,
     Float,
+    Future,
 }
 
 impl PrimType {
@@ -73,6 +75,7 @@ impl PrimType {
             VmValue::Dict(_) => Some(PrimType::Dict),
             VmValue::Int(_) => Some(PrimType::Int),
             VmValue::Float(_) => Some(PrimType::Float),
+            VmValue::Future(_) => Some(PrimType::Future),
             _ => None,
         }
     }
@@ -85,6 +88,7 @@ impl PrimType {
             PrimType::Dict => "dict",
             PrimType::Int => "int",
             PrimType::Float => "float",
+            PrimType::Future => "future",
         }
     }
 }
@@ -184,6 +188,7 @@ pub fn primitive_method_arity(method: &str) -> Option<usize> {
         | "get" | "merge" | "index_of" | "last_index_of" | "count" | "repeat" | "join" => 1,
         "replace" | "slice" | "pad_start" | "pad_end" => 2,
         "trim_start" | "trim_end" | "capitalize" | "is_empty" | "lines" => 0,
+        "ready" => 0,
         _ => return None,
     })
 }
@@ -196,6 +201,7 @@ pub fn find_primitive_method(ty: PrimType, method: &str) -> Option<BuiltinFn> {
         PrimType::Dict => dict::find_dict_method(method),
         PrimType::Int => None,
         PrimType::Float => None,
+        PrimType::Future => future::find_future_method(method),
     }
 }
 
@@ -257,6 +263,7 @@ pub fn register_primitive_method_types(ctx: &mut TypeContext) {
     bytes::register_bytes_method_types(ctx);
     array::register_array_method_types(ctx);
     dict::register_dict_method_types(ctx);
+    future::register_future_method_types(ctx);
 }
 
 // ── Helpers shared across package implementations ─────────────────────────────

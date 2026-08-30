@@ -102,6 +102,7 @@ extern int32_t jrt_recur_enter_task(void);
 extern void    jrt_recur_leave_task(int32_t saved);
 extern jade_value_t jrt_await_impl(void* fut, int* failed, jade_value_t* err, const char** ty);
 extern jade_value_t jrt_await_word(jade_value_t w, int* failed, jade_value_t* err, const char** ty);
+extern int          jrt_future_ready(int64_t w);
 extern void  jrt_join_words(const jade_value_t* ws, int n, jade_value_t* out,
                             int* failed, jade_value_t* err, const char** ty);
 extern void  jrt_join_impl(void* const* futs, int n, jade_value_t* out,
@@ -202,6 +203,20 @@ jade_value_t jade_await(jade_future_t future) {
 /* Word-taking entry points. Codegen now passes futures as ordinary tagged
  * values, so these check the tag before touching the pointer — which is what
  * turns `await 5` from a segfault into a raised error. */
+/* `f.ready()` — has the task finished, without waiting for it.
+ *
+ * `await` is otherwise the only way to read a future, and it blocks, which
+ * makes a task useless to anything with a loop it cannot stop. The receiver
+ * guard runs at the call site, so by here `w` is a future and the sentinel
+ * cannot come back; checked anyway, because this is the boundary and a value
+ * arriving from anywhere else is not the guard's business. Routing the failure
+ * through `jrt_require_kind` is what gets the interpreter's wording for free. */
+jade_value_t jade_future_ready(jade_value_t w) {
+    int r = jrt_future_ready((int64_t)w);
+    if (r < 0) jrt_require_kind((int64_t)w, JRT_WANT_FUTURE, "ready");
+    return jrt_box_bool(r);
+}
+
 jade_value_t jade_await_word(jade_value_t w) {
     int failed = 0; jade_value_t err = 0; const char* ty = NULL;
     jade_value_t r = jrt_await_word(w, &failed, &err, &ty);

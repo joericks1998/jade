@@ -570,6 +570,24 @@ pub unsafe fn await_one(fut: *mut FutureObj) -> Result<i64, TaskError> {
     if st.failed { Err(TaskError::Raised(st.error, st.error_type)) } else { Ok(st.result) }
 }
 
+/// Whether `fut` has finished, without waiting for it.
+///
+/// The one thing you can ask a future that does not block. `await` is otherwise
+/// the only way to read one, which makes a task useless to anything that cannot
+/// afford to stop — a render loop has no point at which it is willing to freeze,
+/// so it could start work concurrently and then never find out the answer.
+///
+/// A future that already handed its result to an awaiter counts as finished: it
+/// is done, and the second `await` raises on its own terms.
+///
+/// # Safety
+/// `fut` must point at a live [`FutureObj`].
+pub unsafe fn is_done(fut: *mut FutureObj) -> bool {
+    let f = unsafe { &*fut };
+    let st = f.state.lock().unwrap_or_else(|e| e.into_inner());
+    st.done
+}
+
 /// Await every future in argument order, returning the first failure.
 ///
 /// Matches the VM: a failing task does not cancel the others, they run to
@@ -670,6 +688,9 @@ pub unsafe fn destroy(fut: *mut FutureObj) {
 // Errors travel back through out-params rather than being thrown here, because
 // throwing means `longjmp` and that must happen on the awaiting thread, in C,
 // where the jump frame lives. The thin C forwarders do it.
+
+/// `jrt_future_ready`'s answer for a word that is not a future.
+pub const NOT_A_FUTURE: i32 = -1;
 
 /// Start `f(args)`; returns an opaque future the caller must eventually free.
 ///
@@ -858,6 +879,20 @@ unsafe fn report(
             }
             0
         }
+    }
+}
+
+/// Whether a tagged word is a finished future.
+///
+/// Three answers rather than two, because a Rust frame cannot raise: `1` done,
+/// `0` still running, and `NOT_A_FUTURE` for a word that is not a future at all,
+/// which the C forwarder turns into the error the interpreter raises. Same shape
+/// as `jrt_len_chunk`, and for the same reason.
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_future_ready(word: i64) -> i32 {
+    match as_future(word) {
+        Some(f) => i32::from(unsafe { is_done(f) }),
+        None => NOT_A_FUTURE,
     }
 }
 

@@ -1,0 +1,91 @@
+// `ready()` asks a task whether it has finished, without waiting for it.
+//
+// `await` blocks, which is the right default and also the whole problem for
+// anything with a loop it cannot stop. A screen redrawing at frame rate has no
+// point at which it is willing to freeze, so before this it could start work
+// concurrently and then never find out the answer:
+//
+//     let pending = connect(ssid)
+//     let shown = false
+//     while running {
+//         draw_frame()
+//         if !shown && pending.ready() {
+//             show_banner(await pending)
+//             shown = true
+//         }
+//     }
+//
+// The `await` after a true `ready()` costs nothing. It falls straight through
+// the wait, which is what makes the shape work rather than merely read well.
+
+use std::time
+
+async fn slow(n) {
+    time.sleep(0.2)
+    return n * 2
+}
+
+let started = time.monotonic()
+let f = slow(21)
+
+// The loop keeps going while the task runs, and asks on each pass. Nothing
+// about how many passes it gets is printed, because that is the machine's
+// business and not the language's.
+let passes = 0
+while !f.ready() {
+    passes = passes + 1
+}
+
+print(passes > 0)
+print(time.monotonic() - started >= 0.2)
+// → true
+// → true
+
+
+// Once it says yes, the answer is already there.
+
+print(f.ready())
+print(await f)
+// → true
+// → 42
+
+
+// A future that has handed over its result is still finished. The second
+// `await` reports the double await on its own terms; `ready()` does not hide it.
+
+print(f.ready())
+// → true
+
+
+// A task that raised is finished too, and the `await` re-raises.
+
+struct Failed {
+    message
+}
+
+async fn breaks() {
+    raise Failed { message: "no route to host" }
+}
+
+let bad = breaks()
+while !bad.ready() {
+    passes = passes + 1
+}
+print(bad.ready())
+try {
+    await bad
+} catch Failed e {
+    print(e.message)
+}
+// → true
+// → no route to host
+
+
+// Futures kept in a collection answer the same way.
+
+let pending = [slow(1), slow(2)]
+while !(pending[0].ready() && pending[1].ready()) {
+    passes = passes + 1
+}
+print(join(pending[0], pending[1]))
+// → [2, 4]

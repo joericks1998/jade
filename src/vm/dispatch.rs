@@ -1304,6 +1304,28 @@ pub(crate) async fn execute_chunk(
                         };
                         set(slots, *dest, v);
                     }
+                    // A future takes a method too: `f.ready()` is the one thing
+                    // you can ask a task without waiting for it. Nothing else
+                    // reaches here, so the fall-through below still catches a
+                    // field read on a value that has none.
+                    VmValue::Future(_) => {
+                        match builtins::find_primitive_method(PrimType::Future, field) {
+                            Some(method) => set(
+                                slots,
+                                *dest,
+                                VmValue::NativeBoundMethod(Arc::new(NativeBoundMethod {
+                                    receiver: obj.clone(),
+                                    method,
+                                })),
+                            ),
+                            None => vm_err!(JadeError::UndefinedField {
+                                type_name: "future".to_string(),
+                                field: field.clone(),
+                                owner: FieldOwner::Value,
+                                span,
+                            }),
+                        }
+                    }
                     _ => {
                         vm_err!(JadeError::NotAStruct { span });
                     }

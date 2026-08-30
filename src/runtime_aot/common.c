@@ -965,6 +965,7 @@ static const char* value_kind_name(jade_value_t v) {
             case JK_DICT:   return "dict";
             case JK_BYTES:  return "bytes";
             case JK_PROMPT: return "prompt";
+            case JK_FUTURE: return "future";
             case JK_STRUCT: {
                 /* A fresh tagged string; leaked deliberately — this path raises
                  * and the message borrows the bytes. */
@@ -986,6 +987,7 @@ static int32_t value_want_bit(jade_value_t v) {
         if (jrt_kind_of(p) == JK_ARRAY) return JRT_WANT_ARRAY;
         if (jrt_kind_of(p) == JK_DICT)  return JRT_WANT_DICT;
         if (jrt_kind_of(p) == JK_BYTES) return JRT_WANT_BYTES;
+        if (jrt_kind_of(p) == JK_FUTURE) return JRT_WANT_FUTURE;
     }
     return 0;
 }

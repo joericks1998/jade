@@ -4,6 +4,28 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.4.4
+
+*You can ask a task whether it has finished, without waiting for it.* `await` blocks, which is the right default and also the whole problem for anything with a loop it cannot stop. A screen redrawing at frame rate has no point at which it is willing to freeze, so it could start work concurrently and then never find out the answer.
+
+```jade
+let pending = connect(ssid)
+let shown = false
+while running {
+    draw_frame()
+    if !shown && pending.ready() {
+        show_banner(await pending)
+        shown = true
+    }
+}
+```
+
+`ready()` is a plain bool and the only thing you can ask a future that does not block. The `await` after a true one costs nothing — 7µs compiled, 39µs interpreted, on a task that has already finished — which is what makes the shape work rather than merely read well. Without that, a poll would move the block rather than remove it.
+
+Finished means finished however it ended. A task that raised is finished, and the `await` re-raises; a future whose result has already been taken is finished, and the second `await` reports the double await on its own terms. `ready()` hides neither, so a caller that wants to know which can `try` around the `await`.
+
+One thing it is not: a way to wait cheaply. `while !f.ready() { }` burns a core. Inside a loop that was already running it costs nothing extra, which is the case it was built for. A program with nothing else to do wants to block until *any* of several futures resolves, with a timeout, and that primitive does not exist yet.
+
 ## v1.4.3
 
 *Async, one layer at a time.* v1.4.2 stopped a deeply nested `await` from aborting a compiled binary, and left it hanging instead. That is the worse failure of the two, and it needed a design decision rather than a patch, because the ceiling it hit was not the real problem.

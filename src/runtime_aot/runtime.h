@@ -529,6 +529,7 @@ int64_t jrt_bool_any(int64_t val);
 #define JK_BYTES  10
 #define JK_HANDLE 11
 #define JK_PROMPT 7
+#define JK_FUTURE 6
 /* A first-class function box: the code pointer sits at offset 0, behind the
  * usual header. `jrt_uhttp_stream` reads one the same way. */
 #define JK_FN     5
@@ -568,6 +569,7 @@ int64_t jrt_bool_any(int64_t val);
 #define JRT_WANT_ARRAY 0x2
 #define JRT_WANT_DICT  0x4
 #define JRT_WANT_BYTES 0x8
+#define JRT_WANT_FUTURE 0x10
 void    jrt_require_kind(int64_t recv, int32_t want, const char* method);
 /* jrt_require_str_arg — the same guard for a str method's *argument*, which is
  * untagged to a char* just like the receiver. Raises the VM's argument wording

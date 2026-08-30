@@ -266,6 +266,7 @@ pub(super) fn chunk_val_method_supported(method: &str, argc: usize) -> bool {
         "has" | "get" => argc == 1,              // dict
         "contains" => argc == 1,                 // str / array (runtime-dispatched)
         "len" => argc == 0,                      // str / array / dict / bytes (runtime-dispatched)
+        "ready" => argc == 0,                    // future
         "decode" => argc == 0,                   // bytes
         "slice" => argc == 2,                    // bytes
         _ => false,
@@ -700,6 +701,17 @@ pub(super) fn emit_val_method<'ctx>(
                 .as_any_value_enum()
                 .into_pointer_value();
             Ok(low.tag_ptr(p))
+        }
+        "ready" => {
+            // `f.ready()` — has the task finished, without waiting for it. The
+            // guard first, so a receiver that is not a future raises the
+            // interpreter's wording rather than reaching the forwarder.
+            low.require_kind(low.load(recv), WANT_FUTURE, "ready")?;
+            let f = low.runtime_fn("jade_future_ready", i64_ty.fn_type(&[i64_ty.into()], false));
+            Ok(b.build_call(f, &[low.load(recv).into()], "ready")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_int_value())
         }
         "len" => {
             // `recv.len()` == `len(recv)`: jrt_len_chunk tag-dispatches str
