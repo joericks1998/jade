@@ -35,6 +35,22 @@ print(outer())        // [1, 2] interpreted, [10, 2] compiled
 
 *A task gets the stack the main body gets.* Pool workers ran on the 2 MB Rust hands a thread by default, so the same function succeeded at top level and overflowed inside an `async fn`, taking the process down with no Jade error to read. They get 256 MB now, matching both `jade run` and the compiled main body.
 
+*A compiled binary's output streams, and does not tear.* Two things `jade run` got right that `jade build` did not, both invisible at a terminal and both serious for a service.
+
+stdio picks full buffering for a stream that is not a terminal, so a binary whose output went to a file or a supervisor produced nothing until 4 KB had piled up, and lost whatever was still buffered when it was told to stop. The interpreter never had this, because Rust line-buffers stdout whether or not it is a terminal. A binary does now too.
+
+And a print was several writes with nothing between them, so concurrent tasks spliced their text together: four tasks printing 200 lines each produced 56 corrupt lines out of 800. A print is one write under one lock now, and the same run produces none.
+
+*`join` reports a second failure instead of escaping the `try`.* This one is the interpreter's. `join` dispatches a caught error by popping a handler and jumping, and the jump was written inside the loop over the tasks — where it bound to that loop instead. So the first failure popped a handler and quietly carried on, and the second found the handler stack empty and escaped the enclosing `try` altogether:
+
+```jade
+try { join(bad(1), bad(2), good(3)) } catch E1 e { print(e.message) }
+```
+
+reported an unhandled exception rather than running the catch arm. Every task is awaited first now and the first failure is reported once, at the end, which is what the compiled backend already did and what `join` is documented to do.
+
+*A double `await` is a `RuntimeError` compiled, as it already was interpreted.* Awaiting a future twice, or awaiting something that is not a future, raised a bare string from a binary, so `catch e` bound a string and `catch RuntimeError e` did not match at all. A program that handled it interpreted died on it compiled.
+
 *`join` no longer leaks its results.* Collecting a task's result into the joined array took a reference for the array without giving back the one the join handed over, so every result that lived on the heap leaked one object. 10,000 iterations of `join(mk(i))` left 10,001 live objects where the same loop written with `await` left 1, and a service that joined in its request loop grew without bound: 400,000 joins peaked at 80 MB, and now hold flat at 3 MB.
 
 *Running out of threads no longer wedges the process.* When the OS refused a worker thread, the pool tried to undo its own bookkeeping while still holding the lock it needed to do it, and a `spawn` deadlocked against itself with nothing to wake it. The success path hid the bug completely, since the new thread is what runs the code that would have re-locked, so it only ever fired when the machine was out of threads and the recovery mattered most.

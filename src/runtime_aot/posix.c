@@ -171,15 +171,17 @@ static void jade_task_rethrow(int failed, jade_value_t err, const char* ty) {
         case 1:
             jade_exc_throw_typed(err, ty);
             break;
+        /* The task machinery's own failures are runtime errors, so they are
+         * `RuntimeError` structs like every other one. Raising them as bare
+         * strings meant `catch e` bound a string and `catch RuntimeError e`
+         * did not match at all, so a program that handled a double await
+         * interpreted died on it compiled. `jrt_throw_runtime` is what every
+         * other runtime failure here already uses. */
         case 2:
-            jade_exc_throw_typed(
-                jrt_box_str(jrt_str_dup("cannot await the same Future more than once",
-                                        JRT_TRUSTED)), NULL);
+            jrt_throw_runtime("cannot await the same Future more than once");
             break;
         case 3:
-            jade_exc_throw_typed(
-                jrt_box_str(jrt_str_dup("'await' applied to a non-Future value",
-                                        JRT_TRUSTED)), NULL);
+            jrt_throw_runtime("'await' applied to a non-Future value");
             break;
         default:
             break;

@@ -102,7 +102,32 @@ int jrt_snprintf_any(char* buf, size_t cap, int64_t val) {
     return snprintf(buf, cap, "<object>");  /* non-string heap pointer */
 }
 
-void jrt_print_any(int64_t val, const char* suffix) {
+/* ── stdout: line-buffered, and one writer at a time ──────────────────────
+ *
+ * Two things a compiled binary got wrong that `jade run` got right, both
+ * invisible at a terminal and both serious for a service.
+ *
+ * stdio picks full buffering for a stream that is not a terminal, so a binary
+ * whose output went to a file or a supervisor produced nothing until 4 KB had
+ * accumulated, and lost whatever was still buffered on SIGTERM. The interpreter
+ * never had this: Rust wraps stdout in a LineWriter, which line-buffers whether
+ * or not it is a terminal. `setvbuf` here says the same thing.
+ *
+ * And a print was several `fputs` calls — the value, then the newline — with
+ * nothing between them, so concurrent tasks spliced their text together. Four
+ * tasks printing 200 lines each produced 56 corrupt lines out of 800. The
+ * interpreter's `println!` takes the stdout lock for the whole write; this is
+ * the compiled half of that. It has to be one lock for the whole of a print,
+ * not one per `fputs`, which is why the body moved into a `_locked` helper that
+ * `write` can share. */
+static pthread_mutex_t jade_out_mu = PTHREAD_MUTEX_INITIALIZER;
+
+__attribute__((constructor))
+static void jade_stdout_line_buffer(void) {
+    setvbuf(stdout, NULL, _IOLBF, 0);
+}
+
+static void jrt_print_any_locked(int64_t val, const char* suffix) {
     /* Print a type-erased value to stdout, then `suffix`. Used by print() for
      * statically-Unknown args. Strings are written directly (unbounded) — unlike
      * routing through jrt_snprintf_any + a fixed scratch buffer, which truncates
@@ -128,6 +153,12 @@ void jrt_print_any(int64_t val, const char* suffix) {
     if (suffix) fputs(suffix, stdout);
 }
 
+void jrt_print_any(int64_t val, const char* suffix) {
+    pthread_mutex_lock(&jade_out_mu);
+    jrt_print_any_locked(val, suffix);
+    pthread_mutex_unlock(&jade_out_mu);
+}
+
 /* jrt_write_any — the `write(x)` builtin: `print` with no newline, flushed.
  *
  * The flush is the whole point and is not optional. `write` exists for output
@@ -137,8 +168,12 @@ void jrt_print_any(int64_t val, const char* suffix) {
  * appears late or, at exit, out of order. The VM's `write` flushes for the same
  * reason (stdio::write_str_flush); this is the compiled half of that. */
 void jrt_write_any(int64_t val) {
-    jrt_print_any(val, NULL);
+    /* The flush is inside the lock, so a `write` cannot be split by a `print`
+     * landing between its text and its flush. */
+    pthread_mutex_lock(&jade_out_mu);
+    jrt_print_any_locked(val, NULL);
     fflush(stdout);
+    pthread_mutex_unlock(&jade_out_mu);
 }
 
 /* ── Dynamic conversion builtins int()/float()/bool() (Chunk backend) ──────
