@@ -14,7 +14,7 @@ The instructions are mostly *monomorphic*, meaning `AddInt` and `AddFloat` rathe
 
 ## What each file does
 
-- *`mod.rs`* holds the whole instruction set. `Instr` is the opcodes. `Chunk` is a linear `Vec<Instr>` plus its constant pools. `CompiledFn` is a function body with its parameters, defaults, slot count, and source file. `FStrPart` holds f-string template pieces, and `Reg` is a register index in the current call frame.
+- *`mod.rs`* holds the whole instruction set. `Instr` is the opcodes. `Chunk` is a linear `Vec<Instr>` plus its constant pools. `CompiledFn` is a function body with its parameters, defaults, slot count, and source file, plus two facts about the body that a caller needs and cannot see: `is_generator` and `is_async`. Both exist because a call site that only has the *value* has no static type to consult — that is what lets `[1, 2].map(some_async_fn)` start tasks. `FStrPart` holds f-string template pieces, and `Reg` is a register index in the current call frame.
 
   Jumps are relative to the program counter. `patch_jump` writes an offset relative to the instruction *after* the jump, so a target is `idx + 1 + offset`.
 - *`tests.rs`* holds the instruction-set tests.
