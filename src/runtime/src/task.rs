@@ -632,6 +632,25 @@ pub unsafe fn destroy(fut: *mut FutureObj) {
         "destroy on a future with live references — use release(); a worker may \
          still be writing its result into this allocation"
     );
+    // Give back a result nobody took.
+    //
+    // A future is not a container, so there is no cascade — but the one word it
+    // holds may be a reference, and this is the last chance to release it.
+    // `consumed` is the test: an awaited future handed its reference to the
+    // awaiter, an un-awaited one still owns it. Without this, `let f = mk(i)` in
+    // a loop leaked one object per iteration whenever the task returned a
+    // collection, which is the shape of a fire-and-forget task in a service.
+    let orphan = {
+        let st = unsafe { (*fut).state.lock().unwrap_or_else(|e| e.into_inner()) };
+        if st.consumed {
+            0
+        } else if st.failed {
+            st.error
+        } else {
+            st.result
+        }
+    };
+    gc::jrt_decref(orphan);
     // A future is not a collection: its result is a single word, not a Vec of
     // children, so there is no cascade. The result word may itself be a
     // collection reference, and dropping an un-awaited future drops that

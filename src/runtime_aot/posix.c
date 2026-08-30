@@ -209,15 +209,27 @@ jade_value_t jade_await_word(jade_value_t w) {
     return r;
 }
 
+/* A join hands its results to the caller, whose collect-into-an-array loop takes
+ * a reference for the array and gives this one back. On a failure that loop
+ * never runs — the rethrow below is a longjmp — so the results already gathered
+ * had no owner at all. A `try { join(ok(), bad()) } catch` in a loop leaked
+ * every successful sibling's value. Slots for tasks that failed hold 0, which is
+ * an int word and no-ops. */
+static void jade_join_release(jade_value_t* results, int n) {
+    for (int i = 0; i < n; i++) jrt_decref(results[i]);
+}
+
 void jade_join_words(const jade_value_t* ws, int n, jade_value_t* results_out) {
     int failed = 0; jade_value_t err = 0; const char* ty = NULL;
     jrt_join_words(ws, n, results_out, &failed, &err, &ty);
+    if (failed) jade_join_release(results_out, n);
     jade_task_rethrow(failed, err, ty);
 }
 
 void jade_join(jade_future_t* futures, int n, jade_value_t* results_out) {
     int failed = 0; jade_value_t err = 0; const char* ty = NULL;
     jrt_join_impl((void* const*)futures, n, results_out, &failed, &err, &ty);
+    if (failed) jade_join_release(results_out, n);
     jade_task_rethrow(failed, err, ty);
 }
 

@@ -35,6 +35,8 @@ print(outer())        // [1, 2] interpreted, [10, 2] compiled
 
 *A task gets the stack the main body gets.* Pool workers ran on the 2 MB Rust hands a thread by default, so the same function succeeded at top level and overflowed inside an `async fn`, taking the process down with no Jade error to read. They get 256 MB now, matching both `jade run` and the compiled main body.
 
+*Two more leaks on the task paths.* A future nobody awaited never released its result, so a fire-and-forget task returning a collection leaked one object per spawn: 5,000 of them left 5,001 live objects, and now leave 2. And a `join` whose task raised abandoned the results it had already collected, because the rethrow is a jump and the caller's collect-into-an-array loop never runs; those are released before the jump now.
+
 *A compiled binary's output streams, and does not tear.* Two things `jade run` got right that `jade build` did not, both invisible at a terminal and both serious for a service.
 
 stdio picks full buffering for a stream that is not a terminal, so a binary whose output went to a file or a supervisor produced nothing until 4 KB had piled up, and lost whatever was still buffered when it was told to stop. The interpreter never had this, because Rust line-buffers stdout whether or not it is a terminal. A binary does now too.
@@ -159,6 +161,16 @@ f(a)                       // aborted here
 *Awaiting deeply no longer aborts.* The task pool computed its runnable population by subtracting blocked threads from its own workers, which underflows once a thread that is not one of its workers blocks — the main thread awaiting at the top level is exactly that.
 
 *A shadowed builtin reads as the builtin until it is assigned.* `print(len)` before `let len = 5` printed `nil` compiled where the interpreter still had the builtin.
+
+Known and not fixed, and worth knowing if you run a compiled binary for a long time: *a caught raise leaks whatever the frames it skipped past were holding.* A `longjmp` runs nothing on its way out, so those frames never reach their own releases:
+
+```jade
+fn c() { raise E { message: "x" } }
+fn b() { let junk = [1, 2, 3]  c() }
+while i < 1000 { try { b() } catch E e { }  i = i + 1 }
+```
+
+leaks three objects an iteration. It is not an async bug and not a new one — a plain `raise` in a loop does it too — and the interpreter does not have it, because its frames are Rust values that unwinding drops. Closing it means every frame telling the runtime where its registers live so a throw can release them, which changes who owns a thrown value and is its own piece of work.
 
 Known and not fixed: an *uncaught* error still prints `jade: <message>` from a binary against `<file>: runtime error: [line:col] <message>` from the interpreter, and caught errors agree apart from that same `[line:col]` prefix on `.message`. A stdlib module function or a primitive method used as a *value* (`let f = math.sqrt`, `let f = s.upper`) still has no compiled form. `await` nests about 512 deep in a binary before the task pool runs out of threads, where the interpreter keeps going. And a callback that mutates the array it is mapping over sees its own writes compiled, where the interpreter walks a snapshot.
 
