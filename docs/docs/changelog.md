@@ -196,15 +196,21 @@ f(a)                       // aborted here
 
 *A shadowed builtin reads as the builtin until it is assigned.* `print(len)` before `let len = 5` printed `nil` compiled where the interpreter still had the builtin.
 
-Known and not fixed, and worth knowing if you run a compiled binary for a long time: *a caught raise leaks whatever the frames it skipped past were holding.* A `longjmp` runs nothing on its way out, so those frames never reach their own releases:
+*A caught raise no longer leaks the value it raised.* A `longjmp` runs nothing on the way out, so a frame it skips never releases what its registers hold — and for the frame that raised, one of those is the raised value itself:
 
 ```jade
 fn c() { raise E { message: "x" } }
-fn b() { let junk = [1, 2, 3]  c() }
-while i < 1000 { try { b() } catch E e { }  i = i + 1 }
+let i = 0
+while i < 1000 { try { c() } catch E e { }  i = i + 1 }
 ```
 
-leaks three objects an iteration. It is not an async bug and not a new one — a plain `raise` in a loop does it too — and the interpreter does not have it, because its frames are Rust values that unwinding drops. Closing it means every frame telling the runtime where its registers live so a throw can release them, which changes who owns a thrown value and is its own piece of work.
+leaked one object a pass, and 5,000 of them left 5,001 live objects at exit. Not an async bug and not a new one; the interpreter never had it, because its frames are Rust values that unwinding drops.
+
+The raiser is the one frame that knows it is leaving, so it now cleans up before it goes, exactly as a `return` does. That also settles who owns a thrown value: the throw takes a reference of its own, and the `catch` binding takes that reference rather than a second one. A raise caught in the same frame is left alone, since that frame is staying.
+
+What still leaks is a frame merely *unwound past* while holding something: `fn b() { let junk = [1, 2, 3]  c() }` between the raise and the catch drops `junk` on the floor. Closing that means every frame telling the runtime where its registers live, which was measured at 41% on a call-heavy benchmark — the register file has to stay in memory for the runtime to read it, so nothing gets promoted. Not worth it for the remainder.
+
+*Two leaks on the `yield` path, found by the same measurement.* `yield x` took two references where the value needed one, because the call site retained and `jrt_karr_push` retained again, so `yield [1, 2]` leaked its array every pass. And a `yield`ing function's `return` retained the buffer it was handing back — right for a value read out of a register, wrong for one the generator already owns — so every call to a generator leaked its stream.
 
 Known and not fixed: an *uncaught* error still prints `jade: <message>` from a binary against `<file>: runtime error: [line:col] <message>` from the interpreter, and caught errors agree apart from that same `[line:col]` prefix on `.message`. A stdlib module function or a primitive method used as a *value* (`let f = math.sqrt`, `let f = s.upper`) still has no compiled form. `await` nests about 512 deep in a binary before the task pool runs out of threads, where the interpreter keeps going. And a callback that mutates the array it is mapping over sees its own writes compiled, where the interpreter walks a snapshot.
 

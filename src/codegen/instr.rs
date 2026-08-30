@@ -35,6 +35,10 @@ pub(super) struct BodyCtx<'a, 'ctx> {
     pub llblocks: &'a [LlvmBlock<'ctx>],
     pub graph: &'a cfg::Cfg,
     pub handler_bufs: &'a HashMap<usize, PointerValue<'ctx>>,
+    /// Per instruction: is a handler *of this function* active here? A `raise`
+    /// inside one stays in this frame; a `raise` outside every one is leaving.
+    /// See the `Raise` arm.
+    pub in_handler: &'a [bool],
     pub call_builtins: &'a HashMap<usize, BuiltinCall>,
     pub user_calls: &'a HashMap<usize, CallKind>,
     pub fn_defs: &'a [Arc<CompiledFn>],
@@ -47,8 +51,16 @@ pub(super) fn lower_instr<'ctx>(
     idx: usize,
     body: &BodyCtx<'_, 'ctx>,
 ) -> Result<bool, String> {
-    let BodyCtx { llblocks, graph, handler_bufs, call_builtins, user_calls, fn_defs, fnctx } =
-        *body;
+    let BodyCtx {
+        llblocks,
+        graph,
+        handler_bufs,
+        in_handler,
+        call_builtins,
+        user_calls,
+        fn_defs,
+        fnctx,
+    } = *body;
     use Instr::*;
     let b = low.builder;
     let i64_ty = low.i64t();
@@ -1266,7 +1278,32 @@ pub(super) fn lower_instr<'ctx>(
         // path. It never returns, so it terminates the block.
         Raise(val) => {
             let v = low.load(*val);
-            low.throw(v)?;
+            // A raise that leaves this function takes its scope exit with it.
+            //
+            // A `longjmp` runs nothing on the way out, so a frame it skips never
+            // releases what its registers hold — including, for the frame that
+            // raised, the raised value itself. That leaked one object per caught
+            // raise in the plainest possible program:
+            //
+            //     fn c() { raise E { message: "x" } }
+            //     while i < 1000 { try { c() } catch E e { }  i = i + 1 }
+            //
+            // The raiser is the one frame that knows it is leaving, so it cleans
+            // up before it goes, exactly as a `return` does. `throw` retains the
+            // value first, so releasing the register holding it is safe — see the
+            // note there, and the landing pad, which takes that reference.
+            //
+            // Not when a handler of *this* function is active: the frame is
+            // staying, the catch arm below will keep using these registers, and
+            // its own return will release them. Nothing leaks in that case
+            // anyway, for the same reason.
+            if !in_handler.get(idx).copied().unwrap_or(false) {
+                low.retain(v);
+                low.emit_scope_exit();
+                low.throw_owned(v)?;
+            } else {
+                low.throw(v)?;
+            }
             Ok(true)
         }
         // Register a handler frame and split on `setjmp`: 0 → try body
@@ -1304,16 +1341,20 @@ pub(super) fn lower_instr<'ctx>(
             // of every generator frame it unwound past, so their buffers are
             // still open and the next `yield` here would land in one of them.
             low.emit_yield_restore()?;
+            // The exception carries a reference, and this is where it lands.
+            //
+            // A store takes ownership rather than retaining, so binding the
+            // caught value here is the whole transfer: the `catch` variable
+            // becomes its owner and releases it at scope exit. Retaining as well
+            // would give one reference two owners and leak one per caught raise.
+            //
+            // This pairs exactly with the retain in `throw` and with the frame
+            // release the throw performs, and none of the three works alone. A
+            // raise in *this* frame leaves the raiser's own register owning its
+            // reference, untouched because this frame is not one of the skipped
+            // ones; a raise from deeper had that register released on the way
+            // out. Either way the value arrives with exactly one owner to be.
             let caught = low.exc_value();
-            // `jade_exc_value` hands back a *borrowed* word — the raiser stored
-            // it and did not give up its reference. For a raise in this same
-            // frame that raiser's slot is still live and still owns it, so
-            // binding it here without a retain gives one reference two owners,
-            // and scope exit releases it twice. (A raise from a deeper frame
-            // leaks that frame's reference instead, because the longjmp skipped
-            // its scope exit — a separate problem, and not one a missing retain
-            // here would fix.)
-            low.retain(caught);
             low.store(*caught_reg, caught);
             b.build_unconditional_branch(block_of(target(*off))).map_err(|e| e.to_string())?;
             Ok(true)
@@ -1347,9 +1388,11 @@ pub(super) fn lower_instr<'ctx>(
                 low.ctx.void_type().fn_type(&[i64_ty.into()], false),
             );
             let v = low.load(*src);
-            // The buffer takes a reference: the slot it came from is released
-            // at scope exit, and the caller reads the value long after.
-            low.incref(v);
+            // No retain here. `jrt_yield_append` appends through `jrt_karr_push`,
+            // which takes the buffer's reference itself — the same one every
+            // other array write takes. Retaining as well gave the yielded value
+            // three references and two owners, so `yield [1, 2]` leaked its array
+            // on every pass.
             b.build_call(f, &[v.into()], "").map_err(|e| e.to_string())?;
             Ok(false)
         }
@@ -1358,22 +1401,36 @@ pub(super) fn lower_instr<'ctx>(
             // Closing the frame here rather than at one exit point covers every
             // return path — an explicit `return`, the implicit one at the end,
             // and a `return` inside a `try`.
-            let v = if low.is_generator {
+            // A generator hands back its buffer; everything else hands back a
+            // register. The difference is who owns what: `jrt_yield_pop` gives up
+            // the buffer's one reference, while a register keeps owning its value
+            // until scope exit releases it just below.
+            let (v, borrowed) = if low.is_generator {
                 let f = low.runtime_fn("jrt_yield_pop", i64_ty.fn_type(&[], false));
-                b.build_call(f, &[], "ypop")
+                let popped = b
+                    .build_call(f, &[], "ypop")
                     .map_err(|e| e.to_string())?
                     .as_any_value_enum()
-                    .into_int_value()
+                    .into_int_value();
+                (popped, false)
             } else {
-                match opt {
+                let w = match opt {
                     Some(r) => low.load(*r),
                     None => i64_ty.const_int(NIL, false),
-                }
+                };
+                (w, true)
             };
             // Transfer the returned reference to the caller: retain it, then the
             // scope-exit release (which decrefs the source slot) nets an ownership
             // move rather than a free of a value the caller now holds.
-            low.incref(v);
+            //
+            // Not for a generator's buffer, which arrives already owned and is not
+            // in any register for scope exit to release. Retaining it there gave
+            // the buffer two references and one owner, so every call to a
+            // `yield`ing function leaked its stream.
+            if borrowed {
+                low.incref(v);
+            }
             low.emit_scope_exit();
             // Drop any handler this function opened but did not fall out of —
             // `return` inside a `try` skips the emitter's PopHandler.

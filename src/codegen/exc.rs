@@ -10,6 +10,29 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
     /// `unreachable` (throw is noreturn — it longjmps to the active handler or
     /// aborts). Callers must not emit anything after this in the same block.
     pub(super) fn throw(&self, value: IntValue<'ctx>) -> Result<(), String> {
+        // Give the exception a reference of its own before it leaves.
+        //
+        // The throw releases the registers of every frame it is about to skip
+        // (`jade_frame_release_above`), and for `raise x` the raiser's own frame
+        // is one of them, with `x` sitting in one of those registers. A store
+        // takes ownership rather than retaining, so that register *is* the
+        // value's only owner: without a reference held by the exception itself,
+        // the value would be freed on the way out and the catch would bind
+        // reclaimed memory.
+        //
+        // The landing pad hands this reference straight to the `catch` binding
+        // and takes none of its own. The runtime's own throwers pass a value
+        // they already own and so retain nothing here — see `jrt_throw_runtime`.
+        self.retain(value);
+        self.throw_owned(value)
+    }
+
+    /// `throw` for a caller that has already taken the exception's reference.
+    ///
+    /// The pair exists because the raiser sometimes has to retain *before* it
+    /// releases its own registers, and doing both here would release the value
+    /// out from under the retain.
+    pub(super) fn throw_owned(&self, value: IntValue<'ctx>) -> Result<(), String> {
         let void = self.ctx.void_type();
         let f = self.runtime_fn(
             "jade_exc_throw_typed",

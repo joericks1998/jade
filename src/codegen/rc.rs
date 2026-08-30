@@ -96,9 +96,11 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
     /// in-place array-mutation case).
     pub(super) fn rc_replace_slot(&self, i: usize, new: IntValue<'ctx>) {
         let old = self.slot_load(i, "rcold");
-        // `jrt_rc_replace` decrefs `old` and increfs `new`; both no-op unless the
-        // word is heap. Skip the call when *neither* is heap (the common case for
-        // scalar slots) with an inline guard — `is_heap(old) || is_heap(new)`.
+        // `jrt_rc_replace` releases `old` and does *not* retain `new`: a store
+        // takes ownership. A producer's result therefore needs no retain, and a
+        // borrowed read (`Move`, `GetLocal`, `GetField`, …) needs one, which is
+        // what `retain` above is for. Skip the call when neither word is heap
+        // (the common case for scalar slots) with an inline guard.
         let old_heap = self.is_heap(old);
         let new_heap = self.is_heap(new);
         let either = self.builder.build_or(old_heap, new_heap, "rc_either").unwrap();

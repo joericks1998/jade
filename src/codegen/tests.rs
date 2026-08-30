@@ -19,6 +19,49 @@ fn ir_of(code: &[Instr], n_slots: u32) -> String {
     module.print_to_string().to_string()
 }
 
+/// A `raise` that leaves its function releases what that function's registers
+/// hold, because a `longjmp` runs nothing on the way out.
+///
+/// The raised value itself is one of them, which is why it is retained first.
+/// Without this, the plainest program that raises in a loop leaked one object
+/// per pass: `fn c() { raise E {…} }` under `try { c() } catch e { }`.
+#[test]
+fn a_raise_that_leaves_the_frame_releases_its_registers() {
+    let ir = ir_of(&[MakeArray(0, vec![]), MakeArray(1, vec![]), Raise(1)], 2);
+    let throw = ir.find("jade_exc_throw_typed").expect("a throw is emitted");
+    let before = &ir[..throw];
+    assert!(before.contains("jrt_incref"), "the raised value is retained first:\n{ir}");
+    assert!(before.contains("jrt_decref"), "and the frame's registers released:\n{ir}");
+}
+
+/// …but not when a handler of this same function is active. The frame is
+/// staying, the catch arm goes on using those registers, and its own return
+/// releases them. Releasing here would free values the function still holds.
+#[test]
+fn a_raise_caught_in_the_same_frame_keeps_its_registers() {
+    let ir = ir_of(
+        &[MakeArray(0, vec![]), SetupHandler(1, 1), Raise(0), PopHandler, Return(Some(0))],
+        2,
+    );
+    let throw = ir.find("jade_exc_throw_typed").expect("a throw is emitted");
+    let setup = ir.find("jade_exc_push_frame").expect("a handler is installed");
+    assert!(
+        !ir[setup..throw].contains("jrt_decref"),
+        "no scope exit between the handler and the raise:\n{ir}"
+    );
+}
+
+/// `yield x` takes exactly one reference, and `jrt_karr_push` inside
+/// `jrt_yield_append` is what takes it. Retaining at the call site as well gave
+/// the value three references and two owners, so `yield [1, 2]` leaked its array
+/// every pass.
+#[test]
+fn yield_does_not_retain_on_top_of_the_append() {
+    let ir = ir_of(&[MakeArray(0, vec![]), Yield(0), Return(None)], 1);
+    let append = ir.find("jrt_yield_append").expect("the append is emitted");
+    assert!(!ir[..append].contains("jrt_incref"), "the append takes the only reference:\n{ir}");
+}
+
 #[test]
 fn dict_get_retains_the_borrowed_value() {
     // r1 = TABLE.get(r0) — the value word comes back borrowed (the dict
