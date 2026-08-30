@@ -128,9 +128,12 @@ pub(crate) async fn call_value(
     {
         let cf = Arc::clone(cf);
         let child_state = state.new_for_spawn();
-        let handle =
-            tokio::spawn(super::async_tasks::call_fn_standalone(cf, args, child_state, span));
-        return Ok(VmValue::Future(Arc::new(JadeFuture { handle: Mutex::new(Some(handle)) })));
+        return Ok(super::async_tasks::spawn_task(super::async_tasks::call_fn_standalone(
+            cf,
+            args,
+            child_state,
+            span,
+        )));
     }
     call_value_body(callee, args, state, span).await
 }

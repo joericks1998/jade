@@ -103,6 +103,7 @@ extern void    jrt_recur_leave_task(int32_t saved);
 extern jade_value_t jrt_await_impl(void* fut, int* failed, jade_value_t* err, const char** ty);
 extern jade_value_t jrt_await_word(jade_value_t w, int* failed, jade_value_t* err, const char** ty);
 extern int          jrt_future_ready(int64_t w);
+extern int          jrt_future_cancel(int64_t w);
 extern void  jrt_join_words(const jade_value_t* ws, int n, jade_value_t* out,
                             int* failed, jade_value_t* err, const char** ty);
 extern void  jrt_join_impl(void* const* futs, int n, jade_value_t* out,
@@ -184,6 +185,9 @@ static void jade_task_rethrow(int failed, jade_value_t err, const char* ty) {
         case 3:
             jrt_throw_runtime("'await' applied to a non-Future value");
             break;
+        case 4:
+            jrt_throw_runtime("awaiting a cancelled task");
+            break;
         default:
             break;
     }
@@ -211,6 +215,29 @@ jade_value_t jade_await(jade_future_t future) {
  * cannot come back; checked anyway, because this is the boundary and a value
  * arriving from anywhere else is not the guard's business. Routing the failure
  * through `jrt_require_kind` is what gets the interpreter's wording for free. */
+/* `time.sleep(secs)` and `time.after(secs)` take the tagged word, so an int
+ * argument works — codegen used to unbox a float straight from it, which
+ * null-dereferenced on `time.sleep(0)`. Both raise the interpreter's wording
+ * for an argument that is not a number. */
+extern int     jrt_time_sleep_word(int64_t w);
+extern int64_t jrt_time_after(int64_t w);
+
+void jade_time_sleep(jade_value_t w) {
+    if (jrt_time_sleep_word((int64_t)w) != 0) jrt_throw_runtime("type error: time.sleep");
+}
+
+jade_value_t jade_time_after(jade_value_t w) {
+    int64_t r = jrt_time_after((int64_t)w);
+    if (r == -1) jrt_throw_runtime("type error: time.after");
+    return (jade_value_t)r;
+}
+
+void jade_future_cancel(jade_value_t w) {
+    if (jrt_future_cancel((int64_t)w) < 0) {
+        jrt_require_kind((int64_t)w, JRT_WANT_FUTURE, "cancel");
+    }
+}
+
 jade_value_t jade_future_ready(jade_value_t w) {
     int r = jrt_future_ready((int64_t)w);
     if (r < 0) jrt_require_kind((int64_t)w, JRT_WANT_FUTURE, "ready");

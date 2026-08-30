@@ -12,12 +12,36 @@ use super::*;
 /// is tracked as a known function and takes precedence over this check.)
 pub(super) const RESERVED_BUILTINS: &[&str] = &[
     // core + native + type-constructor globals
-    "write", "len", "input", "print", "route", "int", "float", "bool", "str", "char", "func",
+    "write",
+    "len",
+    "input",
+    "print",
+    "route",
+    "int",
+    "float",
+    "bool",
+    "str",
+    "char",
+    "func",
+    "cancelled",
     "Grammar",
     // stdlib package globals (accessed via `use`; a bare call is invalid, but
     // reserving them keeps a stray Call from mis-lowering to an indirect call)
-    "llm", "string", "math", "array", "dict", "fs", "time", "http", "uhttp", "sh", "json", "env",
-    "path", "random", "bytes",
+    "llm",
+    "string",
+    "math",
+    "array",
+    "dict",
+    "fs",
+    "time",
+    "http",
+    "uhttp",
+    "sh",
+    "json",
+    "env",
+    "path",
+    "random",
+    "bytes",
 ];
 
 /// Reject a program that reads a global nothing ever binds.
@@ -206,6 +230,7 @@ pub(super) fn chunk_module_supported(module: &str, method: &str, argc: usize) ->
         ("env", "args") => argc == 0,
         ("time", "now" | "now_ms" | "monotonic") => argc == 0,
         ("time", "sleep") => argc == 1,
+        ("time", "after") => argc == 1,
         ("time", "local" | "utc" | "parts") => argc == 1,
         // stamp(y, mo, d[, h[, mi[, s]]]) — time of day defaults to midnight.
         ("time", "stamp") => (3..=6).contains(&argc),
@@ -266,7 +291,7 @@ pub(super) fn chunk_val_method_supported(method: &str, argc: usize) -> bool {
         "has" | "get" => argc == 1,              // dict
         "contains" => argc == 1,                 // str / array (runtime-dispatched)
         "len" => argc == 0,                      // str / array / dict / bytes (runtime-dispatched)
-        "ready" => argc == 0,                    // future
+        "ready" | "cancel" => argc == 0,         // future
         "decode" => argc == 0,                   // bytes
         "slice" => argc == 2,                    // bytes
         _ => false,
@@ -713,6 +738,15 @@ pub(super) fn emit_val_method<'ctx>(
                 .as_any_value_enum()
                 .into_int_value())
         }
+        "cancel" => {
+            // `f.cancel()` — stop waiting. It does not stop the work; see
+            // `future_cancel` in src/future for why not, and why saying so
+            // plainly is the design rather than a shortcoming.
+            low.require_kind(low.load(recv), WANT_FUTURE, "cancel")?;
+            let f = low.runtime_fn("jade_future_cancel", void_ty.fn_type(&[i64_ty.into()], false));
+            b.build_call(f, &[low.load(recv).into()], "").map_err(err)?;
+            Ok(nil)
+        }
         "len" => {
             // `recv.len()` == `len(recv)`: jrt_len_chunk tag-dispatches str
             // (byte length) / collection (ObjHeader.len) at runtime → tagged int.
@@ -1052,16 +1086,26 @@ pub(super) fn emit_module_call<'ctx>(
         ("time", "now") => int_fn("jrt_time_now", 0),
         ("time", "now_ms") => int_fn("jrt_time_now_ms", 0),
         ("time", "sleep") => {
-            // (float seconds) -> nil. Unbox the boxed-float arg to a native f64.
-            let unbox = low.runtime_fn("jrt_unbox_float", f64_ty.fn_type(&[i64_ty.into()], false));
-            let d = b
-                .build_call(unbox, &[low.load(args[0]).into()], "sec")
+            // (seconds word) -> nil. The tagged word, not an unboxed float:
+            // unboxing here null-dereferenced on `time.sleep(0)`, because an int
+            // literal is not a boxed float. `math` never had the problem, since
+            // its cores take the word and coerce — this is the same rule.
+            let f = low.runtime_fn("jade_time_sleep", void_ty.fn_type(&[i64_ty.into()], false));
+            b.build_call(f, &[low.load(args[0]).into()], "").map_err(err)?;
+            Ok(nil)
+        }
+        ("time", "after") => {
+            // (float seconds) -> a future that finishes with nil at the deadline.
+            //
+            // No task behind it: one timer thread serves every deadline, because
+            // a task that sleeps holds a pool worker without announcing itself
+            // as blocked, and a redraw loop arming one every frame would fill
+            // the pool with sleepers. See `after` in jade-runtime's task.rs.
+            let f = low.runtime_fn("jade_time_after", i64_ty.fn_type(&[i64_ty.into()], false));
+            Ok(b.build_call(f, &[low.load(args[0]).into()], "after")
                 .map_err(err)?
                 .as_any_value_enum()
-                .into_float_value();
-            let f = low.runtime_fn("jrt_time_sleep", void_ty.fn_type(&[f64_ty.into()], false));
-            b.build_call(f, &[d.into()], "").map_err(err)?;
-            Ok(nil)
+                .into_int_value())
         }
         ("time", "monotonic") => {
             // () -> raw f64, boxed into a float word (same shape as random.float).

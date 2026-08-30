@@ -1488,17 +1488,21 @@ pub(crate) async fn execute_chunk(
                 let callee = get(slots, *callee_reg).clone();
                 let args: Vec<VmValue> = arg_regs.iter().map(|&r| get(slots, r).clone()).collect();
                 let child_state = state.new_for_spawn();
-                let handle = tokio::spawn(call_value_standalone(callee, args, child_state, span));
-                set(
-                    slots,
-                    *dest,
-                    VmValue::Future(Arc::new(JadeFuture { handle: Mutex::new(Some(handle)) })),
-                );
+                let f =
+                    async_tasks::spawn_task(call_value_standalone(callee, args, child_state, span));
+                set(slots, *dest, f);
             }
             Instr::Await(dest, future_reg) => {
                 let fut_val = get(slots, *future_reg).clone();
                 match fut_val {
                     VmValue::Future(jade_fut) => {
+                        // Cancelled outranks everything, including a result that
+                        // arrived anyway. The caller said it had stopped waiting,
+                        // and handing it the answer after that would make
+                        // `cancel` mean nothing on a task about to finish.
+                        if jade_fut.cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                            vm_err!(JadeError::TaskCancelled { span });
+                        }
                         // SAFETY: .take() consumes the JoinHandle as an owned value before
                         // reaching .await, so the MutexGuard is dropped synchronously here —
                         // std::sync::MutexGuard is never held across an await point.
@@ -1545,7 +1549,11 @@ pub(crate) async fn execute_chunk(
                     let taken = match get(slots, r).clone() {
                         // SAFETY: same as Instr::Await — .take() is synchronous.
                         VmValue::Future(jade_fut) => {
-                            jade_fut.handle.lock().take().ok_or(JadeError::DoubleAwait { span })
+                            if jade_fut.cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                                Err(JadeError::TaskCancelled { span })
+                            } else {
+                                jade_fut.handle.lock().take().ok_or(JadeError::DoubleAwait { span })
+                            }
                         }
                         _ => Err(JadeError::NotAFuture { span }),
                     };

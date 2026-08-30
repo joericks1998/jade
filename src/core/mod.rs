@@ -84,6 +84,28 @@ fn native_input(args: &[VmValue]) -> Result<VmValue> {
 
 pub const INPUT: BuiltinFn = BuiltinFn { name: "input", vm_impl: native_input };
 
+/// `cancelled()` — has the task running here been cancelled?
+///
+/// The only thing that actually stops work. `f.cancel()` stops the *caller*
+/// waiting; a task that wants to give up early has to agree to look, because a
+/// task is a real thread running straight-line code and nothing outside it can
+/// interrupt that.
+///
+/// False outside a task, which is the honest answer: the top level is not
+/// something anyone cancels.
+fn native_cancelled(args: &[VmValue]) -> Result<VmValue> {
+    if !args.is_empty() {
+        return Err(JadeError::ArityMismatch {
+            expected: 0,
+            got: args.len(),
+            span: Span { line: 0, col: 0 },
+        });
+    }
+    Ok(VmValue::Bool(crate::vm::async_tasks::current_is_cancelled()))
+}
+
+pub const CANCELLED: BuiltinFn = BuiltinFn { name: "cancelled", vm_impl: native_cancelled };
+
 // ── Type registration ─────────────────────────────────────────────────────────
 
 pub fn register_types(ctx: &mut TypeContext) {
@@ -105,6 +127,10 @@ pub fn register_types(ctx: &mut TypeContext) {
     ctx.define(
         "input".to_string(),
         JadeType::Fn { params: vec![JadeType::Unknown], ret: Box::new(JadeType::Str) },
+    );
+    ctx.define(
+        "cancelled".to_string(),
+        JadeType::Fn { params: vec![], ret: Box::new(JadeType::Bool) },
     );
     ctx.define(
         "write".to_string(),

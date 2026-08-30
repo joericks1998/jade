@@ -9,7 +9,7 @@ use super::*;
 /// never `SetGlobal`s it (so the global still holds the builtin, not a user
 /// value). Grows as more builtins are supported.
 pub(super) const LOWERABLE_BUILTINS: &[&str] =
-    &["print", "write", "str", "int", "float", "bool", "char", "len"];
+    &["print", "write", "str", "int", "float", "bool", "char", "len", "cancelled"];
 
 /// The single register an instruction writes, or `None` for pure
 /// stores/control-flow. Used to invalidate builtin tracking when a register is
@@ -163,6 +163,8 @@ pub(super) fn resolve_builtin_calls(code: &[Instr]) -> HashMap<usize, BuiltinCal
                         "write" | "str" | "int" | "float" | "bool" | "char" | "len" => {
                             args.len() == 1
                         }
+                        // The task running here, so nothing to take.
+                        "cancelled" => args.is_empty(),
                         _ => false,
                     };
                     if ok {
@@ -851,6 +853,8 @@ pub(super) fn resolve_user_calls(
                                     "write" | "str" | "int" | "float" | "bool" | "char" | "len" => {
                                         args.len() == 1
                                     }
+                                    // The task running here, so nothing to take.
+                                    "cancelled" => args.is_empty(),
                                     _ => false,
                                 };
                             if lowered {

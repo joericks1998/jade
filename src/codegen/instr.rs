@@ -35,10 +35,6 @@ pub(super) struct BodyCtx<'a, 'ctx> {
     pub llblocks: &'a [LlvmBlock<'ctx>],
     pub graph: &'a cfg::Cfg,
     pub handler_bufs: &'a HashMap<usize, PointerValue<'ctx>>,
-    /// Per instruction: is a handler *of this function* active here? A `raise`
-    /// inside one stays in this frame; a `raise` outside every one is leaving.
-    /// See the `Raise` arm.
-    pub in_handler: &'a [bool],
     pub call_builtins: &'a HashMap<usize, BuiltinCall>,
     pub user_calls: &'a HashMap<usize, CallKind>,
     pub fn_defs: &'a [Arc<CompiledFn>],
@@ -51,16 +47,8 @@ pub(super) fn lower_instr<'ctx>(
     idx: usize,
     body: &BodyCtx<'_, 'ctx>,
 ) -> Result<bool, String> {
-    let BodyCtx {
-        llblocks,
-        graph,
-        handler_bufs,
-        in_handler,
-        call_builtins,
-        user_calls,
-        fn_defs,
-        fnctx,
-    } = *body;
+    let BodyCtx { llblocks, graph, handler_bufs, call_builtins, user_calls, fn_defs, fnctx } =
+        *body;
     use Instr::*;
     let b = low.builder;
     let i64_ty = low.i64t();
@@ -1650,6 +1638,29 @@ pub(super) fn lower_instr<'ctx>(
                         }
                         None => low.print_value(arg, *dest)?,
                     }
+                    Ok(false)
+                }
+                // cancelled() → has the task running here been cancelled? The
+                // only thing that actually stops work: `f.cancel()` stops the
+                // caller waiting, and a task gives up early only by agreeing to
+                // look. False at the top level, which is not a task.
+                Some(bc) if bc.name == "cancelled" && bc.args.is_empty() => {
+                    let f = low
+                        .runtime_fn("jrt_task_cancelled", low.ctx.i32_type().fn_type(&[], false));
+                    let r = b
+                        .build_call(f, &[], "canc")
+                        .map_err(|e| e.to_string())?
+                        .as_any_value_enum()
+                        .into_int_value();
+                    let bit = b
+                        .build_int_compare(
+                            IntPredicate::NE,
+                            r,
+                            low.ctx.i32_type().const_zero(),
+                            "cb",
+                        )
+                        .map_err(|e| e.to_string())?;
+                    low.store(*dest, low.bool_word(bit));
                     Ok(false)
                 }
                 // write(x) → print with no newline, flushed. Same renderer as

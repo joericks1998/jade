@@ -898,26 +898,6 @@ fn lower_body<'ctx>(
     // inside a loop reuses one stable buffer instead of growing the stack each
     // iteration. 256 bytes is conservative for every x86_64/arm64 jmp_buf.
     let buf_ty = context.i8_type().array_type(256);
-    // Which instructions sit inside a `try` of *this* function. The emitter
-    // brackets a try body with SetupHandler/PopHandler, and a nested try nests
-    // inside that, so counting them in order answers it. A `raise` outside every
-    // one of them is leaving this frame, and the `Raise` arm uses that to decide
-    // whether to run its scope exit on the way out.
-    let mut in_handler: Vec<bool> = Vec::with_capacity(code.len());
-    let mut handler_depth = 0usize;
-    for instr in code {
-        match instr {
-            Instr::SetupHandler(..) => {
-                in_handler.push(true);
-                handler_depth += 1;
-            }
-            Instr::PopHandler => {
-                handler_depth = handler_depth.saturating_sub(1);
-                in_handler.push(handler_depth > 0);
-            }
-            _ => in_handler.push(handler_depth > 0),
-        }
-    }
     let mut handler_bufs: HashMap<usize, PointerValue> = HashMap::new();
     for (idx, instr) in code.iter().enumerate() {
         if matches!(instr, Instr::SetupHandler(..)) {
@@ -1089,7 +1069,6 @@ fn lower_body<'ctx>(
         llblocks: &llblocks,
         graph: &graph,
         handler_bufs: &handler_bufs,
-        in_handler: &in_handler,
         call_builtins: &call_builtins,
         user_calls: &user_calls,
         fn_defs,
