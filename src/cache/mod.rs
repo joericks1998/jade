@@ -32,7 +32,7 @@ pub const JADE_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// v7: `JadeType` gained `Handle` (1.3.0), inserted after `Struct` and so ahead
 ///     of `Fn`/`AsyncFn`/`Future`/`Unknown` — the same mid-enum renumbering that
 ///     made v6 necessary, with the same silent-misread failure if not bumped.
-pub const CACHE_FORMAT_VERSION: u32 = 11;
+pub const CACHE_FORMAT_VERSION: u32 = 12;
 
 // ── Internal types ────────────────────────────────────────────────────────────
 

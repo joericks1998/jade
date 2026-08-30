@@ -35,6 +35,20 @@ print(outer())        // [1, 2] interpreted, [10, 2] compiled
 
 *A task gets the stack the main body gets.* Pool workers ran on the 2 MB Rust hands a thread by default, so the same function succeeded at top level and overflowed inside an `async fn`, taking the process down with no Jade error to read. They get 256 MB now, matching both `jade run` and the compiled main body.
 
+*An `async fn` is a value now, everywhere.* Holding one refused to compile at all, and `map` over one ran it inline:
+
+```jade
+async fn double(n) { return n * 2 }
+
+let f = double
+await f(21)                       // build error: spawn of a non-static function
+[1, 2].map(double)                // ran inline, gave [2, 4] rather than futures
+```
+
+Whether a call starts a task was decided at the call site, from the static type of what it was calling. A value carries no static type, so a function reached through a local, a collection, `map`, or an import was an ordinary call. The function carries the fact itself now, and every call reads it. Storing one in an array or a dict, returning one, passing one to `map`, and calling one with a default parameter all work on both engines, and a wrong argument count raises where it used to refuse to build.
+
+The same gap is why `await lib.work(3)` never worked. The type checker cannot see inside an imported module — its names only exist once the importer merges the two, which is long after checking — so an imported `async fn` was called synchronously and the `await` failed with "applied to a non-Future value". That was true of both engines, and needed nothing at the call site to change.
+
 *Three ways a task could reach the spawner's data with nothing to say so.* Jade refuses a program whose task mutates state the spawner can still reach, and three shapes walked straight past that check.
 
 A callback. `async fn run(f) { f() }` calls a parameter, and a parameter resolves to no definition, so `let record = || readings.push(3)` reached the task completely unexamined. It is still an ordinary value at the spawn, where its body is as visible as the task's, and that is where it is caught now.

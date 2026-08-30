@@ -1,0 +1,67 @@
+// An `async fn` is a value, and calling it starts a task wherever it came from.
+//
+// A call site that can see the declaration knows to start a task. One that only
+// has the *value* cannot: a value carries no static type. So the function says
+// so itself, and every call consults it. Before that, holding an `async fn` in
+// anything at all refused to compile, and `map` over one ran it inline.
+
+async fn double(n) {
+    return n * 2
+}
+
+
+// Bound to a name, then called through it.
+let f = double
+print(await f(21))
+// → 42
+
+
+// Stored in a collection.
+let fns = [double]
+print(await fns[0](21))
+
+let by_name = { "double": double }
+print(await by_name["double"](21))
+// → 42
+// → 42
+
+
+// Returned from an ordinary function.
+fn pick() {
+    return double
+}
+
+print(await pick()(21))
+// → 42
+
+
+// Handed to `map`, which calls it once per element. Each call starts its own
+// task, so what comes back is an array of futures.
+let futures = [1, 2, 3].map(double)
+print(await futures[0])
+print(await futures[2])
+// → 2
+// → 6
+
+
+// A default parameter is filled by the callee's own entry, so it works through
+// a value exactly as it does at a direct call.
+async fn scale(n, factor = 3) {
+    return n * factor
+}
+
+let s = scale
+print(await s(7))
+print(await s(7, 10))
+// → 21
+// → 70
+
+
+// And a wrong argument count raises, rather than refusing to build or quietly
+// dropping the extra one.
+try {
+    print(await s(1, 2, 3))
+} catch e {
+    print(e.message.contains("wrong number of arguments"))
+}
+// → true

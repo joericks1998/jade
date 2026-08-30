@@ -1,0 +1,10 @@
+// An `async fn` in a module. Nothing here says it is special; the caller learns
+// it from the function itself.
+
+async fn work(n) {
+    return n * 3
+}
+
+async fn slow_sum(a, b) {
+    return a + b
+}

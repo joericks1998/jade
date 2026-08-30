@@ -1,0 +1,22 @@
+// An `async fn` imported from a module still starts a task.
+//
+// The type checker cannot see inside an imported module — its names only exist
+// once the importer merges the two, which happens well after checking. So the
+// call site had no idea `worker.work` was async and emitted an ordinary call,
+// which ran the body inline and handed back its value. `await` on that value
+// then failed with "applied to a non-Future value", on both engines.
+//
+// Nothing at the call site had to learn anything: the function carries the fact
+// and the call reads it.
+
+use lib::worker
+
+print(await worker.work(7))
+// → 21
+
+let futures = [worker.work(1), worker.work(2)]
+print(await futures[1])
+// → 6
+
+print(join(worker.slow_sum(1, 2), worker.slow_sum(10, 20)))
+// → [3, 30]

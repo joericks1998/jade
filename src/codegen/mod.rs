@@ -87,6 +87,9 @@ const OBJKIND_FN: u64 = 5;
 // The byte above the ObjKind in a callable box's kind slot: which sort of
 // callable it is, so a renderer can name it. Mirrors JRT_FN_* in runtime.h.
 const OBJ_FN_NATIVE: u64 = 2;
+// Set on the box of an `async fn`, above the sub-kind byte. Mirrors
+// JRT_FN_ASYNC in runtime.h; see `fn_box_word`.
+const OBJ_FN_ASYNC: u64 = 1 << 16;
 
 // Receiver kinds a primitive method accepts, passed to `jrt_require_kind` as a
 // bitmask. Mirror the JRT_WANT_* macros in runtime_aot/runtime.h.

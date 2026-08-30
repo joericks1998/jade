@@ -326,6 +326,7 @@ fn add_program() -> Chunk {
         source_file: String::new(),
         module_scope: None,
         is_generator: false,
+        is_async: false,
     });
     // top:  LoadFn r0 add ; SetGlobal add r0 ;
     //       GetGlobal r1 add ; LoadInt r2 2 ; LoadInt r3 3 ;
@@ -373,6 +374,7 @@ fn call_with_omitted_default_is_filled_at_the_call_site() {
         source_file: String::new(),
         module_scope: None,
         is_generator: false,
+        is_async: false,
     });
     let mut top = Chunk::new("<top>");
     top.fn_defs.push(greet);
@@ -406,6 +408,7 @@ fn function_value_is_first_class_and_returnable() {
         source_file: String::new(),
         module_scope: None,
         is_generator: false,
+        is_async: false,
     });
     let mut top = Chunk::new("<top>");
     top.fn_defs.push(f);
@@ -435,6 +438,7 @@ fn keyword_call_reorders_args_to_parameter_order() {
         source_file: String::new(),
         module_scope: None,
         is_generator: false,
+        is_async: false,
     });
     let mut top = Chunk::new("<top>");
     top.fn_defs.push(f);
@@ -473,6 +477,7 @@ fn higher_order_call_lowers_to_indirect_call() {
         source_file: String::new(),
         module_scope: None,
         is_generator: false,
+        is_async: false,
     });
     let mut top = Chunk::new("<top>");
     top.fn_defs.push(apply);
@@ -661,6 +666,7 @@ fn async_spawn_await_lower_to_runtime() {
         source_file: String::new(),
         module_scope: None,
         is_generator: false,
+        is_async: false,
     });
     let mut top = Chunk::new("<top>");
     top.fn_defs.push(f);
@@ -1076,6 +1082,7 @@ fn a_global_the_program_binds_is_fine_in_either_order() {
         source_file: String::new(),
         module_scope: None,
         is_generator: false,
+        is_async: false,
     });
     let top = top_chunk(vec![LoadInt(0, 1), SetGlobal("later".to_string(), 0), Halt]);
     check_globals_bound(&top, &[f], &HashMap::new(), &HashMap::new())

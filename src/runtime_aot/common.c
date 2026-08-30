@@ -573,6 +573,17 @@ void jrt_throw_arity(int64_t expected, int64_t got) {
 
 typedef int64_t (*jade_entry_t)(int64_t argc, const int64_t* argv);
 
+extern void* jrt_spawn(int64_t (*fn)(int64_t*, int32_t), const int64_t* args, int n);
+
+/* The body of a task started from a function *value*. `args[0]` is the callee's
+ * box word; the rest are its arguments. Enters the body directly rather than
+ * going back through `jrt_call_value`, which would see the async bit again and
+ * spawn a second task. */
+static int64_t jade_task_entry_shim(int64_t* args, int32_t n) {
+    void** box = (void**)jrt_unbox_ptr((jade_value_t)args[0]);
+    return ((jade_entry_t)box[0])((int64_t)(n - 1), args + 1);
+}
+
 /* No real Jade call comes near this. It exists so a corrupt `argc` cannot turn
  * the receiver-prepending buffer below into an unbounded stack allocation. */
 #define JRT_MAX_CALL_ARGS 256
@@ -594,6 +605,24 @@ int64_t jrt_call_value(int64_t callee, int64_t argc, const int64_t* argv) {
         buf[0] = w[3];
         for (int64_t i = 0; i < argc; i++) { buf[i + 1] = argv[i]; }
         return fn(argc + 1, buf);
+    }
+
+    /* An `async fn` reached as a value. The call site could not know: a value
+     * carries no static type, so `let f = w`, `[1, 2].map(w)` and an `async fn`
+     * imported from a module all arrive here as ordinary calls, where a site
+     * that could see the declaration would have emitted a spawn. The box says
+     * so instead, and this is the one place that reads it.
+     *
+     * The task is handed the box word itself rather than the raw entry, so what
+     * the pool retains is an ordinary tagged value. `jade_task_entry_shim`
+     * unwraps it on the other side and enters the body directly — going back
+     * through this function there would spawn a second task and hand the
+     * awaiter a future where it expects a value. */
+    if (((int64_t*)box)[1] & JRT_FN_ASYNC) {
+        int64_t buf[argc + 1];
+        buf[0] = callee;
+        for (int64_t i = 0; i < argc; i++) { buf[i + 1] = argv[i]; }
+        return (int64_t)jrt_box_ptr(jrt_spawn(jade_task_entry_shim, buf, (int)argc + 1));
     }
 
     /* {entry@0, kind@8, [env@16]}. A native binding is told apart by the

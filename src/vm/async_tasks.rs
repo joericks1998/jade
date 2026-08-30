@@ -107,7 +107,22 @@ pub(crate) async fn call_value_standalone(
     mut state: VmState,
     span: Span,
 ) -> TaskBundle {
-    let result = call_value(callee, args, &mut state, span).await;
+    // `call_value_body`, not `call_value`: this *is* the task, so treating an
+    // async callee as async again would spawn a second one and hand the awaiter
+    // a future where it expects a value.
+    let result = call_value_body(callee, args, &mut state, span).await;
+    let raised = state.raised_exception.take();
+    (result, raised)
+}
+
+/// The same, for a task started from a function *value* — see `call_value`.
+pub(crate) async fn call_fn_standalone(
+    cf: std::sync::Arc<crate::bytecode::CompiledFn>,
+    args: Vec<VmValue>,
+    mut state: VmState,
+    span: Span,
+) -> TaskBundle {
+    let result = call_fn(&cf, args, &mut state, span).await;
     let raised = state.raised_exception.take();
     (result, raised)
 }

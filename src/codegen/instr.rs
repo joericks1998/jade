@@ -1092,7 +1092,7 @@ pub(super) fn lower_instr<'ctx>(
         // Spawn a known async function: pack args into a stack array and call
         // jade_spawn(jf_task_<uid>, args, n). The future is stored as a raw
         // pointer word (futures only flow to await/join, never generic ops).
-        Spawn(dest, _callee, _args) => match user_calls.get(&idx) {
+        Spawn(dest, dyn_callee, dyn_args) => match user_calls.get(&idx) {
             Some(CallKind::Spawn { uid, args }) => {
                 // Pack `params.len()` slots: provided args, then omitted trailing
                 // defaults (the task wrapper unpacks exactly that many).
@@ -1155,6 +1155,18 @@ pub(super) fn lower_instr<'ctx>(
                 // segfaulted. It now carries TAG_PTR and ObjKind::Future, so
                 // the renderer and the await guard can both recognise it.
                 low.store(*dest, low.tag_ptr(fut));
+                Ok(false)
+            }
+            // A spawn whose callee is not statically known: through a local, a
+            // collection, a function that returns one, or an `async fn` imported
+            // from a module. `jrt_call_value` handles it, because the box says
+            // it is async and starting the task is that function's decision
+            // rather than this site's. The same path carries a wrong argument
+            // count to the callee's own entry, which raises the way the
+            // interpreter does instead of refusing to build.
+            None => {
+                let fut = low.indirect_call(*dyn_callee, dyn_args)?;
+                low.store(*dest, fut);
                 Ok(false)
             }
             _ => Err(format!("codegen: unsupported spawn at {idx}")),
@@ -1394,7 +1406,10 @@ pub(super) fn lower_instr<'ctx>(
                         .module
                         .get_function(&format!("jf_ind_{uid}"))
                         .ok_or(format!("codegen: missing indirect entry for fn {uid}"))?;
-                    low.store(*d, low.fn_box_word(uid, entry))
+                    // The box says whether calling it starts a task, because the
+                    // site that eventually calls it will only have the value.
+                    let is_async = fnctx.defs[uid].is_async;
+                    low.store(*d, low.fn_box_word(uid, entry, is_async))
                 }
                 None => return Err(format!("codegen: unknown fn_def index {idx}")),
             }

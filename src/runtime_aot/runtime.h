@@ -537,6 +537,14 @@ int64_t jrt_bool_any(int64_t val);
 #define JRT_FN_NATIVEFN  4   /* print                    -> <native fn>          */
 #define JRT_FN_KIND(sub) ((int64_t)JK_FN | ((int64_t)(sub) << JRT_FN_SUB_SHIFT))
 
+/* Set on a box holding an `async fn`. Calling one starts a task and hands back
+ * a future, and whether it does is the *function's* business: a call site that
+ * only has the value has no static type to decide from, which is why `let f =
+ * w`, `[1, 2].map(w)` and an `async fn` imported from a module all arrive at
+ * `jrt_call_value` as ordinary calls. Above the sub-kind byte, so naming a
+ * callable is unaffected. */
+#define JRT_FN_ASYNC ((int64_t)1 << 16)
+
 /* jrt_require_kind — the receiver guard the Chunk backend emits ahead of a
  * primitive method call (`recv.push(x)`, `recv.keys()`, `recv.upper()`, …).
  * `want` is a bitmask of the kinds that method accepts; a receiver outside it

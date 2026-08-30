@@ -54,6 +54,14 @@ pub struct CompiledFn {
     /// a buffer" model: everything produced is retained, so reading the result
     /// twice gives the same values twice.
     pub is_generator: bool,
+    /// Whether this was declared `async fn`.
+    ///
+    /// Calling one starts a task and hands back a future. A call site knows that
+    /// statically when it can see the declaration, and emits `Spawn`; it cannot
+    /// when the function arrives as a *value* — through a local, a collection,
+    /// `map`, or an imported module, none of which carry a static type. So the
+    /// function itself says so, and calling a value consults it.
+    pub is_async: bool,
 }
 
 /// A compiled code unit: top-level program or function body.

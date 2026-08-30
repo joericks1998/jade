@@ -109,8 +109,39 @@ pub(crate) fn package_dict_value(pkg: &builtins::Package) -> VmValue {
     pkg.vm_dict_value()
 }
 
+/// Call any callable value.
+///
+/// An `async fn` reached this way starts a task and hands back a future, the
+/// same as a call site that could see the declaration and emitted `Spawn`. A
+/// value carries no static type, so that call site could not know: `let f = w`,
+/// `[1, 2].map(w)`, and `lib.work(3)` from an imported module all arrive here as
+/// ordinary calls. The function itself is what says it is async.
 #[async_recursion::async_recursion]
 pub(crate) async fn call_value(
+    callee: VmValue,
+    args: Vec<VmValue>,
+    state: &mut VmState,
+    span: Span,
+) -> Result<VmValue> {
+    if let VmValue::Fn(cf) = &callee
+        && cf.is_async
+    {
+        let cf = Arc::clone(cf);
+        let child_state = state.new_for_spawn();
+        let handle =
+            tokio::spawn(super::async_tasks::call_fn_standalone(cf, args, child_state, span));
+        return Ok(VmValue::Future(Arc::new(JadeFuture { handle: Mutex::new(Some(handle)) })));
+    }
+    call_value_body(callee, args, state, span).await
+}
+
+/// `call_value` without the async check: run the body, whatever it is.
+///
+/// This is what a spawned task itself runs. Going back through `call_value`
+/// there would spawn a second task for the same call and hand the awaiter a
+/// future instead of a value.
+#[async_recursion::async_recursion]
+pub(crate) async fn call_value_body(
     callee: VmValue,
     args: Vec<VmValue>,
     state: &mut VmState,

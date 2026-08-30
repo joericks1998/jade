@@ -639,21 +639,21 @@ pub(super) fn resolve_user_calls(
             // Spawn an async function: only a statically-known callee with an
             // exact-arity argument list is lowered (no defaults through spawn).
             Instr::Spawn(d, callee, args) => {
-                if let Some(&uid) = reg_fn.get(callee) {
+                // Only a statically-known callee with an argument list this site
+                // can complete is lowered as a direct spawn. Everything else —
+                // an unknown callee, or an argument count that does not fit — is
+                // left for the `Spawn` arm in `instr.rs`, which goes through
+                // `jrt_call_value`. That used to be a build refusal for both,
+                // so `let f = w` and a wrong argument count stopped a compile
+                // that the interpreter ran and reported at run time.
+                let direct = reg_fn.get(callee).copied().filter(|&uid| {
                     let cf = &fnctx.defs[uid];
-                    if args.len() > cf.params.len() {
-                        return Err(
-                            "this spawn passes more arguments than the function takes.".into()
-                        );
-                    }
-                    for j in args.len()..cf.params.len() {
-                        if cf.defaults.get(j).and_then(|x| x.as_ref()).is_none() {
-                            return Err("this spawn omits an argument that has no default.".into());
-                        }
-                    }
+                    args.len() <= cf.params.len()
+                        && (args.len()..cf.params.len())
+                            .all(|j| cf.defaults.get(j).and_then(|x| x.as_ref()).is_some())
+                });
+                if let Some(uid) = direct {
                     out.insert(i, CallKind::Spawn { uid, args: args.clone() });
-                } else {
-                    return Err("codegen: spawn of a non-static function".into());
                 }
                 reg_fn.remove(d);
                 reg_global.remove(d);
@@ -767,8 +767,21 @@ pub(super) fn resolve_user_calls(
                         ));
                     }
                 } else {
-                    let kind = if let Some(&uid) = reg_fn.get(callee) {
+                    let kind = if let Some(&uid) =
+                        reg_fn.get(callee).filter(|&&uid| !fnctx.defs[uid].is_async)
+                    {
                         // Statically-known function → direct call (fill defaults).
+                        //
+                        // Not an `async fn`, though. Calling one starts a task,
+                        // and this site is here precisely because the emitter did
+                        // not know that: an `async fn` imported from a module has
+                        // no static type at the call, so it emitted an ordinary
+                        // `Call`. Devirtualizing it would run the body inline and
+                        // hand back its value, and the `await` on it would then
+                        // fail with "applied to a non-Future value" — which is
+                        // what `await lib.work(3)` did on both engines. Left
+                        // unresolved, it goes through `jrt_call_value`, where the
+                        // box's async bit decides.
                         let cf = &fnctx.defs[uid];
                         if args.len() > cf.params.len() {
                             return Err(at(
@@ -984,15 +997,21 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
     /// `f` must be the function's **indirect entry** (`jf_ind_<uid>`), not its
     /// body: a value is entered through `jrt_call_value`, which passes
     /// `(argc, argv)`. See `trampoline.rs`.
-    pub(super) fn fn_box_word(&self, uid: usize, f: FunctionValue<'ctx>) -> IntValue<'ctx> {
+    pub(super) fn fn_box_word(
+        &self,
+        uid: usize,
+        f: FunctionValue<'ctx>,
+        is_async: bool,
+    ) -> IntValue<'ctx> {
         let gname = format!("jf_box_{uid}");
+        let kind = if is_async { OBJKIND_FN | OBJ_FN_ASYNC } else { OBJKIND_FN };
         let g = self.module.get_global(&gname).unwrap_or_else(|| {
             let box_ty = self.ctx.struct_type(&[self.ptrt().into(), self.i64t().into()], false);
             let g = self.module.add_global(box_ty, None, &gname);
             let init = self.ctx.const_struct(
                 &[
                     f.as_global_value().as_pointer_value().into(),
-                    self.i64t().const_int(OBJKIND_FN, false).into(),
+                    self.i64t().const_int(kind, false).into(),
                 ],
                 false,
             );

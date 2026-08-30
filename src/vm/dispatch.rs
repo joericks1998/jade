@@ -846,7 +846,12 @@ pub(crate) async fn execute_chunk(
                 // cost for call-heavy code once hashing is cheap). The slot borrow
                 // is released before the result is stored back below.
                 let result = match get(slots, *callee_reg) {
-                    VmValue::Fn(cf) => call_fn(cf, args, state, span).await,
+                    // …but not an `async fn`. Calling one starts a task, and
+                    // whether it does is the function's business rather than the
+                    // call site's: a value carries no static type, so `let f =
+                    // w` and `lib.work(3)` reach here as ordinary calls. See
+                    // `call_value`, which is the one place that decides.
+                    VmValue::Fn(cf) if !cf.is_async => call_fn(cf, args, state, span).await,
                     _ => {
                         let callee = get(slots, *callee_reg).clone();
                         call_value(callee, args, state, span).await
