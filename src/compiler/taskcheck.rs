@@ -223,7 +223,7 @@ fn analyze(
 
         for (i, instr) in f.chunk.code.iter().enumerate() {
             let span = f.chunk.spans.get(i).copied().unwrap_or(Span { line: 0, col: 0 });
-            step(instr, span, &mut t, table, eff, &mut e, &mut found);
+            step(instr, span, &f.chunk.fn_defs, &mut t, table, eff, &mut e, &mut found);
         }
 
         effects = e;
@@ -239,6 +239,9 @@ fn analyze(
 fn step(
     instr: &Instr,
     span: Span,
+    // The enclosing chunk's nested definitions, which is what a `LoadFn` or
+    // `MakeClosure` index refers to.
+    defs: &[Arc<CompiledFn>],
     t: &mut Taint,
     table: &FnTable,
     eff: &[Effects],
@@ -310,10 +313,34 @@ fn step(
                 t.regs.remove(d);
             }
             t.getfield.insert(*d, (*o, name.clone()));
+            // A method reached through a receiver — `b.grow()` on an `extend`
+            // block — resolves by name, because `FnTable` indexes extend methods
+            // alongside ordinary functions. Without it a user method laundered
+            // taint exactly the way a closure did: `extend Box { fn grow(self)
+            // { self.items.push(9) } }` called from a task mutated the
+            // spawner's array and the pass saw an unresolved call.
+            //
+            // Only ever consulted when this register is *called*, so a data
+            // field that happens to share a name with a function costs nothing.
+            if let Some(&u) = table.by_name.get(name) {
+                t.reg_fn.insert(*d, u);
+            }
         }
-        LoadFn(d, _) | MakeClosure(d, _) => {
+        LoadFn(d, idx) | MakeClosure(d, idx) => {
             clear(t, d);
             t.regs.remove(d);
+            // Remember *which* function, so calling it through the register
+            // inherits its effects the same way calling it by name does.
+            //
+            // Leaving this out let a closure launder everything: `let c = ||
+            // s.push(9)` reaches the task as an ordinary value, the `Call` on it
+            // resolved to no function, and its effects were never inherited —
+            // so a task that ran the closure mutated the spawner's array with
+            // nothing to say so. The scan that finds spawn sites already
+            // resolved these; only this pass did not.
+            if let Some(u) = defs.get(*idx).and_then(|f| table.idx_of(f)) {
+                t.reg_fn.insert(*d, u);
+            }
         }
 
         // ── Fresh allocations are unaliased: taint stops here ───────────────
@@ -403,7 +430,15 @@ fn step(
                         span,
                     ));
                 }
-                if callee_eff.mutates_shared && args.iter().any(|a| t.regs.contains(a)) {
+                // A method reaches its receiver as `self`, not as an argument,
+                // so `b.grow()` on an `extend` method has an empty `args` and
+                // the shared thing is `b`. Counting the receiver is what makes
+                // a user method behave like the built-in `push` above.
+                let recv_shared =
+                    t.getfield.get(callee).is_some_and(|(recv, _)| t.regs.contains(recv));
+                if callee_eff.mutates_shared
+                    && (recv_shared || args.iter().any(|a| t.regs.contains(a)))
+                {
                     e.mutates_shared = true;
                     found.push((
                         format!(
@@ -539,18 +574,35 @@ pub fn check(
         chunks.push(&f.chunk);
     }
 
+    // A function value bound to a global under a name of its own. `by_name` is
+    // keyed on the *definition's* name, which a closure does not have: `let c =
+    // || s.push(9)` binds a global called `c` to an anonymous body, so reading
+    // `c` back resolved to nothing and the closure reached a task unexamined.
+    let mut global_fn: HashMap<String, usize> = HashMap::new();
+
     for chunk in chunks {
         let mut reg_fn: HashMap<Reg, usize> = HashMap::new();
         for (i, instr) in chunk.code.iter().enumerate() {
             match instr {
-                Instr::GetGlobal(d, name) => match table.by_name.get(name) {
-                    Some(&idx) => {
-                        reg_fn.insert(*d, idx);
+                Instr::SetGlobal(name, r) => match reg_fn.get(r).copied() {
+                    Some(u) => {
+                        global_fn.insert(name.clone(), u);
                     }
                     None => {
-                        reg_fn.remove(d);
+                        global_fn.remove(name);
                     }
                 },
+                Instr::GetGlobal(d, name) => {
+                    match global_fn.get(name).copied().or_else(|| table.by_name.get(name).copied())
+                    {
+                        Some(idx) => {
+                            reg_fn.insert(*d, idx);
+                        }
+                        None => {
+                            reg_fn.remove(d);
+                        }
+                    }
+                }
                 Instr::LoadFn(d, idx) | Instr::MakeClosure(d, idx) => {
                     match chunk.fn_defs.get(*idx).and_then(|f| table.idx_of(f)) {
                         Some(u) => {
@@ -569,11 +621,25 @@ pub fn check(
                         reg_fn.remove(d);
                     }
                 },
-                Instr::Spawn(_, callee, _) => {
-                    let Some(&uid) = reg_fn.get(callee) else { continue };
-                    if eff[uid].is_clean() {
+                Instr::Spawn(_, callee, args) => {
+                    // The task body itself, and any function handed to it.
+                    //
+                    // A callback is the other way a task mutates shared state,
+                    // and it hides from the body's own analysis: `async fn
+                    // run(f) { f() }` calls a parameter, which resolves to
+                    // nothing, so `let c = || s.push(9)` reached the task
+                    // completely unexamined. Here the closure is still a
+                    // register with a known definition, so its effects are
+                    // exactly as visible as the body's.
+                    let mut candidates = vec![*callee];
+                    candidates.extend(args.iter().copied());
+                    let Some(uid) = candidates
+                        .iter()
+                        .filter_map(|r| reg_fn.get(r).copied())
+                        .find(|&u| !eff[u].is_clean())
+                    else {
                         continue;
-                    }
+                    };
                     // Report the operation, not the spawn: the author needs the
                     // line to change, and the spawn is only where it becomes a race.
                     let (what, span) = sites[uid].first().cloned().unwrap_or_else(|| {
@@ -620,6 +686,70 @@ mod tests {
     /// fresh allocation, so this compiled clean and the push reached the
     /// spawner's array on both engines.
     #[test]
+    /// A callback reaches a task as a value, so the task's own body says
+    /// nothing about it: `async fn run(f) { f() }` calls a parameter, which
+    /// resolves to no definition at all. The closure is still a register with a
+    /// known body at the *spawn*, which is where this is caught.
+    #[test]
+    fn a_closure_that_mutates_shared_state_is_rejected_at_the_spawn() {
+        let e = rejection(
+            r#"
+            async fn run(f) {
+                f()
+                return 0
+            }
+            let shared = [1]
+            let grow = || shared.push(9)
+            await run(grow)
+            "#,
+        );
+        assert!(e.contains("shared"), "should name the sharing: {e}");
+    }
+
+    /// The closure above is bound to a global named for the *variable*, not for
+    /// any definition, so resolving it by definition name finds nothing. What
+    /// the global was last assigned is what answers it.
+    #[test]
+    fn a_function_value_read_back_from_a_global_still_resolves() {
+        let e = rejection(
+            r#"
+            async fn run(f) {
+                f()
+                return 0
+            }
+            let shared = { "n": 1 }
+            let bump = || shared.set("n", 2)
+            let alias = bump
+            await run(alias)
+            "#,
+        );
+        assert!(e.contains("shared"), "should name the sharing: {e}");
+    }
+
+    /// A method reaches its receiver as `self` rather than as an argument, so a
+    /// user `extend` method mutating the receiver has an empty argument list.
+    /// Counting the receiver is what makes it behave like the built-in `push`.
+    #[test]
+    fn a_user_method_mutating_its_receiver_is_rejected() {
+        let e = rejection(
+            r#"
+            struct Box { items }
+            extend Box {
+                fn grow(self) {
+                    self.items.push(9)
+                }
+            }
+            async fn go(b) {
+                b.grow()
+                return 0
+            }
+            let shared = [1]
+            await go(Box { items: shared })
+            "#,
+        );
+        assert!(e.contains("grow"), "should name the method: {e}");
+    }
+
     fn task_mutating_a_collection_it_wrapped_in_a_struct_is_rejected() {
         let e = rejection(
             r#"

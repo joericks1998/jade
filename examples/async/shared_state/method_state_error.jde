@@ -1,0 +1,27 @@
+// A user method is held to the same rule as a built-in one.
+//
+// `arr.push(x)` was rejected and `box.grow()` was not, because a method reaches
+// its receiver as `self` rather than as an argument — so an `extend` method
+// mutating the receiver had an empty argument list and looked harmless. The
+// receiver counts now.
+//
+// This file is a fixture: `jade check` must REJECT it.
+
+struct Batch {
+    items
+}
+
+extend Batch {
+    fn grow(self) {
+        self.items.push(3)
+    }
+}
+
+async fn absorb(b) {
+    b.grow()
+    return 0
+}
+
+let readings = [1, 2]
+
+print(await absorb(Batch { items: readings }))

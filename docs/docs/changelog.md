@@ -35,6 +35,16 @@ print(outer())        // [1, 2] interpreted, [10, 2] compiled
 
 *A task gets the stack the main body gets.* Pool workers ran on the 2 MB Rust hands a thread by default, so the same function succeeded at top level and overflowed inside an `async fn`, taking the process down with no Jade error to read. They get 256 MB now, matching both `jade run` and the compiled main body.
 
+*Three ways a task could reach the spawner's data with nothing to say so.* Jade refuses a program whose task mutates state the spawner can still reach, and three shapes walked straight past that check.
+
+A callback. `async fn run(f) { f() }` calls a parameter, and a parameter resolves to no definition, so `let record = || readings.push(3)` reached the task completely unexamined. It is still an ordinary value at the spawn, where its body is as visible as the task's, and that is where it is caught now.
+
+A function value read back from a global. A closure is bound under the name of the *variable*, not of any definition, so looking it up by definition name found nothing. What the global was last assigned answers it instead.
+
+A user method. `arr.push(x)` was rejected and `batch.grow()` was not, because a method reaches its receiver as `self` rather than as an argument — so an `extend` method mutating the receiver had an empty argument list and looked harmless. The receiver counts now, the same way it does for the built-in methods.
+
+Still not checked, and worth knowing: the pass looks *inside* tasks only, so the spawner mutating something a running task reads is not caught from its side. `let f = read(s)` followed by `s.push(3)` before the await is a race the compiler still accepts, and a task reading a global the spawner then assigns gives the value as of the spawn interpreted and the live value compiled.
+
 *Two more leaks on the task paths.* A future nobody awaited never released its result, so a fire-and-forget task returning a collection leaked one object per spawn: 5,000 of them left 5,001 live objects, and now leave 2. And a `join` whose task raised abandoned the results it had already collected, because the rethrow is a jump and the caller's collect-into-an-array loop never runs; those are released before the jump now.
 
 *A compiled binary's output streams, and does not tear.* Two things `jade run` got right that `jade build` did not, both invisible at a terminal and both serious for a service.
