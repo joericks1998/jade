@@ -1633,15 +1633,57 @@ int jrt_eq_any(uint64_t a, uint64_t b) {
 
 /* ── Exceptions ───────────────────────────────────────────────────────── */
 
-#define JADE_EXC_MAX_DEPTH 64
+/* The handler stack grows, because its depth tracks the call stack's.
+ *
+ * It was a fixed 64-slot array, which is not many: a recursive function with a
+ * `try` in it ran out at depth 64, and an `await` chain does the same now that
+ * an awaiting thread runs the task itself and each level pushes a frame. The
+ * interpreter has no such limit — its handlers are a vec owned by the dispatch
+ * call frame (vm/dispatch.rs) — so the ceiling was a backend divergence that
+ * reported "exception stack overflow" for a program the VM ran fine.
+ *
+ * The first 64 frames live in a thread-local array so the common case costs no
+ * allocation at all; past that it doubles on the heap. JADE_EXC_MAX_DEPTH is a
+ * backstop against a runaway, far above any real program, and 8 MB of slots at
+ * the ceiling. The grown buffer is not freed when a worker thread exits; the
+ * pool bounds thread count, so the leak is bounded and one-time per thread. */
+#define JADE_EXC_INIT_DEPTH 64
+#define JADE_EXC_MAX_DEPTH  (1 << 20)
 
-static _Thread_local void*       exc_stack[JADE_EXC_MAX_DEPTH];
+static _Thread_local void*       exc_inline[JADE_EXC_INIT_DEPTH];
+static _Thread_local void**      exc_stack = NULL;   /* exc_inline until it grows */
+static _Thread_local int         exc_cap   = 0;
 static _Thread_local int64_t     exc_thrown_value;
 static _Thread_local const char* exc_thrown_type;   /* struct type name, or NULL */
 static _Thread_local int         exc_depth = 0;
 
+/* Make room for one more frame. Returns 0 only at the backstop or on OOM. */
+static int jade_exc_reserve(void) {
+    if (exc_stack == NULL) {
+        exc_stack = exc_inline;
+        exc_cap   = JADE_EXC_INIT_DEPTH;
+    }
+    if (exc_depth < exc_cap) return 1;
+    if (exc_cap >= JADE_EXC_MAX_DEPTH) return 0;
+
+    int ncap = exc_cap * 2;
+    if (ncap > JADE_EXC_MAX_DEPTH) ncap = JADE_EXC_MAX_DEPTH;
+
+    void** grown;
+    if (exc_stack == exc_inline) {
+        grown = (void**)malloc((size_t)ncap * sizeof(void*));
+        if (grown) memcpy(grown, exc_inline, (size_t)exc_cap * sizeof(void*));
+    } else {
+        grown = (void**)realloc(exc_stack, (size_t)ncap * sizeof(void*));
+    }
+    if (!grown) return 0;
+    exc_stack = grown;
+    exc_cap   = ncap;
+    return 1;
+}
+
 void jade_exc_push_frame(void* jmpbuf) {
-    if (exc_depth >= JADE_EXC_MAX_DEPTH) {
+    if (!jade_exc_reserve()) {
         jade_rt_fatal("jade: exception stack overflow");
     }
     exc_stack[exc_depth++] = jmpbuf;
@@ -1763,6 +1805,25 @@ int32_t jrt_recur_depth(void) { return recur_depth; }
  * already ran, and letting it move backwards would double-count. */
 void jrt_recur_restore(int32_t depth) {
     if (depth >= 0 && depth < recur_depth) recur_depth = depth;
+}
+
+/* Begin a task body on a fresh budget, returning the depth to hand back.
+ *
+ * The one place the depth legitimately moves *up*, which is why it is a named
+ * pair rather than a raised jrt_recur_restore. A task is a fresh call chain:
+ * the interpreter's `spawn` builds a new VmState whose call_depth starts at 0
+ * (vm/dispatch.rs), and each task used to get a thread of its own here, which
+ * came to the same thing. Neither is true once an awaiting thread runs the task
+ * itself, so without this the awaiter's own depth counts against the task's
+ * budget and a long `await` chain trips a limit the interpreter never trips. */
+int32_t jrt_recur_enter_task(void) {
+    int32_t saved = recur_depth;
+    recur_depth = 0;
+    return saved;
+}
+
+void jrt_recur_leave_task(int32_t saved) {
+    if (saved >= 0) recur_depth = saved;
 }
 
 #include <fcntl.h>

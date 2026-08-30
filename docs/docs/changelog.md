@@ -4,6 +4,37 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.4.3
+
+*Async, one layer at a time.* v1.4.2 stopped a deeply nested `await` from aborting a compiled binary, and left it hanging instead. That is the worse failure of the two, and it needed a design decision rather than a patch, because the ceiling it hit was not the real problem.
+
+*An `await` chain can now be as deep as the call stack allows.* `await` blocks a whole OS thread, so a chain of N nested awaits pins N threads. Every pool has a last thread: past it the innermost task had nobody left to run it and every level above waited for it forever. Raising the ceiling moves the wall without removing it.
+
+So an awaiting thread runs the task itself. A future carries its own body until somebody claims it, and a thread about to park on one takes it and calls it inline instead. The depth then costs stack rather than threads, which is the same budget ordinary recursion already spends, and both engines agree at 50,000 deep where a binary used to stop at 512.
+
+Tasks that do not wait on each other still run side by side. Running one inline is what a thread does instead of idling, not a replacement for the pool. The pool's ceiling is now a cap on parallelism alone and can no longer stop a program, and a nested fan-out gives the same answer at `JADE_MAX_TASKS=1` as at 512, where it used to deadlock.
+
+*Nested `try` is no longer capped at 64.* The compiled handler stack was a fixed 64-slot array, so a recursive function with a `try` in it reported "exception stack overflow" for a program `jade run` finished. The interpreter's handlers belong to the call frame and have no ceiling. This one grows now.
+
+*A caught raise closes the generator buffers it skipped past.* A `yield`ing function opens a buffer when it starts and hands it back when it returns, and a raise in between never reaches the return:
+
+```jade
+fn inner()  { yield 10
+              raise Stop { message: "no more" } }
+
+fn outer()  { yield 1
+              try { inner() } catch Stop e { }
+              yield 2 }
+
+print(outer())        // [1, 2] interpreted, [10, 2] compiled
+```
+
+`outer`'s second yield went into the buffer `inner` abandoned, and `outer` handed back the one on top. Whoever stops a raise is the one that knows how far to unwind, so the catch now truncates the generator stack the same way it already truncates the handler stack and the recursion counter. A generator that catches its own raise still keeps its own buffer.
+
+*A task no longer inherits the thread it runs on.* Three things leaked across that boundary, invisibly while each task had a thread to itself and visibly once a bounded pool started reusing workers. A generator that raised inside a task left its half-filled buffer behind, and the next `yield` on that thread landed in it. A `try` left open by a `return` did the same to the handler stack. And the recursion budget carried over, so a long chain of awaits tripped a limit the interpreter never trips. A task is a fresh call chain, as it already was in the interpreter.
+
+*A task gets the stack the main body gets.* Pool workers ran on the 2 MB Rust hands a thread by default, so the same function succeeded at top level and overflowed inside an `async fn`, taking the process down with no Jade error to read. They get 256 MB now, matching both `jade run` and the compiled main body.
+
 ## v1.4.2
 
 *Seven ways a compiled binary could crash or quietly disagree with the interpreter, all fixed.* Every one of them ran correctly under `jade run` and misbehaved under `jade build`, which is the class of bug `src/scripts/backend-parity.sh` exists to catch and none of these were caught, because no fixture happened to combine the right pieces.

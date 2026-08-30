@@ -348,6 +348,9 @@ const char* jade_exc_type(void);         /* thrown struct type name, or NULL */
  * native stack without running the intervening frames' own decrements. */
 void    jrt_recur_enter(void);
 int32_t jrt_recur_depth(void);
+/* Fresh call-chain budget for a task body; see common.c. */
+int32_t jrt_recur_enter_task(void);
+void    jrt_recur_leave_task(int32_t saved);
 void    jrt_recur_restore(int32_t depth);
 
 /* ── LLM Inference ────────────────────────────────────────────────────── */

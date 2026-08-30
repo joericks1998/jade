@@ -1279,6 +1279,10 @@ pub(super) fn lower_instr<'ctx>(
             // correct regardless of how many frames were skipped, since this
             // function's own frame is all that is left.
             low.emit_recur_restore()?;
+            // Same reasoning one level up: the longjmp skipped the `jrt_yield_pop`
+            // of every generator frame it unwound past, so their buffers are
+            // still open and the next `yield` here would land in one of them.
+            low.emit_yield_restore()?;
             let caught = low.exc_value();
             // `jade_exc_value` hands back a *borrowed* word — the raiser stored
             // it and did not give up its reference. For a raise in this same

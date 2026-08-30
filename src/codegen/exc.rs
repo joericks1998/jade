@@ -107,6 +107,28 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
         Ok(())
     }
 
+    /// Close any generator buffer a caught raise left open.
+    ///
+    /// Runs only on an exception landing pad. On the ordinary path a
+    /// `yield`ing function closes its own buffer when it returns; the landing
+    /// pad is the one place that knows a raise skipped that close, and how far
+    /// back to unwind. See `yield_depth_slot` for the program this fixes.
+    pub(super) fn emit_yield_restore(&self) -> Result<(), String> {
+        let Some(slot) = self.yield_depth_slot else { return Ok(()) };
+        let i32_ty = self.ctx.i32_type();
+        let saved = self
+            .builder
+            .build_load(i32_ty, slot, "yield_saved")
+            .map_err(|e| e.to_string())?
+            .into_int_value();
+        let f = self.runtime_fn(
+            "jrt_yield_truncate",
+            self.ctx.void_type().fn_type(&[i32_ty.into()], false),
+        );
+        self.builder.build_call(f, &[saved.into()], "").map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     pub(super) fn pop_frame(&self) {
         let f = self.runtime_fn("jade_exc_pop", self.ctx.void_type().fn_type(&[], false));
         self.builder.build_call(f, &[], "").unwrap();

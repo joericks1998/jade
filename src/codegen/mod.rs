@@ -139,6 +139,10 @@ struct Lowerer<'a, 'ctx> {
     /// false` (`jade_toplevel`, `lower_chunk`'s isolated bodies) — a body that
     /// never opened a frame must not close one either.
     recur_depth_slot: Option<PointerValue<'ctx>>,
+    /// Generator-stack depth on entry, for [`Lowerer::emit_yield_restore`].
+    /// `None` for a body with no `try` in it, which is the only place a frame
+    /// can be left open by a raise that this function then stops.
+    yield_depth_slot: Option<PointerValue<'ctx>>,
     /// Whether this function is a `yield`ing stream producer. When true a
     /// `Return` discards the body's value and hands back the generator's buffer
     /// instead — that is what makes calling a generator give you a stream.
@@ -917,6 +921,39 @@ fn lower_body<'ctx>(
         Some(slot)
     };
 
+    // Snapshot the generator stack the same way, and for the same reason.
+    //
+    // A `yield`ing function opens a buffer on entry and closes it on return. A
+    // raise between the two never reaches the close, so the buffer stays open
+    // and the next `yield` on this thread lands in it — which is how
+    //
+    //     fn inner() { yield 10; raise Boom { message: "x" } }
+    //     fn outer() { yield 1; try { inner() } catch Boom e { }; yield 2 }
+    //
+    // gave `[10, 2]` compiled against `[1, 2]` interpreted: `outer`'s second
+    // yield went into `inner`'s abandoned buffer, and `outer` handed back the
+    // one on top. Whoever *stops* the raise is the one that knows how far to
+    // unwind, so the landing pad truncates back to here. Taken after the
+    // generator prologue above, so a generator's own buffer survives its own
+    // catch.
+    let yield_depth_slot = if handler_bufs.is_empty() {
+        None
+    } else {
+        let i32_ty = context.i32_type();
+        let f = match module.get_function("jrt_yield_depth") {
+            Some(f) => f,
+            None => module.add_function("jrt_yield_depth", i32_ty.fn_type(&[], false), None),
+        };
+        let d = builder
+            .build_call(f, &[], "yield_depth0")
+            .map_err(|e| e.to_string())?
+            .as_any_value_enum()
+            .into_int_value();
+        let slot = builder.build_alloca(i32_ty, "yield_depth_entry").map_err(|e| e.to_string())?;
+        builder.build_store(slot, d).map_err(|e| e.to_string())?;
+        Some(slot)
+    };
+
     // Snapshot the recursion-depth counter on entry and bump it — unlike
     // `exc_depth_slot` this runs for every *ordinary* function, since every
     // call counts against the limit, not just ones inside a `try`.
@@ -963,6 +1000,7 @@ fn lower_body<'ctx>(
         exc_depth_slot,
         volatile_slots: exc_depth_slot.is_some(),
         recur_depth_slot,
+        yield_depth_slot,
         entry_bufs: RefCell::new(HashMap::new()),
     };
 

@@ -98,6 +98,8 @@ const char* jade_realpath(const char* path) {
 extern void  jrt_set_task_invoker(int (*f)(jade_task_fn, jade_value_t*, int,
                                            jade_value_t*, jade_value_t*, const char**));
 extern void* jrt_spawn(jade_task_fn fn, const jade_value_t* args, int n);
+extern int32_t jrt_recur_enter_task(void);
+extern void    jrt_recur_leave_task(int32_t saved);
 extern jade_value_t jrt_await_impl(void* fut, int* failed, jade_value_t* err, const char** ty);
 extern jade_value_t jrt_await_word(jade_value_t w, int* failed, jade_value_t* err, const char** ty);
 extern void  jrt_join_words(const jade_value_t* ws, int n, jade_value_t* out,
@@ -113,14 +115,34 @@ static int jade_task_invoke(jade_task_fn fn, jade_value_t* args, int n,
                             jade_value_t* out_result, jade_value_t* out_err,
                             const char** out_type) {
     jmp_buf task_buf;
+    /* Save what belongs to whoever is running this body, because that may be a
+     * thread with work of its own: a pool worker is reused for task after task,
+     * and an awaiting thread now runs a task inline rather than park (see
+     * `await_one` in runtime/src/task.rs). Neither should inherit the body's
+     * leftovers, and the body should not inherit theirs.
+     *
+     * `saved_exc` is a floor to unwind back to, not a slot to start from — the
+     * body's handler frames must sit *above* the caller's, so the throw path
+     * finds the shim's frame before any of theirs. */
+    int32_t saved_exc   = jade_exc_depth();
+    int32_t saved_recur = jrt_recur_enter_task();
+
     if (setjmp(task_buf) == 0) {
         jade_exc_push_frame(&task_buf);
         *out_result = fn(args, n);
         jade_exc_pop();
+        jade_exc_restore(saved_exc);
+        jrt_recur_leave_task(saved_recur);
         return 0;
     }
     *out_err  = jade_exc_value();
     *out_type = jade_exc_type();
+    /* A raise unwinds one frame per throw and lands here, so the depth is
+     * already back at `saved_exc` on the ordinary path. A `return` out of a
+     * `try` inside the body can still leave one behind, and that frame's
+     * jmp_buf died with the C frame holding it. */
+    jade_exc_restore(saved_exc);
+    jrt_recur_leave_task(saved_recur);
     return 1;
 }
 

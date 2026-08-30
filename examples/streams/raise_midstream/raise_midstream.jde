@@ -1,0 +1,73 @@
+// A `yield`ing function that raises leaves its buffer behind, and the catch
+// that stops the raise is what closes it.
+//
+// A generator opens a buffer when it starts and hands it back when it returns.
+// A raise in between never reaches the return, so the buffer stays open — and
+// compiled, the *caller's* next `yield` then landed in the abandoned one and
+// the caller handed back the wrong buffer entirely. The catch now unwinds the
+// generator stack the same way it unwinds the handler stack.
+
+struct Stop { message }
+
+fn counts_then_fails() {
+    yield 10
+    raise Stop { message: "no more" }
+}
+
+fn steady() {
+    yield 1
+    try {
+        counts_then_fails()
+    } catch Stop e {
+    }
+    yield 2
+}
+
+print(steady())
+// → [1, 2]
+
+
+// Two generator levels between the raise and the catch, so two buffers are
+// abandoned at once.
+
+fn innermost() {
+    yield 100
+    yield 200
+    raise Stop { message: "deep" }
+}
+
+fn middle() {
+    yield 300
+    innermost()
+    yield 400
+}
+
+fn outermost() {
+    yield 5
+    try {
+        middle()
+    } catch Stop e {
+    }
+    yield 6
+}
+
+print(outermost())
+// → [5, 6]
+
+
+// A generator that catches its *own* raise keeps its own buffer, since the
+// buffer belongs to the frame doing the catching rather than to the raise.
+
+fn recovers() {
+    yield 7
+    try {
+        yield 8
+        raise Stop { message: "mine" }
+    } catch Stop e {
+        yield 9
+    }
+    yield 10
+}
+
+print(recovers())
+// → [7, 8, 9, 10]

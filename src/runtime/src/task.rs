@@ -23,7 +23,7 @@
 //! body directly with no exception frame, which is exactly right for a test that
 //! spawns a Rust closure and never raises. AOT binaries register the real shim.
 //!
-//! ## Why the pool grows when a worker blocks
+//! ## Why an awaiting thread runs the task itself
 //!
 //! A fixed-size pool deadlocks on Jade's own examples:
 //!
@@ -36,14 +36,28 @@
 //!
 //! With N workers and N tasks all blocked in `await` on tasks still sitting in
 //! the queue, nothing can ever run. Thread-per-spawn could not deadlock this
-//! way, which is why it was never hit. The fix is the standard one: a worker
-//! about to block announces it, and the pool spawns a replacement if there is
-//! queued work and no idle worker to take it. Blocked workers do not count
-//! against the target, so the bound constrains *runnable* concurrency — the
-//! thing that actually costs CPU — while `await` chains stay deadlock-free.
+//! way, which is why it was never hit.
 //!
-//! A hard ceiling still applies, so a pathological program fails with a clear
-//! error rather than exhausting the process's thread limit.
+//! Growing the pool when a worker blocks is the usual answer, and this module
+//! does that. It is not enough on its own. `await` blocks a whole OS thread, so
+//! a chain of N nested awaits pins N threads, and every pool has a last thread:
+//! at [`HARD_MAX_WORKERS`] the innermost body had nobody left to run it and the
+//! entire chain waited for it forever. Raising the ceiling moves the wall
+//! without removing it, and a hang is a worse failure than the abort it
+//! replaced.
+//!
+//! So the awaiting thread runs the body itself. If nobody has claimed the task
+//! yet, `await` takes it and calls it inline instead of parking. Nested `await`
+//! then costs *stack* rather than threads — the same budget ordinary recursion
+//! spends — and the pool's bound goes back to meaning what it says: a cap on
+//! how much runs in parallel, not a cap on how deep an await chain may go.
+//! Deadlock now requires a genuine cycle in the await graph, which no
+//! scheduling policy can rescue.
+//!
+//! The two mechanisms cover different cases and both are needed. Growing keeps
+//! *parallelism* up when a worker parks on a task another thread is already
+//! running; running inline guarantees *progress* when there is no other thread
+//! to wait for.
 
 use core::ffi::{c_char, c_void};
 use std::collections::VecDeque;
@@ -76,10 +90,22 @@ pub type TaskInvoker = unsafe extern "C" fn(
 /// compensation threads does not linger for the life of a long-running service.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Ceiling on total worker threads, blocked ones included. Far above any
-/// reasonable target; this exists so a pathological await graph fails loudly
-/// instead of taking the process's thread limit with it.
+/// Ceiling on total worker threads, blocked ones included.
+///
+/// A cap on parallelism, not on await depth. Reaching it used to hang a nested
+/// `await` chain; since an awaiter runs its own task rather than park, hitting
+/// this only means the next body waits for a thread instead of getting one of
+/// its own.
 const HARD_MAX_WORKERS: usize = 512;
+
+/// Stack for a pool worker, matching the one a compiled binary gives its main
+/// body (`JRT_MAIN_STACK_SIZE` in `runtime_aot/posix.c`).
+///
+/// Rust's 2 MiB default made the *same* function succeed at top level and
+/// overflow inside an `async fn`, and a stack overflow on a worker takes the
+/// whole process down with no Jade error to read. Address space is reserved,
+/// not committed, so a thread that never recurses costs nothing for the room.
+const WORKER_STACK_SIZE: usize = 256 * 1024 * 1024;
 
 // ── The task-body invoker ────────────────────────────────────────────────────
 
@@ -139,6 +165,9 @@ struct FutState {
     failed: bool,
     error: i64,
     error_type: *const c_char,
+    /// The body, until a worker pops it off the queue or an awaiter claims it.
+    /// `None` means somebody is already running it.
+    pending: Option<Job>,
 }
 
 /// A handle to an in-flight task.
@@ -159,7 +188,7 @@ unsafe impl Send for FutureObj {}
 unsafe impl Sync for FutureObj {}
 
 impl FutureObj {
-    fn new() -> Self {
+    fn new(job: Job) -> Self {
         FutureObj {
             header: ObjHeader::new(ObjKind::Future, 0),
             state: Mutex::new(FutState {
@@ -169,9 +198,15 @@ impl FutureObj {
                 failed: false,
                 error: 0,
                 error_type: core::ptr::null(),
+                pending: Some(job),
             }),
             done_cv: Condvar::new(),
         }
+    }
+
+    /// Take the body if nobody is running it yet.
+    fn claim(&self) -> Option<Job> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).pending.take()
     }
 
     /// Publish a completed task's outcome and wake every awaiter.
@@ -193,22 +228,32 @@ impl FutureObj {
 
 // ── The pool ─────────────────────────────────────────────────────────────────
 
-/// A queued task: body, arguments, and the future to resolve.
+/// A task body and its arguments, waiting for a thread to run them.
+///
+/// The job lives *in the future it resolves* rather than in the pool's queue,
+/// which is what lets an awaiter claim it — see [`await_one`]. The queue holds
+/// only a pointer to the future, so claiming is one lock on that future rather
+/// than a scan of the queue.
 struct Job {
     f: TaskFn,
     args: Vec<i64>,
-    future: *mut FutureObj,
     /// Whether `args` are tagged Jade values this job took a reference to and
     /// must release when the body is done. See [`spawn`].
     owns_args: bool,
 }
 
-// The future outlives the job (the awaiter holds a reference), and the args are
-// owned outright by the job.
-unsafe impl Send for Job {}
+/// A queue entry: a future whose body nobody has picked up yet.
+///
+/// Carries one reference to the future, released by whichever worker pops it —
+/// whether or not the body is still there to run, since an awaiter may have
+/// claimed it in the meantime and left the entry behind.
+struct Queued(*mut FutureObj);
+
+// The future outlives the entry: the entry holds a reference of its own.
+unsafe impl Send for Queued {}
 
 struct Inner {
-    queue: VecDeque<Job>,
+    queue: VecDeque<Queued>,
     /// Threads currently alive, blocked ones included.
     workers: usize,
     /// Threads parked waiting for work.
@@ -249,10 +294,11 @@ pub fn pool() -> &'static Pool {
 }
 
 impl Pool {
-    /// Queue a job, starting a worker if there is nobody free to take it.
-    fn submit(&'static self, job: Job) {
+    /// Queue a future's body, starting a worker if there is nobody free to
+    /// take it.
+    fn submit(&'static self, fut: *mut FutureObj) {
         let mut st = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        st.queue.push_back(job);
+        st.queue.push_back(Queued(fut));
         if self.should_grow(&st) {
             st.workers += 1;
             self.start_worker();
@@ -284,11 +330,16 @@ impl Pool {
     fn start_worker(&'static self) {
         if std::thread::Builder::new()
             .name("jade-task".to_string())
+            .stack_size(WORKER_STACK_SIZE)
             .spawn(move || self.worker_loop())
             .is_err()
         {
             // Could not get a thread from the OS. Undo the count so a later
             // submit retries rather than believing a worker exists.
+            //
+            // The queued work is not lost: whoever awaits it runs it inline, so
+            // a machine that has run out of threads degrades to doing the work
+            // sequentially rather than hanging.
             let mut st = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             st.workers -= 1;
             SPAWN_FAILURES.fetch_add(1, Ordering::Relaxed);
@@ -297,7 +348,7 @@ impl Pool {
 
     fn worker_loop(&'static self) {
         loop {
-            let job = {
+            let Queued(fut) = {
                 let mut st = self.inner.lock().unwrap_or_else(|e| e.into_inner());
                 loop {
                     if let Some(j) = st.queue.pop_front() {
@@ -319,34 +370,20 @@ impl Pool {
                 }
             };
 
-            let mut args = job.args;
-            // Snapshot before invoking: `invoke` hands the wrapper a mutable
-            // pointer, and the words to release are the ones the job took a
-            // reference to, not whatever is left in the buffer afterwards.
-            let owned: Vec<i64> = if job.owns_args { args.clone() } else { Vec::new() };
-            let outcome = invoke(job.f, &mut args);
-            // Give back the reference `spawn` took on the job's behalf. The task
-            // body borrowed these — a callee never releases its parameters — so
-            // this is the only release, and it happens after the body is done
-            // reading them.
-            for &a in &owned {
-                gc::jrt_decref(a);
+            // Safety: the queue entry holds a reference, so the future is live
+            // here even if every other holder dropped it.
+            //
+            // `None` means an awaiter claimed the body and ran it itself, and
+            // left this entry behind rather than scan the queue for it. Nothing
+            // to do but let go of the entry's reference.
+            if let Some(job) = unsafe { (*fut).claim() } {
+                run_job(fut, job);
             }
-            // Safety: `spawn` took a reference on the task's behalf, so the
-            // future is guaranteed live here even if every other holder dropped
-            // it while the body ran.
-            unsafe {
-                (*job.future).complete(outcome);
-                // Release the task's reference. If nobody awaited and the handle
-                // is already gone, this is what reclaims the future.
-                if (*job.future).header.decref() {
-                    destroy(job.future);
-                }
-            }
+            unsafe { release(fut) };
         }
     }
 
-    /// Announce that the calling worker is about to block in `await`.
+    /// Announce that the calling thread is about to block in `await`.
     ///
     /// Spawns a replacement if that would leave queued work with nobody to run
     /// it. This is what keeps `await` chains from deadlocking a bounded pool.
@@ -368,6 +405,43 @@ impl Pool {
     pub fn worker_count(&self) -> usize {
         self.inner.lock().unwrap_or_else(|e| e.into_inner()).workers
     }
+}
+
+// ── Running a body ───────────────────────────────────────────────────────────
+
+/// Run a task body and publish its outcome on `fut`.
+///
+/// The one place a body runs, reached from two directions: a pool worker that
+/// popped it off the queue, and an awaiter that claimed it rather than park
+/// (see [`await_one`]). Both must clean up identically, which is why neither
+/// does it inline.
+///
+/// Does not touch `fut`'s reference count. The caller holds one either way —
+/// the worker holds the queue entry's, the awaiter holds the handle's.
+fn run_job(fut: *mut FutureObj, job: Job) {
+    let mut args = job.args;
+    // Snapshot before invoking: `invoke` hands the wrapper a mutable pointer,
+    // and the words to release are the ones the job took a reference to, not
+    // whatever is left in the buffer afterwards.
+    let owned: Vec<i64> = if job.owns_args { args.clone() } else { Vec::new() };
+
+    // Bracket the body's generator frames. A `yield`ing function that raises
+    // never reaches its own `jrt_yield_pop`, so its buffer stays on the thread's
+    // stack and the next `yield` to run here lands in the wrong one. Harmless
+    // when a thread runs one body and dies; not harmless when pool workers are
+    // reused, and much worse now that an awaiter may run a body inline — there
+    // the next `yield` belongs to the awaiting function itself.
+    let yield_mark = crate::coll::jrt_yield_depth();
+    let outcome = invoke(job.f, &mut args);
+    crate::coll::jrt_yield_truncate(yield_mark);
+
+    // Give back the reference `spawn` took on the job's behalf. The task body
+    // borrowed these — a callee never releases its parameters — so this is the
+    // only release, and it happens after the body is done reading them.
+    for &a in &owned {
+        gc::jrt_decref(a);
+    }
+    unsafe { (*fut).complete(outcome) };
 }
 
 // ── Neutral cores ────────────────────────────────────────────────────────────
@@ -400,18 +474,18 @@ pub fn spawn(f: TaskFn, args: Vec<i64>, owns_args: bool) -> *mut FutureObj {
             gc::jrt_incref(a);
         }
     }
-    let fut = gc::leak_obj(FutureObj::new()) as *mut FutureObj;
+    let fut = gc::leak_obj(FutureObj::new(Job { f, args, owns_args })) as *mut FutureObj;
     // Two owners, two references. `ObjHeader::new` starts the count at 1 for the
-    // caller; the running task needs its own, because the task writes the result
-    // into the future and must not be doing so through a freed allocation.
+    // caller; the queue entry needs its own, because the future carries the body
+    // and the result and must not be freed out from under either.
     //
     // This is not hypothetical now that futures are refcounted: a program that
     // spawns and drops the handle without awaiting would otherwise take the
-    // count to zero, free the future, and leave the worker writing into
-    // reclaimed memory. The worker releases its reference in `worker_loop`
-    // immediately after `complete`.
+    // count to zero, free the future, and leave a worker reading a reclaimed
+    // allocation to decide there was nothing to run. The entry's reference is
+    // released in `worker_loop` the moment it is popped.
     unsafe { (*fut).header.incref() };
-    pool().submit(Job { f, args, future: fut, owns_args });
+    pool().submit(fut);
     fut
 }
 
@@ -422,16 +496,34 @@ pub fn spawn(f: TaskFn, args: Vec<i64>, owns_args: bool) -> *mut FutureObj {
 pub unsafe fn await_one(fut: *mut FutureObj) -> Result<i64, TaskError> {
     let f = unsafe { &*fut };
 
-    // Announce the block *before* waiting, so the pool can backfill a worker if
-    // this thread is one of its own. Harmless when the caller is the main
-    // thread: it just permits one extra worker while the main thread waits.
-    let p = pool();
-    p.enter_blocking();
-    let mut st = f.state.lock().unwrap_or_else(|e| e.into_inner());
-    while !st.done {
-        st = f.done_cv.wait(st).unwrap_or_else(|e| e.into_inner());
+    // Run it here rather than wait for a thread that may never come.
+    //
+    // This thread is about to do nothing at all, so if nobody has claimed the
+    // body it takes it. That is what makes a deep `await` chain finish: each
+    // level costs a stack frame instead of an OS thread, so the depth limit is
+    // the stack's, not the pool's. See the module docs.
+    //
+    // Only the body this thread is actually waiting on, never an arbitrary
+    // queued one. Helping with unrelated work would deepen this stack without
+    // moving this thread any closer to returning.
+    if let Some(job) = f.claim() {
+        run_job(fut, job);
+    } else {
+        // Somebody else is running it. Announce the block *before* waiting, so
+        // the pool can backfill a worker if this thread is one of its own.
+        // Harmless when the caller is the main thread: it just permits one
+        // extra worker while the main thread waits.
+        let p = pool();
+        p.enter_blocking();
+        let mut st = f.state.lock().unwrap_or_else(|e| e.into_inner());
+        while !st.done {
+            st = f.done_cv.wait(st).unwrap_or_else(|e| e.into_inner());
+        }
+        drop(st);
+        p.exit_blocking();
     }
-    p.exit_blocking();
+
+    let mut st = f.state.lock().unwrap_or_else(|e| e.into_inner());
 
     // A future resolves once and is consumed once. The VM enforces the same rule
     // by `.take()`-ing the join handle, so a second await is an error on both
@@ -905,6 +997,58 @@ mod tests {
         }
     }
 
+    /// A task that awaits a task that awaits a task, deeper than the pool can
+    /// ever have threads for.
+    extern "C" fn chain(args: *mut i64, _n: i32) -> i64 {
+        let n = unsafe { *args };
+        if n <= 0 {
+            return 0;
+        }
+        let next = spawn(chain, vec![n - 1], false);
+        let r = unsafe { await_one(next) }.expect("inner task must resolve");
+        unsafe { release(next) };
+        r + 1
+    }
+
+    /// An `await` chain finishes even when it is longer than the pool's ceiling.
+    ///
+    /// `nested_await_does_not_deadlock_a_bounded_pool` covers the case growth
+    /// alone handles: workers blocked on tasks still in the queue, with room to
+    /// spawn replacements. This is the case growth cannot reach. Every level of
+    /// the chain parks a thread, so past `HARD_MAX_WORKERS` there is no thread
+    /// left to give the innermost body and every level above waits on it
+    /// forever. It only completes because an awaiter runs the body itself when
+    /// nobody else has claimed it — which is also why the depth here has to
+    /// exceed the ceiling rather than merely the target.
+    #[test]
+    fn an_await_chain_deeper_than_the_pool_still_finishes() {
+        let _g = exclusive();
+        const DEPTH: i64 = HARD_MAX_WORKERS as i64 + 64;
+
+        // A thread of its own with room to recurse: the chain now runs on one
+        // stack rather than one thread per level, which is the whole point.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || {
+                let f = spawn(chain, vec![DEPTH], false);
+                let r = unsafe { await_one(f) }.expect("chain must resolve");
+                unsafe { release(f) };
+                let _ = tx.send(r);
+            })
+            .expect("driver thread");
+
+        // A hang would otherwise take the whole test binary with it rather than
+        // reporting a failure.
+        match rx.recv_timeout(Duration::from_secs(120)) {
+            Ok(depth) => assert_eq!(depth, DEPTH),
+            Err(_) => panic!(
+                "an await chain {DEPTH} deep hung: every level parked a thread, the pool \
+                 ran out at {HARD_MAX_WORKERS}, and the innermost body had nobody to run it"
+            ),
+        }
+    }
+
     /// Releasing the last reference reclaims the future and records the free.
     ///
     /// Tested without a task, so it is a statement about the accounting alone:
@@ -917,7 +1061,10 @@ mod tests {
         // is global to the whole binary, so this also needs the counter lock.
         let _c = crate::gc::test_support::lock_counter();
         let before = gc::jrt_heap_live_count();
-        let fut = gc::leak_obj(FutureObj::new()) as *mut FutureObj;
+        // A never-submitted future, so the body it carries is never claimed and
+        // nothing but this test holds a reference.
+        let job = Job { f: double, args: vec![0], owns_args: false };
+        let fut = gc::leak_obj(FutureObj::new(job)) as *mut FutureObj;
         assert_eq!(gc::jrt_heap_live_count(), before + 1, "leak_obj must be instrumented");
         unsafe { release(fut) }; // sole reference
         assert_eq!(gc::jrt_heap_live_count(), before, "release at zero must free");
