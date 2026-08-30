@@ -10,7 +10,7 @@ sidebar_label: Changelog
 
 *An `await` chain can now be as deep as the call stack allows.* `await` blocks a whole OS thread, so a chain of N nested awaits pins N threads. Every pool has a last thread: past it the innermost task had nobody left to run it and every level above waited for it forever. Raising the ceiling moves the wall without removing it.
 
-So an awaiting thread runs the task itself. A future carries its own body until somebody claims it, and a thread about to park on one takes it and calls it inline instead. The depth then costs stack rather than threads, which is the same budget ordinary recursion already spends, and both engines agree at 50,000 deep where a binary used to stop at 512.
+So an awaiting thread runs the task itself. A future carries its own body until somebody claims it, and a thread about to park on one takes it and calls it inline instead. The depth then costs stack rather than threads, and it spends the same budget ordinary recursion spends: an inline body keeps counting against the recursion limit, so the chain is bounded by the number that already bounds every other call chain rather than by the pool. Past it a binary says "recursion limit exceeded" where the interpreter, whose tasks live on the heap rather than the stack, keeps going. That is a real difference between the two and a loud one; before this, the binary hung at 512 and said nothing.
 
 Tasks that do not wait on each other still run side by side. Running one inline is what a thread does instead of idling, not a replacement for the pool. The pool's ceiling is now a cap on parallelism alone and can no longer stop a program, and a nested fan-out gives the same answer at `JADE_MAX_TASKS=1` as at 512, where it used to deadlock.
 
@@ -34,6 +34,10 @@ print(outer())        // [1, 2] interpreted, [10, 2] compiled
 *A task no longer inherits the thread it runs on.* Three things leaked across that boundary, invisibly while each task had a thread to itself and visibly once a bounded pool started reusing workers. A generator that raised inside a task left its half-filled buffer behind, and the next `yield` on that thread landed in it. A `try` left open by a `return` did the same to the handler stack. And the recursion budget carried over, so a long chain of awaits tripped a limit the interpreter never trips. A task is a fresh call chain, as it already was in the interpreter.
 
 *A task gets the stack the main body gets.* Pool workers ran on the 2 MB Rust hands a thread by default, so the same function succeeded at top level and overflowed inside an `async fn`, taking the process down with no Jade error to read. They get 256 MB now, matching both `jade run` and the compiled main body.
+
+*Running out of threads no longer wedges the process.* When the OS refused a worker thread, the pool tried to undo its own bookkeeping while still holding the lock it needed to do it, and a `spawn` deadlocked against itself with nothing to wake it. The success path hid the bug completely, since the new thread is what runs the code that would have re-locked, so it only ever fired when the machine was out of threads and the recovery mattered most.
+
+A binary now finishes correctly even when *every* thread creation fails: the work runs on whichever thread awaits it, so a machine out of threads does its tasks one after another instead of hanging. The pool reports how often that happened rather than counting it silently.
 
 ## v1.4.2
 

@@ -95,7 +95,7 @@ const char* jade_realpath(const char* path) {
  * it on the awaiting thread, where the frame actually lives.
  */
 
-extern void  jrt_set_task_invoker(int (*f)(jade_task_fn, jade_value_t*, int,
+extern void  jrt_set_task_invoker(int (*f)(jade_task_fn, jade_value_t*, int, int,
                                            jade_value_t*, jade_value_t*, const char**));
 extern void* jrt_spawn(jade_task_fn fn, const jade_value_t* args, int n);
 extern int32_t jrt_recur_enter_task(void);
@@ -112,6 +112,7 @@ extern void  jrt_join_impl(void* const* futs, int n, jade_value_t* out,
  * re-raise with the type intact — typed `catch <Type>` arms over `await` match
  * on that name. */
 static int jade_task_invoke(jade_task_fn fn, jade_value_t* args, int n,
+                            int fresh_budget,
                             jade_value_t* out_result, jade_value_t* out_err,
                             const char** out_type) {
     jmp_buf task_buf;
@@ -124,15 +125,20 @@ static int jade_task_invoke(jade_task_fn fn, jade_value_t* args, int n,
      * `saved_exc` is a floor to unwind back to, not a slot to start from — the
      * body's handler frames must sit *above* the caller's, so the throw path
      * finds the shim's frame before any of theirs. */
-    int32_t saved_exc   = jade_exc_depth();
-    int32_t saved_recur = jrt_recur_enter_task();
+    int32_t saved_exc = jade_exc_depth();
+    /* A fresh budget only where the body really does start a stack: a pool
+     * worker. An awaiting thread running the body inline is genuinely deeper on
+     * a stack already in use, so it keeps counting and the recursion limit stays
+     * the thing that stops a runaway before the OS does. */
+    int32_t saved_recur = fresh_budget ? jrt_recur_enter_task() : jrt_recur_depth();
 
     if (setjmp(task_buf) == 0) {
         jade_exc_push_frame(&task_buf);
         *out_result = fn(args, n);
         jade_exc_pop();
         jade_exc_restore(saved_exc);
-        jrt_recur_leave_task(saved_recur);
+        if (fresh_budget) jrt_recur_leave_task(saved_recur);
+        else              jrt_recur_restore(saved_recur);
         return 0;
     }
     *out_err  = jade_exc_value();
@@ -142,7 +148,8 @@ static int jade_task_invoke(jade_task_fn fn, jade_value_t* args, int n,
      * `try` inside the body can still leave one behind, and that frame's
      * jmp_buf died with the C frame holding it. */
     jade_exc_restore(saved_exc);
-    jrt_recur_leave_task(saved_recur);
+    if (fresh_budget) jrt_recur_leave_task(saved_recur);
+    else              jrt_recur_restore(saved_recur);
     return 1;
 }
 

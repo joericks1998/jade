@@ -81,6 +81,7 @@ pub type TaskInvoker = unsafe extern "C" fn(
     f: TaskFn,
     args: *mut i64,
     n: i32,
+    fresh_budget: i32,
     out_result: *mut i64,
     out_err: *mut i64,
     out_type: *mut *const c_char,
@@ -127,7 +128,7 @@ pub unsafe extern "C" fn jrt_set_task_invoker(f: TaskInvoker) {
 /// tests here (which never raise) and would be wrong for a real AOT program —
 /// which always has the shim, because the same object file defines
 /// `jade_rt_exit` and is therefore always pulled in.
-fn invoke(f: TaskFn, args: &mut [i64]) -> Result<i64, (i64, *const c_char)> {
+fn invoke(f: TaskFn, args: &mut [i64], fresh_budget: bool) -> Result<i64, (i64, *const c_char)> {
     let raw = INVOKER.load(Ordering::Acquire);
     let n = args.len() as i32;
     if raw.is_null() {
@@ -137,7 +138,8 @@ fn invoke(f: TaskFn, args: &mut [i64]) -> Result<i64, (i64, *const c_char)> {
     let mut result = 0i64;
     let mut err = 0i64;
     let mut ty: *const c_char = core::ptr::null();
-    let failed = unsafe { shim(f, args.as_mut_ptr(), n, &mut result, &mut err, &mut ty) };
+    let fresh = i32::from(fresh_budget);
+    let failed = unsafe { shim(f, args.as_mut_ptr(), n, fresh, &mut result, &mut err, &mut ty) };
     if failed != 0 { Err((err, ty)) } else { Ok(result) }
 }
 
@@ -301,7 +303,14 @@ impl Pool {
         st.queue.push_back(Queued(fut));
         if self.should_grow(&st) {
             st.workers += 1;
-            self.start_worker();
+            if !self.start_worker() {
+                // No thread to be had. Undo the count so a later submit retries
+                // rather than believing a worker exists. The queued work is not
+                // lost: whoever awaits it runs it inline, so a machine out of
+                // threads does the work sequentially instead of hanging.
+                st.workers -= 1;
+                SPAWN_FAILURES.fetch_add(1, Ordering::Relaxed);
+            }
         }
         drop(st);
         self.work_cv.notify_one();
@@ -327,23 +336,22 @@ impl Pool {
         runnable < self.target && st.workers < HARD_MAX_WORKERS
     }
 
-    fn start_worker(&'static self) {
-        if std::thread::Builder::new()
+    /// Add a worker thread, reporting whether the OS gave us one.
+    ///
+    /// *Both callers hold `inner`*, so this must not touch it. It used to undo
+    /// the worker count here on failure, which re-locked a `std::sync::Mutex`
+    /// this very thread already owned and wedged the process inside `spawn`
+    /// with no way out. The success path hid it: the closure body runs on the
+    /// *new* thread, so the re-lock only ever happened when `spawn` returned
+    /// `Err` — that is, exactly when the machine was out of threads and the
+    /// recovery path mattered most.
+    #[must_use]
+    fn start_worker(&'static self) -> bool {
+        std::thread::Builder::new()
             .name("jade-task".to_string())
             .stack_size(WORKER_STACK_SIZE)
             .spawn(move || self.worker_loop())
-            .is_err()
-        {
-            // Could not get a thread from the OS. Undo the count so a later
-            // submit retries rather than believing a worker exists.
-            //
-            // The queued work is not lost: whoever awaits it runs it inline, so
-            // a machine that has run out of threads degrades to doing the work
-            // sequentially rather than hanging.
-            let mut st = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            st.workers -= 1;
-            SPAWN_FAILURES.fetch_add(1, Ordering::Relaxed);
-        }
+            .is_ok()
     }
 
     fn worker_loop(&'static self) {
@@ -377,7 +385,7 @@ impl Pool {
             // left this entry behind rather than scan the queue for it. Nothing
             // to do but let go of the entry's reference.
             if let Some(job) = unsafe { (*fut).claim() } {
-                run_job(fut, job);
+                run_job(fut, job, true);
             }
             unsafe { release(fut) };
         }
@@ -392,7 +400,14 @@ impl Pool {
         st.blocked += 1;
         if self.should_grow(&st) {
             st.workers += 1;
-            self.start_worker();
+            if !self.start_worker() {
+                // No thread to be had. Undo the count so a later submit retries
+                // rather than believing a worker exists. The queued work is not
+                // lost: whoever awaits it runs it inline, so a machine out of
+                // threads does the work sequentially instead of hanging.
+                st.workers -= 1;
+                SPAWN_FAILURES.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 
@@ -405,6 +420,15 @@ impl Pool {
     pub fn worker_count(&self) -> usize {
         self.inner.lock().unwrap_or_else(|e| e.into_inner()).workers
     }
+
+    /// How many times the OS refused a worker thread.
+    ///
+    /// Not an error any more: the work still runs, on whichever thread awaits
+    /// it. It is worth being able to see, because a process that keeps hitting
+    /// this is running its tasks one after another and wondering why.
+    pub fn spawn_failures(&self) -> usize {
+        SPAWN_FAILURES.load(Ordering::Relaxed)
+    }
 }
 
 // ── Running a body ───────────────────────────────────────────────────────────
@@ -416,9 +440,19 @@ impl Pool {
 /// (see [`await_one`]). Both must clean up identically, which is why neither
 /// does it inline.
 ///
+/// `fresh_stack` says whether the body starts at the bottom of a thread's own
+/// stack, which decides whether it gets a fresh recursion budget. A worker does.
+/// An awaiter does not: running the body inline puts it genuinely deeper on a
+/// stack that is already in use, so it has to keep counting, or nothing bounds
+/// an `await` chain and a deep one walks off the end of the stack — a SIGBUS
+/// with no output at all, where the interpreter prints the answer and ordinary
+/// recursion raises. The limit is the honest one either way: past it a compiled
+/// binary says "recursion limit exceeded", where the interpreter, whose tasks
+/// live on the heap rather than the stack, keeps going.
+///
 /// Does not touch `fut`'s reference count. The caller holds one either way —
 /// the worker holds the queue entry's, the awaiter holds the handle's.
-fn run_job(fut: *mut FutureObj, job: Job) {
+fn run_job(fut: *mut FutureObj, job: Job, fresh_stack: bool) {
     let mut args = job.args;
     // Snapshot before invoking: `invoke` hands the wrapper a mutable pointer,
     // and the words to release are the ones the job took a reference to, not
@@ -432,7 +466,7 @@ fn run_job(fut: *mut FutureObj, job: Job) {
     // reused, and much worse now that an awaiter may run a body inline — there
     // the next `yield` belongs to the awaiting function itself.
     let yield_mark = crate::coll::jrt_yield_depth();
-    let outcome = invoke(job.f, &mut args);
+    let outcome = invoke(job.f, &mut args, fresh_stack);
     crate::coll::jrt_yield_truncate(yield_mark);
 
     // Give back the reference `spawn` took on the job's behalf. The task body
@@ -507,7 +541,7 @@ pub unsafe fn await_one(fut: *mut FutureObj) -> Result<i64, TaskError> {
     // queued one. Helping with unrelated work would deepen this stack without
     // moving this thread any closer to returning.
     if let Some(job) = f.claim() {
-        run_job(fut, job);
+        run_job(fut, job, false);
     } else {
         // Somebody else is running it. Announce the block *before* waiting, so
         // the pool can backfill a worker if this thread is one of its own.

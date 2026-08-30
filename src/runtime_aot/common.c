@@ -6,6 +6,7 @@
 
 #include <assert.h>
 #include <ctype.h>
+#include <pthread.h>
 #include <setjmp.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -1658,6 +1659,23 @@ static _Thread_local const char* exc_thrown_type;   /* struct type name, or NULL
 static _Thread_local int         exc_depth = 0;
 
 /* Make room for one more frame. Returns 0 only at the backstop or on OOM. */
+/* A grown stack belongs to its thread, so it has to die with it.
+ *
+ * Pool workers retire after an idle timeout and new ones take their place, so
+ * "one buffer per thread" is not a bounded leak in a long-running process — it
+ * is one buffer per thread the process ever creates, and a service that cycles
+ * between bursts and quiet creates them forever. A pthread key destructor is
+ * what frees thread-owned memory at thread exit; the inline array is not heap
+ * memory and never reaches it. */
+static pthread_key_t  exc_stack_key;
+static pthread_once_t exc_stack_key_once = PTHREAD_ONCE_INIT;
+
+static void jade_exc_free_thread(void* p) { free(p); }
+
+static void jade_exc_key_init(void) {
+    (void)pthread_key_create(&exc_stack_key, jade_exc_free_thread);
+}
+
 static int jade_exc_reserve(void) {
     if (exc_stack == NULL) {
         exc_stack = exc_inline;
@@ -1679,6 +1697,9 @@ static int jade_exc_reserve(void) {
     if (!grown) return 0;
     exc_stack = grown;
     exc_cap   = ncap;
+    /* Re-registered on every growth, because realloc may have moved it. */
+    (void)pthread_once(&exc_stack_key_once, jade_exc_key_init);
+    (void)pthread_setspecific(exc_stack_key, grown);
     return 1;
 }
 
