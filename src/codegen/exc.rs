@@ -116,6 +116,36 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
     /// ones with a `try` — on every return path *and* every exception landing
     /// pad, so a caught raise from deep in a call chain does not leave the
     /// counter stuck high from callee frames a longjmp skipped past.
+    /// The landing-pad form: unwind to the entry snapshot and put *this* frame
+    /// back, because a catch is not a return. The function keeps running and its
+    /// registers stay live, so a later `raise` from the handler body still has
+    /// to be able to release what they hold.
+    pub(super) fn emit_recur_resume(&self) -> Result<(), String> {
+        let (Some(slot), Some((spill, n))) = (self.recur_depth_slot, self.spill) else {
+            return self.emit_recur_restore();
+        };
+        let i32_ty = self.ctx.i32_type();
+        let saved = self
+            .builder
+            .build_load(i32_ty, slot, "recur_saved")
+            .map_err(|e| e.to_string())?
+            .into_int_value();
+        let f = self.runtime_fn(
+            "jrt_recur_resume",
+            self.ctx
+                .void_type()
+                .fn_type(&[i32_ty.into(), self.ptrt().into(), i32_ty.into()], false),
+        );
+        self.builder
+            .build_call(
+                f,
+                &[saved.into(), spill.into(), i32_ty.const_int(n as u64, false).into()],
+                "",
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     pub(super) fn emit_recur_restore(&self) -> Result<(), String> {
         let Some(slot) = self.recur_depth_slot else { return Ok(()) };
         let i32_ty = self.ctx.i32_type();

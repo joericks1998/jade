@@ -1278,32 +1278,10 @@ pub(super) fn lower_instr<'ctx>(
         // path. It never returns, so it terminates the block.
         Raise(val) => {
             let v = low.load(*val);
-            // A raise that leaves this function takes its scope exit with it.
-            //
-            // A `longjmp` runs nothing on the way out, so a frame it skips never
-            // releases what its registers hold — including, for the frame that
-            // raised, the raised value itself. That leaked one object per caught
-            // raise in the plainest possible program:
-            //
-            //     fn c() { raise E { message: "x" } }
-            //     while i < 1000 { try { c() } catch E e { }  i = i + 1 }
-            //
-            // The raiser is the one frame that knows it is leaving, so it cleans
-            // up before it goes, exactly as a `return` does. `throw` retains the
-            // value first, so releasing the register holding it is safe — see the
-            // note there, and the landing pad, which takes that reference.
-            //
-            // Not when a handler of *this* function is active: the frame is
-            // staying, the catch arm below will keep using these registers, and
-            // its own return will release them. Nothing leaks in that case
-            // anyway, for the same reason.
-            if !in_handler.get(idx).copied().unwrap_or(false) {
-                low.retain(v);
-                low.emit_scope_exit();
-                low.throw_owned(v)?;
-            } else {
-                low.throw(v)?;
-            }
+            // No scope exit here. The throw releases what *every* frame it
+            // erases was holding, this one included — see
+            // `jade_frame_release_above`. Doing both would release twice.
+            low.throw(v)?;
             Ok(true)
         }
         // Register a handler frame and split on `setjmp`: 0 → try body
@@ -1336,7 +1314,7 @@ pub(super) fn lower_instr<'ctx>(
             // exist. Reset it to what it was when *this* function was entered —
             // correct regardless of how many frames were skipped, since this
             // function's own frame is all that is left.
-            low.emit_recur_restore()?;
+            low.emit_recur_resume()?;
             // Same reasoning one level up: the longjmp skipped the `jrt_yield_pop`
             // of every generator frame it unwound past, so their buffers are
             // still open and the next `yield` here would land in one of them.

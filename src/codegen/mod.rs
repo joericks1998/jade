@@ -142,6 +142,10 @@ struct Lowerer<'a, 'ctx> {
     /// false` (`jade_toplevel`, `lower_chunk`'s isolated bodies) — a body that
     /// never opened a frame must not close one either.
     recur_depth_slot: Option<PointerValue<'ctx>>,
+    /// This function's spill array and its length, or `None` for a body that
+    /// does not register a frame (the top level, and `lower_chunk`'s test
+    /// bodies). See `lower_body` for what it is and why it is not the registers.
+    spill: Option<(PointerValue<'ctx>, usize)>,
     /// Generator-stack depth on entry, for [`Lowerer::emit_yield_restore`].
     /// `None` for a body with no `try` in it, which is the only place a frame
     /// can be left open by a raise that this function then stops.
@@ -987,6 +991,25 @@ fn lower_body<'ctx>(
     // `jade_toplevel` (and `lower_chunk`'s isolated test bodies) opt out via
     // `track_recursion` — see this function's doc comment for why counting
     // them would disagree with the VM by exactly one frame.
+    // A mirror of whatever the registers hold that is worth releasing, handed to
+    // the runtime so a throw can give back what the frames it erases were
+    // holding. Separate from the registers on purpose: an escaping register file
+    // cannot be promoted out of memory, which costs 41% on a benchmark that is
+    // nothing but calls. This one escapes and the registers do not. Written only
+    // where `rc_replace_slot` has already decided a heap word is involved.
+    let spill = if track_recursion {
+        // Not initialised here. `jrt_recur_enter` fills it, and only on the
+        // path where it actually registers the frame — a frame entered outside
+        // any `try` is never read, and paying N stores per call for it put a
+        // benchmark that is nothing but calls 13% down instead of 4%.
+        let arr = builder
+            .build_alloca(i64_ty.array_type(n.max(1) as u32), "spill")
+            .map_err(|e| e.to_string())?;
+        Some((arr, n))
+    } else {
+        None
+    };
+
     let recur_depth_slot = if track_recursion {
         let i32_ty = context.i32_type();
         let recur_depth_fn = match module.get_function("jrt_recur_depth") {
@@ -1000,15 +1023,19 @@ fn lower_body<'ctx>(
             .into_int_value();
         let slot = builder.build_alloca(i32_ty, "recur_depth_entry").map_err(|e| e.to_string())?;
         builder.build_store(slot, recur_depth0).map_err(|e| e.to_string())?;
+        let ptr_ty = context.ptr_type(AddressSpace::default());
+        let (sp, sn) = spill.ok_or("lower_body: tracked recursion without a spill array")?;
         let recur_enter_fn = match module.get_function("jrt_recur_enter") {
             Some(f) => f,
             None => module.add_function(
                 "jrt_recur_enter",
-                context.void_type().fn_type(&[], false),
+                context.void_type().fn_type(&[ptr_ty.into(), i32_ty.into()], false),
                 None,
             ),
         };
-        builder.build_call(recur_enter_fn, &[], "").map_err(|e| e.to_string())?;
+        builder
+            .build_call(recur_enter_fn, &[sp.into(), i32_ty.const_int(sn as u64, false).into()], "")
+            .map_err(|e| e.to_string())?;
         Some(slot)
     } else {
         None
@@ -1024,6 +1051,7 @@ fn lower_body<'ctx>(
         volatile_slots: exc_depth_slot.is_some(),
         recur_depth_slot,
         yield_depth_slot,
+        spill,
         entry_bufs: RefCell::new(HashMap::new()),
     };
 

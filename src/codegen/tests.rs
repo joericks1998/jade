@@ -19,36 +19,58 @@ fn ir_of(code: &[Instr], n_slots: u32) -> String {
     module.print_to_string().to_string()
 }
 
-/// A `raise` that leaves its function releases what that function's registers
-/// hold, because a `longjmp` runs nothing on the way out.
+/// A frame leaves behind a copy of what its registers hold, so a throw can give
+/// it back. A `longjmp` runs nothing on the way out, so the frames it skips
+/// never reach their own releases — `fn b() { let junk = [1, 2, 3]  c() }`
+/// between a raise and its catch leaked `junk` every pass.
 ///
-/// The raised value itself is one of them, which is why it is retained first.
-/// Without this, the plainest program that raises in a loop leaked one object
-/// per pass: `fn c() { raise E {…} }` under `try { c() } catch e { }`.
+/// The copy is a *separate* array from the registers. Handing the runtime the
+/// registers themselves is the obvious design and costs 41% on a call-heavy
+/// benchmark, because a register file whose address escapes cannot be promoted
+/// out of memory and every register access becomes a load.
+///
+/// Uses a whole program rather than `ir_of`, because the top level and
+/// `lower_chunk`'s test bodies opt out of frame tracking.
 #[test]
-fn a_raise_that_leaves_the_frame_releases_its_registers() {
-    let ir = ir_of(&[MakeArray(0, vec![]), MakeArray(1, vec![]), Raise(1)], 2);
-    let throw = ir.find("jade_exc_throw_typed").expect("a throw is emitted");
-    let before = &ir[..throw];
-    assert!(before.contains("jrt_incref"), "the raised value is retained first:\n{ir}");
-    assert!(before.contains("jrt_decref"), "and the frame's registers released:\n{ir}");
-}
+fn a_frame_hands_the_runtime_a_spill_array_not_its_registers() {
+    use std::sync::Arc;
+    // fn f(): let a = []  raise a
+    let f = Arc::new(CompiledFn {
+        params: vec![],
+        defaults: vec![],
+        chunk: Chunk {
+            name: "f".into(),
+            code: vec![MakeArray(0, vec![]), Raise(0)],
+            spans: vec![],
+            fn_defs: vec![],
+        },
+        n_slots: 1,
+        source_file: String::new(),
+        module_scope: None,
+        is_generator: false,
+        is_async: false,
+    });
+    let mut top = Chunk::new("<top>");
+    top.fn_defs.push(f);
+    top.code = vec![LoadFn(0, 0), SetGlobal("f".into(), 0), Halt];
 
-/// …but not when a handler of this same function is active. The frame is
-/// staying, the catch arm goes on using those registers, and its own return
-/// releases them. Releasing here would free values the function still holds.
-#[test]
-fn a_raise_caught_in_the_same_frame_keeps_its_registers() {
-    let ir = ir_of(
-        &[MakeArray(0, vec![]), SetupHandler(1, 1), Raise(0), PopHandler, Return(Some(0))],
-        2,
-    );
-    let throw = ir.find("jade_exc_throw_typed").expect("a throw is emitted");
-    let setup = ir.find("jade_exc_push_frame").expect("a handler is installed");
+    let context = Context::create();
+    let module = context.create_module("t");
+    lower_program(&context, &module, &top, 2, &HashMap::new(), &HashMap::new(), &HashMap::new())
+        .expect("program lowering failed");
+    module.verify().expect("module failed verification");
+    let ir = module.print_to_string().to_string();
+
+    assert!(ir.contains("%spill = alloca"), "a spill array is allocated:\n{ir}");
     assert!(
-        !ir[setup..throw].contains("jrt_decref"),
-        "no scope exit between the handler and the raise:\n{ir}"
+        ir.contains("@jrt_recur_enter(ptr %spill"),
+        "and it, not the register file, is what the prologue registers:\n{ir}"
     );
+    // The register file itself stays as individual promotable allocas.
+    assert!(ir.contains("%r0 = alloca i64"), "registers stay separate:\n{ir}");
+    // Written only where a store has already decided a heap word is involved,
+    // which is what keeps the cost off arithmetic-only code entirely.
+    assert!(ir.contains("spset"), "the spill is written on the heap path:\n{ir}");
 }
 
 /// `yield x` takes exactly one reference, and `jrt_karr_push` inside

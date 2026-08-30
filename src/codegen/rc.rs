@@ -114,6 +114,30 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
             self.ctx.void_type().fn_type(&[self.i64t().into(), self.i64t().into()], false),
         );
         self.builder.build_call(f, &[old.into(), new.into()], "").unwrap();
+        // Mirror the write into the spill array, on this path only.
+        //
+        // The spill is what a throw releases for a frame it erases, so it has to
+        // agree with the register whenever the register holds something worth
+        // releasing — and this branch is exactly where that is true, since it
+        // runs when either word is heap. A scalar written over a scalar skips it
+        // and leaves a stale scalar behind, which releases as nothing. Putting
+        // it here rather than beside every store is what keeps the cost off
+        // arithmetic-only code entirely.
+        if let Some((spill, n)) = self.spill
+            && i < n
+        {
+            let slot = unsafe {
+                self.builder
+                    .build_in_bounds_gep(
+                        self.i64t(),
+                        spill,
+                        &[self.i64t().const_int(i as u64, false)],
+                        "spset",
+                    )
+                    .unwrap()
+            };
+            self.builder.build_store(slot, new).unwrap();
+        }
         self.builder.build_unconditional_branch(cont_bb).unwrap();
         self.builder.position_at_end(cont_bb);
     }

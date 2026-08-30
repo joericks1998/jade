@@ -208,7 +208,11 @@ leaked one object a pass, and 5,000 of them left 5,001 live objects at exit. Not
 
 The raiser is the one frame that knows it is leaving, so it now cleans up before it goes, exactly as a `return` does. That also settles who owns a thrown value: the throw takes a reference of its own, and the `catch` binding takes that reference rather than a second one. A raise caught in the same frame is left alone, since that frame is staying.
 
-What still leaks is a frame merely *unwound past* while holding something: `fn b() { let junk = [1, 2, 3]  c() }` between the raise and the catch drops `junk` on the floor. Closing that means every frame telling the runtime where its registers live, which was measured at 41% on a call-heavy benchmark — the register file has to stay in memory for the runtime to read it, so nothing gets promoted. Not worth it for the remainder.
+A frame merely *unwound past* is covered too: `fn b() { let junk = [1, 2, 3]  c() }` sitting between the raise and the catch used to drop `junk` on the floor. Every frame now leaves behind a copy of what its registers hold, and the throw releases the copies belonging to the frames it erases.
+
+The copy is a separate array from the registers, which is the whole trick. Handing the runtime the registers themselves is the obvious design and it costs 41% on `bench/extreme.jde`, because a register file whose address escapes cannot be promoted out of memory and every register access turns into a load. A copy escapes instead, the registers stay in machine registers, and it is written only where a store has already worked out that a heap value is involved — so arithmetic pays nothing for it.
+
+Nor does anything outside a `try`. A frame can only be skipped by a handler that already existed when the frame was entered, since a handler installed deeper cannot unwind past something shallower and a raise with no handler ends the process. Registering is gated on that, which is what takes the remaining cost to 6% on a benchmark that is nothing but calls, and to nothing measurable on the three that resemble real programs.
 
 *Two leaks on the `yield` path, found by the same measurement.* `yield x` took two references where the value needed one, because the call site retained and `jrt_karr_push` retained again, so `yield [1, 2]` leaked its array every pass. And a `yield`ing function's `return` retained the buffer it was handing back — right for a value read out of a register, wrong for one the generator already owns — so every call to a generator leaked its stream.
 
