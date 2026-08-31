@@ -266,6 +266,7 @@ pub(super) fn chunk_val_method_supported(method: &str, argc: usize) -> bool {
         "has" | "get" => argc == 1,              // dict
         "contains" => argc == 1,                 // str / array (runtime-dispatched)
         "len" => argc == 0,                      // str / array / dict / bytes (runtime-dispatched)
+        "ready" => argc == 0,                    // future
         "decode" => argc == 0,                   // bytes
         "slice" => argc == 2,                    // bytes
         _ => false,
@@ -701,9 +702,32 @@ pub(super) fn emit_val_method<'ctx>(
                 .into_pointer_value();
             Ok(low.tag_ptr(p))
         }
+        "ready" => {
+            // `f.ready()` — has the task finished, without waiting for it. The
+            // guard first, so a receiver that is not a future raises the
+            // interpreter's wording rather than reaching the forwarder.
+            low.require_kind(low.load(recv), WANT_FUTURE, "ready")?;
+            let f = low.runtime_fn("jade_future_ready", i64_ty.fn_type(&[i64_ty.into()], false));
+            Ok(b.build_call(f, &[low.load(recv).into()], "ready")
+                .map_err(err)?
+                .as_any_value_enum()
+                .into_int_value())
+        }
         "len" => {
             // `recv.len()` == `len(recv)`: jrt_len_chunk tag-dispatches str
             // (byte length) / collection (ObjHeader.len) at runtime → tagged int.
+            //
+            // The guard first, because `jrt_len_chunk` answers -1 for a value
+            // with no length rather than raising — a Rust frame cannot raise —
+            // and this arm used to tag that sentinel and hand back `-1`. So
+            // `x.len()` on an int printed -1 compiled where the interpreter
+            // raised. The function spelling `len(x)` went through `jade_len`
+            // and was right all along; only the method spelling was wrong.
+            low.require_kind(
+                low.load(recv),
+                WANT_STR | WANT_ARRAY | WANT_DICT | WANT_BYTES,
+                "len",
+            )?;
             let f = low.runtime_fn("jrt_len_chunk", i64_ty.fn_type(&[i64_ty.into()], false));
             let n = b
                 .build_call(f, &[low.load(recv).into()], "len")
@@ -715,6 +739,16 @@ pub(super) fn emit_val_method<'ctx>(
         "contains" => {
             // `haystack.contains(needle)` == `needle in haystack`: jrt_in_any
             // dispatches str (substring) / array (element eq) at runtime.
+            //
+            // Str and array *only*, which is narrower than the operator. `in`
+            // also takes a dict, and reusing it unguarded meant
+            // `d.contains("k")` answered `true` compiled where the interpreter
+            // raised — a silent wrong answer, since `contains` is not a dict
+            // method at all and `d.has("k")` is the one that is. A bytes
+            // receiver reached the operator's own wording rather than the
+            // method's. The guard settles both, and gets the interpreter's
+            // "dict has no key or method" phrasing for free.
+            low.require_kind(low.load(recv), WANT_STR | WANT_ARRAY, "contains")?;
             let f = low
                 .runtime_fn("jrt_in_any", i32_ty.fn_type(&[i64_ty.into(), i64_ty.into()], false));
             let r = b

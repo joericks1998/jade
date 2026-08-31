@@ -100,8 +100,10 @@ pub(super) fn lower_instr<'ctx>(
         // ── Move ──────────────────────────────────────────────────────────
         Move(d, s) => {
             let v = low.load(*s);
-            low.retain(v); // borrowed alias → the dest slot becomes a new owner
-            low.store(*d, v);
+            // Borrowed alias: the dest slot becomes a new owner. One call, so
+            // the retain and the old value's release cannot drift apart — see
+            // `store_borrowed_idx`.
+            low.store_borrowed(*d, v);
             Ok(false)
         }
 
@@ -110,14 +112,12 @@ pub(super) fn lower_instr<'ctx>(
         // these are moves between slot indices.
         GetLocal(d, slot) => {
             let v = low.load_idx(*slot as usize);
-            low.retain(v); // borrowed alias
-            low.store(*d, v);
+            low.store_borrowed(*d, v); // borrowed alias
             Ok(false)
         }
         SetLocal(slot, s) => {
             let v = low.load(*s);
-            low.retain(v); // borrowed alias into the target local
-            low.store_idx(*slot as usize, v);
+            low.store_borrowed_idx(*slot as usize, v); // borrowed alias into the local
             Ok(false)
         }
         // Module-scoped globals: load/store the named LLVM global cell.
@@ -167,8 +167,7 @@ pub(super) fn lower_instr<'ctx>(
             // `jrt_incref` is gated on the kind and a fn box is not a collection
             // — the same gate that makes a shared, immutable, statically
             // allocated fn value safe to hand out.
-            low.retain(v);
-            low.store(*d, v);
+            low.store_borrowed(*d, v);
             Ok(false)
         }
         SetGlobal(name, s) => {
@@ -177,13 +176,17 @@ pub(super) fn lower_instr<'ctx>(
             // The global cell becomes a new owner: retain the value, and release
             // whatever the cell held before (globals are never scope-exit-released,
             // so their final value intentionally lives until process end).
+            //
+            // `decref` rather than `jrt_rc_replace`, which skips the release
+            // when the cell already holds this very object. That skip is right
+            // for a write-back that took no reference and wrong here, where the
+            // retain above would then be unbalanced — see `store_borrowed_idx`,
+            // which is the same fix one scope in. At the top level every `let`
+            // is a global, so `let x = a` inside a loop leaked `a` on every pass
+            // after the first.
             low.retain(v);
             let old = b.build_load(i64_ty, g, "gold").map_err(|e| e.to_string())?.into_int_value();
-            let f = low.runtime_fn(
-                "jrt_rc_replace",
-                low.ctx.void_type().fn_type(&[i64_ty.into(), i64_ty.into()], false),
-            );
-            b.build_call(f, &[old.into(), v.into()], "").map_err(|e| e.to_string())?;
+            low.decref(old);
             b.build_store(g, v).map_err(|e| e.to_string())?;
             Ok(false)
         }
@@ -732,8 +735,8 @@ pub(super) fn lower_instr<'ctx>(
                 .map_err(|e| e.to_string())?
                 .as_any_value_enum()
                 .into_int_value();
-            low.retain(r); // borrowed element (still owned by the container) → retain
-            low.store(*d, r);
+            // Borrowed element: the container still owns it.
+            low.store_borrowed(*d, r);
             Ok(false)
         }
         MakeDict(d, pairs) => {

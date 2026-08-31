@@ -215,6 +215,37 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
         self.slot_store(i, v);
     }
 
+    /// Store a value the destination is *borrowing* — a `Move`, a local read, an
+    /// element read. The source still owns its reference, so the destination
+    /// takes one of its own.
+    ///
+    /// The retain and the release of the slot's old value belong in one call,
+    /// not two beside each other. `jrt_rc_replace` skips the release when the
+    /// slot already holds the same object, which is right for a write-back that
+    /// mutated in place and took no reference, and wrong here — the retain is
+    /// then unbalanced. Reading the same local on every pass of a loop gained a
+    /// reference per pass:
+    ///
+    /// ```jade
+    /// while seen < 5 { let x = a[0]  seen = seen + 1 }
+    /// ```
+    ///
+    /// leaked the array once per pass of the loop around that one. A single
+    /// pass balanced by luck, because the *next* store to the slot released it,
+    /// which is why it took a nested loop to show at all.
+    pub(super) fn store_borrowed_idx(&self, i: usize, v: IntValue<'ctx>) {
+        // The retain first, so releasing the old value cannot free the new one
+        // when they are the same object.
+        self.retain(v);
+        self.rc_replace_slot_retained(i, v);
+        self.slot_store(i, v);
+    }
+
+    /// [`Self::store_borrowed_idx`] addressed by register.
+    pub(super) fn store_borrowed(&self, r: Reg, v: IntValue<'ctx>) {
+        self.store_borrowed_idx(r as usize, v);
+    }
+
     /// The module-level global cell for `name`, created (initialized to nil) on
     /// first reference. Globals are module-scoped — shared across the top-level
     /// chunk and every lowered `fn_def` — so they must be LLVM globals keyed by

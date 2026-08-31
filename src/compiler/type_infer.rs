@@ -1685,6 +1685,15 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
                     .and_then(|m| m.get(field.as_str()))
                     .cloned()
                     .unwrap_or(JadeType::Unknown),
+                // A future has exactly one method, `ready`. Without this it
+                // resolved to nothing and `f.ready(1)` reported "no method named
+                // `ready`" where `s.upper(1)` names the arity it wanted.
+                JadeType::Future(_) => ctx
+                    .primitive_methods
+                    .get("future")
+                    .and_then(|m| m.get(field.as_str()))
+                    .cloned()
+                    .unwrap_or(JadeType::Unknown),
                 JadeType::Unknown => JadeType::Unknown,
                 _ => JadeType::Unknown,
             };

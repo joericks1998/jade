@@ -84,6 +84,43 @@ fn yield_does_not_retain_on_top_of_the_append() {
     assert!(!ir[..append].contains("jrt_incref"), "the append takes the only reference:\n{ir}");
 }
 
+/// A borrowed store releases the slot's old value unconditionally, because the
+/// new one was already retained.
+///
+/// `jrt_rc_replace` skips the release when the slot already holds this very
+/// object. That is right for a write-back that took no reference and wrong here:
+/// reading the same local on every pass of a loop then gained a reference per
+/// pass, and
+///
+/// ```jade
+/// while i < 1000 {
+///     let a = [1, 2, 3]
+///     let seen = 0
+///     while seen < 3 { let x = a[0]  seen = seen + 1 }
+///     i = i + 1
+/// }
+/// ```
+///
+/// left 1000 live objects at exit. A single inner pass balanced by luck — the
+/// *next* store to the slot released it — which is why it took a nested loop to
+/// show at all, and why it went unnoticed.
+#[test]
+fn a_borrowed_store_releases_the_old_value_unconditionally() {
+    let ir = ir_of(&[MakeArray(0, vec![]), Move(1, 0), Return(Some(1))], 2);
+    let mv = ir.find("rcrep_heap").expect("the heap path is emitted");
+    assert!(ir[mv..].contains("@jrt_decref"), "a Move releases the old value outright:\n{ir}");
+}
+
+/// …and a store that retained nothing keeps the skip, which is what an in-place
+/// write-back needs: it hands back the object the slot already holds, and
+/// releasing it would drop a reference nobody took. `examples/bytes/buffer`
+/// double-freed within seconds when this was removed.
+#[test]
+fn a_write_back_still_skips_the_release() {
+    let ir = ir_of(&[MakeArray(0, vec![]), SetIndex(0, 0, 0), Return(Some(0))], 1);
+    assert!(ir.contains("@jrt_rc_replace"), "the skip is still available:\n{ir}");
+}
+
 #[test]
 fn dict_get_retains_the_borrowed_value() {
     // r1 = TABLE.get(r0) — the value word comes back borrowed (the dict
@@ -159,10 +196,18 @@ fn str_method_guards_receiver_and_arguments() {
 }
 
 #[test]
-fn runtime_dispatched_methods_are_not_guarded() {
-    // `len` and `contains` hand the whole tagged word to jrt_len_chunk /
-    // jrt_in_any, which dispatch on the tag themselves and are safe on a
-    // scalar. Guarding them would raise on receivers the VM accepts.
+fn runtime_dispatched_methods_are_guarded_then_dispatched() {
+    // `len` and `contains` still hand the whole tagged word to jrt_len_chunk /
+    // jrt_in_any, which dispatch on the tag themselves — but the receiver is
+    // checked first.
+    //
+    // This test used to assert the opposite, on the reasoning that guarding
+    // would raise on receivers the interpreter accepts. It does not: `jade run`
+    // answers "int has no method 'len'" for `x.len()` on an int, while the
+    // compiled form tagged jrt_len_chunk's -1 sentinel and printed `-1`. And
+    // `d.contains("k")` answered `true` compiled where the interpreter raised,
+    // because `in` takes a dict and `contains` is not a dict method. Both were
+    // wrong answers rather than permissiveness.
     let ir = ir_of(
         &[
             LoadStr(0, "abc".to_string()),
@@ -173,7 +218,7 @@ fn runtime_dispatched_methods_are_not_guarded() {
         3,
     );
     assert!(ir.contains("jrt_len_chunk"), "len goes to the tag dispatcher:\n{ir}");
-    assert!(!ir.contains("jrt_require_kind"), "and is not kind-guarded:\n{ir}");
+    assert!(ir.contains("jrt_require_kind"), "behind a receiver guard:\n{ir}");
 }
 
 #[test]

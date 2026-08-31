@@ -4,6 +4,47 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.4.4
+
+*You can ask a task whether it has finished, without waiting for it.* `await` blocks, which is the right default and also the whole problem for anything with a loop it cannot stop. A screen redrawing at frame rate has no point at which it is willing to freeze, so it could start work concurrently and then never find out the answer.
+
+```jade
+let pending = connect(ssid)
+let shown = false
+while running {
+    draw_frame()
+    if !shown && pending.ready() {
+        show_banner(await pending)
+        shown = true
+    }
+}
+```
+
+`ready()` is a plain bool and the only thing you can ask a future that does not block. The `await` after a true one costs nothing — 7µs compiled, 39µs interpreted, on a task that has already finished — which is what makes the shape work rather than merely read well. Without that, a poll would move the block rather than remove it.
+
+Finished means finished however it ended. A task that raised is finished, and the `await` re-raises; a future whose result has already been taken is finished, and the second `await` reports the double await on its own terms. `ready()` hides neither, so a caller that wants to know which can `try` around the `await`.
+
+One thing it is not: a way to wait cheaply. `while !f.ready() { }` burns a core. Inside a loop that was already running it costs nothing extra, which is the case it was built for. A program with nothing else to do wants to block until *any* of several futures resolves, with a timeout, and that primitive does not exist yet.
+
+*A nested loop no longer leaks what it reads.* Reading a value declared outside an inner loop leaked it, once per pass of the loop around it:
+
+```jade
+while i < 1000 {
+    let a = [1, 2, 3]
+    let seen = 0
+    while seen < 3 { let x = a[0]  seen = seen + 1 }
+    i = i + 1
+}
+```
+
+left 1000 live objects at exit. A read takes a reference for the destination, and the store that follows releases whatever the destination held — except that the release is skipped when the destination already holds that very object. That skip is right for an in-place write-back, which hands back the object the slot already has and takes no reference, and wrong for a read, whose reference is then unbalanced. A single pass balanced by luck, because the next store released it, which is why it took a nested loop to show and went unnoticed until `while !f.ready()` made it easy to write.
+
+Older than the async work — it reproduces on every build that has the current refcounting.
+
+*A method checks its receiver, even when the work behind it would not.* `x.len()` on a number printed `-1` compiled where the interpreter raised, because the method spelling handed the value to the length dispatcher and tagged its "no length" sentinel as an int. The function spelling, `len(x)`, was right all along.
+
+`d.contains(k)` was worse: it answered `true`. The method reused the `in` operator, which does take a dict, but `contains` is not a dict method — the interpreter raises and points at `has`. A wrong answer rather than a wrong message.
+
 ## v1.4.3
 
 *Async, one layer at a time.* v1.4.2 stopped a deeply nested `await` from aborting a compiled binary, and left it hanging instead. That is the worse failure of the two, and it needed a design decision rather than a patch, because the ceiling it hit was not the real problem.

@@ -43,6 +43,7 @@ Each package is a sibling top-level module with a `mod.rs` and a `tests.rs`. Mos
 | `src/math/` | `std/math` | |
 | `src/json/` | `std/json` | |
 | `src/fs/` | `std/fs` | Output is tainted (see `jade_runtime::trust`). |
+| `src/future/` | *(none)* | Supplies the one `future` primitive method, `ready`. No package form: see that module's README for why. |
 | `src/path/` | `std/path` | |
 | `src/env/` | `std/env` | |
 | `src/time/` | `std/time` | |

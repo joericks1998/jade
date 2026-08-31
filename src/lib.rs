@@ -67,6 +67,7 @@ pub mod core;
 pub mod dict;
 pub mod env;
 pub mod fs;
+pub mod future;
 pub mod grammar;
 pub mod http;
 pub mod json;

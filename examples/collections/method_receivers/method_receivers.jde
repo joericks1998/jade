@@ -1,0 +1,72 @@
+// A method checks its receiver, even when the work behind it would not.
+//
+// `len` and `contains` hand the whole tagged word to a runtime function that
+// dispatches on the tag itself, so for a while neither checked the receiver
+// first. Both were wrong for it. `len` answered with the -1 its dispatcher
+// returns for a value that has no length, tagged as an int, so `x.len()` on a
+// number printed -1 rather than raising. And `contains` reused the `in`
+// operator, which takes a dict — so `d.contains(k)` answered `true` where the
+// interpreter raised, because `contains` is not a dict method at all and
+// `d.has(k)` is the one that is.
+//
+// This file is the receivers each of them does take, and the wording for the
+// ones they do not.
+
+let s = "hello"
+let a = [1, 2, 3]
+let d = { "k": 1 }
+let b = "xy".encode()
+
+print(s.len())
+print(a.len())
+print(d.len())
+print(b.len())
+// → 5
+// → 3
+// → 1
+// → 2
+
+print(s.contains("ell"))
+print(a.contains(2))
+// → true
+// → true
+
+
+// `contains` is a str and array method. A dict answers key membership with
+// `has`, and the message says so.
+
+try {
+    d.contains("k")
+} catch e {
+    print(e.message.contains("dict has no key or method 'contains'"))
+}
+print(d.has("k"))
+// → true
+// → true
+
+
+// A number has neither method, and says which one it was asked for.
+
+let n = 5
+try {
+    n.len()
+} catch e {
+    print(e.message.contains("int has no method 'len'"))
+}
+try {
+    n.contains(1)
+} catch e {
+    print(e.message.contains("int has no method 'contains'"))
+}
+// → true
+// → true
+
+
+// The function spelling of `len` has its own wording, and keeps it.
+
+try {
+    len(n)
+} catch e {
+    print(e.message.contains("type error: len"))
+}
+// → true

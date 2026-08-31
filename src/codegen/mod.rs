@@ -97,6 +97,7 @@ const WANT_STR: u64 = 0x1;
 const WANT_ARRAY: u64 = 0x2;
 const WANT_DICT: u64 = 0x4;
 const WANT_BYTES: u64 = 0x8;
+const WANT_FUTURE: u64 = 0x10;
 
 /// Per-function lowering helper: bundles the builder, the i64 slot type, and the
 /// register `alloca`s so the instruction handlers stay terse.
