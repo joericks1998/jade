@@ -26,6 +26,33 @@ fn time_now_ms(args: &[VmValue]) -> Result<VmValue> {
     Ok(VmValue::Int(jade_runtime::timef::now_ms()))
 }
 
+/// `time.after(secs)` — a future that finishes with nil at the deadline.
+///
+/// A deadline you can *wait on* rather than sleep through, which is what lets
+/// `wait` take a timeout without a timeout parameter: waiting for something or
+/// giving up after half a second is waiting for one of two futures. A negative
+/// or non-finite delay is already past, which is the only reading that does not
+/// invent a wait.
+fn time_after(args: &[VmValue]) -> Result<VmValue> {
+    if args.len() != 1 {
+        return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: ZERO });
+    }
+    let secs = match &args[0] {
+        VmValue::Int(n) => *n as f64,
+        VmValue::Float(f) => *f,
+        _ => return Err(JadeError::TypeError { message: "time.after".to_string(), span: ZERO }),
+    };
+    let d = if secs.is_finite() && secs > 0.0 {
+        std::time::Duration::from_secs_f64(secs)
+    } else {
+        std::time::Duration::ZERO
+    };
+    Ok(crate::vm::async_tasks::spawn_task(async move {
+        tokio::time::sleep(d).await;
+        (Ok(VmValue::Nil), None)
+    }))
+}
+
 fn time_sleep(args: &[VmValue]) -> Result<VmValue> {
     if args.len() != 1 {
         return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: ZERO });
@@ -131,6 +158,7 @@ static TIME_PKG_FNS: &[BuiltinFn] = &[
     BuiltinFn { name: "now_ms", vm_impl: time_now_ms },
     BuiltinFn { name: "monotonic", vm_impl: time_monotonic },
     BuiltinFn { name: "sleep", vm_impl: time_sleep },
+    BuiltinFn { name: "after", vm_impl: time_after },
     BuiltinFn { name: "local", vm_impl: time_local },
     BuiltinFn { name: "utc", vm_impl: time_utc },
     BuiltinFn { name: "parts", vm_impl: time_parts },

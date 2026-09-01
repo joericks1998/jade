@@ -41,7 +41,7 @@ pub(crate) use jade_runtime::trust::JStr;
 // ── Submodules (extracted from the former monolith; added incrementally) ──────
 // `pub(crate)` for `value_type_name`, which the provider backend uses to name the
 // type of a frame it cannot read.
-mod async_tasks;
+pub mod async_tasks;
 mod call;
 mod chunk;
 pub(crate) mod coerce;

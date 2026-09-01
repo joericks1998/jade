@@ -156,6 +156,8 @@ pub enum TaskError {
     /// The task body raised; `(value, type_name)` is re-raised by the caller on
     /// the awaiting thread, where the try/catch frame lives.
     Raised(i64, *const c_char),
+    /// The caller cancelled it and is no longer waiting. See [`cancel`].
+    Cancelled,
 }
 
 /// Mutable state behind the future's lock.
@@ -170,6 +172,15 @@ struct FutState {
     /// The body, until a worker pops it off the queue or an awaiter claims it.
     /// `None` means somebody is already running it.
     pending: Option<Job>,
+    /// Nobody wants this result any more.
+    ///
+    /// Cancelling does not stop the work — a task is a real thread running
+    /// straight-line code with no point at which it could be interrupted, and
+    /// pretending otherwise would be a lie about what the runtime can do. It
+    /// says the *caller* has stopped waiting: `await` raises at once instead of
+    /// blocking, and a task that agrees to check `cancelled()` can give up early
+    /// of its own accord.
+    cancelled: bool,
 }
 
 /// A handle to an in-flight task.
@@ -201,6 +212,7 @@ impl FutureObj {
                 error: 0,
                 error_type: core::ptr::null(),
                 pending: Some(job),
+                cancelled: false,
             }),
             done_cv: Condvar::new(),
         }
@@ -225,7 +237,35 @@ impl FutureObj {
         st.done = true;
         drop(st);
         self.done_cv.notify_all();
+        // …and anyone waiting on *several* futures at once, who cannot watch
+        // every future's own condvar. See [`wait_any`].
+        completions().notify_all();
     }
+}
+
+/// Signalled whenever any future finishes or is cancelled.
+///
+/// [`wait_any`] blocks on this and rechecks its list, which is the whole reason
+/// it exists: a waiter interested in N futures cannot park on N condvars. One
+/// broadcast per completion is the cost, and completions are rare next to the
+/// work that produced them.
+struct Completions {
+    lock: Mutex<u64>,
+    cv: Condvar,
+}
+
+impl Completions {
+    fn notify_all(&self) {
+        let mut n = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        *n = n.wrapping_add(1);
+        drop(n);
+        self.cv.notify_all();
+    }
+}
+
+fn completions() -> &'static Completions {
+    static C: OnceLock<Completions> = OnceLock::new();
+    C.get_or_init(|| Completions { lock: Mutex::new(0), cv: Condvar::new() })
 }
 
 // ── The pool ─────────────────────────────────────────────────────────────────
@@ -433,6 +473,25 @@ impl Pool {
 
 // ── Running a body ───────────────────────────────────────────────────────────
 
+thread_local! {
+    /// The future the body running on this thread resolves, so `cancelled()`
+    /// can answer without the program having to pass its own handle around.
+    /// Restored rather than cleared, because an awaiter runs a body inline and
+    /// is very likely a task itself.
+    static CURRENT: core::cell::Cell<*mut FutureObj> = const {
+        core::cell::Cell::new(core::ptr::null_mut())
+    };
+}
+
+/// Whether the task running on this thread has been cancelled.
+///
+/// False outside a task, which is the honest answer: the top level is not
+/// something anyone can cancel.
+pub fn current_is_cancelled() -> bool {
+    let f = CURRENT.with(|c| c.get());
+    !f.is_null() && unsafe { is_cancelled(f) }
+}
+
 /// Run a task body and publish its outcome on `fut`.
 ///
 /// The one place a body runs, reached from two directions: a pool worker that
@@ -466,7 +525,9 @@ fn run_job(fut: *mut FutureObj, job: Job, fresh_stack: bool) {
     // reused, and much worse now that an awaiter may run a body inline — there
     // the next `yield` belongs to the awaiting function itself.
     let yield_mark = crate::coll::jrt_yield_depth();
+    let prev = CURRENT.with(|c| c.replace(fut));
     let outcome = invoke(job.f, &mut args, fresh_stack);
+    CURRENT.with(|c| c.set(prev));
     crate::coll::jrt_yield_truncate(yield_mark);
 
     // Give back the reference `spawn` took on the job's behalf. The task body
@@ -476,6 +537,115 @@ fn run_job(fut: *mut FutureObj, job: Job, fresh_stack: bool) {
         gc::jrt_decref(a);
     }
     unsafe { (*fut).complete(outcome) };
+}
+
+// ── Timers ───────────────────────────────────────────────────────────────────
+//
+// `time.after(secs)` is a future that finishes on its own, with no body to run.
+// That is what lets a deadline be an ordinary argument to [`wait_any`] rather
+// than a special parameter on it: waiting for something *or* a timeout is
+// waiting for one of two futures.
+//
+// One thread for all of them, not a pool task each. A task that sleeps holds a
+// worker for the duration and does not announce itself as blocked — `await` is
+// the only thing that does — so a redraw loop arming a 16ms timer every frame
+// would saturate the pool with sleepers and stall real work behind them. One
+// thread parked on the earliest deadline costs nothing per timer.
+
+struct Timer {
+    deadline: std::time::Instant,
+    fut: *mut FutureObj,
+}
+
+// The future is kept alive by the reference `after` takes for the timer.
+unsafe impl Send for Timer {}
+
+struct Timers {
+    /// Earliest deadline last, so the next one to fire is a `pop`.
+    pending: Mutex<Vec<Timer>>,
+    cv: Condvar,
+}
+
+fn timers() -> &'static Timers {
+    static T: OnceLock<Timers> = OnceLock::new();
+    T.get_or_init(|| Timers { pending: Mutex::new(Vec::new()), cv: Condvar::new() })
+}
+
+/// Start the timer thread once, on the first `after`.
+fn start_timer_thread() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let t = timers();
+        // A program with no timers never creates this thread at all.
+        let _ = std::thread::Builder::new().name("jade-timer".to_string()).spawn(move || {
+            loop {
+                let mut q = t.pending.lock().unwrap_or_else(|e| e.into_inner());
+                let now = std::time::Instant::now();
+                // Everything already due, in one pass.
+                let mut fired: Vec<*mut FutureObj> = Vec::new();
+                while q.last().is_some_and(|x| x.deadline <= now) {
+                    fired.push(q.pop().expect("just checked").fut);
+                }
+                let next = q.last().map(|x| x.deadline);
+                drop(q);
+
+                for fut in fired {
+                    // Safety: `after` took a reference for this timer, so the
+                    // future is live until the release below.
+                    unsafe {
+                        (*fut).complete(Ok(crate::value::NIL_BITS as i64));
+                        release(fut);
+                    }
+                }
+
+                let q = t.pending.lock().unwrap_or_else(|e| e.into_inner());
+                let _ = match next {
+                    // Park until the earliest deadline, or until `after` adds an
+                    // earlier one and wakes us.
+                    Some(d) => t.cv.wait_timeout(q, d.saturating_duration_since(now)),
+                    None => t.cv.wait_timeout(q, IDLE_TIMEOUT),
+                };
+            }
+        });
+    });
+}
+
+/// A future that finishes with nil after `secs`, with no task behind it.
+///
+/// A negative or non-finite delay is treated as zero: the deadline is already
+/// past, which is the only reading that does not invent a wait.
+pub fn after(secs: f64) -> *mut FutureObj {
+    start_timer_thread();
+    let d = if secs.is_finite() && secs > 0.0 {
+        std::time::Duration::from_secs_f64(secs)
+    } else {
+        std::time::Duration::ZERO
+    };
+    // A timer future has no body, so nothing will ever claim its `pending`. The
+    // job is a placeholder that never runs: `await` on it finds `pending` taken
+    // by nobody and simply waits, which is exactly right.
+    let fut = gc::leak_obj(FutureObj::new(Job { f: never, args: Vec::new(), owns_args: false }))
+        as *mut FutureObj;
+    // The timer's own reference, released when it fires. Without it a program
+    // that drops the handle would free the future out from under the thread.
+    unsafe { (*fut).header.incref() };
+    // Claimed here and now, so no worker can ever pick this up and run `never`.
+    let _ = unsafe { (*fut).claim() };
+
+    let t = timers();
+    let mut q = t.pending.lock().unwrap_or_else(|e| e.into_inner());
+    let deadline = std::time::Instant::now() + d;
+    q.push(Timer { deadline, fut });
+    // Descending by deadline, so the next to fire is a `pop`.
+    q.sort_by_key(|t| std::cmp::Reverse(t.deadline));
+    drop(q);
+    t.cv.notify_all();
+    fut
+}
+
+/// The body a timer future never runs. See [`after`].
+extern "C" fn never(_args: *mut i64, _n: i32) -> i64 {
+    crate::value::NIL_BITS as i64
 }
 
 // ── Neutral cores ────────────────────────────────────────────────────────────
@@ -550,7 +720,7 @@ pub unsafe fn await_one(fut: *mut FutureObj) -> Result<i64, TaskError> {
         let p = pool();
         p.enter_blocking();
         let mut st = f.state.lock().unwrap_or_else(|e| e.into_inner());
-        while !st.done {
+        while !st.done && !st.cancelled {
             st = f.done_cv.wait(st).unwrap_or_else(|e| e.into_inner());
         }
         drop(st);
@@ -558,6 +728,13 @@ pub unsafe fn await_one(fut: *mut FutureObj) -> Result<i64, TaskError> {
     }
 
     let mut st = f.state.lock().unwrap_or_else(|e| e.into_inner());
+
+    // Cancelled outranks everything, including a result that arrived anyway.
+    // The caller said it had stopped waiting, and handing it the answer after
+    // that would make `cancel` mean nothing on a task that was about to finish.
+    if st.cancelled {
+        return Err(TaskError::Cancelled);
+    }
 
     // A future resolves once and is consumed once. The VM enforces the same rule
     // by `.take()`-ing the join handle, so a second await is an error on both
@@ -615,6 +792,88 @@ pub unsafe fn join_all(futs: &[*mut FutureObj]) -> Result<Vec<i64>, TaskError> {
         None => Ok(out),
     }
 }
+
+/// Stop waiting for `fut`.
+///
+/// It does *not* stop the work. A task is a real thread running straight-line
+/// code with no point at which the runtime could interrupt it, and a `cancel`
+/// that claimed otherwise would be a lie about what it can do. What it changes
+/// is the caller's side: an `await` raises at once rather than blocking, and one
+/// already blocked wakes up and raises.
+///
+/// A task that wants to give up early can cooperate by checking [`is_cancelled`]
+/// — `cancelled()` in Jade — which is the only way work actually stops.
+///
+/// Cancelling twice, or cancelling something already finished, is not an error.
+/// The second is the ordinary race: the answer arrived while the caller was
+/// deciding it no longer wanted it, and it does not get it.
+///
+/// # Safety
+/// `fut` must point at a live [`FutureObj`].
+pub unsafe fn cancel(fut: *mut FutureObj) {
+    let f = unsafe { &*fut };
+    let mut st = f.state.lock().unwrap_or_else(|e| e.into_inner());
+    if st.cancelled {
+        return;
+    }
+    st.cancelled = true;
+    drop(st);
+    f.done_cv.notify_all();
+    completions().notify_all();
+}
+
+/// Whether `fut` has been cancelled.
+///
+/// # Safety
+/// `fut` must point at a live [`FutureObj`].
+pub unsafe fn is_cancelled(fut: *mut FutureObj) -> bool {
+    let f = unsafe { &*fut };
+    f.state.lock().unwrap_or_else(|e| e.into_inner()).cancelled
+}
+
+/// Block until one of `futs` is finished or cancelled, and answer which.
+///
+/// The index, not the value, and it consumes nothing: the caller then `await`s
+/// the one that is ready, which costs nothing because it is. That keeps the
+/// resolve-once rule intact and composes with `ready()` rather than duplicating
+/// it — and it is what lets a deadline be an ordinary member of the list, since
+/// `time.after(0.5)` is a future like any other.
+///
+/// Answers the *lowest* ready index when several are, so a program that puts a
+/// timeout last sees real work first on the pass where both arrived.
+///
+/// `NOT_A_FUTURE` for a list holding something that is not a future, and
+/// `NOTHING_TO_WAIT_FOR` for an empty one — waiting for nothing would block
+/// forever, which is never what the caller meant.
+///
+/// # Safety
+/// Every element of `futs` must point at a live [`FutureObj`].
+pub unsafe fn wait_any(futs: &[*mut FutureObj]) -> i32 {
+    if futs.is_empty() {
+        return NOTHING_TO_WAIT_FOR;
+    }
+    let c = completions();
+    let p = pool();
+    // Announced for the same reason `await` announces: this thread may be one of
+    // the pool's own, and it is about to hold none of the CPU it was counted for.
+    p.enter_blocking();
+    let mut seen = c.lock.lock().unwrap_or_else(|e| e.into_inner());
+    loop {
+        for (i, &f) in futs.iter().enumerate() {
+            let st = unsafe { (*f).state.lock().unwrap_or_else(|e| e.into_inner()) };
+            if st.done || st.cancelled {
+                drop(st);
+                drop(seen);
+                p.exit_blocking();
+                return i as i32;
+            }
+        }
+        seen = c.cv.wait(seen).unwrap_or_else(|e| e.into_inner());
+    }
+}
+
+/// [`wait_any`]'s answer for an empty list.
+pub const NOTHING_TO_WAIT_FOR: i32 = -2;
 
 /// Release one reference to a future, reclaiming it if that was the last.
 ///
@@ -879,6 +1138,13 @@ unsafe fn report(
             }
             0
         }
+        Err(TaskError::Cancelled) => {
+            unsafe {
+                *failed = 4;
+                *err = 0;
+            }
+            0
+        }
     }
 }
 
@@ -895,6 +1161,112 @@ pub extern "C" fn jrt_future_ready(word: i64) -> i32 {
         None => NOT_A_FUTURE,
     }
 }
+
+/// A future that finishes with nil after `secs`. See [`after`].
+/// A future for a tagged seconds word, or `NOT_A_NUMBER` for anything that is
+/// not one. The C forwarder raises on that, the way the interpreter does.
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_time_after(word: i64) -> i64 {
+    match crate::timef::seconds_of(word) {
+        Some(secs) => JadeValue::from_ptr(after(secs) as *const ()).bits() as i64,
+        None => NOT_A_NUMBER,
+    }
+}
+
+/// `jrt_time_after`'s answer for an argument that is not a number. An odd word
+/// with the immediate tag, so it can never be mistaken for a real future.
+pub const NOT_A_NUMBER: i64 = -1;
+
+/// Stop waiting for a tagged word. `NOT_A_FUTURE` if it is not one.
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_future_cancel(word: i64) -> i32 {
+    match as_future(word) {
+        Some(f) => {
+            unsafe { cancel(f) };
+            0
+        }
+        None => NOT_A_FUTURE,
+    }
+}
+
+/// Whether the task running on this thread has been cancelled.
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_task_cancelled() -> i32 {
+    i32::from(current_is_cancelled())
+}
+
+/// Block until one of `n` tagged words is finished or cancelled; answer which.
+///
+/// # Safety
+/// `words` must point at `n` readable words.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jrt_wait_any(words: *const i64, n: i32) -> i32 {
+    if n <= 0 || words.is_null() {
+        return NOTHING_TO_WAIT_FOR;
+    }
+    let list = unsafe { core::slice::from_raw_parts(words, n as usize) };
+    let mut futs = Vec::with_capacity(list.len());
+    for &w in list {
+        match as_future(w) {
+            Some(f) => futs.push(f),
+            None => return NOT_A_FUTURE,
+        }
+    }
+    unsafe { wait_any(&futs) }
+}
+
+/// Await every future and report each outcome separately, for `settle = true`.
+///
+/// `out_vals[i]` is the value a task returned or the value it raised, and
+/// `out_ok[i]` says which. Nothing raises here: reporting every outcome is the
+/// whole point, and the caller builds the dicts.
+///
+/// The return is for *misuse* rather than outcome — `NOT_A_FUTURE` for a member
+/// that is not one, `DOUBLE_AWAITED` for one already taken. Those are mistakes
+/// in the program rather than things a task did, so `settle` does not turn them
+/// into data; the C forwarder raises.
+///
+/// # Safety
+/// `words` must point at `n` readable words, and both out-params at `n`
+/// writable ones.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jrt_join_settle(
+    words: *const i64,
+    n: i32,
+    out_vals: *mut i64,
+    out_ok: *mut i32,
+) -> i32 {
+    if n <= 0 || words.is_null() {
+        return 0;
+    }
+    let list = unsafe { core::slice::from_raw_parts(words, n as usize) };
+    // Every member checked before any is awaited, so a misuse is reported
+    // without first blocking on tasks whose results are about to be discarded.
+    let mut futs = Vec::with_capacity(list.len());
+    for &w in list {
+        match as_future(w) {
+            Some(f) => futs.push(f),
+            None => return NOT_A_FUTURE,
+        }
+    }
+    for (i, &f) in futs.iter().enumerate() {
+        let (v, ok) = match unsafe { await_one(f) } {
+            Ok(v) => (v, 1),
+            Err(TaskError::Raised(e, _)) => (e, 0),
+            Err(TaskError::Cancelled) => (crate::value::NIL_BITS as i64, 0),
+            Err(TaskError::DoubleAwait) => return DOUBLE_AWAITED,
+            Err(TaskError::NotAFuture) => return NOT_A_FUTURE,
+        };
+        unsafe {
+            *out_vals.add(i) = v;
+            *out_ok.add(i) = ok;
+        }
+    }
+    0
+}
+
+/// `jrt_join_settle`'s answer for a member already awaited.
+pub const DOUBLE_AWAITED: i32 = -3;
 
 /// Release a future. Until futures are refcounted values (next step), codegen
 /// owns this call — which is exactly why they leak today: the old

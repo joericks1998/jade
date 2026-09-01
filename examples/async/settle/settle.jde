@@ -1,0 +1,60 @@
+// `join(..., settle = true)` reports what every task did.
+//
+// Plain `join` awaits them all and then raises the first failure, which throws
+// away the ones that worked. For a fan-out that is the wrong answer: eight
+// requests with one failure should still hand back the seven that succeeded.
+//
+// `settle` gives one dict per task instead — `{ok: true, value: v}` or
+// `{ok: false, error: e}` — so nothing is lost and nothing raises. The shape
+// needs no new type, and `error` holds the value the task raised rather than
+// its text, so a struct arrives as a struct.
+
+struct Failed {
+    message
+}
+
+async fn fetch(n) {
+    return n * 10
+}
+
+async fn broken(n) {
+    raise Failed { message: "no route to host " + str(n) }
+}
+
+let results = join(fetch(1), broken(2), fetch(3), broken(4), settle = true)
+
+for r in results {
+    if r["ok"] {
+        print("got " + str(r["value"]))
+    } else {
+        print("lost " + r["error"].message)
+    }
+}
+// → got 10
+// → lost no route to host 2
+// → got 30
+// → lost no route to host 4
+
+
+// Plain `join` still raises, and the successes go with it.
+try {
+    join(fetch(1), broken(2), fetch(3))
+} catch Failed e {
+    print("raised " + e.message)
+}
+// → raised no route to host 2
+
+
+// `settle = false` is exactly plain `join`.
+print(join(fetch(5), fetch(6), settle = false))
+// → [50, 60]
+
+
+// It is a mode, not data: `settle` covers what the tasks did, and does not turn
+// calling `join` wrongly into an outcome.
+try {
+    join(fetch(1), 5, settle = true)
+} catch e {
+    print(e.message.contains("non-Future"))
+}
+// → true

@@ -4,6 +4,32 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.4.5
+
+*Four things a task could not do.* `ready()` in v1.4.4 let a loop that was already running check on a task without blocking. These are the rest of what a program needs before it can be built on tasks rather than around them.
+
+*`time.after(secs)` is a deadline you can wait on.* A future that finishes with nil when it expires, which is what lets a timeout be an ordinary member of a list of things to wait for rather than a parameter on the waiting. One timer thread serves every deadline: a task that sleeps holds a pool worker without announcing itself as blocked, so a redraw loop arming a 16ms timer every frame would fill the pool with sleepers.
+
+*`wait(futures)` blocks until one of them is settled, and answers which.* `ready()` suits a loop that was already running and burns a core in one that was not; this is what a program with nothing else to do wants.
+
+```jade
+let which = wait([wifi, input, time.after(0.016)])
+```
+
+It answers the index and consumes nothing, so the caller then awaits the one that is ready — which costs nothing, because it is. That keeps the resolve-once rule intact and composes with `ready()` rather than duplicating it. The lowest ready index when several are, so a program that puts its timeout last sees real work first.
+
+*`f.cancel()` stops waiting for a task, and `cancelled()` is how a task agrees to stop.* Cancelling does not stop the work, and saying so plainly is the design rather than a shortcoming: a compiled task is a real thread running straight-line code with no point at which the runtime could interrupt it, so a cancel that claimed to kill the task would be a promise only one engine could keep. What it changes is the caller's side — `await` raises at once instead of blocking, and one already blocked wakes and raises. Cancelled outranks a result that arrived anyway.
+
+A task that wants to give up early checks `cancelled()`, which is the only thing that actually stops work. Both engines agree down to the iteration a polite worker stops on, and a task that never looks runs to completion on both.
+
+*`join(..., settle = true)` reports what every task did.* Plain `join` raises the first failure and throws away the ones that worked, which is the wrong answer for a fan-out: eight requests with one failure should still hand back the seven that succeeded. `settle` gives one dict per task instead, `{ok: true, value: v}` or `{ok: false, error: e}`, so nothing is lost and nothing raises. `error` holds the value the task raised rather than its text, so a struct arrives as a struct.
+
+It is a mode rather than data — written `true` or `false`, because it changes the shape of what comes back and a caller that cannot tell which it is getting cannot use either. And it covers what the *tasks* did: a member that is not a future still raises, since calling `join` wrongly is not an outcome.
+
+*Fixed on the way: `time.sleep(0)` crashed a compiled binary* with a null dereference. Codegen unboxed a float straight from the argument word, and an int literal is not a boxed float. `math` never had the problem because its cores take the tagged word and coerce; sleep and after do that now.
+
+Still missing, and the next thing worth building: a channel, so tasks can stream to each other instead of resolving once. It fits the concurrency model, where values move rather than being shared.
+
 ## v1.4.4
 
 *You can ask a task whether it has finished, without waiting for it.* `await` blocks, which is the right default and also the whole problem for anything with a loop it cannot stop. A screen redrawing at frame rate has no point at which it is willing to freeze, so it could start work concurrently and then never find out the answer.

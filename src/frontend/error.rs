@@ -238,6 +238,11 @@ pub enum JadeError {
     /// The same Future was awaited more than once.
     DoubleAwait { span: Span },
 
+    /// Awaiting something the caller already cancelled. Cancelling stops the
+    /// waiting, not the work, so the result may well exist — the caller said it
+    /// had stopped waiting for it, and does not get it.
+    TaskCancelled { span: Span },
+
     /// A spawned async task panicked (tokio JoinError).
     AsyncPanic { message: String, span: Span },
 
@@ -539,6 +544,9 @@ impl std::fmt::Display for JadeError {
                 "[{}:{}] cannot await the same Future more than once",
                 span.line, span.col
             ),
+            JadeError::TaskCancelled { span } => {
+                write!(f, "[{}:{}] awaiting a cancelled task", span.line, span.col)
+            }
             JadeError::AsyncPanic { message, span } => {
                 write!(f, "[{}:{}] async task panicked: {}", span.line, span.col, message)
             }

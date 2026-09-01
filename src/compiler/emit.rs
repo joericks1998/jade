@@ -1158,12 +1158,36 @@ fn emit_call(
     if let TExprKind::Identifier(name) = &callee.kind
         && name == "join"
     {
+        // `settle = true` reports every outcome instead of raising the first
+        // failure. A literal, because it changes the *shape* of what comes back
+        // — values, or a dict per task — and a caller that cannot tell which it
+        // is getting cannot use either.
+        let mut settle = false;
+        for (name, value) in kwargs {
+            if name != "settle" {
+                return Err(JadeError::Exception {
+                    message: format!("join takes no `{name}` argument; the only one is `settle`"),
+                    span,
+                });
+            }
+            match &value.kind {
+                TExprKind::Bool(b) => settle = *b,
+                _ => {
+                    return Err(JadeError::Exception {
+                        message: "join's `settle` must be written `true` or `false`, because it \
+                                  decides whether the call returns values or a dict per task"
+                            .to_string(),
+                        span,
+                    });
+                }
+            }
+        }
         let mut arg_regs = Vec::with_capacity(args.len());
         for a in args {
             arg_regs.push(emit_expr(a, em, ctx)?);
         }
         let dest = em.alloc_reg();
-        em.chunk.emit(Instr::Join(dest, arg_regs), span);
+        em.chunk.emit(Instr::Join(dest, arg_regs, settle), span);
         return Ok(dest);
     }
 

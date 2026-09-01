@@ -1,0 +1,77 @@
+// Waiting on several things at once, and giving up on one of them.
+//
+// `await` blocks on one future. `ready()` asks without blocking, which suits a
+// loop that was already running, and burns a core in one that was not. What a
+// program with nothing else to do wants is to sleep until *something* happens,
+// which is what `wait` is: it blocks until one of the futures it was given is
+// settled, and answers which.
+//
+// A deadline is an ordinary member of that list rather than a parameter on the
+// waiting, because `time.after(secs)` is a future like any other. That is the
+// whole reason it exists.
+
+use std::time
+
+async fn slow(secs, label) {
+    time.sleep(secs)
+    return label
+}
+
+// The first one to finish wins, whatever order they were started in.
+let a = slow(0.30, "slow")
+let b = slow(0.05, "fast")
+print(wait([a, b]))
+print(await b)
+// → 1
+// → fast
+
+
+// Nothing is consumed, so the answer is still there to take. Asking again about
+// something already settled returns at once.
+print(wait([a, b]))
+// → 1
+
+
+// A timeout is just another future.
+let hangs = slow(5.0, "never")
+print(wait([hangs, time.after(0.05)]))
+// → 1
+
+
+// Which is also how you stop waiting for it. Cancelling does not stop the work:
+// a task is a real thread running straight-line code, and nothing outside it
+// can interrupt that. It stops the *waiting*, and `await` says so.
+hangs.cancel()
+try {
+    await hangs
+} catch e {
+    print(e.message.contains("awaiting a cancelled task"))
+}
+// → true
+
+
+// A task that wants to give up early has to agree to look. That is the only
+// thing that actually stops work, and it is the task's choice.
+async fn polite() {
+    let i = 0
+    while i < 100 {
+        if cancelled() {
+            return "stopped"
+        }
+        time.sleep(0.01)
+        i = i + 1
+    }
+    return "ran out"
+}
+
+let p = polite()
+time.sleep(0.05)
+p.cancel()
+print("cancelled a task that was checking")
+// → cancelled a task that was checking
+
+
+// `cancelled()` outside a task is false. The top level is not something anyone
+// cancels.
+print(cancelled())
+// → false

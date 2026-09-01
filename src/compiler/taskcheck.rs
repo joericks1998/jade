@@ -243,6 +243,12 @@ fn analyze(
 }
 
 /// One instruction's effect on taint, plus any violation it constitutes.
+///
+/// Long in the arguments because it is a fold over one instruction and needs
+/// everything the fold carries: the taint so far, the call graph, the effects
+/// computed for it, and the two outputs. Bundling them into a struct would name
+/// the same fields one indirection away.
+#[allow(clippy::too_many_arguments)]
 fn step(
     instr: &Instr,
     span: Span,
@@ -509,7 +515,7 @@ fn dest_of(instr: &Instr) -> Option<Reg> {
     Some(match instr {
         LoadInt(d, _) | LoadFloat(d, _) | LoadBool(d, _) | LoadStr(d, _) | LoadNil(d) => *d,
         BuildFStr(d, _) | GetTypeName(d, _) | Not(d, _) | BitNot(d, _) => *d,
-        Await(d, _) | Join(d, _) | Spawn(d, _, _) => *d,
+        Await(d, _) | Join(d, _, _) | Spawn(d, _, _) => *d,
         MakePrompt(d, _) | PromptDeref(d, _, _, _) => *d,
         CallNamed(d, _, _) => *d,
         _ => return None,
@@ -686,7 +692,7 @@ pub fn check(
                         shared_globals.clear();
                     }
                 }
-                Instr::Join(_, regs) => {
+                Instr::Join(_, regs, _) => {
                     for r in regs {
                         if let Some(u) = reg_task.get(r) {
                             live.retain(|x| x != u);
@@ -855,12 +861,6 @@ mod tests {
         }
     }
 
-    /// The named-field half of the same rule, and older than copy-with. Putting
-    /// a shared collection into a struct field hands the task the collection
-    /// itself, not a copy of it. `MakeStruct` used to count as an unconditionally
-    /// fresh allocation, so this compiled clean and the push reached the
-    /// spawner's array on both engines.
-    #[test]
     /// A callback reaches a task as a value, so the task's own body says
     /// nothing about it: `async fn run(f) { f() }` calls a parameter, which
     /// resolves to no definition at all. The closure is still a register with a
@@ -981,6 +981,12 @@ mod tests {
         .expect("writes after the await are not a race");
     }
 
+    /// The named-field half of the same rule, and older than copy-with. Putting
+    /// a shared collection into a struct field hands the task the collection
+    /// itself, not a copy of it. `MakeStruct` used to count as an unconditionally
+    /// fresh allocation, so this compiled clean and the push reached the
+    /// spawner's array on both engines.
+    #[test]
     fn task_mutating_a_collection_it_wrapped_in_a_struct_is_rejected() {
         let e = rejection(
             r#"

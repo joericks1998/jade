@@ -14,7 +14,7 @@ fn ready_resolves_as_a_future_method() {
 /// generic "value is not a struct".
 #[test]
 fn a_future_has_no_other_methods() {
-    for m in ["len", "upper", "push", "keys", "await", "bogus"] {
+    for m in ["len", "upper", "push", "keys", "await", "wait", "bogus"] {
         assert!(
             find_primitive_method(PrimType::Future, m).is_none(),
             "future.{m} should not resolve"
@@ -28,6 +28,22 @@ fn a_future_has_no_other_methods() {
 #[test]
 fn ready_is_in_the_arity_table() {
     assert_eq!(primitive_method_arity("ready"), Some(0));
+}
+
+#[test]
+fn cancel_resolves_and_is_in_the_arity_table() {
+    let f = find_primitive_method(PrimType::Future, "cancel");
+    assert!(f.is_some(), "future.cancel should resolve");
+    assert_eq!(f.unwrap().name, "cancel");
+    assert_eq!(primitive_method_arity("cancel"), Some(0));
+}
+
+#[test]
+fn cancel_rejects_a_receiver_that_is_not_a_future() {
+    assert!(
+        future_cancel(&[crate::vm::VmValue::Int(5)]).is_err(),
+        "a non-future receiver must not answer"
+    );
 }
 
 #[test]

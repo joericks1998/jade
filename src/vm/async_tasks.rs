@@ -17,6 +17,72 @@ pub(crate) type TaskBundle = (TaskOutput, Option<VmValue>);
 /// `Mutex` makes the inner `Option<JoinHandle>` safe to share across threads.
 pub struct JadeFuture {
     pub handle: Mutex<Option<JoinHandle<TaskBundle>>>,
+    /// Nobody wants this result any more. See `task::cancel` in `jade-runtime`
+    /// for what that does and does not mean: it stops the *waiting*, not the
+    /// work, because a compiled task is a real thread with no point at which it
+    /// could be interrupted, and the two engines have to agree. So this does not
+    /// abort the tokio task either, even though it could.
+    pub cancelled: std::sync::atomic::AtomicBool,
+}
+
+impl JadeFuture {
+    /// Whether the task is over, without waiting for it. Cancelled counts:
+    /// nobody is going to read the result either way.
+    pub fn is_settled(&self) -> bool {
+        if self.cancelled.load(std::sync::atomic::Ordering::Acquire) {
+            return true;
+        }
+        // `None` means an `await` already took the handle, so it is certainly
+        // over.
+        self.handle.lock().as_ref().is_none_or(|h| h.is_finished())
+    }
+}
+
+/// Signalled whenever any task finishes.
+///
+/// `wait` watches several futures at once and cannot park on each one, so every
+/// task pokes this on its way out and a waiter rechecks its list. Mirrors the
+/// `Completions` condvar the compiled runtime uses, for the same reason.
+pub fn completions() -> &'static tokio::sync::Notify {
+    static N: std::sync::OnceLock<tokio::sync::Notify> = std::sync::OnceLock::new();
+    N.get_or_init(tokio::sync::Notify::new)
+}
+
+/// Spawn `body` as a task and wrap it in the future the language hands back.
+///
+/// The one place a VM task is created, so the completion signal and the
+/// task-local view of "which future am I" cannot be forgotten by one caller and
+/// remembered by another.
+pub fn spawn_task<F>(body: F) -> VmValue
+where
+    F: std::future::Future<Output = TaskBundle> + Send + 'static,
+{
+    let fut = Arc::new(JadeFuture {
+        handle: Mutex::new(None),
+        cancelled: std::sync::atomic::AtomicBool::new(false),
+    });
+    let mine = Arc::clone(&fut);
+    let handle = tokio::spawn(async move {
+        let out = CURRENT_TASK.scope(mine, body).await;
+        completions().notify_waiters();
+        out
+    });
+    *fut.handle.lock() = Some(handle);
+    VmValue::Future(fut)
+}
+
+tokio::task_local! {
+    /// The future the task running here resolves, so `cancelled()` can answer
+    /// without the program passing its own handle around.
+    pub(crate) static CURRENT_TASK: Arc<JadeFuture>;
+}
+
+/// Whether the task running here has been cancelled. False outside a task,
+/// which is the honest answer: the top level is not something anyone cancels.
+pub fn current_is_cancelled() -> bool {
+    CURRENT_TASK
+        .try_with(|f| f.cancelled.load(std::sync::atomic::Ordering::Acquire))
+        .unwrap_or(false)
 }
 
 /// A lazy token stream from an inference call — and, once drained, the buffer

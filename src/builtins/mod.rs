@@ -146,7 +146,7 @@ impl Package {
 /// All core globals (always available without import).
 /// `print` and `stream` are excluded — they are state-mutating and dispatched
 /// through `NativeFnId` variants injected directly in `seed_globals`.
-static CORE_BUILTINS: &[BuiltinFn] = &[core::WRITE, core::LEN, core::INPUT];
+static CORE_BUILTINS: &[BuiltinFn] = &[core::WRITE, core::LEN, core::INPUT, core::CANCELLED];
 
 /// All stdlib packages (available via `use "..."`).
 static PACKAGES: &[&Package] = &[
@@ -188,7 +188,7 @@ pub fn primitive_method_arity(method: &str) -> Option<usize> {
         | "get" | "merge" | "index_of" | "last_index_of" | "count" | "repeat" | "join" => 1,
         "replace" | "slice" | "pad_start" | "pad_end" => 2,
         "trim_start" | "trim_end" | "capitalize" | "is_empty" | "lines" => 0,
-        "ready" => 0,
+        "ready" | "cancel" => 0,
         _ => return None,
     })
 }
@@ -242,6 +242,8 @@ pub fn seed_globals<S: std::hash::BuildHasher>(globals: &mut HashMap<String, VmV
     // until v1.2.5, when `?p` folded onto the buffered stream and it went away.)
     globals.insert("print".to_string(), VmValue::NativeFn(NativeFnId::Print));
     globals.insert("route".to_string(), VmValue::NativeFn(NativeFnId::Route));
+    // `wait` has to await, so it cannot be a pure BuiltinFn either.
+    globals.insert("wait".to_string(), VmValue::NativeFn(NativeFnId::Wait));
     // Primitive type constructors: callable with one arg like Python's int(), str(), etc.
     for name in &["int", "float", "bool", "str", "char", "func"] {
         globals.insert(name.to_string(), VmValue::TypeRef(name.to_string()));

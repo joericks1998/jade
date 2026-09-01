@@ -21,6 +21,9 @@ pub enum NativeFnId {
     /// `uhttp.stream(url, handler, headers?)` — stream an HTTP response over a
     /// Unix socket, invoking a Jade handler per line.
     UhttpStream,
+    /// `wait(futures)` — block until one of them is settled, answer which. Needs
+    /// to await, so it cannot be a pure BuiltinFn.
+    Wait,
 }
 
 /// A value at VM runtime, carrying `Arc<CompiledFn>` for functions so the VM

@@ -35,10 +35,6 @@ pub(super) struct BodyCtx<'a, 'ctx> {
     pub llblocks: &'a [LlvmBlock<'ctx>],
     pub graph: &'a cfg::Cfg,
     pub handler_bufs: &'a HashMap<usize, PointerValue<'ctx>>,
-    /// Per instruction: is a handler *of this function* active here? A `raise`
-    /// inside one stays in this frame; a `raise` outside every one is leaving.
-    /// See the `Raise` arm.
-    pub in_handler: &'a [bool],
     pub call_builtins: &'a HashMap<usize, BuiltinCall>,
     pub user_calls: &'a HashMap<usize, CallKind>,
     pub fn_defs: &'a [Arc<CompiledFn>],
@@ -51,16 +47,8 @@ pub(super) fn lower_instr<'ctx>(
     idx: usize,
     body: &BodyCtx<'_, 'ctx>,
 ) -> Result<bool, String> {
-    let BodyCtx {
-        llblocks,
-        graph,
-        handler_bufs,
-        in_handler,
-        call_builtins,
-        user_calls,
-        fn_defs,
-        fnctx,
-    } = *body;
+    let BodyCtx { llblocks, graph, handler_bufs, call_builtins, user_calls, fn_defs, fnctx } =
+        *body;
     use Instr::*;
     let b = low.builder;
     let i64_ty = low.i64t();
@@ -1200,7 +1188,7 @@ pub(super) fn lower_instr<'ctx>(
             low.store(*dest, r);
             Ok(false)
         }
-        Join(dest, futs) => {
+        Join(dest, futs, settle) => {
             let n = futs.len();
             // Two entry-block buffers, not allocas here: a join can sit inside a
             // loop. They must stay distinct — `jade_join_words` reads one while
@@ -1219,6 +1207,28 @@ pub(super) fn lower_instr<'ctx>(
                 };
                 b.build_store(slot, low.load(*r)).map_err(|e| e.to_string())?;
             }
+            // `settle = true` hands back one dict per task instead of raising
+            // the first failure. A different call, because it returns a
+            // different shape — the C forwarder builds the dicts, since it is
+            // already the side that knows both outcomes.
+            if *settle {
+                let f = low.runtime_fn(
+                    "jade_join_settle",
+                    i64_ty.fn_type(&[low.ptrt().into(), low.ctx.i32_type().into()], false),
+                );
+                let r = b
+                    .build_call(
+                        f,
+                        &[futarr.into(), low.ctx.i32_type().const_int(n as u64, false).into()],
+                        "settled",
+                    )
+                    .map_err(|e| e.to_string())?
+                    .as_any_value_enum()
+                    .into_int_value();
+                low.store(*dest, r);
+                return Ok(false);
+            }
+
             let resarr = low.entry_buf("join_res", n.max(1))?;
             let join_f = low.runtime_fn(
                 "jade_join_words",
@@ -1650,6 +1660,42 @@ pub(super) fn lower_instr<'ctx>(
                         }
                         None => low.print_value(arg, *dest)?,
                     }
+                    Ok(false)
+                }
+                // cancelled() → has the task running here been cancelled? The
+                // only thing that actually stops work: `f.cancel()` stops the
+                // caller waiting, and a task gives up early only by agreeing to
+                // look. False at the top level, which is not a task.
+                Some(bc) if bc.name == "cancelled" && bc.args.is_empty() => {
+                    let f = low
+                        .runtime_fn("jrt_task_cancelled", low.ctx.i32_type().fn_type(&[], false));
+                    let r = b
+                        .build_call(f, &[], "canc")
+                        .map_err(|e| e.to_string())?
+                        .as_any_value_enum()
+                        .into_int_value();
+                    let bit = b
+                        .build_int_compare(
+                            IntPredicate::NE,
+                            r,
+                            low.ctx.i32_type().const_zero(),
+                            "cb",
+                        )
+                        .map_err(|e| e.to_string())?;
+                    low.store(*dest, low.bool_word(bit));
+                    Ok(false)
+                }
+                // wait(fs) → block until one of the futures is settled, and
+                // answer which. The index, not the value: nothing is consumed,
+                // so the caller then awaits the one that is ready.
+                Some(bc) if bc.name == "wait" => {
+                    let f = low.runtime_fn("jade_wait", i64_ty.fn_type(&[i64_ty.into()], false));
+                    let r = b
+                        .build_call(f, &[low.load(bc.args[0]).into()], "wait")
+                        .map_err(|e| e.to_string())?
+                        .as_any_value_enum()
+                        .into_int_value();
+                    low.store(*dest, r);
                     Ok(false)
                 }
                 // write(x) → print with no newline, flushed. Same renderer as

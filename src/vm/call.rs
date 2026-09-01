@@ -128,9 +128,12 @@ pub(crate) async fn call_value(
     {
         let cf = Arc::clone(cf);
         let child_state = state.new_for_spawn();
-        let handle =
-            tokio::spawn(super::async_tasks::call_fn_standalone(cf, args, child_state, span));
-        return Ok(VmValue::Future(Arc::new(JadeFuture { handle: Mutex::new(Some(handle)) })));
+        return Ok(super::async_tasks::spawn_task(super::async_tasks::call_fn_standalone(
+            cf,
+            args,
+            child_state,
+            span,
+        )));
     }
     call_value_body(callee, args, state, span).await
 }
@@ -366,6 +369,57 @@ pub(crate) async fn call_value_body(
                     }
                 }
                 Ok(VmValue::Array(Arc::new(Mutex::new(ArrayObj::from_vec(out)))))
+            }
+            NativeFnId::Wait => {
+                // `wait(futures)` — block until one is settled, answer which.
+                //
+                // The index, and it consumes nothing: the caller then awaits the
+                // one that is ready, which costs nothing because it is. That
+                // keeps the resolve-once rule intact and composes with `ready()`
+                // rather than duplicating it, and it is what lets a deadline be
+                // an ordinary member of the list.
+                if args.len() != 1 {
+                    return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span });
+                }
+                let futs: Vec<Arc<super::async_tasks::JadeFuture>> = match &args[0] {
+                    VmValue::Array(arc) => {
+                        let elems = arc.lock().clone();
+                        let mut out = Vec::with_capacity(elems.len());
+                        for e in elems {
+                            match e {
+                                VmValue::Future(f) => out.push(f),
+                                _ => return Err(JadeError::NotAFuture { span }),
+                            }
+                        }
+                        out
+                    }
+                    _ => {
+                        return Err(JadeError::TypeError {
+                            message: "wait: expects an array of futures".to_string(),
+                            span,
+                        });
+                    }
+                };
+                // Waiting for nothing would block forever, which is never what
+                // the caller meant.
+                if futs.is_empty() {
+                    return Err(JadeError::TypeError {
+                        message: "wait: no futures to wait for".to_string(),
+                        span,
+                    });
+                }
+                loop {
+                    // Registered *before* the scan, so a task that finishes
+                    // between the two still wakes this waiter rather than
+                    // leaving it parked on an event it already missed.
+                    let woken = super::async_tasks::completions().notified();
+                    // Lowest ready index when several are, so a program that
+                    // puts its timeout last sees real work first.
+                    if let Some(i) = futs.iter().position(|f| f.is_settled()) {
+                        return Ok(VmValue::Int(i as i64));
+                    }
+                    woken.await;
+                }
             }
             NativeFnId::UhttpStream => {
                 use crate::uhttp::{self, StreamEvent};

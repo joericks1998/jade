@@ -214,6 +214,24 @@ pub extern "C" fn jrt_time_now_ms() -> i64 {
 
 /// `time.sleep(secs)` — block for `secs` seconds (non-positive → no-op).
 #[unsafe(no_mangle)]
+/// A tagged int or float word as seconds, or `None` for anything else.
+///
+/// Codegen used to unbox a float straight from the word, which null-dereferenced
+/// on `time.sleep(0)` — an int literal is not a boxed float. `math` never had
+/// the problem because its cores take the tagged word and coerce, which is what
+/// this is: the same rule, one module along.
+pub fn seconds_of(word: i64) -> Option<f64> {
+    let v = crate::value::JadeValue::from_bits(word as u64);
+    if v.is_float() {
+        return Some(crate::float::unbox_float(v));
+    }
+    if v.is_int() {
+        return Some(v.as_int() as f64);
+    }
+    None
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn jrt_time_sleep(secs: f64) {
     sleep(secs);
 }
@@ -256,6 +274,22 @@ pub extern "C" fn jrt_time_parts(ts: i64) -> W {
     }
     JadeValue::from_ptr(crate::gc::leak_obj(d) as *const core::ffi::c_void as *const ()).bits()
         as i64
+}
+
+/// `time.sleep(secs)` taking the tagged word, so an int argument works.
+///
+/// Returns 0 on success and -1 for an argument that is not a number, which the
+/// C forwarder turns into the error the interpreter raises. `jrt_time_sleep`
+/// keeps its `f64` shape for callers that already have one.
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_time_sleep_word(word: i64) -> i32 {
+    match seconds_of(word) {
+        Some(secs) => {
+            jrt_time_sleep(secs);
+            0
+        }
+        None => -1,
+    }
 }
 
 #[cfg(test)]
