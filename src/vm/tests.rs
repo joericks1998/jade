@@ -3939,3 +3939,76 @@ fn a_copy_with_still_requires_a_field_a_known_base_lacks() {
     };
     assert!(err.contains("missing required field 'email'"), "{err}");
 }
+
+// ── max_tasks / set_max_tasks ────────────────────────────────────────────────
+
+/// The pair reads and writes one process-wide number, so these run under a lock
+/// and put it back. `cargo test` is parallel and the limit is not per-VM.
+static MAX_TASKS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn with_max_tasks_restored<T>(f: impl FnOnce() -> T) -> T {
+    let _g = MAX_TASKS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let prev = jade_runtime::task::max_tasks();
+    let out = f();
+    jade_runtime::task::set_max_tasks(prev);
+    out
+}
+
+#[test]
+fn max_tasks_reads_the_default_and_the_setter_answers_with_what_took_effect() {
+    with_max_tasks_restored(|| {
+        let state = run_src(
+            r#"
+            let start = max_tasks()
+            let set = set_max_tasks(6)
+            let now = max_tasks()
+            let over = set_max_tasks(9999)
+            let under = set_max_tasks(0)
+            "#,
+        )
+        .expect("program should run");
+        assert_eq!(get_int(&state, "start"), 32, "the default is a flat 32, not the core count");
+        assert_eq!(get_int(&state, "set"), 6);
+        assert_eq!(get_int(&state, "now"), 6);
+        assert_eq!(get_int(&state, "over"), 512, "clamped to the thread ceiling");
+        assert_eq!(get_int(&state, "under"), 1, "zero runnable tasks is not a state to allow");
+    });
+}
+
+/// The case a limit deadlocks on if a parked task keeps its slot: at a limit of
+/// one, the parent holds the only slot and the child can never start. `parked`
+/// in `async_tasks` is what stops that, mirroring the compiled pool's `blocked`.
+#[test]
+fn a_task_that_awaits_another_finishes_at_a_limit_of_one() {
+    with_max_tasks_restored(|| {
+        let state = run_src(
+            r#"
+            set_max_tasks(1)
+            async fn inner(n) { return n * 2 }
+            async fn outer(n) { return await inner(n) }
+            let got = await outer(21)
+            "#,
+        )
+        .expect("a nested await must not deadlock against the limit");
+        assert_eq!(get_int(&state, "got"), 42);
+    });
+}
+
+/// A task body runs on a blocking thread driving its own `block_on`, which is
+/// not where a runtime timer normally fires. Anything a task awaits has to keep
+/// working there, so this pins the case with the plainest one there is.
+#[test]
+fn a_task_can_still_await_a_timer_from_its_blocking_thread() {
+    let state = run_src(
+        r#"
+        use std::time
+        async fn nap() {
+            time.sleep(0.05)
+            return 7
+        }
+        let got = await nap()
+        "#,
+    )
+    .expect("a task must be able to sleep");
+    assert_eq!(get_int(&state, "got"), 7);
+}

@@ -77,6 +77,72 @@ fn builtin_names() {
     assert_eq!(WRITE.name, "write");
     assert_eq!(LEN.name, "len");
     assert_eq!(INPUT.name, "input");
+    assert_eq!(CANCELLED.name, "cancelled");
+    assert_eq!(MAX_TASKS.name, "max_tasks");
+    assert_eq!(SET_MAX_TASKS.name, "set_max_tasks");
+}
+
+// ── max_tasks / set_max_tasks ────────────────────────────────────────────────
+//
+// The limit is one process-wide number, so anything that writes it runs under
+// this lock and puts it back. `cargo test` is parallel and the value is not
+// per-VM.
+static LIMIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn with_limit_restored<T>(f: impl FnOnce() -> T) -> T {
+    let _g = LIMIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let prev = jade_runtime::task::max_tasks();
+    let out = f();
+    jade_runtime::task::set_max_tasks(prev);
+    out
+}
+
+#[test]
+fn max_tasks_reads_the_live_value() {
+    with_limit_restored(|| {
+        jade_runtime::task::set_max_tasks(11);
+        assert!(matches!(native_max_tasks(&[]), Ok(VmValue::Int(11))));
+    });
+}
+
+#[test]
+fn max_tasks_takes_no_arguments() {
+    assert!(matches!(
+        native_max_tasks(&[VmValue::Int(1)]),
+        Err(JadeError::ArityMismatch { expected: 0, got: 1, .. })
+    ));
+}
+
+/// Clamped rather than refused, and the answer is what took effect — that is
+/// what lets a caller see it got 512 instead of the 9999 it asked for.
+#[test]
+fn set_max_tasks_answers_with_the_clamped_value() {
+    with_limit_restored(|| {
+        assert!(matches!(native_set_max_tasks(&[VmValue::Int(9)]), Ok(VmValue::Int(9))));
+        assert!(matches!(native_set_max_tasks(&[VmValue::Int(0)]), Ok(VmValue::Int(1))));
+        assert!(matches!(native_set_max_tasks(&[VmValue::Int(-3)]), Ok(VmValue::Int(1))));
+        assert!(matches!(native_set_max_tasks(&[VmValue::Int(9999)]), Ok(VmValue::Int(512))));
+    });
+}
+
+#[test]
+fn set_max_tasks_arity_and_type() {
+    assert!(matches!(
+        native_set_max_tasks(&[]),
+        Err(JadeError::ArityMismatch { expected: 1, got: 0, .. })
+    ));
+    assert!(matches!(
+        native_set_max_tasks(&[VmValue::Int(1), VmValue::Int(2)]),
+        Err(JadeError::ArityMismatch { expected: 1, got: 2, .. })
+    ));
+    // A float is the near miss worth naming: `set_max_tasks(2.5)` has no
+    // sensible reading, so it says so rather than truncating.
+    match native_set_max_tasks(&[VmValue::Float(2.5)]) {
+        Err(JadeError::TypeError { message, .. }) => {
+            assert!(message.contains("expects an int"), "unhelpful message: {message}");
+        }
+        other => panic!("expected a type error, got {other:?}"),
+    }
 }
 
 #[test]

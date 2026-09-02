@@ -1685,6 +1685,34 @@ pub(super) fn lower_instr<'ctx>(
                     low.store(*dest, low.bool_word(bit));
                     Ok(false)
                 }
+                // max_tasks() → how many tasks may run at once. The runtime
+                // counts in plain integers, so the answer is tagged on the way
+                // back into a register.
+                Some(bc) if bc.name == "max_tasks" && bc.args.is_empty() => {
+                    let f = low.runtime_fn("jrt_max_tasks", i64_ty.fn_type(&[], false));
+                    let r = b
+                        .build_call(f, &[], "maxt")
+                        .map_err(|e| e.to_string())?
+                        .as_any_value_enum()
+                        .into_int_value();
+                    low.store(*dest, low.tag_int(r));
+                    Ok(false)
+                }
+                // set_max_tasks(n) → set the limit, and answer what is now in
+                // force. The runtime clamps to 1..=512, so the answer is what
+                // makes the clamp visible rather than a courtesy.
+                Some(bc) if bc.name == "set_max_tasks" => {
+                    let f = low
+                        .runtime_fn("jrt_set_max_tasks", i64_ty.fn_type(&[i64_ty.into()], false));
+                    let n = low.untag_int(low.load(bc.args[0]));
+                    let r = b
+                        .build_call(f, &[n.into()], "setmaxt")
+                        .map_err(|e| e.to_string())?
+                        .as_any_value_enum()
+                        .into_int_value();
+                    low.store(*dest, low.tag_int(r));
+                    Ok(false)
+                }
                 // wait(fs) → block until one of the futures is settled, and
                 // answer which. The index, not the value: nothing is consumed,
                 // so the caller then awaits the one that is ready.

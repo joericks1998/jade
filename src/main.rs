@@ -301,6 +301,13 @@ fn main() {
             tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .thread_stack_size(jade::vm::VM_STACK_SIZE)
+                // A task that blocks hands its worker off through
+                // `vm::async_tasks::blocking`, and the replacement comes from
+                // here. The headroom over the 512 tasks a program can ask to run
+                // at once is for the blocking work a task itself starts: a native
+                // call goes through `spawn_blocking` too, and a full pool would
+                // leave it queued behind the task waiting on it.
+                .max_blocking_threads(576)
                 .build()
                 .expect("tokio runtime")
                 .block_on(run_cli(cli));

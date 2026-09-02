@@ -108,6 +108,60 @@ const HARD_MAX_WORKERS: usize = 512;
 /// not committed, so a thread that never recurses costs nothing for the room.
 const WORKER_STACK_SIZE: usize = 256 * 1024 * 1024;
 
+// ── How many tasks may run at once ───────────────────────────────────────────
+
+/// How many tasks run side by side when a program says nothing.
+///
+/// Not the core count, which is what this used to be. A Jade task is far more
+/// often waiting on a socket than saturating a core — the language's own
+/// advertised shape is a fan-out over N prompts — so sizing the limit to the
+/// machine's parallelism sized it to the wrong resource, and a laptop and a
+/// build server ran the same fan-out in a different number of waves.
+///
+/// 32 is a flat number both engines can promise. It is high enough that an
+/// ordinary fan-out finishes in one wave, and low enough to stay well under the
+/// ceiling on threads.
+pub const DEFAULT_MAX_TASKS: usize = 32;
+
+/// The live limit. Read on every scheduling decision rather than captured at
+/// startup, so `set_max_tasks` takes effect on the next task rather than the
+/// next run.
+static MAX_TASKS: AtomicUsize = AtomicUsize::new(DEFAULT_MAX_TASKS);
+
+/// How many tasks may run at once.
+pub fn max_tasks() -> usize {
+    MAX_TASKS.load(Ordering::Relaxed)
+}
+
+/// Set how many tasks may run at once, and report what is now in force.
+///
+/// The request is clamped to `1..=HARD_MAX_WORKERS` rather than refused. Zero
+/// runnable tasks is not a state a program can want, and the ceiling is a real
+/// property of the thread supply, so both ends have one honest answer to give.
+/// Returning the clamped value is what makes the clamp visible: a program that
+/// asks for 9999 can see it got 512 without a second call.
+pub fn set_max_tasks(n: usize) -> usize {
+    let effective = n.clamp(1, HARD_MAX_WORKERS);
+    MAX_TASKS.store(effective, Ordering::Relaxed);
+    effective
+}
+
+/// `max_tasks()` for a compiled program.
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_max_tasks() -> i64 {
+    max_tasks() as i64
+}
+
+/// `set_max_tasks(n)` for a compiled program, answering the effective value.
+///
+/// A negative argument clamps to 1 like any other out-of-range request. It
+/// arrives as `i64` because that is what a Jade `int` is, and saturating the
+/// cast keeps a huge value from wrapping to something small.
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_set_max_tasks(n: i64) -> i64 {
+    set_max_tasks(n.clamp(0, HARD_MAX_WORKERS as i64) as usize) as i64
+}
+
 // ── The task-body invoker ────────────────────────────────────────────────────
 
 static INVOKER: AtomicPtr<c_void> = AtomicPtr::new(core::ptr::null_mut());
@@ -301,15 +355,19 @@ struct Inner {
     /// Threads parked waiting for work.
     idle: usize,
     /// Threads inside `await`. They hold no CPU, so they do not count against
-    /// the target — see the module docs on why a fixed pool deadlocks.
+    /// the limit — see the module docs on why a fixed pool deadlocks.
     blocked: usize,
+    /// Threads inside a task body right now. This is the number `max_tasks`
+    /// bounds, and it is not the same as `workers`: the pool keeps idle threads
+    /// around for `IDLE_TIMEOUT` after a burst, so a wide fan-out followed by
+    /// `set_max_tasks(4)` leaves far more threads alive than the program now
+    /// permits to run. Bounding growth alone let all of them take work.
+    running: usize,
 }
 
 pub struct Pool {
     inner: Mutex<Inner>,
     work_cv: Condvar,
-    /// Target number of *runnable* workers.
-    target: usize,
 }
 
 static POOL: OnceLock<Pool> = OnceLock::new();
@@ -318,20 +376,25 @@ static POOL: OnceLock<Pool> = OnceLock::new();
 /// `spawn` as an error rather than silently dropped.
 static SPAWN_FAILURES: AtomicUsize = AtomicUsize::new(0);
 
-/// The process-wide pool, sized from `JADE_MAX_TASKS` or the machine's
-/// parallelism.
+thread_local! {
+    /// Whether this thread is one of the [`Inner::running`] count. Kept per
+    /// thread rather than passed around because the thread that has to give the
+    /// count back is whichever one reaches `await`, several frames inside a body
+    /// that knows nothing about the pool.
+    static COUNTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The process-wide pool. How wide it grows is [`max_tasks`], read live.
 pub fn pool() -> &'static Pool {
-    POOL.get_or_init(|| {
-        let target = std::env::var("JADE_MAX_TASKS")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|&n| n > 0)
-            .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4));
-        Pool {
-            inner: Mutex::new(Inner { queue: VecDeque::new(), workers: 0, idle: 0, blocked: 0 }),
-            work_cv: Condvar::new(),
-            target: target.min(HARD_MAX_WORKERS),
-        }
+    POOL.get_or_init(|| Pool {
+        inner: Mutex::new(Inner {
+            queue: VecDeque::new(),
+            workers: 0,
+            idle: 0,
+            blocked: 0,
+            running: 0,
+        }),
+        work_cv: Condvar::new(),
     })
 }
 
@@ -369,11 +432,21 @@ impl Pool {
     /// Zero is also the right reading: more threads blocked than the pool has
     /// means nothing is left to run the queue, which is exactly when to grow.
     fn should_grow(&self, st: &Inner) -> bool {
-        if st.idle > 0 || st.queue.is_empty() {
+        // One idle worker used to be enough to refuse, which quietly pinned the
+        // pool at whatever width the *previous* fan-out left behind. Eight tasks
+        // submitted in a loop onto four idle workers grew to nothing: every
+        // submit saw `idle > 0`, because no worker had woken up yet, so eight
+        // tasks ran four at a time under a limit of sixteen. Comparing the whole
+        // queue against the idle count asks the question that matters, which is
+        // whether anything would sit unclaimed. It can over-create by a thread
+        // or two when workers wake mid-loop, and that is the safe direction:
+        // `max_tasks` still bounds it, and the other way is a limit the engine
+        // does not honor.
+        if st.queue.len() <= st.idle {
             return false;
         }
         let runnable = st.workers.saturating_sub(st.blocked);
-        runnable < self.target && st.workers < HARD_MAX_WORKERS
+        runnable < max_tasks() && st.workers < HARD_MAX_WORKERS
     }
 
     /// Add a worker thread, reporting whether the OS gave us one.
@@ -399,7 +472,15 @@ impl Pool {
             let Queued(fut) = {
                 let mut st = self.inner.lock().unwrap_or_else(|e| e.into_inner());
                 loop {
-                    if let Some(j) = st.queue.pop_front() {
+                    // Past the limit this thread parks as though there were no
+                    // work, and the release of a running slot wakes it. Checking
+                    // here rather than only when growing is what makes the limit
+                    // bind on threads that already exist.
+                    if st.running < max_tasks()
+                        && let Some(j) = st.queue.pop_front()
+                    {
+                        st.running += 1;
+                        COUNTED.with(|c| c.set(true));
                         break j;
                     }
                     st.idle += 1;
@@ -427,6 +508,7 @@ impl Pool {
             if let Some(job) = unsafe { (*fut).claim() } {
                 run_job(fut, job, true);
             }
+            self.stop_running();
             unsafe { release(fut) };
         }
     }
@@ -435,7 +517,12 @@ impl Pool {
     ///
     /// Spawns a replacement if that would leave queued work with nobody to run
     /// it. This is what keeps `await` chains from deadlocking a bounded pool.
-    fn enter_blocking(&'static self) {
+    fn enter_blocking(&'static self) -> bool {
+        // A thread about to park is not running a body, so it gives its slot
+        // back for the duration. Without this, `set_max_tasks(1)` plus a task
+        // that awaits another is a deadlock: the parent holds the only slot and
+        // the child can never take one.
+        let had_slot = self.stop_running();
         let mut st = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         st.blocked += 1;
         if self.should_grow(&st) {
@@ -449,11 +536,52 @@ impl Pool {
                 SPAWN_FAILURES.fetch_add(1, Ordering::Relaxed);
             }
         }
+        drop(st);
+        had_slot
     }
 
-    fn exit_blocking(&'static self) {
+    /// `had_slot` is what [`Self::enter_blocking`] answered.
+    fn exit_blocking(&'static self, had_slot: bool) {
+        {
+            let mut st = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            st.blocked -= 1;
+        }
+        if had_slot {
+            self.start_running();
+        }
+    }
+
+    /// Count this thread as running a body.
+    ///
+    /// Deliberately does not wait for room. A thread reaching here has either
+    /// just been handed work under the gate above, or has finished waiting and
+    /// is resuming a body it already started; making the second case queue would
+    /// reintroduce the deadlock `enter_blocking` exists to avoid. It can leave
+    /// the count briefly over the limit, which is the same allowance an awaiter
+    /// running a body inline already has.
+    fn start_running(&'static self) {
+        if COUNTED.with(|c| c.replace(true)) {
+            return;
+        }
         let mut st = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        st.blocked -= 1;
+        st.running += 1;
+    }
+
+    /// Stop counting this thread, and wake somebody parked on the limit.
+    ///
+    /// Reports whether it gave a slot back, so a caller that parks knows whether
+    /// it owes one on the way out. The main thread never held one — it is not a
+    /// task — and must not manufacture one by resuming.
+    fn stop_running(&'static self) -> bool {
+        if !COUNTED.with(|c| c.replace(false)) {
+            return false;
+        }
+        {
+            let mut st = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            st.running -= 1;
+        }
+        self.work_cv.notify_one();
+        true
     }
 
     /// Current worker-thread count. For tests and diagnostics.
@@ -718,13 +846,13 @@ pub unsafe fn await_one(fut: *mut FutureObj) -> Result<i64, TaskError> {
         // Harmless when the caller is the main thread: it just permits one
         // extra worker while the main thread waits.
         let p = pool();
-        p.enter_blocking();
+        let had_slot = p.enter_blocking();
         let mut st = f.state.lock().unwrap_or_else(|e| e.into_inner());
         while !st.done && !st.cancelled {
             st = f.done_cv.wait(st).unwrap_or_else(|e| e.into_inner());
         }
         drop(st);
-        p.exit_blocking();
+        p.exit_blocking(had_slot);
     }
 
     let mut st = f.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -856,7 +984,7 @@ pub unsafe fn wait_any(futs: &[*mut FutureObj]) -> i32 {
     let p = pool();
     // Announced for the same reason `await` announces: this thread may be one of
     // the pool's own, and it is about to hold none of the CPU it was counted for.
-    p.enter_blocking();
+    let had_slot = p.enter_blocking();
     let mut seen = c.lock.lock().unwrap_or_else(|e| e.into_inner());
     loop {
         for (i, &f) in futs.iter().enumerate() {
@@ -864,7 +992,7 @@ pub unsafe fn wait_any(futs: &[*mut FutureObj]) -> i32 {
             if st.done || st.cancelled {
                 drop(st);
                 drop(seen);
-                p.exit_blocking();
+                p.exit_blocking(had_slot);
                 return i as i32;
             }
         }
@@ -1390,7 +1518,70 @@ mod tests {
         }
     }
 
-    /// Peak simultaneous execution should track the pool target rather than the
+    /// Puts the limit back however the test ends, so one that fails mid-way
+    /// does not leave every later test running under its number.
+    struct RestoreMaxTasks(usize);
+
+    impl Drop for RestoreMaxTasks {
+        fn drop(&mut self) {
+            set_max_tasks(self.0);
+        }
+    }
+
+    fn with_max_tasks(n: usize) -> RestoreMaxTasks {
+        let prev = max_tasks();
+        set_max_tasks(n);
+        RestoreMaxTasks(prev)
+    }
+
+    #[test]
+    fn the_limit_starts_at_the_documented_default() {
+        let _g = exclusive();
+        assert_eq!(DEFAULT_MAX_TASKS, 32);
+        assert_eq!(max_tasks(), DEFAULT_MAX_TASKS, "something changed the limit and left it");
+    }
+
+    /// Both ends clamp rather than refuse, and the answer is what was set. A
+    /// caller that asks for more than the thread supply allows has to be able to
+    /// see that without a second call.
+    #[test]
+    fn set_max_tasks_clamps_and_answers_with_what_took_effect() {
+        let _g = exclusive();
+        let _restore = with_max_tasks(DEFAULT_MAX_TASKS);
+
+        assert_eq!(set_max_tasks(8), 8);
+        assert_eq!(max_tasks(), 8);
+
+        assert_eq!(set_max_tasks(0), 1, "zero runnable tasks is not a state to allow");
+        assert_eq!(set_max_tasks(9999), HARD_MAX_WORKERS);
+        assert_eq!(max_tasks(), HARD_MAX_WORKERS);
+
+        // The C entry takes the same path, negatives included.
+        assert_eq!(jrt_set_max_tasks(-5), 1);
+        assert_eq!(jrt_max_tasks(), 1);
+    }
+
+    /// The limit has to bound what actually runs, not merely be stored.
+    #[test]
+    fn the_limit_bounds_peak_concurrency() {
+        let _g = exclusive();
+        let _restore = with_max_tasks(2);
+        CONCURRENT.store(0, Ordering::SeqCst);
+        PEAK.store(0, Ordering::SeqCst);
+        let futs: Vec<_> = (0..24).map(|_| spawn(observe_concurrency, vec![], false)).collect();
+        for &f in &futs {
+            let _ = unsafe { await_one(f) };
+        }
+        // Awaiting runs a task inline when nobody has claimed it, so the waiter
+        // is one more runner than the pool itself would allow.
+        let peak = PEAK.load(Ordering::SeqCst);
+        assert!(peak <= 3, "24 tasks peaked at {peak} under a limit of 2");
+        for f in futs {
+            unsafe { release(f) };
+        }
+    }
+
+    /// Peak simultaneous execution should track `max_tasks` rather than the
     /// number of queued tasks.
     #[test]
     fn concurrency_is_bounded_not_serialized() {
@@ -1427,7 +1618,7 @@ mod tests {
     #[test]
     fn nested_await_does_not_deadlock_a_bounded_pool() {
         let _g = exclusive();
-        // Comfortably more outer tasks than any plausible pool target, so the
+        // Comfortably more outer tasks than any plausible task limit, so the
         // deadlock is certain rather than timing-dependent if compensation is
         // removed.
         const OUTER: i64 = 64;
@@ -1479,7 +1670,7 @@ mod tests {
     /// left to give the innermost body and every level above waits on it
     /// forever. It only completes because an awaiter runs the body itself when
     /// nobody else has claimed it — which is also why the depth here has to
-    /// exceed the ceiling rather than merely the target.
+    /// exceed the ceiling rather than merely the limit.
     #[test]
     fn an_await_chain_deeper_than_the_pool_still_finishes() {
         let _g = exclusive();

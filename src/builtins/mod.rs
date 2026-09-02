@@ -146,7 +146,8 @@ impl Package {
 /// All core globals (always available without import).
 /// `print` and `stream` are excluded — they are state-mutating and dispatched
 /// through `NativeFnId` variants injected directly in `seed_globals`.
-static CORE_BUILTINS: &[BuiltinFn] = &[core::WRITE, core::LEN, core::INPUT, core::CANCELLED];
+static CORE_BUILTINS: &[BuiltinFn] =
+    &[core::WRITE, core::LEN, core::INPUT, core::CANCELLED, core::MAX_TASKS, core::SET_MAX_TASKS];
 
 /// All stdlib packages (available via `use "..."`).
 static PACKAGES: &[&Package] = &[

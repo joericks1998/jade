@@ -4,6 +4,23 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.4.6
+
+*How many tasks run at once is now something a program says, and both engines listen.* It was the machine's core count, overridable only through a `JADE_MAX_TASKS` environment variable that appeared in no documentation and reached the compiled engine only. `jade run` ignored it outright, so the same fan-out ran sixteen requests in one wave built and two waves interpreted.
+
+```jade
+print(max_tasks())           // 32
+print(set_max_tasks(8))      // 8
+```
+
+Two bare globals, next to `cancelled()` and `wait()`, because nothing else about async is imported either. The default is a flat 32 rather than the core count: a task usually waits on a model or a socket rather than using a core, so sizing the limit to the machine measured the wrong resource. `set_max_tasks` answers with what took effect, since a request outside `1` to `512` is clamped rather than refused.
+
+*The interpreter honors it too, which it could not before.* `jade run` ran one task per core whatever the limit said, because a task that blocks on a socket held the runtime worker it landed on. The calls that wait on the outside world — `http`, `uhttp`, `sh`, `time.sleep`, `input`, and `fs.read_stdin_bytes` — now hand that worker off for the duration, so sixteen requests take one wave under `jade run` exactly as they do compiled. Inference already did, through the provider backend. A task parked in `await` gives its slot back, so a task awaiting another cannot deadlock against the limit even at `set_max_tasks(1)`.
+
+*Fixed on the way: the compiled pool ignored the limit on threads it already had.* It refused to grow whenever any worker was idle, which made eight tasks submitted in a loop onto four idle workers run four at a time under a limit of sixteen — every submit saw an idle worker because none had woken yet. And a worker now checks the limit before claiming queued work, not only before starting a thread, so lowering the limit after a wide fan-out binds on the threads that fan-out left behind.
+
+`JADE_MAX_TASKS` is gone. Nothing in the documentation referenced it.
+
 ## v1.4.5
 
 *Four things a task could not do.* `ready()` in v1.4.4 let a loop that was already running check on a task without blocking. These are the rest of what a program needs before it can be built on tasks rather than around them.

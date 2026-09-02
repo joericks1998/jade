@@ -98,7 +98,7 @@ fn execute(
     body: Option<&str>,
     headers: Vec<(String, String)>,
 ) -> Result<VmValue> {
-    uhttpf::request(method, url, body, &headers)
+    crate::vm::async_tasks::blocking(|| uhttpf::request(method, url, body, &headers))
         .map(|(status, body)| make_response(status, body))
         // Message shape matches the AOT path's `set_err` ("uhttp <METHOD>: <detail>").
         .map_err(|message| JadeError::IoError {
@@ -115,7 +115,7 @@ fn execute_bytes(
     body: Option<&[u8]>,
     headers: Vec<(String, String)>,
 ) -> Result<VmValue> {
-    uhttpf::request_bytes(method, url, body, &headers)
+    crate::vm::async_tasks::blocking(|| uhttpf::request_bytes(method, url, body, &headers))
         .map(|(status, body)| make_bytes_response(status, body))
         .map_err(|message| JadeError::IoError {
             message: format!("uhttp {method}: {message}"),

@@ -62,7 +62,7 @@ fn time_sleep(args: &[VmValue]) -> Result<VmValue> {
         VmValue::Float(f) => *f,
         _ => return Err(JadeError::TypeError { message: "time.sleep".to_string(), span: ZERO }),
     };
-    jade_runtime::timef::sleep(secs);
+    crate::vm::async_tasks::blocking(|| jade_runtime::timef::sleep(secs));
     Ok(VmValue::Nil)
 }
 
