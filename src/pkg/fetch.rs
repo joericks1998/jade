@@ -43,26 +43,35 @@ impl Fetcher for HttpFetcher {
         let owned = url.to_string();
         let user_agent = self.user_agent.clone();
 
-        std::thread::spawn(move || -> Result<Vec<u8>, String> {
-            let client = reqwest::blocking::Client::builder()
-                .user_agent(user_agent)
-                .build()
-                .map_err(|e| format!("could not build http client: {e}"))?;
+        let started = std::thread::Builder::new().name("jade-fetch".to_string()).spawn(
+            move || -> Result<Vec<u8>, String> {
+                let client = reqwest::blocking::Client::builder()
+                    .user_agent(user_agent)
+                    .build()
+                    .map_err(|e| format!("could not build http client: {e}"))?;
 
-            let resp =
-                client.get(&owned).send().map_err(|e| format!("could not fetch {owned}: {e}"))?;
+                let resp = client
+                    .get(&owned)
+                    .send()
+                    .map_err(|e| format!("could not fetch {owned}: {e}"))?;
 
-            let status = resp.status();
-            if !status.is_success() {
-                return Err(format!("could not fetch {owned}: HTTP {status}"));
-            }
+                let status = resp.status();
+                if !status.is_success() {
+                    return Err(format!("could not fetch {owned}: HTTP {status}"));
+                }
 
-            resp.bytes()
-                .map(|b| b.to_vec())
-                .map_err(|e| format!("could not read response body from {owned}: {e}"))
-        })
-        .join()
-        .map_err(|_| format!("download thread panicked fetching {url}"))?
+                resp.bytes()
+                    .map(|b| b.to_vec())
+                    .map_err(|e| format!("could not read response body from {owned}: {e}"))
+            },
+        );
+        // `Builder` rather than `thread::spawn`, which unwraps: on a machine out
+        // of threads an install would abort with a Rust panic instead of saying
+        // which download failed and why.
+        started
+            .map_err(|e| format!("could not start a download thread for {url}: {e}"))?
+            .join()
+            .map_err(|_| format!("download thread panicked fetching {url}"))?
     }
 }
 

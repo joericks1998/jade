@@ -19,6 +19,14 @@ Two bare globals, next to `cancelled()` and `wait()`, because nothing else about
 
 *Fixed on the way: the compiled pool ignored the limit on threads it already had.* It refused to grow whenever any worker was idle, which made eight tasks submitted in a loop onto four idle workers run four at a time under a limit of sixteen — every submit saw an idle worker because none had woken yet. And a worker now checks the limit before claiming queued work, not only before starting a thread, so lowering the limit after a wide fan-out binds on the threads that fan-out left behind.
 
+*Also fixed: what a machine out of threads tells you.* Five paths reported nothing useful, and one of them hung.
+
+`time.after` armed its timer thread through a `Once`, which counts the *attempt*. A machine briefly out of threads at the first call left every later `time.after` in that process waiting on a deadline nothing would fire, and a timer future has no body, so awaiting one never returned. Starting the thread is retried per call now, and a deadline that genuinely cannot be armed raises instead of hanging.
+
+The pool says once on stderr when the OS starts refusing worker threads. It stays a warning rather than an error: the work is not lost, because whoever awaits the future runs the body inline, so the run goes serial and still gets the right answer. A program in that state otherwise looks exactly like one that was always slow.
+
+And four thread starts that used `thread::spawn`, which unwraps, now report instead of panicking: `uhttp`'s per-request thread, `uhttp.stream`'s pump, the package downloader, and the two the `jade` binary needs before it can run anything. That last one printed `tokio runtime` over a Rust panic trace, which tells somebody running a `.jde` file nothing they can act on.
+
 `JADE_MAX_TASKS` is gone. Nothing in the documentation referenced it.
 
 ## v1.4.5

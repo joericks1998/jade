@@ -304,6 +304,7 @@ Printing a future is allowed. It shows as `<future>`, because it has no meaningf
 | `DoubleAwait` | Runtime | The same future was awaited or joined more than once. The first await consumes it |
 | `AsyncPanic` | Runtime | A spawned async task panicked internally; the panic message and source span are captured and reported |
 | `ArityMismatch` | Runtime | `max_tasks()` was given an argument, or `set_max_tasks` was given none or more than one |
+| `RuntimeError` from `time.after` | Runtime | The OS refused the timer thread, so no deadline could fire. Lower `set_max_tasks()` or raise the process thread limit |
 | `PromptOverflow` | Runtime | Inside an async task, a typed dereference produced a reply that would not coerce to the target type. The same rule applies in synchronous code |
 | `InferenceError` | Runtime | The inference provider failed inside an async task. The error passes to the awaiting call site |
 

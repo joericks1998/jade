@@ -213,40 +213,55 @@ pub fn request_bytes(
     let body = body.map(<[u8]>::to_vec);
     let headers = headers.to_vec();
 
-    let joined = std::thread::spawn(move || -> Result<(i64, Vec<u8>), String> {
-        let mut stream = UnixStream::connect(&sock_path).map_err(|e| e.to_string())?;
-        stream.set_read_timeout(Some(TIMEOUT)).map_err(|e| e.to_string())?;
-        stream.set_write_timeout(Some(TIMEOUT)).map_err(|e| e.to_string())?;
+    // `Builder` rather than `thread::spawn`, which unwraps: a machine out of
+    // threads would panic here, and a panic inside a task reaches the awaiting
+    // side as an `AsyncPanic` carrying Rust's own wording. This is an ordinary
+    // I/O failure and reads like one.
+    let joined = std::thread::Builder::new().name("jade-uhttp".to_string()).spawn(
+        move || -> Result<(i64, Vec<u8>), String> {
+            let mut stream = UnixStream::connect(&sock_path).map_err(|e| e.to_string())?;
+            stream.set_read_timeout(Some(TIMEOUT)).map_err(|e| e.to_string())?;
+            stream.set_write_timeout(Some(TIMEOUT)).map_err(|e| e.to_string())?;
 
-        // ── request ──────────────────────────────────────────────────────
-        let mut req = format!("{} {} HTTP/1.1\r\n", method, req_path);
-        req.push_str("Host: localhost\r\n");
-        req.push_str("Connection: close\r\n");
-        for (k, v) in &headers {
-            req.push_str(&format!("{}: {}\r\n", k, v));
-        }
-        if verb_has_body(&method) {
-            let len = body.as_deref().map_or(0, <[u8]>::len);
-            req.push_str(&format!("Content-Length: {}\r\n", len));
-        }
-        req.push_str("\r\n");
-        let mut wire = req.into_bytes();
-        if verb_has_body(&method)
-            && let Some(b) = body.as_deref()
-        {
-            wire.extend_from_slice(b);
-        }
-        stream.write_all(&wire).map_err(|e| e.to_string())?;
-        stream.flush().map_err(|e| e.to_string())?;
+            // ── request ──────────────────────────────────────────────────────
+            let mut req = format!("{} {} HTTP/1.1\r\n", method, req_path);
+            req.push_str("Host: localhost\r\n");
+            req.push_str("Connection: close\r\n");
+            for (k, v) in &headers {
+                req.push_str(&format!("{}: {}\r\n", k, v));
+            }
+            if verb_has_body(&method) {
+                let len = body.as_deref().map_or(0, <[u8]>::len);
+                req.push_str(&format!("Content-Length: {}\r\n", len));
+            }
+            req.push_str("\r\n");
+            let mut wire = req.into_bytes();
+            if verb_has_body(&method)
+                && let Some(b) = body.as_deref()
+            {
+                wire.extend_from_slice(b);
+            }
+            stream.write_all(&wire).map_err(|e| e.to_string())?;
+            stream.flush().map_err(|e| e.to_string())?;
 
-        // ── response ─────────────────────────────────────────────────────
-        // `Connection: close` makes the server close the socket after the
-        // response, so read-to-EOF yields the full message.
-        let mut raw = Vec::new();
-        stream.read_to_end(&mut raw).map_err(|e| e.to_string())?;
-        parse_response_bytes(&raw, is_head)
-    })
-    .join();
+            // ── response ─────────────────────────────────────────────────────
+            // `Connection: close` makes the server close the socket after the
+            // response, so read-to-EOF yields the full message.
+            let mut raw = Vec::new();
+            stream.read_to_end(&mut raw).map_err(|e| e.to_string())?;
+            parse_response_bytes(&raw, is_head)
+        },
+    );
+
+    let joined = match joined {
+        Ok(h) => h.join(),
+        Err(e) => {
+            return Err(format!(
+                "could not start a request thread: {e}. The process is at its thread \
+                 limit; lower set_max_tasks(), or raise it (ulimit -u)"
+            ));
+        }
+    };
 
     match joined {
         Ok(inner) => inner,

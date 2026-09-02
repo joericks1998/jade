@@ -372,9 +372,40 @@ pub struct Pool {
 
 static POOL: OnceLock<Pool> = OnceLock::new();
 
-/// Tasks that failed to start because the hard ceiling was reached. Surfaced by
-/// `spawn` as an error rather than silently dropped.
+/// How many times the OS refused a worker thread.
+///
+/// Not an error, and deliberately so. The work is not lost when a thread is
+/// refused: whoever awaits the future runs the body inline, so a machine out of
+/// threads runs its tasks one after another and still gets the right answer.
+/// Raising here would turn a correct-but-slow run into a failed one, and it
+/// would fail on a loaded machine and pass on an idle one, which is a poor
+/// property for something a `catch` might match.
+///
+/// It is worth *saying*, though. A program whose fan-out has quietly gone
+/// serial looks identical to one that was always slow, so [`warn_once`] prints
+/// a line the first time this happens.
 static SPAWN_FAILURES: AtomicUsize = AtomicUsize::new(0);
+
+/// Say once that the machine is out of threads, on the way to the first failure.
+///
+/// Once, because the condition repeats per spawn and a program in this state is
+/// spawning constantly — a line per attempt would bury the run in its own
+/// diagnostics. To stderr, because stdout is the program's own output and this
+/// is not part of it.
+///
+/// Answers whether it printed, which is the only part of this with logic in it
+/// and the only part a test can reach: making a real `thread::spawn` fail needs
+/// a machine genuinely out of threads.
+fn warn_out_of_threads() -> bool {
+    if SPAWN_FAILURES.fetch_add(1, Ordering::Relaxed) != 0 {
+        return false;
+    }
+    eprintln!(
+        "jade: the OS refused a task thread, so tasks are now running one at a time.\n\
+         jade: lower set_max_tasks(), or raise the process thread limit (ulimit -u)."
+    );
+    true
+}
 
 thread_local! {
     /// Whether this thread is one of the [`Inner::running`] count. Kept per
@@ -412,7 +443,7 @@ impl Pool {
                 // lost: whoever awaits it runs it inline, so a machine out of
                 // threads does the work sequentially instead of hanging.
                 st.workers -= 1;
-                SPAWN_FAILURES.fetch_add(1, Ordering::Relaxed);
+                let _ = warn_out_of_threads();
             }
         }
         drop(st);
@@ -533,7 +564,7 @@ impl Pool {
                 // lost: whoever awaits it runs it inline, so a machine out of
                 // threads does the work sequentially instead of hanging.
                 st.workers -= 1;
-                SPAWN_FAILURES.fetch_add(1, Ordering::Relaxed);
+                let _ = warn_out_of_threads();
             }
         }
         drop(st);
@@ -589,11 +620,8 @@ impl Pool {
         self.inner.lock().unwrap_or_else(|e| e.into_inner()).workers
     }
 
-    /// How many times the OS refused a worker thread.
-    ///
-    /// Not an error any more: the work still runs, on whichever thread awaits
-    /// it. It is worth being able to see, because a process that keeps hitting
-    /// this is running its tasks one after another and wondering why.
+    /// How many times the OS refused a worker thread. See [`SPAWN_FAILURES`]
+    /// for why that is not an error.
     pub fn spawn_failures(&self) -> usize {
         SPAWN_FAILURES.load(Ordering::Relaxed)
     }
@@ -699,13 +727,35 @@ fn timers() -> &'static Timers {
     T.get_or_init(|| Timers { pending: Mutex::new(Vec::new()), cv: Condvar::new() })
 }
 
-/// Start the timer thread once, on the first `after`.
-fn start_timer_thread() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
+/// Start the timer thread if it is not already running, reporting whether one
+/// is now there to fire deadlines.
+///
+/// Not a `Once`. A `Once` counts an *attempt*, so a machine that was briefly out
+/// of threads at the first `after` left every later `time.after` in that process
+/// waiting on a deadline nothing would ever fire — a permanent hang from a
+/// transient condition. Retrying per call costs an atomic on the common path and
+/// makes the failure recoverable.
+///
+/// The answer matters because a timer future has no body: if nothing fires it,
+/// `await` waits forever. That is why [`after`] reports the failure instead of
+/// handing back a future that can never finish.
+fn start_timer_thread() -> bool {
+    /// Set once a timer thread is actually running.
+    static RUNNING: AtomicUsize = AtomicUsize::new(0);
+    if RUNNING.load(Ordering::Acquire) == 1 {
+        return true;
+    }
+    static STARTING: Mutex<()> = Mutex::new(());
+    let _g = STARTING.lock().unwrap_or_else(|e| e.into_inner());
+    // Re-checked under the lock: another caller may have started it while this
+    // one waited.
+    if RUNNING.load(Ordering::Acquire) == 1 {
+        return true;
+    }
+    {
         let t = timers();
         // A program with no timers never creates this thread at all.
-        let _ = std::thread::Builder::new().name("jade-timer".to_string()).spawn(move || {
+        let started = std::thread::Builder::new().name("jade-timer".to_string()).spawn(move || {
             loop {
                 let mut q = t.pending.lock().unwrap_or_else(|e| e.into_inner());
                 let now = std::time::Instant::now();
@@ -735,7 +785,12 @@ fn start_timer_thread() {
                 };
             }
         });
-    });
+        if started.is_ok() {
+            RUNNING.store(1, Ordering::Release);
+            return true;
+        }
+    }
+    false
 }
 
 /// A future that finishes with nil after `secs`, with no task behind it.
@@ -743,7 +798,13 @@ fn start_timer_thread() {
 /// A negative or non-finite delay is treated as zero: the deadline is already
 /// past, which is the only reading that does not invent a wait.
 pub fn after(secs: f64) -> *mut FutureObj {
-    start_timer_thread();
+    // Null rather than a future nothing can finish. A timer future has no body,
+    // so with no thread to fire it `await` would wait for the life of the
+    // process — a hang, which is the worst way for this to fail. The caller
+    // turns it into an error a program can read.
+    if !start_timer_thread() {
+        return core::ptr::null_mut();
+    }
     let d = if secs.is_finite() && secs > 0.0 {
         std::time::Duration::from_secs_f64(secs)
     } else {
@@ -1296,7 +1357,13 @@ pub extern "C" fn jrt_future_ready(word: i64) -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_time_after(word: i64) -> i64 {
     match crate::timef::seconds_of(word) {
-        Some(secs) => JadeValue::from_ptr(after(secs) as *const ()).bits() as i64,
+        Some(secs) => {
+            let fut = after(secs);
+            if fut.is_null() {
+                return NO_TIMER_THREAD;
+            }
+            JadeValue::from_ptr(fut as *const ()).bits() as i64
+        }
         None => NOT_A_NUMBER,
     }
 }
@@ -1304,6 +1371,11 @@ pub extern "C" fn jrt_time_after(word: i64) -> i64 {
 /// `jrt_time_after`'s answer for an argument that is not a number. An odd word
 /// with the immediate tag, so it can never be mistaken for a real future.
 pub const NOT_A_NUMBER: i64 = -1;
+
+/// `jrt_time_after`'s answer when the OS refused the timer thread. Distinct from
+/// [`NOT_A_NUMBER`] because the two need different messages: one is a mistake in
+/// the program, the other is the machine being out of threads.
+pub const NO_TIMER_THREAD: i64 = -3;
 
 /// Stop waiting for a tagged word. `NOT_A_FUTURE` if it is not one.
 #[unsafe(no_mangle)]
@@ -1532,6 +1604,55 @@ mod tests {
         let prev = max_tasks();
         set_max_tasks(n);
         RestoreMaxTasks(prev)
+    }
+
+    /// The warning has to be once per process. The condition repeats per spawn,
+    /// and a program in this state is spawning constantly, so a line per attempt
+    /// would bury the run in its own diagnostics.
+    ///
+    /// This is as close as a test gets to the real thing: making `thread::spawn`
+    /// fail needs a machine actually out of threads, which is not something to
+    /// arrange from inside the suite.
+    #[test]
+    fn the_out_of_threads_warning_is_printed_once() {
+        let _g = exclusive();
+        let before = pool().spawn_failures();
+        // Only the very first failure in the process prints. Any earlier test
+        // that hit one would have taken that turn, so the first call here is
+        // only expected to print when the count is still zero.
+        assert_eq!(warn_out_of_threads(), before == 0);
+        assert!(!warn_out_of_threads(), "a second failure must stay quiet");
+        assert!(!warn_out_of_threads());
+        assert_eq!(pool().spawn_failures(), before + 3, "every failure still counts");
+    }
+
+    /// The timer thread has to be startable more than once in a process's life.
+    /// It used to be a `Once`, which counted the *attempt*: a machine briefly
+    /// out of threads at the first `after` left every later `time.after` waiting
+    /// on a deadline nothing would fire, turning a transient condition into a
+    /// permanent hang.
+    #[test]
+    fn the_timer_thread_answers_whether_it_is_running() {
+        let _g = exclusive();
+        assert!(start_timer_thread(), "the timer thread should start");
+        assert!(start_timer_thread(), "asking again should find the running one");
+    }
+
+    /// A deadline that cannot be armed must not come back as a future, because a
+    /// timer future has no body and awaiting one would never return. The null is
+    /// what `jrt_time_after` turns into a sentinel the C forwarder can throw on.
+    #[test]
+    fn after_hands_back_a_real_future_when_the_timer_is_running() {
+        let _g = exclusive();
+        let fut = after(0.01);
+        assert!(!fut.is_null(), "a timer that armed must produce a future");
+        // An int word is the simplest thing `seconds_of` accepts, and zero
+        // seconds is a deadline already past.
+        let armed = jrt_time_after(JadeValue::from_int(0).bits() as i64);
+        assert_ne!(armed, NO_TIMER_THREAD, "the timer is running, so this must arm");
+        assert_ne!(armed, NOT_A_NUMBER);
+        assert_eq!(unsafe { await_one(fut) }, Ok(crate::value::NIL_BITS as i64));
+        unsafe { release(fut) };
     }
 
     #[test]

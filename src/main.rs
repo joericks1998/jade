@@ -309,10 +309,22 @@ fn main() {
                 // leave it queued behind the task waiting on it.
                 .max_blocking_threads(576)
                 .build()
-                .expect("tokio runtime")
+                .unwrap_or_else(|e| {
+                    // Almost always the machine being out of threads: the
+                    // runtime creates its workers here. A bare `expect` printed
+                    // "tokio runtime" over a Rust panic trace, which tells
+                    // somebody running a `.jde` file nothing they can act on.
+                    eprintln!("jade: could not start the task runtime: {e}");
+                    eprintln!("jade: the process is at its thread limit; raise it (ulimit -u).");
+                    std::process::exit(1);
+                })
                 .block_on(run_cli(cli));
         })
-        .expect("failed to spawn the main execution thread")
+        .unwrap_or_else(|e| {
+            eprintln!("jade: could not start the main thread: {e}");
+            eprintln!("jade: the process is at its thread limit; raise it (ulimit -u).");
+            std::process::exit(1);
+        })
         .join()
         .expect("the main execution thread panicked");
 
