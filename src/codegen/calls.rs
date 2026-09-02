@@ -8,8 +8,20 @@ use super::*;
 /// `GetGlobal(name)` + `Call`). A name here is only trusted when the program
 /// never `SetGlobal`s it (so the global still holds the builtin, not a user
 /// value). Grows as more builtins are supported.
-pub(super) const LOWERABLE_BUILTINS: &[&str] =
-    &["print", "write", "str", "int", "float", "bool", "char", "len", "cancelled", "wait"];
+pub(super) const LOWERABLE_BUILTINS: &[&str] = &[
+    "print",
+    "write",
+    "str",
+    "int",
+    "float",
+    "bool",
+    "char",
+    "len",
+    "cancelled",
+    "wait",
+    "max_tasks",
+    "set_max_tasks",
+];
 
 /// The single register an instruction writes, or `None` for pure
 /// stores/control-flow. Used to invalidate builtin tracking when a register is
@@ -165,7 +177,8 @@ pub(super) fn resolve_builtin_calls(code: &[Instr]) -> HashMap<usize, BuiltinCal
                         }
                         // The task running here, so nothing to take.
                         "cancelled" => args.is_empty(),
-                        "wait" => args.len() == 1,
+                        "max_tasks" => args.is_empty(),
+                        "wait" | "set_max_tasks" => args.len() == 1,
                         _ => false,
                     };
                     if ok {
@@ -856,7 +869,8 @@ pub(super) fn resolve_user_calls(
                                     }
                                     // The task running here, so nothing to take.
                                     "cancelled" => args.is_empty(),
-                                    "wait" => args.len() == 1,
+                                    "max_tasks" => args.is_empty(),
+                                    "wait" | "set_max_tasks" => args.len() == 1,
                                     _ => false,
                                 };
                             if lowered {

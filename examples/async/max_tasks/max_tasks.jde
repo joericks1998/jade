@@ -1,0 +1,83 @@
+// How many tasks run at once, and how to change it.
+//
+// A task is a real OS thread on both engines, so something has to bound how
+// many exist. That bound used to be the machine's core count, read from an
+// environment variable nobody could see from inside the program. Now it is two
+// ordinary globals, and the answer is the same on a laptop and a build server.
+
+use std::time
+
+print(max_tasks())
+// → 32
+
+
+// The setter answers with what is actually in force, because the request is
+// clamped to 1..=512. Asking for more than the thread supply allows tells you
+// so rather than pretending.
+print(set_max_tasks(4))
+print(max_tasks())
+// → 4
+// → 4
+
+print(set_max_tasks(9999))
+print(set_max_tasks(0))
+// → 512
+// → 1
+
+
+// What the number buys: eight tasks that each sleep, run four at a time, take
+// two waves rather than one.
+async fn nap() {
+    time.sleep(0.20)
+    return 1
+}
+
+print(set_max_tasks(4))
+let t0 = time.monotonic()
+let fs = []
+let i = 0
+while i < 8 {
+    fs.push(nap())
+    i = i + 1
+}
+let done = 0
+for f in fs {
+    done = done + (await f)
+}
+print(done)
+print(time.monotonic() - t0 > 0.35)
+// → 4
+// → 8
+// → true
+
+
+// Raise it and the same eight finish in one wave.
+print(set_max_tasks(16))
+let t1 = time.monotonic()
+let gs = []
+let j = 0
+while j < 8 {
+    gs.push(nap())
+    j = j + 1
+}
+let done2 = 0
+for g in gs {
+    done2 = done2 + (await g)
+}
+print(done2)
+print(time.monotonic() - t1 < 0.35)
+// → 16
+// → 8
+// → true
+
+
+// A task that awaits another does not count as running while it waits, so a
+// nested fan-out cannot deadlock against its own limit.
+async fn outer() {
+    return await nap()
+}
+
+print(set_max_tasks(1))
+print(await outer())
+// → 1
+// → 1

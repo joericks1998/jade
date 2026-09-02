@@ -231,6 +231,14 @@ void jade_time_sleep(jade_value_t w) {
 jade_value_t jade_time_after(jade_value_t w) {
     int64_t r = jrt_time_after((int64_t)w);
     if (r == -1) jrt_throw_runtime("type error: time.after");
+    /* No timer thread means no deadline will ever fire, and a timer future has
+     * no body — awaiting one would hang for the life of the process. Say so
+     * instead, and name the two things that fix it. */
+    if (r == -3)
+        jrt_throw_io(
+            "time.after: the OS refused the timer thread, so no deadline can "
+            "fire. Lower set_max_tasks(), or raise the process thread limit "
+            "(ulimit -u).");
     return (jade_value_t)r;
 }
 

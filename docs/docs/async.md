@@ -91,6 +91,32 @@ Jade's async model follows one simple rule. Calling an `async fn` starts the wor
 - *Concurrent phase.* The caller keeps running, starting more async calls or computing other values, while the async bodies work in the background.
 - *Await phase.* `await future` pauses the caller until that one task finishes, then gives back its value.
 
+## How many tasks run at once
+
+A task is a real operating system thread, so something has to bound how many exist. That bound is one number, and a program can read it and change it.
+
+```jade
+print(max_tasks())        // 32, the default
+
+set_max_tasks(8)
+print(max_tasks())        // 8
+```
+
+The default is 32 on every machine. A task usually spends its time waiting on a model or a socket rather than using a core, so the number is not tied to how many cores you have, and a fan-out takes the same number of waves on a laptop as on a build server.
+
+`set_max_tasks` answers with the value that actually took effect, because a request outside `1` to `512` is clamped rather than refused.
+
+```jade
+print(set_max_tasks(9999))   // 512
+print(set_max_tasks(0))      // 1
+```
+
+Raising the limit is worth it when your tasks mostly wait. Sixteen requests against a slow server finish in one wave at the default and in two waves at `set_max_tasks(8)`. Lowering it is worth it when a service you call cannot take the load, which is what the number is really for.
+
+A task that is waiting inside `await` does not count against the limit, so a task that awaits another cannot deadlock against it even at `set_max_tasks(1)`.
+
+Both engines obey the same number. `jade run` and a binary from `jade build` run the same fan-out the same number of tasks at a time.
+
 ## No shared mutation
 
 Tasks in Jade run on a *shared heap*, so two tasks can see the same array or the same struct. That makes passing data around cheap, and it also makes a data race possible. The compiler refuses the race outright.
@@ -277,6 +303,8 @@ Printing a future is allowed. It shows as `<future>`, because it has no meaningf
 | `NotAFuture` | Runtime | `await` applied to a non-future whose type the compiler could not see ahead of time |
 | `DoubleAwait` | Runtime | The same future was awaited or joined more than once. The first await consumes it |
 | `AsyncPanic` | Runtime | A spawned async task panicked internally; the panic message and source span are captured and reported |
+| `ArityMismatch` | Runtime | `max_tasks()` was given an argument, or `set_max_tasks` was given none or more than one |
+| `RuntimeError` from `time.after` | Runtime | The OS refused the timer thread, so no deadline could fire. Lower `set_max_tasks()` or raise the process thread limit |
 | `PromptOverflow` | Runtime | Inside an async task, a typed dereference produced a reply that would not coerce to the target type. The same rule applies in synchronous code |
 | `InferenceError` | Runtime | The inference provider failed inside an async task. The error passes to the awaiting call site |
 

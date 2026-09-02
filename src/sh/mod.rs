@@ -48,7 +48,7 @@ fn sh_exec(args: &[VmValue]) -> Result<VmValue> {
     }
     refuse_if_tainted(args, 0, "sh.exec(cmd)")?;
     let cmd = require_str(args, 0, "sh.exec")?;
-    jade_runtime::shf::exec(cmd)
+    crate::vm::async_tasks::blocking(|| jade_runtime::shf::exec(cmd))
         .map(|s| VmValue::Str(JStr::tainted(s)))
         .map_err(|message| JadeError::IoError { message, span: ZERO })
 }
@@ -60,7 +60,7 @@ fn sh_run(args: &[VmValue]) -> Result<VmValue> {
     }
     refuse_if_tainted(args, 0, "sh.run(cmd)")?;
     let cmd = require_str(args, 0, "sh.run")?;
-    jade_runtime::shf::run(cmd)
+    crate::vm::async_tasks::blocking(|| jade_runtime::shf::run(cmd))
         .map(VmValue::Int)
         .map_err(|message| JadeError::IoError { message, span: ZERO })
 }
@@ -79,8 +79,9 @@ fn sh_output(args: &[VmValue]) -> Result<VmValue> {
     }
     refuse_if_tainted(args, 0, "sh.output(cmd)")?;
     let cmd = require_str(args, 0, "sh.output")?;
-    let (stdout, stderr, code) = jade_runtime::shf::output(cmd)
-        .map_err(|message| JadeError::IoError { message, span: ZERO })?;
+    let (stdout, stderr, code) =
+        crate::vm::async_tasks::blocking(|| jade_runtime::shf::output(cmd))
+            .map_err(|message| JadeError::IoError { message, span: ZERO })?;
     let mut map = DictObj::new();
     map.insert("stdout".to_string(), VmValue::Str(stdout.into()));
     map.insert("stderr".to_string(), VmValue::Str(stderr.into()));

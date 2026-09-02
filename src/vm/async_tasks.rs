@@ -48,11 +48,119 @@ pub fn completions() -> &'static tokio::sync::Notify {
     N.get_or_init(tokio::sync::Notify::new)
 }
 
+// ── How many tasks run at once ───────────────────────────────────────────────
+//
+// The limit itself lives in `jade_runtime::task`, because a compiled binary
+// obeys the same number through its own worker pool. What differs is how it is
+// enforced. The pool *is* the limit over there: a task runs when a worker picks
+// it up. Here there is no pool to size, so the count is kept by hand and the
+// limit is consulted on every decision — `set_max_tasks` has to take effect on
+// the next task rather than the next run, and a fixed set of semaphore permits
+// could not be resized to match.
+
+/// Tasks running right now.
+static RUNNING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Signalled whenever a slot is given back, so a task waiting for one rechecks.
+fn slots() -> &'static tokio::sync::Notify {
+    static N: std::sync::OnceLock<tokio::sync::Notify> = std::sync::OnceLock::new();
+    N.get_or_init(tokio::sync::Notify::new)
+}
+
+tokio::task_local! {
+    /// Whether the task running here is holding a slot.
+    ///
+    /// A task-local rather than a value threaded through the interpreter,
+    /// because the thing that has to give a slot back is `await`, dispatched
+    /// deep inside the instruction loop. It cannot be a *thread*-local: a task
+    /// may resume on a different worker after every await point, so the flag has
+    /// to follow the task rather than the thread that happens to be running it.
+    static HOLDS_SLOT: Arc<std::sync::atomic::AtomicBool>;
+}
+
+/// Whether this task holds a slot, and set it either way. False outside a task.
+fn holds_slot(now: bool) -> bool {
+    HOLDS_SLOT.try_with(|h| h.swap(now, std::sync::atomic::Ordering::AcqRel)).unwrap_or(false)
+}
+
+/// Take a slot, waiting for one if the limit is already reached.
+async fn take_slot() {
+    loop {
+        // Registered *before* the check, so a slot released between the two
+        // still wakes this waiter rather than leaving it parked on an event it
+        // already missed. Same reason `wait` builds its `notified` first.
+        let freed = slots().notified();
+        tokio::pin!(freed);
+        freed.as_mut().enable();
+        let n = RUNNING.load(std::sync::atomic::Ordering::Acquire);
+        if n < jade_runtime::task::max_tasks()
+            && RUNNING
+                .compare_exchange(
+                    n,
+                    n + 1,
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                )
+                .is_ok()
+        {
+            return;
+        }
+        freed.await;
+    }
+}
+
+/// Give a slot back.
+fn give_slot() {
+    RUNNING.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    slots().notify_waiters();
+}
+
+/// Run `f` without holding a slot, because a parked task is not a running one.
+///
+/// This is what keeps the limit from deadlocking a program that awaits inside a
+/// task. At `set_max_tasks(1)`, a task that awaits a second task holds the only
+/// slot, and the child can never start; releasing it across the wait means every
+/// slot holder is always making progress toward giving one back. It mirrors the
+/// compiled pool's `blocked` count, which excludes parked threads from the same
+/// limit for the same reason.
+pub(crate) async fn parked<F: std::future::Future>(f: F) -> F::Output {
+    if !holds_slot(false) {
+        // The top level holds no slot: it is not a task.
+        return f.await;
+    }
+    give_slot();
+    let out = f.await;
+    take_slot().await;
+    holds_slot(true);
+    out
+}
+
+/// Releases a task's slot however its body ends, a panic included.
+struct SlotGuard(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for SlotGuard {
+    fn drop(&mut self) {
+        if self.0.swap(false, std::sync::atomic::Ordering::AcqRel) {
+            give_slot();
+        }
+    }
+}
+
 /// Spawn `body` as a task and wrap it in the future the language hands back.
 ///
 /// The one place a VM task is created, so the completion signal and the
 /// task-local view of "which future am I" cannot be forgotten by one caller and
 /// remembered by another.
+///
+/// The body stays a runtime *task*, not a thread of its own. That is what makes
+/// a deep `await` chain cost nothing: `examples/async/deep_nesting` nests 2,000
+/// levels, and each parked level is a suspended future rather than a thread.
+/// Giving each body a blocking thread made the same fixture deadlock the moment
+/// the chain outgrew the thread pool.
+///
+/// What keeps a *blocking* task from holding a worker hostage is [`blocking`],
+/// called by the builtins that wait on the outside world. So depth costs
+/// futures and width costs threads, which is the right way round.
 pub fn spawn_task<F>(body: F) -> VmValue
 where
     F: std::future::Future<Output = TaskBundle> + Send + 'static,
@@ -63,12 +171,41 @@ where
     });
     let mine = Arc::clone(&fut);
     let handle = tokio::spawn(async move {
-        let out = CURRENT_TASK.scope(mine, body).await;
+        // Waiting for a slot happens here, not in the caller: `let f = work()`
+        // hands back a future immediately, and a spawn that blocked until the
+        // machine was free would make starting a fan-out serial.
+        take_slot().await;
+        let held = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        // Owns the slot from here on, so a body that panics still gives it back.
+        let _slot = SlotGuard(Arc::clone(&held));
+        let out = HOLDS_SLOT.scope(held, CURRENT_TASK.scope(mine, body)).await;
         completions().notify_waiters();
         out
     });
     *fut.handle.lock() = Some(handle);
     VmValue::Future(fut)
+}
+
+/// Run a call that is about to block, without holding a runtime worker hostage.
+///
+/// A Jade task is a runtime task rather than a thread, so an HTTP request or a
+/// `sleep` that simply blocked would stop the worker it landed on from running
+/// anything else. The interpreter then ran one task per core whatever `max_tasks`
+/// said, and `set_max_tasks(32)` on an eight-core laptop was a promise only the
+/// compiled engine could keep: sixteen requests took two waves under `jade run`
+/// and one from the same program built.
+///
+/// `block_in_place` is the runtime's own answer — it moves the worker's other
+/// work elsewhere for the duration. It exists only on the multi-threaded
+/// runtime, which is what `jade run` builds; the interpreter's unit tests use a
+/// current-thread one, where the call would panic and there is no worker to free
+/// anyway. So this asks before it uses it.
+pub fn blocking<T>(f: impl FnOnce() -> T) -> T {
+    use tokio::runtime::{Handle, RuntimeFlavor};
+    match Handle::try_current() {
+        Ok(h) if h.runtime_flavor() == RuntimeFlavor::MultiThread => tokio::task::block_in_place(f),
+        _ => f(),
+    }
 }
 
 tokio::task_local! {

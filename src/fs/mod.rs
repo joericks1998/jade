@@ -237,7 +237,10 @@ fn fs_read_stdin_bytes(args: &[VmValue]) -> Result<VmValue> {
     if !args.is_empty() {
         return Err(JadeError::ArityMismatch { expected: 0, got: args.len(), span: ZERO });
     }
-    jade_runtime::fsf::read_stdin_bytes()
+    // Waits on whoever is writing the pipe, so it hands its worker off. The
+    // ordinary file calls above do not: they finish at disk speed, and paying
+    // `block_in_place` per call would tax a read loop for nothing.
+    crate::vm::async_tasks::blocking(jade_runtime::fsf::read_stdin_bytes)
         .map(|d| crate::builtins::make_bytes(d, jade_runtime::trust::TAINTED))
         .map_err(|e| io_err("read_stdin_bytes", "<stdin>", e))
 }

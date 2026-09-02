@@ -47,6 +47,12 @@ Cancelled outranks a result that arrived anyway. The caller said it had stopped 
 
 *Not a guarantee about the next instant.* False means "not yet", not "not soon". Nothing here promises a task will still be unfinished by the time the caller acts on the answer, which is the ordinary property of asking about another thread.
 
+## Where the rest of the async surface lives
+
+Nothing about running tasks is a package, and this module is one piece of that. `async fn` and `await` are keywords, `join` is an opcode, `f.ready()` and `f.cancel()` are here, and `cancelled()`, `wait()`, `max_tasks()`, and `set_max_tasks()` are bare globals in `src/core/`. A program never imports anything to use tasks.
+
+`max_tasks` and `set_max_tasks` are the newest of those and the only ones that are not about a single future: they say how many tasks may run at once, defaulting to 32. See `src/core/README.md` for what the number means and `src/runtime/README.md` for how each engine enforces it.
+
 ## Why there is no package form
 
 Every other primitive method has one: `s.upper()` is `string.upper(s)`, and `src/builtins/README.md` makes registering both a rule. That rule is about *package* functions, which have a receiver-first spelling to mirror. A future is not a package and has no other functions, so a `std/future` holding one name would be a package invented for the symmetry rather than for anything a program wants to import.

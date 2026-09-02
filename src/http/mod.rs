@@ -72,9 +72,11 @@ fn http_get_bytes(args: &[VmValue]) -> Result<VmValue> {
     }
     let url = require_str_owned(args, 0, "http.get_bytes")?;
     let headers = extract_headers(args.get(1))?;
-    jade_runtime::httpf::request_bytes("GET", &url, None, &headers)
-        .map(|(status, body)| make_bytes_response(status as u16, body))
-        .map_err(|message| JadeError::IoError { message, span: ZERO })
+    crate::vm::async_tasks::blocking(|| {
+        jade_runtime::httpf::request_bytes("GET", &url, None, &headers)
+    })
+    .map(|(status, body)| make_bytes_response(status as u16, body))
+    .map_err(|message| JadeError::IoError { message, span: ZERO })
 }
 
 /// `http.post_bytes(url, body[, headers])` — send raw octets.
@@ -97,9 +99,11 @@ fn http_post_bytes(args: &[VmValue]) -> Result<VmValue> {
         None => return Err(JadeError::ArityMismatch { expected: 2, got: args.len(), span: ZERO }),
     };
     let headers = extract_headers(args.get(2))?;
-    jade_runtime::httpf::request_bytes("POST", &url, Some(&body), &headers)
-        .map(|(status, b)| make_bytes_response(status as u16, b))
-        .map_err(|message| JadeError::IoError { message, span: ZERO })
+    crate::vm::async_tasks::blocking(|| {
+        jade_runtime::httpf::request_bytes("POST", &url, Some(&body), &headers)
+    })
+    .map(|(status, b)| make_bytes_response(status as u16, b))
+    .map_err(|message| JadeError::IoError { message, span: ZERO })
 }
 
 enum HttpMethod {
@@ -119,9 +123,11 @@ fn execute(url: String, method: HttpMethod, headers: Vec<(String, String)>) -> R
         HttpMethod::Delete => ("DELETE", None),
         HttpMethod::Head => ("HEAD", None),
     };
-    jade_runtime::httpf::request(m, &url, body.as_deref(), &headers)
-        .map(|(status, body)| make_response(status as u16, body))
-        .map_err(|message| JadeError::IoError { message, span: ZERO })
+    crate::vm::async_tasks::blocking(|| {
+        jade_runtime::httpf::request(m, &url, body.as_deref(), &headers)
+    })
+    .map(|(status, body)| make_response(status as u16, body))
+    .map_err(|message| JadeError::IoError { message, span: ZERO })
 }
 
 fn http_get(args: &[VmValue]) -> Result<VmValue> {

@@ -1509,7 +1509,7 @@ pub(crate) async fn execute_chunk(
                         let handle = vm_try!(
                             jade_fut.handle.lock().take().ok_or(JadeError::DoubleAwait { span })
                         );
-                        let join_result = handle.await;
+                        let join_result = async_tasks::parked(handle).await;
                         let (task_result, child_raised) =
                             vm_try!(join_result.map_err(|e| JadeError::AsyncPanic {
                                 message: e.to_string(),
@@ -1577,7 +1577,7 @@ pub(crate) async fn execute_chunk(
                         outcomes.push(None);
                         continue;
                     };
-                    match handle.await {
+                    match async_tasks::parked(handle).await {
                         Err(e) => {
                             results.push(VmValue::Nil);
                             outcomes.push(Some(VmValue::Str(e.to_string().into())));

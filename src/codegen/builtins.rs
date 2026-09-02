@@ -25,6 +25,8 @@ pub(super) const RESERVED_BUILTINS: &[&str] = &[
     "func",
     "cancelled",
     "wait",
+    "max_tasks",
+    "set_max_tasks",
     "Grammar",
     // stdlib package globals (accessed via `use`; a bare call is invalid, but
     // reserving them keeps a stray Call from mis-lowering to an indirect call)

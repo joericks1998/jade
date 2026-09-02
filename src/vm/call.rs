@@ -418,7 +418,7 @@ pub(crate) async fn call_value_body(
                     if let Some(i) = futs.iter().position(|f| f.is_settled()) {
                         return Ok(VmValue::Int(i as i64));
                     }
-                    woken.await;
+                    super::async_tasks::parked(woken).await;
                 }
             }
             NativeFnId::UhttpStream => {

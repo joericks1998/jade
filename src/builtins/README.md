@@ -36,7 +36,7 @@ Each package is a sibling top-level module with a `mod.rs` and a `tests.rs`. Mos
 
 | Module | Import name | Notes |
 |---|---|---|
-| `src/core/` | *(globals)* | `write`, `len`, and `input`. `print` and `route` are stateful and go through `NativeFnId`. `stream` was a third until v1.2.5 removed it. |
+| `src/core/` | *(globals)* | `write`, `len`, `input`, and the three async globals `cancelled`, `max_tasks`, and `set_max_tasks`. `print` and `route` are stateful and go through `NativeFnId`. `stream` was a third until v1.2.5 removed it. |
 | `src/string/` | `std/string` | Also supplies the `str` primitive methods, such as `upper`, `split`, and `trim`. |
 | `src/array/` | `std/array` | `map` and `filter` are stateful, because they call a user function once per element. Its package functions take the *functional* style, so `array.sort(a)` returns a sorted copy while `a.sort()` sorts in place. |
 | `src/dict/` | `std/dict` | Also supplies the `dict` primitive methods. |

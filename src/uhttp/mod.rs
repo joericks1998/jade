@@ -98,7 +98,7 @@ fn execute(
     body: Option<&str>,
     headers: Vec<(String, String)>,
 ) -> Result<VmValue> {
-    uhttpf::request(method, url, body, &headers)
+    crate::vm::async_tasks::blocking(|| uhttpf::request(method, url, body, &headers))
         .map(|(status, body)| make_response(status, body))
         // Message shape matches the AOT path's `set_err` ("uhttp <METHOD>: <detail>").
         .map_err(|message| JadeError::IoError {
@@ -115,7 +115,7 @@ fn execute_bytes(
     body: Option<&[u8]>,
     headers: Vec<(String, String)>,
 ) -> Result<VmValue> {
-    uhttpf::request_bytes(method, url, body, &headers)
+    crate::vm::async_tasks::blocking(|| uhttpf::request_bytes(method, url, body, &headers))
         .map(|(status, body)| make_bytes_response(status, body))
         .map_err(|message| JadeError::IoError {
             message: format!("uhttp {method}: {message}"),
@@ -246,7 +246,9 @@ pub fn open_stream(
     uhttpf::parse_unix_url(url).map_err(|e| uhttp_io_error(&e))?;
     let (tx, rx) = mpsc::channel::<StreamEvent>(64);
     let url = url.to_string();
-    std::thread::spawn(move || {
+    // `Builder`, because `thread::spawn` unwraps: a machine out of threads would
+    // panic here rather than tell the caller what happened.
+    let pump = std::thread::Builder::new().name("jade-uhttp-stream".to_string()).spawn(move || {
         let mut stream = match uhttpf::Stream::open(&url, &headers) {
             Ok(s) => s,
             Err(e) => {
@@ -274,6 +276,12 @@ pub fn open_stream(
             }
         }
     });
+    if let Err(e) = pump {
+        return Err(uhttp_io_error(&format!(
+            "could not start the stream thread: {e}. The process is at its thread limit; \
+             lower set_max_tasks(), or raise it (ulimit -u)"
+        )));
+    }
     Ok(rx)
 }
 

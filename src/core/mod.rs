@@ -78,7 +78,9 @@ fn native_input(args: &[VmValue]) -> Result<VmValue> {
         }
     }
     let mut line = String::new();
-    std::io::stdin().read_line(&mut line).ok();
+    // Waits on a person, so it must not sit on a runtime worker. See
+    // `async_tasks::blocking` for the rule.
+    crate::vm::async_tasks::blocking(|| std::io::stdin().read_line(&mut line).ok());
     Ok(VmValue::Str(line.trim_end_matches('\n').trim_end_matches('\r').to_string().into()))
 }
 
@@ -106,6 +108,49 @@ fn native_cancelled(args: &[VmValue]) -> Result<VmValue> {
 
 pub const CANCELLED: BuiltinFn = BuiltinFn { name: "cancelled", vm_impl: native_cancelled };
 
+/// `max_tasks()` — how many tasks may run at once.
+fn native_max_tasks(args: &[VmValue]) -> Result<VmValue> {
+    if !args.is_empty() {
+        return Err(JadeError::ArityMismatch {
+            expected: 0,
+            got: args.len(),
+            span: Span { line: 0, col: 0 },
+        });
+    }
+    Ok(VmValue::Int(jade_runtime::task::max_tasks() as i64))
+}
+
+pub const MAX_TASKS: BuiltinFn = BuiltinFn { name: "max_tasks", vm_impl: native_max_tasks };
+
+/// `set_max_tasks(n)` — set how many tasks may run at once, and answer what is
+/// now in force.
+///
+/// The answer is the point rather than a courtesy: the request is clamped to
+/// `1..=512`, so a program that asks for more than the thread supply allows can
+/// see what it actually got without a second call.
+fn native_set_max_tasks(args: &[VmValue]) -> Result<VmValue> {
+    let span = Span { line: 0, col: 0 };
+    if args.len() != 1 {
+        return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span });
+    }
+    let n = match &args[0] {
+        VmValue::Int(n) => *n,
+        other => {
+            return Err(JadeError::TypeError {
+                message: format!(
+                    "set_max_tasks() expects an int, got {}",
+                    crate::vm::value_type_name(other)
+                ),
+                span,
+            });
+        }
+    };
+    Ok(VmValue::Int(jade_runtime::task::jrt_set_max_tasks(n)))
+}
+
+pub const SET_MAX_TASKS: BuiltinFn =
+    BuiltinFn { name: "set_max_tasks", vm_impl: native_set_max_tasks };
+
 // ── Type registration ─────────────────────────────────────────────────────────
 
 pub fn register_types(ctx: &mut TypeContext) {
@@ -131,6 +176,14 @@ pub fn register_types(ctx: &mut TypeContext) {
     ctx.define(
         "cancelled".to_string(),
         JadeType::Fn { params: vec![], ret: Box::new(JadeType::Bool) },
+    );
+    ctx.define(
+        "max_tasks".to_string(),
+        JadeType::Fn { params: vec![], ret: Box::new(JadeType::Int) },
+    );
+    ctx.define(
+        "set_max_tasks".to_string(),
+        JadeType::Fn { params: vec![JadeType::Int], ret: Box::new(JadeType::Int) },
     );
     ctx.define(
         "wait".to_string(),

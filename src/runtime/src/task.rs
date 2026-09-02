@@ -108,6 +108,60 @@ const HARD_MAX_WORKERS: usize = 512;
 /// not committed, so a thread that never recurses costs nothing for the room.
 const WORKER_STACK_SIZE: usize = 256 * 1024 * 1024;
 
+// ── How many tasks may run at once ───────────────────────────────────────────
+
+/// How many tasks run side by side when a program says nothing.
+///
+/// Not the core count, which is what this used to be. A Jade task is far more
+/// often waiting on a socket than saturating a core — the language's own
+/// advertised shape is a fan-out over N prompts — so sizing the limit to the
+/// machine's parallelism sized it to the wrong resource, and a laptop and a
+/// build server ran the same fan-out in a different number of waves.
+///
+/// 32 is a flat number both engines can promise. It is high enough that an
+/// ordinary fan-out finishes in one wave, and low enough to stay well under the
+/// ceiling on threads.
+pub const DEFAULT_MAX_TASKS: usize = 32;
+
+/// The live limit. Read on every scheduling decision rather than captured at
+/// startup, so `set_max_tasks` takes effect on the next task rather than the
+/// next run.
+static MAX_TASKS: AtomicUsize = AtomicUsize::new(DEFAULT_MAX_TASKS);
+
+/// How many tasks may run at once.
+pub fn max_tasks() -> usize {
+    MAX_TASKS.load(Ordering::Relaxed)
+}
+
+/// Set how many tasks may run at once, and report what is now in force.
+///
+/// The request is clamped to `1..=HARD_MAX_WORKERS` rather than refused. Zero
+/// runnable tasks is not a state a program can want, and the ceiling is a real
+/// property of the thread supply, so both ends have one honest answer to give.
+/// Returning the clamped value is what makes the clamp visible: a program that
+/// asks for 9999 can see it got 512 without a second call.
+pub fn set_max_tasks(n: usize) -> usize {
+    let effective = n.clamp(1, HARD_MAX_WORKERS);
+    MAX_TASKS.store(effective, Ordering::Relaxed);
+    effective
+}
+
+/// `max_tasks()` for a compiled program.
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_max_tasks() -> i64 {
+    max_tasks() as i64
+}
+
+/// `set_max_tasks(n)` for a compiled program, answering the effective value.
+///
+/// A negative argument clamps to 1 like any other out-of-range request. It
+/// arrives as `i64` because that is what a Jade `int` is, and saturating the
+/// cast keeps a huge value from wrapping to something small.
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_set_max_tasks(n: i64) -> i64 {
+    set_max_tasks(n.clamp(0, HARD_MAX_WORKERS as i64) as usize) as i64
+}
+
 // ── The task-body invoker ────────────────────────────────────────────────────
 
 static INVOKER: AtomicPtr<c_void> = AtomicPtr::new(core::ptr::null_mut());
@@ -301,37 +355,77 @@ struct Inner {
     /// Threads parked waiting for work.
     idle: usize,
     /// Threads inside `await`. They hold no CPU, so they do not count against
-    /// the target — see the module docs on why a fixed pool deadlocks.
+    /// the limit — see the module docs on why a fixed pool deadlocks.
     blocked: usize,
+    /// Threads inside a task body right now. This is the number `max_tasks`
+    /// bounds, and it is not the same as `workers`: the pool keeps idle threads
+    /// around for `IDLE_TIMEOUT` after a burst, so a wide fan-out followed by
+    /// `set_max_tasks(4)` leaves far more threads alive than the program now
+    /// permits to run. Bounding growth alone let all of them take work.
+    running: usize,
 }
 
 pub struct Pool {
     inner: Mutex<Inner>,
     work_cv: Condvar,
-    /// Target number of *runnable* workers.
-    target: usize,
 }
 
 static POOL: OnceLock<Pool> = OnceLock::new();
 
-/// Tasks that failed to start because the hard ceiling was reached. Surfaced by
-/// `spawn` as an error rather than silently dropped.
+/// How many times the OS refused a worker thread.
+///
+/// Not an error, and deliberately so. The work is not lost when a thread is
+/// refused: whoever awaits the future runs the body inline, so a machine out of
+/// threads runs its tasks one after another and still gets the right answer.
+/// Raising here would turn a correct-but-slow run into a failed one, and it
+/// would fail on a loaded machine and pass on an idle one, which is a poor
+/// property for something a `catch` might match.
+///
+/// It is worth *saying*, though. A program whose fan-out has quietly gone
+/// serial looks identical to one that was always slow, so [`warn_once`] prints
+/// a line the first time this happens.
 static SPAWN_FAILURES: AtomicUsize = AtomicUsize::new(0);
 
-/// The process-wide pool, sized from `JADE_MAX_TASKS` or the machine's
-/// parallelism.
+/// Say once that the machine is out of threads, on the way to the first failure.
+///
+/// Once, because the condition repeats per spawn and a program in this state is
+/// spawning constantly — a line per attempt would bury the run in its own
+/// diagnostics. To stderr, because stdout is the program's own output and this
+/// is not part of it.
+///
+/// Answers whether it printed, which is the only part of this with logic in it
+/// and the only part a test can reach: making a real `thread::spawn` fail needs
+/// a machine genuinely out of threads.
+fn warn_out_of_threads() -> bool {
+    if SPAWN_FAILURES.fetch_add(1, Ordering::Relaxed) != 0 {
+        return false;
+    }
+    eprintln!(
+        "jade: the OS refused a task thread, so tasks are now running one at a time.\n\
+         jade: lower set_max_tasks(), or raise the process thread limit (ulimit -u)."
+    );
+    true
+}
+
+thread_local! {
+    /// Whether this thread is one of the [`Inner::running`] count. Kept per
+    /// thread rather than passed around because the thread that has to give the
+    /// count back is whichever one reaches `await`, several frames inside a body
+    /// that knows nothing about the pool.
+    static COUNTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The process-wide pool. How wide it grows is [`max_tasks`], read live.
 pub fn pool() -> &'static Pool {
-    POOL.get_or_init(|| {
-        let target = std::env::var("JADE_MAX_TASKS")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|&n| n > 0)
-            .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4));
-        Pool {
-            inner: Mutex::new(Inner { queue: VecDeque::new(), workers: 0, idle: 0, blocked: 0 }),
-            work_cv: Condvar::new(),
-            target: target.min(HARD_MAX_WORKERS),
-        }
+    POOL.get_or_init(|| Pool {
+        inner: Mutex::new(Inner {
+            queue: VecDeque::new(),
+            workers: 0,
+            idle: 0,
+            blocked: 0,
+            running: 0,
+        }),
+        work_cv: Condvar::new(),
     })
 }
 
@@ -349,7 +443,7 @@ impl Pool {
                 // lost: whoever awaits it runs it inline, so a machine out of
                 // threads does the work sequentially instead of hanging.
                 st.workers -= 1;
-                SPAWN_FAILURES.fetch_add(1, Ordering::Relaxed);
+                let _ = warn_out_of_threads();
             }
         }
         drop(st);
@@ -369,11 +463,21 @@ impl Pool {
     /// Zero is also the right reading: more threads blocked than the pool has
     /// means nothing is left to run the queue, which is exactly when to grow.
     fn should_grow(&self, st: &Inner) -> bool {
-        if st.idle > 0 || st.queue.is_empty() {
+        // One idle worker used to be enough to refuse, which quietly pinned the
+        // pool at whatever width the *previous* fan-out left behind. Eight tasks
+        // submitted in a loop onto four idle workers grew to nothing: every
+        // submit saw `idle > 0`, because no worker had woken up yet, so eight
+        // tasks ran four at a time under a limit of sixteen. Comparing the whole
+        // queue against the idle count asks the question that matters, which is
+        // whether anything would sit unclaimed. It can over-create by a thread
+        // or two when workers wake mid-loop, and that is the safe direction:
+        // `max_tasks` still bounds it, and the other way is a limit the engine
+        // does not honor.
+        if st.queue.len() <= st.idle {
             return false;
         }
         let runnable = st.workers.saturating_sub(st.blocked);
-        runnable < self.target && st.workers < HARD_MAX_WORKERS
+        runnable < max_tasks() && st.workers < HARD_MAX_WORKERS
     }
 
     /// Add a worker thread, reporting whether the OS gave us one.
@@ -399,7 +503,15 @@ impl Pool {
             let Queued(fut) = {
                 let mut st = self.inner.lock().unwrap_or_else(|e| e.into_inner());
                 loop {
-                    if let Some(j) = st.queue.pop_front() {
+                    // Past the limit this thread parks as though there were no
+                    // work, and the release of a running slot wakes it. Checking
+                    // here rather than only when growing is what makes the limit
+                    // bind on threads that already exist.
+                    if st.running < max_tasks()
+                        && let Some(j) = st.queue.pop_front()
+                    {
+                        st.running += 1;
+                        COUNTED.with(|c| c.set(true));
                         break j;
                     }
                     st.idle += 1;
@@ -427,6 +539,7 @@ impl Pool {
             if let Some(job) = unsafe { (*fut).claim() } {
                 run_job(fut, job, true);
             }
+            self.stop_running();
             unsafe { release(fut) };
         }
     }
@@ -435,7 +548,12 @@ impl Pool {
     ///
     /// Spawns a replacement if that would leave queued work with nobody to run
     /// it. This is what keeps `await` chains from deadlocking a bounded pool.
-    fn enter_blocking(&'static self) {
+    fn enter_blocking(&'static self) -> bool {
+        // A thread about to park is not running a body, so it gives its slot
+        // back for the duration. Without this, `set_max_tasks(1)` plus a task
+        // that awaits another is a deadlock: the parent holds the only slot and
+        // the child can never take one.
+        let had_slot = self.stop_running();
         let mut st = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         st.blocked += 1;
         if self.should_grow(&st) {
@@ -446,14 +564,55 @@ impl Pool {
                 // lost: whoever awaits it runs it inline, so a machine out of
                 // threads does the work sequentially instead of hanging.
                 st.workers -= 1;
-                SPAWN_FAILURES.fetch_add(1, Ordering::Relaxed);
+                let _ = warn_out_of_threads();
             }
+        }
+        drop(st);
+        had_slot
+    }
+
+    /// `had_slot` is what [`Self::enter_blocking`] answered.
+    fn exit_blocking(&'static self, had_slot: bool) {
+        {
+            let mut st = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            st.blocked -= 1;
+        }
+        if had_slot {
+            self.start_running();
         }
     }
 
-    fn exit_blocking(&'static self) {
+    /// Count this thread as running a body.
+    ///
+    /// Deliberately does not wait for room. A thread reaching here has either
+    /// just been handed work under the gate above, or has finished waiting and
+    /// is resuming a body it already started; making the second case queue would
+    /// reintroduce the deadlock `enter_blocking` exists to avoid. It can leave
+    /// the count briefly over the limit, which is the same allowance an awaiter
+    /// running a body inline already has.
+    fn start_running(&'static self) {
+        if COUNTED.with(|c| c.replace(true)) {
+            return;
+        }
         let mut st = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        st.blocked -= 1;
+        st.running += 1;
+    }
+
+    /// Stop counting this thread, and wake somebody parked on the limit.
+    ///
+    /// Reports whether it gave a slot back, so a caller that parks knows whether
+    /// it owes one on the way out. The main thread never held one — it is not a
+    /// task — and must not manufacture one by resuming.
+    fn stop_running(&'static self) -> bool {
+        if !COUNTED.with(|c| c.replace(false)) {
+            return false;
+        }
+        {
+            let mut st = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            st.running -= 1;
+        }
+        self.work_cv.notify_one();
+        true
     }
 
     /// Current worker-thread count. For tests and diagnostics.
@@ -461,11 +620,8 @@ impl Pool {
         self.inner.lock().unwrap_or_else(|e| e.into_inner()).workers
     }
 
-    /// How many times the OS refused a worker thread.
-    ///
-    /// Not an error any more: the work still runs, on whichever thread awaits
-    /// it. It is worth being able to see, because a process that keeps hitting
-    /// this is running its tasks one after another and wondering why.
+    /// How many times the OS refused a worker thread. See [`SPAWN_FAILURES`]
+    /// for why that is not an error.
     pub fn spawn_failures(&self) -> usize {
         SPAWN_FAILURES.load(Ordering::Relaxed)
     }
@@ -571,13 +727,35 @@ fn timers() -> &'static Timers {
     T.get_or_init(|| Timers { pending: Mutex::new(Vec::new()), cv: Condvar::new() })
 }
 
-/// Start the timer thread once, on the first `after`.
-fn start_timer_thread() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
+/// Start the timer thread if it is not already running, reporting whether one
+/// is now there to fire deadlines.
+///
+/// Not a `Once`. A `Once` counts an *attempt*, so a machine that was briefly out
+/// of threads at the first `after` left every later `time.after` in that process
+/// waiting on a deadline nothing would ever fire — a permanent hang from a
+/// transient condition. Retrying per call costs an atomic on the common path and
+/// makes the failure recoverable.
+///
+/// The answer matters because a timer future has no body: if nothing fires it,
+/// `await` waits forever. That is why [`after`] reports the failure instead of
+/// handing back a future that can never finish.
+fn start_timer_thread() -> bool {
+    /// Set once a timer thread is actually running.
+    static RUNNING: AtomicUsize = AtomicUsize::new(0);
+    if RUNNING.load(Ordering::Acquire) == 1 {
+        return true;
+    }
+    static STARTING: Mutex<()> = Mutex::new(());
+    let _g = STARTING.lock().unwrap_or_else(|e| e.into_inner());
+    // Re-checked under the lock: another caller may have started it while this
+    // one waited.
+    if RUNNING.load(Ordering::Acquire) == 1 {
+        return true;
+    }
+    {
         let t = timers();
         // A program with no timers never creates this thread at all.
-        let _ = std::thread::Builder::new().name("jade-timer".to_string()).spawn(move || {
+        let started = std::thread::Builder::new().name("jade-timer".to_string()).spawn(move || {
             loop {
                 let mut q = t.pending.lock().unwrap_or_else(|e| e.into_inner());
                 let now = std::time::Instant::now();
@@ -607,7 +785,12 @@ fn start_timer_thread() {
                 };
             }
         });
-    });
+        if started.is_ok() {
+            RUNNING.store(1, Ordering::Release);
+            return true;
+        }
+    }
+    false
 }
 
 /// A future that finishes with nil after `secs`, with no task behind it.
@@ -615,7 +798,13 @@ fn start_timer_thread() {
 /// A negative or non-finite delay is treated as zero: the deadline is already
 /// past, which is the only reading that does not invent a wait.
 pub fn after(secs: f64) -> *mut FutureObj {
-    start_timer_thread();
+    // Null rather than a future nothing can finish. A timer future has no body,
+    // so with no thread to fire it `await` would wait for the life of the
+    // process — a hang, which is the worst way for this to fail. The caller
+    // turns it into an error a program can read.
+    if !start_timer_thread() {
+        return core::ptr::null_mut();
+    }
     let d = if secs.is_finite() && secs > 0.0 {
         std::time::Duration::from_secs_f64(secs)
     } else {
@@ -718,13 +907,13 @@ pub unsafe fn await_one(fut: *mut FutureObj) -> Result<i64, TaskError> {
         // Harmless when the caller is the main thread: it just permits one
         // extra worker while the main thread waits.
         let p = pool();
-        p.enter_blocking();
+        let had_slot = p.enter_blocking();
         let mut st = f.state.lock().unwrap_or_else(|e| e.into_inner());
         while !st.done && !st.cancelled {
             st = f.done_cv.wait(st).unwrap_or_else(|e| e.into_inner());
         }
         drop(st);
-        p.exit_blocking();
+        p.exit_blocking(had_slot);
     }
 
     let mut st = f.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -856,7 +1045,7 @@ pub unsafe fn wait_any(futs: &[*mut FutureObj]) -> i32 {
     let p = pool();
     // Announced for the same reason `await` announces: this thread may be one of
     // the pool's own, and it is about to hold none of the CPU it was counted for.
-    p.enter_blocking();
+    let had_slot = p.enter_blocking();
     let mut seen = c.lock.lock().unwrap_or_else(|e| e.into_inner());
     loop {
         for (i, &f) in futs.iter().enumerate() {
@@ -864,7 +1053,7 @@ pub unsafe fn wait_any(futs: &[*mut FutureObj]) -> i32 {
             if st.done || st.cancelled {
                 drop(st);
                 drop(seen);
-                p.exit_blocking();
+                p.exit_blocking(had_slot);
                 return i as i32;
             }
         }
@@ -1168,7 +1357,13 @@ pub extern "C" fn jrt_future_ready(word: i64) -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_time_after(word: i64) -> i64 {
     match crate::timef::seconds_of(word) {
-        Some(secs) => JadeValue::from_ptr(after(secs) as *const ()).bits() as i64,
+        Some(secs) => {
+            let fut = after(secs);
+            if fut.is_null() {
+                return NO_TIMER_THREAD;
+            }
+            JadeValue::from_ptr(fut as *const ()).bits() as i64
+        }
         None => NOT_A_NUMBER,
     }
 }
@@ -1176,6 +1371,11 @@ pub extern "C" fn jrt_time_after(word: i64) -> i64 {
 /// `jrt_time_after`'s answer for an argument that is not a number. An odd word
 /// with the immediate tag, so it can never be mistaken for a real future.
 pub const NOT_A_NUMBER: i64 = -1;
+
+/// `jrt_time_after`'s answer when the OS refused the timer thread. Distinct from
+/// [`NOT_A_NUMBER`] because the two need different messages: one is a mistake in
+/// the program, the other is the machine being out of threads.
+pub const NO_TIMER_THREAD: i64 = -3;
 
 /// Stop waiting for a tagged word. `NOT_A_FUTURE` if it is not one.
 #[unsafe(no_mangle)]
@@ -1390,7 +1590,119 @@ mod tests {
         }
     }
 
-    /// Peak simultaneous execution should track the pool target rather than the
+    /// Puts the limit back however the test ends, so one that fails mid-way
+    /// does not leave every later test running under its number.
+    struct RestoreMaxTasks(usize);
+
+    impl Drop for RestoreMaxTasks {
+        fn drop(&mut self) {
+            set_max_tasks(self.0);
+        }
+    }
+
+    fn with_max_tasks(n: usize) -> RestoreMaxTasks {
+        let prev = max_tasks();
+        set_max_tasks(n);
+        RestoreMaxTasks(prev)
+    }
+
+    /// The warning has to be once per process. The condition repeats per spawn,
+    /// and a program in this state is spawning constantly, so a line per attempt
+    /// would bury the run in its own diagnostics.
+    ///
+    /// This is as close as a test gets to the real thing: making `thread::spawn`
+    /// fail needs a machine actually out of threads, which is not something to
+    /// arrange from inside the suite.
+    #[test]
+    fn the_out_of_threads_warning_is_printed_once() {
+        let _g = exclusive();
+        let before = pool().spawn_failures();
+        // Only the very first failure in the process prints. Any earlier test
+        // that hit one would have taken that turn, so the first call here is
+        // only expected to print when the count is still zero.
+        assert_eq!(warn_out_of_threads(), before == 0);
+        assert!(!warn_out_of_threads(), "a second failure must stay quiet");
+        assert!(!warn_out_of_threads());
+        assert_eq!(pool().spawn_failures(), before + 3, "every failure still counts");
+    }
+
+    /// The timer thread has to be startable more than once in a process's life.
+    /// It used to be a `Once`, which counted the *attempt*: a machine briefly
+    /// out of threads at the first `after` left every later `time.after` waiting
+    /// on a deadline nothing would fire, turning a transient condition into a
+    /// permanent hang.
+    #[test]
+    fn the_timer_thread_answers_whether_it_is_running() {
+        let _g = exclusive();
+        assert!(start_timer_thread(), "the timer thread should start");
+        assert!(start_timer_thread(), "asking again should find the running one");
+    }
+
+    /// A deadline that cannot be armed must not come back as a future, because a
+    /// timer future has no body and awaiting one would never return. The null is
+    /// what `jrt_time_after` turns into a sentinel the C forwarder can throw on.
+    #[test]
+    fn after_hands_back_a_real_future_when_the_timer_is_running() {
+        let _g = exclusive();
+        let fut = after(0.01);
+        assert!(!fut.is_null(), "a timer that armed must produce a future");
+        // An int word is the simplest thing `seconds_of` accepts, and zero
+        // seconds is a deadline already past.
+        let armed = jrt_time_after(JadeValue::from_int(0).bits() as i64);
+        assert_ne!(armed, NO_TIMER_THREAD, "the timer is running, so this must arm");
+        assert_ne!(armed, NOT_A_NUMBER);
+        assert_eq!(unsafe { await_one(fut) }, Ok(crate::value::NIL_BITS as i64));
+        unsafe { release(fut) };
+    }
+
+    #[test]
+    fn the_limit_starts_at_the_documented_default() {
+        let _g = exclusive();
+        assert_eq!(DEFAULT_MAX_TASKS, 32);
+        assert_eq!(max_tasks(), DEFAULT_MAX_TASKS, "something changed the limit and left it");
+    }
+
+    /// Both ends clamp rather than refuse, and the answer is what was set. A
+    /// caller that asks for more than the thread supply allows has to be able to
+    /// see that without a second call.
+    #[test]
+    fn set_max_tasks_clamps_and_answers_with_what_took_effect() {
+        let _g = exclusive();
+        let _restore = with_max_tasks(DEFAULT_MAX_TASKS);
+
+        assert_eq!(set_max_tasks(8), 8);
+        assert_eq!(max_tasks(), 8);
+
+        assert_eq!(set_max_tasks(0), 1, "zero runnable tasks is not a state to allow");
+        assert_eq!(set_max_tasks(9999), HARD_MAX_WORKERS);
+        assert_eq!(max_tasks(), HARD_MAX_WORKERS);
+
+        // The C entry takes the same path, negatives included.
+        assert_eq!(jrt_set_max_tasks(-5), 1);
+        assert_eq!(jrt_max_tasks(), 1);
+    }
+
+    /// The limit has to bound what actually runs, not merely be stored.
+    #[test]
+    fn the_limit_bounds_peak_concurrency() {
+        let _g = exclusive();
+        let _restore = with_max_tasks(2);
+        CONCURRENT.store(0, Ordering::SeqCst);
+        PEAK.store(0, Ordering::SeqCst);
+        let futs: Vec<_> = (0..24).map(|_| spawn(observe_concurrency, vec![], false)).collect();
+        for &f in &futs {
+            let _ = unsafe { await_one(f) };
+        }
+        // Awaiting runs a task inline when nobody has claimed it, so the waiter
+        // is one more runner than the pool itself would allow.
+        let peak = PEAK.load(Ordering::SeqCst);
+        assert!(peak <= 3, "24 tasks peaked at {peak} under a limit of 2");
+        for f in futs {
+            unsafe { release(f) };
+        }
+    }
+
+    /// Peak simultaneous execution should track `max_tasks` rather than the
     /// number of queued tasks.
     #[test]
     fn concurrency_is_bounded_not_serialized() {
@@ -1427,7 +1739,7 @@ mod tests {
     #[test]
     fn nested_await_does_not_deadlock_a_bounded_pool() {
         let _g = exclusive();
-        // Comfortably more outer tasks than any plausible pool target, so the
+        // Comfortably more outer tasks than any plausible task limit, so the
         // deadlock is certain rather than timing-dependent if compensation is
         // removed.
         const OUTER: i64 = 64;
@@ -1479,7 +1791,7 @@ mod tests {
     /// left to give the innermost body and every level above waits on it
     /// forever. It only completes because an awaiter runs the body itself when
     /// nobody else has claimed it — which is also why the depth here has to
-    /// exceed the ceiling rather than merely the target.
+    /// exceed the ceiling rather than merely the limit.
     #[test]
     fn an_await_chain_deeper_than_the_pool_still_finishes() {
         let _g = exclusive();
