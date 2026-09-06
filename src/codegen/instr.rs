@@ -407,22 +407,18 @@ pub(super) fn lower_instr<'ctx>(
             );
             Ok(false)
         }
+        // A shift is a runtime call even when both operands are statically
+        // int. The native LLVM shift is undefined for an amount of 64 or more
+        // and silently drops the bits `<<` pushes past the 63-bit range, where
+        // the VM raises `invalid shift amount` and `integer overflow`. The
+        // check is what the call buys; a shift is rare enough that the cost of
+        // making it a call is nothing.
         Shl(d, l, r) => {
-            low.store(
-                *d,
-                low.int_bitop(*l, *r, |a, c| {
-                    b.build_left_shift(a, c, "shl").map_err(|e| e.to_string())
-                })?,
-            );
+            low.store(*d, low.any2("jrt_shl_any", *l, *r));
             Ok(false)
         }
         Shr(d, l, r) => {
-            low.store(
-                *d,
-                low.int_bitop(*l, *r, |a, c| {
-                    b.build_right_shift(a, c, true, "shr").map_err(|e| e.to_string())
-                })?,
-            );
+            low.store(*d, low.any2("jrt_shr_any", *l, *r));
             Ok(false)
         }
         BitNot(d, s) => {
@@ -453,37 +449,16 @@ pub(super) fn lower_instr<'ctx>(
                 }
                 Div => low.store(*d, low.any2("jrt_div_any", *l, *r)),
                 Mod => low.store(*d, low.any2("jrt_mod_any", *l, *r)),
-                // Bitwise/shift are int-only: untag, native op, re-tag.
-                BitAnd => low.store(
-                    *d,
-                    low.int_bitop(*l, *r, |a, c| {
-                        b.build_and(a, c, "band").map_err(|e| e.to_string())
-                    })?,
-                ),
-                BitOr => low.store(
-                    *d,
-                    low.int_bitop(*l, *r, |a, c| {
-                        b.build_or(a, c, "bor").map_err(|e| e.to_string())
-                    })?,
-                ),
-                BitXor => low.store(
-                    *d,
-                    low.int_bitop(*l, *r, |a, c| {
-                        b.build_xor(a, c, "bxor").map_err(|e| e.to_string())
-                    })?,
-                ),
-                Shl => low.store(
-                    *d,
-                    low.int_bitop(*l, *r, |a, c| {
-                        b.build_left_shift(a, c, "shl").map_err(|e| e.to_string())
-                    })?,
-                ),
-                Shr => low.store(
-                    *d,
-                    low.int_bitop(*l, *r, |a, c| {
-                        b.build_right_shift(a, c, true, "shr").map_err(|e| e.to_string())
-                    })?,
-                ),
+                // Bitwise/shift are int-only, and the operands here are of
+                // unknown kind, so the runtime checks them. This used to
+                // untag both words and emit the native op regardless, so a
+                // str operand yielded a number made of its pointer bits
+                // where the VM raised `'&' requires int operands`.
+                BitAnd => low.store(*d, low.any2("jrt_band_any", *l, *r)),
+                BitOr => low.store(*d, low.any2("jrt_bor_any", *l, *r)),
+                BitXor => low.store(*d, low.any2("jrt_bxor_any", *l, *r)),
+                Shl => low.store(*d, low.any2("jrt_shl_any", *l, *r)),
+                Shr => low.store(*d, low.any2("jrt_shr_any", *l, *r)),
                 // `x in y` / `x not in y` — runtime containment (substring / array
                 // element / dict key), producing a bool word.
                 In | NotIn => {

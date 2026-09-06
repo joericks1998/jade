@@ -29,6 +29,9 @@ struct Parser {
     /// literal. Set to false while parsing `if`/`while` conditions so that
     /// `while running { … }` does not try to read `running {…}` as a struct.
     struct_literal_allowed: bool,
+    /// How many nested expressions/blocks are currently open. Bounded by
+    /// [`MAX_NESTING_DEPTH`] — see `enter`.
+    depth: usize,
 }
 
 /// Public entry point. Builds a Parser and drives it to produce a Program.
@@ -43,11 +46,38 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program> {
         loop_depth: 0,
         async_fn_depth: 0,
         struct_literal_allowed: true,
+        depth: 0,
     };
     parser.parse_program()
 }
 
 impl Parser {
+    /// Open one nesting level, or refuse if the source is deeper than
+    /// [`MAX_NESTING_DEPTH`].
+    ///
+    /// Recursive descent spends native stack per level of nesting, and the
+    /// stack running out is an abort, not an error a program can report or a
+    /// caller can catch: `jade check` on 200,000 nested parentheses used to die
+    /// with "has overflowed its stack" and no span. Every failure in this
+    /// subtree is supposed to carry a location, so the depth is bounded here
+    /// and refused like any other parse error. The guarded points are the three
+    /// places the parser re-enters itself — the expression chain
+    /// (`parse_pipe`), unary prefixes (`parse_unary`), and statement blocks
+    /// (`parse_block`) — which between them cover parenthesised expressions,
+    /// array/dict elements, call arguments, and f-string slots.
+    fn enter(&mut self) -> Result<()> {
+        if self.depth >= crate::frontend::error::MAX_NESTING_DEPTH {
+            return Err(JadeError::NestingTooDeep { span: self.peek().span });
+        }
+        self.depth += 1;
+        Ok(())
+    }
+
+    /// Close a level opened by [`Parser::enter`].
+    fn leave(&mut self) {
+        self.depth -= 1;
+    }
+
     /// Returns a reference to the token `offset` positions ahead without advancing.
     fn peek_at(&self, offset: usize) -> Option<&Token> {
         self.tokens.get(self.pos + offset)
@@ -694,6 +724,13 @@ impl Parser {
     /// Leading semicolons between statements are skipped; they can appear after
     /// any closing `}` now that `RBrace` is a line-terminator.
     fn parse_block(&mut self) -> Result<Vec<Stmt>> {
+        self.enter()?;
+        let out = self.parse_block_inner();
+        self.leave();
+        out
+    }
+
+    fn parse_block_inner(&mut self) -> Result<Vec<Stmt>> {
         self.expect(&TokenKind::LBrace)?;
         let mut stmts = Vec::new();
         loop {
@@ -1120,7 +1157,7 @@ impl Parser {
 
     /// Re-lex and re-parse the raw expression source from inside an f-string slot.
     /// Called once per `{…}` interpolation during `parse_primary` for `FStr` tokens.
-    fn parse_fstr_expr(src: &str, span: Span, fn_depth: usize) -> Result<Expr> {
+    fn parse_fstr_expr(src: &str, span: Span, fn_depth: usize, depth: usize) -> Result<Expr> {
         let sub_tokens = super::lexer::tokenize(src).map_err(|_| JadeError::UnexpectedToken {
             expected: "expression".to_string(),
             got: format!("invalid expression `{}`", src),
@@ -1133,6 +1170,10 @@ impl Parser {
             loop_depth: 0,
             async_fn_depth: 0,
             struct_literal_allowed: true,
+            // Inherited, not reset: a slot re-enters this parser, so nesting
+            // f-strings inside f-strings would otherwise get a fresh budget at
+            // every level and descend without bound.
+            depth,
         };
         sub.parse_pipe()
     }
@@ -1152,6 +1193,13 @@ impl Parser {
     /// entirely — see `parse_primary`'s `Question` arm — so the same operator
     /// had two parse paths and two meanings.
     fn parse_pipe(&mut self) -> Result<Expr> {
+        self.enter()?;
+        let out = self.parse_pipe_inner();
+        self.leave();
+        out
+    }
+
+    fn parse_pipe_inner(&mut self) -> Result<Expr> {
         let mut left = self.parse_or()?;
         while self.peek().kind == TokenKind::PipeGt {
             let span = Self::expr_span(&left);
@@ -1409,6 +1457,13 @@ impl Parser {
 
     /// Unary `~` (bitwise NOT), `!` (logical NOT), `-` (negation), `await`.
     fn parse_unary(&mut self) -> Result<Expr> {
+        self.enter()?;
+        let out = self.parse_unary_inner();
+        self.leave();
+        out
+    }
+
+    fn parse_unary_inner(&mut self) -> Result<Expr> {
         match self.peek().kind {
             TokenKind::Tilde => {
                 let span = self.peek().span;
@@ -1652,7 +1707,7 @@ impl Parser {
                     match part {
                         RawFStrPart::Literal(s) => parts.push(FStrPart::Literal(s)),
                         RawFStrPart::Expr(src) => {
-                            let expr = Self::parse_fstr_expr(&src, span, self.fn_depth)?;
+                            let expr = Self::parse_fstr_expr(&src, span, self.fn_depth, self.depth)?;
                             parts.push(FStrPart::Expr(expr));
                         }
                     }

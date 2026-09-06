@@ -14,7 +14,17 @@ use jade_runtime::trust::JStr;
 
 const ZERO: Span = Span { line: 0, col: 0 };
 
-fn json_to_vm(val: serde_json::Value) -> VmValue {
+/// Convert a parsed JSON value to a `VmValue`, tagging every string it
+/// contains with `trust`.
+///
+/// The trust is the *input's*. A model reply or an HTTP body is tainted, and
+/// pulling a field out of it does not make that field trustworthy — but this
+/// used to build every string with `.into()` (`JStr::trusted`), so
+/// `sh.exec(json.parse(reply)["cmd"])` was refused when compiled and executed
+/// under `jade run`. Parsing is the widest path from an LLM to a sink in the
+/// language, so it is the one that most needs to carry the taint. The compiled
+/// backend (`jsonf.rs`) already threaded the input's trust through.
+fn json_to_vm(val: serde_json::Value, trust: u8) -> VmValue {
     match val {
         serde_json::Value::Null => VmValue::Nil,
         serde_json::Value::Bool(b) => VmValue::Bool(b),
@@ -25,12 +35,14 @@ fn json_to_vm(val: serde_json::Value) -> VmValue {
                 VmValue::Float(n.as_f64().unwrap_or(0.0))
             }
         }
-        serde_json::Value::String(s) => VmValue::Str(s.into()),
-        serde_json::Value::Array(arr) => make_array(arr.into_iter().map(json_to_vm).collect()),
+        serde_json::Value::String(s) => VmValue::Str(JStr::with_trust(s, trust)),
+        serde_json::Value::Array(arr) => {
+            make_array(arr.into_iter().map(|v| json_to_vm(v, trust)).collect())
+        }
         serde_json::Value::Object(map) => {
             let mut d = DictObj::new();
             for (k, v) in map {
-                d.insert(k, json_to_vm(v));
+                d.insert(k, json_to_vm(v, trust));
             }
             VmValue::dict(d)
         }
@@ -63,13 +75,13 @@ fn json_parse(args: &[VmValue]) -> Result<VmValue> {
     if args.len() != 1 {
         return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: ZERO });
     }
-    let s = match &args[0] {
-        VmValue::Str(s) => s.as_str(),
+    let (s, trust) = match &args[0] {
+        VmValue::Str(s) => (s.as_str(), s.trust()),
         _ => return Err(JadeError::TypeError { message: "json.parse".to_string(), span: ZERO }),
     };
     let val: serde_json::Value = serde_json::from_str(s)
         .map_err(|e| JadeError::IoError { message: format!("json.parse: {}", e), span: ZERO })?;
-    Ok(json_to_vm(val))
+    Ok(json_to_vm(val, trust))
 }
 
 fn json_stringify(args: &[VmValue]) -> Result<VmValue> {

@@ -97,6 +97,81 @@ pub extern "C" fn jrt_core_neg(a: i64, err: *mut u32) -> i64 {
     unsafe { finish(ops::neg(JadeValue::from_bits(a as u64)), err) }
 }
 
+/// A shift amount outside `0..64`. The C forwarder unboxes the amount itself
+/// for the message.
+pub const JRT_OP_SHIFT: u32 = 5;
+
+/// Both words must be ints; write `JRT_OP_TYPE` and return 0 otherwise.
+#[inline]
+unsafe fn int_pair(a: i64, b: i64, err: *mut u32) -> Option<(i64, i64)> {
+    let (va, vb) = (JadeValue::from_bits(a as u64), JadeValue::from_bits(b as u64));
+    if va.is_int() && vb.is_int() {
+        Some((va.as_int(), vb.as_int()))
+    } else {
+        unsafe { *err = JRT_OP_TYPE };
+        None
+    }
+}
+
+/// Finish a bitwise op whose result is already a valid Jade int (`& | ^` and
+/// `>>` never leave the operands' range).
+#[inline]
+unsafe fn finish_bits(r: Option<i64>, err: *mut u32) -> i64 {
+    match r {
+        Some(v) => {
+            unsafe { *err = JRT_OP_OK };
+            JadeValue::from_int(v).bits() as i64
+        }
+        None => 0,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_core_band(a: i64, b: i64, err: *mut u32) -> i64 {
+    unsafe { finish_bits(int_pair(a, b, err).map(|(x, y)| x & y), err) }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_core_bor(a: i64, b: i64, err: *mut u32) -> i64 {
+    unsafe { finish_bits(int_pair(a, b, err).map(|(x, y)| x | y), err) }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_core_bxor(a: i64, b: i64, err: *mut u32) -> i64 {
+    unsafe { finish_bits(int_pair(a, b, err).map(|(x, y)| x ^ y), err) }
+}
+
+/// Map a shift outcome to the out-param protocol. A bad amount is
+/// `JRT_OP_SHIFT`, an out-of-range result `JRT_OP_OVERFLOW`.
+#[inline]
+unsafe fn finish_shift(r: Option<Result<i64, ops::ShiftErr>>, err: *mut u32) -> i64 {
+    match r {
+        Some(Ok(v)) => {
+            unsafe { *err = JRT_OP_OK };
+            JadeValue::from_int(v).bits() as i64
+        }
+        Some(Err(ops::ShiftErr::Amount(_))) => {
+            unsafe { *err = JRT_OP_SHIFT };
+            0
+        }
+        Some(Err(ops::ShiftErr::Overflow)) => {
+            unsafe { *err = JRT_OP_OVERFLOW };
+            0
+        }
+        None => 0,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_core_shl(a: i64, b: i64, err: *mut u32) -> i64 {
+    unsafe { finish_shift(int_pair(a, b, err).map(|(x, n)| ops::shl(x, n)), err) }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_core_shr(a: i64, b: i64, err: *mut u32) -> i64 {
+    unsafe { finish_shift(int_pair(a, b, err).map(|(x, n)| ops::shr(x, n)), err) }
+}
+
 /// Ordering `-1/0/1`; sets `*err` to `JRT_OP_TYPE` on non-numeric operands.
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_core_cmp(a: i64, b: i64, err: *mut u32) -> i32 {

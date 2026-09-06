@@ -39,7 +39,11 @@ fn path_join(args: &[VmValue]) -> Result<VmValue> {
     for i in 0..args.len() {
         segs.push(require_str(args, i, "path.join")?);
     }
-    Ok(VmValue::Str(jade_runtime::pathf::join(&segs).into()))
+    // The join is as tainted as its most tainted segment: one untrusted
+    // component is enough to steer the whole path.
+    let trust =
+        jade_runtime::trust::combine_all((0..args.len()).map(|i| str_trust(args, i)));
+    Ok(VmValue::Str(JStr::with_trust(jade_runtime::pathf::join(&segs), trust)))
 }
 
 /// `path.basename(p)` — last component of the path (filename + extension).
@@ -48,7 +52,12 @@ fn path_basename(args: &[VmValue]) -> Result<VmValue> {
         return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: ZERO });
     }
     let p = require_str(args, 0, "path.basename")?;
-    Ok(VmValue::Str(jade_runtime::pathf::basename(p).into()))
+    // Trust travels with the derived path. These used to go through `.into()`
+    // (`JStr::trusted`), so taking a tainted path apart and putting it back
+    // together laundered it, and `fs.read(path.dirname(tainted))` was accepted
+    // where `fs.read(tainted)` was refused. `path.abs` always did this
+    // correctly, and the compiled backend does it for all of them.
+    Ok(VmValue::Str(JStr::with_trust(jade_runtime::pathf::basename(p), str_trust(args, 0))))
 }
 
 /// `path.dirname(p)` — parent directory. Returns `"."` for bare filenames.
@@ -57,7 +66,12 @@ fn path_dirname(args: &[VmValue]) -> Result<VmValue> {
         return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: ZERO });
     }
     let p = require_str(args, 0, "path.dirname")?;
-    Ok(VmValue::Str(jade_runtime::pathf::dirname(p).into()))
+    // Trust travels with the derived path. These used to go through `.into()`
+    // (`JStr::trusted`), so taking a tainted path apart and putting it back
+    // together laundered it, and `fs.read(path.dirname(tainted))` was accepted
+    // where `fs.read(tainted)` was refused. `path.abs` always did this
+    // correctly, and the compiled backend does it for all of them.
+    Ok(VmValue::Str(JStr::with_trust(jade_runtime::pathf::dirname(p), str_trust(args, 0))))
 }
 
 /// `path.ext(p)` — file extension including the dot (e.g. `".rs"`), or nil.
@@ -67,7 +81,7 @@ fn path_ext(args: &[VmValue]) -> Result<VmValue> {
     }
     let p = require_str(args, 0, "path.ext")?;
     Ok(match jade_runtime::pathf::ext(p) {
-        Some(e) => VmValue::Str(e.into()),
+        Some(e) => VmValue::Str(JStr::with_trust(e, str_trust(args, 0))),
         None => VmValue::Nil,
     })
 }
@@ -78,7 +92,12 @@ fn path_stem(args: &[VmValue]) -> Result<VmValue> {
         return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span: ZERO });
     }
     let p = require_str(args, 0, "path.stem")?;
-    Ok(VmValue::Str(jade_runtime::pathf::stem(p).into()))
+    // Trust travels with the derived path. These used to go through `.into()`
+    // (`JStr::trusted`), so taking a tainted path apart and putting it back
+    // together laundered it, and `fs.read(path.dirname(tainted))` was accepted
+    // where `fs.read(tainted)` was refused. `path.abs` always did this
+    // correctly, and the compiled backend does it for all of them.
+    Ok(VmValue::Str(JStr::with_trust(jade_runtime::pathf::stem(p), str_trust(args, 0))))
 }
 
 /// `path.abs(p)` — absolute path (does not resolve symlinks, path need not exist).

@@ -1665,6 +1665,69 @@ jade_value_t jrt_pow_any(jade_value_t a, jade_value_t b) {
     return r;
 }
 
+/* ── Bitwise and shift ────────────────────────────────────────────────────
+ *
+ * Int-only, and the checks live in the shared core (jrt_core_band and
+ * friends). Codegen used to untag both words and emit the native op with no
+ * check at all, so `"x" & 1` produced a number from the string's pointer bits
+ * and `1 << 64` was undefined behaviour — a garbage word that `print` then
+ * followed as a pointer and crashed on. The interpreter raised on both. The
+ * messages below are the VM's (src/vm/ops.rs), so a caught error reads the
+ * same either way. */
+static void throw_bits_type(const char* op, jade_value_t a, jade_value_t b) {
+    char msg[128];
+    snprintf(msg, sizeof msg, "%s requires int operands, got %s and %s",
+             op, jrt_core_type_name(a), jrt_core_type_name(b));
+    throw_msg(msg);
+}
+
+static void throw_shift_err(uint32_t err, const char* op, jade_value_t b) {
+    char msg[96];
+    if (err == JRT_OP_SHIFT) {
+        snprintf(msg, sizeof msg, "invalid shift amount %lld", (long long)jrt_unbox_int(b));
+        throw_msg(msg);
+    } else if (err == JRT_OP_TYPE) {
+        snprintf(msg, sizeof msg, "%s requires int operands", op);
+        throw_msg(msg);
+    }
+    throw_op_err(err, op);
+}
+
+jade_value_t jrt_band_any(jade_value_t a, jade_value_t b) {
+    uint32_t err = JRT_OP_OK;
+    jade_value_t r = jrt_core_band(a, b, &err);
+    if (err) throw_bits_type("'&'", a, b);
+    return r;
+}
+
+jade_value_t jrt_bor_any(jade_value_t a, jade_value_t b) {
+    uint32_t err = JRT_OP_OK;
+    jade_value_t r = jrt_core_bor(a, b, &err);
+    if (err) throw_bits_type("'|'", a, b);
+    return r;
+}
+
+jade_value_t jrt_bxor_any(jade_value_t a, jade_value_t b) {
+    uint32_t err = JRT_OP_OK;
+    jade_value_t r = jrt_core_bxor(a, b, &err);
+    if (err) throw_bits_type("'^'", a, b);
+    return r;
+}
+
+jade_value_t jrt_shl_any(jade_value_t a, jade_value_t b) {
+    uint32_t err = JRT_OP_OK;
+    jade_value_t r = jrt_core_shl(a, b, &err);
+    if (err) throw_shift_err(err, "'<<'", b);
+    return r;
+}
+
+jade_value_t jrt_shr_any(jade_value_t a, jade_value_t b) {
+    uint32_t err = JRT_OP_OK;
+    jade_value_t r = jrt_core_shr(a, b, &err);
+    if (err) throw_shift_err(err, "'>>'", b);
+    return r;
+}
+
 jade_value_t jrt_neg_any(jade_value_t a) {
     uint32_t err = JRT_OP_OK;
     jade_value_t r = jrt_core_neg(a, &err);

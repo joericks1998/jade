@@ -605,17 +605,11 @@ pub(crate) async fn execute_chunk(
             }
             Instr::Shl(d, l, r) => {
                 let (a, b) = vm_try!(int2(slots, *l, *r, span));
-                if !(0..64).contains(&b) {
-                    vm_err!(JadeError::InvalidShift { amount: b, span });
-                }
-                set(slots, *d, VmValue::Int(a << b as u32));
+                set(slots, *d, vm_try!(shift_ok(jade_runtime::ops::shl(a, b), span)));
             }
             Instr::Shr(d, l, r) => {
                 let (a, b) = vm_try!(int2(slots, *l, *r, span));
-                if !(0..64).contains(&b) {
-                    vm_err!(JadeError::InvalidShift { amount: b, span });
-                }
-                set(slots, *d, VmValue::Int(a >> b as u32));
+                set(slots, *d, vm_try!(shift_ok(jade_runtime::ops::shr(a, b), span)));
             }
 
             // ── Logical ───────────────────────────────────────────────────────

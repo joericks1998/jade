@@ -105,6 +105,7 @@ fn arr_join(args: &[VmValue]) -> Result<VmValue> {
 }
 
 fn pkg_join(args: &[VmValue]) -> Result<VmValue> {
+    crate::builtins::check_pkg_arity("join", args)?;
     arr_join(args)
 }
 
@@ -138,6 +139,7 @@ fn pkg_filter(_args: &[VmValue]) -> Result<VmValue> {
 }
 
 fn pkg_sort(args: &[VmValue]) -> Result<VmValue> {
+    crate::builtins::check_pkg_arity("sort", args)?;
     match &args[0] {
         VmValue::Array(arc) => {
             let guard = arc.lock();
@@ -151,6 +153,7 @@ fn pkg_sort(args: &[VmValue]) -> Result<VmValue> {
 }
 
 fn pkg_reverse(args: &[VmValue]) -> Result<VmValue> {
+    crate::builtins::check_pkg_arity("reverse", args)?;
     match &args[0] {
         VmValue::Array(arc) => {
             let guard = arc.lock();

@@ -128,6 +128,15 @@ jade_value_t jrt_div_any(jade_value_t a, jade_value_t b);
 jade_value_t jrt_mod_any(jade_value_t a, jade_value_t b);
 jade_value_t jrt_pow_any(jade_value_t a, jade_value_t b);
 jade_value_t jrt_neg_any(jade_value_t a);
+/* Int-only bitwise and shift on tagged words, raising the VM's messages for a
+ * non-int operand, a shift amount outside 0..64, and a `<<` that overflows.
+ * Codegen routes every shift through these, typed or not: the native LLVM
+ * shift has no range check and an amount of 64 or more is undefined. */
+jade_value_t jrt_band_any(jade_value_t a, jade_value_t b);
+jade_value_t jrt_bor_any(jade_value_t a, jade_value_t b);
+jade_value_t jrt_bxor_any(jade_value_t a, jade_value_t b);
+jade_value_t jrt_shl_any(jade_value_t a, jade_value_t b);
+jade_value_t jrt_shr_any(jade_value_t a, jade_value_t b);
 int          jrt_cmp_any(jade_value_t a, jade_value_t b);
 /* jrt_cmp_any_op — as jrt_cmp_any, but `op` names the source operator ("'<'")
  * so a cross-kind failure reads like the VM's message. */
@@ -145,6 +154,7 @@ int          jrt_to_bool(jade_value_t v);
 #define JRT_OP_TYPE     ((uint32_t)2)  /* non-numeric / non-comparable operand */
 #define JRT_OP_OVERFLOW ((uint32_t)3)  /* int + - * overflowed */
 #define JRT_OP_REMZERO  ((uint32_t)4)  /* modulo by zero */
+#define JRT_OP_SHIFT    ((uint32_t)5)  /* shift amount outside 0..64 */
 
 jade_value_t jrt_core_add(jade_value_t a, jade_value_t b, uint32_t* err);
 jade_value_t jrt_core_sub(jade_value_t a, jade_value_t b, uint32_t* err);
@@ -153,6 +163,14 @@ jade_value_t jrt_core_div(jade_value_t a, jade_value_t b, uint32_t* err);
 jade_value_t jrt_core_mod(jade_value_t a, jade_value_t b, uint32_t* err);
 jade_value_t jrt_core_pow(jade_value_t a, jade_value_t b, uint32_t* err);
 jade_value_t jrt_core_neg(jade_value_t a, uint32_t* err);
+/* Int-only bitwise and shift. JRT_OP_TYPE unless both words are ints;
+ * a shift also reports JRT_OP_SHIFT for an amount outside 0..64 and
+ * JRT_OP_OVERFLOW when `<<` leaves the 63-bit range. */
+jade_value_t jrt_core_band(jade_value_t a, jade_value_t b, uint32_t* err);
+jade_value_t jrt_core_bor(jade_value_t a, jade_value_t b, uint32_t* err);
+jade_value_t jrt_core_bxor(jade_value_t a, jade_value_t b, uint32_t* err);
+jade_value_t jrt_core_shl(jade_value_t a, jade_value_t b, uint32_t* err);
+jade_value_t jrt_core_shr(jade_value_t a, jade_value_t b, uint32_t* err);
 int          jrt_core_cmp(jade_value_t a, jade_value_t b, uint32_t* err);
 int          jrt_core_eq(jade_value_t a, jade_value_t b, uint32_t* err);
 /* jrt_core_eq_total — equality for *membership*, which never raises: operands of

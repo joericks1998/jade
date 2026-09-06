@@ -124,6 +124,7 @@ macro_rules! str_op {
             }
         }
         fn $p(args: &[VmValue]) -> Result<VmValue> {
+            crate::builtins::check_pkg_arity(stringify!($core), args)?;
             $m(args)
         }
     };
@@ -138,6 +139,7 @@ macro_rules! str_op {
             }
         }
         fn $p(args: &[VmValue]) -> Result<VmValue> {
+            crate::builtins::check_pkg_arity(stringify!($core), args)?;
             $m(args)
         }
     };
@@ -158,6 +160,7 @@ fn str_is_empty(args: &[VmValue]) -> Result<VmValue> {
 }
 
 fn pkg_is_empty(args: &[VmValue]) -> Result<VmValue> {
+    crate::builtins::check_pkg_arity("is_empty", args)?;
     str_is_empty(args)
 }
 
@@ -176,6 +179,7 @@ fn str_slice(args: &[VmValue]) -> Result<VmValue> {
 }
 
 fn pkg_slice(args: &[VmValue]) -> Result<VmValue> {
+    crate::builtins::check_pkg_arity("slice", args)?;
     str_slice(args)
 }
 
@@ -189,6 +193,7 @@ fn str_repeat(args: &[VmValue]) -> Result<VmValue> {
 }
 
 fn pkg_repeat(args: &[VmValue]) -> Result<VmValue> {
+    crate::builtins::check_pkg_arity("repeat", args)?;
     str_repeat(args)
 }
 
@@ -204,6 +209,7 @@ fn str_pad_start(args: &[VmValue]) -> Result<VmValue> {
 }
 
 fn pkg_pad_start(args: &[VmValue]) -> Result<VmValue> {
+    crate::builtins::check_pkg_arity("pad_start", args)?;
     str_pad_start(args)
 }
 
@@ -218,6 +224,7 @@ fn str_pad_end(args: &[VmValue]) -> Result<VmValue> {
 }
 
 fn pkg_pad_end(args: &[VmValue]) -> Result<VmValue> {
+    crate::builtins::check_pkg_arity("pad_end", args)?;
     str_pad_end(args)
 }
 
@@ -237,6 +244,7 @@ fn str_lines(args: &[VmValue]) -> Result<VmValue> {
 }
 
 fn pkg_lines(args: &[VmValue]) -> Result<VmValue> {
+    crate::builtins::check_pkg_arity("lines", args)?;
     str_lines(args)
 }
 
@@ -272,6 +280,7 @@ pub fn find_str_method(name: &str) -> Option<BuiltinFn> {
 // ── std/string package functions (functional style, args[0] = first arg) ─────
 
 fn pkg_split(args: &[VmValue]) -> Result<VmValue> {
+    crate::builtins::check_pkg_arity("split", args)?;
     match (&args[0], args.get(1)) {
         (VmValue::Str(s), Some(VmValue::Str(sep))) => {
             let parts: Vec<VmValue> =
@@ -283,6 +292,7 @@ fn pkg_split(args: &[VmValue]) -> Result<VmValue> {
 }
 
 fn pkg_upper(args: &[VmValue]) -> Result<VmValue> {
+    crate::builtins::check_pkg_arity("upper", args)?;
     match &args[0] {
         VmValue::Str(s) => Ok(VmValue::Str(s.derive(s.to_uppercase()))),
         _ => Err(JadeError::TypeError { message: "string.upper".to_string(), span: ZERO }),
@@ -290,6 +300,7 @@ fn pkg_upper(args: &[VmValue]) -> Result<VmValue> {
 }
 
 fn pkg_lower(args: &[VmValue]) -> Result<VmValue> {
+    crate::builtins::check_pkg_arity("lower", args)?;
     match &args[0] {
         VmValue::Str(s) => Ok(VmValue::Str(s.derive(s.to_lowercase()))),
         _ => Err(JadeError::TypeError { message: "string.lower".to_string(), span: ZERO }),
@@ -297,6 +308,7 @@ fn pkg_lower(args: &[VmValue]) -> Result<VmValue> {
 }
 
 fn pkg_trim(args: &[VmValue]) -> Result<VmValue> {
+    crate::builtins::check_pkg_arity("trim", args)?;
     match &args[0] {
         VmValue::Str(s) => Ok(VmValue::Str(s.derive(s.trim()))),
         _ => Err(JadeError::TypeError { message: "string.trim".to_string(), span: ZERO }),
@@ -304,6 +316,7 @@ fn pkg_trim(args: &[VmValue]) -> Result<VmValue> {
 }
 
 fn pkg_contains(args: &[VmValue]) -> Result<VmValue> {
+    crate::builtins::check_pkg_arity("contains", args)?;
     match (&args[0], args.get(1)) {
         (VmValue::Str(s), Some(VmValue::Str(sub))) => Ok(VmValue::Bool(s.contains(sub.as_str()))),
         _ => Err(JadeError::TypeError { message: "string.contains".to_string(), span: ZERO }),
@@ -311,6 +324,7 @@ fn pkg_contains(args: &[VmValue]) -> Result<VmValue> {
 }
 
 fn pkg_replace(args: &[VmValue]) -> Result<VmValue> {
+    crate::builtins::check_pkg_arity("replace", args)?;
     match (&args[0], args.get(1), args.get(2)) {
         (VmValue::Str(s), Some(VmValue::Str(from)), Some(VmValue::Str(to))) => {
             let trust = jade_runtime::trust::combine(s.trust(), to.trust());
@@ -321,6 +335,7 @@ fn pkg_replace(args: &[VmValue]) -> Result<VmValue> {
 }
 
 fn pkg_starts_with(args: &[VmValue]) -> Result<VmValue> {
+    crate::builtins::check_pkg_arity("starts_with", args)?;
     match (&args[0], args.get(1)) {
         (VmValue::Str(s), Some(VmValue::Str(prefix))) => {
             Ok(VmValue::Bool(s.starts_with(prefix.as_str())))
@@ -330,6 +345,7 @@ fn pkg_starts_with(args: &[VmValue]) -> Result<VmValue> {
 }
 
 fn pkg_ends_with(args: &[VmValue]) -> Result<VmValue> {
+    crate::builtins::check_pkg_arity("ends_with", args)?;
     match (&args[0], args.get(1)) {
         (VmValue::Str(s), Some(VmValue::Str(suffix))) => {
             Ok(VmValue::Bool(s.ends_with(suffix.as_str())))
