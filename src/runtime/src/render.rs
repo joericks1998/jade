@@ -24,6 +24,27 @@ use crate::coll::{ArrayObj, DictObj};
 use crate::heap::{ObjHeader, ObjKind};
 use crate::value::JadeValue;
 
+/// How deep a value is rendered before the rest is elided as [`TOO_DEEP`].
+///
+/// Arrays and dicts are reference-semantic, so a value can contain itself —
+/// `let a = [1]; let b = [a]; a.push(b)` is an ordinary live value, and no
+/// cycle collector reclaims it. Rendering one used to recurse without bound:
+/// the interpreter hung (it re-locked an array it already held, which a
+/// `parking_lot` mutex answers by deadlocking) and a compiled binary ran out
+/// of stack and died on SIGSEGV. `gc::free_obj` was made iterative for exactly
+/// this reason; the renderers were not.
+///
+/// A depth bound rather than a visited set: it is one counter on a hot path, it
+/// needs no allocation, and it also covers legitimately deep values, which a
+/// visited set would still recurse through. Both engines share the constant and
+/// the marker, so a value that reaches the bound prints identically under
+/// `jade run` and `jade build` — the parity gate diffs stdout, so that is a
+/// contract and not a cosmetic choice.
+pub const MAX_DEPTH: usize = 64;
+
+/// What a value past [`MAX_DEPTH`] renders as.
+pub const TOO_DEEP: &str = "...";
+
 // ── Shared formatting primitives (called by BOTH engines) ─────────────────────
 
 /// Format an `f64` exactly as the VM's `value_to_display` does: Rust's `{}`
@@ -95,6 +116,14 @@ pub fn quote_key(k: &str) -> String {
 /// by this crate (array/dict/struct), and a `TAG_STR` word at a NUL-terminated
 /// tagged string. That is the AOT ABI invariant; violating it is UB.
 pub fn render_word(word: i64) -> String {
+    render_word_at(word, 0)
+}
+
+/// [`render_word`] at nesting depth `depth`, eliding past [`MAX_DEPTH`].
+pub fn render_word_at(word: i64, depth: usize) -> String {
+    if depth > MAX_DEPTH {
+        return TOO_DEEP.to_string();
+    }
     let v = JadeValue::from_bits(word as u64);
     if v.is_int() {
         return v.as_int().to_string();
@@ -130,12 +159,13 @@ pub fn render_word(word: i64) -> String {
     }
     if kind == ObjKind::Array as u8 {
         let a = unsafe { &*(p as *const ArrayObj<i64>) };
-        let parts: Vec<String> = a.as_slice().iter().map(|w| render_word(*w)).collect();
+        let parts: Vec<String> =
+            a.as_slice().iter().map(|w| render_word_at(*w, depth + 1)).collect();
         render_array(&parts)
     } else if kind == ObjKind::Dict as u8 {
         let d = unsafe { &*(p as *const DictObj<i64>) };
         let mut entries: Vec<(String, String)> =
-            d.entries().iter().map(|(k, w)| (k.clone(), render_word(*w))).collect();
+            d.entries().iter().map(|(k, w)| (k.clone(), render_word_at(*w, depth + 1))).collect();
         render_dict(&mut entries)
     } else if kind == ObjKind::Struct as u8 {
         // The VM renders any struct opaquely as `<struct>` (no field walk).
@@ -310,5 +340,28 @@ mod tests {
         let (w, raw) = ptr_word(Box::new(s));
         assert_eq!(render_word(w), "<struct>");
         unsafe { drop(Box::from_raw(raw)) };
+    }
+
+    /// A value that contains itself is an ordinary live value — arrays are
+    /// reference-semantic and nothing collects cycles — and rendering one used
+    /// to recurse until the stack ran out and the process died on SIGSEGV.
+    /// Bounded at `MAX_DEPTH` now, so this returns.
+    #[test]
+    fn a_self_containing_array_renders_instead_of_overflowing_the_stack() {
+        let a = Box::into_raw(Box::new(ArrayObj::<i64>::new()));
+        let word = JadeValue::from_ptr(a as *const ()).bits() as i64;
+        unsafe {
+            (*a).push(int_word(1));
+            // `a` now holds itself: the shape `let a = [1]; a.push(a)` builds.
+            (*a).push(word);
+        }
+
+        let out = render_word(word);
+        assert!(out.starts_with("[1, ["), "renders the value it can reach: {out}");
+        assert!(out.ends_with(TOO_DEEP) || out.contains(TOO_DEEP), "elides the rest: {out}");
+
+        // Reclaim the box. Its second element points back at the box itself,
+        // which `ArrayObj`'s drop does not follow — the words are plain `i64`.
+        unsafe { drop(Box::from_raw(a)) };
     }
 }

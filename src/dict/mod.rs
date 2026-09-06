@@ -74,19 +74,24 @@ pub fn find_dict_method(name: &str) -> Option<BuiltinFn> {
 // ── std/dict package functions ────────────────────────────────────────────────
 
 fn pkg_keys(args: &[VmValue]) -> Result<VmValue> {
+    crate::builtins::check_pkg_arity("keys", args)?;
     dict_keys(args)
 }
 fn pkg_values(args: &[VmValue]) -> Result<VmValue> {
+    crate::builtins::check_pkg_arity("values", args)?;
     dict_values(args)
 }
 fn pkg_has(args: &[VmValue]) -> Result<VmValue> {
+    crate::builtins::check_pkg_arity("has", args)?;
     dict_has(args)
 }
 fn pkg_get(args: &[VmValue]) -> Result<VmValue> {
+    crate::builtins::check_pkg_arity("get", args)?;
     dict_get(args)
 }
 
 fn pkg_merge(args: &[VmValue]) -> Result<VmValue> {
+    crate::builtins::check_pkg_arity("merge", args)?;
     match (&args[0], args.get(1)) {
         (VmValue::Dict(d1), Some(VmValue::Dict(d2))) => {
             let mut merged = (**d1).clone();

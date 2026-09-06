@@ -83,8 +83,16 @@ fn sh_output(args: &[VmValue]) -> Result<VmValue> {
         crate::vm::async_tasks::blocking(|| jade_runtime::shf::output(cmd))
             .map_err(|message| JadeError::IoError { message, span: ZERO })?;
     let mut map = DictObj::new();
-    map.insert("stdout".to_string(), VmValue::Str(stdout.into()));
-    map.insert("stderr".to_string(), VmValue::Str(stderr.into()));
+    // Tainted, not trusted. `sh.exec` already tagged its return this way and
+    // `src/sh/README.md` says the output of a command is tainted, but these two
+    // went through `.into()`, which is `JStr::trusted`. So the refusal that
+    // stops `sh.exec(sh.exec(x))` did not stop `sh.exec(sh.output(x).stdout)`:
+    // the interpreter ran it and a compiled binary refused it, which is the
+    // trust model failing open on the engine most likely to be running
+    // untrusted input. The compiled half (`jrt_coll_sh_output`) always tagged
+    // both TAINTED; this is the interpreter agreeing.
+    map.insert("stdout".to_string(), VmValue::Str(JStr::tainted(stdout)));
+    map.insert("stderr".to_string(), VmValue::Str(JStr::tainted(stderr)));
     map.insert("code".to_string(), VmValue::Int(code));
     Ok(VmValue::dict(map))
 }

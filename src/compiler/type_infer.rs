@@ -117,6 +117,54 @@ impl TypeContext {
         }
     }
 
+    /// Leave a block scope, carrying any binding that shadowed an outer name
+    /// back out to it.
+    ///
+    /// The emitter has no block scoping: `define_local` writes into one flat
+    /// per-function map, so a `let` inside a block rebinds the name for the
+    /// rest of the function — which is what `docs/docs/control-flow.md`
+    /// documents ("a `let` inside a loop body does not shadow, it overwrites").
+    /// The checker treated the same `let` as a shadow that ends with the block,
+    /// so after
+    ///
+    /// ```text
+    /// let x = 1
+    /// if true { let x = "s" }
+    /// return x + 1
+    /// ```
+    ///
+    /// it typed `x` as `Int` while the slot held a string. That reached the
+    /// backends as a typed `AddInt`: the interpreter raised `expected int` for
+    /// a program `jade check` had passed, and compiled code — whose typed
+    /// opcodes trust the checker rather than re-testing the tag — untagged the
+    /// string's pointer and printed arithmetic on its address.
+    ///
+    /// Only names the outer scope already knows are carried out. A name
+    /// introduced *only* inside the block stays unknown outside it: the
+    /// emitter would let it leak, but rejecting a program the runtime would
+    /// have accepted is the safe direction to differ in, and it is what the
+    /// checker has always done.
+    fn pop_block_scope(&mut self) {
+        if self.scopes.len() <= 1 {
+            return;
+        }
+        let inner = self.scopes.pop().unwrap_or_default();
+        self.dict_value_scopes.pop();
+        for (name, ty) in inner {
+            for scope in self.scopes.iter_mut().rev() {
+                if scope.contains_key(&name) {
+                    scope.insert(name.clone(), ty);
+                    break;
+                }
+            }
+            // Whatever the outer scope believed about this name's dict value
+            // type no longer follows from the binding it now has.
+            for scope in self.dict_value_scopes.iter_mut() {
+                scope.remove(&name);
+            }
+        }
+    }
+
     /// Bind `name` in the innermost (current) scope — used for `let` and fn params.
     pub fn define(&mut self, name: String, ty: JadeType) {
         // Anything that binds the name is now what the name means, so it is no
@@ -994,13 +1042,13 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
 
             ctx.push_scope();
             let tthen = check_stmts(then_body, ctx)?;
-            ctx.pop_scope();
+            ctx.pop_block_scope();
 
             let telse = match else_body {
                 Some(body) => {
                     ctx.push_scope();
                     let r = check_stmts(body, ctx)?;
-                    ctx.pop_scope();
+                    ctx.pop_block_scope();
                     Some(r)
                 }
                 None => None,
@@ -1015,7 +1063,7 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
 
             ctx.push_scope();
             let tbody = check_stmts(body, ctx)?;
-            ctx.pop_scope();
+            ctx.pop_block_scope();
 
             Ok(TStmt::While { condition: tcond, body: tbody, span: *span })
         }
@@ -1041,7 +1089,7 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
             ctx.push_scope();
             ctx.define(var.clone(), elem_ty);
             let tbody = check_stmts(body, ctx)?;
-            ctx.pop_scope();
+            ctx.pop_block_scope();
             Ok(TStmt::For { var: var.clone(), iterable: titerable, body: tbody, span: *span })
         }
 
@@ -1114,6 +1162,28 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
             {
                 ctx.assign_dict_vt(name, None);
             }
+            // An array gets the same treatment, and did not used to. Storing a
+            // value of another type makes the array heterogeneous, so a later
+            // `a[i]` is no longer the tracked element type — but `Array(Int)`
+            // stayed on the binding, so `let a = [1, 2]  a[0] = "s"
+            // print(a[0] + 1)` reached the backends as a typed `AddInt` over a
+            // string. The interpreter raised `expected int` for a program
+            // `jade check` had passed; compiled code, whose typed opcodes trust
+            // the checker rather than re-testing the tag, untagged the
+            // string's pointer and printed arithmetic on its address — a wrong
+            // answer that also leaks where the process put its heap.
+            //
+            // Widening to `Array(Unknown)` rather than erroring: a mixed array
+            // is a legal Jade value (`examples/arrays/mixed`), so the fix is to
+            // stop claiming an element type that is no longer true. Both
+            // engines then use their tag-dispatching paths, which raise
+            // properly on a mismatch.
+            if let Some(JadeType::Array(elem)) = ctx.get(name)
+                && *elem != JadeType::Unknown
+                && tval.ty != *elem
+            {
+                ctx.assign(name, JadeType::Array(Box::new(JadeType::Unknown)));
+            }
             Ok(TStmt::IndexAssign { name: name.clone(), index: tidx, value: tval, span: *span })
         }
 
@@ -1179,7 +1249,7 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
         Stmt::TryCatch { body, arms, span } => {
             ctx.push_scope();
             let tbody = check_stmts(body, ctx)?;
-            ctx.pop_scope();
+            ctx.pop_block_scope();
 
             let tarms = arms
                 .iter()
@@ -1188,7 +1258,7 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
                     // The binding variable holds the caught value; type is unknown statically.
                     ctx.define(arm.binding.clone(), JadeType::Unknown);
                     let tbody = check_stmts(&arm.body, ctx)?;
-                    ctx.pop_scope();
+                    ctx.pop_block_scope();
                     Ok(crate::compiler::tir::TCatchArm {
                         catch_type: arm.catch_type.clone(),
                         binding: arm.binding.clone(),
@@ -2313,48 +2383,97 @@ fn infer_return_type(stmts: &[TStmt]) -> JadeType {
     if let Some(elem) = infer_yield_type(stmts) {
         return JadeType::Stream(Box::new(elem));
     }
+
+    // Every path is joined, not just the first one found.
+    //
+    // This used to return the type of the first `return` it met and stop. So
+    // `fn f(c) { if c { return "s" }  return 1 }` was typed `Str`, and a caller
+    // writing `f(false) + "!"` got a `ConcatStr` over an int: the interpreter
+    // raised `expected str` at run time for a program `jade check` had passed,
+    // and the compiled backend — whose typed opcodes trust the checker rather
+    // than re-testing the tag — read the int as a pointer. A body that returns
+    // on only *some* paths had the same problem in reverse: `if c { return 1 }`
+    // was typed `Int` although it answers nil when `c` is false, which is why
+    // the fall-through below joins in `Nil`.
+    let mut found: Vec<JadeType> = Vec::new();
+    collect_return_types(stmts, &mut found);
+
+    // A trailing bare expression is a return — `fn double(x) { x * 2 }` is
+    // documented and the emitter turns it into `Return(Some(..))`. The checker
+    // did not look at it, so such a function was typed `Nil` and
+    // `double(5) + 1` was rejected with "got nil + int" for a program that
+    // runs correctly.
+    if let Some(TStmt::Expr(texpr)) = stmts.last() {
+        found.push(texpr.ty.clone());
+    } else if !always_returns(stmts) {
+        found.push(JadeType::Nil);
+    }
+
+    join_types(found)
+}
+
+/// Every type returned anywhere in `stmts`, not descending into nested
+/// functions (whose returns are their own).
+fn collect_return_types(stmts: &[TStmt], out: &mut Vec<JadeType>) {
     for stmt in stmts {
         match stmt {
-            TStmt::Return { value: Some(texpr), .. } => return texpr.ty.clone(),
-            TStmt::Return { value: None, .. } => return JadeType::Nil,
+            TStmt::Return { value: Some(texpr), .. } => out.push(texpr.ty.clone()),
+            TStmt::Return { value: None, .. } => out.push(JadeType::Nil),
             TStmt::If { then_body, else_body, .. } => {
-                let t = infer_return_type(then_body);
-                if t != JadeType::Unknown && t != JadeType::Nil {
-                    return t;
-                }
+                collect_return_types(then_body, out);
                 if let Some(eb) = else_body {
-                    let t2 = infer_return_type(eb);
-                    if t2 != JadeType::Unknown && t2 != JadeType::Nil {
-                        return t2;
-                    }
+                    collect_return_types(eb, out);
                 }
             }
-            TStmt::While { body, .. } | TStmt::For { body, .. } => {
-                let t = infer_return_type(body);
-                if t != JadeType::Unknown && t != JadeType::Nil {
-                    return t;
-                }
-            }
+            TStmt::While { body, .. } | TStmt::For { body, .. } => collect_return_types(body, out),
             TStmt::TryCatch { body, arms, .. } => {
                 // A `return` can live in the try body or any catch arm. Without
                 // descending here the function is inferred Nil and the AOT
                 // backend emits `ret void`, discarding the value (prints `nil`).
-                let t = infer_return_type(body);
-                if t != JadeType::Unknown && t != JadeType::Nil {
-                    return t;
-                }
+                collect_return_types(body, out);
                 for arm in arms {
-                    let ta = infer_return_type(&arm.body);
-                    if ta != JadeType::Unknown && ta != JadeType::Nil {
-                        return ta;
-                    }
+                    collect_return_types(&arm.body, out);
                 }
             }
-            TStmt::FnDef { .. } | TStmt::AsyncFnDef { .. } => {} // nested fn def — do not recurse
+            // A nested definition's returns belong to it, not to this body.
+            TStmt::FnDef { .. } | TStmt::AsyncFnDef { .. } => {}
             _ => {}
         }
     }
-    JadeType::Nil
+}
+
+/// Whether control cannot fall off the end of `stmts`.
+///
+/// Deliberately conservative: only the shapes that plainly always leave count,
+/// and anything else is treated as able to fall through, which contributes
+/// `Nil` to the join and so widens the result rather than narrowing it. A loop
+/// never counts — proving `while true` has no `break` is more analysis than the
+/// answer is worth here.
+fn always_returns(stmts: &[TStmt]) -> bool {
+    stmts.iter().any(|stmt| match stmt {
+        TStmt::Return { .. } | TStmt::Raise { .. } => true,
+        TStmt::If { then_body, else_body: Some(eb), .. } => {
+            always_returns(then_body) && always_returns(eb)
+        }
+        TStmt::TryCatch { body, arms, .. } => {
+            always_returns(body) && arms.iter().all(|a| always_returns(&a.body))
+        }
+        _ => false,
+    })
+}
+
+/// Join the types a body can produce: the type itself when they all agree,
+/// `Unknown` when they do not.
+///
+/// `Unknown` is what the rest of the checker already uses for "cannot be
+/// pinned down", and it makes both engines fall back to their tag-dispatching
+/// paths — which raise a proper error on a mismatch instead of trusting a
+/// wrong answer. Same rule `infer_yield_type` applies to yields.
+fn join_types(mut types: Vec<JadeType>) -> JadeType {
+    let Some(first) = types.pop() else {
+        return JadeType::Nil;
+    };
+    if types.iter().all(|t| *t == first) { first } else { JadeType::Unknown }
 }
 
 // ── Capture analysis ─────────────────────────────────────────────────────────

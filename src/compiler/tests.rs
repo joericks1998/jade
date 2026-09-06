@@ -26,6 +26,25 @@ mod type_infer {
         infer_src(src).expect_err("expected type error")
     }
 
+    /// The inferred return type of the named top-level function.
+    fn fn_ret(p: &TProgram, name: &str) -> JadeType {
+        p.stmts
+            .iter()
+            .find_map(|s| match s {
+                TStmt::FnDef { name: n, ret_ty, .. } if n == name => Some(ret_ty.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no fn {name}"))
+    }
+
+    /// The inferred type of the named top-level `let`.
+    fn global_ty(p: &TProgram, name: &str) -> Option<JadeType> {
+        p.stmts.iter().find_map(|s| match s {
+            TStmt::Let { name: n, value, .. } if n == name => Some(value.ty.clone()),
+            _ => None,
+        })
+    }
+
     // ── Literals ──────────────────────────────────────────────────────────────
 
     #[test]
@@ -818,6 +837,79 @@ mod type_infer {
             arg(JadeType::Unknown),
         ];
         assert!(reject_handle_across_a_task(&ok).is_ok());
+    }
+
+    /// The checker used to take the type of the *first* `return` it found and
+    /// stop, so a function returning different types on different paths was
+    /// typed as whichever came first. A caller then got a typed opcode for the
+    /// wrong type — the interpreter raised at run time for a program
+    /// `jade check` had passed, and compiled code, whose typed opcodes trust
+    /// the checker rather than re-testing the tag, read the value as the type
+    /// it was told.
+    #[test]
+    fn a_function_returning_two_types_is_unknown_not_the_first_one() {
+        let p = infer_ok("fn f(c) { if c { return \"s\" }  return 1 }");
+        assert_eq!(fn_ret(&p, "f"), JadeType::Unknown);
+    }
+
+    /// A body that returns on only some paths answers nil on the others, so the
+    /// fall-through joins in too. This was typed `Int`.
+    #[test]
+    fn a_conditional_return_joins_the_fall_through() {
+        let p = infer_ok("fn f(c) { if c { return 1 } }");
+        assert_eq!(fn_ret(&p, "f"), JadeType::Unknown);
+    }
+
+    /// Every path agreeing still gives a precise type — the join must not
+    /// throw away what the checker could pin down.
+    #[test]
+    fn a_function_returning_one_type_everywhere_keeps_it() {
+        let p = infer_ok("fn f(c) { if c { return 1 }  return 2 }");
+        assert_eq!(fn_ret(&p, "f"), JadeType::Int);
+    }
+
+    /// A trailing bare expression is a return: the emitter turns it into
+    /// `Return(Some(..))` and `docs/docs/functions.md` documents it. The
+    /// checker did not look at it, so `fn double(x) { x * 2 }` was typed `Nil`
+    /// and `double(5) + 1` was rejected with "got nil + int" for a program that
+    /// runs correctly.
+    #[test]
+    fn an_implicit_return_is_typed() {
+        let p = infer_ok("fn double(x) { x * 2 }");
+        assert_ne!(fn_ret(&p, "double"), JadeType::Nil);
+        infer_ok("fn double(x) { x * 2 }\nlet y = double(5) + 1");
+    }
+
+    /// The emitter has no block scoping — a `let` inside a block rebinds the
+    /// name for the rest of the function, which is what the docs describe. The
+    /// checker treated it as a shadow that ended with the block, so it went on
+    /// typing the outer binding while the slot held the inner value.
+    #[test]
+    fn a_let_inside_a_block_rebinds_for_the_checker_too() {
+        assert!(
+            infer_src("fn f() { let x = 1\n if true { let x = \"s\" }\n return x + 1 }").is_err(),
+            "the checker must see the rebinding the emitter performs"
+        );
+        // A block that does not shadow anything leaves the outer binding alone.
+        infer_ok("fn f() { let x = 1\n if true { let y = \"s\" }\n return x + 1 }");
+    }
+
+    /// Storing another type into an array makes it heterogeneous, so the
+    /// tracked element type is no longer true. It used to stay, and `a[0] + 1`
+    /// reached the backends as a typed `AddInt` over a string.
+    #[test]
+    fn storing_a_different_type_widens_the_array_element_type() {
+        // The read after the store is `Unknown`, not the stale `Int`, so the
+        // operation goes through the tag-dispatching path and raises properly
+        // rather than being trusted. A mixed array is a legal Jade value, so
+        // widening is the fix and rejecting would not be.
+        let p = infer_ok("let a = [1, 2]\na[0] = \"s\"\nlet b = a[0]");
+        assert_eq!(global_ty(&p, "b"), Some(JadeType::Unknown));
+
+        // A store of the tracked type keeps the tracking, so ordinary code
+        // does not lose its precise element type.
+        let p = infer_ok("let a = [1, 2]\na[0] = 3\nlet b = a[0]");
+        assert_eq!(global_ty(&p, "b"), Some(JadeType::Int));
     }
 }
 

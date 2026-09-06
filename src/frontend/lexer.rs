@@ -1,3 +1,8 @@
+/// The magnitude of the smallest Jade integer: `-INT_MIN`, which is 2^62 and
+/// one past `INT_MAX`. Lexed so `-4611686018427387904` can be written; see the
+/// integer-literal arm and `parser::parse_unary`.
+pub const NEGATED_INT_MIN: i64 = -(jade_runtime::value::JadeValue::INT_MIN + 1) + 1;
+
 use super::error::{JadeError, Result, Span};
 
 /// A raw part of an f-string as produced by the lexer.
@@ -570,10 +575,24 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
                     // it so both engines accept the same programs. Parsing as
                     // i64 and then bounding gives one message for "not a
                     // number" and "too large" alike.
+                    // The bound is one *past* `INT_MAX`, not `INT_MAX`. A
+                    // literal is lexed without its sign — `-` is a separate
+                    // token the parser applies — and Jade's range is
+                    // asymmetric, so the magnitude of the smallest integer,
+                    // `INT_MIN` = -(2^62), is 2^62, which is one more than
+                    // `INT_MAX`. Bounding the bare magnitude at `INT_MAX` meant
+                    // the smallest representable integer could not be written
+                    // at all: `-4611686018427387904` was rejected as a literal
+                    // that overflows its type. So 2^62 is lexed, and
+                    // `parse_unary` folds it into `INT_MIN` when it is
+                    // negated. Anywhere else it is still refused, by
+                    // `parse_primary`.
                     let value: i64 = num_str
                         .parse()
                         .ok()
-                        .filter(|v| jade_runtime::value::JadeValue::int_fits(*v))
+                        .filter(|v| {
+                            jade_runtime::value::JadeValue::int_fits(*v) || *v == NEGATED_INT_MIN
+                        })
                         .ok_or(JadeError::LiteralOverflow {
                             span: Span { line, col: start_col },
                         })?;

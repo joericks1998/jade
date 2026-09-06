@@ -1270,6 +1270,23 @@ jade_value_t jrt_json_parse(const char* s) {
     return w;
 }
 
+/* json.stringify / stringify_pretty. Null means the value nests too deep to
+ * represent — a value that contains itself, which arrays and dicts can build
+ * and nothing collects — and the message is waiting on the channel. The VM
+ * raises on the same values, so without this a compiled binary would answer a
+ * null string that the next operation dereferences. */
+extern char* jrt_json_stringify_impl(jade_value_t word, int pretty);
+
+char* jrt_json_stringify_chunk(jade_value_t word, int pretty) {
+    char* s = jrt_json_stringify_impl(word, pretty);
+    if (!s) {
+        char* e = jrt_json_take_error();
+        if (e) { jrt_throw_io(e); jrt_str_free(e); }
+        jrt_throw_io("json.stringify: value could not be represented");
+    }
+    return s;
+}
+
 /* fs.* raising forwarders: the Rust impls (jade-runtime src/fsf.rs) record a
  * pending error instead of throwing (a longjmp must not cross a Rust frame);
  * throw it here as a catchable exception. fs.read additionally refuses a tainted
@@ -1290,6 +1307,30 @@ char* jrt_fs_read(const char* path, int32_t trust) {
  * these is an I/O failure. The wording has to match what the VM raises, because
  * a Jade program can catch it. (The message leaks on this path, exactly as the
  * fs forwarders' does — throw_msg longjmps, so nothing after it runs.) */
+/* The std/string counterpart of bytes_throw_pending: a null return from
+ * jrt_str_repeat / jrt_str_pad_* means the size was refused, and the message is
+ * waiting on the channel. Without this the null came back as a tagged string
+ * that the next operation dereferenced. */
+static char* str_or_throw(char* r, const char* fallback) {
+    if (r) return r;
+    char* e = jrt_str_take_error();
+    if (e) throw_msg(e);
+    throw_msg(fallback);
+    return NULL; /* not reached: throw_msg longjmps */
+}
+
+char* jk_str_repeat(const char* s, int64_t n) {
+    return str_or_throw(jrt_str_repeat(s, n), "str.repeat(): refused");
+}
+
+char* jk_str_pad_start(const char* s, int64_t width, const char* pad) {
+    return str_or_throw(jrt_str_pad_start(s, width, pad), "str.pad_start(): refused");
+}
+
+char* jk_str_pad_end(const char* s, int64_t width, const char* pad) {
+    return str_or_throw(jrt_str_pad_end(s, width, pad), "str.pad_end(): refused");
+}
+
 static void bytes_throw_pending(const char* fallback) {
     char* e = jrt_bytes_take_error();
     if (e) throw_msg(e);
@@ -1662,6 +1703,69 @@ jade_value_t jrt_pow_any(jade_value_t a, jade_value_t b) {
     uint32_t err = JRT_OP_OK;
     jade_value_t r = jrt_core_pow(a, b, &err);
     if (err) throw_op_err(err, "'**'");
+    return r;
+}
+
+/* ── Bitwise and shift ────────────────────────────────────────────────────
+ *
+ * Int-only, and the checks live in the shared core (jrt_core_band and
+ * friends). Codegen used to untag both words and emit the native op with no
+ * check at all, so `"x" & 1` produced a number from the string's pointer bits
+ * and `1 << 64` was undefined behaviour — a garbage word that `print` then
+ * followed as a pointer and crashed on. The interpreter raised on both. The
+ * messages below are the VM's (src/vm/ops.rs), so a caught error reads the
+ * same either way. */
+static void throw_bits_type(const char* op, jade_value_t a, jade_value_t b) {
+    char msg[128];
+    snprintf(msg, sizeof msg, "%s requires int operands, got %s and %s",
+             op, jrt_core_type_name(a), jrt_core_type_name(b));
+    throw_msg(msg);
+}
+
+static void throw_shift_err(uint32_t err, const char* op, jade_value_t b) {
+    char msg[96];
+    if (err == JRT_OP_SHIFT) {
+        snprintf(msg, sizeof msg, "invalid shift amount %lld", (long long)jrt_unbox_int(b));
+        throw_msg(msg);
+    } else if (err == JRT_OP_TYPE) {
+        snprintf(msg, sizeof msg, "%s requires int operands", op);
+        throw_msg(msg);
+    }
+    throw_op_err(err, op);
+}
+
+jade_value_t jrt_band_any(jade_value_t a, jade_value_t b) {
+    uint32_t err = JRT_OP_OK;
+    jade_value_t r = jrt_core_band(a, b, &err);
+    if (err) throw_bits_type("'&'", a, b);
+    return r;
+}
+
+jade_value_t jrt_bor_any(jade_value_t a, jade_value_t b) {
+    uint32_t err = JRT_OP_OK;
+    jade_value_t r = jrt_core_bor(a, b, &err);
+    if (err) throw_bits_type("'|'", a, b);
+    return r;
+}
+
+jade_value_t jrt_bxor_any(jade_value_t a, jade_value_t b) {
+    uint32_t err = JRT_OP_OK;
+    jade_value_t r = jrt_core_bxor(a, b, &err);
+    if (err) throw_bits_type("'^'", a, b);
+    return r;
+}
+
+jade_value_t jrt_shl_any(jade_value_t a, jade_value_t b) {
+    uint32_t err = JRT_OP_OK;
+    jade_value_t r = jrt_core_shl(a, b, &err);
+    if (err) throw_shift_err(err, "'<<'", b);
+    return r;
+}
+
+jade_value_t jrt_shr_any(jade_value_t a, jade_value_t b) {
+    uint32_t err = JRT_OP_OK;
+    jade_value_t r = jrt_core_shr(a, b, &err);
+    if (err) throw_shift_err(err, "'>>'", b);
     return r;
 }
 

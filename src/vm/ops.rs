@@ -73,6 +73,23 @@ pub(crate) fn int_ok(v: Option<i64>, span: Span) -> Result<VmValue> {
     }
 }
 
+/// Wrap a shared-core shift result as a Jade integer, or report why not.
+///
+/// The shift itself lives in `jade_runtime::ops` beside the compiled backend's
+/// `jrt_shl_any`, so `1 << 62` — one past `INT_MAX` — is an overflow on both
+/// engines rather than a value here and a wrapped word there.
+pub(crate) fn shift_ok(
+    r: core::result::Result<i64, jade_runtime::ops::ShiftErr>,
+    span: Span,
+) -> Result<VmValue> {
+    use jade_runtime::ops::ShiftErr;
+    match r {
+        Ok(v) => Ok(VmValue::Int(v)),
+        Err(ShiftErr::Amount(amount)) => Err(JadeError::InvalidShift { amount, span }),
+        Err(ShiftErr::Overflow) => Err(JadeError::IntegerOverflow { span }),
+    }
+}
+
 /// Map a shared-core error to the VM's `JadeError`, reconstructing the exact
 /// message the VM produced before it delegated (tests match on the variants).
 pub(crate) fn map_dynop_err(
@@ -253,26 +270,14 @@ pub(crate) fn eval_binop_dynamic(
             }),
         },
         Shl => match (l, r) {
-            (VmValue::Int(a), VmValue::Int(b)) => {
-                if !(0..64).contains(&b) {
-                    Err(JadeError::InvalidShift { amount: b, span })
-                } else {
-                    Ok(VmValue::Int(a << b as u32))
-                }
-            }
+            (VmValue::Int(a), VmValue::Int(b)) => shift_ok(jade_runtime::ops::shl(a, b), span),
             _ => Err(JadeError::TypeError {
                 message: "'<<' requires int operands".to_string(),
                 span,
             }),
         },
         Shr => match (l, r) {
-            (VmValue::Int(a), VmValue::Int(b)) => {
-                if !(0..64).contains(&b) {
-                    Err(JadeError::InvalidShift { amount: b, span })
-                } else {
-                    Ok(VmValue::Int(a >> b as u32))
-                }
-            }
+            (VmValue::Int(a), VmValue::Int(b)) => shift_ok(jade_runtime::ops::shr(a, b), span),
             _ => Err(JadeError::TypeError {
                 message: "'>>' requires int operands".to_string(),
                 span,

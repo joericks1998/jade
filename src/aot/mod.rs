@@ -727,19 +727,39 @@ pub fn compile_with_mode(
     // (env override → installed layout → dev tree); see `runtime_archive_dirs`.
     let (rt_lib, rust_rt) = runtime_archive_dirs();
     cc.arg(format!("-L{rt_lib}"));
-    cc.arg("-lJadeRuntime");
-    // The shared Rust runtime staticlib supplies symbols moved out of the C
-    // runtime (float boxing, ipow, …). It must come *after* -lJadeRuntime, whose
-    // members reference these symbols (static-archive left-to-right resolution).
     cc.arg(format!("-L{rust_rt}"));
-    cc.arg("-ljade_runtime");
-    // The link is now *bidirectional*: the C runtime references Rust symbols
-    // (jrt_coll_*/jrt_core_*), and — since grammar-constrained prompts — the Rust
-    // runtime references a C symbol (jrt_prompt_grammar_obj → C jrt_prompt_grammar_ex).
-    // Static-archive resolution is single-pass left-to-right on Linux, so repeat
-    // the C archive after the Rust one to close the cycle. (macOS's ld resolves
-    // all archives together and doesn't need it, but the repeat is harmless.)
-    cc.arg("-lJadeRuntime");
+    // The two runtime archives reference each other. The C runtime calls Rust
+    // symbols (jrt_coll_*/jrt_core_*), and the Rust runtime calls back into C
+    // (jrt_prompt_grammar_obj → jrt_prompt_grammar_ex).
+    //
+    // GNU ld resolves static archives in a single left-to-right pass, so a
+    // cycle needs more than an ordering. This used to spell it as
+    // `-lJadeRuntime -ljade_runtime -lJadeRuntime`, which is one pass deep and
+    // covers only a cycle that closes on the first bounce. It did not close
+    // here: the *second* -lJadeRuntime pulls in `infer.o`, whose calls to
+    // `jrt_provider_active_lib_path` and `jrt_provider_active_config` live back
+    // in the Rust archive — already past. So on Linux every `jade build` of a
+    // program that reaches the inference provider failed to link, which is
+    // every prompt dereference and every `Grammar`; the backend-parity gate
+    // reports it as two failing examples.
+    //
+    // A group is the fix rather than a third repetition: the linker re-scans
+    // the members until nothing new is needed, so the cycle closes however deep
+    // it goes and adding a call in either direction cannot reopen this.
+    #[cfg(target_os = "linux")]
+    {
+        cc.arg("-Wl,--start-group");
+        cc.arg("-lJadeRuntime");
+        cc.arg("-ljade_runtime");
+        cc.arg("-Wl,--end-group");
+    }
+    // Apple's ld has no --start-group and does not need one: it resolves all
+    // archives on the command line together.
+    #[cfg(not(target_os = "linux"))]
+    {
+        cc.arg("-lJadeRuntime");
+        cc.arg("-ljade_runtime");
+    }
     #[cfg(target_os = "linux")]
     {
         cc.arg("-lpthread");
