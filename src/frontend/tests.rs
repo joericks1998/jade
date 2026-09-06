@@ -1763,6 +1763,62 @@ mod parser {
         let Stmt::FnDef { decorators, .. } = &p.stmts[0] else { panic!() };
         assert_eq!(decorators[0].0, "tools.register");
     }
+
+    /// Parse `src` on a thread with a stack the size the real binary gives the
+    /// parser.
+    ///
+    /// `main.rs` runs every stage on a thread of `vm::VM_STACK_SIZE` (3 GiB in
+    /// a debug build, 256 MiB released) precisely because recursive descent is
+    /// stack-hungry — a debug frame chain costs roughly 15 KB per nesting
+    /// level. A default 2 MiB test thread overflows a few hundred levels in,
+    /// well before the parser's own limit, and a stack overflow aborts the
+    /// process rather than failing the test. So these run where the parser
+    /// actually runs.
+    fn parse_err_on_a_real_stack(src: String) -> JadeError {
+        std::thread::Builder::new()
+            .stack_size(crate::vm::VM_STACK_SIZE)
+            .spawn(move || parse_src_err(&src))
+            .expect("spawn")
+            .join()
+            .expect("parser must not abort")
+    }
+
+    /// Recursive descent spends native stack per nesting level, and running out
+    /// of it aborts the process — `jade check` on a file of 200,000 nested
+    /// parentheses died with "has overflowed its stack" and no span at all.
+    /// Every failure in this subtree is supposed to carry a location, so the
+    /// depth is bounded and refused like any other parse error.
+    #[test]
+    fn nesting_past_the_limit_is_an_error_and_not_a_stack_overflow() {
+        let n = crate::frontend::error::MAX_NESTING_DEPTH + 100;
+        let deep = format!("let x = {}1{}", "(".repeat(n), ")".repeat(n));
+        assert!(matches!(parse_err_on_a_real_stack(deep), JadeError::NestingTooDeep { .. }));
+
+        // Unary prefixes recurse too, and are the cheapest way in: one frame
+        // per character.
+        let unary = format!("let x = {}true", "!".repeat(n));
+        assert!(matches!(parse_err_on_a_real_stack(unary), JadeError::NestingTooDeep { .. }));
+
+        // Blocks are the third re-entry point.
+        let blocks = format!("fn f() {{ {} {} }}", "if true {".repeat(n), "}".repeat(n));
+        assert!(matches!(parse_err_on_a_real_stack(blocks), JadeError::NestingTooDeep { .. }));
+    }
+
+    /// Nesting a program can plausibly contain still parses. Runs on a real
+    /// stack for the reason `parse_err_on_a_real_stack` gives — a debug frame
+    /// chain is large enough that even a hundred levels overflows the 2 MiB a
+    /// test thread gets by default.
+    #[test]
+    fn ordinary_nesting_is_still_accepted() {
+        let ok = format!("let x = {}1{}", "(".repeat(100), ")".repeat(100));
+        let n = std::thread::Builder::new()
+            .stack_size(crate::vm::VM_STACK_SIZE)
+            .spawn(move || parse_src(&ok).stmts.len())
+            .expect("spawn")
+            .join()
+            .expect("parser must not abort");
+        assert_eq!(n, 1);
+    }
 }
 
 mod ast {

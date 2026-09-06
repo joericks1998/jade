@@ -190,6 +190,24 @@ impl std::fmt::Debug for VmValue {
 
 /// Convert a `VmValue` to its user-visible string representation.
 pub fn value_to_display(v: &VmValue) -> String {
+    value_to_display_at(v, 0)
+}
+
+/// [`value_to_display`] at nesting depth `depth`.
+///
+/// Two things keep a self-containing value from hanging the interpreter here.
+/// The bound is `jade_runtime::render::MAX_DEPTH`, shared with the compiled
+/// renderer so both engines elide at the same point and print the same text.
+/// And each collection's contents are **copied out of the lock before
+/// recursing**: holding an array's guard across the walk meant a value that
+/// contains itself re-locked a `parking_lot` mutex the same thread already
+/// held, which deadlocks rather than raising — so `print(a)` hung with no
+/// output and no way to interrupt it into an error. The copies are `Arc`
+/// clones, not deep ones.
+fn value_to_display_at(v: &VmValue, depth: usize) -> String {
+    if depth > jade_runtime::render::MAX_DEPTH {
+        return jade_runtime::render::TOO_DEEP.to_string();
+    }
     // Scalar/collection formatting rules live once in the shared runtime crate
     // (jade_runtime::render) so the VM and the AOT renderer (render_word) cannot
     // drift — same float `.0` rule, same `[a, b]` / sorted-quoted `{"k": v}`
@@ -200,13 +218,14 @@ pub fn value_to_display(v: &VmValue) -> String {
         VmValue::Bool(b) => b.to_string(),
         VmValue::Str(s) => s.to_string(),
         VmValue::Array(arc) => {
-            let guard = arc.lock();
-            let parts: Vec<String> = guard.iter().map(value_to_display).collect();
+            let items: Vec<VmValue> = arc.lock().iter().cloned().collect();
+            let parts: Vec<String> =
+                items.iter().map(|v| value_to_display_at(v, depth + 1)).collect();
             jade_runtime::render::render_array(&parts)
         }
         VmValue::Dict(m) => {
             let mut entries: Vec<(String, String)> =
-                m.iter().map(|(k, v)| (k.clone(), value_to_display(v))).collect();
+                m.iter().map(|(k, v)| (k.clone(), value_to_display_at(v, depth + 1))).collect();
             jade_runtime::render::render_dict(&mut entries)
         }
         VmValue::Fn(_) => "<fn>".to_string(),
@@ -223,7 +242,9 @@ pub fn value_to_display(v: &VmValue) -> String {
         VmValue::Future(_) => "<future>".to_string(),
         VmValue::TokenStream(_) => "<token stream>".to_string(),
         VmValue::Stream(b) => {
-            let parts: Vec<String> = b.lock().iter().map(value_to_display).collect();
+            let items: Vec<VmValue> = b.lock().iter().cloned().collect();
+            let parts: Vec<String> =
+                items.iter().map(|v| value_to_display_at(v, depth + 1)).collect();
             jade_runtime::render::render_array(&parts)
         }
         VmValue::Char(c) => c.ch().to_string(),

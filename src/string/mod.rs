@@ -185,9 +185,9 @@ fn pkg_slice(args: &[VmValue]) -> Result<VmValue> {
 
 fn str_repeat(args: &[VmValue]) -> Result<VmValue> {
     match (&args[0], args.get(1)) {
-        (VmValue::Str(s), Some(VmValue::Int(n))) => {
-            Ok(VmValue::Str(s.derive(jade_runtime::strf::repeat(s.as_str(), *n))))
-        }
+        (VmValue::Str(s), Some(VmValue::Int(n))) => jade_runtime::strf::repeat(s.as_str(), *n)
+            .map(|out| VmValue::Str(s.derive(out)))
+            .map_err(|message| JadeError::IoError { message, span: ZERO }),
         _ => Err(JadeError::TypeError { message: "str.repeat".to_string(), span: ZERO }),
     }
 }
@@ -202,7 +202,9 @@ fn pkg_repeat(args: &[VmValue]) -> Result<VmValue> {
 fn str_pad_start(args: &[VmValue]) -> Result<VmValue> {
     match (&args[0], args.get(1), args.get(2)) {
         (VmValue::Str(s), Some(VmValue::Int(w)), Some(VmValue::Str(pad))) => {
-            Ok(VmValue::Str(s.derive(jade_runtime::strf::pad_start(s.as_str(), *w, pad.as_str()))))
+            jade_runtime::strf::pad_start(s.as_str(), *w, pad.as_str())
+                .map(|out| VmValue::Str(s.derive(out)))
+                .map_err(|message| JadeError::IoError { message, span: ZERO })
         }
         _ => Err(JadeError::TypeError { message: "str.pad_start".to_string(), span: ZERO }),
     }
@@ -217,7 +219,9 @@ fn pkg_pad_start(args: &[VmValue]) -> Result<VmValue> {
 fn str_pad_end(args: &[VmValue]) -> Result<VmValue> {
     match (&args[0], args.get(1), args.get(2)) {
         (VmValue::Str(s), Some(VmValue::Int(w)), Some(VmValue::Str(pad))) => {
-            Ok(VmValue::Str(s.derive(jade_runtime::strf::pad_end(s.as_str(), *w, pad.as_str()))))
+            jade_runtime::strf::pad_end(s.as_str(), *w, pad.as_str())
+                .map(|out| VmValue::Str(s.derive(out)))
+                .map_err(|message| JadeError::IoError { message, span: ZERO })
         }
         _ => Err(JadeError::TypeError { message: "str.pad_end".to_string(), span: ZERO }),
     }

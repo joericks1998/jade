@@ -488,6 +488,23 @@ void*    jrt_bytes_encode(const unsigned char* s);
 char*    jrt_bytes_decode(const void* p);
 void*    jrt_bytes_slice(const void* p, int64_t s, int64_t e);
 char*    jrt_bytes_take_error(void);
+/* The Rust implementations the wrappers below call. Declared here because a
+ * call with no prototype in scope is assumed to return `int`, which truncates
+ * the returned pointer to 32 bits — the wrappers segfaulted on the first use of
+ * the result until these were added. */
+char*    jrt_str_repeat(const char* s, int64_t n);
+char*    jrt_str_pad_start(const char* s, int64_t width, const char* pad);
+char*    jrt_str_pad_end(const char* s, int64_t width, const char* pad);
+/* Drain the pending std/string error, or NULL. `repeat` and the two `pad_*`
+ * refuse a size that would abort the process on allocation, and report it
+ * through this channel rather than by longjmp'ing out of a Rust frame. */
+char*    jrt_str_take_error(void);
+/* repeat / pad_start / pad_end, raising the refusal the Rust side recorded.
+ * Codegen calls these rather than jrt_str_* so a refused size is a catchable
+ * Jade error instead of a null string pointer the caller then dereferences. */
+char*    jk_str_repeat(const char* s, int64_t n);
+char*    jk_str_pad_start(const char* s, int64_t width, const char* pad);
+char*    jk_str_pad_end(const char* s, int64_t width, const char* pad);
 /* Construction, added in v1.3.27. A program could not build a blob before it:
  * str.encode() cannot carry a NUL or a byte above 127 as one octet, so the only
  * blobs a program could hold were ones it read from somewhere. All three report

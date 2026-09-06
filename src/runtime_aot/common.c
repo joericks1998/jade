@@ -1290,6 +1290,30 @@ char* jrt_fs_read(const char* path, int32_t trust) {
  * these is an I/O failure. The wording has to match what the VM raises, because
  * a Jade program can catch it. (The message leaks on this path, exactly as the
  * fs forwarders' does — throw_msg longjmps, so nothing after it runs.) */
+/* The std/string counterpart of bytes_throw_pending: a null return from
+ * jrt_str_repeat / jrt_str_pad_* means the size was refused, and the message is
+ * waiting on the channel. Without this the null came back as a tagged string
+ * that the next operation dereferenced. */
+static char* str_or_throw(char* r, const char* fallback) {
+    if (r) return r;
+    char* e = jrt_str_take_error();
+    if (e) throw_msg(e);
+    throw_msg(fallback);
+    return NULL; /* not reached: throw_msg longjmps */
+}
+
+char* jk_str_repeat(const char* s, int64_t n) {
+    return str_or_throw(jrt_str_repeat(s, n), "str.repeat(): refused");
+}
+
+char* jk_str_pad_start(const char* s, int64_t width, const char* pad) {
+    return str_or_throw(jrt_str_pad_start(s, width, pad), "str.pad_start(): refused");
+}
+
+char* jk_str_pad_end(const char* s, int64_t width, const char* pad) {
+    return str_or_throw(jrt_str_pad_end(s, width, pad), "str.pad_end(): refused");
+}
+
 static void bytes_throw_pending(const char* fallback) {
     char* e = jrt_bytes_take_error();
     if (e) throw_msg(e);

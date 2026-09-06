@@ -1707,7 +1707,8 @@ impl Parser {
                     match part {
                         RawFStrPart::Literal(s) => parts.push(FStrPart::Literal(s)),
                         RawFStrPart::Expr(src) => {
-                            let expr = Self::parse_fstr_expr(&src, span, self.fn_depth, self.depth)?;
+                            let expr =
+                                Self::parse_fstr_expr(&src, span, self.fn_depth, self.depth)?;
                             parts.push(FStrPart::Expr(expr));
                         }
                     }

@@ -41,8 +41,7 @@ fn path_join(args: &[VmValue]) -> Result<VmValue> {
     }
     // The join is as tainted as its most tainted segment: one untrusted
     // component is enough to steer the whole path.
-    let trust =
-        jade_runtime::trust::combine_all((0..args.len()).map(|i| str_trust(args, i)));
+    let trust = jade_runtime::trust::combine_all((0..args.len()).map(|i| str_trust(args, i)));
     Ok(VmValue::Str(JStr::with_trust(jade_runtime::pathf::join(&segs), trust)))
 }
 
