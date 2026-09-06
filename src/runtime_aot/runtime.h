@@ -802,6 +802,9 @@ jade_value_t jrt_json_parse(const char* s);
 /* jrt_json_stringify_chunk — render an ObjHeader value word to a fresh TRUSTED
  * tagged string (compact, or 2-space pretty when pretty != 0).               */
 char*   jrt_json_stringify_chunk(jade_value_t word, int pretty);
+/* The Rust half. Returns NULL and records a pending error when the value nests
+ * too deep to represent; the wrapper above turns that into a catchable raise. */
+char*   jrt_json_stringify_impl(jade_value_t word, int pretty);
 
 /* ── Conversions ──────────────────────────────────────────────────── */
 /* jrt_bool_of_str — parse a string to a bool, matching the VM's bool():

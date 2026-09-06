@@ -33,6 +33,23 @@ print(shown.starts_with("[1, ["))
 print(len(a.join(",")) > 0)
 // → true
 
+// JSON has no way to spell a cycle, so `json.stringify` refuses rather than
+// writing a document that does not say what the value held. It used to take the
+// same lock across the same recursion and hang.
+use std::json
+
+try {
+    let out = json.stringify(a)
+    print(out)
+} catch e {
+    print("stringify refused a cyclic value")
+}
+// → stringify refused a cyclic value
+
+// Ordinary values still serialize.
+print(json.stringify([1, [2, [3]]]))
+// → [1,[2,[3]]]
+
 // Ordinary nesting is untouched.
 print([1, [2, [3]]])
 print({"k": [1, 2]})

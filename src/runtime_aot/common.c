@@ -1270,6 +1270,23 @@ jade_value_t jrt_json_parse(const char* s) {
     return w;
 }
 
+/* json.stringify / stringify_pretty. Null means the value nests too deep to
+ * represent — a value that contains itself, which arrays and dicts can build
+ * and nothing collects — and the message is waiting on the channel. The VM
+ * raises on the same values, so without this a compiled binary would answer a
+ * null string that the next operation dereferences. */
+extern char* jrt_json_stringify_impl(jade_value_t word, int pretty);
+
+char* jrt_json_stringify_chunk(jade_value_t word, int pretty) {
+    char* s = jrt_json_stringify_impl(word, pretty);
+    if (!s) {
+        char* e = jrt_json_take_error();
+        if (e) { jrt_throw_io(e); jrt_str_free(e); }
+        jrt_throw_io("json.stringify: value could not be represented");
+    }
+    return s;
+}
+
 /* fs.* raising forwarders: the Rust impls (jade-runtime src/fsf.rs) record a
  * pending error instead of throwing (a longjmp must not cross a Rust frame);
  * throw it here as a catchable exception. fs.read additionally refuses a tainted
