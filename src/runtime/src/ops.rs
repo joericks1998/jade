@@ -286,6 +286,48 @@ pub fn to_bool(v: JadeValue) -> i32 {
     unsafe { strval::bool_of(v.as_ptr() as *const u8) as i32 }
 }
 
+// ── Bitwise and shift (int-only) ────────────────────────────────────────────
+//
+// These are int-only on both engines. The compiled backend used to untag both
+// operand words and emit the native LLVM op with no check at all, so a str
+// operand shifted its pointer bits, a float its payload, and a shift amount of
+// 64 or more was undefined behaviour that in practice produced a garbage word
+// which `print` then followed as a pointer. The interpreter raised on every one
+// of those programs. Both engines now come through here.
+
+/// Why a shift was refused.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum ShiftErr {
+    /// The amount is outside `0..64`. Carries it for the message.
+    Amount(i64),
+    /// The shifted value is not a Jade integer (63-bit).
+    Overflow,
+}
+
+/// `a << n`. The amount must be in `0..64`, and the result must still fit a
+/// Jade integer: `1 << 62` is `2^62`, which is one past `INT_MAX`, so it is an
+/// overflow and not a value the compiled representation can hold. The shift is
+/// done in 128 bits so no bit is lost before the range check.
+pub fn shl(a: i64, n: i64) -> Result<i64, ShiftErr> {
+    if !(0..64).contains(&n) {
+        return Err(ShiftErr::Amount(n));
+    }
+    let wide = (a as i128) << n;
+    if wide > JadeValue::INT_MAX as i128 || wide < JadeValue::INT_MIN as i128 {
+        return Err(ShiftErr::Overflow);
+    }
+    Ok(wide as i64)
+}
+
+/// `a >> n`, arithmetic (sign-preserving). The amount must be in `0..64`. The
+/// result of a right shift never leaves the range its operand was in.
+pub fn shr(a: i64, n: i64) -> Result<i64, ShiftErr> {
+    if !(0..64).contains(&n) {
+        return Err(ShiftErr::Amount(n));
+    }
+    Ok(a >> n)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -85,10 +85,14 @@ fn arr_reverse(args: &[VmValue]) -> Result<VmValue> {
 fn arr_join(args: &[VmValue]) -> Result<VmValue> {
     match (&args[0], args.get(1)) {
         (VmValue::Array(arc), Some(VmValue::Str(sep))) => {
-            let guard = arc.lock();
+            // Copied out of the lock before rendering, for the reason
+            // `value_to_display` documents: an array that contains itself made
+            // this re-lock a mutex the thread already held, and `a.join(",")`
+            // hung instead of answering.
+            let items: Vec<VmValue> = arc.lock().iter().cloned().collect();
             let mut trust = sep.trust();
-            let mut parts: Vec<String> = Vec::with_capacity(guard.len());
-            for v in guard.iter() {
+            let mut parts: Vec<String> = Vec::with_capacity(items.len());
+            for v in items.iter() {
                 if let VmValue::Str(s) = v {
                     trust = jade_runtime::trust::combine(trust, s.trust());
                 }
@@ -105,6 +109,7 @@ fn arr_join(args: &[VmValue]) -> Result<VmValue> {
 }
 
 fn pkg_join(args: &[VmValue]) -> Result<VmValue> {
+    crate::builtins::check_pkg_arity("join", args)?;
     arr_join(args)
 }
 
@@ -138,6 +143,7 @@ fn pkg_filter(_args: &[VmValue]) -> Result<VmValue> {
 }
 
 fn pkg_sort(args: &[VmValue]) -> Result<VmValue> {
+    crate::builtins::check_pkg_arity("sort", args)?;
     match &args[0] {
         VmValue::Array(arc) => {
             let guard = arc.lock();
@@ -151,6 +157,7 @@ fn pkg_sort(args: &[VmValue]) -> Result<VmValue> {
 }
 
 fn pkg_reverse(args: &[VmValue]) -> Result<VmValue> {
+    crate::builtins::check_pkg_arity("reverse", args)?;
     match &args[0] {
         VmValue::Array(arc) => {
             let guard = arc.lock();

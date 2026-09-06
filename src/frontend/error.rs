@@ -1,3 +1,11 @@
+/// How deeply the parser will descend before refusing the source.
+///
+/// Recursive descent costs native stack per nesting level, so this bound is
+/// what turns a process abort into a reportable error. It sits far above
+/// anything hand-written — a thousand open parentheses is not a program — and
+/// far below what the smallest stack this runs on can take.
+pub const MAX_NESTING_DEPTH: usize = 1000;
+
 /// A position in source text. Line and column are 1-based (how editors report them).
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct Span {
@@ -75,6 +83,12 @@ pub enum JadeError {
 
     /// Lexer encountered a numeric literal that overflows its target type.
     LiteralOverflow { span: Span },
+
+    /// Source nests expressions, blocks or f-string slots deeper than the
+    /// parser will descend. Recursive descent costs native stack per level, and
+    /// running out of it aborts the process rather than raising — so the depth
+    /// is bounded and reported here, with a span, like any other parse failure.
+    NestingTooDeep { span: Span },
 
     /// Called a function with the wrong number of arguments.
     ArityMismatch { expected: usize, got: usize, span: Span },
@@ -318,6 +332,11 @@ impl std::fmt::Display for JadeError {
             JadeError::LiteralOverflow { span } => {
                 write!(f, "[{}:{}] numeric literal overflows its type", span.line, span.col)
             }
+            JadeError::NestingTooDeep { span } => write!(
+                f,
+                "[{}:{}] expression or block nested too deeply (limit {})",
+                span.line, span.col, MAX_NESTING_DEPTH
+            ),
             JadeError::ArityMismatch { expected, got, span } => write!(
                 f,
                 "[{}:{}] wrong number of arguments: expected {}, got {}",

@@ -42,11 +42,7 @@ fn time_after(args: &[VmValue]) -> Result<VmValue> {
         VmValue::Float(f) => *f,
         _ => return Err(JadeError::TypeError { message: "time.after".to_string(), span: ZERO }),
     };
-    let d = if secs.is_finite() && secs > 0.0 {
-        std::time::Duration::from_secs_f64(secs)
-    } else {
-        std::time::Duration::ZERO
-    };
+    let d = jade_runtime::timef::duration_from_secs(secs);
     Ok(crate::vm::async_tasks::spawn_task(async move {
         tokio::time::sleep(d).await;
         (Ok(VmValue::Nil), None)

@@ -164,3 +164,19 @@ fn exec_output_is_tainted() {
         other => panic!("expected Str, got {other:?}"),
     }
 }
+
+/// `sh.output`'s streams are command output, so they carry the same taint
+/// `sh.exec`'s return does. They were built trusted, which made
+/// `sh.exec(sh.output(x).stdout)` the way around a refusal that stopped
+/// `sh.exec(sh.exec(x))` — accepted interpreted, refused compiled.
+#[test]
+fn output_streams_are_tainted() {
+    let out = sh_output(&[VmValue::Str(JStr::trusted("echo hi"))]).unwrap();
+    let VmValue::Dict(d) = out else { panic!("expected a dict") };
+    for field in ["stdout", "stderr"] {
+        match d.get(field).expect("field") {
+            VmValue::Str(s) => assert!(s.is_tainted(), "sh.output {field} must be tainted"),
+            other => panic!("expected Str for {field}, got {other:?}"),
+        }
+    }
+}

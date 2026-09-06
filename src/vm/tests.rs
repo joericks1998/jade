@@ -4012,3 +4012,40 @@ fn a_task_can_still_await_a_timer_from_its_blocking_thread() {
     .expect("a task must be able to sleep");
     assert_eq!(get_int(&state, "got"), 7);
 }
+
+/// `1 << 62` is `2^62`, one past `INT_MAX`. It used to answer with a number
+/// outside the range a Jade integer can hold — and a compiled binary, which
+/// spends a bit on the value tag, printed a different (negative) number for the
+/// same expression. Both engines raise now.
+#[test]
+fn a_shift_past_the_int_range_is_an_overflow() {
+    let err = try_run_src("let x = 1 << 62").err().expect("expected error");
+    assert!(matches!(err, JadeError::IntegerOverflow { .. }));
+}
+
+/// A package function reads `args[0]` directly, so a call with no arguments
+/// used to panic the interpreter with "index out of bounds" rather than raise.
+#[test]
+fn a_package_call_with_no_arguments_raises_rather_than_panicking() {
+    for src in [
+        "use std::string\nlet x = string.upper()",
+        "use std::array\nlet x = array.sort()",
+        "use std::dict\nlet x = dict.keys()",
+        // Macro-generated package wrappers take the same path.
+        "use std::string\nlet x = string.trim_start()",
+    ] {
+        let err = try_run_src(src).err().unwrap_or_else(|| panic!("expected error for {src}"));
+        assert!(matches!(err, JadeError::ArityMismatch { got: 0, .. }), "{src} gave {err:?}");
+    }
+}
+
+/// The name-keyed arity table is shared across packages, so the check has to be
+/// per package: `http.get(url)` takes one argument where `dict.get(d, k)` takes
+/// two, and checking at the one call site rejected every `http.get`.
+#[test]
+fn a_package_function_sharing_a_method_name_keeps_its_own_arity() {
+    let err = try_run_src("use std::http\nlet x = http.get(\"http://127.0.0.1:1/\")")
+        .err()
+        .expect("connection refused");
+    assert!(!matches!(err, JadeError::ArityMismatch { .. }), "got {err:?}");
+}
