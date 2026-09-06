@@ -1479,6 +1479,28 @@ impl Parser {
             }
             TokenKind::Minus => {
                 let span = self.peek().span;
+                // `-4611686018427387904` is `INT_MIN`, and its magnitude is one
+                // past `INT_MAX`, so it only exists as a value once the
+                // negation is applied. The lexer hands the magnitude through
+                // (see `lexer::NEGATED_INT_MIN`) and the fold happens here.
+                //
+                // Narrow on purpose: only that one magnitude, and only when
+                // nothing postfix follows it, so `-2.abs()` still parses as
+                // `-(2.abs())` rather than becoming a literal with a dangling
+                // method call after it.
+                if matches!(self.peek_ahead(1).kind, TokenKind::Integer(v) if v == super::lexer::NEGATED_INT_MIN)
+                    && !matches!(
+                        self.peek_ahead(2).kind,
+                        TokenKind::Dot | TokenKind::LParen | TokenKind::LBracket
+                    )
+                {
+                    self.advance(); // `-`
+                    self.advance(); // the magnitude
+                    return Ok(Expr::Integer {
+                        value: jade_runtime::value::JadeValue::INT_MIN,
+                        span,
+                    });
+                }
                 self.advance();
                 let operand = self.parse_unary()?;
                 Ok(Expr::UnaryOp { op: UnaryOpKind::Neg, operand: Box::new(operand), span })
@@ -1680,6 +1702,12 @@ impl Parser {
         match token.kind {
             TokenKind::Integer(value) => {
                 self.advance();
+                // The lexer lets `-INT_MIN`'s magnitude through so the negated
+                // form can be written; reaching here means it was not negated,
+                // and on its own it is out of range.
+                if !jade_runtime::value::JadeValue::int_fits(value) {
+                    return Err(JadeError::LiteralOverflow { span: token.span });
+                }
                 Ok(Expr::Integer { value, span: token.span })
             }
             TokenKind::Float(value) => {

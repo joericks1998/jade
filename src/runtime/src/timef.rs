@@ -42,10 +42,33 @@ pub fn now_ms() -> i64 {
     since_epoch().as_millis() as i64
 }
 
+/// The longest sleep or timer this will arm: a little over 136 years.
+///
+/// The bound is not about anyone wanting to wait that long. `Duration::from_secs_f64`
+/// *panics* above `u64::MAX` seconds and `Instant::now() + d` panics on
+/// overflow, and a panic inside an `extern "C"` function aborts the process —
+/// so `time.sleep(1e30)` took the program down with a message no `catch` could
+/// see. Clamping keeps it a wait, which is what an absurd duration means
+/// anyway, and matches how a non-finite or negative one is already treated.
+const MAX_SECS: f64 = u32::MAX as f64;
+
+/// Convert `secs` seconds to a [`Duration`], clamped to something arm-able.
+///
+/// Non-finite (including `NaN`) and non-positive give [`Duration::ZERO`], which
+/// is what every caller already did; the addition here is the upper bound. Used
+/// by both engines and by the timer thread so all three agree.
+pub fn duration_from_secs(secs: f64) -> Duration {
+    if !secs.is_finite() || secs <= 0.0 {
+        return Duration::ZERO;
+    }
+    Duration::from_secs_f64(secs.min(MAX_SECS))
+}
+
 /// Block for `secs` seconds (non-positive → no-op).
 pub fn sleep(secs: f64) {
-    if secs > 0.0 {
-        std::thread::sleep(Duration::from_secs_f64(secs));
+    let d = duration_from_secs(secs);
+    if !d.is_zero() {
+        std::thread::sleep(d);
     }
 }
 
@@ -387,5 +410,26 @@ mod tests {
         let b = monotonic();
         assert!(b >= a, "monotonic went backwards: {} then {}", a, b);
         assert!(b - a < 60.0, "implausible gap: {}", b - a);
+    }
+
+    /// `Duration::from_secs_f64` panics above `u64::MAX` seconds and
+    /// `Instant + Duration` panics on overflow, and a panic inside an
+    /// `extern "C"` function aborts the process — so `time.sleep(1e30)` took
+    /// the program down with a failure no `catch` could see. Clamped now.
+    #[test]
+    fn an_absurd_duration_clamps_instead_of_panicking() {
+        assert_eq!(duration_from_secs(1e30), Duration::from_secs(MAX_SECS as u64));
+        assert_eq!(duration_from_secs(f64::MAX), Duration::from_secs(MAX_SECS as u64));
+        // Arming a timer at the clamp must not overflow either.
+        let _ = std::time::Instant::now() + duration_from_secs(f64::MAX);
+    }
+
+    /// The cases that were already handled, kept honest.
+    #[test]
+    fn a_non_finite_or_non_positive_duration_is_zero() {
+        for secs in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0, 0.0] {
+            assert_eq!(duration_from_secs(secs), Duration::ZERO, "{secs}");
+        }
+        assert_eq!(duration_from_secs(1.5), Duration::from_secs_f64(1.5));
     }
 }

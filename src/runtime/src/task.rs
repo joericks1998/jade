@@ -805,11 +805,7 @@ pub fn after(secs: f64) -> *mut FutureObj {
     if !start_timer_thread() {
         return core::ptr::null_mut();
     }
-    let d = if secs.is_finite() && secs > 0.0 {
-        std::time::Duration::from_secs_f64(secs)
-    } else {
-        std::time::Duration::ZERO
-    };
+    let d = crate::timef::duration_from_secs(secs);
     // A timer future has no body, so nothing will ever claim its `pending`. The
     // job is a placeholder that never runs: `await` on it finds `pending` taken
     // by nobody and simply waits, which is exactly right.

@@ -1819,6 +1819,26 @@ mod parser {
             .expect("parser must not abort");
         assert_eq!(n, 1);
     }
+
+    /// Jade's integer range is asymmetric — `INT_MIN` is -(2^62) and `INT_MAX`
+    /// is 2^62 - 1 — and a literal is lexed without its sign. Bounding the bare
+    /// magnitude at `INT_MAX` meant the smallest representable integer could
+    /// not be written at all: it was rejected as a literal that overflows its
+    /// type.
+    #[test]
+    fn the_smallest_integer_can_be_written() {
+        let p = parse_src("let x = -4611686018427387904");
+        assert_eq!(p.stmts.len(), 1);
+
+        // On its own, without the negation, that magnitude is still out of
+        // range.
+        assert!(matches!(
+            parse_src_err("let x = 4611686018427387904"),
+            JadeError::LiteralOverflow { .. }
+        ));
+        // And anything past it is refused by the lexer as before.
+        assert!(lexer::tokenize("let x = 4611686018427387905").is_err());
+    }
 }
 
 mod ast {

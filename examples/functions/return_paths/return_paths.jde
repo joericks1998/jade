@@ -1,0 +1,76 @@
+// A function's return type is the join of every path, and a trailing
+// expression is one of them.
+//
+// The checker used to take the type of the *first* `return` it found and stop.
+// So a function returning a str on one path and an int on another was typed
+// str, and a caller got a typed opcode for the wrong type: the interpreter
+// raised at run time for a program `jade check` had passed, and compiled code —
+// whose typed opcodes trust the checker rather than re-testing the tag — read
+// the value as the type it was told and printed arithmetic on a pointer.
+//
+// A trailing bare expression is a return too, which the checker did not look
+// at, so `fn double(x) { x * 2 }` was typed nil and `double(5) + 1` was
+// rejected with "got nil + int" for a program that runs correctly.
+
+// Different types on different paths.
+fn pick(c) {
+    if c {
+        return "s"
+    }
+    return 1
+}
+
+print(pick(true))
+print(pick(false))
+// → s
+// → 1
+
+// Returning on only some paths: the others answer nil.
+fn maybe(c) {
+    if c {
+        return 1
+    }
+}
+
+print(maybe(true))
+print(maybe(false))
+// → 1
+// → nil
+
+// A trailing expression is the return value.
+fn double(x) {
+    x * 2
+}
+
+print(double(5))
+print(double(5) + 1)
+// → 10
+// → 11
+
+// Every path agreeing still gives a usable type.
+fn always_int(c) {
+    if c {
+        return 1
+    }
+    return 2
+}
+
+print(always_int(true) + always_int(false))
+// → 3
+
+// A return through a catch arm counts as a path.
+fn caught(c) {
+    try {
+        if c {
+            raise "x"
+        }
+        return 1
+    } catch e {
+        return "recovered"
+    }
+}
+
+print(caught(false))
+print(caught(true))
+// → 1
+// → recovered
