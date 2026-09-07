@@ -4,6 +4,35 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.4.8
+
+*A one-line fix to an example, and the release 1.4.7 never became.* The eighteen fixes below carry the v1.4.7 heading and are in this release; the tag was never pushed, because the CI job that pushes it runs only after a green build, and the build went red on the merge that would have created it. What went red was the backend-parity gate, and what it caught was not a disagreement between the two engines.
+
+*A gate that compares two engines can only compare things that do not depend on when they run.* `examples/async/waiting` started a 0.30s task and a 0.05s task and asserted `wait` answered `1`:
+
+```jade
+let a = slow(0.30, "slow")
+let b = slow(0.05, "fast")
+print(wait([a, b]))      // → 1
+```
+
+`wait` answers the *lowest settled index*, which is not the same as the one that finished first, and the difference is the whole bug. `1` is right only while the slow task is still running when `wait` looks. Let more than 0.30s pass between the spawn and the scan and both are settled, `0` is the correct answer, and the two engines print different numbers for a program neither got wrong. So the margin was never about how much later one task finishes than the other. It was about how long the main thread has to reach the third statement of the program, and a quarter of a second of that is not much on a loaded runner.
+
+Written with the stall put in rather than waited for, it is exact rather than occasional:
+
+```jade
+let a = slow(0.30, "slow")
+let b = slow(0.05, "fast")
+time.sleep(0.40)
+print(wait([a, b]))      // 0
+```
+
+The slow side is 5.0s now, so the window is five seconds instead of a quarter of one, and the comment says what the long sleep is for — shortening it back is what would reintroduce this. The example does not get slower: it already ends with a 5.0s task it cancels without stopping, and the process waits for outstanding tasks at exit, so it runs in the same 5.07s either way.
+
+Widening the window rather than removing the timing. Which future settles first is the subject of the example, and one that waited on nothing would not be teaching `wait`.
+
+The other two timing-sensitive fixtures do not have this shape: `ready` and `max_tasks` assert inequalities with slack, and `ready` deliberately prints nothing about how many passes its loop got, because that is the machine's business. `waiting` was the only one asserting an exact answer that depended on the clock.
+
 ## v1.4.7
 
 *A release of nothing but fixes.* Eighteen of them, from an audit that read the tree stage by stage against each subtree's README. Most were crashes a program could reach from ordinary source, or places where `jade run` and `jade build` quietly disagreed about what a program means.
