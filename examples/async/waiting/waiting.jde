@@ -17,8 +17,15 @@ async fn slow(secs, label) {
     return label
 }
 
-// The first one to finish wins, whatever order they were started in.
-let a = slow(0.30, "slow")
+// The first one to finish wins, whatever order they were started in. The long
+// sleep is the point of the example rather than an accident of it: `wait`
+// answers the *lowest* settled index, so this only shows the fast one winning
+// while the slow one is still running. If both have settled by the time `wait`
+// looks, 0 is the right answer and the example is no longer demonstrating
+// anything. The gap is therefore how long this thread has to reach the `wait`,
+// not how much later one task finishes than the other, and a machine under
+// load can lose a few hundred milliseconds between two statements.
+let a = slow(5.0, "slow")
 let b = slow(0.05, "fast")
 print(wait([a, b]))
 print(await b)
