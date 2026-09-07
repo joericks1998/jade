@@ -1,6 +1,6 @@
 [package]
 name = "jade"
-version = "1.4.6"
+version = "1.4.7"
 edition = "2024"
 description = "A language for LLMs"
 build = "src/runtime_aot/build.rs"

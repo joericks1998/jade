@@ -4,6 +4,45 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## v1.4.7
+
+*A release of nothing but fixes.* Eighteen of them, from an audit that read the tree stage by stage against each subtree's README. Most were crashes a program could reach from ordinary source, or places where `jade run` and `jade build` quietly disagreed about what a program means.
+
+*The compiled backend trusted the type checker in three places the checker was wrong.* That trust is the point of having a checker — compiled code does not re-test a value's tag, which is what makes it fast — so anywhere the checker could be talked into a type the emitter contradicted, a binary computed on whatever the machine word held rather than raising.
+
+```jade
+let a = [1, 2]
+a[0] = "s"
+print(a[0] + 1)      // jade run: type error   jade build: 46956459696519
+```
+
+That number is the string's heap address. Dicts already dropped their tracked value type on a mismatched insert and arrays did not, so `Array(Int)` survived the store. Two more of the same shape: a function's return type was whichever path the checker met first, so a function answering a str on one path and an int on another was typed str; and a `let` inside a block was treated as a shadow that ended with the block, although the emitter has one flat map per function and rebinds the name for the rest of it, which is what the docs describe. Every return path is joined now, a block hands a rebinding back to the scope that owned the name, and an array widens rather than claiming an element type that is no longer true.
+
+The same join fixes a false rejection. A trailing bare expression is a return — the emitter turns it into one — but the checker never looked, so `fn double(x) { x * 2 }` was typed nil and `double(5) + 1` was refused for a program that runs correctly.
+
+*Shifts and bitwise operators reached LLVM with no checks at all.* Codegen untagged both operand words and emitted the native instruction, on the typed path and the dynamic one alike. LLVM leaves a shift by 64 or more undefined, so `print(1 << 64)` produced a garbage word that `print` then followed as a pointer and crashed on; `1 << 62` silently dropped the bit that leaves the 63-bit range where the interpreter raises; and `"x" & 1` answered with a number made of the string's own pointer bits. The semantics live once in the shared runtime now and reach compiled code through `jrt_shl_any` and its siblings, so both engines raise the same errors.
+
+*A value that contains itself could not be printed.* Arrays and dicts are reference-semantic and nothing collects cycles, so this is an ordinary live value:
+
+```jade
+let a = [1]
+let b = [a]
+a.push(b)
+print(a)
+```
+
+Rendering it recursed without bound. The interpreter re-locked an array it already held, which a mutex answers by deadlocking, so `print` produced no output and could not be interrupted into an error; compiled code ran out of stack and died. `array.join` and `json.stringify` held the same lock across the same recursion. Both engines share one depth bound now and copy a collection out of its lock before walking it. `json.stringify` refuses instead, because JSON cannot spell a cycle and a document that quietly drops what it could not follow is worse than an error saying so.
+
+*Three ways to launder an untrusted string into a trusted one.* `sh.output`'s `stdout` and `stderr` were built trusted while `sh.exec` correctly returned tainted, so the refusal that stops `sh.exec(sh.exec(x))` did not stop the same thing spelled `sh.exec(sh.output(x).stdout)`. `json.parse` returned every string trusted regardless of where the input came from, which matters most of anywhere: parsing is the widest path from a model reply to a sink in the language. And `path.abs` propagated trust while `join`, `basename`, `dirname`, `stem` and `ext` dropped it, so `fs.read(tainted)` was refused and `fs.read(path.dirname(tainted))` went through. Each was accepted interpreted and refused compiled — the model failing open on the engine more likely to be running untrusted input.
+
+*Four things aborted the process instead of raising.* An abort is not a failure a program can catch. The parser had no depth limit, so a file of nested parentheses died with "has overflowed its stack" and no span; nesting is bounded at 1000 and refused like any other parse error. `string.upper()` and its neighbours read `args[0]` with no arity check, so a package call with no arguments panicked the interpreter. `"ab".repeat(4611686018427387903)` asked the allocator for nine exabytes. And `time.sleep` of a large or non-finite duration panicked inside an `extern "C"` function, which aborts.
+
+*The string refcount was not atomic.* Spawning a task retains its arguments on the spawning thread and the worker releases them on its own, so a heap string passed to a task had its count written from two threads through a plain `u32`. A lost update either frees the string while a task still reads it or leaks it. Collections became atomic when they started crossing threads; strings were added to refcounting later and did not follow.
+
+*And two that were not the compiler's own code.* On Linux, `jade build` could not link any program that used a prompt or a `Grammar`: the two runtime archives reference each other, GNU ld resolves static archives in one left-to-right pass, and the link line spelled the cycle one bounce deep. It is a linker group now, so the scan repeats until nothing new is needed. Separately, `jade upgrade` unpacked into `<tmp>/jade-upgrade-<pid>` and created it with `create_dir_all`, which succeeds on a directory that already exists — and the command tells you to re-run it under `sudo`. Any local user could pre-create those names for likely pids and have root install their binary. The name comes from `/dev/urandom` now, an existing directory is refused rather than reused, and the mode is set at creation.
+
+*Smaller:* the smallest integer can be written down. Jade's range is asymmetric, and a literal is lexed without its sign, so the magnitude of `-4611686018427387904` was one past `INT_MAX` and refused as an overflowing literal. The C runtime also builds with `-Werror=implicit-function-declaration` now, which caught a truncated return pointer in this very work and turned up three `jrt_str_*` functions that had never been declared.
+
 ## v1.4.6
 
 *How many tasks run at once is now something a program says, and both engines listen.* It was the machine's core count, overridable only through a `JADE_MAX_TASKS` environment variable that appeared in no documentation and reached the compiled engine only. `jade run` ignored it outright, so the same fan-out ran sixteen requests in one wave built and two waves interpreted.

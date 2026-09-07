@@ -982,3 +982,34 @@ fn check_agrees_with_build_about_calls() {
     .unwrap();
     assert!(crate::aot::would_build(&program, Some(&path)).is_ok(), "a good program should pass");
 }
+
+/// The upgrade working directory must be unguessable, private, and never an
+/// existing directory.
+///
+/// `jade upgrade` tells the user to re-run under `sudo` when the install
+/// directory is not writable, so it runs as root against a world-writable
+/// `/tmp`. It used to build `<tmp>/jade-upgrade-<pid>` and create it with
+/// `create_dir_all`, which succeeds on a directory that already exists — so
+/// another user could pre-create it for a likely pid and have root unpack into,
+/// and install from, a directory they own.
+#[test]
+fn the_upgrade_work_dir_is_private_and_freshly_created() {
+    let a = crate::cli::upgrade::make_work_dir().expect("first");
+    let b = crate::cli::upgrade::make_work_dir().expect("second");
+    assert_ne!(a, b, "the name must not be derived from the pid alone");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&a).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "nobody else may read or write the unpacked tree");
+    }
+
+    // An existing directory is refused rather than reused: that is the property
+    // that closes the race.
+    let mut builder = std::fs::DirBuilder::new();
+    assert!(builder.create(&a).is_err(), "create must fail on an existing directory");
+
+    std::fs::remove_dir_all(&a).ok();
+    std::fs::remove_dir_all(&b).ok();
+}

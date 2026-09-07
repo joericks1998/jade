@@ -59,42 +59,71 @@ pub(crate) fn value_to_word(v: &Value, trust: u8) -> W {
 /// An ObjHeader value word → `serde_json::Value`. Mirrors the VM's `vm_to_json`
 /// (non-JSON kinds like structs → `Null`).
 fn word_to_value(word: W) -> Value {
+    word_to_value_at(word, 0).unwrap_or(Value::Null)
+}
+
+/// [`word_to_value`] at nesting depth `depth`, refusing past
+/// [`crate::render::MAX_DEPTH`].
+///
+/// Arrays and dicts are reference-semantic and nothing collects cycles, so a
+/// value can contain itself. This recursed without a bound, and a compiled
+/// `json.stringify(a)` on such a value ran out of stack and died on SIGSEGV.
+/// The bound is the one both renderers use, so the two engines refuse the same
+/// values.
+fn word_to_value_at(word: W, depth: usize) -> Option<Value> {
+    if depth > crate::render::MAX_DEPTH {
+        return None;
+    }
+    word_to_value_inner(word, depth)
+}
+
+fn word_to_value_inner(word: W, depth: usize) -> Option<Value> {
     let v = JadeValue::from_bits(word as u64);
     if v.is_int() {
-        return Value::Number(v.as_int().into());
+        return Some(Value::Number(v.as_int().into()));
     }
     if v.is_bool() {
-        return Value::Bool(v.as_bool());
+        return Some(Value::Bool(v.as_bool()));
     }
     if v.is_nil() {
-        return Value::Null;
+        return Some(Value::Null);
     }
     if v.is_float() {
-        return serde_json::Number::from_f64(unbox_float(v))
-            .map(Value::Number)
-            .unwrap_or(Value::Null);
+        return Some(
+            serde_json::Number::from_f64(unbox_float(v)).map(Value::Number).unwrap_or(Value::Null),
+        );
     }
     if v.is_str() {
         let bytes = unsafe {
             let p = v.as_ptr() as *const u8;
             core::slice::from_raw_parts(p, strlen(p))
         };
-        return Value::String(String::from_utf8_lossy(bytes).into_owned());
+        return Some(Value::String(String::from_utf8_lossy(bytes).into_owned()));
     }
     // Non-string heap pointer: dispatch on kind.
     let p = v.as_ptr();
     let kind = unsafe { (*(p as *const ObjHeader)).kind };
     if kind == ObjKind::Array as u8 {
         let a = unsafe { &*(p as *const ArrayObj<W>) };
-        Value::Array(a.as_slice().iter().map(|w| word_to_value(*w)).collect())
+        let mut out = Vec::with_capacity(a.as_slice().len());
+        for w in a.as_slice() {
+            // `?`, not a `null` in the element's place: a refusal has to reach
+            // the caller so it can raise, the way the VM does. Filling in
+            // `null` would hand back a document that does not say what the
+            // value held.
+            out.push(word_to_value_at(*w, depth + 1)?);
+        }
+        Some(Value::Array(out))
     } else if kind == ObjKind::Dict as u8 {
         let d = unsafe { &*(p as *const DictObj<W>) };
         // Collect into serde's Map (sorted keys), matching the VM.
-        let m: serde_json::Map<String, Value> =
-            d.entries().iter().map(|(k, w)| (k.clone(), word_to_value(*w))).collect();
-        Value::Object(m)
+        let mut m = serde_json::Map::new();
+        for (k, w) in d.entries() {
+            m.insert(k.clone(), word_to_value_at(*w, depth + 1)?);
+        }
+        Some(Value::Object(m))
     } else {
-        Value::Null
+        Some(Value::Null)
     }
 }
 
@@ -166,6 +195,17 @@ pub extern "C" fn jrt_json_parse_impl(s: *const c_char) -> W {
     w
 }
 
+/// Record a pending error, replacing any earlier one.
+fn set_err(msg: String) {
+    let s = crate::cstr::emit(msg.as_bytes(), crate::string::TRUSTED);
+    PENDING.with(|p| {
+        let old = p.replace(s);
+        if !old.is_null() {
+            string::free_str(old as *mut u8);
+        }
+    });
+}
+
 /// Drain the pending parse error (a tagged string the caller owns), or null.
 #[unsafe(no_mangle)]
 pub extern "C" fn jrt_json_take_error() -> *mut c_char {
@@ -176,8 +216,18 @@ pub extern "C" fn jrt_json_take_error() -> *mut c_char {
 /// the ObjHeader value `v` to a fresh TRUSTED tagged string, using serde's
 /// compact / 2-space-pretty formatting so it matches the VM exactly.
 #[unsafe(no_mangle)]
-pub extern "C" fn jrt_json_stringify_chunk(word: W, pretty: i32) -> *mut c_char {
-    let v = word_to_value(word);
+pub extern "C" fn jrt_json_stringify_impl(word: W, pretty: i32) -> *mut c_char {
+    // Null plus a pending error when the value nests too deep, matching how the
+    // parse path reports and how the VM raises. Answering `null` instead would
+    // hand back a document that does not say what the value held.
+    let Some(v) = word_to_value_at(word, 0) else {
+        set_err(format!(
+            "json.stringify: value nests deeper than {} levels (a value that contains itself \
+             cannot be represented as JSON)",
+            crate::render::MAX_DEPTH
+        ));
+        return core::ptr::null_mut();
+    };
     let s = if pretty != 0 { serde_json::to_string_pretty(&v) } else { serde_json::to_string(&v) }
         .unwrap_or_default();
     let bytes = s.as_bytes();
@@ -205,7 +255,7 @@ mod tests {
     fn roundtrip_object() {
         let _g = crate::gc::test_support::lock_counter();
         let w = jrt_json_parse_chunk(c"{\"b\": 2, \"a\": 1}".as_ptr());
-        let s = jrt_json_stringify_chunk(w, 0);
+        let s = jrt_json_stringify_impl(w, 0);
         // serde sorts keys.
         assert_eq!(unsafe { read(s) }, r#"{"a":1,"b":2}"#);
         string::free_str(s as *mut u8);
@@ -215,7 +265,7 @@ mod tests {
     fn pretty_and_nested() {
         let _g = crate::gc::test_support::lock_counter();
         let w = jrt_json_parse_chunk(c"{\"a\": {\"b\": 7}}".as_ptr());
-        let s = jrt_json_stringify_chunk(w, 1);
+        let s = jrt_json_stringify_impl(w, 1);
         assert_eq!(unsafe { read(s) }, "{\n  \"a\": {\n    \"b\": 7\n  }\n}");
         string::free_str(s as *mut u8);
     }

@@ -195,3 +195,31 @@ fn stringify_pretty_arity() {
         Err(JadeError::ArityMismatch { expected: 1, got: 0, .. })
     ));
 }
+
+/// A value that contains itself cannot be JSON, and used to hang rather than
+/// say so: `vm_to_json` held an array's lock while recursing over its elements,
+/// so a self-containing array re-locked a `parking_lot` mutex the same thread
+/// already held. `json.stringify(a)` produced no output and could not be
+/// interrupted into an error.
+#[test]
+fn stringify_refuses_a_self_containing_value_instead_of_hanging() {
+    let inner = make_array(vec![VmValue::Int(1)]);
+    let outer = make_array(vec![inner.clone()]);
+    let VmValue::Array(arc) = &inner else { panic!("expected an array") };
+    arc.lock().push(outer);
+
+    let err = json_stringify(&[inner.clone()]).expect_err("a cycle cannot be represented");
+    assert!(format!("{err}").contains("nests deeper"), "{err}");
+
+    // The pretty form takes the same path.
+    assert!(json_stringify_pretty(&[inner]).is_err());
+}
+
+/// Ordinary nesting still serializes.
+#[test]
+fn stringify_handles_ordinary_nesting() {
+    let v = make_array(vec![VmValue::Int(1), make_array(vec![VmValue::Int(2)])]);
+    let out = json_stringify(&[v]).expect("plain nesting is fine");
+    let VmValue::Str(s) = out else { panic!("expected a string") };
+    assert_eq!(s.as_str(), "[1,[2]]");
+}

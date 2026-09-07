@@ -102,10 +102,34 @@ pub fn trim_end(s: &str) -> &str {
     s.trim_end()
 }
 
+/// The longest string [`repeat`] and the two `pad_*` will build.
+///
+/// The same bound [`crate::bytesf::MAX_LEN`] puts on a blob, and for a stronger
+/// reason: past it the allocation does not merely disagree with a header, it
+/// fails, and a failed allocation aborts the process rather than raising. That
+/// is not a failure a Jade program can catch, so the size is refused before
+/// anything is reserved. `"ab".repeat(4611686018427387903)` used to abort with
+/// "memory allocation of 9223372036854775806 bytes failed".
+pub const MAX_LEN: usize = crate::bytesf::MAX_LEN;
+
 /// `s.repeat(n)` — `n` copies. Zero or negative gives the empty string rather
-/// than raising, matching how `slice` treats an out-of-range bound.
-pub fn repeat(s: &str, n: i64) -> String {
-    if n <= 0 { String::new() } else { s.repeat(n as usize) }
+/// than raising, matching how `slice` treats an out-of-range bound. A result
+/// past [`MAX_LEN`] is refused, because building it would abort the process.
+pub fn repeat(s: &str, n: i64) -> Result<String, String> {
+    if n <= 0 {
+        return Ok(String::new());
+    }
+    let want = (s.len() as u128) * (n as u128);
+    if want > MAX_LEN as u128 {
+        return Err(format!("str.repeat(): result of {want} bytes is past the {MAX_LEN} limit"));
+    }
+    let mut out = String::new();
+    out.try_reserve_exact(want as usize)
+        .map_err(|_| format!("str.repeat(): cannot allocate {want} bytes"))?;
+    for _ in 0..n {
+        out.push_str(s);
+    }
+    Ok(out)
 }
 
 /// `s.pad_start(width, pad)` — left-pad to `width` *characters*.
@@ -114,30 +138,42 @@ pub fn repeat(s: &str, n: i64) -> String {
 /// never truncates. A multi-character `pad` is repeated and then cut to fit, so
 /// the result is always exactly `width`; an empty `pad` would loop forever, so
 /// it answers the input unchanged.
-pub fn pad_start(s: &str, width: i64, pad: &str) -> String {
+pub fn pad_start(s: &str, width: i64, pad: &str) -> Result<String, String> {
     let (_, need) = pad_shape(s, width, pad);
     match need {
-        None => s.to_string(),
+        None => Ok(s.to_string()),
         Some(n) => {
+            check_pad_width(n)?;
             let mut out: String = pad.chars().cycle().take(n).collect();
             out.push_str(s);
-            out
+            Ok(out)
         }
     }
 }
 
 /// `s.pad_end(width, pad)` — right-pad to `width` characters. See
 /// [`pad_start`].
-pub fn pad_end(s: &str, width: i64, pad: &str) -> String {
+pub fn pad_end(s: &str, width: i64, pad: &str) -> Result<String, String> {
     let (_, need) = pad_shape(s, width, pad);
     match need {
-        None => s.to_string(),
+        None => Ok(s.to_string()),
         Some(n) => {
+            check_pad_width(n)?;
             let mut out = s.to_string();
             out.extend(pad.chars().cycle().take(n));
-            out
+            Ok(out)
         }
     }
+}
+
+/// Refuse a pad wide enough that building it would abort. A pad character can
+/// be up to four bytes, so the character count is bounded by a quarter of
+/// [`MAX_LEN`] rather than by it.
+fn check_pad_width(n: usize) -> Result<(), String> {
+    if n > MAX_LEN / 4 {
+        return Err(format!("str.pad(): width of {n} characters is past the limit"));
+    }
+    Ok(())
 }
 
 /// How many pad characters `s` needs to reach `width`, or `None` when it needs
@@ -200,6 +236,48 @@ unsafe fn emit(s: &str, src: *const c_char) -> *mut c_char {
         unsafe { core::ptr::copy_nonoverlapping(s.as_ptr(), out, s.len()) };
     }
     out as *mut c_char
+}
+
+// ── Pending-error channel ────────────────────────────────────────────────────
+//
+// `repeat` and the two `pad_*` can refuse a size, and a Jade raise is a
+// `longjmp` that must not unwind through a Rust frame. So they use the same
+// channel `bytesf` and `fsf` use: record the message, return null, and let the
+// C forwarder in `common.c` turn that into a catchable exception.
+
+thread_local! {
+    static PENDING: core::cell::Cell<*mut c_char> =
+        const { core::cell::Cell::new(core::ptr::null_mut()) };
+}
+
+fn set_err(msg: String) {
+    let s = crate::cstr::emit(msg.as_bytes(), crate::string::TRUSTED);
+    PENDING.with(|p| {
+        let old = p.replace(s);
+        if !old.is_null() {
+            crate::string::free_str(old as *mut u8);
+        }
+    });
+}
+
+/// Drain the pending string error (a tagged string the caller owns), or null.
+#[unsafe(no_mangle)]
+pub extern "C" fn jrt_str_take_error() -> *mut c_char {
+    PENDING.with(|p| p.replace(core::ptr::null_mut()))
+}
+
+/// [`emit`] for a fallible core function: null plus a pending error on refusal.
+///
+/// # Safety
+/// `src` must be a valid tagged string pointer or null.
+unsafe fn emit_or_err(r: Result<String, String>, src: *const c_char) -> *mut c_char {
+    match r {
+        Ok(s) => unsafe { emit(&s, src) },
+        Err(m) => {
+            set_err(m);
+            core::ptr::null_mut()
+        }
+    }
 }
 
 /// `s.upper()`.
@@ -298,7 +376,7 @@ pub unsafe extern "C" fn jrt_str_slice(s: *const c_char, start: i64, end: i64) -
 /// `s` must be a valid tagged string or null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn jrt_str_repeat(s: *const c_char, n: i64) -> *mut c_char {
-    unsafe { emit(&repeat(borrow(s), n), s) }
+    unsafe { emit_or_err(repeat(borrow(s), n), s) }
 }
 
 /// `s.pad_start(width, pad)`.
@@ -314,7 +392,7 @@ pub unsafe extern "C" fn jrt_str_pad_start(
     width: i64,
     pad: *const c_char,
 ) -> *mut c_char {
-    unsafe { emit(&pad_start(borrow(s), width, borrow(pad)), s) }
+    unsafe { emit_or_err(pad_start(borrow(s), width, borrow(pad)), s) }
 }
 
 /// `s.pad_end(width, pad)`. See [`jrt_str_pad_start`].
@@ -327,7 +405,7 @@ pub unsafe extern "C" fn jrt_str_pad_end(
     width: i64,
     pad: *const c_char,
 ) -> *mut c_char {
-    unsafe { emit(&pad_end(borrow(s), width, borrow(pad)), s) }
+    unsafe { emit_or_err(pad_end(borrow(s), width, borrow(pad)), s) }
 }
 
 /// `x.slice(start, end)` where `x` may be a string *or* a blob.
@@ -400,15 +478,15 @@ mod tests {
 
     #[test]
     fn pad_counts_characters() {
-        assert_eq!(pad_start("7", 3, "0"), "007");
-        assert_eq!(pad_end("7", 3, "0"), "700");
+        assert_eq!(pad_start("7", 3, "0").unwrap(), "007");
+        assert_eq!(pad_end("7", 3, "0").unwrap(), "700");
         // Four characters, not six bytes.
-        assert_eq!(pad_start("café", 6, "."), "..café");
+        assert_eq!(pad_start("café", 6, ".").unwrap(), "..café");
         // Padding never truncates, and a multi-character pad is cut to fit.
-        assert_eq!(pad_start("abcd", 2, "0"), "abcd");
-        assert_eq!(pad_start("x", 5, "ab"), "ababx");
+        assert_eq!(pad_start("abcd", 2, "0").unwrap(), "abcd");
+        assert_eq!(pad_start("x", 5, "ab").unwrap(), "ababx");
         // An empty pad would loop forever.
-        assert_eq!(pad_start("x", 5, ""), "x");
+        assert_eq!(pad_start("x", 5, "").unwrap(), "x");
     }
 
     #[test]
@@ -430,9 +508,13 @@ mod tests {
 
     #[test]
     fn repeat_and_trim_edges() {
-        assert_eq!(repeat("ab", 3), "ababab");
-        assert_eq!(repeat("ab", 0), "");
-        assert_eq!(repeat("ab", -1), "");
+        assert_eq!(repeat("ab", 3).unwrap(), "ababab");
+        assert_eq!(repeat("ab", 0).unwrap(), "");
+        assert_eq!(repeat("ab", -1).unwrap(), "");
+        // Past the limit is refused rather than attempted: the allocation
+        // would abort the process, which no Jade program can catch.
+        assert!(repeat("ab", i64::MAX).is_err());
+        assert!(pad_start("x", i64::MAX, "0").is_err());
         assert_eq!(trim_start("  x  "), "x  ");
         assert_eq!(trim_end("  x  "), "  x");
     }

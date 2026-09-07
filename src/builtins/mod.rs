@@ -10,7 +10,7 @@ use parking_lot::Mutex;
 
 use crate::{
     compiler::type_infer::TypeContext,
-    frontend::error::Result,
+    frontend::error::{JadeError, Result, Span},
     vm::{NativeFnId, VmValue},
 };
 
@@ -192,6 +192,31 @@ pub fn primitive_method_arity(method: &str) -> Option<usize> {
         "ready" | "cancel" => 0,
         _ => return None,
     })
+}
+
+/// Check the argument count of a `std/string`, `std/array` or `std/dict`
+/// package call, whose first argument is the receiver.
+///
+/// The method tables and these three package tables share their names, so the
+/// package form's count is [`primitive_method_arity`] plus one for the
+/// receiver. The method form was already checked in `call_value`; the package
+/// form was not, and every implementation reads `args[0]` directly — so
+/// `string.upper()` panicked the interpreter with "index out of bounds"
+/// instead of raising. Checked per package rather than at the one call site
+/// because the tables are keyed by bare method name, and other packages reuse
+/// those names for functions of their own: `http.get(url)` takes one argument
+/// where `dict.get(d, k)` takes two.
+pub fn check_pkg_arity(method: &str, args: &[VmValue]) -> Result<()> {
+    if let Some(want) = primitive_method_arity(method).map(|n| n + 1)
+        && args.len() != want
+    {
+        return Err(JadeError::ArityMismatch {
+            expected: want,
+            got: args.len(),
+            span: Span { line: 0, col: 0 },
+        });
+    }
+    Ok(())
 }
 
 pub fn find_primitive_method(ty: PrimType, method: &str) -> Option<BuiltinFn> {

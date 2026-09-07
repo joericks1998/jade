@@ -66,6 +66,15 @@ fn main() {
         .include(&rt)
         .include(rt.join("infer"))
         .warnings(false)
+        // The one warning that is not a style opinion here. Most of this C
+        // calls into the Rust runtime across the `jrt_*` ABI, and a call with
+        // no prototype in scope is assumed to return `int` — which silently
+        // truncates a returned pointer to 32 bits and segfaults at the first
+        // use of the result, a long way from the missing declaration. A
+        // wrapper added for `str.repeat` did exactly that. `.warnings(false)`
+        // above keeps the tree's existing style warnings quiet; this one is an
+        // error.
+        .flag("-Werror=implicit-function-declaration")
         .compile("JadeRuntime"); // → $OUT_DIR/libJadeRuntime.a
 
     println!("cargo:rustc-env=JADE_RT_LIB_DIR={out_dir}");

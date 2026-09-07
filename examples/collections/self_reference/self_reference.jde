@@ -1,0 +1,57 @@
+// A value that contains itself prints, on both engines, instead of hanging or
+// crashing.
+//
+// Arrays and dicts are reference-semantic, so a value can reach itself, and
+// nothing collects cycles — `let a = [1]  let b = [a]  a.push(b)` is an
+// ordinary live value. Rendering one used to recurse without bound: the
+// interpreter re-locked an array it already held and deadlocked, so `print(a)`
+// hung with no output and no way to interrupt it into an error, while a
+// compiled binary ran out of stack and died on SIGSEGV. Both engines now stop
+// at the same depth and elide the rest, so the text they print is identical.
+
+let a = [1]
+let b = [a]
+a.push(b)
+
+// The value is intact: the cycle is a display problem, not a data one.
+print(len(a))
+print(len(b))
+// → 2
+// → 1
+
+// Printing terminates. What it prints is bounded, and both engines bound it the
+// same way, which is what the parity gate checks.
+let shown = str(a)
+print(len(shown) > 0)
+print(shown.contains("..."))
+print(shown.starts_with("[1, ["))
+// → true
+// → true
+// → true
+
+// join walks the same values and used to deadlock for the same reason.
+print(len(a.join(",")) > 0)
+// → true
+
+// JSON has no way to spell a cycle, so `json.stringify` refuses rather than
+// writing a document that does not say what the value held. It used to take the
+// same lock across the same recursion and hang.
+use std::json
+
+try {
+    let out = json.stringify(a)
+    print(out)
+} catch e {
+    print("stringify refused a cyclic value")
+}
+// → stringify refused a cyclic value
+
+// Ordinary values still serialize.
+print(json.stringify([1, [2, [3]]]))
+// → [1,[2,[3]]]
+
+// Ordinary nesting is untouched.
+print([1, [2, [3]]])
+print({"k": [1, 2]})
+// → [1, [2, [3]]]
+// → {"k": [1, 2]}

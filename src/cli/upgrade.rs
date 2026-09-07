@@ -272,12 +272,13 @@ async fn upgrade_or_reinstall(force: bool, _cleaned: bool) {
         }
     };
 
-    let work = std::env::temp_dir().join(format!("jade-upgrade-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&work);
-    if let Err(e) = std::fs::create_dir_all(&work) {
-        eprintln!("upgrade: could not create temp dir: {e}");
-        std::process::exit(1);
-    }
+    let work = match make_work_dir() {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("upgrade: could not create temp dir: {e}");
+            std::process::exit(1);
+        }
+    };
     let tarball = work.join("jade.tar.gz");
     if let Err(e) = std::fs::write(&tarball, &bytes) {
         cleanup(&work);
@@ -315,6 +316,68 @@ async fn upgrade_or_reinstall(force: bool, _cleaned: bool) {
 
     cleanup(&work);
     println!("jade {latest} installed at {}", current_exe.display());
+}
+
+/// Create the private directory the download is unpacked in.
+///
+/// This used to be `<tmp>/jade-upgrade-<pid>`, cleared with `remove_dir_all`
+/// and then created with `create_dir_all` — and this command tells the user to
+/// re-run it under `sudo` when the install directory is not writable, so it
+/// routinely runs as root against a world-writable `/tmp`.
+///
+/// Two problems with that. The name is guessable, since a pid is a small
+/// number, so another user can pre-create the directory for the pids an
+/// upgrade is likely to get. And `create_dir_all` *succeeds* on a directory
+/// that already exists, so root would then unpack into, and install from, a
+/// directory somebody else owns — they replace `jade` and `lib/**` between the
+/// extract and the copy, and root installs their binary and their provider
+/// libraries into the toolchain prefix.
+///
+/// So: an unpredictable name from real entropy, `create_dir` rather than
+/// `create_dir_all` (it fails rather than accepts an existing directory, which
+/// is the property that closes the race), and mode 0700 applied *at creation*
+/// rather than after. A few attempts, in case a name collides.
+pub(crate) fn make_work_dir() -> std::io::Result<PathBuf> {
+    let base = std::env::temp_dir();
+    let mut last = None;
+    for _ in 0..8 {
+        let dir = base.join(format!("jade-upgrade-{}", random_suffix()));
+        let mut b = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            b.mode(0o700);
+        }
+        match b.create(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) => last = Some(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| std::io::Error::other("could not name a temp dir")))
+}
+
+/// Hex from the system CSPRNG, falling back to the clock and pid.
+///
+/// The fallback is weak on purpose rather than by accident: `create_dir` is
+/// atomic, so a guessed name costs an attacker a failed upgrade, not a
+/// compromised one. The entropy is what keeps that from being easy.
+fn random_suffix() -> String {
+    let mut bytes = [0u8; 16];
+    let filled = std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| {
+            use std::io::Read;
+            f.read_exact(&mut bytes)
+        })
+        .is_ok();
+    if !filled {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let mix = nanos ^ ((std::process::id() as u128) << 64);
+        bytes.copy_from_slice(&mix.to_le_bytes());
+    }
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn cleanup(work: &Path) {

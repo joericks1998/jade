@@ -128,6 +128,15 @@ jade_value_t jrt_div_any(jade_value_t a, jade_value_t b);
 jade_value_t jrt_mod_any(jade_value_t a, jade_value_t b);
 jade_value_t jrt_pow_any(jade_value_t a, jade_value_t b);
 jade_value_t jrt_neg_any(jade_value_t a);
+/* Int-only bitwise and shift on tagged words, raising the VM's messages for a
+ * non-int operand, a shift amount outside 0..64, and a `<<` that overflows.
+ * Codegen routes every shift through these, typed or not: the native LLVM
+ * shift has no range check and an amount of 64 or more is undefined. */
+jade_value_t jrt_band_any(jade_value_t a, jade_value_t b);
+jade_value_t jrt_bor_any(jade_value_t a, jade_value_t b);
+jade_value_t jrt_bxor_any(jade_value_t a, jade_value_t b);
+jade_value_t jrt_shl_any(jade_value_t a, jade_value_t b);
+jade_value_t jrt_shr_any(jade_value_t a, jade_value_t b);
 int          jrt_cmp_any(jade_value_t a, jade_value_t b);
 /* jrt_cmp_any_op — as jrt_cmp_any, but `op` names the source operator ("'<'")
  * so a cross-kind failure reads like the VM's message. */
@@ -145,6 +154,7 @@ int          jrt_to_bool(jade_value_t v);
 #define JRT_OP_TYPE     ((uint32_t)2)  /* non-numeric / non-comparable operand */
 #define JRT_OP_OVERFLOW ((uint32_t)3)  /* int + - * overflowed */
 #define JRT_OP_REMZERO  ((uint32_t)4)  /* modulo by zero */
+#define JRT_OP_SHIFT    ((uint32_t)5)  /* shift amount outside 0..64 */
 
 jade_value_t jrt_core_add(jade_value_t a, jade_value_t b, uint32_t* err);
 jade_value_t jrt_core_sub(jade_value_t a, jade_value_t b, uint32_t* err);
@@ -153,6 +163,14 @@ jade_value_t jrt_core_div(jade_value_t a, jade_value_t b, uint32_t* err);
 jade_value_t jrt_core_mod(jade_value_t a, jade_value_t b, uint32_t* err);
 jade_value_t jrt_core_pow(jade_value_t a, jade_value_t b, uint32_t* err);
 jade_value_t jrt_core_neg(jade_value_t a, uint32_t* err);
+/* Int-only bitwise and shift. JRT_OP_TYPE unless both words are ints;
+ * a shift also reports JRT_OP_SHIFT for an amount outside 0..64 and
+ * JRT_OP_OVERFLOW when `<<` leaves the 63-bit range. */
+jade_value_t jrt_core_band(jade_value_t a, jade_value_t b, uint32_t* err);
+jade_value_t jrt_core_bor(jade_value_t a, jade_value_t b, uint32_t* err);
+jade_value_t jrt_core_bxor(jade_value_t a, jade_value_t b, uint32_t* err);
+jade_value_t jrt_core_shl(jade_value_t a, jade_value_t b, uint32_t* err);
+jade_value_t jrt_core_shr(jade_value_t a, jade_value_t b, uint32_t* err);
 int          jrt_core_cmp(jade_value_t a, jade_value_t b, uint32_t* err);
 int          jrt_core_eq(jade_value_t a, jade_value_t b, uint32_t* err);
 /* jrt_core_eq_total — equality for *membership*, which never raises: operands of
@@ -470,6 +488,23 @@ void*    jrt_bytes_encode(const unsigned char* s);
 char*    jrt_bytes_decode(const void* p);
 void*    jrt_bytes_slice(const void* p, int64_t s, int64_t e);
 char*    jrt_bytes_take_error(void);
+/* The Rust implementations the wrappers below call. Declared here because a
+ * call with no prototype in scope is assumed to return `int`, which truncates
+ * the returned pointer to 32 bits — the wrappers segfaulted on the first use of
+ * the result until these were added. */
+char*    jrt_str_repeat(const char* s, int64_t n);
+char*    jrt_str_pad_start(const char* s, int64_t width, const char* pad);
+char*    jrt_str_pad_end(const char* s, int64_t width, const char* pad);
+/* Drain the pending std/string error, or NULL. `repeat` and the two `pad_*`
+ * refuse a size that would abort the process on allocation, and report it
+ * through this channel rather than by longjmp'ing out of a Rust frame. */
+char*    jrt_str_take_error(void);
+/* repeat / pad_start / pad_end, raising the refusal the Rust side recorded.
+ * Codegen calls these rather than jrt_str_* so a refused size is a catchable
+ * Jade error instead of a null string pointer the caller then dereferences. */
+char*    jk_str_repeat(const char* s, int64_t n);
+char*    jk_str_pad_start(const char* s, int64_t width, const char* pad);
+char*    jk_str_pad_end(const char* s, int64_t width, const char* pad);
 /* Construction, added in v1.3.27. A program could not build a blob before it:
  * str.encode() cannot carry a NUL or a byte above 127 as one octet, so the only
  * blobs a program could hold were ones it read from somewhere. All three report
@@ -767,6 +802,9 @@ jade_value_t jrt_json_parse(const char* s);
 /* jrt_json_stringify_chunk — render an ObjHeader value word to a fresh TRUSTED
  * tagged string (compact, or 2-space pretty when pretty != 0).               */
 char*   jrt_json_stringify_chunk(jade_value_t word, int pretty);
+/* The Rust half. Returns NULL and records a pending error when the value nests
+ * too deep to represent; the wrapper above turns that into a catchable raise. */
+char*   jrt_json_stringify_impl(jade_value_t word, int pretty);
 
 /* ── Conversions ──────────────────────────────────────────────────── */
 /* jrt_bool_of_str — parse a string to a bool, matching the VM's bool():

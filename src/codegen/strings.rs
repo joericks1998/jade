@@ -143,7 +143,7 @@ pub(super) fn emit_str_method<'ctx>(
         }
         "repeat" => {
             let f = low.runtime_fn(
-                "jrt_str_repeat",
+                "jk_str_repeat",
                 ptrt.fn_type(&[ptrt.into(), low.i64t().into()], false),
             );
             let n = low.untag_int(low.load(args[0]));
@@ -157,7 +157,7 @@ pub(super) fn emit_str_method<'ctx>(
         // (s, width, pad): argument 0 is an int, argument 1 a string.
         "pad_start" | "pad_end" => {
             let f = low.runtime_fn(
-                &format!("jrt_str_{method}"),
+                &format!("jk_str_{method}"),
                 ptrt.fn_type(&[ptrt.into(), low.i64t().into(), ptrt.into()], false),
             );
             let w = low.untag_int(low.load(args[0]));
