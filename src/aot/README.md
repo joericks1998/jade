@@ -2,7 +2,7 @@
 
 ## What this subtree is
 
-This is the other execution engine, seen from the outside. `jade build` runs the same frontend and compiler as `jade run`, then turns the resulting bytecode `Chunk` into a native binary or a shared library.
+This is the execution engine, seen from the outside. `jade build` runs the frontend and compiler, then turns the resulting bytecode `Chunk` into a native binary or a shared library. Since v2 it is the only engine, so `jade run` and `jade test` build through it too.
 
 ```
 Chunk → codegen (LLVM IR) → object → link
@@ -10,13 +10,13 @@ Chunk → codegen (LLVM IR) → object → link
 
 This directory owns the first and last steps, and nothing in between. It resolves imports into one namespaced stream, hands the `Chunk` to [`src/codegen/`](../codegen/README.md), wraps what comes back in a `main()` or a `jade_pkg_init`, writes the object file, and drives `cc`. The translation itself, which is one LLVM IR sequence per opcode, lives in `codegen`. It used to live here as `aot/lower/`.
 
-It is a peer of `src/vm/`, not a phase of `src/compiler/`. Both consume the same `Chunk`, and the language is defined by where the two agree.
+It is not a phase of `src/compiler/`. It consumes the `Chunk` the compiler produces. Until v1.4.8 it was a peer of the bytecode VM in `src/vm/`, which consumed the same `Chunk`, and the language was defined by where the two agreed.
 
 ## Why it was built
 
 Compiling in-process is a recent and deliberate change. Code generation used to live in a separate repository, behind a build daemon on `$HOME/.jade/build.sock`. That had a nasty failure mode. A daemon built from an older commit resolved imports differently from the CLI calling it, and stayed silent until the two disagreed. Now there is one resolver, one code path, and one version.
 
-The cost is that *building the toolchain needs LLVM 18 installed*, with `LLVM_SYS_180_PREFIX` pointing at it. *Running* a released `jade` needs nothing installed, because LLVM is linked in rather than loaded.
+The cost is that *building the toolchain needs LLVM 18 installed*, with `LLVM_SYS_180_PREFIX` pointing at it. *Running* a released `jade` needs no LLVM installed, because LLVM is linked in rather than loaded. It does need `cc`, which drives the link, and since v2 that includes `jade run`.
 
 Two design choices are worth knowing before you edit:
 
@@ -29,7 +29,7 @@ That is simpler than tracking a fixed type per register, because the emitter reu
 ## What each file does
 
 - *`mod.rs`* is the public entry point. It sets up the LLVM context and target machine, runs the probe, emits a thin `main()`, writes the object file, and drives the linker. `CompileMode` selects either a binary or a shared library exporting `jade_pkg_init`.
-- *`imports.rs`* handles import resolution and module namespacing. The VM gives every imported file its own namespace, while LLVM has no namespaces at run time. So this file mangles imported symbols to keep two modules that both define `greet` distinct. *The VM is the source of truth for what a namespace means*, so read this file's header before changing import behavior. It is also where a call into a C-ABI dependency is checked against the symbols its manifest declares, which the gotcha below explains.
+- *`imports.rs`* handles import resolution and module namespacing. Jade gives every imported file its own namespace, while LLVM has no namespaces at run time. So this file mangles imported symbols to keep two modules that both define `greet` distinct. *Until v1.4.8 the VM was the source of truth for what a namespace means*, and this file's header still states the rule in the VM's terms, so read it before changing import behavior. It is also where a call into a C-ABI dependency is checked against the symbols its manifest declares, which the gotcha below explains.
 - *`tests.rs`* holds the driver tests.
 
 The translation this directory drives lives in [`src/codegen/`](../codegen/README.md). It is one LLVM IR sequence per opcode, split by concern across ten files. Read that directory's README before adding a lowering.
@@ -60,17 +60,17 @@ Each dependency is now named twice. A `libs/`-relative key is what a moved artif
 
 *An opcode this backend cannot lower is a hard build error.* There is no fallback path, so any new instruction added in `compiler/emit.rs` must be lowered here as well.
 
-*The same applies to a builtin, and it is easier to miss.* A builtin the VM has and this backend does not is not a missing feature. It is the two engines disagreeing about what the language is, and the program only finds out at `jade build`, long after it was written and tested under `jade run`. `write` and `uhttp.stream` sat in that state until v1.1.34.
+*The same applies to a builtin, and it is easier to miss.* A builtin that `builtins/` or a `std/*` package names and this backend cannot lower passes `jade check` and then fails to build. Until v1.4.8 it also ran under the VM's `jade run`, so a program only found out at `jade build`, long after it was written and tested. `write` and `uhttp.stream` sat in that state until v1.1.34.
 
-If you add one to `builtins/` or a `std/*` package, add it here in the same change. Otherwise the parity gate will not catch it, because a builtin nothing in `examples/` exercises looks fine to every test in the repo.
+If you add one to `builtins/` or a `std/*` package, add it here in the same change. `every_package_fn_lowers_in_the_chunk_backend` in `codegen/tests.rs` catches a package function with no lowering. Nothing catches a core builtin that nothing in `examples/` exercises, because it looks fine to every test in the repo.
 
 *Calling a Jade function from a runtime helper is already possible.* A function value is a box whose first word is the raw function pointer, so C calls it as an `int64_t (*)(int64_t)`. `jrt_coll_array_map` has always done this, and `jrt_uhttp_stream` does it once per line.
 
 "It calls back into Jade" is not a reason something cannot be compiled. That reasoning is exactly what kept `uhttp.stream` interpreter-only. The real constraint is narrower: the call must be driven from C rather than Rust, because a raising handler's `longjmp` must not unwind through a Rust frame.
 
-*A runtime helper that reaches a value's kind has to handle every kind the VM does.* `jrt_get_field` handled `JK_STRUCT` and fell through to "value has no fields" for anything else. But the VM reads `d.key` on a dict as `d["key"]`. So dot access on a dict worked under the interpreter and raised when compiled.
+*A runtime helper that reaches a value's kind has to handle every kind the language allows there.* `jrt_get_field` handled `JK_STRUCT` and fell through to "value has no fields" for anything else. But the VM read `d.key` on a dict as `d["key"]`. So dot access on a dict worked under the interpreter and raised when compiled.
 
-That stayed hidden because method *calls* never reach the same path. Codegen rewrites `d.keys()` into a direct call, so only data keys showed the gap. When a helper here switches on `jrt_kind_of`, check the VM's matching `dispatch.rs` arm for every case it accepts, not only the one you came for.
+That stayed hidden because method *calls* never reach the same path. Codegen rewrites `d.keys()` into a direct call, so only data keys showed the gap. When a helper here switches on `jrt_kind_of`, check every kind the language accepts in that position, not only the one you came for. Until v1.4.8 the VM's matching `dispatch.rs` arm was the reference for that. Now the closest one is the fixtures in `examples/` and the output recorded beside them.
 
 *A value that only seems to flow one way still needs a representation.* `MakePrompt` used to store a prompt as the bare string it wraps, on the reasoning that a prompt only ever reaches `PromptDeref`. That is not true. A prompt can be printed, held in a collection, stored in a struct field, passed, or returned.
 
@@ -88,7 +88,7 @@ If you add a lowering that stores a word the runtime handed you, decide explicit
 
 *A buffer a call site needs is allocated in the entry block, not at the call.* LLVM does not reclaim an `alloca` until the function returns, so a call that marshals its arguments into a fresh one grows the stack every time it runs. This backend puts calls inside loops. An FFI call in a `while` loop died at a fixed iteration count for that reason, and the count scaled exactly with `ulimit -s`. `Lowerer::entry_buf` is how a lowering asks for such a buffer. [`../codegen/README.md`](../codegen/README.md) states the rule and explains why sharing one is sound.
 
-*The handler stack is thread-wide here, not per frame.* The VM keeps its `handlers` in a local of the dispatch call frame, so a function's handlers die with it. `jade_exc_push_frame` instead pushes onto one `_Thread_local` stack that only codegen unwinds. The emitter emits `PopHandler` solely on a try body's normal fall-through, which `try { …; return x } catch e { … }` never reaches.
+*The handler stack is thread-wide here, not per frame.* The VM kept its `handlers` in a local of the dispatch call frame, so a function's handlers died with it. `jade_exc_push_frame` instead pushes onto one `_Thread_local` stack that only codegen unwinds. The emitter emits `PopHandler` solely on a try body's normal fall-through, which `try { …; return x } catch e { … }` never reaches.
 
 So every function containing a `try` snapshots `jade_exc_depth()` in its prologue, and calls `jade_exc_restore` on every return path: an explicit `Return`, a `Halt`, and the implicit run off the end. Miss one of those paths and a dead `jmp_buf` outlives its stack frame. That shows up as a segfault, an infinite spin, or a raise landing in the wrong handler, depending on what overwrote the stack.
 
@@ -101,5 +101,5 @@ export LLVM_SYS_180_PREFIX=/opt/homebrew/opt/llvm@18   # or your install
 cargo test aot:: codegen::
 ./target/debug/jade build examples/arithmatic/arithmetic/arithmetic.jde -o /tmp/a && /tmp/a
 ./target/debug/jade build file.jde --emit ir           # inspect the IR
-./src/scripts/backend-parity.sh                            # diff against the VM
+./src/scripts/golden.sh                                    # every example against its recorded output
 ```

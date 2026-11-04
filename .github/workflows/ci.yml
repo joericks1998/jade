@@ -4,19 +4,14 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [main, "2.0.0"]
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      # `submodules` is required, not tidiness: src/protocol/ holds the shared
-      # InferRequest and response-frame definitions. Without it the tripwire tests
-      # cannot read the file and the parity gate cannot build its stub provider.
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -97,23 +92,18 @@ jobs:
       - name: Check formatting
         run: ./target/debug/jade fmt --check examples
 
-      # Runs every example on both the VM and the AOT backend and diffs the
-      # output. The two paths have silently diverged three times; each was
-      # caught by hand, because no automated check ever ran a program both
-      # ways. See the script header for the skip list.
-      #
-      # This covers examples/llm too: the script builds src/scripts/fake-provider.jde
-      # as a stand-in inference provider answering with a canned reply, so the
-      # LLM paths are deterministic rather than skipped. Pointing the gate at
-      # them turned up a VM muting bug and an AOT segfault immediately, so they
-      # are worth keeping covered.
-      - name: Backend parity
+      # Builds every example and compares each binary's output to the
+      # `<name>.expected` beside it. Until v1.4.8 this was a parity gate that ran
+      # each example on the VM and on the compiled backend and diffed the two;
+      # v2 has one engine, so the outputs recorded where both agreed are the
+      # oracle instead. See the script header for the skip list.
+      - name: Golden outputs
         env:
           LLVM_SYS_180_PREFIX: /usr/lib/llvm-18
-        run: ./src/scripts/backend-parity.sh
+        run: ./src/scripts/golden.sh
 
-      # Binds a real C library and runs it on both engines, and compiles the C
-      # runtime the way a release build compiles it.
+      # Binds a real C library and runs it, and compiles the C runtime the way a
+      # release build compiles it.
       #
       # Both halves exist because of bugs that reached users. The C runtime
       # handed `realpath` a buffer a quarter of the size glibc requires, which

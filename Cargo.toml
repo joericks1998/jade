@@ -28,25 +28,12 @@ license = "MIT"
 [workspace]
 members = ["src/runtime"]
 default-members = [".", "src/runtime"]
-# `src/protocol` is the ovata-infer-protocol submodule. This repo uses only its
-# `jade/infer.jde`, never its Rust crate — that dependency went with the daemon in
-# v1.1.30 — so it stays out of the workspace. Excluded rather than ignored, so
-# running cargo inside the submodule does not pick up this workspace.
-exclude = ["src/protocol"]
 
 [dependencies]
 jade-runtime = { path = "src/runtime" }
 clap = { version = "4", features = ["derive"] }
 reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
-async-trait = "0.1"
-async-recursion = "1"
 parking_lot = "0.12"
-# Fast, non-cryptographic hasher for the VM's hot maps (globals, method/struct
-# tables). Variable names are short internal keys, not attacker-controlled hash
-# inputs, so the default SipHash's DoS resistance buys nothing and costs ~10% of
-# interpreter time in call-heavy code — FxHash is several times faster on them.
-rustc-hash = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"

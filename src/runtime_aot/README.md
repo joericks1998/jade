@@ -6,7 +6,7 @@ This directory is C, not Rust. It is the runtime that binaries from `jade build`
 
 The Cargo build script that does the compiling lives here too, as `build.rs`. The root `Cargo.toml` points at it with `build = "src/runtime_aot/build.rs"`. It sits beside the C it compiles rather than at the repo root, and it cannot live at `src/build.rs`, because `src/build/` already claims that module name. Cargo runs a build script with its working directory set to the package root whatever the script's own path, so the `src/runtime_aot/...` paths inside it are unaffected by living here.
 
-Do not confuse this with `src/runtime/`, the `jade-runtime` crate, which is Rust and shared by *both* engines. This directory holds only what is specific to a compiled binary: the exception handler, the platform and concurrency shim, native package loading, and the inference request path.
+Do not confuse this with `src/runtime/`, the `jade-runtime` crate, which is Rust and was shared by *both* engines until v1.4.8. This directory holds only what is specific to a compiled binary: the exception handler, the platform and concurrency shim, native package loading, and the inference request path.
 
 Because it is C, it has no module declaration in `src/lib.rs`.
 
@@ -14,7 +14,7 @@ Because it is C, it has no module declaration in `src/lib.rs`.
 
 The runtime is a platform-independent core plus a swappable platform backend. `common.c` is shared unchanged. The backend supplies only two things: the concurrency layer, meaning `jade_spawn`, `jade_await`, and `jade_join`, and the process-exit primitive `jade_rt_exit`. `posix.c` is the host backend for macOS and Linux. Another target could supply its own without touching the core.
 
-The trend over time has been *shrinking*. Symbols keep moving out of `common.c` into `jade-runtime`, so both engines share one implementation. The C declaration stays behind in `runtime.h`, and the linker resolves it against the Rust static library.
+The trend over time has been *shrinking*. Symbols kept moving out of `common.c` into `jade-runtime`, so both engines shared one implementation. The C declaration stays behind in `runtime.h`, and the linker resolves it against the Rust static library.
 
 `ipc/` went further and disappeared entirely. It held the socket transport to the inference daemon, which moved to Rust and then, in v1.1.30, was removed outright once inference became an in-process call into a provider package.
 
@@ -30,7 +30,7 @@ The trend over time has been *shrinking*. Symbols keep moving out of `common.c` 
 
 macOS sets `PATH_MAX` to 1024 and Linux sets it to 4096. So a hard-coded 1024 was exactly right on one platform and an instant abort on the other. Every FFI package in a compiled binary died at startup on Linux until v1.3.13. `runtime.h` now defines the constant once, with a 4096 fallback.
 
-Two properties of this tree let that bug sit unnoticed, and both still hold. The fortify checks only exist in optimised builds, so a debug toolchain never runs them, which means `cargo test` and the parity gate will not catch the next one. And `build.rs` compiles with `.warnings(false)`, which suppressed the compile-time warning glibc emits saying exactly what was wrong.
+Two properties of this tree let that bug sit unnoticed, and both still hold. The fortify checks only exist in optimised builds, so a debug toolchain never runs them, which means `cargo test` and `src/scripts/golden.sh` will not catch the next one. And `build.rs` compiles with `.warnings(false)`, which suppressed the compile-time warning glibc emits saying exactly what was wrong.
 
 So sweeping the tree by hand is worth doing whenever anything here touches a fixed buffer:
 
@@ -41,15 +41,15 @@ docker run --rm -v "$PWD:/w" -w /w gcc:13 sh -c \
        -o /tmp/o.o "$f"; done'
 ```
 
-- *`native.c`* supports native C-ABI packages: the registry, calling `jade_pkg_init`, and value marshalling. It mirrors `load_native_package`, `vm_to_ffi`, and `ffi_to_vm` in `src/native/mod.rs`, so one `.dylib` serves both `jade run` and `jade build`. The `dlopen` primitives themselves are backend hooks.
-- *`infer/infer.c`* and *`infer/infer.h`* hold every `jrt_prompt_*` entry point. Each one builds an `InferRequest` and drives the installed provider package through `native.c`, so this file carries no transport of its own.
+- *`native.c`* supports native C-ABI packages: the registry, calling `jade_pkg_init`, and value marshalling. Until v1.4.8 it mirrored `load_native_package`, `vm_to_ffi`, and `ffi_to_vm` in `src/native/mod.rs`, the VM's loader, so one `.dylib` served both engines. It is the only loader now. The `dlopen` primitives themselves are backend hooks.
+- *`infer/infer.c`* and *`infer/infer.h`* hold every `jrt_prompt_*` entry point. Each one builds an `InferRequest` and drives the installed provider package through `native.c`, so this file carries no transport of its own. Since v2 nothing installs a provider, because `jade register` was removed, so these entry points have nothing to load until the compiler emits inference itself.
 - *`build.rs`* is the Cargo build script. It compiles every `.c` file here into `libJadeRuntime.a`, exposes the output directory to the linker, and copies the archive up beside the Rust one so both sit in one predictable place. It also enforces the Unix-only rule before `cc` runs.
 
 ## Who uses it
 
 *Depends on:* `jade-runtime` (Rust) for everything declared but not defined here.
 
-*Used by:* the `build.rs` in this directory, which compiles it, and `src/aot/`, which emits calls into it and links the archive into every binary `jade build` produces. `src/native/mod.rs` is its Rust counterpart and has to stay in step with `native.c`.
+*Used by:* the `build.rs` in this directory, which compiles it, and `src/aot/`, which emits calls into it and links the archive into every binary `jade build` and `jade run` produce.
 
 ## One libraries directory per process
 
@@ -69,7 +69,7 @@ So the root is chosen *once*, by whoever hosts the process, which is either a co
 
 ## Gotchas
 
-Marshalling in `native.c` and in `src/native/mod.rs` must agree. Otherwise a package that works under `jade run` misbehaves when compiled, and the failure shows up as corrupted values rather than a clean error.
+Marshalling in `native.c` and in `src/native/mod.rs` had to agree while the VM existed. Otherwise a package that worked under the VM misbehaved when compiled, and the failure showed up as corrupted values rather than a clean error.
 
 That is not hypothetical. v1.2.2 added the `bytes` tag to `runtime.h`, `common.c`, and the VM's marshaller, but not to `native.c`. For three releases, a blob argument silently became `nil` when compiled, and a blob return value crashed the process.
 
@@ -87,11 +87,11 @@ That was three separate copies of the dispatch before, and one of them, `aot_inv
 
 *A guard belongs here, not at the call site, when it has to raise.* A raise is a `longjmp` and must not unwind through a Rust frame, so the checks codegen emits before it dereferences a word all live on this side: `jrt_require_kind` for a primitive method's receiver, `jrt_require_str_arg` for a string method's argument, and `jrt_require_str_val`, `jrt_require_float_val`, `jrt_require_dict_key`, `jrt_require_callable` and `jrt_require_struct` for the places a static type is about to be trusted with a pointer.
 
-Each one exists because its absence was a crash. `{"a": 1}.slice(0, 1)` read a `DictObj` as a `BytesObj`; `{true: "y"}` used a boolean as a `char*`; `fn go(f) { f(1) }; go(5)` loaded a function pointer out of the integer 5. The interpreter checks the value it has and raises, so these have to as well, and with the same wording — `jrt_require_kind` names both a key and a method for a dict, because a dict reads `d.name` as a lookup before it looks for a method and the VM says so.
+Each one exists because its absence was a crash. `{"a": 1}.slice(0, 1)` read a `DictObj` as a `BytesObj`; `{true: "y"}` used a boolean as a `char*`; `fn go(f) { f(1) }; go(5)` loaded a function pointer out of the integer 5. The interpreter checked the value it had and raised, so these have to as well, and with the same wording. `jrt_require_kind` names both a key and a method for a dict, because a dict reads `d.name` as a lookup before it looks for a method, and the VM said so.
 
-*A method call resolves against the receiver it has.* `jrt_struct_is_type` answers whether the receiver is the type a devirtualized call site assumed, and `jrt_method_fallback` handles it when it is not. The fallback goes through `jrt_get_field` rather than straight to the method registry, because that function already implements the interpreter's order — a data field holding a function beats a method of the same name — and then hands the result to `jrt_call_value`. `jrt_method_resolve_or_raise` is the registry lookup with the interpreter's wording on a miss; the Rust half reports failure through a status out-param, since it cannot raise.
+*A method call resolves against the receiver it has.* `jrt_struct_is_type` answers whether the receiver is the type a devirtualized call site assumed, and `jrt_method_fallback` handles it when it is not. The fallback goes through `jrt_get_field` rather than straight to the method registry, because that function already implements the order the interpreter used, where a data field holding a function beats a method of the same name. It then hands the result to `jrt_call_value`. `jrt_method_resolve_or_raise` is the registry lookup with the wording the interpreter used on a miss; the Rust half reports failure through a status out-param, since it cannot raise.
 
-*A binary runs its body on a thread of its own.* `jrt_run_main` in `posix.c` gives it 256 MB of stack, matching what the CLI gives the interpreter. On the process default a program that printed fine under `jade run` segfaulted compiled — 2,000 levels of nested array was enough, because rendering one walks it. Every piece of per-execution state the runtime keeps is already thread-local, since async tasks have always run elsewhere, so nothing had to move. State that is a fact about the *program* rather than the execution must therefore not be thread-local: `jrt_libs_root_publish`'s bookkeeping was, and the answer to "where did this root come from" vanished the moment the body ran on another thread.
+*A binary runs its body on a thread of its own.* `jrt_run_main` in `posix.c` gives it 256 MB of stack, matching what the CLI gave the interpreter. On the process default, a program that printed fine under the interpreter segfaulted compiled, and 2,000 levels of nested array was enough, because rendering one walks it. Every piece of per-execution state the runtime keeps is already thread-local, since async tasks have always run elsewhere, so nothing had to move. State that is a fact about the *program* rather than the execution must therefore not be thread-local: `jrt_libs_root_publish`'s bookkeeping was, and the answer to "where did this root come from" vanished the moment the body ran on another thread.
 
 *A throw gives back what the frames it erases were holding.* A `longjmp` runs nothing on its way out, so every frame it skips loses its scope-exit releases. Each frame leaves a *spill* array behind for exactly this — a copy of whatever its registers hold that is worth releasing — and `jade_frame_release_above` walks the spills of the frames above the handler's own depth, before the jump, while those frames still exist. Afterwards they sit below the stack pointer and reading them is not allowed. Deliberately not the registers themselves: see `src/codegen/README.md` for the 41% that costs. Registering is gated on `exc_depth != 0`, because a frame entered outside every `try` can never be skipped.
 
@@ -115,15 +115,15 @@ Any change to the tagged value layout has three homes: `runtime.h`, `jade-runtim
 
 The exception stack, meaning `exc_stack` and `exc_depth` in `common.c`, is `_Thread_local` and *grows*, and *nothing unwinds it automatically*. A `longjmp` needs its `jmp_buf` to live in a stack frame that has not returned, so codegen scopes the depth: `jade_exc_depth` in a function's prologue, and `jade_exc_restore` on each of its return paths. `jade_exc_restore` only ever lowers the depth, because raising it would resurrect a buffer whose frame is gone. If you add a path out of a lowered function, it needs the restore too.
 
-It was a fixed 64-slot array until v1.4.2, which is not many: a recursive function with a `try` in it ran out at depth 64 and reported "exception stack overflow" for a program the interpreter ran fine, since the interpreter's handlers are a vec owned by the dispatch call frame and have no ceiling. The first 64 frames still live in a thread-local array so the common case allocates nothing; past that it doubles on the heap, up to a backstop far above any real program.
+It was a fixed 64-slot array until v1.4.2, which is not many: a recursive function with a `try` in it ran out at depth 64 and reported "exception stack overflow" for a program the interpreter ran fine, since the interpreter's handlers were a vec owned by the dispatch call frame and had no ceiling. The first 64 frames still live in a thread-local array so the common case allocates nothing; past that it doubles on the heap, up to a backstop far above any real program.
 
 *A task body must not inherit the thread it happens to run on.* `jade_task_invoke` in `posix.c` saves the handler depth and swaps in a fresh recursion budget around the body, and hands both back on the way out. That used to be free: each task got a thread of its own, so there was nothing to inherit. It stopped being free when a bounded pool started reusing workers, and it stopped being optional when an awaiting thread began running tasks inline rather than parking on them — the thread underneath a task body can now be one in the middle of its own generator, its own `try`, and its own deep call chain. See *An awaiting thread runs the task* in `src/runtime/README.md`.
 
-*A raise has to produce the value the VM would produce, not just the right text.* Every non-user error in the interpreter is a `RuntimeError` struct with a `message` field, built in `vm/exceptions.rs`. So `catch e` binds a struct, and `catch RuntimeError e` matches.
+*A raise has to produce the value the VM produced, not just the right text.* Every non-user error in the interpreter was a `RuntimeError` struct with a `message` field, built in `vm/exceptions.rs`. So `catch e` binds a struct, and `catch RuntimeError e` matches.
 
 Raising the bare message string here meant the same `try` saw a str when compiled and a struct when interpreted. `e.message` raised, and a typed catch quietly never fired.
 
-`throw_msg` builds the struct now, and everything that raises goes through it. `jrt_throw_io` adds the interpreter's `I/O error: ` prefix for the fs, http, uhttp, and sh forwarders. `jrt_throw_runtime` is the entry point for codegen's own failures, such as a zero divisor or an overflow. A user's `raise x` deliberately does *not* pass through either, and throws the value written, exactly as the VM does. The `[line:col]` prefix is the one part that stays absent, because compiled code has no source position at run time.
+`throw_msg` builds the struct now, and everything that raises goes through it. `jrt_throw_io` adds the `I/O error: ` prefix the interpreter used, for the fs, http, uhttp, and sh forwarders. `jrt_throw_runtime` is the entry point for codegen's own failures, such as a zero divisor or an overflow. A user's `raise x` deliberately does *not* pass through either, and throws the value written, exactly as the VM did. The `[line:col]` prefix is the one part that stays absent, because compiled code has no source position at run time.
 
 `jrt_require_kind` and `jrt_require_str_arg` exist because a primitive method's *name* does not establish its receiver's kind. The compiled path calls them before untagging a receiver whose type it could not determine ahead of time. They raise through `throw_msg`, deliberately, so a Jade `catch` can see the failure. The common way to test a type is a method call wrapped in `try`.
 

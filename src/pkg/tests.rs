@@ -996,10 +996,7 @@ fn a_installed_jade_abi_package_loads_and_calls() {
         .expect("dependency resolves as a bare import");
     assert_eq!(resolved.kind, crate::project::ImportKind::Native);
 
-    let span = crate::frontend::error::Span { line: 0, col: 0 };
-    let pkg = crate::native::load_native_package(&resolved.path, span)
-        .expect("installed artifact must dlopen and expose jade_pkg_init");
-    assert!(pkg.contains_key("triple"), "binding missing: {:?}", pkg.keys().collect::<Vec<_>>());
+    assert!(exports_pkg_init(&resolved.path), "installed artifact must expose jade_pkg_init");
 }
 
 /// A plain C library — no `jade_pkg_init` anywhere in it.
@@ -1020,11 +1017,7 @@ fn a_generated_shim_makes_a_plain_c_library_loadable() {
 
     // The raw library must NOT be loadable as a package on its own — that is
     // the whole reason the shim exists.
-    let span = crate::frontend::error::Span { line: 0, col: 0 };
-    assert!(
-        crate::native::load_native_package(&built, span).is_err(),
-        "a plain C library should not satisfy the Jade package ABI"
-    );
+    assert!(!exports_pkg_init(&built), "a plain C library should not satisfy the Jade package ABI");
 
     let m = manifest(&format!(
         "[project]\nname = \"app\"\n[dependencies.plain]\nversion = \"1.0.0\"\npath = \"{rel}\"\n\
@@ -1042,9 +1035,7 @@ fn a_generated_shim_makes_a_plain_c_library_loadable() {
         .unwrap()
         .expect("c dependency resolves as a bare import");
 
-    let pkg = crate::native::load_native_package(&resolved.path, span)
-        .expect("the generated shim must dlopen and expose jade_pkg_init");
-    assert!(pkg.contains_key("square"), "shim did not bind the declared symbol");
+    assert!(exports_pkg_init(&resolved.path), "the generated shim must expose jade_pkg_init");
 }
 
 #[test]
@@ -1117,15 +1108,12 @@ fn a_shim_is_relinked_when_its_library_is_rebuilt() {
     let second = std::fs::metadata(&shim).unwrap().modified().unwrap();
     assert!(second > first, "a shim older than its library must be relinked");
 
-    // And it still loads, against the new build.
-    let span = crate::frontend::error::Span { line: 0, col: 0 };
+    // And it is still a package, against the new build.
     let libs = resolved_libraries(tmp.path(), &m);
     let resolved = crate::project::resolve_library_import(&libs, "plain", tmp.path())
         .unwrap()
         .expect("c dependency resolves as a bare import");
-    let pkg = crate::native::load_native_package(&resolved.path, span)
-        .expect("the relinked shim must dlopen");
-    assert!(pkg.contains_key("square"));
+    assert!(exports_pkg_init(&resolved.path), "the relinked shim must expose jade_pkg_init");
 }
 
 // ── Bundling a dependency beside an artifact ──────────────────────────────
@@ -1414,51 +1402,12 @@ fn a_row_of_structs_is_readable_end_to_end() {
     build_c_shims(tmp.path(), &lock, &m).expect("the shim must compile");
 
     let libs = resolved_libraries(tmp.path(), &m);
-    let span = crate::frontend::error::Span { line: 0, col: 0 };
     let resolved =
         crate::project::resolve_library_import(&libs, "rowlib", tmp.path()).unwrap().unwrap();
-    let pkg = crate::native::load_native_package(&resolved.path, span).expect("load");
+    assert!(exports_pkg_init(&resolved.path), "the row library's shim must be a package");
+}
 
-    // Call it, rather than only loading it. Nothing in the suite did that
-    // before, which is why a binding that raised on success went unnoticed.
-    let callable = |name: &str| match pkg.get(name) {
-        Some(crate::vm::VmValue::NativeLibFn(f)) => f.clone(),
-        other => panic!("{name} should be callable, got {other:?}"),
-    };
-    let disasm = callable("d_disasm");
-    let at = callable("insn_at");
-
-    let code = crate::builtins::make_trusted_bytes(vec![0x55, 0x48, 0xc3]);
-    let result = disasm.call(&[code], span).expect("the call must not raise on success");
-
-    // Two things back: how many, and the row.
-    let (count, handle) = match &result {
-        crate::vm::VmValue::Struct(s) => {
-            let g = s.lock();
-            (g.get_field("ret").cloned().unwrap(), g.get_field("out").cloned().unwrap())
-        }
-        other => panic!("expected a count beside the row, got {other:?}"),
-    };
-    assert!(matches!(count, crate::vm::VmValue::Int(3)), "wrong count: {count:?}");
-
-    // And every one of them is readable, not just the first.
-    let mut seen = Vec::new();
-    for i in 0..3 {
-        let one = at.call(&[handle.clone(), crate::vm::VmValue::Int(i)], span).expect("at");
-        let crate::vm::VmValue::Struct(s) = one else { panic!("expected a struct") };
-        let g = s.lock();
-        let crate::vm::VmValue::Array(row) = g.get_field("mnemonic").cloned().unwrap() else {
-            panic!("mnemonic should be a row of characters")
-        };
-        let text: String = row
-            .lock()
-            .iter()
-            .filter_map(|v| match v {
-                crate::vm::VmValue::Char(c) if c.ch() != '\0' => Some(c.ch()),
-                _ => None,
-            })
-            .collect();
-        seen.push(text);
-    }
-    assert_eq!(seen, ["push", "mov", "ret"], "every instruction should be readable");
+/// Whether the library at `path` exports the Jade package entry point.
+fn exports_pkg_init(path: &std::path::Path) -> bool {
+    crate::pkg::bindgen::exported_symbols(path).is_some_and(|e| e.contains("jade_pkg_init"))
 }

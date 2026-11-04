@@ -1767,7 +1767,7 @@ mod parser {
     /// Parse `src` on a thread with a stack the size the real binary gives the
     /// parser.
     ///
-    /// `main.rs` runs every stage on a thread of `vm::VM_STACK_SIZE` (3 GiB in
+    /// `main.rs` runs every stage on a thread of `COMPILER_STACK_SIZE` (3 GiB in
     /// a debug build, 256 MiB released) precisely because recursive descent is
     /// stack-hungry — a debug frame chain costs roughly 15 KB per nesting
     /// level. A default 2 MiB test thread overflows a few hundred levels in,
@@ -1776,7 +1776,7 @@ mod parser {
     /// actually runs.
     fn parse_err_on_a_real_stack(src: String) -> JadeError {
         std::thread::Builder::new()
-            .stack_size(crate::vm::VM_STACK_SIZE)
+            .stack_size(crate::frontend::error::COMPILER_STACK_SIZE)
             .spawn(move || parse_src_err(&src))
             .expect("spawn")
             .join()
@@ -1812,7 +1812,7 @@ mod parser {
     fn ordinary_nesting_is_still_accepted() {
         let ok = format!("let x = {}1{}", "(".repeat(100), ")".repeat(100));
         let n = std::thread::Builder::new()
-            .stack_size(crate::vm::VM_STACK_SIZE)
+            .stack_size(crate::frontend::error::COMPILER_STACK_SIZE)
             .spawn(move || parse_src(&ok).stmts.len())
             .expect("spawn")
             .join()

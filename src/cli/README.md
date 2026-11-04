@@ -11,18 +11,19 @@ Keeping `main.rs` to argument parsing leaves the commands as ordinary library fu
 ## What each file does
 
 - *`run.rs`* implements `jade run`. With no argument it finds the project root and runs the entry file. A `.jde` argument runs that file. Anything else is looked up as a named script in the `[scripts]` section of `jade.toml`.
+
+  Jade has one engine, the compiler, so running a file means building it. `run_file` builds into a scratch directory under the system temp dir, runs the binary with the same standard streams and any arguments given after `--`, removes the directory, and exits with the binary's status. A binary killed by a signal exits as a shell would report it, 128 plus the signal number, so a crash never reads as success. Until v1.4.8, `jade run` interpreted the file on a bytecode VM instead.
 - *`check.rs`* implements `jade check`, which type-checks without running anything. It deliberately runs two more things past inference, so that `check` stays an honest predictor of whether `run` and `build` will succeed.
 
-  The first is `emit`, because shared mutation across tasks is rejected at emit time. The second is `project::walk_imports`, because import resolution is not a compile stage. The VM resolves a `use` when the Import opcode runs, so before v1.1.33, `use totally_made_up_module` reported `ok` and then failed at run time.
+  The first is `emit`, because shared mutation across tasks is rejected at emit time. The second is `project::walk_imports`, because import resolution is not a type-checking stage. Before v1.1.33, `use totally_made_up_module` reported `ok` and then failed later.
 
   Unlike `run`, the import walk does not call `pkg::ensure_ready`. Checking a file should not reach the network to fetch dependencies.
 - *`build.rs`* implements `jade build`. It runs the whole pipeline inside one process: lex, parse, infer, resolve imports, generate LLVM IR, and link. It also handles `--emit ir` and `--lib`.
 
-  It calls `pkg::ensure_ready` before resolving imports, exactly as `run` does. Without that call, the two engines disagreed about what a dependency is: `build` linked against whatever `libs/` happened to hold, while `run` installed first.
+  The compile step is `compile_file`, which `run` and `test` share. It calls `pkg::ensure_ready` before resolving imports, so a fresh clone installs its dependencies first rather than linking against whatever `libs/` happened to hold. `try_compile_file` is the same step returning its message instead of exiting, for `jade test`, where one failing file must not stop the rest.
 
   With no file argument, `--lib` builds the project's `[package]`. `resolve_target` turns the manifest into an entry, an output path, and an export list, and `compare_sources` holds the declared file list to what the entry actually imports.
-- *`repl.rs`* implements `jade repl`. It uses the VM, so the REPL and `jade run` share one implementation. A bare trailing expression is assigned to an internal capture slot and echoed. That slot's name starts with a NUL byte, so it can never collide with a user global.
-- *`test.rs`* implements `jade test`. It finds every `test_*.jde` and `*_test.jde` under the project root, optionally filtered by a pattern.
+- *`test.rs`* implements `jade test`. It finds every `test_*.jde` and `*_test.jde` under the project root, optionally filtered by a pattern, and builds and runs each one. A test passes when its binary exits 0.
 - *`fmt.rs`* implements `jade fmt`. It works line by line on source *text* rather than on the token stream, because the lexer strips comments and a reprint would lose them. It is limited on purpose: it fixes indentation and trailing whitespace, and does not normalize operator spacing. `--check` exits 1 if anything would change.
 - *`new.rs`* implements `jade new` and `jade init`. It sets up a project directory from either the `basic` or the `llm` template.
 - *`pkg.rs`* implements `jade pkg add`, `bind`, `remove`, `install`, `update`, and `list`.
@@ -39,7 +40,6 @@ Keeping `main.rs` to argument parsing leaves the commands as ordinary library fu
 
   The manifest is the source of truth, and `jade.lock` is derived from it. With no registry to query, "update" means reconciling the lock with the manifest rather than discovering a newer version. `install` re-hashes local `path` dependencies before installing, since those point at files the user rebuilds. `--locked` reports that drift as an error instead.
 
-- *`register.rs`* implements `jade register` and `jade use`. It picks which inference provider `?p` uses and stores that provider's API key under `~/.jade`, for the whole machine. `install.sh` runs `jade register` interactively after an install, so this is often a new user's very first `jade` command. It stays chatty and forgiving on purpose.
 - *`env.rs`* implements `jade env`, which prints the version, binary path, platform, cache statistics, and project information. `--json` makes the output easy to script against.
 - *`cache.rs`* implements `jade cache info` and `jade cache clean`.
 - *`upgrade.rs`* implements `jade upgrade`, which updates the toolchain itself from GitHub Releases. It is a different thing from `jade pkg update`, which is about a project's dependencies.
@@ -48,7 +48,7 @@ Keeping `main.rs` to argument parsing leaves the commands as ordinary library fu
 
 ## Who uses it
 
-*Depends on:* nearly every other module. `frontend/` and `compiler/` for the pipeline, `vm/` for execution, `build/` for compilation, `project/` for manifest and root resolution, `pkg/` for dependencies, `providers/` for the provider registry, and `cache/` for the on-disk cache.
+*Depends on:* nearly every other module. `frontend/` and `compiler/` for the pipeline, `build/` for compilation, `project/` for manifest and root resolution, `pkg/` for dependencies, and `cache/` for the on-disk cache.
 
 *Used by:* `src/main.rs` only.
 
@@ -81,6 +81,6 @@ cargo test cli::
 
 A subcommand handler cannot be tested in process. Every one ends in `process::exit`, and several read stdin, reach the network, or write under `~/.jade`.
 
-So `tests.rs` covers the decision each command makes *before* it touches the world: how `fmt` formats, `build`'s default output path and its `[package] sources` comparison, the archive name `upgrade` picks for this platform, how `run -v` renders a value, and what `new` scaffolds. Extract a pure helper when you add a command, or nothing will cover it.
+So `tests.rs` covers the decision each command makes *before* it touches the world: how `fmt` formats, `build`'s default output path and its `[package] sources` comparison, the archive name `upgrade` picks for this platform, and what `new` scaffolds. Extract a pure helper when you add a command, or nothing will cover it.
 
 Two rules keep the tests safe under `cargo test`'s parallelism: never call `std::env::set_var`, and never change the working directory. Anything needing the filesystem uses the `TempDir` helper at the top of `tests.rs`, which gives each test a uniquely named directory and removes it on drop.

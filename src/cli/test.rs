@@ -1,7 +1,7 @@
 use std::{path::PathBuf, process};
 
 /// `jade test [pattern] [-v]`
-pub async fn run_test(pattern: Option<&str>, verbose: bool) {
+pub fn run_test(pattern: Option<&str>, verbose: bool) {
     // Find test files relative to project root (or CWD).
     let root = crate::project::find_project_root()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
@@ -28,8 +28,7 @@ pub async fn run_test(pattern: Option<&str>, verbose: bool) {
 
         print!("  {} ... ", name);
 
-        // Fix 5: pass &Path directly instead of converting to an owned String.
-        match run_test_file(file, verbose).await {
+        match run_test_file(file, verbose) {
             Ok(()) => {
                 println!("ok");
                 passed += 1;
@@ -56,96 +55,35 @@ pub async fn run_test(pattern: Option<&str>, verbose: bool) {
     }
 }
 
-/// Run a single test file.  Returns `Ok(())` on clean exit, `Err(msg)` on any error.
-///
-/// Uses `select_backend` (same as `jade run`) so the daemon socket drives
-/// inference, matching the path that regular `jade run` uses.
-async fn run_test_file(path: &std::path::Path, _verbose: bool) -> Result<(), String> {
-    use crate::{
-        compiler::{emit, type_infer},
-        vm,
-    };
-
-    let source =
-        std::fs::read_to_string(path).map_err(|e| format!("could not read file: {}", e))?;
-
-    // Lex + parse (with cache).
-    let hash = crate::cache::file_hash(path);
-    let cached_ast = hash.as_ref().and_then(crate::cache::read_ast_cache);
-    let program = match cached_ast {
-        Some(p) => p,
-        None => {
-            let tokens = crate::frontend::lexer::tokenize(&source)
-                .map_err(|e| format!("lexer error: {}", e))?;
-            let p = crate::frontend::parser::parse(tokens)
-                .map_err(|e| format!("parse error: {}", e))?;
-            if let Some(ref h) = hash {
-                // to_string_lossy only where a &str is truly needed (cache key display).
-                crate::cache::write_ast_cache(h, &path.to_string_lossy(), &p);
-            }
-            p
+/// Build and run a single test file. Returns `Ok(())` on a clean exit, and
+/// `Err(msg)` naming the build error or the binary's failure otherwise.
+fn run_test_file(path: &std::path::Path, _verbose: bool) -> Result<(), String> {
+    let scratch =
+        std::env::temp_dir().join(format!("jade-test-{}-{}", process::id(), unique_suffix(path)));
+    std::fs::create_dir_all(&scratch)
+        .map_err(|e| format!("could not create '{}': {e}", scratch.display()))?;
+    let bin = scratch.join("test");
+    let result = (|| {
+        super::build::try_compile_file(&path.to_string_lossy(), &bin, crate::build::Emit::Binary)?;
+        let out = process::Command::new(&bin)
+            .output()
+            .map_err(|e| format!("could not run '{}': {e}", bin.display()))?;
+        if out.status.success() {
+            return Ok(());
         }
-    };
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let detail = if stderr.trim().is_empty() { stdout } else { stderr };
+        Err(format!("{}: {}", out.status, detail.trim()))
+    })();
+    let _ = std::fs::remove_dir_all(&scratch);
+    result
+}
 
-    // Type inference.
-    let tprogram = if let Some(ref h) = hash {
-        match crate::cache::read_tir_cache(h) {
-            Some(tp) => tp,
-            None => {
-                let tp = type_infer::infer(program).map_err(|e| format!("type error: {}", e))?;
-                crate::cache::write_tir_cache(h, &path.to_string_lossy(), &tp);
-                tp
-            }
-        }
-    } else {
-        type_infer::infer(program).map_err(|e| format!("type error: {}", e))?
-    };
-
-    // Emit + run.
-    let compiled = emit::emit(tprogram).map_err(|e| format!("compile error: {}", e))?;
-
-    // Connect to the inference daemon if it's running, same as `jade run`.
-    let backend = crate::llm::select_backend();
-
-    let source_dir = path
-        .canonicalize()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-
-    // Honor registered [lib] libraries and locked dependencies so test files
-    // can import them too. Resolved from the test file's own directory, same rule
-    // as `jade run` and `jade build`: a file belongs to the project it sits in.
-    let project_root = crate::project::find_project_root_from(&source_dir);
-    let libraries = project_root
-        .as_ref()
-        .map(|root| {
-            // Reported rather than skipped: a manifest that will not parse
-            // takes the project's `[lib]` entries and dependencies with it, and
-            // every test then fails on an import instead of on the real cause.
-            let manifest = crate::project::load_project(root).unwrap_or_else(|e| {
-                eprintln!("error: {e}");
-                std::process::exit(1);
-            });
-            if let Err(e) = crate::pkg::ensure_ready(root, &manifest) {
-                eprintln!("error: {e}");
-                std::process::exit(1);
-            }
-            crate::pkg::resolved_libraries(root, &manifest)
-        })
-        .unwrap_or_default();
-
-    let opts = vm::VmOpts {
-        backend,
-        source_dir,
-        project_root,
-        libraries,
-        #[cfg(test)]
-        test_stdout: None,
-        #[cfg(test)]
-        max_call_depth: None,
-    };
-
-    vm::run(compiled, opts).await.map_err(|e| e.to_string())?;
-    Ok(())
+/// A short name for `path`, so two test files never share a scratch directory.
+fn unique_suffix(path: &std::path::Path) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut h);
+    format!("{:x}", h.finish())
 }

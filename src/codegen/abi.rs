@@ -15,15 +15,15 @@ pub(super) fn default_word_const<'ctx>(
     context: &'ctx Context,
     module: &Module<'ctx>,
     b: &inkwell::builder::Builder<'ctx>,
-    v: &VmValue,
+    v: &Const,
 ) -> Result<IntValue<'ctx>, String> {
     let i64_ty = context.i64_type();
     let ptr_ty = context.ptr_type(AddressSpace::default());
     Ok(match v {
-        VmValue::Int(n) => i64_ty.const_int((n.wrapping_shl(1)) as u64, false),
-        VmValue::Bool(x) => i64_ty.const_int(if *x { TRUE } else { FALSE }, false),
-        VmValue::Nil => i64_ty.const_int(NIL, false),
-        VmValue::Float(f) => {
+        Const::Int(n) => i64_ty.const_int((n.wrapping_shl(1)) as u64, false),
+        Const::Bool(x) => i64_ty.const_int(if *x { TRUE } else { FALSE }, false),
+        Const::Nil => i64_ty.const_int(NIL, false),
+        Const::Float(f) => {
             let bf = module.get_function("jrt_box_float").unwrap_or_else(|| {
                 module.add_function(
                     "jrt_box_float",
@@ -36,7 +36,7 @@ pub(super) fn default_word_const<'ctx>(
                 .as_any_value_enum()
                 .into_int_value()
         }
-        VmValue::Str(sv) => {
+        Const::Str(sv) => {
             let dup = module.get_function("jrt_str_dup").unwrap_or_else(|| {
                 module.add_function(
                     "jrt_str_dup",
@@ -63,7 +63,7 @@ pub(super) fn default_word_const<'ctx>(
         // A fresh empty collection, allocated per instance. It cannot be a
         // constant: two structs sharing one array would see each other's
         // writes, and the VM builds a new `ArrayObj` for every literal.
-        VmValue::Array(_) => {
+        Const::EmptyArray => {
             let f = module.get_function("jrt_karr_new").unwrap_or_else(|| {
                 module.add_function("jrt_karr_new", ptr_ty.fn_type(&[], false), None)
             });
@@ -75,7 +75,7 @@ pub(super) fn default_word_const<'ctx>(
             let iv = b.build_ptr_to_int(p, i64_ty, "dfai").map_err(|e| e.to_string())?;
             b.build_or(iv, i64_ty.const_int(TAG_PTR, false), "dfatag").map_err(|e| e.to_string())?
         }
-        VmValue::Dict(_) => {
+        Const::EmptyDict => {
             let f = module.get_function("jrt_kdict_new").unwrap_or_else(|| {
                 module.add_function("jrt_kdict_new", ptr_ty.fn_type(&[], false), None)
             });
@@ -87,7 +87,6 @@ pub(super) fn default_word_const<'ctx>(
             let iv = b.build_ptr_to_int(p, i64_ty, "dfdi").map_err(|e| e.to_string())?;
             b.build_or(iv, i64_ty.const_int(TAG_PTR, false), "dfdtag").map_err(|e| e.to_string())?
         }
-        other => return Err(format!("codegen: unsupported struct field default {other:?}")),
     })
 }
 
@@ -357,18 +356,18 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
     /// Materialize a compiled default-parameter value (always a literal, per
     /// `emit_fn`) as a tagged word for a call-site argument fill. Mirrors the
     /// tagged ABI used by the constant-load opcodes.
-    pub(super) fn default_word(&self, v: &VmValue) -> Result<IntValue<'ctx>, String> {
+    pub(super) fn default_word(&self, v: &Const) -> Result<IntValue<'ctx>, String> {
         Ok(match v {
-            VmValue::Int(n) => self.i64t().const_int((n.wrapping_shl(1)) as u64, false),
-            VmValue::Bool(b) => self.i64t().const_int(if *b { TRUE } else { FALSE }, false),
-            VmValue::Nil => self.i64t().const_int(NIL, false),
-            VmValue::Float(f) => self.box_float(self.f64t().const_float(*f)),
-            VmValue::Str(s) => self.str_literal_word(s)?,
+            Const::Int(n) => self.i64t().const_int((n.wrapping_shl(1)) as u64, false),
+            Const::Bool(b) => self.i64t().const_int(if *b { TRUE } else { FALSE }, false),
+            Const::Nil => self.i64t().const_int(NIL, false),
+            Const::Float(f) => self.box_float(self.f64t().const_float(*f)),
+            Const::Str(s) => self.str_literal_word(s)?,
             // A fresh empty collection per instance, not a shared constant: two
             // structs holding one array would see each other's writes. Reached
             // by a struct field default under a `...base`, where the default is
             // no longer folded into the literal while it compiles.
-            VmValue::Array(_) => {
+            Const::EmptyArray => {
                 let f = self.runtime_fn("jrt_karr_new", self.ptrt().fn_type(&[], false));
                 let p = self
                     .builder
@@ -378,7 +377,7 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
                     .into_pointer_value();
                 self.tag_ptr(p)
             }
-            VmValue::Dict(_) => {
+            Const::EmptyDict => {
                 let f = self.runtime_fn("jrt_kdict_new", self.ptrt().fn_type(&[], false));
                 let p = self
                     .builder
@@ -388,7 +387,6 @@ impl<'a, 'ctx> Lowerer<'a, 'ctx> {
                     .into_pointer_value();
                 self.tag_ptr(p)
             }
-            other => return Err(format!("codegen: unsupported default value {other:?}")),
         })
     }
 }

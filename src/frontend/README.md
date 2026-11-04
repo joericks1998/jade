@@ -7,7 +7,7 @@ This is the front half of the Jade compiler. It takes raw `.jde` source text and
 It is the first link in the one-way chain that defines the toolchain:
 
 ```
-source text → frontend → compiler (TIR) → bytecode → vm | aot
+source text → frontend → compiler (TIR) → bytecode → aot
 ```
 
 No stage reaches backwards, so a change here ripples forward and never the other way.
@@ -18,7 +18,7 @@ Two ideas shape the code.
 
 *One concern per file.* The lexer only lexes and the parser only parses. When a language feature needs both, it gets a token in the lexer and a rule in the parser, rather than one helper doing a bit of each. That is what keeps these files readable at the size they have grown to.
 
-*Every failure carries a span.* Every `JadeError` variant holds a `Span { line, col }`, because an error with no location is nearly useless to whoever is writing the program. That is also why there are no panics on the interpreter path. An `unwrap()` on anything derived from user input turns a good message into a backtrace.
+*Every failure carries a span.* Every `JadeError` variant holds a `Span { line, col }`, because an error with no location is nearly useless to whoever is writing the program. That is also why there are no panics on the compiler path. An `unwrap()` on anything derived from user input turns a good message into a backtrace.
 
 A third choice is worth knowing before you add syntax: *prefer desugaring*. If the parser can rewrite new syntax into an AST node that already exists, the rest of the pipeline never learns about it. The `~>` operator is the model. It is a parser-level rewrite to the prompt-dereference node, so type inference, the emitter, and both backends were left untouched.
 
@@ -33,7 +33,9 @@ In v1.2.0, `|>` became an ordinary `Expr::Pipe` node, and `compiler::type_infer:
 - *`lexer.rs`* turns source text into a `Vec<Token>`. It handles Jade's string forms, meaning plain, single-quoted, triple-quoted, and f-strings, plus numeric literals with overflow detection and the prompt-related sigils. It *strips comments*, which is why `cli/fmt.rs` formats source text directly rather than reprinting the token stream.
 - *`parser.rs`* turns tokens into a `Program`. It is the largest file here. Operator precedence lives in its call chain, which runs `parse_or`, then `parse_and`, and on down to `parse_primary`. Add a precedence level by inserting a function at the right point in that chain, rather than special-casing inside an existing one.
 - *`ast.rs`* holds the AST node types, plus the small enums shared with later stages: `BinOpKind`, `UnaryOpKind`, `StructFieldDef`, and `FStrPart`. All of them are serde-serializable, because the on-disk cache stores them.
-- *`error.rs`* holds `JadeError`, `Span`, and the `Result` alias the whole crate uses. Every variant carries a span. `undefined_variable_hint` lives here rather than beside either engine, because the AOT backend reports the same thing about programs that type inference had to let through, and the two should word it the same way.
+- *`error.rs`* holds `JadeError`, `Span`, and the `Result` alias the whole crate uses. Every variant carries a span. `undefined_variable_hint` lives here rather than in the backend, because type inference and the AOT backend both report an undefined name, the backend for programs that type inference had to let through, and the two should word it the same way.
+
+  It also holds two limits. `MAX_NESTING_DEPTH` is how deeply the parser descends before refusing the source. `COMPILER_STACK_SIZE` is the stack `main.rs` runs the whole CLI on, 3 GiB in a debug build and 256 MiB in a release build, because every compiler stage recurses over the source. It replaced the VM's `VM_STACK_SIZE` in v2.
 - *`mod.rs`* holds module declarations only.
 - *`tests.rs`* holds the parser and lexer tests. Two helpers: `parse_src(src)` returns a `Program`, and `parse_src_err(src)` returns the `JadeError` a bad program produces.
 
@@ -41,7 +43,7 @@ In v1.2.0, `|>` became an ordinary `Expr::Pipe` node, and `compiler::type_infer:
 
 *Depends on:* nothing else in the crate. This is the bottom of the stack.
 
-*Used by:* nearly everything. `compiler/type_infer.rs` consumes the `Program`, and `cache/` serializes it. `cli/check.rs`, `cli/run.rs`, `cli/build.rs`, and `cli/repl.rs` all begin by calling the lexer and parser. Every module in the crate uses `error::JadeError` and `Span`, including the VM, the AOT backend, and the built-in packages.
+*Used by:* nearly everything. `compiler/type_infer.rs` consumes the `Program`, and `cache/` serializes it. `cli/check.rs` and `cli/build.rs` both begin by calling the lexer and parser, and `jade run` and `jade test` reach them through `cli/build.rs`. Every later stage uses `error::JadeError` and `Span`, including the compiler, the bytecode, `codegen`, and the AOT backend. `main.rs` reads `COMPILER_STACK_SIZE` from `error.rs`.
 
 ## Gotchas
 

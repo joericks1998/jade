@@ -2,23 +2,23 @@
 //!
 //! ## Why this exists
 //!
-//! The bytecode VM gives every imported file its **own namespace**: `use "a.jde"
-//! as a` runs `a.jde` in an isolated sub-state and binds its symbols under `a`
-//! (`a.greet`, struct defs as `a.Foo`, methods as `a.Foo`). Two different modules
-//! can each define `greet` and stay distinct (see `vm::run` ImportFile handling).
-//! **The VM is the source of truth.**
+//! Every imported file has its **own namespace**: `use "a.jde" as a` binds its
+//! symbols under `a` (`a.greet`, struct defs as `a.Foo`, methods as `a.Foo`), so
+//! two different modules can each define `greet` and stay distinct. Until v1.4.8
+//! the bytecode VM ran each import in an isolated sub-state, and this pass was
+//! written to match it.
 //!
-//! The AOT backend has no runtime namespaces — everything collapses into one LLVM
-//! module. The previous pass flattened every imported file into one global stream
-//! and rewrote `a.greet` → bare `greet`, which **fused all namespaces together**:
-//! two modules each defining `greet` collided (last definition won, or LLVM
-//! rejected the duplicate symbol). That diverged from the VM.
+//! A compiled program has no runtime namespaces: everything collapses into one
+//! LLVM module. The previous pass flattened every imported file into one global
+//! stream and rewrote `a.greet` to bare `greet`, which **fused all namespaces
+//! together**: two modules each defining `greet` collided (last definition won,
+//! or LLVM rejected the duplicate symbol).
 //!
 //! ## What this pass does instead
 //!
 //! It inlines imported files (AOT still needs one module) but **mangles every
 //! imported module's globals by a per-module id**, so distinct modules never
-//! collide. `main` keeps bare names — it is the root namespace, matching the VM.
+//! collide. `main` keeps bare names, since it is the root namespace.
 //!
 //! Mangling scheme: `name$<id>`. `$` is valid in LLVM symbol names but is **never
 //! produced by the Jade lexer** (identifiers are `[A-Za-z0-9_]`), so a mangled name
@@ -89,10 +89,9 @@ pub fn resolve_and_namespace(
 
     let mut reg = Registry::new();
     // Load registered [lib] libraries from the project's jade.toml (walking up
-    // from the main file), so `use "<lib>/<module>"` resolves the same way the
-    // VM does. Locked dependencies join them as synthetic [lib] entries, so
-    // `use <dep>` lowers exactly like a hand-written library and the two
-    // backends cannot resolve differently.
+    // from the main file), so `use "<lib>/<module>"` resolves the way `jade
+    // check` resolves it. Locked dependencies join them as synthetic [lib]
+    // entries, so `use <dep>` lowers exactly like a hand-written library.
     if let Some((root, manifest)) = crate::project::find_project_root_from(&main_dir)
         .and_then(|r| crate::project::load_project(&r).ok().map(|m| (r, m)))
     {
@@ -494,8 +493,7 @@ fn resolve_use(reg: &Registry, dir: &Path, path: &str) -> Result<Resolved, Strin
     }
     // Not a registered library: resolve relative to the importing file. `path` is
     // a module stem (`utils`, `sub/helper`), so probe `<path>.jde` then a native
-    // library — the same order as an allowlist-free `[lib]`, and identical to the
-    // VM's `resolve_user_import`, so the two backends can't diverge.
+    // library, the same order as an allowlist-free `[lib]`.
     let relative = || {
         let r = crate::project::resolve_relative_import(dir, path);
         (r.path, r.kind == crate::project::ImportKind::Native)

@@ -157,12 +157,11 @@ fn a_compiled_jade_package_loads_and_binds_its_exports() {
     assert!(result.is_ok(), "linking a package failed: {:?}", result.err());
     assert!(out.exists(), "no shared library was produced at {}", out.display());
 
-    let span = crate::frontend::error::Span { line: 0, col: 0 };
-    let pkg = crate::native::load_native_package(&out, span)
-        .expect("a compiled Jade package must satisfy the native package ABI");
-
-    assert!(pkg.contains_key("add"), "missing export: {:?}", pkg.keys().collect::<Vec<_>>());
-    assert!(pkg.contains_key("triple"), "missing export: {:?}", pkg.keys().collect::<Vec<_>>());
+    let exports = crate::pkg::bindgen::exported_symbols(&out).unwrap_or_default();
+    assert!(
+        exports.contains("jade_pkg_init"),
+        "a compiled Jade package must export jade_pkg_init: {exports:?}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

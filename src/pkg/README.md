@@ -58,7 +58,7 @@ The third decision is that a local `path` dependency is *re-hashed on every inst
 
 A URL is the opposite. It either serves the bytes the lock pins or it does not, and quietly re-pinning it would defeat the point of having a lock. So `refresh_local` runs before every `materialize`, and `verify_local_unchanged` is its `--locked` counterpart, turning the same drift into a CI failure rather than a fix.
 
-The whole surface between this module and the rest of the compiler is one function, `dependency_libraries`. Resolved dependencies come back as synthetic `project::LibraryEntry` values and are merged into the manifest's `[lib]` map. So neither the VM nor the AOT import resolver ever learns what a dependency is. Both keep resolving `[lib]` entries exactly as before, which is how the two backends are kept from drifting on imports.
+The whole surface between this module and the rest of the compiler is one function, `dependency_libraries`. Resolved dependencies come back as synthetic `project::LibraryEntry` values and are merged into the manifest's `[lib]` map. So the AOT import resolver never learns what a dependency is. It keeps resolving `[lib]` entries exactly as before. Until v1.4.8 the VM did the same, which is how the two backends were kept from drifting on imports.
 
 ## What each file does
 
@@ -68,7 +68,7 @@ The whole surface between this module and the rest of the compiler is one functi
 - *`manifest.rs`* makes format-preserving edits to `jade.toml` through `toml_edit`. `jade pkg add` and `jade pkg remove` rewrite a file a person wrote by hand. Parsing and re-serializing it instead would silently discard every comment and all the original layout.
 - *`cshim.rs`* generates a Jade-ABI binding shim for a plain C library. The loader requires a `jade_pkg_init` symbol, which something like `libz` does not have.
 
-  Teaching the runtime to dispatch arbitrary C signatures would mean a `libffi` dependency and *two* marshalling implementations, one per engine. Instead this file emits a small C wrapper and compiles it with `cc`. The result is an ordinary Jade-ABI package both backends already know how to load.
+  Teaching the runtime to dispatch arbitrary C signatures would have meant a `libffi` dependency and *two* marshalling implementations, one per engine. Instead this file emits a small C wrapper and compiles it with `cc`. The result is an ordinary Jade-ABI package the compiled runtime already knows how to load.
 
   The type vocabulary is the FFI's own: `int`, `float`, `bool`, `str`, `bytes`, and `nil` for returns. Two more forms make the shim *rewrite* a call rather than forward it, which is what lets a real C signature be callable at all:
 
@@ -76,7 +76,7 @@ The whole surface between this module and the rest of the compiler is one functi
   - `out_buffer:<ctype>` and `out_struct:<Type>` are out-parameters. They consume *no* Jade argument, because the shim owns the memory. So `x_read(handle, buf, n)` is called from Jade as `x_read(handle, n)` and hands back the bytes. The rewrite rules are below.
   - `scalar:<ctype>` is the same value with the library's own C type named, for the case where the shim writes the declaration itself. See *A width the library never agreed to* below.
 
-A symbol may also declare `fails_when`, whose values are `null`, `negative`, `nonzero`, and `never`. The shim then clears `errno`, tests the return against that convention, and on failure hands back a `JADE_FFI_ERROR` carrying the `strerror` text and the number. Both engines already turn that into a catchable Jade raise.
+A symbol may also declare `fails_when`, whose values are `null`, `negative`, `nonzero`, and `never`. The shim then clears `errno`, tests the return against that convention, and on failure hands back a `JADE_FFI_ERROR` carrying the `strerror` text and the number. The compiled runtime already turns that into a catchable Jade raise.
 
 Without `fails_when`, a failed call returns its raw sentinel and throws away the reason the library *had already recorded*. The program sees `-1` and nothing else.
 
@@ -100,7 +100,7 @@ On the real `sqlite3.h` that comes to 181 bound, 2 assumed, and 105 skipped, whe
 
 *Also depends on:* `clang` on your `PATH`, but only when a header is actually read. That means `add --header`, `bind`, or an `install` filling in missing symbols. A manifest that already carries its symbols installs without clang. Nothing else in the package manager needs it, and a missing clang is reported along with the workaround, which is to write the table by hand, rather than as a crash.
 
-*Used by:* `cli/pkg.rs`, for the commands. Indirectly, `vm/chunk.rs` and `aot/imports.rs` consume the `[lib]` entries this module contributes, without knowing they came from a dependency.
+*Used by:* `cli/pkg.rs`, for the commands. Indirectly, `aot/imports.rs` consumes the `[lib]` entries this module contributes, without knowing they came from a dependency.
 
 ## How the shim rewrites a call
 
@@ -204,9 +204,9 @@ No `libffi` is involved. That is the whole payoff of generating the shim from a 
 
 Two rules follow from where the callback runs:
 
-*The registration outlives the call that made it, and it is not thread-local.* Both used to be the other way round, and both had to change together for a library that *stores* a callback. Such a library invokes the callback from a later call entirely. Under the VM, each native call runs on its own worker thread, so a thread-local slot set during one call would read empty in the next, even if nothing cleared it.
+*The registration outlives the call that made it, and it is not thread-local.* Both used to be the other way round, and both had to change together for a library that *stores* a callback. Such a library invokes the callback from a later call entirely. Under the VM, each native call ran on its own worker thread, so a thread-local slot set during one call would read empty in the next, even if nothing cleared it.
 
-`native::CallbackBus` keeps the Jade function alive for the life of the VM. Nothing in C says when a library is finished with a stored callback, so there is no moment at which releasing it would be safe.
+In a compiled binary, `jade_ffi_free` in `runtime_aot/native.c` deliberately never frees a callback's wrapper, so the Jade function stays reachable until the process exits. Until v1.4.8 the VM did the same with `native::CallbackBus`. Nothing in C says when a library is finished with a stored callback, so there is no moment at which releasing it would be safe.
 
 *There is one slot per symbol, which is not always enough.* Two outstanding registrations on one symbol collide, and the second takes the first's answers.
 
@@ -328,7 +328,7 @@ Inside a container, the copy is a `strdup`, and Jade's `ffi_free` reclaims it al
 
 That buffer used to be a fixed 4096 bytes and truncated, which is the worst answer available. A URL-escaped path came back silently short, and nothing anywhere said so.
 
-A copy that fails is a failed call, and it says so. `out` comes back as a `JADE_FFI_ERROR` naming both the symbol and the cause. It used to be a bare status with `out` left as it was found, which reads as "returned a non-zero status" in a compiled binary and "returned error code 1" under the VM. Neither of those says "out of memory".
+A copy that fails is a failed call, and it says so. `out` comes back as a `JADE_FFI_ERROR` naming both the symbol and the cause. It used to be a bare status with `out` left as it was found, which read as "returned a non-zero status" in a compiled binary and "returned error code 1" under the VM. Neither of those says "out of memory".
 
 The error goes on `out` rather than on wherever the string was headed. With two results, the string's target is a field of the result struct, and a failure is always reported through the top-level `out`.
 
@@ -552,7 +552,7 @@ The second place matters. Without it, `jade run` on a fresh project answers "the
 
 The visitor handles the string case itself and hands the map case to a derived struct, which leaves those messages exactly as they were. A test pins the behavior.
 
-*A thread-exit hook cannot read a thread-local, and a version that tries still runs.* The per-thread buffer behind `jade_shim_owned` is released through a `pthread_key_create` destructor. C11's `_Thread_local` has no destructor, and both engines retire idle pool workers after ten seconds. Threads come and go for as long as the program runs, so the last buffer each one held accumulates rather than staying capped at one per pool slot.
+*A thread-exit hook cannot read a thread-local, and a version that tries still runs.* The per-thread buffer behind `jade_shim_owned` is released through a `pthread_key_create` destructor. C11's `_Thread_local` has no destructor, and the runtime retires idle pool workers after ten seconds. Threads come and go for as long as the program runs, so the last buffer each one held accumulates rather than staying capped at one per pool slot.
 
 The trap is in how the destructor finds the buffer. Written to read a `_Thread_local`, it compiles, it is called once per thread, and it frees nothing. On macOS, the thread's thread-local storage is already torn down by the time key destructors run, so the pointer reads back null. Peak resident memory was identical with the hook and without it, and only measuring across a few thousand threads revealed the problem.
 

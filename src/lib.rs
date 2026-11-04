@@ -45,18 +45,14 @@ pub mod compiler;
 /// Bytecode interpreter — one of the two execution engines, peer to `aot`
 /// rather than a phase of `compiler`. `jade run` uses this; `jade build` uses
 /// `aot`. Backend parity exists to keep the two agreeing.
-pub mod vm;
 // `src/runtime_aot/` is C, not Rust, so it has no module declaration here. It
 // is the runtime linked into AOT-compiled binaries only — the exception
 // handler, the platform/concurrency shim, and the IPC and inference clients —
 // and `build.rs` compiles it to `libJadeRuntime.a`. Distinct from
 // `jade-runtime` (`src/runtime/`), which is Rust and shared by *both* engines.
 pub mod frontend;
-pub mod llm;
-pub mod native;
 pub mod pkg;
 pub mod project;
-pub mod providers;
 pub mod stdio;
 
 // Native built-in packages (the `std/*` + core intrinsic registry).
@@ -68,7 +64,6 @@ pub mod dict;
 pub mod env;
 pub mod fs;
 pub mod future;
-pub mod grammar;
 pub mod http;
 pub mod json;
 pub mod math;

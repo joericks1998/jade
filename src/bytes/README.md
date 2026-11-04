@@ -4,7 +4,7 @@
 
 Two things that belong together. The method surface of the `bytes` type, which is `len`, `decode`, and `slice`. And the `std::bytes` package, which is the three ways to *build* a blob: `zeros`, `from_ints`, and `concat`.
 
-The value itself is not here. A blob lives in `jade_runtime::bytesf::BytesObj`, shared with the AOT heap, so both engines agree on what a `bytes` value *is*. This directory decides what the VM does when you call a method on one, or call one of the package functions.
+The value itself is not here, and neither is any behavior. A blob lives in `jade_runtime::bytesf::BytesObj`, and the compiled backend runs every method and package function against it. Since v2 this directory only names them and gives the checker their types. Until v1.4.8 it also held what the VM did when you called one.
 
 ## Why `bytes` is not just a string
 
@@ -22,18 +22,17 @@ The three functions are a package rather than three more methods for two reasons
 
 ## Why writing is `b[i] = v` and not `b.set(i, v)`
 
-Reading one octet was already spelled `b[i]`. An array already writes with `a[i] = v`. Using the same spelling adds no new concept, reuses the `SetIndex` opcode both engines already lower, and keeps the method count at three.
+Reading one octet was already spelled `b[i]`. An array already writes with `a[i] = v`. Using the same spelling adds no new concept, reuses the `SetIndex` opcode the backend already lowers, and keeps the method count at three.
 
-It also means the write path is *two* instructions and not one. The emitter picks `SetIndex` for a local binding and `SetIndexGlobal` for a module-level one, and they are separate arms in both engines. An implementation that handles only the first makes `b[0] = 1` work inside a function and fail at the top level.
+It also means the write path is *two* instructions and not one. The emitter picks `SetIndex` for a local binding and `SetIndexGlobal` for a module-level one, and they are separate arms in the backend. An implementation that handles only the first makes `b[0] = 1` work inside a function and fail at the top level.
 
 ## What each file does
 
-- *`mod.rs`* holds the three methods, the three package functions, `find_bytes_method`, the `BYTES_PKG` registration, and the type registration that lets `b.len()` be checked before it runs.
-- *`tests.rs`* covers the behaviors below, plus the NUL and invalid-UTF-8 cases that are the reason this type exists.
+- *`mod.rs`* holds `BYTES_METHODS`, which names the three methods, the `BYTES_PKG` registration, which names the three package functions, and the type registration that lets `b.len()` be checked before it runs.
 
 ## The decisions worth knowing
 
-*A blob is reference-semantic.* Since v1.3.27 it is mutable, so two names for one buffer see the same write, exactly as they do for an array. `VmValue::Bytes` holds `Arc<Mutex<BytesObj>>`; the lock lives in the VM's wrapper rather than inside `BytesObj`, because that type is `repr(C)` and shares its layout with the compiled heap and the native package ABI, neither of which has one. Nothing synchronises the payload on the AOT path either. What keeps two tasks off one buffer is `compiler::taskcheck`, the same rule that already covered arrays.
+*A blob is reference-semantic.* Since v1.3.27 it is mutable, so two names for one buffer see the same write, exactly as they do for an array. `BytesObj` carries no lock, because that type is `repr(C)` and shares its layout with the compiled heap and the native package ABI, neither of which has one. Until v1.4.8 the VM wrapped it in a `Mutex`, but nothing synchronises the payload in a compiled binary. What keeps two tasks off one buffer is `compiler::taskcheck`, the same rule that already covered arrays.
 
 *`decode` raises on invalid UTF-8* rather than substituting `�`. Quietly corrupting data is worse than a catchable error. A caller who wants lossy behavior can ask for it, while a caller who assumed the bytes were text needs to hear that they were not.
 
@@ -43,24 +42,23 @@ It also means the write path is *two* instructions and not one. The emitter pick
 
 *`slice` clamps instead of raising.* Reading past the end is how you take the tail of a buffer, and every caller would otherwise write the same `min()` call.
 
-*Nothing here raises `JadeError::Exception`.* That variant means a `raise` the program wrote, and the VM answers one by handing the catch block `state.raised_exception`, which a built-in never fills in. `bytes.decode` used to raise it, so a caught decode failure bound the bare string `"unknown exception"` under `jade run` and a `RuntimeError` struct under `jade build`. A test in `tests.rs` pins the rule.
+*A failed decode raises a `RuntimeError` struct.* `jk_bytes_decode` in `src/runtime_aot/common.c` raises through `throw_msg`, like every other runtime failure. Until v1.4.8 the VM's `bytes.decode` raised `JadeError::Exception` instead. That variant means a `raise` the program wrote, and the VM answered one by handing the catch block `state.raised_exception`, which a built-in never filled in. So a caught decode failure bound the bare string `"unknown exception"` under the VM and a `RuntimeError` struct under `jade build`.
 
 ## Who uses it
 
-`src/vm/dispatch.rs` routes a method call on a `VmValue::Bytes` here, and its two index-assignment arms call `write_octet` for `b[i] = v`. The compiled backend does not use this directory at all. It lowers the same three methods to `jrt_bytes_*` symbols in `jade_runtime::bytesf`, lowers the package functions to the `jk_bytes_*` forwarders in `src/runtime_aot/common.c`, and writes an octet through the `JK_BYTES` arm of `jrt_val_set_index`. So a change to any behavior has to land in both places, or the engines disagree.
+`src/builtins/` lists `BYTES_METHODS` among the primitive-method tables and `BYTES_PKG` among the packages, and the type checker reads both. The compiled backend does all the work. It lowers the three methods to `jrt_bytes_*` symbols in `jade_runtime::bytesf`, lowers the package functions to the `jk_bytes_*` forwarders in `src/runtime_aot/common.c`, and writes an octet through the `JK_BYTES` arm of `jrt_val_set_index`. So a change to behavior lands there, and a new method or function also needs its name added here.
 
-The message text for every failure lives once, in `jade_runtime::bytesf`, and both engines format from there. A program can catch these, which makes the wording part of the language rather than an implementation detail.
+The message text for every failure lives once, in `jade_runtime::bytesf`, and the compiled backend formats from there. A program can catch these, which makes the wording part of the language rather than an implementation detail.
 
 The things that produce `bytes` values elsewhere: `read_bytes` and `read_stdin_bytes` in `std::fs`, `get_bytes` and `post_bytes` in `std::http` and `std::uhttp`, `str.encode()`, and a native package handing one back across the FFI.
 
 ## Building and testing
 
 ```sh
-cargo test bytes::
 cargo test -p jade-runtime bytesf
 ./target/debug/jade run examples/bytes/construct/construct.jde
 ./target/debug/jade run examples/bytes/buffer/buffer.jde
-./src/scripts/backend-parity.sh
+./src/scripts/golden.sh
 ```
 
-The parity script is the one that matters. Everything here has a second implementation in the compiled backend, and only running the same program both ways proves the two agree.
+The golden script is the one that matters. It builds every example, these two included, and compares each binary's output with what the VM and the compiled backend agreed on at v1.4.8.

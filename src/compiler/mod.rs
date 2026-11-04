@@ -1,8 +1,8 @@
 //! The compiler proper: source AST → typed IR → bytecode.
 //!
-//! Ends at a [`crate::bytecode::Chunk`]. What consumes that chunk — the VM or
-//! the LLVM backend — is not this module's concern; both live alongside it
-//! rather than within it.
+//! Ends at a [`crate::bytecode::Chunk`]. What consumes that chunk, the LLVM
+//! backend in `src/codegen/`, is not this module's concern; it lives alongside
+//! it rather than within it.
 
 pub mod emit;
 pub mod escape;

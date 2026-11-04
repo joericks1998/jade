@@ -8,17 +8,17 @@ This is the middle of the pipeline. It takes the untyped `Program` the frontend 
 Program (AST) → type_infer → TProgram (TIR) → emit → CompiledProgram (bytecode)
 ```
 
-It ends at the bytecode. What runs that bytecode is not this module's concern, whether that is the interpreter in `src/vm/` or the LLVM backend in `src/aot/`. Both live alongside it rather than inside it, and that is deliberate. Neither backend is privileged.
+It ends at the bytecode. What runs that bytecode is not this module's concern. The LLVM backend in `src/aot/` lives alongside it rather than inside it, and that is deliberate. Until v1.4.8 the interpreter in `src/vm/` did too, and neither backend was privileged.
 
 ## Why it was built
 
-Type inference exists so the instruction set can be *monomorphic*. Because the compiler already knows an addition is integer addition, it emits `AddInt` rather than a generic `Add`. That is what lets the VM add two `i64` values with no tag dispatch, and what lets the AOT backend emit a bare LLVM `add`. Almost every performance property of both engines traces back to this pass.
+Type inference exists so the instruction set can be *monomorphic*. Because the compiler already knows an addition is integer addition, it emits `AddInt` rather than a generic `Add`. That is what lets the AOT backend emit a bare LLVM `add`, and what let the VM add two `i64` values with no tag dispatch. Almost every performance property of the compiled backend traces back to this pass, as it did for the VM.
 
-`JadeType::Unknown` is a real type, and it means "could not be determined ahead of time". It spreads through operations without raising, which keeps the checker conservative and stops it producing false positives. A program the checker cannot fully understand still runs, with the VM dispatching on runtime tags instead.
+`JadeType::Unknown` is a real type, and it means "could not be determined ahead of time". It spreads through operations without raising, which keeps the checker conservative and stops it producing false positives. A program the checker cannot fully understand still runs, with the compiled code dispatching on runtime tags instead.
 
 ## What each file does
 
-- *`type_infer.rs`* is the inference pass. It keeps a `TypeContext`, which holds a scope stack mirroring the evaluator's scoping, plus flat maps for struct definitions, their parents and ancestry, `extend` methods, and primitive method types. `resolve_inheritance` runs here, folding each parent's fields into its children so nothing downstream has to know inheritance exists. A built-in package registers its type information here when imported, through `Package::register_types`. *All type errors belong in this file*, because by the time bytecode runs, types are settled.
+- *`type_infer.rs`* is the inference pass. It keeps a `TypeContext`, which holds a scope stack mirroring the language's scoping, plus flat maps for struct definitions, their parents and ancestry, `extend` methods, and primitive method types. `resolve_inheritance` runs here, folding each parent's fields into its children so nothing downstream has to know inheritance exists. A built-in package registers its type information here when imported, through `Package::register_types`. *All type errors belong in this file*, because by the time bytecode runs, types are settled.
 
   It also *resolves* one piece of syntax rather than only checking it. `infer_pipe` decides whether a `|>` stage is a type, a Grammar, or a function, then lowers the pipe to a `Call` or folds it into a `PromptDeref`. Nothing downstream ever sees an `Expr::Pipe`.
 
@@ -41,14 +41,14 @@ Type inference exists so the instruction set can be *monomorphic*. Because the c
 
   One case this pass deliberately does *not* cover lives in `type_infer.rs` instead: a `handle` passed into a spawned function. This pass finds races by watching `SetIndex`, `SetField`, and mutating methods, and a handle triggers none of them. All the mutation happens inside the C library, where Jade sees a call and nothing more. So the rule is enforced where the type is known rather than where the opcodes are, and it refuses outright, because Jade cannot tell a thread-safe library from an unsafe one.
 - *`escape.rs`* runs type-aware escape analysis for arena allocation. It decides which array literals can live in the per-frame bump arena instead of the reference-counted heap. It is deliberately narrow, and marks a literal eligible only when it can *prove* the value does not escape, because being wrong here means a use-after-free.
-- *`gbnf.rs`* builds GBNF sampling grammars for a typed prompt dereference such as `?p |> int`. The pattern-wrapping code itself lives in `jade_runtime::grammarf`, so the VM and the AOT backend cannot wrap grammars differently.
+- *`gbnf.rs`* builds GBNF sampling grammars for a typed prompt dereference such as `?p |> int`. The pattern-wrapping code itself lives in `jade_runtime::grammarf`, so the compiler and a compiled binary cannot wrap grammars differently.
 - *`mod.rs`* and *`tests.rs`* hold the module declarations and the pass tests.
 
 ## Who uses it
 
 *Depends on:* `frontend/` for the AST and errors, `builtins/` for the type information of built-in packages, `bytecode/` for the instruction set it emits into, and `jade_runtime` for the shared grammar wrapper.
 
-*Used by:* `vm/` and `aot/`, which both consume a `CompiledProgram`. `build/` and `cli/check.rs` call `type_infer` directly, and `cache/` stores the `TProgram`.
+*Used by:* `aot/`, which consumes a `CompiledProgram`. `build/` and `cli/check.rs` call `type_infer` directly, and `cache/` stores the `TProgram`.
 
 ## Mixed arrays, and the sum type that is still missing
 
@@ -60,7 +60,7 @@ The lesson worth keeping: a restriction that makes a class of program unwritable
 
 What is still missing is a *named sum type*, written something like `type Frame = Token | Done | Error`, with `[Frame]` as a homogeneous array of it. Mixed arrays only make the heterogeneous list *writable*. The element type is `Unknown`, so every check happens at run time in the decoder.
 
-A sum type would let the compiler reject a frame the protocol does not declare, and it would match how the Rust half already spells the same idea. Building it is a real feature, covering declaration syntax, inference, exhaustiveness, lowering in both engines, and an FFI representation. It is worth doing once frames stop being the only caller.
+A sum type would let the compiler reject a frame the protocol does not declare, and it would match how the Rust half already spells the same idea. Building it is a real feature, covering declaration syntax, inference, exhaustiveness, lowering in the backend, and an FFI representation. It is worth doing once frames stop being the only caller.
 
 ## Gotchas
 
@@ -72,9 +72,9 @@ A `continue` lands at the *bottom* of the body rather than the top, so it still 
 
 Both also emit a `PopHandler` first, for every `try` they jump out of, tracked by `Emitter::handler_depth`. A handler frame left installed points into code the loop has already left, and the next exception anywhere in the function would land there.
 
-A struct literal's TIR field list is complete *except* under a `...base`, where it holds only the fields the literal named. Filling a field's declared default there would overwrite the value being copied, so the fill is skipped and the engines resolve the rest when the literal runs. The order they apply is fixed: a named field beats the base, and the base beats a default.
+A struct literal's TIR field list is complete *except* under a `...base`, where it holds only the fields the literal named. Filling a field's declared default there would overwrite the value being copied, so the fill is skipped and the backend resolves the rest when the literal runs. The order they apply is fixed: a named field beats the base, and the base beats a default.
 
-That skip is also what first asked a backend to build a default at run time. Every default used to be materialized here, so neither engine ever had to; the compiled side turned out to handle scalars only, and `let tags = []` came out as a missing field. Both build the collection now, and a default shape one engine knows and the other does not is a difference between the two.
+That skip is also what first asked a backend to build a default at run time. Every default used to be materialized here, so neither engine ever had to; the compiled side turned out to handle scalars only, and `let tags = []` came out as a missing field. The backend builds the collection now.
 
 Changing the shape of any TIR type means bumping `CACHE_FORMAT_VERSION` in `src/cache/mod.rs`.
 

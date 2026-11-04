@@ -6,6 +6,19 @@
 /// far below what the smallest stack this runs on can take.
 pub const MAX_NESTING_DEPTH: usize = 1000;
 
+/// The stack every compiler stage runs on.
+///
+/// The parser, type inference and code generation all recurse over the source,
+/// and a debug build spends roughly 15 KB of stack per nesting level, so the
+/// 8 MiB of a main thread runs out well before [`MAX_NESTING_DEPTH`]. `main`
+/// runs the whole CLI on a thread of this size instead. Reserving address space
+/// costs nothing until it is touched: a 64-bit process does not commit stack
+/// pages it never writes.
+#[cfg(debug_assertions)]
+pub const COMPILER_STACK_SIZE: usize = 3 * 1024 * 1024 * 1024;
+#[cfg(not(debug_assertions))]
+pub const COMPILER_STACK_SIZE: usize = 256 * 1024 * 1024;
+
 /// A position in source text. Line and column are 1-based (how editors report them).
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct Span {

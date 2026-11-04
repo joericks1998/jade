@@ -1,155 +1,30 @@
-#[cfg(test)]
-mod tests;
+//! The globals every program has without an import: `print`, `len`, `write`,
+//! `input`, the task controls, the primitive conversions and `Grammar`.
 
-use crate::{
-    compiler::{tir::JadeType, type_infer::TypeContext},
-    frontend::error::{JadeError, Result, Span},
-    vm::{VmValue, value_to_display},
-};
+use crate::compiler::{tir::JadeType, type_infer::TypeContext};
 
-use crate::builtins::BuiltinFn;
-
-// ── write ─────────────────────────────────────────────────────────────────────
-
-fn native_write(args: &[VmValue]) -> Result<VmValue> {
-    if args.len() != 1 {
-        return Err(JadeError::ArityMismatch {
-            expected: 1,
-            got: args.len(),
-            span: Span { line: 0, col: 0 },
-        });
-    }
-    crate::stdio::write_str_flush(&value_to_display(&args[0]));
-    Ok(VmValue::Nil)
-}
-
-pub const WRITE: BuiltinFn = BuiltinFn { name: "write", vm_impl: native_write };
-
-// ── len ───────────────────────────────────────────────────────────────────────
-
-fn native_len(args: &[VmValue]) -> Result<VmValue> {
-    if args.len() != 1 {
-        return Err(JadeError::ArityMismatch {
-            expected: 1,
-            got: args.len(),
-            span: Span { line: 0, col: 0 },
-        });
-    }
-    let n = match &args[0] {
-        VmValue::Str(s) => s.chars().count() as i64,
-        // A character has length 1, the same answer `len` gave when indexing a
-        // string produced a one-character string.
-        VmValue::Char(_) => 1,
-        VmValue::Bytes(b) => b.lock().len() as i64,
-        VmValue::Stream(b) => b.lock().len() as i64,
-        VmValue::Array(a) => a.lock().len() as i64,
-        VmValue::Dict(d) => d.len() as i64,
-        _ => {
-            return Err(JadeError::TypeError {
-                message: "len".to_string(),
-                span: Span { line: 0, col: 0 },
-            });
-        }
-    };
-    Ok(VmValue::Int(n))
-}
-
-pub const LEN: BuiltinFn = BuiltinFn { name: "len", vm_impl: native_len };
-
-// ── input ─────────────────────────────────────────────────────────────────────
-
-fn native_input(args: &[VmValue]) -> Result<VmValue> {
-    if args.len() > 1 {
-        return Err(JadeError::ArityMismatch {
-            expected: 1,
-            got: args.len(),
-            span: Span { line: 0, col: 0 },
-        });
-    }
-    if let Some(prompt) = args.first() {
-        match prompt {
-            VmValue::Str(s) => crate::stdio::write_str_flush(s),
-            _ => {
-                return Err(JadeError::TypeError {
-                    message: "input".to_string(),
-                    span: Span { line: 0, col: 0 },
-                });
-            }
-        }
-    }
-    let mut line = String::new();
-    // Waits on a person, so it must not sit on a runtime worker. See
-    // `async_tasks::blocking` for the rule.
-    crate::vm::async_tasks::blocking(|| std::io::stdin().read_line(&mut line).ok());
-    Ok(VmValue::Str(line.trim_end_matches('\n').trim_end_matches('\r').to_string().into()))
-}
-
-pub const INPUT: BuiltinFn = BuiltinFn { name: "input", vm_impl: native_input };
-
-/// `cancelled()` — has the task running here been cancelled?
+/// Every global a program can name without importing anything.
 ///
-/// The only thing that actually stops work. `f.cancel()` stops the *caller*
-/// waiting; a task that wants to give up early has to agree to look, because a
-/// task is a real thread running straight-line code and nothing outside it can
-/// interrupt that.
-///
-/// False outside a task, which is the honest answer: the top level is not
-/// something anyone cancels.
-fn native_cancelled(args: &[VmValue]) -> Result<VmValue> {
-    if !args.is_empty() {
-        return Err(JadeError::ArityMismatch {
-            expected: 0,
-            got: args.len(),
-            span: Span { line: 0, col: 0 },
-        });
-    }
-    Ok(VmValue::Bool(crate::vm::async_tasks::current_is_cancelled()))
-}
-
-pub const CANCELLED: BuiltinFn = BuiltinFn { name: "cancelled", vm_impl: native_cancelled };
-
-/// `max_tasks()` — how many tasks may run at once.
-fn native_max_tasks(args: &[VmValue]) -> Result<VmValue> {
-    if !args.is_empty() {
-        return Err(JadeError::ArityMismatch {
-            expected: 0,
-            got: args.len(),
-            span: Span { line: 0, col: 0 },
-        });
-    }
-    Ok(VmValue::Int(jade_runtime::task::max_tasks() as i64))
-}
-
-pub const MAX_TASKS: BuiltinFn = BuiltinFn { name: "max_tasks", vm_impl: native_max_tasks };
-
-/// `set_max_tasks(n)` — set how many tasks may run at once, and answer what is
-/// now in force.
-///
-/// The answer is the point rather than a courtesy: the request is clamped to
-/// `1..=512`, so a program that asks for more than the thread supply allows can
-/// see what it actually got without a second call.
-fn native_set_max_tasks(args: &[VmValue]) -> Result<VmValue> {
-    let span = Span { line: 0, col: 0 };
-    if args.len() != 1 {
-        return Err(JadeError::ArityMismatch { expected: 1, got: args.len(), span });
-    }
-    let n = match &args[0] {
-        VmValue::Int(n) => *n,
-        other => {
-            return Err(JadeError::TypeError {
-                message: format!(
-                    "set_max_tasks() expects an int, got {}",
-                    crate::vm::value_type_name(other)
-                ),
-                span,
-            });
-        }
-    };
-    Ok(VmValue::Int(jade_runtime::task::jrt_set_max_tasks(n)))
-}
-
-pub const SET_MAX_TASKS: BuiltinFn =
-    BuiltinFn { name: "set_max_tasks", vm_impl: native_set_max_tasks };
+/// The compiled backend checks each global a program reads against what it
+/// binds; these are the ones it binds without being told.
+pub const GLOBAL_NAMES: &[&str] = &[
+    "print",
+    "len",
+    "write",
+    "input",
+    "cancelled",
+    "max_tasks",
+    "set_max_tasks",
+    "wait",
+    "route",
+    "int",
+    "float",
+    "bool",
+    "str",
+    "char",
+    "func",
+    "Grammar",
+];
 
 // ── Type registration ─────────────────────────────────────────────────────────
 

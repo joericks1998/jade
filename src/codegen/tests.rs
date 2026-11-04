@@ -46,7 +46,6 @@ fn a_frame_hands_the_runtime_a_spill_array_not_its_registers() {
         },
         n_slots: 1,
         source_file: String::new(),
-        module_scope: None,
         is_generator: false,
         is_async: false,
     });
@@ -434,7 +433,6 @@ fn add_program() -> Chunk {
         chunk: Chunk { name: "add".into(), code: body, spans: vec![], fn_defs: vec![] },
         n_slots: 3,
         source_file: String::new(),
-        module_scope: None,
         is_generator: false,
         is_async: false,
     });
@@ -478,11 +476,10 @@ fn call_with_omitted_default_is_filled_at_the_call_site() {
     let body = vec![GetLocal(1, 0), Return(Some(1))];
     let greet = Arc::new(CompiledFn {
         params: vec!["n".to_string()],
-        defaults: vec![Some(VmValue::Int(5))],
+        defaults: vec![Some(crate::bytecode::Const::Int(5))],
         chunk: Chunk { name: "greet".into(), code: body, spans: vec![], fn_defs: vec![] },
         n_slots: 2,
         source_file: String::new(),
-        module_scope: None,
         is_generator: false,
         is_async: false,
     });
@@ -516,7 +513,6 @@ fn function_value_is_first_class_and_returnable() {
         chunk: Chunk { name: "f".into(), code: vec![Return(None)], spans: vec![], fn_defs: vec![] },
         n_slots: 0,
         source_file: String::new(),
-        module_scope: None,
         is_generator: false,
         is_async: false,
     });
@@ -546,7 +542,6 @@ fn keyword_call_reorders_args_to_parameter_order() {
         },
         n_slots: 4,
         source_file: String::new(),
-        module_scope: None,
         is_generator: false,
         is_async: false,
     });
@@ -585,7 +580,6 @@ fn higher_order_call_lowers_to_indirect_call() {
         chunk: Chunk { name: "apply".into(), code: apply_body, spans: vec![], fn_defs: vec![] },
         n_slots: 5,
         source_file: String::new(),
-        module_scope: None,
         is_generator: false,
         is_async: false,
     });
@@ -774,7 +768,6 @@ fn async_spawn_await_lower_to_runtime() {
         },
         n_slots: 2,
         source_file: String::new(),
-        module_scope: None,
         is_generator: false,
         is_async: false,
     });
@@ -1190,7 +1183,6 @@ fn a_global_the_program_binds_is_fine_in_either_order() {
         chunk: body,
         n_slots: 1,
         source_file: String::new(),
-        module_scope: None,
         is_generator: false,
         is_async: false,
     });
@@ -1210,26 +1202,25 @@ fn runtime_builtins_and_package_globals_are_bound() {
         .expect("builtins and package globals are bound");
 }
 
-// ── The VM's package tables and this backend's lowering ───────────────────────
+// ── The package tables and this backend's lowering ────────────────────────────
 
-/// Every stdlib package function the interpreter exposes must be lowerable here
-/// at some arity.
+/// Every stdlib package function the checker accepts must be lowerable here at
+/// some arity.
 ///
 /// A module call this backend declines is a *hard build error*, not a fallback,
-/// so a function present in a package's `fns` table and absent from
-/// `chunk_module_supported` is a program `jade run` accepts and `jade build`
+/// so a function present in a package's `fns` list and absent from
+/// `chunk_module_supported` is a program `jade check` accepts and `jade build`
 /// refuses. That is not hypothetical: `string.upper(s)`, `dict.keys(d)` and a
 /// dozen more sat in exactly that state until v1.3.21, and nothing prevented it
 /// happening again. This is what prevents it.
 ///
-/// Arity is not checked, only that *some* arity lowers — the predicate is the
-/// authority on which, and the VM does its own arity checking per function.
+/// Arity is not checked, only that *some* arity lowers: the predicate is the
+/// authority on which.
 #[test]
 fn every_package_fn_lowers_in_the_chunk_backend() {
     let mut missing = Vec::new();
     for pkg in crate::builtins::all_packages() {
-        let names = pkg.fns.iter().map(|f| f.name).chain(pkg.natives.iter().map(|(n, _)| *n));
-        for name in names {
+        for name in pkg.fns.iter().copied() {
             if !(0..=4).any(|argc| chunk_module_supported(pkg.global_name, name, argc)) {
                 missing.push(format!("{}.{name}", pkg.global_name));
             }

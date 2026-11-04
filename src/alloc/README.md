@@ -15,9 +15,11 @@ Jade briefly used mimalloc as its global allocator, declared in the shared `jade
 
 The fix is the rule this directory exists to enforce: *a global allocator is declared in the binary, never in `jade-runtime`*. The `#[global_allocator]` statics live in `src/main.rs` and refer to types defined here, so neither allocator can reach a loaded package.
 
-Note the distinction the split preserves. The pool *implementation* still lives in `jade-runtime`, because the AOT path calls it directly from `gc::leak_obj` and `gc::free_obj`, and both engines should share one free list. What lives here is only the `GlobalAlloc` adapter. Sharing an allocator's *code* is safe. Sharing its *registration as the global allocator* is not.
+Note the distinction the split preserves. The pool *implementation* still lives in `jade-runtime`, because the AOT path calls it directly from `gc::leak_obj` and `gc::free_obj`, and the `jade` binary and every compiled binary should share one implementation. What lives here is only the `GlobalAlloc` adapter. Sharing an allocator's *code* is safe. Sharing its *registration as the global allocator* is not.
 
 The profiler is the first phase of the same piece of work. It exists so the pool's size classes came from measured data rather than a guess. It is never built into a release.
+
+The profiler measures the `jade` process and nothing else. Until v1.4.8 that process ran the program too, so a profile showed the program's allocations. Since v2, `jade run` builds the program and runs it as a separate binary, and a compiled binary links neither allocator here. So a profile now shows what the compiler allocates.
 
 ## What each file does
 
@@ -49,7 +51,9 @@ The tests never install `ProfilingAlloc` globally. The `#[global_allocator]` liv
 cargo test --lib alloc::                          # the pool wrapper
 cargo test --lib --features alloc-profile alloc:: # adds the profiler tests
 
-# take a profile
+# take a profile of the compiler
 cargo build --features alloc-profile
-JADE_ALLOC_PROFILE=1 ./target/debug/jade run bench/alloc_heavy.jde
+JADE_ALLOC_PROFILE=1 ./target/debug/jade build bench/alloc_heavy.jde -o /tmp/alloc_heavy
 ```
+
+Use `jade build` rather than `jade run` for a profile. `jade run` exits with the binary's status before `main.rs` reaches the report, so it prints nothing.

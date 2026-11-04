@@ -1,153 +1,40 @@
-//! The native built-in registry: shared types (`BuiltinFn`, `Package`,
-//! `PrimType`), the `PACKAGES` table, and `seed_globals`. Each package is a
-//! flat top-level module (`crate::array`, `crate::math`, …).
+//! The built-in registry: the `PACKAGES` table and the names every program has.
+//!
+//! Each package is a flat top-level module (`crate::array`, `crate::math`, …)
+//! that declares its function names and registers its types with the checker.
+//! The functions themselves are lowered by `src/codegen/`; nothing here runs.
 
-use std::{collections::HashMap, sync::Arc};
-
-use jade_runtime::bytesf::BytesObj;
-use jade_runtime::coll::{ArrayObj, DictObj};
-use parking_lot::Mutex;
-
-use crate::{
-    compiler::type_infer::TypeContext,
-    frontend::error::{JadeError, Result, Span},
-    vm::{NativeFnId, VmValue},
-};
+use crate::compiler::type_infer::TypeContext;
 
 // The built-in packages are flat top-level modules; pull them into scope so the
 // registry can refer to them by bare name.
-use crate::uhttp;
 use crate::{
-    array, bytes, core, dict, env, fs, future, grammar, http, json, math, path, random, sh, string,
-    time,
+    array, bytes, core, dict, env, fs, future, http, json, math, path, random, sh, string, time,
+    uhttp,
 };
-
-// ── BuiltinFn ─────────────────────────────────────────────────────────────────
-
-/// A pure (no VmState mutation) Rust-backed function.
-///
-/// `vm_impl` receives all arguments as a slice: for primitive methods,
-/// `args[0]` is the receiver (pre-pended by `NativeBoundMethod` dispatch).
-pub type NativeFnPtr = fn(&[VmValue]) -> Result<VmValue>;
-
-#[derive(Clone, Copy)]
-pub struct BuiltinFn {
-    pub name: &'static str,
-    pub vm_impl: NativeFnPtr,
-}
-
-impl std::fmt::Debug for BuiltinFn {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "<builtin {}>", self.name)
-    }
-}
-
-// ── NativeBoundMethod ─────────────────────────────────────────────────────────
-
-/// A primitive method that has already captured its receiver.
-///
-/// Stored as `VmValue::NativeBoundMethod`. On call, the VM prepends
-/// `receiver` as `args[0]` before invoking `method.vm_impl`.
-pub struct NativeBoundMethod {
-    pub receiver: VmValue,
-    pub method: BuiltinFn,
-}
-
-// ── PrimType ──────────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PrimType {
-    Str,
-    Bytes,
-    Array,
-    Dict,
-    Int,
-    Float,
-    Future,
-}
-
-impl PrimType {
-    pub fn from_value(v: &VmValue) -> Option<Self> {
-        match v {
-            VmValue::Str(_) => Some(PrimType::Str),
-            VmValue::Bytes(_) => Some(PrimType::Bytes),
-            VmValue::Array(_) => Some(PrimType::Array),
-            VmValue::Dict(_) => Some(PrimType::Dict),
-            VmValue::Int(_) => Some(PrimType::Int),
-            VmValue::Float(_) => Some(PrimType::Float),
-            VmValue::Future(_) => Some(PrimType::Future),
-            _ => None,
-        }
-    }
-
-    pub fn type_name(self) -> &'static str {
-        match self {
-            PrimType::Str => "str",
-            PrimType::Bytes => "bytes",
-            PrimType::Array => "array",
-            PrimType::Dict => "dict",
-            PrimType::Int => "int",
-            PrimType::Float => "float",
-            PrimType::Future => "future",
-        }
-    }
-}
 
 // ── Package ───────────────────────────────────────────────────────────────────
 
 /// A stdlib package injected via `use "..."`.
 ///
-/// `import_name` is the string in the `use` statement ("llm", "std/string").
-/// `global_name` is the variable name injected into scope ("llm", "string").
+/// `import_name` is the string in the `use` statement ("std/string").
+/// `global_name` is the variable name injected into scope ("string").
 pub struct Package {
     pub import_name: &'static str,
     pub global_name: &'static str,
-    pub fns: &'static [BuiltinFn],
-    /// Functions the VM dispatches by id because they touch `VmState` — the
-    /// token budget, the inference backend, the loaded model profile — and so
-    /// cannot be expressed as a pure [`BuiltinFn`].
-    ///
-    /// Three packages needed these (`llm`, `std/array`, `std/uhttp`) and each
-    /// grew its own `*_vm_dict_value()` override, hand-listed in the VM's
-    /// `package_dict_value`. `llm` fared worst: with every one of its ten
-    /// functions stateful, it declared each one *three* times — a
-    /// `unreachable!()` stub, an entry in its `fns` table, and the real id in
-    /// the override — so adding a function meant editing three lists and
-    /// getting a runtime panic if you missed one.
-    ///
-    /// Listing the ids here instead makes that the package's own business. A
-    /// package with no stateful functions passes `&[]`.
-    pub natives: &'static [(&'static str, NativeFnId)],
-    /// Register type information into the type checker when this package is imported.
+    /// Every function the package has, by name.
+    pub fns: &'static [&'static str],
     pub register_types: fn(ctx: &mut TypeContext),
 }
 
 impl Package {
-    /// Build the VmValue::Dict for this package's functions.
-    ///
-    /// Natives are inserted after the pure functions, so a name appearing in
-    /// both resolves to the stateful implementation. `std/array` relies on
-    /// that: `map`/`filter` have pure entries used for their signatures but
-    /// must dispatch through the VM to call a Jade function per element.
-    pub fn vm_dict_value(&self) -> VmValue {
-        let mut map = DictObj::new();
-        for f in self.fns {
-            map.insert(f.name.to_string(), VmValue::BuiltinFn(*f));
-        }
-        for (name, id) in self.natives {
-            map.insert((*name).to_string(), VmValue::NativeFn(id.clone()));
-        }
-        VmValue::dict(map)
+    /// Whether the package has a function of this name.
+    pub fn has_fn(&self, name: &str) -> bool {
+        self.fns.contains(&name)
     }
 }
 
 // ── Registries ────────────────────────────────────────────────────────────────
-
-/// All core globals (always available without import).
-/// `print` and `stream` are excluded — they are state-mutating and dispatched
-/// through `NativeFnId` variants injected directly in `seed_globals`.
-static CORE_BUILTINS: &[BuiltinFn] =
-    &[core::WRITE, core::LEN, core::INPUT, core::CANCELLED, core::MAX_TASKS, core::SET_MAX_TASKS];
 
 /// All stdlib packages (available via `use "..."`).
 static PACKAGES: &[&Package] = &[
@@ -171,16 +58,14 @@ static PACKAGES: &[&Package] = &[
 
 /// How many arguments a primitive method takes, not counting the receiver.
 ///
-/// `BuiltinFn` carries none, and each implementation simply reads the arguments
-/// it wants — so a surplus one was dropped in silence. `"abc".upper(1, 2, 3)`
-/// answered `ABC` under `jade run` and was a build error compiled, and a stray
-/// argument is exactly what gets left behind when a call is edited. Too *few*
-/// was already caught, because the implementations pattern-match on what they
-/// need and fall through to a type error.
+/// A surplus argument used to be dropped in silence: `"abc".upper(1, 2, 3)`
+/// answered `ABC`, and a stray argument is exactly what gets left behind when a
+/// call is edited.
 ///
-/// Keyed by name alone: the four tables share `len` and `contains` across every
-/// receiver kind, and neither differs in arity by kind. `primitive_methods_all_declare_an_arity`
-/// fails if a method is added to one of those tables and not to this list.
+/// Keyed by name alone: the method tables share `len` and `contains` across
+/// every receiver kind, and neither differs in arity by kind.
+/// `primitive_methods_all_declare_an_arity` fails if a method is added to one of
+/// those tables and not to this list.
 pub fn primitive_method_arity(method: &str) -> Option<usize> {
     Some(match method {
         "len" | "upper" | "lower" | "trim" | "encode" | "pop" | "sort" | "reverse" | "keys"
@@ -194,48 +79,22 @@ pub fn primitive_method_arity(method: &str) -> Option<usize> {
     })
 }
 
-/// Check the argument count of a `std/string`, `std/array` or `std/dict`
-/// package call, whose first argument is the receiver.
-///
-/// The method tables and these three package tables share their names, so the
-/// package form's count is [`primitive_method_arity`] plus one for the
-/// receiver. The method form was already checked in `call_value`; the package
-/// form was not, and every implementation reads `args[0]` directly — so
-/// `string.upper()` panicked the interpreter with "index out of bounds"
-/// instead of raising. Checked per package rather than at the one call site
-/// because the tables are keyed by bare method name, and other packages reuse
-/// those names for functions of their own: `http.get(url)` takes one argument
-/// where `dict.get(d, k)` takes two.
-pub fn check_pkg_arity(method: &str, args: &[VmValue]) -> Result<()> {
-    if let Some(want) = primitive_method_arity(method).map(|n| n + 1)
-        && args.len() != want
-    {
-        return Err(JadeError::ArityMismatch {
-            expected: want,
-            got: args.len(),
-            span: Span { line: 0, col: 0 },
-        });
-    }
-    Ok(())
-}
-
-pub fn find_primitive_method(ty: PrimType, method: &str) -> Option<BuiltinFn> {
-    match ty {
-        PrimType::Str => string::find_str_method(method),
-        PrimType::Bytes => bytes::find_bytes_method(method),
-        PrimType::Array => array::find_array_method(method),
-        PrimType::Dict => dict::find_dict_method(method),
-        PrimType::Int => None,
-        PrimType::Float => None,
-        PrimType::Future => future::find_future_method(method),
-    }
+/// Every primitive method table, by receiver kind.
+pub fn primitive_method_tables() -> [(&'static str, &'static [&'static str]); 5] {
+    [
+        ("str", string::STR_METHODS),
+        ("bytes", bytes::BYTES_METHODS),
+        ("array", array::ARRAY_METHODS),
+        ("dict", dict::DICT_METHODS),
+        ("future", future::FUTURE_METHODS),
+    ]
 }
 
 // ── Public lookup API ─────────────────────────────────────────────────────────
 
 /// Every stdlib package, for callers that need to walk the whole set rather
-/// than look one up. The tripwire tying these tables to the AOT backend's
-/// lowering predicate uses it — see `codegen::tests`.
+/// than look one up. The tripwire tying these tables to the compiled backend's
+/// lowering predicate uses it; see `codegen::tests`.
 pub fn all_packages() -> &'static [&'static Package] {
     PACKAGES
 }
@@ -256,28 +115,9 @@ pub fn is_package_global_name(name: &str) -> bool {
     PACKAGES.iter().any(|p| p.global_name == name)
 }
 
-/// Pre-seed `globals` with all core built-in functions. Generic over the map's
-/// hasher so the VM can seed a fast-hashed `globals` (see `VmState::globals`).
-pub fn seed_globals<S: std::hash::BuildHasher>(globals: &mut HashMap<String, VmValue, S>) {
-    for f in CORE_BUILTINS {
-        globals.insert(f.name.to_string(), VmValue::BuiltinFn(*f));
-    }
-    // `print` needs async VmState access to drain a TokenStream, and `route`
-    // needs it to call the method it dispatches to, so both go through
-    // NativeFnId rather than the pure BuiltinFn path. (`stream` was here too
-    // until v1.2.5, when `?p` folded onto the buffered stream and it went away.)
-    globals.insert("print".to_string(), VmValue::NativeFn(NativeFnId::Print));
-    globals.insert("route".to_string(), VmValue::NativeFn(NativeFnId::Route));
-    // `wait` has to await, so it cannot be a pure BuiltinFn either.
-    globals.insert("wait".to_string(), VmValue::NativeFn(NativeFnId::Wait));
-    // Primitive type constructors: callable with one arg like Python's int(), str(), etc.
-    for name in &["int", "float", "bool", "str", "char", "func"] {
-        globals.insert(name.to_string(), VmValue::TypeRef(name.to_string()));
-    }
-    // Grammar global: Grammar.new(pattern) → VmValue::Grammar(pattern)
-    let mut grammar_fields = DictObj::new();
-    grammar_fields.insert("new".to_string(), VmValue::BuiltinFn(grammar::GRAMMAR_NEW));
-    globals.insert("Grammar".to_string(), VmValue::dict(grammar_fields));
+/// Every global a program has without an import.
+pub fn global_names() -> &'static [&'static str] {
+    core::GLOBAL_NAMES
 }
 
 /// Register type signatures for all core built-ins into the type checker.
@@ -292,28 +132,6 @@ pub fn register_primitive_method_types(ctx: &mut TypeContext) {
     array::register_array_method_types(ctx);
     dict::register_dict_method_types(ctx);
     future::register_future_method_types(ctx);
-}
-
-// ── Helpers shared across package implementations ─────────────────────────────
-
-/// Wrap a `Vec<VmValue>` as the standard Jade array value.
-pub fn make_array(v: Vec<VmValue>) -> VmValue {
-    VmValue::Array(Arc::new(Mutex::new(ArrayObj::from_vec(v))))
-}
-
-/// Wrap octets as the standard Jade `bytes` value, carrying `trust`.
-///
-/// Every blob the VM builds goes through here. The wrapping is three layers
-/// deep and it changed once already, in v1.3.27, when a blob became mutable;
-/// nine sites across seven files spelled it out by hand at the time.
-pub fn make_bytes(data: Vec<u8>, trust: u8) -> VmValue {
-    VmValue::Bytes(Arc::new(Mutex::new(BytesObj::new(data, trust))))
-}
-
-/// The same, for octets the program built itself rather than read from
-/// anywhere. See [`jade_runtime::trust`].
-pub fn make_trusted_bytes(data: Vec<u8>) -> VmValue {
-    make_bytes(data, jade_runtime::trust::TRUSTED)
 }
 
 #[cfg(test)]

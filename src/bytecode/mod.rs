@@ -1,17 +1,15 @@
-//! The instruction set both engines consume.
+//! The instruction set the compiled backend lowers.
 //!
-//! `compiler::emit` produces a [`Chunk`]; [`crate::vm`] interprets one and
-//! [`crate::aot`] lowers one to LLVM. It belongs to neither engine, which is
-//! why it sits between them rather than inside either.
+//! `compiler::emit` produces a [`Chunk`], and [`crate::codegen`] lowers one to
+//! LLVM. Until v1.4.8 a bytecode VM interpreted the same chunks, which is why
+//! this representation sits between the compiler and the backend rather than
+//! inside either.
 //!
-//! Instructions are largely *monomorphic* — `AddInt` and `AddFloat` rather than
-//! a single `Add` — because type inference has already run. That is what lets
-//! the VM add two `i64`s without a tag dispatch and the AOT backend emit a bare
-//! LLVM `add`, and it is why the two engines share this representation but no
-//! execution code.
+//! Instructions are largely *monomorphic*, `AddInt` and `AddFloat` rather than
+//! a single `Add`, because type inference has already run. That is what lets
+//! the backend emit a bare LLVM `add` without a tag dispatch.
 
-use parking_lot::Mutex;
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use crate::frontend::{
     ast::{BinOpKind, UnaryOpKind},
@@ -28,6 +26,23 @@ pub enum FStrPart {
     Reg(Reg),
 }
 
+/// A value known at compile time: a parameter default or a struct field default.
+///
+/// The VM used to carry these as its own runtime values. The compiled backend
+/// only ever needs to know which literal it is, so this is that and nothing more.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Const {
+    Nil,
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    Str(String),
+    /// A fresh empty array, built once per use rather than shared.
+    EmptyArray,
+    /// A fresh empty dict, built once per use rather than shared.
+    EmptyDict,
+}
+
 /// A compiled function body together with its metadata.
 #[derive(Debug, Clone)]
 pub struct CompiledFn {
@@ -35,7 +50,7 @@ pub struct CompiledFn {
     pub params: Vec<String>,
     /// Default values for optional parameters, parallel to `params`.
     /// `None` means the parameter is required.
-    pub defaults: Vec<Option<crate::vm::VmValue>>,
+    pub defaults: Vec<Option<Const>>,
     /// Bytecode body.
     pub chunk: Chunk,
     /// Total number of register slots needed by this function frame.
@@ -43,10 +58,6 @@ pub struct CompiledFn {
     /// Source file this function was compiled from. Empty for top-level programs;
     /// set to the module's path when the function is loaded from an imported file.
     pub source_file: String,
-    /// Persistent module scope shared by all functions from the same imported file.
-    /// `None` for top-level functions. Reads and writes to module-level variables
-    /// are routed through this scope so mutations survive across calls.
-    pub module_scope: Option<Arc<Mutex<HashMap<String, crate::vm::VmValue>>>>,
     /// Whether the body contains a `yield`, making this a stream producer.
     ///
     /// Calling one runs the body to completion into a buffer and returns the
@@ -129,7 +140,7 @@ impl Chunk {
 /// Register-based: every instruction that produces a value writes to a
 /// destination `Reg`.  Jump offsets are signed and PC-relative (relative to
 /// the instruction immediately *after* the jump instruction).
-#[allow(dead_code)] // many variants are used only by the emitter or VM
+#[allow(dead_code)] // some variants are used only by the emitter
 #[derive(Debug, Clone)]
 pub enum Instr {
     // ── Constant loads ─────────────────────────────────────────────────────
@@ -264,15 +275,13 @@ pub enum Instr {
     MakeArray(Reg, Vec<Reg>),
     /// Like `MakeArray`, but the compiler's escape analysis proved this array
     /// does not escape its region, so the AOT backend allocates it in the
-    /// per-frame bump arena (and skips refcounting it). The VM treats it exactly
-    /// as `MakeArray` — arena vs heap is an AOT implementation detail, invisible
-    /// in output, so backend parity holds.
+    /// per-frame bump arena and skips refcounting it. Arena or heap is invisible
+    /// in output.
     MakeArrayArena(Reg, Vec<Reg>),
-    /// Snapshot the arena cursor into `dest` (an i64 token). AOT-only effect;
-    /// a no-op that yields 0 in the VM.
+    /// Snapshot the arena cursor into `dest`, an i64 token.
     ArenaMark(Reg),
     /// Reset the arena to the token in `reg`, freeing everything arena-allocated
-    /// since the matching `ArenaMark`. AOT-only effect; a no-op in the VM.
+    /// since the matching `ArenaMark`.
     ArenaReset(Reg),
     /// (dest, [(key_reg, val_reg), …])
     MakeDict(Reg, Vec<(Reg, Reg)>),
@@ -315,7 +324,7 @@ pub enum Instr {
     // ── Prompt ─────────────────────────────────────────────────────────────
     MakePrompt(Reg, Reg),
     /// (dest, prompt_reg, output_type, grammar_reg)
-    /// grammar_reg holds a VmValue::Grammar for user-supplied GBNF pattern.
+    /// grammar_reg holds the `Grammar` value for a user-supplied GBNF pattern.
     PromptDeref(Reg, Reg, Option<String>, Option<Reg>),
     /// Append a value to the stream the running generator is filling.
     Yield(Reg),

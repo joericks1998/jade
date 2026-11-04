@@ -54,7 +54,7 @@ static void provider_raise(const char* msg) {
 static void* provider_handle(void) {
     if (g_provider) return g_provider;
     char* path = jrt_provider_active_lib_path();
-    if (!path) provider_raise("no inference backend available — run `jade register` to choose a provider and set your API key");
+    if (!path) provider_raise("no inference backend available: this build of Jade 2.0 cannot dereference a prompt yet");
     void* h = jrt_native_load(path); /* raises on dlopen / missing jade_pkg_init */
     free(path);
 

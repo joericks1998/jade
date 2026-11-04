@@ -1,18 +1,15 @@
-//! The active-provider slot — where the CLI installs the one provider package the
-//! engines load, and how both engines find it.
+//! The active-provider slot, where a compiled binary looks for the one provider
+//! package it loads.
 //!
-//! A provider is a compiled Jade `--lib` package (dovata's `anthropic`/`openai`)
-//! that exposes `infer(request) -> [Frame]` / `configure(opts)` and does its own
-//! HTTP to the vendor API. This module only resolves the *slot* — it does not load
-//! or drive the package. The VM loads it through `crate::native` (the jade crate);
-//! AOT-compiled binaries load it through the C runtime's `jrt_native_*` — both via
-//! the small C surface in [`ffi`].
+//! A provider is a compiled Jade `--lib` package that exposes
+//! `infer(request) -> [Frame]` / `configure(opts)`. This module only resolves the
+//! *slot*; compiled binaries load the package through the C runtime's
+//! `jrt_native_*`, via the small C surface in [`ffi`].
 //!
-//! The CLI (`jade register` / `jade use`) is the sole writer of the slot: it keeps
-//! exactly one `.so` under `$HOME/.jade/provider/active/` plus one opaque
-//! `config.json` credential blob. Because every provider is a package with the same
-//! `infer` shape, neither engine learns a vendor detail — it loads whatever library
-//! is there.
+//! v2 removed the provider registry: `jade register` and `jade use`, which wrote
+//! this slot, are gone, and nothing installs a provider any more. Inference
+//! returns when the compiler emits it over memory the dovata process hands out,
+//! and this module goes with the rest of the v1 runtime.
 
 use std::path::{Path, PathBuf};
 
@@ -44,8 +41,7 @@ pub fn jade_home() -> PathBuf {
 
 /// The active-provider slot dir, `$HOME/.jade/provider/active/`. The CLI keeps
 /// exactly one provider `.so` here. `JADE_PROVIDER_ACTIVE` overrides the whole
-/// path (dev/testing), which is what lets the parity gate point both engines at
-/// a stand-in provider.
+/// path, for development and testing.
 pub fn active_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("JADE_PROVIDER_ACTIVE")
         && !dir.is_empty()

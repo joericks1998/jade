@@ -39,9 +39,9 @@ enum Commands {
     Run {
         /// File to run, script name, or omit to run the project entry point
         target: Option<String>,
-        /// Print all global variables after execution
-        #[arg(short, long)]
-        verbose: bool,
+        /// Arguments passed to the program
+        #[arg(last = true)]
+        args: Vec<String>,
     },
 
     /// Type-check a source file without executing it
@@ -84,13 +84,6 @@ enum Commands {
         template: String,
     },
 
-    /// Start an interactive REPL session
-    Repl {
-        /// Print extra debug info for each evaluated expression
-        #[arg(short, long)]
-        verbose: bool,
-    },
-
     /// Discover and run test files (test_*.jde or *_test.jde)
     Test {
         /// Only run tests whose name contains this string
@@ -129,30 +122,6 @@ enum Commands {
     /// Distinct from `jade upgrade`, which updates the jade toolchain itself.
     #[command(subcommand)]
     Pkg(PkgCommands),
-
-    /// Register an inference provider and its API key (global, per-user)
-    ///
-    /// Providers ship with jade; this records which one `?p` uses and stores its
-    /// key under ~/.jade. With no PROVIDER it lists installed providers and
-    /// prompts interactively.
-    Register {
-        /// Provider to register (e.g. anthropic, openai); omit for interactive
-        provider: Option<String>,
-        /// API key to store (omit to be prompted). e.g. `jade register anthropic sk-ant-…`
-        key: Option<String>,
-        /// List installed providers and the active selection, then exit
-        #[arg(long)]
-        list: bool,
-        /// Remove the provider's stored credential instead of setting one
-        #[arg(long)]
-        remove: bool,
-    },
-
-    /// Select which registered provider `?p` uses (global, per-user)
-    Use {
-        /// Provider name (must be installed)
-        provider: String,
-    },
 
     /// Upgrade jade to the latest release
     Upgrade,
@@ -286,47 +255,19 @@ fn main() {
     let cli = Cli::parse();
     publish_libs_root(&cli);
 
-    // The whole CLI runs on a thread with a stack sized for the interpreter: a
-    // Jade call chain is a native call chain, and `call::MAX_CALL_DEPTH` is
-    // meant to be what stops a runaway recursion rather than the OS. See
-    // `vm::chunk::VM_STACK_SIZE`.
-    //
-    // The runtime is built *inside* that thread on purpose. `block_on` drives
-    // its future on the calling thread, so setting `thread_stack_size` on the
-    // worker pool would not cover it — the workers only run what is `spawn`ed.
+    // Every compiler stage recurses over the source, so the CLI runs on a thread
+    // with a stack sized for that. See `COMPILER_STACK_SIZE`.
     std::thread::Builder::new()
         .name("jade-main".to_string())
-        .stack_size(jade::vm::VM_STACK_SIZE)
-        .spawn(move || {
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .thread_stack_size(jade::vm::VM_STACK_SIZE)
-                // A task that blocks hands its worker off through
-                // `vm::async_tasks::blocking`, and the replacement comes from
-                // here. The headroom over the 512 tasks a program can ask to run
-                // at once is for the blocking work a task itself starts: a native
-                // call goes through `spawn_blocking` too, and a full pool would
-                // leave it queued behind the task waiting on it.
-                .max_blocking_threads(576)
-                .build()
-                .unwrap_or_else(|e| {
-                    // Almost always the machine being out of threads: the
-                    // runtime creates its workers here. A bare `expect` printed
-                    // "tokio runtime" over a Rust panic trace, which tells
-                    // somebody running a `.jde` file nothing they can act on.
-                    eprintln!("jade: could not start the task runtime: {e}");
-                    eprintln!("jade: the process is at its thread limit; raise it (ulimit -u).");
-                    std::process::exit(1);
-                })
-                .block_on(run_cli(cli));
-        })
+        .stack_size(jade::frontend::error::COMPILER_STACK_SIZE)
+        .spawn(move || run_cli(cli))
         .unwrap_or_else(|e| {
             eprintln!("jade: could not start the main thread: {e}");
             eprintln!("jade: the process is at its thread limit; raise it (ulimit -u).");
             std::process::exit(1);
         })
         .join()
-        .expect("the main execution thread panicked");
+        .expect("the main thread panicked");
 
     #[cfg(feature = "alloc-profile")]
     if std::env::var_os("JADE_ALLOC_PROFILE").is_some() {
@@ -379,24 +320,22 @@ fn publish_libs_root(cli: &Cli) {
     }
     let libs = std::fs::canonicalize(&libs).unwrap_or(libs);
 
-    // SAFETY: the tokio runtime has not been built yet and no thread has been
-    // spawned, so this is the only thread in the process and nothing can be
-    // reading the environment concurrently. That is the whole reason `Cli::parse`
-    // moved above the runtime build. `src/cache/mod.rs` documents the same rule
-    // for the same reason.
+    // SAFETY: no thread has been spawned yet, so this is the only thread in the
+    // process and nothing can be reading the environment concurrently.
+    // `src/cache/mod.rs` documents the same rule for the same reason.
     unsafe { std::env::set_var("JADE_LIBS", &libs) };
 }
 
-async fn run_cli(cli: Cli) {
+fn run_cli(cli: Cli) {
     match cli.command {
         // ── run ───────────────────────────────────────────────────────────────
-        Commands::Run { target: None, verbose } => {
-            cli::run::run_entry(verbose).await;
+        Commands::Run { target: None, args } => {
+            cli::run::run_entry(&args);
         }
-        Commands::Run { target: Some(ref t), verbose }
+        Commands::Run { target: Some(ref t), ref args }
             if t.ends_with(".jde") || std::path::Path::new(t).exists() =>
         {
-            cli::run::run_file(t, verbose).await;
+            cli::run::run_file(t, args);
         }
         Commands::Run { target: Some(ref t), .. } => {
             cli::run::run_script(t);
@@ -423,14 +362,9 @@ async fn run_cli(cli: Cli) {
             cli::new::run_init(&template);
         }
 
-        // ── repl ─────────────────────────────────────────────────────────────
-        Commands::Repl { verbose } => {
-            cli::repl::run_repl(verbose).await;
-        }
-
         // ── test ─────────────────────────────────────────────────────────────
         Commands::Test { pattern, verbose } => {
-            cli::test::run_test(pattern.as_deref(), verbose).await;
+            cli::test::run_test(pattern.as_deref(), verbose);
         }
 
         // ── fmt ──────────────────────────────────────────────────────────────
@@ -486,20 +420,12 @@ async fn run_cli(cli: Cli) {
             PkgCommands::List => cli::pkg::run_list(),
         },
 
-        // ── provider registry ────────────────────────────────────────────────
-        Commands::Register { provider, key, list, remove } => {
-            cli::register::run_register(provider.as_deref(), key.as_deref(), list, remove);
-        }
-        Commands::Use { provider } => {
-            cli::register::run_use(&provider);
-        }
-
         Commands::Upgrade => {
-            cli::upgrade::run_upgrade().await;
+            cli::upgrade::run_upgrade();
         }
 
         Commands::Reinstall { clean, yes } => {
-            cli::upgrade::run_reinstall(clean, yes).await;
+            cli::upgrade::run_reinstall(clean, yes);
         }
 
         Commands::Uninstall { purge, yes } => {
@@ -517,8 +443,7 @@ async fn run_cli(cli: Cli) {
                 eprintln!("error: unknown command '{}'\n       Run 'jade --help' for usage.", file);
                 std::process::exit(1);
             }
-            let verbose = args.get(1).map(|f| f == "-v" || f == "--verbose").unwrap_or(false);
-            cli::run::run_file(file, verbose).await;
+            cli::run::run_file(file, &args[1..]);
         }
     }
 }

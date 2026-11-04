@@ -353,12 +353,12 @@ void jade_join(jade_future_t* futures, int n, jade_value_t* results_out) {
 
 /* ── The program's own stack ──────────────────────────────────────────────
  *
- * `jade run` executes on a thread the CLI gives 256 MB of stack (see
- * `vm::chunk::VM_STACK_SIZE`), because interpreting a deeply recursive program
- * needs far more native stack than the 8 MB a process gets by default. A
- * compiled binary ran on that default, so the same program that printed fine
- * interpreted segfaulted compiled — a 2,000-deep nested array was enough, since
- * rendering one walks it recursively.
+ * Until v1.4.8, `jade run` interpreted on a thread the CLI gave 256 MB of
+ * stack, because interpreting a deeply recursive program needs far more native
+ * stack than the 8 MB a process gets by default. A compiled binary ran on that
+ * default, so the same program that printed fine interpreted segfaulted
+ * compiled: a 2,000-deep nested array was enough, since rendering one walks it
+ * recursively.
  *
  * So a binary runs its body on a thread of its own, sized to match. Every piece
  * of per-execution state the runtime keeps is already thread-local (the handler

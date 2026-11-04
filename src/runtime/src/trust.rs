@@ -60,7 +60,7 @@ pub fn combine_all(trusts: impl IntoIterator<Item = u8>) -> u8 {
 /// The message shown when a tainted value reaches `sink_name`.
 ///
 /// Byte-identical to the C runtime's `jrt_refuse_if_tainted`, because
-/// backend-parity diffs output: the wording is a contract, not a cosmetic.
+/// the golden gate compares output: the wording is a contract, not a cosmetic.
 pub fn refusal_message(sink_name: &str) -> String {
     format!(
         "refused tainted string in {sink_name} — value derived from an \
@@ -100,7 +100,7 @@ mod tests {
         assert!(is_tainted(TAINTED));
     }
 
-    // The wording is compared by the backend-parity gate, so it is pinned.
+    // The wording is compared by the golden gate, so it is pinned.
     #[test]
     fn the_refusal_names_the_sink_and_the_reason() {
         let m = refusal_message("sh.exec(cmd)");

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Bind a real C library and run it on both engines.
+# Bind a real C library and run it.
 #
 # The FFI is the one part of the toolchain whose correctness depends on code we
 # do not write: someone else's header, someone else's macros, and a C compiler's
@@ -11,7 +11,7 @@
 #
 #   1. The fortify check. glibc's `realpath` writes up to PATH_MAX bytes into the
 #      buffer it is given and aborts the process when that buffer is smaller —
-#      but only in an optimised build, which is why `cargo test` and the parity
+#      but only in an optimised build, which is why `cargo test` and the golden
 #      gate both miss it. Every FFI package in a compiled binary died at startup
 #      on Linux for two releases. glibc says so at compile time, so compiling the
 #      C runtime optimised and refusing the warning is enough, and takes seconds
@@ -81,7 +81,7 @@ else
   skip=$((skip + 1))
 fi
 
-# ── 2. glib, bound and run on both engines ────────────────────────────────────
+# ── 2. glib, bound and run ────────────────────────────────────
 #
 # pkg-config rather than a hard-coded path: the library sits in an
 # architecture-named directory on Linux and under the Homebrew prefix on macOS,
@@ -113,7 +113,7 @@ else
 fi
 
 if [ -z "$glib_lib" ] || [ ! -e "$glib_hdr" ]; then
-  echo "  skip  glib bound and run on both engines             (glib not installed)"
+  echo "  skip  glib bound and run                             (glib not installed)"
   skip=$((skip + 1))
 else
   hdr="$glib_hdr"
@@ -159,18 +159,15 @@ TOML
     # Every one of these keeps its exit status, and that is not a detail.
     #
     # A process killed by a signal *after* it has printed everything leaves an
-    # output file that looks perfectly correct, and the two engines then agree
-    # about it because both printed the same correct thing. This step used to
-    # check only that the file was non-empty and free of the word "error", so a
-    # SIGSEGV in the VM was reported as `ok` from v1.3.19 until v1.3.24 — the
-    # crash was visible in the CI log the whole time, as a line the *shell*
-    # printed, while the gate below it said 4 ok, 0 failed.
+    # output file that looks perfectly correct. This step used to check only
+    # that the file was non-empty and free of the word "error", so a SIGSEGV was
+    # reported as `ok` from v1.3.19 until v1.3.24: the crash was visible in the
+    # CI log the whole time, as a line the *shell* printed, while the gate below
+    # it said 4 ok, 0 failed.
     #
     # Each runs through an inner shell for the reason `run_loop` documents: the
     # shell that waits on a signalled child announces it, and that line is noise
     # on top of a FAIL that already says the same thing.
-    bash -c 'cd "$1" && "$2" run main.jde > vm.txt 2>&1' _ "$proj" "$JADE" 2>/dev/null
-    vm_rc=$?
     bash -c 'cd "$1" && "$2" build main.jde -o app > build.txt 2>&1' _ "$proj" "$JADE" 2>/dev/null
     build_rc=$?
     aot_rc=0
@@ -178,28 +175,20 @@ TOML
       bash -c 'cd "$1" && ./app > aot.txt 2>&1' _ "$proj" 2>/dev/null
       aot_rc=$?
     fi
-    if [ "$vm_rc" -ne 0 ] || [ ! -s "$proj/vm.txt" ] || grep -q "error" "$proj/vm.txt"; then
-      echo "  FAIL  glib under the VM (exit $vm_rc):"
-      # The *last* lines, not the first. When the failure is a crash, the one
-      # thing worth knowing is which call it got to, and `head` shows the calls
-      # that already succeeded instead — the fixture prints in call order, so
-      # the tail names the suspect and the head never can.
-      tail -5 "$proj/vm.txt" | sed 's/^/        /'
-      fail=$((fail + 1))
-    elif [ "$build_rc" -ne 0 ] || [ ! -f "$proj/aot.txt" ]; then
+    if [ "$build_rc" -ne 0 ] || [ ! -f "$proj/aot.txt" ]; then
       echo "  FAIL  glib would not compile:"
       tail -5 "$proj/build.txt" | sed 's/^/        /'
       fail=$((fail + 1))
-    elif [ "$aot_rc" -ne 0 ]; then
+    elif [ "$aot_rc" -ne 0 ] || [ ! -s "$proj/aot.txt" ] || grep -q "error" "$proj/aot.txt"; then
+      # The *last* lines, not the first. When the failure is a crash, the one
+      # thing worth knowing is which call it got to, and `head` shows the calls
+      # that already succeeded instead: the fixture prints in call order, so
+      # the tail names the suspect and the head never can.
       echo "  FAIL  the compiled glib program did not survive its own run (exit $aot_rc):"
       tail -5 "$proj/aot.txt" | sed 's/^/        /'
       fail=$((fail + 1))
-    elif ! diff -q "$proj/vm.txt" "$proj/aot.txt" >/dev/null; then
-      echo "  FAIL  glib: the two engines disagree:"
-      diff "$proj/vm.txt" "$proj/aot.txt" | head -10 | sed 's/^/        /'
-      fail=$((fail + 1))
     else
-      echo "  ok    glib bound and run on both engines             ($bound)"
+      echo "  ok    glib bound and run                             ($bound)"
       pass=$((pass + 1))
     fi
   fi
@@ -210,12 +199,6 @@ fi
 # Two runs of the same program at different call counts. Surviving is the
 # assertion that matters and is checked always; comparing what the two runs held
 # needs a peak-RSS tool, and skips when there is none.
-#
-# Compiled only, not both engines. Two reasons. The VM is far slower per FFI
-# call, so matching these counts there would cost minutes rather than seconds.
-# And the failure being chased is a compiled one — the user's report is a
-# compiled binary, and step 2 already covers the two engines agreeing about
-# alloc_str. Nothing is lost by leaving the VM out of the long run.
 #
 # The counts: the smaller is a baseline, the larger has to clear the ~300,000
 # from the user's report by enough to be worth calling a gate. 800,000 calls

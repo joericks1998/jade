@@ -10,7 +10,7 @@ Nothing here writes a file, runs a linker, or knows what a project is. [`src/aot
 
 This used to be `src/aot/lower/`, one level down inside the backend that calls it. That put the half of `jade build` about *the language* underneath the half about *producing a file*, and the two are not related that way.
 
-Lowering is where the VM and the compiled path have to agree on what an opcode means. It is a peer of `src/vm/`, in the same way `src/vm/` is a peer of the AOT driver. Sitting a level down made it look like an implementation detail of linking.
+Lowering is where an opcode gets its meaning in a compiled binary. Until v1.4.8 it was where the VM and the compiled path had to agree on that meaning, which made it a peer of `src/vm/` rather than a detail of the AOT driver. Sitting a level down made it look like an implementation detail of linking.
 
 The move also removed one level of nesting and fixed a name. "Lower" describes how the code is written, while "codegen" describes what it produces.
 
@@ -36,7 +36,7 @@ The split was *purely mechanical*. Every item moved verbatim, and the only edits
 - *`calls.rs`* handles call resolution and emission. `resolve_user_calls` decides, for each call site, which `CallKind` applies: direct, method, module, native, spawn, or stream. The emission side covers indirect calls and function boxing.
 - *`builtins.rs`* handles builtin dispatch: native package calls, stdlib module calls, primitive value methods, and struct methods dispatched at run time. The `chunk_*_supported` predicates that gate them live here too.
 
-  *A name those predicates answer `false` for is a hard build error*, so the set they accept has to match what `jade run` accepts. For a while it did not. `string.upper(s)` ran under the VM and refused to build until v1.3.21, while the identical `s.upper()` compiled fine.
+  *A name those predicates answer `false` for is a hard build error*, so the set they accept has to match every name the packages in `builtins/` list, which is what `jade check` accepts. For a while it did not. `string.upper(s)` ran under the VM and refused to build until v1.3.21, while the identical `s.upper()` compiled fine.
 
   `as_receiver_first` closes that gap by lowering the package spelling as the method. It does so only for names the package table actually lists, and only for `std/string` and `std/dict`, where the two spellings are the same function. `std/array` is deliberately excluded, because `array.sort(a)` returns a copy while `a.sort()` mutates. Those get their own lowering over `jrt_coll_array_sorted`. Read `package_fn_is_the_method` before widening it.
 
@@ -52,13 +52,13 @@ The split was *purely mechanical*. Every item moved verbatim, and the only edits
 
 ## Who uses it
 
-*Depends on:* `bytecode/` for the instruction set, `vm::VmValue` for compile-time constants, `frontend::ast` for struct-default expressions, and `inkwell` for LLVM.
+*Depends on:* `bytecode/` for the instruction set and its `Const` compile-time constants, `frontend::ast` for struct-default expressions, and `inkwell` for LLVM.
 
 *Used by:* `aot/mod.rs` only, through `lower_program` and `LoweredProgram`.
 
 ## Gotchas
 
-*Several of the gotchas that matter here live in the caller's README*, not this one. Those are reference-count ownership on borrowed value words, calling `jrt_require_kind` before untagging a receiver, the thread-wide handler stack, and the rule that any new opcode or builtin must be lowered here or the two engines quietly disagree. Read [`../aot/README.md`](../aot/README.md) before editing.
+*Several of the gotchas that matter here live in the caller's README*, not this one. Those are reference-count ownership on borrowed value words, calling `jrt_require_kind` before untagging a receiver, the thread-wide handler stack, and the rule that any new opcode or builtin must be lowered here or a program that passes `jade check` fails to build. Read [`../aot/README.md`](../aot/README.md) before editing.
 
 *A buffer a call site needs goes in the entry block, because the lowered code puts calls inside loops.* A call that marshals its arguments into memory needs somewhere to put them. The obvious spelling, an `alloca` right where the call is emitted, is wrong. LLVM does not reclaim an `alloca` until the function returns, so a call inside a loop walks the stack down once per iteration until it reaches the guard page.
 
@@ -68,13 +68,13 @@ An FFI call in a `while` loop died at a fixed iteration count for exactly that r
 
 *Never assume "it gets dead-code-eliminated".* The `GetGlobal` arm that materializes a native fn value said exactly that in a comment, and used it to justify a `malloc` on every evaluation. The reasoning was that a reference which is immediately called devirtualizes to a direct native call, so the value it built must be dead.
 
-It is not dead. `GetGlobal` stores the tagged word into the register-file `alloca`, and a word that is dead to Jade is still a live store to LLVM. So both allocations stayed in the loop body next to the call. Nothing freed them either, because the `ObjKind::Fn` at offset 8 exists precisely so `is_collection` is false and `jrt_decref` returns early. A compiled binary therefore leaked 48 bytes per FFI call, without bound, while `jade run` leaked nothing.
+It is not dead. `GetGlobal` stores the tagged word into the register-file `alloca`, and a word that is dead to Jade is still a live store to LLVM. So both allocations stayed in the loop body next to the call. Nothing freed them either, because the `ObjKind::Fn` at offset 8 exists precisely so `is_collection` is false and `jrt_decref` returns early. A compiled binary therefore leaked 48 bytes per FFI call, without bound, while the VM leaked nothing.
 
 The register file defeats dead-code elimination for every value that reaches a slot, which is most of them. If a lowering is only affordable when something downstream deletes it, it is not affordable.
 
 *A value with no identity and no mutable state should be a link-time constant, not an allocation.* A native fn value is a pure function of its `(pkgid, fname)` pair, so there is now one `internal constant` box and environment per binding, and every evaluation hands out the same pointer.
 
-Two things make that legal, and both are worth checking before doing the same thing elsewhere. Nothing ever writes to the object, because `jrt_incref` and `jrt_decref` are both gated on the kind and skip a fn box. And nothing can observe the sharing, because `==` on two native fn values raises on *both* engines, so pointer identity is not reachable from the language.
+Two things make that legal, and both are worth checking before doing the same thing elsewhere. Nothing ever writes to the object, because `jrt_incref` and `jrt_decref` are both gated on the kind and skip a fn box. And nothing can observe the sharing, because `==` on two native fn values raises, as it did under the VM, so pointer identity is not reachable from the language.
 
 `set_constant` and `align 8` are load-bearing rather than decorative. A write should fault rather than corrupt an object the whole program shares, and `TAG_PTR` lives in the low three bits that `untag_ptr` masks off.
 
@@ -86,7 +86,7 @@ Pointing the environment at `@native_pkg$<pkgid>` instead leaves nothing to init
 
 *A call site cannot know a callee's arity, so it must not try.* Everything callable — a compiled `fn`, a bound method, a native package binding, a core builtin — is entered through one signature, `int64_t entry(int64_t argc, const int64_t* argv)`. `indirect_call` packs its arguments into a buffer and hands the whole thing to `jrt_call_value`; `array.map`, `array.filter`, runtime-dispatched struct methods, and callbacks the C runtime invokes all go the same way.
 
-It used to build a fixed-arity call out of the arguments the site happened to have and jump straight at the body. That is only correct when the site knows the callee, and an indirect call is precisely the case where it does not. `f(1, 2)` through a value dropped an argument, `f()` read the missing one out of an uninitialised register, and a default parameter was never filled at all. All three ran correctly under `jade run`.
+It used to build a fixed-arity call out of the arguments the site happened to have and jump straight at the body. That is only correct when the site knows the callee, and an indirect call is precisely the case where it does not. `f(1, 2)` through a value dropped an argument, `f()` read the missing one out of an uninitialised register, and a default parameter was never filled at all. All three ran correctly under the VM.
 
 The consequence for anything new: a value that can be called needs an entry with that signature and an `ObjKind` byte at offset 8, and it is reached through `jrt_call_value` rather than by reading a function pointer out of its box. The byte *above* the ObjKind says which sort of callable it is, which is how a renderer prints `<builtin len>` rather than `<object>`.
 
@@ -110,9 +110,9 @@ Two things keep the remaining cost near zero. A frame only registers when `exc_d
 
 *Three counters unwind at an exception landing pad, not two.* A `longjmp` skips every intervening frame's epilogue, so whatever those frames left open is still open when the catch runs. The recursion counter and the handler stack were already restored there. The generator stack is the third: a `yield`ing function opens a buffer on entry and closes it on return, a raise in between never reaches the close, and the caller's next `yield` then landed in the abandoned buffer — `fn outer() { yield 1; try { inner() } catch e { }; yield 2 }` gave `[10, 2]` compiled against `[1, 2]` interpreted. `emit_yield_restore` truncates back to the depth snapshotted in the prologue, which is taken *after* the generator's own `jrt_yield_push` so a generator that catches its own raise keeps its own buffer. If you add a fourth thing a function opens and closes, it belongs in the same list.
 
-*Check the tag before untagging on the strength of a static type.* Inference is not always precise enough to be trusted with a dereference. A function whose branches return different types takes the first branch's type, and an `Unknown` value pushed into a typed container keeps the container's element type. When the static type is then wrong, the compiled binary reads an int as a `char*` or as a pointer to a double and dies, where the interpreter checks the value it actually has and raises.
+*Check the tag before untagging on the strength of a static type.* Inference is not always precise enough to be trusted with a dereference. A function whose branches return different types takes the first branch's type, and an `Unknown` value pushed into a typed container keeps the container's element type. When the static type is then wrong, the compiled binary reads an int as a `char*` or as a pointer to a double and dies, where the interpreter checked the value it actually had and raised.
 
-So a lowering that turns a word into a pointer emits a guard first: `jrt_require_str_val` before a concatenation, `jrt_require_float_val` before an unbox, `jrt_require_dict_key` before a key becomes a `char*`, `jrt_require_callable` before an indirect call or a `map`/`filter` callback, and `jrt_require_kind` before a primitive method touches its receiver. Each raises the wording the VM raises. `{true: "y"}`, `let f = 5; f(1)`, and `[1].decode()` were all segfaults before their guard existed.
+So a lowering that turns a word into a pointer emits a guard first: `jrt_require_str_val` before a concatenation, `jrt_require_float_val` before an unbox, `jrt_require_dict_key` before a key becomes a `char*`, `jrt_require_callable` before an indirect call or a `map`/`filter` callback, and `jrt_require_kind` before a primitive method touches its receiver. Each raises the wording the VM raised. `{true: "y"}`, `let f = 5; f(1)`, and `[1].decode()` were all segfaults before their guard existed.
 
 *Put a new helper in the file that owns its concern, not in `instr.rs`.* The old file reached 5,000 lines because `lower_instr` was the path of least resistance for every addition. An arm that grows past a few lines belongs in a topic file, with a thin call from the match.
 
@@ -122,7 +122,7 @@ So a lowering that turns a word into a pointer emits a guard first: `jrt_require
 
 ```sh
 cargo test codegen::
-./src/scripts/backend-parity.sh
+./src/scripts/golden.sh
 ```
 
 A change here alters generated code rather than observable behavior, so tests alone are a weak signal. The strongest check available is to diff the IR itself:

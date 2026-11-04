@@ -5,7 +5,7 @@
 use super::*;
 
 /// Reserved global names that resolve to a runtime builtin (not a user value),
-/// mirroring `crate::builtins::seed_globals`. A `Call` whose callee is
+/// mirroring `crate::builtins::global_names`. A `Call` whose callee is
 /// `GetGlobal(<one of these>)` and which this backend does not itself lower is a
 /// builtin call we can't emit — the whole program falls back to `expr.rs`. (A
 /// user function that shadows one of these names is bound via `SetGlobal`, so it
@@ -73,11 +73,9 @@ pub(super) fn check_globals_bound(
 ) -> Result<(), String> {
     let mut bound: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    // The runtime's own globals, read from `seed_globals` rather than restated,
-    // so a new builtin cannot make valid programs stop building.
-    let mut seeded: HashMap<String, VmValue> = HashMap::new();
-    crate::builtins::seed_globals(&mut seeded);
-    bound.extend(seeded.into_keys());
+    // The globals every program has, read from the registry rather than
+    // restated, so a new builtin cannot make valid programs stop building.
+    bound.extend(crate::builtins::global_names().iter().map(|n| n.to_string()));
 
     // A type name reaches here as a `GetGlobal` that nothing ever stores to —
     // it lives in these side tables, not in the instruction stream. Counting it
@@ -169,7 +167,7 @@ fn package_fn_is_the_method(module: &str, method: &str) -> bool {
         "dict" => "std/dict",
         _ => return false,
     };
-    crate::builtins::find_package(import).is_some_and(|p| p.fns.iter().any(|f| f.name == method))
+    crate::builtins::find_package(import).is_some_and(|p| p.has_fn(method))
 }
 
 /// The receiver and remaining arguments of a package-form collection call.
@@ -742,9 +740,9 @@ pub(super) fn emit_val_method<'ctx>(
                 .into_int_value())
         }
         "cancel" => {
-            // `f.cancel()` — stop waiting. It does not stop the work; see
-            // `future_cancel` in src/future for why not, and why saying so
-            // plainly is the design rather than a shortcoming.
+            // `f.cancel()`: stop waiting. It does not stop the work; see
+            // src/future/README.md for why not, and why saying so plainly is
+            // the design rather than a shortcoming.
             low.require_kind(low.load(recv), WANT_FUTURE, "cancel")?;
             let f = low.runtime_fn("jade_future_cancel", void_ty.fn_type(&[i64_ty.into()], false));
             b.build_call(f, &[low.load(recv).into()], "").map_err(err)?;

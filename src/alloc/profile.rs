@@ -5,13 +5,14 @@
 //! HOST-ONLY BY CONSTRUCTION. This is declared as the `jade` *binary's*
 //! `#[global_allocator]` in `main.rs`, never in the shared `jade-runtime` crate,
 //! so — unlike mimalloc — it cannot be linked into a dlopen'd package and create
-//! two allocator instances. It exists only to measure the VM's allocation
-//! profile so the Phase-1 pool's size classes are chosen from data, not guessed.
-//! It is never built into a release.
+//! two allocator instances. It was built to measure the v1 VM's allocation
+//! profile so the Phase-1 pool's size classes were chosen from data, not guessed.
+//! With the VM gone it measures the compiler itself. It is never built into a
+//! release.
 //!
 //! Run e.g.:
 //!   cargo build --features alloc-profile
-//!   JADE_ALLOC_PROFILE=1 ./target/debug/jade run bench/alloc_heavy.jde
+//!   JADE_ALLOC_PROFILE=1 ./target/debug/jade build bench/alloc_heavy.jde
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};

@@ -144,8 +144,8 @@ pub fn run_uninstall(purge: bool, yes: bool) {
     println!("  curl -fsSL https://raw.githubusercontent.com/{GITHUB_REPO}/main/install.sh | sh");
 }
 
-pub async fn run_upgrade() {
-    upgrade_or_reinstall(false, false).await
+pub fn run_upgrade() {
+    upgrade_or_reinstall(false, false)
 }
 
 /// `jade reinstall [--clean] [--yes]` — fetch and install the latest release
@@ -153,7 +153,7 @@ pub async fn run_upgrade() {
 ///
 /// `upgrade` stops when it is already current, which is right for an upgrade
 /// and useless when the reason you are here is that something is broken.
-pub async fn run_reinstall(clean: bool, yes: bool) {
+pub fn run_reinstall(clean: bool, yes: bool) {
     if clean {
         let Some(dir) = user_dir() else {
             eprintln!("reinstall: no ~/.jade to clean");
@@ -171,10 +171,10 @@ pub async fn run_reinstall(clean: bool, yes: bool) {
         println!("removed {}", dir.display());
         println!("note: re-register your provider afterwards with `jade register`");
     }
-    upgrade_or_reinstall(true, clean).await
+    upgrade_or_reinstall(true, clean)
 }
 
-async fn upgrade_or_reinstall(force: bool, _cleaned: bool) {
+fn upgrade_or_reinstall(force: bool, _cleaned: bool) {
     let label = match archive_label() {
         Some(l) => l,
         None => {
@@ -189,13 +189,13 @@ async fn upgrade_or_reinstall(force: bool, _cleaned: bool) {
 
     println!("checking for updates...");
 
-    let client = reqwest::Client::builder()
+    let client = reqwest::blocking::Client::builder()
         .user_agent(format!("jade/{CURRENT_VERSION}"))
         .build()
         .expect("http client");
 
     let url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest");
-    let resp = match client.get(&url).send().await {
+    let resp = match client.get(&url).send() {
         Ok(r) => r,
         Err(e) => {
             eprintln!("upgrade: could not reach GitHub: {e}");
@@ -212,7 +212,7 @@ async fn upgrade_or_reinstall(force: bool, _cleaned: bool) {
         std::process::exit(1);
     }
 
-    let release: GhRelease = match resp.json().await {
+    let release: GhRelease = match resp.json() {
         Ok(r) => r,
         Err(e) => {
             eprintln!("upgrade: could not parse GitHub response: {e}");
@@ -258,8 +258,8 @@ async fn upgrade_or_reinstall(force: bool, _cleaned: bool) {
     let lib_dir = exe_dir.parent().map(|prefix| prefix.join("lib").join("jade"));
 
     // Download the tarball and extract it into a scratch dir.
-    let bytes = match client.get(&asset.browser_download_url).send().await {
-        Ok(r) => match r.bytes().await {
+    let bytes = match client.get(&asset.browser_download_url).send() {
+        Ok(r) => match r.bytes() {
             Ok(b) => b,
             Err(e) => {
                 eprintln!("upgrade: download failed: {e}");

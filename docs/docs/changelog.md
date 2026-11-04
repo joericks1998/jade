@@ -4,6 +4,15 @@ title: Changelog
 sidebar_label: Changelog
 ---
 
+## Unreleased
+
+*Jade 2.0 is in progress, and the first step removes the interpreter.* v2 makes Jade a pure ahead-of-time compiler, with model inference compiled into the program rather than handed to a provider at run time. These changes are on the `2.0.0` branch and are not released.
+
+- *`jade run` builds, then runs.* There is no bytecode VM any more. `jade run app.jde` compiles the file into a scratch directory, runs the binary with the same input and output, and exits with its status. Arguments for the program go after `--`, as in `jade run app.jde -- input.txt`. `jade test` builds and runs each test file the same way.
+- *The REPL is gone*, along with `jade run -v`, which printed the interpreter's globals.
+- *Cloud providers are gone.* `jade register` and `jade use` are removed, and `jade env` no longer reports a provider. A prompt dereference does not work on this branch yet; it returns when the compiler emits inference over a local model.
+- *Every example now carries its expected output*, as `<name>.expected`, recorded from v1.4.8. With one engine there is nothing left to compare two against, so the build is held to what v1.4.8 printed instead.
+
 ## v1.4.8
 
 *A one-line fix to an example, and the release 1.4.7 never became.* The eighteen fixes below carry the v1.4.7 heading and are in this release; the tag was never pushed, because the CI job that pushes it runs only after a green build, and the build went red on the merge that would have created it. What went red was the backend-parity gate, and what it caught was not a disagreement between the two engines.

@@ -114,7 +114,6 @@ fn intern_fn_returns_sequential_indices() {
             chunk: Chunk::new(name),
             n_slots: 0,
             source_file: String::new(),
-            module_scope: None,
             is_generator: false,
             is_async: false,
         })

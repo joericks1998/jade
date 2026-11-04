@@ -897,17 +897,17 @@ fn emit_fn(
         fn_em.arena_fn_tok = Some(tok);
     }
     // Compile literal defaults — non-literal defaults are unsupported for now.
-    let defaults: Vec<Option<crate::vm::VmValue>> = params.iter()
+    let defaults: Vec<Option<crate::bytecode::Const>> = params.iter()
         .map(|(_, default)| {
             match default {
                 None => Ok(None),
                 Some(expr) => match &expr.kind {
-                    crate::compiler::tir::TExprKind::Integer(n) => Ok(Some(crate::vm::VmValue::Int(*n))),
-                    crate::compiler::tir::TExprKind::Float(f)   => Ok(Some(crate::vm::VmValue::Float(*f))),
-                    crate::compiler::tir::TExprKind::Bool(b)    => Ok(Some(crate::vm::VmValue::Bool(*b))),
-                    crate::compiler::tir::TExprKind::Str(s)     => Ok(Some(crate::vm::VmValue::Str(s.clone().into()))),
+                    crate::compiler::tir::TExprKind::Integer(n) => Ok(Some(crate::bytecode::Const::Int(*n))),
+                    crate::compiler::tir::TExprKind::Float(f)   => Ok(Some(crate::bytecode::Const::Float(*f))),
+                    crate::compiler::tir::TExprKind::Bool(b)    => Ok(Some(crate::bytecode::Const::Bool(*b))),
+                    crate::compiler::tir::TExprKind::Str(s)     => Ok(Some(crate::bytecode::Const::Str(s.clone()))),
                     crate::compiler::tir::TExprKind::Identifier(s) if s == "None" || s == "nil" || s == "null" => {
-                        Ok(Some(crate::vm::VmValue::Nil))
+                        Ok(Some(crate::bytecode::Const::Nil))
                     }
                     _ => Err(crate::frontend::error::JadeError::Exception {
                         message: "default parameter values must be literals (None, nil, null, numbers, booleans, strings)".to_string(),
@@ -961,7 +961,6 @@ fn emit_fn(
         chunk: fn_em.chunk,
         n_slots,
         source_file: String::new(),
-        module_scope: None,
         is_generator,
         is_async,
     })

@@ -2,7 +2,7 @@
 
 ## What this subtree is
 
-This is a content-addressed store of parsed and type-checked programs. `jade run`, `jade check`, and `jade build` all hash the source file first, and skip straight to the cached AST or TIR when the hash matches. That is what makes repeated runs of an unchanged file fast.
+This is a content-addressed store of parsed and type-checked programs. `jade check` hashes the source file first, and skips straight to the cached AST or TIR when the hash matches. That is what makes repeated checks of an unchanged file fast. Until v1.4.8 `jade run` used it the same way. Since v2 `jade run` builds through the compiled backend, which does not read the cache.
 
 ## Why it works the way it does
 
@@ -24,7 +24,7 @@ A cache written before format versioning existed has no `format_version` field. 
 
 *Depends on:* `frontend::ast::Program` and `compiler::tir::TProgram`, both of which are serde-serializable, plus `sha2` and `bincode`.
 
-*Used by:* `cli/run.rs`, `cli/check.rs`, and `cli/build.rs` on the fast path, plus `cli/cache.rs` and `cli/env.rs` for statistics and cleanup.
+*Used by:* `cli/check.rs` on the fast path, plus `cli/cache.rs` and `cli/env.rs` for statistics and cleanup.
 
 ## Gotchas
 

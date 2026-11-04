@@ -4,11 +4,11 @@
 
 These are benchmark programs written twice, once in Jade and once in Python, plus the harnesses that time them and a file of results.
 
-Comparing against CPython is the point. Jade's VM and its AOT backend are each interesting on their own, but "is this fast" only means something next to a language people already have a feel for.
+Comparing against CPython is the point. Jade's compiled backend, and until v1.4.8 its VM, are interesting on their own, but "is this fast" only means something next to a language people already have a feel for.
 
 ## Why it exists
 
-Performance work here has been driven by measurement rather than guesswork. The allocation profiling is the clearest case. The `alloc-profile` Cargo feature swaps the `jade` binary's global allocator for one that records a size-class histogram. The numbers showed that collection churn dominates allocation-heavy code, and that finding produced both the segregated free-list pool in `jade-runtime` and the escape analysis in `compiler/escape.rs`. `alloc_heavy.jde` is the workload that exercises it.
+Performance work here has been driven by measurement rather than guesswork. The allocation profiling is the clearest case. The `alloc-profile` Cargo feature swaps the `jade` binary's global allocator for one that records a size-class histogram. The numbers showed that collection churn dominates allocation-heavy code, and that finding produced both the segregated free-list pool in `jade-runtime` and the escape analysis in `compiler/escape.rs`. `alloc_heavy.jde` is the workload that exercised it. Since v2 the program runs as a separate compiled binary, which the profiling allocator is not part of, so a profile of `jade` now shows the compiler's allocations rather than the workload's. `src/alloc/README.md` has the detail.
 
 ## What each file does
 
@@ -22,8 +22,10 @@ Performance work here has been driven by measurement rather than guesswork. The 
 
 *Harnesses:*
 
-- `bench.py` does quick runs.
-- `bench_full.py` runs the full suite across all three backends, meaning the Jade VM, Jade compiled to native code, and CPython. It produces the table in `RESULTS.md`.
+- `bench.py` does quick runs. It times `jade <file>`, which is shorthand for `jade run <file>`, against CPython.
+- `bench_full.py` runs the full suite in three columns: `jade run`, which it still labels the bytecode VM, a binary compiled ahead of time with `jade build`, and CPython. It produces the table in `RESULTS.md`.
+
+Since v2, `jade run` builds the program before running it, so every `jade run` timing in both harnesses now includes a compile and link step.
 
 *`RESULTS.md`* holds the recorded runs, newest first, each under its own dated header naming the platform and versions that produced it. There are two runs in it: a 1.1.33 run on an M4, which is the first measurement of the current in-process build path, and the original 1.0.9 snapshot.
 
@@ -51,7 +53,7 @@ Re-running the suite means adding a fresh dated header to `RESULTS.md`, naming t
 cargo build --release
 python3 bench/bench_full.py
 
-# allocation profile
+# allocation profile of the compiler, see src/alloc/README.md
 cargo build --features alloc-profile
-./target/debug/jade run bench/alloc_heavy.jde
+JADE_ALLOC_PROFILE=1 ./target/debug/jade build bench/alloc_heavy.jde -o /tmp/alloc_heavy
 ```

@@ -35,9 +35,9 @@ use inkwell::values::{
 };
 use inkwell::{AddressSpace, FloatPredicate, IntPredicate};
 
+use crate::bytecode::Const;
 use crate::bytecode::{Chunk, CompiledFn, FStrPart, Instr, Reg};
 use crate::frontend::ast::{BinOpKind, Expr, StructFieldDef, UnaryOpKind};
-use crate::vm::VmValue;
 
 mod abi;
 mod arith;
@@ -241,7 +241,7 @@ struct FnCtx<'ctx> {
     global_fns: HashMap<String, usize>,
     /// Struct type name → its optional fields' (name, scalar-literal default),
     /// used to fill fields a struct literal omits (the VM fills these at runtime).
-    struct_defaults: HashMap<String, Vec<(String, VmValue, bool)>>,
+    struct_defaults: HashMap<String, Vec<(String, Const, bool)>>,
     /// Every declared struct type name.
     ///
     /// Used to recognise a *call* on a type name, which is an error worth
@@ -322,23 +322,17 @@ impl<'ctx> FnCtx<'ctx> {
 /// went in as nothing at all, which nobody saw while every default was filled
 /// during type inference; a copy-with reads it here instead, and got a struct
 /// with no `xs` field on the compiled side and an empty array on the VM.
-fn eval_scalar_default(e: &Expr) -> Option<VmValue> {
+fn eval_scalar_default(e: &Expr) -> Option<Const> {
     match e {
-        Expr::Str { value, .. } => Some(VmValue::Str(value.clone().into())),
-        Expr::Integer { value, .. } => Some(VmValue::Int(*value)),
-        Expr::Float { value, .. } => Some(VmValue::Float(*value)),
-        Expr::Bool { value, .. } => Some(VmValue::Bool(*value)),
+        Expr::Str { value, .. } => Some(Const::Str(value.clone())),
+        Expr::Integer { value, .. } => Some(Const::Int(*value)),
+        Expr::Float { value, .. } => Some(Const::Float(*value)),
+        Expr::Bool { value, .. } => Some(Const::Bool(*value)),
         Expr::Identifier { name, .. } if name == "nil" || name == "None" || name == "null" => {
-            Some(VmValue::Nil)
+            Some(Const::Nil)
         }
-        Expr::Array { elements, .. } if elements.is_empty() => {
-            Some(VmValue::Array(std::sync::Arc::new(parking_lot::Mutex::new(
-                jade_runtime::coll::ArrayObj::from_vec(vec![]),
-            ))))
-        }
-        Expr::Dict { entries, .. } if entries.is_empty() => {
-            Some(VmValue::dict(jade_runtime::coll::DictObj::new()))
-        }
+        Expr::Array { elements, .. } if elements.is_empty() => Some(Const::EmptyArray),
+        Expr::Dict { entries, .. } if entries.is_empty() => Some(Const::EmptyDict),
         _ => None,
     }
 }
@@ -352,7 +346,7 @@ fn eval_scalar_default(e: &Expr) -> Option<VmValue> {
 /// rather than stored as the bare string, matching what the VM does.
 fn build_struct_defaults(
     struct_defs: &HashMap<String, Vec<StructFieldDef>>,
-) -> HashMap<String, Vec<(String, VmValue, bool)>> {
+) -> HashMap<String, Vec<(String, Const, bool)>> {
     let mut out = HashMap::new();
     for (tn, fields) in struct_defs {
         let mut ds = Vec::new();

@@ -243,125 +243,116 @@ pub fn run_build(
     lib: bool,
     exports: &[String],
 ) {
-    {
-        let target = resolve_target(path, output, lib, exports);
-        let path = &target.source.to_string_lossy().into_owned();
-        let output = target.output.as_deref();
-        let exports = &target.exports[..];
+    let target = resolve_target(path, output, lib, exports);
+    let path = &target.source.to_string_lossy().into_owned();
+    let out = output_path(path, target.output.as_deref(), lib);
 
-        let source = match std::fs::read_to_string(path) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("error: could not read '{}': {}", path, e);
-                process::exit(1);
-            }
-        };
+    let emit = if emit_ir {
+        crate::build::Emit::Ir
+    } else if lib {
+        crate::build::Emit::CDylib { exports: target.exports.clone() }
+    } else {
+        crate::build::Emit::Binary
+    };
 
-        // Frontend: lex → parse → type-infer.
-        let tokens = match crate::frontend::lexer::tokenize(&source) {
-            Ok(t) => t,
-            Err(e) => {
-                eprintln!("{path}: lexer error: {e}");
-                process::exit(1);
-            }
-        };
-        let program = match crate::frontend::parser::parse(tokens) {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("{path}: parse error: {e}");
-                process::exit(1);
-            }
-        };
-        let tprogram = match crate::compiler::type_infer::infer(program) {
-            Ok(tp) => tp,
-            Err(e) => {
-                eprintln!("{path}: type error: {e}");
-                process::exit(1);
-            }
-        };
+    let bundled = compile_file(path, &out, emit);
 
-        // Absolute source path so imports resolve relative to it, not the CWD.
-        let abs_source = std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
-
-        // Install the project's dependencies before resolving imports, exactly
-        // as `jade run` does. Without this the two engines disagree on what a
-        // dependency *is*: `run` picks up a rebuilt local library while `build`
-        // silently links whatever `libs/` was last left holding, and a fresh
-        // clone builds against nothing at all. The project is found from the
-        // source file's directory because that is how `aot/imports.rs` finds it.
-        //
-        // A manifest that will not parse is reported here, not skipped. Skipped,
-        // the dependencies it declares simply did not exist for this build, and
-        // the first thing to notice was the AOT import resolver failing on a
-        // `use` — a span in the source file, for a mistake in jade.toml.
-        if let Some(root) = abs_source.parent().and_then(crate::project::find_project_root_from) {
-            let manifest = crate::project::load_project(&root).unwrap_or_else(|e| {
-                eprintln!("error: {e}");
-                process::exit(1);
-            });
-            if let Err(e) = crate::pkg::ensure_ready(&root, &manifest) {
-                eprintln!("error: {e}");
-                process::exit(1);
-            }
-        }
-
-        let out = output_path(path, output, lib);
-        // Make the output path absolute so the artifact lands where the user expects.
-        let abs_out = if out.is_absolute() {
-            out.clone()
+    if !emit_ir {
+        if bundled.is_empty() {
+            eprintln!("built: {}", out.display());
         } else {
-            std::env::current_dir().map(|d| d.join(&out)).unwrap_or_else(|_| out.clone())
-        };
-
-        let emit = if emit_ir {
-            crate::build::Emit::Ir
-        } else if lib {
-            crate::build::Emit::CDylib { exports: exports.to_vec() }
-        } else {
-            crate::build::Emit::Binary
-        };
-
-        let needed = match crate::build::build(&tprogram, &abs_source, &abs_out, emit) {
-            Ok(needed) => needed,
-            Err(e) => {
-                eprintln!("{path}: build error: {e}");
-                process::exit(1);
-            }
-        };
-
-        // Copy the dependencies the artifact will look for into a `libs/` beside
-        // it, so the pair can be moved together and still work. Without this the
-        // artifact holds the build machine's absolute paths, which is why one
-        // used to run here and nowhere else.
-        let mut bundled: Vec<String> = Vec::new();
-        if !needed.is_empty()
-            && let Some(root) = abs_source.parent().and_then(crate::project::find_project_root_from)
-        {
-            let libs_root = root.join(crate::pkg::LIBS_DIR);
-            let libs_root = std::fs::canonicalize(&libs_root).unwrap_or(libs_root);
-            match crate::pkg::bundle_beside_artifact(&abs_out, &libs_root) {
-                Ok(names) => bundled = names,
-                Err(e) => {
-                    eprintln!("error: {e}");
-                    process::exit(1);
-                }
-            }
-        }
-
-        if !emit_ir {
-            if bundled.is_empty() {
-                eprintln!("built: {}", out.display());
-            } else {
-                // Named rather than counted: `-o` now writes a directory's worth
-                // of files, and a reader who does not know that will ship one.
-                let dir = out.parent().unwrap_or_else(|| Path::new(".")).join(crate::pkg::LIBS_DIR);
-                eprintln!(
-                    "built: {} (with {} in {}/)",
-                    out.display(),
-                    bundled.join(", "),
-                    dir.display()
-                );
-            }
+            // Named rather than counted: `-o` now writes a directory's worth
+            // of files, and a reader who does not know that will ship one.
+            let dir = out.parent().unwrap_or_else(|| Path::new(".")).join(crate::pkg::LIBS_DIR);
+            eprintln!(
+                "built: {} (with {} in {}/)",
+                out.display(),
+                bundled.join(", "),
+                dir.display()
+            );
         }
     }
+}
+
+/// Compile one source file to `out`, exiting with a message on any error.
+///
+/// Shared by `jade build` and `jade run`, which builds into a scratch directory
+/// and then runs the binary. Returns the dependencies copied into a `libs/`
+/// beside the artifact, so the caller can say where they went.
+pub(crate) fn compile_file(path: &str, out: &Path, emit: crate::build::Emit) -> Vec<String> {
+    try_compile_file(path, out, emit).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        process::exit(1);
+    })
+}
+
+/// [`compile_file`], returning the message instead of exiting. `jade test`
+/// uses it, since one failing file must not stop the rest.
+pub(crate) fn try_compile_file(
+    path: &str,
+    out: &Path,
+    emit: crate::build::Emit,
+) -> Result<Vec<String>, String> {
+    let source = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => return Err(format!("error: could not read '{}': {}", path, e)),
+    };
+
+    // Frontend: lex → parse → type-infer.
+    let tokens = match crate::frontend::lexer::tokenize(&source) {
+        Ok(t) => t,
+        Err(e) => return Err(format!("{path}: lexer error: {e}")),
+    };
+    let program = match crate::frontend::parser::parse(tokens) {
+        Ok(p) => p,
+        Err(e) => return Err(format!("{path}: parse error: {e}")),
+    };
+    let tprogram = match crate::compiler::type_infer::infer(program) {
+        Ok(tp) => tp,
+        Err(e) => return Err(format!("{path}: type error: {e}")),
+    };
+
+    // Absolute source path so imports resolve relative to it, not the CWD.
+    let abs_source = std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
+
+    // Install the project's dependencies before resolving imports. Without
+    // this a fresh clone builds against nothing at all, and a rebuilt local
+    // library is silently ignored in favour of whatever `libs/` last held. The
+    // project is found from the source file's directory because that is how
+    // `aot/imports.rs` finds it. A manifest that will not parse is reported
+    // here rather than skipped, so the error names jade.toml and not a `use`.
+    if let Some(root) = abs_source.parent().and_then(crate::project::find_project_root_from) {
+        let manifest = crate::project::load_project(&root).map_err(|e| format!("error: {e}"))?;
+        crate::pkg::ensure_ready(&root, &manifest).map_err(|e| format!("error: {e}"))?;
+    }
+
+    // Make the output path absolute so the artifact lands where the user expects.
+    let abs_out = if out.is_absolute() {
+        out.to_path_buf()
+    } else {
+        std::env::current_dir().map(|d| d.join(out)).unwrap_or_else(|_| out.to_path_buf())
+    };
+
+    let needed = match crate::build::build(&tprogram, &abs_source, &abs_out, emit) {
+        Ok(needed) => needed,
+        Err(e) => return Err(format!("{path}: build error: {e}")),
+    };
+
+    // Copy the dependencies the artifact will look for into a `libs/` beside
+    // it, so the pair can be moved together and still work. Without this the
+    // artifact holds the build machine's absolute paths, which is why one
+    // used to run here and nowhere else.
+    let mut bundled: Vec<String> = Vec::new();
+    if !needed.is_empty()
+        && let Some(root) = abs_source.parent().and_then(crate::project::find_project_root_from)
+    {
+        let libs_root = root.join(crate::pkg::LIBS_DIR);
+        let libs_root = std::fs::canonicalize(&libs_root).unwrap_or(libs_root);
+        match crate::pkg::bundle_beside_artifact(&abs_out, &libs_root) {
+            Ok(names) => bundled = names,
+            Err(e) => return Err(format!("error: {e}")),
+        }
+    }
+
+    Ok(bundled)
 }

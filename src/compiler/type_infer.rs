@@ -1655,13 +1655,12 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
             if let Expr::Identifier { name, .. } = object.as_ref()
                 && ctx.imported_packages.contains(name)
                 && let Some(pkg) = builtins::package_by_global_name(name)
-                && !pkg.fns.iter().any(|f| f.name == field)
-                && !pkg.natives.iter().any(|(n, _)| n == field)
+                && !pkg.has_fn(field)
             {
                 return Err(JadeError::UnknownPackageFn {
                     package: pkg.import_name.replace('/', "::"),
                     name: field.clone(),
-                    available: pkg.fns.iter().map(|f| f.name.to_string()).collect(),
+                    available: pkg.fns.iter().map(|f| f.to_string()).collect(),
                     span: *span,
                 });
             }
