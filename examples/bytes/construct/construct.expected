@@ -17,6 +17,3 @@ jade
 refused a negative length
 refused an element above 255
 refused a negative element
-refused an element that is not an int
-refused an argument that is not an array
-refused joining something that is not a blob

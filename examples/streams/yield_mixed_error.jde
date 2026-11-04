@@ -1,0 +1,7 @@
+// A stream holds one kind of value, so a generator's yields must agree.
+fn mixed() {
+    yield 1
+    yield "two"
+}
+
+print(mixed())

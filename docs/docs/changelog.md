@@ -12,6 +12,7 @@ sidebar_label: Changelog
 - *The REPL is gone*, along with `jade run -v`, which printed the interpreter's globals.
 - *Cloud providers are gone.* `jade register` and `jade use` are removed, and `jade env` no longer reports a provider. A prompt dereference does not work on this branch yet; it returns when the compiler emits inference over a local model.
 - *Every example now carries its expected output*, as `<name>.expected`, recorded from v1.4.8. With one engine there is nothing left to compare two against, so the build is held to what v1.4.8 printed instead.
+- *Every value has one static type.* The compiler checks each function once for every set of argument types it is called with, so `add(1, 2)` and `add("a", "b")` are both fine and `add(1, "b")` is a compile error at that call. Several things v1 allowed are compile errors now: a variable changing kind, an array or dict mixing kinds (`[1, "a"]`, `{"name": "jade", "version": 1}`), a function returning different kinds on different paths, reading a dict with a dot, and calling a method a value's type does not have. A value that may be `nil` is checked before use with `if x != nil`. Records whose fields differ in kind are structs, several kinds of record share a parent struct, and `json.parse` returns a JSON value read with brackets and converted with `str`, `int` and friends. The design is `design/v2-static-values.md`.
 
 ## v1.4.8
 

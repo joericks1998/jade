@@ -47,8 +47,9 @@ try {
 print(1 << 61)
 // → 2305843009213693952
 
-// Bitwise and shift are int-only on both engines, including when the operands
-// reach the operator with no static type.
+// Bitwise and shift are int-only. A function is checked at the types it is
+// called with, so a non-int operand reaching `&` through a parameter is a
+// compile error now; bitwise_non_int_error.jde pins that.
 fn band(a, b) {
     return a & b
 }
@@ -59,13 +60,6 @@ fn shl(a, b) {
 
 print(band(6, 3))
 // → 2
-
-try {
-    print(band("x", 1))
-} catch e {
-    print("non-int operand refused")
-}
-// → non-int operand refused
 
 try {
     print(shl(1, 70))

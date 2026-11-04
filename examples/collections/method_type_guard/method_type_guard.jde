@@ -1,75 +1,17 @@
-// Calling a primitive method on the wrong kind of value raises, and the raise
-// is catchable — on both engines.
+// Calling a primitive method on the wrong kind of value is a compile error.
 //
-// Regression fixture. The AOT backend picked the method arm from the method
-// *name* and then untagged the receiver to a pointer of the kind it assumed. A
-// name does not prove a kind: in `fn f(v) { v.keys() }` the receiver is only
-// known when f is called. So `v.keys()` on a string dereferenced a char* as a
-// dict and killed the process, while `v.keys()` on an array quietly answered as
-// though the array were a dict. The interpreter checked at runtime and raised.
+// Regression fixture. The v1 compiled backend picked the method arm from the
+// method *name* and then untagged the receiver to a pointer of the kind it
+// assumed. A name does not prove a kind: in `fn f(v) { v.keys() }` the receiver
+// was only known when f was called. So `v.keys()` on a string dereferenced a
+// char* as a dict and killed the process.
 //
-// The catch matters as much as the raise. This try/catch shape is how Jade asks
-// a value's type, and a process that segfaults cannot be caught by anything.
-
-fn is_dict(v) {
-    try {
-        v.keys()
-        return true
-    } catch e {
-        return false
-    }
-}
-
-fn is_array(v) {
-    try {
-        v.push(1)
-        return true
-    } catch e {
-        return false
-    }
-}
-
-print(is_dict({"x": 1}))   // true
-print(is_dict([1, 2]))     // false
-print(is_dict("str"))      // false
-print(is_dict(42))         // false
-print(is_dict(1.5))        // false
-print(is_dict(true))       // false
-print(is_dict(nil))        // false
-
-print(is_array([1, 2]))    // true
-print(is_array({"x": 1}))  // false
-print(is_array("str"))     // false
-print(is_array(42))        // false
-
-// A str method on a non-str raises the same way.
-fn upper_or_bust(v) {
-    try {
-        return v.upper()
-    } catch e {
-        return "raised"
-    }
-}
-
-print(upper_or_bust("ok"))   // OK
-print(upper_or_bust(42))     // raised
-print(upper_or_bust([1]))    // raised
-
-// A str method's *argument* is untagged to a char* too, so it needs the same
-// check — and reports as an argument type error, not a missing field.
-fn starts(hay, needle) {
-    try {
-        return hay.starts_with(needle)
-    } catch e {
-        return "raised"
-    }
-}
-
-print(starts("abc", "a"))   // true
-print(starts("abc", 42))    // raised
-
-// The guard rejects a wrong receiver, never a right one: the real methods still
-// work on the kinds that do have them.
+// v2 checks a function at the types each call gives it, so `f("str")` is
+// refused before the program runs, and the try/catch shape v1 used to ask a
+// value its type is gone with it. method_type_guard_error.jde pins the refusal.
+//
+// What is left here is the other half of the old guard: the real methods still
+// work on the kinds that have them.
 let d = {"k": "v"}
 print(d.keys())      // [k]
 print(d.values())    // [v]

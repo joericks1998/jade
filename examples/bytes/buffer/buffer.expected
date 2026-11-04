@@ -12,4 +12,3 @@ refused an index past the end
 refused a negative index
 refused a value above 255
 refused a negative value
-refused a value that is not an int

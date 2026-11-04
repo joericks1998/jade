@@ -55,9 +55,9 @@ print(len(over))
 over["z"] = 3
 print(over)
 
-// nested and heterogeneous values
-let deep = {"list": [1, 2], "map": {"inner": "v"}, "n": 1.5, "flag": false}
-print(deep["list"][1])
+// nested values: a dict of dicts is one kind. A dict holds one kind of value,
+// so a record whose fields differ in kind is a struct instead.
+let deep = {"map": {"inner": "v"}, "other": {"k": "w"}}
 print(deep["map"]["inner"])
 print(deep)
 

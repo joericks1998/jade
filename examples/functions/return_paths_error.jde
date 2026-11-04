@@ -1,0 +1,10 @@
+// A function's paths must agree on one kind. A str on one and an int on another
+// have no type to share, so the function is refused.
+fn pick(c) {
+    if c {
+        return "s"
+    }
+    return 1
+}
+
+print(pick(true))

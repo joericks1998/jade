@@ -1,0 +1,8 @@
+// A bitwise operator takes ints only. A function is checked at the types each
+// call gives it, so a string reaching `&` through a parameter is refused when
+// the program is checked, not when the line runs.
+fn band(a, b) {
+    return a & b
+}
+
+print(band("x", 1))

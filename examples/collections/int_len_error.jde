@@ -1,0 +1,3 @@
+// A number has no length, so `len` on one is refused when the program is checked.
+let n = 5
+print(n.len())

@@ -8,10 +8,10 @@
 // `catch RuntimeError e` never matched at all. A program that only reported the
 // error looked fine; one that inspected it broke when you shipped it.
 //
-// The receiver wording is checked here too. Both engines said `struct 'int'
-// has no field 'upper'` until v1.3.21 — an int is not a struct and has no
-// fields — and the fix had to land in two places, since compiled code raises
-// from `jrt_require_kind` in the C runtime rather than from `JadeError`.
+// Calling a method an int does not have, such as `42.upper()`, used to be one
+// of these runtime errors. Every value's type is known when the program is
+// checked now, so it is a compile error instead; collections/int_len_error.jde
+// pins the wording.
 //
 // The one part that stays different is the `[line:col]` prefix the VM puts in
 // the message — compiled code has no span at runtime. So this fixture asserts
@@ -22,11 +22,6 @@ fn divzero() {
     let a = 1
     let b = 0
     return a / b
-}
-
-fn bad_method() {
-    let v = 42
-    return v.upper()
 }
 
 fn overflow() {
@@ -48,7 +43,6 @@ fn kind_of(f) {
 }
 
 print(kind_of(divzero))      // RuntimeError
-print(kind_of(bad_method))   // RuntimeError
 print(kind_of(overflow))     // RuntimeError
 
 // The message field is readable, and carries the same wording on both engines.
@@ -62,11 +56,10 @@ fn message_of(f) {
 }
 
 print(message_of(divzero).contains("division by zero"))            // true
-print(message_of(bad_method).contains("int has no method 'upper'"))  // true
 print(message_of(overflow).contains("integer overflow"))           // true
 
-// A user's `raise x` is NOT wrapped: the value thrown is the value written, so
-// a raised string stays a string and a raised struct keeps its own type.
+// A raised string becomes a RuntimeError carrying it as the message, so it
+// prints as the string it was. A raised struct keeps its own type.
 struct MyError {
     message
 }

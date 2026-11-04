@@ -1,0 +1,14 @@
+// A method is checked against the type of the value it is called on, even when
+// that value arrives through a parameter: `is_dict` is checked at the types
+// each call gives it, and a string has no `keys`.
+fn is_dict(v) {
+    try {
+        v.keys()
+        return true
+    } catch e {
+        return false
+    }
+}
+
+print(is_dict({"x": 1}))
+print(is_dict("str"))

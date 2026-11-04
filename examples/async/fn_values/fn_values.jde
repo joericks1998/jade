@@ -57,11 +57,6 @@ print(await s(7, 10))
 // → 70
 
 
-// And a wrong argument count raises, rather than refusing to build or quietly
-// dropping the extra one.
-try {
-    print(await s(1, 2, 3))
-} catch e {
-    print(e.message.contains("wrong number of arguments"))
-}
-// → true
+// A wrong argument count through a function value is a compile error, since a
+// function value has one type: its parameters, its result and whether it is
+// async. functions/value_arity_error.jde pins that.

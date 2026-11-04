@@ -198,7 +198,10 @@ mod tests {
         let tokens = lexer::tokenize(&source).map_err(|e| format!("lexer error: {e}"))?;
         let program = parser::parse(tokens).map_err(|e| format!("parse error: {e}"))?;
         let tprogram = type_infer::infer(program).map_err(|e| format!("{e}"))?;
-        crate::compiler::emit::emit(tprogram.clone()).map_err(|e| format!("{e}"))?;
+        // The same passes `jade check` runs after inference, including the
+        // whole-program static types, so a fixture is judged the way the CLI
+        // judges it.
+        super::post_tir_checks(&tprogram, &path.to_string_lossy())?;
         check_imports(&tprogram, &path.to_string_lossy())
     }
 

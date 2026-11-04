@@ -48,14 +48,8 @@ fn upto(limit) {
 
 print(upto(3))
 
-// Yields of different types widen to a mixed stream rather than failing, the
-// same rule a mixed array literal follows.
-fn mixed() {
-    yield 1
-    yield "two"
-}
-
-print(mixed())
+// A stream holds one kind of value, the way an array does, so yields of
+// different kinds are a compile error; yield_mixed_error.jde pins that.
 
 // A generator calling a generator keeps their yields apart.
 fn outer() {

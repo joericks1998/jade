@@ -74,23 +74,6 @@ try {
     print("refused a negative element")
 }
 
-try {
-    bytes.from_ints([1, "two"])
-    print("NOT RAISED: an element that is not an int")
-} catch e {
-    print("refused an element that is not an int")
-}
-
-try {
-    bytes.from_ints(5)
-    print("NOT RAISED: an argument that is not an array")
-} catch e {
-    print("refused an argument that is not an array")
-}
-
-try {
-    bytes.concat(whole, 5)
-    print("NOT RAISED: joining something that is not a blob")
-} catch e {
-    print("refused joining something that is not a blob")
-}
+// An element that is not an int, an argument that is not an array, and joining
+// something that is not a blob are compile errors now rather than raises;
+// construct_types_error.jde pins the first.

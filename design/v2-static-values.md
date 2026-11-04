@@ -270,6 +270,17 @@ Each phase ends with the golden gate green for every example it covers. The new 
 5. *The standard library*, in the order of decision 10, then C libraries and Jade packages per decision 11.
 6. *Switch over and delete* the bytecode, the old codegen and both runtimes.
 
+## Progress
+
+*Phase 1 is done* (2026-11-04): `src/compiler/infer/` checks the whole merged program and gates `jade build` and `jade check`. Every runnable example checks, the 19 fixtures listed above were rewritten, and each runtime type error they tested is now a `*_error.jde` compile-error fixture. Building it settled four details this document had left open:
+
+- *A function's trailing bare expression is its return value*, as v1 ran it: `fn double(x) { x * 2 }` returns an int.
+- *An early exit narrows too.* After `if x == nil { return }`, the rest of the block reads `x` as its non-optional type, as inside `if x != nil { … }`.
+- *JSON absorbs nil.* A `Json` value already has a null, so `let first = nil` later assigned `json.parse(line)` is `Json`, not an optional.
+- *An array cannot contain itself.* Its element type would have to contain its own type. A structure that points back at itself goes through a struct field, whose type is a name.
+
+Phase 2, MIR and core codegen, is next.
+
 ## Open questions
 
 1. *How does a program test which child struct it holds?* Methods cover most uses. For the rest, the choices are a new `if x is Token { ... }` test, which narrows `x` inside the branch, or nothing beyond methods and typed `catch`.

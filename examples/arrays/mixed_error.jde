@@ -1,0 +1,5 @@
+// An array holds one kind of value, so a literal that mixes kinds is refused.
+// To keep several kinds of record together, give them a shared parent struct;
+// see mixed/mixed.jde.
+let mixed = [1, "two", true]
+print(mixed)

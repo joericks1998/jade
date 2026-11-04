@@ -1,6 +1,9 @@
 // basic dict operations
+//
+// A dict maps string keys to one kind of value. A record whose fields differ in
+// kind is a struct; see examples/structs.
 
-let d = {"name": "jade", "version": 1}
+let d = {"name": "jade", "version": "1"}
 print(d["name"])      // jade
 print(d["version"])   // 1
 
@@ -9,12 +12,12 @@ let empty = {}
 print(len(empty))     // 0
 
 // mutation
-d["version"] = 2
+d["version"] = "2"
 print(d["version"])   // 2
 
 // adding a new key
-d["stable"] = true
-print(d["stable"])    // true
+d["stable"] = "yes"
+print(d["stable"])    // yes
 
 // len
 print(len(d))         // 3

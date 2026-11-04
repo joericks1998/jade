@@ -1,0 +1,6 @@
+// bytes.from_ints takes an array of ints. An array that mixes kinds cannot be
+// built at all, and an array of strings is the wrong type: both are refused when
+// the program is checked.
+use std::bytes
+
+print(bytes.from_ints(["one", "two"]))

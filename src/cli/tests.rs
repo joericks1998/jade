@@ -852,9 +852,9 @@ fn check_agrees_with_build_about_calls() {
     let dir = std::env::temp_dir().join("jade_check_calls");
     let _ = std::fs::create_dir_all(&dir);
     let cases = [
-        ("unknown_method", "print(str(\"abc\".bogus()))\n", "no method named `bogus`"),
+        ("unknown_method", "print(str(\"abc\".bogus()))\n", "has no method 'bogus'"),
         ("surplus_args", "print(str(\"abc\".upper(1, 2, 3)))\n", "takes 0 arguments"),
-        ("short_call", "fn f(a, b) { return a }\nprint(str(f(1)))\n", "omits argument 2"),
+        ("short_call", "fn f(a, b) { return a }\nprint(str(f(1)))\n", "needs an argument for 'b'"),
     ];
     for (name, src, want) in cases {
         let path = dir.join(format!("{name}.jde"));

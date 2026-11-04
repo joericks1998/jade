@@ -1,0 +1,15 @@
+// Inside `catch Failure e`, `e` is a Failure, which may be any of its children.
+// A field only one child has cannot be read there; the arm has to name the child.
+struct Failure {
+    reason
+}
+
+struct NotFound(Failure) {
+    path
+}
+
+try {
+    raise NotFound { reason: "gone", path: "/tmp/x" }
+} catch Failure e {
+    print(e.path)
+}

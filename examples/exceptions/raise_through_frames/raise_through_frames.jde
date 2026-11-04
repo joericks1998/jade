@@ -83,7 +83,7 @@ fn wrong_arm() {
     try {
         innermost()
     } catch Other e {
-        return "unreachable"
+        return ["unreachable"]
     }
     return temp
 }

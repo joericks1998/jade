@@ -18,9 +18,8 @@
 {"x": 100, "y": 2}
 2
 {"x": 100, "y": 2, "z": 3}
-2
 v
-{"flag": false, "list": [1, 2], "map": {"inner": v}, "n": 1.5}
+{"map": {"inner": v}, "other": {"k": w}}
 {"k": a string}
 [a, b]
 1

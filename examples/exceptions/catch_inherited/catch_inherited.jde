@@ -7,9 +7,9 @@
 // It does not run the other way. A `NotFound` arm is asking for that type in
 // particular, so a plain `Failure` walks past it.
 //
-// Both engines answer the same question from the same flattened ancestry: the
-// VM reads it out of its own state, and a compiled binary reads a registry
-// filled at program start, because it has no compiler left to ask.
+// Inside an arm, `e` has the type the arm names. A `Failure` arm reads the
+// fields every Failure has; to read a child's own field, name the child in the
+// arm. catch_parent_reads_child_error.jde pins the refusal.
 
 struct Failure {
     reason
@@ -23,14 +23,12 @@ struct Timeout(Failure) {
     let seconds = 30
 }
 
-// The parent's arm catches the child, and the child's own fields are still
-// there once it has.
+// The parent's arm catches the child.
 try {
     raise NotFound { reason: "gone", path: "/tmp/x" }
 } catch Failure e {
     print("parent arm caught it")
     print(e.reason)
-    print(e.path)
 } catch e {
     print("WRONG: fell through to the untyped arm")
 }
@@ -42,7 +40,7 @@ try {
     print("WRONG: a sibling arm caught it")
 } catch Failure e {
     print("sibling skipped, parent caught")
-    print(e.seconds)
+    print(e.reason)
 }
 
 // The exact type still matches, which is what every arm did before.
@@ -59,6 +57,7 @@ try {
     raise NotFound { reason: "gone", path: "/tmp/y" }
 } catch NotFound e {
     print("the nearer arm wins when it is written first")
+    print(e.path)
 } catch Failure e {
     print("WRONG: the parent arm took it")
 }

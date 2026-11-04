@@ -105,6 +105,9 @@ pub fn would_build(
     };
     crate::compiler::type_infer::fill_struct_literal_defaults(&mut program)
         .map_err(|e| e.to_string())?;
+    // v2's static types: a program the whole-program checker rejects does not
+    // build, even though this backend could still run it.
+    crate::compiler::infer::check_program(&program).map_err(|e| e.to_string())?;
 
     let cp = crate::compiler::emit::emit(program).map_err(|e| e.to_string())?;
     let ctx = Context::create();
@@ -474,6 +477,12 @@ pub fn compile_with_mode(
     // would zero-initialise those slots — turning `[]` into a NULL pointer.
     crate::compiler::type_infer::fill_struct_literal_defaults(&mut program)
         .map_err(|e| e.to_string())?;
+
+    // ── Whole-program static types ────────────────────────────────────────
+    // v2 checks the merged program with every type known ahead of time; see
+    // `compiler::infer`. Until the static backend lands, this is a gate in
+    // front of the bytecode backend rather than its input.
+    crate::compiler::infer::check_program(&program).map_err(|e| e.to_string())?;
 
     let context = Context::create();
     let module = context.create_module("jade_program");
