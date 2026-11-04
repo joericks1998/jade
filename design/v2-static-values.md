@@ -1,6 +1,6 @@
 # Jade 2.0: static values
 
-Status: draft for review, 2026-11-04. Nothing here is built yet.
+Status: decided, 2026-11-04. Joe chose the recommendation in every decision below, including the four that change what programs the language accepts: dicts are maps and records are structs (3), mixed values join to a parent struct (4), the whole standard library stays (10), and Jade packages are compiled from source (11). The three open questions at the end are still open. Nothing here is built yet.
 
 ## Summary
 
@@ -8,7 +8,7 @@ Jade 2.0 compiles every value to a plain machine value whose type the compiler k
 
 Jade keeps inferring types rather than asking for annotations. The inference gets stronger instead: the compiler type-checks each function once for every set of argument types it is called with, and compiles a copy for each. A few dynamic patterns that v1 allowed become type errors, and this document lists them and proposes what replaces each one.
 
-The first eleven sections below are decisions. Each says what the problem is, what this document recommends, what a program looks like under it, and what stops compiling. The rest describes how the compiler changes and in what order the work lands.
+The first eleven sections below are decisions. Each says what the problem is, what was decided, what a program looks like under it, and what stops compiling. The rest describes how the compiler changes and in what order the work lands.
 
 ## Why
 
