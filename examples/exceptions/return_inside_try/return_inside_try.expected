@@ -1,0 +1,7 @@
+returned out of the try
+returned out of the catch
+caught: boom
+caught: after many
+from the inner try
+caught: still fine
+done

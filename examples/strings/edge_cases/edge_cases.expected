@@ -1,0 +1,53 @@
+0
+[]
+3
+[padded]
+[]
+a
+b
+
+abcd
+70
+0123456789012345678901234567890123456789012345678901234567890123456789
+140
+tab:	end
+quote:"end
+backslash:\end
+newline:
+end
+3
+h
+o
+1
+true
+false
+true
+true
+true
+true
+HELLO WORLD
+hello world
+true
+true
+true
+false
+a+b+c
+bbbbbb
+no match here
+3
+a
+c
+1
+1
+3
+NAÏVE
+5
+åäö
+MIXED ASCII Ÿ
+1
+2
+3
+hello world
+42 and world
+worldworld
+empty: 

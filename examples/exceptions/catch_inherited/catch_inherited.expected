@@ -1,0 +1,7 @@
+parent arm caught it
+gone
+/tmp/x
+sibling skipped, parent caught
+30
+exact match still works
+the nearer arm wins when it is written first

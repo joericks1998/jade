@@ -1,0 +1,23 @@
+5
+[1, 2.0, true, hello, nil]
+1
+hello
+1
+2.0
+true
+hello
+nil
+true
+true
+false
+true
+false
+6
+[1, 2]
+[nil, hello, true, 2.0, 1]
+[1.5, 2, 3]
+[[1, 2], between, [3]]
+2
+3
+hi
+2

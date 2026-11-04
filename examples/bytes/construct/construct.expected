@@ -1,0 +1,22 @@
+4
+0
+b"\x00\x00\x00\x00"
+0
+4
+255
+0
+128
+b"\xff\x00\x80@"
+0
+5
+b"\x89P\x01\x02\x03"
+2
+5
+b"\x89P\x89P"
+jade
+refused a negative length
+refused an element above 255
+refused a negative element
+refused an element that is not an int
+refused an argument that is not an array
+refused joining something that is not a blob

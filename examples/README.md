@@ -13,6 +13,8 @@ Two rules, both enforced by CI:
 - `<name>.jde` must *pass* `jade check`.
 - `<name>_error.jde` must *fail* `jade check`. These document programs the language deliberately rejects, so one that quietly starts passing is also a CI failure.
 
+Each runnable fixture also has a `<name>.expected` beside it: what it printed on v1.4.8, recorded from a run where the VM and the compiled backend agreed. v2 removes the VM, so there is no second engine to diff against, and `src/scripts/golden.sh` compares each built binary to that file instead. A fixture that should exit non-zero records its status in `<name>.expected-exit`. A new fixture needs its `.expected` written by hand, and checked by reading it.
+
 A third rule applies to the whole tree: it stays formatted, and CI runs `jade fmt --check examples` to hold it there. That is as much a test of the formatter as of the fixtures. `jade fmt` is the one command nothing else here exercises, and by v1.1.34 it had rotted badly enough to reindent the inside of multi-line strings, changing what a program printed. Run `jade fmt examples` before committing a new fixture. Four spaces per level.
 
 ## What is in here
