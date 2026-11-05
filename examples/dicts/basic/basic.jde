@@ -1,7 +1,7 @@
 // basic dict operations
 //
 // A dict maps string keys to one kind of value. A record whose fields differ in
-// kind is a struct; see examples/structs.
+// kind is a class; see examples/classes.
 
 let d = {"name": "jade", "version": "1"}
 print(d["name"])      // jade

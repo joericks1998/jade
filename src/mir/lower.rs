@@ -1080,7 +1080,7 @@ impl<'a, 'l> Fx<'a, 'l> {
                 };
                 self.assign_temp(et.clone(), Rvalue::Un(u, v))
             }
-            TExprKind::StructLiteral { type_name, base, fields } => {
+            TExprKind::StructLiteral { type_name, base, fields, .. } => {
                 self.struct_literal(type_name, base.as_deref(), fields, span)?
             }
             TExprKind::FieldAccess { object, field } => {

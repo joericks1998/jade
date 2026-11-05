@@ -1001,7 +1001,7 @@ mod parser {
 
     #[test]
     fn test_parse_struct_def() {
-        let p = parse_src("struct Point {\n    x,\n    y\n}");
+        let p = parse_src("class Point {\n    x,\n    y\n}");
         let Stmt::StructDef { name, fields, .. } = &p.stmts[0] else { panic!() };
         assert_eq!(name, "Point");
         assert_eq!(fields.len(), 2);
@@ -1011,7 +1011,7 @@ mod parser {
 
     #[test]
     fn test_parse_struct_def_empty() {
-        let p = parse_src("struct Empty {\n}");
+        let p = parse_src("class Empty {\n}");
         let Stmt::StructDef { name, fields, .. } = &p.stmts[0] else { panic!() };
         assert_eq!(name, "Empty");
         assert!(fields.is_empty());
@@ -1019,7 +1019,7 @@ mod parser {
 
     #[test]
     fn test_parse_struct_def_let_default() {
-        let p = parse_src("struct Agent {\n    let name = \"Assistant\"\n}");
+        let p = parse_src("class Agent {\n    let name = \"Assistant\"\n}");
         let Stmt::StructDef { name, fields, .. } = &p.stmts[0] else { panic!() };
         assert_eq!(name, "Agent");
         assert_eq!(fields.len(), 1);
@@ -1028,7 +1028,7 @@ mod parser {
 
     #[test]
     fn test_parse_struct_def_prompt_field() {
-        let p = parse_src("struct Agent {\n    prompt system = \"You are helpful\"\n}");
+        let p = parse_src("class Agent {\n    prompt system = \"You are helpful\"\n}");
         let Stmt::StructDef { name, fields, .. } = &p.stmts[0] else { panic!() };
         assert_eq!(name, "Agent");
         assert_eq!(fields.len(), 1);
@@ -1038,7 +1038,7 @@ mod parser {
     #[test]
     fn test_parse_struct_def_mixed() {
         let p = parse_src(
-            "struct Mixed {\n    x,\n    let label = \"origin\",\n    prompt sys = \"helpful\"\n}",
+            "class Mixed {\n    x,\n    let label = \"origin\",\n    prompt sys = \"helpful\"\n}",
         );
         let Stmt::StructDef { fields, .. } = &p.stmts[0] else { panic!() };
         assert_eq!(fields.len(), 3);
@@ -1051,7 +1051,7 @@ mod parser {
     fn test_parse_struct_def_struct_literal_default() {
         // A struct-literal expression as a default value parses without ambiguity.
         // The inner `}` belongs to the nested struct literal; the outer `}` closes the struct def.
-        let p = parse_src("struct Wrapper {\n    let inner = Point { x: 0, y: 0 }\n}");
+        let p = parse_src("class Wrapper {\n    let inner = Point { x: 0, y: 0 }\n}");
         let Stmt::StructDef { fields, .. } = &p.stmts[0] else { panic!() };
         assert_eq!(fields.len(), 1);
         assert!(
@@ -1060,14 +1060,49 @@ mod parser {
     }
 
     #[test]
-    fn a_plain_extend_block_still_parses() {
-        let p = parse_src("extend Foo {\n    fn get(self) {\n        return 1\n    }\n}");
-        let Stmt::ExtendBlock { type_name, methods, .. } = &p.stmts[0] else { panic!() };
+    fn a_method_in_a_class_body_gets_an_implicit_self() {
+        let p = parse_src("class Foo {\n    fn get() {\n        return 1\n    }\n}");
+        let Stmt::ExtendBlock { type_name, methods, outside, .. } = &p.stmts[1] else { panic!() };
         assert_eq!(type_name, "Foo");
-        assert_eq!(methods.len(), 1);
+        assert!(!outside);
         let Stmt::FnDef { name, params, .. } = &methods[0] else { panic!() };
         assert_eq!(name, "get");
+        assert_eq!(params.len(), 1);
         assert_eq!(params[0].0, "self");
+    }
+
+    #[test]
+    fn a_constructor_is_a_top_level_function_with_no_self() {
+        let p = parse_src("class A {\n    n\n    fn new(n) { return A { n: n } }\n}");
+        let Stmt::FnDef { name, params, .. } = &p.stmts[1] else { panic!("{:?}", p.stmts) };
+        assert_eq!(name, "A::new");
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].0, "n");
+    }
+
+    #[test]
+    fn a_class_body_records_decorators_and_declarations() {
+        let p = parse_src("class A {\n    @public n\n    secret\n    @public fn area()\n}");
+        let Stmt::StructDef { members, .. } = &p.stmts[0] else { panic!() };
+        assert!(members.is_public("n"));
+        assert!(!members.is_public("secret"));
+        assert!(members.is_public("area"));
+        assert_eq!(members.declared, vec!["area".to_string()]);
+        assert_eq!(p.stmts.len(), 1, "a declared method has no body to emit");
+    }
+
+    #[test]
+    fn listing_self_is_refused() {
+        let e = parse_src_err("class A {\n    fn get(self) { return 1 }\n}");
+        assert!(matches!(e, JadeError::SelfIsImplicit { .. }), "got: {e}");
+        let e = parse_src_err("fn A::get(self) { return 1 }");
+        assert!(matches!(e, JadeError::SelfIsImplicit { .. }), "got: {e}");
+    }
+
+    #[test]
+    fn a_class_inside_a_block_is_refused() {
+        let e = parse_src_err("if true {\n    class A { n }\n}");
+        assert!(matches!(e, JadeError::ClassNotAtTopLevel { .. }), "got: {e}");
     }
 
     #[test]
@@ -1213,18 +1248,19 @@ mod parser {
 
     /// Likewise the conformance claim. Without its own arm the author gets
     /// "expected `{`, found `:`", which explains nothing.
-    #[test]
-    fn an_extend_conformance_claim_is_refused_by_name() {
-        let e = parse_src_err("extend Foo: Bar {\n    fn go(self) {\n        return 1\n    }\n}");
-        assert!(e.to_string().contains("conformance claim was removed"), "got: {e}");
-    }
 
     #[test]
-    fn test_parse_extend_block() {
-        let p = parse_src("extend Foo {\n    fn go(self) {\n        return 1\n    }\n}");
-        let Stmt::ExtendBlock { type_name, methods, .. } = &p.stmts[0] else { panic!() };
+    fn a_method_defined_outside_its_class_is_marked_outside() {
+        let p = parse_src("fn Foo::go(n) {\n    return n\n}");
+        let Stmt::ExtendBlock { type_name, methods, outside, .. } = &p.stmts[0] else { panic!() };
         assert_eq!(type_name, "Foo");
-        assert_eq!(methods.len(), 1);
+        assert!(outside);
+        let Stmt::FnDef { params, .. } = &methods[0] else { panic!() };
+        assert_eq!(params[0].0, "self");
+        assert_eq!(params[1].0, "n");
+        let p = parse_src("fn shapes.Point::area() { return 1 }");
+        let Stmt::ExtendBlock { type_name, .. } = &p.stmts[0] else { panic!() };
+        assert_eq!(type_name, "shapes.Point");
     }
 
     #[test]
@@ -1693,25 +1729,19 @@ mod parser {
         assert!(matches!(value, Expr::Call { .. }));
     }
 
-    /// A decorator on a struct ran under `jade run` and was skipped under
-    /// `jade build`, so the two engines disagreed about what a literal produced.
-    /// Refused by name rather than dropped in silence.
+    /// `struct` and `extend` were replaced by `class` in 2.0.1, and a class takes
+    /// no decorators. Each is refused with a message naming what to write.
     #[test]
-    fn a_decorator_on_a_struct_is_refused_by_name() {
-        let e = parse_src_err("@log(\"City\")\nstruct City {\n  name,\n}");
-        assert!(e.to_string().contains("decorator on a struct was removed"), "got: {e}");
+    fn struct_and_extend_are_refused_with_their_replacements() {
+        let e = parse_src_err("struct City {\n  name,\n}");
+        assert!(matches!(e, JadeError::StructRemoved { .. }), "got: {e}");
+        let e = parse_src_err("extend Foo {\n    fn go(self) {\n        return 1\n    }\n}");
+        assert!(matches!(e, JadeError::ExtendRemoved { .. }), "got: {e}");
+        let e = parse_src_err("@log(\"City\")\nclass City {\n  name,\n}");
+        assert!(e.to_string().contains("a class takes no decorators"), "got: {e}");
     }
 
-    /// `@route` went for the same reason, and on the same terms.
-    #[test]
-    fn a_route_decorator_is_refused_by_name() {
-        let e = parse_src_err(
-            "@route(\"kind\")\nextend Foo {\n    fn go(self) {\n        return 1\n    }\n}",
-        );
-        assert!(e.to_string().contains("`@route` was removed"), "got: {e}");
-    }
-
-    /// A decorator on a `let` still works; only the struct target went.
+    /// A decorator on a `let` still works; only the class target is refused.
     #[test]
     fn a_decorator_on_a_let_still_parses() {
         let p = parse_src("@shout\nlet greeting = \"hi\"");
@@ -1721,8 +1751,8 @@ mod parser {
     #[test]
     fn test_parse_implicit_self_field_access() {
         // `.name` should desugar to `self.name`
-        let p = parse_src("extend T { fn greet(self) { return .name } }");
-        let Stmt::ExtendBlock { methods, .. } = &p.stmts[0] else { panic!() };
+        let p = parse_src("class T {\n    name\n    fn greet() { return .name }\n}");
+        let Stmt::ExtendBlock { methods, .. } = &p.stmts[1] else { panic!() };
         let Stmt::FnDef { body, .. } = &methods[0] else { panic!() };
         let Stmt::Return { value: Some(ret), .. } = &body[0] else { panic!() };
         assert!(matches!(ret,
@@ -1734,8 +1764,8 @@ mod parser {
     #[test]
     fn test_parse_implicit_self_assignment() {
         // `.count = .count + 1` desugars to FieldAssign { object: "self", field: "count", ... }
-        let p = parse_src("extend T { fn inc(self) { .count = .count + 1 } }");
-        let Stmt::ExtendBlock { methods, .. } = &p.stmts[0] else { panic!() };
+        let p = parse_src("class T {\n    count\n    fn inc() { .count = .count + 1 }\n}");
+        let Stmt::ExtendBlock { methods, .. } = &p.stmts[1] else { panic!() };
         let Stmt::FnDef { body, .. } = &methods[0] else { panic!() };
         let Stmt::FieldAssign { object, field, .. } = &body[0] else { panic!() };
         assert_eq!(object, "self");
@@ -2114,7 +2144,7 @@ mod error {
             owner: crate::frontend::error::FieldOwner::Struct,
             span: span(2, 2),
         };
-        assert_eq!(e.to_string(), "[2:2] struct 'Point' has no field 'z'");
+        assert_eq!(e.to_string(), "[2:2] class 'Point' has no field 'z'");
     }
 
     /// The same variant reports a non-struct differently, because it used to

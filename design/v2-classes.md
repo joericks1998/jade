@@ -279,6 +279,10 @@ Then phase 3 of `design/v2-static-values.md` continues, smaller than before: exc
 
 *Step 1 is done* (2026-11-05): closures and bound methods are removed. The parser refuses `|x| …` with `JadeError::ClosureRemoved`, and the checker refuses a method used without a call. `closures/closures.jde` is written with named functions and pipes and prints what it always did, `structs/bound_method` is gone, and `closures/closure_error` and `structs/method_value_error` pin the refusals. The task-safety tests that used closures now hand a task a named function and still catch the race. `CACHE_FORMAT_VERSION` is 14.
 
+*Steps 2 and 3 are done* (2026-11-05): class syntax, visibility and constructors. The parser turns a class body into today's definitions, with `self` added to every method and a constructor as a top-level `Class::new` function, and refuses `struct` and `extend`. `compiler::infer::members` checks literals and outside definitions before defaults are filled, and the checker refuses private fields and methods outside their class. Every example uses classes, with `@public` only where outside code needs it; `examples/structs` is `examples/classes`. Both backends compile all of it, since everything so far is either syntax the parser rewrites or a compile-time check.
+
+Building them settled two details. A declared method with no definition is an error only where it is called, as in C++, so a file such as `classes/outside_methods/geometry.jde` can declare methods its importer defines. And a constructor must be defined in the file that declares its class, since it is a top-level function named for the class.
+
 ## Open questions
 
 None. Decisions 5, 7, 8, 9 and 11 to 14 are recommendations Joe has not overruled, and the constructor's shape in decision 4 is one.

@@ -87,9 +87,8 @@ fn dicts_print_sorted_with_quoted_keys() {
 
 #[test]
 fn a_child_struct_runs_its_own_method_through_a_parent() {
-    let src = "struct A { n }\nstruct B(A) { m }\n\
-               extend A { fn who(self) { return \"A\" } }\n\
-               extend B { fn who(self) { return \"B\" } }\n\
+    let src = "class A {\n    @public n\n    @public fn who() { return \"A\" }\n}\n\
+               class B(A) {\n    @public m\n    @public fn who() { return \"B\" }\n}\n\
                let xs = [A { n: 1 }, B { n: 2, m: 3 }]\n\
                for x in xs { print(x.who()) }\n";
     let (out, _, _) = run(src);

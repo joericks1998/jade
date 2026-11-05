@@ -149,6 +149,23 @@ pub enum JadeError {
     /// String index is out of range.
     IndexOutOfBounds { index: i64, len: usize, span: Span },
 
+    /// `struct` was replaced by `class` in 2.0.1.
+    StructRemoved { span: Span },
+
+    /// `extend` was removed in 2.0.1; methods live in the class body or are
+    /// defined as `fn Type::method(…)`.
+    ExtendRemoved { span: Span },
+
+    /// A method listed `self` as a parameter, which 2.0.1 made implicit.
+    SelfIsImplicit { span: Span },
+
+    /// A class was defined inside a block or a function.
+    ClassNotAtTopLevel { span: Span },
+
+    /// A decorator was written on a class, or on a method's outside definition,
+    /// or a member decorator was given arguments.
+    MisplacedDecorator { reason: String, span: Span },
+
     /// `|x| expr` used a closure, which 2.0.1 removed. Named functions are
     /// values, and the pipe passes a value as a function's first argument.
     ClosureRemoved { span: Span },
@@ -163,23 +180,10 @@ pub enum JadeError {
     /// run time; inheritance covers what it was reached for.
     InterfaceRemoved { span: Span },
 
-    /// `extend Type: Interface` used the removed conformance claim. A plain
-    /// `extend Type { … }` still attaches the methods.
-    ExtendConformanceRemoved { span: Span },
-
-    /// `@dec struct Name { … }` used the removed struct-decorator form. It ran
-    /// under `jade run` and was silently skipped under `jade build`, so the two
-    /// engines disagreed about what a literal produced.
-    StructDecoratorRemoved { span: Span },
-
-    /// `@route` on an `extend` block used the removed routing decorator, which
-    /// had the same one-engine problem as a struct decorator.
-    RouteDecoratorRemoved { span: Span },
-
     /// `struct Child(Parent)` names a parent that is not a struct in scope.
     UnknownParent { child: String, parent: String, span: Span },
 
-    /// A field name appears twice across a struct and everything it inherits.
+    /// A field name appears twice across a class and everything it inherits.
     /// `owner` and `other` name where the two declarations came from.
     InheritedFieldClash { field: String, owner: String, other: String, span: Span },
 
@@ -397,7 +401,11 @@ impl std::fmt::Display for JadeError {
                 write!(f, "[{}:{}] integer overflow", span.line, span.col)
             }
             JadeError::NotAStruct { span } => {
-                write!(f, "[{}:{}] value is not a struct", span.line, span.col)
+                write!(
+                    f,
+                    "[{}:{}] value is not a class value, so it has no fields",
+                    span.line, span.col
+                )
             }
             // Said "struct" for everything until v1.3.21, so a missing method
             // on an array reported `struct 'array' has no field 'map'` — three
@@ -405,7 +413,7 @@ impl std::fmt::Display for JadeError {
             JadeError::UndefinedField { type_name, field, owner, span } => match owner {
                 FieldOwner::Struct => write!(
                     f,
-                    "[{}:{}] struct '{}' has no field '{}'",
+                    "[{}:{}] class '{}' has no field '{}'",
                     span.line, span.col, type_name, field
                 ),
                 FieldOwner::Dict => {
@@ -420,11 +428,11 @@ impl std::fmt::Display for JadeError {
                 }
             },
             JadeError::UndefinedType { name, span } => {
-                write!(f, "[{}:{}] undefined struct type '{}'", span.line, span.col, name)
+                write!(f, "[{}:{}] undefined class '{}'", span.line, span.col, name)
             }
             JadeError::MissingField { field, span } => write!(
                 f,
-                "[{}:{}] missing required field '{}' in struct literal",
+                "[{}:{}] missing required field '{}' in class literal",
                 span.line, span.col, field
             ),
             JadeError::UnterminatedString { span } => {
@@ -435,6 +443,27 @@ impl std::fmt::Display for JadeError {
                 "[{}:{}] index {} out of bounds (length {})",
                 span.line, span.col, index, len
             ),
+            JadeError::StructRemoved { span } => write!(
+                f,
+                "[{}:{}] `struct` became `class` in 2.0.1; write `class Name {{ … }}`, with its methods inside it or defined as `fn Name::method(…)`",
+                span.line, span.col
+            ),
+            JadeError::ExtendRemoved { span } => write!(
+                f,
+                "[{}:{}] `extend` was removed in 2.0.1; move these methods into the class body, or declare each in the class as `fn method(…)` and define it as `fn Type::method(…) {{ … }}`",
+                span.line, span.col
+            ),
+            JadeError::SelfIsImplicit { span } => write!(
+                f,
+                "[{}:{}] `self` is implicit in 2.0.1; remove it from the parameter list, and it is still available in the method",
+                span.line, span.col
+            ),
+            JadeError::ClassNotAtTopLevel { span } => {
+                write!(f, "[{}:{}] define classes at the top level of a file", span.line, span.col)
+            }
+            JadeError::MisplacedDecorator { reason, span } => {
+                write!(f, "[{}:{}] {}", span.line, span.col, reason)
+            }
             JadeError::ClosureRemoved { span } => write!(
                 f,
                 "[{}:{}] closures were removed in 2.0.1; write a named function and pass it by name, or pipe a value into one: `5 |> scale(3)` calls `scale(5, 3)`",
@@ -447,32 +476,17 @@ impl std::fmt::Display for JadeError {
             ),
             JadeError::InterfaceRemoved { span } => write!(
                 f,
-                "[{}:{}] `interface` was removed. It only checked that a type declared a set of methods and meant nothing at run time; a shared parent (`struct Child(Parent)`) is what to reach for instead.",
-                span.line, span.col
-            ),
-            JadeError::ExtendConformanceRemoved { span } => write!(
-                f,
-                "[{}:{}] the `extend Type: Interface` conformance claim was removed along with interfaces; write `extend Type {{ … }}` to attach the same methods.",
-                span.line, span.col
-            ),
-            JadeError::StructDecoratorRemoved { span } => write!(
-                f,
-                "[{}:{}] a decorator on a struct was removed. It ran under `jade run` and was skipped under `jade build`, so the two engines disagreed; call the function where the struct is built instead.",
-                span.line, span.col
-            ),
-            JadeError::RouteDecoratorRemoved { span } => write!(
-                f,
-                "[{}:{}] `@route` was removed. It reached only `jade run` and was skipped under `jade build`; dispatch on the field yourself.",
+                "[{}:{}] `interface` was removed. It only checked that a type declared a set of methods and meant nothing at run time; a shared parent (`class Child(Parent)`) is what to reach for instead.",
                 span.line, span.col
             ),
             JadeError::UnknownParent { child, parent, span } => write!(
                 f,
-                "[{}:{}] struct '{}' inherits '{}', which is not a struct in scope",
+                "[{}:{}] class '{}' inherits '{}', which is not a class in scope",
                 span.line, span.col, child, parent
             ),
             JadeError::InheritedFieldClash { field, owner, other, span } => write!(
                 f,
-                "[{}:{}] field '{}' comes from both '{}' and '{}'; a field name may appear once across a struct and everything it inherits",
+                "[{}:{}] field '{}' comes from both '{}' and '{}'; a field name may appear once across a class and everything it inherits",
                 span.line, span.col, field, owner, other
             ),
             JadeError::InheritedMethodClash { method, first, second, span } => write!(
@@ -525,7 +539,7 @@ impl std::fmt::Display for JadeError {
             ),
             JadeError::DuplicateField { field, span } => write!(
                 f,
-                "[{}:{}] field '{}' is specified more than once in struct literal",
+                "[{}:{}] field '{}' is specified more than once in class literal",
                 span.line, span.col, field
             ),
             JadeError::TypeMismatch { expected, got, span } => write!(

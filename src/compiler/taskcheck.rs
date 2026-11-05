@@ -421,7 +421,7 @@ fn step(
         SetField(o, field, _) => {
             if t.regs.contains(o) {
                 e.mutates_shared = true;
-                found.push((format!("assigns to the field `{field}` of a shared struct"), span));
+                found.push((format!("assigns to the field `{field}` of a shared object"), span));
             }
         }
 
@@ -908,12 +908,14 @@ mod tests {
     fn a_user_method_mutating_its_receiver_is_rejected() {
         let e = rejection(
             r#"
-            struct Box { items }
-            extend Box {
-                fn grow(self) {
+            class Box {
+    @public items
+
+                @public fn grow() {
                     self.items.push(9)
                 }
-            }
+            
+}
             async fn go(b) {
                 b.grow()
                 return 0
@@ -990,7 +992,9 @@ mod tests {
     fn task_mutating_a_collection_it_wrapped_in_a_struct_is_rejected() {
         let e = rejection(
             r#"
-            struct Box { let items = [] }
+            class Box {
+    @public let items = []
+}
             let shared = [1, 2]
             async fn worker() {
                 let b = Box { items: shared }
@@ -1011,7 +1015,9 @@ mod tests {
     fn task_mutating_a_collection_reached_through_a_copy_with_base_is_rejected() {
         let e = rejection(
             r#"
-            struct Box { let items = [] }
+            class Box {
+    @public let items = []
+}
             let shared = Box { items: [1, 2] }
             async fn worker() {
                 let copy = Box { ...shared }
@@ -1030,7 +1036,9 @@ mod tests {
     fn task_mutating_a_collection_in_a_struct_it_built_is_allowed() {
         compile(
             r#"
-            struct Box { let items = [] }
+            class Box {
+    @public let items = []
+}
             let shared = Box { items: [1, 2] }
             async fn worker() {
                 let fresh = Box { items: [9] }
@@ -1174,7 +1182,9 @@ mod tests {
     fn task_assigning_a_field_of_a_passed_struct_is_rejected() {
         let e = rejection(
             r#"
-            struct Counter { n }
+            class Counter {
+    @public n
+}
             async fn bump(c) { c.n = c.n + 1 }
             let c = Counter { n: 0 }
             await bump(c)
@@ -1220,7 +1230,9 @@ mod tests {
     fn task_mutating_its_own_struct_is_allowed() {
         compile(
             r#"
-            struct P { x }
+            class P {
+    @public x
+}
             async fn make(n) {
                 let p = P { x: 0 }
                 p.x = n

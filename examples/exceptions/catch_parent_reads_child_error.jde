@@ -1,11 +1,11 @@
 // Inside `catch Failure e`, `e` is a Failure, which may be any of its children.
 // A field only one child has cannot be read there; the arm has to name the child.
-struct Failure {
-    reason
+class Failure {
+    @public reason
 }
 
-struct NotFound(Failure) {
-    path
+class NotFound(Failure) {
+    @public path
 }
 
 try {

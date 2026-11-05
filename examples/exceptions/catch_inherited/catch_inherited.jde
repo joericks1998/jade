@@ -11,16 +11,16 @@
 // fields every Failure has; to read a child's own field, name the child in the
 // arm. catch_parent_reads_child_error.jde pins the refusal.
 
-struct Failure {
-    reason
+class Failure {
+    @public reason
 }
 
-struct NotFound(Failure) {
-    path
+class NotFound(Failure) {
+    @public path
 }
 
-struct Timeout(Failure) {
-    let seconds = 30
+class Timeout(Failure) {
+    @public let seconds = 30
 }
 
 // The parent's arm catches the child.

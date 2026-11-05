@@ -1,4 +1,4 @@
-// A dict is a value; an array and a struct are references.
+// A dict is a value; an array and a class are references.
 //
 // The three containers behave differently when a function writes to one, and
 // the difference is not guessable. A dict parameter is a copy, so the write is
@@ -7,8 +7,8 @@
 // afternoon in the userland: a layout cursor whose `y` never advanced, and a
 // keyboard that forgot a held shift the instant the function returned.
 //
-// The rule is deliberate. A dict is for data you pass around; a struct is for
-// state something else needs to change. Reach for a struct when a function has
+// The rule is deliberate. A dict is for data you pass around; a class is for
+// state something else needs to change. Reach for a class when a function has
 // to hand a change back — that is what the bottom of this file shows.
 //
 // The copy is not paid for on a read. v1.3.22 put the dict behind a
@@ -16,7 +16,10 @@
 // only when someone writes through a shared handle. The semantics below are
 // exactly what they were; only the cost changed.
 
-struct Cursor { x, y }
+class Cursor {
+    @public x
+    @public y
+}
 
 fn write_dict(d) { d["x"] = 99 }
 fn push_array(a) { a.push(99) }
@@ -32,7 +35,7 @@ let a = [1]
 push_array(a)
 print(a.len())
 
-// A struct parameter is the caller's struct.
+// A class value parameter is the caller's object.
 let s = Cursor { x: 1, y: 0 }
 write_struct(s)
 print(s.x)
@@ -52,7 +55,7 @@ let inner = outer["inner"]
 inner["y"] = 42
 print(outer["inner"]["y"])
 
-// What to write when the caller has to see the change: a struct.
+// What to write when the caller has to see the change: a class.
 fn advance(c, dy) { c.y = c.y + dy }
 
 let cur = Cursor { x: 0, y: 0 }

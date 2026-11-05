@@ -1049,7 +1049,7 @@ fn emit_expr(expr: &TExpr, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<Reg> {
             Ok(dest)
         }
 
-        TExprKind::StructLiteral { type_name, base, fields } => {
+        TExprKind::StructLiteral { type_name, base, fields, .. } => {
             // The base is evaluated first and exactly once, into one register.
             let base_reg = match base {
                 Some(b) => Some(emit_expr(b, em, ctx)?),

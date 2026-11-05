@@ -17,7 +17,9 @@ Each runnable fixture also has a `<name>.expected` beside it: what it printed on
 
 v2 turned a set of runtime type errors into compile errors, since every value's type is known when the program is checked. The fixtures that raised and caught one of those kept their other cases, and each error moved into a `*_error.jde` beside its category: `arithmatic/bitwise_non_int_error`, `arrays/mixed_error`, `async/join_non_future_error`, `bytes/write_non_int_error`, `bytes/construct_types_error`, `collections/dict_contains_error`, `collections/int_len_error`, `collections/method_type_guard_error`, `collections/self_reference_error`, `dicts/dot_access_error`, `exceptions/catch_parent_reads_child_error`, `functions/value_arity_error`, `functions/return_paths_error` and `streams/yield_mixed_error`. Each names the rule it pins in its opening comment.
 
-2.0.1 removed closures and bound methods (`design/v2-classes.md`). `closures/closures.jde` shows what replaced them, named functions and the pipe, with the output it always had. `closures/closure_error` and `structs/method_value_error` pin the two refusals, and `structs/bound_method` is gone.
+2.0.1 removed closures and bound methods (`design/v2-classes.md`). `closures/closures.jde` shows what replaced them, named functions and the pipe, with the output it always had. `closures/closure_error` and `classes/method_value_error` pin the two refusals, and `structs/bound_method` is gone.
+
+2.0.1 also replaced `struct` and `extend` with `class`, so `structs/` is now `classes/` and every example declares classes, marking `@public` only what code outside the class uses. `classes/visibility/` shows private members, what a child class may see, and a constructor, with `private_field_error` and `constructor_required_error` beside it. `classes/outside_methods/` defines methods declared in another file's class, with `undeclared_method_error` and `undefined_method_error` beside it.
 
 A third rule applies to the whole tree: it stays formatted, and CI runs `jade fmt --check examples` to hold it there. That is as much a test of the formatter as of the fixtures. `jade fmt` is the one command nothing else here exercises, and by v1.1.34 it had rotted badly enough to reindent the inside of multi-line strings, changing what a program printed. Run `jade fmt examples` before committing a new fixture. Four spaces per level.
 
@@ -25,7 +27,7 @@ A third rule applies to the whole tree: it stays formatted, and CI runs `jade fm
 
 There is one directory per language area, and one subdirectory inside it per case:
 
-`arithmatic/` (arithmetic, bitwise, unary) · `arrays/` · `assignment/` · `async/` · `bytes/` · `closures/` · `collections/` · `control_flow/` · `decorators/` · `dicts/` · `exceptions/` · `ffi/` · `for_loop/` · `fs/` · `functions/` · `http/` · `imports/` · `interfaces/` · `json/` · `llm/` · `llvm/` · `numbers/` · `pipe/` · `streams/` · `strings/` · `structs/` · `time/` · `trust/` · `uhttp/`
+`arithmatic/` (arithmetic, bitwise, unary) · `arrays/` · `assignment/` · `async/` · `bytes/` · `classes/` · `closures/` · `collections/` · `control_flow/` · `decorators/` · `dicts/` · `exceptions/` · `ffi/` · `for_loop/` · `fs/` · `functions/` · `http/` · `imports/` · `interfaces/` · `json/` · `llm/` · `llvm/` · `numbers/` · `pipe/` · `streams/` · `strings/` · `time/` · `trust/` · `uhttp/`
 
 `async/max_tasks/` pins the v1.4.6 concurrency limit. It reads the default, clamps at both ends, and then times the same eight sleeping tasks at a limit of four and of sixteen, so a run that widened or narrowed the fan-out fails on the wave count rather than passing quietly. Its last case is a task awaiting another at `set_max_tasks(1)`, which is what a parked task keeping its slot would deadlock on.
 
@@ -74,7 +76,7 @@ Its importing file sits under `app/`, so the target directory is out of relative
 ## Running them
 
 ```sh
-./target/debug/jade check examples/structs/prompt_fields/prompt_fields.jde
+./target/debug/jade check examples/classes/prompt_fields/prompt_fields.jde
 ./target/debug/jade run   examples/strings/fstrings/fstrings.jde
 ./src/scripts/golden.sh
 ```

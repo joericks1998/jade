@@ -52,6 +52,8 @@ pub(super) fn register_builtin_structs(c: &mut Checker) {
                 fields: fields.iter().map(|(f, _)| f.to_string()).collect(),
                 prompt_fields: Default::default(),
                 parents: vec![],
+                public: None,
+                declared: Vec::new(),
             },
         );
         for (f, t) in fields {
@@ -83,6 +85,8 @@ pub(super) fn settled_struct(c: &mut Checker, inner: &Ty) -> String {
                 fields: vec!["ok".into(), "value".into(), "error".into()],
                 prompt_fields: Default::default(),
                 parents: vec![],
+                public: None,
+                declared: Vec::new(),
             },
         );
         let ok = c.store.slot_of(Ty::Bool);

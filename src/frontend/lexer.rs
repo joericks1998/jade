@@ -39,6 +39,8 @@ pub enum TokenKind {
     Continue,
     Struct,
     Extend,
+    /// `class`, which replaced `struct` and `extend` in 2.0.1.
+    Class,
     /// Reserved only so a removed `interface` block gets an error that names
     /// the removal. Nothing parses it; see `JadeError::InterfaceRemoved`.
     Interface,
@@ -140,6 +142,7 @@ pub fn token_kind_desc(kind: &TokenKind) -> String {
         TokenKind::Continue => "`continue`".to_string(),
         TokenKind::Struct => "`struct`".to_string(),
         TokenKind::Extend => "`extend`".to_string(),
+        TokenKind::Class => "`class`".to_string(),
         TokenKind::Interface => "`interface`".to_string(),
         TokenKind::Prompt => "`prompt`".to_string(),
         TokenKind::Use => "`use`".to_string(),
@@ -626,6 +629,7 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>> {
                     "continue" => TokenKind::Continue,
                     "struct" => TokenKind::Struct,
                     "extend" => TokenKind::Extend,
+                    "class" => TokenKind::Class,
                     "interface" => TokenKind::Interface,
                     "prompt" => TokenKind::Prompt,
                     "use" => TokenKind::Use,

@@ -59,8 +59,8 @@ print(f.ready())
 
 // A task that raised is finished too, and the `await` re-raises.
 
-struct Failed {
-    message
+class Failed {
+    @public message
 }
 
 async fn breaks() {

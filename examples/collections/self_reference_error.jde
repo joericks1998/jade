@@ -1,5 +1,5 @@
 // An array cannot contain itself: its element type would have to contain its own
-// type. A structure that points back at itself goes through a struct field.
+// type. A structure that points back at itself goes through a class field.
 let a = []
 a.push(a)
 print(a)

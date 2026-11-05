@@ -987,7 +987,7 @@ impl Renamer {
                 self.rename_expr(right);
             }
             TExprKind::UnaryOp { operand, .. } => self.rename_expr(operand),
-            TExprKind::StructLiteral { type_name, base, fields } => {
+            TExprKind::StructLiteral { type_name, base, fields, .. } => {
                 if let Some(m) = self.ref_type(type_name) {
                     *type_name = m;
                 }

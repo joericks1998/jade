@@ -1,22 +1,27 @@
-// A dot reads a struct field, and the same field reads by name in brackets.
+// A dot reads a class field, and the same field reads by name in brackets.
 //
 // v1 also let `d.key` read a dict entry. It once raised "value has no fields" in
 // compiled programs only, and was found through `sh.output(cmd).code`. In v2 a
-// dot reads a struct field and nothing else, and a dict reads with brackets;
+// dot reads a class field and nothing else, and a dict reads with brackets;
 // dot_access_error.jde pins the refusal. A std result that used to be a dict,
-// such as sh.output's, is a struct now, so both spellings still read it.
+// such as sh.output's, is a class now, so both spellings still read it.
 use std::sh
 
 let r = sh.output("printf hi")
 print(r.code)
 print(r.stdout)
 
-// Bracket and dot are the same read on a struct.
+// Bracket and dot are the same read on a class.
 print(r["code"] == r.code)
 
-// Nested structs read through one dot each.
-struct Inner { deep }
-struct Outer { code, nested }
+// Nested classes read through one dot each.
+class Inner {
+    @public deep
+}
+class Outer {
+    @public code
+    @public nested
+}
 let d = Outer { code: 0, nested: Inner { deep: 7 } }
 print(d.nested.deep)
 

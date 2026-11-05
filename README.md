@@ -96,7 +96,7 @@ To move a locally built toolchain to another machine, copy the archives along wi
 
 ```sh
 ./target/debug/jade run examples/strings/fstrings/fstrings.jde     # prints "hello, Jade!"
-./target/debug/jade check examples/structs/prompt_fields/prompt_fields.jde
+./target/debug/jade check examples/classes/prompt_fields/prompt_fields.jde
 ```
 
 If both behave, your setup is good. Welcome aboard.

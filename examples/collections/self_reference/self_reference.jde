@@ -1,16 +1,16 @@
-// A structure that points back at itself is built from a struct.
+// A structure that points back at itself is built from a class.
 //
 // In v1, arrays and dicts were untyped and reference-semantic, so
 // `let a = [1]  let b = [a]  a.push(b)` built a value that reached itself, and
 // printing it had to stop at a fixed depth and elide the rest. In v2 every array
 // has one element type, and an array holding itself would need a type that
 // contains itself, so the checker refuses it; self_reference_error.jde pins
-// that. A struct's type is a name, so a struct field can hold the struct it
+// that. A class's type is a name, so a class field can hold the class it
 // belongs to, and a cycle through one is an ordinary live value.
 
-struct Node {
-    name
-    let children = []
+class Node {
+    @public name
+    @public let children = []
 }
 
 let root = Node { name: "root" }

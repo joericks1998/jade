@@ -1,0 +1,14 @@
+// A literal outside a class cannot leave a private field without a value.
+//
+// `balance` is private and has no default, so nothing outside Account can give
+// it one. The class needs a constructor, `fn new(…)`, and the message says so.
+//
+// This file is a fixture: `jade check` must REJECT it.
+
+class Account {
+    @public owner
+    balance
+}
+
+let a = Account { owner: "ann" }
+print(a.owner)

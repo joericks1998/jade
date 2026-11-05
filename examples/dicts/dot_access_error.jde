@@ -1,4 +1,4 @@
-// A dot reads a struct field. A dict reads with brackets, so `d.code` on a dict
+// A dot reads a class field. A dict reads with brackets, so `d.code` on a dict
 // is refused, and the message says how to write it.
 let d = {"code": 0}
 print(d.code)

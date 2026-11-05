@@ -9,8 +9,8 @@
 // has `ok` false and the `error` it raised. Each of `value` and `error` may be
 // nil, so a program checks the one it reads, the way it checks any optional.
 
-struct Failed {
-    message
+class Failed {
+    @public message
 }
 
 async fn fetch(n) {

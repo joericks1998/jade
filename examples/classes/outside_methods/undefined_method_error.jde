@@ -1,0 +1,17 @@
+// A declared method must be defined before anything calls it.
+//
+// `area` is declared in the body with no body of its own, and no
+// `fn Rect::area()` defines it. Declaring it alone is allowed, as in a C++
+// header, so a file can declare methods another file defines; calling it is
+// where the missing definition is an error.
+//
+// This file is a fixture: `jade check` must REJECT it.
+
+class Rect {
+    @public width
+    @public height
+
+    @public fn area()
+}
+
+print(Rect { width: 2, height: 3 }.area())

@@ -103,6 +103,9 @@ pub fn would_build(
         },
         None => program.clone(),
     };
+    // Class member rules read what literals wrote, so they run before the
+    // defaults are filled in. See `compiler::infer::members`.
+    crate::compiler::infer::check_members(&program).map_err(|e| e.to_string())?;
     crate::compiler::type_infer::fill_struct_literal_defaults(&mut program)
         .map_err(|e| e.to_string())?;
     // v2's static types: a program the whole-program checker rejects does not
@@ -166,6 +169,9 @@ pub fn compile_static(
         None => program,
     };
     let mut program = program;
+    // Class member rules read what literals wrote, so they run before the
+    // defaults are filled in. See `compiler::infer::members`.
+    crate::compiler::infer::check_members(&program).map_err(|e| e.to_string())?;
     crate::compiler::type_infer::fill_struct_literal_defaults(&mut program)
         .map_err(|e| e.to_string())?;
     let typed = crate::compiler::infer::check_program(&program).map_err(|e| e.to_string())?;
@@ -530,6 +536,9 @@ pub fn compile_with_mode(
     // like `messages.Session { system: ..., tools: ... }` leave default-bearing
     // fields (e.g. `let _history = []`) missing.  Without this pass the emitter
     // would zero-initialise those slots — turning `[]` into a NULL pointer.
+    // Class member rules read what literals wrote, so they run before the
+    // defaults are filled in. See `compiler::infer::members`.
+    crate::compiler::infer::check_members(&program).map_err(|e| e.to_string())?;
     crate::compiler::type_infer::fill_struct_literal_defaults(&mut program)
         .map_err(|e| e.to_string())?;
 

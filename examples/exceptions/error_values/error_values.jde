@@ -1,10 +1,10 @@
-// A caught runtime error is a `RuntimeError` struct with a `message` field,
+// A caught runtime error is a `RuntimeError` class with a `message` field,
 // on both engines.
 //
 // Regression fixture. The VM funnels every non-user error through
-// `make_vm_runtime_error`, so `catch e` binds a struct. The compiled backend
+// `make_vm_runtime_error`, so `catch e` binds a class. The compiled backend
 // raised the bare message string instead, so the same `try` saw a str under
-// `jade build` and a struct under `jade run`: `e.message` raised compiled, and
+// `jade build` and a class under `jade run`: `e.message` raised compiled, and
 // `catch RuntimeError e` never matched at all. A program that only reported the
 // error looked fine; one that inspected it broke when you shipped it.
 //
@@ -59,9 +59,9 @@ print(message_of(divzero).contains("division by zero"))            // true
 print(message_of(overflow).contains("integer overflow"))           // true
 
 // A raised string becomes a RuntimeError carrying it as the message, so it
-// prints as the string it was. A raised struct keeps its own type.
-struct MyError {
-    message
+// prints as the string it was. A raised class keeps its own type.
+class MyError {
+    @public message
 }
 
 try {

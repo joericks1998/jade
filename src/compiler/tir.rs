@@ -115,6 +115,11 @@ pub enum TExprKind {
         /// the fields the literal named, because the rest come from the base
         /// and a default must not be filled over it.
         fields: Vec<(String, TExpr, bool)>,
+        /// The fields the source wrote, before any default was filled in. The
+        /// class member rules read this: a literal outside a class may set only
+        /// public fields, which `fields` alone cannot tell once defaults are in.
+        #[serde(default)]
+        given: Vec<String>,
     },
     FieldAccess {
         object: Box<TExpr>,
@@ -228,12 +233,18 @@ pub enum TStmt {
         /// is read for one thing: working out each struct's full ancestry, which
         /// a typed `catch` arm needs at run time.
         parents: Vec<String>,
+        /// Member decorators and methods declared for outside definition.
+        #[serde(default)]
+        members: crate::frontend::ast::ClassMembers,
         span: Span,
     },
     ExtendBlock {
         type_name: String,
         methods: Vec<TStmt>,
         decorators: TDecorators,
+        /// True for a `fn TypeName::method(…)` defined outside the class body.
+        #[serde(default)]
+        outside: bool,
         span: Span,
     },
     FieldAssign {

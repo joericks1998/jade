@@ -32,6 +32,7 @@
 
 mod builtins;
 mod check;
+mod members;
 mod ty;
 
 #[cfg(test)]
@@ -43,6 +44,7 @@ use crate::compiler::tir::{TExpr, TExprKind, TProgram, TStmt};
 use crate::frontend::ast::StructFieldDef;
 use crate::frontend::error::{JadeError, Span};
 
+pub use members::check_members;
 use ty::Store;
 pub use ty::{FnTy, FuncRef, Ty, display_name as display_type_name};
 
@@ -93,6 +95,11 @@ struct StructInfo {
     prompt_fields: HashSet<String>,
     /// Direct parents, as written.
     parents: Vec<String>,
+    /// Members marked `@public`, or `None` for a built-in struct, whose
+    /// members are all public.
+    public: Option<HashSet<String>>,
+    /// Methods the body declares without defining.
+    declared: Vec<String>,
 }
 
 /// Purpose: This struct holds one instance's state across passes.
@@ -268,7 +275,7 @@ impl<'a> Checker<'a> {
                         self.decorated.insert(name.clone(), decorators.clone());
                     }
                 }
-                TStmt::StructDef { name, fields, parents, .. } => {
+                TStmt::StructDef { name, fields, parents, members, .. } => {
                     for fd in fields {
                         if let StructFieldDef::Let { name: fname, default } = fd
                             && let Some(t) = default_type(default)
@@ -284,6 +291,15 @@ impl<'a> Checker<'a> {
                             .map(|f| f.name().to_string())
                             .collect(),
                         parents: parents.clone(),
+                        public: Some(
+                            members
+                                .decorators
+                                .iter()
+                                .filter(|(_, ds)| ds.iter().any(|d| d == "public"))
+                                .map(|(m, _)| m.clone())
+                                .collect(),
+                        ),
+                        declared: members.declared.clone(),
                     };
                     self.structs.insert(name.clone(), info);
                 }

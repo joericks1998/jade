@@ -13,6 +13,7 @@ fn check(src: &str) -> Result<Typed, JadeError> {
     let tokens = crate::frontend::lexer::tokenize(src).expect("lexes");
     let program = crate::frontend::parser::parse(tokens).expect("parses");
     let mut tp = crate::compiler::type_infer::infer(program).expect("v1 checker accepts it");
+    check_members(&tp)?;
     crate::compiler::type_infer::fill_struct_literal_defaults(&mut tp).expect("defaults fill");
     check_program(&tp)
 }
@@ -147,7 +148,7 @@ fn a_dict_holds_one_kind_of_value() {
     let t = ok("let ages = {\"ana\": 31}\nages[\"bo\"] = 28\nlet a = ages.get(\"x\")\n");
     assert_eq!(global(&t, "ages"), Ty::Map(Box::new(Ty::Int)));
     assert_eq!(global(&t, "a"), Ty::Opt(Box::new(Ty::Int)));
-    rejects("let d = {\"name\": \"jade\", \"version\": 1}\n", "use a struct");
+    rejects("let d = {\"name\": \"jade\", \"version\": 1}\n", "use a class");
 }
 
 #[test]
@@ -162,18 +163,21 @@ fn mixed_arrays_are_an_error() {
 
 #[test]
 fn structs_join_to_their_common_parent() {
-    let src = "struct Frame {}\nstruct Token(Frame) { text }\nstruct Done(Frame) { reason }\n\
+    let src = "class Frame {}\nclass Token(Frame) {\n    @public text\n}\nclass Done(Frame) {\n    @public reason\n}\n\
                let frames = [Token { text: \"hi\" }, Done { reason: \"stop\" }]\n";
     let t = ok(src);
     assert_eq!(global(&t, "frames"), Ty::Array(Box::new(Ty::Struct("Frame".into()))));
-    rejects("struct A { x }\nstruct B { y }\nlet m = [A { x: 1 }, B { y: 2 }]\n", "shared parent");
+    rejects(
+        "class A {\n    @public x\n}\nclass B {\n    @public y\n}\nlet m = [A { x: 1 }, B { y: 2 }]\n",
+        "shared parent",
+    );
 }
 
 #[test]
 fn a_method_dispatches_on_the_actual_struct() {
-    let src = "struct Animal { name }\nstruct Dog(Animal) {}\nstruct Cat(Animal) {}\n\
-               extend Dog { fn speak(self) { return \"woof\" } }\n\
-               extend Cat { fn speak(self) { return \"meow\" } }\n\
+    let src = "class Animal {\n    @public name\n}\n\
+               class Dog(Animal) {\n    @public fn speak() { return \"woof\" }\n}\n\
+               class Cat(Animal) {\n    @public fn speak() { return \"meow\" }\n}\n\
                let pets = [Dog { name: \"rex\" }, Cat { name: \"tom\" }]\n\
                for p in pets {\n    print(p.speak())\n}\n";
     ok(src);
@@ -181,7 +185,7 @@ fn a_method_dispatches_on_the_actual_struct() {
 
 #[test]
 fn a_struct_field_is_typed_by_every_literal() {
-    rejects("struct P { let x = 0 }\nlet p = P { x: \"s\" }\n", "do not mix");
+    rejects("class P {\n    @public let x = 0\n}\nlet p = P { x: \"s\" }\n", "do not mix");
 }
 
 #[test]
@@ -227,7 +231,7 @@ fn different_functions_in_one_array_share_a_function_type() {
 #[test]
 fn raise_takes_a_struct_or_a_string() {
     ok(
-        "struct Oops { code }\ntry {\n    raise Oops { code: 1 }\n} catch Oops e {\n    print(e.code)\n} catch e {\n    print(e.message)\n}\n",
+        "class Oops {\n    @public code\n}\ntry {\n    raise Oops { code: 1 }\n} catch Oops e {\n    print(e.code)\n} catch e {\n    print(e.message)\n}\n",
     );
     rejects("raise 5\n", "cannot raise int");
 }
@@ -296,8 +300,88 @@ fn a_trailing_expression_is_the_return_value() {
 #[test]
 fn a_method_used_without_a_call_is_refused() {
     rejects(
-        "struct C { n }\nextend C {\n    fn get(self) { return self.n }\n}\nlet c = C { n: 1 }\nlet g = c.get\n",
+        "class C {\n    @public n\n\n    @public fn get() { return self.n }\n}\nlet c = C { n: 1 }\nlet g = c.get\n",
         "a method is called, not passed",
     );
     rejects("let s = \"a\"\nlet u = s.upper\n", "a method is called, not passed");
+}
+
+// ── classes: visibility, constructors, outside definitions ───────────────────
+
+#[test]
+fn a_private_field_is_refused_outside_its_class() {
+    rejects(
+        "class A {\n    @public n\n    let secret = 1\n}\nlet a = A { n: 1 }\nprint(a.secret)\n",
+        "field 'secret' is private to A",
+    );
+    rejects(
+        "class A {\n    @public n\n    let secret = 1\n}\nlet a = A { n: 1 }\na.secret = 2\n",
+        "field 'secret' is private to A",
+    );
+}
+
+#[test]
+fn a_private_method_is_refused_outside_its_class() {
+    rejects(
+        "class A {\n    @public n\n    fn hidden() { return 1 }\n}\nlet a = A { n: 1 }\nprint(a.hidden())\n",
+        "method 'hidden' is private to A",
+    );
+}
+
+#[test]
+fn a_child_sees_its_parents_private_members() {
+    ok("class A {\n    let secret = 1\n    fn hidden() { return self.secret }\n}\n\
+        class B(A) {\n    @public fn peek() { return self.secret + self.hidden() }\n}\n\
+        let b = B {}\nprint(b.peek())\n");
+}
+
+#[test]
+fn a_literal_outside_the_class_sets_only_public_fields() {
+    rejects(
+        "class A {\n    @public n\n    let secret = 1\n}\nlet a = A { n: 1, secret: 2 }\n",
+        "field 'secret' is private to A, so a literal outside the class cannot set it",
+    );
+    rejects(
+        "class A {\n    @public n\n    secret\n}\nlet a = A { n: 1 }\n",
+        "A's private field 'secret' has no default",
+    );
+}
+
+#[test]
+fn a_constructor_builds_private_state_from_inside() {
+    let t = ok(
+        "class A {\n    @public n\n    secret\n    @public fn new(n)\n    @public fn read() { return self.secret }\n}\n\
+                fn A::new(n) { return A { n: n, secret: n * 2 } }\n\
+                let a = A::new(3)\nlet r = a.read()\n",
+    );
+    assert_eq!(global(&t, "r"), Ty::Int);
+}
+
+#[test]
+fn an_outside_definition_needs_a_declaration() {
+    rejects("class A {\n    @public n\n}\nfn A::area() { return self.n }\n", "does not declare");
+    ok(
+        "class A {\n    @public n\n    @public fn area()\n}\nfn A::area() { return self.n }\nprint(A { n: 2 }.area())\n",
+    );
+}
+
+#[test]
+fn a_declared_method_is_refused_only_where_it_is_called() {
+    ok("class A {\n    @public n\n    @public fn area()\n}\nprint(A { n: 2 }.n)\n");
+    rejects(
+        "class A {\n    @public n\n    @public fn area()\n}\nprint(A { n: 2 }.area())\n",
+        "declares `fn area` but nothing defines it",
+    );
+}
+
+#[test]
+fn a_method_defined_twice_is_refused() {
+    rejects(
+        "class A {\n    @public n\n    @public fn area() { return 1 }\n}\nfn A::area() { return 2 }\n",
+        "does not declare",
+    );
+    rejects(
+        "class A {\n    @public n\n    @public fn area()\n}\nfn A::area() { return 1 }\nfn A::area() { return 2 }\n",
+        "defined more than once",
+    );
 }

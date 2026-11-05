@@ -87,9 +87,9 @@ fn a_function_that_can_fall_off_returns_nil() {
 
 #[test]
 fn a_method_on_a_parent_dispatches_on_the_type_id() {
-    let src = "struct Shape { name }\nstruct Sq(Shape) { side }\nstruct Ci(Shape) { r }\n\
-               extend Sq { fn area(self) { return self.side * self.side } }\n\
-               extend Ci { fn area(self) { return self.r * 3 } }\n\
+    let src = "class Shape {\n    @public name\n}\n\
+               class Sq(Shape) {\n    @public side\n    @public fn area() { return self.side * self.side }\n}\n\
+               class Ci(Shape) {\n    @public r\n    @public fn area() { return self.r * 3 }\n}\n\
                let shapes = [Sq { name: \"s\", side: 2 }, Ci { name: \"c\", r: 1 }]\n\
                for s in shapes { print(s.area()) }\n";
     let t = text(src);

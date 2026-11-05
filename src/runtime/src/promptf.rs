@@ -13,7 +13,7 @@
 //! `<prompt>` under `jade run` and the raw prompt text from the same program
 //! built. The invisible half was that `MakeStruct` had to refuse prompt fields
 //! outright, because there was nothing to store that would read back correctly —
-//! which is why `examples/structs/prompt_fields` was excluded from the parity
+//! which is why `examples/classes/prompt_fields` was excluded from the parity
 //! gate rather than passing it.
 //!
 //! So a prompt carries an [`ObjHeader`] like every other non-scalar value. The

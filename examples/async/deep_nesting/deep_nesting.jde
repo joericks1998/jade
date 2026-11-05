@@ -56,7 +56,9 @@ print(fanned)
 // That buffer belongs to the task, not to whichever thread ran it, so the
 // caller's own `yield`s still land where they should.
 
-struct Halt { message }
+class Halt {
+    @public message
+}
 
 fn partial() {
     yield 10

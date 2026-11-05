@@ -128,7 +128,7 @@ impl<'a> Checker<'a> {
                     span,
                     format!(
                         "a value cannot contain itself ({what}); point back at it through a \
-                         struct field instead"
+                         class field instead"
                     ),
                 );
                 a.clone()
@@ -324,6 +324,7 @@ impl<'a> Checker<'a> {
                 match ot {
                     Ty::Struct(sn) => match self.field_slot(&sn, field) {
                         Some(slot) => {
+                            self.check_visible(f, &sn, field, false, *span);
                             let slot = if self.structs[&sn].prompt_fields.contains(field) {
                                 self.expect_text(&v, *span, "a prompt field");
                                 return;
@@ -335,7 +336,7 @@ impl<'a> Checker<'a> {
                         None => self.report(
                             *span,
                             format!(
-                                "struct '{}' has no field '{field}'",
+                                "class '{}' has no field '{field}'",
                                 super::ty::display_name(&sn)
                             ),
                         ),
@@ -346,7 +347,7 @@ impl<'a> Checker<'a> {
                         self.report(
                             *span,
                             format!(
-                                "cannot set field '{field}' on {other}; only a struct has fields{}",
+                                "cannot set field '{field}' on {other}; only a class value has fields{}",
                                 if matches!(other, Ty::Map(_)) {
                                     format!(", so write {object}[\"{field}\"] = … for a dict")
                                 } else {
@@ -395,7 +396,7 @@ impl<'a> Checker<'a> {
                         self.report(
                             *span,
                             format!(
-                                "cannot raise {other}; raise a struct, or a string, which becomes a \
+                                "cannot raise {other}; raise a class value, or a string, which becomes a \
                                  RuntimeError"
                             ),
                         );
@@ -616,7 +617,7 @@ impl<'a> Checker<'a> {
                     },
                 }
             }
-            TExprKind::StructLiteral { type_name, base, fields } => {
+            TExprKind::StructLiteral { type_name, base, fields, .. } => {
                 self.check_struct_literal(type_name, base.as_deref(), fields, span, f)
             }
             TExprKind::FieldAccess { object, field } => {
@@ -637,7 +638,7 @@ impl<'a> Checker<'a> {
                     let kt = self.check_expr(k, f);
                     self.unify(&kt, &Ty::Str, k.span, "a dict key");
                     let vt = self.check_expr(v, f);
-                    let msg = "the values of a dict (a dict holds one kind of value; use a struct \
+                    let msg = "the values of a dict (a dict holds one kind of value; use a class \
                                for named fields of different kinds)";
                     self.unify(&val, &vt, v.span, msg);
                 }
@@ -747,7 +748,7 @@ impl<'a> Checker<'a> {
         if self.structs.contains_key(name) {
             self.report(
                 span,
-                format!("'{}' is a struct type, not a value", super::ty::display_name(name)),
+                format!("'{}' is a class, not a value", super::ty::display_name(name)),
             );
             return self.slot(f, node);
         }
@@ -843,7 +844,7 @@ impl<'a> Checker<'a> {
                 self.report(
                     span,
                     format!(
-                        "'{0}' is a struct type, not a function; build one with {0} {{ … }}",
+                        "'{0}' is a class, not a function; build one with {0} {{ … }}",
                         super::ty::display_name(name)
                     ),
                 );
@@ -1280,7 +1281,7 @@ impl<'a> Checker<'a> {
         f: &mut Frame,
     ) -> Ty {
         if !self.structs.contains_key(type_name) {
-            self.report(span, format!("unknown struct '{}'", super::ty::display_name(type_name)));
+            self.report(span, format!("unknown class '{}'", super::ty::display_name(type_name)));
             return Ty::Struct(type_name.to_string());
         }
         self.constructed.insert(type_name.to_string());
@@ -1296,10 +1297,7 @@ impl<'a> Checker<'a> {
                 }
                 None => self.report(
                     value.span,
-                    format!(
-                        "struct '{}' has no field '{name}'",
-                        super::ty::display_name(type_name)
-                    ),
+                    format!("class '{}' has no field '{name}'", super::ty::display_name(type_name)),
                 ),
             }
         }
@@ -1331,7 +1329,7 @@ impl<'a> Checker<'a> {
                 }
             } else if !matches!(self.store.shallow(&bt), Ty::Var(_)) {
                 let r = self.store.resolve(&bt);
-                self.report(span, format!("'...' copies fields from a struct, got {r}"));
+                self.report(span, format!("'...' copies fields from a class value, got {r}"));
             }
         }
         Ty::Struct(type_name.to_string())
@@ -1385,6 +1383,9 @@ impl<'a> Checker<'a> {
     ) -> Ty {
         match self.store.shallow(ot) {
             Ty::Struct(sn) => {
+                if self.structs.get(&sn).is_some_and(|i| i.fields.iter().any(|x| x == field)) {
+                    self.check_visible(f, &sn, field, false, span);
+                }
                 if self.structs.get(&sn).is_some_and(|i| i.prompt_fields.contains(field)) {
                     return Ty::Prompt;
                 }
@@ -1397,7 +1398,7 @@ impl<'a> Checker<'a> {
                 }
                 self.report(
                     span,
-                    format!("struct '{}' has no field '{field}'", super::ty::display_name(&sn)),
+                    format!("class '{}' has no field '{field}'", super::ty::display_name(&sn)),
                 );
                 self.slot(f, node)
             }
@@ -1408,7 +1409,7 @@ impl<'a> Checker<'a> {
                     self.report(
                         span,
                         format!(
-                            "a caught error only has 'message'; catch the struct by its type to read \
+                            "a caught error only has 'message'; catch the class by its type to read \
                              '{field}'"
                         ),
                     );
@@ -1420,7 +1421,7 @@ impl<'a> Checker<'a> {
                 self.report(
                     span,
                     format!(
-                        "a dict has no fields; read it with [\"{field}\"], or use a struct for named fields"
+                        "a dict has no fields; read it with [\"{field}\"], or use a class for named fields"
                     ),
                 );
                 self.slot(f, node)
@@ -1501,7 +1502,7 @@ impl<'a> Checker<'a> {
                 _ => {
                     self.report(
                         span,
-                        "a struct is indexed only by a field name written as a string literal"
+                        "a class value is indexed only by a field name written as a string literal"
                             .to_string(),
                     );
                     self.slot(f, node)
@@ -1514,6 +1515,63 @@ impl<'a> Checker<'a> {
                 self.slot(f, node)
             }
         }
+    }
+
+    /// Purpose: This function returns the class whose code is being checked:
+    /// the class a method belongs to, or the class of a constructor.
+    ///
+    /// Inputs:
+    /// - `f`: the frame.
+    ///
+    /// Outputs: the class, or `None` outside every class.
+    fn current_class(&self, f: &Frame) -> Option<String> {
+        match &f.key.func {
+            FnKey::Method(t, _) => Some(t.clone()),
+            FnKey::Named(n) => super::members::constructor_class(n)
+                .filter(|c| self.structs.contains_key(c.as_str())),
+            _ => None,
+        }
+    }
+
+    /// Purpose: This function refuses using a private member from outside the
+    /// class that owns it and its descendants.
+    ///
+    /// Inputs:
+    /// - `f`: the frame.
+    /// - `sn`: the static class of the value.
+    /// - `member`: the field or method.
+    /// - `is_method`: true for a method.
+    /// - `span`: where.
+    ///
+    /// Outputs: none. Reports on the final pass.
+    fn check_visible(&mut self, f: &Frame, sn: &str, member: &str, is_method: bool, span: Span) {
+        let owner = if is_method {
+            match self.find_method(sn, member) {
+                Some(o) => o,
+                None => return,
+            }
+        } else {
+            self.field_owner(sn, member)
+        };
+        let public = match self.structs.get(&owner).and_then(|i| i.public.as_ref()) {
+            None => true,
+            Some(p) => p.contains(member),
+        };
+        if public {
+            return;
+        }
+        if self.current_class(f).is_some_and(|k| self.store.is_a(&k, &owner)) {
+            return;
+        }
+        let kind = if is_method { "method" } else { "field" };
+        let use_it = if is_method { "call it" } else { "use it" };
+        self.report(
+            span,
+            format!(
+                "{kind} '{member}' is private to {}; mark it @public in the class to {use_it} here",
+                super::ty::display_name(&owner)
+            ),
+        );
     }
 
     /// Purpose: This function finds the method a struct's value runs: its own,
@@ -1574,6 +1632,9 @@ impl<'a> Checker<'a> {
                 let result = self.slot(f, node);
                 let mut targets = Vec::new();
                 let mut found = false;
+                if self.find_method(&sn, name).is_some() {
+                    self.check_visible(f, &sn, name, true, span);
+                }
                 for kind in kinds {
                     let Some(owner) = self.find_method(&kind, name) else { continue };
                     found = true;
@@ -1601,10 +1662,26 @@ impl<'a> Checker<'a> {
                     targets.push((kind, k));
                 }
                 if !found {
-                    self.report(
-                        span,
-                        format!("struct '{}' has no method '{name}'", super::ty::display_name(&sn)),
-                    );
+                    let declared = std::iter::once(sn.clone())
+                        .chain(self.store.ancestors.get(&sn).cloned().unwrap_or_default())
+                        .find(|c| {
+                            self.structs
+                                .get(c)
+                                .is_some_and(|i| i.declared.iter().any(|d| d == name))
+                        });
+                    let msg = match declared {
+                        Some(c) => {
+                            let c = super::ty::display_name(&c).to_string();
+                            format!(
+                                "class {c} declares `fn {name}` but nothing defines it; write `fn {c}::{name}(…) {{ … }}`"
+                            )
+                        }
+                        None => format!(
+                            "class '{}' has no method '{name}'",
+                            super::ty::display_name(&sn)
+                        ),
+                    };
+                    self.report(span, msg);
                     return result;
                 }
                 let t = if targets.len() == 1 {
@@ -1851,7 +1928,7 @@ fn op_symbol(op: &BinOpKind) -> &'static str {
 fn mismatch_hint(a: &Ty, b: &Ty) -> String {
     let structs = matches!(a, Ty::Struct(_)) && matches!(b, Ty::Struct(_));
     if structs {
-        return "; give both structs a shared parent struct to keep them together".to_string();
+        return "; give both classes a shared parent class to keep them together".to_string();
     }
     if matches!((a, b), (Ty::Int, Ty::Float) | (Ty::Float, Ty::Int)) {
         return "; convert one with float(x) or int(x)".to_string();

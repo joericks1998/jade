@@ -35,6 +35,8 @@ pub struct TypeContext {
     struct_parents: HashMap<String, Vec<String>>,
     /// Every struct a type inherits, nearest first, flattened transitively.
     struct_ancestors: HashMap<String, Vec<String>>,
+    /// Each class's member decorators and declarations, as its body wrote them.
+    struct_members: HashMap<String, crate::frontend::ast::ClassMembers>,
     /// Where each struct was declared, so an inheritance error points at the
     /// child rather than at wherever the clash was noticed.
     struct_spans: HashMap<String, Span>,
@@ -87,6 +89,7 @@ impl TypeContext {
             extend_methods: HashMap::new(),
             struct_parents: HashMap::new(),
             struct_ancestors: HashMap::new(),
+            struct_members: HashMap::new(),
             struct_spans: HashMap::new(),
             primitive_methods: HashMap::new(),
             opaque_imports: false,
@@ -610,7 +613,7 @@ fn fill_in_expr(
             }
         }
         TExprKind::PromptDeref { expr, .. } => fill_in_expr(expr, defs, ctx)?,
-        TExprKind::StructLiteral { type_name, base, fields } => {
+        TExprKind::StructLiteral { type_name, base, fields, .. } => {
             if let Some(b) = base.as_mut() {
                 fill_in_expr(b, defs, ctx)?;
             }
@@ -865,7 +868,17 @@ fn pre_pass(stmts: &[Stmt], ctx: &mut TypeContext) {
                 );
             }
 
-            Stmt::StructDef { name, fields, parents, span } => {
+            Stmt::StructDef { name, fields, parents, members, span } => {
+                // A declared method is a method here even before anything
+                // defines it; the whole-program checker reports a missing
+                // definition where it is called.
+                for d in members.declared.iter().filter(|d| *d != "new") {
+                    ctx.extend_methods
+                        .entry(name.clone())
+                        .or_default()
+                        .insert(d.clone(), JadeType::Unknown);
+                }
+                ctx.struct_members.insert(name.clone(), members.clone());
                 ctx.struct_defs.insert(name.clone(), fields.clone());
                 ctx.struct_parents.insert(name.clone(), parents.clone());
                 ctx.struct_spans.insert(name.clone(), *span);
@@ -1096,14 +1109,15 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
         // folded every parent's fields in already, so nothing downstream — not
         // `emit`, not either backend — has to know inheritance exists to build a
         // value or to find a field.
-        Stmt::StructDef { name, fields, parents, span } => Ok(TStmt::StructDef {
+        Stmt::StructDef { name, fields, parents, members, span } => Ok(TStmt::StructDef {
             name: name.clone(),
             fields: ctx.struct_defs.get(name).cloned().unwrap_or_else(|| fields.clone()),
             parents: parents.clone(),
+            members: members.clone(),
             span: *span,
         }),
 
-        Stmt::ExtendBlock { type_name, methods, decorators, span } => {
+        Stmt::ExtendBlock { type_name, methods, decorators, outside, span } => {
             // Type-check method bodies. Each FnDef pushes/pops its own scope.
             // The first param (`self`) is bound as Unknown inside the fn scope —
             // field accesses on self return Unknown (conservative for Stage B).
@@ -1114,6 +1128,7 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
                 type_name: type_name.clone(),
                 methods: tmethods,
                 decorators: tdecorators,
+                outside: *outside,
                 span: *span,
             })
         }
@@ -1380,7 +1395,7 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
             {
                 return Err(JadeError::TypeError {
                     message: format!(
-                        "'{}' is a struct type, not a function — build one with {} {{ ... }}",
+                        "'{}' is a class, not a function; build one with {} {{ ... }}",
                         name, name
                     ),
                     span: *span,
@@ -1483,6 +1498,7 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
                         type_name: bare.clone(),
                         base: tbase,
                         fields: tfields,
+                        given: fields.iter().map(|(n, _)| n.clone()).collect(),
                     },
                     ty: JadeType::Struct(bare),
                     span: *span,
@@ -1511,6 +1527,7 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
                         type_name: type_name.clone(),
                         base: tbase,
                         fields: tfields,
+                        given: fields.iter().map(|(n, _)| n.clone()).collect(),
                     },
                     ty: JadeType::Struct(type_name.clone()),
                     span: *span,
@@ -1551,9 +1568,13 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
             // still catches a missing field, and with an unknown one there is
             // nothing to check against and the copy answers at run time.
             for def_field in &def_fields {
+                // A private field is left to `compiler::infer::members`, which
+                // knows whether the literal is inside the class and can name a
+                // constructor in its message.
                 if let StructFieldDef::Required(req) = def_field
                     && !fields.iter().any(|(n, _)| n == req)
                     && !(tbase.is_some() && (base_supplies.is_none() || supplied(req)))
+                    && !field_is_private(ctx, type_name, req)
                 {
                     return Err(JadeError::MissingField { field: req.clone(), span: *span });
                 }
@@ -1633,6 +1654,7 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
                     type_name: type_name.clone(),
                     base: tbase,
                     fields: tfields,
+                    given: fields.iter().map(|(n, _)| n.clone()).collect(),
                 },
                 ty: JadeType::Struct(type_name.clone()),
                 span: *span,
@@ -2437,6 +2459,27 @@ fn join_types(mut types: Vec<JadeType>) -> JadeType {
         return JadeType::Nil;
     };
     if types.iter().all(|t| *t == first) { first } else { JadeType::Unknown }
+}
+
+/// Purpose: This function says whether a class's field is private in the class
+/// that declares it, as far as this file can tell.
+///
+/// Inputs:
+/// - `ctx`: the file's type context.
+/// - `class`: the class the literal builds.
+/// - `field`: the field.
+///
+/// Outputs: true when the declaring class is in this file and does not mark
+/// the field `@public`.
+fn field_is_private(ctx: &TypeContext, class: &str, field: &str) -> bool {
+    let has =
+        |c: &str| ctx.struct_defs.get(c).is_some_and(|fs| fs.iter().any(|f| f.name() == field));
+    let owner = ctx
+        .struct_ancestors
+        .get(class)
+        .and_then(|a| a.iter().rev().find(|x| has(x)).cloned())
+        .unwrap_or_else(|| class.to_string());
+    ctx.struct_members.get(&owner).is_some_and(|m| !m.is_public(field))
 }
 
 fn require_bool_or_unknown(ty: &JadeType, span: Span) -> Result<()> {

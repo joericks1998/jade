@@ -312,7 +312,8 @@ mod type_infer {
 
     #[test]
     fn test_infer_struct_literal_type() {
-        let tp = infer_ok("struct Point {\n x,\n y\n}\nlet p = Point { x: 1, y: 2 }");
+        let tp =
+            infer_ok("class Point {\n @public x,\n @public y\n}\nlet p = Point { x: 1, y: 2 }");
         let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!() };
         assert_eq!(value.ty, JadeType::Struct("Point".to_string()));
     }
@@ -325,26 +326,26 @@ mod type_infer {
 
     #[test]
     fn test_infer_struct_missing_field_is_error() {
-        let err = infer_err("struct P {\n x,\n y\n}\nlet p = P { x: 1 }");
+        let err = infer_err("class P {\n @public x,\n @public y\n}\nlet p = P { x: 1 }");
         assert!(matches!(err, JadeError::MissingField { .. }));
     }
 
     #[test]
     fn test_infer_struct_extra_field_is_error() {
-        let err = infer_err("struct P {\n x\n}\nlet p = P { x: 1, z: 2 }");
+        let err = infer_err("class P {\n @public x\n}\nlet p = P { x: 1, z: 2 }");
         assert!(matches!(err, JadeError::UndefinedField { .. }));
     }
 
     #[test]
     fn test_infer_empty_struct_literal_type() {
-        let tp = infer_ok("struct Unit {}\nlet u = Unit {}");
+        let tp = infer_ok("class Unit {}\nlet u = Unit {}");
         let TStmt::Let { value, .. } = &tp.stmts[1] else { panic!() };
         assert_eq!(value.ty, JadeType::Struct("Unit".to_string()));
     }
 
     #[test]
     fn test_infer_empty_struct_extra_field_is_error() {
-        let err = infer_err("struct Unit {}\nlet u = Unit { x: 1 }");
+        let err = infer_err("class Unit {}\nlet u = Unit { x: 1 }");
         assert!(matches!(err, JadeError::UndefinedField { .. }));
     }
 
@@ -582,7 +583,8 @@ mod type_infer {
     /// function rule first turned `?p |> City` into `City(?p)`.
     #[test]
     fn a_struct_name_stage_on_a_deref_is_a_type_not_a_call() {
-        let tp = infer_ok("struct City { name }\nprompt p = \"x\"\nlet c = ?p |> City");
+        let tp =
+            infer_ok("class City {\n    @public name\n}\nprompt p = \"x\"\nlet c = ?p |> City");
         let TStmt::Let { value, .. } = &tp.stmts[2] else { panic!("expected Let") };
         let TExprKind::PromptDeref { output_type, .. } = &value.kind else {
             panic!("expected PromptDeref, got {:?}", value.kind)
@@ -1072,9 +1074,9 @@ mod emit {
     #[test]
     fn a_deep_inheritance_chain_does_not_blow_up() {
         let n = 300;
-        let mut src = String::from("struct S0 {\n    f0\n}\n");
+        let mut src = String::from("class S0 {\n    @public f0\n}\n");
         for i in 1..n {
-            src.push_str(&format!("struct S{i}(S{}) {{\n    f{i}\n}}\n", i - 1));
+            src.push_str(&format!("class S{i}(S{}) {{\n    f{i}\n}}\n", i - 1));
         }
         let start = std::time::Instant::now();
         let cp = compile_ok(&src);
@@ -1189,7 +1191,7 @@ mod emit {
 
     #[test]
     fn emit_structdef_records_field_defs() {
-        let cp = compile_ok("struct Point { x, y }");
+        let cp = compile_ok("class Point {\n    @public x\n    @public y\n}");
         let fields = cp.struct_defs.get("Point").expect("Point struct recorded");
         assert_eq!(fields.len(), 2);
     }
@@ -1217,7 +1219,7 @@ mod emit {
 
     #[test]
     fn emit_extend_block_registers_methods() {
-        let src = "struct P { x }\nextend P {\n fn get(self) { return self.x }\n}";
+        let src = "class P {\n    @public x\n\n @public fn get() { return self.x }\n}";
         let cp = compile_ok(src);
         let methods = cp.extend_methods.get("P").expect("extend methods for P");
         assert!(methods.contains_key("get"), "method `get` should be registered");

@@ -1,0 +1,11 @@
+// The class half of outside_methods.jde. It declares `area` and `scale`
+// without defining them; the importing file defines both.
+
+class Rect {
+    @public width
+    @public height
+
+    @public fn area()
+    @public fn scale(by)
+    @public fn describe() { return f"{self.width} by {self.height}" }
+}

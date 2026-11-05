@@ -12,8 +12,10 @@ try {
 }
 // → something went wrong
 
-// 2. Custom exception struct with typed catch
-struct ValueError { message }
+// 2. Custom exception class with typed catch
+class ValueError {
+    @public message
+}
 
 fn parse_age(n) {
     if n < 0 {
@@ -30,7 +32,10 @@ try {
 // → age cannot be negative
 
 // 3. Multiple typed catch arms — first match wins
-struct NetworkError { code, message }
+class NetworkError {
+    @public code
+    @public message
+}
 
 try {
     raise NetworkError { code: 503, message: "service unavailable" }

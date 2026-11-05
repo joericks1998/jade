@@ -10,8 +10,8 @@
 // pins is that the values are still correct after the cleanup. The leak itself
 // is measured by `jade-heap` and pinned by a codegen test.
 
-struct Halt {
-    message
+class Halt {
+    @public message
 }
 
 fn innermost() {
@@ -74,7 +74,7 @@ print(recovers())
 // And a catch that does not match rethrows to the frame above, which cleans up
 // the rethrowing frame on its way past.
 
-struct Other {
+class Other {
     message
 }
 

@@ -1,6 +1,7 @@
 use super::{
     ast::{
-        BinOpKind, CatchArm, DerefStyle, Expr, FStrPart, Program, Stmt, StructFieldDef, UnaryOpKind,
+        BinOpKind, CatchArm, ClassMembers, DerefStyle, Expr, FStrPart, Program, Stmt,
+        StructFieldDef, UnaryOpKind,
     },
     error::{JadeError, Result, Span},
     lexer::{RawFStrPart, Token, TokenKind, token_kind_desc},
@@ -179,6 +180,12 @@ impl Parser {
             if self.peek().kind == TokenKind::Eof {
                 break;
             }
+            // A class becomes several statements, so it is parsed here rather
+            // than by `parse_stmt`, which returns one; anywhere else it is refused.
+            if self.peek().kind == TokenKind::Class {
+                stmts.extend(self.parse_class_def()?);
+                continue;
+            }
             stmts.push(self.parse_stmt()?);
         }
         Ok(Program { stmts })
@@ -284,18 +291,22 @@ impl Parser {
     fn parse_stmt(&mut self) -> Result<Stmt> {
         let decorators = self.parse_decorators()?;
         if !decorators.is_empty() {
-            // Decorators are valid on fn, async fn, struct, extend, let, and prompt.
+            // Decorators are valid on fn, async fn, let, and prompt.
             return match self.peek().kind {
                 TokenKind::Fn => self.parse_fn_with_decorators(decorators),
                 TokenKind::Async => self.parse_async_fn_with_decorators(decorators),
-                TokenKind::Struct => self.parse_struct_def_with_decorators(decorators),
-                TokenKind::Extend => self.parse_extend_block_with_decorators(decorators),
+                TokenKind::Struct => Err(JadeError::StructRemoved { span: self.peek().span }),
+                TokenKind::Extend => Err(JadeError::ExtendRemoved { span: self.peek().span }),
+                TokenKind::Class => Err(JadeError::MisplacedDecorator {
+                    reason: "a class takes no decorators; decorate its members instead, such as `@public name`".to_string(),
+                    span: self.peek().span,
+                }),
                 TokenKind::Let => self.parse_let_with_decorators(decorators),
                 TokenKind::Prompt => self.parse_prompt_decl_with_decorators(decorators),
                 _ => {
                     let t = self.peek().clone();
                     Err(JadeError::UnexpectedToken {
-                        expected: "`fn`, `async fn`, `struct`, `extend`, `let`, or `prompt` after decorator".to_string(),
+                        expected: "`fn`, `async fn`, `let`, or `prompt` after decorator".to_string(),
                         got: token_kind_desc(&t.kind),
                         span: t.span,
                     })
@@ -313,8 +324,9 @@ impl Parser {
             TokenKind::For => self.parse_for(),
             TokenKind::Break => self.parse_break(),
             TokenKind::Continue => self.parse_continue(),
-            TokenKind::Struct => self.parse_struct_def_with_decorators(vec![]),
-            TokenKind::Extend => self.parse_extend_block_with_decorators(vec![]),
+            TokenKind::Struct => Err(JadeError::StructRemoved { span: self.peek().span }),
+            TokenKind::Extend => Err(JadeError::ExtendRemoved { span: self.peek().span }),
+            TokenKind::Class => Err(JadeError::ClassNotAtTopLevel { span: self.peek().span }),
             TokenKind::Interface => Err(JadeError::InterfaceRemoved { span: self.peek().span }),
             TokenKind::Prompt => self.parse_prompt_decl_with_decorators(vec![]),
             TokenKind::Use => self.parse_use(),
@@ -483,17 +495,72 @@ impl Parser {
             }
         };
 
+        // `fn Type::method(…)` or `fn shapes.Type::method(…)`: a method defined
+        // outside its class body.
+        if matches!(self.peek().kind, TokenKind::ColonColon | TokenKind::Dot) {
+            return self.parse_outside_method(name, decorators, span);
+        }
+
         // Parameter list
         let params = self.parse_param_list()?;
 
         // Body block
-        self.fn_depth += 1;
-        let outer_loops = std::mem::take(&mut self.loop_depth);
-        let body = self.parse_block()?;
-        self.loop_depth = outer_loops;
-        self.fn_depth -= 1;
+        let body = self.parse_fn_body(false)?;
 
         Ok(Stmt::FnDef { name, params, body, decorators, span })
+    }
+
+    /// Parse the rest of `fn Type::method(…) { … }`, a method defined outside
+    /// its class, after the first name.
+    ///
+    /// The class may be qualified, `fn shapes.Point::area()`, which is how a
+    /// file names a class another file declares. The result is an
+    /// `ExtendBlock` marked `outside`, which the checker matches to a
+    /// declaration in the class body. A constructor defined this way becomes the
+    /// top-level `Type::new` function, and must sit in the class's own file.
+    fn parse_outside_method(
+        &mut self,
+        first: String,
+        decorators: Decorators,
+        span: Span,
+    ) -> Result<Stmt> {
+        if !decorators.is_empty() {
+            return Err(JadeError::MisplacedDecorator {
+                reason: "decorate the method's declaration in the class body, not its definition"
+                    .to_string(),
+                span,
+            });
+        }
+        let mut class = first;
+        while self.peek().kind == TokenKind::Dot {
+            self.advance(); // consume `.`
+            let seg = self.expect_ident("class name after `.`")?;
+            class = format!("{class}.{seg}");
+        }
+        self.expect(&TokenKind::ColonColon)?;
+        let mname = self.expect_ident("method name after `::`")?;
+        let params = self.parse_param_list()?;
+        if params.first().is_some_and(|(p, _)| p == "self") {
+            return Err(JadeError::SelfIsImplicit { span });
+        }
+        if mname == "new" && class.contains('.') {
+            return Err(JadeError::MisplacedDecorator {
+                reason: "define a constructor in the file that declares its class".to_string(),
+                span,
+            });
+        }
+        let body = self.parse_fn_body(false)?;
+        let def = Self::method_stmt(&class, &mname, params, body, false, span);
+        if mname == "new" {
+            return Ok(def);
+        }
+        Ok(Stmt::ExtendBlock {
+            type_name: class,
+            methods: vec![def],
+            decorators: Vec::new(),
+            outside: true,
+            span,
+        })
     }
 
     /// Parse `async fn <ident> ( <params> ) { <body> }` with pre-collected decorators.
@@ -910,62 +977,183 @@ impl Parser {
     /// Parse `struct Name { field, … }`
     /// Fields may be bare identifiers (required), `let name = expr` (optional with default),
     /// or `prompt name = expr` (optional prompt field with default text).
-    fn parse_struct_def_with_decorators(&mut self, decorators: Decorators) -> Result<Stmt> {
+    /// Parse `class Name(Parent, …) { members }` into the statements the
+    /// later stages already understand.
+    ///
+    /// A class body holds fields, methods with bodies, and methods declared
+    /// with no body, each optionally preceded by decorators such as `@public`.
+    /// It becomes:
+    ///
+    /// - a `StructDef` with the fields, the parents, and a `ClassMembers`
+    ///   recording each member's decorators and the declared methods;
+    /// - an `ExtendBlock` with the methods written in the body, each given
+    ///   `self` as its first parameter, since `self` is implicit;
+    /// - a top-level `FnDef` named `Name::new` for a constructor written in the
+    ///   body, which has no `self` because there is no value yet.
+    fn parse_class_def(&mut self) -> Result<Vec<Stmt>> {
         let span = self.peek().span;
-        self.advance(); // consume `struct`
-        let name = self.expect_ident("struct name")?;
-        // A decorator on a struct ran under `jade run` and was skipped under
-        // `jade build`, so the two engines disagreed about what a literal
-        // produced. Refused by name rather than dropped in silence.
-        if !decorators.is_empty() {
-            return Err(JadeError::StructDecoratorRemoved { span });
-        }
+        self.advance(); // consume `class`
+        let name = self.expect_ident("class name")?;
         let parents = self.parse_parent_list()?;
         self.expect(&TokenKind::LBrace)?;
         let mut fields = Vec::new();
+        let mut methods = Vec::new();
+        let mut ctors = Vec::new();
+        let mut members = ClassMembers::default();
         loop {
-            // Skip auto-semicolons between field declarations (from trailing newlines)
             while self.peek().kind == TokenKind::Semicolon {
                 self.advance();
             }
             if self.peek().kind == TokenKind::RBrace || self.peek().kind == TokenKind::Eof {
                 break;
             }
-            match self.peek().kind.clone() {
+            let dec_span = self.peek().span;
+            let decorators = self.parse_decorators()?;
+            if decorators.iter().any(|(_, args)| !args.is_empty()) {
+                return Err(JadeError::MisplacedDecorator {
+                    reason: "a member's decorators take no arguments".to_string(),
+                    span: dec_span,
+                });
+            }
+            let member = match self.peek().kind.clone() {
                 TokenKind::Identifier(_) => {
                     let field_name = self.expect_ident("field name")?;
-                    fields.push(StructFieldDef::Required(field_name));
+                    fields.push(StructFieldDef::Required(field_name.clone()));
+                    field_name
                 }
                 TokenKind::Let => {
                     self.advance(); // consume `let`
                     let field_name = self.expect_ident("field name after `let`")?;
                     self.expect(&TokenKind::Equals)?;
                     let default = self.parse_pipe()?;
-                    fields.push(StructFieldDef::Let { name: field_name, default });
+                    fields.push(StructFieldDef::Let { name: field_name.clone(), default });
+                    field_name
                 }
                 TokenKind::Prompt => {
                     self.advance(); // consume `prompt`
                     let field_name = self.expect_ident("field name after `prompt`")?;
                     self.expect(&TokenKind::Equals)?;
                     let default = self.parse_pipe()?;
-                    fields.push(StructFieldDef::Prompt { name: field_name, default });
+                    fields.push(StructFieldDef::Prompt { name: field_name.clone(), default });
+                    field_name
+                }
+                TokenKind::Fn | TokenKind::Async => {
+                    let (mname, def) = self.parse_method(&name)?;
+                    match def {
+                        None => members.declared.push(mname.clone()),
+                        Some(d) if mname == "new" => ctors.push(d),
+                        Some(d) => methods.push(d),
+                    }
+                    mname
                 }
                 _ => {
                     let t = self.peek().clone();
                     return Err(JadeError::UnexpectedToken {
-                        expected: "field name, `let`, or `prompt`".to_string(),
+                        expected: "a field, `let`, `prompt`, or `fn`".to_string(),
                         got: token_kind_desc(&t.kind),
                         span: t.span,
                     });
                 }
+            };
+            if !decorators.is_empty() {
+                members.decorators.push((member, decorators.into_iter().map(|(n, _)| n).collect()));
             }
-            // Allow a trailing comma or semicolon after each field declaration
+            // Allow a trailing comma or semicolon after each member.
             if self.peek().kind == TokenKind::Comma || self.peek().kind == TokenKind::Semicolon {
                 self.advance();
             }
         }
         self.expect(&TokenKind::RBrace)?;
-        Ok(Stmt::StructDef { name, fields, parents, span })
+        let mut out = vec![Stmt::StructDef { name: name.clone(), fields, parents, members, span }];
+        if !methods.is_empty() {
+            out.push(Stmt::ExtendBlock {
+                type_name: name,
+                methods,
+                decorators: Vec::new(),
+                outside: false,
+                span,
+            });
+        }
+        out.extend(ctors);
+        Ok(out)
+    }
+
+    /// Parse one method in a class body: `fn m(params) { body }`, or a
+    /// declaration with no body, `fn m(params)`, either one possibly `async`.
+    ///
+    /// Inputs:
+    /// - `class`: the class the method belongs to.
+    ///
+    /// Outputs: the method's name, and its definition when it has a body. A
+    /// constructor (`new`) comes back as a top-level `Name::new` function with
+    /// no `self`; any other method gets `self` as its first parameter.
+    fn parse_method(&mut self, class: &str) -> Result<(String, Option<Stmt>)> {
+        let span = self.peek().span;
+        let is_async = self.peek().kind == TokenKind::Async;
+        if is_async {
+            self.advance(); // consume `async`
+        }
+        self.expect(&TokenKind::Fn)?;
+        let mname = self.expect_ident("method name")?;
+        let params = self.parse_param_list()?;
+        if params.first().is_some_and(|(p, _)| p == "self") {
+            return Err(JadeError::SelfIsImplicit { span });
+        }
+        if self.peek().kind != TokenKind::LBrace {
+            return Ok((mname, None));
+        }
+        let body = self.parse_fn_body(is_async)?;
+        Ok((mname.clone(), Some(Self::method_stmt(class, &mname, params, body, is_async, span))))
+    }
+
+    /// Parse a function body, tracking the depths a body resets.
+    fn parse_fn_body(&mut self, is_async: bool) -> Result<Vec<Stmt>> {
+        self.fn_depth += 1;
+        if is_async {
+            self.async_fn_depth += 1;
+        }
+        let outer_loops = std::mem::take(&mut self.loop_depth);
+        let body = self.parse_block()?;
+        self.loop_depth = outer_loops;
+        if is_async {
+            self.async_fn_depth -= 1;
+        }
+        self.fn_depth -= 1;
+        Ok(body)
+    }
+
+    /// Purpose: This function builds a method's definition statement.
+    ///
+    /// Inputs:
+    /// - `class`: the class.
+    /// - `mname`: the method.
+    /// - `params`: the parameters as written, without `self`.
+    /// - `body`: the body.
+    /// - `is_async`: whether it was declared `async`.
+    /// - `span`: where it starts.
+    ///
+    /// Outputs: a `Name::new` function for a constructor, or the method with
+    /// `self` prepended to its parameters.
+    fn method_stmt(
+        class: &str,
+        mname: &str,
+        params: Vec<(String, Option<Expr>)>,
+        body: Vec<Stmt>,
+        is_async: bool,
+        span: Span,
+    ) -> Stmt {
+        let (name, params) = if mname == "new" {
+            (format!("{class}::new"), params)
+        } else {
+            let mut all = vec![("self".to_string(), None)];
+            all.extend(params);
+            (mname.to_string(), all)
+        };
+        if is_async {
+            Stmt::AsyncFnDef { name, params, body, decorators: Vec::new(), span }
+        } else {
+            Stmt::FnDef { name, params, body, decorators: Vec::new(), span }
+        }
     }
 
     /// Parse an optional `(Parent, Other)` after a struct's name.
@@ -985,10 +1173,10 @@ impl Parser {
         self.advance(); // consume `(`
         let mut parents = Vec::new();
         while self.peek().kind != TokenKind::RParen {
-            let mut name = self.expect_ident("parent struct name")?;
+            let mut name = self.expect_ident("parent class name")?;
             while self.peek().kind == TokenKind::Dot {
                 self.advance();
-                let seg = self.expect_ident("parent struct name after `.`")?;
+                let seg = self.expect_ident("parent class name after `.`")?;
                 name = format!("{name}.{seg}");
             }
             parents.push(name);
@@ -999,45 +1187,6 @@ impl Parser {
         }
         self.expect(&TokenKind::RParen)?;
         Ok(parents)
-    }
-
-    /// Parse `extend TypeName { fn method(self, …) { … } … }`
-    fn parse_extend_block_with_decorators(&mut self, decorators: Decorators) -> Result<Stmt> {
-        let span = self.peek().span;
-        self.advance(); // consume `extend`
-        let type_name = self.expect_ident("type name")?;
-        // `extend Type: Interface` went with interfaces. Caught here so the
-        // message names the removal; without it the author gets
-        // "expected `{`, found `:`", which explains nothing.
-        if self.peek().kind == TokenKind::Colon {
-            return Err(JadeError::ExtendConformanceRemoved { span: self.peek().span });
-        }
-        if decorators.iter().any(|(n, _)| n == "route") {
-            return Err(JadeError::RouteDecoratorRemoved { span });
-        }
-        self.expect(&TokenKind::LBrace)?;
-        let mut methods = Vec::new();
-        loop {
-            while self.peek().kind == TokenKind::Semicolon {
-                self.advance();
-            }
-            if self.peek().kind == TokenKind::RBrace || self.peek().kind == TokenKind::Eof {
-                break;
-            }
-            match self.peek().kind {
-                TokenKind::Fn => methods.push(self.parse_fn_with_decorators(vec![])?),
-                _ => {
-                    let t = self.peek().clone();
-                    return Err(JadeError::UnexpectedToken {
-                        expected: "`fn` method definition".to_string(),
-                        got: token_kind_desc(&t.kind),
-                        span: t.span,
-                    });
-                }
-            }
-        }
-        self.expect(&TokenKind::RBrace)?;
-        Ok(Stmt::ExtendBlock { type_name, methods, decorators, span })
     }
 
     /// Parse `object.field = expr ;`
@@ -1564,7 +1713,7 @@ impl Parser {
                 let dspan = self.peek().span;
                 if base.is_some() {
                     return Err(JadeError::UnexpectedToken {
-                        expected: "a field name; a struct literal copies at most one `...` base"
+                        expected: "a field name; a class literal copies at most one `...` base"
                             .to_string(),
                         got: "a second `...`".to_string(),
                         span: dspan,
@@ -1675,7 +1824,15 @@ impl Parser {
             } else if self.peek().kind == TokenKind::Dot {
                 let span = Self::expr_span(&expr);
                 self.advance(); // consume `.`
-                let field = self.expect_ident("field name")?;
+                let mut field = self.expect_ident("field name")?;
+                // `shapes.Account::new`: a member of an imported class.
+                if self.peek().kind == TokenKind::ColonColon
+                    && matches!(self.peek_ahead(1).kind, TokenKind::Identifier(_))
+                {
+                    self.advance(); // consume `::`
+                    let member = self.expect_ident("class member name")?;
+                    field = format!("{field}::{member}");
+                }
                 expr = Expr::FieldAccess { object: Box::new(expr), field, span };
             } else if self.peek().kind == TokenKind::TildeGt {
                 // `obj~>field` — terse spelling of `obj.?field`.
@@ -1760,9 +1917,21 @@ impl Parser {
                     && self.tokens.get(self.pos + 2).map(|t| &t.kind) == Some(&TokenKind::LBrace)
                 {
                     self.advance(); // consume `.`
-                    let type_name = self.expect_ident("struct type name")?;
+                    let type_name = self.expect_ident("class name")?;
                     let qualified = format!("{}.{}", name, type_name);
                     return self.parse_struct_literal_body(qualified, token.span);
+                }
+                // `Account::new` or `Dog::speak`: a class member named through
+                // its class. It stays one identifier, which the checker resolves.
+                if self.peek().kind == TokenKind::ColonColon
+                    && matches!(self.peek_ahead(1).kind, TokenKind::Identifier(_))
+                {
+                    self.advance(); // consume `::`
+                    let member = self.expect_ident("class member name")?;
+                    return Ok(Expr::Identifier {
+                        name: format!("{name}::{member}"),
+                        span: token.span,
+                    });
                 }
                 Ok(Expr::Identifier { name, span: token.span })
             }

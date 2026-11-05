@@ -6,23 +6,27 @@
 //
 // Mixed arrays were added for one case: a reply that is several Token frames
 // followed by a Done. That is several kinds of record in one list, which is what
-// a shared parent struct says. The array's element type is the parent, and a
+// a shared parent class says. The array's element type is the parent, and a
 // method each kind defines answers for the value an element actually holds.
 
-struct Frame {}
-struct Token(Frame) { let text = "" }
-struct Done(Frame) { let count = 0 }
+class Frame {}
+class Token(Frame) {
+    @public let text = ""
 
-extend Token {
-    fn describe(self) {
-        return f"token '{self.text}'"
-    }
+    fn describe()
+}
+class Done(Frame) {
+    @public let count = 0
+
+    fn describe()
 }
 
-extend Done {
-    fn describe(self) {
-        return f"done after {self.count}"
-    }
+fn Token::describe() {
+    return f"token '{self.text}'"
+}
+
+fn Done::describe() {
+    return f"done after {self.count}"
 }
 
 let frames = [Token { text: "hi" }, Token { text: " there" }, Done { count: 2 }]

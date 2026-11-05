@@ -1,0 +1,43 @@
+// Empty classes — classes with zero fields.
+// Useful as marker/tag types, unit types, or exception types.
+
+class Unit {
+    @public fn tag()
+}
+class Done {}
+class MyError {}
+
+// Instantiation
+let u = Unit {}
+// u is a Unit
+
+// Methods work on empty classes
+fn Unit::tag() {
+    return "unit"
+}
+
+let tag = u.tag()
+// tag == "unit"
+
+// Empty classes can be collected
+let units = [Unit {}, Unit {}, Unit {}]
+let count = len(units)
+// count == 3
+
+// Empty classes work as exception types
+fn must_be_positive(n) {
+    if n < 0 {
+        raise MyError {}
+    }
+    return n
+}
+
+try {
+    let r = must_be_positive(-1)
+} catch MyError e {
+    let caught = true
+    // caught == true
+}
+
+// Empty class extra field is an error
+// let bad = Unit { x: 1 }  // → UndefinedField

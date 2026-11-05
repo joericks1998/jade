@@ -59,6 +59,31 @@ pub struct Program {
 }
 
 /// A statement is a top-level action.
+/// Purpose: This struct holds what a class body says about its members
+/// beyond their definitions.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ClassMembers {
+    /// Each decorated member, by name, with the names of its decorators in
+    /// written order. `public` makes a member visible outside the class; a type
+    /// name gives a field its type.
+    pub decorators: Vec<(String, Vec<String>)>,
+    /// Methods the body declares without a body, defined as `fn Name::m(…)`
+    /// elsewhere. A declared constructor appears as `new`.
+    pub declared: Vec<String>,
+}
+
+impl ClassMembers {
+    /// Purpose: This function says whether a member is marked `@public`.
+    ///
+    /// Inputs:
+    /// - `name`: the member.
+    ///
+    /// Outputs: true when one of its decorators is `public`.
+    pub fn is_public(&self, name: &str) -> bool {
+        self.decorators.iter().any(|(m, ds)| m == name && ds.iter().any(|d| d == "public"))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Stmt {
     /// `let name = expr`
@@ -120,23 +145,35 @@ pub enum Stmt {
         span: Span,
     },
 
-    /// `struct Name(Parent, …) { field, … }`
+    /// `class Name(Parent, …) { field, … }`: the data half of a class. The
+    /// parser splits a class body into this, an `ExtendBlock` of the methods
+    /// written in it, and a top-level `FnDef` named `Name::new` for a
+    /// constructor, so the stages after it see the shapes they always did.
     StructDef {
         name: String,
         fields: Vec<StructFieldDef>,
-        /// Structs this one inherits, in written order. A name may be bare
+        /// Classes this one inherits, in written order. A name may be bare
         /// (`Animal`) or qualified for an imported one (`shapes.Animal`).
-        /// Empty for a struct that inherits nothing.
+        /// Empty for a class that inherits nothing.
         parents: Vec<String>,
+        /// What the class body says about its members beyond their definitions.
+        #[serde(default)]
+        members: ClassMembers,
         #[allow(dead_code)]
         span: Span,
     },
 
-    /// `extend TypeName { fn method(self, …) { … } … }`
+    /// A class's methods: the ones written in its body, or one written outside
+    /// it as `fn TypeName::method(…) { … }`. Each method's first parameter is
+    /// `self`, which the parser adds.
     ExtendBlock {
         type_name: String,
         methods: Vec<Stmt>,
         decorators: DecoratorList,
+        /// True for `fn TypeName::method(…)`, a definition outside the class
+        /// body, which the body must declare.
+        #[serde(default)]
+        outside: bool,
         #[allow(dead_code)]
         span: Span,
     },
