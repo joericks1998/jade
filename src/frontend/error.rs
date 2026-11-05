@@ -149,6 +149,10 @@ pub enum JadeError {
     /// String index is out of range.
     IndexOutOfBounds { index: i64, len: usize, span: Span },
 
+    /// `|x| expr` used a closure, which 2.0.1 removed. Named functions are
+    /// values, and the pipe passes a value as a function's first argument.
+    ClosureRemoved { span: Span },
+
     /// Jade 2.0's static backend reached a feature it cannot compile yet. It
     /// lands phase by phase (see `design/v2-static-values.md`), so this names
     /// the feature rather than calling the program wrong.
@@ -430,6 +434,11 @@ impl std::fmt::Display for JadeError {
                 f,
                 "[{}:{}] index {} out of bounds (length {})",
                 span.line, span.col, index, len
+            ),
+            JadeError::ClosureRemoved { span } => write!(
+                f,
+                "[{}:{}] closures were removed in 2.0.1; write a named function and pass it by name, or pipe a value into one: `5 |> scale(3)` calls `scale(5, 3)`",
+                span.line, span.col
             ),
             JadeError::NotYetStatic { what, span } => write!(
                 f,

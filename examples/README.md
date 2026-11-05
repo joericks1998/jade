@@ -17,6 +17,8 @@ Each runnable fixture also has a `<name>.expected` beside it: what it printed on
 
 v2 turned a set of runtime type errors into compile errors, since every value's type is known when the program is checked. The fixtures that raised and caught one of those kept their other cases, and each error moved into a `*_error.jde` beside its category: `arithmatic/bitwise_non_int_error`, `arrays/mixed_error`, `async/join_non_future_error`, `bytes/write_non_int_error`, `bytes/construct_types_error`, `collections/dict_contains_error`, `collections/int_len_error`, `collections/method_type_guard_error`, `collections/self_reference_error`, `dicts/dot_access_error`, `exceptions/catch_parent_reads_child_error`, `functions/value_arity_error`, `functions/return_paths_error` and `streams/yield_mixed_error`. Each names the rule it pins in its opening comment.
 
+2.0.1 removed closures and bound methods (`design/v2-classes.md`). `closures/closures.jde` shows what replaced them, named functions and the pipe, with the output it always had. `closures/closure_error` and `structs/method_value_error` pin the two refusals, and `structs/bound_method` is gone.
+
 A third rule applies to the whole tree: it stays formatted, and CI runs `jade fmt --check examples` to hold it there. That is as much a test of the formatter as of the fixtures. `jade fmt` is the one command nothing else here exercises, and by v1.1.34 it had rotted badly enough to reindent the inside of multi-line strings, changing what a program printed. Run `jade fmt examples` before committing a new fixture. Four spaces per level.
 
 ## What is in here

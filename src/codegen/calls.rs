@@ -40,7 +40,6 @@ pub(super) fn dest_reg(instr: &Instr) -> Option<Reg> {
         | LoadStr(d, _)
         | LoadNil(d)
         | LoadFn(d, _)
-        | MakeClosure(d, _)
         | GetLocal(d, _)
         | GetGlobal(d, _) => Some(*d),
         Move(d, _)
@@ -576,7 +575,7 @@ pub(super) fn resolve_user_calls(
                 reg_array_lit.insert(*d, elems.clone());
                 continue;
             }
-            Instr::LoadFn(d, idx) | Instr::MakeClosure(d, idx) => {
+            Instr::LoadFn(d, idx) => {
                 reg_global.remove(d);
                 reg_getfield.remove(d);
                 reg_getfield_module.remove(d);

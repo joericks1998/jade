@@ -6,7 +6,7 @@ sidebar_label: Changelog
 
 ## Unreleased
 
-*Jade 2.0 is in progress, and the first step removes the interpreter.* v2 makes Jade a pure ahead-of-time compiler, with model inference compiled into the program rather than handed to a provider at run time. These changes are on the `2.0.0` branch and are not released.
+*Jade 2.0 is in progress, and the first step removes the interpreter.* v2 makes Jade a pure ahead-of-time compiler, with model inference compiled into the program rather than handed to a provider at run time. These changes are on the `2.0.0` and `2.0.1` branches and are not released.
 
 - *`jade run` builds, then runs.* There is no bytecode VM any more. `jade run app.jde` compiles the file into a scratch directory, runs the binary with the same input and output, and exits with its status. Arguments for the program go after `--`, as in `jade run app.jde -- input.txt`. `jade test` builds and runs each test file the same way.
 - *The REPL is gone*, along with `jade run -v`, which printed the interpreter's globals.
@@ -14,6 +14,7 @@ sidebar_label: Changelog
 - *Every example now carries its expected output*, as `<name>.expected`, recorded from v1.4.8. With one engine there is nothing left to compare two against, so the build is held to what v1.4.8 printed instead.
 - *Every value has one static type.* The compiler checks each function once for every set of argument types it is called with, so `add(1, 2)` and `add("a", "b")` are both fine and `add(1, "b")` is a compile error at that call. Several things v1 allowed are compile errors now: a variable changing kind, an array or dict mixing kinds (`[1, "a"]`, `{"name": "jade", "version": 1}`), a function returning different kinds on different paths, reading a dict with a dot, and calling a method a value's type does not have. A value that may be `nil` is checked before use with `if x != nil`. Records whose fields differ in kind are structs, several kinds of record share a parent struct, and `json.parse` returns a JSON value read with brackets and converted with `str`, `int` and friends. The design is `design/v2-static-values.md`.
 - *A new backend compiles with no runtime library*, behind `jade build --backend=static` while it grows. It uses the static types to put an int in a register and a struct in a fixed layout, and it writes the support code a program needs into the program, so a binary links the C library and nothing else. It covers the core language so far: numbers, strings, arrays, dicts, structs, control flow, functions and printing, which is 52 of the examples. Anything else stops with an error naming what is missing. `--emit mir` shows the typed middle layer it compiles from. Two behaviors differ from v1: `==` between two arrays or two dicts compares their contents, where v1 refused it, and popping an empty array is an error, where v1 returned `nil`.
+- *Closures are gone* (2.0.1). `|x| x * 2` is refused with a message naming what to write instead: a named function, which can be passed and stored like any value, or a pipe, since `5 |> scale(3)` calls `scale(5, 3)`. A method used without calling it, such as `let bump = c.bump`, is refused too; call it where it is needed, or pass the object. The rest of 2.0.1 replaces structs with classes; the plan is `design/v2-classes.md`.
 
 ## v1.4.8
 

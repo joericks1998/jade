@@ -198,15 +198,16 @@ fn recursion_that_changes_its_own_types_is_refused() {
 }
 
 #[test]
-fn closures_take_their_types_from_their_use() {
-    let t = ok("fn apply(f, x) { return f(x) }\nlet sq = apply(|x| x * x, 6)\n");
+fn a_function_passed_as_a_value_takes_its_types_from_the_call() {
+    let t =
+        ok("fn apply(f, x) { return f(x) }\nfn square(x) { x * x }\nlet sq = apply(square, 6)\n");
     assert_eq!(global(&t, "sq"), Ty::Int);
 }
 
 #[test]
 fn map_and_filter_are_typed() {
     let t = ok(
-        "let xs = [1, 2, 3]\nlet ys = xs.map(|x| x * 2)\nlet zs = xs.filter(|x| x > 1)\nlet ss = xs.map(str)\n",
+        "fn double(x) { x * 2 }\nfn big(x) { x > 1 }\nlet xs = [1, 2, 3]\nlet ys = xs.map(double)\nlet zs = xs.filter(big)\nlet ss = xs.map(str)\n",
     );
     assert_eq!(global(&t, "ys"), Ty::Array(Box::new(Ty::Int)));
     assert_eq!(global(&t, "zs"), Ty::Array(Box::new(Ty::Int)));
@@ -290,4 +291,13 @@ fn an_early_exit_on_nil_narrows_the_rest_of_the_block() {
 fn a_trailing_expression_is_the_return_value() {
     let t = ok("fn double(x) {\n    x * 2\n}\nlet d = double(5) + 1\n");
     assert_eq!(global(&t, "d"), Ty::Int);
+}
+
+#[test]
+fn a_method_used_without_a_call_is_refused() {
+    rejects(
+        "struct C { n }\nextend C {\n    fn get(self) { return self.n }\n}\nlet c = C { n: 1 }\nlet g = c.get\n",
+        "a method is called, not passed",
+    );
+    rejects("let s = \"a\"\nlet u = s.upper\n", "a method is called, not passed");
 }

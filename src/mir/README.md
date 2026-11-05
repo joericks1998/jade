@@ -52,7 +52,7 @@ Releasing a cleared place does nothing. That is what lets a temporary be dropped
 
 ## Gotchas
 
-*Anything a later phase adds stops here.* A closure, `try`, a task, a stream, a prompt or a std package other than `array` returns `JadeError::NotYetStatic`, naming the feature. Each phase of `design/v2-static-values.md` removes some of these errors.
+*Anything a later phase adds stops here.* A function used as a value, `try`, a task, a stream, a prompt or a std package other than `array` returns `JadeError::NotYetStatic`, naming the feature. Each phase of `design/v2-static-values.md` removes some of these errors.
 
 *Scopes must mirror the checker's.* A top-level `let` in `main` is a global, a `let` inside a block is a local, and the checker decides which slot a variable gets by the same rule. If the two walks disagree about scoping, a variable's slot lookup fails with an internal error.
 

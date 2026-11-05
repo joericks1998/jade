@@ -190,12 +190,6 @@ impl TypeContext {
         }
     }
 
-    /// Returns `true` if `name` is defined in the global (outermost) scope only.
-    /// Used by the capture analysis to skip builtins and top-level functions.
-    fn is_in_global_scope(&self, name: &str) -> bool {
-        self.scopes.first().map(|s| s.contains_key(name)).unwrap_or(false)
-    }
-
     /// Look up `name` from innermost scope outward. Returns `None` if undefined.
     fn get(&self, name: &str) -> Option<JadeType> {
         for scope in self.scopes.iter().rev() {
@@ -615,7 +609,6 @@ fn fill_in_expr(
                 fill_in_expr(v, defs, ctx)?;
             }
         }
-        TExprKind::Closure { body, .. } => fill_in_stmts(body, defs, ctx)?,
         TExprKind::PromptDeref { expr, .. } => fill_in_expr(expr, defs, ctx)?,
         TExprKind::StructLiteral { type_name, base, fields } => {
             if let Some(b) = base.as_mut() {
@@ -1878,35 +1871,6 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
             })
         }
 
-        // ── Closures ──────────────────────────────────────────────────────────
-        Expr::Closure { params, body, span } => {
-            ctx.push_scope();
-            for param in params {
-                ctx.define(param.clone(), JadeType::Unknown);
-            }
-            let tbody = check_stmts(body, ctx)?;
-            // Collect free variables BEFORE popping scope so ctx.get() still resolves them.
-            let captures = collect_captures(&tbody, params, ctx);
-            ctx.pop_scope();
-            // Infer the return type from the body (like named fns) so callers know
-            // a closure returns e.g. a Str — without it the AOT backend treats the
-            // uniform i64 result as an integer and prints a string as a pointer.
-            if infer_yield_type(&tbody).is_some()
-                && let Some(rspan) = body_returns_a_value(&tbody)
-            {
-                return Err(JadeError::YieldAndReturn { span: rspan });
-            }
-            let ret_ty = infer_return_type(&tbody);
-            Ok(TExpr {
-                kind: TExprKind::Closure { params: params.clone(), body: tbody, captures },
-                ty: JadeType::Fn {
-                    params: params.iter().map(|_| JadeType::Unknown).collect(),
-                    ret: Box::new(ret_ty),
-                },
-                span: *span,
-            })
-        }
-
         // ── Async await ───────────────────────────────────────────────────────
         Expr::Await { expr, span } => {
             let texpr = infer_expr(expr, ctx)?;
@@ -2475,220 +2439,6 @@ fn join_types(mut types: Vec<JadeType>) -> JadeType {
     if types.iter().all(|t| *t == first) { first } else { JadeType::Unknown }
 }
 
-// ── Capture analysis ─────────────────────────────────────────────────────────
-
-/// Collect variables captured from enclosing scopes by the closure whose typed
-/// body is `tbody`.  A variable is captured when it is:
-///   1. referenced inside the body (as `TExprKind::Identifier`), AND
-///   2. not a parameter of this closure, AND
-///   3. not bound by a `let` or `for` inside the closure body, AND
-///   4. not in the global scope (builtins, top-level functions).
-fn collect_captures(
-    tbody: &[TStmt],
-    params: &[String],
-    ctx: &TypeContext,
-) -> Vec<(String, JadeType)> {
-    let mut locals: HashSet<String> = params.iter().cloned().collect();
-    let mut captures: Vec<(String, JadeType)> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
-    collect_captures_in_stmts(tbody, &mut locals, &mut captures, &mut seen, ctx);
-    captures
-}
-
-fn collect_captures_in_stmts(
-    stmts: &[TStmt],
-    locals: &mut HashSet<String>,
-    captures: &mut Vec<(String, JadeType)>,
-    seen: &mut HashSet<String>,
-    ctx: &TypeContext,
-) {
-    for stmt in stmts {
-        match stmt {
-            TStmt::Let { name, value, .. } => {
-                collect_captures_in_expr(value, locals, captures, seen, ctx);
-                locals.insert(name.clone());
-            }
-            TStmt::Yield { value, .. } => {
-                collect_captures_in_expr(value, locals, captures, seen, ctx);
-            }
-            TStmt::Assign { value, .. } => {
-                collect_captures_in_expr(value, locals, captures, seen, ctx);
-            }
-            TStmt::Return { value, .. } => {
-                if let Some(e) = value { collect_captures_in_expr(e, locals, captures, seen, ctx); }
-            }
-            TStmt::Expr(e) => collect_captures_in_expr(e, locals, captures, seen, ctx),
-            TStmt::If { condition, then_body, else_body, .. } => {
-                collect_captures_in_expr(condition, locals, captures, seen, ctx);
-                let mut tl = locals.clone();
-                collect_captures_in_stmts(then_body, &mut tl, captures, seen, ctx);
-                if let Some(eb) = else_body {
-                    let mut el = locals.clone();
-                    collect_captures_in_stmts(eb, &mut el, captures, seen, ctx);
-                }
-            }
-            TStmt::While { condition, body, .. } => {
-                collect_captures_in_expr(condition, locals, captures, seen, ctx);
-                let mut bl = locals.clone();
-                collect_captures_in_stmts(body, &mut bl, captures, seen, ctx);
-            }
-            TStmt::For { var, iterable, body, .. } => {
-                collect_captures_in_expr(iterable, locals, captures, seen, ctx);
-                let mut bl = locals.clone();
-                bl.insert(var.clone());
-                collect_captures_in_stmts(body, &mut bl, captures, seen, ctx);
-            }
-            TStmt::FnDef { name, .. } | TStmt::AsyncFnDef { name, .. } => {
-                // Nested fn defs are separate scopes; just mark the name as locally bound.
-                locals.insert(name.clone());
-            }
-            TStmt::FieldAssign { object, value, .. } => {
-                maybe_capture(object, locals, captures, seen, ctx);
-                collect_captures_in_expr(value, locals, captures, seen, ctx);
-            }
-            TStmt::IndexAssign { name, index, value, .. } => {
-                maybe_capture(name, locals, captures, seen, ctx);
-                collect_captures_in_expr(index, locals, captures, seen, ctx);
-                collect_captures_in_expr(value, locals, captures, seen, ctx);
-            }
-            TStmt::Raise { value, .. } => {
-                collect_captures_in_expr(value, locals, captures, seen, ctx);
-            }
-            TStmt::TryCatch { body, arms, .. } => {
-                let mut bl = locals.clone();
-                collect_captures_in_stmts(body, &mut bl, captures, seen, ctx);
-                for arm in arms {
-                    let mut al = locals.clone();
-                    al.insert(arm.binding.clone());
-                    collect_captures_in_stmts(&arm.body, &mut al, captures, seen, ctx);
-                }
-            }
-            TStmt::PromptDecl { name, body, .. } => {
-                collect_captures_in_expr(body, locals, captures, seen, ctx);
-                locals.insert(name.clone());
-            }
-            TStmt::StructDef { .. }
-            | TStmt::ExtendBlock { .. } | TStmt::Use { .. } | TStmt::FromUse { .. }
-            // Control flow, capturing nothing.
-            | TStmt::Break { .. } | TStmt::Continue { .. } => {}
-        }
-    }
-}
-
-fn collect_captures_in_expr(
-    expr: &TExpr,
-    locals: &mut HashSet<String>,
-    captures: &mut Vec<(String, JadeType)>,
-    seen: &mut HashSet<String>,
-    ctx: &TypeContext,
-) {
-    match &expr.kind {
-        TExprKind::Identifier(name) => maybe_capture(name, locals, captures, seen, ctx),
-        TExprKind::BinOp { left, right, .. } => {
-            collect_captures_in_expr(left, locals, captures, seen, ctx);
-            collect_captures_in_expr(right, locals, captures, seen, ctx);
-        }
-        TExprKind::UnaryOp { operand, .. } => {
-            collect_captures_in_expr(operand, locals, captures, seen, ctx)
-        }
-        TExprKind::Call { callee, args, kwargs } => {
-            collect_captures_in_expr(callee, locals, captures, seen, ctx);
-            for a in args {
-                collect_captures_in_expr(a, locals, captures, seen, ctx);
-            }
-            for (_, v) in kwargs {
-                collect_captures_in_expr(v, locals, captures, seen, ctx);
-            }
-        }
-        TExprKind::Array { elements } => {
-            for e in elements {
-                collect_captures_in_expr(e, locals, captures, seen, ctx);
-            }
-        }
-        TExprKind::Index { object, index } => {
-            collect_captures_in_expr(object, locals, captures, seen, ctx);
-            collect_captures_in_expr(index, locals, captures, seen, ctx);
-        }
-        TExprKind::FieldAccess { object, .. } => {
-            collect_captures_in_expr(object, locals, captures, seen, ctx)
-        }
-        TExprKind::StructLiteral { fields, .. } => {
-            for (_, e, _) in fields {
-                collect_captures_in_expr(e, locals, captures, seen, ctx);
-            }
-        }
-        TExprKind::FStr { parts } => {
-            for p in parts {
-                if let TFStrPart::Expr(e) = p {
-                    collect_captures_in_expr(e, locals, captures, seen, ctx);
-                }
-            }
-        }
-        TExprKind::Dict { entries } => {
-            for (k, v) in entries {
-                collect_captures_in_expr(k, locals, captures, seen, ctx);
-                collect_captures_in_expr(v, locals, captures, seen, ctx);
-            }
-        }
-        TExprKind::Await { expr } => collect_captures_in_expr(expr, locals, captures, seen, ctx),
-        TExprKind::PromptDeref { expr, grammar_expr, .. } => {
-            collect_captures_in_expr(expr, locals, captures, seen, ctx);
-            if let Some(g) = grammar_expr {
-                collect_captures_in_expr(g, locals, captures, seen, ctx);
-            }
-        }
-        TExprKind::PromptLiteral { body } => {
-            collect_captures_in_expr(body, locals, captures, seen, ctx)
-        }
-        TExprKind::Closure { params: inner_params, captures: inner_caps, .. } => {
-            // The inner closure already resolved its own captures.
-            // Propagate any that come from OUR enclosing scope.
-            for (name, ty) in inner_caps {
-                if !inner_params.contains(name) {
-                    maybe_capture_typed(name, ty, locals, captures, seen, ctx);
-                }
-            }
-        }
-        // Literals carry no identifiers.
-        TExprKind::Integer(_) | TExprKind::Float(_) | TExprKind::Bool(_) | TExprKind::Str(_) => {}
-    }
-}
-
-/// Add `name` to captures if it is a free variable in this closure scope.
-fn maybe_capture(
-    name: &str,
-    locals: &HashSet<String>,
-    captures: &mut Vec<(String, JadeType)>,
-    seen: &mut HashSet<String>,
-    ctx: &TypeContext,
-) {
-    if locals.contains(name) || seen.contains(name) || ctx.is_in_global_scope(name) {
-        return;
-    }
-    if let Some(ty) = ctx.get(name) {
-        captures.push((name.to_string(), ty));
-        seen.insert(name.to_string());
-    }
-}
-
-/// Same as `maybe_capture` but uses a known type (from an already-resolved inner capture).
-fn maybe_capture_typed(
-    name: &str,
-    ty: &JadeType,
-    locals: &HashSet<String>,
-    captures: &mut Vec<(String, JadeType)>,
-    seen: &mut HashSet<String>,
-    ctx: &TypeContext,
-) {
-    if locals.contains(name) || seen.contains(name) || ctx.is_in_global_scope(name) {
-        return;
-    }
-    captures.push((name.to_string(), ty.clone()));
-    seen.insert(name.to_string());
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
 fn require_bool_or_unknown(ty: &JadeType, span: Span) -> Result<()> {
     if *ty != JadeType::Bool && *ty != JadeType::Unknown {
         Err(JadeError::TypeMismatch { expected: "bool".to_string(), got: jade_type_name(ty), span })
@@ -2834,7 +2584,6 @@ fn expr_span(e: &Expr) -> Span {
         | Expr::PromptLiteral { span, .. }
         | Expr::PromptDeref { span, .. }
         | Expr::Dict { span, .. }
-        | Expr::Closure { span, .. }
         | Expr::Await { span, .. }
         | Expr::Pipe { span, .. } => *span,
     }

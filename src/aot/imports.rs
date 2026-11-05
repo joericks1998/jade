@@ -1032,24 +1032,6 @@ impl Renamer {
                     self.rename_expr(v);
                 }
             }
-            TExprKind::Closure { params, body, captures } => {
-                // Captures bind enclosing locals (kept bare); only their types may
-                // reference mangled structs.
-                for (_, cty) in captures.iter_mut() {
-                    self.rename_type(cty);
-                }
-                self.push_scope();
-                for p in params.iter() {
-                    self.bind_local(p);
-                }
-                for (cn, _) in captures.iter() {
-                    self.bind_local(cn);
-                }
-                for st in body.iter_mut() {
-                    self.rename_stmt(st, false);
-                }
-                self.pop_scope();
-            }
             TExprKind::Await { expr } => self.rename_expr(expr),
             TExprKind::PromptLiteral { body } => self.rename_expr(body),
             TExprKind::Integer(_)
@@ -1168,8 +1150,6 @@ impl Renamer {
                 self.rename_ast_expr(value);
                 self.rename_ast_expr(stage);
             }
-            // Known gap: closure bodies inside a default are not walked (see module doc).
-            Expr::Closure { .. } => {}
             Expr::Integer { .. } | Expr::Float { .. } | Expr::Bool { .. } | Expr::Str { .. } => {}
         }
     }

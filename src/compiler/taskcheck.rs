@@ -342,7 +342,7 @@ fn step(
                 t.reg_fn.insert(*d, u);
             }
         }
-        LoadFn(d, idx) | MakeClosure(d, idx) => {
+        LoadFn(d, idx) => {
             clear(t, d);
             t.regs.remove(d);
             // Remember *which* function, so calling it through the register
@@ -769,7 +769,7 @@ pub fn check(
                         shared_regs.insert(*d);
                     }
                 }
-                Instr::LoadFn(d, idx) | Instr::MakeClosure(d, idx) => {
+                Instr::LoadFn(d, idx) => {
                     match chunk.fn_defs.get(*idx).and_then(|f| table.idx_of(f)) {
                         Some(u) => {
                             reg_fn.insert(*d, u);
@@ -863,10 +863,10 @@ mod tests {
 
     /// A callback reaches a task as a value, so the task's own body says
     /// nothing about it: `async fn run(f) { f() }` calls a parameter, which
-    /// resolves to no definition at all. The closure is still a register with a
+    /// resolves to no definition at all. The function is still a register with a
     /// known body at the *spawn*, which is where this is caught.
     #[test]
-    fn a_closure_that_mutates_shared_state_is_rejected_at_the_spawn() {
+    fn a_function_value_that_mutates_shared_state_is_rejected_at_the_spawn() {
         let e = rejection(
             r#"
             async fn run(f) {
@@ -874,16 +874,16 @@ mod tests {
                 return 0
             }
             let shared = [1]
-            let grow = || shared.push(9)
+            fn grow() { shared.push(9) }
             await run(grow)
             "#,
         );
         assert!(e.contains("shared"), "should name the sharing: {e}");
     }
 
-    /// The closure above is bound to a global named for the *variable*, not for
-    /// any definition, so resolving it by definition name finds nothing. What
-    /// the global was last assigned is what answers it.
+    /// A function value copied into another global is bound to a name that is
+    /// not any definition's, so resolving it by definition name finds nothing.
+    /// What the global was last assigned is what answers it.
     #[test]
     fn a_function_value_read_back_from_a_global_still_resolves() {
         let e = rejection(
@@ -893,7 +893,7 @@ mod tests {
                 return 0
             }
             let shared = { "n": 1 }
-            let bump = || shared.set("n", 2)
+            fn bump() { shared["n"] = 2 }
             let alias = bump
             await run(alias)
             "#,

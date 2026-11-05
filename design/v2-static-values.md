@@ -289,7 +289,7 @@ Building it settled five details:
 - *A parameter is owned by the function*, which retains it on entry. That keeps a dict parameter a copy under copy-on-write.
 - *Integer literals are still limited to 2^62* by the lexer, because the tagged backend cannot hold more. The limit lifts at the switchover in phase 6.
 
-Phase 3, exceptions, function values and closures, parent-struct joins and streams, is next.
+Phase 3, exceptions, function values and closures, parent-struct joins and streams, is next. `design/v2-classes.md` removes closures and bound methods, so phase 3's function values are plain functions.
 
 ## Open questions
 

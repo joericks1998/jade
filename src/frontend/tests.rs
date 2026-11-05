@@ -611,6 +611,18 @@ mod parser {
         parse(tokens).unwrap_err()
     }
 
+    #[test]
+    fn a_closure_is_refused_with_its_replacement() {
+        for src in ["let f = |x| x * 2", "let g = || 1"] {
+            assert!(
+                matches!(parse_src_err(src), JadeError::ClosureRemoved { .. }),
+                "{src} should be refused as a closure"
+            );
+        }
+        // `||` between two expressions is still logical or.
+        parse_src("let x = true || false");
+    }
+
     // ── existing operations ──────────────────────────────────────────────────
 
     #[test]

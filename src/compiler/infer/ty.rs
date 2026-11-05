@@ -70,12 +70,8 @@ pub struct FnTy {
 pub enum FuncRef {
     /// A top-level `fn` or `async fn`, by its global name.
     Named(String),
-    /// A closure, by the address of its syntax node.
-    Closure(usize),
     /// A builtin such as `len` or `str`.
     Builtin(String),
-    /// A method with its receiver already bound: `t.read`.
-    Method { recv: Box<Ty>, name: String },
 }
 
 impl Ty {
@@ -219,9 +215,6 @@ impl Store {
                 ret: self.resolve(&f.ret),
                 is_async: f.is_async,
             })),
-            Ty::Func(FuncRef::Method { recv, name }) => {
-                Ty::Func(FuncRef::Method { recv: Box::new(self.resolve(&recv)), name })
-            }
             other => other,
         }
     }
@@ -536,7 +529,6 @@ fn contains_var(t: &Ty) -> bool {
         Ty::Var(_) => true,
         Ty::Opt(a) | Ty::Array(a) | Ty::Map(a) | Ty::Future(a) | Ty::Stream(a) => contains_var(a),
         Ty::Fn(f) => f.params.iter().any(contains_var) || contains_var(&f.ret),
-        Ty::Func(FuncRef::Method { recv, .. }) => contains_var(recv),
         _ => false,
     }
 }
@@ -567,9 +559,7 @@ impl fmt::Display for Ty {
                 write!(f, "{a}fn({}) -> {}", ps.join(", "), ft.ret)
             }
             Ty::Func(FuncRef::Named(n)) => write!(f, "fn {}", display_name(n)),
-            Ty::Func(FuncRef::Closure(_)) => write!(f, "closure"),
             Ty::Func(FuncRef::Builtin(n)) => write!(f, "builtin {n}"),
-            Ty::Func(FuncRef::Method { name, .. }) => write!(f, "method {name}"),
             Ty::Future(t) => write!(f, "future of {t}"),
             Ty::Stream(t) => write!(f, "stream of {t}"),
             Ty::Prompt => write!(f, "prompt"),

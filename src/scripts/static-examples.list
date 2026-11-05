@@ -18,6 +18,7 @@ examples/assignment/comparison/comparison.jde
 examples/assignment/math_variable_assignment/math_variable_assignment.jde
 examples/async/imported/lib/worker.jde
 examples/async/shadowed_module/bytes.jde
+examples/closures/closures.jde
 examples/collections/container_semantics/container_semantics.jde
 examples/collections/edge_cases/edge_cases.jde
 examples/collections/method_type_guard/method_type_guard.jde

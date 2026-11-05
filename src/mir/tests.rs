@@ -106,7 +106,6 @@ fn a_for_loop_over_a_string_walks_its_characters() {
 #[test]
 fn features_from_later_phases_say_so() {
     for (src, what) in [
-        ("let f = |x| x + 1\nprint(f(1))\n", "closures"),
         ("try { print(1) } catch e { print(2) }\n", "try and catch"),
         ("async fn f() { return 1 }\nprint(await f())\n", "await"),
         ("fn g(x) { yield x }\nlet s = g(1)\nprint(s[0])\n", "stream"),

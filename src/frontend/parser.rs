@@ -502,7 +502,7 @@ impl Parser {
         // omission rather than a decision, since the body below increments
         // `fn_depth` exactly as the plain form does. A nested `async fn` used to
         // parse and run, and then hand the user two surprises: it cannot see the
-        // enclosing function's parameters (a closure captures top-level globals
+        // enclosing function's parameters (a nested function sees top-level globals
         // only), so it failed at *run* time with `undefined variable`; and a
         // decorator on it was dropped without a word, because decorators are
         // applied at emit time only to a global. One rule for both forms turns
@@ -1149,7 +1149,6 @@ impl Parser {
             Expr::PromptLiteral { span, .. } => *span,
             Expr::PromptDeref { span, .. } => *span,
             Expr::Dict { span, .. } => *span,
-            Expr::Closure { span, .. } => *span,
             Expr::Await { span, .. } => *span,
             Expr::Pipe { span, .. } => *span,
         }
@@ -1808,32 +1807,10 @@ impl Parser {
                     span,
                 })
             }
-            // ── Closures: `|x, y| expr` or `|x, y| { body }` ────────────────
-            TokenKind::Pipe => {
-                let span = token.span;
-                self.advance(); // consume first `|`
-                let mut params = Vec::new();
-                // Parse parameters until the closing `|`
-                while self.peek().kind != TokenKind::Pipe {
-                    if self.peek().kind == TokenKind::Eof {
-                        return Err(JadeError::UnexpectedEof { span: self.peek().span });
-                    }
-                    let p = self.expect_ident("closure parameter")?;
-                    params.push(p);
-                    if self.peek().kind == TokenKind::Comma {
-                        self.advance();
-                    }
-                }
-                self.expect(&TokenKind::Pipe)?; // consume closing `|`
-                let body = self.parse_closure_body(span)?;
-                Ok(Expr::Closure { params, body, span })
-            }
-            // ── Empty-param closure: `|| expr` or `|| { body }` ─────────────
-            TokenKind::PipePipe => {
-                let span = token.span;
-                self.advance(); // consume `||`
-                let body = self.parse_closure_body(span)?;
-                Ok(Expr::Closure { params: Vec::new(), body, span })
+            // Closures were removed in 2.0.1; say so rather than "expected
+            // expression", which would explain nothing to someone porting code.
+            TokenKind::Pipe | TokenKind::PipePipe => {
+                Err(JadeError::ClosureRemoved { span: token.span })
             }
             // ── Prompt literal as expression: `prompt <expr>` ────────────────
             // Allows `let p = prompt "text"` inside function bodies, in addition
@@ -1861,21 +1838,5 @@ impl Parser {
                 span: token.span,
             }),
         }
-    }
-
-    /// Parse the body of a closure: `{ stmts }` or a single expression (implicit return).
-    fn parse_closure_body(&mut self, span: Span) -> Result<Vec<Stmt>> {
-        self.fn_depth += 1;
-        let outer_loops = std::mem::take(&mut self.loop_depth);
-        let body = if self.peek().kind == TokenKind::LBrace {
-            self.parse_block()?
-        } else {
-            // Single expression: wrap as implicit return so eval_block returns it.
-            let expr = self.parse_pipe()?;
-            vec![Stmt::Return { value: Some(expr), span }]
-        };
-        self.loop_depth = outer_loops;
-        self.fn_depth -= 1;
-        Ok(body)
     }
 }

@@ -280,9 +280,6 @@ pub enum Expr {
     /// A dictionary literal, e.g. `{"key": 1, "other": 2}` or `{}`
     Dict { entries: Vec<(Expr, Expr)>, span: Span },
 
-    /// An anonymous function (closure), e.g. `|x| x * 2` or `|x, y| { x + y }`
-    Closure { params: Vec<String>, body: Vec<Stmt>, span: Span },
-
     /// `await expr`
     Await { expr: Box<Expr>, span: Span },
 

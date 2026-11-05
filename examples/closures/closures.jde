@@ -1,22 +1,27 @@
-// Basic inline closure
-let double = |x| x * 2
+// What closures did, written without them.
+//
+// Closures were removed in 2.0.1. A named function is a value that can be
+// passed and stored, and the pipe passes a value as a function's first
+// argument, so `5 |> scale(3)` is `scale(5, 3)`. State a closure would have
+// captured becomes an argument. closure_error.jde shows the refusal.
+
+// An inline function becomes a named one.
+fn double(x) { x * 2 }
 print(double(5))
 
-// Multi-param closure
-let add = |x, y| x + y
+fn add(x, y) { x + y }
 print(add(3, 4))
 
-// Empty-param closure
-let greet = || "hello"
+fn greet() { "hello" }
 print(greet())
 
-// Closure capturing outer variable
+// A captured variable becomes an argument, and the pipe supplies the value.
+fn scale(x, by) { x * by }
 let multiplier = 3
-let triple = |x| x * multiplier
-print(triple(5))
+print(5 |> scale(multiplier))
 
-// Block-body closure
-let abs_val = |x| {
+// A block body is an ordinary function body.
+fn abs_val(x) {
     if x < 0 {
         return -x
     }

@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 use super::ty::{FuncRef, Ty};
-use super::{Checker, ClosureInfo, FnKey, InstKey, Target, addr, is_nil_literal};
+use super::{Checker, FnKey, InstKey, Target, addr, is_nil_literal};
 use crate::compiler::tir::{TExpr, TExprKind, TFStrPart, TStmt};
 use crate::frontend::ast::{BinOpKind, UnaryOpKind};
 use crate::frontend::error::Span;
@@ -61,13 +61,6 @@ impl<'a> Checker<'a> {
             FnKey::Method(t, n) => {
                 let info = self.methods[&(t.clone(), n.clone())].clone();
                 for ((p, _), t) in info.params.iter().zip(&params) {
-                    frame.scopes[0].insert(p.clone(), t.clone());
-                }
-                info.body
-            }
-            FnKey::Closure(a) => {
-                let info = self.closures[a].clone();
-                for (p, t) in info.params.iter().zip(&params) {
                     frame.scopes[0].insert(p.clone(), t.clone());
                 }
                 info.body
@@ -681,12 +674,6 @@ impl<'a> Checker<'a> {
                     Some(t) => self.named_type(t, span),
                 }
             }
-            TExprKind::Closure { params, body, .. } => {
-                let a = addr(e);
-                self.closures.entry(a).or_insert(ClosureInfo { params, body });
-                self.store.arities.insert(FuncRef::Closure(a), (params.len(), false));
-                Ty::Func(FuncRef::Closure(a))
-            }
             TExprKind::Await { expr } => {
                 let t = self.check_expr(expr, f);
                 match self.store.shallow(&t) {
@@ -1044,25 +1031,6 @@ impl<'a> Checker<'a> {
                 }
                 Some(self.instance_result(&k))
             }
-            FuncRef::Closure(a) => {
-                let info = self.closures.get(a)?.clone();
-                if info.params.len() != tys.len() {
-                    self.report(
-                        span,
-                        format!(
-                            "this closure takes {} arguments, got {}",
-                            info.params.len(),
-                            tys.len()
-                        ),
-                    );
-                    return None;
-                }
-                let k = self.instantiate(FnKey::Closure(*a), tys, span)?;
-                if let Some((f, node)) = site {
-                    self.record_target(f, node, Target::Instance(k.clone()));
-                }
-                Some(self.instance_result(&k))
-            }
             FuncRef::Builtin(n) => {
                 let (f, node) = match site {
                     Some(s) => s,
@@ -1070,13 +1038,6 @@ impl<'a> Checker<'a> {
                 };
                 Some(self.builtin_call(n, tys, &[], span, f, node))
             }
-            FuncRef::Method { recv, name } => match site {
-                Some((f, node)) => Some(self.method_call(recv, name, tys, &[], span, f, node)),
-                None => {
-                    let recv = (**recv).clone();
-                    self.method_result_detached(&recv, name, tys, span)
-                }
-            },
         }
     }
 
@@ -1431,10 +1392,8 @@ impl<'a> Checker<'a> {
                     return slot;
                 }
                 if self.find_method(&sn, field).is_some() {
-                    return Ty::Func(FuncRef::Method {
-                        recv: Box::new(Ty::Struct(sn)),
-                        name: field.to_string(),
-                    });
+                    self.report(span, method_value_message(field));
+                    return self.slot(f, node);
                 }
                 self.report(
                     span,
@@ -1477,10 +1436,8 @@ impl<'a> Checker<'a> {
             other => {
                 let other = self.store.resolve(&other);
                 if super::builtins::primitive_has_method(&other, field) {
-                    return Ty::Func(FuncRef::Method {
-                        recv: Box::new(other),
-                        name: field.to_string(),
-                    });
+                    self.report(span, method_value_message(field));
+                    return self.slot(f, node);
                 }
                 self.report(span, format!("{other} has no field '{field}'"));
                 self.slot(f, node)
@@ -1672,33 +1629,6 @@ impl<'a> Checker<'a> {
                 super::builtins::primitive_method(self, &other, name, tys, args, span, f, node)
             }
         }
-    }
-
-    /// Purpose: This function types a method value called from a joined
-    /// function type, outside any body.
-    ///
-    /// Inputs:
-    /// - `recv`: the bound receiver's type.
-    /// - `name`: the method.
-    /// - `tys`: the argument types.
-    /// - `span`: where.
-    ///
-    /// Outputs: the call's type, or `None`.
-    fn method_result_detached(
-        &mut self,
-        recv: &Ty,
-        name: &str,
-        tys: Vec<Ty>,
-        span: Span,
-    ) -> Option<Ty> {
-        let Ty::Struct(sn) = self.store.shallow(recv) else { return None };
-        let owner = self.find_method(&sn, name)?;
-        let info = self.methods[&(owner.clone(), name.to_string())].clone();
-        let mut all = vec![Ty::Struct(sn)];
-        all.extend(tys);
-        let all = self.fill_defaults(&info.name, info.params, all, span)?;
-        let k = self.instantiate(FnKey::Method(owner, name.to_string()), all, span)?;
-        Some(self.instance_result(&k))
     }
 
     /// Purpose: This function types `join(f1, f2, …)`, which awaits several futures.
@@ -1927,4 +1857,17 @@ fn mismatch_hint(a: &Ty, b: &Ty) -> String {
         return "; convert one with float(x) or int(x)".to_string();
     }
     String::new()
+}
+
+/// Purpose: This function words the refusal of a method used as a value.
+///
+/// Inputs:
+/// - `name`: the method.
+///
+/// Outputs: the message, naming what to write instead.
+fn method_value_message(name: &str) -> String {
+    format!(
+        "a method is called, not passed: write `x.{name}(…)` where it is needed, or pass `x` to \
+         the function that calls it"
+    )
 }

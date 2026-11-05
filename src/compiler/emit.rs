@@ -165,16 +165,6 @@ struct EmitCtx {
     struct_parents: HashMap<String, Vec<String>>,
     struct_ancestors: HashMap<String, Vec<String>>,
     extend_methods: HashMap<String, HashMap<String, Arc<CompiledFn>>>,
-    /// Counter for generating unique closure names (`__closure_0__`, etc.).
-    next_closure_id: usize,
-}
-
-impl EmitCtx {
-    fn next_closure_name(&mut self) -> String {
-        let id = self.next_closure_id;
-        self.next_closure_id += 1;
-        format!("__closure_{}__", id)
-    }
 }
 
 /// Per-chunk compilation state.
@@ -357,7 +347,6 @@ pub fn emit(program: TProgram) -> Result<CompiledProgram> {
         struct_parents: HashMap::new(),
         struct_ancestors: HashMap::new(),
         extend_methods: HashMap::new(),
-        next_closure_id: 0,
     };
     for stmt in &program.stmts {
         if let TStmt::StructDef { name, fields, parents, .. } = stmt {
@@ -1117,18 +1106,6 @@ fn emit_expr(expr: &TExpr, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<Reg> {
             let grammar_reg = grammar_expr.as_ref().map(|g| emit_expr(g, em, ctx)).transpose()?;
             let dest = em.alloc_reg();
             em.chunk.emit(Instr::PromptDeref(dest, src, output_type.clone(), grammar_reg), span);
-            Ok(dest)
-        }
-
-        TExprKind::Closure { params, body, .. } => {
-            let name = ctx.next_closure_name();
-            let owned: Vec<(String, Option<TExpr>)> =
-                params.iter().map(|p| (p.clone(), None)).collect();
-            let compiled = emit_fn(&name, owned, body.clone(), span, false, ctx)?;
-            let rc = Arc::new(compiled);
-            let idx = em.chunk.intern_fn(Arc::clone(&rc));
-            let dest = em.alloc_reg();
-            em.chunk.emit(Instr::MakeClosure(dest, idx), span);
             Ok(dest)
         }
 

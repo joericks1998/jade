@@ -275,6 +275,10 @@ Class values are references, so copying one copies the reference. Jade needs no 
 
 Then phase 3 of `design/v2-static-values.md` continues, smaller than before: exceptions, function values as plain pointers, `map` and `filter`, and streams.
 
+## Progress
+
+*Step 1 is done* (2026-11-05): closures and bound methods are removed. The parser refuses `|x| …` with `JadeError::ClosureRemoved`, and the checker refuses a method used without a call. `closures/closures.jde` is written with named functions and pipes and prints what it always did, `structs/bound_method` is gone, and `closures/closure_error` and `structs/method_value_error` pin the refusals. The task-safety tests that used closures now hand a task a named function and still catch the race. `CACHE_FORMAT_VERSION` is 14.
+
 ## Open questions
 
 None. Decisions 5, 7, 8, 9 and 11 to 14 are recommendations Joe has not overruled, and the constructor's shape in decision 4 is one.

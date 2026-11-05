@@ -1418,9 +1418,8 @@ pub(super) fn lower_instr<'ctx>(
 
         // ── Function values (first-class: boxed function pointers) ────────
         // Materialize `jf_<uid>` as a callable value (used by escapes / indirect
-        // calls; a devirtualized direct call ignores it). A closure is just a
-        // plain function here — it captures only globals, read via GetGlobal.
-        LoadFn(d, idx) | MakeClosure(d, idx) => {
+        // calls; a devirtualized direct call ignores it).
+        LoadFn(d, idx) => {
             match fnctx.uid_of(fn_defs, *idx) {
                 Some(uid) => {
                     // The box points at the indirect entry, which checks arity

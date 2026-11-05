@@ -53,7 +53,9 @@ In v1.2.0, `|>` became an ordinary `Expr::Pipe` node, and `compiler::type_infer:
 
 *Structural rules that need a counter are enforced here, not in the type checker.* `return` and `yield` need an enclosing function. `break` and `continue` need an enclosing loop. Two depth counters on the parser settle all four: `fn_depth` and `loop_depth`. The answer depends only on where the statement sits, and by the time type inference runs, the nesting has been flattened into a tree that no longer records it.
 
-`loop_depth` is *reset* across a function boundary rather than merely saved, in all three places a body is parsed: `fn`, `async fn`, and a closure. A loop outside the enclosing function is not one its body can break out of, because leaving it would mean crossing a call frame, and `return` is the statement for that. Getting this wrong fails silently. The parse succeeds, and the emitter produces a jump to an address in another chunk.
+*Closures were removed in 2.0.1.* A `|` or `||` where an expression starts is refused with `JadeError::ClosureRemoved`, which names the replacement, rather than with "expected expression". `||` between two expressions is still logical or.
+
+`loop_depth` is *reset* across a function boundary rather than merely saved, in both places a body is parsed: `fn` and `async fn`. A loop outside the enclosing function is not one its body can break out of, because leaving it would mean crossing a call frame, and `return` is the statement for that. Getting this wrong fails silently. The parse succeeds, and the emitter produces a jump to an address in another chunk.
 
 *A rule that applies to `fn` almost certainly applies to `async fn`, and separate functions parse the two.* `parse_fn_with_decorators` rejected nesting while `parse_async_fn_with_decorators` did not, even though both increment `fn_depth` in the body. That was an omission, not a decision.
 

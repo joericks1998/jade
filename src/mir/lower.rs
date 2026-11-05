@@ -95,7 +95,6 @@ fn inst_label(k: &InstKey) -> String {
         FnKey::Main => "main".to_string(),
         FnKey::Named(n) => n.clone(),
         FnKey::Method(t, n) => format!("{t}.{n}"),
-        FnKey::Closure(_) => "closure".to_string(),
     };
     let args: Vec<String> = k.args.iter().map(|a| norm(a).to_string()).collect();
     format!("{base}({})", args.join(", "))
@@ -365,9 +364,6 @@ impl<'a> Lowerer<'a> {
         };
         let (name, body) = match &k.func {
             FnKey::Main => ("main".to_string(), self.top),
-            FnKey::Closure(_) => {
-                return Err(not_yet("closures", Span { line: 0, col: 0 }));
-            }
             other => {
                 let def = self.def_of(other).ok_or_else(|| {
                     internal(
@@ -1170,7 +1166,6 @@ impl<'a, 'l> Fx<'a, 'l> {
                     _ => self.assign_temp(Ty::Str, Rvalue::Op(Op::StrCat, ops)),
                 }
             }
-            TExprKind::Closure { .. } => return Err(not_yet("closures", span)),
             TExprKind::Await { .. } => return Err(not_yet("await", span)),
             TExprKind::PromptDeref { .. } | TExprKind::PromptLiteral { .. } => {
                 return Err(not_yet("prompts", span));
@@ -1500,7 +1495,10 @@ impl<'a, 'l> Fx<'a, 'l> {
         let target = self.targets.get(&addr(e)).cloned();
         match target {
             Some(Target::Instance(k)) => {
-                let def = self.l.def_of(&k.func).ok_or_else(|| not_yet("closures", span))?;
+                let def = self
+                    .l
+                    .def_of(&k.func)
+                    .ok_or_else(|| internal("a call to a function with no definition", span))?;
                 let mut vals: Vec<Option<(Operand, Ty, Span)>> = vec![None; def.params.len()];
                 let mut next = 0;
                 if let FnKey::Method(..) = &k.func {

@@ -1,0 +1,23 @@
+// A method is called, not passed.
+//
+// `c.bump` without a call would be a bound method: a value that holds its
+// receiver and passes it as `self` later. That is a closure over one variable,
+// and 2.0.1 removed closures. Call the method where it is needed, or pass the
+// object to the function that calls it.
+//
+// This file is a fixture: `jade check` must REJECT it.
+
+struct Counter {
+    count
+}
+
+extend Counter {
+    fn bump(self, by) {
+        self.count = self.count + by
+        return self.count
+    }
+}
+
+let c = Counter { count: 10 }
+let bump = c.bump
+print(bump(5))

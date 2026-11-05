@@ -219,12 +219,6 @@ fn scan_expr(e: &TExpr, name: &str, ok: &mut usize, bad: &mut usize) {
                 scan_expr(v, name, ok, bad);
             }
         }
-        TExprKind::Closure { body, .. } => {
-            // A closure could capture `name`; treat any use inside as escaping.
-            for s in body {
-                scan_stmt(s, name, ok, bad);
-            }
-        }
         TExprKind::Await { expr } => scan_expr(expr, name, ok, bad),
         TExprKind::PromptLiteral { body } => scan_expr(body, name, ok, bad),
     }
@@ -397,9 +391,7 @@ fn expr_contains_await(e: &TExpr) -> bool {
                 || grammar_expr.as_ref().is_some_and(|g| expr_contains_await(g))
         }
         TExprKind::PromptLiteral { body } => expr_contains_await(body),
-        // A closure body's awaits belong to the closure.
-        TExprKind::Closure { .. }
-        | TExprKind::Identifier(_)
+        TExprKind::Identifier(_)
         | TExprKind::Integer(_)
         | TExprKind::Float(_)
         | TExprKind::Bool(_)

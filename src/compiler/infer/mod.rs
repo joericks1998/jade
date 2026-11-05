@@ -63,8 +63,6 @@ pub enum FnKey {
     Named(String),
     /// A method, by the struct whose `extend` block defines it and its name.
     Method(String, String),
-    /// A closure, by the address of its syntax node.
-    Closure(usize),
 }
 
 /// Purpose: This struct holds an instance's identity: the code and the
@@ -84,13 +82,6 @@ struct FnInfo<'a> {
     body: &'a [TStmt],
     is_async: bool,
     is_generator: bool,
-}
-
-/// Purpose: This struct holds one closure's definition.
-#[derive(Debug, Clone)]
-struct ClosureInfo<'a> {
-    params: &'a [String],
-    body: &'a [TStmt],
 }
 
 /// Purpose: This struct holds what the checker knows about one struct type.
@@ -171,7 +162,6 @@ pub struct Checker<'a> {
     fns: HashMap<String, FnInfo<'a>>,
     /// Methods by (defining struct, method name).
     methods: HashMap<(String, String), FnInfo<'a>>,
-    closures: HashMap<usize, ClosureInfo<'a>>,
     structs: HashMap<String, StructInfo>,
     /// The slot of each field, by the struct that owns it and its name. An
     /// inherited field shares its owner's slot, so a child and its parent
@@ -222,7 +212,6 @@ impl<'a> Checker<'a> {
             store: Store::default(),
             fns: HashMap::new(),
             methods: HashMap::new(),
-            closures: HashMap::new(),
             structs: HashMap::new(),
             field_slots: HashMap::new(),
             constructed: HashSet::new(),
@@ -570,7 +559,6 @@ impl<'a> Checker<'a> {
             FnKey::Method(t, n) => {
                 self.methods.get(&(t.clone(), n.clone())).is_some_and(|i| i.is_generator)
             }
-            FnKey::Closure(a) => self.closures.get(a).is_some_and(|c| body_yields(c.body)),
             FnKey::Main => false,
         }
     }
@@ -602,7 +590,6 @@ impl<'a> Checker<'a> {
             FnKey::Main => "the program".to_string(),
             FnKey::Named(n) => format!("'{}'", ty::display_name(n)),
             FnKey::Method(t, n) => format!("'{}.{}'", ty::display_name(t), n),
-            FnKey::Closure(_) => "a closure".to_string(),
         }
     }
 
