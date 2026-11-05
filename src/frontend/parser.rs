@@ -289,7 +289,16 @@ impl Parser {
 
     /// Parse a single statement.
     fn parse_stmt(&mut self) -> Result<Stmt> {
+        let dec_span = self.peek().span;
         let decorators = self.parse_decorators()?;
+        if decorators.iter().any(|(n, _)| n == "public") {
+            return Err(JadeError::MisplacedDecorator {
+                reason: "@public marks a class member; a top-level name is already visible to \
+                         files that import it"
+                    .to_string(),
+                span: dec_span,
+            });
+        }
         if !decorators.is_empty() {
             // Decorators are valid on fn, async fn, let, and prompt.
             return match self.peek().kind {
@@ -1282,6 +1291,7 @@ impl Parser {
     /// Extract the span from any expression node.
     fn expr_span(e: &Expr) -> Span {
         match e {
+            Expr::Is { span, .. } => *span,
             Expr::Integer { span, .. } => *span,
             Expr::Float { span, .. } => *span,
             Expr::Bool { span, .. } => *span,
@@ -1404,6 +1414,19 @@ impl Parser {
     fn parse_comparison(&mut self) -> Result<Expr> {
         let mut left = self.parse_bitor()?;
         loop {
+            // `x is Dog`: a class test, whose right side is a class name.
+            if self.peek().kind == TokenKind::Is {
+                let span = Self::expr_span(&left);
+                self.advance(); // consume `is`
+                let mut class = self.expect_ident("class name after `is`")?;
+                while self.peek().kind == TokenKind::Dot {
+                    self.advance();
+                    let seg = self.expect_ident("class name after `.`")?;
+                    class = format!("{class}.{seg}");
+                }
+                left = Expr::Is { value: Box::new(left), class, span };
+                continue;
+            }
             // `not in` — two-token membership test
             let is_not_in = self.peek().kind == TokenKind::Bang
                 && self.peek_at(1).map(|t| t.kind == TokenKind::In).unwrap_or(false);

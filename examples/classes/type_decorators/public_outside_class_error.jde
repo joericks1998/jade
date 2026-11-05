@@ -1,0 +1,10 @@
+// @public marks a class member.
+//
+// A name at the top level of a file is already visible to every file that
+// imports it, so @public on one says nothing and is refused.
+//
+// This file is a fixture: `jade check` must REJECT it.
+
+@public
+let version = "2.0.1"
+print(version)

@@ -1,0 +1,14 @@
+// A destructor is never called by code.
+//
+// `drop` runs by itself when the last reference to a value goes. Calling it
+// directly would run it twice, once now and once when the value is freed.
+//
+// This file is a fixture: `jade check` must REJECT it.
+
+class Resource {
+    @public name
+    fn drop() { print("closed") }
+}
+
+let r = Resource { name: "x" }
+r.drop()

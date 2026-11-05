@@ -491,8 +491,8 @@ impl std::fmt::Display for JadeError {
             ),
             JadeError::InheritedMethodClash { method, first, second, span } => write!(
                 f,
-                "[{}:{}] '{}' and '{}' both supply a method named '{}', and neither is nearer; a child's own method may override a parent's, but two parents cannot decide between themselves",
-                span.line, span.col, first, second, method
+                "[{}:{}] '{}' and '{}' both supply a method named '{}'; define `{}` in the class itself to settle which one it runs",
+                span.line, span.col, first, second, method, method
             ),
             JadeError::InheritanceCycle { chain, span } => write!(
                 f,

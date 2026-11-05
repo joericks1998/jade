@@ -220,6 +220,10 @@ fn purge_predicate_filters() {
 
 #[test]
 fn cache_format_version_is_stable() {
+    // Bumped to 16 in 2.0.1. `x is Class` added `Expr::Is` and `TExprKind::Is`
+    // at the front of their enums, so every other variant renumbers under
+    // bincode. A stale cache read back `for n in nums` with an empty name.
+    //
     // Bumped to 15 in 2.0.1. Classes replaced structs: `StructDef` gained
     // `members`, `ExtendBlock` gained `outside`, and the TIR `StructLiteral`
     // gained `given`. Each is a new field bincode cannot notice is missing.
@@ -249,6 +253,6 @@ fn cache_format_version_is_stable() {
     // `decorators` field for `parents`; and `Instr::CatchMatches` is a new
     // opcode. A TIR cached by an older build would deserialize into something
     // this one cannot run, and would do it without complaining.
-    assert_eq!(CACHE_FORMAT_VERSION, 15);
+    assert_eq!(CACHE_FORMAT_VERSION, 16);
     assert!(!JADE_VERSION.is_empty());
 }

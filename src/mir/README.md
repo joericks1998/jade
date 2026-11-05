@@ -36,6 +36,10 @@ Every heap value (a string, array, dict or struct) carries a reference count, an
 
 Releasing a cleared place does nothing. That is what lets a temporary be dropped on every path out of a statement without tracking which paths set it.
 
+## Classes
+
+A struct value carries its class id, so `x is C` lowers to `Rvalue::IsA` over the ids of `C` and its descendants, and a method with a version per child switches on `Rvalue::TypeId`. Each class's destructor chain arrives in `Program::drops`, as the functions the backend runs from the class's release. The lowering also frees a block's variables when `break` or `continue` leaves it, and releases the globals, newest first, when `main` ends normally, so a destructor runs when the language says it does.
+
 ## What each file does
 
 - *`mod.rs`* defines MIR: `Program`, `Func`, `Block`, `Stmt`, `Rvalue`, `Operand` and `Term`, plus `Op`, the support operations every builtin and method lowers to. Its header states the ownership rules.

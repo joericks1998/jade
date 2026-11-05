@@ -495,6 +495,18 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            // `if a is Dog { … }` reads `a` as a Dog inside, when Dog is
+            // narrower than what `a` holds.
+            TExprKind::Is { value, class } => {
+                if let TExprKind::Identifier(n) = &value.kind
+                    && let Some(slot) = self.read_var(f, n)
+                    && let Ty::Struct(s) = self.store.shallow(&slot)
+                    && s != *class
+                    && self.store.is_a(class, &s)
+                {
+                    yes.insert(n.clone(), Ty::Struct(class.clone()));
+                }
+            }
             TExprKind::BinOp { op: BinOpKind::And, left, right } => {
                 let (l, _) = self.narrowing_of(left, f);
                 let (r, _) = self.narrowing_of(right, f);
@@ -595,6 +607,36 @@ impl<'a> Checker<'a> {
     fn check_expr_inner(&mut self, e: &'a TExpr, f: &mut Frame) -> Ty {
         let span = e.span;
         match &e.kind {
+            TExprKind::Is { value, class } => {
+                let t = self.check_expr(value, f);
+                let c = super::ty::display_name(class).to_string();
+                if !self.structs.contains_key(class.as_str()) {
+                    self.report(span, format!("unknown class '{c}' after `is`"));
+                    return Ty::Bool;
+                }
+                match self.store.shallow(&t) {
+                    Ty::Struct(s) => {
+                        if !self.store.is_a(class, &s) && !self.store.is_a(&s, class) {
+                            let s = super::ty::display_name(&s).to_string();
+                            self.report(
+                                span,
+                                format!("a {s} can never be a {c}, since neither class inherits from the other"),
+                            );
+                        }
+                    }
+                    Ty::Var(_) => {}
+                    Ty::Opt(_) => self.report(
+                        span,
+                        "this value may be nil; check it with 'if x != nil' before testing its class"
+                            .to_string(),
+                    ),
+                    other => {
+                        let other = self.store.resolve(&other);
+                        self.report(span, format!("`is` tests a class value's class, and this is a {other}"));
+                    }
+                }
+                Ty::Bool
+            }
             TExprKind::Integer(_) => Ty::Int,
             TExprKind::Float(_) => Ty::Float,
             TExprKind::Bool(_) => Ty::Bool,
@@ -841,14 +883,23 @@ impl<'a> Checker<'a> {
                 return self.builtin_call(name, tys, args, span, f, node);
             }
             if self.structs.contains_key(name) {
+                if args.len() == 1 && kwargs.is_empty() {
+                    return self.class_view(name, &args[0], span, f, node);
+                }
                 self.report(
                     span,
                     format!(
-                        "'{0}' is a class, not a function; build one with {0} {{ … }}",
+                        "'{0}' is a class, not a function; build one with {0} {{ … }} or \
+                         {0}::new(…), or view a value as the class with {0}(x)",
                         super::ty::display_name(name)
                     ),
                 );
                 return self.slot(f, node);
+            }
+            if let Some((class, m)) = name.split_once("::")
+                && self.structs.contains_key(class)
+            {
+                return self.parent_call(class, m, args, kwargs, span, f, node);
             }
             if name.starts_with("__native$") {
                 for a in args {
@@ -867,6 +918,116 @@ impl<'a> Checker<'a> {
             self.check_expr(v, f);
         }
         self.call_value(&ct, tys, span, f, node)
+    }
+
+    /// Purpose: This function types `C(x)`, which views a value as class `C`.
+    /// It is also what a class decorator on a `let` becomes: `@Animal let a = d`
+    /// is `let a = Animal(d)`.
+    ///
+    /// Inputs:
+    /// - `class`: the class.
+    /// - `arg`: the value.
+    /// - `span`: where.
+    /// - `f`: the frame.
+    /// - `node`: the call's address.
+    ///
+    /// Outputs: the class type. The value must be the class or descend from it.
+    fn class_view(
+        &mut self,
+        class: &str,
+        arg: &'a TExpr,
+        span: Span,
+        f: &mut Frame,
+        node: usize,
+    ) -> Ty {
+        let t = self.check_expr(arg, f);
+        match self.store.shallow(&t) {
+            Ty::Struct(s) if self.store.is_a(&s, class) => {}
+            Ty::Var(_) => {
+                self.unify(&t, &Ty::Struct(class.to_string()), span, "a class view");
+            }
+            other => {
+                let other = self.store.resolve(&other);
+                let c = super::ty::display_name(class);
+                self.report(
+                    span,
+                    format!(
+                        "{c}(x) views a value as a {c}, and this value is a {other}, which is not a {c} \
+                         or a class that inherits from it"
+                    ),
+                );
+            }
+        }
+        self.record_target(f, node, Target::Builtin("as".to_string()));
+        Ty::Struct(class.to_string())
+    }
+
+    /// Purpose: This function types `Parent::m(…)` inside a method, which calls
+    /// the parent's version of a method on the same object. The type pass has
+    /// already put `self` first among the arguments.
+    ///
+    /// Inputs:
+    /// - `class`: the class named before `::`.
+    /// - `m`: the method.
+    /// - `args`, `kwargs`: the arguments, `self` first.
+    /// - `span`: where.
+    /// - `f`: the frame.
+    /// - `node`: the call's address.
+    ///
+    /// Outputs: the call's type.
+    #[allow(clippy::too_many_arguments)]
+    fn parent_call(
+        &mut self,
+        class: &str,
+        m: &str,
+        args: &'a [TExpr],
+        kwargs: &'a [(String, TExpr)],
+        span: Span,
+        f: &mut Frame,
+        node: usize,
+    ) -> Ty {
+        let c = super::ty::display_name(class).to_string();
+        let in_method = matches!(&f.key.func, FnKey::Method(..))
+            && self.current_class(f).is_some_and(|k| self.store.is_a(&k, class));
+        if !in_method {
+            for a in args {
+                self.check_expr(a, f);
+            }
+            self.report(
+                span,
+                format!(
+                    "{c}::{m}(…) calls {c}'s version of a method on the same object, so it works only \
+                     inside a method of {c} or of a class that inherits from it"
+                ),
+            );
+            return self.slot(f, node);
+        }
+        let Some(owner) = self.find_method(class, m) else {
+            for a in args {
+                self.check_expr(a, f);
+            }
+            self.report(span, format!("class {c} has no method '{m}'"));
+            return self.slot(f, node);
+        };
+        self.check_visible(f, class, m, true, span);
+        let mut tys = Vec::new();
+        for a in args {
+            tys.push(self.check_expr(a, f));
+        }
+        for (_, v) in kwargs {
+            self.check_expr(v, f);
+        }
+        let info = self.methods[&(owner.clone(), m.to_string())].clone();
+        let Some(all) = self.fill_defaults(&info.name, info.params, tys, span) else {
+            return self.slot(f, node);
+        };
+        match self.instantiate(FnKey::Method(owner, m.to_string()), all, span) {
+            Some(k) => {
+                self.record_target(f, node, Target::Instance(k.clone()));
+                self.instance_result(&k)
+            }
+            None => self.slot(f, node),
+        }
     }
 
     /// Purpose: This function records what a call resolved to, on the final pass.
@@ -1617,6 +1778,15 @@ impl<'a> Checker<'a> {
         node: usize,
     ) -> Ty {
         match self.store.shallow(recv) {
+            Ty::Struct(sn) if name == "drop" && self.find_method(&sn, "drop").is_some() => {
+                self.report(
+                    span,
+                    "`drop` is a destructor, which runs by itself when the last reference to a \
+                     value goes; it cannot be called"
+                        .to_string(),
+                );
+                self.slot(f, node)
+            }
             Ty::Struct(sn) => {
                 // A field that holds a function: `obj.callback(x)`.
                 if let Some(slot) = self.field_slot(&sn, name) {

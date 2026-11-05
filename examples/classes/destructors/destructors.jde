@@ -1,0 +1,84 @@
+// A destructor runs when the last reference to a value goes.
+//
+// A class may declare a member named `drop`, which pairs with the constructor
+// `new`. It takes no arguments, and nothing calls it: Jade frees a class value
+// the moment its last reference goes away, and runs `drop` first, so it can
+// still read the value's fields. That is when a local's block ends or its
+// function returns, when a variable is given a new value, and when the program
+// ends, for its globals, newest first.
+//
+// After a class's own `drop`, each ancestor's runs too, nearest first. A
+// destructor that stores `self` somewhere keeps the value alive, and it does not
+// run again when that last reference goes.
+//
+// The static backend runs destructors; this example is in
+// src/scripts/static-examples.list and skipped by the default gate.
+// drop_call_error.jde and drop_args_error.jde show the two refusals.
+
+class Resource {
+    @public name
+    @public fn new(name)
+    fn drop()
+}
+
+fn Resource::new(name) {
+    print(f"open {name}")
+    return Resource { name: name }
+}
+
+fn Resource::drop() {
+    print(f"close {self.name}")
+}
+
+class Logged(Resource) {
+    fn drop() { print(f"log: {self.name} closed") }
+}
+
+// A local's destructor runs when its function returns.
+fn work() {
+    let r = Resource::new("scratch")
+    print(f"working with {r.name}")
+}
+
+work()
+print("after work")
+
+// A loop's variable is freed at the end of each pass, and when `break` leaves.
+let i = 0
+while i < 3 {
+    let t = Resource::new(f"pass {i}")
+    i = i + 1
+    if i == 2 {
+        break
+    }
+}
+print("after the loop")
+
+// Giving a variable a new value frees the old one.
+let slot = Resource::new("first")
+slot = Resource::new("second")
+
+// A child runs its own destructor, then its parent's.
+let child = Logged { name: "audit" }
+
+// A destructor that keeps `self` keeps the value alive.
+let kept = []
+
+class Stubborn {
+    @public name
+    fn drop()
+}
+
+fn Stubborn::drop() {
+    print(f"{self.name} refuses to go")
+    kept.push(self)
+}
+
+fn make() {
+    let s = Stubborn { name: "mule" }
+}
+
+make()
+print(f"{len(kept)} kept, still named {kept[0].name}")
+
+print("end of program")

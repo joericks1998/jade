@@ -283,6 +283,16 @@ Then phase 3 of `design/v2-static-values.md` continues, smaller than before: exc
 
 Building them settled two details. A declared method with no definition is an error only where it is called, as in C++, so a file such as `classes/outside_methods/geometry.jde` can declare methods its importer defines. And a constructor must be defined in the file that declares its class, since it is a top-level function named for the class.
 
+*Steps 4 to 8 are done* (2026-11-05), which completes this design.
+
+- *Type decorators.* A built-in type decorator on a `let` converts, as it always did by becoming a call. A class decorator becomes `Class(value)`, which is now a general expression: a class applied to one value views the value as that class, and the checker requires the value to be the class or a descendant. A field's type decorator joins into the field's type. `@public` outside a class body is refused.
+- *Inheritance.* Flattening inherits a shared ancestor's fields once, by tracking which class declared each field. Two parents supplying different versions of a method are an error unless the class defines the method itself; a method both reach through their shared ancestor is one method.
+- *`Parent::m()` and `is`.* The type pass puts `self` first among a parent call's arguments; the checker resolves the call to the parent's method, and the import pass renames the class part like any class reference. `x is C` narrows inside `if` and `&&`, as `!= nil` does.
+- *Second-parent fields.* The static backend switches on the object's class id wherever a descendant keeps a field at a different offset than the static class does, and reads it directly otherwise.
+- *Destructors.* The checker instantiates each constructed class's `drop` chain, which nothing calls, and refuses calling `drop` or giving it arguments. The static backend runs the chain from the class's release, holding a reference while it runs, and sets a bit in the type id word so a value a destructor revived does not run its destructors again; type id reads mask the bit. A block's variables are freed on `break` and `continue`, and a program that ends normally releases its globals, newest first.
+
+Decision 14 turned out narrower than planned. Only destructors are static-backend only. `Class(x)`, `Parent::m()`, `is`, the diamond and second-parent fields all work on the tagged backend too, because each was a rewrite in the frontend or a small addition the tagged backend already had the pieces for: `is` asks the question a typed `catch` already asks, and every method is now also a global named `Type::method`. The examples for them run in both golden gates; `classes/destructors` runs in the static one.
+
 ## Open questions
 
 None. Decisions 5, 7, 8, 9 and 11 to 14 are recommendations Joe has not overruled, and the constructor's shape in decision 4 is one.

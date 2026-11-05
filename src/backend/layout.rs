@@ -30,6 +30,9 @@ pub const DICT_ICAP: i64 = 48;
 pub const DICT_SIZE: i64 = 56;
 /// Byte offset of a struct's type id.
 pub const TYPE_ID: i64 = 8;
+/// A bit of the type id word set once an object's destructors have run, so a
+/// value a destructor revived never runs them again. Type id reads mask it off.
+pub const DROPPED: i64 = 1 << 62;
 
 /// Purpose: This function says whether a type is held as a pointer.
 ///
@@ -172,5 +175,17 @@ impl<'a, 'ctx> F<'a, 'ctx> {
             }
             _ => v,
         }
+    }
+
+    /// Purpose: This function reads a struct object's type id, without the
+    /// destructor mark.
+    ///
+    /// Inputs:
+    /// - `p`: the object.
+    ///
+    /// Outputs: its type id.
+    pub fn type_id(&self, p: inkwell::values::PointerValue<'ctx>) -> IntValue<'ctx> {
+        let word = self.load_i64(self.at_c(p, TYPE_ID));
+        self.and(word, self.i64(!DROPPED))
     }
 }

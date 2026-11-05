@@ -293,7 +293,7 @@ Phase 3, exceptions, function values and closures, parent-struct joins and strea
 
 ## Open questions
 
-`design/v2-classes.md` proposes answers to the first two: an `is` test (its decision 8) and support for every parent through a field table (its decision 9).
+`design/v2-classes.md` answers the first two, and both are built: an `is` test (its decision 8) and support for every parent through a field table (its decision 9).
 
 1. *How does a program test which child struct it holds?* Methods cover most uses. For the rest, the choices are a new `if x is Token { ... }` test, which narrows `x` inside the branch, or nothing beyond methods and typed `catch`.
 2. *Multiple inheritance and layout.* A child's fields follow its first parent's, so a child can stand in for its first parent with no adjustment. Standing in for a second parent needs a per-type field table. That is a cost only programs using a second parent pay, but it is worth confirming that both parents should support it.

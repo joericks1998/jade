@@ -797,13 +797,21 @@ impl Renamer {
                 }
                 self.pop_scope();
             }
-            TStmt::StructDef { name, fields, parents, .. } => {
+            TStmt::StructDef { name, fields, parents, members, .. } => {
                 // A parent is a type *reference*, so it renames the way an
                 // `extend` target does. Left bare when `ref_type` cannot place
                 // it, which `resolve_inheritance` then reports by name.
                 for parent in parents.iter_mut() {
                     if let Some(m) = self.ref_type(parent) {
                         *parent = m;
+                    }
+                }
+                // A member's type decorator names a class, which renames too.
+                for (_, decs) in members.decorators.iter_mut() {
+                    for d in decs.iter_mut() {
+                        if let Some(m) = self.ref_type(d) {
+                            *d = m;
+                        }
                     }
                 }
                 for f in fields.iter_mut() {
@@ -959,6 +967,13 @@ impl Renamer {
         let collapse = qualified.and_then(|(alias, field)| {
             self.ref_native_qual(&alias, &field, e.span)
                 .or_else(|| self.ref_value_qual(&alias, &field))
+                // `shapes.Animal` as a value is a class view, `shapes.Animal(x)`,
+                // and `shapes.Animal::speak` a parent call: both name a class.
+                .or_else(|| self.ref_type(&format!("{alias}.{field}")))
+                .or_else(|| {
+                    let (class, member) = field.split_once("::")?;
+                    self.ref_type(&format!("{alias}.{class}")).map(|c| format!("{c}::{member}"))
+                })
         });
         if let Some(m) = collapse {
             e.kind = TExprKind::Identifier(m);
@@ -966,10 +981,24 @@ impl Renamer {
         }
 
         match &mut e.kind {
+            TExprKind::Is { value, class } => {
+                self.rename_expr(value);
+                if let Some(m) = self.ref_type(class) {
+                    *class = m;
+                }
+            }
             TExprKind::Identifier(n) => {
                 if let Some(m) = self.ref_native_value(n) {
                     *n = m;
                 } else if let Some(m) = self.ref_value(n) {
+                    *n = m;
+                } else if let Some((class, member)) = n.split_once("::")
+                    && let Some(c) = self.ref_type(class)
+                {
+                    // `Animal::speak`: the class part is a type reference.
+                    *n = format!("{c}::{member}");
+                } else if let Some(m) = self.ref_type(n) {
+                    // `Animal(x)`, a class view of a value.
                     *n = m;
                 }
             }
@@ -1083,6 +1112,12 @@ impl Renamer {
         }
 
         match e {
+            Expr::Is { value, class, .. } => {
+                self.rename_ast_expr(value);
+                if let Some(m) = self.ref_type(class) {
+                    *class = m;
+                }
+            }
             Expr::Identifier { name, .. } => {
                 if let Some(m) = self.ref_native_value(name) {
                     *name = m;

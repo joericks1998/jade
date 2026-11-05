@@ -1,0 +1,36 @@
+// A class with several parents, two of which share an ancestor: the diamond.
+//
+// A class inherits each ancestor once, however many paths lead to it, so a
+// ServiceDog has one `name`, not one from Pet and another from Worker.
+//
+// When two parents both supply a method with one name, the class must define
+// that method itself to say which one it runs, as in C++. Here both parents
+// have a `kind`, and ServiceDog's own `kind` uses both, calling each parent's
+// version by name. A method the parents share through the common ancestor,
+// such as `label`, is one method and needs nothing. classes/inherit_method_clash
+// _error.jde shows the conflict left unsettled.
+
+class Named {
+    @public name
+    @public fn label() { return f"<{self.name}>" }
+}
+
+class Pet(Named) {
+    @public owner
+    @public fn kind() { return "pet" }
+}
+
+class Worker(Named) {
+    @public job
+    @public fn kind() { return "worker" }
+}
+
+class ServiceDog(Pet, Worker) {
+    @public fn kind() { return Pet::kind() + " and " + Worker::kind() }
+}
+
+let d = ServiceDog { name: "rex", owner: "ann", job: "guide" }
+print(d.name)
+print(d.label())
+print(d.kind())
+print(f"{d.owner} owns {d.name}, who works as a {d.job}")

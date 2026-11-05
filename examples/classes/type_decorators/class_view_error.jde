@@ -1,0 +1,18 @@
+// A class decorator declares a class the value is, or descends from.
+//
+// `@Cat let pet = Dog { … }` is `Cat(Dog { … })`, and a Dog is not a Cat, so
+// there is nothing to declare. The message says what the value is.
+//
+// This file is a fixture: `jade check` must REJECT it.
+
+class Animal {
+    @public name
+}
+
+class Dog(Animal) { }
+
+class Cat(Animal) { }
+
+@Cat
+let pet = Dog { name: "rex" }
+print(pet.name)

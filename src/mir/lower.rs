@@ -76,11 +76,20 @@ pub fn lower_program(program: &TProgram, typed: &Typed) -> Result<Program> {
         .map(|(n, (id, t))| (*id, Global { name: n.clone(), ty: t.clone() }))
         .collect();
     globals.sort_by_key(|(id, _)| id.0);
+    let mut drops: Vec<(String, Vec<FuncId>)> = typed
+        .drops
+        .iter()
+        .map(|(class, keys)| {
+            (class.clone(), keys.iter().filter_map(|k| l.func_ids.get(k).copied()).collect())
+        })
+        .collect();
+    drops.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(Program {
         funcs,
         globals: globals.into_iter().map(|(_, g)| g).collect(),
         structs: l.structs,
         main: FuncId(0),
+        drops,
     })
 }
 
@@ -249,6 +258,30 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// Purpose: This function lists the globals in the order the program first
+    /// sets them.
+    ///
+    /// Inputs: none.
+    ///
+    /// Outputs: their ids, first set first.
+    pub(super) fn global_order(&self) -> Vec<GlobalId> {
+        let mut out = Vec::new();
+        for s in self.top {
+            let name = match s {
+                TStmt::Let { name, .. }
+                | TStmt::Assign { name, .. }
+                | TStmt::PromptDecl { name, .. } => name,
+                _ => continue,
+            };
+            if let Some((g, _)) = self.globals.get(name)
+                && !out.contains(g)
+            {
+                out.push(*g);
+            }
+        }
+        out
+    }
+
     /// Purpose: This function finds the definition an instance checks.
     ///
     /// Inputs:
@@ -299,23 +332,6 @@ impl<'a> Lowerer<'a> {
     pub(super) fn field(&self, s: &str, field: &str) -> Option<(u32, Ty)> {
         let def = self.strukt(s)?;
         def.fields.iter().position(|(n, _)| n == field).map(|i| (i as u32, def.fields[i].1.clone()))
-    }
-
-    /// Purpose: This function says whether a value of struct `child` can be
-    /// read as a `parent`: its fields must start with the parent's, in order.
-    ///
-    /// Inputs:
-    /// - `child`, `parent`: the two structs.
-    ///
-    /// Outputs: true when the parent's layout is a prefix of the child's.
-    fn prefix_layout(&self, child: &str, parent: &str) -> bool {
-        match (self.strukt(child), self.strukt(parent)) {
-            (Some(c), Some(p)) => {
-                p.fields.len() <= c.fields.len()
-                    && p.fields.iter().zip(&c.fields).all(|(a, b)| a.0 == b.0)
-            }
-            _ => false,
-        }
     }
 
     /// Purpose: This function finds the nearest struct two structs share.
@@ -405,8 +421,9 @@ pub(super) struct Fx<'a, 'l> {
     cur: BlockId,
     /// Variables in scope, innermost last.
     scopes: Vec<HashMap<String, Local>>,
-    /// Each enclosing loop's continue and break targets, innermost last.
-    loops: Vec<(BlockId, BlockId)>,
+    /// Each enclosing loop's continue and break targets, and how many scopes
+    /// were open outside it, innermost last.
+    loops: Vec<(BlockId, BlockId, usize)>,
     /// Heap temporaries of the statement being lowered, dropped when it ends.
     temps: Vec<Local>,
     /// Temporaries whose reference has not been handed over yet.
@@ -523,6 +540,25 @@ impl<'a, 'l> Fx<'a, 'l> {
         self.cur = b;
     }
 
+    /// Purpose: This function frees the variables of every scope from a depth
+    /// in, for a `break` or `continue` that leaves them, innermost first.
+    ///
+    /// Inputs:
+    /// - `depth`: how many scopes stay open.
+    ///
+    /// Outputs: none.
+    fn drop_scopes_from(&mut self, depth: usize) {
+        let mut drops = Vec::new();
+        for scope in self.scopes[depth.min(self.scopes.len())..].iter().rev() {
+            let mut ls: Vec<Local> = scope.values().copied().collect();
+            ls.sort_by_key(|l| std::cmp::Reverse(l.0));
+            drops.extend(ls.into_iter().filter(|l| is_heap(&self.locals[l.0 as usize].ty)));
+        }
+        for l in drops {
+            self.emit(Stmt::Drop(Place::Local(l)));
+        }
+    }
+
     /// Purpose: This function drops the temporaries made since a mark.
     ///
     /// Inputs:
@@ -608,10 +644,8 @@ impl<'a, 'l> Fx<'a, 'l> {
         match (from, to) {
             (Ty::Nil, Ty::Opt(_)) => Ok(Operand::Const(Const::Nil(to.clone()))),
             (Ty::Opt(a), Ty::Opt(b)) => match (&**a, &**b) {
-                (Ty::Struct(x), Ty::Struct(y)) => {
-                    self.check_upcast(x, y, span)?;
-                    Ok(op)
-                }
+                // A class value is the same object read as any of its classes.
+                (Ty::Struct(_), Ty::Struct(_)) => Ok(op),
                 _ => Err(internal(format!("cannot convert {from} to {to}"), span)),
             },
             (_, Ty::Opt(inner)) => {
@@ -622,36 +656,9 @@ impl<'a, 'l> Fx<'a, 'l> {
                 let v = self.assign_temp((**inner).clone(), Rvalue::Unwrap(op));
                 self.coerce(v, inner, to, span)
             }
-            (Ty::Struct(x), Ty::Struct(y)) => {
-                self.check_upcast(x, y, span)?;
-                Ok(op)
-            }
+            (Ty::Struct(_), Ty::Struct(_)) => Ok(op),
             _ => Err(internal(format!("cannot convert {from} to {to}"), span)),
         }
-    }
-
-    /// Purpose: This function refuses reading a child struct through a parent
-    /// whose fields it does not start with, which needs a field table per type.
-    ///
-    /// Inputs:
-    /// - `child`, `parent`: the two structs; a downcast is always allowed.
-    /// - `span`: where.
-    ///
-    /// Outputs: `Ok(())`, or the not-yet error.
-    fn check_upcast(&self, child: &str, parent: &str, span: Span) -> Result<()> {
-        let is_ancestor =
-            self.l.strukt(child).is_some_and(|c| c.ancestors.iter().any(|a| a == parent));
-        if is_ancestor && !self.l.prefix_layout(child, parent) {
-            return Err(not_yet(
-                format!(
-                    "a {} held as its second parent {}",
-                    crate::compiler::infer::display_type_name(child),
-                    crate::compiler::infer::display_type_name(parent)
-                ),
-                span,
-            ));
-        }
-        Ok(())
     }
 
     /// Purpose: This function finds the one type two compared values both fit in.
@@ -700,6 +707,16 @@ impl<'a, 'l> Fx<'a, 'l> {
         }
         for s in body {
             self.stmt(s)?;
+        }
+        // A program that ends normally releases its globals, newest first, so
+        // every destructor of a value nothing else holds runs.
+        if self.is_main {
+            for g in self.l.global_order().into_iter().rev() {
+                let ty = self.l.globals.values().find(|(id, _)| *id == g).map(|(_, t)| t.clone());
+                if ty.as_ref().is_some_and(is_heap) {
+                    self.emit(Stmt::Drop(Place::Global(g)));
+                }
+            }
         }
         // Falling off the end returns nil, where the return type can hold it.
         match &self.ret {
@@ -850,7 +867,7 @@ impl<'a, 'l> Fx<'a, 'l> {
                 self.drop_temps(mark);
                 self.terminate(Term::If(c, bb, exit));
                 self.switch_to(bb);
-                self.loops.push((head, exit));
+                self.loops.push((head, exit, self.scopes.len()));
                 self.block(body)?;
                 self.loops.pop();
                 self.terminate(Term::Goto(head));
@@ -861,14 +878,16 @@ impl<'a, 'l> Fx<'a, 'l> {
                 self.for_loop(s, var, iterable, body, *span)
             }
             TStmt::Break { span } => {
-                let (_, brk) =
+                let (_, brk, depth) =
                     *self.loops.last().ok_or_else(|| internal("break outside a loop", *span))?;
+                self.drop_scopes_from(depth);
                 self.terminate(Term::Goto(brk));
                 Ok(())
             }
             TStmt::Continue { span } => {
-                let (cont, _) =
+                let (cont, _, depth) =
                     *self.loops.last().ok_or_else(|| internal("continue outside a loop", *span))?;
+                self.drop_scopes_from(depth);
                 self.terminate(Term::Goto(cont));
                 Ok(())
             }
@@ -1012,7 +1031,7 @@ impl<'a, 'l> Fx<'a, 'l> {
         );
         self.store(vp, &vty, el, &elem, span)?;
         self.drop_temps(mark);
-        self.loops.push((step, exit));
+        self.loops.push((step, exit, self.scopes.len()));
         for st in body {
             self.stmt(st)?;
         }
@@ -1055,6 +1074,18 @@ impl<'a, 'l> Fx<'a, 'l> {
             TExprKind::Float(x) => Operand::Const(Const::Float(*x)),
             TExprKind::Bool(b) => Operand::Const(Const::Bool(*b)),
             TExprKind::Str(s) => Operand::Const(Const::Str(s.clone())),
+            TExprKind::Is { value, class } => {
+                let (v, _) = self.expr(value)?;
+                let ids: Vec<i64> = self
+                    .l
+                    .structs
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, s)| s.name == *class || s.ancestors.iter().any(|a| a == class))
+                    .map(|(i, _)| i as i64)
+                    .collect();
+                self.assign_temp(Ty::Bool, Rvalue::IsA(v, ids))
+            }
             TExprKind::Identifier(name) => {
                 if matches!(name.as_str(), "nil" | "None" | "null") {
                     Operand::Const(Const::Nil(et.clone()))
@@ -1501,10 +1532,11 @@ impl<'a, 'l> Fx<'a, 'l> {
                     .ok_or_else(|| internal("a call to a function with no definition", span))?;
                 let mut vals: Vec<Option<(Operand, Ty, Span)>> = vec![None; def.params.len()];
                 let mut next = 0;
-                if let FnKey::Method(..) = &k.func {
-                    let TExprKind::FieldAccess { object, .. } = &callee.kind else {
-                        return Err(not_yet("bound methods used as values", span));
-                    };
+                // A method called on an object takes the object as its first
+                // argument. `Parent::m(self, …)` already has it among the args.
+                if let (FnKey::Method(..), TExprKind::FieldAccess { object, .. }) =
+                    (&k.func, &callee.kind)
+                {
                     let (o, t) = self.expr(object)?;
                     vals[0] = Some((o, t, object.span));
                     next = 1;

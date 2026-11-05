@@ -128,3 +128,32 @@ fn a_program_declares_nothing_but_c_library_functions() {
         f = func.get_next_function();
     }
 }
+
+#[test]
+fn a_field_read_through_a_second_parent_finds_the_childs_own() {
+    let src = "class W {\n    @public span\n}\nclass F {\n    @public fins\n}\nclass D(W, F) {\n    @public name\n}\n\
+               fn grow(f) {\n    f.fins = f.fins + 1\n    return f.fins\n}\n\
+               let d = D { span: 2, fins: 5, name: \"dot\" }\nlet fs = [F { fins: 1 }, F(d)]\n\
+               for f in fs {\n    print(grow(f))\n}\nprint(d.fins)\nprint(d.span)\n";
+    let (out, _, _) = run(src);
+    assert_eq!(out, "2\n6\n6\n2\n");
+}
+
+#[test]
+fn destructors_run_child_first_and_globals_newest_first() {
+    let src = "class R {\n    @public name\n    fn drop() { print(\"R \" + self.name) }\n}\n\
+               class L(R) {\n    fn drop() { print(\"L \" + self.name) }\n}\n\
+               fn f() {\n    let x = R { name: \"local\" }\n}\nf()\n\
+               let a = R { name: \"a\" }\nlet b = L { name: \"b\" }\nprint(\"end\")\n";
+    let (out, _, rc) = run(src);
+    assert_eq!(rc, 0);
+    assert_eq!(out, "R local\nend\nL b\nR b\nR a\n");
+}
+
+#[test]
+fn is_tests_the_class_and_its_descendants() {
+    let src = "class A {\n    @public n\n}\nclass B(A) { }\nclass C(B) { }\nclass D(A) { }\n\
+               let xs = [A { n: 1 }, B { n: 2 }, C { n: 3 }, D { n: 4 }]\nfor x in xs {\n    print(x is B)\n}\n";
+    let (out, _, _) = run(src);
+    assert_eq!(out, "false\ntrue\ntrue\nfalse\n");
+}

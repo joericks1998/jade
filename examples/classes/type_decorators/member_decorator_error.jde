@@ -1,0 +1,11 @@
+// A class member takes @public, and a field also takes a type.
+//
+// `@cached` is neither, so the class body refuses it rather than ignore it.
+//
+// This file is a fixture: `jade check` must REJECT it.
+
+class Report {
+    @public @cached title
+}
+
+print(Report { title: "q3" }.title)

@@ -74,6 +74,9 @@ pub struct Program {
     pub structs: Vec<StructDef>,
     /// The function holding the program's top-level statements.
     pub main: FuncId,
+    /// Each class with a destructor chain, with the `drop` functions a value
+    /// of it runs when it is freed, in order.
+    pub drops: Vec<(String, Vec<FuncId>)>,
 }
 
 /// Purpose: This struct holds one struct type's layout.
@@ -199,6 +202,9 @@ pub enum Rvalue {
     IntToFloat(Operand),
     /// The type id of a struct value, as an int.
     TypeId(Operand),
+    /// Whether a struct value's type id is one of these: the class `x is C`
+    /// names and every class that descends from it.
+    IsA(Operand, Vec<i64>),
 }
 
 /// Purpose: This enum lists the number types arithmetic works on.

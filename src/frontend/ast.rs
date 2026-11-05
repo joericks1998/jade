@@ -235,6 +235,8 @@ pub enum Stmt {
 /// An expression produces a value.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Expr {
+    /// `value is Class`: whether a value holds that class or a descendant.
+    Is { value: Box<Expr>, class: String, span: Span },
     /// An integer literal, e.g. `42`
     Integer { value: i64, span: Span },
 

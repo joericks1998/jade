@@ -29,6 +29,8 @@ On one benchmark of recursion, string building, dict inserts and a float loop, a
 
 *Text matches v1 exactly.* `print`, `str()` and f-strings all go through `jade.tostr.<type>`. Floats print the shortest digits that read back to the same value, found with `snprintf` and `strtod`, laid out without an exponent. Case mapping uses tables built from Rust's own Unicode data when the program uses `upper`, `lower` or `capitalize`.
 
+*Classes.* A field read through a static class whose descendants keep the field at a different offset, which happens when a class is used as a child's second parent, switches on the object's class id in `func.rs`'s `field_ptr`; otherwise it is one direct load. A class's release runs its destructor chain before freeing its fields: it holds a reference while `drop` runs, gives it back, and frees the object only when that was the last one. A destructor that stored `self` keeps the object alive, and a bit in the type id word (`layout::DROPPED`) stops its destructors from running again; every type id read masks the bit off.
+
 *Runtime errors* print `jade: <message>` and exit with status 1, as an uncaught v1 error did. They all go through `F::fail`, which is where exceptions will hook in during the next phase.
 
 ## What each file does

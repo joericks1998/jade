@@ -94,6 +94,8 @@ pub struct Cx<'ctx> {
     support: RefCell<HashMap<String, FunctionValue<'ctx>>>,
     /// String literal objects emitted so far, by content.
     lits: RefCell<HashMap<String, PointerValue<'ctx>>>,
+    /// Each class's destructor chain, as the functions to call.
+    pub drops: HashMap<String, Vec<FunctionValue<'ctx>>>,
 }
 
 impl<'ctx> Cx<'ctx> {
@@ -115,6 +117,7 @@ impl<'ctx> Cx<'ctx> {
             struct_tys: RefCell::new(HashMap::new()),
             support: RefCell::new(HashMap::new()),
             lits: RefCell::new(HashMap::new()),
+            drops: HashMap::new(),
         }
     }
 
@@ -274,7 +277,7 @@ impl<'ctx> Cx<'ctx> {
 ///
 /// Outputs: the verified module, or LLVM's complaint about it.
 pub fn build_module<'ctx>(ctx: &'ctx Context, prog: &mir::Program) -> Result<Module<'ctx>, String> {
-    let cx = Cx::new(ctx, prog);
+    let mut cx = Cx::new(ctx, prog);
     let globals: Vec<GlobalValue> = prog
         .globals
         .iter()
@@ -296,6 +299,11 @@ pub fn build_module<'ctx>(ctx: &'ctx Context, prog: &mir::Program) -> Result<Mod
             let ty = cx.llty(&f.ret).fn_type(&params, false);
             cx.module.add_function(&format!("jade.fn{i}.{}", f.name), ty, Some(Linkage::Internal))
         })
+        .collect();
+    cx.drops = prog
+        .drops
+        .iter()
+        .map(|(class, ids)| (class.clone(), ids.iter().map(|id| funcs[id.0 as usize]).collect()))
         .collect();
     let env = func::Env { prog, funcs: &funcs, globals: &globals };
     for (i, f) in prog.funcs.iter().enumerate() {

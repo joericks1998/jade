@@ -15,7 +15,7 @@
 
 use inkwell::values::{BasicValueEnum, FunctionValue, IntValue, PointerValue};
 
-use super::layout::{ARR_DATA, DICT_INDEX, DICT_KEYS, DICT_VALS, LEN, TYPE_ID};
+use super::layout::{ARR_DATA, DICT_INDEX, DICT_KEYS, DICT_VALS, DROPPED, LEN, TYPE_ID};
 use super::{Cx, F};
 use crate::mir::{Ty, is_heap};
 
@@ -90,8 +90,28 @@ impl<'ctx> Cx<'ctx> {
     fn destroy_struct_fn(&self, name: &str) -> FunctionValue<'ctx> {
         let fields = self.struct_fields(name);
         let st = self.struct_ty(name);
+        let drops = self.drops.get(name).cloned().unwrap_or_default();
         self.support(&format!("jade.destroy.{name}"), None, &[self.ptrt().into()], |f| {
             let p = f.param_ptr(0);
+            if !drops.is_empty() {
+                // Run the destructors once, holding a reference so the object
+                // is alive while they run, then give it back. If a destructor
+                // stored `self` somewhere, the count stays above zero, the
+                // object lives on, and the mark keeps its destructors from
+                // running a second time when it is finally freed.
+                let tid_p = f.at_c(p, TYPE_ID);
+                let word = f.load_i64(tid_p);
+                let fresh = f.eq(f.and(word, f.i64(DROPPED)), f.i64(0));
+                f.if_(fresh, |f| {
+                    f.store(tid_p, f.or(word, f.i64(DROPPED)));
+                    f.store(p, f.i64(1));
+                    for d in &drops {
+                        f.call(*d, &[p.into()]);
+                    }
+                    let old = f.atomic_add(p, -1);
+                    f.if_(f.ne(old, f.i64(1)), |f| f.ret_void());
+                });
+            }
             for (i, ft) in fields.iter().enumerate() {
                 if is_heap(ft) {
                     let fp = f.field(st, p, i as u32 + 2);
@@ -179,7 +199,7 @@ impl<'a, 'ctx> F<'a, 'ctx> {
                 self.call(free, &[p.into()]);
             }
             Ty::Struct(_) => {
-                let tid = self.load_i64(self.at_c(p, TYPE_ID));
+                let tid = self.type_id(p);
                 let default = self.block();
                 let end = self.block();
                 let names: Vec<String> = self.cx.structs.iter().map(|s| s.name.clone()).collect();

@@ -75,6 +75,11 @@ pub enum TFStrPart {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TExprKind {
+    /// `value is Class`: whether the value holds that class or a descendant.
+    Is {
+        value: Box<TExpr>,
+        class: String,
+    },
     Integer(i64),
     Float(f64),
     Bool(bool),

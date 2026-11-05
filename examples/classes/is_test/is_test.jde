@@ -1,0 +1,45 @@
+// `x is Dog` tests a value's class.
+//
+// A value whose static type is a parent class may hold any of its children.
+// `x is Dog` is true when `x` holds a Dog or a class that inherits from Dog,
+// and inside `if x is Dog { … }` the value is read as a Dog, so its own fields
+// can be used. It works like the `if x != nil` narrowing. is_unrelated_error.jde
+// shows a test that could never be true refused.
+
+class Animal {
+    @public name
+}
+
+class Dog(Animal) {
+    @public breed
+}
+
+class Puppy(Dog) {
+    @public weeks
+}
+
+class Cat(Animal) {
+    @public indoor
+}
+
+let animals = [
+    Animal { name: "a" },
+    Dog { name: "rex", breed: "corgi" },
+    Puppy { name: "bit", breed: "pug", weeks: 6 },
+    Cat { name: "tom", indoor: true },
+]
+
+for x in animals {
+    if x is Dog {
+        print(f"{x.name} is a dog, a {x.breed}")
+    } else {
+        print(f"{x.name} is not a dog")
+    }
+}
+
+// It combines with `&&`, which narrows its right side by its left.
+for x in animals {
+    if x is Cat && x.indoor {
+        print(f"{x.name} stays in")
+    }
+}

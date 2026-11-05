@@ -57,6 +57,12 @@ impl<'a, 'l> Fx<'a, 'l> {
         if let Some((pkg, f)) = name.split_once('.') {
             return self.package_fn(pkg, f, args, et, span);
         }
+        if name == "as" {
+            // `Animal(x)`: the same object, read as its class or a parent.
+            let first = args.first().ok_or_else(|| internal("a class view with no value", span))?;
+            let (v, t) = self.expr(first)?;
+            return Ok((self.coerce(v, &t, et, span)?, et.clone()));
+        }
         if matches!(name, "max_tasks" | "set_max_tasks" | "cancelled" | "join" | "wait") {
             return Err(not_yet("tasks", span));
         }

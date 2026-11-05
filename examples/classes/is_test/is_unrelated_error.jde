@@ -1,0 +1,17 @@
+// `x is C` asks about classes the value could hold.
+//
+// A Dog can never be a Cat: neither inherits from the other, so the test would
+// always be false, and it is refused as a mistake.
+//
+// This file is a fixture: `jade check` must REJECT it.
+
+class Animal {
+    @public name
+}
+
+class Dog(Animal) { }
+
+class Cat(Animal) { }
+
+let d = Dog { name: "rex" }
+print(d is Cat)

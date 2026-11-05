@@ -23,11 +23,17 @@ examples/classes/copy_with/copy_with.jde
 examples/classes/copy_with_inherit_across_files/copy_with_inherit_across_files.jde
 examples/classes/copy_with_inherit_across_files/creatures.jde
 examples/classes/defaults/defaults.jde
+examples/classes/destructors/destructors.jde
+examples/classes/diamond/diamond.jde
 examples/classes/inherit_across_files/creatures.jde
 examples/classes/inherit_across_files/inherit_across_files.jde
 examples/classes/inheritance/inheritance.jde
+examples/classes/is_test/is_test.jde
 examples/classes/outside_methods/geometry.jde
 examples/classes/outside_methods/outside_methods.jde
+examples/classes/parent_calls/parent_calls.jde
+examples/classes/second_parent/second_parent.jde
+examples/classes/type_decorators/type_decorators.jde
 examples/classes/visibility/visibility.jde
 examples/closures/closures.jde
 examples/collections/container_semantics/container_semantics.jde

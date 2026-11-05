@@ -385,3 +385,124 @@ fn a_method_defined_twice_is_refused() {
         "defined more than once",
     );
 }
+
+/// Purpose: This function asserts a program is refused by any stage before
+/// code generation, with a message containing `want`.
+///
+/// Inputs:
+/// - `src`: a Jade program.
+/// - `want`: part of the expected message.
+///
+/// Outputs: none.
+fn refused(src: &str, want: &str) {
+    let tokens = crate::frontend::lexer::tokenize(src).expect("lexes");
+    let program = match crate::frontend::parser::parse(tokens) {
+        Ok(p) => p,
+        Err(e) => {
+            let m = e.to_string();
+            assert!(m.contains(want), "expected '{want}', got: {m}");
+            return;
+        }
+    };
+    let result = crate::compiler::type_infer::infer(program).and_then(|mut tp| {
+        check_members(&tp)?;
+        crate::compiler::type_infer::fill_struct_literal_defaults(&mut tp)?;
+        check_program(&tp).map(|_| ())
+    });
+    match result {
+        Ok(()) => panic!("expected an error containing '{want}', but it compiled:\n{src}"),
+        Err(e) => {
+            let m = e.to_string();
+            assert!(m.contains(want), "expected '{want}', got: {m}");
+        }
+    }
+}
+
+const ANIMALS: &str = "class Animal {\n    @public name\n    @public fn speak() { return \"...\" }\n}\n\
+                       class Dog(Animal) {\n    @public breed\n    @public fn speak() { return Animal::speak() + \"woof\" }\n}\n\
+                       class Cat(Animal) {\n    @public fn speak() { return \"meow\" }\n}\n";
+
+#[test]
+fn a_class_decorator_declares_a_parent_class() {
+    let t = ok(&format!("{ANIMALS}@Animal\nlet pet = Dog {{ name: \"rex\", breed: \"x\" }}\n"));
+    assert_eq!(global(&t, "pet"), Ty::Struct("Animal".into()));
+    refused(
+        &format!("{ANIMALS}@Cat\nlet pet = Dog {{ name: \"rex\", breed: \"x\" }}\n"),
+        "views a value as a Cat",
+    );
+}
+
+#[test]
+fn a_type_decorator_types_a_field() {
+    let t = ok("class K {\n    @public @int capacity\n}\nlet c = K { capacity: 2 }.capacity\n");
+    assert_eq!(global(&t, "c"), Ty::Int);
+    refused(
+        "class K {\n    @public @int capacity\n}\nlet c = K { capacity: \"two\" }\n",
+        "do not mix",
+    );
+    refused(
+        "class K {\n    @public @cached capacity\n}\nlet c = K { capacity: 2 }\n",
+        "is not @public or a type",
+    );
+    refused("class K {\n    @int fn size() { return 1 }\n}\n", "a method takes only @public");
+}
+
+#[test]
+fn a_diamond_inherits_its_shared_ancestor_once() {
+    let t = ok(
+        "class N {\n    @public name\n}\nclass P(N) {\n    @public owner\n}\nclass W(N) {\n    @public job\n}\n\
+                class S(P, W) { }\nlet d = S { name: \"rex\", owner: \"a\", job: \"g\" }\nlet n = d.name\n",
+    );
+    assert_eq!(global(&t, "n"), Ty::Str);
+}
+
+#[test]
+fn two_parents_methods_need_the_class_to_settle_them() {
+    let parents = "class P {\n    @public fn kind() { return \"p\" }\n}\nclass W {\n    @public fn kind() { return \"w\" }\n}\n";
+    refused(
+        &format!("{parents}class S(P, W) {{ }}\nprint(S {{}}.kind())\n"),
+        "define `kind` in the class itself",
+    );
+    ok(&format!(
+        "{parents}class S(P, W) {{\n    @public fn kind() {{ return P::kind() + W::kind() }}\n}}\nprint(S {{}}.kind())\n"
+    ));
+}
+
+#[test]
+fn a_parent_call_runs_the_parents_version() {
+    let t = ok(&format!("{ANIMALS}let s = Dog {{ name: \"rex\", breed: \"x\" }}.speak()\n"));
+    assert_eq!(global(&t, "s"), Ty::Str);
+    refused(&format!("{ANIMALS}print(Animal::speak())\n"), "works only inside a method");
+}
+
+#[test]
+fn is_narrows_to_the_class_it_tests() {
+    ok(&format!(
+        "{ANIMALS}let xs = [Dog {{ name: \"r\", breed: \"x\" }}, Cat {{ name: \"t\" }}]\n\
+         for x in xs {{\n    if x is Dog {{\n        print(x.breed)\n    }}\n}}\n"
+    ));
+    refused(
+        &format!("{ANIMALS}let d = Dog {{ name: \"r\", breed: \"x\" }}\nprint(d is Cat)\n"),
+        "can never be a Cat",
+    );
+}
+
+#[test]
+fn a_destructor_chain_is_recorded_for_each_class_and_never_called() {
+    let src = "class R {\n    @public name\n    fn drop() { print(self.name) }\n}\nclass L(R) {\n    fn drop() { print(\"l\") }\n}\n\
+               let a = R { name: \"a\" }\nlet b = L { name: \"b\" }\n";
+    let t = ok(src);
+    let chain: Vec<String> = t.drops["L"].iter().map(|k| format!("{:?}", k.func)).collect();
+    assert_eq!(
+        chain,
+        vec!["Method(\"L\", \"drop\")".to_string(), "Method(\"R\", \"drop\")".to_string()]
+    );
+    refused(
+        "class R {\n    @public name\n    fn drop() { print(1) }\n}\nR { name: \"a\" }.drop()\n",
+        "cannot be called",
+    );
+    refused(
+        "class R {\n    @public name\n    fn drop(why) { print(why) }\n}\n",
+        "takes no arguments",
+    );
+}

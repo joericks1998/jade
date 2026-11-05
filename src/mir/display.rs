@@ -197,6 +197,7 @@ impl Display for Rvalue {
             Rvalue::IsNil(o) => write!(f, "isnil {o}"),
             Rvalue::IntToFloat(o) => write!(f, "itof {o}"),
             Rvalue::TypeId(o) => write!(f, "typeid {o}"),
+            Rvalue::IsA(o, ids) => write!(f, "isa {o} {ids:?}"),
         }
     }
 }

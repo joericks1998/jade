@@ -318,6 +318,7 @@ impl<'a> Pass<'a> {
                 grammar_expr.as_ref().map_or(Ok(()), |g| self.expr(g, inside))
             }
             TExprKind::Await { expr } => self.expr(expr, inside),
+            TExprKind::Is { value, .. } => self.expr(value, inside),
             TExprKind::PromptLiteral { body } => self.expr(body, inside),
             _ => Ok(()),
         }

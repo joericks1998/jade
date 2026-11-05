@@ -149,6 +149,10 @@ pub struct Typed {
     pub slots: HashMap<(InstKey, usize), Ty>,
     /// Every struct type, built-in ones included, by name.
     pub structs: HashMap<String, StructType>,
+    /// Each class that has a destructor chain, with the `drop` instances to run
+    /// when a value of it is freed: its own first, then its ancestors', nearest
+    /// first, a shared ancestor's once and last.
+    pub drops: HashMap<String, Vec<InstKey>>,
 }
 
 /// Purpose: This struct holds one struct type's layout as the backend needs it.
@@ -181,6 +185,9 @@ pub struct Checker<'a> {
     field_defaults: Vec<(String, String, Ty)>,
     /// Global variable slots.
     globals: HashMap<String, Ty>,
+    /// Each class member's decorators, with whether the member is a field and
+    /// where its class is: `(class, member, decorators, is_field, span)`.
+    member_decorators: Vec<(String, String, Vec<String>, bool, Span)>,
     /// Globals bound to the result of a decorator applied to a function.
     decorated: HashMap<String, crate::compiler::tir::TDecorators>,
     /// Std package names, which a variable or function of the same name shadows.
@@ -225,6 +232,7 @@ impl<'a> Checker<'a> {
             field_defaults: Vec::new(),
             globals: HashMap::new(),
             decorated: HashMap::new(),
+            member_decorators: Vec::new(),
             packages: HashSet::new(),
             instances: HashMap::new(),
             instance_count: HashMap::new(),
@@ -275,7 +283,17 @@ impl<'a> Checker<'a> {
                         self.decorated.insert(name.clone(), decorators.clone());
                     }
                 }
-                TStmt::StructDef { name, fields, parents, members, .. } => {
+                TStmt::StructDef { name, fields, parents, members, span } => {
+                    for (member, decs) in &members.decorators {
+                        let is_field = fields.iter().any(|fd| fd.name() == member);
+                        self.member_decorators.push((
+                            name.clone(),
+                            member.clone(),
+                            decs.clone(),
+                            is_field,
+                            *span,
+                        ));
+                    }
                     for fd in fields {
                         if let StructFieldDef::Let { name: fname, default } = fd
                             && let Some(t) = default_type(default)
@@ -303,8 +321,22 @@ impl<'a> Checker<'a> {
                     };
                     self.structs.insert(name.clone(), info);
                 }
-                TStmt::ExtendBlock { type_name, methods, .. } => {
+                TStmt::ExtendBlock { type_name, methods, span, .. } => {
                     for m in methods {
+                        if let TStmt::FnDef { name, params, .. }
+                        | TStmt::AsyncFnDef { name, params, .. } = m
+                            && name == "drop"
+                            && (params.len() != 1 || matches!(m, TStmt::AsyncFnDef { .. }))
+                        {
+                            return Err(JadeError::TypeError {
+                                message: format!(
+                                    "{}'s destructor `drop` takes no arguments and is not async; \
+                                     the language calls it when the last reference goes",
+                                    ty::display_name(type_name)
+                                ),
+                                span: *span,
+                            });
+                        }
                         if let TStmt::FnDef { name, params, body, .. }
                         | TStmt::AsyncFnDef { name, params, body, .. } = m
                         {
@@ -333,6 +365,58 @@ impl<'a> Checker<'a> {
             }
         }
         self.build_hierarchy();
+        self.apply_member_decorators()
+    }
+
+    /// Purpose: This function applies the decorators on class members: a
+    /// type decorator gives a field its type, and `@public` was already read.
+    ///
+    /// Inputs: none.
+    ///
+    /// Outputs: `Ok(())`, or an error for a decorator a member cannot take.
+    fn apply_member_decorators(&mut self) -> Result<(), JadeError> {
+        for (class, member, decs, is_field, span) in std::mem::take(&mut self.member_decorators) {
+            let c = ty::display_name(&class).to_string();
+            for d in decs.iter().filter(|d| *d != "public") {
+                let t = match d.as_str() {
+                    "int" => Ty::Int,
+                    "float" => Ty::Float,
+                    "str" => Ty::Str,
+                    "bool" => Ty::Bool,
+                    "char" => Ty::Char,
+                    other if self.structs.contains_key(other) => Ty::Struct(other.to_string()),
+                    other => {
+                        return Err(JadeError::TypeError {
+                            message: format!(
+                                "@{other} on {c}.{member} is not @public or a type; a member takes \
+                                 @public, and a field also takes a type such as @int or a class name"
+                            ),
+                            span,
+                        });
+                    }
+                };
+                if !is_field {
+                    return Err(JadeError::TypeError {
+                        message: format!(
+                            "@{d} on the method {c}.{member}: a type decorator goes on a field or a \
+                             `let`, and a method takes only @public"
+                        ),
+                        span,
+                    });
+                }
+                if let Some(slot) = self.field_slot(&class, &member)
+                    && self.store.join(&slot, &t).is_err()
+                {
+                    let have = self.store.resolve(&slot);
+                    return Err(JadeError::TypeError {
+                        message: format!(
+                            "{c}.{member} is declared @{d}, but its default is a {have}"
+                        ),
+                        span,
+                    });
+                }
+            }
+        }
         Ok(())
     }
 
@@ -465,6 +549,7 @@ impl<'a> Checker<'a> {
             );
         }
         self.worklist.push(main);
+        self.instantiate_drops();
         while let Some(key) = self.worklist.pop() {
             let Some(inst) = self.instances.get_mut(&key) else { continue };
             if inst.checked_in == self.pass {
@@ -477,6 +562,43 @@ impl<'a> Checker<'a> {
             }
         }
         self.settle_fn_members();
+    }
+
+    /// Purpose: This function lists the `drop` methods a value of a class runs
+    /// when it is freed: the class's own, then each ancestor's that defines
+    /// one, nearest first.
+    ///
+    /// Inputs:
+    /// - `class`: the class.
+    ///
+    /// Outputs: the classes whose `drop` runs, in order.
+    fn drop_chain(&self, class: &str) -> Vec<String> {
+        std::iter::once(class.to_string())
+            .chain(self.store.ancestors.get(class).cloned().unwrap_or_default())
+            .filter(|c| self.methods.contains_key(&(c.clone(), "drop".to_string())))
+            .collect()
+    }
+
+    /// Purpose: This function checks every destructor a constructed class will
+    /// run. Nothing calls `drop`; the language does, when a value is freed, so
+    /// each one is instantiated here for each class that may be freed.
+    ///
+    /// Inputs: none.
+    ///
+    /// Outputs: none.
+    fn instantiate_drops(&mut self) {
+        let mut kinds: Vec<String> = self.constructed.iter().cloned().collect();
+        kinds.sort();
+        for kind in kinds {
+            for owner in self.drop_chain(&kind) {
+                let span = Span { line: 0, col: 0 };
+                let _ = self.instantiate(
+                    FnKey::Method(owner, "drop".to_string()),
+                    vec![Ty::Struct(kind.clone())],
+                    span,
+                );
+            }
+        }
     }
 
     /// Purpose: This function instantiates the functions that flowed into each
@@ -666,6 +788,22 @@ impl<'a> Checker<'a> {
         for (n, t) in globals {
             let r = self.store.resolve(&t);
             self.out.globals.insert(n, r);
+        }
+        let mut kinds: Vec<String> = self.constructed.iter().cloned().collect();
+        kinds.sort();
+        for kind in kinds {
+            let chain: Vec<InstKey> = self
+                .drop_chain(&kind)
+                .into_iter()
+                .map(|owner| InstKey {
+                    func: FnKey::Method(owner, "drop".to_string()),
+                    args: vec![Ty::Struct(kind.clone())],
+                })
+                .filter(|k| self.instances.contains_key(k))
+                .collect();
+            if !chain.is_empty() {
+                self.out.drops.insert(kind, chain);
+            }
         }
         let fields: Vec<((String, String), Ty)> =
             self.field_slots.iter().map(|(k, v)| (k.clone(), v.clone())).collect();

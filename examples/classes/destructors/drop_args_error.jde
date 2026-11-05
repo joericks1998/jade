@@ -1,0 +1,12 @@
+// A destructor takes no arguments.
+//
+// Nothing calls `drop`, so there is nobody to pass one.
+//
+// This file is a fixture: `jade check` must REJECT it.
+
+class Resource {
+    @public name
+    fn drop(reason) { print(reason) }
+}
+
+print(Resource { name: "x" }.name)

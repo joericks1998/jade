@@ -150,6 +150,7 @@ fn escapes(name: &str, stmts: &[TStmt]) -> bool {
 /// `bad` unless it is consumed as `name[i]` with a scalar result.
 fn scan_expr(e: &TExpr, name: &str, ok: &mut usize, bad: &mut usize) {
     match &e.kind {
+        TExprKind::Is { value, .. } => scan_expr(value, name, ok, bad),
         TExprKind::Identifier(n) => {
             if n == name {
                 *bad += 1;
@@ -360,6 +361,7 @@ fn stmt_contains_await(st: &TStmt) -> bool {
 
 fn expr_contains_await(e: &TExpr) -> bool {
     match &e.kind {
+        TExprKind::Is { value, .. } => expr_contains_await(value),
         TExprKind::Await { .. } => true,
         TExprKind::Call { callee, args, kwargs } => {
             expr_contains_await(callee)

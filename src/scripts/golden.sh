@@ -51,6 +51,10 @@ skip_reason() {
     examples/llm/typed_struct_messy/*|examples/pipe/deref_chain/*|\
     examples/pipe/deref_in_print/*)
       echo "dereferences a prompt" ;;
+    # Behavior the static backend has and the tagged one never will, since it
+    # is deleted at the end of v2: destructors run only there.
+    examples/classes/destructors/*)
+      if [[ -z "$LIST" ]]; then echo "static backend only"; else echo ""; fi ;;
     *) echo "" ;;
   esac
 }

@@ -604,7 +604,7 @@ fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
         // Metadata only — already captured in the first pass.
         TStmt::StructDef { .. } => {}
 
-        TStmt::ExtendBlock { type_name, methods, .. } => {
+        TStmt::ExtendBlock { type_name, methods, span, .. } => {
             // Compile all methods first (releasing the ctx borrow from extend_methods),
             // then insert them all at once.
             let mut compiled_methods: Vec<(String, CompiledFn)> = Vec::new();
@@ -614,9 +614,16 @@ fn emit_stmt(stmt: TStmt, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<()> {
                     compiled_methods.push((name, compiled));
                 }
             }
-            let method_map = ctx.extend_methods.entry(type_name.clone()).or_default();
+            // Each method is also a global named `Type::method`, which is what
+            // `Type::method(self, …)` calls: a parent's version, picked by name
+            // rather than by the object's own class.
             for (name, compiled) in compiled_methods {
-                method_map.insert(name, Arc::new(compiled));
+                let rc = Arc::new(compiled);
+                let idx = em.chunk.intern_fn(Arc::clone(&rc));
+                let dest = em.alloc_reg();
+                em.chunk.emit(Instr::LoadFn(dest, idx), span);
+                em.chunk.emit(Instr::SetGlobal(format!("{type_name}::{name}"), dest), span);
+                ctx.extend_methods.entry(type_name.clone()).or_default().insert(name, rc);
             }
         }
 
@@ -979,6 +986,16 @@ fn body_yields(body: &[TStmt]) -> bool {
 fn emit_expr(expr: &TExpr, em: &mut Emitter, ctx: &mut EmitCtx) -> Result<Reg> {
     let span = expr.span;
     match &expr.kind {
+        // `x is Dog` asks the same question a typed `catch` arm asks of the
+        // value it caught, so it uses the same two instructions.
+        TExprKind::Is { value, class } => {
+            let v = emit_expr(value, em, ctx)?;
+            let type_reg = em.alloc_reg();
+            em.chunk.emit(Instr::GetTypeName(type_reg, v), span);
+            let dest = em.alloc_reg();
+            em.chunk.emit(Instr::CatchMatches(dest, type_reg, class.clone()), span);
+            Ok(dest)
+        }
         TExprKind::Integer(n) => {
             let dest = em.alloc_reg();
             em.chunk.emit(Instr::LoadInt(dest, *n), span);
@@ -1177,6 +1194,16 @@ fn emit_call(
         let dest = em.alloc_reg();
         em.chunk.emit(Instr::Spawn(dest, callee_reg, arg_regs), span);
         return Ok(dest);
+    }
+
+    // `Animal(x)` views a value as a class. A value carries its own class at
+    // run time, so there is nothing to do but evaluate it.
+    if let TExprKind::Identifier(name) = &callee.kind
+        && ctx.struct_defs.contains_key(name)
+        && args.len() == 1
+        && kwargs.is_empty()
+    {
+        return emit_expr(&args[0], em, ctx);
     }
 
     let callee_reg = emit_expr(callee, em, ctx)?;

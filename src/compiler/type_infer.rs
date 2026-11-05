@@ -574,7 +574,9 @@ fn fill_in_expr(
 ) -> Result<()> {
     // Recurse first so nested literals get filled before we patch this one.
     match &mut e.kind {
-        TExprKind::Await { expr } => fill_in_expr(expr, defs, ctx)?,
+        TExprKind::Await { expr } | TExprKind::Is { value: expr, .. } => {
+            fill_in_expr(expr, defs, ctx)?
+        }
         TExprKind::Call { callee, args, kwargs } => {
             fill_in_expr(callee, defs, ctx)?;
             for a in args.iter_mut() {
@@ -759,65 +761,91 @@ fn flatten_struct(
     // name is checked against where it already came from, so the message can
     // name both sides.
     let mut fields: Vec<StructFieldDef> = Vec::new();
-    let mut owner: HashMap<String, String> = HashMap::new();
+    // Each field's name, with the class that declared it and the parent it
+    // came through. A class reached by two paths, the shared ancestor of a
+    // diamond, declares its fields once, so the second path adds nothing.
+    let mut owner: HashMap<String, (String, String)> = HashMap::new();
+    // The class that declared a field a parent passes on: the nearest of the
+    // parent and its ancestors whose own body names it.
+    let declarer = |field: &str, parent: &str| -> String {
+        std::iter::once(parent.to_string())
+            .chain(ancestors.get(parent).cloned().unwrap_or_default())
+            .find(|c| {
+                ctx.struct_defs.get(c).is_some_and(|own| own.iter().any(|f| f.name() == field))
+            })
+            .unwrap_or_else(|| parent.to_string())
+    };
     let push = |f: &StructFieldDef,
+                decl: String,
                 from: &str,
                 fields: &mut Vec<StructFieldDef>,
-                owner: &mut HashMap<String, String>|
+                owner: &mut HashMap<String, (String, String)>|
      -> Result<()> {
-        if let Some(first) = owner.get(f.name()) {
+        if let Some((first_decl, first_from)) = owner.get(f.name()) {
+            if *first_decl == decl {
+                return Ok(());
+            }
             return Err(JadeError::InheritedFieldClash {
                 field: f.name().to_string(),
-                owner: first.clone(),
+                owner: first_from.clone(),
                 other: from.to_string(),
                 span,
             });
         }
-        owner.insert(f.name().to_string(), from.to_string());
+        owner.insert(f.name().to_string(), (decl, from.to_string()));
         fields.push(f.clone());
         Ok(())
     };
     for parent in &parents {
         let inherited = resolved.get(parent).cloned().unwrap_or_default();
         for f in &inherited {
-            push(f, parent, &mut fields, &mut owner)?;
+            push(f, declarer(f.name(), parent), parent, &mut fields, &mut owner)?;
         }
     }
     for f in &own {
-        push(f, name, &mut fields, &mut owner)?;
+        push(f, name.to_string(), name, &mut fields, &mut owner)?;
     }
 
     // Two parents supplying one method name have nothing to decide between
-    // them. The child's own methods are not consulted: a child overriding an
-    // inherited method is the point of inheriting one.
-    let mut from_parent: HashMap<String, String> = HashMap::new();
+    // them, unless both supply the same method, inherited from an ancestor
+    // they share. The class settles it by defining the method itself, as in
+    // C++; then neither parent's version is the one it runs.
+    let defines_itself =
+        |method: &str| ctx.extend_methods.get(name).is_some_and(|m| m.contains_key(method));
+    // Each method a parent supplies, with the class whose version it is.
+    let mut from_parent: HashMap<String, (String, String)> = HashMap::new();
     for parent in &parents {
-        let mut supplied: Vec<String> =
-            ctx.extend_methods.get(parent).map(|m| m.keys().cloned().collect()).unwrap_or_default();
-        supplied.extend(
-            ancestors
-                .get(parent)
-                .into_iter()
-                .flatten()
-                .flat_map(|a| {
-                    ctx.extend_methods.get(a).map(|m| m.keys().cloned().collect::<Vec<_>>())
-                })
-                .flatten(),
-        );
+        let line: Vec<String> = std::iter::once(parent.clone())
+            .chain(ancestors.get(parent).cloned().unwrap_or_default())
+            .collect();
+        let mut supplied: Vec<(String, String)> = Vec::new();
+        for class in &line {
+            for method in ctx
+                .extend_methods
+                .get(class)
+                .map(|m| m.keys().cloned().collect::<Vec<_>>())
+                .unwrap_or_default()
+            {
+                if !supplied.iter().any(|(m, _)| *m == method) {
+                    supplied.push((method, class.clone()));
+                }
+            }
+        }
         supplied.sort();
-        supplied.dedup();
-        for method in supplied {
-            if let Some(first) = from_parent.get(&method)
-                && first != parent
+        for (method, version) in supplied {
+            if let Some((first_parent, first_version)) = from_parent.get(&method)
+                && first_parent != parent
+                && *first_version != version
+                && !defines_itself(&method)
             {
                 return Err(JadeError::InheritedMethodClash {
                     method,
-                    first: first.clone(),
+                    first: first_parent.clone(),
                     second: parent.clone(),
                     span,
                 });
             }
-            from_parent.insert(method, parent.clone());
+            from_parent.entry(method).or_insert((parent.clone(), version));
         }
     }
 
@@ -1290,6 +1318,24 @@ fn check_stmt(stmt: &Stmt, ctx: &mut TypeContext) -> Result<TStmt> {
 
 fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
     match expr {
+        // ── Class test ────────────────────────────────────────────────────────
+        // Whether the class is related to the value's is the whole-program
+        // checker's question; a class this file does not know may be imported.
+        Expr::Is { value, class, span } => {
+            if !class.contains('.') && !ctx.struct_defs.contains_key(class) && !ctx.opaque_imports {
+                return Err(JadeError::UndefinedType { name: class.clone(), span: *span });
+            }
+            let tv = infer_expr(value, ctx)?;
+            let bare =
+                class.rsplit_once('.').map(|(_, b)| b.to_string()).unwrap_or_else(|| class.clone());
+            let class = if ctx.struct_defs.contains_key(class) { class.clone() } else { bare };
+            Ok(TExpr {
+                kind: TExprKind::Is { value: Box::new(tv), class },
+                ty: JadeType::Bool,
+                span: *span,
+            })
+        }
+
         // ── Literals ──────────────────────────────────────────────────────────
         Expr::Integer { value, span } => {
             Ok(TExpr { kind: TExprKind::Integer(*value), ty: JadeType::Int, span: *span })
@@ -1385,24 +1431,87 @@ fn infer_expr(expr: &Expr, ctx: &mut TypeContext) -> Result<TExpr> {
                 _ => None,
             };
 
-            // A struct type is not callable — `City { .. }` is the one way to
-            // build one. Caught here so `jade check`, `jade run` and `jade build`
-            // all agree: the AOT backend rejects this at build time, so letting
-            // `jade check` pass it would mean a program that checks clean and
-            // then fails to compile.
-            if let Expr::Identifier { name, .. } = callee.as_ref()
+            // A class applied to one value views the value as that class:
+            // `Animal(d)`, which is also what `@Animal let a = d` means. The
+            // whole-program checker requires the value to be the class or one
+            // of its descendants. Called any other way, a class is refused here
+            // so `jade check`, `jade run` and `jade build` all agree.
+            if let Expr::Identifier { name, span: cspan } = callee.as_ref()
                 && ctx.struct_defs.contains_key(name)
             {
+                if args.len() == 1 && kwargs.is_empty() {
+                    let targ = infer_expr(&args[0], ctx)?;
+                    let ty = JadeType::Struct(name.clone());
+                    return Ok(TExpr {
+                        kind: TExprKind::Call {
+                            callee: Box::new(TExpr {
+                                kind: TExprKind::Identifier(name.clone()),
+                                ty: JadeType::Unknown,
+                                span: *cspan,
+                            }),
+                            args: vec![targ],
+                            kwargs: Vec::new(),
+                        },
+                        ty,
+                        span: *span,
+                    });
+                }
                 return Err(JadeError::TypeError {
                     message: format!(
-                        "'{}' is a class, not a function; build one with {} {{ ... }}",
-                        name, name
+                        "'{name}' is a class, not a function; build one with {name} {{ … }} or \
+                         {name}::new(…), or view a value as the class with {name}(x)"
                     ),
                     span: *span,
                 });
             }
 
-            let tcallee = infer_expr(callee, ctx)?;
+            // `Animal::speak(…)` inside a method calls Animal's version on the
+            // same object, so the object goes first, as it does for any method.
+            let parent_call = match callee.as_ref() {
+                Expr::Identifier { name, .. } => {
+                    name.split_once("::").is_some_and(|(_, m)| m != "new")
+                }
+                Expr::FieldAccess { field, .. } => {
+                    field.split_once("::").is_some_and(|(_, m)| m != "new")
+                }
+                _ => false,
+            };
+            if parent_call && ctx.get("self").is_none() {
+                let named = match callee.as_ref() {
+                    Expr::Identifier { name, .. } | Expr::FieldAccess { field: name, .. } => {
+                        name.clone()
+                    }
+                    _ => String::new(),
+                };
+                let (class, method) = named.split_once("::").unwrap_or((named.as_str(), ""));
+                return Err(JadeError::TypeError {
+                    message: format!(
+                        "{class}::{method}(…) calls {class}'s version of a method on the same object, \
+                         so it works only inside a method of {class} or of a class that inherits from it"
+                    ),
+                    span: *span,
+                });
+            }
+            let with_self: Vec<Expr>;
+            let args: &[Expr] = if parent_call {
+                let mut all = vec![Expr::Identifier { name: "self".to_string(), span: *span }];
+                all.extend(args.iter().cloned());
+                with_self = all;
+                &with_self
+            } else {
+                args
+            };
+
+            // A parent call's `Animal::speak` names a method, not a variable, so
+            // it is not looked up here; the whole-program checker resolves it.
+            let tcallee = match callee.as_ref() {
+                Expr::Identifier { name, span: cspan } if parent_call => TExpr {
+                    kind: TExprKind::Identifier(name.clone()),
+                    ty: JadeType::Unknown,
+                    span: *cspan,
+                },
+                _ => infer_expr(callee, ctx)?,
+            };
             let targs: Vec<TExpr> =
                 args.iter().map(|a| infer_expr(a, ctx)).collect::<Result<_>>()?;
             let tkwargs: Vec<(String, TExpr)> = kwargs
@@ -2611,7 +2720,8 @@ fn op_symbol(op: &BinOpKind) -> &'static str {
 
 fn expr_span(e: &Expr) -> Span {
     match e {
-        Expr::Integer { span, .. }
+        Expr::Is { span, .. }
+        | Expr::Integer { span, .. }
         | Expr::Float { span, .. }
         | Expr::Bool { span, .. }
         | Expr::Str { span, .. }

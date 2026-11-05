@@ -159,6 +159,70 @@ impl<'a, 'b, 'ctx> Lw<'a, 'b, 'ctx> {
         v
     }
 
+    /// Purpose: This function addresses a field of an object read through its
+    /// static class.
+    ///
+    /// A child keeps its first parent's fields where the parent keeps them, so
+    /// usually the static class's offset is right for every object it can hold.
+    /// A class reached as a second parent keeps its fields elsewhere in the
+    /// child. When any descendant of the static class does that, the address is
+    /// chosen by the object's class id, which is the per-class table design
+    /// decision 9 of `design/v2-classes.md` describes, written as a switch.
+    ///
+    /// Inputs:
+    /// - `obj`: the object.
+    /// - `strukt`: its static class.
+    /// - `index`: the field's index in that class's layout.
+    ///
+    /// Outputs: a pointer to the field.
+    fn field_ptr(&self, obj: PointerValue<'ctx>, strukt: &str, index: u32) -> PointerValue<'ctx> {
+        let f = &self.f;
+        let cx = self.cx();
+        let st = cx.struct_ty(strukt);
+        let direct = f.field(st, obj, index + 2);
+        let Some(field) = cx
+            .structs
+            .iter()
+            .find(|s| s.name == strukt)
+            .and_then(|s| s.fields.get(index as usize))
+            .map(|(n, _)| n.clone())
+        else {
+            return direct;
+        };
+        let moved: Vec<(usize, u32)> = cx
+            .structs
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.ancestors.iter().any(|a| a == strukt))
+            .filter_map(|(id, s)| {
+                let i = s.fields.iter().position(|(n, _)| *n == field)? as u32;
+                (i != index).then_some((id, i))
+            })
+            .collect();
+        if moved.is_empty() {
+            return direct;
+        }
+        let at = f.var(direct);
+        let tid = f.type_id(obj);
+        let end = f.block();
+        let mut cases = Vec::new();
+        let mut bodies = Vec::new();
+        for (id, i) in &moved {
+            let b = f.block();
+            cases.push((f.i64(*id as i64), b));
+            bodies.push((b, *id, *i));
+        }
+        f.switch(tid, end, &cases);
+        for (b, id, i) in bodies {
+            f.position(b);
+            let child = cx.struct_ty(&cx.structs[id].name);
+            f.store(at, f.field(child, obj, i + 2));
+            f.br(end);
+        }
+        f.position(end);
+        f.load_ptr(at)
+    }
+
     fn nil(&self) -> BasicValueEnum<'ctx> {
         self.f.i8(0).into()
     }
@@ -188,10 +252,9 @@ impl<'a, 'b, 'ctx> Lw<'a, 'b, 'ctx> {
             Stmt::SetField { object, strukt, index, value } => {
                 let obj = self.operand(object).into_pointer_value();
                 let v = self.consume(value);
-                let st = self.cx().struct_ty(strukt);
                 let fields = self.cx().struct_fields(strukt);
                 let ft = fields.get(*index as usize).cloned().unwrap_or(Ty::Nil);
-                let fp = f.field(st, obj, *index + 2);
+                let fp = self.field_ptr(obj, strukt, *index);
                 let old = f.load(self.cx().llty(&ft), fp);
                 f.store(fp, v);
                 f.release(&ft, old);
@@ -308,9 +371,8 @@ impl<'a, 'b, 'ctx> Lw<'a, 'b, 'ctx> {
             }
             Rvalue::Field { object, strukt, index } => {
                 let obj = self.operand(object).into_pointer_value();
-                let st = cx.struct_ty(strukt);
                 let ft = cx.struct_fields(strukt).get(*index as usize).cloned().unwrap_or(Ty::Nil);
-                let v = f.load(cx.llty(&ft), f.field(st, obj, *index + 2));
+                let v = f.load(cx.llty(&ft), self.field_ptr(obj, strukt, *index));
                 (v, ft)
             }
             Rvalue::Wrap(t, op) => (f.wrap(t, self.operand(op)), t.clone()),
@@ -329,7 +391,16 @@ impl<'a, 'b, 'ctx> Lw<'a, 'b, 'ctx> {
             Rvalue::IntToFloat(op) => (f.itof(self.operand(op).into_int_value()).into(), Ty::Float),
             Rvalue::TypeId(op) => {
                 let p = self.operand(op).into_pointer_value();
-                (f.load_i64(f.at_c(p, TYPE_ID)).into(), Ty::Int)
+                (f.type_id(p).into(), Ty::Int)
+            }
+            Rvalue::IsA(op, ids) => {
+                let p = self.operand(op).into_pointer_value();
+                let tid = f.type_id(p);
+                let mut any = f.bool(false);
+                for id in ids {
+                    any = f.or(any, f.eq(tid, f.i64(*id)));
+                }
+                (any.into(), Ty::Bool)
             }
         }
     }

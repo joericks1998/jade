@@ -24,7 +24,9 @@ The v1 checker in `type_infer.rs` is one forward pass with no type variables. A 
 
 *Visibility.* A class member is private unless its class marks it `@public`. `check_visible` refuses reading or setting a private field, or calling a private method, from code outside the class that owns it and its descendants. The code being checked belongs to a class when it is one of that class's methods, or its constructor, the function the parser names `Class::new`. Built-in structs such as `RuntimeError` have only public members. A call to a method the class declares but nothing defines is refused here, at the call, so a file can declare methods its importers define.
 
-*Narrowing.* Inside `if x != nil { … }`, and after `if x == nil { return }`, the variable is read as its non-optional type. `&&` narrows its right side by its left. Narrowing lives beside the scopes rather than in them, so assigning the variable still reaches its real slot.
+*Narrowing.* Inside `if x != nil { … }`, and after `if x == nil { return }`, the variable is read as its non-optional type. Inside `if x is Dog { … }` it is read as a `Dog`. `&&` narrows its right side by its left.
+
+*Classes.* `Class(x)` views a value as a class it is or descends from; a class decorator on a `let` becomes one. `Parent::m(self, …)` inside a method resolves to that parent's version of `m`, with `self` put first by the type pass. A field's type decorator joins into its slot when classes are registered. Nothing calls a destructor, so `instantiate_drops` checks each constructed class's `drop` chain, its own then its ancestors', and `Typed::drops` hands the chains to the backend; calling `drop`, or giving it arguments, is refused. Narrowing lives beside the scopes rather than in them, so assigning the variable still reaches its real slot.
 
 ## What each file does
 
