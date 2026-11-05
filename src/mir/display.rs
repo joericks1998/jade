@@ -266,6 +266,7 @@ fn op_name(op: &Op) -> String {
             format!("{}.{m:?}", if *unix { "uhttp" } else { "http" }).to_lowercase()
         }
         Op::UhttpStream(t) => typed("uhttp.stream", t),
+        Op::Native(c) => format!("native {} -> {}", c.display, c.ret),
         Op::Fail(m) => format!("fail {m:?}"),
         Op::Await(t) => typed("await", t),
         Op::Join(t) => typed("join", t),

@@ -178,6 +178,12 @@ fn a_program_declares_nothing_but_c_library_functions() {
         "tzset",
         "localtime_r",
         "strftime",
+        "dlopen",
+        "dlsym",
+        "dlerror",
+        "dladdr",
+        "realpath",
+        "strcmp",
     ];
     let mut f = module.get_first_function();
     while let Some(func) = f {

@@ -187,6 +187,11 @@ impl<'ctx> Cx<'ctx> {
                 Ty::Future(_) => f.cx.lit("<future>"),
                 Ty::Bytes => f.call_ptr(f.cx.bytes_render_fn(), &[v]),
                 Ty::Json => f.call_ptr(f.cx.json_tostr_fn(), &[v]),
+                // A handle names its type and never its address, as in v1.
+                Ty::Handle(_) => {
+                    let name = f.load_ptr(f.at_c(v.into_pointer_value(), 16));
+                    f.str_cat(&[f.cx.lit("handle<"), name, f.cx.lit(">")])
+                }
                 _ => f.cx.lit("<value>"),
             };
             f.ret(s);

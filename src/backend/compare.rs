@@ -116,6 +116,20 @@ impl<'a, 'ctx> F<'a, 'ctx> {
             }
             Ty::Array(_) | Ty::Map(_) | Ty::Opt(_) => self.call_int(self.cx.eq_fn(t), &[a, b]),
             Ty::Json => self.call_int(self.cx.json_eq_fn(), &[a, b]),
+            // Two handles are equal when they hold one pointer as one type.
+            Ty::Handle(_) => {
+                let (x, y) = (a.into_pointer_value(), b.into_pointer_value());
+                let i = self.cx.i64t();
+                let px = self.load_ptr(self.at_c(x, 8));
+                let py = self.load_ptr(self.at_c(y, 8));
+                let same = self.eq(
+                    self.b.build_ptr_to_int(px, i, "").expect("positioned"),
+                    self.b.build_ptr_to_int(py, i, "").expect("positioned"),
+                );
+                let nx = self.load_ptr(self.at_c(x, 16));
+                let ny = self.load_ptr(self.at_c(y, 16));
+                self.and(same, self.call_int(self.cx.str_eq_fn(), &[nx.into(), ny.into()]))
+            }
             _ => self.bool(false),
         }
     }

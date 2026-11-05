@@ -307,7 +307,13 @@ With phases 3 and 4, 94 examples pass under `--backend=static`.
 - *`json.stringify` keeps the taint of the strings it writes*, where v1's result was trusted, which was a way around `sh.exec`'s check. It writes a class value as an object of its fields; v1 wrote `null`.
 - *`http.head` runs `curl --head`.* v1's `-X HEAD` left curl waiting for the body a HEAD response's length promised.
 
-What remains of phase 5 is decision 11, packages and C libraries, which needs the input that decision names.
+*Decision 11's C libraries are done* (2026-11-04). A native package keeps v1's `JadeVal` boundary, so a library built for v1 loads unchanged, and the static backend marshals each call by its static types. The types come from `jade.toml`:
+
+- *A Jade-ABI library declares its functions in its `[lib]` entry*, as `[lib.<name>.symbols.<fn>]` with `args` and `ret` in Jade types: `handle<Thing>`, `handle` for any handle, `fn(int, str) -> int` for a callback, `[T]`, `{T}`, `T?`. This is new, and it is what keeps a native call from being the one untyped thing left: such a library has no types of its own.
+- *A C dependency's Jade signature is derived from its symbol table*, through the same parse the shim generator uses. A C struct crossing either way, or several results coming back as one record, is refused by name for now; every other shape works, and glib's fixture and the `alloc_str` long run pass under `--backend=static`.
+- *An undeclared function still checks*: its arguments go as they are, and its result takes the type its use gives it. Where nothing settles the result, the build names the declaration to add. A callback always needs one, since nothing else says what C will pass it.
+
+This is the part of decision 11 that needed the input it names: a Jade-ABI package such as jade-graphics now builds under `--backend=static` once its `[lib]` entry declares what its functions take and return, and its calls whose results the program uses are typed even without that. Jade packages as source dependencies remain.
 
 ## Open questions
 

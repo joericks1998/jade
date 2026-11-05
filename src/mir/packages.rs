@@ -157,7 +157,10 @@ impl<'a, 'l> Fx<'a, 'l> {
                     "shuffle" => (RandomFn::Shuffle, Ty::Nil),
                     "seed" => (RandomFn::Seed, Ty::Nil),
                     other => {
-                        return Err(internal(format!("an unknown random function '{other}'"), span));
+                        return Err(internal(
+                            format!("an unknown random function '{other}'"),
+                            span,
+                        ));
                     }
                 };
                 let ops = self.operands(args)?;

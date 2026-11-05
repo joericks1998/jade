@@ -32,6 +32,13 @@ pub(super) struct FnDef<'a> {
 /// Purpose: This struct holds what every function's lowering shares.
 pub(super) struct Lowerer<'a> {
     top: &'a [TStmt],
+    /// Native calls whose result type nothing settled; see `Typed`.
+    unsettled_natives: &'a HashSet<(InstKey, usize)>,
+    /// Each native package's import name, by id, for messages.
+    native_names: HashMap<u32, String>,
+    /// What `jade.toml` declares about native functions, by
+    /// `__native$<pkg>$<fn>`.
+    native_sigs: HashMap<String, crate::compiler::infer::native::NativeSig>,
     fns: HashMap<&'a str, FnDef<'a>>,
     methods: HashMap<(&'a str, &'a str), FnDef<'a>>,
     func_ids: HashMap<InstKey, FuncId>,
@@ -68,7 +75,27 @@ struct Adapter {
 /// Outputs: the MIR program, or the first feature the static backend cannot
 /// compile yet.
 pub fn lower_program(program: &TProgram, typed: &Typed) -> Result<Program> {
+    lower_program_with(program, typed, Vec::new(), &HashMap::new())
+}
+
+/// Purpose: This function lowers a program that calls native packages.
+///
+/// Inputs:
+/// - `program`, `typed`: as for [`lower_program`].
+/// - `natives`: the native packages the program imports.
+/// - `sigs`: what `jade.toml` declares about their functions, by
+///   `__native$<pkg>$<fn>`.
+///
+/// Outputs: the MIR program.
+pub fn lower_program_with(
+    program: &TProgram,
+    typed: &Typed,
+    natives: Vec<NativeLib>,
+    sigs: &HashMap<String, crate::compiler::infer::native::NativeSig>,
+) -> Result<Program> {
     let mut l = Lowerer::new(&program.stmts, typed);
+    l.native_sigs = sigs.clone();
+    l.native_names = natives.iter().map(|n| (n.id, n.name.clone())).collect();
     l.collect(&program.stmts);
 
     let mut keys: Vec<&(InstKey, Vec<Ty>, Ty)> = typed.instances.iter().collect();
@@ -107,6 +134,7 @@ pub fn lower_program(program: &TProgram, typed: &Typed) -> Result<Program> {
         structs: l.structs,
         main: FuncId(0),
         drops,
+        natives,
     })
 }
 
@@ -228,6 +256,9 @@ impl<'a> Lowerer<'a> {
 
         Lowerer {
             top,
+            unsettled_natives: &typed.unsettled_natives,
+            native_names: HashMap::new(),
+            native_sigs: HashMap::new(),
             fns: HashMap::new(),
             methods: HashMap::new(),
             func_ids: HashMap::new(),
@@ -487,6 +518,7 @@ impl<'a> Lowerer<'a> {
         let empty_t = HashMap::new();
         let mut fx = Fx {
             l: self,
+            key: k.clone(),
             types: self.exprs.get(k).unwrap_or(&empty),
             targets: self.targets.get(k).unwrap_or(&empty_t),
             slots: self.slots.get(k).unwrap_or(&empty),
@@ -550,6 +582,8 @@ pub(super) struct Fx<'a, 'l> {
     pub(super) l: &'l Lowerer<'a>,
     types: &'l HashMap<usize, Ty>,
     pub(super) targets: &'l HashMap<usize, Target>,
+    /// The instance being lowered.
+    pub(super) key: InstKey,
     slots: &'l HashMap<usize, Ty>,
     is_main: bool,
     ret: Ty,
@@ -1836,6 +1870,80 @@ impl<'a, 'l> Fx<'a, 'l> {
         }
     }
 
+    /// Purpose: This function lowers a call into a native package. Each
+    /// argument goes as its declared type, or as the type it has here when
+    /// `jade.toml` declares none, and the result is read back as the call's
+    /// type, which must be settled.
+    ///
+    /// Inputs:
+    /// - `name`: the `__native$<pkg>$<fn>` reference.
+    /// - `args`: the arguments.
+    /// - `et`: the call's type.
+    /// - `span`: where.
+    ///
+    /// Outputs: the result.
+    fn native_call(
+        &mut self,
+        name: &str,
+        node: usize,
+        args: &'a [TExpr],
+        et: &Ty,
+        span: Span,
+    ) -> Result<Operand> {
+        let rest = name.trim_start_matches("__native$");
+        let (pkg, func) = rest
+            .split_once('$')
+            .ok_or_else(|| internal(format!("a malformed native reference '{name}'"), span))?;
+        let pkg: u32 =
+            pkg.parse().map_err(|_| internal("a native package id that is not a number", span))?;
+        let sig = self.l.native_sigs.get(name).cloned();
+        let lib = self.l.native_names.get(&pkg).cloned().unwrap_or_default();
+        let display =
+            sig.as_ref().map(|s| s.display.clone()).unwrap_or_else(|| format!("{lib}.{func}"));
+        let table = format!("[lib.{lib}.symbols.{func}]");
+        if let Some(why) = sig.as_ref().and_then(|s| s.refused.clone()) {
+            return Err(JadeError::NotYetStatic { what: format!("{display}'s {why}"), span });
+        }
+        let declared = sig.as_ref().and_then(|s| s.params.clone());
+        let mut ops = Vec::with_capacity(args.len());
+        let mut tys = Vec::with_capacity(args.len());
+        for (i, a) in args.iter().enumerate() {
+            let (v, t) = self.expr(a)?;
+            let want = match declared.as_ref().and_then(|p| p.get(i)) {
+                // `handle` takes any handle, so the value goes as it is.
+                Some(Ty::Handle(n)) if n.is_empty() => t.clone(),
+                Some(p) => norm(p),
+                None => t.clone(),
+            };
+            if matches!(want, Ty::Func(_)) || has_var(&want) {
+                return Err(JadeError::TypeError {
+                    message: format!(
+                        "argument {} to {display} has no type a native call can send; declare \
+                         it in jade.toml under {table}, such as `args = [\"fn(int) -> int\"]` \
+                         for a function",
+                        i + 1
+                    ),
+                    span: a.span,
+                });
+            }
+            let v = self.coerce(v, &t, &want, a.span)?;
+            ops.push(v);
+            tys.push(want);
+        }
+        if has_var(et) || self.l.unsettled_natives.contains(&(self.key.clone(), node)) {
+            return Err(JadeError::TypeError {
+                message: format!(
+                    "nothing in the program settles what {display} returns; declare it in \
+                     jade.toml under {table}, such as `ret = \"str\"`"
+                ),
+                span,
+            });
+        }
+        let call =
+            NativeCall { pkg, func: func.to_string(), display, params: tys, ret: et.clone() };
+        Ok(self.assign_temp(et.clone(), Rvalue::Op(Op::Native(Box::new(call)), ops)))
+    }
+
     /// Purpose: This function lowers `&&` and `||`, which skip the right side
     /// when the left already decides.
     ///
@@ -1976,7 +2084,7 @@ impl<'a, 'l> Fx<'a, 'l> {
             Some(Target::Builtin(name)) => self.builtin(e, et, &name, callee, args, kwargs),
             None => match &callee.kind {
                 TExprKind::Identifier(n) if n.starts_with("__native$") => {
-                    Err(not_yet("C libraries", span))
+                    self.native_call(n, addr(e), args, et, span).map(|o| (o, et.clone()))
                 }
                 _ => {
                     // A call through a joined function type: a pointer.
@@ -2064,4 +2172,15 @@ impl<'a, 'l> Fx<'a, 'l> {
 /// Outputs: true for `nil`, `None` or `null`.
 fn is_nil(e: &TExpr) -> bool {
     matches!(&e.kind, TExprKind::Identifier(n) if n == "nil" || n == "None" || n == "null")
+}
+
+/// Purpose: This function says whether a type still holds a slot the checker
+/// never settled.
+fn has_var(t: &Ty) -> bool {
+    match t {
+        Ty::Var(_) => true,
+        Ty::Opt(i) | Ty::Array(i) | Ty::Map(i) | Ty::Future(i) | Ty::Stream(i) => has_var(i),
+        Ty::Fn(f) => f.params.iter().any(has_var) || has_var(&f.ret),
+        _ => false,
+    }
 }

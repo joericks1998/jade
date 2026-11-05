@@ -52,6 +52,7 @@ mod http;
 mod json;
 mod layout;
 mod math;
+mod native;
 mod random;
 mod rc;
 mod sh;
@@ -107,6 +108,8 @@ pub struct Cx<'ctx> {
     lits: RefCell<HashMap<String, PointerValue<'ctx>>>,
     /// Each class's destructor chain, as the functions to call.
     pub drops: HashMap<String, Vec<FunctionValue<'ctx>>>,
+    /// The native packages the program calls.
+    pub natives: Vec<mir::NativeLib>,
 }
 
 impl<'ctx> Cx<'ctx> {
@@ -129,6 +132,7 @@ impl<'ctx> Cx<'ctx> {
             support: RefCell::new(HashMap::new()),
             lits: RefCell::new(HashMap::new()),
             drops: HashMap::new(),
+            natives: prog.natives.clone(),
         }
     }
 
@@ -249,6 +253,10 @@ impl<'ctx> Cx<'ctx> {
             "getcwd" => ptr.fn_type(&[ptr.into(), i64t.into()], false),
             "getpid" => i32t.fn_type(&[], false),
             "strdup" => ptr.fn_type(&[ptr.into()], false),
+            "dlopen" => ptr.fn_type(&[ptr.into(), i32t.into()], false),
+            "dlsym" | "realpath" => ptr.fn_type(&[ptr.into(), ptr.into()], false),
+            "dlerror" => ptr.fn_type(&[], false),
+            "dladdr" | "strcmp" => i32t.fn_type(&[ptr.into(), ptr.into()], false),
             "unsetenv" => i32t.fn_type(&[ptr.into()], false),
             "tzset" => void.fn_type(&[], false),
             "localtime_r" => ptr.fn_type(&[ptr.into(), ptr.into()], false),
@@ -529,7 +537,7 @@ fn link(obj: &Path, out: &Path) -> Result<(), String> {
         cc.arg(format!("-mmacosx-version-min={short}"));
     }
     if cfg!(target_os = "linux") {
-        cc.arg("-lpthread").arg("-lm");
+        cc.arg("-lpthread").arg("-lm").arg("-ldl");
     }
     let result = cc.output().map_err(|e| format!("linker not found: {e}"))?;
     if !result.status.success() {

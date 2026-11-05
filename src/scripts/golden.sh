@@ -120,11 +120,7 @@ HANDLE_JDE="$(dirname "$0")/handle-fixture.jde"
 HANDLE_WANT="$(dirname "$0")/handle-fixture.expected"
 HANDLE_DIR="$WORK/handles"
 
-if [[ -n "$LIST" ]]; then
-  # The static backend links no C libraries yet; the handle fixture needs one.
-  printf '  skip  %-52s (%s)\n' "native handle round-trip" "static backend has no C libraries yet"
-  skip=$((skip + 1))
-elif ! command -v cc >/dev/null 2>&1; then
+if ! command -v cc >/dev/null 2>&1; then
   printf '  skip  %-52s (%s)\n' "native handle round-trip" "no C compiler"
   skip=$((skip + 1))
 else
@@ -149,6 +145,9 @@ else
     # The module name is the file stem, so the library is named for the `use`
     # that imports it.
     cp "$HANDLE_JDE" "$HANDLE_DIR/handles.jde"
+    # The `symbols` tables give the library's functions their static types,
+    # which a Jade-ABI library cannot carry itself (design decision 11 in
+    # design/v2-static-values.md). `tag_of` takes a handle of any type.
     cat > "$HANDLE_DIR/jade.toml" <<'TOML'
 [project]
 name = "handle-fixture"
@@ -156,8 +155,44 @@ name = "handle-fixture"
 [lib.handlefix]
 path  = "."
 files = ["handlefix.so"]
+
+[lib.handlefix.symbols.open]
+args = ["str"]
+ret = "handle<Thing>"
+
+[lib.handlefix.symbols.name]
+args = ["handle<Thing>"]
+ret = "str"
+
+[lib.handlefix.symbols.tag_of]
+args = ["handle"]
+ret = "str"
+
+[lib.handlefix.symbols.cursor]
+args = ["handle<Thing>"]
+ret = "handle<Cursor>"
+
+[lib.handlefix.symbols.close]
+args = ["handle<Thing>"]
+ret = "nil"
+
+[lib.handlefix.symbols.live]
+args = []
+ret = "int"
+
+[lib.handlefix.symbols.visit]
+args = ["handle<Cursor>", "fn(int, str) -> int"]
+ret = "int"
+
+[lib.handlefix.symbols.store]
+args = ["fn(int) -> int"]
+ret = "nil"
+
+[lib.handlefix.symbols.pump]
+args = ["int"]
+ret = "int"
 TOML
-    if ! h_build="$("$JADE" build "$HANDLE_DIR/handles.jde" -o "$HANDLE_DIR/handles.bin" 2>&1)"; then
+    if ! h_build="$("$JADE" build ${BACKEND_FLAGS[@]+"${BACKEND_FLAGS[@]}"} "$HANDLE_DIR/handles.jde" -o "$HANDLE_DIR/handles.bin" 2>&1)"; then
       printf '  FAIL  %-52s (build failed)\n' "native handle round-trip"
       failures+=("native handle round-trip: build failed: $h_build")
       fail=$((fail + 1))

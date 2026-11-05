@@ -57,7 +57,9 @@ A struct value carries its class id, so `x is C` lowers to `Rvalue::IsA` over th
 
 ## Gotchas
 
-*Anything a later phase adds stops here.* A prompt, or a std package the static backend does not have yet, returns `JadeError::NotYetStatic`, naming the feature. Each phase of `design/v2-static-values.md` removes some of these errors.
+*Anything a later phase adds stops here.* A prompt, or a C symbol whose shape the static backend does not decode yet, returns `JadeError::NotYetStatic`, naming the feature. Each phase of `design/v2-static-values.md` removes some of these errors.
+
+*A call into a native package is `Op::Native`*, carrying the function and the static types its arguments go as and its result comes back as. The types are the declared ones from `jade.toml` where there are any (`compiler::infer::native`), and otherwise the ones the call has; a result nothing settles is an error naming the declaration to add. `Program.natives` says where each package is found.
 
 *A call to an async function is `Rvalue::Spawn`*, which makes a future; the function's own MIR body returns the plain value. `await`, `join`, `wait` and the future methods are `Op`s the backend implements in `backend/tasks.rs`.
 

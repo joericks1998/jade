@@ -1180,6 +1180,7 @@ pub fn dependency_libraries(lock: &Lockfile) -> std::collections::HashMap<String
                 LibraryEntry {
                     path: format!("{LIBS_DIR}/{}", pkg.install_dir()),
                     files: Some(vec![module_file(pkg, artifact)]),
+                    symbols: None,
                 },
             );
         }

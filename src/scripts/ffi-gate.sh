@@ -39,9 +39,20 @@
 # All three are skipped rather than failed when what they need is absent, so
 # this is safe to run anywhere. Skips are reported, never silent.
 #
-# Usage: src/scripts/ffi-gate.sh [path-to-jade-binary]
+# With --backend=static, the glib program and the long run are built with Jade
+# 2.0's static backend, which calls the same generated shim with each
+# argument and result marshalled by its static type. The C runtime check runs
+# either way.
+#
+# Usage: src/scripts/ffi-gate.sh [--backend=static] [path-to-jade-binary]
 
 set -uo pipefail
+
+BACKEND_FLAG=""
+if [[ "${1:-}" == "--backend=static" ]]; then
+  BACKEND_FLAG="--backend=static"
+  shift
+fi
 
 JADE="${1:-./target/debug/jade}"
 # Absolute, because every step below runs from a scratch directory.
@@ -168,7 +179,7 @@ TOML
     # Each runs through an inner shell for the reason `run_loop` documents: the
     # shell that waits on a signalled child announces it, and that line is noise
     # on top of a FAIL that already says the same thing.
-    bash -c 'cd "$1" && "$2" build main.jde -o app > build.txt 2>&1' _ "$proj" "$JADE" 2>/dev/null
+    bash -c 'cd "$1" && "$2" build $3 main.jde -o app > build.txt 2>&1' _ "$proj" "$JADE" "$BACKEND_FLAG" 2>/dev/null
     build_rc=$?
     aot_rc=0
     if [ "$build_rc" -eq 0 ]; then
@@ -257,7 +268,7 @@ if [ -z "$loop_proj" ]; then
   skip=$((skip + 1))
 else
   cp "$LOOP_FIXTURE" "$loop_proj/loop.jde"
-  ( cd "$loop_proj" && "$JADE" build loop.jde -o looper > loopbuild.txt 2>&1 )
+  ( cd "$loop_proj" && "$JADE" build $BACKEND_FLAG loop.jde -o looper > loopbuild.txt 2>&1 )
   if [ ! -x "$loop_proj/looper" ]; then
     echo "  FAIL  the alloc_str loop would not compile:"
     tail -5 "$loop_proj/loopbuild.txt" | sed 's/^/        /'

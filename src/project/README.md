@@ -10,6 +10,8 @@ Import resolution has to give the same answer every time a `use` is read. The AO
 
 The `[lib]` mechanism is why this module is more than a TOML parser. A `[lib.<name>]` section registers a directory and its modules under a name, anchored at the project root. So `use utils.math` works from anywhere in the tree, rather than only from a sibling directory.
 
+A `[lib]` entry naming a native library may also carry `symbols`, one table a function with `args` and `ret` written in Jade types. A Jade-ABI library carries no types of its own, and the static checker reads them from here; see `compiler::infer::native`.
+
 The `files` list carries file extensions on purpose. An extension does two jobs: it separates modules from the other files in the directory, and it *selects how each one loads*. `.jde` means Jade source, while `.dylib`, `.so`, and `.dll` mean a native shared library loaded over the `jade_pkg_init` C ABI.
 
 The package manager reuses that mechanism rather than adding a second one beside it. Resolved dependencies come back from `pkg/` as synthetic `LibraryEntry` values, which are merged into the `[lib]` map. So nothing downstream ever learns what a dependency is.

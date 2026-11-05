@@ -170,7 +170,7 @@ fn libs_with(name: &str, entry: LibraryEntry) -> HashMap<String, LibraryEntry> {
 
 #[test]
 fn resolve_import_not_a_library_reference() {
-    let libs = libs_with("utils", LibraryEntry { path: "src".into(), files: None });
+    let libs = libs_with("utils", LibraryEntry { path: "src".into(), files: None, symbols: None });
     // Bare name that matches no registered library → not a lib reference, so a
     // plain relative import still falls through to file resolution.
     assert!(matches!(resolve_library_import(&libs, "plainimport", Path::new("/root")), Ok(None)));
@@ -182,7 +182,11 @@ fn resolve_import_not_a_library_reference() {
 fn resolve_import_with_allowlist_hit() {
     let libs = libs_with(
         "utils",
-        LibraryEntry { path: "src/utils".into(), files: Some(vec!["math.jde".into()]) },
+        LibraryEntry {
+            path: "src/utils".into(),
+            files: Some(vec!["math.jde".into()]),
+            symbols: None,
+        },
     );
     let resolved =
         resolve_library_import(&libs, "utils/math", Path::new("/root")).unwrap().unwrap();
@@ -194,7 +198,11 @@ fn resolve_import_with_allowlist_hit() {
 fn resolve_import_with_allowlist_native() {
     let libs = libs_with(
         "utils",
-        LibraryEntry { path: "src/utils".into(), files: Some(vec!["fast.dylib".into()]) },
+        LibraryEntry {
+            path: "src/utils".into(),
+            files: Some(vec!["fast.dylib".into()]),
+            symbols: None,
+        },
     );
     let resolved =
         resolve_library_import(&libs, "utils/fast", Path::new("/root")).unwrap().unwrap();
@@ -206,7 +214,11 @@ fn resolve_import_with_allowlist_native() {
 fn resolve_import_allowlist_miss_is_err() {
     let libs = libs_with(
         "utils",
-        LibraryEntry { path: "src/utils".into(), files: Some(vec!["math.jde".into()]) },
+        LibraryEntry {
+            path: "src/utils".into(),
+            files: Some(vec!["math.jde".into()]),
+            symbols: None,
+        },
     );
     let err = resolve_library_import(&libs, "utils/missing", Path::new("/root"));
     assert!(err.is_err());
@@ -217,7 +229,11 @@ fn resolve_import_allowlist_miss_is_err() {
 fn resolve_import_absolute_lib_path() {
     let libs = libs_with(
         "utils",
-        LibraryEntry { path: "/abs/utils".into(), files: Some(vec!["m.jde".into()]) },
+        LibraryEntry {
+            path: "/abs/utils".into(),
+            files: Some(vec!["m.jde".into()]),
+            symbols: None,
+        },
     );
     let resolved = resolve_library_import(&libs, "utils/m", Path::new("/root")).unwrap().unwrap();
     // Absolute lib path ignores `root`.
@@ -231,7 +247,8 @@ fn resolve_import_no_allowlist_probes_disk() {
     std::fs::create_dir_all(&libdir).unwrap();
     std::fs::write(libdir.join("thing.jde"), "").unwrap();
 
-    let libs = libs_with("mylib", LibraryEntry { path: "mylib".into(), files: None });
+    let libs =
+        libs_with("mylib", LibraryEntry { path: "mylib".into(), files: None, symbols: None });
     let resolved = resolve_library_import(&libs, "mylib/thing", tmp.path()).unwrap().unwrap();
     assert_eq!(resolved.kind, ImportKind::Jade);
     assert_eq!(resolved.path, libdir.join("thing.jde"));
@@ -240,7 +257,8 @@ fn resolve_import_no_allowlist_probes_disk() {
 #[test]
 fn resolve_import_no_allowlist_missing_returns_jde_candidate() {
     let tmp = TempDir::new("libmiss");
-    let libs = libs_with("mylib", LibraryEntry { path: "mylib".into(), files: None });
+    let libs =
+        libs_with("mylib", LibraryEntry { path: "mylib".into(), files: None, symbols: None });
     // Nothing on disk → returns the `.jde` candidate as Jade so caller emits a
     // normal not-found error.
     let resolved = resolve_library_import(&libs, "mylib/ghost", tmp.path()).unwrap().unwrap();
@@ -399,6 +417,7 @@ fn bare_import_resolves_registered_library() {
         LibraryEntry {
             path: "libs/fastmath-1.0.0".into(),
             files: Some(vec!["fastmath.so".into()]),
+            symbols: None,
         },
     );
     let resolved = resolve_library_import(&libs, "fastmath", Path::new("/root")).unwrap().unwrap();
@@ -412,7 +431,7 @@ fn bare_import_still_honours_the_allowlist() {
     // same as for a slashed import.
     let libs = libs_with(
         "fastmath",
-        LibraryEntry { path: "libs".into(), files: Some(vec!["other.so".into()]) },
+        LibraryEntry { path: "libs".into(), files: Some(vec!["other.so".into()]), symbols: None },
     );
     let err = resolve_library_import(&libs, "fastmath", Path::new("/root")).unwrap_err();
     assert!(err.contains("fastmath"), "error should name the module: {err}");
@@ -422,7 +441,11 @@ fn bare_import_still_honours_the_allowlist() {
 fn slashed_imports_are_unaffected_by_bare_name_support() {
     let libs = libs_with(
         "utils",
-        LibraryEntry { path: "src/utils".into(), files: Some(vec!["math.jde".into()]) },
+        LibraryEntry {
+            path: "src/utils".into(),
+            files: Some(vec!["math.jde".into()]),
+            symbols: None,
+        },
     );
     let resolved =
         resolve_library_import(&libs, "utils/math", Path::new("/root")).unwrap().unwrap();
@@ -830,4 +853,17 @@ fn reachable_modules_terminates_on_a_cycle() {
 
     let reached = crate::project::reachable_jade_modules(&paths_of("use a\n"), &ctx).unwrap();
     assert_eq!(reached.len(), 2, "both files, visited once each");
+}
+
+#[test]
+fn a_lib_entry_declares_its_functions_types() {
+    let m = parse(
+        "[lib.fix]\npath = \".\"\n\n[lib.fix.symbols.open]\nargs = [\"str\"]\nret = \"handle<Thing>\"\n\n\
+         [lib.fix.symbols.live]\nret = \"int\"\n",
+    );
+    let fix = &m.lib.as_ref().unwrap()["fix"];
+    let syms = fix.symbols.as_ref().unwrap();
+    assert_eq!(syms["open"].args.as_deref(), Some(&["str".to_string()][..]));
+    assert_eq!(syms["open"].ret.as_deref(), Some("handle<Thing>"));
+    assert!(syms["live"].args.is_none());
 }

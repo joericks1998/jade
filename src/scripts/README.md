@@ -18,12 +18,14 @@ v2 removed the VM, which leaves nothing to diff against. So before the VM went, 
 
   It also runs the native handle round-trip, against `handle-fixture.expected`.
 
-  With `--backend=static`, it builds with Jade 2.0's static backend instead, and only the examples listed in *`static-examples.list`*. That list grows with each phase of `design/v2-static-values.md` until it holds every example, at which point the static backend becomes the only one and the flag and list go away. The handle round-trip is skipped in this mode, because the static backend links no C libraries yet.
+  With `--backend=static`, it builds with Jade 2.0's static backend instead, and only the examples listed in *`static-examples.list`*. That list grows with each phase of `design/v2-static-values.md` until it holds every example, at which point the static backend becomes the only one and the flag and list go away. The handle round-trip runs in this mode too.
 - *`handle-fixture.c`* and *`handle-fixture.jde`* are a stand-in *native* package that hands out opaque handles, plus the Jade program that exercises it. `cc` compiles the C file and `golden.sh` builds the program against it.
 
   They live here rather than under `examples/` for a reason worth stating. A handle only ever comes from a native C package, and a Jade package built with `--lib` cannot produce one. So no `.jde` fixture can reach the tag at all, and leaving it out of the gate would recreate the blind spot that let the `bytes` marshaller stay broken for three releases. The built library's file extension also differs by platform, which a committed `jade.toml` under `examples/` would have to hard-code.
 
   `jade_pkg_abi_version` in the C file must match `jade_runtime::RUNTIME_ABI_VERSION`. The gate reads that number from the runtime source rather than carrying a copy.
+
+  The `jade.toml` the gate writes declares the fixture's functions in `[lib.handlefix.symbols]`, because a Jade-ABI library carries no types and the static backend needs them (design decision 11). The default backend reads the same file and ignores the declarations' types.
 - *`ffi-gate.sh`*, *`glib-fixture.jde`* and *`alloc-str-loop.jde`* are the FFI gate, described below.
 
 ## Who uses it
@@ -40,6 +42,7 @@ cargo build
 ./src/scripts/golden.sh /path/to/jade      # or a specific binary
 ./src/scripts/golden.sh --backend=static   # the static backend's examples
 ./src/scripts/ffi-gate.sh
+./src/scripts/ffi-gate.sh --backend=static # the glib checks, built with the static backend
 ```
 
 ## `ffi-gate.sh`: a real C library, bound and run

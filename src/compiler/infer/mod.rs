@@ -33,6 +33,7 @@
 mod builtins;
 mod check;
 mod members;
+pub mod native;
 mod ty;
 
 #[cfg(test)]
@@ -153,6 +154,10 @@ pub struct Typed {
     /// when a value of it is freed: its own first, then its ancestors', nearest
     /// first, a shared ancestor's once and last.
     pub drops: HashMap<String, Vec<InstKey>>,
+    /// The native calls whose result nothing declared and nothing in the
+    /// program settled, by instance and call node. The static backend cannot
+    /// read such a result, so it names the declaration to add.
+    pub unsettled_natives: HashSet<(InstKey, usize)>,
 }
 
 /// Purpose: This struct holds one struct type's layout as the backend needs it.
@@ -170,6 +175,12 @@ pub struct StructType {
 /// Purpose: This struct holds the whole checker's state.
 pub struct Checker<'a> {
     store: Store,
+    /// What each native function is declared to take and return, by its
+    /// `__native$<pkg>$<fn>` name. See `native.rs`.
+    natives: HashMap<String, native::NativeSig>,
+    /// The result slot of every native call with no declared result, by
+    /// instance and call node, to tell which ones use never settled.
+    native_results: HashMap<(InstKey, usize), Ty>,
     fns: HashMap<String, FnInfo<'a>>,
     /// Methods by (defining struct, method name).
     methods: HashMap<(String, String), FnInfo<'a>>,
@@ -209,7 +220,24 @@ pub struct Checker<'a> {
 ///
 /// Outputs: the types of everything in it, or the first type error.
 pub fn check_program(program: &TProgram) -> Result<Typed, JadeError> {
+    check_program_with(program, &HashMap::new())
+}
+
+/// Purpose: This function checks a program that calls native packages, with
+/// what `jade.toml` declares about their functions.
+///
+/// Inputs:
+/// - `program`: the merged program.
+/// - `natives`: each declared native function, by its `__native$<pkg>$<fn>`
+///   name.
+///
+/// Outputs: the checker's answer, as `check_program` gives it.
+pub fn check_program_with(
+    program: &TProgram,
+    natives: &HashMap<String, native::NativeSig>,
+) -> Result<Typed, JadeError> {
     let mut c = Checker::new(&program.stmts);
+    c.natives = natives.clone();
     c.register(&program.stmts)?;
     c.run()
 }
@@ -224,6 +252,8 @@ impl<'a> Checker<'a> {
     fn new(top: &'a [TStmt]) -> Self {
         Checker {
             store: Store::default(),
+            natives: HashMap::new(),
+            native_results: HashMap::new(),
             fns: HashMap::new(),
             methods: HashMap::new(),
             structs: HashMap::new(),
@@ -521,6 +551,16 @@ impl<'a> Checker<'a> {
                 span: Span { line: 0, col: 0 },
             });
         }
+        // A native result left open would become nil below, which is not what
+        // the library returns; record those for the static backend to refuse.
+        let open: Vec<(InstKey, usize)> = self
+            .native_results
+            .clone()
+            .into_iter()
+            .filter(|(_, t)| self.store.has_empty_slot(t))
+            .map(|(k, _)| k)
+            .collect();
+        self.out.unsettled_natives = open.into_iter().collect();
         // Whatever no part of the program constrained is nil: an empty array
         // nothing pushes into, or a function that only ever raises.
         self.store.default_empty_slots();
@@ -550,18 +590,30 @@ impl<'a> Checker<'a> {
         }
         self.worklist.push(main);
         self.instantiate_drops();
-        while let Some(key) = self.worklist.pop() {
-            let Some(inst) = self.instances.get_mut(&key) else { continue };
-            if inst.checked_in == self.pass {
-                continue;
+        loop {
+            while let Some(key) = self.worklist.pop() {
+                let Some(inst) = self.instances.get_mut(&key) else { continue };
+                if inst.checked_in == self.pass {
+                    continue;
+                }
+                inst.checked_in = self.pass;
+                self.check_instance(&key);
+                if self.error.is_some() {
+                    return;
+                }
             }
-            inst.checked_in = self.pass;
-            self.check_instance(&key);
-            if self.error.is_some() {
-                return;
+            // Settling a function type checks its members at its parameter
+            // types. A member nothing in the program calls directly, such as a
+            // function only a C library calls back, is reached only here, so
+            // it is checked in this same pass rather than left for the next.
+            self.settle_fn_members();
+            let pass = self.pass;
+            let instances = &self.instances;
+            self.worklist.retain(|k| instances.get(k).is_some_and(|i| i.checked_in != pass));
+            if self.worklist.is_empty() {
+                break;
             }
         }
-        self.settle_fn_members();
     }
 
     /// Purpose: This function lists the `drop` methods a value of a class runs

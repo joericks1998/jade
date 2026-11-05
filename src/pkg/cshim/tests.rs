@@ -2075,3 +2075,30 @@ fn a_negative_convention_on_an_unsigned_return_can_never_fire() {
     let ok = failing_sym(&["str"], "scalar:int32_t", CFailure::Negative);
     assert!(generate("z", &symbols(&[("f", ok)])).is_ok());
 }
+
+#[test]
+fn a_c_symbols_jade_signature_follows_the_shims_rewrite() {
+    let sig = |args: &[&str], ret: &str| jade_signature("z", "f", &sym(args, ret));
+    // A plain call.
+    assert_eq!(
+        sig(&["int", "str"], "float").unwrap(),
+        (vec!["int".into(), "str".into()], "float".into())
+    );
+    // An out-buffer takes no argument and is the result; its count stays a parameter.
+    assert_eq!(
+        sig(&["handle<gzFile_s>", "out_buffer:uint8_t", "int"], "int").unwrap(),
+        (vec!["handle<gzFile_s>".into(), "int".into()], "bytes".into())
+    );
+    // An out-handle is the result, and the C return is its status.
+    assert_eq!(
+        sig(&["str", "out_handle:sqlite3"], "int").unwrap(),
+        (vec!["str".into()], "handle<sqlite3>".into())
+    );
+    // A callback goes as a function of its Jade types.
+    assert_eq!(
+        sig(&["callback:int(int, const char*)"], "nil").unwrap(),
+        (vec!["fn(int, str) -> int".into()], "nil".into())
+    );
+    // Several results come back as a record, which the static backend refuses by name.
+    assert!(sig(&["out_scalar:int@a", "out_scalar:int@b"], "nil").is_err());
+}

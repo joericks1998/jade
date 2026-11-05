@@ -898,6 +898,10 @@ impl<'a, 'b, 'ctx> Lw<'a, 'b, 'ctx> {
                 f.call(cx.uhttp_stream_fn(t), &[arg(0), arg(1), arg(2)]);
                 (self.nil(), Ty::Nil)
             }
+            Op::Native(c) => {
+                let vals: Vec<BasicValueEnum> = (0..args.len()).map(arg).collect();
+                (f.callv(cx.native_call_fn(c), &vals), c.ret.clone())
+            }
             Op::BytesInts => {
                 let b = ptr(0);
                 let n = f.str_len(b);

@@ -48,7 +48,7 @@ mod packages;
 mod tests;
 
 pub use crate::compiler::infer::Ty;
-pub use lower::lower_program;
+pub use lower::{lower_program, lower_program_with};
 
 /// Purpose: This struct names a local of the current function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -78,6 +78,38 @@ pub struct Program {
     /// Each class with a destructor chain, with the `drop` functions a value
     /// of it runs when it is freed, in order.
     pub drops: Vec<(String, Vec<FuncId>)>,
+    /// The native packages the program calls, which it loads the first time
+    /// it calls each.
+    pub natives: Vec<NativeLib>,
+}
+
+/// Purpose: This struct says where a native package is found when the program
+/// runs.
+#[derive(Debug, Clone)]
+pub struct NativeLib {
+    /// The id its calls name.
+    pub id: u32,
+    /// The name the program imports it by, for messages.
+    pub name: String,
+    /// Its path within the project's `libs/` directory, which the program
+    /// looks for beside itself or under `JADE_LIBS`; `None` for a library
+    /// outside `libs/`.
+    pub rel: Option<String>,
+    /// Where it was when the program was built.
+    pub abs: String,
+}
+
+/// Purpose: This struct describes one call into a native package: the
+/// function and the static types its arguments are sent as and its result is
+/// read back as.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NativeCall {
+    pub pkg: u32,
+    pub func: String,
+    /// How the program writes the call, `handlefix.open`, for messages.
+    pub display: String,
+    pub params: Vec<Ty>,
+    pub ret: Ty,
 }
 
 /// Purpose: This struct holds one struct type's layout.
@@ -469,6 +501,9 @@ pub enum Op {
     /// [`HttpFn`]. The operands are the url, the body when the method has one,
     /// and the headers, a `{str}` or nil.
     Http(HttpFn, bool),
+    /// A call into a native package, with arguments marshalled by their
+    /// static types; see [`NativeCall`].
+    Native(Box<NativeCall>),
     /// `(url: str, handler: fn(str) -> T, headers: {str}?) -> nil`:
     /// `uhttp.stream`, calling the handler once a line until the stream ends
     /// or the handler returns `false`. `T` is the handler's result type.
@@ -795,6 +830,7 @@ impl Op {
                 | Op::Json(_)
                 | Op::Http(..)
                 | Op::UhttpStream(_)
+                | Op::Native(_)
                 | Op::Fs(
                     FsFn::Read
                         | FsFn::ReadBytes
@@ -892,7 +928,8 @@ pub fn is_heap(t: &Ty) -> bool {
         | Ty::Struct(_)
         | Ty::Error
         | Ty::Future(_)
-        | Ty::Json => true,
+        | Ty::Json
+        | Ty::Handle(_) => true,
         Ty::Opt(inner) => is_heap(inner),
         _ => false,
     }

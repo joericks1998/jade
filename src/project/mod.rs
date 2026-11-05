@@ -180,6 +180,23 @@ pub struct LibraryEntry {
     pub path: String,
     #[serde(default)]
     pub files: Option<Vec<String>>,
+    /// What a native library's functions take and return, for the static
+    /// checker: `[lib.<name>.symbols.<fn>]` with `args` and `ret` written in
+    /// Jade types. A Jade-ABI library carries no types of its own, so this is
+    /// where they come from. See `compiler::infer::native`.
+    #[serde(default)]
+    pub symbols: Option<HashMap<String, NativeDecl>>,
+}
+
+/// Purpose: This struct holds one native function's declared types, as
+/// `jade.toml` writes them: `args = ["str"]`, `ret = "handle<Thing>"`. Either
+/// may be left out, and inference fills in what is missing.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct NativeDecl {
+    #[serde(default)]
+    pub args: Option<Vec<String>>,
+    #[serde(default)]
+    pub ret: Option<String>,
 }
 
 /// How a resolved `[lib]` module is loaded.

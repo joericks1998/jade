@@ -902,10 +902,8 @@ impl<'a> Checker<'a> {
                 return self.parent_call(class, m, args, kwargs, span, f, node);
             }
             if name.starts_with("__native$") {
-                for a in args {
-                    self.check_expr(a, f);
-                }
-                return self.native_call(name, span, f, node);
+                let tys: Vec<Ty> = args.iter().map(|a| self.check_expr(a, f)).collect();
+                return self.native_call(name, args, tys, span, f, node);
             }
         }
         // A call through a value: a variable holding a function, or any expression.
@@ -1972,17 +1970,83 @@ impl<'a> Checker<'a> {
     ///
     /// Inputs:
     /// - `name`: the `__native$<pkg>$<fn>` reference.
+    /// - `args`, `tys`: the arguments and their types.
     /// - `span`: where.
     /// - `f`: the frame.
     /// - `node`: the call's address.
     ///
-    /// Outputs: the call's type.
-    fn native_call(&mut self, name: &str, span: Span, f: &mut Frame, node: usize) -> Ty {
-        // C bindings declare their types in jade.toml; feeding those to the
-        // checker is part of the package work (design decision 11). Until then a
-        // native call's result is whatever its use makes it.
-        let _ = (name, span);
-        self.slot(f, node)
+    /// Outputs: the call's type: the declared result, or a slot its use fills
+    /// when `jade.toml` declares none (see `native.rs`).
+    fn native_call(
+        &mut self,
+        name: &str,
+        args: &'a [TExpr],
+        tys: Vec<Ty>,
+        span: Span,
+        f: &mut Frame,
+        node: usize,
+    ) -> Ty {
+        let result = self.slot(f, node);
+        let sig = self.natives.get(name).cloned();
+        if sig.as_ref().is_none_or(|s| s.ret.is_none()) {
+            self.native_results.insert((f.key.clone(), node), result.clone());
+        }
+        let Some(sig) = sig else {
+            return result;
+        };
+        if let Some(params) = &sig.params {
+            if params.len() != tys.len() {
+                self.report(
+                    span,
+                    format!(
+                        "{} takes {} argument{}, got {}",
+                        sig.display,
+                        params.len(),
+                        if params.len() == 1 { "" } else { "s" },
+                        tys.len()
+                    ),
+                );
+                return result;
+            }
+            for (i, ((p, t), a)) in params.iter().zip(&tys).zip(args).enumerate() {
+                // A declared callback type gets a return slot of its own at this
+                // call, which is how the store recognizes it on the next pass
+                // rather than recording the function as a new member each time.
+                let p = &match p {
+                    Ty::Fn(ft) => {
+                        let ret = self.slot(f, node + 10 + i);
+                        self.unify(
+                            &ret,
+                            &ft.ret,
+                            a.span,
+                            &format!("what {}'s callback returns", sig.display),
+                        );
+                        Ty::Fn(Box::new(super::FnTy {
+                            params: ft.params.clone(),
+                            ret,
+                            is_async: ft.is_async,
+                        }))
+                    }
+                    other => other.clone(),
+                };
+                // `handle` takes a handle of any type; the call decides which.
+                if matches!(p, Ty::Handle(n) if n.is_empty()) {
+                    let at = self.store.resolve(t);
+                    if !matches!(at, Ty::Handle(_) | Ty::Var(_)) {
+                        self.report(
+                            a.span,
+                            format!("{} takes a handle here, got {at}", sig.display),
+                        );
+                    }
+                    continue;
+                }
+                self.unify(p, t, a.span, &format!("the argument to {}", sig.display));
+            }
+        }
+        if let Some(r) = &sig.ret {
+            self.unify(&result, r, span, &format!("what {} returns", sig.display));
+        }
+        result
     }
 }
 

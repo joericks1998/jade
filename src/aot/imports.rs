@@ -49,6 +49,7 @@
 //! default expression have their `Vec<Stmt>` body left un-mangled — vanishingly
 //! rare and not worth an entire AST-statement walker yet.
 
+use crate::compiler::infer::native::NativeSig;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -97,6 +98,7 @@ pub fn resolve_and_namespace(
     {
         reg.libraries = crate::pkg::resolved_libraries(&root, &manifest);
         reg.dep_symbols = declared_c_symbols(&manifest);
+        reg.native_decls = native_declarations(&manifest).map_err(ResolveError::Program)?;
         reg.lib_root = Some(root);
     }
 
@@ -113,7 +115,12 @@ pub fn resolve_and_namespace(
     let libs_root = reg.libs_root();
     let mut out = reg.out;
     out.extend(main_stmts);
-    Ok(ResolvedImports { stmts: out, libs_root, native_pkgs: reg.native_pkgs })
+    Ok(ResolvedImports {
+        stmts: out,
+        libs_root,
+        native_pkgs: reg.native_pkgs,
+        native_sigs: reg.native_sigs,
+    })
 }
 
 /// Why import resolution failed.
@@ -160,6 +167,9 @@ impl From<String> for ResolveError {
 pub struct ResolvedImports {
     pub stmts: Vec<TStmt>,
     pub native_pkgs: Vec<NativePkg>,
+    /// What each native function this program can call is declared to take
+    /// and return, by `__native$<pkgid>$<fn>`.
+    pub native_sigs: HashMap<String, NativeSig>,
     /// `None` when the build is not inside a project.
     pub libs_root: Option<PathBuf>,
 }
@@ -187,6 +197,13 @@ struct Registry {
     native_ids: HashMap<PathBuf, u32>,
     native_next_id: u32,
     native_pkgs: Vec<NativePkg>,
+    /// What `jade.toml` declares about each native package's functions, by
+    /// the package's import name, then the function. See
+    /// `compiler::infer::native`.
+    native_decls: HashMap<String, HashMap<String, NativeSig>>,
+    /// The same declarations by `__native$<pkgid>$<fn>`, for the packages this
+    /// build loads.
+    native_sigs: HashMap<String, NativeSig>,
     /// Declared C-ABI symbols by dependency name, from
     /// `[dependencies.<name>.symbols]` in the project's `jade.toml`.
     ///
@@ -214,6 +231,8 @@ struct Registry {
 #[derive(Debug, Clone)]
 pub struct NativePkg {
     pub id: u32,
+    /// The name the program imports it by.
+    pub name: String,
     /// `None` when the library is not under the project's `libs/`.
     pub rel: Option<String>,
     pub abs: String,
@@ -239,6 +258,8 @@ impl Registry {
             native_ids: HashMap::new(),
             native_next_id: 0,
             native_pkgs: Vec::new(),
+            native_decls: HashMap::new(),
+            native_sigs: HashMap::new(),
             dep_symbols: HashMap::new(),
             native_symbols: HashMap::new(),
         }
@@ -267,8 +288,14 @@ impl Registry {
         if let Some(symbols) = self.dep_symbols.get(import_path) {
             self.native_symbols.insert(id, symbols.clone());
         }
+        if let Some(decls) = self.native_decls.get(import_path) {
+            for (f, sig) in decls {
+                self.native_sigs.insert(native_ref(id, f), sig.clone());
+            }
+        }
         self.native_pkgs.push(NativePkg {
             id,
+            name: import_path.to_string(),
             rel: self.libs_relative(canon),
             abs: canon.to_string_lossy().into_owned(),
         });
@@ -519,6 +546,64 @@ fn stem(path: &str) -> String {
 /// set: the two mean different things here, and an empty set would reject every
 /// call into it. `[symbols]` is required for `abi = "c"`, so an empty one means
 /// a manifest still being filled in, not a library with no functions.
+/// Purpose: This function reads what `jade.toml` declares about native
+/// packages' functions: a `[lib]` entry's `symbols` table in Jade types, and a
+/// C dependency's `symbols` table, whose Jade signature is derived from its C
+/// one.
+///
+/// Inputs:
+/// - `manifest`: the project's manifest.
+///
+/// Outputs: the declarations by import name, then function, or a message for a
+/// type a `[lib]` declaration misspells.
+fn native_declarations(
+    manifest: &crate::project::ProjectManifest,
+) -> Result<HashMap<String, HashMap<String, NativeSig>>, String> {
+    use crate::compiler::infer::native::parse_sig;
+    let mut out: HashMap<String, HashMap<String, NativeSig>> = HashMap::new();
+    if let Some(deps) = &manifest.dependencies {
+        for (name, d) in deps {
+            if d.abi != crate::project::Abi::C {
+                continue;
+            }
+            let Some(symbols) = &d.symbols else { continue };
+            let table = out.entry(name.clone()).or_default();
+            for (sym, spec) in symbols {
+                let display = format!("{name}.{sym}");
+                // A symbol whose signature does not translate refuses only
+                // calls to itself; the rest of the dependency still builds.
+                let derived = crate::pkg::cshim::jade_signature(name, sym, spec)
+                    .and_then(|(params, ret)| parse_sig(&display, Some(&params), Some(&ret)));
+                let sig = match derived {
+                    Ok(sig) => sig,
+                    Err(why) => NativeSig {
+                        display: display.clone(),
+                        params: None,
+                        ret: None,
+                        refused: Some(why),
+                    },
+                };
+                table.insert(sym.clone(), sig);
+            }
+        }
+    }
+    // A `[lib]` of the same name is the library this build uses, so its
+    // declarations replace a dependency's.
+    if let Some(libs) = &manifest.lib {
+        for (name, entry) in libs {
+            let Some(symbols) = &entry.symbols else { continue };
+            let table = out.entry(name.clone()).or_default();
+            table.clear();
+            for (f, decl) in symbols {
+                let display = format!("{name}.{f}");
+                let sig = parse_sig(&display, decl.args.as_deref(), decl.ret.as_deref())?;
+                table.insert(f.clone(), sig);
+            }
+        }
+    }
+    Ok(out)
+}
+
 fn declared_c_symbols(
     manifest: &crate::project::ProjectManifest,
 ) -> HashMap<String, HashSet<String>> {
@@ -1445,7 +1530,7 @@ mod ffi_symbol_tests {
         let mut libs = HashMap::new();
         libs.insert(
             "gfx".to_string(),
-            LibraryEntry { path: "other.dylib".to_string(), files: None },
+            LibraryEntry { path: "other.dylib".to_string(), files: None, symbols: None },
         );
         m.lib = Some(libs);
         assert!(declared_c_symbols(&m).is_empty());

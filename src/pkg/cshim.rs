@@ -3547,3 +3547,106 @@ fn bad_type_msg(pkg: &str, sym: &str, t: &str, at: Position) -> String {
 
 #[cfg(test)]
 mod tests;
+
+/// Purpose: This function derives the Jade signature a C dependency's symbol
+/// is called with, for the static checker.
+///
+/// The declared `args` describe the C signature, and the shim rewrites the call
+/// (see `How the shim rewrites a call` in this directory's README): a `bytes`
+/// argument is one Jade value, an out-parameter takes none and becomes the
+/// result, and so on. This walks the same parse the generator does, so the two
+/// cannot disagree about which C parameters are Jade arguments.
+///
+/// Inputs:
+/// - `pkg`, `sym`: the dependency and the symbol, for messages.
+/// - `spec`: the symbol's declaration.
+///
+/// Outputs: the Jade parameter types and the result type, written in the
+/// spelling `compiler::infer::native::parse_type` reads, or a short name for
+/// a shape the static backend does not decode, such as `C struct argument`:
+/// a C struct crossing either way, or several results coming back as one
+/// record.
+pub fn jade_signature(
+    pkg: &str,
+    sym: &str,
+    spec: &crate::project::CSymbol,
+) -> Result<(Vec<String>, String), String> {
+    let tag_type = |tag: &str| -> &'static str {
+        match tag {
+            "JADE_FFI_FLOAT" => "float",
+            "JADE_FFI_BOOL" => "bool",
+            "JADE_FFI_STR" => "str",
+            "JADE_FFI_CHAR" => "char",
+            _ => "int",
+        }
+    };
+    let scalar_of = |c_type: &str| c_scalar(c_type).map(|(t, _)| tag_type(t)).unwrap_or("int");
+    let unsupported = |what: &str| Err(what.to_string());
+    let mut params = Vec::new();
+    let mut results = Vec::new();
+    let mut ret_consumed = false;
+    for full in &spec.args {
+        let a = parse_arg(pkg, sym, full)?;
+        match &a {
+            ArgSpec::Scalar(t) => params.push(tag_type(t.tag).to_string()),
+            ArgSpec::CScalar(c) => params.push(tag_type(c.tag).to_string()),
+            ArgSpec::Bytes | ArgSpec::BytesPtr => params.push("bytes".into()),
+            ArgSpec::InoutBytes { .. } => {
+                params.push("bytes".into());
+                results.push("bytes".to_string());
+            }
+            ArgSpec::OutBuffer { .. } => {
+                results.push("bytes".to_string());
+                ret_consumed = true;
+            }
+            ArgSpec::SizedBuffer { .. } => {
+                params.push("int".into());
+                results.push("bytes".to_string());
+            }
+            ArgSpec::Handle { name } => params.push(format!("handle<{name}>")),
+            ArgSpec::OutHandle { type_name, .. } => {
+                results.push(format!("handle<{type_name}>"));
+                ret_consumed = true;
+            }
+            ArgSpec::OutScalar { c_type, .. } => results.push(scalar_of(c_type).to_string()),
+            ArgSpec::InoutScalar { c_type, .. } => {
+                params.push(scalar_of(c_type).to_string());
+                results.push(scalar_of(c_type).to_string());
+            }
+            ArgSpec::OutStr { .. } | ArgSpec::OutAllocStr { .. } => results.push("str".into()),
+            ArgSpec::RetLen { .. } | ArgSpec::CallbackData | ArgSpec::NullPtr => {}
+            ArgSpec::Callback { ret, params: cb } => {
+                let ps: Vec<&str> = cb
+                    .iter()
+                    .filter_map(|p| match &p.kind {
+                        CbKind::Scalar(t, _) => Some(tag_type(t)),
+                        CbKind::Bytes => Some("bytes"),
+                        CbKind::UserData | CbKind::BytesLen => None,
+                    })
+                    .collect();
+                let r = ret.marshal.map(|(t, _)| tag_type(t)).unwrap_or("nil");
+                params.push(format!("fn({}) -> {r}", ps.join(", ")));
+            }
+            ArgSpec::OutStruct { .. } | ArgSpec::InStruct { .. } | ArgSpec::InoutStruct { .. } => {
+                return unsupported("C struct argument");
+            }
+        }
+    }
+    if !ret_consumed {
+        match parse_ret(pkg, sym, &spec.ret)? {
+            RetSpec::Nil => {}
+            RetSpec::Scalar(t) => results.insert(0, tag_type(t.tag).to_string()),
+            RetSpec::CScalar(c) => results.insert(0, tag_type(c.tag).to_string()),
+            RetSpec::Bytes => results.insert(0, "bytes".to_string()),
+            RetSpec::AllocStr => results.insert(0, "str".to_string()),
+            RetSpec::Handle(name) => results.insert(0, format!("handle<{name}>")),
+            RetSpec::Struct(_) => return unsupported("C struct result"),
+        }
+    }
+    let ret = match results.len() {
+        0 => "nil".to_string(),
+        1 => results.remove(0),
+        _ => return unsupported("result of several values"),
+    };
+    Ok((params, ret))
+}

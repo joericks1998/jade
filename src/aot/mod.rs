@@ -91,9 +91,13 @@ pub fn would_build(
     // dependency has not been installed yet, which `check_imports` has already
     // said in the words that name the actual problem; probing on top of that
     // would bury it under a backend message about an opcode.
+    let mut natives = std::collections::HashMap::new();
     let mut program = match source_path {
         Some(src) => match imports::resolve_and_namespace(program.stmts.clone(), src) {
-            Ok(r) => crate::compiler::tir::TProgram { stmts: r.stmts },
+            Ok(r) => {
+                natives = r.native_sigs;
+                crate::compiler::tir::TProgram { stmts: r.stmts }
+            }
             // An unresolved import is not this probe's to report (see above).
             // A *program* error is: nothing downstream of here looks at the
             // import graph, so staying quiet is what let a mistyped FFI symbol
@@ -110,7 +114,7 @@ pub fn would_build(
         .map_err(|e| e.to_string())?;
     // v2's static types: a program the whole-program checker rejects does not
     // build, even though this backend could still run it.
-    crate::compiler::infer::check_program(&program).map_err(|e| e.to_string())?;
+    crate::compiler::infer::check_program_with(&program, &natives).map_err(|e| e.to_string())?;
 
     let cp = crate::compiler::emit::emit(program).map_err(|e| e.to_string())?;
     let ctx = Context::create();
@@ -146,41 +150,56 @@ pub enum StaticEmit {
 /// It covers the features `design/v2-static-values.md` lists as landed; for
 /// anything else it stops with an error naming the feature.
 ///
-/// Returns the IR or MIR text when asked for it, `None` after writing a binary.
+/// Returns the IR or MIR text when asked for it, and after writing a binary,
+/// the native packages it will look for beside itself.
 pub fn compile_static(
     program: TProgram,
     source_path: Option<&Path>,
     output_path: &Path,
     emit: StaticEmit,
-) -> Result<Option<String>, String> {
-    let program = match source_path {
+) -> Result<CompileOutcome, String> {
+    let (program, native_pkgs, native_sigs) = match source_path {
         Some(src) => {
             let r =
                 imports::resolve_and_namespace(program.stmts, src).map_err(|e| e.to_string())?;
-            if !r.native_pkgs.is_empty() {
-                return Err(crate::frontend::error::JadeError::NotYetStatic {
-                    what: "C libraries".to_string(),
-                    span: crate::frontend::error::Span { line: 0, col: 0 },
-                }
-                .to_string());
-            }
-            crate::compiler::tir::TProgram { stmts: r.stmts }
+            (crate::compiler::tir::TProgram { stmts: r.stmts }, r.native_pkgs, r.native_sigs)
         }
-        None => program,
+        None => (program, Vec::new(), std::collections::HashMap::new()),
     };
+    // Only the packages from the project's `libs/` are the caller's to copy
+    // beside the artifact, as for the default backend.
+    let dependencies: Vec<PathBuf> =
+        native_pkgs.iter().filter(|p| p.rel.is_some()).map(|p| PathBuf::from(&p.abs)).collect();
+    let libs: Vec<crate::mir::NativeLib> = native_pkgs
+        .iter()
+        .map(|p| crate::mir::NativeLib {
+            id: p.id,
+            name: p.name.clone(),
+            rel: p.rel.clone(),
+            abs: p.abs.clone(),
+        })
+        .collect();
     let mut program = program;
     // Class member rules read what literals wrote, so they run before the
     // defaults are filled in. See `compiler::infer::members`.
     crate::compiler::infer::check_members(&program).map_err(|e| e.to_string())?;
     crate::compiler::type_infer::fill_struct_literal_defaults(&mut program)
         .map_err(|e| e.to_string())?;
-    let typed = crate::compiler::infer::check_program(&program).map_err(|e| e.to_string())?;
-    let mir = crate::mir::lower_program(&program, &typed).map_err(|e| e.to_string())?;
+    let typed = crate::compiler::infer::check_program_with(&program, &native_sigs)
+        .map_err(|e| e.to_string())?;
+    let mir = crate::mir::lower_program_with(&program, &typed, libs, &native_sigs)
+        .map_err(|e| e.to_string())?;
     match emit {
-        StaticEmit::Mir => Ok(Some(mir.to_string())),
-        StaticEmit::Ir => crate::backend::compile(&mir, output_path, crate::backend::Emit::Ir),
+        StaticEmit::Mir => {
+            Ok(CompileOutcome { ir: Some(mir.to_string()), dependencies: Vec::new() })
+        }
+        StaticEmit::Ir => {
+            let ir = crate::backend::compile(&mir, output_path, crate::backend::Emit::Ir)?;
+            Ok(CompileOutcome { ir, dependencies: Vec::new() })
+        }
         StaticEmit::Binary => {
-            crate::backend::compile(&mir, output_path, crate::backend::Emit::Binary)
+            crate::backend::compile(&mir, output_path, crate::backend::Emit::Binary)?;
+            Ok(CompileOutcome { ir: None, dependencies })
         }
     }
 }
@@ -524,11 +543,16 @@ pub fn compile_with_mode(
     // module's globals into its own `name$<id>` namespace so distinct modules
     // never collide — matching the bytecode VM (the source of truth), which keeps
     // imports namespaced. `main` keeps bare names. See `imports.rs`.
-    let (mut program, native_pkgs, _libs_root) = if let Some(src) = source_path {
+    let (mut program, native_pkgs, _libs_root, native_sigs) = if let Some(src) = source_path {
         let r = imports::resolve_and_namespace(program.stmts, src).map_err(|e| e.to_string())?;
-        (crate::compiler::tir::TProgram { stmts: r.stmts }, r.native_pkgs, r.libs_root)
+        (
+            crate::compiler::tir::TProgram { stmts: r.stmts },
+            r.native_pkgs,
+            r.libs_root,
+            r.native_sigs,
+        )
     } else {
-        (program, Vec::new(), None)
+        (program, Vec::new(), None, std::collections::HashMap::new())
     };
 
     // ── Inline defaults into cross-file struct literals ───────────────────
@@ -546,7 +570,8 @@ pub fn compile_with_mode(
     // v2 checks the merged program with every type known ahead of time; see
     // `compiler::infer`. Until the static backend lands, this is a gate in
     // front of the bytecode backend rather than its input.
-    crate::compiler::infer::check_program(&program).map_err(|e| e.to_string())?;
+    crate::compiler::infer::check_program_with(&program, &native_sigs)
+        .map_err(|e| e.to_string())?;
 
     let context = Context::create();
     let module = context.create_module("jade_program");

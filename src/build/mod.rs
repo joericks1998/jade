@@ -62,13 +62,13 @@ pub fn build(
     emit: Emit,
 ) -> Result<Vec<std::path::PathBuf>, String> {
     if let Emit::Static(how) = emit {
-        if let Some(text) =
-            crate::aot::compile_static(program.clone(), Some(source_path), out, how)?
-        {
+        let outcome = crate::aot::compile_static(program.clone(), Some(source_path), out, how)?;
+        if let Some(text) = outcome.ir {
             crate::stdio::write_str(&text);
             crate::stdio::flush();
+            return Ok(Vec::new());
         }
-        return Ok(Vec::new());
+        return Ok(outcome.dependencies);
     }
     let outcome = crate::aot::compile_with_mode(
         program.clone(),
