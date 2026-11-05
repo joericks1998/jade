@@ -1907,7 +1907,14 @@ impl<'a> Checker<'a> {
             let t = self.check_expr(v, f);
             if k == "settle" {
                 self.unify(&t, &Ty::Bool, v.span, "join's settle");
-                settle = true;
+                // The result's type depends on it, so it has to be written out.
+                match v.kind {
+                    TExprKind::Bool(b) => settle = b,
+                    _ => self.report(
+                        v.span,
+                        "join's settle changes what join returns, so write `settle = true` or `settle = false`".into(),
+                    ),
+                }
             } else {
                 self.report(v.span, format!("join has no parameter named '{k}'"));
             }

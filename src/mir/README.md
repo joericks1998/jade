@@ -56,7 +56,9 @@ A struct value carries its class id, so `x is C` lowers to `Rvalue::IsA` over th
 
 ## Gotchas
 
-*Anything a later phase adds stops here.* A function used as a value, `try`, a task, a stream, a prompt or a std package other than `array` returns `JadeError::NotYetStatic`, naming the feature. Each phase of `design/v2-static-values.md` removes some of these errors.
+*Anything a later phase adds stops here.* A prompt, or a std package the static backend does not have yet, returns `JadeError::NotYetStatic`, naming the feature. Each phase of `design/v2-static-values.md` removes some of these errors.
+
+*A call to an async function is `Rvalue::Spawn`*, which makes a future; the function's own MIR body returns the plain value. `await`, `join`, `wait` and the future methods are `Op`s the backend implements in `backend/tasks.rs`.
 
 *Scopes must mirror the checker's.* A top-level `let` in `main` is a global, a `let` inside a block is a local, and the checker decides which slot a variable gets by the same rule. If the two walks disagree about scoping, a variable's slot lookup fails with an internal error.
 

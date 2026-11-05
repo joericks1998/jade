@@ -105,7 +105,7 @@ fn a_for_loop_over_a_string_walks_its_characters() {
 
 #[test]
 fn features_from_later_phases_say_so() {
-    for (src, what) in [("async fn f() { return 1 }\nprint(await f())\n", "await")] {
+    for (src, what) in [("prompt p = \"Say hi\"\nprint(?p)\n", "prompts")] {
         match lower(src) {
             Err(JadeError::NotYetStatic { what: w, .. }) => {
                 assert!(w.contains(what), "{src}: named {w}, expected {what}")
@@ -113,6 +113,13 @@ fn features_from_later_phases_say_so() {
             other => panic!("{src}: expected a not-yet error, got {other:?}"),
         }
     }
+}
+
+#[test]
+fn a_call_to_an_async_function_spawns_a_task() {
+    let t = text("async fn f(n) { return n + 1 }\nprint(await f(1))\n");
+    assert!(t.contains("spawn f1(1)"), "{t}");
+    assert!(t.contains("await.int"), "{t}");
 }
 
 #[test]

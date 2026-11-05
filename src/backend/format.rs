@@ -169,6 +169,7 @@ impl<'ctx> Cx<'ctx> {
                 // which is what a raised string becomes; a class prints as one.
                 Ty::Error => {
                     let e = v.into_pointer_value();
+                    f.if_(f.is_null(e), |f| f.ret(f.cx.lit("nil")));
                     let rt = f.eq(f.type_id(e), f.i64(f.cx.struct_id("RuntimeError") as i64));
                     let out = f.var(f.cx.lit("<struct>"));
                     f.if_(rt, |f| {
@@ -179,6 +180,7 @@ impl<'ctx> Cx<'ctx> {
                     });
                     f.load_ptr(out)
                 }
+                Ty::Future(_) => f.cx.lit("<future>"),
                 _ => f.cx.lit("<value>"),
             };
             f.ret(s);

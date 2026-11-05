@@ -201,6 +201,7 @@ impl Display for Rvalue {
             Rvalue::TypeId(o) => write!(f, "typeid {o}"),
             Rvalue::IsA(o, ids) => write!(f, "isa {o} {ids:?}"),
             Rvalue::FnAddr(id) => write!(f, "fnaddr f{}", id.0),
+            Rvalue::Spawn(id, args) => write!(f, "spawn f{}({})", id.0, list(args)),
             Rvalue::CallIndirect(c, args) => write!(f, "callindirect {c}({})", list(args)),
             Rvalue::ErrPending => write!(f, "errpending"),
             Rvalue::TakeErr => write!(f, "takeerr"),
@@ -255,6 +256,10 @@ fn op_name(op: &Op) -> String {
         Op::DictMerge(t) => typed("dict.merge", t),
         Op::Str(m) => format!("str.{m:?}").to_lowercase(),
         Op::Fail(m) => format!("fail {m:?}"),
+        Op::Await(t) => typed("await", t),
+        Op::Join(t) => typed("join", t),
+        Op::JoinSettled(t, s) => format!("join.settled.{t} {s}"),
+        Op::WaitArray(t) => typed("wait.array", t),
         other => format!("{other:?}").to_lowercase(),
     }
 }

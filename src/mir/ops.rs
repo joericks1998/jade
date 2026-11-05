@@ -63,8 +63,51 @@ impl<'a, 'l> Fx<'a, 'l> {
             let (v, t) = self.expr(first)?;
             return Ok((self.coerce(v, &t, et, span)?, et.clone()));
         }
-        if matches!(name, "max_tasks" | "set_max_tasks" | "cancelled" | "join" | "wait") {
-            return Err(not_yet("tasks", span));
+        if name == "join" {
+            let Ty::Array(el) = et else {
+                return Err(internal("join that does not make an array", span));
+            };
+            let settle = kwargs
+                .iter()
+                .any(|(k, v)| k == "settle" && matches!(v.kind, TExprKind::Bool(true)));
+            let mut fs = Vec::new();
+            let mut inner = Ty::Nil;
+            for a in args {
+                let (v, t) = self.expr(a)?;
+                if let Ty::Future(i) = &t {
+                    inner = (**i).clone();
+                }
+                fs.push(v);
+            }
+            let op = match (settle, &**el) {
+                (true, Ty::Struct(s)) => Op::JoinSettled(inner, s.clone()),
+                _ => Op::Join((**el).clone()),
+            };
+            return Ok((self.assign_temp(et.clone(), Rvalue::Op(op, fs)), et.clone()));
+        }
+        if name == "wait" {
+            let first = args.first().ok_or_else(|| internal("wait with no futures", span))?;
+            // A literal list may hold futures of different result types, since
+            // `wait` never reads a result; each is passed as it is.
+            if let TExprKind::Array { elements } = &first.kind {
+                let mut fs = Vec::new();
+                for x in elements {
+                    let (v, _) = self.expr(x)?;
+                    fs.push(v);
+                }
+                return Ok((self.assign_temp(Ty::Int, Rvalue::Op(Op::Wait, fs)), Ty::Int));
+            }
+            let (v, t) = self.expr(first)?;
+            let Ty::Array(f) = &t else {
+                return Err(internal("wait over something that is not an array", span));
+            };
+            let Ty::Future(inner) = &**f else {
+                return Err(internal("wait over an array of non-futures", span));
+            };
+            return Ok((
+                self.assign_temp(Ty::Int, Rvalue::Op(Op::WaitArray((**inner).clone()), vec![v])),
+                Ty::Int,
+            ));
         }
         let mut argv = Vec::new();
         for a in args {
@@ -177,6 +220,16 @@ impl<'a, 'l> Fx<'a, 'l> {
                 };
                 Ok((r, Ty::Char))
             }
+            "max_tasks" => {
+                Ok((self.assign_temp(Ty::Int, Rvalue::Op(Op::MaxTasks, Vec::new())), Ty::Int))
+            }
+            "cancelled" => {
+                Ok((self.assign_temp(Ty::Bool, Rvalue::Op(Op::Cancelled, Vec::new())), Ty::Bool))
+            }
+            "set_max_tasks" => {
+                let (v, _) = one(argv, span)?;
+                Ok((self.assign_temp(Ty::Int, Rvalue::Op(Op::SetMaxTasks, vec![v])), Ty::Int))
+            }
             other => {
                 let _ = et;
                 Err(internal(format!("an unknown builtin '{other}'"), span))
@@ -233,8 +286,35 @@ impl<'a, 'l> Fx<'a, 'l> {
                 };
                 Ok((self.assign_temp(et.clone(), Rvalue::Op(op, vec![v])), et.clone()))
             }
+            ("time", "now" | "now_ms" | "monotonic") => {
+                let (op, t) = match f {
+                    "now" => (Op::Now, Ty::Int),
+                    "now_ms" => (Op::NowMs, Ty::Int),
+                    _ => (Op::Monotonic, Ty::Float),
+                };
+                Ok((self.assign_temp(t.clone(), Rvalue::Op(op, Vec::new())), t))
+            }
+            ("time", "sleep" | "after") => {
+                let first =
+                    args.first().ok_or_else(|| internal("time.sleep with no delay", span))?;
+                let secs = self.float_operand(first)?;
+                if f == "sleep" {
+                    self.emit(Stmt::Eval(Rvalue::Op(Op::Sleep, vec![secs])));
+                    return Ok((Operand::Const(Const::Nil(Ty::Nil)), Ty::Nil));
+                }
+                Ok((self.assign_temp(et.clone(), Rvalue::Op(Op::After, vec![secs])), et.clone()))
+            }
             _ => Err(not_yet(format!("std/{pkg}"), span)),
         }
+    }
+
+    /// Purpose: This function lowers a number argument as a float.
+    fn float_operand(&mut self, e: &'a TExpr) -> Result<Operand> {
+        let (v, t) = self.expr(e)?;
+        Ok(match t {
+            Ty::Int => self.assign_temp(Ty::Float, Rvalue::IntToFloat(v)),
+            _ => v,
+        })
     }
 
     /// Purpose: This function lowers a method on a string, array or dict.
@@ -356,7 +436,14 @@ impl<'a, 'l> Fx<'a, 'l> {
                 Ok((self.assign_temp(et.clone(), Rvalue::Op(op, ops)), et.clone()))
             }
             Ty::Bytes => Err(not_yet("bytes", span)),
-            Ty::Future(_) => Err(not_yet("tasks", span)),
+            Ty::Future(_) => match m {
+                "ready" => Ok((self.assign_temp(Ty::Bool, Rvalue::Op(Op::Ready, ops)), Ty::Bool)),
+                "cancel" => {
+                    self.emit(Stmt::Eval(Rvalue::Op(Op::Cancel, ops)));
+                    Ok(nil)
+                }
+                other => Err(internal(format!("an unknown future method '{other}'"), span)),
+            },
             Ty::Json => Err(not_yet("json values", span)),
             other => Err(internal(format!("a method '{m}' on {other}"), span)),
         }

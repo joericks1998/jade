@@ -46,6 +46,7 @@ mod format;
 mod func;
 mod layout;
 mod rc;
+mod tasks;
 mod text;
 mod unicode;
 
@@ -207,7 +208,15 @@ impl<'ctx> Cx<'ctx> {
             "pthread_create" => {
                 i32t.fn_type(&[ptr.into(), ptr.into(), ptr.into(), ptr.into()], false)
             }
-            "pthread_join" => i32t.fn_type(&[ptr.into(), ptr.into()], false),
+            "pthread_join" | "pthread_mutex_init" | "pthread_cond_init" | "pthread_cond_wait" => {
+                i32t.fn_type(&[ptr.into(), ptr.into()], false)
+            }
+            "pthread_mutex_lock"
+            | "pthread_mutex_unlock"
+            | "pthread_cond_broadcast"
+            | "pthread_detach" => i32t.fn_type(&[ptr.into()], false),
+            "nanosleep" => i32t.fn_type(&[ptr.into(), ptr.into()], false),
+            "clock_gettime" => i32t.fn_type(&[i32t.into(), ptr.into()], false),
             other => panic!("the static backend declares no C function named {other}"),
         };
         self.module.add_function(name, ty, Some(Linkage::External))
@@ -332,6 +341,10 @@ fn emit_c_main<'ctx>(cx: &Cx<'ctx>, top: FunctionValue<'ctx>) {
     let main_ty = cx.i32t().fn_type(&[cx.i32t().into(), ptr.into()], false);
     let main = cx.module.add_function("main", main_ty, Some(Linkage::External));
     let f = F::new(cx, main);
+    // The task lock is set up before any thread runs, when the program has tasks.
+    if cx.module.get_function("jade.task.submit").is_some() {
+        f.call(cx.task_init_fn(), &[]);
+    }
     // A pthread_attr_t and a pthread_t are opaque; 128 bytes holds either on
     // every Unix this targets.
     let attr = f.alloca(cx.i8t().array_type(128));

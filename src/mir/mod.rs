@@ -212,6 +212,9 @@ pub enum Rvalue {
     /// Whether a struct value's type id is one of these: the class `x is C`
     /// names and every class that descends from it.
     IsA(Operand, Vec<i64>),
+    /// Start an async function as a task: `-> future of T`, where `T` is the
+    /// function's return type. Arguments are kept by the task.
+    Spawn(FuncId, Vec<Operand>),
     /// A pointer to a function, for a value of a joined function type.
     FnAddr(FuncId),
     /// A call through a function pointer whose type is the callee operand's.
@@ -368,6 +371,42 @@ pub enum Op {
     /// `(e: error) -> str`: a caught error's message: a `RuntimeError`'s, or
     /// the `message` field of a class that has one, or its printed form.
     ErrorMessage,
+
+    // ── tasks (the result type is given) ─────────────────────────────────
+    /// `(f: future of T) -> T`: wait for a task, then its value or its error.
+    Await(Ty),
+    /// `(f…: future of T) -> [T]`: await each in turn, raising the first error.
+    Join(Ty),
+    /// `(f…: future of T) -> [S]`: await each, building the `Settled` class `S`
+    /// for every outcome instead of raising.
+    JoinSettled(Ty, String),
+    /// `(f…: futures) -> int`: the lowest index of a task that has finished,
+    /// waiting until one has. The futures may have different result types.
+    Wait,
+    /// `(fs: [future of T]) -> int`: `Wait` over an array.
+    WaitArray(Ty),
+    /// `(f: future) -> bool`: whether the task has finished.
+    Ready,
+    /// `(f: future) -> nil`: ask the task to stop.
+    Cancel,
+    /// `() -> bool`: whether the running task was asked to stop.
+    Cancelled,
+    /// `() -> int`: the concurrency limit.
+    MaxTasks,
+    /// `(n: int) -> int`: set the concurrency limit, clamped to 1..=512.
+    SetMaxTasks,
+    /// `(secs: float) -> future of nil`: a task that finishes after a delay.
+    After,
+
+    // ── time ─────────────────────────────────────────────────────────────
+    /// `() -> int`: Unix seconds, from the wall clock.
+    Now,
+    /// `() -> int`: Unix milliseconds, from the wall clock.
+    NowMs,
+    /// `() -> float`: seconds on a clock that never moves backwards.
+    Monotonic,
+    /// `(secs: float) -> nil`: pause the running thread.
+    Sleep,
 }
 
 /// Purpose: This enum lists the string methods the static backend has.
@@ -436,6 +475,8 @@ impl Op {
                 | Op::ArrayPop(_)
                 | Op::DictGet(_)
                 | Op::Fail(_)
+                | Op::Await(_)
+                | Op::Join(_)
                 | Op::Str(StrMethod::Repeat | StrMethod::PadStart | StrMethod::PadEnd)
         )
     }
@@ -509,7 +550,7 @@ pub enum Term {
 /// Outputs: true for strings, arrays, dicts, structs, and optionals of them.
 pub fn is_heap(t: &Ty) -> bool {
     match t {
-        Ty::Str | Ty::Array(_) | Ty::Map(_) | Ty::Struct(_) | Ty::Error => true,
+        Ty::Str | Ty::Array(_) | Ty::Map(_) | Ty::Struct(_) | Ty::Error | Ty::Future(_) => true,
         Ty::Opt(inner) => is_heap(inner),
         _ => false,
     }

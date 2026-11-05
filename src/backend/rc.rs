@@ -67,6 +67,7 @@ impl<'ctx> Cx<'ctx> {
         let t = base(t).clone();
         let name = match &t {
             Ty::Struct(_) | Ty::Error => "jade.release.struct".to_string(),
+            Ty::Future(_) => "jade.release.future".to_string(),
             other => format!("jade.release.{}", key(other)),
         };
         self.support(&name, None, &[self.ptrt().into()], |f| {
@@ -223,6 +224,13 @@ impl<'a, 'ctx> F<'a, 'ctx> {
                 self.call(free, &[p.into()]);
                 self.br(end);
                 self.position(end);
+            }
+            Ty::Future(_) => {
+                // A job frees itself through the function it carries, which
+                // knows its result type.
+                let free = self.load_ptr(self.at_c(p, super::tasks::FREE));
+                let ty = self.cx.ctx.void_type().fn_type(&[self.cx.ptrt().into()], false);
+                self.b.build_indirect_call(ty, free, &[p.into()], "").expect("positioned");
             }
             _ => {}
         }

@@ -16,7 +16,7 @@ use inkwell::values::{BasicValueEnum, FunctionValue, GlobalValue, IntValue, Poin
 use inkwell::{FloatPredicate, IntPredicate};
 
 use super::layout::{self, ARR_DATA, LEN, TYPE_ID};
-use super::{Cx, F};
+use super::{Cx, F, tasks};
 use crate::mir::{
     ArithOp, BinOp, BitOp, CmpOp, Const, Func, NumTy, Op, Operand, Place, Program, Rvalue, Stmt,
     StrMethod, Term, Ty, UnOp, is_heap,
@@ -245,6 +245,17 @@ impl<'a, 'b, 'ctx> Lw<'a, 'b, 'ctx> {
         self.f.i8(0).into()
     }
 
+    /// Purpose: This function stores pointer operands in a stack array, for a
+    /// support function that takes any number of futures.
+    fn pointer_array(&self, args: &[Operand]) -> PointerValue<'ctx> {
+        let f = &self.f;
+        let a = f.alloca(self.cx().ptrt().array_type(args.len().max(1) as u32));
+        for (i, op) in args.iter().enumerate() {
+            f.store(f.elem(self.cx().ptrt(), a, f.i64(i as i64)), self.operand(op));
+        }
+        a
+    }
+
     // ── statements ───────────────────────────────────────────────────────
 
     fn stmt(&self, s: &Stmt) {
@@ -423,6 +434,22 @@ impl<'a, 'b, 'ctx> Lw<'a, 'b, 'ctx> {
             Rvalue::IsNil(op) => {
                 let t = self.op_ty(op);
                 (f.is_nil(&t, self.operand(op)).into(), Ty::Bool)
+            }
+            Rvalue::Spawn(id, args) => {
+                let target = self.env.funcs[id.0 as usize];
+                let mf = &self.env.prog.funcs[id.0 as usize];
+                let params: Vec<Ty> =
+                    mf.locals[..mf.params as usize].iter().map(|l| l.ty.clone()).collect();
+                let at = cx.args_ty(&params);
+                let size = f.size_of(at.into());
+                let packed = f.call_ptr(cx.libc("malloc"), &[size.into()]);
+                for (i, a) in args.iter().enumerate() {
+                    let v = self.consume(a);
+                    f.store(f.field(at, packed, i as u32), v);
+                }
+                let entry = cx.task_entry_fn(target, &params, &mf.ret);
+                let job = f.new_job(&mf.ret, entry, packed);
+                (job.into(), Ty::Future(Box::new(mf.ret.clone())))
             }
             Rvalue::FnAddr(id) => {
                 (self.env.funcs[id.0 as usize].as_global_value().as_pointer_value().into(), Ty::Nil)
@@ -727,6 +754,55 @@ impl<'a, 'b, 'ctx> Lw<'a, 'b, 'ctx> {
                 (self.nil(), Ty::Nil)
             }
             Op::ErrorMessage => (f.callv(cx.error_message_fn(false), &[arg(0)]), Ty::Str),
+            Op::Await(t) => (f.callv(cx.await_fn(t), &[arg(0)]), t.clone()),
+            Op::Join(_) | Op::JoinSettled(..) | Op::Wait => {
+                let jobs = self.pointer_array(args);
+                let n = f.i64(args.len() as i64).into();
+                match op {
+                    Op::Join(t) => {
+                        (f.callv(cx.join_fn(t), &[jobs.into(), n]), Ty::Array(Box::new(t.clone())))
+                    }
+                    Op::JoinSettled(t, s) => (
+                        f.callv(cx.join_settled_fn(t, s), &[jobs.into(), n]),
+                        Ty::Array(Box::new(Ty::Struct(s.clone()))),
+                    ),
+                    _ => (f.callv(cx.wait_fn(), &[jobs.into(), n]), Ty::Int),
+                }
+            }
+            Op::WaitArray(_) => {
+                let a = ptr(0);
+                let data = f.load_ptr(f.at_c(a, ARR_DATA));
+                let n = f.load_i64(f.at_c(a, LEN));
+                (f.callv(cx.wait_fn(), &[data.into(), n.into()]), Ty::Int)
+            }
+            Op::Ready => {
+                let job = ptr(0);
+                f.lock();
+                let st = f.load_i64(f.at_c(job, tasks::STATE));
+                let cancelled = f.ne(f.load_i64(f.at_c(job, tasks::CANCEL)), f.i64(0));
+                let r = f.or(f.sge(st, f.i64(tasks::DONE)), cancelled);
+                f.unlock();
+                (r.into(), Ty::Bool)
+            }
+            Op::Cancel => {
+                let job = ptr(0);
+                f.lock();
+                f.store(f.at_c(job, tasks::CANCEL), f.i64(1));
+                f.broadcast();
+                f.unlock();
+                (self.nil(), Ty::Nil)
+            }
+            Op::Cancelled => (f.cancelled().into(), Ty::Bool),
+            Op::MaxTasks => (f.max_tasks().into(), Ty::Int),
+            Op::SetMaxTasks => (f.set_max_tasks(arg(0).into_int_value()).into(), Ty::Int),
+            Op::After => (f.callv(cx.after_fn(), &[arg(0)]), Ty::Future(Box::new(Ty::Nil))),
+            Op::Sleep => {
+                f.call(cx.sleep_fn(), &[arg(0)]);
+                (self.nil(), Ty::Nil)
+            }
+            Op::Now => (f.clock(false, 1).into(), Ty::Int),
+            Op::NowMs => (f.clock(false, 1000).into(), Ty::Int),
+            Op::Monotonic => (f.monotonic().into(), Ty::Float),
         }
     }
 }

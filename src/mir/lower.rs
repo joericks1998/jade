@@ -27,7 +27,6 @@ pub(super) struct FnDef<'a> {
     pub params: &'a [(String, Option<TExpr>)],
     pub body: &'a [TStmt],
     pub is_async: bool,
-    pub span: Span,
 }
 
 /// Purpose: This struct holds what every function's lowering shares.
@@ -257,20 +256,20 @@ impl<'a> Lowerer<'a> {
     fn collect(&mut self, stmts: &'a [TStmt]) {
         for s in stmts {
             match s {
-                TStmt::FnDef { name, params, body, span, .. }
-                | TStmt::AsyncFnDef { name, params, body, span, .. } => {
+                TStmt::FnDef { name, params, body, .. }
+                | TStmt::AsyncFnDef { name, params, body, .. } => {
                     let is_async = matches!(s, TStmt::AsyncFnDef { .. });
-                    self.fns.insert(name, FnDef { params, body, is_async, span: *span });
+                    self.fns.insert(name, FnDef { params, body, is_async });
                 }
                 TStmt::ExtendBlock { type_name, methods, .. } => {
                     for m in methods {
-                        if let TStmt::FnDef { name, params, body, span, .. }
-                        | TStmt::AsyncFnDef { name, params, body, span, .. } = m
+                        if let TStmt::FnDef { name, params, body, .. }
+                        | TStmt::AsyncFnDef { name, params, body, .. } = m
                         {
                             let is_async = matches!(m, TStmt::AsyncFnDef { .. });
                             self.methods.insert(
                                 (type_name.as_str(), name.as_str()),
-                                FnDef { params, body, is_async, span: *span },
+                                FnDef { params, body, is_async },
                             );
                         }
                     }
@@ -514,8 +513,12 @@ impl<'a> Lowerer<'a> {
                         Span { line: 0, col: 0 },
                     )
                 })?;
-                if def.is_async {
-                    return Err(not_yet("async functions", def.span));
+                // An async function's body returns its value; a call to it
+                // starts a task that holds the value in a future.
+                if def.is_async
+                    && let Ty::Future(inner) = fx.ret.clone()
+                {
+                    fx.ret = *inner;
                 }
                 for ((p, _), t) in def.params.iter().zip(&params) {
                     let l = fx.new_local(t.clone(), Some(p.clone()));
@@ -1518,7 +1521,10 @@ impl<'a, 'l> Fx<'a, 'l> {
                     _ => self.assign_temp(Ty::Str, Rvalue::Op(Op::StrCat, ops)),
                 }
             }
-            TExprKind::Await { .. } => return Err(not_yet("await", span)),
+            TExprKind::Await { expr } => {
+                let (f, _) = self.expr(expr)?;
+                self.assign_temp(et.clone(), Rvalue::Op(Op::Await(et.clone()), vec![f]))
+            }
             TExprKind::PromptDeref { .. } | TExprKind::PromptLiteral { .. } => {
                 return Err(not_yet("prompts", span));
             }
@@ -1675,8 +1681,9 @@ impl<'a, 'l> Fx<'a, 'l> {
             let (v, t) = self.expr(other)?;
             let is = match t {
                 Ty::Nil => Operand::Const(Const::Bool(true)),
-                Ty::Opt(_) => self.assign_temp(Ty::Bool, Rvalue::IsNil(v)),
-                Ty::Json | Ty::Error => {
+                // An error is nil when it is a null pointer.
+                Ty::Opt(_) | Ty::Error => self.assign_temp(Ty::Bool, Rvalue::IsNil(v)),
+                Ty::Json => {
                     return Err(not_yet(format!("comparing {t} with nil"), span));
                 }
                 _ => Operand::Const(Const::Bool(false)),
@@ -1981,6 +1988,7 @@ impl<'a, 'l> Fx<'a, 'l> {
         span: Span,
     ) -> Result<Operand> {
         let (id, params, ret) = self.l.sig(k, span)?;
+        let spawn = def.is_async;
         let mut argv = Vec::with_capacity(params.len());
         for (i, (v, pt)) in vals.into_iter().zip(&params).enumerate() {
             let (o, t, sp) = match v {
@@ -1995,6 +2003,9 @@ impl<'a, 'l> Fx<'a, 'l> {
                 }
             };
             argv.push(self.coerce(o, &t, pt, sp)?);
+        }
+        if spawn {
+            return Ok(self.assign_temp(ret, Rvalue::Spawn(id, argv)));
         }
         Ok(self.assign_temp(ret, Rvalue::Call(id, argv)))
     }

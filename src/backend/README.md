@@ -21,17 +21,19 @@ On one benchmark of recursion, string building, dict inserts and a float loop, a
 
 *Support code is generated on demand.* Every helper a program needs is an internal LLVM function named `jade.*`, generated the first time something asks for it through `Cx::support`. A program that never splits a string carries no split. Code that depends on a type is generated once per type the program uses, such as releasing an array of strings (`jade.release.Array(Str)`) or printing a dict of arrays. The optimizer inlines what is small and drops what is unused.
 
-*The C library is the only dependency.* `Cx::libc` declares the few functions used: `malloc`, `realloc`, `free`, `memcmp`, `write`, `read`, `exit`, `snprintf`, `strtod`, `qsort` and the pthread calls that give the program a 256 MiB stack, as v1 did. A test pins that list.
+*The C library is the only dependency.* `Cx::libc` declares the few functions used: `malloc`, `realloc`, `free`, `memcmp`, `write`, `read`, `exit`, `snprintf`, `strtod`, `qsort`, `nanosleep`, `clock_gettime`, the pthread calls that give the program a 256 MiB stack, as v1 did, and the pthread lock, condition variable and thread calls tasks use. A test pins that list.
 
 *Object layouts.* Every heap object starts with an `i64` reference count, and a count below zero marks an immortal object such as a string literal. Strings are `{ rc, len, bytes…, 0 }`. Arrays hold their elements unboxed in a separate buffer, so growing one never moves the object. Dicts keep entries in insertion order, with an FNV-1a index past eight entries. Structs are `{ rc, type_id, fields… }`. An optional of a pointer type is the pointer, null for nil; an optional of a scalar is `{ i1, T }`. `mod.rs` has the full table.
 
-*Reference counts are atomic*, because tasks will share one heap. Releasing an object whose count reaches zero releases what it holds, through a function generated per type. A struct value may hold any descendant of its static type, so struct release switches on the object's type id.
+*Reference counts are atomic*, because tasks share one heap. Releasing an object whose count reaches zero releases what it holds, through a function generated per type. A struct value may hold any descendant of its static type, so struct release switches on the object's type id.
 
 *Text matches v1 exactly.* `print`, `str()` and f-strings all go through `jade.tostr.<type>`. Floats print the shortest digits that read back to the same value, found with `snprintf` and `strtod`, laid out without an exponent. Case mapping uses tables built from Rust's own Unicode data when the program uses `upper`, `lower` or `capitalize`.
 
 *Classes.* A field read through a static class whose descendants keep the field at a different offset, which happens when a class is used as a child's second parent, switches on the object's class id in `func.rs`'s `field_ptr`; otherwise it is one direct load. A class's release runs its destructor chain before freeing its fields: it holds a reference while `drop` runs, gives it back, and frees the object only when that was the last one. A destructor that stored `self` keeps the object alive, and a bit in the type id word (`layout::DROPPED`) stops its destructors from running again; every type id read masks the bit off.
 
-*Runtime errors* print `jade: <message>` and exit with status 1, as an uncaught v1 error did. They all go through `F::fail`, which is where exceptions will hook in during the next phase.
+*Errors are values in a slot, not unwinding.* Raising puts a class value in the thread-local `jade.err`. MIR checks the slot after every operation that can raise and branches to the nearest `catch` or to the function's unwind block, which releases its locals and returns. Support code that fails calls `F::fail`, which raises and returns a zero value at once, since its caller checks next; code lowered from MIR calls `F::raise` and carries on to that check. An error that reaches the top prints `jade: <message>`, or `jade: uncaught Name` for a class with no message, and exits with status 1, as v1 did. Calls deeper than 10,000 raise `recursion limit exceeded`.
+
+*Tasks are jobs on one queue.* A call to an `async fn` packs its arguments into a job, which is also its future, and queues it. Worker threads, made as the queue needs them up to `max_tasks()`, run jobs; one mutex and one condition variable guard the queue and every job's state. Awaiting a job that has not started runs it on the awaiting thread, so a chain of tasks each awaiting the next runs on one thread, and `set_max_tasks(1)` cannot deadlock. A job carries a free function generated for its result type, so the queue can release a future without knowing what it holds. `tasks.rs` has the layout.
 
 ## What each file does
 
@@ -45,7 +47,8 @@ On one benchmark of recursion, string building, dict inserts and a float loop, a
 - *`collections.rs`* has arrays and dicts.
 - *`compare.rs`* has equality for every type and ordering for numbers, strings, chars and bools.
 - *`unicode.rs`* builds the case tables.
-- *`errors.rs`* has `jade.fail` and the `F::fail` helpers.
+- *`errors.rs`* has the error slot, raising, an error's message, the report for an uncaught error, and the `F::fail` and `F::raise` helpers.
+- *`tasks.rs`* has tasks: the job layout, the queue and its workers, `await`, `join`, `wait`, `cancel`, the concurrency limit, `time.sleep`, `time.after` and the two clocks.
 - *`tests.rs`* builds small programs, runs them, and checks what they print. One test checks that a program declares only C library functions.
 
 ## Who uses it
@@ -60,7 +63,9 @@ On one benchmark of recursion, string building, dict inserts and a float loop, a
 
 *Equality is structural for arrays and dicts, and identity for structs.* v1 refused `==` between two arrays at run time; the checker now accepts it, so this backend gives it a meaning. A struct is a reference, so two structs are equal when they are the same object.
 
-*Popping an empty array is an error.* v1 returned `nil`, but an `[int]` cannot hold `nil`, so the static backend stops with `pop from an empty array`.
+*Popping an empty array is an error.* v1 returned `nil`, but an `[int]` cannot hold `nil`, so the static backend raises `pop from an empty array`.
+
+*A new C function goes in `Cx::libc`'s table.* It panics on a name it does not know, so a missing signature shows up the first time a test builds the code that uses it. Add the name to the pinned list in `tests.rs` at the same time.
 
 ## Building and testing
 

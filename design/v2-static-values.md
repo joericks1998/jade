@@ -289,7 +289,14 @@ Building it settled five details:
 - *A parameter is owned by the function*, which retains it on entry. That keeps a dict parameter a copy under copy-on-write.
 - *Integer literals are still limited to 2^62* by the lexer, because the tagged backend cannot hold more. The limit lifts at the switchover in phase 6.
 
-Phase 3, exceptions, function values and closures, parent-struct joins and streams, is next. `design/v2-classes.md` removes closures and bound methods, so phase 3's function values are plain functions.
+*Phase 3 is done* (2026-11-04), without closures, which `design/v2-classes.md` removed. Exceptions are a thread-local error slot that MIR checks after every operation that can raise, with no unwinding library. A named function used as a value is called directly; a value of a joined function type is a pointer to a generated adapter. A stream runs its generator to the end into an array, which is what v1 printed. Parent-struct joins became classes.
+
+*Phase 4 is done* (2026-11-04). A call to an async function queues a job that is also its future, and worker threads up to `max_tasks()` run them. Two choices keep it simple:
+
+- *Awaiting a job that has not started runs it on the awaiting thread.* A chain of 2,000 tasks each awaiting the next runs on one thread, and `set_max_tasks(1)` with a task awaiting another cannot deadlock.
+- *`join(…, settle = …)` needs a written `true` or `false`*, because it decides whether the result is an array of values or of `Settled` records. v1 decided at run time.
+
+With phases 3 and 4, 94 examples pass under `--backend=static`. What remains outside prompts is the standard library.
 
 ## Open questions
 

@@ -8,7 +8,7 @@
 #
 # Phase 2 (core codegen): ints, floats, bools, strings, arrays, dicts, classes,
 # control flow, functions, printing and integer overflow. Phase 3: exceptions,
-# functions as values, map and filter, and streams.
+# functions as values, map and filter, streams, and tasks.
 examples/arithmatic/arithmetic/arithmetic.jde
 examples/arithmatic/bitwise/bitwise.jde
 examples/arithmatic/shift_bounds/shift_bounds.jde
@@ -18,8 +18,19 @@ examples/arrays/mixed/mixed.jde
 examples/assignment/boolean_assignment/boolean_assignment.jde
 examples/assignment/comparison/comparison.jde
 examples/assignment/math_variable_assignment/math_variable_assignment.jde
+examples/async/arg_lifetime/arg_lifetime.jde
+examples/async/basic/basic.jde
+examples/async/deep_nesting/deep_nesting.jde
+examples/async/first_class/first_class.jde
+examples/async/fn_values/fn_values.jde
+examples/async/imported/imported.jde
 examples/async/imported/lib/worker.jde
+examples/async/max_tasks/max_tasks.jde
+examples/async/ready/ready.jde
+examples/async/settle/settle.jde
 examples/async/shadowed_module/bytes.jde
+examples/async/shared_state/shared_state.jde
+examples/async/waiting/waiting.jde
 examples/classes/basic/basic.jde
 examples/classes/copy_with/copy_with.jde
 examples/classes/copy_with_inherit_across_files/copy_with_inherit_across_files.jde

@@ -136,6 +136,7 @@ impl<'a, 'ctx> F<'a, 'ctx> {
         match t {
             Ty::Nil => self.bool(true),
             Ty::Opt(inner) if is_ptr(inner) => self.is_null(v.into_pointer_value()),
+            Ty::Error => self.is_null(v.into_pointer_value()),
             Ty::Opt(_) => {
                 let present = self
                     .b

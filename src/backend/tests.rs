@@ -99,7 +99,9 @@ fn a_child_struct_runs_its_own_method_through_a_parent() {
 /// C library. Every external symbol the IR declares must be one of these.
 #[test]
 fn a_program_declares_nothing_but_c_library_functions() {
-    let src = "let d = {\"k\": \"v\"}\nlet a = [1.5, 2.5]\na.sort()\nprint(f\"{d} {a} {\"x\".upper()}\")\nprint(int(\"3\") + len(\"abc\".split(\"\")))\n";
+    let src = "use std::time\nasync fn nap(n) {\n    time.sleep(0.01)\n    return n\n}\n\
+               let d = {\"k\": \"v\"}\nlet a = [1.5, 2.5]\na.sort()\nprint(f\"{d} {a} {\"x\".upper()}\")\n\
+               print(int(\"3\") + len(\"abc\".split(\"\")))\nprint(join(nap(1), nap(2)))\nprint(time.monotonic() > 0.0)\n";
     let ctx = Context::create();
     let module = build_module(&ctx, &mir_of(src)).expect("builds");
     let allowed = [
@@ -118,6 +120,15 @@ fn a_program_declares_nothing_but_c_library_functions() {
         "pthread_attr_setstacksize",
         "pthread_create",
         "pthread_join",
+        "pthread_detach",
+        "pthread_mutex_init",
+        "pthread_mutex_lock",
+        "pthread_mutex_unlock",
+        "pthread_cond_init",
+        "pthread_cond_wait",
+        "pthread_cond_broadcast",
+        "nanosleep",
+        "clock_gettime",
     ];
     let mut f = module.get_first_function();
     while let Some(func) = f {
@@ -180,4 +191,16 @@ fn map_and_filter_pass_extra_arguments() {
                print([1, 2, 3].map(scale, 10))\nprint([1, 5, 9].filter(above, 4))\nprint([1, 22].map(str))\n";
     let (out, _, _) = run(src);
     assert_eq!(out, "[10, 20, 30]\n[5, 9]\n[1, 22]\n");
+}
+
+#[test]
+fn tasks_join_in_order_and_settle_their_errors() {
+    let src = "async fn half(n) {\n    if n % 2 == 1 {\n        raise \"odd \" + str(n)\n    }\n    return n / 2\n}\n\
+               print(join(half(4), half(8)))\n\
+               for r in join(half(2), half(3), settle = true) {\n    print(r.ok)\n}\n\
+               try {\n    join(half(1), half(2))\n} catch e {\n    print(e.message)\n}\n\
+               print(set_max_tasks(0))\nprint(await half(10))\n";
+    let (out, _, code) = run(src);
+    assert_eq!(out, "[2, 4]\ntrue\nfalse\nodd 1\n1\n5\n");
+    assert_eq!(code, 0);
 }
