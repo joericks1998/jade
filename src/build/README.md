@@ -12,7 +12,7 @@ What is left is the `Emit` decision and the plumbing around it. It stays a separ
 
 ## What each file does
 
-- *`mod.rs`* holds the `Emit` enum, whose variants are `Binary`, `Ir`, and `CDylib { exports }`, its conversion into `aot::CompileMode`, and the function that drives compilation.
+- *`mod.rs`* holds the `Emit` enum, whose variants are `Binary`, `Ir`, `CDylib { exports }` and `Static(how)`, its conversion into `aot::CompileMode`, and the function that drives compilation. `Static` sends the build to `aot::compile_static`, Jade 2.0's static backend, and `how` picks a binary, the IR or the MIR.
 - *`tests.rs`* holds tests for the emit-mode plumbing.
 
 ## Who uses it

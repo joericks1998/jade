@@ -102,6 +102,14 @@ jobs:
           LLVM_SYS_180_PREFIX: /usr/lib/llvm-18
         run: ./src/scripts/golden.sh
 
+      # Jade 2.0's static backend, held to the same recorded outputs for the
+      # examples it covers so far (src/scripts/static-examples.list). The list
+      # grows phase by phase until it holds every example.
+      - name: Golden outputs (static backend)
+        env:
+          LLVM_SYS_180_PREFIX: /usr/lib/llvm-18
+        run: ./src/scripts/golden.sh --backend=static
+
       # Binds a real C library and runs it, and compiles the C runtime the way a
       # release build compiles it.
       #

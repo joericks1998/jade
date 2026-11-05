@@ -29,6 +29,10 @@ pub mod alloc;
 /// emitted binaries link against is `src/runtime_aot/` (C), built by this
 /// crate's `build.rs`.
 pub mod aot;
+/// Jade 2.0's static backend: MIR → LLVM with no runtime library. Support code
+/// is emitted into each program as it is used. Reached through
+/// `jade build --backend=static` until it covers the whole language.
+pub mod backend;
 pub mod build;
 pub mod builtins;
 /// The instruction set both engines consume: the compiler emits a `Chunk`, the
@@ -51,6 +55,10 @@ pub mod compiler;
 // and `build.rs` compiles it to `libJadeRuntime.a`. Distinct from
 // `jade-runtime` (`src/runtime/`), which is Rust and shared by *both* engines.
 pub mod frontend;
+/// The typed middle layer between the checked program and the static backend:
+/// one function per checked instance, typed locals, basic blocks, and reference
+/// counting written out.
+pub mod mir;
 pub mod pkg;
 pub mod project;
 pub mod stdio;

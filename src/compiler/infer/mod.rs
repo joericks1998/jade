@@ -44,7 +44,7 @@ use crate::frontend::ast::StructFieldDef;
 use crate::frontend::error::{JadeError, Span};
 
 use ty::Store;
-pub use ty::{FnTy, FuncRef, Ty};
+pub use ty::{FnTy, FuncRef, Ty, display_name as display_type_name};
 
 /// The most instances one function may have. A function that calls itself with
 /// a different type every time, such as `f(x)` calling `f([x])`, would make
@@ -144,6 +144,25 @@ pub struct Typed {
     pub globals: HashMap<String, Ty>,
     /// Each struct field's resolved type, by struct and field.
     pub fields: HashMap<(String, String), Ty>,
+    /// Every slot an instance made, resolved, by instance and the address of
+    /// the node that made it. A variable's type is its slot's, which can be
+    /// wider than the expression that first set it: `let x = nil` later
+    /// assigned `5` is `int?`.
+    pub slots: HashMap<(InstKey, usize), Ty>,
+    /// Every struct type, built-in ones included, by name.
+    pub structs: HashMap<String, StructType>,
+}
+
+/// Purpose: This struct holds one struct type's layout as the backend needs it.
+#[derive(Debug, Clone)]
+pub struct StructType {
+    /// Every field, inherited ones first, with its resolved type. A prompt
+    /// field's type is `Ty::Prompt`.
+    pub fields: Vec<(String, Ty)>,
+    /// Every ancestor, nearest first.
+    pub ancestors: Vec<String>,
+    /// Direct parents, as written.
+    pub parents: Vec<String>,
 }
 
 /// Purpose: This struct holds the whole checker's state.
@@ -615,7 +634,29 @@ impl<'a> Checker<'a> {
             let params = inst.params.iter().map(|p| self.store.resolve(p)).collect();
             let ret = self.instance_result(&k);
             let ret = self.store.resolve(&ret);
+            for (node, slot) in &inst.slots {
+                let r = self.store.resolve(slot);
+                self.out.slots.insert((k.clone(), *node), r);
+            }
             self.out.instances.push((k, params, ret));
+        }
+        let names: Vec<String> = self.structs.keys().cloned().collect();
+        for n in names {
+            let info = self.structs[&n].clone();
+            let mut fields = Vec::with_capacity(info.fields.len());
+            for f in &info.fields {
+                let t = if info.prompt_fields.contains(f) {
+                    Ty::Prompt
+                } else {
+                    match self.field_slot(&n, f) {
+                        Some(slot) => self.store.resolve(&slot),
+                        None => Ty::Nil,
+                    }
+                };
+                fields.push((f.clone(), t));
+            }
+            let ancestors = self.store.ancestors.get(&n).cloned().unwrap_or_default();
+            self.out.structs.insert(n, StructType { fields, ancestors, parents: info.parents });
         }
         let globals: Vec<(String, Ty)> =
             self.globals.iter().map(|(k, v)| (k.clone(), v.clone())).collect();

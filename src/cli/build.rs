@@ -239,7 +239,8 @@ pub(crate) fn compare_sources(
 pub fn run_build(
     path: Option<&str>,
     output: Option<&str>,
-    emit_ir: bool,
+    emit: Option<&str>,
+    backend: Option<&str>,
     lib: bool,
     exports: &[String],
 ) {
@@ -247,12 +248,28 @@ pub fn run_build(
     let path = &target.source.to_string_lossy().into_owned();
     let out = output_path(path, target.output.as_deref(), lib);
 
-    let emit = if emit_ir {
-        crate::build::Emit::Ir
-    } else if lib {
-        crate::build::Emit::CDylib { exports: target.exports.clone() }
-    } else {
-        crate::build::Emit::Binary
+    let emit_ir = emit.is_some();
+    let emit = match (backend, emit) {
+        (None, None) if lib => crate::build::Emit::CDylib { exports: target.exports.clone() },
+        (None, None) => crate::build::Emit::Binary,
+        (None, Some("ir")) => crate::build::Emit::Ir,
+        (Some("static"), _) if lib => {
+            eprintln!("error: --backend=static cannot build a --lib package yet");
+            process::exit(1);
+        }
+        (Some("static"), None) => crate::build::Emit::Static(crate::aot::StaticEmit::Binary),
+        (Some("static"), Some("ir")) => crate::build::Emit::Static(crate::aot::StaticEmit::Ir),
+        (Some("static"), Some("mir")) => crate::build::Emit::Static(crate::aot::StaticEmit::Mir),
+        (Some(b), None) => {
+            eprintln!("error: unknown backend '{b}'; the one other backend is 'static'");
+            process::exit(1);
+        }
+        (_, Some(e)) => {
+            eprintln!(
+                "error: unknown --emit format '{e}'; use 'ir', or 'mir' with --backend=static"
+            );
+            process::exit(1);
+        }
     };
 
     let bundled = compile_file(path, &out, emit);

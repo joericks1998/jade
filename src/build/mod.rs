@@ -31,6 +31,8 @@ pub enum Emit {
     /// projects can depend on. `exports` narrows which functions are bound;
     /// empty means all of them.
     CDylib { exports: Vec<String> },
+    /// A build with Jade 2.0's static backend (`--backend=static`).
+    Static(crate::aot::StaticEmit),
 }
 
 impl From<&Emit> for crate::aot::CompileMode {
@@ -41,7 +43,7 @@ impl From<&Emit> for crate::aot::CompileMode {
             }
             // IR is printed rather than linked, so the mode only decides which
             // entry point gets generated — the binary shape is the right one.
-            Emit::Binary | Emit::Ir => crate::aot::CompileMode::Binary,
+            Emit::Binary | Emit::Ir | Emit::Static(_) => crate::aot::CompileMode::Binary,
         }
     }
 }
@@ -59,6 +61,15 @@ pub fn build(
     out: &Path,
     emit: Emit,
 ) -> Result<Vec<std::path::PathBuf>, String> {
+    if let Emit::Static(how) = emit {
+        if let Some(text) =
+            crate::aot::compile_static(program.clone(), Some(source_path), out, how)?
+        {
+            crate::stdio::write_str(&text);
+            crate::stdio::flush();
+        }
+        return Ok(Vec::new());
+    }
     let outcome = crate::aot::compile_with_mode(
         program.clone(),
         Some(source_path),

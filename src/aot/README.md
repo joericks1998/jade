@@ -29,6 +29,8 @@ That is simpler than tracking a fixed type per register, because the emitter reu
 ## What each file does
 
 - *`mod.rs`* is the public entry point. It sets up the LLVM context and target machine, runs the probe, emits a thin `main()`, writes the object file, and drives the linker. `CompileMode` selects either a binary or a shared library exporting `jade_pkg_init`.
+
+  `compile_static` is the entry point for Jade 2.0's static backend, behind `jade build --backend=static`. It shares the front half, import resolution and struct defaults, then runs the whole-program checker, lowers its answer to [MIR](../mir/README.md), and hands that to [`src/backend/`](../backend/README.md), which links against libc alone. `StaticEmit` selects a binary, the IR, or the MIR as text. A program that imports a C library stops with a not-yet error, since the static backend links none yet.
 - *`imports.rs`* handles import resolution and module namespacing. Jade gives every imported file its own namespace, while LLVM has no namespaces at run time. So this file mangles imported symbols to keep two modules that both define `greet` distinct. *Until v1.4.8 the VM was the source of truth for what a namespace means*, and this file's header still states the rule in the VM's terms, so read it before changing import behavior. It is also where a call into a C-ABI dependency is checked against the symbols its manifest declares, which the gotcha below explains.
 - *`tests.rs`* holds the driver tests.
 

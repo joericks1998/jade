@@ -149,6 +149,11 @@ pub enum JadeError {
     /// String index is out of range.
     IndexOutOfBounds { index: i64, len: usize, span: Span },
 
+    /// Jade 2.0's static backend reached a feature it cannot compile yet. It
+    /// lands phase by phase (see `design/v2-static-values.md`), so this names
+    /// the feature rather than calling the program wrong.
+    NotYetStatic { what: String, span: Span },
+
     /// `interface Name { … }` used the removed interface form. An interface only
     /// ever checked that a type declared a set of methods, and meant nothing at
     /// run time; inheritance covers what it was reached for.
@@ -425,6 +430,11 @@ impl std::fmt::Display for JadeError {
                 f,
                 "[{}:{}] index {} out of bounds (length {})",
                 span.line, span.col, index, len
+            ),
+            JadeError::NotYetStatic { what, span } => write!(
+                f,
+                "[{}:{}] the static backend cannot compile {} yet; build without --backend=static",
+                span.line, span.col, what
             ),
             JadeError::InterfaceRemoved { span } => write!(
                 f,

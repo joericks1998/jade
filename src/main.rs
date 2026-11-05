@@ -57,9 +57,12 @@ enum Commands {
         /// Output binary path (default: input filename without extension)
         #[arg(short, long, value_name = "PATH")]
         output: Option<String>,
-        /// Emit LLVM IR instead of compiling a binary
+        /// Emit LLVM IR instead of compiling a binary (`ir`; `mir` with --backend=static)
         #[arg(long = "emit", value_name = "FORMAT")]
         emit: Option<String>,
+        /// Compile with Jade 2.0's static backend (`static`), which is in progress
+        #[arg(long, value_name = "NAME")]
+        backend: Option<String>,
         /// Build a shared library other Jade projects can depend on
         #[arg(long)]
         lib: bool,
@@ -347,9 +350,15 @@ fn run_cli(cli: Cli) {
         }
 
         // ── build ─────────────────────────────────────────────────────────────
-        Commands::Build { file, output, emit, lib, export } => {
-            let emit_ir = emit.as_deref() == Some("ir");
-            cli::build::run_build(file.as_deref(), output.as_deref(), emit_ir, lib, &export);
+        Commands::Build { file, output, emit, backend, lib, export } => {
+            cli::build::run_build(
+                file.as_deref(),
+                output.as_deref(),
+                emit.as_deref(),
+                backend.as_deref(),
+                lib,
+                &export,
+            );
         }
 
         // ── new ──────────────────────────────────────────────────────────────

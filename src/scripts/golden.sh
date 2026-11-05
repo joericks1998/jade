@@ -11,9 +11,21 @@
 # An example that should exit non-zero records its status in `<name>.expected-exit`.
 # An example with no `.expected` file is reported as missing, never as passing.
 #
-# Usage: src/scripts/golden.sh [path-to-jade-binary]
+# With --backend=static, it builds with Jade 2.0's static backend instead, and
+# only the examples listed in src/scripts/static-examples.list, which grows phase
+# by phase until it holds every example.
+#
+# Usage: src/scripts/golden.sh [--backend=static] [path-to-jade-binary]
 
 set -uo pipefail
+
+BACKEND_FLAGS=()
+LIST=""
+if [[ "${1:-}" == "--backend=static" ]]; then
+  BACKEND_FLAGS=(--backend=static)
+  LIST="$(dirname "$0")/static-examples.list"
+  shift
+fi
 
 JADE="${1:-./target/debug/jade}"
 WORK="$(mktemp -d)"
@@ -67,7 +79,7 @@ while IFS= read -r file; do
   fi
 
   bin="$WORK/$(echo "$file" | tr '/' '_').bin"
-  if ! build_err="$("$JADE" build "$file" -o "$bin" 2>&1)"; then
+  if ! build_err="$("$JADE" build ${BACKEND_FLAGS[@]+"${BACKEND_FLAGS[@]}"} "$file" -o "$bin" 2>&1)"; then
     printf '  FAIL  %-52s (build failed)\n' "$file"
     failures+=("$file: build failed: $build_err")
     fail=$((fail + 1))
@@ -86,7 +98,7 @@ while IFS= read -r file; do
 $(diff <(printf '%s\n' "$got") "$stem.expected")")
     fail=$((fail + 1))
   fi
-done < <(find examples -name '*.jde' | sort)
+done < <(if [[ -n "$LIST" ]]; then grep -v '^#' "$LIST" | grep .; else find examples -name '*.jde' | sort; fi)
 
 # ── Native handles ───────────────────────────────────────────────────────────
 #
@@ -103,7 +115,11 @@ HANDLE_JDE="$(dirname "$0")/handle-fixture.jde"
 HANDLE_WANT="$(dirname "$0")/handle-fixture.expected"
 HANDLE_DIR="$WORK/handles"
 
-if ! command -v cc >/dev/null 2>&1; then
+if [[ -n "$LIST" ]]; then
+  # The static backend links no C libraries yet; the handle fixture needs one.
+  printf '  skip  %-52s (%s)\n' "native handle round-trip" "static backend has no C libraries yet"
+  skip=$((skip + 1))
+elif ! command -v cc >/dev/null 2>&1; then
   printf '  skip  %-52s (%s)\n' "native handle round-trip" "no C compiler"
   skip=$((skip + 1))
 else

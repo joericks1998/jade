@@ -1,6 +1,6 @@
 # Jade 2.0: static values
 
-Status: decided, 2026-11-04. Joe chose the recommendation in every decision below, including the four that change what programs the language accepts: dicts are maps and records are structs (3), mixed values join to a parent struct (4), the whole standard library stays (10), and Jade packages are compiled from source (11). The three open questions at the end are still open. Nothing here is built yet.
+Status: decided, 2026-11-04. Joe chose the recommendation in every decision below, including the four that change what programs the language accepts: dicts are maps and records are structs (3), mixed values join to a parent struct (4), the whole standard library stays (10), and Jade packages are compiled from source (11). The three open questions at the end are still open. Phases 1 and 2 of the order of work are built; see Progress.
 
 ## Summary
 
@@ -279,7 +279,17 @@ Each phase ends with the golden gate green for every example it covers. The new 
 - *JSON absorbs nil.* A `Json` value already has a null, so `let first = nil` later assigned `json.parse(line)` is `Json`, not an optional.
 - *An array cannot contain itself.* Its element type would have to contain its own type. A structure that points back at itself goes through a struct field, whose type is a name.
 
-Phase 2, MIR and core codegen, is next.
+*Phase 2 is done* (2026-11-04): `src/mir/` lowers the checker's answer into MIR, and `src/backend/` compiles MIR to a binary that links libc and nothing else, behind `jade build --backend=static`. The 52 examples that use only the core language print exactly their recorded output under `golden.sh --backend=static`, with no leaks under macOS's `leaks` tool. The list is `src/scripts/static-examples.list`. Everything a later phase adds stops with an error that names the feature. On one benchmark the static binary ran about 30 times faster than v1's and was a hundredth of its size.
+
+Building it settled five details:
+
+- *`==` compares the contents of arrays and dicts*, and the identity of structs, which are references. v1 refused `==` on two arrays at run time; the checker accepts it, so it needed a meaning.
+- *Popping an empty array is a runtime error*, `pop from an empty array`. v1 returned `nil`, which an `[int]` cannot hold.
+- *Runtime errors stop the program* with v1's `jade: <message>` and exit status 1 until exceptions land in phase 3. They all go through one function, `F::fail`, which phase 3 turns into a raise.
+- *A parameter is owned by the function*, which retains it on entry. That keeps a dict parameter a copy under copy-on-write.
+- *Integer literals are still limited to 2^62* by the lexer, because the tagged backend cannot hold more. The limit lifts at the switchover in phase 6.
+
+Phase 3, exceptions, function values and closures, parent-struct joins and streams, is next.
 
 ## Open questions
 

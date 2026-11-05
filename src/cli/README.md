@@ -18,7 +18,7 @@ Keeping `main.rs` to argument parsing leaves the commands as ordinary library fu
   The first is `emit`, because shared mutation across tasks is rejected at emit time. The second is `project::walk_imports`, because import resolution is not a type-checking stage. Before v1.1.33, `use totally_made_up_module` reported `ok` and then failed later.
 
   Unlike `run`, the import walk does not call `pkg::ensure_ready`. Checking a file should not reach the network to fetch dependencies.
-- *`build.rs`* implements `jade build`. It runs the whole pipeline inside one process: lex, parse, infer, resolve imports, generate LLVM IR, and link. It also handles `--emit ir` and `--lib`.
+- *`build.rs`* implements `jade build`. It runs the whole pipeline inside one process: lex, parse, infer, resolve imports, generate LLVM IR, and link. It also handles `--emit ir` and `--lib`, and `--backend=static`, which builds with Jade 2.0's static backend and also accepts `--emit mir`.
 
   The compile step is `compile_file`, which `run` and `test` share. It calls `pkg::ensure_ready` before resolving imports, so a fresh clone installs its dependencies first rather than linking against whatever `libs/` happened to hold. `try_compile_file` is the same step returning its message instead of exiting, for `jade test`, where one failing file must not stop the rest.
 

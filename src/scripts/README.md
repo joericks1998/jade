@@ -17,6 +17,8 @@ v2 removed the VM, which leaves nothing to diff against. So before the VM went, 
 - *`golden.sh`* builds every example, runs the binary, and compares its output and exit status to the `<name>.expected` and optional `<name>.expected-exit` beside it. An example with no `.expected` file fails rather than passes. It takes an optional path to a `jade` binary, and keeps a skip list: the network examples, the `*_error.jde` fixtures that `jade check` covers, and the examples that dereference a prompt, which wait on v2's inference. Read the header before assuming an example is covered.
 
   It also runs the native handle round-trip, against `handle-fixture.expected`.
+
+  With `--backend=static`, it builds with Jade 2.0's static backend instead, and only the examples listed in *`static-examples.list`*. That list grows with each phase of `design/v2-static-values.md` until it holds every example, at which point the static backend becomes the only one and the flag and list go away. The handle round-trip is skipped in this mode, because the static backend links no C libraries yet.
 - *`handle-fixture.c`* and *`handle-fixture.jde`* are a stand-in *native* package that hands out opaque handles, plus the Jade program that exercises it. `cc` compiles the C file and `golden.sh` builds the program against it.
 
   They live here rather than under `examples/` for a reason worth stating. A handle only ever comes from a native C package, and a Jade package built with `--lib` cannot produce one. So no `.jde` fixture can reach the tag at all, and leaving it out of the gate would recreate the blind spot that let the `bytes` marshaller stay broken for three releases. The built library's file extension also differs by platform, which a committed `jade.toml` under `examples/` would have to hard-code.
@@ -26,7 +28,7 @@ v2 removed the VM, which leaves nothing to diff against. So before the VM went, 
 
 ## Who uses it
 
-*Used by:* `.github/workflows/ci.yml` runs `golden.sh` and `ffi-gate.sh` as required steps on every pull request. Run them locally before opening one.
+*Used by:* `.github/workflows/ci.yml` runs `golden.sh`, `golden.sh --backend=static` and `ffi-gate.sh` as required steps on every pull request. Run them locally before opening one.
 
 *Depends on:* a built `jade` binary, defaulting to `./target/debug/jade`, the fixtures and `.expected` files in `examples/`, and `cc` for the handle fixture. A missing `cc` reports as a skip rather than a silent pass. Paths are relative to the current directory, so run the scripts from the repository root.
 
@@ -36,6 +38,7 @@ v2 removed the VM, which leaves nothing to diff against. So before the VM went, 
 cargo build
 ./src/scripts/golden.sh                    # uses ./target/debug/jade
 ./src/scripts/golden.sh /path/to/jade      # or a specific binary
+./src/scripts/golden.sh --backend=static   # the static backend's examples
 ./src/scripts/ffi-gate.sh
 ```
 

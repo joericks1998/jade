@@ -124,6 +124,61 @@ pub fn would_build(
     .map(|_| ())
 }
 
+/// What a `--backend=static` build produces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StaticEmit {
+    /// A native executable linked against libc alone.
+    Binary,
+    /// The LLVM IR, unoptimized.
+    Ir,
+    /// The MIR, as text.
+    Mir,
+}
+
+/// Compile a program with Jade 2.0's static backend.
+///
+/// The same front half as [`compile_with_mode`]: imports are inlined and struct
+/// defaults filled. Then the whole-program checker's answer is lowered to MIR
+/// (`crate::mir`) and MIR to LLVM (`crate::backend`), with no runtime library.
+/// It covers the features `design/v2-static-values.md` lists as landed; for
+/// anything else it stops with an error naming the feature.
+///
+/// Returns the IR or MIR text when asked for it, `None` after writing a binary.
+pub fn compile_static(
+    program: TProgram,
+    source_path: Option<&Path>,
+    output_path: &Path,
+    emit: StaticEmit,
+) -> Result<Option<String>, String> {
+    let program = match source_path {
+        Some(src) => {
+            let r =
+                imports::resolve_and_namespace(program.stmts, src).map_err(|e| e.to_string())?;
+            if !r.native_pkgs.is_empty() {
+                return Err(crate::frontend::error::JadeError::NotYetStatic {
+                    what: "C libraries".to_string(),
+                    span: crate::frontend::error::Span { line: 0, col: 0 },
+                }
+                .to_string());
+            }
+            crate::compiler::tir::TProgram { stmts: r.stmts }
+        }
+        None => program,
+    };
+    let mut program = program;
+    crate::compiler::type_infer::fill_struct_literal_defaults(&mut program)
+        .map_err(|e| e.to_string())?;
+    let typed = crate::compiler::infer::check_program(&program).map_err(|e| e.to_string())?;
+    let mir = crate::mir::lower_program(&program, &typed).map_err(|e| e.to_string())?;
+    match emit {
+        StaticEmit::Mir => Ok(Some(mir.to_string())),
+        StaticEmit::Ir => crate::backend::compile(&mir, output_path, crate::backend::Emit::Ir),
+        StaticEmit::Binary => {
+            crate::backend::compile(&mir, output_path, crate::backend::Emit::Binary)
+        }
+    }
+}
+
 /// What `compile` produces.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum CompileMode {

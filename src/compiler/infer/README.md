@@ -4,7 +4,7 @@
 
 This is Jade 2.0's type checker. It works out one concrete type for every value in a program, with no annotations, so the static backend can compile an int to a register and a struct to a fixed layout with no type tags. It also decides which programs Jade 2.0 accepts. The rules it enforces are the decisions in [`design/v2-static-values.md`](../../../design/v2-static-values.md); read that first.
 
-It runs on the whole merged program: after the per-file pass in `type_infer.rs`, after the import pass inlines every module, and after struct defaults are filled. Until the static backend replaces the bytecode backend, it is a gate. `aot::compile_with_mode` and `aot::would_build` call `check_program`, so a program it rejects neither builds nor passes `jade check`, even though the bytecode backend could still run it.
+It runs on the whole merged program: after the per-file pass in `type_infer.rs`, after the import pass inlines every module, and after struct defaults are filled. It has two jobs while the static backend is being built. For the default backend it is a gate: `aot::compile_with_mode` and `aot::would_build` call `check_program`, so a program it rejects neither builds nor passes `jade check`, even though the bytecode backend could still run it. For `jade build --backend=static` it is the input: [`src/mir/`](../../mir/README.md) lowers its answer into typed code.
 
 ## Why it was built
 
@@ -26,7 +26,7 @@ The v1 checker in `type_infer.rs` is one forward pass with no type variables. A 
 
 ## What each file does
 
-- *`mod.rs`* holds `check_program`, the `Checker`, registration of every top-level definition, the struct hierarchy and field slots, the pass loop, `instantiate`, and the `Typed` answer: every instance, the resolved type of every expression by instance and node address, and what every call resolved to.
+- *`mod.rs`* holds `check_program`, the `Checker`, registration of every top-level definition, the struct hierarchy and field slots, the pass loop, `instantiate`, and the `Typed` answer: every instance, the resolved type of every expression and every slot by instance and node address, what every call resolved to, and every struct's layout.
 - *`ty.rs`* holds `Ty`, `FnTy`, `FuncRef`, and the `Store` of slots with `join`, `resolve`, the cycle check that refuses a type containing itself, and the common-ancestor walk that joins two structs.
 - *`check.rs`* checks statements and expressions inside one instance: scopes, narrowing, calls by name, by value and by method, operators, struct literals, fields and indexing, `join` and `wait`.
 - *`builtins.rs`* holds the types of everything a program calls without writing it: the bare globals, every std package function, the primitive methods, and the built-in structs that replaced v1's record-shaped dicts (`RuntimeError`, `HttpResponse`, `HttpBytesResponse`, `ShOutput`, `TimeParts`, and one `Settled` struct per `join(…, settle = true)` site).
@@ -34,7 +34,7 @@ The v1 checker in `type_infer.rs` is one forward pass with no type variables. A 
 
 ## Who uses it
 
-*Used by:* `aot::compile_with_mode` and `aot::would_build`, as the gate described above. `cli/check.rs` reaches it through `would_build`, which is also how the `every_example_matches_its_expected_check_result` test judges every fixture.
+*Used by:* `aot::compile_with_mode` and `aot::would_build`, as the gate described above, and `mir::lower_program`, which reads `Typed` through `aot::compile_static`. `cli/check.rs` reaches it through `would_build`, which is also how the `every_example_matches_its_expected_check_result` test judges every fixture.
 
 *Depends on:* `compiler::tir` for the merged program it reads, `frontend::ast` for struct field definitions, and `builtins` for the package and primitive-method name lists.
 
