@@ -1,6 +1,6 @@
 # Jade 2.0.1: classes, and no closures
 
-Status: proposed, 2026-11-05. Nothing here is built yet. Joe has decided how methods attach to a class (1), implicit `self` (2), private-by-default members and their reach (3), constructors (4), the method-conflict rule (6) and types as decorators (10). The rest are recommendations that stand unless he changes them.
+Status: proposed, 2026-11-05. Nothing here is built yet. Joe has decided how methods attach to a class (1), implicit `self` (2), private-by-default members and their reach (3), constructors (4), the method-conflict rule (6), types as decorators (10) and destructors (15). The rest are recommendations that stand unless he changes them.
 
 ## Summary
 
@@ -216,13 +216,40 @@ print([1, 2, 3].map(scale, 10))      // [10, 20, 30]
 
 The rest is static only: a shared ancestor once, `Parent::m()`, `is`, second-parent field tables, class decorators and extra arguments to `map`. Examples that use those are listed for `golden.sh --backend=static` and skipped by the default gate with the reason "static backend only".
 
+### 15. A destructor runs when the last reference goes
+
+*Decided.* A class may declare a member named `drop`, which pairs with the constructor `new`. It takes no arguments, has `self`, and is never called by code; the language calls it.
+
+```
+class Session {
+    region
+
+    @public fn new(model)
+    fn drop()
+}
+
+fn Session::drop() {
+    dovata.unmap(self.region)
+}
+```
+
+- *When it runs.* Jade frees a class value when its last reference goes away, so `drop` runs then. That is when a local's block ends or its function returns, when a temporary's statement ends, or when a variable is given a new value. `drop` runs before the fields are freed, so it can read them. Leaving a block by `break` or `continue` frees its variables too, so a destructor never runs late; the lowering does not do that today and gains it with this change.
+- *Inheritance.* After a class's own `drop`, each ancestor's `drop` runs automatically, as in C++, and a shared ancestor's runs once, last.
+- *Globals.* When the program ends normally, globals are released in reverse order of declaration, so their destructors run. A program stopped by a runtime error exits without running destructors, as C++'s `terminate` does.
+- *Cycles.* Values that point at each other are never freed, so their destructors never run. Cycles leak in v2, as they did in v1.
+- *Revival.* A destructor that stores `self` somewhere keeps the value alive: it is not freed, and its destructor does not run again.
+- *Errors.* An error raised in a destructor stops the program, because there is no caller to hand it to.
+- *Threads.* A destructor runs on the thread that drops the last reference.
+
+Class values are references, so copying one copies the reference. Jade needs no copy constructors or assignment operators, and C++'s rule of three does not arise.
+
 ## How the compiler changes
 
 - *Lexer and parser.* `class` becomes a keyword. The parser reads a class body: fields, method definitions and method declarations, each with decorators. An `fn A::m(...)` definition is matched to its declaration, and every method gets `self` as its first parameter. The result is the same definition nodes a struct and its `extend` blocks produce today, plus each member's visibility. `struct`, `extend` and `|x|` are refused with messages naming the replacement. `Parent::m()` and `x is T` are new expressions.
 - *Imports.* An `fn shapes.Point::m()` definition in one file attaches to the class another file declares.
 - *`type_infer.rs`.* Flattening inherits a shared ancestor once and finds conflicting methods.
 - *`compiler/infer/`.* It checks visibility on every field read, field write, method call and literal, and that a literal outside its class sets only public fields. It resolves `Parent::m()` to that parent's method, and narrows on `is` the way it does on `!= nil`. It types a variable or field from its type decorator. Closures and bound methods leave `FnKey` and `FuncRef`.
-- *`mir/` and `backend/`.* `is` becomes a type-id test, `Parent::m()` a direct call, and second-parent field reads use the offset table. `map` and `filter` with function arguments land here as part of phase 3.
+- *`mir/` and `backend/`.* A class's release runs its `drop` chain before freeing its fields, and the lowering frees a block's variables on every way out of it. `is` becomes a type-id test, `Parent::m()` a direct call, and second-parent field reads use the offset table. `map` and `filter` with function arguments land here as part of phase 3.
 - *Everywhere a message says "struct"*, it says "class". Internal names in code the switchover deletes are left alone.
 - *`jade fmt`* prints classes.
 
@@ -232,7 +259,7 @@ The rest is static only: a shared ancestor once, `Parent::m()`, `is`, second-par
 - *`closures/closures.jde`* is rewritten to named functions and pipes, with the same output.
 - *`structs/bound_method`* is removed, and `functions/values` loses its bound-method line.
 - *`async/shared_state/callback_state_error.jde`* hands the task a named function.
-- *New examples* cover `A::` definitions across files, private access errors, constructors, type decorators, diamonds, method conflicts, `Parent::m()`, `is`, second parents and extra arguments to `map`.
+- *New examples* cover `A::` definitions across files, private access errors, constructors, destructors, type decorators, diamonds, method conflicts, `Parent::m()`, `is`, second parents and extra arguments to `map`.
 - *User docs:* the struct, closure, decorator and inheritance pages in `docs/docs/` are rewritten.
 
 ## Order of work
@@ -244,6 +271,7 @@ The rest is static only: a shared ancestor once, `Parent::m()`, `is`, second-par
 5. *Inheritance rules*: a shared ancestor once, and method conflicts.
 6. *`Parent::m()` and `is`*, in the checker and the static backend.
 7. *Second-parent field tables* in the static backend.
+8. *Destructors*: `drop`, its chaining, freeing on `break` and `continue`, and releasing globals at exit.
 
 Then phase 3 of `design/v2-static-values.md` continues, smaller than before: exceptions, function values as plain pointers, `map` and `filter`, and streams.
 
