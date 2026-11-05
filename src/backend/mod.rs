@@ -22,7 +22,8 @@
 //! released or freed.
 //!
 //! ```text
-//! str     { i64 rc, i64 len, u8 data[len], u8 0 }
+//! str     { i64 rc, i64 len, i64 trust, u8 data[len], u8 0 }
+//! bytes   the same as str
 //! array   { i64 rc, i64 len, i64 cap, ptr data }          data: cap elements
 //! dict    { i64 rc, i64 len, i64 cap, ptr keys, ptr vals, ptr index, i64 icap }
 //! struct  { i64 rc, i64 type_id, fields... }
@@ -38,16 +39,25 @@
 //! `collections.rs` (arrays and dicts), `unicode.rs` (case tables) and
 //! `errors.rs` (runtime errors).
 
+mod bytes;
 mod collections;
 mod compare;
+mod env;
 mod errors;
 mod fb;
 mod format;
+mod fs;
 mod func;
+mod http;
+mod json;
 mod layout;
+mod math;
+mod random;
 mod rc;
+mod sh;
 mod tasks;
 mod text;
+mod time;
 mod unicode;
 
 #[cfg(test)]
@@ -186,7 +196,8 @@ impl<'ctx> Cx<'ctx> {
     ///
     /// Outputs: its declaration, with the signature the backend uses.
     pub fn libc(&self, name: &str) -> FunctionValue<'ctx> {
-        if let Some(f) = self.module.get_function(name) {
+        let sym = libc_symbol(name);
+        if let Some(f) = self.module.get_function(sym) {
             return f;
         }
         let (i64t, i32t, ptr, f64t) = (self.i64t(), self.i32t(), self.ptrt(), self.f64t());
@@ -199,6 +210,7 @@ impl<'ctx> Cx<'ctx> {
             "write" => i64t.fn_type(&[i32t.into(), ptr.into(), i64t.into()], false),
             "read" => i64t.fn_type(&[i32t.into(), ptr.into(), i64t.into()], false),
             "exit" => void.fn_type(&[i32t.into()], false),
+            "isatty" => i32t.fn_type(&[i32t.into()], false),
             "snprintf" => i32t.fn_type(&[ptr.into(), i64t.into(), ptr.into()], true),
             "strtod" => f64t.fn_type(&[ptr.into(), ptr.into()], false),
             "strtoll" => i64t.fn_type(&[ptr.into(), ptr.into(), i32t.into()], false),
@@ -217,9 +229,51 @@ impl<'ctx> Cx<'ctx> {
             | "pthread_detach" => i32t.fn_type(&[ptr.into()], false),
             "nanosleep" => i32t.fn_type(&[ptr.into(), ptr.into()], false),
             "clock_gettime" => i32t.fn_type(&[i32t.into(), ptr.into()], false),
+            "tan" | "asin" | "acos" | "atan" => f64t.fn_type(&[f64t.into()], false),
+            "atan2" | "hypot" => f64t.fn_type(&[f64t.into(), f64t.into()], false),
+            "fopen" => ptr.fn_type(&[ptr.into(), ptr.into()], false),
+            "fread" | "fwrite" => {
+                i64t.fn_type(&[ptr.into(), i64t.into(), i64t.into(), ptr.into()], false)
+            }
+            "fclose" | "ferror" | "unlink" | "rmdir" | "closedir" => {
+                i32t.fn_type(&[ptr.into()], false)
+            }
+            "stat" | "rename" => i32t.fn_type(&[ptr.into(), ptr.into()], false),
+            "mkdir" => i32t.fn_type(&[ptr.into(), i32t.into()], false),
+            "opendir" | "readdir" => ptr.fn_type(&[ptr.into()], false),
+            "strlen" => i64t.fn_type(&[ptr.into()], false),
+            "strerror" => ptr.fn_type(&[i32t.into()], false),
+            "errno" => ptr.fn_type(&[], false),
+            "getenv" => ptr.fn_type(&[ptr.into()], false),
+            "setenv" => i32t.fn_type(&[ptr.into(), ptr.into(), i32t.into()], false),
+            "getcwd" => ptr.fn_type(&[ptr.into(), i64t.into()], false),
+            "getpid" => i32t.fn_type(&[], false),
+            "strdup" => ptr.fn_type(&[ptr.into()], false),
+            "unsetenv" => i32t.fn_type(&[ptr.into()], false),
+            "tzset" => void.fn_type(&[], false),
+            "localtime_r" => ptr.fn_type(&[ptr.into(), ptr.into()], false),
+            "strftime" => i64t.fn_type(&[ptr.into(), i64t.into(), ptr.into(), ptr.into()], false),
+            "pipe" | "posix_spawn_file_actions_init" | "posix_spawn_file_actions_destroy" => {
+                i32t.fn_type(&[ptr.into()], false)
+            }
+            "posix_spawn_file_actions_adddup2" => {
+                i32t.fn_type(&[ptr.into(), i32t.into(), i32t.into()], false)
+            }
+            "posix_spawn_file_actions_addopen" => i32t
+                .fn_type(&[ptr.into(), i32t.into(), ptr.into(), i32t.into(), i32t.into()], false),
+            "signal" => ptr.fn_type(&[i32t.into(), ptr.into()], false),
+            "kill" => i32t.fn_type(&[i32t.into(), i32t.into()], false),
+            "posix_spawn" | "posix_spawnp" => i32t.fn_type(
+                &[ptr.into(), ptr.into(), ptr.into(), ptr.into(), ptr.into(), ptr.into()],
+                false,
+            ),
+            "fcntl" => i32t.fn_type(&[i32t.into(), i32t.into()], true),
+            "close" => i32t.fn_type(&[i32t.into()], false),
+            "poll" => i32t.fn_type(&[ptr.into(), i64t.into(), i32t.into()], false),
+            "waitpid" => i32t.fn_type(&[i32t.into(), ptr.into(), i32t.into()], false),
             other => panic!("the static backend declares no C function named {other}"),
         };
-        self.module.add_function(name, ty, Some(Linkage::External))
+        self.module.add_function(sym, ty, Some(Linkage::External))
     }
 
     /// Purpose: This function returns an immortal string object for a literal.
@@ -234,14 +288,17 @@ impl<'ctx> Cx<'ctx> {
         }
         let bytes = s.as_bytes();
         let arr_ty = self.i8t().array_type(bytes.len() as u32 + 1);
-        let obj_ty =
-            self.ctx.struct_type(&[self.i64t().into(), self.i64t().into(), arr_ty.into()], false);
+        let obj_ty = self.ctx.struct_type(
+            &[self.i64t().into(), self.i64t().into(), self.i64t().into(), arr_ty.into()],
+            false,
+        );
         let mut data: Vec<inkwell::values::IntValue> =
             bytes.iter().map(|b| self.i8t().const_int(*b as u64, false)).collect();
         data.push(self.i8t().const_zero());
         let init = obj_ty.const_named_struct(&[
             self.i64t().const_int(u64::MAX, true).into(),
             self.i64t().const_int(bytes.len() as u64, false).into(),
+            self.i64t().const_zero().into(),
             self.i8t().const_array(&data).into(),
         ]);
         let g = self.module.add_global(obj_ty, None, "jade.lit");
@@ -262,9 +319,10 @@ impl<'ctx> Cx<'ctx> {
     /// Outputs: a pointer to its NUL-terminated bytes.
     pub fn cstr(&self, s: &str) -> PointerValue<'ctx> {
         let p = self.lit(s);
-        // The bytes of a literal object start 16 bytes in and end with a NUL.
+        // The bytes of a literal object start at `STR_DATA` and end with a NUL.
         // SAFETY: a constant offset into a constant global this module owns.
-        unsafe { p.const_in_bounds_gep(self.i8t(), &[self.i64t().const_int(16, false)]) }
+        let off = self.i64t().const_int(layout::STR_DATA as u64, false);
+        unsafe { p.const_in_bounds_gep(self.i8t(), &[off]) }
     }
 
     /// Purpose: This function returns a struct's type id.
@@ -275,6 +333,27 @@ impl<'ctx> Cx<'ctx> {
     /// Outputs: its index in the program's struct list.
     pub fn struct_id(&self, name: &str) -> u32 {
         self.struct_ids.get(name).copied().unwrap_or(u32::MAX)
+    }
+}
+
+/// Purpose: This function returns the symbol a C library function has on
+/// this target. Intel macOS names the 64-bit-inode versions of the directory
+/// and `stat` calls with a suffix, and each C library reaches `errno` through a
+/// function of its own.
+///
+/// Inputs:
+/// - `name`: the function as C source names it, or `errno`.
+///
+/// Outputs: the symbol to declare.
+fn libc_symbol(name: &str) -> &str {
+    let intel_mac = cfg!(all(target_os = "macos", target_arch = "x86_64"));
+    match name {
+        "errno" if cfg!(target_os = "macos") => "__error",
+        "errno" => "__errno_location",
+        "stat" if intel_mac => "stat$INODE64",
+        "opendir" if intel_mac => "opendir$INODE64",
+        "readdir" if intel_mac => "readdir$INODE64",
+        other => other,
     }
 }
 
@@ -341,6 +420,12 @@ fn emit_c_main<'ctx>(cx: &Cx<'ctx>, top: FunctionValue<'ctx>) {
     let main_ty = cx.i32t().fn_type(&[cx.i32t().into(), ptr.into()], false);
     let main = cx.module.add_function("main", main_ty, Some(Linkage::External));
     let f = F::new(cx, main);
+    // `env.args()` reads the arguments from where `main` leaves them.
+    if cx.module.get_function("jade.env.args").is_some() {
+        let (argc, argv) = cx.args_globals();
+        f.store(argc, f.sext(f.param_int(0), cx.i64t()));
+        f.store(argv, f.param_ptr(1));
+    }
     // The task lock is set up before any thread runs, when the program has tasks.
     if cx.module.get_function("jade.task.submit").is_some() {
         f.call(cx.task_init_fn(), &[]);
@@ -444,7 +529,7 @@ fn link(obj: &Path, out: &Path) -> Result<(), String> {
         cc.arg(format!("-mmacosx-version-min={short}"));
     }
     if cfg!(target_os = "linux") {
-        cc.arg("-lpthread");
+        cc.arg("-lpthread").arg("-lm");
     }
     let result = cc.output().map_err(|e| format!("linker not found: {e}"))?;
     if !result.status.success() {

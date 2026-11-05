@@ -195,7 +195,7 @@ impl<'ctx> Cx<'ctx> {
     // ── dicts ────────────────────────────────────────────────────────────
 
     /// Purpose: This function returns `jade.dict.new(cap, vsize) -> dict`.
-    fn dict_new_fn(&self) -> FunctionValue<'ctx> {
+    pub fn dict_new_fn(&self) -> FunctionValue<'ctx> {
         let i64t = self.i64t();
         self.support("jade.dict.new", Some(self.ptrt().into()), &[i64t.into(), i64t.into()], |f| {
             let (cap, vsize) = (f.param_int(0), f.param_int(1));

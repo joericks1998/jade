@@ -296,7 +296,18 @@ Building it settled five details:
 - *Awaiting a job that has not started runs it on the awaiting thread.* A chain of 2,000 tasks each awaiting the next runs on one thread, and `set_max_tasks(1)` with a task awaiting another cannot deadlock.
 - *`join(…, settle = …)` needs a written `true` or `false`*, because it decides whether the result is an array of values or of `Settled` records. v1 decided at run time.
 
-With phases 3 and 4, 94 examples pass under `--backend=static`. What remains outside prompts is the standard library.
+With phases 3 and 4, 94 examples pass under `--backend=static`.
+
+*Phase 5's standard library is done* (2026-11-04): math, time, bytes, fs, sh, env, path, random, json, http and uhttp, with the trust model. Every example that does not dereference a prompt, 112 of them, passes under `--backend=static`, and ad hoc programs exercising each package printed what v1 printed, byte for byte, apart from the choices below. Building it settled these:
+
+- *Strings carry a trust word in their header*, and a char taken from a tainted string carries the taint in bit 31. Bytes have the string layout, so they carry it too.
+- *`http` and `uhttp` both run `curl`.* v1 ran `curl` for `http` and framed HTTP by hand over a Unix socket for `uhttp`; `curl --unix-socket` does the second as well, so one mechanism serves both, and `uhttp.stream` calls the handler through a function pointer once a line.
+- *`json.parse` follows serde_json's grammar and messages*, line and column included, and a `Json` value is the one tagged value: null is a null pointer, and arrays and objects are a `[json]` and a `{json}`.
+- *`math.pow` of two ints with a negative exponent raises*, since the result is an int; v1 returned a float. `random.choice` of an empty array raises; v1 returned `nil`.
+- *`json.stringify` keeps the taint of the strings it writes*, where v1's result was trusted, which was a way around `sh.exec`'s check. It writes a class value as an object of its fields; v1 wrote `null`.
+- *`http.head` runs `curl --head`.* v1's `-X HEAD` left curl waiting for the body a HEAD response's length promised.
+
+What remains of phase 5 is decision 11, packages and C libraries, which needs the input that decision names.
 
 ## Open questions
 

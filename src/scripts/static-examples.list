@@ -8,7 +8,9 @@
 #
 # Phase 2 (core codegen): ints, floats, bools, strings, arrays, dicts, classes,
 # control flow, functions, printing and integer overflow. Phase 3: exceptions,
-# functions as values, map and filter, streams, and tasks.
+# functions as values, map and filter, streams, and tasks. The standard
+# library: math, time, bytes, fs, sh and the trust model, env, path, random
+# and json.
 examples/arithmatic/arithmetic/arithmetic.jde
 examples/arithmatic/bitwise/bitwise.jde
 examples/arithmatic/shift_bounds/shift_bounds.jde
@@ -31,6 +33,8 @@ examples/async/settle/settle.jde
 examples/async/shadowed_module/bytes.jde
 examples/async/shared_state/shared_state.jde
 examples/async/waiting/waiting.jde
+examples/bytes/buffer/buffer.jde
+examples/bytes/construct/construct.jde
 examples/classes/basic/basic.jde
 examples/classes/copy_with/copy_with.jde
 examples/classes/copy_with_inherit_across_files/copy_with_inherit_across_files.jde
@@ -52,7 +56,10 @@ examples/classes/visibility/visibility.jde
 examples/closures/closures.jde
 examples/collections/container_semantics/container_semantics.jde
 examples/collections/edge_cases/edge_cases.jde
+examples/collections/join_and_lines/join_and_lines.jde
+examples/collections/method_receivers/method_receivers.jde
 examples/collections/method_type_guard/method_type_guard.jde
+examples/collections/self_reference/self_reference.jde
 examples/collections/two_spellings/two_spellings.jde
 examples/control_flow/break_continue/break_continue.jde
 examples/control_flow/elif/elif.jde
@@ -64,6 +71,7 @@ examples/control_flow/while_in_fn/while_in_fn.jde
 examples/control_flow/while_nested/while_nested.jde
 examples/decorators/values/values.jde
 examples/dicts/basic/basic.jde
+examples/dicts/dot_access/dot_access.jde
 examples/dicts/nested_get/nested_get.jde
 examples/exceptions/break_from_catch/break_from_catch.jde
 examples/exceptions/catch_inherited/catch_inherited.jde
@@ -74,6 +82,9 @@ examples/exceptions/return_inside_try/return_inside_try.jde
 examples/exceptions/state_after_catch/state_after_catch.jde
 examples/ffi/char_across/char_across.jde
 examples/for_loop/for_loop.jde
+examples/fs/basic/basic.jde
+examples/fs/bytes_roundtrip/bytes_roundtrip.jde
+examples/fs/metadata/metadata.jde
 examples/functions/basic/basic.jde
 examples/functions/first_class/first_class.jde
 examples/functions/nested_calls/nested_calls.jde
@@ -88,10 +99,13 @@ examples/imports/class_methods/class_methods.jde
 examples/imports/class_methods/shapes.jde
 examples/imports/project_lib/app/project_lib.jde
 examples/imports/project_lib/shared/units.jde
+examples/json/parse/parse.jde
 examples/llvm/dict_in/dict_in.jde
 examples/llvm/kwargs/kwargs.jde
+examples/llvm/stdlib_math/stdlib_math.jde
 examples/numbers/float_display/float_display.jde
 examples/numbers/int_bounds/int_bounds.jde
+examples/numbers/math_functions/math_functions.jde
 examples/numbers/overflow/overflow.jde
 examples/pipe/pipe.jde
 examples/streams/raise_midstream/raise_midstream.jde
@@ -99,7 +113,13 @@ examples/streams/yield_basic/yield_basic.jde
 examples/strings/chars/chars.jde
 examples/strings/edge_cases/edge_cases.jde
 examples/strings/fstrings/fstrings.jde
+examples/strings/methods/methods.jde
 examples/strings/strings/strings.jde
 examples/strings/triple_quote/triple_quote.jde
 examples/strings/unicode/unicode.jde
 examples/strings/write/write.jde
+examples/time/calendar/calendar.jde
+examples/trust/bytes_concat_taint/bytes_concat_taint.jde
+examples/trust/bytes_taint/bytes_taint.jde
+examples/trust/propagation/propagation.jde
+examples/trust/sh_sinks/sh_sinks.jde

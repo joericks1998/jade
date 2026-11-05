@@ -42,6 +42,7 @@
 mod display;
 pub mod lower;
 mod ops;
+mod packages;
 
 #[cfg(test)]
 mod tests;
@@ -407,6 +408,311 @@ pub enum Op {
     Monotonic,
     /// `(secs: float) -> nil`: pause the running thread.
     Sleep,
+    /// `(ts: int) -> str`: ISO 8601 in UTC.
+    TimeUtc,
+    /// `(ts: int) -> TimeParts`: UTC calendar fields.
+    TimeParts,
+    /// `(y, mo, d, h, mi, s: int) -> int`: the inverse of `TimeParts`.
+    TimeStamp,
+    /// `(tz: str?) -> str`: the local time, formatted as `date` formats it,
+    /// in a named zone or the system's. It is tainted, as in v1.
+    TimeLocal,
+
+    // ── bytes ────────────────────────────────────────────────────────────
+    /// `(b: bytes, i: int) -> int`: one octet.
+    BytesGet,
+    /// `(b: bytes, i: int, v: int) -> nil`: write one octet in place.
+    BytesSet,
+    /// `(b: bytes) -> int`.
+    BytesLen,
+    /// `(b: bytes) -> str`: the octets as UTF-8, which must be valid.
+    BytesDecode,
+    /// `(b: bytes, start: int, end: int) -> bytes`: a copy, both ends clamped.
+    BytesSlice,
+    /// `(s: str) -> bytes`: the string's UTF-8 octets.
+    StrEncode,
+    /// `(n: int) -> bytes`: `n` zero octets.
+    BytesZeros,
+    /// `(a: [int]) -> bytes`: each int an octet in 0 to 255.
+    BytesFromInts,
+    /// `(a: bytes, b: bytes) -> bytes`.
+    BytesConcat,
+
+    // ── math ─────────────────────────────────────────────────────────────
+    /// A `std::math` function on numbers whose kinds are settled; see [`MathFn`].
+    Math(MathFn),
+
+    // ── files ────────────────────────────────────────────────────────────
+    /// A `std::fs` function; see [`FsFn`].
+    Fs(FsFn),
+
+    // ── the shell ────────────────────────────────────────────────────────
+    /// A `std::sh` function; see [`ShFn`].
+    Sh(ShFn),
+
+    // ── env, path and random ─────────────────────────────────────────────
+    /// A `std::env` function; see [`EnvFn`].
+    Env(EnvFn),
+    /// A `std::path` function; see [`PathFn`].
+    Path(PathFn),
+    /// A `std::random` function; see [`RandomFn`].
+    Random(RandomFn),
+
+    // ── json ─────────────────────────────────────────────────────────────
+    /// `std::json`, or an operation on a `Json` value; see [`JsonFn`].
+    Json(JsonFn),
+    /// `(b: bytes) -> [int]`: each octet, for a `for` loop over bytes.
+    BytesInts,
+
+    // ── http ─────────────────────────────────────────────────────────────
+    /// An `std::http` request, or with `true` an `std::uhttp` one; see
+    /// [`HttpFn`]. The operands are the url, the body when the method has one,
+    /// and the headers, a `{str}` or nil.
+    Http(HttpFn, bool),
+    /// `(url: str, handler: fn(str) -> T, headers: {str}?) -> nil`:
+    /// `uhttp.stream`, calling the handler once a line until the stream ends
+    /// or the handler returns `false`. `T` is the handler's result type.
+    UhttpStream(Ty),
+}
+
+/// Purpose: This enum lists the request functions `std::http` and `std::uhttp`
+/// share. A transport failure raises; a 4xx or 5xx is an ordinary status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HttpFn {
+    Get,
+    Delete,
+    Head,
+    Post,
+    Put,
+    /// Like `Get` and `Post`, with a `bytes` body.
+    GetBytes,
+    PostBytes,
+}
+
+impl HttpFn {
+    /// Purpose: This function returns the HTTP method.
+    pub fn method(self) -> &'static str {
+        match self {
+            HttpFn::Get | HttpFn::GetBytes => "GET",
+            HttpFn::Delete => "DELETE",
+            HttpFn::Head => "HEAD",
+            HttpFn::Post | HttpFn::PostBytes => "POST",
+            HttpFn::Put => "PUT",
+        }
+    }
+
+    /// Purpose: This function says whether the request sends a body.
+    pub fn has_body(self) -> bool {
+        matches!(self, HttpFn::Post | HttpFn::Put | HttpFn::PostBytes)
+    }
+
+    /// Purpose: This function returns the class the response comes back as.
+    pub fn result(self) -> Ty {
+        match self {
+            HttpFn::GetBytes => Ty::Struct("HttpBytesResponse".into()),
+            _ => Ty::Struct("HttpResponse".into()),
+        }
+    }
+}
+
+/// Purpose: This enum lists `std::json` and what a `Json` value supports. A
+/// `Json` value carries its kind; one of the wrong kind raises.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JsonFn {
+    /// `(s: str) -> json`: raises `I/O error: json.parse: …` on bad input.
+    Parse,
+    /// `(v: T) -> str`: compact JSON; the operand's type picks the writer.
+    Stringify,
+    /// `(v: T) -> str`: two-space indented JSON.
+    StringifyPretty,
+    /// `(j: json, key: str) -> json`: an object's member.
+    Get,
+    /// `(j: json, i: int) -> json`: an array's element.
+    At,
+    /// `(j: json) -> int`: an array's, object's or string's length.
+    Len,
+    /// `(j: json) -> [json]`: what a `for` loop walks: an array's elements,
+    /// an object's keys or a string's characters.
+    Items,
+    /// `(j: json) -> int`, `-> float`, `-> bool`: `int(j)` and friends.
+    ToInt,
+    ToFloat,
+    ToBool,
+}
+
+/// Purpose: This enum lists the `std::env` functions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnvFn {
+    /// `(name: str) -> str?`: a variable's value, tainted, or nil.
+    Get,
+    /// `(name: str, value: str) -> nil`.
+    Set,
+    /// `() -> [str]`: the program's arguments, its own path first.
+    Args,
+    /// `() -> str`: the working directory.
+    Cwd,
+}
+
+/// Purpose: This enum lists the `std::path` functions, which follow Rust's
+/// `Path` on Unix and give results the trust of their inputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathFn {
+    /// `(a: str, b: str) -> str`: `b` after `a`; an absolute `b` replaces it.
+    Join,
+    /// `(p: str) -> str`: the last component, or "".
+    Basename,
+    /// `(p: str) -> str`: everything before it, or ".".
+    Dirname,
+    /// `(p: str) -> str`: the last component without its extension.
+    Stem,
+    /// `(p: str) -> str?`: the extension with its dot, or nil.
+    Ext,
+    /// `(p: str) -> str`: an absolute form, without resolving links.
+    Abs,
+    /// `(p: str) -> bool`.
+    IsAbs,
+}
+
+/// Purpose: This enum lists the `std::random` operations: a xoshiro256**
+/// generator shared by the whole program, seeded from the clock until
+/// `random.seed` is called.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RandomFn {
+    /// `(lo: int, hi: int) -> int`, both ends included; `lo > hi` raises.
+    Int,
+    /// `() -> float` in `[0, 1)`.
+    Float,
+    /// `(n: int) -> int` in `[0, n)`, for `random.choice`; 0 raises.
+    Index,
+    /// `(a: [T]) -> nil`: shuffle in place.
+    Shuffle,
+    /// `(n: int) -> nil`.
+    Seed,
+}
+
+/// Purpose: This enum lists the `std::sh` functions. Each runs `sh -c cmd`,
+/// refuses a tainted command, and gives back tainted output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShFn {
+    /// `(cmd: str) -> str`: stdout without trailing newlines; a non-zero exit
+    /// raises with stderr in the message.
+    Exec,
+    /// `(cmd: str) -> int`: the exit code, with output going to the program's.
+    Run,
+    /// `(cmd: str) -> ShOutput`: stdout, stderr and the code.
+    Output,
+}
+
+impl ShFn {
+    /// Purpose: This function returns the type a `std::sh` function returns.
+    pub fn result(self) -> Ty {
+        match self {
+            ShFn::Exec => Ty::Str,
+            ShFn::Run => Ty::Int,
+            ShFn::Output => Ty::Struct("ShOutput".into()),
+        }
+    }
+}
+
+/// Purpose: This enum lists the `std::fs` functions. A failure raises
+/// `I/O error: <op> '<path>': <reason> (os error <n>)`, as v1 did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FsFn {
+    /// `(path: str, trust: bool) -> str`: the file as UTF-8 text, tainted
+    /// unless `trust` is true. A tainted path is refused unless `trust` is.
+    Read,
+    /// `(path: str, trust: bool) -> bytes`: the same, as octets.
+    ReadBytes,
+    /// `(path: str, text: str) -> nil`.
+    Write,
+    Append,
+    /// `(path: str, data: bytes) -> nil`.
+    WriteBytes,
+    AppendBytes,
+    /// `() -> bytes`: all of standard input, tainted.
+    ReadStdinBytes,
+    /// `(data: bytes) -> nil`.
+    WriteStdoutBytes,
+    /// `(path: str) -> bool`; these never raise.
+    Exists,
+    IsFile,
+    IsDir,
+    /// `(path: str) -> nil`.
+    Delete,
+    /// Makes missing parents too, and succeeds when the directory exists.
+    Mkdir,
+    /// Removes an empty directory only.
+    Rmdir,
+    /// `(path: str) -> [str]`: entry names, without `.` and `..`.
+    ListDir,
+    /// `(path: str) -> int`: the size in bytes.
+    Size,
+    /// `(src: str, dst: str) -> nil`.
+    Copy,
+    Rename,
+}
+
+impl FsFn {
+    /// Purpose: This function returns the type a `std::fs` function returns.
+    pub fn result(self) -> Ty {
+        match self {
+            FsFn::Read => Ty::Str,
+            FsFn::ReadBytes | FsFn::ReadStdinBytes => Ty::Bytes,
+            FsFn::Exists | FsFn::IsFile | FsFn::IsDir => Ty::Bool,
+            FsFn::ListDir => Ty::Array(Box::new(Ty::Str)),
+            FsFn::Size => Ty::Int,
+            _ => Ty::Nil,
+        }
+    }
+}
+
+/// Purpose: This enum lists the `std::math` operations, each for one set of
+/// operand kinds. The lowering picks the variant from the argument types, and
+/// gives an int argument to a float-only function as a float.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MathFn {
+    /// `(x: float) -> int`, saturating as v1's `as i64` did.
+    Floor,
+    Ceil,
+    /// Halves round away from zero.
+    Round,
+    Trunc,
+    /// `(x: float) -> float`.
+    Sqrt,
+    Ln,
+    Log2,
+    Log10,
+    Exp,
+    Sin,
+    Cos,
+    Tan,
+    Asin,
+    Acos,
+    Atan,
+    /// `(a: float, b: float) -> float`.
+    Atan2,
+    Hypot,
+    Pow,
+    /// `(base: float, exp: int) -> float`.
+    PowI,
+    /// `(base: int, exp: int) -> int`; overflow or a negative exponent raises.
+    PowInt,
+    /// `(a: int, b: int) -> int`.
+    MinInt,
+    MaxInt,
+    /// `(a: float, b: float) -> float`; a NaN operand gives the other.
+    MinFloat,
+    MaxFloat,
+    /// `(x: int) -> int`; the most negative int raises.
+    AbsInt,
+    AbsFloat,
+    /// `(x: int) -> int`: -1, 0 or 1.
+    SignInt,
+    /// `(x: float) -> float`: -1.0, 0.0 or 1.0, and NaN for NaN.
+    SignFloat,
+    /// `(x: float) -> bool`.
+    IsNan,
+    IsInf,
 }
 
 /// Purpose: This enum lists the string methods the static backend has.
@@ -477,6 +783,35 @@ impl Op {
                 | Op::Fail(_)
                 | Op::Await(_)
                 | Op::Join(_)
+                | Op::Math(MathFn::PowInt | MathFn::AbsInt)
+                | Op::BytesGet
+                | Op::BytesSet
+                | Op::BytesDecode
+                | Op::BytesZeros
+                | Op::BytesFromInts
+                | Op::BytesConcat
+                | Op::Sh(_)
+                | Op::Random(RandomFn::Int | RandomFn::Index)
+                | Op::Json(_)
+                | Op::Http(..)
+                | Op::UhttpStream(_)
+                | Op::Fs(
+                    FsFn::Read
+                        | FsFn::ReadBytes
+                        | FsFn::Write
+                        | FsFn::Append
+                        | FsFn::WriteBytes
+                        | FsFn::AppendBytes
+                        | FsFn::ReadStdinBytes
+                        | FsFn::WriteStdoutBytes
+                        | FsFn::Delete
+                        | FsFn::Mkdir
+                        | FsFn::Rmdir
+                        | FsFn::ListDir
+                        | FsFn::Size
+                        | FsFn::Copy
+                        | FsFn::Rename
+                )
                 | Op::Str(StrMethod::Repeat | StrMethod::PadStart | StrMethod::PadEnd)
         )
     }
@@ -550,7 +885,14 @@ pub enum Term {
 /// Outputs: true for strings, arrays, dicts, structs, and optionals of them.
 pub fn is_heap(t: &Ty) -> bool {
     match t {
-        Ty::Str | Ty::Array(_) | Ty::Map(_) | Ty::Struct(_) | Ty::Error | Ty::Future(_) => true,
+        Ty::Str
+        | Ty::Bytes
+        | Ty::Array(_)
+        | Ty::Map(_)
+        | Ty::Struct(_)
+        | Ty::Error
+        | Ty::Future(_)
+        | Ty::Json => true,
         Ty::Opt(inner) => is_heap(inner),
         _ => false,
     }

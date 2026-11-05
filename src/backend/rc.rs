@@ -166,7 +166,7 @@ impl<'a, 'ctx> F<'a, 'ctx> {
     fn destroy(&self, t: &Ty, p: PointerValue<'ctx>) {
         let free = self.cx.libc("free");
         match t {
-            Ty::Str => {
+            Ty::Str | Ty::Bytes => {
                 self.call(free, &[p.into()]);
             }
             Ty::Array(el) => {
@@ -225,6 +225,7 @@ impl<'a, 'ctx> F<'a, 'ctx> {
                 self.br(end);
                 self.position(end);
             }
+            Ty::Json => self.json_destroy(p),
             Ty::Future(_) => {
                 // A job frees itself through the function it carries, which
                 // knows its result type.

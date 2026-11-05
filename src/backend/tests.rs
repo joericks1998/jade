@@ -112,6 +112,7 @@ fn a_program_declares_nothing_but_c_library_functions() {
         "write",
         "read",
         "exit",
+        "isatty",
         "snprintf",
         "strtod",
         "qsort",
@@ -129,6 +130,54 @@ fn a_program_declares_nothing_but_c_library_functions() {
         "pthread_cond_broadcast",
         "nanosleep",
         "clock_gettime",
+        "tan",
+        "asin",
+        "acos",
+        "atan",
+        "atan2",
+        "hypot",
+        "fopen",
+        "fread",
+        "fwrite",
+        "fclose",
+        "ferror",
+        "stat",
+        "stat$INODE64",
+        "unlink",
+        "rmdir",
+        "mkdir",
+        "opendir",
+        "opendir$INODE64",
+        "readdir",
+        "readdir$INODE64",
+        "closedir",
+        "rename",
+        "strlen",
+        "strerror",
+        "__error",
+        "__errno_location",
+        "pipe",
+        "fcntl",
+        "close",
+        "poll",
+        "waitpid",
+        "posix_spawn",
+        "posix_spawn_file_actions_init",
+        "posix_spawn_file_actions_destroy",
+        "posix_spawn_file_actions_adddup2",
+        "getenv",
+        "setenv",
+        "getcwd",
+        "getpid",
+        "posix_spawnp",
+        "posix_spawn_file_actions_addopen",
+        "signal",
+        "kill",
+        "strdup",
+        "unsetenv",
+        "tzset",
+        "localtime_r",
+        "strftime",
     ];
     let mut f = module.get_first_function();
     while let Some(func) = f {
@@ -203,4 +252,35 @@ fn tasks_join_in_order_and_settle_their_errors() {
     let (out, _, code) = run(src);
     assert_eq!(out, "[2, 4]\ntrue\nfalse\nodd 1\n1\n5\n");
     assert_eq!(code, 0);
+}
+
+#[test]
+fn a_commands_output_is_refused_as_a_command_however_it_is_rebuilt() {
+    let src = "use std::sh\nlet t = sh.exec(\"echo hi\")\nlet again = \"\"\nfor c in t {\n    again = again + c\n}\n\
+               for cmd in [t, again, t.upper(), f\"{t}\", t.split(\"\")[1]] {\n    try {\n        sh.run(cmd)\n        print(\"ran\")\n    } catch e {\n        print(\"refused\")\n    }\n}\n\
+               print(sh.exec(\"echo \" + \"trusted\"))\n";
+    let (out, _, code) = run(src);
+    assert_eq!(out, "refused\nrefused\nrefused\nrefused\nrefused\ntrusted\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn json_parses_and_writes_with_serdes_rules() {
+    let src = "use std::json\nlet j = json.parse(\"{\\\"b\\\": [1, 2.5, null], \\\"a\\\": \\\"x\\\"}\")\n\
+               print(j)\nprint(json.stringify(j))\nprint(int(j[\"b\"][0]) + 1)\n\
+               try {\n    json.parse(\"{} oops\")\n} catch e {\n    print(e.message)\n}\n";
+    let (out, _, _) = run(src);
+    assert_eq!(
+        out,
+        "{\"a\": x, \"b\": [1, 2.5, nil]}\n{\"a\":\"x\",\"b\":[1,2.5,null]}\n2\n\
+         I/O error: json.parse: trailing characters at line 1 column 4\n"
+    );
+}
+
+#[test]
+fn paths_follow_rusts_components() {
+    let src = "use std::path\nprint(path.basename(\"a/b/\"))\nprint(path.dirname(\"/a\"))\nprint(path.ext(\"x.tar.gz\"))\n\
+               print(path.stem(\".hidden\"))\nprint(path.join(\"a\", \"/b\"))\n";
+    let (out, _, _) = run(src);
+    assert_eq!(out, "b\n/\n.gz\n.hidden\n/b\n");
 }

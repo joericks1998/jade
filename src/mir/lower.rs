@@ -831,7 +831,10 @@ impl<'a, 'l> Fx<'a, 'l> {
             return Ok(op);
         }
         match (from, to) {
-            (Ty::Nil, Ty::Opt(_)) => Ok(Operand::Const(Const::Nil(to.clone()))),
+            // JSON null and a missing error are null pointers too.
+            (Ty::Nil, Ty::Opt(_) | Ty::Json | Ty::Error) => {
+                Ok(Operand::Const(Const::Nil(to.clone())))
+            }
             (Ty::Opt(a), Ty::Opt(b)) => match (&**a, &**b) {
                 // A class value is the same object read as any of its classes.
                 (Ty::Struct(_), Ty::Struct(_)) => Ok(op),
@@ -1144,7 +1147,14 @@ impl<'a, 'l> Fx<'a, 'l> {
                         self.emit(Stmt::DictSet { dict: place, key: k, value: v });
                         Ok(())
                     }
-                    Ty::Bytes => Err(not_yet("bytes", *span)),
+                    Ty::Bytes => {
+                        let v = self.coerce(v, &vt, &Ty::Int, *span)?;
+                        self.emit(Stmt::Eval(Rvalue::Op(
+                            Op::BytesSet,
+                            vec![Operand::Copy(place), i, v],
+                        )));
+                        Ok(())
+                    }
                     other => Err(internal(format!("an index assignment into {other}"), *span)),
                 }
             }
@@ -1304,6 +1314,18 @@ impl<'a, 'l> Fx<'a, 'l> {
                     Rvalue::Op(Op::DictKeys((**v).clone()), vec![it]),
                 );
                 (a, Ty::Str)
+            }
+            Ty::Bytes => {
+                let a = self
+                    .assign_temp(Ty::Array(Box::new(Ty::Int)), Rvalue::Op(Op::BytesInts, vec![it]));
+                (a, Ty::Int)
+            }
+            Ty::Json => {
+                let a = self.assign_temp(
+                    Ty::Array(Box::new(Ty::Json)),
+                    Rvalue::Op(Op::Json(JsonFn::Items), vec![it]),
+                );
+                (a, Ty::Json)
             }
             Ty::Stream(_) => return Err(not_yet("streams", span)),
             other => return Err(not_yet(format!("a for loop over {other}"), span)),
@@ -1467,8 +1489,15 @@ impl<'a, 'l> Fx<'a, 'l> {
                         TExprKind::Str(field) => self.read_field(o, &ot, field, &et, span)?,
                         _ => return Err(internal("a struct indexed by a non-literal", span)),
                     },
-                    Ty::Bytes => return Err(not_yet("bytes", span)),
-                    Ty::Json => return Err(not_yet("json values", span)),
+                    Ty::Bytes => {
+                        let (i, _) = self.expr(index)?;
+                        self.assign_temp(Ty::Int, Rvalue::Op(Op::BytesGet, vec![o, i]))
+                    }
+                    Ty::Json => {
+                        let (i, itt) = self.expr(index)?;
+                        let m = if itt == Ty::Int { JsonFn::At } else { JsonFn::Get };
+                        self.assign_temp(Ty::Json, Rvalue::Op(Op::Json(m), vec![o, i]))
+                    }
                     Ty::Stream(_) => return Err(not_yet("streams", span)),
                     other => return Err(internal(format!("an index into {other}"), span)),
                 }
@@ -1681,11 +1710,8 @@ impl<'a, 'l> Fx<'a, 'l> {
             let (v, t) = self.expr(other)?;
             let is = match t {
                 Ty::Nil => Operand::Const(Const::Bool(true)),
-                // An error is nil when it is a null pointer.
-                Ty::Opt(_) | Ty::Error => self.assign_temp(Ty::Bool, Rvalue::IsNil(v)),
-                Ty::Json => {
-                    return Err(not_yet(format!("comparing {t} with nil"), span));
-                }
+                // An error, and a JSON null, is a null pointer.
+                Ty::Opt(_) | Ty::Error | Ty::Json => self.assign_temp(Ty::Bool, Rvalue::IsNil(v)),
                 _ => Operand::Const(Const::Bool(false)),
             };
             return Ok(if matches!(op, BinOpKind::Ne) {
@@ -1802,7 +1828,7 @@ impl<'a, 'l> Fx<'a, 'l> {
     /// - `v`, `t`: the value and its type.
     ///
     /// Outputs: a float operand.
-    fn as_float(&mut self, v: Operand, t: &Ty) -> Operand {
+    pub(super) fn as_float(&mut self, v: Operand, t: &Ty) -> Operand {
         match (t, &v) {
             (Ty::Int, Operand::Const(Const::Int(i))) => Operand::Const(Const::Float(*i as f64)),
             (Ty::Int, _) => self.assign_temp(Ty::Float, Rvalue::IntToFloat(v)),

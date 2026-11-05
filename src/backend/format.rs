@@ -62,6 +62,10 @@ impl<'ctx> Cx<'ctx> {
         self.support("jade.input", Some(ptr.into()), &[ptr.into()], |f| {
             f.write_str(1, f.param_ptr(0));
             let sb = f.sb_new();
+            // A terminal is the person running the program, whose intent is
+            // trusted; piped input came from somewhere else, as in v1.
+            let tty = f.call_int(f.cx.libc("isatty"), &[f.i32(0).into()]);
+            f.sb_taint(sb, f.zext(f.eq(tty, f.i32(0)), f.cx.i64t()));
             let byte = f.alloca(f.cx.i8t());
             f.while_(
                 |_| f.bool(true),
@@ -181,6 +185,8 @@ impl<'ctx> Cx<'ctx> {
                     f.load_ptr(out)
                 }
                 Ty::Future(_) => f.cx.lit("<future>"),
+                Ty::Bytes => f.call_ptr(f.cx.bytes_render_fn(), &[v]),
+                Ty::Json => f.call_ptr(f.cx.json_tostr_fn(), &[v]),
                 _ => f.cx.lit("<value>"),
             };
             f.ret(s);
@@ -194,6 +200,7 @@ impl<'ctx> Cx<'ctx> {
         self.support("jade.str.debug", Some(ptr.into()), &[ptr.into()], |f| {
             let s = f.param_ptr(0);
             let sb = f.sb_new();
+            f.sb_taint(sb, f.str_trust(s));
             f.sb_push_lit(sb, "\"");
             let data = f.str_data(s);
             let len = f.str_len(s);
@@ -269,69 +276,7 @@ impl<'ctx> Cx<'ctx> {
             f.if_(f.fcmp(P::OEQ, x, f.f64(f64::INFINITY)), |f| f.ret(f.cx.lit("inf")));
             f.if_(f.fcmp(P::OEQ, x, f.f64(f64::NEG_INFINITY)), |f| f.ret(f.cx.lit("-inf")));
 
-            // The fewest significant digits that read back as `x`.
-            let buf = f.alloca(f.cx.i8t().array_type(64));
-            let prec = f.var(f.i32(0));
-            f.while_(
-                |f| {
-                    let p = f.load_i32(prec);
-                    f.call(
-                        f.cx.libc("snprintf"),
-                        &[
-                            buf.into(),
-                            f.i64(64).into(),
-                            f.cx.cstr("%.*e").into(),
-                            p.into(),
-                            x.into(),
-                        ],
-                    );
-                    let back = f
-                        .callv(f.cx.libc("strtod"), &[buf.into(), f.null().into()])
-                        .into_float_value();
-                    let same = f.fcmp(P::OEQ, back, x);
-                    f.and(f.not(same), f.slt(p, f.i32(17)))
-                },
-                |f, _| f.store(prec, f.add(f.load_i32(prec), f.i32(1))),
-            );
-
-            // `buf` is now `[-]d[.ddd]e±xx`. Gather the digits and the exponent.
-            let digits = f.alloca(f.cx.i8t().array_type(32));
-            let nd = f.var(f.i64(0));
-            let i = f.var(f.i64(0));
-            let neg = f.eq(f.load_i8(buf), f.i8(45));
-            f.if_(neg, |f| f.store(i, f.i64(1)));
-            f.while_(
-                |f| {
-                    let b = f.load_i8(f.at(buf, f.load_i64(i)));
-                    f.ne(b, f.i8(101))
-                },
-                |f, _| {
-                    let at = f.load_i64(i);
-                    let b = f.load_i8(f.at(buf, at));
-                    f.if_(f.ne(b, f.i8(46)), |f| {
-                        let n = f.load_i64(nd);
-                        f.store(f.at(digits, n), b);
-                        f.store(nd, f.add(n, f.i64(1)));
-                    });
-                    f.store(i, f.add(at, f.i64(1)));
-                },
-            );
-            let after_e = f.add(f.load_i64(i), f.i64(1));
-            let exp_neg = f.eq(f.load_i8(f.at(buf, after_e)), f.i8(45));
-            let e = f.var(f.i64(0));
-            let j = f.var(f.add(after_e, f.i64(1)));
-            f.while_(
-                |f| f.ne(f.load_i8(f.at(buf, f.load_i64(j))), f.i8(0)),
-                |f, _| {
-                    let at = f.load_i64(j);
-                    let d = f.sext(f.sub(f.load_i8(f.at(buf, at)), f.i8(48)), f.cx.i64t());
-                    f.store(e, f.add(f.mul(f.load_i64(e), f.i64(10)), d));
-                    f.store(j, f.add(at, f.i64(1)));
-                },
-            );
-            let ev = f.load_i64(e);
-            let exp = f.select_int(exp_neg, f.sub(f.i64(0), ev), ev);
-            let k = f.load_i64(nd);
+            let (neg, digits, k, exp) = f.float_digits(x);
 
             let sb = f.sb_new();
             f.if_(neg, |f| f.sb_push_lit(sb, "-"));
@@ -496,6 +441,78 @@ impl<'a, 'ctx> F<'a, 'ctx> {
             self.cx.write_fn(),
             &[self.i32(fd).into(), self.str_data(s).into(), self.str_len(s).into()],
         );
+    }
+
+    /// Purpose: This function finds a finite float's shortest digits: the
+    /// fewest significant digits that read back as the same value.
+    ///
+    /// Inputs:
+    /// - `x`: the float, not NaN or infinite.
+    ///
+    /// Outputs: whether it is negative, a stack buffer of ASCII digits, how
+    /// many there are, and the decimal exponent of the first, so the value is
+    /// `d.ddd × 10^exp`.
+    pub fn float_digits(
+        &self,
+        x: inkwell::values::FloatValue<'ctx>,
+    ) -> (IntValue<'ctx>, PointerValue<'ctx>, IntValue<'ctx>, IntValue<'ctx>) {
+        use inkwell::FloatPredicate as P;
+        let f = self;
+        let buf = f.alloca(f.cx.i8t().array_type(64));
+        let prec = f.var(f.i32(0));
+        f.while_(
+            |f| {
+                let p = f.load_i32(prec);
+                f.call(
+                    f.cx.libc("snprintf"),
+                    &[buf.into(), f.i64(64).into(), f.cx.cstr("%.*e").into(), p.into(), x.into()],
+                );
+                let back =
+                    f.callv(f.cx.libc("strtod"), &[buf.into(), f.null().into()]).into_float_value();
+                let same = f.fcmp(P::OEQ, back, x);
+                f.and(f.not(same), f.slt(p, f.i32(17)))
+            },
+            |f, _| f.store(prec, f.add(f.load_i32(prec), f.i32(1))),
+        );
+
+        // `buf` is now `[-]d[.ddd]e±xx`. Gather the digits and the exponent.
+        let digits = f.alloca(f.cx.i8t().array_type(32));
+        let nd = f.var(f.i64(0));
+        let i = f.var(f.i64(0));
+        let neg = f.eq(f.load_i8(buf), f.i8(45));
+        f.if_(neg, |f| f.store(i, f.i64(1)));
+        f.while_(
+            |f| {
+                let b = f.load_i8(f.at(buf, f.load_i64(i)));
+                f.ne(b, f.i8(101))
+            },
+            |f, _| {
+                let at = f.load_i64(i);
+                let b = f.load_i8(f.at(buf, at));
+                f.if_(f.ne(b, f.i8(46)), |f| {
+                    let n = f.load_i64(nd);
+                    f.store(f.at(digits, n), b);
+                    f.store(nd, f.add(n, f.i64(1)));
+                });
+                f.store(i, f.add(at, f.i64(1)));
+            },
+        );
+        let after_e = f.add(f.load_i64(i), f.i64(1));
+        let exp_neg = f.eq(f.load_i8(f.at(buf, after_e)), f.i8(45));
+        let e = f.var(f.i64(0));
+        let j = f.var(f.add(after_e, f.i64(1)));
+        f.while_(
+            |f| f.ne(f.load_i8(f.at(buf, f.load_i64(j))), f.i8(0)),
+            |f, _| {
+                let at = f.load_i64(j);
+                let d = f.sext(f.sub(f.load_i8(f.at(buf, at)), f.i8(48)), f.cx.i64t());
+                f.store(e, f.add(f.mul(f.load_i64(e), f.i64(10)), d));
+                f.store(j, f.add(at, f.i64(1)));
+            },
+        );
+        let ev = f.load_i64(e);
+        let exp = f.select_int(exp_neg, f.sub(f.i64(0), ev), ev);
+        (neg, digits, f.load_i64(nd), exp)
     }
 
     /// Purpose: This function formats an int as decimal text.

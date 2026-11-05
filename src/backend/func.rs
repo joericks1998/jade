@@ -18,8 +18,8 @@ use inkwell::{FloatPredicate, IntPredicate};
 use super::layout::{self, ARR_DATA, LEN, TYPE_ID};
 use super::{Cx, F, tasks};
 use crate::mir::{
-    ArithOp, BinOp, BitOp, CmpOp, Const, Func, NumTy, Op, Operand, Place, Program, Rvalue, Stmt,
-    StrMethod, Term, Ty, UnOp, is_heap,
+    ArithOp, BinOp, BitOp, CmpOp, Const, EnvFn, Func, JsonFn, NumTy, Op, Operand, PathFn, Place,
+    Program, RandomFn, Rvalue, Stmt, StrMethod, Term, Ty, UnOp, is_heap,
 };
 
 /// Purpose: This struct holds what every function's lowering needs from the
@@ -684,7 +684,8 @@ impl<'a, 'b, 'ctx> Lw<'a, 'b, 'ctx> {
                             .expect("declaration");
                         f.call_int(decl, &[v])
                     }
-                    Ty::Bool | Ty::Char => f.zext(v.into_int_value(), cx.i64t()),
+                    Ty::Bool => f.zext(v.into_int_value(), cx.i64t()),
+                    Ty::Char => f.zext(f.char_cp(v.into_int_value()), cx.i64t()),
                     _ => f.call_int(cx.toint_str_fn(), &[v]),
                 };
                 (r.into(), Ty::Int)
@@ -705,7 +706,9 @@ impl<'a, 'b, 'ctx> Lw<'a, 'b, 'ctx> {
                 };
                 (r, Ty::Char)
             }
-            Op::ArrayLen | Op::DictLen => (f.load_i64(f.at_c(ptr(0), LEN)).into(), Ty::Int),
+            Op::ArrayLen | Op::DictLen | Op::BytesLen => {
+                (f.load_i64(f.at_c(ptr(0), LEN)).into(), Ty::Int)
+            }
             Op::ArrayGet(t) => (f.callv(cx.array_fn("get", t), &[arg(0), arg(1)]), t.clone()),
             Op::ArraySet(t) => {
                 let (a, i) = (arg(0), arg(1));
@@ -803,6 +806,114 @@ impl<'a, 'b, 'ctx> Lw<'a, 'b, 'ctx> {
             Op::Now => (f.clock(false, 1).into(), Ty::Int),
             Op::NowMs => (f.clock(false, 1000).into(), Ty::Int),
             Op::Monotonic => (f.monotonic().into(), Ty::Float),
+            Op::TimeUtc => (f.callv(cx.time_utc_fn(), &[arg(0)]), Ty::Str),
+            Op::TimeLocal => (f.callv(cx.time_local_fn(), &[arg(0)]), Ty::Str),
+            Op::TimeParts => {
+                (f.callv(cx.time_parts_fn(), &[arg(0)]), Ty::Struct("TimeParts".into()))
+            }
+            Op::TimeStamp => {
+                let vals: Vec<BasicValueEnum> = (0..6).map(arg).collect();
+                (f.callv(cx.time_stamp_fn(), &vals), Ty::Int)
+            }
+            Op::BytesGet => (f.callv(cx.bytes_get_fn(), &[arg(0), arg(1)]), Ty::Int),
+            Op::BytesSet => {
+                f.call(cx.bytes_set_fn(), &[arg(0), arg(1), arg(2)]);
+                (self.nil(), Ty::Nil)
+            }
+            Op::BytesDecode => (f.callv(cx.bytes_decode_fn(), &[arg(0)]), Ty::Str),
+            Op::BytesSlice => (f.callv(cx.bytes_slice_fn(), &[arg(0), arg(1), arg(2)]), Ty::Bytes),
+            Op::StrEncode => {
+                let s = ptr(0);
+                (f.copy_bytes(s, f.i64(0), f.str_len(s)).into(), Ty::Bytes)
+            }
+            Op::BytesZeros => (f.callv(cx.bytes_zeros_fn(), &[arg(0)]), Ty::Bytes),
+            Op::BytesFromInts => (f.callv(cx.bytes_from_ints_fn(), &[arg(0)]), Ty::Bytes),
+            Op::BytesConcat => (f.callv(cx.bytes_concat_fn(), &[arg(0), arg(1)]), Ty::Bytes),
+            Op::Fs(m) => {
+                let vals: Vec<BasicValueEnum> = (0..args.len()).map(arg).collect();
+                let r = f.call(cx.fs_fn(*m), &vals).unwrap_or_else(|| self.nil());
+                (r, m.result())
+            }
+            Op::Sh(m) => (f.callv(cx.sh_fn(*m), &[arg(0)]), m.result()),
+            Op::Env(m) => {
+                let vals: Vec<BasicValueEnum> = (0..args.len()).map(arg).collect();
+                let r = f.call(cx.env_fn(*m), &vals).unwrap_or_else(|| self.nil());
+                let t = match m {
+                    EnvFn::Get => Ty::opt(Ty::Str),
+                    EnvFn::Set => Ty::Nil,
+                    EnvFn::Args => Ty::Array(Box::new(Ty::Str)),
+                    EnvFn::Cwd => Ty::Str,
+                };
+                (r, t)
+            }
+            Op::Path(m) => {
+                let vals: Vec<BasicValueEnum> = (0..args.len()).map(arg).collect();
+                let t = match m {
+                    PathFn::Ext => Ty::opt(Ty::Str),
+                    PathFn::IsAbs => Ty::Bool,
+                    _ => Ty::Str,
+                };
+                (f.callv(cx.path_fn(*m), &vals), t)
+            }
+            Op::Random(RandomFn::Shuffle) => {
+                let el = match self.op_ty(&args[0]) {
+                    Ty::Array(el) => *el,
+                    _ => Ty::Int,
+                };
+                let size = f.size_of(cx.llty(&el));
+                f.call(cx.random_fn(RandomFn::Shuffle), &[arg(0), size.into()]);
+                (self.nil(), Ty::Nil)
+            }
+            Op::Random(m) => {
+                let vals: Vec<BasicValueEnum> = (0..args.len()).map(arg).collect();
+                let r = f.call(cx.random_fn(*m), &vals).unwrap_or_else(|| self.nil());
+                let t = match m {
+                    RandomFn::Float => Ty::Float,
+                    RandomFn::Seed | RandomFn::Shuffle => Ty::Nil,
+                    _ => Ty::Int,
+                };
+                (r, t)
+            }
+            Op::Json(m @ (JsonFn::Stringify | JsonFn::StringifyPretty)) => {
+                let t = self.op_ty(&args[0]);
+                let pretty = f.bool(*m == JsonFn::StringifyPretty);
+                (f.callv(cx.json_stringify_fn(&t), &[arg(0), pretty.into()]), Ty::Str)
+            }
+            Op::Json(m) => {
+                let vals: Vec<BasicValueEnum> = (0..args.len()).map(arg).collect();
+                let t = match m {
+                    JsonFn::Len | JsonFn::ToInt => Ty::Int,
+                    JsonFn::ToFloat => Ty::Float,
+                    JsonFn::ToBool => Ty::Bool,
+                    JsonFn::Items => Ty::Array(Box::new(Ty::Json)),
+                    _ => Ty::Json,
+                };
+                (f.callv(cx.json_fn(*m), &vals), t)
+            }
+            Op::Http(m, unix) => {
+                let vals: Vec<BasicValueEnum> = (0..args.len()).map(arg).collect();
+                (f.callv(cx.http_fn(*m, *unix), &vals), m.result())
+            }
+            Op::UhttpStream(t) => {
+                f.call(cx.uhttp_stream_fn(t), &[arg(0), arg(1), arg(2)]);
+                (self.nil(), Ty::Nil)
+            }
+            Op::BytesInts => {
+                let b = ptr(0);
+                let n = f.str_len(b);
+                let a = f.array_new(&Ty::Int, n);
+                let (src, dst) = (f.str_data(b), f.load_ptr(f.at_c(a, ARR_DATA)));
+                f.for_range(f.i64(0), n, |f, i, _| {
+                    let v = f.zext(f.load_i8(f.at(src, i)), cx.i64t());
+                    f.store(f.elem(cx.i64t(), dst, i), v);
+                });
+                f.store(f.at_c(a, LEN), n);
+                (a.into(), Ty::Array(Box::new(Ty::Int)))
+            }
+            Op::Math(m) => {
+                let vals: Vec<BasicValueEnum> = (0..args.len()).map(arg).collect();
+                f.math(*m, &vals)
+            }
         }
     }
 }

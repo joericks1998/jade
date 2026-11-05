@@ -1,8 +1,17 @@
 //! Strings: allocation, comparison, characters, and every string method.
 //!
-//! A string is `{ i64 rc, i64 len, u8 data[len], u8 0 }`, UTF-8, with a NUL
-//! after the bytes so C functions such as `strtod` can read it in place.
-//! Strings never change after they are made; every method returns a new one.
+//! A string is `{ i64 rc, i64 len, i64 trust, u8 data[len], u8 0 }`, UTF-8,
+//! with a NUL after the bytes so C functions such as `strtod` can read it in
+//! place. Strings never change after they are made; every method returns a new
+//! one.
+//!
+//! *Trust* is 1 for a string derived from outside the program: a file, a
+//! command's output, stdin, the environment. Every function here that builds a
+//! string from others gives it the most tainted of their trusts, and a char
+//! taken from a tainted string keeps the taint in bit 31 (`CHAR_TAINT`), so
+//! `"" + s[0] + s[1]` cannot launder it. The string builder collects the trust
+//! of what is pushed into it. Code-execution sinks such as `sh.exec` refuse a
+//! tainted string.
 //! Character positions count Unicode scalars, not bytes, as v1 did:
 //! `len("café")` is 4 and `"café"[3]` is `é`.
 //!
@@ -12,7 +21,7 @@
 
 use inkwell::values::{BasicValueEnum, FunctionValue, IntValue, PointerValue};
 
-use super::layout::{ARR_DATA, LEN, STR_DATA};
+use super::layout::{ARR_DATA, CHAR_TAINT, LEN, STR_DATA, STR_TRUST};
 use super::{Cx, F};
 
 impl<'ctx> Cx<'ctx> {
@@ -25,6 +34,7 @@ impl<'ctx> Cx<'ctx> {
             let p = f.call_ptr(f.cx.libc("malloc"), &[f.add(len, f.i64(STR_DATA + 1)).into()]);
             f.store(p, f.i64(1));
             f.store(f.at_c(p, LEN), len);
+            f.store(f.at_c(p, STR_TRUST), f.i64(0));
             f.store(f.at(f.at_c(p, STR_DATA), len), f.i8(0));
             f.ret(p);
         })
@@ -131,6 +141,7 @@ impl<'ctx> Cx<'ctx> {
             &[self.i32t().into(), ptr.into()],
             |f| {
                 let (c, out) = (f.param_int(0), f.param_ptr(1));
+                let c = f.char_cp(c);
                 let i8t = f.cx.i8t();
                 let put = |k: i64, v: IntValue<'ctx>| f.store(f.at_c(out, k), f.trunc(v, i8t));
                 let cont =
@@ -163,8 +174,9 @@ impl<'ctx> Cx<'ctx> {
     pub fn char_tostr_fn(&self) -> FunctionValue<'ctx> {
         self.support("jade.char.tostr", Some(self.ptrt().into()), &[self.i32t().into()], |f| {
             let buf = f.alloca(f.cx.i8t().array_type(4));
-            let n = f.call_int(f.cx.utf8_encode_fn(), &[f.param(0), buf.into()]);
-            let s = f.call_ptr(f.cx.str_from_fn(), &[buf.into(), n.into()]);
+            let c = f.param_int(0);
+            let n = f.call_int(f.cx.utf8_encode_fn(), &[c.into(), buf.into()]);
+            let s = f.str_from_trust(buf, n, f.char_trust(c));
             f.ret(s);
         })
     }
@@ -235,7 +247,9 @@ impl<'ctx> Cx<'ctx> {
                         let o = f.load_i64(off);
                         let cp =
                             f.call_int(f.cx.utf8_decode_fn(), &[f.at(data, o).into(), step.into()]);
-                        f.if_(f.eq(f.load_i64(seen), want), |f| f.ret(cp));
+                        f.if_(f.eq(f.load_i64(seen), want), |f| {
+                            f.ret(f.char_with_trust(cp, f.str_trust(s)))
+                        });
                         f.store(seen, f.add(f.load_i64(seen), f.i64(1)));
                         f.store(off, f.add(o, f.load_i64(step)));
                     },
@@ -253,12 +267,13 @@ impl<'ctx> Cx<'ctx> {
             let arr = f.array_new(&crate::mir::Ty::Char, n);
             let buf = f.load_ptr(f.at_c(arr, ARR_DATA));
             let data = f.str_data(s);
+            let trust = f.str_trust(s);
             let off = f.var(f.i64(0));
             let step = f.alloca(f.cx.i64t());
             f.for_range(f.i64(0), n, |f, i, _| {
                 let o = f.load_i64(off);
                 let cp = f.call_int(f.cx.utf8_decode_fn(), &[f.at(data, o).into(), step.into()]);
-                f.store(f.elem(f.cx.i32t(), buf, i), cp);
+                f.store(f.elem(f.cx.i32t(), buf, i), f.char_with_trust(cp, trust));
                 f.store(off, f.add(o, f.load_i64(step)));
             });
             f.store(f.at_c(arr, LEN), n);
@@ -380,6 +395,7 @@ impl<'ctx> Cx<'ctx> {
             match which {
                 M::Upper | M::Lower | M::Capitalize => {
                     let sb = f.sb_new();
+                    f.sb_taint(sb, f.str_trust(s));
                     let data = f.str_data(s);
                     let len = f.str_len(s);
                     let off = f.var(f.i64(0));
@@ -464,9 +480,7 @@ impl<'ctx> Cx<'ctx> {
                         |f, _| f.store(e, f.sub(f.load_i64(e), f.i64(1))),
                     );
                     let (a, e) = (f.load_i64(a), f.load_i64(e));
-                    f.ret(
-                        f.call_ptr(f.cx.str_from_fn(), &[f.at(data, a).into(), f.sub(e, a).into()]),
-                    );
+                    f.ret(f.str_from_trust(f.at(data, a), f.sub(e, a), f.str_trust(s)));
                 }
                 M::TrimStart | M::TrimEnd => {
                     let data = f.str_data(s);
@@ -502,9 +516,7 @@ impl<'ctx> Cx<'ctx> {
                         (f.i64(0), f.load_i64(end))
                     };
                     let e = f.select_int(f.slt(e, a), a, e);
-                    f.ret(
-                        f.call_ptr(f.cx.str_from_fn(), &[f.at(data, a).into(), f.sub(e, a).into()]),
-                    );
+                    f.ret(f.str_from_trust(f.at(data, a), f.sub(e, a), f.str_trust(s)));
                 }
                 _ => f.unreachable(),
             }
@@ -544,17 +556,13 @@ impl<'ctx> Cx<'ctx> {
                     let from = f.load_i64(start);
                     let at = f.call_int(f.cx.str_find_fn(), &[s.into(), sep.into(), from.into()]);
                     f.if_(f.slt(at, f.i64(0)), |f| f.br(exit));
-                    let part = f.call_ptr(
-                        f.cx.str_from_fn(),
-                        &[f.at(data, from).into(), f.sub(at, from).into()],
-                    );
+                    let part = f.str_from_trust(f.at(data, from), f.sub(at, from), f.str_trust(s));
                     f.array_push_owned(&st, arr, part.into());
                     f.store(start, f.add(at, lsep));
                 },
             );
             let from = f.load_i64(start);
-            let part =
-                f.call_ptr(f.cx.str_from_fn(), &[f.at(data, from).into(), f.sub(len, from).into()]);
+            let part = f.str_from_trust(f.at(data, from), f.sub(len, from), f.str_trust(s));
             f.array_push_owned(&st, arr, part.into());
             f.ret(arr);
         })
@@ -582,20 +590,14 @@ impl<'ctx> Cx<'ctx> {
                         f.if_(f.eq(prev, f.i8(13)), |f| f.store(end, f.sub(i, f.i64(1))));
                     });
                     let e = f.load_i64(end);
-                    let part = f.call_ptr(
-                        f.cx.str_from_fn(),
-                        &[f.at(data, from).into(), f.sub(e, from).into()],
-                    );
+                    let part = f.str_from_trust(f.at(data, from), f.sub(e, from), f.str_trust(s));
                     f.array_push_owned(&st, arr, part.into());
                     f.store(start, f.add(i, f.i64(1)));
                 });
             });
             let from = f.load_i64(start);
             f.if_(f.slt(from, len), |f| {
-                let part = f.call_ptr(
-                    f.cx.str_from_fn(),
-                    &[f.at(data, from).into(), f.sub(len, from).into()],
-                );
+                let part = f.str_from_trust(f.at(data, from), f.sub(len, from), f.str_trust(s));
                 f.array_push_owned(&st, arr, part.into());
             });
             f.ret(arr);
@@ -683,6 +685,7 @@ impl<'ctx> Cx<'ctx> {
                     f.ret(s);
                 });
                 let sb = f.sb_new();
+                f.sb_taint(sb, f.str_trust(s));
                 let data = f.str_data(s);
                 let pos = f.var(f.i64(0));
                 f.while_(
@@ -726,13 +729,8 @@ impl<'ctx> Cx<'ctx> {
                 let (s, a, b) = (f.param_ptr(0), f.param_int(1), f.param_int(2));
                 let ba = f.call_int(f.cx.str_byteat_fn(), &[s.into(), a.into()]);
                 let bb = f.call_int(f.cx.str_byteat_fn(), &[s.into(), b.into()]);
-                f.if_(f.sge(ba, bb), |f| {
-                    f.ret(f.call_ptr(f.cx.str_alloc_fn(), &[f.i64(0).into()]))
-                });
-                f.ret(f.call_ptr(
-                    f.cx.str_from_fn(),
-                    &[f.at(f.str_data(s), ba).into(), f.sub(bb, ba).into()],
-                ));
+                let len = f.select_int(f.sge(ba, bb), f.i64(0), f.sub(bb, ba));
+                f.ret(f.str_from_trust(f.at(f.str_data(s), ba), len, f.str_trust(s)));
             },
         )
     }
@@ -813,6 +811,48 @@ impl<'a, 'ctx> F<'a, 'ctx> {
         self.load_i64(self.at_c(s, LEN))
     }
 
+    /// Purpose: This function reads a string's trust: 0 trusted, 1 tainted.
+    pub fn str_trust(&self, s: PointerValue<'ctx>) -> IntValue<'ctx> {
+        self.load_i64(self.at_c(s, STR_TRUST))
+    }
+
+    /// Purpose: This function sets the trust of a string this code just made.
+    /// It must never be called on a string anything else holds, or on a
+    /// literal, which is read-only.
+    pub fn set_trust(&self, s: PointerValue<'ctx>, trust: IntValue<'ctx>) {
+        self.store(self.at_c(s, STR_TRUST), trust);
+    }
+
+    /// Purpose: This function makes a string from bytes with a given trust.
+    pub fn str_from_trust(
+        &self,
+        src: PointerValue<'ctx>,
+        len: IntValue<'ctx>,
+        trust: IntValue<'ctx>,
+    ) -> PointerValue<'ctx> {
+        let s = self.call_ptr(self.cx.str_from_fn(), &[src.into(), len.into()]);
+        self.set_trust(s, trust);
+        s
+    }
+
+    /// Purpose: This function strips the taint bit from a char, leaving the
+    /// Unicode scalar.
+    pub fn char_cp(&self, c: IntValue<'ctx>) -> IntValue<'ctx> {
+        self.and(c, self.i32(!CHAR_TAINT & 0xffff_ffff))
+    }
+
+    /// Purpose: This function reads a char's taint bit as a trust word.
+    pub fn char_trust(&self, c: IntValue<'ctx>) -> IntValue<'ctx> {
+        let bit = self.lshr(c, self.i32(31));
+        self.zext(bit, self.cx.i64t())
+    }
+
+    /// Purpose: This function marks a scalar with a string's trust.
+    pub fn char_with_trust(&self, cp: IntValue<'ctx>, trust: IntValue<'ctx>) -> IntValue<'ctx> {
+        let bit = self.shl(self.trunc(trust, self.cx.i32t()), self.i32(31));
+        self.or(cp, bit)
+    }
+
     /// Purpose: This function returns a pointer to a string's first byte.
     pub fn str_data(&self, s: PointerValue<'ctx>) -> PointerValue<'ctx> {
         self.at_c(s, STR_DATA)
@@ -828,14 +868,17 @@ impl<'a, 'ctx> F<'a, 'ctx> {
     /// Inputs:
     /// - `parts`: the strings.
     ///
-    /// Outputs: the joined string, owned.
+    /// Outputs: the joined string, owned, tainted when any part is.
     pub fn str_cat(&self, parts: &[PointerValue<'ctx>]) -> PointerValue<'ctx> {
         let mut total = self.i64(0);
+        let mut trust = self.i64(0);
         let lens: Vec<IntValue> = parts.iter().map(|p| self.str_len(*p)).collect();
-        for l in &lens {
+        for (l, p) in lens.iter().zip(parts) {
             total = self.add(total, *l);
+            trust = self.or(trust, self.str_trust(*p));
         }
         let s = self.str_new(total);
+        self.set_trust(s, trust);
         let mut off = self.i64(0);
         for (p, l) in parts.iter().zip(&lens) {
             self.memcpy(self.at(self.str_data(s), off), self.str_data(*p), *l);
@@ -846,17 +889,25 @@ impl<'a, 'ctx> F<'a, 'ctx> {
 
     /// Purpose: This function makes an empty string builder on the stack.
     ///
-    /// Outputs: a pointer to its `{ ptr buf, i64 len, i64 cap }`.
+    /// Outputs: a pointer to its `{ ptr buf, i64 len, i64 cap, i64 trust }`.
     pub fn sb_new(&self) -> PointerValue<'ctx> {
-        let t = self.cx.ctx.struct_type(
-            &[self.cx.ptrt().into(), self.cx.i64t().into(), self.cx.i64t().into()],
-            false,
-        );
+        let i = self.cx.i64t();
+        let t =
+            self.cx.ctx.struct_type(&[self.cx.ptrt().into(), i.into(), i.into(), i.into()], false);
         let sb = self.alloca(t);
         self.store(sb, self.null());
         self.store(self.at_c(sb, 8), self.i64(0));
         self.store(self.at_c(sb, 16), self.i64(0));
+        self.store(self.at_c(sb, 24), self.i64(0));
         sb
+    }
+
+    /// Purpose: This function marks what a string builder makes as derived
+    /// from something with this trust, such as a string whose bytes are pushed
+    /// a piece at a time.
+    pub fn sb_taint(&self, sb: PointerValue<'ctx>, trust: IntValue<'ctx>) {
+        let p = self.at_c(sb, 24);
+        self.store(p, self.or(self.load_i64(p), trust));
     }
 
     /// Purpose: This function appends bytes to a string builder.
@@ -864,8 +915,9 @@ impl<'a, 'ctx> F<'a, 'ctx> {
         self.call(self.cx.sb_push_fn(), &[sb.into(), src.into(), n.into()]);
     }
 
-    /// Purpose: This function appends a string to a string builder.
+    /// Purpose: This function appends a string to a string builder, with its trust.
     pub fn sb_push_str(&self, sb: PointerValue<'ctx>, s: PointerValue<'ctx>) {
+        self.sb_taint(sb, self.str_trust(s));
         self.sb_push(sb, self.str_data(s), self.str_len(s));
     }
 
@@ -880,6 +932,7 @@ impl<'a, 'ctx> F<'a, 'ctx> {
 
     /// Purpose: This function appends one scalar to a string builder.
     pub fn sb_push_cp(&self, sb: PointerValue<'ctx>, cp: IntValue<'ctx>) {
+        self.sb_taint(sb, self.char_trust(cp));
         let buf = self.alloca(self.cx.i8t().array_type(4));
         let n = self.call_int(self.cx.utf8_encode_fn(), &[cp.into(), buf.into()]);
         self.sb_push(sb, buf, n);
@@ -892,7 +945,7 @@ impl<'a, 'ctx> F<'a, 'ctx> {
     pub fn sb_finish(&self, sb: PointerValue<'ctx>) -> PointerValue<'ctx> {
         let buf = self.load_ptr(sb);
         let len = self.load_i64(self.at_c(sb, 8));
-        let s = self.call_ptr(self.cx.str_from_fn(), &[buf.into(), len.into()]);
+        let s = self.str_from_trust(buf, len, self.load_i64(self.at_c(sb, 24)));
         self.call(self.cx.libc("free"), &[buf.into()]);
         s
     }

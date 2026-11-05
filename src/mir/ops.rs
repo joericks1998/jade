@@ -55,7 +55,7 @@ impl<'a, 'l> Fx<'a, 'l> {
             return self.method(m, r, &rt, argv, et, span, addr_of(e));
         }
         if let Some((pkg, f)) = name.split_once('.') {
-            return self.package_fn(pkg, f, args, et, span);
+            return self.package_fn(pkg, f, args, kwargs, et, span);
         }
         if name == "as" {
             // `Animal(x)`: the same object, read as its class or a parent.
@@ -167,6 +167,10 @@ impl<'a, 'l> Fx<'a, 'l> {
                     Ty::Char => Operand::Const(Const::Int(1)),
                     Ty::Array(_) => self.assign_temp(Ty::Int, Rvalue::Op(Op::ArrayLen, vec![v])),
                     Ty::Map(_) => self.assign_temp(Ty::Int, Rvalue::Op(Op::DictLen, vec![v])),
+                    Ty::Bytes => self.assign_temp(Ty::Int, Rvalue::Op(Op::BytesLen, vec![v])),
+                    Ty::Json => {
+                        self.assign_temp(Ty::Int, Rvalue::Op(Op::Json(JsonFn::Len), vec![v]))
+                    }
                     other => return Err(not_yet(format!("len() of {other}"), span)),
                 };
                 Ok((r, Ty::Int))
@@ -182,6 +186,9 @@ impl<'a, 'l> Fx<'a, 'l> {
                     Ty::Float | Ty::Bool | Ty::Char | Ty::Str => {
                         self.assign_temp(Ty::Int, Rvalue::Op(Op::ToInt(t.clone()), vec![v]))
                     }
+                    Ty::Json => {
+                        self.assign_temp(Ty::Int, Rvalue::Op(Op::Json(JsonFn::ToInt), vec![v]))
+                    }
                     other => return Err(not_yet(format!("int() of {other}"), span)),
                 };
                 Ok((r, Ty::Int))
@@ -194,6 +201,9 @@ impl<'a, 'l> Fx<'a, 'l> {
                     Ty::Str => {
                         self.assign_temp(Ty::Float, Rvalue::Op(Op::ToFloat(Ty::Str), vec![v]))
                     }
+                    Ty::Json => {
+                        self.assign_temp(Ty::Float, Rvalue::Op(Op::Json(JsonFn::ToFloat), vec![v]))
+                    }
                     other => return Err(not_yet(format!("float() of {other}"), span)),
                 };
                 Ok((r, Ty::Float))
@@ -204,6 +214,9 @@ impl<'a, 'l> Fx<'a, 'l> {
                     Ty::Bool => v,
                     Ty::Int | Ty::Str => {
                         self.assign_temp(Ty::Bool, Rvalue::Op(Op::ToBool(t.clone()), vec![v]))
+                    }
+                    Ty::Json => {
+                        self.assign_temp(Ty::Bool, Rvalue::Op(Op::Json(JsonFn::ToBool), vec![v]))
                     }
                     other => return Err(not_yet(format!("bool() of {other}"), span)),
                 };
@@ -251,70 +264,6 @@ impl<'a, 'l> Fx<'a, 'l> {
             }
             _ => false,
         }
-    }
-
-    /// Purpose: This function lowers a std package function the checker did
-    /// not route to a method.
-    ///
-    /// Inputs:
-    /// - `pkg`, `f`: the package and function.
-    /// - `args`: the arguments.
-    /// - `et`: the call's type.
-    /// - `span`: where.
-    ///
-    /// Outputs: the result and its type.
-    fn package_fn(
-        &mut self,
-        pkg: &str,
-        f: &str,
-        args: &'a [TExpr],
-        et: &Ty,
-        span: Span,
-    ) -> Result<(Operand, Ty)> {
-        match (pkg, f) {
-            ("array", "sort" | "reverse") => {
-                let first =
-                    args.first().ok_or_else(|| internal("array function with no array", span))?;
-                let (v, t) = self.expr(first)?;
-                let Ty::Array(el) = &t else {
-                    return Err(internal("array function on a non-array", span));
-                };
-                let op = if f == "sort" {
-                    Op::ArraySorted((**el).clone())
-                } else {
-                    Op::ArrayReversed((**el).clone())
-                };
-                Ok((self.assign_temp(et.clone(), Rvalue::Op(op, vec![v])), et.clone()))
-            }
-            ("time", "now" | "now_ms" | "monotonic") => {
-                let (op, t) = match f {
-                    "now" => (Op::Now, Ty::Int),
-                    "now_ms" => (Op::NowMs, Ty::Int),
-                    _ => (Op::Monotonic, Ty::Float),
-                };
-                Ok((self.assign_temp(t.clone(), Rvalue::Op(op, Vec::new())), t))
-            }
-            ("time", "sleep" | "after") => {
-                let first =
-                    args.first().ok_or_else(|| internal("time.sleep with no delay", span))?;
-                let secs = self.float_operand(first)?;
-                if f == "sleep" {
-                    self.emit(Stmt::Eval(Rvalue::Op(Op::Sleep, vec![secs])));
-                    return Ok((Operand::Const(Const::Nil(Ty::Nil)), Ty::Nil));
-                }
-                Ok((self.assign_temp(et.clone(), Rvalue::Op(Op::After, vec![secs])), et.clone()))
-            }
-            _ => Err(not_yet(format!("std/{pkg}"), span)),
-        }
-    }
-
-    /// Purpose: This function lowers a number argument as a float.
-    fn float_operand(&mut self, e: &'a TExpr) -> Result<Operand> {
-        let (v, t) = self.expr(e)?;
-        Ok(match t {
-            Ty::Int => self.assign_temp(Ty::Float, Rvalue::IntToFloat(v)),
-            _ => v,
-        })
     }
 
     /// Purpose: This function lowers a method on a string, array or dict.
@@ -366,7 +315,12 @@ impl<'a, 'l> Fx<'a, 'l> {
                     "pad_start" => StrMethod::PadStart,
                     "pad_end" => StrMethod::PadEnd,
                     "is_empty" => StrMethod::IsEmpty,
-                    "encode" => return Err(not_yet("bytes", span)),
+                    "encode" => {
+                        return Ok((
+                            self.assign_temp(Ty::Bytes, Rvalue::Op(Op::StrEncode, ops)),
+                            Ty::Bytes,
+                        ));
+                    }
                     other => {
                         return Err(internal(format!("an unknown string method '{other}'"), span));
                     }
@@ -435,7 +389,20 @@ impl<'a, 'l> Fx<'a, 'l> {
                 }
                 Ok((self.assign_temp(et.clone(), Rvalue::Op(op, ops)), et.clone()))
             }
-            Ty::Bytes => Err(not_yet("bytes", span)),
+            Ty::Bytes => {
+                for (v, _) in argv {
+                    ops.push(v);
+                }
+                let (op, t) = match m {
+                    "decode" => (Op::BytesDecode, Ty::Str),
+                    "slice" => (Op::BytesSlice, Ty::Bytes),
+                    "len" => (Op::BytesLen, Ty::Int),
+                    other => {
+                        return Err(internal(format!("an unknown bytes method '{other}'"), span));
+                    }
+                };
+                Ok((self.assign_temp(t.clone(), Rvalue::Op(op, ops)), t))
+            }
             Ty::Future(_) => match m {
                 "ready" => Ok((self.assign_temp(Ty::Bool, Rvalue::Op(Op::Ready, ops)), Ty::Bool)),
                 "cancel" => {
@@ -444,7 +411,12 @@ impl<'a, 'l> Fx<'a, 'l> {
                 }
                 other => Err(internal(format!("an unknown future method '{other}'"), span)),
             },
-            Ty::Json => Err(not_yet("json values", span)),
+            Ty::Json => match m {
+                "len" => {
+                    Ok((self.assign_temp(Ty::Int, Rvalue::Op(Op::Json(JsonFn::Len), ops)), Ty::Int))
+                }
+                other => Err(internal(format!("an unknown json method '{other}'"), span)),
+            },
             other => Err(internal(format!("a method '{m}' on {other}"), span)),
         }
     }
@@ -614,7 +586,7 @@ fn addr_of<T>(x: &T) -> usize {
 /// - `span`: where.
 ///
 /// Outputs: the one argument.
-fn one(argv: Vec<(Operand, Ty)>, span: Span) -> Result<(Operand, Ty)> {
+pub(super) fn one(argv: Vec<(Operand, Ty)>, span: Span) -> Result<(Operand, Ty)> {
     argv.into_iter().next().ok_or_else(|| internal("a builtin with no argument", span))
 }
 

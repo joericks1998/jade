@@ -13,8 +13,15 @@ use crate::mir::Ty;
 
 /// Byte offset of an object's length (strings, arrays, dicts).
 pub const LEN: i64 = 8;
+/// Byte offset of a string's trust word: 0 for a string made only from the
+/// program's own text, 1 for one derived from outside it. Bytes share the
+/// string layout, so they carry it too.
+pub const STR_TRUST: i64 = 16;
 /// Byte offset of a string's first byte.
-pub const STR_DATA: i64 = 16;
+pub const STR_DATA: i64 = 24;
+/// The bit of a char that marks it as taken from a tainted string. A char has
+/// no header, and a Unicode scalar never reaches bit 31.
+pub const CHAR_TAINT: i64 = 1 << 31;
 /// Byte offset of an array's or dict's capacity.
 pub const CAP: i64 = 16;
 /// Byte offset of an array's element buffer.
@@ -136,7 +143,7 @@ impl<'a, 'ctx> F<'a, 'ctx> {
         match t {
             Ty::Nil => self.bool(true),
             Ty::Opt(inner) if is_ptr(inner) => self.is_null(v.into_pointer_value()),
-            Ty::Error => self.is_null(v.into_pointer_value()),
+            Ty::Error | Ty::Json => self.is_null(v.into_pointer_value()),
             Ty::Opt(_) => {
                 let present = self
                     .b

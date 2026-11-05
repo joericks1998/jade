@@ -472,25 +472,6 @@ impl<'ctx> Cx<'ctx> {
         )
     }
 
-    /// Purpose: This function returns `jade.task.sleep(secs)`.
-    pub fn sleep_fn(&self) -> FunctionValue<'ctx> {
-        self.support("jade.task.sleep", None, &[self.f64t().into()], |f| {
-            let secs = f.param(0).into_float_value();
-            let ts =
-                f.alloca(f.cx.ctx.struct_type(&[f.cx.i64t().into(), f.cx.i64t().into()], false));
-            let whole = f.ftoi(secs);
-            let frac = f.fsub(secs, f.itof(whole));
-            let nanos = f.ftoi(f.fmul(frac, f.f64(1e9)));
-            let ok = f.sge(whole, f.i64(0));
-            f.if_(ok, |f| {
-                f.store(ts, whole);
-                f.store(f.at_c(ts, 8), nanos);
-                f.call(f.cx.libc("nanosleep"), &[ts.into(), f.null().into()]);
-            });
-            f.ret_void();
-        })
-    }
-
     /// Purpose: This function returns `jade.task.after(secs) -> future of nil`:
     /// a job that only sleeps.
     pub fn after_fn(&self) -> FunctionValue<'ctx> {
@@ -629,40 +610,6 @@ impl<'a, 'ctx> F<'a, 'ctx> {
         self.broadcast();
         self.unlock();
         v
-    }
-
-    /// Purpose: This function reads a clock as a whole number of units.
-    ///
-    /// Inputs:
-    /// - `monotonic`: true for the clock that never moves backwards, false
-    ///   for the wall clock.
-    /// - `per_sec`: the units in a second: 1 for seconds, 1000 for milliseconds.
-    ///
-    /// Outputs: the reading.
-    pub fn clock(&self, monotonic: bool, per_sec: i64) -> IntValue<'ctx> {
-        let (secs, nanos) = self.timespec(monotonic);
-        let whole = self.mul(secs, self.i64(per_sec));
-        self.add(whole, self.sdiv(nanos, self.i64(1_000_000_000 / per_sec)))
-    }
-
-    /// Purpose: This function reads the monotonic clock in seconds.
-    pub fn monotonic(&self) -> inkwell::values::FloatValue<'ctx> {
-        let (secs, nanos) = self.timespec(true);
-        self.fadd(self.itof(secs), self.fdiv(self.itof(nanos), self.f64(1e9)))
-    }
-
-    /// Purpose: This function calls `clock_gettime`.
-    fn timespec(&self, monotonic: bool) -> (IntValue<'ctx>, IntValue<'ctx>) {
-        // CLOCK_REALTIME is 0 everywhere; CLOCK_MONOTONIC differs.
-        let id = match (monotonic, cfg!(target_os = "macos")) {
-            (false, _) => 0,
-            (true, true) => 6,
-            (true, false) => 1,
-        };
-        let i = self.cx.i64t();
-        let ts = self.alloca(self.cx.ctx.struct_type(&[i.into(), i.into()], false));
-        self.call(self.cx.libc("clock_gettime"), &[self.i32(id).into(), ts.into()]);
-        (self.load_i64(ts), self.load_i64(self.at_c(ts, 8)))
     }
 
     /// Purpose: This function reads the concurrency limit.

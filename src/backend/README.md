@@ -21,9 +21,11 @@ On one benchmark of recursion, string building, dict inserts and a float loop, a
 
 *Support code is generated on demand.* Every helper a program needs is an internal LLVM function named `jade.*`, generated the first time something asks for it through `Cx::support`. A program that never splits a string carries no split. Code that depends on a type is generated once per type the program uses, such as releasing an array of strings (`jade.release.Array(Str)`) or printing a dict of arrays. The optimizer inlines what is small and drops what is unused.
 
-*The C library is the only dependency.* `Cx::libc` declares the few functions used: `malloc`, `realloc`, `free`, `memcmp`, `write`, `read`, `exit`, `snprintf`, `strtod`, `qsort`, `nanosleep`, `clock_gettime`, the pthread calls that give the program a 256 MiB stack, as v1 did, and the pthread lock, condition variable and thread calls tasks use. A test pins that list.
+*The C library is the only dependency.* `Cx::libc` declares the functions used, and a test pins the list: memory, `write` and `read`, `snprintf` and `strtod`, the pthread calls behind the 256 MiB main stack and tasks, the clocks, the math library, `fopen` and the directory calls for `std::fs`, and `posix_spawn` with pipes for `std::sh` and `curl`. A few have a different symbol on some platform, such as `errno`'s accessor or Intel macOS's `stat$INODE64`; `libc_symbol` maps them. A `struct stat` or `struct dirent` field is read at an offset chosen per target in `fs.rs`.
 
 *Object layouts.* Every heap object starts with an `i64` reference count, and a count below zero marks an immortal object such as a string literal. Strings are `{ rc, len, bytes…, 0 }`. Arrays hold their elements unboxed in a separate buffer, so growing one never moves the object. Dicts keep entries in insertion order, with an FNV-1a index past eight entries. Structs are `{ rc, type_id, fields… }`. An optional of a pointer type is the pointer, null for nil; an optional of a scalar is `{ i1, T }`. `mod.rs` has the full table.
+
+*Strings carry a trust word.* A string is `{ rc, len, trust, bytes…, 0 }`, and trust is 1 for text from outside the program: a file, a command, stdin, the environment, the network. Every function that builds a string from others gives it the most tainted of their trusts, the string builder collects the trust of what is pushed into it, and a char taken from a tainted string keeps the taint in bit 31, so `"" + s[0]` cannot launder it. `sh.exec`, `sh.run`, `sh.output`, `fs.read` and `fs.read_bytes` refuse a tainted argument with v1's message. Bytes share the string layout, so they carry trust the same way.
 
 *Reference counts are atomic*, because tasks share one heap. Releasing an object whose count reaches zero releases what it holds, through a function generated per type. A struct value may hold any descendant of its static type, so struct release switches on the object's type id.
 
@@ -48,7 +50,16 @@ On one benchmark of recursion, string building, dict inserts and a float loop, a
 - *`compare.rs`* has equality for every type and ordering for numbers, strings, chars and bools.
 - *`unicode.rs`* builds the case tables.
 - *`errors.rs`* has the error slot, raising, an error's message, the report for an uncaught error, and the `F::fail` and `F::raise` helpers.
-- *`tasks.rs`* has tasks: the job layout, the queue and its workers, `await`, `join`, `wait`, `cancel`, the concurrency limit, `time.sleep`, `time.after` and the two clocks.
+- *`tasks.rs`* has tasks: the job layout, the queue and its workers, `await`, `join`, `wait`, `cancel`, the concurrency limit and `time.after`.
+- *`time.rs`* has `std::time`: the two clocks, sleeping, UTC calendar conversion and `time.local`.
+- *`math.rs`* has `std::math`, as LLVM intrinsics and C math calls, with v1's rounding and saturation.
+- *`bytes.rs`* has bytes: indexing, `decode` with strict UTF-8 checking, lossy decoding for command and network output, `slice`, `encode`, `std::bytes`, and the `b"…"` form `print` shows.
+- *`fs.rs`* has `std::fs`, the `I/O error: <op> '<path>': <reason>` messages, and `refuse_tainted`, the sink check.
+- *`sh.rs`* has `std::sh`, and `spawn`, which starts a program with chosen standard streams; `http.rs` uses it too.
+- *`env.rs`* has `std::env` and `std::path`, which follows Rust's `Path` on Unix as v1 did.
+- *`random.rs`* has `std::random`: v1's xoshiro256** generator, so a seeded program draws the same numbers.
+- *`json.rs`* has the `Json` value, `json.parse` with serde_json's grammar and messages, and `json.stringify`, generated per type.
+- *`http.rs`* has `std::http` and `std::uhttp`, both through `curl`, and `uhttp.stream`, which calls the handler through a function pointer once a line.
 - *`tests.rs`* builds small programs, runs them, and checks what they print. One test checks that a program declares only C library functions.
 
 ## Who uses it
@@ -63,7 +74,9 @@ On one benchmark of recursion, string building, dict inserts and a float loop, a
 
 *Equality is structural for arrays and dicts, and identity for structs.* v1 refused `==` between two arrays at run time; the checker now accepts it, so this backend gives it a meaning. A struct is a reference, so two structs are equal when they are the same object.
 
-*Popping an empty array is an error.* v1 returned `nil`, but an `[int]` cannot hold `nil`, so the static backend raises `pop from an empty array`.
+*Popping an empty array is an error.* v1 returned `nil`, but an `[int]` cannot hold `nil`, so the static backend raises `pop from an empty array`. `random.choice` on an empty array raises for the same reason.
+
+*A few std answers differ from v1 on purpose.* `math.pow` of two ints with a negative exponent raises, since its result is an int. `http.head` runs `curl --head`, where v1's `-X HEAD` failed against any server that sends a length with no body. `json.stringify` keeps the taint of the strings it writes, where v1's result was trusted, and writes a class value as an object of its fields, where v1 wrote `null`.
 
 *A new C function goes in `Cx::libc`'s table.* It panics on a name it does not know, so a missing signature shows up the first time a test builds the code that uses it. Add the name to the pinned list in `tests.rs` at the same time.
 

@@ -97,11 +97,12 @@ impl<'a, 'ctx> F<'a, 'ctx> {
         b: BasicValueEnum<'ctx>,
     ) -> IntValue<'ctx> {
         match t {
-            Ty::Int | Ty::Bool | Ty::Char | Ty::Nil => {
-                self.eq(a.into_int_value(), b.into_int_value())
-            }
+            Ty::Int | Ty::Bool | Ty::Nil => self.eq(a.into_int_value(), b.into_int_value()),
+            // A char's taint bit is not part of its value.
+            Ty::Char => self.eq(self.char_cp(a.into_int_value()), self.char_cp(b.into_int_value())),
             Ty::Float => self.fcmp(FloatPredicate::OEQ, a.into_float_value(), b.into_float_value()),
-            Ty::Str => self.call_int(self.cx.str_eq_fn(), &[a, b]),
+            // Bytes share the string layout, so they compare the same way.
+            Ty::Str | Ty::Bytes => self.call_int(self.cx.str_eq_fn(), &[a, b]),
             Ty::Struct(_) => {
                 let ia = self
                     .b
@@ -114,6 +115,7 @@ impl<'a, 'ctx> F<'a, 'ctx> {
                 self.eq(ia, ib)
             }
             Ty::Array(_) | Ty::Map(_) | Ty::Opt(_) => self.call_int(self.cx.eq_fn(t), &[a, b]),
+            Ty::Json => self.call_int(self.cx.json_eq_fn(), &[a, b]),
             _ => self.bool(false),
         }
     }
@@ -141,7 +143,10 @@ impl<'a, 'ctx> F<'a, 'ctx> {
                 self.select_int(lt, self.i32(-1), r)
             }
             _ => {
-                let (x, y) = (a.into_int_value(), b.into_int_value());
+                let (mut x, mut y) = (a.into_int_value(), b.into_int_value());
+                if *t == Ty::Char {
+                    (x, y) = (self.char_cp(x), self.char_cp(y));
+                }
                 // Ints compare signed; bools and chars have no sign to keep.
                 let (pl, pg) = if *t == Ty::Int {
                     (IntPredicate::SLT, IntPredicate::SGT)

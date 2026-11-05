@@ -44,7 +44,8 @@ A struct value carries its class id, so `x is C` lowers to `Rvalue::IsA` over th
 
 - *`mod.rs`* defines MIR: `Program`, `Func`, `Block`, `Stmt`, `Rvalue`, `Operand` and `Term`, plus `Op`, the support operations every builtin and method lowers to. Its header states the ownership rules.
 - *`lower.rs`* walks each checked instance's body with the checker's answers and writes MIR. It looks up expression types, slot types and call targets by instance and node address. It inserts conversions where a value meets a wider slot, binds arguments to parameters with defaults and keywords, and lowers `for` loops over arrays, strings and dict keys.
-- *`ops.rs`* lowers calls the checker resolved to a builtin: `print`, `len`, `str`, the conversions, and the methods on strings, arrays and dicts.
+- *`ops.rs`* lowers calls the checker resolved to a builtin: `print`, `len`, `str`, the conversions, `join` and `wait`, and the methods on strings, arrays, dicts, bytes, futures and `Json` values.
+- *`packages.rs`* lowers std package calls, `time.sleep` or `fs.read`, to their `Op`. Each package is one `Op`, often carrying an enum of its functions, such as `Op::Fs(FsFn::Read)`, and the argument types the checker settled pick the variant.
 - *`display.rs`* prints MIR as text.
 - *`tests.rs`* lowers small programs and checks the MIR they produce.
 
