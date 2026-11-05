@@ -1198,6 +1198,7 @@ impl<'a> Checker<'a> {
                     Some(s) => s,
                     None => return super::builtins::builtin_value_result(self, n, &tys, span),
                 };
+                self.record_target(f, node, Target::Builtin(n.clone()));
                 Some(self.builtin_call(n, tys, &[], span, f, node))
             }
         }

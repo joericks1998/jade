@@ -326,6 +326,7 @@ fn emit_c_main<'ctx>(cx: &Cx<'ctx>, top: FunctionValue<'ctx>) {
     let ptr = cx.ptrt();
     let body = cx.support("jade.thread_body", Some(ptr.into()), &[ptr.into()], |f| {
         f.call(top, &[]);
+        f.call(f.cx.report_uncaught_fn(), &[]);
         f.ret(f.null());
     });
     let main_ty = cx.i32t().fn_type(&[cx.i32t().into(), ptr.into()], false);
@@ -343,6 +344,7 @@ fn emit_c_main<'ctx>(cx: &Cx<'ctx>, top: FunctionValue<'ctx>) {
     let both = f.or(ok_init, ok_size);
     let fallback = |f: &F<'_, 'ctx>| {
         f.call(top, &[]);
+        f.call(f.cx.report_uncaught_fn(), &[]);
     };
     f.if_else(
         f.eq(both, f.i32(0)),

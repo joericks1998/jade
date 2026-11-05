@@ -130,6 +130,7 @@ impl Display for Const {
             Const::Char(c) => write!(f, "{c:?}"),
             Const::Str(s) => write!(f, "{s:?}"),
             Const::Nil(t) => write!(f, "nil: {t}"),
+            Const::Static(t) => write!(f, "static {t}"),
         }
     }
 }
@@ -167,6 +168,7 @@ impl Display for Stmt {
             }
             Stmt::DictSet { dict, key, value } => write!(f, "{dict}[{key}] = {value}"),
             Stmt::Drop(p) => write!(f, "drop {p}"),
+            Stmt::Raise(o) => write!(f, "raise {o}"),
         }
     }
 }
@@ -198,6 +200,10 @@ impl Display for Rvalue {
             Rvalue::IntToFloat(o) => write!(f, "itof {o}"),
             Rvalue::TypeId(o) => write!(f, "typeid {o}"),
             Rvalue::IsA(o, ids) => write!(f, "isa {o} {ids:?}"),
+            Rvalue::FnAddr(id) => write!(f, "fnaddr f{}", id.0),
+            Rvalue::CallIndirect(c, args) => write!(f, "callindirect {c}({})", list(args)),
+            Rvalue::ErrPending => write!(f, "errpending"),
+            Rvalue::TakeErr => write!(f, "takeerr"),
         }
     }
 }
@@ -271,6 +277,7 @@ impl Display for Term {
             }
             Term::Return(o) => write!(f, "return {o}"),
             Term::Unreachable => write!(f, "unreachable"),
+            Term::Unwind => write!(f, "unwind"),
         }
     }
 }

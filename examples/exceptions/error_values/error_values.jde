@@ -26,7 +26,7 @@ fn divzero() {
 
 fn overflow() {
     let big = 4611686018427387903
-    return big + big
+    return big + big + big
 }
 
 // A typed catch has to match, which is what proves the raised value carries the

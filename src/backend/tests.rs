@@ -157,3 +157,27 @@ fn is_tests_the_class_and_its_descendants() {
     let (out, _, _) = run(src);
     assert_eq!(out, "false\ntrue\ntrue\nfalse\n");
 }
+
+#[test]
+fn a_runtime_error_is_caught_and_the_program_carries_on() {
+    let src = "fn f(n) {\n    let xs = [1, 2]\n    return xs[n]\n}\n\
+               try {\n    print(f(5))\n} catch e {\n    print(e.message)\n}\nprint(f(1))\n";
+    let (out, _, rc) = run(src);
+    assert_eq!((out.as_str(), rc), ("index out of bounds\n2\n", 0));
+}
+
+#[test]
+fn an_uncaught_class_reports_its_message() {
+    let (out, err, rc) = run(
+        "class Halt {\n    @public message\n}\nprint(1)\nraise Halt { message: \"stop\" }\nprint(2)\n",
+    );
+    assert_eq!((out.as_str(), err.as_str(), rc), ("1\n", "jade: stop\n", 1));
+}
+
+#[test]
+fn map_and_filter_pass_extra_arguments() {
+    let src = "fn scale(x, by) { x * by }\nfn above(x, floor) { x > floor }\n\
+               print([1, 2, 3].map(scale, 10))\nprint([1, 5, 9].filter(above, 4))\nprint([1, 22].map(str))\n";
+    let (out, _, _) = run(src);
+    assert_eq!(out, "[10, 20, 30]\n[5, 9]\n[1, 22]\n");
+}

@@ -68,8 +68,26 @@ pub fn lower<'a, 'ctx>(
         }
         slots.push(p);
     }
+    // Count the call against the recursion limit, raising past it as v1 did.
+    // The top level is not a call, so it does not count.
+    let d = cx.depth_slot();
+    let counts = if func.name == "main" { 0 } else { 1 };
+    let depth = f.add(f.load_i64(d), f.i64(counts));
+    f.store(d, depth);
+    let too_deep = f.sgt(depth, f.i64(super::errors::RECURSION_LIMIT));
     let blocks: Vec<BasicBlock> = func.blocks.iter().map(|_| f.block()).collect();
-    f.br(blocks[0]);
+    let refuse = f.block();
+    f.cond_br(too_deep, refuse, blocks[0]);
+    f.position(refuse);
+    f.raise("recursion limit exceeded");
+    for (i, l) in func.locals.iter().enumerate() {
+        if is_heap(&l.ty) {
+            let old = f.load(cx.llty(&l.ty), slots[i]);
+            f.release(&l.ty, old);
+        }
+    }
+    f.store(d, f.sub(f.load_i64(d), f.i64(1)));
+    f.ret(layout::zero(cx.llty(&func.ret)));
     let lw = Lw { f, env, func, slots, blocks };
     for (i, b) in func.blocks.iter().enumerate() {
         lw.f.position(lw.blocks[i]);
@@ -115,7 +133,7 @@ impl<'a, 'b, 'ctx> Lw<'a, 'b, 'ctx> {
                 Const::Bool(_) => Ty::Bool,
                 Const::Char(_) => Ty::Char,
                 Const::Str(_) => Ty::Str,
-                Const::Nil(t) => t.clone(),
+                Const::Nil(t) | Const::Static(t) => t.clone(),
             },
         }
     }
@@ -143,7 +161,7 @@ impl<'a, 'b, 'ctx> Lw<'a, 'b, 'ctx> {
                 Const::Bool(b) => f.bool(*b).into(),
                 Const::Char(ch) => f.i32(*ch as i64).into(),
                 Const::Str(s) => self.cx().lit(s).into(),
-                Const::Nil(t) => layout::zero(self.cx().llty(t)),
+                Const::Nil(t) | Const::Static(t) => layout::zero(self.cx().llty(t)),
             },
         }
     }
@@ -269,6 +287,10 @@ impl<'a, 'b, 'ctx> Lw<'a, 'b, 'ctx> {
                 f.store(ptr, u);
                 f.call(self.cx().dict_fn("set", &vt), &[u.into(), k, v]);
             }
+            Stmt::Raise(op) => {
+                let v = self.consume(op);
+                f.call(self.cx().set_err_fn(), &[v]);
+            }
             Stmt::Drop(p) => {
                 let t = self.place_ty(p);
                 if is_heap(&t) {
@@ -298,16 +320,30 @@ impl<'a, 'b, 'ctx> Lw<'a, 'b, 'ctx> {
             }
             Term::Return(op) => {
                 let v = self.consume(op);
-                for (i, l) in self.func.locals.iter().enumerate() {
-                    if is_heap(&l.ty) {
-                        let old = f.load(self.cx().llty(&l.ty), self.slots[i]);
-                        f.release(&l.ty, old);
-                    }
-                }
+                self.leave();
                 f.ret(v);
+            }
+            Term::Unwind => {
+                self.leave();
+                f.ret(layout::zero(self.cx().llty(&self.func.ret)));
             }
             Term::Unreachable => f.unreachable(),
         }
+    }
+
+    /// Purpose: This function does what every way out of a function does:
+    /// release each local and count the call off the recursion depth.
+    fn leave(&self) {
+        let f = &self.f;
+        for (i, l) in self.func.locals.iter().enumerate() {
+            if is_heap(&l.ty) {
+                let old = f.load(self.cx().llty(&l.ty), self.slots[i]);
+                f.release(&l.ty, old);
+            }
+        }
+        let d = self.cx().depth_slot();
+        let counts = if self.func.name == "main" { 0 } else { 1 };
+        f.store(d, f.sub(f.load_i64(d), f.i64(counts)));
     }
 
     // ── rvalues ──────────────────────────────────────────────────────────
@@ -326,7 +362,7 @@ impl<'a, 'b, 'ctx> Lw<'a, 'b, 'ctx> {
                 match op {
                     UnOp::Neg(NumTy::Int) => {
                         let (r, o) = f.checked("ssub", f.i64(0), v.into_int_value());
-                        f.fail_if(o, "integer overflow");
+                        f.raise_if(o, "integer overflow");
                         (r.into(), Ty::Int)
                     }
                     UnOp::Neg(NumTy::Float) => (f.fneg(v.into_float_value()).into(), Ty::Float),
@@ -388,6 +424,35 @@ impl<'a, 'b, 'ctx> Lw<'a, 'b, 'ctx> {
                 let t = self.op_ty(op);
                 (f.is_nil(&t, self.operand(op)).into(), Ty::Bool)
             }
+            Rvalue::FnAddr(id) => {
+                (self.env.funcs[id.0 as usize].as_global_value().as_pointer_value().into(), Ty::Nil)
+            }
+            Rvalue::CallIndirect(c, args) => {
+                let Ty::Fn(ft) = self.op_ty(c) else {
+                    return (layout::zero(cx.i8t().into()), Ty::Nil);
+                };
+                let callee = self.operand(c).into_pointer_value();
+                let vals: Vec<BasicValueEnum> = args.iter().map(|a| self.operand(a)).collect();
+                let params: Vec<inkwell::types::BasicMetadataTypeEnum> =
+                    ft.params.iter().map(|p| cx.llty(&crate::mir::lower::norm(p)).into()).collect();
+                let ret = crate::mir::lower::norm(&ft.ret);
+                let fn_ty = inkwell::types::BasicType::fn_type(&cx.llty(&ret), &params, false);
+                let meta: Vec<inkwell::values::BasicMetadataValueEnum> =
+                    vals.iter().map(|v| (*v).into()).collect();
+                let cs = f.b.build_indirect_call(fn_ty, callee, &meta, "").expect("positioned");
+                let v = match cs.try_as_basic_value() {
+                    inkwell::values::ValueKind::Basic(v) => v,
+                    inkwell::values::ValueKind::Instruction(_) => layout::zero(cx.i8t().into()),
+                };
+                (v, ret)
+            }
+            Rvalue::ErrPending => (f.err_pending().into(), Ty::Bool),
+            Rvalue::TakeErr => {
+                let slot = cx.err_slot();
+                let e = f.load_ptr(slot);
+                f.store(slot, f.null());
+                (e.into(), Ty::Error)
+            }
             Rvalue::IntToFloat(op) => (f.itof(self.operand(op).into_int_value()).into(), Ty::Float),
             Rvalue::TypeId(op) => {
                 let p = self.operand(op).into_pointer_value();
@@ -420,20 +485,25 @@ impl<'a, 'b, 'ctx> Lw<'a, 'b, 'ctx> {
                             _ => "smul",
                         };
                         let (r, over) = f.checked(name, x, y);
-                        f.fail_if(over, "integer overflow");
+                        f.raise_if(over, "integer overflow");
                         r
                     }
+                    // A raise only marks the error; the division still runs, so
+                    // it divides by something safe and the result is discarded.
                     ArithOp::Div => {
-                        f.fail_if(f.eq(y, f.i64(0)), "division by zero");
+                        let zero = f.eq(y, f.i64(0));
+                        f.raise_if(zero, "division by zero");
                         let edge = f.and(f.eq(x, f.i64(i64::MIN)), f.eq(y, f.i64(-1)));
-                        f.fail_if(edge, "integer overflow");
-                        f.sdiv(x, y)
+                        f.raise_if(edge, "integer overflow");
+                        let safe = f.select_int(f.or(zero, edge), f.i64(1), y);
+                        f.sdiv(x, safe)
                     }
                     ArithOp::Rem => {
-                        f.fail_if(f.eq(y, f.i64(0)), "modulo by zero");
+                        let zero = f.eq(y, f.i64(0));
+                        f.raise_if(zero, "modulo by zero");
                         // i64::MIN % -1 is 0, but `srem` would trap on it.
                         let edge = f.eq(y, f.i64(-1));
-                        let safe = f.select_int(edge, f.i64(1), y);
+                        let safe = f.select_int(f.or(zero, edge), f.i64(1), y);
                         let r = f.srem(x, safe);
                         f.select_int(edge, f.i64(0), r)
                     }
@@ -447,11 +517,11 @@ impl<'a, 'b, 'ctx> Lw<'a, 'b, 'ctx> {
                     ArithOp::Sub => f.fsub(x, y),
                     ArithOp::Mul => f.fmul(x, y),
                     ArithOp::Div => {
-                        f.fail_if(f.fcmp(FloatPredicate::OEQ, y, f.f64(0.0)), "division by zero");
+                        f.raise_if(f.fcmp(FloatPredicate::OEQ, y, f.f64(0.0)), "division by zero");
                         f.fdiv(x, y)
                     }
                     ArithOp::Rem => {
-                        f.fail_if(f.fcmp(FloatPredicate::OEQ, y, f.f64(0.0)), "modulo by zero");
+                        f.raise_if(f.fcmp(FloatPredicate::OEQ, y, f.f64(0.0)), "modulo by zero");
                         f.frem(x, y)
                     }
                 };
@@ -471,11 +541,15 @@ impl<'a, 'b, 'ctx> Lw<'a, 'b, 'ctx> {
                             f.sb_push_lit(sb, "invalid shift amount ");
                             f.sb_push_str(sb, text);
                             let m = f.sb_finish(sb);
-                            f.fail_str(m);
+                            f.raise_str(m);
                         });
+                        // A shift of 64 or more is undefined in LLVM, so the
+                        // amount is kept in range even when it was refused.
+                        let y = f.and(y, f.i64(63));
                         if *o == BitOp::Shl {
                             let r = f.shl(x, y);
-                            f.fail_if(f.ne(f.ashr(r, y), x), "integer overflow");
+                            let lost = f.and(f.not(bad), f.ne(f.ashr(r, y), x));
+                            f.raise_if(lost, "integer overflow");
                             r
                         } else {
                             f.ashr(x, y)
@@ -649,9 +723,10 @@ impl<'a, 'b, 'ctx> Lw<'a, 'b, 'ctx> {
                 (f.callv(cx.dict_fn("merge", t), &[arg(0), arg(1)]), Ty::Map(Box::new(t.clone())))
             }
             Op::Fail(msg) => {
-                f.fail(msg);
+                f.raise(msg);
                 (self.nil(), Ty::Nil)
             }
+            Op::ErrorMessage => (f.callv(cx.error_message_fn(false), &[arg(0)]), Ty::Str),
         }
     }
 }

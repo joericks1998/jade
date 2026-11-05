@@ -105,11 +105,7 @@ fn a_for_loop_over_a_string_walks_its_characters() {
 
 #[test]
 fn features_from_later_phases_say_so() {
-    for (src, what) in [
-        ("try { print(1) } catch e { print(2) }\n", "try and catch"),
-        ("async fn f() { return 1 }\nprint(await f())\n", "await"),
-        ("fn g(x) { yield x }\nlet s = g(1)\nprint(s[0])\n", "stream"),
-    ] {
+    for (src, what) in [("async fn f() { return 1 }\nprint(await f())\n", "await")] {
         match lower(src) {
             Err(JadeError::NotYetStatic { what: w, .. }) => {
                 assert!(w.contains(what), "{src}: named {w}, expected {what}")
@@ -125,4 +121,38 @@ fn heap_types_are_the_reference_counted_ones() {
     assert!(is_heap(&Ty::Opt(Box::new(Ty::Array(Box::new(Ty::Int))))));
     assert!(!is_heap(&Ty::Int));
     assert!(!is_heap(&Ty::Opt(Box::new(Ty::Float))));
+}
+
+#[test]
+fn an_operation_that_can_raise_is_followed_by_a_check() {
+    let t = text("fn f(a, b) { return a / b }\nprint(f(1, 2))\n");
+    assert!(t.contains("errpending"), "{t}");
+    assert!(t.contains("unwind"), "a function's errors leave through its unwind block: {t}");
+}
+
+#[test]
+fn a_catch_arm_tests_the_raised_class() {
+    let t = text(
+        "class E {\n    @public message\n}\ntry {\n    raise E { message: \"x\" }\n} catch E e {\n    print(e.message)\n}\n",
+    );
+    assert!(t.contains("takeerr"), "{t}");
+    assert!(t.contains("isa"), "{t}");
+    assert!(t.contains("raise"), "{t}");
+}
+
+#[test]
+fn a_generator_fills_an_array() {
+    let t = text("fn g(n) {\n    yield n\n    yield n + 1\n}\nprint(g(1))\n");
+    assert!(t.contains("g(int)(_0: int) -> [int]"), "a stream is an array in MIR: {t}");
+    assert!(t.contains("array.push.int"), "{t}");
+}
+
+#[test]
+fn a_joined_function_value_is_a_pointer_to_an_adapter() {
+    let t = text(
+        "fn a(x) { x + 1 }\nfn b(x) { x * 2 }\nlet fs = [a, b]\nfor f in fs {\n    print(f(3))\n}\n",
+    );
+    assert!(t.contains("fnaddr"), "{t}");
+    assert!(t.contains("callindirect"), "{t}");
+    assert!(t.contains("adapter a"), "{t}");
 }

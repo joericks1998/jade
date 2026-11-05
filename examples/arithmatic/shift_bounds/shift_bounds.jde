@@ -3,9 +3,9 @@
 // Compiled code used to untag both operands and emit the bare machine shift.
 // LLVM leaves a shift by 64 or more undefined, so `1 << 64` produced a garbage
 // word that `print` then followed as a pointer — a segfault where `jade run`
-// raised. `1 << 62` was worse for being quiet: it is 2^62, one past the largest
-// Jade integer, and the two engines printed different numbers for it rather
-// than either of them raising. The same lowering covered `&`, `|` and `^`, so
+// raised. A shift past the largest Jade integer was worse for being quiet: the
+// two engines printed different numbers for it rather than either of them
+// raising. The same lowering covered `&`, `|` and `^`, so
 // `"x" & 1` answered with a number made of the string's pointer bits.
 
 // Ordinary shifts are unaffected.
@@ -33,17 +33,17 @@ try {
 }
 // → negative amount refused
 
-// Jade integers are 63-bit, so a result past the range overflows like any other
-// arithmetic rather than wrapping.
+// A result past the int range overflows like any other arithmetic rather than
+// wrapping. `1 << 63` reaches the sign bit of a 64-bit int.
 try {
-    let x = 1 << 62
+    let x = 1 << 63
     print(x)
 } catch e {
     print("shift overflow caught")
 }
 // → shift overflow caught
 
-// The largest shift that still fits.
+// A shift that fits.
 print(1 << 61)
 // → 2305843009213693952
 

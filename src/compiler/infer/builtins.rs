@@ -870,8 +870,10 @@ pub(super) fn primitive_method(
         c.report(span, format!("{resolved_recv} has no method '{name}'{hint}"));
         return Ty::Nil;
     }
+    // `map` and `filter` take their function and then any extra arguments.
+    let at_least = matches!(name, "map" | "filter");
     if let Some(n) = want_n
-        && tys.len() != n
+        && (if at_least { tys.len() < n } else { tys.len() != n })
     {
         c.report(
             span,
@@ -952,16 +954,22 @@ pub(super) fn primitive_method(
                     want(c, 0, Ty::Str, "separator");
                     Ty::Str
                 }
+                // Extra arguments go to the function after each element, in the
+                // order a pipe uses: `xs.map(scale, 10)` calls `scale(x, 10)`.
                 "map" => {
                     let fv = arg(0);
-                    let r = c.call_value(&fv, vec![elem], span, f, node + 1);
+                    let mut call = vec![elem];
+                    call.extend(tys[1..].iter().cloned());
+                    let r = c.call_value(&fv, call, span, f, node + 1);
                     let out = c.slot(f, node + 2);
                     c.unify(&out, &r, span, "map's results");
                     Ty::Array(Box::new(out))
                 }
                 "filter" => {
                     let fv = arg(0);
-                    let r = c.call_value(&fv, vec![elem.clone()], span, f, node + 1);
+                    let mut call = vec![elem.clone()];
+                    call.extend(tys[1..].iter().cloned());
+                    let r = c.call_value(&fv, call, span, f, node + 1);
                     c.unify(&r, &Ty::Bool, span, "filter's predicate (it must return a bool)");
                     Ty::Array(Box::new(elem))
                 }

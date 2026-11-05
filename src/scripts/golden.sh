@@ -52,8 +52,9 @@ skip_reason() {
     examples/pipe/deref_in_print/*)
       echo "dereferences a prompt" ;;
     # Behavior the static backend has and the tagged one never will, since it
-    # is deleted at the end of v2: destructors run only there.
-    examples/classes/destructors/*)
+    # is deleted at the end of v2: destructors run only there, and only its ints
+    # are 64-bit.
+    examples/classes/destructors/*|examples/numbers/int_bounds/*)
       if [[ -z "$LIST" ]]; then echo "static backend only"; else echo ""; fi ;;
     *) echo "" ;;
   esac

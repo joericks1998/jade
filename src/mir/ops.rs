@@ -52,7 +52,7 @@ impl<'a, 'l> Fx<'a, 'l> {
                 let (v, t) = self.expr(a)?;
                 argv.push((v, t));
             }
-            return self.method(m, r, &rt, argv, et, span);
+            return self.method(m, r, &rt, argv, et, span, addr_of(e));
         }
         if let Some((pkg, f)) = name.split_once('.') {
             return self.package_fn(pkg, f, args, et, span);
@@ -74,6 +74,26 @@ impl<'a, 'l> Fx<'a, 'l> {
         if let Some((k, v)) = kwargs.first() {
             return Err(internal(format!("keyword argument '{k}' to a builtin"), v.span));
         }
+        self.builtin_apply(name, argv, et, span)
+    }
+
+    /// Purpose: This function applies a bare builtin to arguments already
+    /// lowered, for a direct call and for a builtin passed as a value.
+    ///
+    /// Inputs:
+    /// - `name`: the builtin.
+    /// - `argv`: the arguments with their types.
+    /// - `et`: the call's type.
+    /// - `span`: where.
+    ///
+    /// Outputs: the result and its type.
+    pub(super) fn builtin_apply(
+        &mut self,
+        name: &str,
+        argv: Vec<(Operand, Ty)>,
+        et: &Ty,
+        span: Span,
+    ) -> Result<(Operand, Ty)> {
         let nil = || (Operand::Const(Const::Nil(Ty::Nil)), Ty::Nil);
         match name {
             "print" | "write" => {
@@ -227,6 +247,7 @@ impl<'a, 'l> Fx<'a, 'l> {
     /// - `span`: where.
     ///
     /// Outputs: the result and its type.
+    #[allow(clippy::too_many_arguments)]
     fn method(
         &mut self,
         m: &str,
@@ -235,6 +256,7 @@ impl<'a, 'l> Fx<'a, 'l> {
         argv: Vec<(Operand, Ty)>,
         et: &Ty,
         span: Span,
+        node: usize,
     ) -> Result<(Operand, Ty)> {
         let nil = (Operand::Const(Const::Nil(Ty::Nil)), Ty::Nil);
         let mut ops = vec![r];
@@ -299,7 +321,8 @@ impl<'a, 'l> Fx<'a, 'l> {
                         return Ok((self.assign_temp(Ty::Bool, Rvalue::Op(op, ops)), Ty::Bool));
                     }
                     "map" | "filter" => {
-                        return Err(not_yet("map and filter, which take a function", span));
+                        let r = ops.pop().ok_or_else(|| internal("map with no array", span))?;
+                        return self.map_filter(m == "map", r, &el, argv, et, span, node);
                     }
                     other => {
                         return Err(internal(format!("an unknown array method '{other}'"), span));
@@ -338,6 +361,163 @@ impl<'a, 'l> Fx<'a, 'l> {
             other => Err(internal(format!("a method '{m}' on {other}"), span)),
         }
     }
+}
+
+impl<'a, 'l> Fx<'a, 'l> {
+    /// Purpose: This function lowers `xs.map(f, extra…)` and
+    /// `xs.filter(f, extra…)` as a loop over the array.
+    ///
+    /// Inputs:
+    /// - `is_map`: true for map, false for filter.
+    /// - `arr`: the array.
+    /// - `el`: its element type.
+    /// - `argv`: the function value, then the extra arguments.
+    /// - `et`: the result's type.
+    /// - `span`: where.
+    /// - `node`: the call's address; the checker recorded the function's call
+    ///   at the next address.
+    ///
+    /// Outputs: the new array.
+    #[allow(clippy::too_many_arguments)]
+    fn map_filter(
+        &mut self,
+        is_map: bool,
+        arr: Operand,
+        el: &Ty,
+        argv: Vec<(Operand, Ty)>,
+        et: &Ty,
+        span: Span,
+        node: usize,
+    ) -> Result<(Operand, Ty)> {
+        let mut it = argv.into_iter();
+        let (fv, ft) = it.next().ok_or_else(|| internal("map with no function", span))?;
+        let extras: Vec<(Operand, Ty)> = it.collect();
+        let Ty::Array(out_el) = et else {
+            return Err(internal("map that does not make an array", span));
+        };
+        let out_el = (**out_el).clone();
+        let out = self.assign_temp(et.clone(), Rvalue::Array(out_el.clone(), Vec::new()));
+        let n = self.assign_temp(Ty::Int, Rvalue::Op(Op::ArrayLen, vec![arr.clone()]));
+        let i = self.new_local(Ty::Int, None);
+        self.emit(Stmt::Assign(Place::Local(i), Rvalue::Use(Operand::Const(Const::Int(0)))));
+        let head = self.new_block();
+        let body = self.new_block();
+        let exit = self.new_block();
+        self.terminate(Term::Goto(head));
+        self.switch_to(head);
+        let more = self.assign_temp(
+            Ty::Bool,
+            Rvalue::Bin(BinOp::Cmp(CmpOp::Lt, Ty::Int), Operand::Copy(Place::Local(i)), n),
+        );
+        self.terminate(Term::If(more, body, exit));
+        self.switch_to(body);
+        let x = self.assign_temp(
+            el.clone(),
+            Rvalue::Op(Op::ArrayGet(el.clone()), vec![arr, Operand::Copy(Place::Local(i))]),
+        );
+        let mut call = vec![(x.clone(), el.clone())];
+        call.extend(extras);
+        let (r, rt) = self.call_function_value(fv, &ft, call, node + 1, span)?;
+        if is_map {
+            let r = self.coerce(r, &rt, &out_el, span)?;
+            self.emit(Stmt::Eval(Rvalue::Op(Op::ArrayPush(out_el.clone()), vec![out.clone(), r])));
+        } else {
+            let keep = self.new_block();
+            let skip = self.new_block();
+            self.terminate(Term::If(r, keep, skip));
+            self.switch_to(keep);
+            self.emit(Stmt::Eval(Rvalue::Op(Op::ArrayPush(el.clone()), vec![out.clone(), x])));
+            self.terminate(Term::Goto(skip));
+            self.switch_to(skip);
+        }
+        self.emit(Stmt::Assign(
+            Place::Local(i),
+            Rvalue::Bin(
+                BinOp::Arith(ArithOp::Add, NumTy::Int),
+                Operand::Copy(Place::Local(i)),
+                Operand::Const(Const::Int(1)),
+            ),
+        ));
+        self.terminate(Term::Goto(head));
+        self.switch_to(exit);
+        Ok((out, et.clone()))
+    }
+
+    /// Purpose: This function calls a function value with arguments already
+    /// lowered: a named function or builtin known when compiling, or a pointer
+    /// of a joined function type.
+    ///
+    /// Inputs:
+    /// - `fv`, `ft`: the function value and its type.
+    /// - `args`: the arguments with their types.
+    /// - `call_node`: the address the checker recorded the call's target under.
+    /// - `span`: where.
+    ///
+    /// Outputs: the result and its type.
+    pub(super) fn call_function_value(
+        &mut self,
+        fv: Operand,
+        ft: &Ty,
+        args: Vec<(Operand, Ty)>,
+        call_node: usize,
+        span: Span,
+    ) -> Result<(Operand, Ty)> {
+        match ft {
+            Ty::Fn(f) => {
+                let mut argv = Vec::new();
+                for ((v, t), pt) in args.into_iter().zip(&f.params) {
+                    argv.push(self.coerce(v, &t, &super::lower::norm(pt), span)?);
+                }
+                let rt = super::lower::norm(&f.ret);
+                Ok((self.assign_temp(rt.clone(), Rvalue::CallIndirect(fv, argv)), rt))
+            }
+            Ty::Func(crate::compiler::infer::FuncRef::Builtin(name)) => {
+                let rt = builtin_result(name);
+                self.builtin_apply(name, args, &rt, span)
+            }
+            Ty::Func(_) => match self.targets.get(&call_node).cloned() {
+                Some(crate::compiler::infer::Target::Instance(k)) => {
+                    let def = self
+                        .l
+                        .def_of(&k.func)
+                        .ok_or_else(|| internal("a function value with no body", span))?;
+                    let mut vals: Vec<Option<(Operand, Ty, Span)>> = vec![None; def.params.len()];
+                    for (i, (v, t)) in args.into_iter().enumerate() {
+                        if i < vals.len() {
+                            vals[i] = Some((v, t, span));
+                        }
+                    }
+                    let (_, _, ret) = self.l.sig(&k, span)?;
+                    let r = self.call_instance(&k, def, vals, span)?;
+                    Ok((r, ret))
+                }
+                _ => Err(internal("a function value whose call was not resolved", span)),
+            },
+            other => Err(internal(format!("calling a {other}"), span)),
+        }
+    }
+}
+
+/// Purpose: This function gives a builtin's result type.
+///
+/// Inputs:
+/// - `name`: the builtin.
+///
+/// Outputs: the type it returns.
+fn builtin_result(name: &str) -> Ty {
+    match name {
+        "len" | "int" | "max_tasks" | "set_max_tasks" => Ty::Int,
+        "str" | "input" => Ty::Str,
+        "float" => Ty::Float,
+        "bool" | "cancelled" => Ty::Bool,
+        "char" => Ty::Char,
+        _ => Ty::Nil,
+    }
+}
+
+/// Purpose: This function gives a syntax node its identity, as the checker does.
+fn addr_of<T>(x: &T) -> usize {
+    x as *const T as usize
 }
 
 /// Purpose: This function takes a builtin's single argument.

@@ -151,6 +151,10 @@ pub enum Const {
     Str(String),
     /// The absent value of a type that has one: `nil` itself, or an optional.
     Nil(Ty),
+    /// A value whose type says everything about it: a named function or a
+    /// builtin used as a value, which is known when the program compiles and
+    /// is called directly wherever it ends up.
+    Static(Ty),
 }
 
 /// Purpose: This enum holds one statement.
@@ -168,6 +172,9 @@ pub enum Stmt {
     DictSet { dict: Place, key: Operand, value: Operand },
     /// Release a place's value and clear it.
     Drop(Place),
+    /// Raise a class value: put it in this thread's error slot. Control goes
+    /// to the handler the lowering names next, by a terminator.
+    Raise(Operand),
 }
 
 /// Purpose: This enum holds the right-hand side of an assignment.
@@ -205,6 +212,14 @@ pub enum Rvalue {
     /// Whether a struct value's type id is one of these: the class `x is C`
     /// names and every class that descends from it.
     IsA(Operand, Vec<i64>),
+    /// A pointer to a function, for a value of a joined function type.
+    FnAddr(FuncId),
+    /// A call through a function pointer whose type is the callee operand's.
+    CallIndirect(Operand, Vec<Operand>),
+    /// Whether an error has been raised and not yet caught on this thread.
+    ErrPending,
+    /// Take the raised error out of this thread's slot, owned, clearing it.
+    TakeErr,
 }
 
 /// Purpose: This enum lists the number types arithmetic works on.
@@ -348,8 +363,11 @@ pub enum Op {
     /// `(a: {str: V}, b: {str: V}) -> {str: V}`: `a` with `b`'s entries over it.
     DictMerge(Ty),
 
-    /// `() -> nil`: stop with the message as a runtime error.
+    /// `() -> nil`: raise a `RuntimeError` with this message.
     Fail(String),
+    /// `(e: error) -> str`: a caught error's message: a `RuntimeError`'s, or
+    /// the `message` field of a class that has one, or its printed form.
+    ErrorMessage,
 }
 
 /// Purpose: This enum lists the string methods the static backend has.
@@ -400,7 +418,48 @@ impl Op {
     }
 }
 
+impl Op {
+    /// Purpose: This function says whether an operation can raise.
+    ///
+    /// Inputs: none.
+    ///
+    /// Outputs: true when it can fail, such as an index past the end.
+    pub fn may_raise(&self) -> bool {
+        matches!(
+            self,
+            Op::StrIndex
+                | Op::ToInt(Ty::Str)
+                | Op::ToFloat(_)
+                | Op::ToChar(_)
+                | Op::ArrayGet(_)
+                | Op::ArraySet(_)
+                | Op::ArrayPop(_)
+                | Op::DictGet(_)
+                | Op::Fail(_)
+                | Op::Str(StrMethod::Repeat | StrMethod::PadStart | StrMethod::PadEnd)
+        )
+    }
+}
+
 impl Rvalue {
+    /// Purpose: This function says whether computing an rvalue can raise, so
+    /// the lowering checks for an error after it.
+    ///
+    /// Inputs: none.
+    ///
+    /// Outputs: true for calls and for operations that can fail.
+    pub fn may_raise(&self) -> bool {
+        match self {
+            Rvalue::Call(..) | Rvalue::CallIndirect(..) => true,
+            Rvalue::Op(op, _) => op.may_raise(),
+            Rvalue::Bin(BinOp::Arith(_, NumTy::Int), ..) => true,
+            Rvalue::Bin(BinOp::Arith(ArithOp::Div | ArithOp::Rem, NumTy::Float), ..) => true,
+            Rvalue::Bin(BinOp::Bit(BitOp::Shl | BitOp::Shr), ..) => true,
+            Rvalue::Un(UnOp::Neg(NumTy::Int), _) => true,
+            _ => false,
+        }
+    }
+
     /// Purpose: This function says whether an rvalue's result is borrowed,
     /// so that storing it needs a retain.
     ///
@@ -436,6 +495,9 @@ pub enum Term {
     Return(Operand),
     /// A block control never reaches, such as the one after a failure.
     Unreachable,
+    /// Leave the function with an error raised: release every local and
+    /// return, leaving the error for the caller to find.
+    Unwind,
 }
 
 /// Purpose: This function says whether values of a type live on the heap and
@@ -447,7 +509,7 @@ pub enum Term {
 /// Outputs: true for strings, arrays, dicts, structs, and optionals of them.
 pub fn is_heap(t: &Ty) -> bool {
     match t {
-        Ty::Str | Ty::Array(_) | Ty::Map(_) | Ty::Struct(_) => true,
+        Ty::Str | Ty::Array(_) | Ty::Map(_) | Ty::Struct(_) | Ty::Error => true,
         Ty::Opt(inner) => is_heap(inner),
         _ => false,
     }

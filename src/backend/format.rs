@@ -158,6 +158,27 @@ impl<'ctx> Cx<'ctx> {
                     f.sb_finish(sb)
                 }
                 Ty::Struct(_) => f.cx.lit("<struct>"),
+                // Functions print the way v1 named them.
+                Ty::Func(crate::compiler::infer::FuncRef::Builtin(n)) => match n.as_str() {
+                    "str" | "int" | "float" | "bool" | "char" => f.cx.lit(&format!("<type {n}>")),
+                    "print" | "write" | "input" => f.cx.lit("<native fn>"),
+                    other => f.cx.lit(&format!("<builtin {other}>")),
+                },
+                Ty::Func(_) | Ty::Fn(_) => f.cx.lit("<fn>"),
+                // A caught error prints its message when it is a RuntimeError,
+                // which is what a raised string becomes; a class prints as one.
+                Ty::Error => {
+                    let e = v.into_pointer_value();
+                    let rt = f.eq(f.type_id(e), f.i64(f.cx.struct_id("RuntimeError") as i64));
+                    let out = f.var(f.cx.lit("<struct>"));
+                    f.if_(rt, |f| {
+                        let st = f.cx.struct_ty("RuntimeError");
+                        let m = f.load_ptr(f.field(st, e, 2));
+                        f.retain(&Ty::Str, m.into());
+                        f.store(out, m);
+                    });
+                    f.load_ptr(out)
+                }
                 _ => f.cx.lit("<value>"),
             };
             f.ret(s);

@@ -76,6 +76,9 @@ impl<'ctx> Cx<'ctx> {
             Ty::Bool => self.i1t().into(),
             Ty::Char => self.i32t().into(),
             Ty::Nil => self.i8t().into(),
+            // A named function or builtin as a value is known when compiling;
+            // only a joined function type is held as a pointer.
+            Ty::Func(_) => self.i8t().into(),
             Ty::Opt(inner) if is_ptr(inner) => self.ptrt().into(),
             Ty::Opt(inner) => self.opt_ty(inner).into(),
             _ => self.ptrt().into(),

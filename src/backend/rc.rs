@@ -66,7 +66,7 @@ impl<'ctx> Cx<'ctx> {
     pub fn release_fn(&self, t: &Ty) -> FunctionValue<'ctx> {
         let t = base(t).clone();
         let name = match &t {
-            Ty::Struct(_) => "jade.release.struct".to_string(),
+            Ty::Struct(_) | Ty::Error => "jade.release.struct".to_string(),
             other => format!("jade.release.{}", key(other)),
         };
         self.support(&name, None, &[self.ptrt().into()], |f| {
@@ -108,6 +108,8 @@ impl<'ctx> Cx<'ctx> {
                     for d in &drops {
                         f.call(*d, &[p.into()]);
                     }
+                    // An error raised in a destructor has no caller to go to.
+                    f.call(f.cx.report_uncaught_fn(), &[]);
                     let old = f.atomic_add(p, -1);
                     f.if_(f.ne(old, f.i64(1)), |f| f.ret_void());
                 });
@@ -198,7 +200,7 @@ impl<'a, 'ctx> F<'a, 'ctx> {
                 }
                 self.call(free, &[p.into()]);
             }
-            Ty::Struct(_) => {
+            Ty::Struct(_) | Ty::Error => {
                 let tid = self.type_id(p);
                 let default = self.block();
                 let end = self.block();

@@ -45,6 +45,19 @@ pub(super) struct Lowerer<'a> {
     pub(super) struct_ids: HashMap<String, u32>,
     pub(super) structs: Vec<StructDef>,
     pub(super) packages: HashSet<String>,
+    /// Adapters made so far, which let a named function stand behind a joined
+    /// function type's pointer.
+    adapters: std::cell::RefCell<Vec<Adapter>>,
+    /// How many instances there are, so an adapter's id follows them.
+    n_instances: usize,
+}
+
+/// Purpose: This struct holds one adapter: a function with a joined function
+/// type's signature that calls a named function's instance.
+struct Adapter {
+    name: String,
+    ty: crate::compiler::infer::FnTy,
+    func: Func,
 }
 
 /// Purpose: This function lowers a whole checked program into MIR.
@@ -69,6 +82,11 @@ pub fn lower_program(program: &TProgram, typed: &Typed) -> Result<Program> {
     let mut funcs = Vec::with_capacity(keys.len());
     for (k, _, _) in &keys {
         funcs.push(l.lower_instance(k)?);
+    }
+    // Adapters for functions stored in joined function types, asked for while
+    // the bodies above were lowered; their ids follow the instances'.
+    for a in l.adapters.borrow().iter() {
+        funcs.push(a.func.clone());
     }
     let mut globals: Vec<(GlobalId, Global)> = l
         .globals
@@ -115,14 +133,16 @@ fn inst_label(k: &InstKey) -> String {
 /// - `t`: a resolved type.
 ///
 /// Outputs: the same type with no `Var` in it.
-pub(super) fn norm(t: &Ty) -> Ty {
+pub fn norm(t: &Ty) -> Ty {
     match t {
         Ty::Var(_) => Ty::Nil,
         Ty::Opt(a) => Ty::opt(norm(a)),
         Ty::Array(a) => Ty::Array(Box::new(norm(a))),
         Ty::Map(a) => Ty::Map(Box::new(norm(a))),
         Ty::Future(a) => Ty::Future(Box::new(norm(a))),
-        Ty::Stream(a) => Ty::Stream(Box::new(norm(a))),
+        // Calling a generator runs it to the end and buffers what it yields,
+        // and a stream reads like an array, so in MIR a stream is an array.
+        Ty::Stream(a) => Ty::Array(Box::new(norm(a))),
         other => other.clone(),
     }
 }
@@ -219,6 +239,8 @@ impl<'a> Lowerer<'a> {
             globals,
             struct_ids,
             structs,
+            adapters: std::cell::RefCell::new(Vec::new()),
+            n_instances: typed.instances.len(),
             packages: crate::builtins::all_packages()
                 .iter()
                 .map(|p| p.global_name.to_string())
@@ -256,6 +278,108 @@ impl<'a> Lowerer<'a> {
                 _ => {}
             }
         }
+    }
+
+    /// Purpose: This function returns the adapter that lets a named function
+    /// stand behind a pointer of a joined function type, making it the first
+    /// time.
+    ///
+    /// The checker checked the function at the joined type's parameter types,
+    /// with its remaining parameters' defaults after them. The adapter takes
+    /// exactly the joined type's parameters, fills the defaults, calls that
+    /// instance, and converts its result to the joined type's.
+    ///
+    /// Inputs:
+    /// - `name`: the named function.
+    /// - `ft`: the joined function type.
+    /// - `span`: where, for errors.
+    ///
+    /// Outputs: the adapter's id.
+    pub(super) fn adapter(
+        &self,
+        name: &str,
+        ft: &crate::compiler::infer::FnTy,
+        span: Span,
+    ) -> Result<FuncId> {
+        if let Some(i) = self.adapters.borrow().iter().position(|a| a.name == name && a.ty == *ft) {
+            return Ok(FuncId((self.n_instances + i) as u32));
+        }
+        let def = self
+            .fns
+            .get(name)
+            .copied()
+            .ok_or_else(|| internal("an unknown function value", span))?;
+        let mut args: Vec<Ty> = ft.params.iter().map(norm).collect();
+        let mut defaults = Vec::new();
+        for (_, d) in &def.params[args.len().min(def.params.len())..] {
+            let c = match d.as_ref().map(|d| &d.kind) {
+                Some(TExprKind::Integer(i)) => (Const::Int(*i), Ty::Int),
+                Some(TExprKind::Float(x)) => (Const::Float(*x), Ty::Float),
+                Some(TExprKind::Bool(b)) => (Const::Bool(*b), Ty::Bool),
+                Some(TExprKind::Str(s)) => (Const::Str(s.clone()), Ty::Str),
+                _ => (Const::Nil(Ty::Nil), Ty::Nil),
+            };
+            args.push(c.1.clone());
+            defaults.push(c.0);
+        }
+        let key = InstKey { func: FnKey::Named(name.to_string()), args };
+        let (id, params, ret) = self.sig(&key, span)?;
+        let want = norm(&ft.ret);
+        let mut locals: Vec<LocalDecl> =
+            ft.params.iter().map(|t| LocalDecl { ty: norm(t), name: None }).collect();
+        let r = Local(locals.len() as u32);
+        locals.push(LocalDecl { ty: ret.clone(), name: None });
+        let e = Local(locals.len() as u32);
+        locals.push(LocalDecl { ty: Ty::Bool, name: None });
+        let mut argv: Vec<Operand> =
+            (0..ft.params.len()).map(|i| Operand::Copy(Place::Local(Local(i as u32)))).collect();
+        argv.extend(defaults.into_iter().map(Operand::Const));
+        let _ = params;
+        let mut done = vec![
+            Stmt::Assign(Place::Local(r), Rvalue::Call(id, argv)),
+            Stmt::Assign(Place::Local(e), Rvalue::ErrPending),
+        ];
+        let result = if ret == want {
+            Operand::Move(r)
+        } else {
+            match (&ret, &want) {
+                (_, Ty::Opt(_)) if ret != Ty::Nil => {
+                    let w = Local(locals.len() as u32);
+                    locals.push(LocalDecl { ty: want.clone(), name: None });
+                    done.push(Stmt::Assign(
+                        Place::Local(w),
+                        Rvalue::Wrap(want.clone(), Operand::Move(r)),
+                    ));
+                    Operand::Move(w)
+                }
+                (Ty::Nil, Ty::Opt(_)) => Operand::Const(Const::Nil(want.clone())),
+                (Ty::Struct(_), Ty::Struct(_)) => Operand::Move(r),
+                _ => {
+                    return Err(not_yet(
+                        format!("a function returning {ret} stored as one returning {want}"),
+                        span,
+                    ));
+                }
+            }
+        };
+        let blocks = vec![
+            Block {
+                stmts: done,
+                term: Term::If(Operand::Copy(Place::Local(e)), BlockId(2), BlockId(1)),
+            },
+            Block { stmts: Vec::new(), term: Term::Return(result) },
+            Block { stmts: Vec::new(), term: Term::Unwind },
+        ];
+        let func = Func {
+            name: format!("adapter {name} as {ft:?}"),
+            params: ft.params.len() as u32,
+            locals,
+            ret: want,
+            blocks,
+        };
+        let mut all = self.adapters.borrow_mut();
+        all.push(Adapter { name: name.to_string(), ty: ft.clone(), func });
+        Ok(FuncId((self.n_instances + all.len() - 1) as u32))
     }
 
     /// Purpose: This function lists the globals in the order the program first
@@ -377,6 +501,9 @@ impl<'a> Lowerer<'a> {
             loops: Vec::new(),
             temps: Vec::new(),
             fresh: HashSet::new(),
+            handlers: Vec::new(),
+            unwind: None,
+            stream: None,
         };
         let (name, body) = match &k.func {
             FnKey::Main => ("main".to_string(), self.top),
@@ -390,17 +517,26 @@ impl<'a> Lowerer<'a> {
                 if def.is_async {
                     return Err(not_yet("async functions", def.span));
                 }
-                if super::ops::body_yields(def.body) {
-                    return Err(not_yet("functions that yield", def.span));
-                }
                 for ((p, _), t) in def.params.iter().zip(&params) {
                     let l = fx.new_local(t.clone(), Some(p.clone()));
                     fx.scopes[0].insert(p.clone(), l);
                 }
+
                 (inst_label(k), def.body)
             }
         };
         let nparams = fx.locals.len() as u32;
+        if k.func != FnKey::Main && super::ops::body_yields(body) {
+            let Ty::Array(el) = fx.ret.clone() else {
+                return Err(internal(
+                    "a generator that does not return a stream",
+                    Span { line: 0, col: 0 },
+                ));
+            };
+            let s = fx.new_local(fx.ret.clone(), None);
+            fx.emit(Stmt::Assign(Place::Local(s), Rvalue::Array((*el).clone(), Vec::new())));
+            fx.stream = Some((s, *el));
+        }
         fx.lower_body(body)?;
         Ok(Func { name, params: nparams, locals: fx.locals, ret: fx.ret, blocks: fx.blocks })
     }
@@ -428,6 +564,12 @@ pub(super) struct Fx<'a, 'l> {
     temps: Vec<Local>,
     /// Temporaries whose reference has not been handed over yet.
     fresh: HashSet<Local>,
+    /// Each enclosing `try`'s handler block, innermost last.
+    handlers: Vec<BlockId>,
+    /// The block that leaves the function with an error raised, once made.
+    unwind: Option<BlockId>,
+    /// For a generator, the array each `yield` appends to, and its element type.
+    stream: Option<(Local, Ty)>,
 }
 
 impl<'a, 'l> Fx<'a, 'l> {
@@ -502,7 +644,51 @@ impl<'a, 'l> Fx<'a, 'l> {
             let b = self.new_block();
             self.cur = b;
         }
+        let raises = match &s {
+            Stmt::Assign(_, rv) | Stmt::Eval(rv) => rv.may_raise(),
+            _ => false,
+        };
         self.blocks[self.cur.0 as usize].stmts.push(s);
+        if raises {
+            self.check_err();
+        }
+    }
+
+    /// Purpose: This function sends control to the error handler when the
+    /// statement just emitted raised.
+    ///
+    /// Inputs: none.
+    ///
+    /// Outputs: none. Lowering continues in the block where nothing was raised.
+    fn check_err(&mut self) {
+        let e = self.new_local(Ty::Bool, None);
+        self.blocks[self.cur.0 as usize]
+            .stmts
+            .push(Stmt::Assign(Place::Local(e), Rvalue::ErrPending));
+        let handler = self.handler();
+        let cont = self.new_block();
+        self.terminate(Term::If(Operand::Copy(Place::Local(e)), handler, cont));
+        self.switch_to(cont);
+    }
+
+    /// Purpose: This function returns where a raised error goes from here: the
+    /// innermost `try`'s handler, or out of the function.
+    ///
+    /// Inputs: none.
+    ///
+    /// Outputs: the block.
+    fn handler(&mut self) -> BlockId {
+        if let Some(h) = self.handlers.last() {
+            return *h;
+        }
+        if let Some(u) = self.unwind {
+            return u;
+        }
+        let u = self.new_block();
+        self.blocks[u.0 as usize].term = Term::Unwind;
+        self.done[u.0 as usize] = true;
+        self.unwind = Some(u);
+        u
     }
 
     /// Purpose: This function makes a new empty block.
@@ -657,6 +843,13 @@ impl<'a, 'l> Fx<'a, 'l> {
                 self.coerce(v, inner, to, span)
             }
             (Ty::Struct(_), Ty::Struct(_)) => Ok(op),
+            // A named function joining others becomes a pointer to an adapter
+            // with the joined signature.
+            (Ty::Func(crate::compiler::infer::FuncRef::Named(n)), Ty::Fn(ft)) => {
+                let id = self.l.adapter(n, ft, span)?;
+                Ok(self.assign_temp(to.clone(), Rvalue::FnAddr(id)))
+            }
+            (Ty::Func(_), Ty::Fn(_)) => Err(not_yet("a builtin stored with other functions", span)),
             _ => Err(internal(format!("cannot convert {from} to {to}"), span)),
         }
     }
@@ -691,6 +884,7 @@ impl<'a, 'l> Fx<'a, 'l> {
     fn lower_body(&mut self, body: &'a [TStmt]) -> Result<()> {
         // A function's trailing bare expression is its return value.
         if !self.is_main
+            && self.stream.is_none()
             && let Some(TStmt::Expr(e)) = body.last()
         {
             for s in &body[..body.len() - 1] {
@@ -717,6 +911,12 @@ impl<'a, 'l> Fx<'a, 'l> {
                     self.emit(Stmt::Drop(Place::Global(g)));
                 }
             }
+        }
+        // A generator returns what it yielded.
+        if let Some((s, _)) = &self.stream {
+            let s = *s;
+            self.terminate(Term::Return(Operand::Copy(Place::Local(s))));
+            return Ok(());
         }
         // Falling off the end returns nil, where the return type can hold it.
         match &self.ret {
@@ -822,6 +1022,11 @@ impl<'a, 'l> Fx<'a, 'l> {
             | TStmt::ExtendBlock { .. }
             | TStmt::Use { .. }
             | TStmt::FromUse { .. } => Ok(()),
+            TStmt::Return { span, .. } if self.stream.is_some() => {
+                let (s, _) = self.stream.clone().ok_or_else(|| internal("no stream", *span))?;
+                self.terminate(Term::Return(Operand::Copy(Place::Local(s))));
+                Ok(())
+            }
             TStmt::Return { value, span } => {
                 let ret = self.ret.clone();
                 let v = match value {
@@ -941,14 +1146,126 @@ impl<'a, 'l> Fx<'a, 'l> {
                 }
             }
             TStmt::PromptDecl { span, .. } => Err(not_yet("prompts", *span)),
-            TStmt::Yield { span, .. } => Err(not_yet("yield", *span)),
-            TStmt::Raise { span, .. } => Err(not_yet("raise", *span)),
-            TStmt::TryCatch { span, .. } => Err(not_yet("try and catch", *span)),
+            TStmt::Yield { value, span } => {
+                let (s, el) = self
+                    .stream
+                    .clone()
+                    .ok_or_else(|| internal("yield outside a generator", *span))?;
+                let (v, t) = self.expr(value)?;
+                let v = self.coerce(v, &t, &el, *span)?;
+                let v = self.consume(v);
+                self.emit(Stmt::Eval(Rvalue::Op(
+                    Op::ArrayPush(el),
+                    vec![Operand::Copy(Place::Local(s)), v],
+                )));
+                Ok(())
+            }
+            TStmt::Raise { value, span } => {
+                let (v, vt) = self.expr(value)?;
+                let obj = match &vt {
+                    // `raise "x"` raises a RuntimeError carrying the message.
+                    Ty::Str => {
+                        let v = self.consume(v);
+                        self.assign_temp(
+                            Ty::Struct("RuntimeError".into()),
+                            Rvalue::Struct("RuntimeError".into(), vec![v]),
+                        )
+                    }
+                    Ty::Struct(_) | Ty::Error => v,
+                    other => return Err(internal(format!("raising a {other}"), *span)),
+                };
+                let obj = self.consume(obj);
+                self.emit(Stmt::Raise(obj));
+                let h = self.handler();
+                self.terminate(Term::Goto(h));
+                Ok(())
+            }
+            TStmt::TryCatch { body, arms, .. } => self.try_catch(body, arms),
             TStmt::Expr(e) => {
                 self.expr(e)?;
                 Ok(())
             }
         }
+    }
+
+    /// Purpose: This function lowers `try { … } catch … { … }`.
+    ///
+    /// The body runs with a handler block of its own, which takes the raised
+    /// error out of the thread's slot and tests each arm in order: a typed arm
+    /// matches the class it names and every class that descends from it, and
+    /// an untyped arm matches anything. An error no arm matches is raised again
+    /// to the enclosing handler.
+    ///
+    /// Inputs:
+    /// - `body`: the statements tried.
+    /// - `arms`: the catch arms.
+    ///
+    /// Outputs: `Ok(())` or an error.
+    fn try_catch(
+        &mut self,
+        body: &'a [TStmt],
+        arms: &'a [crate::compiler::tir::TCatchArm],
+    ) -> Result<()> {
+        let h = self.new_block();
+        let end = self.new_block();
+        self.handlers.push(h);
+        self.block(body)?;
+        self.handlers.pop();
+        self.terminate(Term::Goto(end));
+
+        self.switch_to(h);
+        let err = self.new_local(Ty::Error, None);
+        self.emit(Stmt::Assign(Place::Local(err), Rvalue::TakeErr));
+        for arm in arms {
+            let (bound, next) = match &arm.catch_type {
+                Some(class) => {
+                    let ids: Vec<i64> = self
+                        .l
+                        .structs
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, s)| s.name == *class || s.ancestors.iter().any(|a| a == class))
+                        .map(|(i, _)| i as i64)
+                        .collect();
+                    let hit = self.new_local(Ty::Bool, None);
+                    self.emit(Stmt::Assign(
+                        Place::Local(hit),
+                        Rvalue::IsA(Operand::Copy(Place::Local(err)), ids),
+                    ));
+                    let yes = self.new_block();
+                    let next = self.new_block();
+                    self.terminate(Term::If(Operand::Copy(Place::Local(hit)), yes, next));
+                    self.switch_to(yes);
+                    (Ty::Struct(class.clone()), Some(next))
+                }
+                None => (Ty::Error, None),
+            };
+            self.scopes.push(HashMap::new());
+            let b = self.new_local(bound, Some(arm.binding.clone()));
+            self.scopes.last_mut().expect("scope").insert(arm.binding.clone(), b);
+            self.emit(Stmt::Assign(Place::Local(b), Rvalue::Use(Operand::Move(err))));
+            for s in &arm.body {
+                self.stmt(s)?;
+            }
+            let scope = self.scopes.pop().expect("scope");
+            for l in scope.into_values() {
+                self.emit(Stmt::Drop(Place::Local(l)));
+            }
+            self.terminate(Term::Goto(end));
+            match next {
+                Some(n) => self.switch_to(n),
+                None => {
+                    self.switch_to(end);
+                    return Ok(());
+                }
+            }
+        }
+        // No arm matched: raise it again for the enclosing handler.
+        self.emit(Stmt::Raise(Operand::Move(err)));
+        let outer = self.handler();
+        self.terminate(Term::Goto(outer));
+        self.switch_to(end);
+        Ok(())
     }
 
     /// Purpose: This function lowers a `for` loop over an array, a string or a
@@ -1092,8 +1409,12 @@ impl<'a, 'l> Fx<'a, 'l> {
                 } else if let Some((place, pt)) = self.lookup(name) {
                     // A narrowed read: the variable is `T?` and known present here.
                     self.coerce(Operand::Copy(place), &pt, &et, span)?
+                } else if matches!(et, Ty::Func(_)) {
+                    // A named function or builtin as a value: known now, called
+                    // directly wherever it goes.
+                    Operand::Const(Const::Static(et.clone()))
                 } else {
-                    return Err(not_yet("functions used as values", span));
+                    return Err(internal(format!("an unknown name '{name}'"), span));
                 }
             }
             TExprKind::Call { callee, args, kwargs } => {
@@ -1250,7 +1571,9 @@ impl<'a, 'l> Fx<'a, 'l> {
                 }
                 None => Err(not_yet("bound methods used as values", span)),
             },
-            Ty::Error => Err(not_yet("caught errors", span)),
+            Ty::Error if field == "message" => {
+                Ok(self.assign_temp(Ty::Str, Rvalue::Op(Op::ErrorMessage, vec![o])))
+            }
             other => Err(not_yet(format!("methods of {other} used as values"), span)),
         }
     }
@@ -1622,7 +1945,20 @@ impl<'a, 'l> Fx<'a, 'l> {
                 TExprKind::Identifier(n) if n.starts_with("__native$") => {
                     Err(not_yet("C libraries", span))
                 }
-                _ => Err(not_yet("calls through function values", span)),
+                _ => {
+                    // A call through a joined function type: a pointer.
+                    let (c, ct) = self.expr(callee)?;
+                    let Ty::Fn(ft) = &ct else {
+                        return Err(internal(format!("a call through a {ct}"), span));
+                    };
+                    let mut argv = Vec::new();
+                    for (a, pt) in args.iter().zip(&ft.params) {
+                        let (v, t) = self.expr(a)?;
+                        argv.push(self.coerce(v, &t, &norm(pt), a.span)?);
+                    }
+                    let rt = norm(&ft.ret);
+                    Ok((self.assign_temp(rt.clone(), Rvalue::CallIndirect(c, argv)), et.clone()))
+                }
             },
         }
     }
@@ -1637,7 +1973,7 @@ impl<'a, 'l> Fx<'a, 'l> {
     /// - `span`: where.
     ///
     /// Outputs: the call's result.
-    fn call_instance(
+    pub(super) fn call_instance(
         &mut self,
         k: &InstKey,
         def: FnDef<'a>,

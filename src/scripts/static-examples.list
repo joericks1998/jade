@@ -6,10 +6,12 @@
 # design/v2-static-values.md; when it holds every example, the static backend
 # becomes the only one and this file goes away.
 #
-# Phase 2 (core codegen): ints, floats, bools, strings, arrays, dicts, structs,
-# control flow, functions, printing and integer overflow.
+# Phase 2 (core codegen): ints, floats, bools, strings, arrays, dicts, classes,
+# control flow, functions, printing and integer overflow. Phase 3: exceptions,
+# functions as values, map and filter, and streams.
 examples/arithmatic/arithmetic/arithmetic.jde
 examples/arithmatic/bitwise/bitwise.jde
+examples/arithmatic/shift_bounds/shift_bounds.jde
 examples/arithmatic/unary/unary.jde
 examples/arrays/basic/basic.jde
 examples/arrays/mixed/mixed.jde
@@ -25,6 +27,7 @@ examples/classes/copy_with_inherit_across_files/creatures.jde
 examples/classes/defaults/defaults.jde
 examples/classes/destructors/destructors.jde
 examples/classes/diamond/diamond.jde
+examples/classes/empty/empty.jde
 examples/classes/inherit_across_files/creatures.jde
 examples/classes/inherit_across_files/inherit_across_files.jde
 examples/classes/inheritance/inheritance.jde
@@ -39,6 +42,8 @@ examples/closures/closures.jde
 examples/collections/container_semantics/container_semantics.jde
 examples/collections/edge_cases/edge_cases.jde
 examples/collections/method_type_guard/method_type_guard.jde
+examples/collections/two_spellings/two_spellings.jde
+examples/control_flow/break_continue/break_continue.jde
 examples/control_flow/elif/elif.jde
 examples/control_flow/if_else/if_else.jde
 examples/control_flow/nested_if/nested_if.jde
@@ -49,10 +54,23 @@ examples/control_flow/while_nested/while_nested.jde
 examples/decorators/values/values.jde
 examples/dicts/basic/basic.jde
 examples/dicts/nested_get/nested_get.jde
+examples/exceptions/break_from_catch/break_from_catch.jde
+examples/exceptions/catch_inherited/catch_inherited.jde
+examples/exceptions/error_values/error_values.jde
+examples/exceptions/exceptions.jde
+examples/exceptions/raise_through_frames/raise_through_frames.jde
+examples/exceptions/return_inside_try/return_inside_try.jde
+examples/exceptions/state_after_catch/state_after_catch.jde
+examples/ffi/char_across/char_across.jde
 examples/for_loop/for_loop.jde
 examples/functions/basic/basic.jde
+examples/functions/first_class/first_class.jde
+examples/functions/nested_calls/nested_calls.jde
 examples/functions/recursion/recursion.jde
+examples/functions/recursion_limit/recursion_limit.jde
+examples/functions/return_paths/return_paths.jde
 examples/functions/scope/scope.jde
+examples/functions/values/values.jde
 examples/imports/basic/basic.jde
 examples/imports/basic/math_lib.jde
 examples/imports/class_methods/class_methods.jde
@@ -62,7 +80,11 @@ examples/imports/project_lib/shared/units.jde
 examples/llvm/dict_in/dict_in.jde
 examples/llvm/kwargs/kwargs.jde
 examples/numbers/float_display/float_display.jde
+examples/numbers/int_bounds/int_bounds.jde
+examples/numbers/overflow/overflow.jde
 examples/pipe/pipe.jde
+examples/streams/raise_midstream/raise_midstream.jde
+examples/streams/yield_basic/yield_basic.jde
 examples/strings/chars/chars.jde
 examples/strings/edge_cases/edge_cases.jde
 examples/strings/fstrings/fstrings.jde
