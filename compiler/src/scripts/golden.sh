@@ -11,7 +11,7 @@
 # An example that should exit non-zero records its status in `<name>.expected-exit`.
 # An example with no `.expected` file is reported as missing, never as passing.
 #
-# Usage: src/scripts/golden.sh [path-to-jade-binary]
+# Usage: compiler/src/scripts/golden.sh [path-to-jade-binary]
 
 set -uo pipefail
 

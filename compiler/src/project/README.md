@@ -47,7 +47,7 @@ A `[lib]` entry may also name an `entry` module, which a bare `use <name>` resol
 
 ## Gotchas
 
-Any change to resolution behavior must be checked against `examples/imports/`. `./src/scripts/golden.sh` builds those fixtures and compares their output with what was recorded, and `jade check` over the same fixtures covers the import walk.
+Any change to resolution behavior must be checked against `examples/imports/`. `./compiler/src/scripts/golden.sh` builds those fixtures and compares their output with what was recorded, and `jade check` over the same fixtures covers the import walk.
 
 `CSymbol` accepts two shapes: a table, or the bare string `"?"` for a prototype nobody has written yet. It deserializes by hand to keep the two apart. Using `#[serde(untagged)]` would collapse every table's error into "data did not match any variant", losing the "missing field `ret`" that says what is actually wrong.
 

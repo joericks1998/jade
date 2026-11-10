@@ -30,5 +30,5 @@ The earlier design had `?p` produce a one-shot token stream that raised `DoubleS
 ```sh
 ./target/debug/jade run examples/streams/yield_basic/yield_basic.jde
 ./target/debug/jade check examples/streams/yield_toplevel_error.jde   # must fail
-./src/scripts/backend-parity.sh
+./compiler/src/scripts/golden.sh
 ```

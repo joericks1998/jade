@@ -30,7 +30,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y llvm-18-dev libpolly-18-dev libzstd-dev liblld-18-dev
 
-      # glib is the FFI gate's fixture — see src/scripts/ffi-gate.sh for why a
+      # glib is the FFI gate's fixture — see compiler/src/scripts/ffi-gate.sh for why a
       # big ordinary library is the point. pkg-config is how the gate finds it,
       # since the library sits in an architecture-named directory.
       - name: Install glib
@@ -112,7 +112,7 @@ jobs:
       - name: Golden outputs
         env:
           LLVM_SYS_180_PREFIX: /usr/lib/llvm-18
-        run: ./src/scripts/golden.sh
+        run: ./compiler/src/scripts/golden.sh
 
       # Binds a real C library and runs it, once and then 600,000 times.
       #
@@ -125,7 +125,7 @@ jobs:
       - name: FFI gate
         env:
           LLVM_SYS_180_PREFIX: /usr/lib/llvm-18
-        run: ./src/scripts/ffi-gate.sh
+        run: ./compiler/src/scripts/ffi-gate.sh
 
   tag-release:
     name: Tag release
@@ -137,12 +137,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The compiler releases when its own version, the root Cargo.toml's, is new.
+      # The compiler releases when its own version, compiler/Cargo.toml's, is new.
       # Its tags stay plain `v2.0.1`, the scheme every earlier release used; dovata's
-      # are `dovata-v3.2.0`, pushed by dovata-ci.yml from dovata/Cargo.toml.
+      # are `dovata-v3.2.0`, pushed by dovata-ci.yml from dovata/Cargo.toml. The root
+      # Cargo.toml is the workspace's and has no version.
       - name: Create version tag if new
         run: |
-          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          VERSION=$(grep '^version' compiler/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
           TAG="v$VERSION"
           if git ls-remote --tags origin "refs/tags/$TAG" | grep -q "$TAG"; then
             echo "Tag $TAG already exists — skipping."

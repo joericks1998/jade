@@ -213,11 +213,18 @@ mod tests {
                 }
             }
         }
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+        let root = repo_root().join("examples");
         let mut files = Vec::new();
         walk(&root, &mut files);
         files.sort();
         files
+    }
+
+    /// Purpose: This function finds the repo's root, where `examples/` is: the
+    /// directory above this crate's, `compiler/`.
+    fn repo_root() -> &'static Path {
+        let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        crate_dir.parent().unwrap_or(crate_dir)
     }
 
     /// Fixtures named `*_error.jde` document a rejected program and are expected
@@ -238,8 +245,7 @@ mod tests {
         // run reports the full list.
         let mut problems = Vec::new();
         for path in &files {
-            let rel =
-                path.strip_prefix(env!("CARGO_MANIFEST_DIR")).unwrap_or(path).display().to_string();
+            let rel = path.strip_prefix(repo_root()).unwrap_or(path).display().to_string();
             match (check_file(path), expects_failure(path)) {
                 // Expected outcomes.
                 (Ok(()), false) | (Err(_), true) => {}

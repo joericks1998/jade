@@ -92,6 +92,6 @@ On one benchmark of recursion, string building, dict inserts and a float loop, a
 
 ```sh
 cargo test backend::
-./src/scripts/golden.sh
+./compiler/src/scripts/golden.sh
 ./target/debug/jade build --emit ir file.jde    # the IR, before optimization
 ```

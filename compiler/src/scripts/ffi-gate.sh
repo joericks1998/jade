@@ -30,7 +30,7 @@
 # Both are skipped rather than failed when what they need is absent, so this
 # is safe to run anywhere. Skips are reported, never silent.
 #
-# Usage: src/scripts/ffi-gate.sh [path-to-jade-binary]
+# Usage: compiler/src/scripts/ffi-gate.sh [path-to-jade-binary]
 
 set -uo pipefail
 

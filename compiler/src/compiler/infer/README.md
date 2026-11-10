@@ -2,7 +2,7 @@
 
 ## What this subtree is
 
-This is Jade 2.0's type checker. It works out one concrete type for every value in a program, with no annotations, so the backend can compile an int to a register and a struct to a fixed layout with no type tags. It also decides which programs Jade 2.0 accepts. The rules it enforces are the decisions in [`design/v2-static-values.md`](../../../design/v2-static-values.md); read that first.
+This is Jade 2.0's type checker. It works out one concrete type for every value in a program, with no annotations, so the backend can compile an int to a register and a struct to a fixed layout with no type tags. It also decides which programs Jade 2.0 accepts. The rules it enforces are the decisions in [`design/v2-static-values.md`](../../../../design/v2-static-values.md); read that first.
 
 It runs on the whole merged program: after the per-file pass in `type_infer.rs`, after the import pass inlines every module, and after struct defaults are filled. Its answer is the input to the rest of the build: [`src/mir/`](../../mir/README.md) lowers it into typed code. A program it rejects neither builds nor passes `jade check`.
 

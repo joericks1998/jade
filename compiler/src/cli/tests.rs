@@ -319,7 +319,8 @@ mod fmt {
     fn formatting_every_example_preserves_its_tokens() {
         // The suite in `examples/` is the widest real sample of Jade there is.
         // Formatting any of it into a different token stream is a bug here.
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+        // The crate is compiler/, and examples/ is beside it at the repo root.
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples");
         let mut files = Vec::new();
         collect_jde_files(&root, &mut files);
         assert!(files.len() > 50, "expected the fixture suite, found {}", files.len());

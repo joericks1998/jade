@@ -4,7 +4,7 @@ This repo holds two programs, and each one is tested, tagged and released from i
 
 | crate | lives in | version in | tags | workflows |
 |---|---|---|---|---|
-| `jade`, the compiler | the repo root | `Cargo.toml` | `v2.0.1` | `ci.yml`, `release.yml` |
+| `jade`, the compiler | `compiler/` | `compiler/Cargo.toml` | `v2.0.1` | `ci.yml`, `release.yml` |
 | `dovata`, the model memory process | `dovata/` | `dovata/Cargo.toml` | `dovata-v3.2.0` | `dovata-ci.yml`, `dovata-release.yml` |
 
 `deploy-docs.yml` publishes jadelang.org from `docs/` and has nothing to do with either release.
@@ -19,15 +19,15 @@ A release starts with a crate's version changing, and nothing else. For dovata:
 4. A tag pushed with the workflow's own token starts no other workflow, so `tag-release` sends a `repository_dispatch` event named `release-dovata` instead.
 5. `dovata-release.yml` builds `dovata` and `gguf-inspect` on each platform, checks that `dovata --version` matches the tag, and publishes a GitHub release with the archives, `checksums.txt` and generated release notes.
 
-The compiler works the same way, with the root `Cargo.toml`, `ci.yml`, a `v2.0.2` tag, the dispatch event `release`, and `release.yml`.
+The compiler works the same way, with `compiler/Cargo.toml`, `ci.yml`, a `v2.0.2` tag, the dispatch event `release`, and `release.yml`.
 
 A merge that changes neither version tags nothing and releases nothing. A merge that changes one releases that one alone, so a dovata fix ships without a new compiler, and the other way around.
 
 ## Why each workflow only runs for its own crate
 
-`ci.yml` ignores `dovata/**`, and `dovata-ci.yml` runs only for `dovata/**`, the root `Cargo.toml` and `Cargo.lock`, and its own workflow files. A change to dovata alone does not install LLVM 18 and build the compiler, and a change to the compiler does not run dovata's tests. The root manifest and lockfile are the workspace's, so a change to them runs both.
+`ci.yml` ignores `dovata/**`, and `dovata-ci.yml` runs only for `dovata/**`, the root `Cargo.toml` and `Cargo.lock`, and its own workflow files. A change to dovata alone does not install LLVM 18 and build the compiler, and a change to the compiler does not run dovata's tests. The root `Cargo.toml` is the workspace's alone, with no version of its own, and the lockfile is shared, so a change to either runs both.
 
-Every cargo command in dovata's workflows names dovata's packages with `-p`, never `--workspace`, because the workspace holds the compiler too, and the compiler needs LLVM 18 to build. The compiler's commands need no `-p`: the root package is the workspace's default, so a bare `cargo build` there builds `jade` alone. The one exception is `cargo fmt -p jade --check`, since `cargo fmt --all` would reach dovata, which is not formatted with rustfmt.
+Every cargo command in dovata's workflows names dovata's packages with `-p`, never `--workspace`, because the workspace holds the compiler too, and the compiler needs LLVM 18 to build. The compiler's commands need no `-p`: the workspace's `default-members` is `compiler`, so a bare `cargo build` at the root builds `jade` alone. The one exception is `cargo fmt -p jade --check`, since `cargo fmt --all` would reach dovata, which is not formatted with rustfmt.
 
 ## The latest release is the compiler's
 

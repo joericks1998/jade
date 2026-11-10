@@ -39,9 +39,9 @@ v2 removed the VM, which leaves nothing to diff against. So before the VM went, 
 
 ```sh
 cargo build
-./src/scripts/golden.sh                    # uses ./target/debug/jade
-./src/scripts/golden.sh /path/to/jade      # or a specific binary
-./src/scripts/ffi-gate.sh
+./compiler/src/scripts/golden.sh                    # uses ./target/debug/jade
+./compiler/src/scripts/golden.sh /path/to/jade      # or a specific binary
+./compiler/src/scripts/ffi-gate.sh
 ```
 
 ## `ffi-gate.sh`: a real C library, bound and run
@@ -95,7 +95,7 @@ The 16 MB allowance between the two runs comes from the measurement above rather
 A missing glib or a missing C compiler produces a *skip*, reported rather than silent, so the script is safe to run anywhere.
 
 ```sh
-./src/scripts/ffi-gate.sh                    # or pass a path to a jade binary
+./compiler/src/scripts/ffi-gate.sh                    # or pass a path to a jade binary
 ```
 
 To drive the loop by hand at a different size, set `JADE_FFI_LOOP_ITERS` to the call count you want. The fixture defaults to 100,000 without it.

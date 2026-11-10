@@ -58,7 +58,7 @@ The things that produce `bytes` values elsewhere: `read_bytes` and `read_stdin_b
 cargo test backend::
 ./target/debug/jade run examples/bytes/construct/construct.jde
 ./target/debug/jade run examples/bytes/buffer/buffer.jde
-./src/scripts/golden.sh
+./compiler/src/scripts/golden.sh
 ```
 
 The golden script is the one that matters. It builds every example, these two included, and compares each binary's output with what the VM and the compiled backend agreed on at v1.4.8.

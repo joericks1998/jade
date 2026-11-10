@@ -2,7 +2,7 @@
 
 ## What this subtree is
 
-The fixtures for `std::bytes` and for `b[i] = v`. Two programs, each built and run by `src/scripts/golden.sh`, which compares what the binary prints with the `.expected` file beside it.
+The fixtures for `std::bytes` and for `b[i] = v`. Two programs, each built and run by `compiler/src/scripts/golden.sh`, which compares what the binary prints with the `.expected` file beside it.
 
 - *`construct/construct.jde`* covers `bytes.zeros`, `bytes.from_ints`, and `bytes.concat`, including every failure each can raise.
 - *`buffer/buffer.jde`* covers writing an octet, and the reference semantics that come with it.
@@ -17,8 +17,8 @@ Because a module-level binding and a local inside a function reach the write by 
 
 Until v1.4.8 the parity gate diffed stdout, stderr, and the exit code byte for byte. The VM prefixed a raised message with its source span and a compiled binary has no span at run time, so a fixture that printed `e.message` would have failed the gate on plumbing rather than on behavior. Printing `"refused a negative length"` still proves the raise happened, still proves it was catchable, and proved both engines agreed on *whether* it raises. The `.expected` files were recorded from those runs, so the literal stays.
 
-The wording itself lives in `src/backend/bytes.rs`, which emits the support code that raises it.
+The wording itself lives in `compiler/src/backend/bytes.rs`, which emits the support code that raises it.
 
 ## Who uses it
 
-`src/scripts/golden.sh` runs both files. `src/cli/check.rs` asserts every example passes `jade check`, and `src/cli/tests.rs` asserts the formatter leaves them alone. See [`examples/README.md`](../README.md) for the rules a fixture has to follow.
+`compiler/src/scripts/golden.sh` runs both files. `compiler/src/cli/check.rs` asserts every example passes `jade check`, and `compiler/src/cli/tests.rs` asserts the formatter leaves them alone. See [`examples/README.md`](../README.md) for the rules a fixture has to follow.

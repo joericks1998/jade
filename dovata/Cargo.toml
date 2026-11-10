@@ -111,7 +111,7 @@ libc = { version = "0.2", optional = true }
 objc2-metal = { version = "0.3.2", default-features = false, features = ["std", "MTLDevice"], optional = true }
 
 # ── Workspace ─────────────────────────────────────────────────────────────────
-# dovata is a member of the jadelang repo's workspace, whose root Cargo.toml lists
+# dovata is a member of the Jade repo's workspace, whose root Cargo.toml lists
 # chat_template and refback beside it and holds the [workspace.package] values these
 # crates inherit. It keeps its own version and its own releases, tagged dovata-v*.
 

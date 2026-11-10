@@ -42,5 +42,5 @@ There are three rather than one because a caller wants something different in ea
 
 ```sh
 ./target/debug/jade run examples/trust/sh_sinks/sh_sinks.jde
-./src/scripts/golden.sh
+./compiler/src/scripts/golden.sh
 ```

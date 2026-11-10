@@ -12,180 +12,54 @@ let n = ?p |> int      // n is an int, or the program raises. Never a string to 
 
 That `|> int` runs in two stages. First, naming a type builds a grammar that limits how the model generates its reply. A reply shaped like prose or wrapped in a code fence is ruled out before a single token of it exists. Second, whatever comes back is coerced to the type you named. If it still does not fit, the program raises `PromptOverflow` instead of handing you a string to parse. The glue code you would otherwise write by hand is the language's job.
 
-On this branch, prompts do not compile yet. Jade 2.0 compiles model inference into the program itself, and a program that dereferences a prompt stops with `jade cannot compile prompts yet` until the Metal kernel milestone, which is next.
+On this branch, Jade 2.0 compiles model inference into the program itself. A program that dereferences a prompt runs a model the dovata process holds, as Metal kernels on Apple Silicon, and `?p |> int`, `float`, `bool` and `char` read their value out of the reply. The grammar and `?p |> Class` are not compiled yet, and Linux and CUDA come next.
 
-Prompts live wherever values live, including inside structs. You dereference them right where you use them.
+Prompts live wherever values live, including inside classes. You dereference them right where you use them.
 
 ```jade
-struct Agent {
-    prompt system = "You are a careful code reviewer."
+class Agent {
+    @public prompt system = "You are a careful code reviewer."
 }
 
 let a = Agent {}
 let review = a~>system        // or the explicit a.(?system)
 ```
 
-*This README is for people working on the compiler.* If you want to use Jade, install it, learn the syntax, or browse the standard library, go to [jadelang.org](https://jadelang.org).
+*This README is for people working on Jade.* If you want to use Jade, install it, learn the syntax, or browse the standard library, go to [jadelang.org](https://jadelang.org).
 
 ---
 
-## Where to start reading
+## What is in this repo
 
-Every directory in this repo has its own `README.md`. Read them in the order the compiler runs, because almost every change makes more sense once you know which stage it belongs to.
+The repo holds two programs. Each is a directory with its own `Cargo.toml`, `README.md` and `src/`, and each has its own version and its own releases.
 
-1. [`src/frontend/`](src/frontend/README.md) turns source text into tokens and then an AST. Start here if you are touching syntax.
-2. [`src/compiler/`](src/compiler/README.md) infers types and produces TIR, and its `infer/` gives every value one static type. Start here if you are touching types.
-3. [`src/mir/`](src/mir/README.md) lowers the checker's answer into MIR: typed locals, basic blocks, and explicit reference counts.
-4. [`src/backend/`](src/backend/README.md) turns MIR into LLVM IR and links a binary against the C library alone. What v1 called the runtime is support code here, emitted into each program only where it is used.
-5. [`examples/`](examples/README.md) is the fixture suite. A language change starts here.
+| directory | what it is |
+|---|---|
+| [`compiler/`](compiler/README.md) | `jade`, the compiler and the rest of the toolchain: lexer, parser, type checker, LLVM backend, package manager and CLI. Start here to work on the language. |
+| [`dovata/`](dovata/README.md) | the process that holds a model's memory, plans where every tensor lives, and hands that memory to compiled programs. |
 
-Three more that come up often:
+The rest is shared by both:
 
-- [`src/builtins/`](src/builtins/README.md) if you are adding something to `std`.
-- [`src/pkg/`](src/pkg/README.md) if you are working on packages or C bindings.
-- [`src/cli/`](src/cli/README.md) if you are adding or changing a `jade` subcommand.
+- [`examples/`](examples/README.md) is the `.jde` fixture suite. CI checks every one, and builds and runs most of them.
+- [`design/`](design/README.md) holds design documents for work in progress.
+- [`docs/`](docs/README.md) is the jadelang.org site, for people using Jade.
+- [`bench/`](bench/README.md) holds benchmarks against CPython.
+- [`.github/workflows/`](.github/workflows/README.md) tests and releases both programs.
 
-[`CLAUDE.md`](CLAUDE.md) has the full map of every directory with a one-line description of each.
+The root `Cargo.toml` is the workspace and nothing else. A bare `cargo build` or `cargo test` here means the compiler; name dovata's packages with `-p`, as in `cargo build -p dovata`.
 
 ---
 
 ## Build from source
 
-You need two things installed.
-
-*Rust 1.85 or later.* Install it from [rustup.rs](https://rustup.rs). The crate uses edition 2024, so an older toolchain will not build it.
-
-*LLVM 18.* `jade build` compiles and links in-process rather than shelling out to a separate compiler, so LLVM and its linker, LLD, are build dependencies of the toolchain itself. The root `build.rs` compiles `src/backend/lld.cpp` against LLD's libraries from the same install. A released `jade` binary needs nothing installed; only building from source does.
-
-```sh
-brew install llvm@18                                              # macOS
-sudo apt-get install llvm-18-dev libpolly-18-dev libzstd-dev liblld-18-dev   # Debian and Ubuntu
-```
-
-`cargo build` and `cargo test` need nothing else. The FFI gate, `src/scripts/ffi-gate.sh`, binds against real glib, so running that one script also needs glib, pkg-config, and clang:
-
-```sh
-brew install glib pkg-config                                # macOS
-sudo apt-get install libglib2.0-dev pkg-config clang        # Debian and Ubuntu
-```
-
-The `llvm-sys` crate finds LLVM through the `LLVM_SYS_180_PREFIX` environment variable. `.cargo/config.toml` sets it to the Apple Silicon Homebrew path as a default. Cargo will not overwrite a variable you have already exported, so on any other host set it yourself:
-
-```sh
-export LLVM_SYS_180_PREFIX=/opt/homebrew/opt/llvm@18    # macOS
-export LLVM_SYS_180_PREFIX=/usr/lib/llvm-18             # Debian and Ubuntu
-```
-
-Then clone and build:
-
 ```sh
 git clone https://github.com/joericks1998/jade
 cd jade
-cargo build            # debug build, at target/debug/jade
-cargo test
+cargo build              # the compiler, at target/debug/jade
+cargo build -p dovata    # dovata, at target/debug/dovata
 ```
 
-For a build with optimizations, use `cargo build --release` and look in `target/release` instead. Both work; debug builds are faster to produce and are what you want while developing.
-
-### The binary stands alone
-
-A program `jade build` emits links the C library and nothing else, through the LLD built into `jade`. There are no runtime archives to keep beside the binary, so a locally built `jade` works after you delete the checkout, and you can copy it to another machine on its own. Until Jade 2.0 every program linked two runtime archives, and the checkout had to stay.
-
-### Confirm it works
-
-```sh
-./target/debug/jade run examples/strings/fstrings/fstrings.jde     # prints "hello, Jade!"
-./target/debug/jade check examples/classes/basic/basic.jde         # prints "ok"
-```
-
-If both behave, your setup is good. Welcome aboard.
-
----
-
-## How it fits together
-
-Data flows one way through the compiler, and no stage reaches backwards:
-
-```
-source text
-  → frontend/lexer.rs      → Vec<Token>
-  → frontend/parser.rs     → Program (AST)
-  → compiler/type_infer.rs → TProgram (TIR), per file
-  → aot/imports.rs         → one merged TProgram
-  → compiler/infer/        → Typed: one static type for every value
-  → mir/                   → MIR, checked by mir/taskcheck.rs
-  → backend/               → LLVM IR → object → binary, linked by LLD
-```
-
-Jade has one engine, the compiler. `jade build` runs the whole chain, `jade run` and `jade test` build into a scratch directory and run the binary, and `jade check` runs everything short of LLVM. Every example's output is recorded beside it as `<name>.expected`, and `src/scripts/golden.sh` builds each one and compares. Until v1.4.8 there was also a bytecode VM, and until phase 6 of `design/v2-static-values.md` compiled programs linked a shared runtime; both are gone.
-
-`jade build` needs no build daemon and no system linker. `src/backend/` lowers MIR through LLVM 18, and `src/backend/link.rs` links the object with LLD inside the same process. A daemon used to exist because code generation lived in a separate repository. Once it moved here, the daemon's only remaining job was forwarding a request to a function this crate already exported, so it was removed.
-
----
-
-## Working on the compiler
-
-### One concern per file
-
-The lexer lexes. The parser parses. Each compiler pass turns one IR into the next. A feature that spans several layers should touch each layer on its own terms rather than smearing logic across the boundaries.
-
-### Adding a language feature
-
-Follow the pipeline in order:
-
-1. Token or tokens in `frontend/lexer.rs`
-2. AST node or nodes in `frontend/ast.rs`
-3. Parse rule or rules in `frontend/parser.rs`
-4. Lowering in `compiler/type_infer.rs`
-5. Static types in `compiler/infer/`
-6. Lowering to MIR in `mir/`
-7. LLVM code in `backend/`
-8. Error variant in `frontend/error.rs`, if the feature can fail
-
-Not every feature needs all eight steps. Syntax that desugars to an AST node you already have stops at step 3, which costs nothing downstream. Reach for that when you can. The `~>` operator is a good example. It is a parser-level rewrite to a node that already existed, so nothing past the parser ever had to learn about it.
-
-Operator precedence lives in the parser's call chain, which runs `parse_or` then `parse_and` and on down to `parse_primary`. To add a precedence level, insert a new function at the right point in that chain rather than special-casing inside an existing one.
-
-### Adding a built-in
-
-A built-in is a name in a central registry plus code the backend emits. To add one, put its name in the package's `fns` slice in `src/<name>/mod.rs` and its type in `register_types`; give it a static type in `compiler/infer/builtins.rs`; lower it in `mir/packages.rs`; and emit its code from the matching file in `src/backend/`. Global built-ins go in `core::GLOBAL_NAMES` instead of a package slice. [`src/builtins/README.md`](src/builtins/README.md) has the detail.
-
-A whole new package also needs `src/<name>/mod.rs`, a `pub mod <name>;` line in `lib.rs`, a `use crate::<name>;` line in `builtins/mod.rs`, and an entry in `PACKAGES`.
-
-### Errors
-
-Every failure returns a `JadeError`, and every variant carries a `Span`.
-
-*No panics in the compiler.* That includes `unwrap()` on anything derived from user input.
-
-Type errors belong in `compiler/type_infer.rs` and `compiler/infer/`, not in MIR or the backend. By the time MIR is lowered, types are already settled.
-
-Good messages name the fix, not just the problem. Prefer `prefix '?' cannot be applied to a field, write 'obj.(?p)' or 'obj~>p' instead` over `unexpected token`.
-
-### Tests
-
-Tests live in `#[cfg(test)] mod tests` blocks, either inline or in a sibling `tests.rs` wired up with `mod tests;`. There is no top-level `tests/` directory.
-
-Three sets of helpers cover most cases. `run(src)` in `backend/tests.rs` builds a program, runs it, and returns its output and exit status. `lower(src)` and `text(src)` in `mir/tests.rs` lower a program to MIR. `parse_src(src)` and `parse_src_err(src)` in `frontend/tests.rs` cover the parser alone.
-
-*Write the `.jde` fixture in `examples/` first, then make the Rust match it.* That is the established workflow here, and it tends to surface design problems before you have built on top of them.
-
-CI and `cargo test` type-check every fixture:
-
-- `<name>.jde` must pass `jade check`.
-- `<name>_error.jde` must fail. These fixtures document programs the language rejects, so one that quietly starts passing is also a failure.
-
-A fixture that uses a feature v2 does not compile yet, such as a prompt, fails `jade check` with `jade cannot compile … yet` and is reported as pending rather than as a failure.
-
-CI also runs the fixtures. `src/scripts/golden.sh` builds every example, runs the binary, and compares what it prints with the `<name>.expected` file beside it. It skips the few that reach the network or dereference a prompt, and lists each skip with its reason at the top of the script. An example with no `.expected` file is reported as missing, never as passing.
-
-### Two things that will bite you
-
-Both have already caused real bugs, so they are worth knowing before you hit them.
-
-*Do not mutate process-global state in tests.* `cargo test` is heavily parallel, so `std::env::set_var` races against every other thread calling `getenv`. That is a genuine data race, and it is why `set_var` is `unsafe` as of the 2024 edition. It made the cache tests fail intermittently for a while. Inject a path instead, or use a `#[cfg(test)]` thread-local with an RAII guard so cleanup survives a failing assertion.
-
-*Bump `CACHE_FORMAT_VERSION` when you change a serialized shape.* The AST and TIR are serialized with serde into the on-disk cache in `src/cache/mod.rs`. Adding a field to either one means a stale cache would deserialize into the wrong struct. A tripwire test pins the constant. If that test fails after your change, it is doing its job, not flaking.
+The compiler needs Rust 1.85 or later and LLVM 18; [`compiler/README.md`](compiler/README.md#build-from-source) says how to install them. dovata needs no LLVM.
 
 ---
 
@@ -196,17 +70,22 @@ Open an issue before starting anything substantial. Bug fixes and small improvem
 Run these before you open it:
 
 ```sh
+# The compiler
 cargo build
 cargo test
 cargo clippy --all-targets
-cargo fmt --all --check
+cargo fmt -p jade --check
+
+# dovata, if you changed it
+cargo test -p dovata -p dovata-chat-template -p refback
+cargo clippy -p dovata -p dovata-chat-template -p refback --all-targets
 ```
 
-CI is defined in `.github/workflows/ci.yml` and runs on every pull request against `main`. It runs the four commands above, then `jade check` and `jade fmt --check` over every fixture in `examples/`, then two gates: `src/scripts/golden.sh`, which builds every example and compares its output with the recorded `.expected` file, and `src/scripts/ffi-gate.sh`, which builds and runs real C bindings.
+CI is defined in `.github/workflows/`, one workflow per program, and runs on every pull request against `main` that touches that program. The compiler's, `ci.yml`, runs its four commands above, then `jade check` and `jade fmt --check` over every fixture in `examples/`, then two gates: `compiler/src/scripts/golden.sh`, which builds every example and compares its output with the recorded `.expected` file, and `compiler/src/scripts/ffi-gate.sh`, which builds and runs real C bindings.
 
 Clippy runs without `-D warnings`, so existing warnings do not fail the build. Do not add new ones.
 
-One rule to know before you touch `Cargo.toml`. *A version bump ships a release.* On merge to `main`, CI reads `version` from `Cargo.toml`, and if no matching tag exists it creates one and starts the release build. Only bump the version when you mean to publish. The full release procedure is in [`CLAUDE.md`](CLAUDE.md).
+One rule to know before you touch a version. *A version bump ships a release.* Each program releases from its own version: the compiler from `compiler/Cargo.toml`, tagged `v2.0.1`, and dovata from `dovata/Cargo.toml`, tagged `dovata-v3.2.0`. On merge to `main`, each program's CI reads its version, and if no matching tag exists it creates one and starts that program's release build. Only bump a version when you mean to publish it. The details are in [`.github/workflows/README.md`](.github/workflows/README.md).
 
 ---
 

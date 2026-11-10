@@ -13,7 +13,7 @@ Two rules, both enforced by CI:
 - `<name>.jde` must *pass* `jade check`.
 - `<name>_error.jde` must *fail* `jade check`. These document programs the language deliberately rejects, so one that quietly starts passing is also a CI failure.
 
-Each runnable fixture also has a `<name>.expected` beside it: what it printed on v1.4.8, recorded from a run where the VM and the compiled backend agreed. v2 removes the VM, so there is no second engine to diff against, and `src/scripts/golden.sh` compares each built binary to that file instead. A fixture that should exit non-zero records its status in `<name>.expected-exit`. A new fixture needs its `.expected` written by hand, and checked by reading it.
+Each runnable fixture also has a `<name>.expected` beside it: what it printed on v1.4.8, recorded from a run where the VM and the compiled backend agreed. v2 removes the VM, so there is no second engine to diff against, and `compiler/src/scripts/golden.sh` compares each built binary to that file instead. A fixture that should exit non-zero records its status in `<name>.expected-exit`. A new fixture needs its `.expected` written by hand, and checked by reading it.
 
 v2 turned a set of runtime type errors into compile errors, since every value's type is known when the program is checked. The fixtures that raised and caught one of those kept their other cases, and each error moved into a `*_error.jde` beside its category: `arithmatic/bitwise_non_int_error`, `arrays/mixed_error`, `async/join_non_future_error`, `bytes/write_non_int_error`, `bytes/construct_types_error`, `collections/dict_contains_error`, `collections/int_len_error`, `collections/method_type_guard_error`, `collections/self_reference_error`, `dicts/dot_access_error`, `exceptions/catch_parent_reads_child_error`, `functions/value_arity_error`, `functions/return_paths_error` and `streams/yield_mixed_error`. Each names the rule it pins in its opening comment.
 
@@ -37,9 +37,9 @@ Five fixtures pin the v1.4.3 async work, and each fails on a build from before i
 
 Three fixtures pin the v1.3.3 fixes, and each one fails on a build from before those fixes. `trust/sh_sinks/` feeds a shell command's own output back into all three `sh` functions, and `sh.output` used to run it. `dicts/dot_access/` reads dict entries with a dot, which raised "value has no fields" when compiled and worked when interpreted. `async/nested_async_error.jde` nests an `async fn`, which used to parse and then fail at run time on a variable the inner function could not see.
 
-`decorators/` covers `@dec` on a `let` and on a `prompt`, both of which the parser rewrites into a call. In `prompt_tags/`, the wrapper prints what it built, because there is otherwise nothing to assert against. A prompt renders as `<prompt>`, so a fixture cannot observe its text any other way. Decorators on `fn`, `struct`, and `extend` are older, and unit tests in `src/frontend/tests.rs` exercise those rather than fixtures here.
+`decorators/` covers `@dec` on a `let` and on a `prompt`, both of which the parser rewrites into a call. In `prompt_tags/`, the wrapper prints what it built, because there is otherwise nothing to assert against. A prompt renders as `<prompt>`, so a fixture cannot observe its text any other way. Decorators on `fn`, `struct`, and `extend` are older, and unit tests in `compiler/src/frontend/tests.rs` exercise those rather than fixtures here.
 
-`llm/` is worth calling out. Those fixtures do real prompt dereferences. Until v1.4.8 they gave the same answer every time in CI, because the parity script installed a stand-in inference provider that answered with a canned reply. An example supplied its own reply as a `responses.txt` beside the `.jde`, and got the default without one. Pointing the parity gate at these turned up a VM muting bug and an AOT segfault immediately. v2 dropped the provider packages, so `src/scripts/golden.sh` skips every example that dereferences a prompt until the compiler emits inference itself.
+`llm/` is worth calling out. Those fixtures do real prompt dereferences. Until v1.4.8 they gave the same answer every time in CI, because the parity script installed a stand-in inference provider that answered with a canned reply. An example supplied its own reply as a `responses.txt` beside the `.jde`, and got the default without one. Pointing the parity gate at these turned up a VM muting bug and an AOT segfault immediately. v2 dropped the provider packages, so `compiler/src/scripts/golden.sh` skips every example that dereferences a prompt until the compiler emits inference itself.
 
 `exceptions/error_values/` pins the *shape* of a caught error: a `RuntimeError` struct with a `message` field, matched by a typed catch. The compiled backend used to raise the bare message string, so `e.message` worked when interpreted and raised when compiled. The fixture checks messages by substring rather than by equality, because the interpreter added a `[line:col]` prefix and a compiled binary has no source position at run time. That was the one difference between the two engines that remained on purpose.
 
@@ -63,20 +63,20 @@ Its importing file sits under `app/`, so the target directory is out of relative
 
 ## Who uses it
 
-*Used by:* `.github/workflows/ci.yml`, which runs `jade check` over every fixture and `jade fmt --check` over the tree. `src/scripts/golden.sh` builds each fixture, runs the binary, and compares its output with the `.expected` file beside it. The `docs/` site draws on several of them for its examples.
+*Used by:* `.github/workflows/ci.yml`, which runs `jade check` over every fixture and `jade fmt --check` over the tree. `compiler/src/scripts/golden.sh` builds each fixture, runs the binary, and compares its output with the `.expected` file beside it. The `docs/` site draws on several of them for its examples.
 
 *Depends on:* only the `jade` binary. Fixtures never import from the Rust tree.
 
 ## Gotchas
 
-*The `jade check` gate type-checks fixtures and never runs them.* That is what lets them depend on a network or an API key at run time. The tradeoff is that a fixture can type-check happily while printing something its own comments contradict. When the *behavior* matters, record it in the fixture's `.expected` file, which `src/scripts/golden.sh` holds the built binary to. Until v1.4.8 the helpers for a Rust test of behavior were `run_src` and `run_src_with_mock` in `src/vm/tests.rs`, and they went with the VM.
+*The `jade check` gate type-checks fixtures and never runs them.* That is what lets them depend on a network or an API key at run time. The tradeoff is that a fixture can type-check happily while printing something its own comments contradict. When the *behavior* matters, record it in the fixture's `.expected` file, which `compiler/src/scripts/golden.sh` holds the built binary to. Until v1.4.8 the helpers for a Rust test of behavior were `run_src` and `run_src_with_mock` in `compiler/src/vm/tests.rs`, and they went with the VM.
 
-`src/scripts/golden.sh` keeps a skip list for examples it does not run: the ones that need the network, the `_error` fixtures, and the 14 that dereference a prompt. Check it before assuming an example is covered.
+`compiler/src/scripts/golden.sh` keeps a skip list for examples it does not run: the ones that need the network, the `_error` fixtures, and the 14 that dereference a prompt. Check it before assuming an example is covered.
 
 ## Running them
 
 ```sh
 ./target/debug/jade check examples/classes/prompt_fields/prompt_fields.jde
 ./target/debug/jade run   examples/strings/fstrings/fstrings.jde
-./src/scripts/golden.sh
+./compiler/src/scripts/golden.sh
 ```
