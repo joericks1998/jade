@@ -51,6 +51,7 @@ pub mod compiler;
 // and `build.rs` compiles it to `libJadeRuntime.a`. Distinct from
 // `jade-runtime` (`src/runtime/`), which is Rust and shared by *both* engines.
 pub mod frontend;
+pub mod infer;
 /// The typed middle layer between the checked program and the static backend:
 /// one function per checked instance, typed locals, basic blocks, and reference
 /// counting written out.

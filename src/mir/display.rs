@@ -262,6 +262,7 @@ fn op_name(op: &Op) -> String {
         Op::Path(m) => format!("path.{m:?}").to_lowercase(),
         Op::Random(m) => format!("random.{m:?}").to_lowercase(),
         Op::Json(m) => format!("json.{m:?}").to_lowercase(),
+        Op::Infer(m) => format!("infer.{m:?}").to_lowercase(),
         Op::Http(m, unix) => {
             format!("{}.{m:?}", if *unix { "uhttp" } else { "http" }).to_lowercase()
         }

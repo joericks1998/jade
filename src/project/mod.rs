@@ -34,6 +34,23 @@ pub struct ProjectManifest {
     /// `jade build --lib` should read what it is made of from here rather than
     /// from command-line flags. See [`PackageSection`].
     pub package: Option<PackageSection>,
+    /// `[model]`: which model a program that dereferences a prompt runs, by
+    /// its name in the dovata process. See [`ModelSection`].
+    pub model: Option<ModelSection>,
+}
+
+/// Purpose: This struct holds the `[model]` section of `jade.toml`.
+///
+/// ```toml
+/// [model]
+/// name = "qwen3-0.6b"
+/// ```
+///
+/// Without it, a program runs the one model the dovata process holds.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ModelSection {
+    /// The model's name, as `dovata status` lists it.
+    pub name: Option<String>,
 }
 
 /// The `[package]` section of `jade.toml` — a project that builds itself into a

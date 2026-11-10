@@ -49,6 +49,7 @@ mod format;
 mod fs;
 mod func;
 mod http;
+mod infer;
 mod json;
 mod layout;
 mod link;
@@ -111,6 +112,8 @@ pub struct Cx<'ctx> {
     pub drops: HashMap<String, Vec<FunctionValue<'ctx>>>,
     /// The native packages the program calls.
     pub natives: Vec<mir::NativeLib>,
+    /// The model the program runs, when it dereferences a prompt.
+    pub infer: Option<crate::infer::plan::InferPlan>,
 }
 
 impl<'ctx> Cx<'ctx> {
@@ -134,6 +137,7 @@ impl<'ctx> Cx<'ctx> {
             lits: RefCell::new(HashMap::new()),
             drops: HashMap::new(),
             natives: prog.natives.clone(),
+            infer: prog.infer.clone(),
         }
     }
 
@@ -443,6 +447,10 @@ fn emit_c_main<'ctx>(cx: &Cx<'ctx>, top: FunctionValue<'ctx>) {
     // The task lock is set up before any thread runs, when the program has tasks.
     if cx.module.get_function("jade.task.submit").is_some() {
         f.call(cx.task_init_fn(), &[]);
+    }
+    // So is the model's, when the program runs one.
+    if cx.infer.is_some() {
+        f.call(cx.infer_init_fn(), &[]);
     }
     // A pthread_attr_t and a pthread_t are opaque; 128 bytes holds either on
     // every Unix this targets.

@@ -73,6 +73,9 @@ fn merge(program: TProgram, source_path: Option<&Path>) -> Result<Merged, import
         .map_err(|e| imports::ResolveError::Program(e.to_string()))?;
     crate::compiler::type_infer::fill_struct_literal_defaults(&mut program)
         .map_err(|e| imports::ResolveError::Program(e.to_string()))?;
+    // Each `?p` becomes a call into the inference prelude, added here.
+    program.stmts =
+        crate::infer::rewrite::inject(program.stmts).map_err(imports::ResolveError::Program)?;
     Ok(Merged { program, natives, sigs })
 }
 
@@ -138,7 +141,10 @@ pub fn compile(
     emit: Emit,
 ) -> Result<CompileOutcome, String> {
     let merged = merge(program, source_path).map_err(|e| e.to_string())?;
-    let mir = lower(&merged)?;
+    let mut mir = lower(&merged)?;
+    if emit != Emit::Mir && mir.runs_a_model() {
+        mir.infer = Some(model_plan(source_path)?);
+    }
     match emit {
         Emit::Mir => Ok(CompileOutcome { ir: Some(mir.to_string()), dependencies: Vec::new() }),
         Emit::Ir => {
@@ -158,6 +164,29 @@ pub fn compile(
             Ok(CompileOutcome { ir: None, dependencies })
         }
     }
+}
+
+/// Purpose: This function reads the plan of the model a program runs.
+///
+/// Inputs:
+/// - `source_path`: the program's file, whose project may name the model.
+///
+/// Outputs: the plan, or a message: the machine cannot run a model yet, dovata
+/// is not running, or its plan describes what the kernels cannot run.
+fn model_plan(source_path: Option<&Path>) -> Result<crate::infer::plan::InferPlan, String> {
+    if !cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        return Err("this program dereferences a prompt, and prompts compile for Apple \
+                    Silicon Macs only so far; Linux and CUDA come next"
+            .to_string());
+    }
+    let name = source_path
+        .and_then(|p| p.parent())
+        .and_then(crate::project::find_project_root_from)
+        .and_then(|root| crate::project::load_project(&root).ok())
+        .and_then(|m| m.model)
+        .and_then(|m| m.name);
+    let (model, plan) = crate::infer::dovata::model_plan(name.as_deref())?;
+    crate::infer::plan::read(&model, &plan)
 }
 
 #[cfg(test)]

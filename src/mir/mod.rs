@@ -82,6 +82,31 @@ pub struct Program {
     /// The native packages the program calls, which it loads the first time
     /// it calls each.
     pub natives: Vec<NativeLib>,
+    /// The model a program that dereferences a prompt runs, read from its plan
+    /// when the program is built into a binary. `None` until then, and for a
+    /// program that runs no model.
+    pub infer: Option<crate::infer::plan::InferPlan>,
+}
+
+impl Program {
+    /// Purpose: This function says whether the program runs a model.
+    ///
+    /// Inputs: none.
+    ///
+    /// Outputs: whether any function asks `__infer` for anything.
+    pub fn runs_a_model(&self) -> bool {
+        self.funcs.iter().any(|f| {
+            f.blocks.iter().any(|b| {
+                b.stmts.iter().any(|s| {
+                    matches!(
+                        s,
+                        Stmt::Assign(_, Rvalue::Op(Op::Infer(_), _))
+                            | Stmt::Eval(Rvalue::Op(Op::Infer(_), _))
+                    )
+                })
+            })
+        })
+    }
 }
 
 /// Purpose: This struct says where a native package is found when the program
@@ -509,6 +534,8 @@ pub enum Op {
     // ── json ─────────────────────────────────────────────────────────────
     /// `std::json`, or an operation on a `Json` value; see [`JsonFn`].
     Json(JsonFn),
+    /// What the inference prelude asks of the backend; see [`InferFn`].
+    Infer(InferFn),
     /// `(b: bytes) -> [int]`: each octet, for a `for` loop over bytes.
     BytesInts,
 
@@ -589,6 +616,34 @@ pub enum JsonFn {
     ToInt,
     ToFloat,
     ToBool,
+}
+
+/// Purpose: This enum lists what the inference prelude, `src/infer/prelude.jde`,
+/// asks of the backend: the tables in the model's plan, and the model itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InferFn {
+    /// `(k: int) -> str`: one of the tokenizer's tables, as text.
+    Data,
+    /// `(k: int) -> int`: a number from the plan, such as which pre-tokenizer.
+    Config,
+    /// `(c: char) -> int`: 1 for a letter, 2 a number, 3 white space, else 0.
+    CharClass,
+    /// `(s: str) -> str`: the text, marked as coming from outside the program.
+    Taint,
+    /// `(p: prompt) -> str`: a prompt's text.
+    Text,
+    /// `() -> bool`: whether the model is mapped and its kernels built.
+    Ready,
+    /// `() -> str`: ask the dovata process for the model's memory, keeping the
+    /// file descriptors it sends, and return its reply.
+    DovataMap,
+    /// `(region, fd, offset, bytes: int, writable: bool) -> nil`: map one region.
+    MapRegion,
+    /// `() -> nil`: build the GPU buffers and kernels over the mapped regions.
+    Setup,
+    /// `(ids: [int], max: int) -> [int]`: run the model on a prompt's tokens and
+    /// return the ones it generates, greedily, up to a stop token or `max`.
+    Generate,
 }
 
 /// Purpose: This enum lists the `std::env` functions.
@@ -844,6 +899,9 @@ impl Op {
                 | Op::Sh(_)
                 | Op::Random(RandomFn::Int | RandomFn::Index)
                 | Op::Json(_)
+                | Op::Infer(
+                    InferFn::DovataMap | InferFn::MapRegion | InferFn::Setup | InferFn::Generate
+                )
                 | Op::Http(..)
                 | Op::UhttpStream(_)
                 | Op::Native(_)

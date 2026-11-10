@@ -166,6 +166,28 @@ impl<'a, 'l> Fx<'a, 'l> {
                 let ops = self.operands(args)?;
                 self.package_op(Op::Random(m), ops, t)
             }
+            ("__infer", _) => {
+                let (m, t) = match f {
+                    "data" => (InferFn::Data, Ty::Str),
+                    "config" => (InferFn::Config, Ty::Int),
+                    "char_class" => (InferFn::CharClass, Ty::Int),
+                    "taint" => (InferFn::Taint, Ty::Str),
+                    "text" => (InferFn::Text, Ty::Str),
+                    "ready" => (InferFn::Ready, Ty::Bool),
+                    "dovata_map" => (InferFn::DovataMap, Ty::Str),
+                    "map_region" => (InferFn::MapRegion, Ty::Nil),
+                    "setup" => (InferFn::Setup, Ty::Nil),
+                    "generate" => (InferFn::Generate, Ty::Array(Box::new(Ty::Int))),
+                    other => {
+                        return Err(internal(
+                            format!("an unknown __infer function '{other}'"),
+                            span,
+                        ));
+                    }
+                };
+                let ops = self.operands(args)?;
+                self.package_op(Op::Infer(m), ops, t)
+            }
             ("json", "parse") => {
                 let ops = self.operands(args)?;
                 self.package_op(Op::Json(JsonFn::Parse), ops, Ty::Json)

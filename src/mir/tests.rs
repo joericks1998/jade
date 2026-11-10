@@ -105,7 +105,8 @@ fn a_for_loop_over_a_string_walks_its_characters() {
 
 #[test]
 fn features_from_later_phases_say_so() {
-    for (src, what) in [("prompt p = \"Say hi\"\nprint(?p)\n", "prompts")] {
+    let class_prompt = "class C {\n    @public x\n}\nprompt p = \"hi\"\nlet c = ?p |> C\nprint(c.x)\n";
+    for (src, what) in [(class_prompt, "decoded into C")] {
         match lower(src) {
             Err(JadeError::NotYetStatic { what: w, .. }) => {
                 assert!(w.contains(what), "{src}: named {w}, expected {what}")

@@ -53,6 +53,7 @@ static PACKAGES: &[&Package] = &[
     &path::PATH_PKG,
     &random::RANDOM_PKG,
     &bytes::BYTES_PKG,
+    &crate::infer::INFER_PKG,
 ];
 
 // ── Primitive method tables ───────────────────────────────────────────────────

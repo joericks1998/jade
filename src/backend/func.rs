@@ -874,6 +874,10 @@ impl<'a, 'b, 'ctx> Lw<'a, 'b, 'ctx> {
                 };
                 (r, t)
             }
+            Op::Infer(m) => {
+                let vals: Vec<BasicValueEnum> = (0..args.len()).map(arg).collect();
+                cx.infer_op(f, *m, &vals)
+            }
             Op::Json(m @ (JsonFn::Stringify | JsonFn::StringifyPretty)) => {
                 let t = self.op_ty(&args[0]);
                 let pretty = f.bool(*m == JsonFn::StringifyPretty);

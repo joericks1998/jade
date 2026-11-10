@@ -124,11 +124,8 @@ fn link_macho(obj: &Path, out: &Path) -> Result<(), String> {
     let bytes = std::fs::read(obj).map_err(|e| format!("cannot read {}: {e}", obj.display()))?;
     let imports = macho_imports(&bytes)?;
     let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "x86_64" };
-    let stub = obj.with_extension("tbd");
-    std::fs::write(&stub, libsystem_tbd(arch, &imports))
-        .map_err(|e| format!("cannot write {}: {e}", stub.display()))?;
     let version = macos_version();
-    let args = [
+    let mut args = vec![
         "ld64.lld".to_string(),
         "-arch".into(),
         arch.into(),
@@ -139,11 +136,55 @@ fn link_macho(obj: &Path, out: &Path) -> Result<(), String> {
         "-o".into(),
         out.display().to_string(),
         obj.display().to_string(),
-        stub.display().to_string(),
     ];
+    // One stub per library the object reaches into: the C library always, and
+    // for a program that runs a model, the Objective-C runtime and Metal.
+    let mut stubs = Vec::new();
+    for (i, (install, symbols)) in by_library(&imports).iter().enumerate() {
+        let stub = obj.with_extension(format!("{i}.tbd"));
+        std::fs::write(&stub, stub_tbd(arch, install, symbols))
+            .map_err(|e| format!("cannot write {}: {e}", stub.display()))?;
+        args.push(stub.display().to_string());
+        stubs.push(stub);
+    }
     let r = run_lld(&args);
-    std::fs::remove_file(&stub).ok();
+    for s in stubs {
+        std::fs::remove_file(&s).ok();
+    }
     r
+}
+
+/// Purpose: This function sorts imported symbols by the system library that
+/// exports them.
+///
+/// Inputs:
+/// - `symbols`: the symbol names, with Mach-O's leading underscore.
+///
+/// Outputs: each library's install name and its symbols; `libSystem` first,
+/// and always present.
+fn by_library(symbols: &[String]) -> Vec<(&'static str, Vec<String>)> {
+    const OBJC: &str = "/usr/lib/libobjc.A.dylib";
+    const METAL: &str = "/System/Library/Frameworks/Metal.framework/Versions/A/Metal";
+    let mut system = Vec::new();
+    let mut objc = Vec::new();
+    let mut metal = Vec::new();
+    for s in symbols {
+        if s.starts_with("_objc_") || s.starts_with("_sel_") {
+            objc.push(s.clone());
+        } else if s.starts_with("_MTL") {
+            metal.push(s.clone());
+        } else {
+            system.push(s.clone());
+        }
+    }
+    let mut out = vec![("/usr/lib/libSystem.B.dylib", system)];
+    if !objc.is_empty() {
+        out.push((OBJC, objc));
+    }
+    if !metal.is_empty() {
+        out.push((METAL, metal));
+    }
+    out
 }
 
 /// Purpose: This function writes a `libSystem.tbd` exporting the given
@@ -155,19 +196,34 @@ fn link_macho(obj: &Path, out: &Path) -> Result<(), String> {
 ///
 /// Outputs: the stub, in Apple's text format, version 4.
 fn libsystem_tbd(arch: &str, symbols: &[String]) -> String {
+    stub_tbd(arch, "/usr/lib/libSystem.B.dylib", symbols)
+}
+
+/// Purpose: This function writes a stub for one system library exporting the
+/// given symbols, for one architecture.
+///
+/// Inputs:
+/// - `arch`: `arm64` or `x86_64`.
+/// - `install`: the library's install name, where the loader finds it.
+/// - `symbols`: the symbol names, with Mach-O's leading underscore.
+///
+/// Outputs: the stub, in Apple's text format, version 4.
+fn stub_tbd(arch: &str, install: &str, symbols: &[String]) -> String {
     let target = format!("{arch}-macos");
+    let system = install.ends_with("libSystem.B.dylib");
     let mut names: Vec<String> = symbols.iter().map(|s| format!("'{s}'")).collect();
-    // Lazy binding asks for the stub binder when the loader does not use
-    // chained fixups; listing it costs nothing when it is not needed.
-    if !symbols.iter().any(|s| s == "dyld_stub_binder") {
+    // Lazy binding asks libSystem for the stub binder when the loader does not
+    // use chained fixups; listing it costs nothing when it is not needed.
+    if system && !symbols.iter().any(|s| s == "dyld_stub_binder") {
         names.push("'dyld_stub_binder'".into());
     }
+    let version = if system { 1351 } else { 1 };
     format!(
         "--- !tapi-tbd\n\
          tbd-version:     4\n\
          targets:         [ {target} ]\n\
-         install-name:    '/usr/lib/libSystem.B.dylib'\n\
-         current-version: 1351\n\
+         install-name:    '{install}'\n\
+         current-version: {version}\n\
          exports:\n  \
          - targets:         [ {target} ]\n    \
          symbols:         [ {} ]\n\

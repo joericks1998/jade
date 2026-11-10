@@ -1371,6 +1371,15 @@ impl<'a> Checker<'a> {
                 }
                 match (&sl, &sr) {
                     (Ty::Char, Ty::Str) | (Ty::Str, Ty::Char) => {}
+                    // A char compares with a string, so a side not known yet
+                    // facing either may be the other. It is left for the code
+                    // that settles it, such as the call it comes from, and
+                    // made the same type only if nothing does.
+                    (Ty::Var(_), Ty::Str | Ty::Char) | (Ty::Str | Ty::Char, Ty::Var(_))
+                        if !self.force_eq =>
+                    {
+                        self.deferred_eq = true;
+                    }
                     _ => {
                         self.unify(
                             &l,

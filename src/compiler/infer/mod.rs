@@ -209,6 +209,12 @@ pub struct Checker<'a> {
     top: &'a [TStmt],
     pass: usize,
     final_pass: bool,
+    /// Whether a pass left an `==` between an unknown side and a string or
+    /// char, in case the code that settles the side has not been checked yet.
+    deferred_eq: bool,
+    /// Whether such comparisons make their sides one type now, because the
+    /// passes have settled and nothing else will.
+    force_eq: bool,
     error: Option<JadeError>,
     out: Typed,
 }
@@ -270,6 +276,8 @@ impl<'a> Checker<'a> {
             top,
             pass: 0,
             final_pass: false,
+            deferred_eq: false,
+            force_eq: false,
             error: None,
             out: Typed::default(),
         }
@@ -544,11 +552,18 @@ impl<'a> Checker<'a> {
         let mut settled = false;
         for _ in 0..MAX_PASSES {
             let before = self.store.version;
+            self.deferred_eq = false;
             self.one_pass();
             if let Some(e) = self.error.take() {
                 return Err(e);
             }
             if self.store.version == before {
+                // A comparison waited on a side nothing else settled; one
+                // more pass makes both sides one type.
+                if self.deferred_eq && !self.force_eq {
+                    self.force_eq = true;
+                    continue;
+                }
                 settled = true;
                 break;
             }

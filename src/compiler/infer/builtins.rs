@@ -756,6 +756,50 @@ impl<'a> Checker<'a> {
                 want!(0, Ty::Str, "path");
                 Ty::Bool
             }
+            // ── the inference prelude's own package; see src/infer/ ─────────
+            ("__infer", _) => {
+                let (params, ret): (Vec<Ty>, Ty) = match name {
+                    "data" => (vec![Ty::Int], Ty::Str),
+                    "config" => (vec![Ty::Int], Ty::Int),
+                    "char_class" => (vec![Ty::Char], Ty::Int),
+                    "taint" => (vec![Ty::Str], Ty::Str),
+                    "ready" | "setup" | "dovata_map" => (
+                        Vec::new(),
+                        match name {
+                            "ready" => Ty::Bool,
+                            "setup" => Ty::Nil,
+                            _ => Ty::Str,
+                        },
+                    ),
+                    "map_region" => (vec![Ty::Int, Ty::Int, Ty::Int, Ty::Int, Ty::Bool], Ty::Nil),
+                    "generate" => {
+                        (vec![Ty::Array(Box::new(Ty::Int)), Ty::Int], Ty::Array(Box::new(Ty::Int)))
+                    }
+                    // A prompt's text, from a prompt or a string.
+                    "text" => {
+                        if !count(1..=1) {
+                            return bad_count(self, "a prompt");
+                        }
+                        let t = self.store.shallow(&tys[0]);
+                        if !matches!(t, Ty::Prompt | Ty::Str | Ty::Var(_)) {
+                            let t = self.store.resolve(&t);
+                            self.report(span, format!("'?' dereferences a prompt, got {t}"));
+                        }
+                        return Ty::Str;
+                    }
+                    other => {
+                        self.report(span, format!("__infer has no function '{other}'"));
+                        return Ty::Nil;
+                    }
+                };
+                if r.len() != params.len() {
+                    return bad_count(self, &format!("{} arguments", params.len()));
+                }
+                for (i, p) in params.iter().enumerate() {
+                    want!(i, p.clone(), "argument");
+                }
+                ret
+            }
             // ── random ───────────────────────────────────────────────────────
             ("random", "int") => {
                 if !count(2..=2) {

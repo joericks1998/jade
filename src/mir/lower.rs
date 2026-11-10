@@ -135,6 +135,7 @@ pub fn lower_program_with(
         main: FuncId(0),
         drops,
         natives,
+        infer: None,
     })
 }
 
@@ -170,6 +171,9 @@ pub fn norm(t: &Ty) -> Ty {
         // Calling a generator runs it to the end and buffers what it yields,
         // and a stream reads like an array, so in MIR a stream is an array.
         Ty::Stream(a) => Ty::Array(Box::new(norm(a))),
+        // A prompt is its text. `?p` itself becomes a call into the
+        // inference prelude before checking; see `src/infer/rewrite.rs`.
+        Ty::Prompt => Ty::Str,
         other => other.clone(),
     }
 }
@@ -1075,7 +1079,7 @@ impl<'a, 'l> Fx<'a, 'l> {
     /// Outputs: `Ok(())` or the first error.
     fn stmt_inner(&mut self, s: &'a TStmt) -> Result<()> {
         match s {
-            TStmt::Let { name, value, span } => {
+            TStmt::Let { name, value, span } | TStmt::PromptDecl { name, body: value, span } => {
                 let (v, vt) = self.expr(value)?;
                 let (place, pt) = if self.is_main && self.scopes.len() == 1 {
                     let (g, t) = self
@@ -1191,9 +1195,6 @@ impl<'a, 'l> Fx<'a, 'l> {
                 };
                 let (index, ft) =
                     self.l.field(sn, field).ok_or_else(|| internal("an unknown field", *span))?;
-                if ft == Ty::Prompt {
-                    return Err(not_yet("prompt fields", *span));
-                }
                 let v = self.coerce(v, &vt, &ft, *span)?;
                 let v = self.consume(v);
                 self.emit(Stmt::SetField {
@@ -1238,7 +1239,6 @@ impl<'a, 'l> Fx<'a, 'l> {
                     other => Err(internal(format!("an index assignment into {other}"), *span)),
                 }
             }
-            TStmt::PromptDecl { span, .. } => Err(not_yet("prompts", *span)),
             TStmt::Yield { value, span } => {
                 let (s, el) = self
                     .stream
@@ -1648,8 +1648,20 @@ impl<'a, 'l> Fx<'a, 'l> {
                 let (f, _) = self.expr(expr)?;
                 self.assign_temp(et.clone(), Rvalue::Op(Op::Await(et.clone()), vec![f]))
             }
-            TExprKind::PromptDeref { .. } | TExprKind::PromptLiteral { .. } => {
-                return Err(not_yet("prompts", span));
+            TExprKind::PromptLiteral { body } => {
+                let (v, t) = self.expr(body)?;
+                self.coerce(v, &t, &Ty::Str, span)?
+            }
+            // `src/infer/rewrite.rs` turns every dereference it can into a call
+            // into the inference prelude; what is left is a kind it cannot.
+            TExprKind::PromptDeref { grammar_expr: Some(_), .. } => {
+                return Err(not_yet("a prompt constrained by a grammar", span));
+            }
+            TExprKind::PromptDeref { output_type: Some(t), .. } => {
+                return Err(not_yet(format!("a prompt decoded into {t}"), span));
+            }
+            TExprKind::PromptDeref { .. } => {
+                return Err(internal("a prompt dereference the rewrite left", span));
             }
         };
         Ok((op, et))
@@ -1689,9 +1701,6 @@ impl<'a, 'l> Fx<'a, 'l> {
         match ot {
             Ty::Struct(sn) => match self.l.field(sn, field) {
                 Some((index, ft)) => {
-                    if ft == Ty::Prompt {
-                        return Err(not_yet("prompt fields", span));
-                    }
                     let v = self.assign_temp(
                         ft.clone(),
                         Rvalue::Field { object: o, strukt: sn.clone(), index },
@@ -1726,10 +1735,8 @@ impl<'a, 'l> Fx<'a, 'l> {
         let def =
             self.l.strukt(type_name).ok_or_else(|| internal("an unknown struct", span))?.clone();
         let mut given: HashMap<&str, Operand> = HashMap::new();
-        for (name, value, is_prompt) in fields {
-            if *is_prompt {
-                return Err(not_yet("prompt fields", value.span));
-            }
+        // A prompt field holds its text, as any prompt does.
+        for (name, value, _) in fields {
             let (v, t) = self.expr(value)?;
             let ft = self
                 .l
@@ -1745,9 +1752,6 @@ impl<'a, 'l> Fx<'a, 'l> {
         };
         let mut ops = Vec::with_capacity(def.fields.len());
         for (fname, fty) in &def.fields {
-            if *fty == Ty::Prompt {
-                return Err(not_yet("prompt fields", span));
-            }
             let v = match given.remove(fname.as_str()) {
                 Some(v) => self.consume(v),
                 None => {

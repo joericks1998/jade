@@ -123,6 +123,30 @@ pub fn resolve_and_namespace(
     })
 }
 
+/// Purpose: This function namespaces a module given as source text rather
+/// than a file, such as the inference prelude, so its names cannot meet a
+/// program's.
+///
+/// Inputs:
+/// - `source`: the module's source.
+/// - `label`: what to call it in a message.
+/// - `id`: the namespace id its globals are mangled with, as `name$<id>`.
+///
+/// Outputs: its statements, mangled, or why it does not compile. It may import
+/// `std` packages only.
+pub fn namespace_source(source: &str, label: &str, id: u32) -> Result<Vec<TStmt>, String> {
+    let tokens = crate::frontend::lexer::tokenize(source).map_err(|e| format!("{label}: {e}"))?;
+    let ast = crate::frontend::parser::parse(tokens).map_err(|e| format!("{label}: {e}"))?;
+    let tp = crate::compiler::type_infer::infer(ast).map_err(|e| format!("{label}: {e}"))?;
+    let (values, types) = collect_globals(&tp.stmts);
+    let mut reg = Registry::new();
+    let body = process_file(&mut reg, tp.stmts, Path::new("."), Some(id), values, types)
+        .map_err(|e| format!("{label}: {e}"))?;
+    let mut out = reg.out;
+    out.extend(body);
+    Ok(out)
+}
+
 /// Why import resolution failed.
 ///
 /// The two cases need telling apart because `aot::would_build` probes a program
